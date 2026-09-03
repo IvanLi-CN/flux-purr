@@ -31,7 +31,12 @@ use axum::{
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::{process::Command, sync::broadcast};
+#[cfg(unix)]
+use std::sync::Once;
+use tokio::{
+    process::Command,
+    sync::{broadcast, mpsc},
+};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
@@ -77,6 +82,27 @@ const LEGACY_FLASH_CONFIG_SIZE: u64 = 0x2000;
 const FLASH_CONFIG_LABEL: &str = "flux_cfg";
 const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 const ESPFLASH_USB_RESET_RETRY_DELAY: Duration = Duration::from_secs(1);
+const ESPFLASH_SINGLE_SESSION_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(1);
+// The serialport builder defaults to a zero-duration read timeout.  That is
+// appropriate for the runtime JSONL worker, but it can leave an in-process
+// ROM writer blocked forever after a USB-JTAG disconnect.  espflash retries
+// timed-out ROM packets itself, so give its single-session transport a finite
+// I/O deadline.
+const ESPFLASH_SINGLE_SESSION_IO_TIMEOUT: Duration = Duration::from_secs(1);
+// The in-process ESP32-S3 USB-JTAG writer remains available for diagnostics,
+// but the protected subprocess transaction is the production default. It has
+// explicit command deadlines and reset-mode recovery for every ROM operation.
+const USE_IN_PROCESS_USB_JTAG_WRITER: bool = false;
+
+// Loading the flash stub opens a second USB-JTAG transport exchange. On the
+// ESP32-S3 integrated USB port that can disconnect the protected writer before
+// its first segment is accepted.
+const USB_JTAG_SINGLE_SESSION_USE_STUB: bool = false;
+// A recovery write may erase the application range. Connection retries happen
+// before writes begin, but a started protected transaction is never replayed
+// automatically against the hardware.
+const ESPFLASH_SINGLE_SESSION_FLASH_ATTEMPTS: usize = 1;
+const ROM_SECURITY_PROBE_ATTEMPTS: usize = 6;
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 const LEASE_REAPER_INTERVAL: Duration = Duration::from_secs(1);
@@ -109,7 +135,14 @@ static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SerialRetryPolicy {
     ReadOnly,
+    Idempotent,
     SingleShot,
+}
+
+impl SerialRetryPolicy {
+    fn allows_reset_retry(self) -> bool {
+        matches!(self, Self::ReadOnly | Self::Idempotent)
+    }
 }
 
 #[cfg(unix)]
@@ -349,8 +382,17 @@ struct FirmwareApproval {
     bundle_sha256: String,
     operation: FirmwareOperation,
     allow_downgrade: bool,
+    source_partition_hash: Option<String>,
     preflight_digest: String,
     expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct FirmwareExecutionProof {
+    approval: FirmwareApproval,
+    request: FirmwareOperationRequest,
+    device_id: String,
+    bundle_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +511,8 @@ pub struct DeviceRecord {
     pub heater_curve: HeaterCurveState,
     #[serde(default)]
     pub thermal_plant_run: ThermalPlantRunSnapshot,
+    #[serde(default = "mock_thermal_tuning_snapshot")]
+    pub thermal_tuning_run: Value,
     pub selected_artifact_id: Option<String>,
     pub logs: VecDeque<LogEntry>,
     pub trace: VecDeque<TraceEntry>,
@@ -575,12 +619,14 @@ impl DeviceRecord {
                 "network".to_string(),
                 "calibration".to_string(),
                 "thermal_plant_run".to_string(),
+                "thermal_tuning_run_v1".to_string(),
                 "wifi_config".to_string(),
                 "wifi_state_v2".to_string(),
                 "monitor".to_string(),
                 "firmware_check".to_string(),
                 "flash".to_string(),
             ],
+            thermal_tuning: Some(mock_thermal_tuning_capability()),
         };
         let network = NetworkSummary {
             state: NetworkState::Connected,
@@ -691,6 +737,7 @@ impl DeviceRecord {
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
             thermal_plant_run: mock_thermal_plant_snapshot(),
+            thermal_tuning_run: mock_thermal_tuning_snapshot(),
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -794,11 +841,13 @@ impl DeviceRecord {
                     "status".to_string(),
                     "network".to_string(),
                     "thermal_plant_run".to_string(),
+                    "thermal_tuning_run_v1".to_string(),
                     "wifi_config".to_string(),
                     "monitor".to_string(),
                     "firmware_check".to_string(),
                     "flash".to_string(),
                 ],
+                thermal_tuning: Some(mock_thermal_tuning_capability()),
             },
             network,
             status,
@@ -809,6 +858,7 @@ impl DeviceRecord {
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
             thermal_plant_run: ThermalPlantRunSnapshot::default(),
+            thermal_tuning_run: mock_thermal_tuning_snapshot(),
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -870,6 +920,46 @@ pub struct Identity {
     pub protocol_version: String,
     pub hostname: String,
     pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_tuning: Option<ThermalTuningCapability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningTraceCapability {
+    pub paged: bool,
+    pub acknowledged: bool,
+    pub sealed_review: bool,
+    pub buffer_capacity: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningCapability {
+    pub id: String,
+    pub evidence_schema: String,
+    pub supported_power_classes: Vec<String>,
+    pub target_schedule_c: [i16; 9],
+    pub physical_targets_c: [i16; 9],
+    pub trace: ThermalTuningTraceCapability,
+    pub candidate_promotion: bool,
+}
+
+fn mock_thermal_tuning_capability() -> ThermalTuningCapability {
+    ThermalTuningCapability {
+        id: "thermal_tuning_run_v1".to_string(),
+        evidence_schema: "thermal_tuning_evidence_v3".to_string(),
+        supported_power_classes: vec!["pps3a".to_string(), "pps5a".to_string()],
+        target_schedule_c: [60, 240, 140, 100, 80, 120, 180, 160, 220],
+        physical_targets_c: [60, 80, 100, 120, 140, 160, 180, 220, 240],
+        trace: ThermalTuningTraceCapability {
+            paged: true,
+            acknowledged: true,
+            sealed_review: true,
+            buffer_capacity: 1_024,
+        },
+        candidate_promotion: true,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1412,6 +1502,83 @@ pub struct ThermalPlantRunSnapshot {
     pub trace_page: ThermalPlantTracePage,
     pub provisional_curve: Option<ThermalPlantProvisionalCurve>,
     pub active_result: Option<ThermalPlantActiveResult>,
+}
+
+/// Device-owned thermal tuning is intentionally kept as an opaque snapshot in
+/// devd. The daemon forwards this JSON contract between USB, LAN, and the
+/// localhost API; it does not interpret candidates or run the tuner.
+pub const THERMAL_TUNING_RUN_SCHEMA: &str = "thermal_tuning_run_v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningRunRequest {
+    pub lease_id: String,
+    pub op: String,
+    pub run_id: Option<String>,
+    pub power_class: Option<String>,
+    pub after_sequence: Option<u64>,
+    pub limit: Option<u16>,
+    pub through_sequence: Option<u64>,
+    pub trace_digest: Option<String>,
+    pub candidate_id: Option<String>,
+    pub candidate_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningRunQuery {
+    pub lease_id: Option<String>,
+    pub after_sequence: Option<u64>,
+    pub limit: Option<u16>,
+}
+
+fn mock_thermal_tuning_snapshot() -> Value {
+    json!({
+        "schema": THERMAL_TUNING_RUN_SCHEMA,
+        "run": {
+            "runId": "idle",
+            "state": "idle",
+            "powerClass": null,
+            "phase": "idle",
+            "currentTargetC": null,
+            "targetProgress": {
+                "acceptedC": [],
+                "failedC": [],
+                "skippedC": []
+            },
+            "terminalDisposition": null,
+            "eligibility": {
+                "ready": true,
+                "reasons": [],
+                "activeOwner": null
+            },
+            "review": {
+                "state": "not_applicable",
+                "reason": null,
+                "acknowledgedThrough": null,
+                "terminalSequence": null,
+                "traceDigest": null
+            },
+            "candidate": {
+                "candidateId": null,
+                "candidateHash": null,
+                "powerClass": null,
+                "promotionState": "unavailable"
+            },
+            "journal": {
+                "lastRunId": null,
+                "lastDisposition": null
+            }
+        },
+        "page": {
+            "earliestSequence": 0,
+            "emittedThrough": null,
+            "nextAfterSequence": 0,
+            "acknowledgedThrough": null,
+            "digestThroughPage": null,
+            "events": []
+        }
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2378,6 +2545,15 @@ impl FirmwareOperationProgress {
         self.active_stage = None;
     }
 
+    fn stage_failed_with_error(&mut self, stage: &str, error: &ApiError) {
+        let mut details = json!({ "code": error.code });
+        if let Some(diagnostic) = firmware_operation_diagnostic(error) {
+            details["diagnostic"] = Value::String(diagnostic);
+        }
+        self.emit("stage_failed", Some(stage), details);
+        self.active_stage = None;
+    }
+
     fn operation_completed(&mut self, outcome: &str) {
         self.emit("operation_completed", None, json!({ "outcome": outcome }));
     }
@@ -2391,7 +2567,7 @@ impl FirmwareOperationProgress {
             "failed"
         };
         if let Some(stage) = self.active_stage.clone() {
-            self.stage_failed(&stage, &error.error.code);
+            self.stage_failed_with_error(&stage, &error.error);
         }
         self.operation_completed(outcome);
         error
@@ -2400,6 +2576,23 @@ impl FirmwareOperationProgress {
     fn require<T>(&mut self, result: Result<T, HttpError>) -> Result<T, HttpError> {
         result.map_err(|error| self.fail(error))
     }
+}
+
+fn firmware_operation_diagnostic(error: &ApiError) -> Option<String> {
+    let details = error.details.as_ref()?;
+    details
+        .get("stderr")
+        .and_then(Value::as_str)
+        .or_else(|| details.get("diagnostic").and_then(Value::as_str))
+        .or_else(|| {
+            details
+                .get("attempts")
+                .and_then(Value::as_array)
+                .and_then(|attempts| attempts.last())
+                .and_then(|attempt| attempt.get("stderr"))
+                .and_then(Value::as_str)
+        })
+        .map(|diagnostic| diagnostic.chars().take(512).collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2525,6 +2718,7 @@ impl IntoResponse for HttpError {
 
 #[derive(Debug, Deserialize)]
 pub struct LeaseQuery {
+    #[serde(alias = "leaseId")]
     pub lease_id: Option<String>,
 }
 
@@ -2596,6 +2790,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/devices/{device_id}/calibration/thermal-plant/run",
             get(device_thermal_plant_run),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/calibration/thermal-tuning/run",
+            get(device_thermal_tuning_run).post(configure_device_thermal_tuning_run),
         )
         .route(
             "/api/v1/devices/{device_id}/eeprom",
@@ -3547,6 +3745,368 @@ async fn device_thermal_plant_run(
         &target.thermal_plant_run,
         after_sample,
     )))
+}
+
+fn thermal_tuning_trace_page(snapshot: &Value, after_sequence: Option<u64>, limit: usize) -> Value {
+    let mut page = snapshot.clone();
+    let Some(page_object) = page.get_mut("page").and_then(Value::as_object_mut) else {
+        return page;
+    };
+    let events = page_object
+        .get("events")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let selected = events
+        .into_iter()
+        .filter(|event| {
+            event
+                .get("sequence")
+                .and_then(Value::as_u64)
+                .is_some_and(|sequence| after_sequence.is_none_or(|cursor| sequence > cursor))
+        })
+        .take(limit.max(1))
+        .collect::<Vec<_>>();
+    let next_after = selected
+        .last()
+        .and_then(|event| event.get("sequence"))
+        .and_then(Value::as_u64)
+        .map_or_else(
+            || after_sequence.map_or(0, |cursor| cursor.saturating_add(1)),
+            |sequence| sequence.saturating_add(1),
+        );
+    page_object.insert("events".to_string(), Value::Array(selected));
+    page_object.insert("nextAfterSequence".to_string(), json!(next_after));
+    page
+}
+
+fn thermal_tuning_lan_path(after_sequence: Option<u64>, limit: usize) -> String {
+    match after_sequence {
+        None if limit == 8 => "calibration/thermal-tuning/run".to_string(),
+        None => format!("calibration/thermal-tuning/run?limit={limit}"),
+        Some(cursor) => {
+            format!("calibration/thermal-tuning/run?afterSequence={cursor}&limit={limit}")
+        }
+    }
+}
+
+fn mock_thermal_tuning_command(
+    snapshot: &mut Value,
+    payload: &ThermalTuningRunRequest,
+) -> Result<Value, HttpError> {
+    if snapshot.get("run").and_then(Value::as_object).is_none() {
+        return Err(HttpError::internal(
+            "mock thermal tuning snapshot is invalid",
+        ));
+    }
+    let op = payload.op.as_str();
+    if !matches!(op, "start" | "get") {
+        let run = snapshot
+            .get("run")
+            .and_then(Value::as_object)
+            .ok_or_else(|| HttpError::internal("mock thermal tuning snapshot is invalid"))?;
+        let active_run_id = run.get("runId").and_then(Value::as_str).unwrap_or("idle");
+        if active_run_id == "idle" || payload.run_id.as_deref() != Some(active_run_id) {
+            return Err(HttpError::bad_request(
+                "tuning_run_not_active",
+                "The requested thermal tuning run is not active.",
+            ));
+        }
+    }
+    match op {
+        "start" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            let power_class = payload.power_class.as_deref().ok_or_else(|| {
+                HttpError::bad_request(
+                    "tuning_power_class_required",
+                    "Thermal tuning requires explicit pps3a or pps5a.",
+                )
+            })?;
+            if !matches!(power_class, "pps3a" | "pps5a") {
+                return Err(HttpError::bad_request(
+                    "tuning_power_class_unsupported",
+                    "Only pps3a and pps5a are supported.",
+                ));
+            }
+            if run.get("state").and_then(Value::as_str) == Some("running") {
+                return Err(HttpError::conflict(
+                    "tuning_busy",
+                    "A thermal tuning run is already active.",
+                    json!({}),
+                ));
+            }
+            let run_id = now_millis().to_string();
+            let candidate_hash = format!(
+                "{}",
+                hex::encode(Sha256::digest(
+                    format!("{THERMAL_TUNING_RUN_SCHEMA}:{power_class}").as_bytes()
+                ))
+            );
+            run.insert("runId".to_string(), json!(run_id));
+            run.insert("state".to_string(), json!("running"));
+            run.insert("powerClass".to_string(), json!(power_class));
+            run.insert("phase".to_string(), json!("cooldown_wait"));
+            run.insert("currentTargetC".to_string(), json!(60));
+            run.insert("terminalDisposition".to_string(), Value::Null);
+            run.insert(
+                "candidate".to_string(),
+                json!({
+                    "candidateId": "candidate-1",
+                    "candidateHash": candidate_hash,
+                    "powerClass": power_class,
+                    "promotionState": "awaiting_review"
+                }),
+            );
+            run.insert(
+                "review".to_string(),
+                json!({
+                    "state": "recording",
+                    "reason": null,
+                    "acknowledgedThrough": null,
+                    "terminalSequence": null,
+                    "traceDigest": null
+                }),
+            );
+            if let Some(page) = snapshot.get_mut("page").and_then(Value::as_object_mut) {
+                page.insert("earliestSequence".to_string(), json!(0));
+                page.insert("emittedThrough".to_string(), json!(0));
+                page.insert("nextAfterSequence".to_string(), json!(1));
+                page.insert(
+                    "events".to_string(),
+                    json!([{
+                        "sequence": 0,
+                        "elapsedMs": 0,
+                        "kind": "decision",
+                        "phase": "cooldown_wait",
+                        "targetC": 60,
+                        "temperatureCentiC": 2500,
+                        "vinMv": null,
+                        "ppsContractMv": 20000,
+                        "ppsContractMa": if power_class == "pps3a" { 3250 } else { 5000 },
+                        "heaterOutputPermille": 0,
+                        "measurementValid": true,
+                        "disposition": "pending",
+                        "scoreTracking": 0,
+                        "scoreEnergy": 0,
+                        "scoreOvershoot": 0,
+                        "scoreStability": 0,
+                        "gates": 0,
+                        "candidateHash": candidate_hash
+                    }]),
+                );
+            }
+        }
+        "cancel" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            run.insert("state".to_string(), json!("terminal"));
+            run.insert("phase".to_string(), json!("terminal"));
+            run.insert("terminalDisposition".to_string(), json!("cancelled"));
+            if let Some(candidate) = run.get_mut("candidate").and_then(Value::as_object_mut) {
+                candidate.insert("promotionState".to_string(), json!("unavailable"));
+            }
+        }
+        "ack_trace" => {
+            let through = payload.through_sequence.ok_or_else(|| {
+                HttpError::bad_request("trace_ack_invalid", "throughSequence is required.")
+            })?;
+            if let Some(page) = snapshot.get_mut("page").and_then(Value::as_object_mut) {
+                page.insert("acknowledgedThrough".to_string(), json!(through));
+            }
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            if let Some(review) = run.get_mut("review").and_then(Value::as_object_mut) {
+                review.insert("acknowledgedThrough".to_string(), json!(through));
+            }
+        }
+        "seal_review" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            run.insert("state".to_string(), json!("terminal"));
+            run.insert("phase".to_string(), json!("terminal"));
+            run.insert("terminalDisposition".to_string(), json!("completed"));
+            if let Some(review) = run.get_mut("review").and_then(Value::as_object_mut) {
+                review.insert("state".to_string(), json!("complete"));
+            }
+            if let Some(candidate) = run.get_mut("candidate").and_then(Value::as_object_mut) {
+                candidate.insert("promotionState".to_string(), json!("ready"));
+            }
+        }
+        "preview" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            let candidate = run
+                .get_mut("candidate")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    HttpError::bad_request("candidate_mismatch", "No candidate is available.")
+                })?;
+            if payload.candidate_id.as_deref()
+                != candidate.get("candidateId").and_then(Value::as_str)
+                || payload.candidate_hash.as_deref()
+                    != candidate.get("candidateHash").and_then(Value::as_str)
+                || payload.power_class.as_deref()
+                    != candidate.get("powerClass").and_then(Value::as_str)
+            {
+                return Err(HttpError::bad_request(
+                    "candidate_mismatch",
+                    "Candidate identity does not match the device-owned candidate.",
+                ));
+            }
+            candidate.insert("promotionState".to_string(), json!("previewed"));
+        }
+        "discard_preview" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            let candidate = run
+                .get_mut("candidate")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    HttpError::bad_request("candidate_mismatch", "No candidate is available.")
+                })?;
+            if payload.candidate_id.as_deref()
+                != candidate.get("candidateId").and_then(Value::as_str)
+                || payload.candidate_hash.as_deref()
+                    != candidate.get("candidateHash").and_then(Value::as_str)
+                || payload.power_class.as_deref()
+                    != candidate.get("powerClass").and_then(Value::as_str)
+            {
+                return Err(HttpError::bad_request(
+                    "candidate_mismatch",
+                    "Candidate identity does not match the device-owned candidate.",
+                ));
+            }
+            candidate.insert("promotionState".to_string(), json!("ready"));
+        }
+        "save" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            if let Some(candidate) = run.get_mut("candidate").and_then(Value::as_object_mut) {
+                if candidate.get("promotionState").and_then(Value::as_str) != Some("previewed") {
+                    return Err(HttpError::bad_request(
+                        "candidate_preview_required",
+                        "Candidate save requires a successful preview and confirmation.",
+                    ));
+                }
+                candidate.insert("promotionState".to_string(), json!("saved"));
+            }
+        }
+        "get" => {}
+        _ => {
+            return Err(HttpError::bad_request(
+                "thermal_tuning_op_unsupported",
+                "Unsupported thermal tuning operation.",
+            ));
+        }
+    }
+    Ok(snapshot.clone())
+}
+
+async fn device_thermal_tuning_run(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<ThermalTuningRunQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    let after_sequence = query.after_sequence;
+    // Keep all transport pages within the firmware's 8 KiB USB JSONL budget.
+    let limit = usize::from(query.limit.unwrap_or(8).clamp(1, 8));
+    if target.transport == DeviceTransport::NativeSerial {
+        let snapshot =
+            serial_thermal_tuning_run_get(&state, &target, after_sequence, limit).await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.thermal_tuning_run = snapshot.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(snapshot));
+    }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let path = thermal_tuning_lan_path(after_sequence, limit);
+        let snapshot = lan_bridge_read::<Value>(&configured, &path).await?;
+        return Ok(Json(snapshot));
+    }
+    Ok(Json(thermal_tuning_trace_page(
+        &target.thermal_tuning_run,
+        after_sequence,
+        limit,
+    )))
+}
+
+async fn configure_device_thermal_tuning_run(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<ThermalTuningRunRequest>,
+) -> Result<Json<Value>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    if target.transport == DeviceTransport::NativeSerial {
+        let snapshot = serial_thermal_tuning_run_command(&state, &target, &payload).await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.thermal_tuning_run = snapshot.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(snapshot));
+    }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let snapshot = lan_bridge_write::<Value>(
+            &configured,
+            "calibration/thermal-tuning/run",
+            Method::POST,
+            Some(lan_bridge_payload(&payload)?),
+        )
+        .await?;
+        return Ok(Json(snapshot));
+    }
+    let mut state_lock = state.lock()?;
+    let device = state_lock
+        .devices
+        .get_mut(&device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+    let snapshot = mock_thermal_tuning_command(&mut device.thermal_tuning_run, &payload)?;
+    Ok(Json(snapshot))
 }
 
 async fn configure_calibration_job(
@@ -5693,6 +6253,39 @@ async fn firmware_operation(
     let transport = target.transport;
     let mut current_version = target.identity.firmware_version.clone();
     let mut status = target.status.clone();
+    // A USB Serial/JTAG transaction must not reopen a proven ROM connection
+    // before it starts the writer. The preflight token binds the exact port,
+    // ROM MAC, artifact, and partition layout for five minutes.
+    let recovery_uses_single_rom_session =
+        recovery_uses_single_rom_session(payload.operation, transport, &port_path);
+    let usb_update_reuses_preflight_evidence = usb_update_reuses_preflight_evidence(
+        payload.operation,
+        transport,
+        &port_path,
+        payload.dry_run,
+    );
+    let pending_approval = if payload.dry_run {
+        None
+    } else {
+        let token = progress.require(payload.approval_token.as_deref().ok_or_else(|| {
+            HttpError::forbidden(
+                "approval_required",
+                "Execution requires a current single-use approval token.",
+            )
+        }))?;
+        let approval = state
+            .lock()?
+            .firmware_approvals
+            .get(token)
+            .cloned()
+            .ok_or_else(|| {
+                HttpError::forbidden(
+                    "approval_invalid",
+                    "The approval token is invalid or already used.",
+                )
+            });
+        Some(progress.require(approval)?)
+    };
 
     // An update preserves an existing Flux Purr installation, so it must stop
     // heat and use fresh runtime facts from this exact serial target before it
@@ -5740,29 +6333,37 @@ async fn firmware_operation(
         progress.stage_started("rom_reset", json!({}));
     }
 
-    let security_result = match transport {
-        DeviceTransport::Mock => RomSecurityInfo {
-            rom_mac: mock_identity,
-            secure_boot_enabled: false,
-            flash_encryption_enabled: false,
-            secure_download_mode_enabled: false,
-            response_known: true,
-            chip_is_esp32s3: true,
-            flash_size_bytes: 4 * 1024 * 1024,
-            package_matches: true,
-        },
-        DeviceTransport::NativeSerial => {
-            progress.require(probe_native_rom_security(&state, &port_path).await)?
-        }
-        DeviceTransport::Lan => unreachable!(),
+    let security = if (recovery_uses_single_rom_session || usb_update_reuses_preflight_evidence)
+        && !payload.dry_run
+    {
+        // Recovery reads its proof in the writer session. A same-layout USB
+        // update instead consumes the short-lived proof minted by preflight;
+        // it has already been bound to the exact port and ROM MAC.
+        None
+    } else {
+        Some(match transport {
+            DeviceTransport::Mock => RomSecurityInfo {
+                rom_mac: mock_identity,
+                secure_boot_enabled: false,
+                flash_encryption_enabled: false,
+                secure_download_mode_enabled: false,
+                response_known: true,
+                chip_is_esp32s3: true,
+                flash_size_bytes: 4 * 1024 * 1024,
+                package_matches: true,
+            },
+            DeviceTransport::NativeSerial => progress
+                .require(probe_native_rom_security(&state, &port_path, payload.dry_run).await)?,
+            DeviceTransport::Lan => unreachable!(),
+        })
     };
-    let security = security_result;
     if payload.dry_run {
         progress.stage_completed("rom_reset", json!({}));
         progress.stage_started("chip_flash_security", json!({}));
     }
-    progress.require(security.validate_for_flash())?;
-    let rom_mac = security.rom_mac.clone();
+    if let Some(security) = security.as_ref() {
+        progress.require(security.validate_for_flash())?;
+    }
     if payload.dry_run {
         progress.stage_completed("chip_flash_security", json!({}));
         progress.stage_started("layout_config", json!({}));
@@ -5772,7 +6373,11 @@ async fn firmware_operation(
         async {
             let mut source_partition_hash = None;
             if payload.operation == FirmwareOperation::Update {
-                if transport == DeviceTransport::NativeSerial {
+                if usb_update_reuses_preflight_evidence {
+                    source_partition_hash = pending_approval
+                        .as_ref()
+                        .and_then(|approval| approval.source_partition_hash.clone());
+                } else if transport == DeviceTransport::NativeSerial {
                     let source_hash = probe_native_partition_hash(&state, &port_path).await?;
                     if !firmware_bundle::source_partition_hash_supported(
                         &source_hash,
@@ -5816,15 +6421,19 @@ async fn firmware_operation(
         progress.stage_started("preflight", json!({}));
     }
 
-    let preflight_digest = firmware_preflight_digest(
-        &payload,
-        &device_id,
-        &port_path,
-        &rom_mac,
-        &bundle.bundle_sha256,
-        source_partition_hash.as_deref(),
-    );
     if payload.dry_run {
+        let security = security
+            .as_ref()
+            .expect("preflight always performs a ROM security probe");
+        let rom_mac = security.rom_mac.clone();
+        let preflight_digest = firmware_preflight_digest(
+            &payload,
+            &device_id,
+            &port_path,
+            &rom_mac,
+            &bundle.bundle_sha256,
+            source_partition_hash.as_deref(),
+        );
         let token = {
             let mut inner = state.lock()?;
             let token = inner.next_id("firmware-approval");
@@ -5838,6 +6447,7 @@ async fn firmware_operation(
                     bundle_sha256: bundle.bundle_sha256.clone(),
                     operation: payload.operation,
                     allow_downgrade: payload.allow_downgrade,
+                    source_partition_hash: source_partition_hash.clone(),
                     preflight_digest,
                     expires_at: Instant::now() + Duration::from_secs(5 * 60),
                 },
@@ -5879,11 +6489,25 @@ async fn firmware_operation(
         || approval.lease_id != payload.lease_id
         || approval.device_id != device_id
         || approval.port_path != port_path
-        || approval.rom_mac != rom_mac
         || approval.bundle_sha256 != bundle.bundle_sha256
         || approval.operation != payload.operation
         || approval.allow_downgrade != payload.allow_downgrade
-        || approval.preflight_digest != preflight_digest
+        || (usb_update_reuses_preflight_evidence
+            && approval.source_partition_hash != source_partition_hash)
+        || (!recovery_uses_single_rom_session && !usb_update_reuses_preflight_evidence && {
+            let security = security
+                .as_ref()
+                .expect("non-recovery execution performs a ROM security probe");
+            let digest = firmware_preflight_digest(
+                &payload,
+                &device_id,
+                &port_path,
+                &security.rom_mac,
+                &bundle.bundle_sha256,
+                source_partition_hash.as_deref(),
+            );
+            approval.rom_mac != security.rom_mac || approval.preflight_digest != digest
+        })
     {
         return Err(progress.fail(HttpError::forbidden(
             "approval_mismatch",
@@ -5914,12 +6538,29 @@ async fn firmware_operation(
     }
     progress.stage_completed("authorization", json!({}));
 
+    let single_session_execution = progress.require(
+        uses_single_usb_serial_jtag_bundle_session(
+            payload.operation,
+            &port_path,
+            source_partition_hash.as_deref(),
+            &bundle.manifest.migrations,
+        )
+        .map_err(bundle_http_error),
+    )?;
+    let execution_proof = single_session_execution.then(|| FirmwareExecutionProof {
+        approval: approval.clone(),
+        request: payload.clone(),
+        device_id: device_id.clone(),
+        bundle_sha256: bundle.bundle_sha256.clone(),
+    });
+
     run_bundle_flash_transaction(
         &state,
         &bundle,
         payload.operation,
         &port_path,
         source_partition_hash.as_deref(),
+        execution_proof,
         &mut progress,
     )
     .await?;
@@ -6032,8 +6673,19 @@ async fn run_bundle_flash_transaction(
     operation: FirmwareOperation,
     port_path: &str,
     source_partition_hash: Option<&str>,
+    execution_proof: Option<FirmwareExecutionProof>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<(), HttpError> {
+    if execution_proof.is_some() && USE_IN_PROCESS_USB_JTAG_WRITER {
+        return run_usb_serial_jtag_single_session_flash_transaction(
+            state,
+            bundle,
+            port_path,
+            execution_proof,
+            progress,
+        )
+        .await;
+    }
     let _serial_rpc = progress.require(
         acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
     )?;
@@ -6064,6 +6716,16 @@ async fn run_bundle_flash_transaction(
         port_path.into(),
         "--non-interactive".into(),
     ];
+    // ESP32-S3 USB Serial/JTAG drops the loader transport when a multi-segment
+    // update starts a fresh espflash process for the application image. Write
+    // the boot-critical ranges as one 0x0 factory image for both update and
+    // recovery operations, then retain the normal MD5/config verification.
+    let usb_serial_jtag_single_bundle_write =
+        uses_single_usb_serial_jtag_bundle_write(operation, port_path);
+    // USB Serial/JTAG's ROM link is lost when espflash uploads its RAM stub.
+    // Bundle writes therefore remain in the ROM loader, matching the read and
+    // checksum paths used by the protected transaction.
+    let usb_serial_jtag_no_stub = is_esp_usb_serial_jtag_port(port_path);
     let initial_reset = if is_esp_usb_serial_jtag_port(port_path) {
         "usb-reset"
     } else {
@@ -6082,38 +6744,50 @@ async fn run_bundle_flash_transaction(
             firmware_bundle::config_copy_plan(source_partition_hash, &bundle.manifest.migrations)
                 .map_err(bundle_http_error),
         )?;
-        let path = workspace.path().join("preserved-flux-cfg.bin");
-        let args = build_bundle_read_flash_args(
-            &common,
-            initial_reset,
-            copy.source_address,
-            copy.length,
-            &path,
-        );
-        progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
-        let bytes =
-            progress.require(fs::read(&path).map_err(|error| {
+        if !config_copy_requires_transfer(copy) {
+            // The factory image ends immediately before this partition, so
+            // retaining its same-address bytes needs no ROM read or rewrite.
+            None
+        } else {
+            let path = workspace.path().join("preserved-flux-cfg.bin");
+            let args = build_bundle_read_flash_args(
+                &common,
+                initial_reset,
+                copy.source_address,
+                copy.length,
+                &path,
+            );
+            progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
+            let bytes = progress.require(fs::read(&path).map_err(|error| {
                 HttpError::internal(&format!("failed to stage flux_cfg: {error}"))
             }))?;
-        if bytes.len() as u64 != copy.length {
-            return Err(progress.fail(HttpError::internal("flux_cfg staging length differs.")));
+            if bytes.len() as u64 != copy.length {
+                return Err(progress.fail(HttpError::internal("flux_cfg staging length differs.")));
+            }
+            Some((path, bytes, copy))
         }
-        Some((path, bytes, copy))
     } else {
         None
     };
     if operation == FirmwareOperation::InstallRecovery {
         progress.stage_started("erase", json!({}));
-        let mut args = vec!["erase-flash".into()];
-        args.extend(common.clone());
-        args.extend([
-            "--before".into(),
-            initial_reset.into(),
-            "--after".into(),
-            "no-reset".into(),
-        ]);
-        progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
-        progress.stage_completed("erase", json!({}));
+        if usb_serial_jtag_single_bundle_write {
+            // ROM write-bin erases each destination range as it is programmed.
+            // The recovery bundle covers every boot-critical range, so a full
+            // flash erase is unnecessary and would require an unsupported stub.
+            progress.stage_completed("erase", json!({"scope": "bundle_ranges"}));
+        } else {
+            let mut args = vec!["erase-flash".into()];
+            args.extend(common.clone());
+            args.extend([
+                "--before".into(),
+                initial_reset.into(),
+                "--after".into(),
+                "no-reset".into(),
+            ]);
+            progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
+            progress.stage_completed("erase", json!({}));
+        }
         progress.stage_started("write_segments", json!({
             "completedUnits": 0,
             "totalUnits": bundle.manifest.segments.iter().map(|segment| segment.length).sum::<u64>(),
@@ -6127,11 +6801,24 @@ async fn run_bundle_flash_transaction(
         .map(|segment| segment.length)
         .sum::<u64>();
     let mut completed_bytes = 0_u64;
-    for segment in &bundle.manifest.segments {
-        let path = workspace.path().join(format!("{:?}.bin", segment.kind));
-        let args = build_bundle_write_bin_args(&common, "no-reset", segment.address, &path);
+    if usb_serial_jtag_single_bundle_write {
+        // espflash 4.5 accepts one address/file pair per write-bin invocation.
+        // Build one 0x0-based factory image so USB Serial/JTAG remains in a
+        // single ROM session across bootloader, partition table, and app.
+        let factory_image = progress.require(build_boot_critical_factory_image(bundle))?;
+        let factory_path = workspace.path().join("usb-jtag-factory.bin");
+        progress.require(fs::write(&factory_path, factory_image).map_err(|error| {
+            HttpError::internal(&format!("failed to stage USB-JTAG factory image: {error}"))
+        }))?;
+        let args = build_bundle_write_bin_args(
+            &common,
+            initial_reset,
+            0,
+            &factory_path,
+            usb_serial_jtag_no_stub,
+        );
         progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
-        completed_bytes = completed_bytes.saturating_add(segment.length);
+        completed_bytes = total_bytes;
         progress.stage_progress(
             "write_segments",
             json!({
@@ -6140,6 +6827,32 @@ async fn run_bundle_flash_transaction(
                 "unit": "bytes",
             }),
         );
+    } else {
+        for (index, segment) in bundle.manifest.segments.iter().enumerate() {
+            let path = workspace.path().join(format!("{:?}.bin", segment.kind));
+            let before_reset = bundle_segment_before_reset(
+                usb_serial_jtag_single_bundle_write,
+                initial_reset,
+                index,
+            );
+            let args = build_bundle_write_bin_args(
+                &common,
+                before_reset,
+                segment.address,
+                &path,
+                usb_serial_jtag_no_stub,
+            );
+            progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
+            completed_bytes = completed_bytes.saturating_add(segment.length);
+            progress.stage_progress(
+                "write_segments",
+                json!({
+                    "completedUnits": completed_bytes,
+                    "totalUnits": total_bytes,
+                    "unit": "bytes",
+                }),
+            );
+        }
     }
     progress.stage_completed(
         "write_segments",
@@ -6158,7 +6871,13 @@ async fn run_bundle_flash_transaction(
         }),
     );
     for (index, segment) in bundle.manifest.segments.iter().enumerate() {
-        let checksum = build_checksum_md5_args(&common, segment.address, segment.length);
+        let before_reset = if usb_serial_jtag_single_bundle_write {
+            initial_reset
+        } else {
+            "no-reset"
+        };
+        let checksum =
+            build_checksum_md5_args(&common, before_reset, segment.address, segment.length);
         let output = progress
             .require(require_bundle_espflash_success(&program, &checksum, port_path).await)?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
@@ -6177,7 +6896,13 @@ async fn run_bundle_flash_transaction(
         );
     }
     if let Some((path, expected, copy)) = preserved_config {
-        let write = build_bundle_write_bin_args(&common, "no-reset", copy.target_address, &path);
+        let write = build_bundle_write_bin_args(
+            &common,
+            "no-reset",
+            copy.target_address,
+            &path,
+            usb_serial_jtag_no_stub,
+        );
         progress.require(require_bundle_espflash_success(&program, &write, port_path).await)?;
         let verified_path = workspace.path().join("verified-flux-cfg.bin");
         let read = build_bundle_read_flash_args(
@@ -6211,12 +6936,492 @@ async fn run_bundle_flash_transaction(
     Ok(())
 }
 
-fn build_checksum_md5_args(common: &[String], address: u64, length: u64) -> Vec<String> {
+fn bundle_segment_before_reset(
+    usb_serial_jtag_single_bundle_write: bool,
+    initial_reset: &'static str,
+    _index: usize,
+) -> &'static str {
+    if usb_serial_jtag_single_bundle_write {
+        initial_reset
+    } else {
+        "no-reset"
+    }
+}
+
+fn uses_single_usb_serial_jtag_bundle_write(operation: FirmwareOperation, port_path: &str) -> bool {
+    matches!(
+        operation,
+        FirmwareOperation::Update | FirmwareOperation::InstallRecovery
+    ) && is_esp_usb_serial_jtag_port(port_path)
+}
+
+fn uses_single_usb_serial_jtag_bundle_session(
+    operation: FirmwareOperation,
+    port_path: &str,
+    source_partition_hash: Option<&str>,
+    migrations: &[String],
+) -> Result<bool, firmware_bundle::BundleError> {
+    if !uses_single_usb_serial_jtag_bundle_write(operation, port_path) {
+        return Ok(false);
+    }
+    if operation == FirmwareOperation::InstallRecovery {
+        return Ok(true);
+    }
+    let source_partition_hash = source_partition_hash.ok_or_else(|| {
+        firmware_bundle::BundleError::Contract(
+            "same-session update requires an approved source layout".into(),
+        )
+    })?;
+    Ok(!config_copy_requires_transfer(
+        firmware_bundle::config_copy_plan(source_partition_hash, migrations)?,
+    ))
+}
+
+fn usb_update_reuses_preflight_evidence(
+    operation: FirmwareOperation,
+    transport: DeviceTransport,
+    port_path: &str,
+    dry_run: bool,
+) -> bool {
+    !dry_run
+        && operation == FirmwareOperation::Update
+        && transport == DeviceTransport::NativeSerial
+        && is_esp_usb_serial_jtag_port(port_path)
+}
+
+fn config_copy_requires_transfer(copy: firmware_bundle::ConfigCopyPlan) -> bool {
+    copy.source_address != copy.target_address
+}
+
+#[derive(Debug, Clone)]
+struct BundleFlashSegment {
+    address: u32,
+    length: u32,
+    md5: String,
+    bytes: Vec<u8>,
+}
+
+fn prepare_bundle_flash_segments(
+    bundle: &firmware_bundle::FirmwareBundle,
+) -> Result<Vec<BundleFlashSegment>, HttpError> {
+    bundle
+        .manifest
+        .segments
+        .iter()
+        .map(|segment| {
+            let address = u32::try_from(segment.address).map_err(|_| {
+                HttpError::internal("validated bundle segment address does not fit ESP32 flash")
+            })?;
+            let length = u32::try_from(segment.length).map_err(|_| {
+                HttpError::internal("validated bundle segment length does not fit ESP32 flash")
+            })?;
+            let bytes = bundle.images.get(&segment.path).ok_or_else(|| {
+                HttpError::internal("validated bundle segment disappeared before execution")
+            })?;
+            if bytes.len() != length as usize {
+                return Err(HttpError::internal(
+                    "validated bundle segment length changed before execution",
+                ));
+            }
+            Ok(BundleFlashSegment {
+                address,
+                length,
+                md5: segment.md5.clone(),
+                bytes: bytes.clone(),
+            })
+        })
+        .collect()
+}
+
+async fn run_usb_serial_jtag_single_session_flash_transaction(
+    state: &AppState,
+    bundle: &firmware_bundle::FirmwareBundle,
+    port_path: &str,
+    proof: Option<FirmwareExecutionProof>,
+    progress: &mut FirmwareOperationProgress,
+) -> Result<(), HttpError> {
+    let proof = progress.require(proof.ok_or_else(|| {
+        HttpError::internal("USB-JTAG single-session execution is missing its preflight proof")
+    }))?;
+    let segments = progress.require(prepare_bundle_flash_segments(bundle))?;
+    let _serial_rpc = progress.require(
+        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
+    )?;
+    progress.require(drop_cached_serial_session(
+        &state.serial_sessions,
+        port_path,
+    ))?;
+
+    let total_bytes = segments
+        .iter()
+        .map(|segment| u64::from(segment.length))
+        .sum::<u64>();
+    progress.stage_started(
+        "write_segments",
+        json!({ "completedUnits": 0, "totalUnits": total_bytes, "unit": "bytes" }),
+    );
+
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let writer_port = port_path.to_string();
+    let writer_proof = proof.clone();
+    let writer = tokio::task::spawn_blocking(move || {
+        flash_bundle_with_single_usb_serial_jtag_session(
+            &writer_port,
+            &segments,
+            Some(writer_proof),
+            events,
+        )
+    });
+    let write_result = writer
+        .await
+        .map_err(|error| {
+            HttpError::internal_with_details(
+                "usb_jtag_single_session_writer_failed",
+                "USB-JTAG single-session writer task failed.",
+                json!({ "diagnostic": error.to_string() }),
+            )
+        })
+        .and_then(|result| {
+            result.map_err(|error| {
+                HttpError::internal_with_details(
+                    "usb_jtag_single_session_writer_failed",
+                    "USB-JTAG single-session writer failed before all bundle segments were verified.",
+                    json!({ "diagnostic": error }),
+                )
+            })
+        });
+
+    if proof.request.operation == FirmwareOperation::InstallRecovery {
+        progress.stage_started("erase", json!({}));
+        progress.stage_completed("erase", json!({ "scope": "bundle_ranges" }));
+    }
+
+    let mut completed_bytes = 0_u64;
+    let mut verified_segments = 0_u64;
+    let mut write_completed = false;
+    let mut md5_started = false;
+    let mut reset_started = false;
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            SingleSessionFlashEvent::RomConnected
+            | SingleSessionFlashEvent::ExecutionProofVerified
+            | SingleSessionFlashEvent::RangePreparationCompleted => {}
+            SingleSessionFlashEvent::SegmentWritten { length } => {
+                completed_bytes = completed_bytes.saturating_add(u64::from(length));
+                progress.stage_progress(
+                    "write_segments",
+                    json!({
+                        "completedUnits": completed_bytes,
+                        "totalUnits": total_bytes,
+                        "unit": "bytes",
+                    }),
+                );
+            }
+            SingleSessionFlashEvent::WriteCompleted => {
+                write_completed = true;
+                progress.stage_completed(
+                    "write_segments",
+                    json!({
+                        "completedUnits": completed_bytes,
+                        "totalUnits": total_bytes,
+                        "unit": "bytes",
+                    }),
+                );
+                progress.stage_started(
+                    "rom_md5",
+                    json!({ "completedUnits": 0, "totalUnits": bundle.manifest.segments.len(), "unit": "segments" }),
+                );
+                md5_started = true;
+            }
+            SingleSessionFlashEvent::SegmentMd5Verified => {
+                verified_segments = verified_segments.saturating_add(1);
+                progress.stage_progress(
+                    "rom_md5",
+                    json!({ "completedUnits": verified_segments, "totalUnits": bundle.manifest.segments.len(), "unit": "segments" }),
+                );
+            }
+            SingleSessionFlashEvent::Md5Completed => {
+                progress.stage_completed(
+                    "rom_md5",
+                    json!({ "completedUnits": verified_segments, "totalUnits": bundle.manifest.segments.len(), "unit": "segments" }),
+                );
+                progress.stage_started("reset", json!({}));
+                reset_started = true;
+            }
+            SingleSessionFlashEvent::ResetCompleted => {
+                progress.stage_completed("reset", json!({}));
+                reset_started = false;
+            }
+        }
+    }
+
+    match progress.require(write_result) {
+        Ok(receipt)
+            if receipt.verified_segments == bundle.manifest.segments.len() as u64
+                && write_completed
+                && md5_started =>
+        {
+            if reset_started {
+                return Err(progress.fail(HttpError::internal(
+                    "USB-JTAG single-session write completed without a reset receipt.",
+                )));
+            }
+            Ok(())
+        }
+        Ok(_) => Err(progress.fail(HttpError::internal(
+            "USB-JTAG single-session receipt was incomplete.",
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SingleSessionFlashReceipt {
+    verified_segments: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SingleSessionFlashEvent {
+    RomConnected,
+    ExecutionProofVerified,
+    RangePreparationCompleted,
+    SegmentWritten { length: u32 },
+    WriteCompleted,
+    SegmentMd5Verified,
+    Md5Completed,
+    ResetCompleted,
+}
+
+#[derive(Debug)]
+struct SingleSessionFlashProgress {
+    segment_lengths: HashMap<u32, u32>,
+    current_length: Option<u32>,
+    events: mpsc::UnboundedSender<SingleSessionFlashEvent>,
+}
+
+impl SingleSessionFlashProgress {
+    fn new(
+        segments: &[BundleFlashSegment],
+        events: mpsc::UnboundedSender<SingleSessionFlashEvent>,
+    ) -> Self {
+        Self {
+            segment_lengths: segments
+                .iter()
+                .map(|segment| (segment.address, segment.length))
+                .collect(),
+            current_length: None,
+            events,
+        }
+    }
+}
+
+impl espflash::target::ProgressCallbacks for SingleSessionFlashProgress {
+    fn init(&mut self, address: u32, _total: usize) {
+        self.current_length = self.segment_lengths.get(&address).copied();
+    }
+
+    fn update(&mut self, _current: usize) {}
+
+    fn verifying(&mut self) {}
+
+    fn finish(&mut self, _skipped: bool) {
+        if let Some(length) = self.current_length.take() {
+            let _ = self
+                .events
+                .send(SingleSessionFlashEvent::SegmentWritten { length });
+        }
+    }
+}
+
+fn flash_bundle_with_single_usb_serial_jtag_session(
+    port_path: &str,
+    segments: &[BundleFlashSegment],
+    proof: Option<FirmwareExecutionProof>,
+    events: mpsc::UnboundedSender<SingleSessionFlashEvent>,
+) -> Result<SingleSessionFlashReceipt, String> {
+    let mut failures = Vec::new();
+    for attempt in 1..=ESPFLASH_SINGLE_SESSION_FLASH_ATTEMPTS {
+        // A failed ROM write may leave an erased or partial image. Retry the
+        // whole transaction in a new authorized ROM session, and publish only
+        // the receipt from the attempt that completed every verification step.
+        let (attempt_events, mut attempt_event_rx) = mpsc::unbounded_channel();
+        match flash_bundle_with_single_usb_serial_jtag_session_once(
+            port_path,
+            segments,
+            proof.clone(),
+            attempt_events,
+        ) {
+            Ok(receipt) => {
+                while let Ok(event) = attempt_event_rx.try_recv() {
+                    let _ = events.send(event);
+                }
+                return Ok(receipt);
+            }
+            Err(error) => {
+                failures.push(format!("attempt {attempt}: {error}"));
+                if attempt < ESPFLASH_SINGLE_SESSION_FLASH_ATTEMPTS {
+                    std::thread::sleep(ESPFLASH_USB_RESET_RETRY_DELAY);
+                }
+            }
+        }
+    }
+    Err(format!(
+        "single-session firmware write failed after {ESPFLASH_SINGLE_SESSION_FLASH_ATTEMPTS} complete attempts: {}",
+        failures.join(" | ")
+    ))
+}
+
+fn flash_bundle_with_single_usb_serial_jtag_session_once(
+    port_path: &str,
+    segments: &[BundleFlashSegment],
+    proof: Option<FirmwareExecutionProof>,
+    events: mpsc::UnboundedSender<SingleSessionFlashEvent>,
+) -> Result<SingleSessionFlashReceipt, String> {
+    use espflash::image_format::Segment;
+
+    ignore_sigpipe_for_in_process_espflash();
+    let mut flasher = connect_single_session_rom_flasher(port_path)?;
+    let _ = events.send(SingleSessionFlashEvent::RomConnected);
+    if let Some(proof) = proof.as_ref() {
+        verify_firmware_execution_proof(port_path, &mut flasher, proof)?;
+        let _ = events.send(SingleSessionFlashEvent::ExecutionProofVerified);
+    }
+    let _ = events.send(SingleSessionFlashEvent::RangePreparationCompleted);
+    let images = segments
+        .iter()
+        .map(|segment| Segment::new(segment.address, &segment.bytes))
+        .collect::<Vec<_>>();
+    let mut progress = SingleSessionFlashProgress::new(segments, events.clone());
+    flasher
+        .write_bins_to_flash(&images, &mut progress)
+        .map_err(|error| format!("{error:?}"))?;
+    let _ = events.send(SingleSessionFlashEvent::WriteCompleted);
+
+    for segment in segments {
+        let checksum = flasher
+            .checksum_md5(segment.address, segment.length)
+            .map_err(|error| error.to_string())?;
+        if hex::encode(checksum.to_be_bytes()) != segment.md5 {
+            return Err(format!(
+                "ROM MD5 mismatch at 0x{:x}: expected {}, got {}",
+                segment.address,
+                segment.md5,
+                hex::encode(checksum.to_be_bytes()),
+            ));
+        }
+        let _ = events.send(SingleSessionFlashEvent::SegmentMd5Verified);
+    }
+    let _ = events.send(SingleSessionFlashEvent::Md5Completed);
+    flasher
+        .connection()
+        .reset()
+        .map_err(|error| error.to_string())?;
+    let _ = events.send(SingleSessionFlashEvent::ResetCompleted);
+
+    Ok(SingleSessionFlashReceipt {
+        verified_segments: segments.len() as u64,
+    })
+}
+
+fn connect_single_session_rom_flasher(
+    port_path: &str,
+) -> Result<espflash::flasher::Flasher, String> {
+    use espflash::{
+        connection::{Connection, ResetAfterOperation},
+        flasher::Flasher,
+    };
+    use serialport::FlowControl;
+
+    let mut attempts = Vec::new();
+    for reset_mode in recovery_rom_reset_modes() {
+        let connection = (|| -> Result<Connection, String> {
+            let usb_info = usb_info_for_authorized_port(port_path)?;
+            let serial = serialport::new(port_path, DEFAULT_BAUD_RATE)
+                .flow_control(FlowControl::None)
+                .timeout(ESPFLASH_SINGLE_SESSION_IO_TIMEOUT)
+                .open_native()
+                .map_err(|error| error.to_string())?;
+            Ok(Connection::new(
+                serial,
+                usb_info,
+                // Keep the ROM loader alive exactly like the execution-time
+                // security probe. The only runtime reset is issued after all
+                // bundle segments have passed ROM MD5 verification.
+                ResetAfterOperation::NoResetNoStub,
+                reset_mode,
+                DEFAULT_BAUD_RATE,
+            ))
+        })();
+        match connection {
+            // The approved recovery bundle explicitly covers the bootloader,
+            // Keep the ROM transport and its flash stub alive through the
+            // bootloader, partition table, and application write. This is the
+            // same supported data path as `espflash write-bin`, without a
+            // process boundary before ROM MD5 verification.
+            Ok(connection) => match Flasher::connect(
+                connection,
+                USB_JTAG_SINGLE_SESSION_USE_STUB,
+                true,
+                true,
+                None,
+                None,
+            ) {
+                Ok(flasher) => return Ok(flasher),
+                Err(error) => attempts.push(format!("{reset_mode:?}: {error}")),
+            },
+            Err(error) => attempts.push(format!("{reset_mode:?}: {error}")),
+        }
+        std::thread::sleep(ESPFLASH_SINGLE_SESSION_CONNECT_RETRY_DELAY);
+    }
+    Err(format!(
+        "unable to establish one ROM session after reset retries: {}",
+        attempts.join(" | ")
+    ))
+}
+
+fn recovery_rom_reset_modes() -> [espflash::connection::ResetBeforeOperation; 6] {
+    use espflash::connection::ResetBeforeOperation;
+
+    // The single-session writer must establish ROM connectivity exactly as
+    // the execution-time security probe does. That probe is the approved
+    // source of truth for USB Serial/JTAG reset ordering.
+    [
+        ResetBeforeOperation::NoReset,
+        ResetBeforeOperation::DefaultReset,
+        ResetBeforeOperation::DefaultReset,
+        ResetBeforeOperation::UsbReset,
+        ResetBeforeOperation::DefaultReset,
+        ResetBeforeOperation::UsbReset,
+    ]
+}
+
+#[cfg(unix)]
+fn ignore_sigpipe_for_in_process_espflash() {
+    static SIGPIPE_IGNORED: Once = Once::new();
+    SIGPIPE_IGNORED.call_once(|| {
+        // ESP32-S3 USB Serial/JTAG can briefly disappear during ROM reset. The
+        // embedded espflash library must surface EPIPE to devd instead of
+        // inheriting the process-terminating default SIGPIPE action.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn ignore_sigpipe_for_in_process_espflash() {}
+
+fn build_checksum_md5_args(
+    common: &[String],
+    before_reset: &str,
+    address: u64,
+    length: u64,
+) -> Vec<String> {
     let mut args = vec!["checksum-md5".to_string()];
     args.extend(common.iter().cloned());
     args.extend([
         "--before".to_string(),
-        "no-reset".to_string(),
+        before_reset.to_string(),
         "--after".to_string(),
         "no-reset".to_string(),
         format!("0x{address:x}"),
@@ -6253,7 +7458,12 @@ async fn require_bundle_espflash_success(
         return Err(espflash_command_error(program, args, &output));
     };
     let recovery_modes: &[&str] = match before_reset {
-        "no-reset" | "usb-reset" => &["usb-reset", "default-reset"],
+        // A USB reset can succeed while the original host file descriptor
+        // breaks. Try the freshly enumerated ROM connection before issuing a
+        // second reset that would discard that state.
+        "usb-reset" => &["no-reset", "usb-reset", "default-reset"],
+        "no-reset" => &["usb-reset", "no-reset", "default-reset"],
+        "default-reset" => &["no-reset", "default-reset", "usb-reset"],
         _ => return Err(espflash_command_error(program, args, &output)),
     };
 
@@ -6312,78 +7522,14 @@ fn espflash_command_error(program: &Path, args: &[String], output: &Output) -> H
 async fn probe_native_rom_security(
     state: &AppState,
     port_path: &str,
+    return_to_runtime: bool,
 ) -> Result<RomSecurityInfo, HttpError> {
-    use espflash::{
-        connection::{Connection, ResetAfterOperation, ResetBeforeOperation},
-        flasher::Flasher,
-    };
-    use serialport::{FlowControl, SerialPortType, UsbPortInfo};
-
     let _serial_rpc =
         acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
     drop_cached_serial_session(&state.serial_sessions, port_path)?;
     let port_path = port_path.to_owned();
     tokio::task::spawn_blocking(move || {
-        let port_info = serialport::available_ports()
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .find(|candidate| candidate.port_name == port_path)
-            .ok_or_else(|| "authorized serial port is no longer enumerated".to_string())?;
-        let usb_info = match port_info.port_type {
-            SerialPortType::UsbPort(info) => info,
-            SerialPortType::PciPort | SerialPortType::Unknown => UsbPortInfo {
-                vid: 0,
-                pid: 0,
-                serial_number: None,
-                manufacturer: None,
-                product: None,
-            },
-            _ => {
-                return Err(String::from(
-                    "authorized port is not a supported USB serial target",
-                ));
-            }
-        };
-        let serial = serialport::new(&port_path, 115_200)
-            .flow_control(FlowControl::None)
-            .open_native()
-            .map_err(|error| error.to_string())?;
-        let connection = Connection::new(
-            serial,
-            usb_info,
-            ResetAfterOperation::HardReset,
-            ResetBeforeOperation::DefaultReset,
-            115_200,
-        );
-        let mut flasher = Flasher::connect(connection, false, true, false, None, None)
-            .map_err(|error| error.to_string())?;
-        let info = flasher.security_info().map_err(|error| error.to_string())?;
-        let device = flasher.device_info().map_err(|error| error.to_string())?;
-        const ESP32S3_EFUSE_BLOCK1: u32 = 0x6000_7044;
-        let flash_cap = (flasher
-            .connection()
-            .read_reg(ESP32S3_EFUSE_BLOCK1 + 12)
-            .map_err(|error| error.to_string())?
-            >> 27)
-            & 0x07;
-        let psram_cap = (flasher
-            .connection()
-            .read_reg(ESP32S3_EFUSE_BLOCK1 + 16)
-            .map_err(|error| error.to_string())?
-            >> 3)
-            & 0x03;
-        Ok(RomSecurityInfo {
-            rom_mac: device
-                .mac_address
-                .ok_or_else(|| "ROM MAC is unavailable".to_string())?,
-            secure_boot_enabled: info.flags & 0x1 != 0,
-            flash_encryption_enabled: info.flash_crypt_cnt.count_ones() % 2 == 1,
-            secure_download_mode_enabled: info.flags & 0x4 != 0 || flasher.secure_download_mode(),
-            response_known: true,
-            chip_is_esp32s3: flasher.chip().to_string() == "esp32s3",
-            flash_size_bytes: u64::from(device.flash_size.size()),
-            package_matches: flash_cap == 2 && psram_cap == 2,
-        })
+        probe_native_rom_security_with_retries(&port_path, return_to_runtime)
     })
     .await
     .map_err(|error| HttpError::internal(&format!("ROM security probe task failed: {error}")))?
@@ -6393,6 +7539,117 @@ async fn probe_native_rom_security(
             &format!("ROM security probe failed; flashing is blocked: {error}"),
         )
     })
+}
+
+fn probe_native_rom_security_with_retries(
+    port_path: &str,
+    return_to_runtime: bool,
+) -> Result<RomSecurityInfo, String> {
+    use espflash::connection::{ResetAfterOperation, ResetBeforeOperation};
+
+    let reset_after = if return_to_runtime {
+        ResetAfterOperation::HardReset
+    } else {
+        ResetAfterOperation::NoResetNoStub
+    };
+
+    let reset_modes = [
+        ResetBeforeOperation::DefaultReset,
+        ResetBeforeOperation::DefaultReset,
+        ResetBeforeOperation::UsbReset,
+        ResetBeforeOperation::DefaultReset,
+        ResetBeforeOperation::UsbReset,
+        ResetBeforeOperation::DefaultReset,
+    ];
+    debug_assert_eq!(reset_modes.len(), ROM_SECURITY_PROBE_ATTEMPTS);
+    let mut failures = Vec::new();
+    for (index, reset_mode) in reset_modes.into_iter().enumerate() {
+        match probe_native_rom_security_once(port_path, reset_mode, reset_after) {
+            Ok(info) => return Ok(info),
+            Err(error) => failures.push(format!("attempt {}: {error}", index + 1)),
+        }
+        if index + 1 < ROM_SECURITY_PROBE_ATTEMPTS {
+            std::thread::sleep(ESPFLASH_SINGLE_SESSION_CONNECT_RETRY_DELAY);
+        }
+    }
+    Err(format!(
+        "unable to probe the authorized port after {ROM_SECURITY_PROBE_ATTEMPTS} reset attempts: {}",
+        failures.join(" | ")
+    ))
+}
+
+fn probe_native_rom_security_once(
+    port_path: &str,
+    reset_mode: espflash::connection::ResetBeforeOperation,
+    reset_after: espflash::connection::ResetAfterOperation,
+) -> Result<RomSecurityInfo, String> {
+    use espflash::{connection::Connection, flasher::Flasher};
+    use serialport::FlowControl;
+
+    let usb_info = usb_info_for_authorized_port(port_path)?;
+    let serial = serialport::new(port_path, 115_200)
+        .flow_control(FlowControl::None)
+        .open_native()
+        .map_err(|error| error.to_string())?;
+    let connection = Connection::new(serial, usb_info, reset_after, reset_mode, 115_200);
+    let mut flasher = Flasher::connect(connection, false, true, false, None, None)
+        .map_err(|error| error.to_string())?;
+    read_rom_security_info(&mut flasher)
+}
+
+fn read_rom_security_info(
+    flasher: &mut espflash::flasher::Flasher,
+) -> Result<RomSecurityInfo, String> {
+    let info = flasher.security_info().map_err(|error| error.to_string())?;
+    let device = flasher.device_info().map_err(|error| error.to_string())?;
+    const ESP32S3_EFUSE_BLOCK1: u32 = 0x6000_7044;
+    let flash_cap = (flasher
+        .connection()
+        .read_reg(ESP32S3_EFUSE_BLOCK1 + 12)
+        .map_err(|error| error.to_string())?
+        >> 27)
+        & 0x07;
+    let psram_cap = (flasher
+        .connection()
+        .read_reg(ESP32S3_EFUSE_BLOCK1 + 16)
+        .map_err(|error| error.to_string())?
+        >> 3)
+        & 0x03;
+    Ok(RomSecurityInfo {
+        rom_mac: device
+            .mac_address
+            .ok_or_else(|| "ROM MAC is unavailable".to_string())?,
+        secure_boot_enabled: info.flags & 0x1 != 0,
+        flash_encryption_enabled: info.flash_crypt_cnt.count_ones() % 2 == 1,
+        secure_download_mode_enabled: info.flags & 0x4 != 0 || flasher.secure_download_mode(),
+        response_known: true,
+        chip_is_esp32s3: flasher.chip().to_string() == "esp32s3",
+        flash_size_bytes: u64::from(device.flash_size.size()),
+        package_matches: flash_cap == 2 && psram_cap == 2,
+    })
+}
+
+fn verify_firmware_execution_proof(
+    port_path: &str,
+    flasher: &mut espflash::flasher::Flasher,
+    proof: &FirmwareExecutionProof,
+) -> Result<(), String> {
+    let security = read_rom_security_info(flasher)?;
+    security
+        .validate_for_flash()
+        .map_err(|error| error.error.message)?;
+    let digest = firmware_preflight_digest(
+        &proof.request,
+        &proof.device_id,
+        port_path,
+        &security.rom_mac,
+        &proof.bundle_sha256,
+        proof.approval.source_partition_hash.as_deref(),
+    );
+    if security.rom_mac != proof.approval.rom_mac || digest != proof.approval.preflight_digest {
+        return Err("execution-time ROM facts do not match the approved firmware target".into());
+    }
+    Ok(())
 }
 
 fn firmware_preflight_stages() -> Vec<String> {
@@ -6819,6 +8076,82 @@ async fn serial_thermal_plant_run_get(
     extract_usb_payload(result, "thermal_plant_run")
 }
 
+async fn serial_thermal_tuning_run_get(
+    state: &AppState,
+    target: &DeviceRecord,
+    after_sequence: Option<u64>,
+    limit: usize,
+) -> Result<Value, HttpError> {
+    let mut payload = json!({
+        "type": "thermal_tuning_run",
+        "requestId": format!("devd-{}-thermal-tuning-run", now_millis()),
+        "op": "get",
+        "limit": u16::try_from(limit.min(8)).unwrap_or(8),
+    });
+    if let Some(sequence) = after_sequence
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("afterSequence".to_string(), json!(sequence));
+    }
+    serial_thermal_tuning_exchange(state, target, payload).await
+}
+
+async fn serial_thermal_tuning_run_command(
+    state: &AppState,
+    target: &DeviceRecord,
+    command: &ThermalTuningRunRequest,
+) -> Result<Value, HttpError> {
+    let mut payload = serde_json::to_value(command)
+        .map_err(|_| HttpError::internal("failed to encode thermal tuning request"))?;
+    let Some(object) = payload.as_object_mut() else {
+        return Err(HttpError::internal(
+            "thermal tuning request is not an object",
+        ));
+    };
+    object.remove("leaseId");
+    object.insert("type".to_string(), json!("thermal_tuning_run"));
+    object.insert(
+        "requestId".to_string(),
+        json!(format!("devd-{}-thermal-tuning-run", now_millis())),
+    );
+    serial_thermal_tuning_exchange(state, target, payload).await
+}
+
+async fn serial_thermal_tuning_exchange(
+    state: &AppState,
+    target: &DeviceRecord,
+    payload: Value,
+) -> Result<Value, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = payload
+        .get("requestId")
+        .and_then(Value::as_str)
+        .unwrap_or("devd-thermal-tuning-run")
+        .to_string();
+    let request = serde_json::to_string(&payload)
+        .map_err(|_| HttpError::internal("failed to encode thermal tuning USB request"))?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        thermal_tuning_retry_policy(payload.get("op").and_then(Value::as_str)),
+    )
+    .await?;
+    extract_usb_payload(result, "thermal_tuning_run")
+}
+
+fn thermal_tuning_retry_policy(operation: Option<&str>) -> SerialRetryPolicy {
+    match operation {
+        Some("get") => SerialRetryPolicy::ReadOnly,
+        // The firmware accepts an exact repeated acknowledgement as a no-op.
+        // No state-changing tuning operation shares that retry privilege.
+        Some("ack_trace") => SerialRetryPolicy::Idempotent,
+        _ => SerialRetryPolicy::SingleShot,
+    }
+}
+
 async fn serial_calibration_job_config(
     state: &AppState,
     target: &DeviceRecord,
@@ -7239,10 +8572,10 @@ fn serial_exchange_blocking(
                         emit_serial_log_line(state, events, device_id, &line);
                         if serial_line_is_usb_reset_marker(&line) {
                             // Opening an ESP32-S3 USB Serial/JTAG port can itself
-                            // trigger this reset. Keep the fd open so the firmware
-                            // can complete its startup and answer the request; an
-                            // actual I/O failure below remains the reopen signal.
-                            retry_after_runtime_ready = true;
+                            // trigger this reset. Only requests whose duplicate is
+                            // defined as harmless may be sent again once the
+                            // runtime-ready marker arrives.
+                            retry_after_runtime_ready |= retry_policy.allows_reset_retry();
                         } else if should_retry_request_after_runtime_ready(
                             retry_after_runtime_ready,
                             &line,
@@ -7405,7 +8738,7 @@ async fn observe_post_flash_boot(
 
 fn serial_rpc_timeout(retry_policy: SerialRetryPolicy) -> Duration {
     match retry_policy {
-        SerialRetryPolicy::ReadOnly => SERIAL_READ_ONLY_RPC_TIMEOUT,
+        SerialRetryPolicy::ReadOnly | SerialRetryPolicy::Idempotent => SERIAL_READ_ONLY_RPC_TIMEOUT,
         SerialRetryPolicy::SingleShot => SERIAL_RPC_TIMEOUT,
     }
 }
@@ -7639,6 +8972,53 @@ fn serial_lock_path(port_path: &str) -> PathBuf {
 
 fn is_esp_usb_serial_jtag_port(port_path: &str) -> bool {
     port_path.starts_with("/dev/cu.usbmodem")
+}
+
+fn requires_protected_firmware_bundle(port_path: &str) -> bool {
+    is_esp_usb_serial_jtag_port(port_path)
+}
+
+fn recovery_uses_single_rom_session(
+    operation: FirmwareOperation,
+    transport: DeviceTransport,
+    port_path: &str,
+) -> bool {
+    operation == FirmwareOperation::InstallRecovery
+        && transport == DeviceTransport::NativeSerial
+        && is_esp_usb_serial_jtag_port(port_path)
+}
+
+fn usb_info_for_authorized_port(port_path: &str) -> Result<serialport::UsbPortInfo, String> {
+    if is_esp_usb_serial_jtag_port(port_path) {
+        // ESP32-S3's integrated USB Serial/JTAG interface. Avoid global serial
+        // enumeration for an explicitly authorized path.
+        return Ok(serialport::UsbPortInfo {
+            vid: 0x303a,
+            pid: 0x1001,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+        });
+    }
+
+    let port_info = serialport::available_ports()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|candidate| candidate.port_name == port_path)
+        .ok_or_else(|| "authorized serial port is no longer enumerated".to_string())?;
+    match port_info.port_type {
+        serialport::SerialPortType::UsbPort(info) => Ok(info),
+        serialport::SerialPortType::PciPort | serialport::SerialPortType::Unknown => {
+            Ok(serialport::UsbPortInfo {
+                vid: 0,
+                pid: 0,
+                serial_number: None,
+                manufacturer: None,
+                product: None,
+            })
+        }
+        _ => Err("authorized port is not a supported USB serial target".to_string()),
+    }
 }
 
 fn open_serial_port(port_path: &str) -> Result<Box<dyn SerialSessionPort>, HttpError> {
@@ -8029,6 +9409,13 @@ async fn flash_device(
             }
         }
     };
+
+    if requires_protected_firmware_bundle(&port_path) {
+        return Err(HttpError::bad_request(
+            "firmware_bundle_required",
+            "USB Serial/JTAG firmware writes must use the protected firmware-bundle operation.",
+        ));
+    }
 
     let verification = verify_artifact(&payload.artifact, state.config.artifact_root.as_deref())
         .map_err(sanitize_io_error)?;
@@ -8823,9 +10210,13 @@ fn build_bundle_write_bin_args(
     before_reset: &str,
     address: u64,
     input_path: &Path,
+    no_stub: bool,
 ) -> Vec<String> {
     let mut args = vec!["write-bin".to_string()];
     args.extend(common.iter().cloned());
+    if no_stub {
+        args.push("--no-stub".to_string());
+    }
     args.extend([
         "--before".to_string(),
         before_reset.to_string(),
@@ -8835,6 +10226,49 @@ fn build_bundle_write_bin_args(
         input_path.to_string_lossy().into_owned(),
     ]);
     args
+}
+
+fn build_boot_critical_factory_image(
+    bundle: &firmware_bundle::FirmwareBundle,
+) -> Result<Vec<u8>, HttpError> {
+    if !bundle
+        .manifest
+        .segments
+        .iter()
+        .any(|segment| segment.address == 0)
+    {
+        return Err(HttpError::internal(
+            "firmware bundle is missing its 0x0 bootloader segment",
+        ));
+    }
+    let mut image_len = 0_usize;
+    for segment in &bundle.manifest.segments {
+        let address = usize::try_from(segment.address).map_err(|_| {
+            HttpError::internal("firmware segment address does not fit host memory")
+        })?;
+        let length = usize::try_from(segment.length)
+            .map_err(|_| HttpError::internal("firmware segment length does not fit host memory"))?;
+        let end = address
+            .checked_add(length)
+            .ok_or_else(|| HttpError::internal("firmware segment range overflows host memory"))?;
+        image_len = image_len.max(end);
+    }
+    let mut image = vec![0xff; image_len];
+    for segment in &bundle.manifest.segments {
+        let address = usize::try_from(segment.address).map_err(|_| {
+            HttpError::internal("firmware segment address does not fit host memory")
+        })?;
+        let bytes = bundle.images.get(&segment.path).ok_or_else(|| {
+            HttpError::internal("validated bundle segment disappeared before factory staging")
+        })?;
+        if bytes.len() != segment.length as usize {
+            return Err(HttpError::internal(
+                "validated firmware segment length changed before factory staging",
+            ));
+        }
+        image[address..address + bytes.len()].copy_from_slice(bytes);
+    }
+    Ok(image)
 }
 
 async fn stage_flash_config_before_app_flash_with_program(
@@ -9041,6 +10475,10 @@ fn espflash_connection_failure_text(output: &str) -> bool {
     output.contains("failed to connect to the device")
         || output.contains("error while connecting to device")
         || output.contains("no such device or address")
+        // USB Serial/JTAG reset can briefly remove the exact authorized
+        // device node before macOS recreates it at the same path.
+        || output.contains("error while connecting to device: no such file or directory")
+        || output.contains("failed to connect to the device: no such file or directory")
         || output.contains("broken pipe")
 }
 
@@ -9485,6 +10923,15 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn lease_query_accepts_camel_case_and_legacy_snake_case() {
+        let camel: LeaseQuery = serde_json::from_value(json!({"leaseId": "lease-camel"})).unwrap();
+        let snake: LeaseQuery = serde_json::from_value(json!({"lease_id": "lease-snake"})).unwrap();
+
+        assert_eq!(camel.lease_id.as_deref(), Some("lease-camel"));
+        assert_eq!(snake.lease_id.as_deref(), Some("lease-snake"));
+    }
 
     fn flash_partition_layout(entries: &[(&str, u64, u64)]) -> Vec<FlashPartitionRange> {
         entries
@@ -10497,12 +11944,25 @@ mod tests {
     }
 
     #[test]
+    fn usb_serial_jtag_raw_flash_requires_the_protected_bundle_flow() {
+        assert!(requires_protected_firmware_bundle(
+            "/dev/cu.usbmodem2111401"
+        ));
+        assert!(!requires_protected_firmware_bundle(
+            "/dev/cu.usbserial-unrelated"
+        ));
+    }
+
+    #[test]
     fn broken_pipe_is_an_espflash_connection_failure() {
         assert!(espflash_connection_failure_text(
             "IO error while using serial port: Broken pipe"
         ));
         assert!(espflash_connection_failure_text(
             "Error while connecting to device: No such file or directory (os error 2)"
+        ));
+        assert!(!espflash_connection_failure_text(
+            "cp: /tmp/flux_cfg-source.bin: No such file or directory"
         ));
         assert!(!espflash_connection_failure_text(
             "Image verification failed after flash"
@@ -10612,7 +12072,7 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(attempts).unwrap(),
-            "erase-flash --before usb-reset\nerase-flash --before usb-reset\nerase-flash --before default-reset\n"
+            "erase-flash --before usb-reset\nerase-flash --before no-reset\nerase-flash --before usb-reset\nerase-flash --before default-reset\n"
         );
     }
 
@@ -10853,6 +12313,9 @@ mod tests {
         assert!(espflash_connection_failure_text(
             "Error while connecting to device: No such device or address"
         ));
+        assert!(espflash_connection_failure_text(
+            "Error while connecting to device: No such file or directory (os error 2)"
+        ));
     }
 
     #[cfg(unix)]
@@ -10931,6 +12394,24 @@ mod tests {
     }
 
     #[test]
+    fn same_address_bundle_config_needs_no_rom_transfer() {
+        assert!(!config_copy_requires_transfer(
+            firmware_bundle::ConfigCopyPlan {
+                source_address: 0x210000,
+                target_address: 0x210000,
+                length: 0x2000,
+            }
+        ));
+        assert!(config_copy_requires_transfer(
+            firmware_bundle::ConfigCopyPlan {
+                source_address: 0x110000,
+                target_address: 0x210000,
+                length: 0x2000,
+            }
+        ));
+    }
+
+    #[test]
     fn bundle_flash_commands_keep_usb_serial_jtag_in_loader_until_final_reset() {
         let common = vec![
             "--chip".to_string(),
@@ -10951,9 +12432,11 @@ mod tests {
             "no-reset",
             0x10_000,
             Path::new("/private/tmp/app.bin"),
+            true,
         );
 
         assert!(config_read.iter().any(|argument| argument == "--no-stub"));
+        assert!(segment_write.iter().any(|argument| argument == "--no-stub"));
         assert!(
             config_read
                 .windows(2)
@@ -10974,6 +12457,39 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["--after", "no-reset"])
         );
+    }
+
+    #[test]
+    fn usb_serial_jtag_recovery_enters_rom_before_every_bundle_segment() {
+        assert_eq!(
+            bundle_segment_before_reset(true, "usb-reset", 0),
+            "usb-reset"
+        );
+        assert_eq!(
+            bundle_segment_before_reset(true, "usb-reset", 1),
+            "usb-reset"
+        );
+        assert_eq!(
+            bundle_segment_before_reset(false, "default-reset", 0),
+            "no-reset"
+        );
+    }
+
+    #[test]
+    fn usb_serial_jtag_update_and_recovery_use_one_factory_write() {
+        for operation in [
+            FirmwareOperation::Update,
+            FirmwareOperation::InstallRecovery,
+        ] {
+            assert!(uses_single_usb_serial_jtag_bundle_write(
+                operation,
+                "/dev/cu.usbmodem2111401"
+            ));
+        }
+        assert!(!uses_single_usb_serial_jtag_bundle_write(
+            FirmwareOperation::Update,
+            "/dev/cu.usbserial-unrelated"
+        ));
     }
 
     #[test]
@@ -12238,7 +13754,7 @@ mod tests {
             ..AppConfig::default()
         });
         let mut native = DeviceRecord::mock("serial-test", DeviceTransport::NativeSerial);
-        native.port_path = Some("/dev/cu.usbmodem21221401".to_string());
+        native.port_path = Some("/dev/cu.usbserial-legacy-test".to_string());
         {
             let mut inner = state.lock().unwrap();
             inner.devices.insert(native.id.clone(), native);
@@ -13170,9 +14686,42 @@ mod tests {
             SERIAL_READ_ONLY_RPC_TIMEOUT
         );
         assert_eq!(
+            serial_rpc_timeout(SerialRetryPolicy::Idempotent),
+            SERIAL_READ_ONLY_RPC_TIMEOUT
+        );
+        assert_eq!(
             serial_rpc_timeout(SerialRetryPolicy::SingleShot),
             SERIAL_RPC_TIMEOUT
         );
+    }
+
+    #[test]
+    fn thermal_tuning_only_retries_idempotent_requests_after_a_usb_reset() {
+        assert_eq!(
+            thermal_tuning_retry_policy(Some("get")),
+            SerialRetryPolicy::ReadOnly
+        );
+        assert_eq!(
+            thermal_tuning_retry_policy(Some("ack_trace")),
+            SerialRetryPolicy::Idempotent
+        );
+        for operation in [
+            "start",
+            "cancel",
+            "seal_review",
+            "preview",
+            "discard_preview",
+            "save",
+        ] {
+            assert_eq!(
+                thermal_tuning_retry_policy(Some(operation)),
+                SerialRetryPolicy::SingleShot,
+                "{operation} must remain single-shot",
+            );
+        }
+        assert!(SerialRetryPolicy::ReadOnly.allows_reset_retry());
+        assert!(SerialRetryPolicy::Idempotent.allows_reset_retry());
+        assert!(!SerialRetryPolicy::SingleShot.allows_reset_retry());
     }
 
     #[test]
@@ -13543,6 +15092,75 @@ mod tests {
     }
 
     #[test]
+    fn single_session_recovery_preserves_the_validated_three_segment_order() {
+        let state = AppState::test();
+        let artifact_id = seed_test_bundle(&state);
+        let bundle_path = state.bundle_store.path().join(format!(
+            "{}.fluxpurr-fw",
+            artifact_id.trim_start_matches("sha256:")
+        ));
+        let bundle = firmware_bundle::read_bundle(&bundle_path).unwrap();
+
+        let segments = prepare_bundle_flash_segments(&bundle).unwrap();
+
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.address)
+                .collect::<Vec<_>>(),
+            vec![0, 0x8000, 0x10000]
+        );
+        assert!(segments.iter().all(|segment| {
+            segment.length as usize == segment.bytes.len() && segment.md5.len() == 32
+        }));
+    }
+
+    #[test]
+    fn factory_image_keeps_each_validated_segment_at_its_flash_offset() {
+        let state = AppState::test();
+        let artifact_id = seed_test_bundle(&state);
+        let bundle_path = state.bundle_store.path().join(format!(
+            "{}.fluxpurr-fw",
+            artifact_id.trim_start_matches("sha256:")
+        ));
+        let bundle = firmware_bundle::read_bundle(&bundle_path).unwrap();
+
+        let image = build_boot_critical_factory_image(&bundle).unwrap();
+
+        for segment in &bundle.manifest.segments {
+            let start = segment.address as usize;
+            let bytes = bundle.images.get(&segment.path).unwrap();
+            assert_eq!(&image[start..start + bytes.len()], bytes.as_slice());
+        }
+        assert_eq!(image[0x4_000], 0xff);
+        assert_eq!(image[0x9_000], 0xff);
+    }
+
+    #[test]
+    fn single_session_write_progress_reports_only_completed_segments() {
+        use espflash::target::ProgressCallbacks;
+
+        let segments = vec![BundleFlashSegment {
+            address: 0x10000,
+            length: 0x4000,
+            md5: "0".repeat(32),
+            bytes: vec![0; 0x4000],
+        }];
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let mut progress = SingleSessionFlashProgress::new(&segments, events);
+
+        progress.init(0x10000, 3);
+        assert!(receiver.try_recv().is_err());
+        progress.finish(false);
+
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            SingleSessionFlashEvent::SegmentWritten { length: 0x4000 }
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
     fn security_info_fails_closed_for_each_protected_state() {
         let safe = RomSecurityInfo {
             rom_mac: "00:11:22:33:44:55".into(),
@@ -13803,7 +15421,148 @@ mod tests {
     }
 
     #[test]
-    fn rom_md5_keeps_the_existing_rom_session_until_final_reset() {
+    fn firmware_failed_stage_emits_bounded_espflash_diagnostic() {
+        let state = AppState::test();
+        let mut progress = FirmwareOperationProgress::new(
+            &state,
+            "mock-fp-lab-01",
+            FirmwareOperation::Update,
+            "sha256:test",
+            false,
+        );
+        let operation_id = progress.operation_id().to_string();
+        progress.stage_started("write_segments", json!({}));
+        let error = HttpError {
+            status: StatusCode::BAD_GATEWAY,
+            error: ApiError {
+                code: "espflash_failed".into(),
+                message: "Protected espflash transaction failed.".into(),
+                retryable: true,
+                details: Some(json!({ "stderr": "Error: checksum mismatch" })),
+            },
+        };
+
+        let _ = progress.fail(error);
+
+        let state = state.lock().unwrap();
+        let failed = state
+            .devices
+            .get("mock-fp-lab-01")
+            .unwrap()
+            .events
+            .iter()
+            .find(|event| {
+                event.kind == "firmware_operation"
+                    && event.payload["operationId"] == operation_id
+                    && event.payload["event"] == "stage_failed"
+            })
+            .unwrap();
+        assert_eq!(failed.payload["code"], "espflash_failed");
+        assert_eq!(failed.payload["diagnostic"], "Error: checksum mismatch");
+    }
+
+    #[test]
+    fn single_session_recovery_claims_the_live_loader_before_probe_reset_fallbacks() {
+        use espflash::connection::ResetBeforeOperation;
+
+        assert_eq!(
+            recovery_rom_reset_modes(),
+            [
+                ResetBeforeOperation::NoReset,
+                ResetBeforeOperation::DefaultReset,
+                ResetBeforeOperation::DefaultReset,
+                ResetBeforeOperation::UsbReset,
+                ResetBeforeOperation::DefaultReset,
+                ResetBeforeOperation::UsbReset,
+            ]
+        );
+    }
+
+    #[test]
+    fn usb_jtag_recovery_defers_execution_proof_to_its_writer_session() {
+        assert!(recovery_uses_single_rom_session(
+            FirmwareOperation::InstallRecovery,
+            DeviceTransport::NativeSerial,
+            "/dev/cu.usbmodem2111401",
+        ));
+        assert!(!recovery_uses_single_rom_session(
+            FirmwareOperation::InstallRecovery,
+            DeviceTransport::NativeSerial,
+            "/dev/cu.usbserial-unrelated",
+        ));
+        assert!(!recovery_uses_single_rom_session(
+            FirmwareOperation::Update,
+            DeviceTransport::NativeSerial,
+            "/dev/cu.usbmodem2111401",
+        ));
+        assert!(usb_update_reuses_preflight_evidence(
+            FirmwareOperation::Update,
+            DeviceTransport::NativeSerial,
+            "/dev/cu.usbmodem2111401",
+            false,
+        ));
+        assert!(!usb_update_reuses_preflight_evidence(
+            FirmwareOperation::Update,
+            DeviceTransport::NativeSerial,
+            "/dev/cu.usbmodem2111401",
+            true,
+        ));
+        assert!(!usb_update_reuses_preflight_evidence(
+            FirmwareOperation::InstallRecovery,
+            DeviceTransport::NativeSerial,
+            "/dev/cu.usbmodem2111401",
+            false,
+        ));
+        assert!(!usb_update_reuses_preflight_evidence(
+            FirmwareOperation::Update,
+            DeviceTransport::NativeSerial,
+            "/dev/cu.usbserial-unrelated",
+            false,
+        ));
+    }
+
+    #[test]
+    fn same_layout_usb_jtag_update_uses_the_single_session_writer() {
+        assert!(
+            uses_single_usb_serial_jtag_bundle_session(
+                FirmwareOperation::Update,
+                "/dev/cu.usbmodem2111401",
+                Some(firmware_bundle::CURRENT_PARTITION_TABLE_SHA256),
+                &[],
+            )
+            .unwrap()
+        );
+        assert!(
+            uses_single_usb_serial_jtag_bundle_session(
+                FirmwareOperation::InstallRecovery,
+                "/dev/cu.usbmodem2111401",
+                None,
+                &[],
+            )
+            .unwrap()
+        );
+        assert!(
+            !uses_single_usb_serial_jtag_bundle_session(
+                FirmwareOperation::Update,
+                "/dev/cu.usbserial-unrelated",
+                Some(firmware_bundle::CURRENT_PARTITION_TABLE_SHA256),
+                &[],
+            )
+            .unwrap()
+        );
+        assert!(
+            uses_single_usb_serial_jtag_bundle_session(
+                FirmwareOperation::Update,
+                "/dev/cu.usbmodem2111401",
+                None,
+                &[],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rom_md5_uses_the_selected_reset_strategy() {
         let common = vec![
             "--chip".to_string(),
             "esp32s3".to_string(),
@@ -13813,7 +15572,7 @@ mod tests {
         ];
 
         assert_eq!(
-            build_checksum_md5_args(&common, 0x10000, 0x200000),
+            build_checksum_md5_args(&common, "usb-reset", 0x10000, 0x200000),
             vec![
                 "checksum-md5",
                 "--chip",
@@ -13822,7 +15581,7 @@ mod tests {
                 "/dev/cu.usbmodem2111401",
                 "--non-interactive",
                 "--before",
-                "no-reset",
+                "usb-reset",
                 "--after",
                 "no-reset",
                 "0x10000",
@@ -13863,5 +15622,65 @@ mod tests {
         .expect_err("mock transport must not expose install status");
 
         assert_eq!(error.error.code, "native_serial_required");
+    }
+
+    #[test]
+    fn thermal_tuning_first_page_preserves_sequence_zero_and_following_cursor_is_exclusive() {
+        let snapshot = json!({
+            "page": {
+                "events": [
+                    {"sequence": 0, "kind": "sample"},
+                    {"sequence": 1, "kind": "decision"}
+                ]
+            }
+        });
+
+        let first = thermal_tuning_trace_page(&snapshot, None, 16);
+        assert_eq!(first["page"]["events"][0]["sequence"], json!(0));
+        assert_eq!(first["page"]["nextAfterSequence"], json!(2));
+
+        let second = thermal_tuning_trace_page(&snapshot, Some(0), 16);
+        assert_eq!(second["page"]["events"][0]["sequence"], json!(1));
+        assert_eq!(second["page"]["nextAfterSequence"], json!(2));
+    }
+
+    #[test]
+    fn thermal_tuning_lan_page_keeps_sequence_zero_when_limit_is_explicit() {
+        assert_eq!(
+            thermal_tuning_lan_path(None, 32),
+            "calibration/thermal-tuning/run?limit=32"
+        );
+        assert_eq!(
+            thermal_tuning_lan_path(Some(0), 32),
+            "calibration/thermal-tuning/run?afterSequence=0&limit=32"
+        );
+    }
+
+    #[test]
+    fn thermal_tuning_mock_uses_shared_wire_enum_values() {
+        let mut snapshot = mock_thermal_tuning_snapshot();
+        let start = ThermalTuningRunRequest {
+            lease_id: "lease".to_string(),
+            op: "start".to_string(),
+            run_id: None,
+            power_class: Some("pps3a".to_string()),
+            after_sequence: None,
+            limit: None,
+            through_sequence: None,
+            trace_digest: None,
+            candidate_id: None,
+            candidate_hash: None,
+        };
+        mock_thermal_tuning_command(&mut snapshot, &start).unwrap();
+        assert_eq!(snapshot["run"]["phase"], json!("cooldown_wait"));
+
+        let cancel = ThermalTuningRunRequest {
+            op: "cancel".to_string(),
+            run_id: snapshot["run"]["runId"].as_str().map(str::to_string),
+            ..start
+        };
+        mock_thermal_tuning_command(&mut snapshot, &cancel).unwrap();
+        assert_eq!(snapshot["run"]["phase"], json!("terminal"));
+        assert_eq!(snapshot["run"]["terminalDisposition"], json!("cancelled"));
     }
 }

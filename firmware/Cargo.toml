@@ -48,6 +48,7 @@ pd-request-20v = []
 pd-request-28v = []
 
 [dependencies]
+flux-purr-thermal-tuning-core = { path = "../crates/thermal-tuning-core" }
 embassy-futures = "0.1.2"
 embedded-graphics = "0.8.1"
 embedded-hal = "1.0.0"
@@ -67,7 +68,7 @@ embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"] }
 embedded-io-async = { version = "0.6.1", optional = true }
 embedded-storage = "0.3.1"
-esp-hal = { version = "1.0.0", features = ["esp32s3", "unstable"] }
+esp-hal = { version = "1.0.0", features = ["esp32s3", "psram", "unstable"] }
 esp-rtos = { version = "0.2.0", features = ["embassy", "esp32s3", "esp-alloc"] }
 esp-bootloader-esp-idf = { version = "0.2.0", features = ["esp32s3"] }
 esp-storage = { version = "0.7.0", features = ["esp32s3"] }

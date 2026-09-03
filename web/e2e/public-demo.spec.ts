@@ -150,6 +150,48 @@ test.describe('public demo build', () => {
     expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.viewportWidth)
   })
 
+  test('keeps every thermal tuning tab reachable on the mobile calibration workspace', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 393, height: 852 })
+    await page.goto('/devices/fp-lab-01/calibration/thermal-tuning?demo=true')
+
+    const calibrationTabs = page.locator('.industrial-calibration-tab')
+    await expect(calibrationTabs).toHaveCount(4)
+    const tabBounds = await calibrationTabs.evaluateAll((tabs) =>
+      tabs.map((tab) => {
+        const rect = tab.getBoundingClientRect()
+        return { left: rect.left, right: rect.right }
+      })
+    )
+    expect(tabBounds).toHaveLength(4)
+    for (const bounds of tabBounds) {
+      expect(bounds.left).toBeGreaterThanOrEqual(0)
+      expect(bounds.right).toBeLessThanOrEqual(393)
+    }
+
+    await page.getByRole('button', { name: 'PPS 5A · 100W 级' }).click()
+    const startButton = page.getByRole('button', { name: /开始 PPS 5A/ })
+    const startBounds = await startButton.boundingBox()
+    expect(startBounds?.height).toBeGreaterThanOrEqual(48)
+    await startButton.click()
+    const confirmationDialog = page.getByRole('dialog')
+    await expect(confirmationDialog).toBeVisible()
+    await expect(confirmationDialog.getByText('确认开始调优')).toBeVisible()
+    await expect(confirmationDialog.getByText('PPS 5A · 100W 级')).toBeVisible()
+    await expect(page.locator('.thermal-tuning-card [role="dialog"]')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '预览候选' })).toHaveCount(0)
+    const confirmBounds = await confirmationDialog
+      .getByRole('button', { name: '确认开始' })
+      .boundingBox()
+    expect(confirmBounds?.height).toBeGreaterThanOrEqual(48)
+    await expect(page.locator('input[type="text"], input[type="password"], textarea')).toHaveCount(
+      0
+    )
+    await confirmationDialog.getByRole('button', { name: '确认开始' }).click()
+    await expect(page.getByText('运行中').first()).toBeVisible()
+  })
+
   test('keeps the fixed desktop workstation at its natural width before the dock threshold', async ({
     page,
   }) => {

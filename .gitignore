@@ -4,6 +4,8 @@
 # Node / Bun
 node_modules/
 web/node_modules/
+web/src/generated/thermal-tuning-wasm/
+web/src/generated/thermal-report/
 web/storybook-static/
 web/dist/
 web/playwright-report/

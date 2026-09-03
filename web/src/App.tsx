@@ -284,6 +284,16 @@ function App() {
         })
         return
       }
+      if (tab === 'thermal_tuning') {
+        await navigate({
+          to: '/devices/$deviceId/calibration/thermal-tuning',
+          params,
+          search,
+          replace: options?.replace,
+          ignoreBlocker: options?.ignoreBlocker,
+        })
+        return
+      }
       await navigate({
         to: '/devices/$deviceId/calibration/heater-curve',
         params,

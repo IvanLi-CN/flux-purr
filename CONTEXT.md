@@ -156,6 +156,66 @@ _Avoid_: Cached result, historical result, preview
 The optional operator workflow for importing, previewing, or saving a heater-resistance curve. It is separate from an Automatic Thermal-Model Result.
 _Avoid_: Automatic thermal-model calibration
 
+**Thermal Tuning**:
+A supervised, multi-target control optimization workflow that evaluates point-local thermal-control parameters, confirms each accepted point, and produces a reviewable tuning result. It is distinct from Automatic Thermal-Model Calibration and the Advanced Manual Curve Tool.
+_Avoid_: Heater Curve Calibration, generic PID adjustment
+
+**Thermal Tuning Core**:
+The deterministic, non-interactive state machine that schedules a Thermal Tuning Run, generates and evaluates candidates, and produces the Device-authoritative result. It uses canonical fixed-point values for decisions and candidate hashes, executes in firmware after a run starts, and may be replayed and verified by native and WebAssembly consumers without allowing them to advance a live run.
+_Avoid_: Web tuning logic, CLI tuning logic, source coordinator
+
+**Thermal Tuning Run**:
+One Device-owned execution of the Thermal Tuning Core. Once started, it continues across Control Console, CLI, and `devd` disconnects; only an Operator cancellation or a Device safety condition can terminate it. A Device reset, power loss, or failed startup terminates the run as `interrupted_reset`; it never resumes automatically and cannot retain a promotable candidate.
+_Avoid_: Calibration Job, report generation, host session
+
+**Thermal Tuning Capability**:
+The `thermal_tuning_run_v1` Device capability that declares support for the Device-owned Thermal Tuning Run protocol. Control Console tuning operations are unavailable without it and do not fall back to legacy host-driven behavior.
+_Avoid_: firmware version inference, host-reference fallback, generic calibration capability
+
+**Tuning Journal**:
+The Device's compact two-phase persisted run record. It writes a start marker and one terminal or recovery summary for only the latest Thermal Tuning Run, allowing a reboot to report `interrupted_reset` without persisting raw samples or a promotable candidate.
+_Avoid_: telemetry archive, candidate persistence, run history
+
+**Tuning Eligibility**:
+The Device-confirmed prerequisites for starting a Thermal Tuning Run: an active valid thermal model, valid heater-curve coverage, an available selected Thermal Tuning Power Class, and no current Maintenance Run owner.
+_Avoid_: host preflight, estimated compatibility, automatic calibration
+
+**Thermal Tuning Candidate**:
+The Device-confirmed profile produced by a review-complete Thermal Tuning Run, identified by its candidate ID, power class, and content hash. Preview applies it only in RAM with a Device readback; a second simple confirmation may save only that unchanged preview to its matching persistent bank.
+_Avoid_: saved profile, active profile, automatic persistence
+
+**Maintenance Run Arbiter**:
+The Device component that grants exclusive ownership to one heating-affecting maintenance workflow at a time. It rejects a Thermal Tuning Run while manual heating, automatic calibration, or another maintenance run is active and never implicitly stops or resumes the conflicting operation.
+_Avoid_: UI disabled state, lease, automatic preemption
+
+**Thermal Tuning Reference Engine**:
+The independent host-driven CLI implementation retained to replay, compare, and improve the Thermal Tuning Core before firmware changes. It is not a normal Control Console workflow and may be removed only with explicit Operator approval.
+_Avoid_: Production tuning engine, Web fallback, disposable compatibility path
+
+**Tuning Reference Comparison**:
+The optional CLI-produced comparison between a Thermal Tuning Report Bundle and the Thermal Tuning Reference Engine. Its `equivalent`, `divergent`, `inconclusive`, or `not_run` result informs algorithm improvement and HIL/release validation but never blocks runtime preview or save of a Device-authoritative candidate.
+_Avoid_: Device safety disposition, runtime promotion gate, Web dependency
+
+**Tuning Evidence**:
+The Device's compact persisted decision journal together with the complete, monotonically sequenced Device telemetry archive recorded by a local Tuning Recorder. It contains only Device-local temperature, VIN, PPS-contract, and control-output evidence; it does not include external VBUS-current telemetry. A detected `trace_gap` or missing archive makes a run `review-incomplete` and prevents preview or save of its candidate profile.
+_Avoid_: Device raw-trace storage, external source telemetry, terminal summary, saved profile
+
+**Thermal Tuning Report Bundle**:
+The versioned, cross-surface audit export for a Thermal Tuning Run. Version `thermal-tuning-v2` contains `index.html`, `run.bundle.json`, `samples.ndjson`, `thermal-profile.candidate.json`, and `decision-ledger.ndjson`; old `thermal-profile.accepted.json` is import-only compatibility data.
+_Avoid_: EEPROM image, active profile, Web-only export format
+
+**Tuning Host Runner**:
+The `flux-purr` CLI process used in a CLI-initiated workflow. It records detailed telemetry, builds reports, and runs reference comparisons. It observes a Device-owned Thermal Tuning Run but does not make live tuning decisions.
+_Avoid_: devd session, Control Console service, production tuning engine
+
+**Tuning Recorder**:
+A local persistence component owned by one host surface. The CLI writes native run artifacts and the Control Console automatically writes browser-local persistent artifacts, with no file-selection, upload, or credential step. The two surfaces do not communicate or relay tuning data to one another.
+_Avoid_: Device raw-trace storage, devd report service, shared host session
+
+**Thermal Tuning Power Class**:
+The explicitly selected PPS source capability class used by a Thermal Tuning Run. `pps3a` is the 3A-class PPS tier and includes the existing 65W / `20V @ 3250mA` capability; `pps5a` is the 5A-class tier. This workflow supports only these PPS classes and never automatically resolves or downgrades between them.
+_Avoid_: USB-C power rating, non-PPS tuning mode
+
 ## Product Release
 
 **Product Release Version**:

@@ -111,6 +111,10 @@ jobs:
         with:
           toolchain: 1.91.0
 
+      - name: Setup Wasm toolchain
+        if: steps.release.outputs.enabled == 'true'
+        uses: ./.github/actions/setup-wasm
+
       - name: Setup Xtensa toolchain
         if: steps.release.outputs.enabled == 'true'
         uses: ./.github/actions/setup-xtensa

@@ -334,6 +334,25 @@ impl FrontPanelInputController {
         self.sample_with_capabilities(now_ms, raw_state, FrontPanelGestureCapabilities::ALL)
     }
 
+    /// Treat the observed boot-time electrical levels as already settled.
+    ///
+    /// A reset can occur while a switch line is low.  That existing level is
+    /// not a new user action: its eventual release must not synthesize a short
+    /// press that arms the heater.
+    pub fn prime_raw_state(&mut self, raw_state: FrontPanelRawState, now_ms: u64) {
+        for raw_key in RawFrontPanelKey::ALL {
+            let pressed = raw_state.is_pressed(raw_key);
+            let tracker = &mut self.trackers[raw_key.index()];
+            tracker.raw_pressed = pressed;
+            tracker.stable_pressed = pressed;
+            tracker.last_raw_change_ms = now_ms;
+            tracker.press_started_ms = None;
+            tracker.long_fired = false;
+            tracker.next_repeat_ms = None;
+            tracker.pending_short_release_ms = None;
+        }
+    }
+
     pub fn sample_with_capabilities(
         &mut self,
         now_ms: u64,
@@ -1455,6 +1474,52 @@ mod tests {
             events.events.is_empty(),
             "cleared center press should not reappear after the double-click window"
         );
+    }
+
+    #[test]
+    fn boot_time_pressed_center_is_not_replayed_as_a_heater_toggle() {
+        let capabilities =
+            FrontPanelUiState::new(FrontPanelRuntimeMode::App).gesture_capabilities();
+        let mut controller = FrontPanelInputController::default();
+        controller.prime_raw_state(raw_state(&[RawFrontPanelKey::CenterBoot]), 0);
+
+        assert!(
+            controller
+                .sample_with_capabilities(
+                    20,
+                    raw_state(&[RawFrontPanelKey::CenterBoot]),
+                    capabilities
+                )
+                .events
+                .is_empty()
+        );
+        assert!(
+            controller
+                .sample_with_capabilities(50, raw_state(&[]), capabilities)
+                .events
+                .is_empty()
+        );
+        assert!(
+            controller
+                .sample_with_capabilities(320, raw_state(&[]), capabilities)
+                .events
+                .is_empty()
+        );
+
+        let events = collect_events_with_capabilities(
+            &mut controller,
+            capabilities,
+            &[
+                (400, raw_state(&[RawFrontPanelKey::CenterBoot])),
+                (430, raw_state(&[RawFrontPanelKey::CenterBoot])),
+                (440, raw_state(&[])),
+                (470, raw_state(&[])),
+                (740, raw_state(&[])),
+            ],
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key, FrontPanelKey::Center);
+        assert_eq!(events[0].gesture, KeyGesture::ShortPress);
     }
 
     #[test]

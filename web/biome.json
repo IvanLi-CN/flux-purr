@@ -8,6 +8,8 @@
       "!storybook-static",
       "!playwright-report",
       "!test-results",
+      "!src/generated/thermal-tuning-wasm",
+      "!src/generated/thermal-report",
       "!src/routeTree.gen.ts"
     ]
   },

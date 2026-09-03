@@ -101,7 +101,7 @@ pub(super) async fn run_flagship_tuning(
     let tune_targets_c = parse_thermal_targets(Some(&args.tune_targets_c))?;
     validate_flagship_scope(args.profile_mode, &tune_targets_c)?;
     let tuning_execution_order_c = build_recursive_tuning_execution_order(&tune_targets_c);
-    let output_root = effective_output_root(&args.output_root);
+    let output_root = effective_output_root(&args.output_root, args.profile_mode);
     fs::create_dir_all(&output_root)?;
     let bundle_dir = args
         .bundle_dir
@@ -318,6 +318,7 @@ pub(super) async fn run_flagship_tuning(
         "bundleDir": display_path(&bundle_dir),
         "bundleJson": bundle.pointer("/files/bundleJson").cloned().unwrap_or(Value::Null),
         "bundleIndexHtml": bundle.pointer("/files/indexHtml").cloned().unwrap_or(Value::Null),
+        "reportAccess": super::thermal_report::report_access_receipt(&bundle_dir)?,
         "reviewOutcomes": review_outcomes,
         "candidateDispositions": candidate_dispositions,
         "candidateReadyTargetsC": candidate_ready_targets_c.iter().copied().map(i64::from).collect::<Vec<_>>(),
@@ -3078,8 +3079,8 @@ fn validate_flagship_scope(
     profile_mode: ThermalProfileMode,
     tune_targets_c: &[i16],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if profile_mode != ThermalProfileMode::W100 {
-        return Err("5A full-batch tuning requires --profile-mode 100w".into());
+    if profile_mode == ThermalProfileMode::Auto {
+        return Err("host-reference tuning requires --profile-mode 65w or 100w".into());
     }
     if tune_targets_c.is_empty() {
         return Err("flagship tuning target list must be non-empty".into());
@@ -3093,9 +3094,13 @@ fn validate_flagship_scope(
     Ok(())
 }
 
-fn effective_output_root(output_root: &Path) -> PathBuf {
+fn effective_output_root(output_root: &Path, profile_mode: ThermalProfileMode) -> PathBuf {
     if output_root == Path::new(DEFAULT_OUTPUT_ROOT) {
-        output_root.join(format!("flagship-pps5a-sprint-{}", current_unix_millis()))
+        output_root.join(format!(
+            "flagship-{}-sprint-{}",
+            flagship_detected_source_class(profile_mode),
+            current_unix_millis()
+        ))
     } else {
         output_root.to_path_buf()
     }
@@ -3214,14 +3219,15 @@ mod tests {
     }
 
     #[test]
-    fn flagship_scope_rejects_non_100w_profile_modes() {
+    fn flagship_scope_accepts_both_supported_power_classes() {
         assert!(validate_flagship_scope(ThermalProfileMode::W100, &[60, 240]).is_ok());
-        for mode in [ThermalProfileMode::W65, ThermalProfileMode::Auto] {
+        assert!(validate_flagship_scope(ThermalProfileMode::W65, &[60, 240]).is_ok());
+        for mode in [ThermalProfileMode::Auto] {
             assert_eq!(
                 validate_flagship_scope(mode, &[60, 240])
                     .expect_err("non-100w mode must be rejected")
                     .to_string(),
-                "5A full-batch tuning requires --profile-mode 100w"
+                "host-reference tuning requires --profile-mode 65w or 100w"
             );
         }
     }

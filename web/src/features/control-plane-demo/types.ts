@@ -66,6 +66,7 @@ export interface DeviceTarget {
   transitionSequence?: number
   wifiFailureCode?: NetworkFailureCode | null
   capabilities: string[]
+  thermalTuningEvidenceSchema?: string | null
   networkState?: 'disabled' | 'idle' | 'saving' | 'connecting' | 'connected' | 'error' | 'timeout'
   leaseState?: 'none' | 'active' | 'conflict' | 'expired'
   leaseId?: string

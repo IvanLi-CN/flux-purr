@@ -294,6 +294,7 @@ pub enum LanEndpoint {
     Calibration,
     CalibrationJob,
     ThermalPlantRun,
+    ThermalTuningRun,
     HeaterCurve,
     HeaterCurveSave,
     ThermalProfile,
@@ -318,6 +319,7 @@ impl LanEndpoint {
             | Self::Calibration
             | Self::CalibrationJob
             | Self::ThermalPlantRun
+            | Self::ThermalTuningRun
             | Self::HeaterCurve
             | Self::HeaterCurveSave
             | Self::ThermalProfile => EndpointPermission::Lease,

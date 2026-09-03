@@ -413,6 +413,51 @@ describe('web serial control-plane client', () => {
 
     await client.disconnect()
   })
+
+  it('uses the firmware thermal tuning frame for both paged reads and commands', async () => {
+    const fake = new FakeSerial()
+    const client = new WebSerialControlPlaneClient({ serial: fake })
+    await client.connect()
+
+    const current = await client.getThermalTuningRun(7, 24)
+    const started = await client.configureThermalTuningRun({
+      op: 'start',
+      powerClass: 'pps5a',
+    })
+
+    expect(current).toMatchObject({ schema: 'thermal_tuning_run_v1' })
+    expect(started.run.powerClass).toBe('pps5a')
+    expect(fake.requests.at(-2)).toMatchObject({
+      type: 'thermal_tuning_run',
+      op: 'get',
+      afterSequence: 7,
+      limit: 8,
+    })
+    expect(fake.requests.at(-1)).toMatchObject({
+      type: 'thermal_tuning_run',
+      op: 'start',
+      powerClass: 'pps5a',
+    })
+
+    await client.disconnect()
+  })
+
+  it('omits the exclusive thermal tuning cursor for the first page', async () => {
+    const fake = new FakeSerial()
+    const client = new WebSerialControlPlaneClient({ serial: fake })
+    await client.connect()
+
+    await client.getThermalTuningRun()
+
+    expect(fake.requests.at(-1)).toMatchObject({
+      type: 'thermal_tuning_run',
+      op: 'get',
+      limit: 8,
+    })
+    expect(fake.requests.at(-1)).not.toHaveProperty('afterSequence')
+
+    await client.disconnect()
+  })
 })
 
 class FakeSerial implements BrowserSerial {
@@ -845,6 +890,51 @@ function responseFor(request: Record<string, unknown>) {
           },
           provisionalCurve: null,
           activeResult: null,
+        },
+      },
+    }
+  }
+  if (request.type === 'thermal_tuning_run') {
+    const powerClass = request.powerClass === 'pps5a' ? 'pps5a' : 'pps3a'
+    return {
+      type: 'response',
+      requestId,
+      ok: true,
+      result: {
+        thermal_tuning_run: {
+          schema: 'thermal_tuning_run_v1',
+          run: {
+            runId: 'mock-tuning-serial-1',
+            state: request.op === 'start' ? 'running' : 'idle',
+            powerClass: request.op === 'start' ? powerClass : null,
+            phase: request.op === 'start' ? 'scout' : 'idle',
+            currentTargetC: request.op === 'start' ? 60 : null,
+            targetProgress: { acceptedC: [], failedC: [], skippedC: [] },
+            terminalDisposition: null,
+            eligibility: { ready: true, reasons: [], activeOwner: null },
+            review: {
+              state: request.op === 'start' ? 'recording' : 'not_applicable',
+              reason: null,
+              acknowledgedThrough: 0,
+              terminalSequence: null,
+              traceDigest: null,
+            },
+            candidate: {
+              candidateId: null,
+              candidateHash: null,
+              powerClass: request.op === 'start' ? powerClass : null,
+              promotionState: request.op === 'start' ? 'awaiting_review' : 'unavailable',
+            },
+            journal: { lastRunId: null, lastDisposition: null },
+          },
+          page: {
+            earliestSequence: 1,
+            emittedThrough: 0,
+            nextAfterSequence: 1,
+            acknowledgedThrough: 0,
+            digestThroughPage: null,
+            events: [],
+          },
         },
       },
     }

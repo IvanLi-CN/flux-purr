@@ -10,6 +10,15 @@
 - Created: 2026-04-21
 - Last: 2026-04-25
 
+## Thermal Tuning Authority
+
+本文中关于 host 负责正式 thermal tuning 的条款描述的是兼容历史算法，保留用于
+回放、对照和必要的算法改进，不是当前设备调优的 live authority。正式调优由
+[`thermal-tuning/SPEC.md`](../thermal-tuning/SPEC.md) 与
+[`0006-firmware-owned-thermal-tuning-core`](../../adr/0006-firmware-owned-thermal-tuning-core.md)
+约束：固件执行核心状态机和 promotion，CLI/Web 只负责各自记录、回放、验证和报告；
+`host-reference` 与 `flagship-tune` 兼容入口未经主人明确批准不得删除。
+
 ## 背景 / 问题陈述
 
 - 当前 `flux-purr` 已完成前面板输入、RTD 读取、CH224Q 默认电压请求与 heater/fan bring-up，但 Dashboard 的风扇语义仍残留旧的单布尔开关口径。

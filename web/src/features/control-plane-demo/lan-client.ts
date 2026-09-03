@@ -151,6 +151,7 @@ export function lanProbeToDeviceTarget(session: LanDeviceSession, probe: LanProb
     wifiRssi: network.wifiRssi ?? null,
     wifiPasswordLength: network.wifiPasswordLength ?? 0,
     capabilities: Array.from(new Set([...identity.capabilities, 'lan_http', 'lan_lease'])),
+    thermalTuningEvidenceSchema: identity.thermalTuning?.evidenceSchema ?? null,
     networkState: network.state,
     leaseState: 'none',
   }
