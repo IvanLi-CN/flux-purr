@@ -15025,7 +15025,7 @@ mod tests {
     }
 
     #[test]
-    fn protection_alarm_reuses_one_carrier_through_its_pulses_and_replay() {
+    fn protection_alarm_preserves_its_dual_carrier_steps_and_replay() {
         let mut buzzer = BuzzerArbiter::new();
         let mut cadence = ProtectionAlarmCadence::new();
         let mut configured_frequency_hz = BUZZER_IDLE_FREQUENCY_HZ;
@@ -15050,12 +15050,18 @@ mod tests {
             first_rest
         ));
         let second_pulse = hardware_state(buzzer.tick(130).output);
-        assert_eq!(second_pulse.frequency_hz, Some(2_300));
-        assert!(!buzzer_timer_reconfiguration_needed(
+        assert_eq!(second_pulse.frequency_hz, Some(1_850));
+        assert!(buzzer_timer_reconfiguration_needed(
             configured_frequency_hz,
             second_pulse
         ));
-        let _ = buzzer.tick(220);
+        configured_frequency_hz = second_pulse.frequency_hz.unwrap();
+
+        let second_rest = hardware_state(buzzer.tick(220).output);
+        assert!(!buzzer_timer_reconfiguration_needed(
+            configured_frequency_hz,
+            second_rest
+        ));
         let _ = buzzer.tick(300);
 
         let replay = cadence
@@ -15064,7 +15070,7 @@ mod tests {
         assert_eq!(replay.cue, BuzzerCueId::ProtectionAlarm);
         let replay_pulse = hardware_state(buzzer.output());
         assert_eq!(replay_pulse.frequency_hz, Some(2_300));
-        assert!(!buzzer_timer_reconfiguration_needed(
+        assert!(buzzer_timer_reconfiguration_needed(
             configured_frequency_hz,
             replay_pulse
         ));

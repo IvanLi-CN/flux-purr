@@ -336,7 +336,7 @@ const ACTIVE_COOLING_REJECT_PATTERN: [BuzzerStep; 5] = [
 const PROTECTION_ALARM_PATTERN: [BuzzerStep; 4] = [
     BuzzerStep::tone(2_300, 90),
     BuzzerStep::rest(40),
-    BuzzerStep::tone(2_300, 90),
+    BuzzerStep::tone(1_850, 90),
     BuzzerStep::rest(80),
 ];
 const ATTENTION_REMINDER_PATTERN: [BuzzerStep; 3] = [
@@ -1122,7 +1122,7 @@ mod tests {
         // the rest before it emits the second audible step.
         assert_eq!(controller.tick(145).duty_percent, 0);
         assert_eq!(controller.tick(184).duty_percent, 0);
-        assert_eq!(controller.tick(185).frequency_hz, Some(2_300));
+        assert_eq!(controller.tick(185).frequency_hz, Some(1_850));
     }
 
     #[cfg(feature = "buzzer-debug")]
@@ -1316,18 +1316,19 @@ mod tests {
 
         assert_eq!(arbiter.output().frequency_hz, Some(2_300));
         assert_eq!(arbiter.tick(90).output.frequency_hz, None);
-        assert_eq!(arbiter.tick(130).output.frequency_hz, Some(2_300));
+        assert_eq!(arbiter.tick(130).output.frequency_hz, Some(1_850));
         assert_eq!(arbiter.tick(220).output.frequency_hz, None);
         assert_eq!(arbiter.tick(300).output.frequency_hz, None);
         assert_eq!(arbiter.active_cue(), None);
     }
 
     #[test]
-    fn protection_alarm_keeps_one_frequency_across_its_audible_steps() {
+    fn protection_alarm_keeps_its_established_audible_steps() {
         let pattern = pattern_for(BuzzerCueId::ProtectionAlarm);
         let mut audible_frequencies = pattern.steps.iter().filter_map(|step| step.frequency_hz);
         assert_eq!(audible_frequencies.next(), Some(2_300));
-        assert!(audible_frequencies.all(|frequency_hz| frequency_hz == 2_300));
+        assert_eq!(audible_frequencies.next(), Some(1_850));
+        assert_eq!(audible_frequencies.next(), None);
     }
 
     #[test]
