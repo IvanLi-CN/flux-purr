@@ -29,7 +29,7 @@ describe('thermal tuning calibration surface', () => {
     expect(markup).not.toContain('封存审查')
   })
 
-  it('keeps mock lifecycle explicit and requires review before save', () => {
+  it('keeps candidate actions out of an active run until review can make them relevant', () => {
     const idle = createDefaultThermalTuningSnapshot()
     const running = applyMockThermalTuningCommand(idle, { op: 'start', powerClass: 'pps5a' })
     expect(running.run.state).toBe('running')
@@ -38,11 +38,15 @@ describe('thermal tuning calibration surface', () => {
     const markup = renderToStaticMarkup(
       createElement(ThermalTuningRunCard, { snapshot: running, onCommand: () => undefined })
     )
-    expect(markup).toContain('保存候选')
+    expect(markup).toContain('停止调优')
+    expect(markup).not.toContain('候选审查')
+    expect(markup).not.toContain('预览候选')
+    expect(markup).not.toContain('保存候选')
+    expect(markup).not.toContain('导出 bundle')
     expect(markup).toContain('disabled')
   })
 
-  it('does not offer review sealing for a non-promotable terminal run', () => {
+  it('allows a new run but no review actions for a non-promotable terminal run', () => {
     const canceled = applyMockThermalTuningCommand(
       applyMockThermalTuningCommand(createDefaultThermalTuningSnapshot(), {
         op: 'start',
@@ -53,6 +57,8 @@ describe('thermal tuning calibration surface', () => {
     const markup = renderToStaticMarkup(
       createElement(ThermalTuningRunCard, { snapshot: canceled, onCommand: () => undefined })
     )
+    expect(markup).toContain('开始 PPS 3A')
+    expect(markup).not.toContain('候选审查')
     expect(markup).not.toContain('封存审查')
   })
 

@@ -67,28 +67,44 @@
 /* Firmware-owned thermal tuning work surface. The host records the bounded
    trace, while the device remains the live authority for every decision. */
 .industrial-calibration-tabs__content:has(.thermal-tuning-card) {
-  display: block;
+  display: flex;
   min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
+  padding-right: 0;
+}
+
+.thermal-tuning-scroll-area {
+  width: 100%;
+  min-height: 0;
+  height: 100%;
+}
+
+.thermal-tuning-scroll-area .simplebar-content {
+  display: grid;
+  gap: 0.55rem;
+  min-height: 100%;
+  padding-right: 1rem;
+}
+
+.thermal-tuning-scroll-area .simplebar-content-wrapper {
+  overscroll-behavior: contain;
 }
 
 .thermal-tuning-card {
   display: grid;
   min-width: 0;
-  gap: 0.75rem;
+  gap: 1rem;
   border: 1px solid var(--industrial-panel-border-strong);
-  border-radius: 8px;
-  padding: clamp(0.75rem, 1.5vw, 1.1rem);
+  border-radius: 18px;
+  padding: clamp(1rem, 1.75vw, 1.25rem);
   background: var(--industrial-panel);
-  box-shadow: var(--industrial-surface-shadow);
   color: var(--industrial-text);
 }
 
 .thermal-tuning-card__header,
 .thermal-tuning-card__section-title,
-.thermal-tuning-card__actions,
-.thermal-tuning-card__confirm {
+.thermal-tuning-card__candidate-actions {
   display: flex;
   min-width: 0;
   align-items: center;
@@ -99,7 +115,7 @@
   justify-content: space-between;
   align-items: flex-start;
   border-bottom: 1px solid var(--industrial-panel-border);
-  padding-bottom: 0.75rem;
+  padding-bottom: 1rem;
 }
 
 .thermal-tuning-card__header h2,
@@ -109,26 +125,17 @@
 }
 
 .thermal-tuning-card__header h2 {
-  font-size: clamp(1.15rem, 2vw, 1.45rem);
-  line-height: 1.2;
-}
-
-.thermal-tuning-card__eyebrow {
-  margin: 0 0 0.22rem;
-  color: var(--industrial-muted-text);
-  font-family: "JetBrains Mono", monospace;
-  font-size: 0.62rem;
-  font-weight: 800;
-  letter-spacing: 0;
+  font-size: 1.35rem;
+  line-height: 1.1;
 }
 
 .thermal-tuning-card__lede,
 .thermal-tuning-card__candidate p,
 .thermal-tuning-card__ok,
 .thermal-tuning-card__warning {
-  margin: 0.35rem 0 0;
+  margin: 0.45rem 0 0;
   color: var(--industrial-muted-text);
-  font-size: 0.76rem;
+  font-size: 1rem;
   line-height: 1.45;
 }
 
@@ -142,7 +149,7 @@
   padding: 0.35rem 0.5rem;
   color: var(--industrial-accent);
   font-family: "JetBrains Mono", monospace;
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   font-weight: 800;
   white-space: nowrap;
 }
@@ -164,16 +171,45 @@
   color: var(--industrial-green);
 }
 
-.thermal-tuning-card__eligibility,
-.thermal-tuning-card__controls,
-.thermal-tuning-card__progress,
-.thermal-tuning-card__trace,
-.thermal-tuning-card__candidate {
+.thermal-tuning-card__setup {
+  display: grid;
+  gap: 1rem;
   min-width: 0;
-  border: 1px solid var(--industrial-panel-border);
-  border-radius: 6px;
-  padding: 0.7rem;
-  background: color-mix(in oklch, var(--industrial-bg) 72%, var(--industrial-panel));
+  border-bottom: 1px solid var(--industrial-panel-border);
+  padding-bottom: 1rem;
+}
+
+.thermal-tuning-card__readiness {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: start;
+}
+
+.thermal-tuning-card__readiness > svg {
+  width: 1.1rem;
+  height: 1.1rem;
+  margin-top: 0.15rem;
+  color: var(--industrial-green);
+}
+
+.thermal-tuning-card__readiness p,
+.thermal-tuning-card__readiness ul {
+  margin: 0.32rem 0 0;
+  color: var(--industrial-muted-text);
+  font-size: 1rem;
+  line-height: 1.45;
+}
+
+.thermal-tuning-card__readiness ul {
+  padding-left: 1.2rem;
+  color: var(--industrial-accent);
+}
+
+.thermal-tuning-card__power {
+  display: grid;
+  gap: 0.7rem;
+  min-width: 0;
 }
 
 .thermal-tuning-card__section-title {
@@ -188,7 +224,7 @@
 }
 
 .thermal-tuning-card__section-title h3 {
-  font-size: 0.84rem;
+  font-size: 1rem;
   font-weight: 850;
 }
 
@@ -196,7 +232,7 @@
   margin-left: auto;
   color: var(--industrial-muted-text);
   font-family: "JetBrains Mono", monospace;
-  font-size: 0.64rem;
+  font-size: 0.7rem;
   font-weight: 800;
   white-space: nowrap;
 }
@@ -210,13 +246,6 @@
   color: var(--industrial-accent);
 }
 
-.thermal-tuning-card__eligibility ul {
-  margin: 0.45rem 0 0;
-  padding-left: 1.2rem;
-  color: var(--industrial-accent);
-  font-size: 0.75rem;
-}
-
 .thermal-tuning-card__segmented {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -224,14 +253,9 @@
   margin-top: 0.55rem;
 }
 
-.thermal-tuning-card__segmented,
-.thermal-tuning-card__confirm {
-  min-width: 0;
-  margin-inline: 0;
-}
-
 .thermal-tuning-card__segmented {
   border: 0;
+  margin: 0;
   padding: 0;
 }
 
@@ -246,13 +270,14 @@
 
 .thermal-tuning-card__segmented button {
   min-width: 0;
-  min-height: 2.35rem;
+  min-height: 3rem;
   border: 1px solid var(--industrial-panel-border-strong);
-  border-radius: 5px;
-  padding: 0.4rem 0.55rem;
+  border-radius: 14px;
+  padding: 0.55rem 0.7rem;
   background: var(--industrial-panel);
   color: var(--industrial-muted-text);
-  font-size: 0.75rem;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.7rem;
   font-weight: 800;
   cursor: pointer;
 }
@@ -268,11 +293,35 @@
   outline-offset: 2px;
 }
 
+.thermal-tuning-card__primary-action {
+  min-height: 3rem;
+  border-radius: 14px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.thermal-tuning-card__stop-action {
+  border-color: color-mix(in oklch, var(--industrial-accent) 44%, var(--industrial-panel-border));
+  color: var(--industrial-accent);
+}
+
+.thermal-tuning-card__run,
+.thermal-tuning-card__candidate {
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+  border: 1px solid var(--industrial-panel-border);
+  border-radius: 18px;
+  padding: 1rem;
+  background: color-mix(in oklch, var(--industrial-bg) 72%, var(--industrial-panel));
+}
+
 .thermal-tuning-card__targets {
   display: grid;
   grid-template-columns: repeat(9, minmax(0, 1fr));
-  gap: 0.3rem;
-  margin-top: 0.55rem;
+  gap: 0.35rem;
+  margin: 0;
   padding: 0;
   list-style: none;
 }
@@ -280,13 +329,13 @@
 .thermal-tuning-card__targets li {
   display: grid;
   min-width: 0;
-  min-height: 2rem;
+  min-height: 2.5rem;
   place-items: center;
   border: 1px solid var(--industrial-panel-border);
-  border-radius: 4px;
+  border-radius: 8px;
   color: var(--industrial-muted-text);
   font-family: "JetBrains Mono", monospace;
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   font-weight: 800;
 }
 
@@ -300,6 +349,20 @@
 .thermal-tuning-card__targets li.is-skipped {
   border-color: color-mix(in oklch, var(--industrial-accent) 48%, transparent);
   color: var(--industrial-accent);
+}
+
+.thermal-tuning-card__run-hint {
+  margin: 0;
+  color: var(--industrial-muted-text);
+  font-size: 1rem;
+  line-height: 1.45;
+}
+
+.thermal-tuning-card__trace {
+  display: grid;
+  gap: 0.7rem;
+  border-top: 1px solid var(--industrial-panel-border);
+  padding-top: 0.85rem;
 }
 
 .thermal-tuning-card__trace dl {
@@ -322,48 +385,109 @@
 
 .thermal-tuning-card__trace dt {
   color: var(--industrial-muted-text);
-  font-size: 0.65rem;
+  font-size: 0.7rem;
 }
 
 .thermal-tuning-card__trace dd {
   overflow: hidden;
   color: var(--industrial-text);
   font-family: "JetBrains Mono", monospace;
-  font-size: 0.72rem;
+  font-size: 1rem;
   font-weight: 800;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.thermal-tuning-card__actions {
+.thermal-tuning-card__candidate-actions {
   flex-wrap: wrap;
   align-items: center;
   padding-top: 0.15rem;
 }
 
-.thermal-tuning-card__actions > button,
-.thermal-tuning-card__confirm > button {
-  min-height: 2.25rem;
+.thermal-tuning-card__candidate-actions > button,
+.thermal-tuning-card__export > button {
+  min-height: 3rem;
+  border-radius: 14px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.7rem;
+  font-weight: 800;
 }
 
-.thermal-tuning-card__confirm {
-  flex-wrap: wrap;
-  border: 1px solid color-mix(in oklch, var(--industrial-accent) 40%, transparent);
-  border-radius: 5px;
-  padding: 0.35rem 0.45rem;
+.thermal-tuning-card__export {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.thermal-tuning-confirm-dialog[data-slot="dialog-content"] {
+  max-width: min(30rem, calc(100% - 2rem));
+  gap: 1rem;
+  border-color: var(--industrial-panel-border-strong);
+  border-radius: 18px;
+  background: var(--industrial-panel);
   color: var(--industrial-text);
-  font-size: 0.72rem;
+  box-shadow: var(--industrial-surface-shadow);
+  padding: clamp(1rem, 3vw, 1.5rem);
 }
 
-.thermal-tuning-card__confirm {
-  min-width: min(100%, 22rem);
+.thermal-tuning-confirm-dialog [data-slot="dialog-title"] {
+  color: var(--industrial-text);
+  font-size: 1.35rem;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.thermal-tuning-confirm-dialog [data-slot="dialog-description"] {
+  color: var(--industrial-muted-text);
+  font-size: 1rem;
+  line-height: 1.45;
+}
+
+.thermal-tuning-confirm-dialog__details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
   margin: 0;
 }
 
-.thermal-tuning-card__confirm legend {
-  padding: 0 0.2rem;
+.thermal-tuning-confirm-dialog__details div {
+  min-width: 0;
+  border: 1px solid var(--industrial-panel-border);
+  border-radius: 14px;
+  padding: 0.7rem;
+  background: var(--industrial-bg);
+}
+
+.thermal-tuning-confirm-dialog__details dt,
+.thermal-tuning-confirm-dialog__details dd {
+  margin: 0;
+}
+
+.thermal-tuning-confirm-dialog__details dt {
   color: var(--industrial-muted-text);
-  font-size: 0.65rem;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.thermal-tuning-confirm-dialog__details dd {
+  margin-top: 0.32rem;
+  color: var(--industrial-text);
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.thermal-tuning-confirm-dialog [data-slot="dialog-footer"] {
+  gap: 0.6rem;
+}
+
+.thermal-tuning-confirm-dialog__action {
+  /* The shared dialog's entry animation briefly scales content below 1.0.
+     Keep the physical hit target at least 48px throughout that transition. */
+  min-height: 52px;
+  border-radius: 14px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.7rem;
   font-weight: 800;
 }
 
@@ -389,22 +513,39 @@
 .thermal-tuning-card__empty p {
   margin: 0.35rem 0 0;
   color: var(--industrial-muted-text);
-  font-size: 0.76rem;
+  font-size: 0.7rem;
   line-height: 1.45;
 }
 
 @media (max-width: 759px) {
   .thermal-tuning-card {
-    padding: 0.65rem;
+    gap: 0.85rem;
+    border-radius: 14px;
+    padding: 0.85rem;
   }
 
   .thermal-tuning-card__header {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.6rem;
+    padding-bottom: 0.5rem;
   }
 
   .thermal-tuning-card__status {
-    justify-self: start;
+    justify-self: end;
+  }
+
+  .thermal-tuning-card__lede {
+    font-size: 1rem;
+  }
+
+  .thermal-tuning-card__readiness p {
+    display: none;
+  }
+
+  .thermal-tuning-card__setup {
+    gap: 0.75rem;
+    padding-bottom: 0.75rem;
   }
 
   .thermal-tuning-card__targets {
@@ -415,17 +556,19 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .thermal-tuning-card__actions {
+  .thermal-tuning-card__candidate-actions,
+  .thermal-tuning-confirm-dialog [data-slot="dialog-footer"] {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .thermal-tuning-card__actions > button {
+  .thermal-tuning-card__candidate-actions > button,
+  .thermal-tuning-confirm-dialog__action {
     width: 100%;
   }
 
-  .thermal-tuning-card__confirm {
-    grid-column: 1 / -1;
+  .thermal-tuning-confirm-dialog__details {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

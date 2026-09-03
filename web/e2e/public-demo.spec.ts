@@ -171,12 +171,24 @@ test.describe('public demo build', () => {
     }
 
     await page.getByRole('button', { name: 'PPS 5A · 100W 级' }).click()
-    await page.getByRole('button', { name: /开始 PPS 5A/ }).click()
-    await expect(page.getByText('确认开始调优')).toBeVisible()
+    const startButton = page.getByRole('button', { name: /开始 PPS 5A/ })
+    const startBounds = await startButton.boundingBox()
+    expect(startBounds?.height).toBeGreaterThanOrEqual(48)
+    await startButton.click()
+    const confirmationDialog = page.getByRole('dialog')
+    await expect(confirmationDialog).toBeVisible()
+    await expect(confirmationDialog.getByText('确认开始调优')).toBeVisible()
+    await expect(confirmationDialog.getByText('PPS 5A · 100W 级')).toBeVisible()
+    await expect(page.locator('.thermal-tuning-card [role="dialog"]')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '预览候选' })).toHaveCount(0)
+    const confirmBounds = await confirmationDialog
+      .getByRole('button', { name: '确认开始' })
+      .boundingBox()
+    expect(confirmBounds?.height).toBeGreaterThanOrEqual(48)
     await expect(page.locator('input[type="text"], input[type="password"], textarea')).toHaveCount(
       0
     )
-    await page.getByRole('button', { name: '确认开始' }).click()
+    await confirmationDialog.getByRole('button', { name: '确认开始' }).click()
     await expect(page.getByText('运行中').first()).toBeVisible()
   })
 

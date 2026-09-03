@@ -11,6 +11,14 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import type {
   ThermalTuningPowerClass,
   ThermalTuningRunRequest,
@@ -39,6 +47,8 @@ const powerClassLabel: Record<ThermalTuningPowerClass, string> = {
   pps3a: 'PPS 3A · 65W 级',
   pps5a: 'PPS 5A · 100W 级',
 }
+
+type ConfirmationAction = 'start' | 'cancel' | 'save'
 
 export function createDefaultThermalTuningSnapshot(): ThermalTuningRunSnapshot {
   return {
@@ -217,8 +227,7 @@ export function ThermalTuningRunCard({
 }: ThermalTuningRunCardProps) {
   const [powerClass, setPowerClass] = useState<ThermalTuningPowerClass>('pps3a')
   const [pending, setPending] = useState<string | null>(null)
-  const [confirmAction, setConfirmAction] = useState<'start' | 'cancel' | null>(null)
-  const [confirmSave, setConfirmSave] = useState(false)
+  const [confirmationAction, setConfirmationAction] = useState<ConfirmationAction | null>(null)
   const [wasmVerification, setWasmVerification] = useState<
     'idle' | 'checking' | 'valid' | 'invalid' | 'unavailable'
   >('idle')
@@ -231,6 +240,28 @@ export function ThermalTuningRunCard({
   const candidateHash = snapshot.run.candidate.candidateHash
   const candidateProfileHex = snapshot.run.candidate.canonicalProfileHex
   const candidatePowerClass = snapshot.run.candidate.powerClass
+  const isRunning = snapshot.run.state === 'running'
+  const isTerminal = snapshot.run.state === 'terminal'
+  const hasCandidate = snapshot.run.candidate.candidateId != null
+  const candidatePreviewed = snapshot.run.candidate.promotionState === 'previewed'
+  const confirmationTitle =
+    confirmationAction === 'cancel'
+      ? '确认停止调优'
+      : confirmationAction === 'save'
+        ? '确认保存候选'
+        : '确认开始调优'
+  const confirmationDescription =
+    confirmationAction === 'cancel'
+      ? '设备会安全收口，并保留已记录的调优证据。'
+      : confirmationAction === 'save'
+        ? '这会将已审查的候选写入设备配置。'
+        : '设备将按九个固定温度点运行，主机持续归档 trace。'
+  const confirmationButtonLabel =
+    confirmationAction === 'cancel'
+      ? '确认停止'
+      : confirmationAction === 'save'
+        ? '确认保存'
+        : '确认开始'
 
   useEffect(() => {
     let cancelled = false
@@ -269,6 +300,27 @@ export function ThermalTuningRunCard({
     }
   }
 
+  const confirm = () => {
+    const action = confirmationAction
+    if (!action) return
+    setConfirmationAction(null)
+    if (action === 'start') {
+      void command({ op: 'start', powerClass })
+      return
+    }
+    if (action === 'cancel') {
+      void command({ op: 'cancel', runId: snapshot.run.runId })
+      return
+    }
+    void command({
+      op: 'save',
+      runId: snapshot.run.runId,
+      candidateId: snapshot.run.candidate.candidateId ?? undefined,
+      candidateHash: snapshot.run.candidate.candidateHash ?? undefined,
+      powerClass: candidatePowerClass ?? undefined,
+    })
+  }
+
   if (unsupported) {
     return (
       <article
@@ -293,7 +345,6 @@ export function ThermalTuningRunCard({
     <article className="thermal-tuning-card" aria-label="热控调优工作面">
       <header className="thermal-tuning-card__header">
         <div>
-          <p className="thermal-tuning-card__eyebrow">FIRMWARE AUTHORITY · NINE TARGETS</p>
           <h2>热控调优</h2>
           <p className="thermal-tuning-card__lede">
             核心调优在设备内运行，主机只负责记录、审查与导出。
@@ -307,46 +358,74 @@ export function ThermalTuningRunCard({
         </div>
       </header>
 
-      <section className="thermal-tuning-card__eligibility" aria-label="调优前置条件">
-        <div className="thermal-tuning-card__section-title">
+      <section className="thermal-tuning-card__setup" aria-label="调优准备">
+        <div className="thermal-tuning-card__readiness">
           <ShieldCheck aria-hidden="true" />
-          <h3>开始检查</h3>
-          <span>{snapshot.run.eligibility.ready ? '允许开始' : '需要处理'}</span>
+          <div>
+            <div className="thermal-tuning-card__section-title">
+              <h3>开始检查</h3>
+              <span className={snapshot.run.eligibility.ready ? 'is-ok' : 'is-warning'}>
+                {snapshot.run.eligibility.ready ? '允许开始' : '需要处理'}
+              </span>
+            </div>
+            {snapshot.run.eligibility.ready ? (
+              <p>热模型、曲线覆盖、PPS 合同与安全状态已满足。</p>
+            ) : (
+              <ul>
+                {snapshot.run.eligibility.reasons.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
-        {snapshot.run.eligibility.ready ? (
-          <p className="thermal-tuning-card__ok">热模型、曲线覆盖、PPS 合同与安全状态已满足。</p>
-        ) : (
-          <ul>
-            {snapshot.run.eligibility.reasons.map((reason) => (
-              <li key={reason}>{reason}</li>
+        <div className="thermal-tuning-card__power">
+          <div className="thermal-tuning-card__section-title">
+            <Activity aria-hidden="true" />
+            <h3>PPS 功率级别</h3>
+            <span>仅支持 PPS</span>
+          </div>
+          <fieldset className="thermal-tuning-card__segmented">
+            <legend>PPS 功率级别</legend>
+            {(Object.keys(powerClassLabel) as ThermalTuningPowerClass[]).map((value) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={powerClass === value}
+                disabled={disabled || isRunning}
+                onClick={() => setPowerClass(value)}
+              >
+                {powerClassLabel[value]}
+              </button>
             ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="thermal-tuning-card__controls" aria-label="调优参数">
-        <div className="thermal-tuning-card__section-title">
-          <Activity aria-hidden="true" />
-          <h3>PPS 功率级别</h3>
-          <span>仅支持 PPS</span>
+          </fieldset>
         </div>
-        <fieldset className="thermal-tuning-card__segmented">
-          <legend>PPS 功率级别</legend>
-          {(Object.keys(powerClassLabel) as ThermalTuningPowerClass[]).map((value) => (
-            <button
-              key={value}
-              type="button"
-              aria-pressed={powerClass === value}
-              disabled={disabled || snapshot.run.state === 'running'}
-              onClick={() => setPowerClass(value)}
-            >
-              {powerClassLabel[value]}
-            </button>
-          ))}
-        </fieldset>
+        {!isRunning ? (
+          <Button
+            type="button"
+            className="thermal-tuning-card__primary-action"
+            disabled={!canStart || pending != null}
+            onClick={() => setConfirmationAction('start')}
+          >
+            <Activity aria-hidden="true" />
+            {pending === 'start' ? '启动中…' : `开始 ${powerClassLabel[powerClass]}`}
+          </Button>
+        ) : null}
+        {isRunning ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="thermal-tuning-card__primary-action thermal-tuning-card__stop-action"
+            disabled={pending != null}
+            onClick={() => setConfirmationAction('cancel')}
+          >
+            <CircleStop aria-hidden="true" />
+            {pending === 'cancel' ? '停止中…' : '停止调优'}
+          </Button>
+        ) : null}
       </section>
 
-      <section className="thermal-tuning-card__progress" aria-label="调优进度">
+      <section className="thermal-tuning-card__run" aria-label="调优进度">
         <div className="thermal-tuning-card__section-title">
           <CheckCircle2 aria-hidden="true" />
           <h3>{phaseLabel(snapshot)}</h3>
@@ -371,207 +450,176 @@ export function ThermalTuningRunCard({
             )
           })}
         </ul>
-      </section>
-
-      <section className="thermal-tuning-card__trace" aria-label="主机 trace 记录健康度">
-        <div className="thermal-tuning-card__section-title">
-          <Activity aria-hidden="true" />
-          <h3>Trace 健康度</h3>
-          <span className={health.reviewIncomplete ? 'is-warning' : 'is-ok'}>
-            {health.reviewIncomplete ? 'review incomplete' : '连续'}
-          </span>
-        </div>
-        <dl>
-          <div>
-            <dt>设备已发出</dt>
-            <dd>{snapshot.page.emittedThrough ?? 0}</dd>
-          </div>
-          <div>
-            <dt>主机已确认</dt>
-            <dd>{snapshot.page.acknowledgedThrough ?? 0}</dd>
-          </div>
-          <div>
-            <dt>当前 digest</dt>
-            <dd>
-              {snapshot.page.digestThroughPage
-                ? `${snapshot.page.digestThroughPage.slice(0, 12)}…`
-                : '待生成'}
-            </dd>
-          </div>
-        </dl>
-        {health.reviewIncomplete ? (
-          <p className="thermal-tuning-card__warning">
-            检测到 trace 缺口，不能 preview 或保存候选。
+        {snapshot.run.state === 'idle' ? (
+          <p className="thermal-tuning-card__run-hint">
+            开始后依序执行九个固定温度点，并持续记录设备决策与主机确认。
           </p>
-        ) : null}
+        ) : (
+          <section className="thermal-tuning-card__trace" aria-label="主机 trace 记录健康度">
+            <div className="thermal-tuning-card__section-title">
+              <Activity aria-hidden="true" />
+              <h3>Trace 健康度</h3>
+              <span className={health.reviewIncomplete ? 'is-warning' : 'is-ok'}>
+                {health.reviewIncomplete ? 'review incomplete' : '连续'}
+              </span>
+            </div>
+            <dl>
+              <div>
+                <dt>设备已发出</dt>
+                <dd>{snapshot.page.emittedThrough ?? 0}</dd>
+              </div>
+              <div>
+                <dt>主机已确认</dt>
+                <dd>{snapshot.page.acknowledgedThrough ?? 0}</dd>
+              </div>
+              <div>
+                <dt>当前 digest</dt>
+                <dd>
+                  {snapshot.page.digestThroughPage
+                    ? `${snapshot.page.digestThroughPage.slice(0, 12)}…`
+                    : '待生成'}
+                </dd>
+              </div>
+            </dl>
+            {health.reviewIncomplete ? (
+              <p className="thermal-tuning-card__warning">
+                检测到 trace 缺口，不能 preview 或保存候选。
+              </p>
+            ) : null}
+          </section>
+        )}
       </section>
 
-      <section className="thermal-tuning-card__candidate" aria-label="候选审查">
-        <div className="thermal-tuning-card__section-title">
-          <Eye aria-hidden="true" />
-          <h3>候选审查</h3>
-          <span>{snapshot.run.candidate.promotionState}</span>
-        </div>
-        <p>
-          {snapshot.run.candidate.candidateId
-            ? `${snapshot.run.candidate.candidateId} · ${(snapshot.run.candidate.candidateHash ?? '').slice(0, 16)}…`
-            : '完成九点运行并封存 trace 后生成候选。'}
-        </p>
-        {wasmVerification !== 'idle' ? (
-          <p className="thermal-tuning-card__ok" aria-live="polite">
-            Wasm 校验：
-            {wasmVerification === 'checking'
-              ? '进行中'
-              : wasmVerification === 'valid'
-                ? '通过'
-                : wasmVerification === 'invalid'
-                  ? '不通过'
-                  : '不可用'}
+      {hasCandidate ? (
+        <section className="thermal-tuning-card__candidate" aria-label="候选审查">
+          <div className="thermal-tuning-card__section-title">
+            <Eye aria-hidden="true" />
+            <h3>候选审查</h3>
+            <span>{snapshot.run.candidate.promotionState}</span>
+          </div>
+          <p>
+            {snapshot.run.candidate.candidateId} ·{' '}
+            {(snapshot.run.candidate.candidateHash ?? '').slice(0, 16)}…
           </p>
-        ) : null}
-      </section>
-
-      <footer className="thermal-tuning-card__actions" aria-live="polite">
-        {snapshot.run.state === 'running' ? (
-          confirmAction === 'cancel' ? (
-            <fieldset className="thermal-tuning-card__confirm">
-              <legend>确认停止调优</legend>
-              <span>停止当前调优？设备会安全收口。</span>
+          {wasmVerification !== 'idle' ? (
+            <p className="thermal-tuning-card__ok" aria-live="polite">
+              Wasm 校验：
+              {wasmVerification === 'checking'
+                ? '进行中'
+                : wasmVerification === 'valid'
+                  ? '通过'
+                  : wasmVerification === 'invalid'
+                    ? '不通过'
+                    : '不可用'}
+            </p>
+          ) : null}
+          <div className="thermal-tuning-card__candidate-actions" aria-live="polite">
+            {reviewReady ? (
               <Button
                 type="button"
-                size="sm"
+                variant="secondary"
                 disabled={pending != null}
-                onClick={() => {
-                  setConfirmAction(null)
-                  void command({ op: 'cancel', runId: snapshot.run.runId })
-                }}
+                onClick={() =>
+                  void command({
+                    op: 'preview',
+                    runId: snapshot.run.runId,
+                    candidateId: snapshot.run.candidate.candidateId ?? undefined,
+                    candidateHash: snapshot.run.candidate.candidateHash ?? undefined,
+                    powerClass: candidatePowerClass ?? undefined,
+                  })
+                }
               >
-                确认停止
+                <Eye aria-hidden="true" /> 预览候选
               </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => setConfirmAction(null)}
-              >
-                取消
-              </Button>
-            </fieldset>
-          ) : (
+            ) : null}
+            {candidatePreviewed ? (
+              <>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={pending != null}
+                  onClick={() =>
+                    void command({
+                      op: 'discard_preview',
+                      runId: snapshot.run.runId,
+                      candidateId: snapshot.run.candidate.candidateId ?? undefined,
+                      candidateHash: snapshot.run.candidate.candidateHash ?? undefined,
+                      powerClass: candidatePowerClass ?? undefined,
+                    })
+                  }
+                >
+                  <Trash2 aria-hidden="true" /> 丢弃预览
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={pending != null}
+                  onClick={() => setConfirmationAction('save')}
+                >
+                  <Save aria-hidden="true" /> 保存候选
+                </Button>
+              </>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+
+      {isTerminal ? (
+        <div className="thermal-tuning-card__export">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => downloadThermalTuningBundle(deviceId, snapshot)}
+          >
+            <Download aria-hidden="true" /> 导出 bundle
+          </Button>
+        </div>
+      ) : null}
+
+      <Dialog
+        open={confirmationAction != null}
+        onOpenChange={(open) => {
+          if (!open && pending == null) setConfirmationAction(null)
+        }}
+      >
+        <DialogContent className="thermal-tuning-confirm-dialog" showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>{confirmationTitle}</DialogTitle>
+            <DialogDescription>{confirmationDescription}</DialogDescription>
+          </DialogHeader>
+          {confirmationAction === 'start' ? (
+            <dl className="thermal-tuning-confirm-dialog__details">
+              <div>
+                <dt>PPS 功率级别</dt>
+                <dd>{powerClassLabel[powerClass]}</dd>
+              </div>
+              <div>
+                <dt>执行序列</dt>
+                <dd>九点固定顺序</dd>
+              </div>
+            </dl>
+          ) : null}
+          <DialogFooter>
             <Button
               type="button"
               variant="outline"
+              className="thermal-tuning-confirm-dialog__action"
               disabled={pending != null}
-              onClick={() => setConfirmAction('cancel')}
+              onClick={() => setConfirmationAction(null)}
             >
-              <CircleStop aria-hidden="true" /> {pending === 'cancel' ? '停止中…' : '停止调优'}
-            </Button>
-          )
-        ) : confirmAction === 'start' ? (
-          <fieldset className="thermal-tuning-card__confirm">
-            <legend>确认开始调优</legend>
-            <span>开始九点 {powerClassLabel[powerClass]} 调优？</span>
-            <Button
-              type="button"
-              size="sm"
-              disabled={pending != null}
-              onClick={() => {
-                setConfirmAction(null)
-                void command({ op: 'start', powerClass })
-              }}
-            >
-              确认开始
-            </Button>
-            <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmAction(null)}>
               取消
             </Button>
-          </fieldset>
-        ) : (
-          <Button
-            type="button"
-            disabled={!canStart || pending != null}
-            onClick={() => setConfirmAction('start')}
-          >
-            <Activity aria-hidden="true" />{' '}
-            {pending === 'start' ? '启动中…' : `开始 ${powerClassLabel[powerClass]}`}
-          </Button>
-        )}
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={pending != null || !reviewReady}
-          onClick={() =>
-            void command({
-              op: 'preview',
-              runId: snapshot.run.runId,
-              candidateId: snapshot.run.candidate.candidateId ?? undefined,
-              candidateHash: snapshot.run.candidate.candidateHash ?? undefined,
-              powerClass: candidatePowerClass ?? undefined,
-            })
-          }
-        >
-          <Eye aria-hidden="true" /> 预览候选
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={pending != null || snapshot.run.candidate.promotionState !== 'previewed'}
-          onClick={() =>
-            void command({
-              op: 'discard_preview',
-              runId: snapshot.run.runId,
-              candidateId: snapshot.run.candidate.candidateId ?? undefined,
-              candidateHash: snapshot.run.candidate.candidateHash ?? undefined,
-              powerClass: candidatePowerClass ?? undefined,
-            })
-          }
-        >
-          <Trash2 aria-hidden="true" /> 丢弃预览
-        </Button>
-        {confirmSave ? (
-          <fieldset className="thermal-tuning-card__confirm">
-            <legend>确认保存候选</legend>
-            <span>保存这份已审查候选？</span>
             <Button
               type="button"
-              size="sm"
+              className="thermal-tuning-confirm-dialog__action"
               disabled={pending != null}
-              onClick={() => {
-                setConfirmSave(false)
-                void command({
-                  op: 'save',
-                  runId: snapshot.run.runId,
-                  candidateId: snapshot.run.candidate.candidateId ?? undefined,
-                  candidateHash: snapshot.run.candidate.candidateHash ?? undefined,
-                  powerClass: candidatePowerClass ?? undefined,
-                })
-              }}
+              onClick={confirm}
             >
-              确认保存
+              {confirmationButtonLabel}
             </Button>
-            <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmSave(false)}>
-              取消
-            </Button>
-          </fieldset>
-        ) : (
-          <Button
-            type="button"
-            variant="outline"
-            disabled={pending != null || snapshot.run.candidate.promotionState !== 'previewed'}
-            onClick={() => setConfirmSave(true)}
-          >
-            <Save aria-hidden="true" /> 保存候选
-          </Button>
-        )}
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={snapshot.run.state === 'idle'}
-          onClick={() => downloadThermalTuningBundle(deviceId, snapshot)}
-        >
-          <Download aria-hidden="true" /> 导出 bundle
-        </Button>
-      </footer>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </article>
   )
 }

@@ -8182,15 +8182,17 @@ function CalibrationView({
             </section>
           </TabsContent>
           <TabsContent value="thermal_tuning" className="industrial-calibration-tabs__content">
-            <section className="industrial-calibration-mode-panel" aria-label="热控调优">
-              <ThermalTuningRunCard
-                deviceId={device.id}
-                snapshot={thermalTuningRun}
-                unsupported={thermalTuningRunUnsupported}
-                disabled={controlsBlocked || pendingCalibrationAction != null}
-                onCommand={onThermalTuningCommand}
-              />
-            </section>
+            <ScrollArea className="thermal-tuning-scroll-area" autoHide>
+              <section className="industrial-calibration-mode-panel" aria-label="热控调优">
+                <ThermalTuningRunCard
+                  deviceId={device.id}
+                  snapshot={thermalTuningRun}
+                  unsupported={thermalTuningRunUnsupported}
+                  disabled={controlsBlocked || pendingCalibrationAction != null}
+                  onCommand={onThermalTuningCommand}
+                />
+              </section>
+            </ScrollArea>
           </TabsContent>
           <TabsContent value="rtd_adc" className="industrial-calibration-tabs__content">
             <section className="industrial-calibration-mode-panel" aria-label="温度标定">
