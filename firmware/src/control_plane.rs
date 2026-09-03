@@ -296,6 +296,15 @@ pub struct ControlPlaneStatus {
     #[serde(default)]
     pub thermal_plant_model: ThermalPlantRuntimeWire,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
+    #[cfg(feature = "buzzer-debug")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontpanel_route: Option<String<ERROR_CODE_MAX_LEN>>,
+    #[cfg(feature = "buzzer-debug")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontpanel_presented_route: Option<String<ERROR_CODE_MAX_LEN>>,
+    #[cfg(feature = "buzzer-debug")]
+    #[serde(default)]
+    pub frontpanel_presentation_count: u32,
     pub network: NetworkSummary,
 }
 
@@ -537,6 +546,12 @@ impl ControlPlaneStatus {
                 thermal_control: ThermalControlRuntimeWire::default(),
                 thermal_plant_model: ThermalPlantRuntimeWire::default(),
                 frontpanel_key: status.frontpanel_key.map(Into::into),
+                #[cfg(feature = "buzzer-debug")]
+                frontpanel_route: None,
+                #[cfg(feature = "buzzer-debug")]
+                frontpanel_presented_route: None,
+                #[cfg(feature = "buzzer-debug")]
+                frontpanel_presentation_count: 0,
                 network,
             });
         }

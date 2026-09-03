@@ -668,6 +668,9 @@ impl DeviceRecord {
             thermal_control: ThermalControlRuntime::default(),
             thermal_plant_model: ThermalPlantRuntime::default(),
             frontpanel_key: None,
+            frontpanel_route: None,
+            frontpanel_presented_route: None,
+            frontpanel_presentation_count: None,
             network: network.clone(),
         };
 
@@ -771,6 +774,9 @@ impl DeviceRecord {
             thermal_control: ThermalControlRuntime::default(),
             thermal_plant_model: ThermalPlantRuntime::default(),
             frontpanel_key: None,
+            frontpanel_route: None,
+            frontpanel_presented_route: None,
+            frontpanel_presentation_count: None,
             network: network.clone(),
         };
 
@@ -1052,6 +1058,12 @@ pub struct ControlPlaneStatus {
     #[serde(default)]
     pub thermal_plant_model: ThermalPlantRuntime,
     pub frontpanel_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontpanel_route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontpanel_presented_route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontpanel_presentation_count: Option<u32>,
     pub network: NetworkSummary,
 }
 
@@ -13088,6 +13100,9 @@ mod tests {
                 job: CalibrationJobState::default(),
             },
             frontpanel_key: None,
+            frontpanel_route: None,
+            frontpanel_presented_route: None,
+            frontpanel_presentation_count: None,
             network: NetworkSummary {
                 state: NetworkState::Idle,
                 configuration_generation: 0,

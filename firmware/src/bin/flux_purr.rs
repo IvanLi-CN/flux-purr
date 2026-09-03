@@ -10,6 +10,8 @@ use alloc::{
     alloc::{Layout, alloc},
     boxed::Box,
 };
+#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
+use core::sync::atomic::AtomicU32;
 #[cfg(any(target_arch = "xtensa", test))]
 use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 #[cfg(target_arch = "xtensa")]
@@ -729,7 +731,7 @@ fn runtime_mode_label(mode: FrontPanelRuntimeMode) -> &'static str {
     }
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", all(test, feature = "buzzer-debug")))]
 fn route_label(route: FrontPanelRoute) -> &'static str {
     match route {
         FrontPanelRoute::KeyTest => "key-test",
@@ -739,6 +741,45 @@ fn route_label(route: FrontPanelRoute) -> &'static str {
         FrontPanelRoute::ActiveCooling => "active-cooling",
         FrontPanelRoute::WifiInfo => "wifi-info",
         FrontPanelRoute::DeviceInfo => "device-info",
+    }
+}
+
+#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
+static FRONTPANEL_PRESENTED_ROUTE: AtomicU8 = AtomicU8::new(0);
+#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
+static FRONTPANEL_PRESENTATION_COUNT: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+fn record_frontpanel_presentation(route: FrontPanelRoute) -> u32 {
+    let route_code = match route {
+        FrontPanelRoute::KeyTest => 1,
+        FrontPanelRoute::Dashboard => 2,
+        FrontPanelRoute::Menu => 3,
+        FrontPanelRoute::PresetTemp => 4,
+        FrontPanelRoute::ActiveCooling => 5,
+        FrontPanelRoute::WifiInfo => 6,
+        FrontPanelRoute::DeviceInfo => 7,
+    };
+    FRONTPANEL_PRESENTED_ROUTE.store(route_code, Ordering::Release);
+    FRONTPANEL_PRESENTATION_COUNT.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+#[cfg(all(target_arch = "xtensa", not(feature = "buzzer-debug")))]
+fn record_frontpanel_presentation(_route: FrontPanelRoute) -> u32 {
+    0
+}
+
+#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
+fn presented_frontpanel_route_label() -> Option<&'static str> {
+    match FRONTPANEL_PRESENTED_ROUTE.load(Ordering::Acquire) {
+        1 => Some("key-test"),
+        2 => Some("dashboard"),
+        3 => Some("menu"),
+        4 => Some("preset-temp"),
+        5 => Some("active-cooling"),
+        6 => Some("wifi-info"),
+        7 => Some("device-info"),
+        _ => None,
     }
 }
 
@@ -2707,6 +2748,33 @@ fn overtemp_forced_fan_state(
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 fn startup_pd_contract_ready(observation: Option<PdStatusObservation>) -> bool {
     observation.is_some_and(|observation| observation.status.pd_active)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StartupFrontPanelPresentationPlan {
+    reinitialize_panel: bool,
+    flush_count: u8,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn startup_frontpanel_presentation_plan(
+    pd_contract_ready: bool,
+) -> StartupFrontPanelPresentationPlan {
+    if pd_contract_ready {
+        StartupFrontPanelPresentationPlan {
+            reinitialize_panel: false,
+            flush_count: 1,
+        }
+    } else {
+        // The panel has been showing the calibration scene while PD discovery
+        // times out. Reset it before committing the normal runtime frame so a
+        // stale startup scene cannot survive the interlocked transition.
+        StartupFrontPanelPresentationPlan {
+            reinitialize_panel: true,
+            flush_count: 2,
+        }
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -8360,6 +8428,14 @@ fn usb_runtime_status_with_calibration(
         )
     };
     status.thermal_plant_model = thermal_plant_runtime_wire(memory_config);
+    #[cfg(feature = "buzzer-debug")]
+    {
+        status.frontpanel_route = Some(error_code_string(route_label(ui_state.route)));
+        status.frontpanel_presented_route =
+            presented_frontpanel_route_label().map(error_code_string);
+        status.frontpanel_presentation_count =
+            FRONTPANEL_PRESENTATION_COUNT.load(Ordering::Acquire);
+    }
     status
 }
 
@@ -12011,7 +12087,58 @@ where
     DC::Error: core::fmt::Debug,
 {
     present_ui(display, canvas, state)?;
-    display.flush().await
+    display.flush().await?;
+    let presentation_count = record_frontpanel_presentation(state.route);
+    info!(
+        "frontpanel presentation committed route={=str} count={=u32}",
+        route_label(state.route),
+        presentation_count,
+    );
+    Ok(())
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn present_initial_frontpanel_ui<'a, BUS, DC, RST>(
+    display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    pd_contract_ready: bool,
+) -> bool
+where
+    BUS: embedded_hal_async::spi::SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
+    BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
+    DC::Error: core::fmt::Debug,
+{
+    let plan = startup_frontpanel_presentation_plan(pd_contract_ready);
+    if plan.reinitialize_panel {
+        info!("frontpanel runtime recovery: reinitializing after PD startup timeout");
+        if !matches!(
+            with_timeout(DISPLAY_IO_TIMEOUT, display.init()).await,
+            Ok(Ok(()))
+        ) {
+            warn!("frontpanel runtime recovery: panel reinitialization failed");
+            return false;
+        }
+    }
+
+    for pass in 1..=plan.flush_count {
+        if !matches!(
+            with_timeout(DISPLAY_IO_TIMEOUT, flush_ui(display, canvas, state)).await,
+            Ok(Ok(()))
+        ) {
+            warn!("frontpanel runtime presentation failed pass={=u8}", pass);
+            return false;
+        }
+        info!(
+            "frontpanel startup presentation complete route={=str} pass={=u8}",
+            route_label(state.route),
+            pass,
+        );
+    }
+
+    true
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -13329,14 +13456,22 @@ async fn main(_spawner: Spawner) {
         ..StatusLightInputs::default()
     });
     set_status_light_state(initial_status_light_state);
-    let initial_frontpanel_ui_ready = matches!(
-        with_timeout(
-            DISPLAY_IO_TIMEOUT,
-            flush_ui(&mut display, canvas, &ui_state)
-        )
-        .await,
-        Ok(Ok(()))
-    );
+    #[cfg(feature = "web_serial")]
+    if !pd_contract_ready {
+        let _ = usb_write_bytes_bounded(
+            &mut usb_serial,
+            b"boot_stage=display_dashboard_recovery_start\n",
+        );
+    }
+    let initial_frontpanel_ui_ready =
+        present_initial_frontpanel_ui(&mut display, canvas, &ui_state, pd_contract_ready).await;
+    #[cfg(feature = "web_serial")]
+    if initial_frontpanel_ui_ready && !pd_contract_ready {
+        let _ = usb_write_bytes_bounded(
+            &mut usb_serial,
+            b"boot_stage=display_dashboard_recovery_complete\n",
+        );
+    }
     if !initial_frontpanel_ui_ready {
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
@@ -22886,9 +23021,12 @@ mod tests {
     fn pd_unavailable_startup_enters_dashboard_with_heater_locked() {
         let pd_contract_ready = startup_pd_contract_ready(None);
         let state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let presentation = startup_frontpanel_presentation_plan(pd_contract_ready);
 
         assert_eq!(state.route, FrontPanelRoute::Dashboard);
         assert!(!pd_contract_ready);
+        assert!(presentation.reinitialize_panel);
+        assert_eq!(presentation.flush_count, 2);
         assert_eq!(
             next_heater_lock_reason(None, false, true, pd_contract_ready),
             Some(HeaterLockReason::PdContractUnavailable)
