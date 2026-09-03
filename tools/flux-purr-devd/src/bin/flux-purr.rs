@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, BufWriter, IsTerminal, Read, Write},
-    net::Ipv4Addr,
+    net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     sync::{Arc, Mutex},
@@ -523,6 +523,10 @@ enum ThermalReportCommand {
         about = "Rerender an existing thermal-tuning-v2 firmware bundle with the full canonical thermal report."
     )]
     RenderFirmware(ThermalFirmwareReportArgs),
+    #[command(
+        about = "Serve a verified thermal report over loopback and keep the URL alive until interrupted."
+    )]
+    Serve(ThermalReportServeArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -900,6 +904,21 @@ struct ThermalFirmwareReportArgs {
         help = "Directory containing a firmware thermal-tuning-v2 five-file bundle. index.html is regenerated in place without contacting a device."
     )]
     bundle_dir: PathBuf,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ThermalReportServeArgs {
+    #[arg(
+        long = "bundle-dir",
+        help = "Canonical thermal report bundle. All required files and rendered report data are verified before a URL is emitted."
+    )]
+    bundle_dir: PathBuf,
+    #[arg(
+        long,
+        default_value = "127.0.0.1:0",
+        help = "Loopback bind address. Port 0 selects a free local port."
+    )]
+    bind: SocketAddr,
 }
 
 #[derive(Debug, Args)]
@@ -1351,6 +1370,15 @@ fn is_unicast_static_ipv4(address: Ipv4Addr) -> bool {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
+    if let Command::Thermal {
+        command:
+            ThermalCommand::Report {
+                command: ThermalReportCommand::Serve(args),
+            },
+    } = &cli.command
+    {
+        return serve_thermal_report_cli(args.clone(), cli.json).await;
+    }
     let client = Client::new();
     let payload = match cli.command {
         Command::Devices => {
@@ -2739,11 +2767,39 @@ async fn handle_thermal_command(
                     },
                 )
             }
+            ThermalReportCommand::Serve(_) => unreachable!("report serve is handled before device setup"),
         },
         ThermalCommand::Retune(args) => {
             thermal_retune::run_thermal_retune(client, default_devd, args).await
         }
     }
+}
+
+async fn serve_thermal_report_cli(
+    args: ThermalReportServeArgs,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let server = thermal_report::serve_local_report(thermal_report::ThermalReportServeInput {
+        bundle_dir: args.bundle_dir,
+        bind: args.bind,
+    })
+    .await?;
+    let payload = server.ready_payload();
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "Thermal report is available at: {}\nHealth check: {}\nThis process owns the report URL. Press Ctrl-C to stop serving.",
+            payload.get("url").and_then(Value::as_str).unwrap_or("-"),
+            payload
+                .get("healthUrl")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+        );
+    }
+    io::stdout().flush()?;
+    server.wait_for_shutdown().await;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -4420,7 +4476,8 @@ fn write_firmware_tuning_bundle(
             candidate_path,
             ledger_path,
             index_path
-        ]
+        ],
+        "reportAccess": thermal_report::report_access_receipt(output_dir)?
     }))
 }
 
@@ -12384,16 +12441,23 @@ fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + S
                 .unwrap_or(false),
         ));
     }
-    if payload.get("operation").and_then(Value::as_str)
-        == Some("thermal_report.rerender_legacy_preliminary_review_bundle")
-    {
+    if let Some(report_access) = payload.get("reportAccess") {
         return Ok(format!(
-            "Thermal report bundle: {}",
-            payload
-                .get("bundleIndexHtml")
+            "Thermal report bundle verified: {}\nServe it with: flux-purr thermal report serve --bundle-dir {}",
+            report_access
+                .get("entry")
+                .and_then(Value::as_str)
+                .unwrap_or("index.html"),
+            report_access
+                .get("bundleDir")
                 .and_then(Value::as_str)
                 .unwrap_or("-")
         ));
+    }
+    if payload.get("operation").and_then(Value::as_str)
+        == Some("thermal_report.rerender_legacy_preliminary_review_bundle")
+    {
+        return Ok("Thermal report bundle rerendered without an access receipt.".to_string());
     }
     if payload.get("runId").is_some() && payload.get("sampleCount").is_some() {
         return Ok(format!(
@@ -12600,6 +12664,21 @@ mod tests {
         });
         let rendered = render_human(&payload).unwrap();
         assert!(rendered.contains("Thermal replay thermal-1: 36 samples passed=false"));
+    }
+
+    #[test]
+    fn report_receipt_human_output_requires_the_serving_command() {
+        let rendered = render_human(&json!({
+            "reportAccess": {
+                "entry": "index.html",
+                "bundleDir": "/tmp/verified-report"
+            }
+        }))
+        .expect("render verified report bundle output");
+
+        assert!(rendered.contains("bundle verified"));
+        assert!(rendered.contains("thermal report serve --bundle-dir /tmp/verified-report"));
+        assert!(!rendered.contains("file://"));
     }
 
     #[test]
@@ -15951,6 +16030,34 @@ mod tests {
 
         assert_eq!(args.run_dir, vec![PathBuf::from("/tmp/raw-self-test")]);
         assert_eq!(args.output_dir, Some(PathBuf::from("/tmp/html-bundle")));
+    }
+
+    #[test]
+    fn parses_thermal_report_serve_command_with_loopback_ephemeral_port() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "thermal",
+            "report",
+            "serve",
+            "--bundle-dir",
+            "/tmp/thermal-bundle",
+            "--bind",
+            "127.0.0.1:0",
+        ])
+        .expect("parse thermal report serve command");
+
+        let Command::Thermal {
+            command:
+                ThermalCommand::Report {
+                    command: ThermalReportCommand::Serve(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected thermal report serve command");
+        };
+
+        assert_eq!(args.bundle_dir, PathBuf::from("/tmp/thermal-bundle"));
+        assert_eq!(args.bind.to_string(), "127.0.0.1:0");
     }
 
     #[test]

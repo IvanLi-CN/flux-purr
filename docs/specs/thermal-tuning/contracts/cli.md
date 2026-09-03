@@ -100,5 +100,26 @@ firmware engine must do so for every terminal local archive. Legacy
 `thermal-profile.accepted.json` is accepted only by import/reference compatibility commands and
 is never emitted by the firmware-engine product command.
 
+A bundle path is not an owner-facing report URL. Every writer and renderer first validates the
+canonical required files, parses `run.bundle.json`, and verifies that `index.html` contains
+rendered report data rather than a template placeholder. Their output carries a
+`thermal-report-access-v1` receipt in the `verified_bundle` state. It proves the archive can be
+served, but it deliberately does not claim that a previous `file://` address or a terminated
+temporary server is reachable.
+
+The only CLI command that publishes a local report URL is:
+
+```text
+flux-purr thermal report serve --bundle-dir <directory> --bind 127.0.0.1:0
+```
+
+It accepts only canonical `thermal-tuning-v2`, `thermal_self_test_preliminary_bundle`, or
+`thermal_self_test_report_bundle` directories. The bind address must be loopback. Before printing
+the URL, it starts a process-owned HTTP server, probes `/healthz`, fetches the report entry page
+through that server, verifies an HTML content type, and revalidates the rendered report data. The
+process remains responsible for the URL until it receives `Ctrl-C`; callers must keep that process
+alive for as long as they share the URL. A failed validation or probe exits nonzero and must not
+emit a report URL.
+
 See [file-formats.md](./file-formats.md) for the required files and [control-plane.md](./control-plane.md)
 for the Device protocol.

@@ -26,7 +26,10 @@
   The firmware runner writes the five-file `thermal-tuning-v2` archive without source or
   external VBUS operations. `thermal candidate preview|discard-preview|save` separately
   revalidates an archived firmware candidate against the Device before RAM preview or a
-  second-confirmed EEPROM save.
+  second-confirmed EEPROM save. Report writers validate the canonical archive and rendered
+  embedded JSON before emitting a `verified_bundle` receipt; `thermal report serve` is the
+  loopback-only, process-owned path that performs a health and entry-page HTTP probe before
+  publishing a temporary local report URL.
 - Firmware now exposes the complete five-kind evidence union (`sample`, `phase_transition`,
   `candidate_trial`, `decision`, `safety`) with target/trial/candidate identity and canonical
   candidate bytes. CLI and Web recorders persist the global sequence independently and

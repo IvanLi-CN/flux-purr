@@ -6,6 +6,14 @@
 contents in a ZIP; CLI writes a directory and may optionally package an identical ZIP. All
 files are UTF-8 and self-contained: `index.html` must render without network access.
 
+The bundle is an archive, not a durable URL. CLI report writers emit a
+`thermal-report-access-v1` `verified_bundle` receipt only after checking the complete file set,
+`run.bundle.json`, the HTML doctype, and injected `thermal-report-data`. A reachable local URL is
+a separate `serving` receipt emitted exclusively by `flux-purr thermal report serve`; it exists
+only while that serving process remains alive and has passed its own HTTP health and entry-page
+probes. No workflow may present a `file://` path, stale localhost address, or a terminated
+temporary server as an accessible report.
+
 | File | Required content |
 | --- | --- |
 | `index.html` | Offline human-readable report with summary, nine-target progress, candidate state, trace integrity, decision details and optional reference comparison |

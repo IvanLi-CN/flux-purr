@@ -318,6 +318,7 @@ pub(super) async fn run_flagship_tuning(
         "bundleDir": display_path(&bundle_dir),
         "bundleJson": bundle.pointer("/files/bundleJson").cloned().unwrap_or(Value::Null),
         "bundleIndexHtml": bundle.pointer("/files/indexHtml").cloned().unwrap_or(Value::Null),
+        "reportAccess": super::thermal_report::report_access_receipt(&bundle_dir)?,
         "reviewOutcomes": review_outcomes,
         "candidateDispositions": candidate_dispositions,
         "candidateReadyTargetsC": candidate_ready_targets_c.iter().copied().map(i64::from).collect::<Vec<_>>(),

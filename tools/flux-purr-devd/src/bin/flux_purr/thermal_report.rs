@@ -2,15 +2,25 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{self, BufRead, BufReader},
+    net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use axum::{
+    Router,
+    extract::State,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use flux_purr_thermal_tuning_core::{
     CANDIDATE_POINT_CANONICAL_BYTES, CANDIDATE_PROFILE_CANONICAL_BYTES, CandidatePoint,
     CandidateProfile, TARGET_BUDGET_SECONDS,
 };
 use serde_json::{Map, Value, json};
+use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
 const UNKNOWN_LEGACY_METADATA: &str = "unknown";
 const DATA_PLACEHOLDER: &str = "__THERMAL_REPORT_DATA__";
@@ -53,6 +63,365 @@ pub(super) struct ThermalSelfTestReportInput {
 #[derive(Debug, Clone)]
 pub(super) struct ThermalFirmwareReportInput {
     pub(super) bundle_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ThermalReportServeInput {
+    pub(super) bundle_dir: PathBuf,
+    pub(super) bind: SocketAddr,
+}
+
+#[derive(Debug)]
+struct ValidatedReportBundle {
+    bundle_dir: PathBuf,
+    schema: Option<String>,
+    kind: Option<String>,
+    run_id: Option<String>,
+    files: Vec<&'static str>,
+    index_html: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct ThermalReportServerState {
+    index_html: Arc<Vec<u8>>,
+    health_json: Arc<String>,
+}
+
+/// A local report endpoint that owns both the listening socket and the
+/// validated report bytes. A URL is never exposed before its health and entry
+/// page have been read successfully through that socket.
+pub(super) struct ThermalReportServer {
+    url: String,
+    health_url: String,
+    bundle: ValidatedReportBundle,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+impl ThermalReportServer {
+    pub(super) fn ready_payload(&self) -> Value {
+        json!({
+            "ok": true,
+            "operation": "thermal_report.serve",
+            "access": "serving",
+            "url": self.url,
+            "healthUrl": self.health_url,
+            "bundleDir": display_path(&self.bundle.bundle_dir),
+            "schema": self.bundle.schema,
+            "kind": self.bundle.kind,
+            "runId": self.bundle.run_id,
+            "files": self.bundle.files,
+        })
+    }
+
+    pub(super) async fn wait_for_shutdown(self) {
+        let _ = tokio::signal::ctrl_c().await;
+        self.shutdown().await;
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let _ = self.task.await;
+    }
+
+    async fn verify_ready(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let client = reqwest::Client::new();
+        let health = client.get(&self.health_url).send().await?;
+        if health.status() != StatusCode::OK {
+            return Err(io::Error::other(format!(
+                "thermal report health probe returned {}",
+                health.status()
+            ))
+            .into());
+        }
+        let health_body: Value = health.json().await?;
+        if health_body.get("ok").and_then(Value::as_bool) != Some(true)
+            || health_body.get("contract").and_then(Value::as_str)
+                != Some("thermal-report-access-v1")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "thermal report health probe returned an invalid receipt",
+            )
+            .into());
+        }
+
+        let entry = client.get(&self.url).send().await?;
+        if entry.status() != StatusCode::OK {
+            return Err(io::Error::other(format!(
+                "thermal report entry probe returned {}",
+                entry.status()
+            ))
+            .into());
+        }
+        let content_type = entry
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !content_type.starts_with("text/html") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "thermal report entry probe did not return HTML",
+            )
+            .into());
+        }
+        validate_report_html(&entry.bytes().await?)?;
+        Ok(())
+    }
+}
+
+pub(super) async fn serve_local_report(
+    input: ThermalReportServeInput,
+) -> Result<ThermalReportServer, Box<dyn std::error::Error + Send + Sync>> {
+    if !input.bind.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "thermal report server only accepts a loopback --bind address",
+        )
+        .into());
+    }
+
+    let bundle = validate_report_bundle(&input.bundle_dir)?;
+    let listener = TcpListener::bind(input.bind).await?;
+    let address = listener.local_addr()?;
+    let url = format!("http://{address}/");
+    let health_url = format!("{url}healthz");
+    let health_json = serde_json::to_string(&json!({
+        "ok": true,
+        "contract": "thermal-report-access-v1",
+        "schema": bundle.schema,
+        "kind": bundle.kind,
+        "runId": bundle.run_id,
+    }))?;
+    let app = Router::new()
+        .route("/", get(report_index))
+        .route("/index.html", get(report_index))
+        .route("/healthz", get(report_health))
+        .with_state(ThermalReportServerState {
+            index_html: Arc::new(bundle.index_html.clone()),
+            health_json: Arc::new(health_json),
+        });
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+    let server = ThermalReportServer {
+        url,
+        health_url,
+        bundle,
+        shutdown: Some(shutdown_tx),
+        task,
+    };
+
+    if let Err(error) = server.verify_ready().await {
+        server.shutdown().await;
+        return Err(error);
+    }
+    Ok(server)
+}
+
+pub(super) fn report_access_receipt(
+    bundle_dir: &Path,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let bundle = validate_report_bundle(bundle_dir)?;
+    Ok(json!({
+        "contract": "thermal-report-access-v1",
+        "state": "verified_bundle",
+        "bundleDir": display_path(&bundle.bundle_dir),
+        "entry": "index.html",
+        "files": bundle.files,
+        "serve": {
+            "command": "flux-purr thermal report serve",
+            "bind": "127.0.0.1:0",
+            "required": true,
+            "note": "A report URL is emitted only by the serving command after an HTTP health and entry-page probe succeeds."
+        }
+    }))
+}
+
+async fn report_index(State(state): State<ThermalReportServerState>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (
+                header::HeaderName::from_static("x-content-type-options"),
+                "nosniff",
+            ),
+        ],
+        (*state.index_html).clone(),
+    )
+        .into_response()
+}
+
+async fn report_health(State(state): State<ThermalReportServerState>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (
+                header::HeaderName::from_static("x-content-type-options"),
+                "nosniff",
+            ),
+        ],
+        (*state.health_json).clone(),
+    )
+        .into_response()
+}
+
+fn validate_report_bundle(
+    bundle_dir: &Path,
+) -> Result<ValidatedReportBundle, Box<dyn std::error::Error + Send + Sync>> {
+    let bundle_dir = absolute_path(bundle_dir)?;
+    if !bundle_dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "thermal report bundle directory does not exist: {}",
+                bundle_dir.display()
+            ),
+        )
+        .into());
+    }
+    let run_bundle = read_json(&bundle_dir.join("run.bundle.json"))?;
+    if !run_bundle.is_object() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "thermal report run.bundle.json must contain an object",
+        )
+        .into());
+    }
+    let schema = run_bundle
+        .get("schema")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let kind = run_bundle
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let files = match (schema.as_deref(), kind.as_deref()) {
+        (Some("thermal-tuning-v2"), _) => vec![
+            "index.html",
+            "run.bundle.json",
+            "samples.ndjson",
+            "thermal-profile.candidate.json",
+            "decision-ledger.ndjson",
+        ],
+        (_, Some("thermal_self_test_preliminary_bundle" | "thermal_self_test_report_bundle")) => {
+            vec![
+                "index.html",
+                "run.bundle.json",
+                "samples.ndjson",
+                "thermal-profile.accepted.json",
+            ]
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "thermal report server accepts only canonical thermal-tuning-v2 or thermal self-test bundles",
+            )
+            .into());
+        }
+    };
+    for file in &files {
+        let path = bundle_dir.join(file);
+        if !path.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "thermal report bundle is missing required file: {}",
+                    path.display()
+                ),
+            )
+            .into());
+        }
+    }
+    match schema.as_deref() {
+        Some("thermal-tuning-v2") => {
+            read_json(&bundle_dir.join("thermal-profile.candidate.json"))?;
+            read_ndjson_values(&bundle_dir.join("samples.ndjson"))?;
+            read_ndjson_values(&bundle_dir.join("decision-ledger.ndjson"))?;
+        }
+        _ => {
+            read_json(&bundle_dir.join("thermal-profile.accepted.json"))?;
+            read_ndjson_values(&bundle_dir.join("samples.ndjson"))?;
+        }
+    }
+    let index_html = fs::read(bundle_dir.join("index.html"))?;
+    validate_report_html(&index_html)?;
+    Ok(ValidatedReportBundle {
+        bundle_dir,
+        schema,
+        kind,
+        run_id: run_bundle
+            .get("runId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        files,
+        index_html,
+    })
+}
+
+fn validate_report_html(html: &[u8]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let html = std::str::from_utf8(html)?;
+    if !html.starts_with("<!doctype html") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "thermal report index.html must start with an HTML doctype",
+        )
+        .into());
+    }
+    if html.contains(DATA_PLACEHOLDER) || !html.contains("id=\"thermal-report-data\"") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "thermal report index.html is missing rendered report data",
+        )
+        .into());
+    }
+    let marker = "<script id=\"thermal-report-data\"";
+    let data_start = html
+        .find(marker)
+        .and_then(|script_start| {
+            html[script_start..]
+                .find('>')
+                .map(|tag_end| script_start + tag_end + 1)
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "thermal report index.html has an invalid report-data tag",
+            )
+        })?;
+    let data_end = html[data_start..]
+        .find("</script>")
+        .map(|offset| data_start + offset)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "thermal report index.html has no report-data terminator",
+            )
+        })?;
+    let data: Value = serde_json::from_str(&html[data_start..data_end]).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("thermal report index.html has invalid report data: {error}"),
+        )
+    })?;
+    if !data.is_object() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "thermal report index.html report data must be an object",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 pub(super) fn rerender_legacy_preliminary_review_bundle(
@@ -200,6 +569,7 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
         "bundleDisposition": bundle.get("bundleDisposition").cloned().unwrap_or(Value::Null),
         "acceptedProfileRole": bundle.get("acceptedProfileRole").cloned().unwrap_or(Value::Null),
         "tuningTargetsC": bundle.get("tuningTargetsC").cloned().unwrap_or(Value::Null),
+        "reportAccess": report_access_receipt(&output_dir)?,
     }))
 }
 
@@ -237,6 +607,7 @@ pub(super) fn render_firmware_tuning_v2_bundle(
         "powerClass": run_bundle.get("powerClass").cloned().unwrap_or(Value::Null),
         "samples": samples.len(),
         "decisions": decisions.len(),
+        "reportAccess": report_access_receipt(&bundle_dir)?,
     }))
 }
 
@@ -1029,6 +1400,7 @@ pub(super) fn render_self_test_evidence_bundle(
         "kind": bundle.get("kind").cloned().unwrap_or(Value::Null),
         "bundleDisposition": bundle.get("bundleDisposition").cloned().unwrap_or(Value::Null),
         "targetsC": target_temps_c,
+        "reportAccess": report_access_receipt(&output_dir)?,
     }))
 }
 
@@ -2483,15 +2855,38 @@ fn escape_report_html_value(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        REPORT_TEMPLATE, ThermalLegacyReportInput, ThermalSelfTestReportInput,
-        firmware_report_data, render_baseline_html, render_self_test_evidence_bundle,
-        report_identity, rerender_legacy_preliminary_review_bundle,
-        sanitize_non_finite_json_numbers, sanitize_point, tuning_workflow,
-        write_preliminary_review_bundle,
+        REPORT_TEMPLATE, ThermalLegacyReportInput, ThermalReportServeInput,
+        ThermalSelfTestReportInput, firmware_report_data, render_baseline_html,
+        render_self_test_evidence_bundle, report_access_receipt, report_identity,
+        rerender_legacy_preliminary_review_bundle, sanitize_non_finite_json_numbers,
+        sanitize_point, serve_local_report, tuning_workflow, write_preliminary_review_bundle,
     };
     use serde_json::{Value, json};
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs, path::Path};
+
+    fn write_report_server_fixture(directory: &Path) {
+        fs::create_dir_all(directory).expect("create report fixture directory");
+        fs::write(
+            directory.join("run.bundle.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema": "thermal-tuning-v2",
+                "engine": "firmware",
+                "runId": "report-serve-test",
+            }))
+            .expect("serialize report fixture bundle"),
+        )
+        .expect("write report fixture bundle");
+        fs::write(
+            directory.join("index.html"),
+            render_baseline_html(&json!({"runId": "report-serve-test"}))
+                .expect("render report fixture"),
+        )
+        .expect("write report fixture html");
+        fs::write(directory.join("samples.ndjson"), "").expect("write samples");
+        fs::write(directory.join("thermal-profile.candidate.json"), "{}").expect("write candidate");
+        fs::write(directory.join("decision-ledger.ndjson"), "").expect("write ledger");
+    }
 
     #[test]
     fn firmware_report_reconstructs_candidate_trial_rounds() {
@@ -2985,6 +3380,111 @@ mod tests {
             decoded,
             json!({"label": "&lt;/script&gt;&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;&amp;\u{2028}\u{2029}"})
         );
+    }
+
+    #[tokio::test]
+    async fn report_server_probes_and_serves_only_the_validated_entry() {
+        let directory = tempfile::tempdir().expect("report server fixture directory");
+        write_report_server_fixture(directory.path());
+
+        let server = serve_local_report(ThermalReportServeInput {
+            bundle_dir: directory.path().to_path_buf(),
+            bind: "127.0.0.1:0".parse().expect("loopback bind"),
+        })
+        .await
+        .expect("start verified report server");
+        let receipt = server.ready_payload();
+        assert_eq!(receipt["access"], "serving");
+        assert_eq!(receipt["runId"], "report-serve-test");
+        let client = reqwest::Client::new();
+        let entry = client
+            .get(receipt["url"].as_str().expect("report URL"))
+            .send()
+            .await
+            .expect("fetch report entry");
+        assert_eq!(entry.status(), axum::http::StatusCode::OK);
+        assert!(
+            entry
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/html"))
+        );
+        assert!(
+            entry
+                .text()
+                .await
+                .expect("report body")
+                .contains("thermal-report-data")
+        );
+
+        let health = client
+            .get(receipt["healthUrl"].as_str().expect("health URL"))
+            .send()
+            .await
+            .expect("fetch report health");
+        assert_eq!(health.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            health.json::<Value>().await.expect("health JSON")["ok"],
+            true
+        );
+
+        let raw = client
+            .get(format!(
+                "{}run.bundle.json",
+                receipt["url"].as_str().expect("report URL")
+            ))
+            .send()
+            .await
+            .expect("fetch unserved raw artifact");
+        assert_eq!(raw.status(), axum::http::StatusCode::NOT_FOUND);
+        server.shutdown().await;
+    }
+
+    #[test]
+    fn report_receipt_rejects_incomplete_or_unrendered_bundles() {
+        let directory = tempfile::tempdir().expect("invalid report fixture directory");
+        write_report_server_fixture(directory.path());
+        fs::write(
+            directory.path().join("index.html"),
+            "<!doctype html><main>template</main>",
+        )
+        .expect("replace report fixture html");
+
+        let error = report_access_receipt(directory.path())
+            .expect_err("unrendered report must not receive a verified receipt");
+        assert!(error.to_string().contains("missing rendered report data"));
+    }
+
+    #[test]
+    fn report_receipt_rejects_non_json_embedded_report_data() {
+        let directory = tempfile::tempdir().expect("invalid report fixture directory");
+        write_report_server_fixture(directory.path());
+        fs::write(
+            directory.path().join("index.html"),
+            "<!doctype html><script id=\"thermal-report-data\" type=\"application/json\">not-json</script>",
+        )
+        .expect("replace report fixture html");
+
+        let error = report_access_receipt(directory.path())
+            .expect_err("invalid embedded report data must not receive a verified receipt");
+        assert!(error.to_string().contains("invalid report data"));
+    }
+
+    #[tokio::test]
+    async fn report_server_rejects_non_loopback_binds_before_listening() {
+        let directory = tempfile::tempdir().expect("report server fixture directory");
+        write_report_server_fixture(directory.path());
+
+        let result = serve_local_report(ThermalReportServeInput {
+            bundle_dir: directory.path().to_path_buf(),
+            bind: "0.0.0.0:0".parse().expect("non-loopback bind"),
+        })
+        .await;
+        let Err(error) = result else {
+            panic!("non-loopback report server must be rejected");
+        };
+        assert!(error.to_string().contains("loopback"));
     }
 
     #[test]

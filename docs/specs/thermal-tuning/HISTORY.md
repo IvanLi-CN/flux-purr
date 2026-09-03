@@ -27,6 +27,11 @@ bench diagnostics 的开发用途，但这些诊断不属于 `thermal-tuning-v2`
 decision ledger。`thermal-profile.accepted.json` 只保留 import compatibility；新
 CLI runner 和 Web ZIP 不再把它作为正式导出或 candidate promotion 的依据。
 
+CLI 将 bundle 写入与 owner-facing URL 发布分为两个可审计状态：`verified_bundle`
+只表示 canonical 文件及已渲染 HTML 已验证；`serving` 只在 loopback HTTP health 与
+首页探测成功后成立，并且 URL 的生命周期由 serving process 持有。这个边界避免临时
+目录、`file://` 兼容性或已退出的本地 server 被误报为可访问报告。
+
 ## Ownership Migration
 
 旧主机驱动的正式调优描述在新实现交付时迁移为 reference compatibility 描述。设备

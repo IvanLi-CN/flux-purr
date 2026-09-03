@@ -41,6 +41,11 @@ CLI 或 `devd` 断连时继续承担设备控制。
   硬门槛与完整主机 trace 审查后才允许 RAM preview 与 EEPROM save。
 - 让浏览器与 CLI 分别拥有本地详细记录、报告导出和可选的参考比较，不建立
   Web-to-CLI 通信、转发或共同记录器。
+- CLI 的 canonical report bundle 必须先完成结构与渲染数据校验，才可获得
+  `verified_bundle` receipt；owner-facing localhost URL 只能由 CLI 自身的 loopback
+  report server 在成功完成 `/healthz` 与首页 HTTP 探测后发布，并且必须由仍存活的
+  serving process 持有。裸 `file://` 路径、过期 localhost 地址或已停止进程不得
+  被报告为可访问交付物。
 - 保留现有主机编排算法作为显式 `host-reference` CLI 引擎；删除它必须获得主人
   的明确批准。
 
