@@ -725,6 +725,7 @@ pub const BUZZER_DEBUG_TRACE_CAPACITY: usize = 8;
 pub enum BuzzerDebugScenario {
     FeedbackCoalesce,
     FeedbackReplace,
+    ActiveCoolingRetrigger,
 }
 
 #[cfg(feature = "buzzer-debug")]
@@ -1074,6 +1075,13 @@ const fn scenario_action(scenario: BuzzerDebugScenario, action: u8) -> Option<(u
         (BuzzerDebugScenario::FeedbackReplace, 0) => Some((0, BuzzerCueId::UiInput)),
         (BuzzerDebugScenario::FeedbackReplace, 1) => Some((15, BuzzerCueId::UiInput)),
         (BuzzerDebugScenario::FeedbackReplace, 2) => Some((30, BuzzerCueId::HeaterOn)),
+        (BuzzerDebugScenario::ActiveCoolingRetrigger, 0) => Some((0, BuzzerCueId::ActiveCoolingOn)),
+        (BuzzerDebugScenario::ActiveCoolingRetrigger, 1) => {
+            Some((15, BuzzerCueId::ActiveCoolingOn))
+        }
+        (BuzzerDebugScenario::ActiveCoolingRetrigger, 2) => {
+            Some((30, BuzzerCueId::ActiveCoolingOn))
+        }
         _ => None,
     }
 }
@@ -1083,6 +1091,7 @@ const fn scenario_duration_ms(scenario: BuzzerDebugScenario) -> u64 {
     match scenario {
         BuzzerDebugScenario::FeedbackCoalesce => 250,
         BuzzerDebugScenario::FeedbackReplace => 350,
+        BuzzerDebugScenario::ActiveCoolingRetrigger => 500,
     }
 }
 
@@ -1196,6 +1205,32 @@ mod tests {
             status.trace[3].decision.disposition,
             BuzzerDecisionDisposition::Started
         );
+    }
+
+    #[cfg(feature = "buzzer-debug")]
+    #[test]
+    fn debug_active_cooling_retrigger_preserves_the_three_tone_production_pattern() {
+        let mut arbiter = BuzzerArbiter::new();
+        let mut session = BuzzerDebugSession::new();
+
+        session
+            .start_scenario(&mut arbiter, BuzzerDebugScenario::ActiveCoolingRetrigger, 0)
+            .expect("the idle debug session starts");
+        assert_eq!(arbiter.output().frequency_hz, Some(900));
+        assert_eq!(
+            session.advance(&mut arbiter, 15)[0].disposition,
+            BuzzerDecisionDisposition::Queued
+        );
+        assert_eq!(
+            session.advance(&mut arbiter, 30)[0].disposition,
+            BuzzerDecisionDisposition::Replaced
+        );
+
+        assert_eq!(arbiter.tick(45).output.duty_percent, 0);
+        assert_eq!(arbiter.tick(70).output.frequency_hz, Some(1_200));
+        assert_eq!(arbiter.tick(115).output.duty_percent, 0);
+        assert_eq!(arbiter.tick(140).output.frequency_hz, Some(1_550));
+        assert_eq!(arbiter.tick(210).output.frequency_hz, Some(900));
     }
 
     #[cfg(feature = "buzzer-debug")]

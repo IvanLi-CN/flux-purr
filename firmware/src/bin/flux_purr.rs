@@ -56,7 +56,7 @@ use esp_hal::{
     interrupt::{Priority, software::SoftwareInterruptControl},
     mcpwm::{
         McPwm, PeripheralClockConfig,
-        operator::{PwmPin, PwmPinConfig},
+        operator::{PwmActions, PwmPin, PwmPinConfig, PwmUpdateMethod},
         timer::{CounterDirection, PwmWorkingMode},
     },
     spi::{
@@ -1762,6 +1762,32 @@ fn buzzer_timer_reconfiguration_needed(
     next_state
         .frequency_hz
         .is_some_and(|frequency_hz| frequency_hz != configured_frequency_hz)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuzzerHardwareAction {
+    Retune(u32),
+    SetDutyPercent(u8),
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn buzzer_hardware_actions(
+    configured_frequency_hz: u32,
+    next_state: BuzzerHardwareState,
+) -> heapless::Vec<BuzzerHardwareAction, 3> {
+    let mut actions = heapless::Vec::new();
+    if buzzer_timer_reconfiguration_needed(configured_frequency_hz, next_state) {
+        let frequency_hz = next_state
+            .frequency_hz
+            .expect("timer reconfiguration requires an audible buzzer frequency");
+        let _ = actions.push(BuzzerHardwareAction::SetDutyPercent(0));
+        let _ = actions.push(BuzzerHardwareAction::Retune(frequency_hz));
+    }
+    let _ = actions.push(BuzzerHardwareAction::SetDutyPercent(
+        next_state.duty_percent,
+    ));
+    actions
 }
 
 #[cfg(any(test, all(target_arch = "xtensa", feature = "buzzer-debug")))]
@@ -8065,25 +8091,27 @@ where
         return false;
     }
 
-    if buzzer_timer_reconfiguration_needed(*configured_frequency_hz, next_state) {
-        let next_frequency_hz = next_state
-            .frequency_hz
-            .expect("timer reconfiguration requires an audible buzzer frequency");
-        let timer_cfg = peripheral_clock
-            .timer_clock_with_frequency(
-                BUZZER_PWM_PERIOD_TICKS,
-                PwmWorkingMode::Increase,
-                Rate::from_hz(next_frequency_hz),
-            )
-            .expect("failed to derive buzzer PWM timer clock");
-        buzzer_timer.stop();
-        buzzer_timer.set_counter(0, CounterDirection::Increasing);
-        buzzer_timer.start(timer_cfg);
-        *configured_frequency_hz = next_frequency_hz;
+    for action in buzzer_hardware_actions(*configured_frequency_hz, next_state) {
+        match action {
+            // Duty updates on GPIO48 are immediate. Quiesce the output before
+            // touching Timer2 so a retune cannot preserve a partial old cycle.
+            BuzzerHardwareAction::SetDutyPercent(duty_percent) => {
+                let _ = buzzer_pwm.set_duty_cycle_percent(duty_percent);
+            }
+            BuzzerHardwareAction::Retune(next_frequency_hz) => {
+                let timer_cfg = peripheral_clock
+                    .timer_clock_with_frequency(
+                        BUZZER_PWM_PERIOD_TICKS,
+                        PwmWorkingMode::Increase,
+                        Rate::from_hz(next_frequency_hz),
+                    )
+                    .expect("failed to derive buzzer PWM timer clock");
+                buzzer_timer.set_counter(0, CounterDirection::Increasing);
+                buzzer_timer.start(timer_cfg);
+                *configured_frequency_hz = next_frequency_hz;
+            }
+        }
     }
-
-    // Silence is duty=0, so preserve the carrier across same-frequency pulse gaps.
-    let _ = buzzer_pwm.set_duty_cycle_percent(next_state.duty_percent);
     info!(
         "buzzer output -> freq_hz={=u32} duty={=u8}% gen={=u32}",
         next_state.frequency_hz.unwrap_or(0),
@@ -13244,9 +13272,10 @@ async fn main(_spawner: Spawner) {
     let _ = heater_pwm.set_duty_cycle_percent(0);
 
     mcpwm.operator2.set_timer(&mcpwm.timer2);
-    let mut buzzer_pwm = mcpwm
-        .operator2
-        .with_pin_a(peripherals.GPIO48, PwmPinConfig::UP_ACTIVE_HIGH);
+    let mut buzzer_pwm = mcpwm.operator2.with_pin_a(
+        peripherals.GPIO48,
+        PwmPinConfig::new(PwmActions::UP_ACTIVE_HIGH, PwmUpdateMethod::SYNC_IMMEDIATLY),
+    );
     let buzzer_timer_cfg = pwm_clock_cfg
         .timer_clock_with_frequency(
             BUZZER_PWM_PERIOD_TICKS,
@@ -14951,6 +14980,63 @@ mod tests {
         assert_ne!(
             mcpwm_timer_frequency_hz(31, BUZZER_PWM_PERIOD_TICKS),
             mcpwm_timer_frequency_hz(22, BUZZER_PWM_PERIOD_TICKS)
+        );
+    }
+
+    #[test]
+    fn active_cooling_tone_steps_quiet_gpio48_before_each_retune() {
+        let mut buzzer = BuzzerArbiter::new();
+        let mut configured_frequency_hz = BUZZER_IDLE_FREQUENCY_HZ;
+        let hardware_state = |output: BuzzerOutput| BuzzerHardwareState {
+            frequency_hz: output.frequency_hz,
+            duty_percent: output.duty_percent,
+            generation: output.generation,
+        };
+
+        let _ =
+            buzzer.request_feedback(BuzzerCueSource::FrontPanel, BuzzerCueId::ActiveCoolingOn, 0);
+        let first_tone = hardware_state(buzzer.output());
+        assert_eq!(
+            buzzer_hardware_actions(configured_frequency_hz, first_tone).as_slice(),
+            [
+                BuzzerHardwareAction::SetDutyPercent(0),
+                BuzzerHardwareAction::Retune(900),
+                BuzzerHardwareAction::SetDutyPercent(50),
+            ]
+        );
+        configured_frequency_hz = first_tone.frequency_hz.unwrap();
+
+        let first_rest = hardware_state(buzzer.tick(45).output);
+        assert_eq!(
+            buzzer_hardware_actions(configured_frequency_hz, first_rest).as_slice(),
+            [BuzzerHardwareAction::SetDutyPercent(0)]
+        );
+
+        let second_tone = hardware_state(buzzer.tick(70).output);
+        assert_eq!(
+            buzzer_hardware_actions(configured_frequency_hz, second_tone).as_slice(),
+            [
+                BuzzerHardwareAction::SetDutyPercent(0),
+                BuzzerHardwareAction::Retune(1_200),
+                BuzzerHardwareAction::SetDutyPercent(50),
+            ]
+        );
+        configured_frequency_hz = second_tone.frequency_hz.unwrap();
+
+        let second_rest = hardware_state(buzzer.tick(115).output);
+        assert_eq!(
+            buzzer_hardware_actions(configured_frequency_hz, second_rest).as_slice(),
+            [BuzzerHardwareAction::SetDutyPercent(0)]
+        );
+
+        let third_tone = hardware_state(buzzer.tick(140).output);
+        assert_eq!(
+            buzzer_hardware_actions(configured_frequency_hz, third_tone).as_slice(),
+            [
+                BuzzerHardwareAction::SetDutyPercent(0),
+                BuzzerHardwareAction::Retune(1_550),
+                BuzzerHardwareAction::SetDutyPercent(50),
+            ]
         );
     }
 

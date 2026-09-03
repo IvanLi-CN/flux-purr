@@ -477,7 +477,7 @@ struct BuzzerScenarioDescriptor {
     description: &'static str,
 }
 
-const BUZZER_SCENARIO_CATALOG: [BuzzerScenarioDescriptor; 2] = [
+const BUZZER_SCENARIO_CATALOG: [BuzzerScenarioDescriptor; 3] = [
     BuzzerScenarioDescriptor {
         scenario: BuzzerScenarioArg::FeedbackCoalesce,
         label: "Feedback coalesce",
@@ -488,12 +488,18 @@ const BUZZER_SCENARIO_CATALOG: [BuzzerScenarioDescriptor; 2] = [
         label: "Feedback replace",
         description: "two UI-input requests followed by heater-on at 30 ms",
     },
+    BuzzerScenarioDescriptor {
+        scenario: BuzzerScenarioArg::ActiveCoolingRetrigger,
+        label: "Active cooling retrigger",
+        description: "three active-cooling-on requests at 0, 15, and 30 ms",
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum BuzzerScenarioArg {
     FeedbackCoalesce,
     FeedbackReplace,
+    ActiveCoolingRetrigger,
 }
 
 impl BuzzerScenarioArg {
@@ -501,6 +507,7 @@ impl BuzzerScenarioArg {
         match self {
             Self::FeedbackCoalesce => "feedback_coalesce",
             Self::FeedbackReplace => "feedback_replace",
+            Self::ActiveCoolingRetrigger => "active_cooling_retrigger",
         }
     }
 
@@ -508,6 +515,7 @@ impl BuzzerScenarioArg {
         match self {
             Self::FeedbackCoalesce => 250,
             Self::FeedbackReplace => 350,
+            Self::ActiveCoolingRetrigger => 500,
         }
     }
 }
@@ -17277,6 +17285,16 @@ mod tests {
                 false,
             ),
             Some(Duration::from_millis(450))
+        );
+        assert_eq!(
+            super::buzzer_capture_delay(
+                None,
+                Some(super::BuzzerScenarioArg::ActiveCoolingRetrigger),
+                false,
+                false,
+                false,
+            ),
+            Some(Duration::from_millis(600))
         );
         assert_eq!(
             super::buzzer_capture_delay(

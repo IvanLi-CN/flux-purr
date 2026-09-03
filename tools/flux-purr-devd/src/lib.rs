@@ -1763,6 +1763,7 @@ pub enum BuzzerDebugCue {
 pub enum BuzzerDebugScenario {
     FeedbackCoalesce,
     FeedbackReplace,
+    ActiveCoolingRetrigger,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10594,14 +10595,14 @@ mod tests {
             request_id: "buzzer-1",
             op: BuzzerDebugOp::Run,
             buzzer_cue: None,
-            buzzer_scenario: Some(BuzzerDebugScenario::FeedbackReplace),
+            buzzer_scenario: Some(BuzzerDebugScenario::ActiveCoolingRetrigger),
             repeat: false,
         };
         let json = serde_json::to_value(wire).unwrap();
 
         assert_eq!(json["type"], "buzzer_debug");
         assert_eq!(json["op"], "run");
-        assert_eq!(json["buzzerScenario"], "feedback_replace");
+        assert_eq!(json["buzzerScenario"], "active_cooling_retrigger");
         assert!(json.get("buzzerCue").is_none());
         assert!(json.get("frequencyHz").is_none());
         assert!(json.get("dutyPercent").is_none());
