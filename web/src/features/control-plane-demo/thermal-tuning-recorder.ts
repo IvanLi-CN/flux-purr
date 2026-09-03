@@ -124,16 +124,19 @@ function reportPhase(phase?: string | null) {
 }
 
 function candidatePoint(hex?: string | null) {
-  if (!hex || hex.length !== 68) return null
+  if (!hex || hex.length !== 80) return null
   const bytes = Uint8Array.from(hex.match(/.{2}/g) ?? [], (pair) => Number.parseInt(pair, 16))
-  if (bytes.length !== 34 || bytes.some((value) => !Number.isFinite(value))) return null
+  if (bytes.length !== 40 || bytes.some((value) => !Number.isFinite(value))) return null
   const view = new DataView(bytes.buffer)
-  const values = Array.from({ length: 16 }, (_, index) => view.getUint16(2 + index * 2, true))
+  const values = Array.from({ length: 19 }, (_, index) => view.getUint16(2 + index * 2, true))
   const keys = [
     'brakeDistanceCentiC',
     'warmupPowerPermille',
+    'warmupReenterCentiC',
     'approachPowerPermille',
     'approachFloorPowerPermille',
+    'approachDampingExponentPermille',
+    'approachTailWindowCentiC',
     'holdPowerPermille',
     'holdReheatPowerPermille',
     'holdEntryCentiC',
@@ -208,7 +211,7 @@ function firmwareReportData(
         candidateName: trial.candidateId ?? null,
         candidateHash: trial.candidateHash ?? null,
         selected: trial.candidateHash === decision.candidateHash,
-        evidenceValid: trial.gates != null && (trial.gates & 0x1f) === 0x1f,
+        evidenceValid: trial.gates != null && (trial.gates & 0x0f) === 0x0f,
         point: candidatePoint(trial.canonicalCandidatePointHex),
         pointSource: 'firmware_candidate_trial',
         samples: trialSamples.map((sample) => ({

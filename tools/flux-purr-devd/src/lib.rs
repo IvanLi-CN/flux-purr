@@ -89,9 +89,15 @@ const ESPFLASH_SINGLE_SESSION_CONNECT_RETRY_DELAY: Duration = Duration::from_sec
 // timed-out ROM packets itself, so give its single-session transport a finite
 // I/O deadline.
 const ESPFLASH_SINGLE_SESSION_IO_TIMEOUT: Duration = Duration::from_secs(1);
-// Match the supported `espflash write-bin` transport: ESP32-S3 requires the
-// flash stub for a reliable multi-segment application write over USB-JTAG.
-const USB_JTAG_SINGLE_SESSION_USE_STUB: bool = true;
+// The in-process ESP32-S3 USB-JTAG writer remains available for diagnostics,
+// but the protected subprocess transaction is the production default. It has
+// explicit command deadlines and reset-mode recovery for every ROM operation.
+const USE_IN_PROCESS_USB_JTAG_WRITER: bool = false;
+
+// Loading the flash stub opens a second USB-JTAG transport exchange. On the
+// ESP32-S3 integrated USB port that can disconnect the protected writer before
+// its first segment is accepted.
+const USB_JTAG_SINGLE_SESSION_USE_STUB: bool = false;
 // A recovery write may erase the application range. Connection retries happen
 // before writes begin, but a started protected transaction is never replayed
 // automatically against the hardware.
@@ -942,7 +948,7 @@ pub struct ThermalTuningCapability {
 fn mock_thermal_tuning_capability() -> ThermalTuningCapability {
     ThermalTuningCapability {
         id: "thermal_tuning_run_v1".to_string(),
-        evidence_schema: "thermal_tuning_evidence_v2".to_string(),
+        evidence_schema: "thermal_tuning_evidence_v3".to_string(),
         supported_power_classes: vec!["pps3a".to_string(), "pps5a".to_string()],
         target_schedule_c: [60, 240, 140, 100, 80, 120, 180, 160, 220],
         physical_targets_c: [60, 80, 100, 120, 140, 160, 180, 220, 240],
@@ -950,7 +956,7 @@ fn mock_thermal_tuning_capability() -> ThermalTuningCapability {
             paged: true,
             acknowledged: true,
             sealed_review: true,
-            buffer_capacity: 96,
+            buffer_capacity: 1_024,
         },
         candidate_promotion: true,
     }
@@ -6670,7 +6676,7 @@ async fn run_bundle_flash_transaction(
     execution_proof: Option<FirmwareExecutionProof>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<(), HttpError> {
-    if execution_proof.is_some() {
+    if execution_proof.is_some() && USE_IN_PROCESS_USB_JTAG_WRITER {
         return run_usb_serial_jtag_single_session_flash_transaction(
             state,
             bundle,
@@ -6716,6 +6722,10 @@ async fn run_bundle_flash_transaction(
     // recovery operations, then retain the normal MD5/config verification.
     let usb_serial_jtag_single_bundle_write =
         uses_single_usb_serial_jtag_bundle_write(operation, port_path);
+    // USB Serial/JTAG's ROM link is lost when espflash uploads its RAM stub.
+    // Bundle writes therefore remain in the ROM loader, matching the read and
+    // checksum paths used by the protected transaction.
+    let usb_serial_jtag_no_stub = is_esp_usb_serial_jtag_port(port_path);
     let initial_reset = if is_esp_usb_serial_jtag_port(port_path) {
         "usb-reset"
     } else {
@@ -6800,7 +6810,13 @@ async fn run_bundle_flash_transaction(
         progress.require(fs::write(&factory_path, factory_image).map_err(|error| {
             HttpError::internal(&format!("failed to stage USB-JTAG factory image: {error}"))
         }))?;
-        let args = build_bundle_write_bin_args(&common, initial_reset, 0, &factory_path);
+        let args = build_bundle_write_bin_args(
+            &common,
+            initial_reset,
+            0,
+            &factory_path,
+            usb_serial_jtag_no_stub,
+        );
         progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
         completed_bytes = total_bytes;
         progress.stage_progress(
@@ -6819,7 +6835,13 @@ async fn run_bundle_flash_transaction(
                 initial_reset,
                 index,
             );
-            let args = build_bundle_write_bin_args(&common, before_reset, segment.address, &path);
+            let args = build_bundle_write_bin_args(
+                &common,
+                before_reset,
+                segment.address,
+                &path,
+                usb_serial_jtag_no_stub,
+            );
             progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
             completed_bytes = completed_bytes.saturating_add(segment.length);
             progress.stage_progress(
@@ -6874,7 +6896,13 @@ async fn run_bundle_flash_transaction(
         );
     }
     if let Some((path, expected, copy)) = preserved_config {
-        let write = build_bundle_write_bin_args(&common, "no-reset", copy.target_address, &path);
+        let write = build_bundle_write_bin_args(
+            &common,
+            "no-reset",
+            copy.target_address,
+            &path,
+            usb_serial_jtag_no_stub,
+        );
         progress.require(require_bundle_espflash_success(&program, &write, port_path).await)?;
         let verified_path = workspace.path().join("verified-flux-cfg.bin");
         let read = build_bundle_read_flash_args(
@@ -10182,9 +10210,13 @@ fn build_bundle_write_bin_args(
     before_reset: &str,
     address: u64,
     input_path: &Path,
+    no_stub: bool,
 ) -> Vec<String> {
     let mut args = vec!["write-bin".to_string()];
     args.extend(common.iter().cloned());
+    if no_stub {
+        args.push("--no-stub".to_string());
+    }
     args.extend([
         "--before".to_string(),
         before_reset.to_string(),
@@ -12400,9 +12432,11 @@ mod tests {
             "no-reset",
             0x10_000,
             Path::new("/private/tmp/app.bin"),
+            true,
         );
 
         assert!(config_read.iter().any(|argument| argument == "--no-stub"));
+        assert!(segment_write.iter().any(|argument| argument == "--no-stub"));
         assert!(
             config_read
                 .windows(2)

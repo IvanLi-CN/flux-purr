@@ -281,7 +281,7 @@ export function ThermalTuningRunCard({
             <h2>固件不支持热控调优</h2>
             <p>
               设备未发布 thermal_tuning_run_v1 与
-              thermal_tuning_evidence_v2，当前页面不会启用备用算法。
+              thermal_tuning_evidence_v3，当前页面不会启用备用算法。
             </p>
           </div>
         </div>

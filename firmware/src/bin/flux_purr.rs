@@ -11587,6 +11587,21 @@ async fn process_control_line(
                     ),
                 );
             }
+            let manual_heating_requested = config.heater_enabled == Some(true);
+            if manual_heating_requested
+                && thermal_tuning_runtime
+                    .acquire_maintenance(MaintenanceRunOwner::ManualHeating)
+                    .is_err()
+            {
+                return (
+                    needs_redraw,
+                    usb_error_response(
+                        request_id,
+                        "tuning_busy",
+                        maintenance_owner_busy_message(thermal_tuning_runtime.owner()),
+                    ),
+                );
+            }
             let previous_memory_config = memory_config.clone();
             let heater_toggle_requested = config.heater_enabled.is_some();
             let heater_rearm_requested = config.heater_enabled == Some(true);
@@ -11631,6 +11646,9 @@ async fn process_control_line(
             );
             if heater_toggle_requested {
                 controller.clear_pending_short_press(RawFrontPanelKey::CenterBoot);
+                if !ui_state.heater_enabled {
+                    thermal_tuning_runtime.release_maintenance(MaintenanceRunOwner::ManualHeating);
+                }
             }
             if *memory_config != previous_memory_config {
                 *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
@@ -11708,13 +11726,22 @@ async fn process_control_line(
             request_id,
             command,
         }) => {
-            if thermal_tuning_runtime.owner() == MaintenanceRunOwner::ThermalTuning {
+            let calibration_start = matches!(command.op, CalibrationJobOpWire::Start);
+            let calibration_cancel = matches!(command.op, CalibrationJobOpWire::Cancel);
+            if calibration_start
+                && thermal_tuning_runtime
+                    .acquire_maintenance(MaintenanceRunOwner::Calibration)
+                    .is_err()
+            {
                 usb_error_response(
                     request_id,
                     "tuning_busy",
-                    "Thermal tuning owns maintenance controls while the run is active.",
+                    maintenance_owner_busy_message(thermal_tuning_runtime.owner()),
                 )
             } else if ui_state.eeprom_data_incompatible {
+                if calibration_start {
+                    thermal_tuning_runtime.release_maintenance(MaintenanceRunOwner::Calibration);
+                }
                 usb_error_response(
                     request_id,
                     "eeprom_data_incompatible",
@@ -11723,20 +11750,27 @@ async fn process_control_line(
             } else if matches!(command.op, CalibrationJobOpWire::Start)
                 && !pd_contract_allows_calibration(pd_controller, last_pd_observation)
             {
+                thermal_tuning_runtime.release_maintenance(MaintenanceRunOwner::Calibration);
                 let (code, message) = (
                     "pd_performance_not_guaranteed",
                     "Calibration requires a performance-guaranteed PPS contract.",
                 );
                 usb_error_response(request_id, code, message)
             } else {
-                usb_calibration_job_response(
+                let response = usb_calibration_job_response(
                     request_id,
                     command,
                     calibration_runtime_state,
                     memory_config,
                     manual_pps,
                     thermal_plant_workspace,
-                )
+                );
+                if calibration_cancel
+                    || !thermal_plant_calibration_job_running(*calibration_runtime_state)
+                {
+                    thermal_tuning_runtime.release_maintenance(MaintenanceRunOwner::Calibration);
+                }
+                response
             }
         }
         Ok(UsbFrame::ThermalPlantRun {
@@ -11880,6 +11914,21 @@ async fn process_control_line(
                 );
             }
             let op = command.op;
+            let installation_acquired = raw_eeprom_operation_mutates(op);
+            if installation_acquired
+                && thermal_tuning_runtime
+                    .acquire_maintenance(MaintenanceRunOwner::Installation)
+                    .is_err()
+            {
+                return (
+                    false,
+                    usb_error_response(
+                        request_id,
+                        "tuning_busy",
+                        maintenance_owner_busy_message(thermal_tuning_runtime.owner()),
+                    ),
+                );
+            }
             if raw_eeprom_operation_mutates(op) {
                 begin_mutating_eeprom_maintenance(
                     ui_state,
@@ -11888,6 +11937,7 @@ async fn process_control_line(
                     memory_commit_due_ms,
                 );
                 if !request_pd_fixed_voltage(pd_i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST).await {
+                    thermal_tuning_runtime.release_maintenance(MaintenanceRunOwner::Installation);
                     return (
                         needs_redraw,
                         usb_error_response(
@@ -11914,6 +11964,9 @@ async fn process_control_line(
                     *preview_heater_curve = None;
                     *thermal_control_profile_preview = None;
                 }
+            }
+            if installation_acquired {
+                thermal_tuning_runtime.release_maintenance(MaintenanceRunOwner::Installation);
             }
             response
         }
@@ -12042,6 +12095,16 @@ fn process_thermal_tuning_command(
                         request_id,
                         "tuning_busy",
                         "Thermal tuning cannot start while another PPS override is active.",
+                    ),
+                );
+            }
+            if thermal_tuning_runtime.owner() != MaintenanceRunOwner::None {
+                return (
+                    false,
+                    usb_error_response(
+                        request_id,
+                        "tuning_busy",
+                        maintenance_owner_busy_message(thermal_tuning_runtime.owner()),
                     ),
                 );
             }
@@ -12413,6 +12476,17 @@ fn thermal_tuning_runtime_error_label(error: ThermalTuningRuntimeError) -> &'sta
             "candidate_not_previewed"
         }
         ThermalTuningRuntimeError::Promotion(PromotionError::Unavailable) => "candidate_expired",
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn maintenance_owner_busy_message(owner: MaintenanceRunOwner) -> &'static str {
+    match owner {
+        MaintenanceRunOwner::ManualHeating => "manual_heating currently owns the device.",
+        MaintenanceRunOwner::Calibration => "calibration currently owns the device.",
+        MaintenanceRunOwner::Installation => "installation currently owns the device.",
+        MaintenanceRunOwner::ThermalTuning => "thermal_tuning currently owns the device.",
+        MaintenanceRunOwner::None => "Another maintenance run owns the device.",
     }
 }
 
@@ -15088,6 +15162,9 @@ async fn main(_spawner: Spawner) {
                     last_heater_duty,
                 );
             }
+            if !thermal_plant_calibration_job_running(calibration_runtime_state) {
+                thermal_tuning_runtime.release_maintenance(MaintenanceRunOwner::Calibration);
+            }
             let thermal_plant_completed = calibration_runtime_state.mode == CalibrationMode::Off
                 && calibration_runtime_state.job.kind == Some(CalibrationJobKind::ThermalPlant)
                 && calibration_runtime_state.job.status == CalibrationJobStatus::Completed;
@@ -15181,6 +15258,17 @@ async fn main(_spawner: Spawner) {
             }
             if force_thermal_plant_output_off {
                 ui_state.heater_enabled = false;
+            }
+            if thermal_tuning_runtime.core().state()
+                != flux_purr_thermal_tuning_core::RunState::Running
+                && calibration_runtime_state.mode == CalibrationMode::Off
+            {
+                if ui_state.heater_enabled {
+                    let _ = thermal_tuning_runtime
+                        .acquire_maintenance(MaintenanceRunOwner::ManualHeating);
+                } else {
+                    thermal_tuning_runtime.release_maintenance(MaintenanceRunOwner::ManualHeating);
+                }
             }
             let runtime_plant = thermal_plant_projection_for_runtime(&memory_config);
             // The controller works in heater watts, not source capability

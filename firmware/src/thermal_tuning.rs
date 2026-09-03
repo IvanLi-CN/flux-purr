@@ -356,6 +356,22 @@ impl ThermalTuningRuntime {
         self.arbiter.owner()
     }
 
+    /// All maintenance producers use this owner record. Thermal tuning keeps
+    /// its own lifecycle, while manual heating, auto calibration and install
+    /// paths acquire/release the same arbiter at their actual boundaries.
+    pub fn acquire_maintenance(
+        &mut self,
+        owner: MaintenanceRunOwner,
+    ) -> Result<(), ThermalTuningRuntimeError> {
+        self.arbiter
+            .try_acquire(owner)
+            .map_err(|_| ThermalTuningRuntimeError::Busy)
+    }
+
+    pub fn release_maintenance(&mut self, owner: MaintenanceRunOwner) {
+        self.arbiter.release(owner);
+    }
+
     pub const fn journal(&self) -> ThermalTuningJournal {
         self.journal
     }
@@ -389,9 +405,7 @@ impl ThermalTuningRuntime {
             return Err(ThermalTuningRuntimeError::Busy);
         }
         self.reset_interruption_reason = None;
-        self.arbiter
-            .try_acquire(MaintenanceRunOwner::ThermalTuning)
-            .map_err(|_| ThermalTuningRuntimeError::Busy)?;
+        self.acquire_maintenance(MaintenanceRunOwner::ThermalTuning)?;
         if !self.eligibility.for_class(power_class).pps_class_available {
             self.arbiter.release(MaintenanceRunOwner::ThermalTuning);
             return Err(ThermalTuningRuntimeError::PowerClassUnavailable);
@@ -530,12 +544,14 @@ impl ThermalTuningRuntime {
         let error = target_centi
             .saturating_sub(sample.temperature_centi_c)
             .abs();
-        // Candidate scoring begins only after its cooldown boundary. Samples
-        // captured while cooling remain target-level safety evidence.
+        // A scout sample proves that this candidate produced real heat. It is
+        // deliberately separate from scoring and promotion gates.
         if self.candidate_trial_active && phase == Phase::Scout {
             self.warmup_complete |= sample.heater_output_permille > 0;
         }
-        if self.candidate_trial_active && phase != Phase::CooldownWait {
+        // Candidate score begins at actual PID approach. Scout/warmup and
+        // cooldown samples remain evidence only and cannot change ranking.
+        if self.candidate_trial_active && matches!(phase, Phase::Retune | Phase::HoldConfirm) {
             self.max_overshoot_centi = self.max_overshoot_centi.max(
                 sample
                     .temperature_centi_c
@@ -630,7 +646,6 @@ impl ThermalTuningRuntime {
                         |started| started.saturating_sub(approach_started_ms),
                     );
                     let gates = CandidateGates {
-                        warmup_complete: self.warmup_complete,
                         stage_complete: self.approach_started_ms.is_some(),
                         overshoot: self.max_overshoot_centi <= MAX_OVERSHOOT_CENTI,
                         hold_peak_to_peak: peak_to_peak <= MAX_HOLD_PEAK_TO_PEAK_CENTI,
@@ -1526,6 +1541,27 @@ mod tests {
     }
 
     #[test]
+    fn runtime_exposes_one_arbiter_for_all_maintenance_owners() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .acquire_maintenance(MaintenanceRunOwner::Calibration)
+            .unwrap();
+        assert_eq!(
+            runtime.acquire_maintenance(MaintenanceRunOwner::ManualHeating),
+            Err(ThermalTuningRuntimeError::Busy)
+        );
+        assert_eq!(
+            runtime.acquire_maintenance(MaintenanceRunOwner::ThermalTuning),
+            Err(ThermalTuningRuntimeError::Busy)
+        );
+        runtime.release_maintenance(MaintenanceRunOwner::Calibration);
+        runtime
+            .acquire_maintenance(MaintenanceRunOwner::Installation)
+            .unwrap();
+        assert_eq!(runtime.owner(), MaintenanceRunOwner::Installation);
+    }
+
+    #[test]
     fn in_place_initialization_matches_the_regular_constructor() {
         let expected = ThermalTuningRuntime::new();
         let mut storage = MaybeUninit::<ThermalTuningRuntime>::uninit();
@@ -1812,6 +1848,37 @@ mod tests {
     }
 
     #[test]
+    fn scout_warmup_samples_do_not_change_candidate_score() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.set_eligibility(ready());
+        runtime.start(12, PpsPowerClass::Pps3a, 0).unwrap();
+
+        runtime
+            .tick(sample_with_output(0, 4_500, 3_250, 0))
+            .unwrap();
+        let mut scout = sample_with_output(1_000, 4_500, 3_250, 1_000);
+        scout.heater_phase = HeaterPhase::Warmup;
+        runtime.tick(scout).unwrap();
+        scout.elapsed_ms = 2_000;
+        scout.heater_output_permille = 0;
+        scout.heater_phase = HeaterPhase::Approach;
+        runtime.tick(scout).unwrap();
+        assert_eq!(runtime.core().phase(), Phase::Retune);
+
+        let mut approach = sample_with_output(3_000, 6_100, 3_250, 600);
+        approach.heater_phase = HeaterPhase::Approach;
+        runtime.tick(approach).unwrap();
+        approach.elapsed_ms = 4_000;
+        approach.temperature_centi_c = 6_000;
+        approach.heater_output_permille = 200;
+        approach.heater_phase = HeaterPhase::Hold;
+        runtime.tick(approach).unwrap();
+
+        assert_eq!(runtime.max_overshoot_centi, 100);
+        assert_eq!(runtime.output_switches, 1);
+    }
+
+    #[test]
     fn scout_warmup_timeout_disarms_without_becoming_a_candidate_gate() {
         let mut runtime = ThermalTuningRuntime::new();
         runtime.set_eligibility(ready());
@@ -1848,7 +1915,6 @@ mod tests {
             .candidate_ladder_for_current_target()
             .expect("candidate ladder");
         let passed = CandidateGates {
-            warmup_complete: true,
             stage_complete: true,
             overshoot: true,
             hold_peak_to_peak: true,

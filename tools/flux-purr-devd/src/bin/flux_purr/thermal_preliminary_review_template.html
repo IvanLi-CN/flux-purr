@@ -346,7 +346,7 @@
       function samplesForRun(run){return Array.isArray(run?.samples)?run.samples:[];}
       function roundsForRun(run){return Array.isArray(run?.rounds)?run.rounds:[];}
       function gateMask(round){const value=round?.firmwareDecision?.gates??round?.result?.gates;const numeric=Number(value);return Number.isFinite(numeric)?numeric:null;}
-      function gatePassed(round){const gates=gateMask(round);return gates!=null&&(gates&0x1f)===0x1f;}
+      function gatePassed(round){const gates=gateMask(round);return gates!=null&&(gates&0x0f)===0x0f;}
       function trialState(round){if(round?.selected)return 'adopted';if(firmwareReport)return gatePassed(round)?'passed':'rejected';return round?.evidenceValid===false?'rejected':'passed';}
       function trialStateLabel(round){return {adopted:'采用',passed:'通过',rejected:'拒绝'}[trialState(round)]||'未知';}
       function trialColor(round){return TRIAL_COLORS[(Math.max(1,Number(round?.round??1))-1)%TRIAL_COLORS.length];}

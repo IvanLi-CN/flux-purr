@@ -121,7 +121,7 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
 ### MUST
 
 - 设备必须在 capability 中发布 `thermal_tuning_run_v1` 与精确的
-  `evidenceSchema=thermal_tuning_evidence_v2`，并列出可用的
+  `evidenceSchema=thermal_tuning_evidence_v3`，并列出可用的
   `pps3a` / `pps5a` 等级、固定目标集合、trace buffer 参数和候选 promotion
   支持。Web 只在该 capability 存在时激活新 tab 的操作。
 - 每个调优开始请求必须显式携带 `powerClass: "pps3a" | "pps5a"`。不得接受
@@ -143,10 +143,14 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   confirm。预热只受独立安全 deadline 约束，不参与 candidate score 或 gate：deadline 固定为
   `15_000ms + 4ms * max(0, targetCentiC - candidateStartTempCentiC)`，其中 start 是该候选
   进入 `scout` 的实际温度。deadline 到期前必须观察到实际 PID `approach`，否则以安全失败
-  disarm。`scoreSettleMs` 只从首个实际 PID `approach` sample 计至首个实际 PID `hold`
+  disarm。PPS5A 的 `>=200°C` candidate 必须保留至少 `12°C` 的 warmup-to-Approach
+  制动窗口，以保证可在这条既有 deadline 内进入 bounded Approach；不得通过修改 deadline 或
+  Approach 时间上限规避该约束。`scoreSettleMs` 只从首个实际 PID `approach` sample 计至首个实际 PID `hold`
   sample。逼近时间上限唯一服从主加热控制器既有 `approachMaxTicks` 行为；调优 core、协议和
   报告不得修改、替换或另设 competing approach limit。所有门槛计算使用固定点；临界低裕量候选
-  必须确认，不得直接 accepted。
+  必须确认，不得直接 accepted。`thermal_tuning_evidence_v3` 的 candidate/decision gate
+  mask 固定为 bit0=`stage_complete`、bit1=`overshoot`、bit2=`hold_peak_to_peak`、
+  bit3=`hold_confirm`；预热证据不占用 gate bit。
 - 核心必须以确定性的有界 perturbation ladder 生成 candidate。通过硬门槛的候选
   使用固定点字典序评分：最大正超调、hold 峰峰值、PID `approach -> hold` 时长
   时间、60 秒 hold 平均绝对误差、控制输出切换次数。并列时使用参数 canonical
@@ -207,9 +211,10 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   归档至空 page，随后导出五文件的 incomplete bundle。不得因 trace gap 隐藏 runId、让加热任务
   因无法取消而继续运行，或伪造连续 trace。短暂 transport 失败必须有限重试，exactly repeated
   `ack_trace(throughSequence, traceDigest)` 必须幂等；相同 sequence 但不同 digest 必须失败。
-- `review_complete` 只能由设备验证过连续 host archive acknowledgment 后产生。
-  未 seal 的候选、trace gap、取消、硬故障、预算耗尽、reset 中断或失败 run 均不得
-  preview 或 save。
+- `review_complete` 只能由设备验证过连续 host archive acknowledgment 且 terminal
+  trace 已 seal 后产生；它只证明证据完整，不表示 candidate 可 promotion。成功 terminal
+  run 会得到可 promotion 的 candidate；取消、硬故障、预算耗尽、reset 中断或失败 run
+  也可以 seal 成完整诊断证据，但其 candidate 必须保持 unavailable，且不得 preview 或 save。
 - preview 必须用 `runId + candidateId + candidateHash + powerClass` 精确绑定，
   只把 candidate 写入 RAM active bank、回读验证且不启动加热。save 必须在一次
   preview 成功后，由第二次简单确认触发，将同一未改变 candidate 写入相同 EEPROM
@@ -273,16 +278,18 @@ disarm；普通失败 point 的区间裁剪不影响其它合法子区间。核�
 sequence、最近确认 sequence 和当前 digest；一次 page 最多 8 条事件。host 读取 page 后
 持久化事件，再发送连续 `ack_trace`；设备只接受从上一次确认连续前进且 digest 匹配的 ack。
 主机因响应丢失重发同一 `(throughSequence, traceDigest)` 时，该 ack 必须幂等；同一 sequence
-携带不同 digest 必须失败。
+携带不同 digest 必须失败。成功 ack 后，设备必须立即回收该连续前缀并推进 earliest sequence；
+它只保留尚未确认的 PSRAM 重传窗口及最后确认的 digest cursor。
 
 CLI、浏览器或 `devd` 断连不会影响调优控制。只要 host 在 buffer 覆盖前重新读取
 并确认全部事件，run 仍可得到 review-complete；否则设备永久标记
 `trace_gap/review_incomplete`。发生 gap 的 snapshot 仍携带 runId 与可读的 ring tail，
 记录器归档尾部但不确认，并在 run 尚运行时发送 cancel，直到得到 terminal/空页；由此产生的
 五文件 bundle 必须明确为 incomplete。host 完整确认到 terminal sequence 后发送
-`seal_review`，设备以其紧凑 digest 和 sequence 验证完整性，并仅在当前 boot 的
-RAM 中标记 candidate 可 promotion。浏览器页面关闭、CLI 退出或浏览器 storage
-失败不会使设备不安全，但可能使 candidate 不可 promotion。
+`seal_review`，设备以其紧凑 digest 和 sequence 验证完整性。成功 terminal run 才在当前
+boot 的 RAM 中标记 candidate 可 promotion；其它 terminal disposition 只得到完整的
+诊断证据，candidate 保持 unavailable。浏览器页面关闭、CLI 退出或浏览器 storage
+失败不会使设备不安全，但可能使证据不完整或 candidate 不可 promotion。
 
 ### 候选 preview、save 与恢复
 

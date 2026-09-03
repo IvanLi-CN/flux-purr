@@ -4001,9 +4001,9 @@ fn validate_firmware_tuning_identity(
     let detail = identity
         .get("thermalTuning")
         .ok_or("device identity is missing thermalTuning capability detail")?;
-    if detail.get("evidenceSchema").and_then(Value::as_str) != Some("thermal_tuning_evidence_v2") {
+    if detail.get("evidenceSchema").and_then(Value::as_str) != Some("thermal_tuning_evidence_v3") {
         return Err(
-            "device does not publish the required thermal_tuning_evidence_v2 schema".into(),
+            "device does not publish the required thermal_tuning_evidence_v3 schema".into(),
         );
     }
     if !detail
@@ -4190,7 +4190,7 @@ fn firmware_review_requires_seal(snapshot: &Value) -> bool {
     snapshot
         .pointer("/run/terminalDisposition")
         .and_then(Value::as_str)
-        == Some("completed")
+        .is_some()
         && snapshot
             .pointer("/run/review/state")
             .and_then(Value::as_str)
@@ -15566,7 +15566,7 @@ mod tests {
     }
 
     #[test]
-    fn firmware_bundle_seals_only_successful_terminal_runs() {
+    fn firmware_bundle_seals_every_non_gapped_terminal_run() {
         let successful = json!({
             "run": {
                 "terminalDisposition": "completed",
@@ -15587,7 +15587,7 @@ mod tests {
         });
 
         assert!(firmware_review_requires_seal(&successful));
-        assert!(!firmware_review_requires_seal(&failed));
+        assert!(firmware_review_requires_seal(&failed));
         assert!(!firmware_review_requires_seal(&gap));
     }
 

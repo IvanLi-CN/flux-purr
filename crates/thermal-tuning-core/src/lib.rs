@@ -23,11 +23,13 @@ pub const MAX_OVERSHOOT_CENTI: i16 = 300;
 pub const MAX_HOLD_PEAK_TO_PEAK_CENTI: i16 = 300;
 pub const CANDIDATE_LADDER_WIDTH: usize = 3;
 
-pub const GATE_WARMUP_COMPLETE: u16 = 1 << 0;
-pub const GATE_STAGE_COMPLETE: u16 = 1 << 1;
-pub const GATE_OVERSHOOT: u16 = 1 << 2;
-pub const GATE_HOLD_PEAK_TO_PEAK: u16 = 1 << 3;
-pub const GATE_HOLD_CONFIRM: u16 = 1 << 4;
+// Warmup is a separate safety-evidence requirement. It must be observed
+// before the controller can enter approach, but cannot affect candidate
+// scoring or promotion gates.
+pub const GATE_STAGE_COMPLETE: u16 = 1 << 0;
+pub const GATE_OVERSHOOT: u16 = 1 << 1;
+pub const GATE_HOLD_PEAK_TO_PEAK: u16 = 1 << 2;
+pub const GATE_HOLD_CONFIRM: u16 = 1 << 3;
 
 pub const PHYSICAL_TARGETS_C: [i16; TARGET_COUNT] = [60, 80, 100, 120, 140, 160, 180, 220, 240];
 pub const EXECUTION_ORDER_C: [i16; TARGET_COUNT] = [60, 240, 140, 100, 80, 120, 180, 160, 220];
@@ -240,27 +242,51 @@ impl CandidatePoint {
         // The measured 5 A low-temperature plant retains substantial energy
         // after its warmup phase. Begin braking early and make the full-speed
         // portion itself bounded; the ladder below then brackets this seed.
-        let low_temperature_5a = high_power && target_c <= 60;
+        let low_temperature_5a = high_power && target_c <= 120;
+        let (
+            low_brake_distance_centi_c,
+            low_warmup_power_permille,
+            low_approach_power_permille,
+            low_approach_floor_power_permille,
+            low_hold_power_permille,
+            low_hold_kp_permille_per_c,
+            low_hold_ki_permille_per_c_tick,
+        ) = if target_c <= 60 {
+            (2_150, 650, 340, 180, 60, 8, 2)
+        } else if target_c <= 80 {
+            (1_800, 680, 350, 180, 90, 14, 3)
+        } else if target_c <= 100 {
+            (1_450, 700, 360, 180, 120, 20, 4)
+        } else {
+            (1_100, 720, 370, 190, 150, 26, 5)
+        };
         Self {
             target_c,
             brake_distance_centi_c: if low_temperature_5a {
-                1_800
+                low_brake_distance_centi_c
             } else if target_c < 120 {
                 450
             } else if target_c < 200 {
                 700
             } else if high_temperature {
-                // The 5 A HIL plant needs a high steady-state floor, but a
-                // 1.5 C handoff lets residual heat drive a full-off/full-on
-                // cycle. Begin the bounded approach at 2 C instead.
-                200
+                // The 5 A plant still needs a high steady-state floor, but
+                // it takes long enough to traverse the final few degrees at
+                // full warmup power that a 2 C handoff can exhaust the
+                // candidate-local warmup safety deadline before Approach is
+                // reached. Reserve a 12 C braking window so every high-end
+                // trial reaches bounded Approach within that existing limit.
+                1_200
             } else {
                 1_000
             },
-            warmup_power_permille: if low_temperature_5a { 750 } else { 1_000 },
+            warmup_power_permille: if low_temperature_5a {
+                low_warmup_power_permille
+            } else {
+                1_000
+            },
             warmup_reenter_centi_c: if low_temperature_5a { 1_000 } else { 400 },
             approach_power_permille: if low_temperature_5a {
-                450
+                low_approach_power_permille
             } else if high_temperature {
                 600
             } else if high_power {
@@ -269,7 +295,7 @@ impl CandidatePoint {
                 320
             },
             approach_floor_power_permille: if low_temperature_5a {
-                260
+                low_approach_floor_power_permille
             } else if high_temperature {
                 450
             } else if high_power {
@@ -277,10 +303,10 @@ impl CandidatePoint {
             } else {
                 120
             },
-            approach_damping_exponent_permille: if low_temperature_5a { 1_800 } else { 1_000 },
+            approach_damping_exponent_permille: if low_temperature_5a { 2_100 } else { 1_000 },
             approach_tail_window_centi_c: 0,
             hold_power_permille: if low_temperature_5a {
-                60
+                low_hold_power_permille
             } else if high_temperature {
                 600
             } else if high_power {
@@ -289,7 +315,7 @@ impl CandidatePoint {
                 160
             },
             hold_reheat_power_permille: if low_temperature_5a {
-                60
+                low_hold_power_permille
             } else if high_temperature {
                 600
             } else if high_power {
@@ -297,13 +323,17 @@ impl CandidatePoint {
             } else {
                 60
             },
-            hold_entry_centi_c: if low_temperature_5a { 200 } else { 90 },
-            hold_exit_centi_c: if low_temperature_5a { 540 } else { 200 },
+            // The previous 5 A low-temperature seed entered Hold more than
+            // 2 C below target. Its otherwise stable candidate then failed
+            // the peak-to-peak gate solely on that entry climb. Keep the
+            // confirmed Hold window local to the target instead.
+            hold_entry_centi_c: if low_temperature_5a { 100 } else { 90 },
+            hold_exit_centi_c: if low_temperature_5a { 400 } else { 200 },
             hold_on_centi_c: 30,
             hold_off_centi_c: if low_temperature_5a { 120 } else { 5 },
             overshoot_cutoff_centi_c: if low_temperature_5a { 150 } else { 25 },
             hold_kp_permille_per_c: if low_temperature_5a {
-                8
+                low_hold_kp_permille_per_c
             } else if high_temperature {
                 40
             } else if high_power {
@@ -312,7 +342,7 @@ impl CandidatePoint {
                 120
             },
             hold_ki_permille_per_c_tick: if low_temperature_5a {
-                2
+                low_hold_ki_permille_per_c_tick
             } else if high_temperature {
                 4
             } else if high_power {
@@ -320,8 +350,8 @@ impl CandidatePoint {
             } else {
                 12
             },
-            hold_blend_ticks: if low_temperature_5a { 1 } else { 12 },
-            approach_lead_ticks: if low_temperature_5a { 4 } else { 0 },
+            hold_blend_ticks: if low_temperature_5a { 2 } else { 12 },
+            approach_lead_ticks: if low_temperature_5a { 8 } else { 0 },
             hold_lead_ticks: if low_temperature_5a { 2 } else { 0 },
         }
     }
@@ -482,7 +512,6 @@ pub struct CandidateScore {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CandidateGates {
-    pub warmup_complete: bool,
     pub stage_complete: bool,
     pub overshoot: bool,
     pub hold_peak_to_peak: bool,
@@ -491,19 +520,14 @@ pub struct CandidateGates {
 
 impl CandidateGates {
     pub const fn mask(self) -> u16 {
-        gate_bit(self.warmup_complete, GATE_WARMUP_COMPLETE)
-            | gate_bit(self.stage_complete, GATE_STAGE_COMPLETE)
+        gate_bit(self.stage_complete, GATE_STAGE_COMPLETE)
             | gate_bit(self.overshoot, GATE_OVERSHOOT)
             | gate_bit(self.hold_peak_to_peak, GATE_HOLD_PEAK_TO_PEAK)
             | gate_bit(self.hold_confirm, GATE_HOLD_CONFIRM)
     }
 
     pub const fn passes(self) -> bool {
-        self.warmup_complete
-            && self.stage_complete
-            && self.overshoot
-            && self.hold_peak_to_peak
-            && self.hold_confirm
+        self.stage_complete && self.overshoot && self.hold_peak_to_peak && self.hold_confirm
     }
 }
 
@@ -563,23 +587,51 @@ fn candidate_ladder_from_seed_for_class(
             recovery.hold_reheat_power_permille.saturating_add(100);
         return [baseline, sustained, recovery];
     }
-    if matches!(power_class, PpsPowerClass::Pps5a) && seed.target_c <= 60 {
+    if matches!(power_class, PpsPowerClass::Pps5a) && seed.target_c <= 120 {
         // Keep the low-temperature 5 A trials meaningfully distinct. A small
         // +/- 0.5 C brake change cannot identify a delayed, high-power plant.
         let mut conservative = baseline;
-        conservative.brake_distance_centi_c = 2_150;
-        conservative.warmup_power_permille = 650;
-        conservative.approach_power_permille = 340;
-        conservative.approach_floor_power_permille = 180;
-        conservative.approach_damping_exponent_permille = 2_100;
+        conservative.brake_distance_centi_c =
+            conservative.brake_distance_centi_c.saturating_add(150);
+        conservative.warmup_power_permille = conservative.warmup_power_permille.saturating_sub(80);
+        conservative.approach_power_permille =
+            conservative.approach_power_permille.saturating_sub(35);
+        conservative.approach_floor_power_permille = conservative
+            .approach_floor_power_permille
+            .saturating_sub(20);
+        conservative.hold_power_permille = conservative.hold_power_permille.saturating_sub(20);
+        conservative.hold_reheat_power_permille = conservative.hold_power_permille;
+        conservative.hold_entry_centi_c = 80;
+        conservative.hold_kp_permille_per_c =
+            conservative.hold_kp_permille_per_c.saturating_sub(4).max(4);
+        conservative.hold_ki_permille_per_c_tick = conservative
+            .hold_ki_permille_per_c_tick
+            .saturating_sub(1)
+            .max(1);
+        conservative.approach_damping_exponent_permille = 2_300;
         conservative.approach_lead_ticks = 10;
 
         let mut responsive = baseline;
-        responsive.brake_distance_centi_c = 1_500;
-        responsive.warmup_power_permille = 820;
-        responsive.approach_power_permille = 520;
-        responsive.approach_floor_power_permille = 340;
-        responsive.approach_damping_exponent_permille = 1_500;
+        responsive.brake_distance_centi_c = responsive.brake_distance_centi_c.saturating_sub(150);
+        responsive.warmup_power_permille = responsive
+            .warmup_power_permille
+            .saturating_add(80)
+            .min(1_000);
+        responsive.approach_power_permille = responsive
+            .approach_power_permille
+            .saturating_add(35)
+            .min(1_000);
+        responsive.approach_floor_power_permille = responsive
+            .approach_floor_power_permille
+            .saturating_add(20)
+            .min(1_000);
+        responsive.hold_power_permille = responsive.hold_power_permille.saturating_add(20);
+        responsive.hold_reheat_power_permille = responsive.hold_power_permille;
+        responsive.hold_entry_centi_c = 120;
+        responsive.hold_kp_permille_per_c = responsive.hold_kp_permille_per_c.saturating_add(4);
+        responsive.hold_ki_permille_per_c_tick =
+            responsive.hold_ki_permille_per_c_tick.saturating_add(1);
+        responsive.approach_damping_exponent_permille = 1_900;
         responsive.approach_lead_ticks = 7;
         return [baseline, conservative, responsive];
     }
@@ -973,6 +1025,7 @@ pub struct ThermalTuningCore<const TRACE_CAP: usize = TRACE_EVENT_CAPACITY> {
     candidate: Option<CandidateProfile>,
     candidate_identity: Option<CandidateIdentity>,
     promotion: PromotionState,
+    review_sealed: bool,
     trace: [Option<TraceRecord>; TRACE_CAP],
     first_sequence: u64,
     next_sequence: u64,
@@ -996,6 +1049,7 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
             candidate: None,
             candidate_identity: None,
             promotion: PromotionState::Unavailable,
+            review_sealed: false,
             trace: core::array::from_fn(|_| None),
             first_sequence: 0,
             next_sequence: 0,
@@ -1027,6 +1081,7 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
             core::ptr::addr_of_mut!((*out).candidate).write(None);
             core::ptr::addr_of_mut!((*out).candidate_identity).write(None);
             core::ptr::addr_of_mut!((*out).promotion).write(PromotionState::Unavailable);
+            core::ptr::addr_of_mut!((*out).review_sealed).write(false);
             let trace = core::ptr::addr_of_mut!((*out).trace).cast::<Option<TraceRecord>>();
             for index in 0..TRACE_CAP {
                 trace.add(index).write(None);
@@ -1067,6 +1122,7 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
         self.candidate_identity = Some(CandidateIdentity::from_profile(profile));
         self.candidate = Some(profile);
         self.promotion = PromotionState::AwaitingReview;
+        self.review_sealed = false;
         self.clear_trace();
         self.first_sequence = 0;
         self.next_sequence = 0;
@@ -1483,6 +1539,15 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
         }
         self.acknowledged_through = Some(through_sequence);
         self.acknowledged_digest = Some(digest);
+        // The PSRAM ring is a retransmission window, not an archive. The
+        // recorder has durably committed this contiguous prefix, so reclaim
+        // it immediately while preserving the digest cursor for sealing.
+        let mut sequence = self.first_sequence;
+        while sequence <= through_sequence {
+            self.trace[(sequence as usize) % TRACE_CAP] = None;
+            sequence = sequence.saturating_add(1);
+        }
+        self.first_sequence = through_sequence.saturating_add(1);
         Ok(())
     }
 
@@ -1511,13 +1576,13 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
             self.promotion = PromotionState::Unavailable;
             return Err(TraceError::DigestMismatch);
         }
+        self.review_sealed = true;
         if self.terminal.is_some_and(TerminalDisposition::is_success) {
             self.promotion = PromotionState::Ready;
-            Ok(())
         } else {
             self.promotion = PromotionState::Unavailable;
-            Err(TraceError::NotTerminal)
         }
+        Ok(())
     }
 
     pub fn preview(
@@ -1635,8 +1700,7 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
             failed,
             skipped,
             terminal: self.terminal,
-            review_complete: self.promotion != PromotionState::Unavailable
-                && self.promotion != PromotionState::AwaitingReview,
+            review_complete: self.review_sealed,
             trace_gap: self.trace_gap,
             first_sequence: (self.next_sequence > self.first_sequence)
                 .then_some(self.first_sequence),
@@ -1769,9 +1833,9 @@ mod tests {
         assert_eq!(
             CandidateProfile::baseline(PpsPowerClass::Pps5a).hash(),
             [
-                0xcf, 0x74, 0x33, 0xca, 0x34, 0x20, 0xd9, 0xc7, 0x9a, 0x29, 0xdd, 0xbd, 0xd4, 0x88,
-                0xed, 0x65, 0xa3, 0xd0, 0xd0, 0x4a, 0x78, 0x41, 0xc3, 0xe5, 0xa3, 0x69, 0xfb, 0xd6,
-                0xd6, 0xab, 0x1e, 0x1e,
+                0xb7, 0xae, 0xd7, 0x01, 0x66, 0x7d, 0xeb, 0x7a, 0xae, 0x3a, 0x62, 0x53, 0xa7, 0xfd,
+                0x64, 0x88, 0xfc, 0xac, 0xe5, 0xff, 0xe8, 0xab, 0xde, 0xe0, 0x9a, 0x09, 0x2f, 0xbc,
+                0x5a, 0x17, 0x36, 0x49,
             ]
         );
         assert_eq!(
@@ -1800,10 +1864,10 @@ mod tests {
     }
 
     #[test]
-    fn pps5a_high_temperature_seed_preserves_high_heat_margin() {
+    fn pps5a_high_temperature_seed_reserves_approach_headroom() {
         let point = CandidatePoint::baseline(240, PpsPowerClass::Pps5a);
 
-        assert_eq!(point.brake_distance_centi_c, 200);
+        assert_eq!(point.brake_distance_centi_c, 1_200);
         assert_eq!(point.approach_power_permille, 600);
         assert_eq!(point.approach_floor_power_permille, 450);
         assert_eq!(point.hold_power_permille, 600);
@@ -1822,43 +1886,52 @@ mod tests {
         );
         assert_eq!(
             ladder.map(|candidate| candidate.brake_distance_centi_c),
-            [200, 200, 200]
+            [1_200, 1_200, 1_200]
         );
     }
 
     #[test]
-    fn pps5a_low_temperature_seed_brackets_the_measured_conservative_control() {
+    fn pps5a_low_temperature_seed_scales_the_measured_conservative_control() {
         let point = CandidatePoint::baseline(60, PpsPowerClass::Pps5a);
 
-        assert_eq!(point.brake_distance_centi_c, 1_800);
-        assert_eq!(point.warmup_power_permille, 750);
+        assert_eq!(point.brake_distance_centi_c, 2_150);
+        assert_eq!(point.warmup_power_permille, 650);
         assert_eq!(point.warmup_reenter_centi_c, 1_000);
-        assert_eq!(point.approach_power_permille, 450);
-        assert_eq!(point.approach_floor_power_permille, 260);
-        assert_eq!(point.approach_damping_exponent_permille, 1_800);
+        assert_eq!(point.approach_power_permille, 340);
+        assert_eq!(point.approach_floor_power_permille, 180);
+        assert_eq!(point.approach_damping_exponent_permille, 2_100);
         assert_eq!(point.approach_tail_window_centi_c, 0);
         assert_eq!(point.hold_power_permille, 60);
         assert_eq!(point.hold_reheat_power_permille, 60);
-        assert_eq!(point.hold_entry_centi_c, 200);
-        assert_eq!(point.hold_exit_centi_c, 540);
+        assert_eq!(point.hold_entry_centi_c, 100);
+        assert_eq!(point.hold_exit_centi_c, 400);
         assert_eq!(point.hold_off_centi_c, 120);
         assert_eq!(point.overshoot_cutoff_centi_c, 150);
         assert_eq!(point.hold_kp_permille_per_c, 8);
         assert_eq!(point.hold_ki_permille_per_c_tick, 2);
-        assert_eq!(point.hold_blend_ticks, 1);
-        assert_eq!(point.approach_lead_ticks, 4);
+        assert_eq!(point.hold_blend_ticks, 2);
+        assert_eq!(point.approach_lead_ticks, 8);
         assert_eq!(point.hold_lead_ticks, 2);
 
         assert_eq!(
             candidate_ladder(60, PpsPowerClass::Pps5a)
                 .map(|candidate| candidate.brake_distance_centi_c),
-            [1_800, 2_150, 1_500]
+            [2_150, 2_300, 2_000]
         );
         assert_eq!(
             candidate_ladder(60, PpsPowerClass::Pps5a)
                 .map(|candidate| candidate.warmup_power_permille),
-            [750, 650, 820]
+            [650, 570, 730]
         );
+
+        let upper_low_point = CandidatePoint::baseline(120, PpsPowerClass::Pps5a);
+        assert_eq!(upper_low_point.brake_distance_centi_c, 1_100);
+        assert_eq!(upper_low_point.warmup_power_permille, 720);
+        assert_eq!(upper_low_point.approach_power_permille, 370);
+        assert_eq!(upper_low_point.hold_power_permille, 150);
+        assert_eq!(upper_low_point.hold_entry_centi_c, 100);
+        assert_eq!(upper_low_point.hold_kp_permille_per_c, 26);
+        assert_eq!(upper_low_point.hold_ki_permille_per_c_tick, 5);
     }
 
     #[test]
@@ -1868,7 +1941,6 @@ mod tests {
         assert_ne!(ladder[0], ladder[1]);
         assert_ne!(ladder[1], ladder[2]);
         let gates = CandidateGates {
-            warmup_complete: true,
             stage_complete: true,
             overshoot: true,
             hold_peak_to_peak: true,
@@ -1925,7 +1997,6 @@ mod tests {
         );
 
         let gates = CandidateGates {
-            warmup_complete: true,
             stage_complete: true,
             overshoot: true,
             hold_peak_to_peak: true,
@@ -1965,7 +2036,6 @@ mod tests {
         let mut core = ThermalTuningCore::<8>::new();
         core.start(10, PpsPowerClass::Pps3a, READY).unwrap();
         let gates = CandidateGates {
-            warmup_complete: true,
             stage_complete: true,
             overshoot: true,
             hold_peak_to_peak: true,
@@ -2104,8 +2174,71 @@ mod tests {
         let record = core.trace_record(0).unwrap();
 
         assert_eq!(core.ack_trace(0, record.digest), Ok(()));
+        assert_eq!(core.summary().first_sequence, None);
+        assert_eq!(core.trace_record(0), None);
         assert_eq!(core.ack_trace(0, record.digest), Ok(()));
         assert_eq!(core.ack_trace(0, [7; 32]), Err(TraceError::DigestMismatch));
+    }
+
+    #[test]
+    fn acknowledged_trace_prefix_is_reclaimed_before_the_next_page() {
+        let mut core = ThermalTuningCore::<4>::new();
+        core.start(8, PpsPowerClass::Pps3a, READY).unwrap();
+        for elapsed_ms in [0, 500] {
+            core.record_sample(SampleEvent {
+                elapsed_ms,
+                target_c: 60,
+                trial_index: 0,
+                candidate_hash: [0; 32],
+                temperature_centi_c: 2_500,
+                vin_mv: 20_000,
+                pps_contract_mv: 20_000,
+                pps_contract_ma: 3_250,
+                heater_output_permille: 0,
+                measurement_valid: true,
+                phase: Phase::Scout,
+                heater_phase: HeaterPhase::Warmup,
+            })
+            .unwrap();
+        }
+        let acknowledged = core.trace_record(0).unwrap();
+        core.ack_trace(0, acknowledged.digest).unwrap();
+        assert_eq!(core.summary().first_sequence, Some(1));
+        assert_eq!(core.trace_record(0), None);
+
+        let placeholder = TraceRecord {
+            sequence: 0,
+            event: TraceEvent::Sample(SampleEvent {
+                elapsed_ms: 0,
+                target_c: 0,
+                trial_index: 0,
+                candidate_hash: [0; 32],
+                temperature_centi_c: 0,
+                vin_mv: 0,
+                pps_contract_mv: 0,
+                pps_contract_ma: 0,
+                heater_output_permille: 0,
+                measurement_valid: false,
+                phase: Phase::Idle,
+                heater_phase: HeaterPhase::Warmup,
+            }),
+            digest: [0; 32],
+        };
+        let mut page = [placeholder; 4];
+        assert_eq!(core.trace_page(None, 4, &mut page), 1);
+        assert_eq!(page[0].sequence, 1);
+    }
+
+    #[test]
+    fn candidate_gate_mask_excludes_warmup_evidence() {
+        let gates = CandidateGates {
+            stage_complete: true,
+            overshoot: true,
+            hold_peak_to_peak: true,
+            hold_confirm: true,
+        };
+        assert!(gates.passes());
+        assert_eq!(gates.mask(), 0x000f);
     }
 
     #[test]
@@ -2228,5 +2361,38 @@ mod tests {
         core.ack_trace(last, digest).unwrap();
         assert_eq!(core.seal_review(last, digest), Ok(()));
         assert_eq!(core.promotion(), PromotionState::Ready);
+    }
+
+    #[test]
+    fn sealing_a_failed_terminal_preserves_complete_evidence_without_promotion() {
+        let mut core = ThermalTuningCore::<8>::new();
+        core.start(10, PpsPowerClass::Pps5a, READY).unwrap();
+        core.record_sample(SampleEvent {
+            elapsed_ms: 0,
+            target_c: 60,
+            trial_index: 0,
+            candidate_hash: [0; 32],
+            temperature_centi_c: 6_000,
+            vin_mv: 20_000,
+            pps_contract_mv: 20_000,
+            pps_contract_ma: 5_000,
+            heater_output_permille: 650,
+            measurement_valid: true,
+            phase: Phase::HoldConfirm,
+            heater_phase: HeaterPhase::Hold,
+        })
+        .unwrap();
+        core.finish(TerminalDisposition::Failed).unwrap();
+        let last = core.summary().last_sequence.unwrap();
+        let digest = core.trace_digest();
+
+        assert_eq!(core.seal_review(last, digest), Ok(()));
+        assert!(core.summary().review_complete);
+        assert_eq!(core.promotion(), PromotionState::Unavailable);
+        let identity = core.candidate_identity().unwrap();
+        assert_eq!(
+            core.preview(10, identity, PpsPowerClass::Pps5a),
+            Err(PromotionError::ReviewIncomplete)
+        );
     }
 }

@@ -101,7 +101,7 @@ describe('thermal tuning calibration surface', () => {
     expect(thermalTuningRunStorageKey('fp-1', 'run-1')).toBe('fp-1:run-1')
   })
 
-  it('archives the actual PID phase and accepts both current and archived pass masks', () => {
+  it('archives the actual PID phase and decodes the complete firmware candidate point', () => {
     const idle = createDefaultThermalTuningSnapshot()
     const snapshot: ThermalTuningRunSnapshot = {
       ...idle,
@@ -124,7 +124,8 @@ describe('thermal tuning calibration surface', () => {
             targetC: 60,
             trialIndex: 0,
             candidateHash: 'candidate-60',
-            canonicalCandidatePointHex: '00',
+            canonicalCandidatePointHex:
+              '3c000100020003000400050006000700080009000a000b000c000d000e000f001000110012001300',
           },
           {
             sequence: 1,
@@ -147,12 +148,13 @@ describe('thermal tuning calibration surface', () => {
             targetC: 60,
             trialIndex: 0,
             candidateHash: 'candidate-60',
-            canonicalCandidatePointHex: '00',
+            canonicalCandidatePointHex:
+              '3c000100020003000400050006000700080009000a000b000c000d000e000f001000110012001300',
             trialStartSequence: 0,
             trialEndSequence: 2,
             trialStartElapsedMs: 0,
             trialEndElapsedMs: 1000,
-            gates: 31,
+            gates: 15,
           },
           {
             sequence: 3,
@@ -161,7 +163,7 @@ describe('thermal tuning calibration surface', () => {
             targetC: 60,
             candidateHash: 'candidate-60',
             disposition: 'accepted',
-            gates: 63,
+            gates: 15,
           },
         ],
       },
@@ -170,5 +172,8 @@ describe('thermal tuning calibration surface', () => {
     const files = buildThermalTuningBundle('fp-1', snapshot)
     expect(files['index.html']).toContain('"heaterPhase":"warmup"')
     expect(files['index.html']).toContain('"evidenceValid":true')
+    expect(files['index.html']).toContain('"warmupReenterCentiC":3')
+    expect(files['index.html']).toContain('"approachDampingExponentPermille":6')
+    expect(files['index.html']).toContain('"holdLeadTicks":19')
   })
 })

@@ -8,7 +8,7 @@
 ```json
 {
   "id": "thermal_tuning_run_v1",
-  "evidenceSchema": "thermal_tuning_evidence_v2",
+  "evidenceSchema": "thermal_tuning_evidence_v3",
   "supportedPowerClasses": ["pps3a", "pps5a"],
   "targetScheduleC": [60, 240, 140, 100, 80, 120, 180, 160, 220],
   "physicalTargetsC": [60, 80, 100, 120, 140, 160, 180, 220, 240],
@@ -26,7 +26,7 @@
 放在 PSRAM；缺少 PSRAM 或无法分配完整窗口时不得启动调优。每次 read response 最多包含
 `8` 个 `events`，无论请求来自 USB JSONL、LAN 还是 DEVD Bridge。缺少 capability 或 detail
 的设备不支持本协议；客户端必须显示不兼容，不能从 `thermalProfileMode` 推断支持性。
-`evidenceSchema` 必须精确为 `thermal_tuning_evidence_v2`，表示设备会输出本合同定义的
+`evidenceSchema` 必须精确为 `thermal_tuning_evidence_v3`，表示设备会输出本合同定义的
 完整 sample、phase transition、candidate trial、decision 与 safety 证据。缺少该值或
 值不匹配时，客户端可以只读归档设备实际返回的数据，但不得将 run 标记为 review
 complete、生成可保存候选或声称报告与正式调优报告等价。
@@ -73,7 +73,7 @@ approval token 或额外身份步骤。
     },
     "review": {
       "state": "not_applicable|recording|awaiting_seal|complete|incomplete",
-      "reason": "trace_gap|null",
+      "reason": "trace_gap|failed|cancelled|budget_exhausted|safety_disarmed|review_incomplete|interrupted_reset|null",
       "acknowledgedThrough": null,
       "terminalSequence": 0,
       "traceDigest": "hex|null"
@@ -127,6 +127,9 @@ independent fixed-point safety deadline
 first actual PID `heaterPhase: "hold"` sample. Its upper limit remains the existing main
 controller `approachMaxTicks` behavior; this protocol neither modifies it nor adds another
 approach threshold.
+In `thermal_tuning_evidence_v3`, the hard-gate mask is exactly bit0=`stage_complete`,
+bit1=`overshoot`, bit2=`hold_peak_to_peak`, and bit3=`hold_confirm`. Warmup remains required
+candidate-local `scout` evidence, but is not a gate or score input.
 `decision` records the complete candidate/score/gate/target state, freeze and interval result.
 `safety` records a safety fault and disarm reason. Preview, discard and save occur after terminal
 trace sealing, so their normal command responses carry applied hash, persistent revision and
@@ -145,7 +148,9 @@ CLI persists sample and non-sample events into the two NDJSON files and complete
 data synchronization before ack. Web merges the global sequence into its run record and waits
 for the IndexedDB read-write transaction to complete before ack. Normal clients perform this
 automatically for every page; acknowledgement is not a user action. DEVD only proxies these
-reads and commands and never becomes the recorder.
+reads and commands and never becomes the recorder. After a successful contiguous ack, firmware
+reclaims that prefix immediately and advances `earliestSequence`; it retains only the last
+acknowledged digest cursor needed for idempotence and terminal sealing.
 
 If a non-gapped run receives an `afterSequence` that predates `earliestSequence - 1`, the
 response has error `trace_gap` and includes the available range. Once the Device itself has
@@ -218,8 +223,9 @@ no later ack can clear it.
 ```
 
 This is valid only for a terminal run whose acknowledged range and digest exactly equal its
-terminal trace. Firmware then marks the in-RAM candidate `ready`; it does not write a third
-journal record. `trace_gap`, terminal failure, cancellation, reset recovery or a different
+terminal trace. It marks the evidence `complete` without writing a third journal record. A
+`completed` terminal then marks the in-RAM candidate `ready`; every other terminal disposition
+is a complete diagnostic record but leaves promotion `unavailable`. `trace_gap` or a different
 digest returns `review_incomplete`.
 
 ### `preview`, `discard_preview`, and `save`

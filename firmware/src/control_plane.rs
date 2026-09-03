@@ -467,7 +467,7 @@ fn thermal_tuning_capability() -> ThermalTuningCapabilityWire {
     let _ = supported_power_classes.push(ThermalTuningPowerClassWire::Pps5a);
     ThermalTuningCapabilityWire {
         id: string("thermal_tuning_run_v1"),
-        evidence_schema: string("thermal_tuning_evidence_v2"),
+        evidence_schema: string("thermal_tuning_evidence_v3"),
         supported_power_classes,
         target_schedule_c: flux_purr_thermal_tuning_core::EXECUTION_ORDER_C,
         physical_targets_c: flux_purr_thermal_tuning_core::PHYSICAL_TARGETS_C,

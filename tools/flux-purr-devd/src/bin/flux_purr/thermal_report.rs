@@ -347,7 +347,7 @@ fn firmware_report_data(
                 "candidateName": trial.get("candidateId").cloned().unwrap_or(Value::Null),
                 "candidateHash": trial.get("candidateHash").cloned().unwrap_or(Value::Null),
                 "selected": selected,
-                "evidenceValid": gates & 0x1f == 0x1f,
+                "evidenceValid": gates & 0x0f == 0x0f,
                 "point": point,
                 "pointSource": "firmware_candidate_trial",
                 "samples": trial_samples,

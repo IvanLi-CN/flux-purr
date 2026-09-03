@@ -1955,7 +1955,7 @@ export function ControlPlaneDemo({
   const thermalTuningRunUnsupported =
     visibleDevice.transport !== 'mock' &&
     (!visibleDevice.capabilities.includes('thermal_tuning_run_v1') ||
-      visibleDevice.thermalTuningEvidenceSchema !== 'thermal_tuning_evidence_v2')
+      visibleDevice.thermalTuningEvidenceSchema !== 'thermal_tuning_evidence_v3')
   const visibleCalibrationWorkspaceTab =
     navigation?.state.kind === 'device' && navigation.state.view === 'calibration'
       ? (navigation.state.calibrationTab ?? 'heater_curve')
@@ -2768,7 +2768,7 @@ export function ControlPlaneDemo({
     }
     if (
       !visibleDevice.capabilities.includes('thermal_tuning_run_v1') ||
-      visibleDevice.thermalTuningEvidenceSchema !== 'thermal_tuning_evidence_v2'
+      visibleDevice.thermalTuningEvidenceSchema !== 'thermal_tuning_evidence_v3'
     ) {
       return
     }

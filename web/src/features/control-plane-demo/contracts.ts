@@ -31,7 +31,7 @@ export interface ThermalTuningTraceCapability {
 
 export interface ThermalTuningCapability {
   id: 'thermal_tuning_run_v1' | string
-  evidenceSchema: 'thermal_tuning_evidence_v2' | string
+  evidenceSchema: 'thermal_tuning_evidence_v3' | string
   supportedPowerClasses: ThermalTuningPowerClass[]
   targetScheduleC: number[]
   physicalTargetsC: number[]
