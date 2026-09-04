@@ -31,7 +31,7 @@
 
 ### REQ-BUZZER-ARBITRATION-003
 
-- `AttentionReminder` MUST 在已清除但未确认的热失控状态下保持十秒提醒节奏。
+- `AttentionReminder` MUST 在已清除但未确认的热失控状态下立即播放首个提醒，随后保持十秒提醒节奏。
 - 当 `AttentionReminder` 到期时，系统 MUST 允许已开始的 Feedback Cue 正常收尾；随后 `AttentionReminder` MUST 先于任何 Pending Feedback 播放，并替换该 Pending Feedback。
 - `AttentionReminder` MUST 被新的 `ProtectionAlarm` 立即抢占。
 
@@ -62,7 +62,7 @@
 ### REQ-BUZZER-ARBITRATION-008
 
 - 标准固件 MUST 通过 native USB JSONL 与受 lease 保护的 `devd` 端点提供 `Buzzer Test Session`；能力必须由 `buzzer_test` identity capability 明确声明，且不得经 LAN 或产品 Web 控制面暴露。`buzzer-observe` 是可选扩展，只增加 GPIO48 数字载波观测字段，不改变测试请求或生产播放路径。
-- 该诊断 MUST 只接受生产 `BuzzerCueId` 或固定 `feedback_coalesce` / `feedback_replace` / `active_cooling_retrigger` 仲裁场景，并且仍 MUST 通过 `BuzzerArbiter` 提交。`ProtectionAlarm` MUST 复用 production `ProtectionAlarmCadence` 和已存在的安全请求接口；`AttentionReminder` MUST 复用其十秒 cadence。它不得暴露频率、占空比、原始步骤或持久化控制。
+- 该诊断 MUST 只接受生产 `BuzzerCueId` 或固定 `feedback_coalesce` / `feedback_replace` / `active_cooling_retrigger` 仲裁场景，并且仍 MUST 通过 `BuzzerArbiter` 提交。`ProtectionAlarm` MUST 复用 production `ProtectionAlarmCadence` 和已存在的安全请求接口；`AttentionReminder` MUST 立即播放首个 production one-shot，并复用其十秒重放 cadence。它不得暴露频率、占空比、原始步骤或持久化控制。
 - 诊断触发 MUST 在加热、测温 fault、热保护 latch 或未确认的 thermal attention 存在时拒绝；返回的有限 decision trace MUST 只记录本诊断会话的仲裁结果。`buzzer-observe` build 还 MUST 返回有限 output trace：每一项关联已请求的 cue 输出、Timer2 `prescaler` / `period` 推导的配置 carrier、GPIO48 pad 经 PCNT 上升沿计数得到的观测 carrier、duty 与 generation，且只在同一 real-time 时序任务实际应用输出后记录。PCNT 只读回该 pad 的数字波形，不得表述为声学频率测量。静音项的逻辑频率为 `null`，但 timer 配置按普通固件的 duty-zero 复用合同保留。普通 Feedback Cue 的显式 `repeat` MUST 在每轮生产音型结束后重新通过 `BuzzerArbiter` 提交；保护和提醒 cue MUST 保持生产 cadence。重复播放只能由显式 `repeat` 请求开始，并且 MUST 由显式 `stop` 请求结束。
 - `buzzer-test` feature MUST 在标准运行时初始化、主循环、GPIO48 输出应用与 cue pattern 之上添加该受控测试会话；它不得使用恢复模式、替代传感器输入、替代 heater/GPIO 初始化或独立 PWM 路径。`buzzer-observe` MUST 仅在同一 GPIO48 输出所有权内初始化 PCNT 观测，不得创建第二条 PWM 路径。
 
@@ -82,7 +82,7 @@
 
 ### VER-BUZZER-ARBITRATION-003
 
-- Method: 覆盖 Feedback Cue、到期 `AttentionReminder` 和随后 `ProtectionAlarm` 的确定性时序测试。
+- Method: 覆盖立即启动与十秒重放的 `AttentionReminder`、Feedback Cue 和随后 `ProtectionAlarm` 的确定性时序测试。
 - covers: `REQ-BUZZER-ARBITRATION-003`
 - Pass condition: Feedback Cue 完整结束后才开始 reminder，reminder 替换等待中的反馈，新的保护 cue 立即抢占 reminder。
 

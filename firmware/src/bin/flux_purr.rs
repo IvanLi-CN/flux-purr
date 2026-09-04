@@ -3268,12 +3268,16 @@ fn update_fault_attention_state<B: BuzzerCueSink>(
     } else if !fault_present && *last_fault_present {
         *attention_pending_after_fault_clear = !*attention_acknowledged;
         protection_alarm.clear();
-        *next_attention_reminder_ms = attention_pending_after_fault_clear
-            .then_some(now_ms.saturating_add(BUZZER_ATTENTION_REMINDER_INTERVAL_MS));
         if *attention_pending_after_fault_clear {
             buzzer.enter_attention_pending();
+            // The protection alarm has just stopped. Give the operator an
+            // immediate reminder, then keep the existing ten-second cadence.
+            buzzer.request_attention_reminder(BuzzerCueSource::ThermalAttention, now_ms);
+            *next_attention_reminder_ms =
+                Some(now_ms.saturating_add(BUZZER_ATTENTION_REMINDER_INTERVAL_MS));
         } else {
             buzzer.clear_attention();
+            *next_attention_reminder_ms = None;
         }
         changed = true;
     }
@@ -23038,7 +23042,7 @@ mod tests {
             &mut buzzer,
             8_000,
         ));
-        assert_eq!(buzzer.active_cue(), None);
+        assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::AttentionReminder));
         assert!(attention_pending);
         assert_eq!(protection_alarm.next_replay_ms(), None);
         assert_eq!(
@@ -23046,6 +23050,40 @@ mod tests {
             Some(8_000 + BUZZER_ATTENTION_REMINDER_INTERVAL_MS)
         );
         assert!(forced_fan_active);
+    }
+
+    #[test]
+    fn attention_reminder_starts_immediately_after_fault_clear_then_rearms() {
+        let mut last_fault_present = true;
+        let mut attention_acknowledged = false;
+        let mut attention_pending = false;
+        let mut forced_fan_active = true;
+        let mut protection_alarm = ProtectionAlarmCadence::new();
+        let mut next_reminder_ms = None;
+        let mut buzzer = BuzzerArbiter::new();
+        buzzer.activate_protection(BuzzerCueSource::ThermalProtection, 0);
+
+        assert!(update_fault_attention_state(
+            false,
+            FaultAttentionState {
+                last_fault_present: &mut last_fault_present,
+                attention_acknowledged: &mut attention_acknowledged,
+                attention_pending_after_fault_clear: &mut attention_pending,
+                forced_fan_active: &mut forced_fan_active,
+                protection_alarm: &mut protection_alarm,
+                next_attention_reminder_ms: &mut next_reminder_ms,
+            },
+            39,
+            &mut buzzer,
+            2_000,
+        ));
+
+        assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::AttentionReminder));
+        assert_eq!(buzzer.output().frequency_hz, Some(1_650));
+        assert_eq!(
+            next_reminder_ms,
+            Some(2_000 + BUZZER_ATTENTION_REMINDER_INTERVAL_MS)
+        );
     }
 
     #[test]

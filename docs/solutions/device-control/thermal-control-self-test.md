@@ -145,7 +145,7 @@ At PPS transition boundaries:
 Current runtime truth separates thermal-runaway attention from measurement protection:
 
 - `temp >= 420°C` 立即启动 `300ms` non-looping thermal-runaway cue，并通过单输出仲裁器每 `1s` 请求重放；该保护 cue 可抢占较低优先级反馈
-- after temperature falls below `420°C`, an unacknowledged runaway exposes `faultAttentionPending=true` and uses a `10s` reminder cadence
+- after temperature falls below `420°C`, an unacknowledged runaway emits one immediate reminder, then exposes `faultAttentionPending=true` and uses a `10s` reminder cadence
 - front panel input and runtime/CLI/app `faultAttentionAcknowledged=true` are equivalent acknowledgement paths, but acknowledgement never bypasses active absolute overtemperature cutoff
 - `sensor-open`, `sensor-short`, and `adc-read-failed` stop heating without buzzer attention or pending reminder
 

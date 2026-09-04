@@ -402,9 +402,8 @@ impl BuzzerCueArg {
             Self::HeaterReject => 305,
             Self::ActiveCoolingReject => 310,
             Self::ProtectionAlarm => 300,
-            // The normal reminder cadence delays its first cue for ten seconds.
-            // A short post-command readback is therefore safe and reports its
-            // scheduled state without interrupting an audible step.
+            // The cue pattern itself is 210 ms; the firmware owns the initial
+            // start and ten-second replay cadence.
             Self::AttentionReminder => 210,
         }
     }

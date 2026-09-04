@@ -206,11 +206,14 @@ impl BuzzerTestSession {
             BuzzerCueId::ProtectionAlarm => Some(self.protection_cadence.enter(arbiter, now_ms)),
             BuzzerCueId::AttentionReminder => {
                 let _ = arbiter.enter_attention_pending();
+                let decision =
+                    arbiter.request_attention_reminder(BuzzerCueSource::ThermalAttention, now_ms);
                 if let Some(playback) = self.playback.as_mut() {
                     playback.attention_due_ms =
                         Some(now_ms.saturating_add(ATTENTION_REMINDER_INTERVAL_MS));
+                    playback.attention_started = true;
                 }
-                None
+                Some(decision)
             }
             _ => Some(arbiter.request_feedback(BuzzerCueSource::BuzzerTest, cue, now_ms)),
         };

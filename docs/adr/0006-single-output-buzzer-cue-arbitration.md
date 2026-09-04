@@ -27,8 +27,8 @@ caller preemption.
   lower-priority playback and clears retained feedback.
 - `AttentionReminder` is lower than `ProtectionAlarm` and higher than ordinary
   feedback. It waits for an already-started feedback cue to finish, replaces
-  any retained feedback, and keeps its existing ten-second cadence after an
-  unacknowledged runaway has cleared.
+  any retained feedback, starts immediately after an unacknowledged runaway
+  clears, and keeps its ten-second cadence thereafter.
 - `FeedbackCue` covers accepted interaction and runtime-operation feedback. It
   never interrupts an active cue. The arbiter retains at most one pending
   feedback cue: repeated `ui_input` requests coalesce, while the latest

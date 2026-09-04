@@ -945,6 +945,44 @@ mod tests {
 
     #[cfg(feature = "buzzer-test")]
     #[test]
+    fn buzzer_test_attention_reminder_starts_immediately_then_rearms_at_ten_seconds() {
+        let mut arbiter = BuzzerArbiter::new();
+        let mut session = BuzzerTestSession::new();
+
+        let started = session
+            .start_playback(&mut arbiter, BuzzerCueId::AttentionReminder, true, 0)
+            .expect("the idle buzzer test session starts an immediate attention reminder");
+        assert_eq!(
+            started.as_slice(),
+            &[BuzzerDecision::new(
+                BuzzerCueSource::ThermalAttention,
+                BuzzerCueId::AttentionReminder,
+                BuzzerDecisionDisposition::Started,
+            )]
+        );
+        assert_eq!(arbiter.active_cue(), Some(BuzzerCueId::AttentionReminder));
+        assert_eq!(arbiter.output().frequency_hz, Some(1_650));
+
+        let _ = arbiter.tick(70);
+        let _ = arbiter.tick(100);
+        let _ = arbiter.tick(211);
+        assert!(!arbiter.is_active());
+        assert!(session.advance(&mut arbiter, 9_999).is_empty());
+        let replay = session.advance(&mut arbiter, 10_000);
+        assert_eq!(replay.len(), 1);
+        assert_eq!(
+            replay[0],
+            BuzzerDecision::new(
+                BuzzerCueSource::ThermalAttention,
+                BuzzerCueId::AttentionReminder,
+                BuzzerDecisionDisposition::Started,
+            )
+        );
+        assert_eq!(arbiter.active_cue(), Some(BuzzerCueId::AttentionReminder));
+    }
+
+    #[cfg(feature = "buzzer-test")]
+    #[test]
     fn buzzer_test_one_shot_feedback_starts_a_fresh_decision_trace() {
         let mut arbiter = BuzzerArbiter::new();
         let mut session = BuzzerTestSession::new();
