@@ -10,8 +10,8 @@ tags:
   - hil
 status: active
 related_specs:
-  - docs/specs/q2aw6-heater-pid-frontpanel-runtime/SPEC.md
-  - docs/specs/m8r4q-real-control-plane-runtime/SPEC.md
+  - docs/specs/heater-pid-frontpanel-runtime/SPEC.md
+  - docs/specs/real-control-plane-runtime/SPEC.md
 ---
 
 # Thermal plant calibration and self-test
@@ -381,8 +381,8 @@ If the local daemon stops serving the active hardware path:
 
 ## References
 
-- `docs/specs/q2aw6-heater-pid-frontpanel-runtime/SPEC.md`
-- `docs/specs/m8r4q-real-control-plane-runtime/SPEC.md`
+- `docs/specs/heater-pid-frontpanel-runtime/SPEC.md`
+- `docs/specs/real-control-plane-runtime/SPEC.md`
 - `thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd63w-pps3a/accepted-full-range-20hz/`
 - `thermal-self-test-runs/approach-characterization-pd100w-pps5a-20260717-final/`
 - `thermal-self-test-runs/preliminary-pd100w-pps5a-60-140-220-20260717/`

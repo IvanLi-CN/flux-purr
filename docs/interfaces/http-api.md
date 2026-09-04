@@ -2,8 +2,8 @@
 
 Source of truth for this implementation scope:
 
-- `docs/specs/m8r4q-real-control-plane-runtime/SPEC.md`
-- `docs/specs/jt8r2-adc-calibration-control-plane/SPEC.md`
+- `docs/specs/real-control-plane-runtime/SPEC.md`
+- `docs/specs/adc-calibration-control-plane/SPEC.md`
 - `docs/solutions/device-control/web-native-wifi-bridge-console.md`
 
 ## Shared Models

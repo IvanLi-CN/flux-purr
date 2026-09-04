@@ -211,7 +211,7 @@ None.
 
 - [ADR 0003](../../adr/0003-version-file-is-the-product-version-source.md)
 - [ADR 0005](../../adr/0005-pr-local-version-preparation.md)
-- [旧 PR label 发布规格](../r9k3m-pr-label-release-protection/SPEC.md)
+- [旧 PR label 发布规格](../pr-label-release-protection/SPEC.md)
 - [CI Main](../../../.github/workflows/ci-main.yml)
 - [Prepare product version](../../../.github/workflows/release-preparation.yml)
 - [Release Product](../../../.github/workflows/release.yml)

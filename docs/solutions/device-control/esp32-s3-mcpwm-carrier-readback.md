@@ -14,7 +14,7 @@ tags:
 status: active
 related_specs:
   - docs/specs/buzzer-cue-arbitration/SPEC.md
-  - docs/specs/q2aw6-heater-pid-frontpanel-runtime/SPEC.md
+  - docs/specs/heater-pid-frontpanel-runtime/SPEC.md
 symptoms: Unexpected cue changes, compressed rests, or a multi-tone cue with one apparent pitch.
 root_cause: Multiple cue owners or timer configuration that does not change the GPIO carrier.
 resolution_type: Single-owner cue arbitration with pad-level carrier validation.

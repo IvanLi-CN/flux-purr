@@ -164,8 +164,8 @@
 
 - `docs/specs/README.md`
 - `docs/interfaces/http-api.md`
-- `docs/specs/35bta-eeprom-memory-config/SPEC.md`
-- `docs/specs/m8r4q-real-control-plane-runtime/SPEC.md`
+- `docs/specs/eeprom-memory-config/SPEC.md`
+- `docs/specs/real-control-plane-runtime/SPEC.md`
 - `firmware/README.md`
 - `web/README.md`
 
@@ -205,14 +205,6 @@ PR: none
 PR: none
 ![固件事务日志历史滚动与返回最新入口](./assets/firmware-transaction-log-history.png)
 
-## 实现里程碑（Milestones / Delivery checklist）
-
-- [ ] M1: bundle/layout/schema/fixtures 与 release artifact 合同
-- [ ] M2: firmware identity、install status 与 commissioning persistence
-- [ ] M3: devd bundle API 与 protected update/recovery transaction
-- [ ] M4: Browser engine、统一状态机、UI/E2E 与视觉证据
-- [ ] M5: 非硬件门禁、授权 HIL、review 与 PR Step 5C 收敛
-
 ## 风险 / 开放问题 / 假设
 
 - 每次 HIL 都要求主人提供精确端口与全擦授权；该授权不允许自动发现、重新枚举或切换端口。devd 与 Browser HIL 分别验收。
@@ -221,6 +213,6 @@ PR: none
 
 ## 参考（References）
 
-- `../m8r4q-real-control-plane-runtime/SPEC.md`
-- `../35bta-eeprom-memory-config/SPEC.md`
-- `../hhwq8-web-control-plane-demo/SPEC.md`
+- `../real-control-plane-runtime/SPEC.md`
+- `../eeprom-memory-config/SPEC.md`
+- `../web-control-plane-demo/SPEC.md`
