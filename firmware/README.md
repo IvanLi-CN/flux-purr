@@ -74,7 +74,7 @@
   - `fan_enabled` is the actual fan runtime state, not a mock toggle
 - EEPROM memory:
   - `M24C64` on shared `GPIO8/9` I2C stores current v5 memory records in two `2 KiB` slots at `0x1000` and `0x1800`; the decoder accepts v1-v5, while previous `1 KiB` slots at `0x0400` / `0x0800` and legacy `512 B` slots at `0x0000` / `0x0200` remain read-only migration sources, with the highest valid sequence restored. Legacy EEPROM records are migrated in RAM and materialized as v5 on the next successful configuration commit.
-  - if EEPROM access fails, the same record falls back to two slots in the dedicated `flux_cfg` 8KiB data partition declared by `firmware/partitions.csv`; each slot owns a separate `4 KiB` erase sector so a power loss during one write leaves the other record recoverable without writing into NVS-managed space. The 4 MiB layout reserves a 2 MiB factory app partition for the WiFi HTTP release, then places `flux_cfg` at `0x210000`.
+  - EEPROM is the only persistence backend. EEPROM absence, read/write failure, or verification failure enters `EEPROM_REQUIRED`; MCU Flash, NVS, raw sectors, and `flux_cfg` are not configuration fallbacks.
   - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, `active_cooling_enabled`, and Wi-Fi config fields
   - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended, and newly persisted thermal-profile TLVs use an explicit `TCP2` layout marker while unmarked historical layouts remain readable
   - accepted front-panel edits debounce for about `2s` before writing the next slot
@@ -163,7 +163,7 @@
 - MCU id: `esp32s3_frontpanel`
 - Configured ELF artifact:
   - `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr`
-- `mcu-agentd` remains available for selector inspection and diagnostics. It is not the data-preserving firmware installation path because direct `espflash` execution bypasses devd's `flux_cfg` migration preflight.
+- `mcu-agentd` remains available for selector inspection and diagnostics. It is not a firmware installation path.
 - Typical diagnostic flow:
   - `source /Users/ivan/export-esp.sh`
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release` (default `20 V` + real control-plane transport)
@@ -173,7 +173,7 @@
   - if selector is missing, `mcu-agentd --non-interactive selector list esp32s3_frontpanel`
   - `mcu-agentd --non-interactive monitor esp32s3_frontpanel`
   - 板级验证使用默认 app runtime；输入校准通过正常前面板交互和 USB JSONL 状态完成
-- Use the repository-local `flux-purr` CLI through `flux-purr-devd` for every real firmware installation that must preserve device configuration. Direct `mcu-agentd flash`, direct `espflash`, erase-chip, or an explicit recovery workflow are outside that preservation guarantee.
+- Use the repository-local `flux-purr` CLI for firmware installation: General User `update` accepts only a signed local `.fluxpurr-fw` bundle; Developer `flash` accepts only a local ELF and automatically archives EEPROM before the write. `recover` is the explicitly confirmed MCU-internal-Flash erase path and does not touch EEPROM. All three require the exact authorized serial port. See `docs/specs/firmware-update-and-developer-flash/` for the contract and its implementation status.
 
 ## Hardware baseline notes
 
@@ -197,7 +197,7 @@
 - The repository-root `.cargo/config.toml` carries the `build-std` and `linkall.x` settings required for `--manifest-path firmware/Cargo.toml` invocations from the repo root.
 - The same config bounds the ESP WiFi station RX/TX pools for the low-throughput LAN control plane. If WiFi driver or LAN task startup cannot be completed, firmware publishes a network error and continues the USB JSONL recovery/control loop.
 - The ESP32-S3 executor reserves an 80 KiB shared task arena for the main loop and LAN tasks. WiFi drivers plus HTTP request/response buffers and mailbox staging use static storage so they do not consume async task-frame capacity.
-- The repository-root `espflash.toml` pins `firmware/partitions.csv`, so ELF flashing installs the dedicated `flux_cfg` fallback partition together with the normal NVS, PHY, and factory-app layout. `firmware/partitions.bin` is the checked-in equivalent for the supported raw-app devd path: devd writes it at `0x8000` before the app and then resets the target. Before either real-flash path changes the `flux_cfg` address, devd reads the current device layout, stages the complete record at the target address, and verifies that staged copy before it writes the app image; a failed or unsafe preflight refuses the app write.
+- The repository-root `espflash.toml` pins `firmware/partitions.csv` for the normal NVS, PHY, and factory-app layout. No supported layout declares a configuration fallback partition, and no MCU flash operation migrates or restores configuration; EEPROM remains physically outside the MCU flash target.
 - `firmware/build.rs` adds `defmt.x` for Xtensa builds, and `mcu-agentd.toml` stays pinned to `espflash` + `defmt` decoding.
 - Host checks keep using the std preview path so repository checks can run without Xtensa hardware.
 - This round still does not implement touch input, tach feedback, external PID tuning, or closed-loop VIN/current power compensation.

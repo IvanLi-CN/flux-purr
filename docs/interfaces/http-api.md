@@ -46,9 +46,9 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 
 `state`: `disabled | idle | connecting | connected | error` for device-published WiFi facts. `saving` and `timeout` are not public firmware WiFi states; timeout is settled as `error`. `idle` means the Device has confirmed that its current WiFi station has stopped while saved credentials remain intact. `configurationGeneration` changes for every accepted set/clear configuration; `transitionSequence` increases on every accepted state transition, including a confirmed cancel. `failureCode` is absent for nonterminal states and is one of `disconnect_timed_out | configuration_failed | association_rejected | association_timed_out | ipv4_timed_out | station_disconnected | lan_startup_failed`. A configuration transaction makes at most three attempts in 30 seconds: disconnect is bounded at 3 seconds, association at 8 seconds per attempt, and IPv4/DHCP at 15 seconds per attempt, with the 30-second transaction deadline taking precedence. Recoverable failures remain `connecting`; once the attempt budget or transaction deadline is exhausted, the device publishes one terminal `error`. The same configuration generation never starts a background recovery; a new set/clear configuration is required.
 
-During firmware boot, before EEPROM/flash restoration and WiFi task startup complete, USB `get_network` and `get_status` return the retryable `startup_busy` error instead of a placeholder `disabled` snapshot. `devd` retries that boundary; clients must not persist or display a network state until a versioned `NetworkSummary` is returned by the running device.
+During firmware boot, before EEPROM restoration and WiFi task startup complete, USB `get_network` and `get_status` return the retryable `startup_busy` error instead of a placeholder `disabled` snapshot. `devd` retries that boundary; clients must not persist or display a network state until a versioned `NetworkSummary` is returned by the running device.
 
-`ssid` is the device-confirmed configured network name and is safe to display in a configuration form. `wifiPasswordLength` is the saved WiFi password's UTF-8 byte length. The password itself is never returned by USB, LAN, devd, logs, events, errors, or exports.
+`ssid` is the device-confirmed configured network name and is safe to display in a configuration form. `wifiPasswordLength` is the saved WiFi password's UTF-8 byte length. The password itself is never returned by normal USB, LAN, devd status, logs, events, or errors. A raw EEPROM maintenance read is an unparsed device image and can contain WiFi credentials and the LAN pairing token; it must not enter logs, diagnostics, or unencrypted archives.
 
 ### `Status`
 
@@ -192,7 +192,7 @@ Calibration live control requires an active adjustable PPS contract. FUSB302BMPX
 }
 ```
 
-Heater curve points store temperature in centi-Celsius and effective resistance in milliohms. `preview` is runtime-only and can be used immediately by heater power limiting logic. `save` copies the preview curve to `active`; only `active` is persisted in device memory and restored after reboot. Firmware uses external EEPROM as the primary memory backend and falls back to an ESP flash data/NVS sector when EEPROM is unavailable.
+Heater curve points store temperature in centi-Celsius and effective resistance in milliohms. `preview` is runtime-only and can be used immediately by heater power limiting logic. `save` copies the preview curve to `active`; only `active` is persisted in device memory and restored after reboot. Firmware uses external EEPROM as the only memory backend; EEPROM failure enters `EEPROM_REQUIRED` and never selects an ESP flash or NVS fallback.
 
 ### `ThermalPlantModel`
 
@@ -237,7 +237,7 @@ The calibration state machine uses the current valid RTD measurement directly fo
 }
 ```
 
-`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; an authorized native USB Serial/JTAG `cu.usbmodem*` port uses `--before usb-reset`. A connection failure waits one second and retries that USB reset once before a final `default-reset` fallback; no retry changes the authorized port. Other serial paths retain `default-reset`. `flashAddress` is only set for raw app binaries. For a raw app, devd writes the checked-in `firmware/partitions.bin` at `0x8000`, writes the app at its explicit address, then explicitly resets the target so the `flux_cfg` layout is installed and the application starts.
+`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; an authorized native USB Serial/JTAG `cu.usbmodem*` port uses `--before usb-reset`. A connection failure waits one second and retries that USB reset once before a final `default-reset` fallback; no retry changes the authorized port. Other serial paths retain `default-reset`. `flashAddress` is only set for raw app binaries. For a raw app, devd writes the checked-in `firmware/partitions.bin` at `0x8000`, writes the app at its explicit address, then explicitly resets the target so the supported partition layout and application start together.
 
 ### `ApiError`
 

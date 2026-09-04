@@ -62,7 +62,7 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 - `devd` 启动、CLI 调用和 Web live development 要显式使用当前 repo checkout、显式 bind/port 和显式环境变量，不依赖默认端口或全局二进制。
 - `scripts/devd-hardware-smoke.py --device-id mock-fp-lab-01 --allow-mock-device` 只证明 localhost HTTP contract；不得把 mock smoke 报告成硬件验证。
 - Web live development 在需要 leased `devd` 端口时，必须显式设置 `VITE_FLUX_PURR_DEVD_URL` 与 `VITE_FLUX_PURR_ENABLE_DEVD=1`。
-- 固件发布目录由 `tools/firmware-web-catalog/build_catalog.py` 在服务器侧构建；Browser 只能读取同源 `/firmware/releases-manifest.json` 和清单声明的精确 bundle 路径。开发中的当前固件固定通过 `bun run build:firmware:web` 直接生成至 `firmware/target/flux-purr-web-artifacts/`；Vite 监听该目录、只在内存中响应该原文件，绝不向 `web/public` 或其他位置拷贝副本。Vite 开发默认通过服务器端 GitHub proxy 合并发布版本；`FLUX_PURR_FIRMWARE_ARTIFACTS_DIR` 可覆写本地产物根目录，`FLUX_PURR_DEV_FIRMWARE_RELEASES=0` 仅禁用远端刷新，不禁用已打包或本地产物。遇到 GitHub API 限流时，设置仅供该本地 Vite 进程读取的 `GITHUB_TOKEN`；绝不以 `VITE_*` 变量或浏览器请求暴露它。
+- 固件发布目录由 `tools/firmware-web-catalog/build_catalog.py` 在服务器侧构建；Browser 只能读取同源 `/firmware/releases-manifest.json` 和清单声明的精确、已签名 bundle 路径。开发构建的本地 ELF 只能通过 Developer `flash` 使用，不得由 Vite 或任何 Web 目录包装成 `.fluxpurr-fw`。Vite 开发默认通过服务器端 GitHub proxy 提供已签名发布版本；`FLUX_PURR_DEV_FIRMWARE_RELEASES=0` 仅禁用远端刷新，不禁用已打包 release。遇到 GitHub API 限流时，设置仅供该本地 Vite 进程读取的 `GITHUB_TOKEN`；绝不以 `VITE_*` 变量或浏览器请求暴露它。
 
 ## 文档与交付要求
 
@@ -78,7 +78,7 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 - 任何烧录、复位、串口读写、`mcu-agentd selector set`、`espflash`、`esptool` 或等价 MCU 操作，都只能使用主人明确授权的设备端口。
 - 授权端口消失、变号、重新枚举或被占用时，必须停止并报告证据；不得自动切换端口。
 - `mcu-agentd` 操作只允许针对当前项目目标 `esp32s3_frontpanel`；不得把其它 MCU 目标或其它仓库设备当作当前目标。
-- `mcu-agentd` 不是 CLI/`devd` HIL 的默认 acceptance path；除非主人明确改计划，否则不要用它替代 `flux-purr` through `devd` 的验收路径。涉及 device persistence 的 real flash 必须走 `flux-purr -> flux-purr-devd`，由 daemon 在 partition layout 变化前保全并验证 `flux_cfg`；不得用 `mcu-agentd flash` 或直接 `espflash` 绕过该步骤。
+- `mcu-agentd` 不是 CLI/`devd` HIL 的默认 acceptance path；除非主人明确改计划，否则不要用它替代 `flux-purr` 的验收路径。一般用户更新必须使用签名 bundle、精确串口与本地 devd control socket；开发者烧录必须使用精确串口、本地 ELF 与直接串口路径，并默认自动备份 EEPROM。不得通过 CLI HTTP/devd 调用、默认端口、自动选设备、`flux_cfg` 迁移或直接 `mcu-agentd flash` 绕过这些边界。
 - IsolaPurr HUB 只可作为外部电源/链路控制边界，不能当作当前项目目标 MCU、host tool 或 release surface。
 - 真实烧录默认禁用；只有主人明确授权且满足精确端口授权边界时，才允许走 real flash。
 - 固件与热控改动不得为了让日志“更正常”而屏蔽传感器故障、按键故障或保护逻辑；安全失败路径必须保留。

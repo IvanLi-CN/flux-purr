@@ -116,7 +116,7 @@
 - `flux-purr usb-port set` 必须写用户配置，并明确需要重启运行中的 `devd`。
 - lease 必须有 heartbeat、TTL、过期 cleanup 和 conflict response。
 - logs、trace、events 必须有固定上限；Runtime trace 只记录真实 bounded events 与 operator actions，`devd reachable`、当前连接状态或 scenario 重算摘要不得伪装成事件重复插入。所有事件在 adapter 边界统一为旧到新的时间顺序，并把时间格式化为本地 `HH:mm:ss`；Browser Web Serial 与 live operator action 在追加边界立即生成同一格式的本地时钟时间，只有 demo fixture 可使用固定时间。 “跟随尾部”启用时必须立即滚至最新事件，后续事件持续保持在可视底部，operator 主动向上滚动超过阈值后才自动关闭跟随。不得把 `live`、`web`、epoch timestamp、事件 ID 或内部序号显示在时间列。`devd` native USB JSONL TX/RX 必须作为 redacted `transport` events 进入 Runtime trace，保留 request ID、frame type 与 payload，WiFi password 等 secret 只能显示为 redacted。
-- firmware artifact verify 必须校验 file existence、size 和 sha256，且只允许 artifact root 内的相对路径；real flash 必须先通过 dry-run。real flash 在应用写入前必须读取当前设备 partition table，并对当前 `flux_cfg` record 完成备份写入与逐字验证；应用写入后必须将同一 record 恢复至目标 `flux_cfg` 地址并再次逐字验证，即使地址未变化。任何预写、恢复或验证失败都必须明确失败，预写失败时不得开始 app 写入。
+- firmware artifact verify 必须校验 file existence、size 和 sha256，且只允许 artifact root 内的相对路径；real flash 必须先通过 dry-run。MCU Flash 写入不得读取、备份、迁移、恢复或验证 `flux_cfg` 或任何内部配置 record；EEPROM 不属于 MCU Flash 目标。CLI 的 General User update、Developer flash 与 recovery 合同由 `firmware-update-and-developer-flash` topic 管理。
 - devd artifact catalog 必须从本地构建产物计算 size/sha256，Web dry-check 必须调用 devd verify，而不是只做前端计时模拟。
 - Web UI 必须在 capability 缺失、lease conflict、offline target、blocked artifact 时禁用危险操作并显示原因。
 - Calibration mode control 必须只支持 PPS；Web 的 mode 入口固定为 `电压读数标定`、`温度标定`、`加热曲线标定`，owner-facing 术语不得回退到旧命名。

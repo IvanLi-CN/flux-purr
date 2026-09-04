@@ -4,11 +4,17 @@ Flux Purr is a device mono-repo for an embedded firmware + React control console
 
 ## Native devd
 
-`tools/flux-purr-devd` is the localhost native daemon for browser-to-device workflows that cannot be handled safely by Web UI alone: USB/serial discovery, exclusive leases, bounded monitor events, WiFi provisioning bridge, firmware artifact dry-run, and guarded `espflash` execution.
+`tools/flux-purr-devd` is the local daemon for browser-to-device workflows that cannot be handled safely by Web UI alone: USB/serial discovery, exclusive leases, bounded monitor events, and WiFi provisioning bridge. Its HTTP boundary is for the Web surface only; the `flux-purr` CLI never communicates with devd through HTTP.
 
-The daemon is started with `flux-purr-devd serve`. Default bind is `127.0.0.1:30080`, and loopback binds enable development CORS for local `localhost` / loopback origins so the Vite console can reach the daemon from its own local port. Real flashing stays disabled unless `--allow-real-flash` or `FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1` is set; dry-run verification is available without hardware. Before every real flash, devd stages and verifies the complete existing `flux_cfg` record; after the app write it restores that record at the target address and verifies it again. An unsafe or failed preflight blocks the app write.
+Firmware operations have two user classes and two firmware sources:
 
-The user-facing command-line entry point is `flux-purr`. It talks to `flux-purr-devd`, creates and heartbeats device leases automatically, and covers `devices`, `status`, `runtime`, `wifi`, `flash`, `monitor`, `hardware`, and `usb-port` commands. User hardware memory and the default USB port live in the OS user config directory; `FLUX_PURR_HOME` overrides that location. `flux-purr usb-port set <port>` updates the remembered default for future daemon starts.
+| User class | Command | Firmware source |
+| --- | --- | --- |
+| General User | `flux-purr update --port <serial-port> --bundle <local.fluxpurr-fw>` | Locally available, product-signed `.fluxpurr-fw` bundle |
+| Developer | `flux-purr flash --port <serial-port> [--elf <local-elf>]` | Local ELF; defaults to `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr` |
+| Developer | `flux-purr recover --port <serial-port> --elf <local-elf> --confirm ERASE` | Local ELF only |
+
+Every firmware operation requires the exact serial port. `update` starts a managed local devd when no `--devd <local-control-socket>` is supplied; it neither selects nor remembers a port. `flash` uses no devd, URL, HTTP, bundle, artifact ID, or manifest. It automatically creates an encrypted EEPROM archive before writing unless the Developer explicitly confirms the emergency bypass. `recover` is the explicit MCU-internal-Flash erase path and does not touch EEPROM. The complete contract is [Firmware Update And Developer Flash](docs/specs/firmware-update-and-developer-flash/SPEC.md); its [implementation status](docs/specs/firmware-update-and-developer-flash/IMPLEMENTATION.md) records the current gaps.
 
 ## WiFi/LAN Control
 

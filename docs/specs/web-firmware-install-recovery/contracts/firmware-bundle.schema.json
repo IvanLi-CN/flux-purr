@@ -1,13 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://flux-purr.ivanli.cc/schemas/firmware-bundle-v1.json",
+  "$id": "https://flux-purr.ivanli.cc/schemas/firmware-bundle-v2.json",
   "title": "Flux Purr firmware bundle manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "mediaType", "identity", "target", "layout", "segments", "migrations"],
+  "required": ["schemaVersion", "mediaType", "signingKeyId", "identity", "target", "layout", "segments", "migrations"],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "mediaType": { "const": "application/vnd.flux-purr.firmware-bundle+zip" },
+    "signingKeyId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
     "identity": {
       "type": "object",
       "additionalProperties": false,
@@ -16,7 +17,7 @@
         "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$", "maxLength": 64 },
         "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "buildId": { "type": "string", "pattern": "^[0-9a-f]{16,64}$" },
-        "channel": { "enum": ["stable", "rc", "local"] }
+        "channel": { "enum": ["stable", "rc"] }
       }
     },
     "target": {
