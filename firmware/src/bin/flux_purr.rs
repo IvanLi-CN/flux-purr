@@ -3170,7 +3170,11 @@ trait BuzzerCueSink {
     fn request_feedback(&mut self, source: BuzzerCueSource, cue: BuzzerCueId, now_ms: u64);
     fn activate_protection(&mut self, source: BuzzerCueSource, now_ms: u64);
     fn request_protection_replay(&mut self, source: BuzzerCueSource, now_ms: u64);
-    fn enter_attention_pending(&mut self);
+    fn enter_attention_pending_and_request_reminder(
+        &mut self,
+        source: BuzzerCueSource,
+        now_ms: u64,
+    );
     fn clear_attention(&mut self);
     fn request_attention_reminder(&mut self, source: BuzzerCueSource, now_ms: u64);
 }
@@ -3189,8 +3193,13 @@ impl BuzzerCueSink for BuzzerArbiter {
         let _ = BuzzerArbiter::request_protection_replay(self, source, now_ms);
     }
 
-    fn enter_attention_pending(&mut self) {
+    fn enter_attention_pending_and_request_reminder(
+        &mut self,
+        source: BuzzerCueSource,
+        now_ms: u64,
+    ) {
         let _ = BuzzerArbiter::enter_attention_pending(self);
+        let _ = BuzzerArbiter::request_attention_reminder(self, source, now_ms);
     }
 
     fn clear_attention(&mut self) {
@@ -3216,8 +3225,12 @@ impl BuzzerCueSink for BuzzerRuntime {
         BuzzerRuntime::request_protection_replay(self, source, now_ms);
     }
 
-    fn enter_attention_pending(&mut self) {
-        self.enter_attention_pending();
+    fn enter_attention_pending_and_request_reminder(
+        &mut self,
+        source: BuzzerCueSource,
+        now_ms: u64,
+    ) {
+        BuzzerRuntime::enter_attention_pending_and_request_reminder(self, source, now_ms);
     }
 
     fn clear_attention(&mut self) {
@@ -3269,10 +3282,12 @@ fn update_fault_attention_state<B: BuzzerCueSink>(
         *attention_pending_after_fault_clear = !*attention_acknowledged;
         protection_alarm.clear();
         if *attention_pending_after_fault_clear {
-            buzzer.enter_attention_pending();
             // The protection alarm has just stopped. Give the operator an
             // immediate reminder, then keep the existing ten-second cadence.
-            buzzer.request_attention_reminder(BuzzerCueSource::ThermalAttention, now_ms);
+            buzzer.enter_attention_pending_and_request_reminder(
+                BuzzerCueSource::ThermalAttention,
+                now_ms,
+            );
             *next_attention_reminder_ms =
                 Some(now_ms.saturating_add(BUZZER_ATTENTION_REMINDER_INTERVAL_MS));
         } else {
@@ -8190,7 +8205,7 @@ enum BuzzerRuntimeCommand {
 #[derive(Debug, Clone, Copy)]
 enum BuzzerSafetyCommand {
     ActivateProtection { source: BuzzerCueSource },
-    EnterAttentionPending,
+    EnterAttentionPendingAndRequestReminder { source: BuzzerCueSource },
     ClearAttention,
 }
 
@@ -8238,8 +8253,9 @@ impl BuzzerRuntime {
         Self::submit(BuzzerRuntimeCommand::ProtectionReplay { source });
     }
 
-    fn enter_attention_pending(&mut self) {
-        BUZZER_SAFETY_COMMAND.signal(BuzzerSafetyCommand::EnterAttentionPending);
+    fn enter_attention_pending_and_request_reminder(&mut self, source: BuzzerCueSource, _: u64) {
+        BUZZER_SAFETY_COMMAND
+            .signal(BuzzerSafetyCommand::EnterAttentionPendingAndRequestReminder { source });
     }
 
     fn clear_attention(&mut self) {
@@ -8405,7 +8421,12 @@ fn apply_buzzer_safety_command(
         BuzzerSafetyCommand::ActivateProtection { source } => {
             Some(arbiter.activate_protection(source, now_ms))
         }
-        BuzzerSafetyCommand::EnterAttentionPending => arbiter.enter_attention_pending(),
+        BuzzerSafetyCommand::EnterAttentionPendingAndRequestReminder { source } => {
+            if let Some(decision) = arbiter.enter_attention_pending() {
+                log_buzzer_decision(decision);
+            }
+            Some(arbiter.request_attention_reminder(source, now_ms))
+        }
         BuzzerSafetyCommand::ClearAttention => arbiter.clear_attention(),
     };
     if let Some(decision) = decision {
