@@ -136,7 +136,7 @@
 - `GPIO48` 蜂鸣器必须使用独立 PWM 通道；boot 和 idle 保持静音，不得复用 heater/fan 已占用的 PWM 输出。
 - heater 成功切换必须请求 `heater_on / heater_off`；主动降温成功切换必须请求 `active_cooling_on / active_cooling_off`；heater 重臂被拒绝时必须请求 `heater_reject`。请求的实际播放受 `buzzer-cue-arbitration` 仲裁合同约束。
 - 任何已接受的前面板用户操作都必须提交提示音请求；其中非 heater / 主动降温专用反馈的已接受操作（如菜单导航、子页进入/退出、预设编辑）统一提交通用 `ui_input` 请求。安全状态可抑制或合并普通反馈。
-- 只有仲裁器选中开始播放的蜂鸣器 cue 才从第一拍开始。普通反馈不得重启当前 cue；重复 pending `ui_input` 合并，最新专用反馈替换旧 Pending Feedback。若被选中 cue 的下一有声阶段频率与当前载波相同，GPIO48 的 MCPWM 载波相位必须跨 duty=0 的静音间隙复用。静音只能将 duty 置零；只有下一有声阶段频率不同才重配 timer，不得沿用上一轮尚未结束的频率段。完整优先级和安全状态合同见 `buzzer-cue-arbitration`。
+- 只有仲裁器选中开始播放的蜂鸣器 cue 才从第一拍开始。普通反馈不得重启当前 cue；重复 pending `ui_input` 合并，最新专用反馈替换旧 Pending Feedback。若被选中 cue 的下一有声阶段频率与当前载波相同，GPIO48 的 MCPWM 载波相位必须跨 duty=0 的静音间隙复用。Timer2 必须保持固定 prescaler 并以 period 选择音高；下一有声阶段频率不同时必须先静音并停止 timer，再将计数器归零、应用新 period、重启 timer，最后恢复 duty，不得沿用上一频率段。完整优先级和安全状态合同见 `buzzer-cue-arbitration`。
 - 过温保护不得占用 Dashboard 的风扇元素；SET 行必须在告警激活时以 `1Hz` 闪烁 `WARN / OTEMP` 两关键帧。
 - `Active Cooling` 页面在正式 runtime 中为只读安全策略说明页；用户开启这一项时，口径统一称为“开启主动降温”，并必须同步默认 `20V`（及 `12V / 28V` build variants）、`>=35°C => 0% PWM`、`<35°C => 100% PWM + 30s`、加热期 `>100°C` 输出门控脉冲与 `>350 / >360°C` 包线。
 - 当前风扇硬件为反相 `FB` 注入控制：`GPIO36 duty=0%` 表示最高风扇轨电压，`GPIO36 duty=100%`（`1000‰`）才表示最低风扇轨电压；所有 `minimum-voltage profile` 语义都必须落到该 `1000‰` 档位。

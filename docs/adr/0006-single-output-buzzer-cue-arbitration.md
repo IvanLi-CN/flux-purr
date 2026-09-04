@@ -39,9 +39,12 @@ caller preemption.
 - The lower-level controller still owns cue steps, silence, and PWM carrier
   preservation. Its real-time task wakes at every cue-step deadline; if it is
   late, it emits the next unobserved step before advancing again, so a short
-  silence cannot be skipped. Arbiter decision logs identify the request source,
-  cue, and selected disposition without creating a new product API or
-  persistent state.
+  silence cannot be skipped. Timer2 keeps one prescaler and selects pitch with
+  its period. A different-frequency step first silences GPIO48, stops Timer2,
+  resets its counter, applies the new period, starts the timer, and only then
+  restores duty. Same-frequency silence keeps Timer2 running.
+  Arbiter decision logs identify the request source, cue, and selected
+  disposition without creating a new product API or persistent state.
 - A non-default `buzzer-debug` firmware feature may expose a native-USB/devd
   diagnostic after declaring the `buzzer_debug` identity capability. It can
   submit production cue IDs or fixed arbitration scenarios, is rejected while
@@ -51,9 +54,10 @@ caller preemption.
   controlled test of the same one-second safety cadence. The feature adds only
   this test session to ordinary runtime initialization and never selects a
   recovery-only audio path. Its bounded output trace reads MCPWM timer2's
-  prescaler and period only after the ordinary real-time GPIO48 task applies a cue
-  output, so it can prove the carrier actually configured by that task without
-  adding a raw-PWM control surface.
+  prescaler and period and uses a feature-only PCNT input to count rising edges
+  from the GPIO48 pad after the ordinary real-time task applies each cue step.
+  This distinguishes timer configuration from the emitted digital carrier
+  without claiming an acoustic measurement or adding a raw-PWM control surface.
 
 ## Consequences
 

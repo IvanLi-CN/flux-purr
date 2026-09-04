@@ -1806,6 +1806,12 @@ pub struct BuzzerDebugOutputTraceEvent {
     pub elapsed_ms: u32,
     pub requested_frequency_hz: Option<u32>,
     pub applied_frequency_hz: u32,
+    #[serde(default)]
+    pub observed_frequency_hz: Option<u32>,
+    #[serde(default)]
+    pub observed_rising_edges: u16,
+    #[serde(default)]
+    pub observed_window_ms: u32,
     pub duty_percent: u8,
     pub generation: u32,
     pub timer_prescaler: u8,

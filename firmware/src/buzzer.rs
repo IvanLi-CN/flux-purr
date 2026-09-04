@@ -751,8 +751,9 @@ pub struct BuzzerDebugTraceEvent {
     pub decision: BuzzerDecision,
 }
 
-/// A readback of the physical MCPWM configuration after the shared buzzer
-/// task applies a production cue output. It is only present in debug firmware.
+/// A bounded timer-configuration and GPIO-pad observation captured after the
+/// shared buzzer task applies a production cue output. It is only present in
+/// debug firmware.
 #[cfg(feature = "buzzer-debug")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -760,6 +761,9 @@ pub struct BuzzerDebugOutputTraceEvent {
     pub elapsed_ms: u32,
     pub requested_frequency_hz: Option<u32>,
     pub applied_frequency_hz: u32,
+    pub observed_frequency_hz: Option<u32>,
+    pub observed_rising_edges: u16,
+    pub observed_window_ms: u32,
     pub duty_percent: u8,
     pub generation: u32,
     pub timer_prescaler: u8,
@@ -1018,14 +1022,18 @@ impl BuzzerDebugSession {
         decisions
     }
 
-    /// Reconcile a one-shot session after the GPIO48 owner advances its cue.
+    /// Reconcile playback after the GPIO48 owner advances its cue.
     ///
     /// `advance` runs before `BuzzerArbiter::tick` so scheduled requests can
-    /// affect the current deadline. A non-repeating protection cue can finish
-    /// in that later tick, though, so its status must be settled before the
-    /// next USB readback without waiting for another debug cadence deadline.
-    pub fn settle_after_tick(&mut self, arbiter: &mut BuzzerArbiter) {
-        self.complete_playback_if_quiet(arbiter);
+    /// affect the current deadline. The later tick can finish a one-shot cue
+    /// or make an ordinary repeating cue idle, so settle both states before
+    /// calculating the next deadline.
+    pub fn settle_after_tick(
+        &mut self,
+        arbiter: &mut BuzzerArbiter,
+        now_ms: u64,
+    ) -> heapless::Vec<BuzzerDecision, 3> {
+        self.advance_playback(arbiter, now_ms)
     }
 
     fn complete_playback_if_quiet(&mut self, arbiter: &mut BuzzerArbiter) {
@@ -1292,6 +1300,36 @@ mod tests {
 
     #[cfg(feature = "buzzer-debug")]
     #[test]
+    fn debug_repeat_feedback_restarts_after_each_production_pattern() {
+        let mut arbiter = BuzzerArbiter::new();
+        let mut session = BuzzerDebugSession::new();
+
+        session
+            .start_playback(&mut arbiter, BuzzerCueId::UiInput, true, 0)
+            .expect("the idle debug session starts a repeating feedback cue");
+        assert_eq!(arbiter.active_cue(), Some(BuzzerCueId::UiInput));
+
+        assert_eq!(arbiter.tick(45).output.duty_percent, 0);
+        assert!(!arbiter.is_active());
+        let replay = session.settle_after_tick(&mut arbiter, 45);
+
+        assert_eq!(arbiter.active_cue(), Some(BuzzerCueId::UiInput));
+        assert_eq!(replay.len(), 1);
+        let status = session.status(arbiter.active_cue());
+        assert_eq!(status.trace.len(), 2);
+        assert_eq!(status.trace[1].elapsed_ms, 45);
+        assert_eq!(
+            status.trace[1].decision,
+            BuzzerDecision::new(
+                BuzzerCueSource::DeveloperDebug,
+                BuzzerCueId::UiInput,
+                BuzzerDecisionDisposition::Started,
+            )
+        );
+    }
+
+    #[cfg(feature = "buzzer-debug")]
+    #[test]
     fn debug_one_shot_protection_completes_after_its_last_gpio_step() {
         let mut arbiter = BuzzerArbiter::new();
         let mut session = BuzzerDebugSession::new();
@@ -1306,7 +1344,7 @@ mod tests {
         assert_eq!(arbiter.tick(300).output.duty_percent, 0);
         assert!(!arbiter.is_active());
 
-        session.settle_after_tick(&mut arbiter);
+        let _ = session.settle_after_tick(&mut arbiter, 300);
         assert_eq!(
             session.status(arbiter.active_cue()).state,
             BuzzerDebugSessionState::Complete

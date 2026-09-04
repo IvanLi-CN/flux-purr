@@ -14,18 +14,17 @@
 - `BuzzerArbiter` 以 `ProtectionAlarm > AttentionReminder > FeedbackCue` 仲裁请求，保留一个 Pending Feedback，并在 `tick` 中报告延后启动的 cue。
 - `ProtectionAlarm` 保留既有 `2300Hz`、静音、`2300Hz`、静音四步音型，作为 `300ms` non-looping one-shot；thermal scheduler 在活动热失控期间每秒请求重放。
 - 启动恢复、热失控状态机、两个 cadence scheduler、runtime-control 和前面板反馈均使用仲裁请求，并用来源、cue 与 disposition 记录固件诊断。
-- real-time 时序任务按 cue step deadline 唤醒并输出 GPIO48 duty；迟到时控制器只前进一个 step 并从实际输出时刻重新计时，因此短 rest 不会被一次补偿性 tick 吞掉。静音仍是 duty 归零，同频载波仍被复用。
-- `buzzer-debug` 是非默认开发 feature。它经 native USB JSONL 与 `devd` lease 向同一 real-time 时序任务提交生产 `BuzzerCueId` 或固定仲裁场景，返回最多八条会话决策 trace，并返回最多十六条 MCPWM timer2 输出 readback trace。每条输出 readback 同时保留逻辑请求频率、由 timer 寄存器 prescaler/period 推导的实际载波、duty 与 cue generation，因此可证明 cue 选择与 GPIO48 的实际 timer 配置一致。`ProtectionAlarm` 测试调用生产 `ProtectionAlarmCadence`，以相同的一秒节奏经 `BuzzerArbiter` 重放；`AttentionReminder` 保持其十秒节奏。feature build 使用普通固件的启动、GPIO48/PWM 输出和 real-time 时序任务，不含独立恢复播放或原始 PWM 控制。生产构建不声明此 capability，LAN 与产品 Web 控制面也没有此端点。
+- real-time 时序任务按 cue step deadline 唤醒并输出 GPIO48 duty；迟到时控制器只前进一个 step 并从实际输出时刻重新计时，因此短 rest 不会被一次补偿性 tick 吞掉。静音仍是 duty 归零，同频载波仍被复用。Timer2 使用固定 prescaler `3`，异频 step 先静音并停止 Timer2，再将计数器归零、应用匹配目标音高的 period、重启 Timer2，最后恢复目标 duty。
+- `buzzer-debug` 是非默认开发 feature。它经 native USB JSONL 与 `devd` lease 向同一 real-time 时序任务提交生产 `BuzzerCueId` 或固定仲裁场景，返回最多八条会话决策 trace，并返回最多十六条输出 trace。每条输出 trace 同时保留逻辑请求频率、由 Timer2 配置寄存器推导的载波、GPIO48 pad 经 PCNT 上升沿计数得到的观测频率、duty 与 cue generation。普通 Feedback Cue 连续模式在每轮生产音型结束后重新通过 `BuzzerArbiter` 提交；`ProtectionAlarm` 调用生产 `ProtectionAlarmCadence`，以相同的一秒节奏重放；`AttentionReminder` 保持其十秒节奏。feature build 使用普通固件的启动、GPIO48/PWM 输出和 real-time 时序任务，不含独立恢复播放或原始 PWM 控制。生产构建不初始化 PCNT 探针、不声明此 capability，LAN 与产品 Web 控制面也没有此端点。
 
 ## Coverage / rollout summary
 
 - 通过 host-side 仲裁单元测试、feature-gated USB/devd 协议测试、固件运行时测试和 PWM 载波回归测试验证；生产构建不新增 Control Plane API、持久化字段或设备配置。
-- 真机确认不在本主题的 host-side 验收范围内。若未来需要，必须由主人提供精确授权端口；不得以发现到的候选端口替代授权目标。
+- 授权设备上的 `active_cooling_on` 连续播放以 GPIO48 PCNT 闭环观测到对应 `900 / 1200 / 1550Hz` 的三段载波，并完成听感确认。
 
 ## Remaining Gaps
 
 - 无阻塞本主题交付的实现缺口。
-- 授权设备上的只读声音/诊断关联确认可作为后续硬件验证，但不替代或阻塞本主题的 host-side 合同验证。
 
 ## Related Changes
 

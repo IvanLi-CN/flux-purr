@@ -10863,6 +10863,19 @@ fn write_buzzer_session_status<W: Write>(status: &Value, output: &mut W) -> io::
                 .get("appliedFrequencyHz")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
+            let observed = event
+                .get("observedFrequencyHz")
+                .and_then(Value::as_u64)
+                .map(|value| format!("{value} Hz"))
+                .unwrap_or_else(|| "pending".to_string());
+            let observed_edges = event
+                .get("observedRisingEdges")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let observed_window_ms = event
+                .get("observedWindowMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let duty = event
                 .get("dutyPercent")
                 .and_then(Value::as_u64)
@@ -10877,7 +10890,7 @@ fn write_buzzer_session_status<W: Write>(status: &Value, output: &mut W) -> io::
                 .unwrap_or(0);
             writeln!(
                 output,
-                "    {elapsed:>4} ms  requested={requested:<10} carrier={applied:>4} Hz  duty={duty:>3}%  timer={prescaler}/{period}"
+                "    {elapsed:>4} ms  requested={requested:<10} timer={applied:>4} Hz  pad={observed:<10} ({observed_edges} edges/{observed_window_ms} ms)  duty={duty:>3}%  cfg={prescaler}/{period}"
             )?;
         }
     }
@@ -10885,11 +10898,10 @@ fn write_buzzer_session_status<W: Write>(status: &Value, output: &mut W) -> io::
 }
 
 fn buzzer_output_trace_summary(status: &Value) -> String {
-    let Some(last) = status
-        .get("outputTrace")
-        .and_then(Value::as_array)
-        .and_then(|trace| trace.last())
-    else {
+    let Some(trace) = status.get("outputTrace").and_then(Value::as_array) else {
+        return "MCPWM timer2 readback: unavailable on this firmware.".to_string();
+    };
+    let Some(last) = trace.last() else {
         return "MCPWM timer2 readback: unavailable on this firmware.".to_string();
     };
     let requested = last
@@ -10901,8 +10913,14 @@ fn buzzer_output_trace_summary(status: &Value) -> String {
         .get("appliedFrequencyHz")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let observed = trace
+        .iter()
+        .rev()
+        .find_map(|event| event.get("observedFrequencyHz").and_then(Value::as_u64))
+        .map(|value| format!("{value} Hz"))
+        .unwrap_or_else(|| "pending".to_string());
     let duty = last.get("dutyPercent").and_then(Value::as_u64).unwrap_or(0);
-    format!("MCPWM timer2: requested {requested}, carrier {applied} Hz, duty {duty}%")
+    format!("GPIO48: requested {requested}, timer {applied} Hz, pad {observed}, duty {duty}%")
 }
 
 fn buzzer_session_state(status: &Value) -> &str {
@@ -17325,6 +17343,7 @@ mod tests {
             "outputTrace": [{
                 "requestedFrequencyHz": 1680,
                 "appliedFrequencyHz": 1739,
+                "observedFrequencyHz": 1683,
                 "dutyPercent": 50,
             }],
         });
@@ -17332,7 +17351,8 @@ mod tests {
         let summary = super::buzzer_output_trace_summary(&status);
 
         assert!(summary.contains("requested 1680 Hz"));
-        assert!(summary.contains("carrier 1739 Hz"));
+        assert!(summary.contains("timer 1739 Hz"));
+        assert!(summary.contains("pad 1683 Hz"));
         assert!(summary.contains("duty 50%"));
     }
 

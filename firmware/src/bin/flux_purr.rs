@@ -67,6 +67,11 @@ use esp_hal::{
     timer::timg::TimerGroup,
     usb_serial_jtag::UsbSerialJtag,
 };
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+use esp_hal::{
+    gpio::Pin,
+    pcnt::{Pcnt, channel::EdgeMode, unit::Unit},
+};
 #[cfg(target_arch = "xtensa")]
 use esp_rtos::embassy::InterruptExecutor;
 #[cfg(target_arch = "xtensa")]
@@ -583,8 +588,11 @@ const FAN_PWM_PERIOD_TICKS: u16 = 99;
 const HEATER_PWM_PERIOD_TICKS: u16 = 1_599;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_WARMUP_SOFT_START_MS: u64 = 1_000;
+// Timer2 keeps one clock divider for its lifetime. Cue pitch is selected with
+// the period register because ESP32-S3 can report a new timer prescaler in
+// CFG0 while the GPIO matrix continues emitting the previous carrier.
 #[cfg(any(target_arch = "xtensa", test))]
-const BUZZER_PWM_PERIOD_TICKS: u16 = 999;
+const BUZZER_TIMER_PRESCALER: u8 = 3;
 #[cfg(any(target_arch = "xtensa", test))]
 const BUZZER_IDLE_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1767,6 +1775,7 @@ fn buzzer_timer_reconfiguration_needed(
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BuzzerHardwareAction {
+    StopTimer,
     Retune(u32),
     SetDutyPercent(u8),
 }
@@ -1775,13 +1784,14 @@ enum BuzzerHardwareAction {
 fn buzzer_hardware_actions(
     configured_frequency_hz: u32,
     next_state: BuzzerHardwareState,
-) -> heapless::Vec<BuzzerHardwareAction, 3> {
+) -> heapless::Vec<BuzzerHardwareAction, 4> {
     let mut actions = heapless::Vec::new();
     if buzzer_timer_reconfiguration_needed(configured_frequency_hz, next_state) {
         let frequency_hz = next_state
             .frequency_hz
             .expect("timer reconfiguration requires an audible buzzer frequency");
         let _ = actions.push(BuzzerHardwareAction::SetDutyPercent(0));
+        let _ = actions.push(BuzzerHardwareAction::StopTimer);
         let _ = actions.push(BuzzerHardwareAction::Retune(frequency_hz));
     }
     let _ = actions.push(BuzzerHardwareAction::SetDutyPercent(
@@ -1793,6 +1803,29 @@ fn buzzer_hardware_actions(
 #[cfg(any(test, all(target_arch = "xtensa", feature = "buzzer-debug")))]
 fn mcpwm_timer_frequency_hz(prescaler: u8, period_ticks: u16) -> u32 {
     MCPWM_PERIPHERAL_CLOCK_HZ / (u32::from(prescaler) + 1) / (u32::from(period_ticks) + 1)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn buzzer_timer_period_ticks(frequency_hz: u32) -> Option<u16> {
+    if frequency_hz == 0 {
+        return None;
+    }
+    let timer_clock_hz = MCPWM_PERIPHERAL_CLOCK_HZ / (u32::from(BUZZER_TIMER_PRESCALER) + 1);
+    let period_counts = timer_clock_hz
+        .saturating_add(frequency_hz / 2)
+        .checked_div(frequency_hz)?;
+    if period_counts == 0 || period_counts > u32::from(u16::MAX) + 1 {
+        return None;
+    }
+    Some((period_counts - 1) as u16)
+}
+
+#[cfg(any(test, all(target_arch = "xtensa", feature = "buzzer-debug")))]
+fn buzzer_observed_frequency_hz(rising_edges: u16, window_ms: u32) -> Option<u32> {
+    if window_ms == 0 {
+        return None;
+    }
+    Some(u32::from(rising_edges).saturating_mul(1_000) / window_ms)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -8098,14 +8131,15 @@ where
             BuzzerHardwareAction::SetDutyPercent(duty_percent) => {
                 let _ = buzzer_pwm.set_duty_cycle_percent(duty_percent);
             }
+            BuzzerHardwareAction::StopTimer => buzzer_timer.stop(),
             BuzzerHardwareAction::Retune(next_frequency_hz) => {
-                let timer_cfg = peripheral_clock
-                    .timer_clock_with_frequency(
-                        BUZZER_PWM_PERIOD_TICKS,
-                        PwmWorkingMode::Increase,
-                        Rate::from_hz(next_frequency_hz),
-                    )
-                    .expect("failed to derive buzzer PWM timer clock");
+                let period_ticks = buzzer_timer_period_ticks(next_frequency_hz)
+                    .expect("buzzer frequency is outside the Timer2 period range");
+                let timer_cfg = peripheral_clock.timer_clock_with_prescaler(
+                    period_ticks,
+                    PwmWorkingMode::Increase,
+                    BUZZER_TIMER_PRESCALER,
+                );
                 buzzer_timer.set_counter(0, CounterDirection::Increasing);
                 buzzer_timer.start(timer_cfg);
                 *configured_frequency_hz = next_frequency_hz;
@@ -8246,6 +8280,8 @@ fn publish_buzzer_debug_status(
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
 struct BuzzerDebugOutputTrace {
     started_at_ms: u64,
+    last_recorded_ms: u64,
+    last_pad_rising_edges: u16,
     events: heapless::Vec<
         flux_purr_firmware::buzzer::BuzzerDebugOutputTraceEvent,
         { flux_purr_firmware::buzzer::BUZZER_DEBUG_OUTPUT_TRACE_CAPACITY },
@@ -8257,21 +8293,38 @@ impl BuzzerDebugOutputTrace {
     const fn new() -> Self {
         Self {
             started_at_ms: 0,
+            last_recorded_ms: 0,
+            last_pad_rising_edges: 0,
             events: heapless::Vec::new(),
         }
     }
 
-    fn reset(&mut self, now_ms: u64) {
+    fn reset(&mut self, now_ms: u64, pad_rising_edges: u16) {
         self.started_at_ms = now_ms;
+        self.last_recorded_ms = now_ms;
+        self.last_pad_rising_edges = pad_rising_edges;
         self.events.clear();
     }
 
-    fn record(&mut self, now_ms: u64, output: BuzzerOutput) {
+    fn record(&mut self, now_ms: u64, output: BuzzerOutput, pad_rising_edges: u16) {
         // The buzzer task exclusively owns timer2 writes. This direct PAC
         // access reads CFG0 only, after `apply_buzzer_output` has completed.
         let cfg0 = unsafe { (&*esp_hal::peripherals::MCPWM0::PTR).timer(2).cfg0().read() };
         let timer_prescaler = cfg0.prescale().bits();
         let timer_period_ticks = cfg0.period().bits();
+        let observed_window_ms = now_ms
+            .saturating_sub(self.last_recorded_ms)
+            .min(u64::from(u32::MAX)) as u32;
+        let observed_rising_edges = pad_rising_edges.wrapping_sub(self.last_pad_rising_edges);
+        if let Some(previous) = self.events.last_mut() {
+            previous.observed_window_ms = observed_window_ms;
+            previous.observed_rising_edges = observed_rising_edges;
+            previous.observed_frequency_hz = (previous.duty_percent > 0)
+                .then(|| buzzer_observed_frequency_hz(observed_rising_edges, observed_window_ms))
+                .flatten();
+        }
+        self.last_recorded_ms = now_ms;
+        self.last_pad_rising_edges = pad_rising_edges;
         if self.events.len() == flux_purr_firmware::buzzer::BUZZER_DEBUG_OUTPUT_TRACE_CAPACITY {
             let _ = self.events.remove(0);
         }
@@ -8283,6 +8336,9 @@ impl BuzzerDebugOutputTrace {
                     .min(u64::from(u32::MAX)) as u32,
                 requested_frequency_hz: output.frequency_hz,
                 applied_frequency_hz: mcpwm_timer_frequency_hz(timer_prescaler, timer_period_ticks),
+                observed_frequency_hz: None,
+                observed_rising_edges: 0,
+                observed_window_ms: 0,
                 duty_percent: output.duty_percent.min(100),
                 generation: output.generation,
                 timer_prescaler,
@@ -8393,6 +8449,7 @@ async fn run_buzzer_task(
     mut buzzer_timer: esp_hal::mcpwm::timer::Timer<2, esp_hal::peripherals::MCPWM0<'static>>,
     mut buzzer_pwm: PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 2, true>,
     peripheral_clock: PeripheralClockConfig,
+    #[cfg(feature = "buzzer-debug")] buzzer_edge_counter: Unit<'static, 0>,
 ) -> ! {
     let mut arbiter = BuzzerArbiter::new();
     let mut applied = BuzzerHardwareState::default();
@@ -8416,7 +8473,9 @@ async fn run_buzzer_task(
             debug.record_deferred_start(now_ms, decision);
         }
         #[cfg(feature = "buzzer-debug")]
-        debug.settle_after_tick(&mut arbiter);
+        for decision in debug.settle_after_tick(&mut arbiter, now_ms) {
+            log_buzzer_decision(decision);
+        }
         let output = arbiter.output();
         let _output_changed = apply_buzzer_output(
             &mut buzzer_timer,
@@ -8428,7 +8487,7 @@ async fn run_buzzer_task(
         );
         #[cfg(feature = "buzzer-debug")]
         if _output_changed {
-            output_trace.record(now_ms, output);
+            output_trace.record(now_ms, output, buzzer_edge_counter.value() as u16);
         }
         #[cfg(feature = "buzzer-debug")]
         publish_buzzer_debug_status(&debug, &arbiter, &output_trace);
@@ -8482,7 +8541,7 @@ async fn run_buzzer_task(
                             ..
                         })
                     ) {
-                        output_trace.reset(now_ms);
+                        output_trace.reset(now_ms, buzzer_edge_counter.value() as u16);
                     }
                     apply_buzzer_command(
                         command,
@@ -13272,25 +13331,45 @@ async fn main(_spawner: Spawner) {
     let _ = heater_pwm.set_duty_cycle_percent(0);
 
     mcpwm.operator2.set_timer(&mcpwm.timer2);
+    #[cfg(feature = "buzzer-debug")]
+    let mut buzzer_pin = peripherals.GPIO48.degrade();
+    #[cfg(not(feature = "buzzer-debug"))]
+    let buzzer_pin = peripherals.GPIO48;
+    #[cfg(feature = "buzzer-debug")]
+    let buzzer_edge_counter = {
+        let pcnt = Pcnt::new(peripherals.PCNT);
+        let unit = pcnt.unit0;
+        unit.channel0.set_edge_signal(buzzer_pin.reborrow());
+        unit.channel0
+            .set_input_mode(EdgeMode::Hold, EdgeMode::Increment);
+        unit.clear();
+        unit.resume();
+        unit
+    };
     let mut buzzer_pwm = mcpwm.operator2.with_pin_a(
-        peripherals.GPIO48,
+        buzzer_pin,
         PwmPinConfig::new(PwmActions::UP_ACTIVE_HIGH, PwmUpdateMethod::SYNC_IMMEDIATLY),
     );
-    let buzzer_timer_cfg = pwm_clock_cfg
-        .timer_clock_with_frequency(
-            BUZZER_PWM_PERIOD_TICKS,
-            PwmWorkingMode::Increase,
-            Rate::from_hz(BUZZER_IDLE_FREQUENCY_HZ),
-        )
-        .expect("failed to derive buzzer PWM timer clock");
+    let buzzer_timer_cfg = pwm_clock_cfg.timer_clock_with_prescaler(
+        buzzer_timer_period_ticks(BUZZER_IDLE_FREQUENCY_HZ)
+            .expect("idle buzzer frequency is outside the Timer2 period range"),
+        PwmWorkingMode::Increase,
+        BUZZER_TIMER_PRESCALER,
+    );
     mcpwm.timer2.start(buzzer_timer_cfg);
     let _ = buzzer_pwm.set_duty_cycle_percent(0);
     info!(
-        "buzzer runtime armed: gpio48 default=silent period_ticks={=u16}",
-        BUZZER_PWM_PERIOD_TICKS,
+        "buzzer runtime armed: gpio48 default=silent fixed_prescaler={=u8}",
+        BUZZER_TIMER_PRESCALER,
     );
     buzzer_realtime_spawner
-        .spawn(run_buzzer_task(mcpwm.timer2, buzzer_pwm, pwm_clock_cfg))
+        .spawn(run_buzzer_task(
+            mcpwm.timer2,
+            buzzer_pwm,
+            pwm_clock_cfg,
+            #[cfg(feature = "buzzer-debug")]
+            buzzer_edge_counter,
+        ))
         .expect("failed to spawn realtime buzzer task");
     let mut last_pd_observation = initial_pd_observation;
     if let Some(PdStatusObservation {
@@ -14975,16 +15054,42 @@ mod tests {
 
     #[test]
     fn buzzer_timer_readback_distinguishes_the_heater_on_tone_steps() {
-        assert_eq!(mcpwm_timer_frequency_hz(31, BUZZER_PWM_PERIOD_TICKS), 1_250);
-        assert_eq!(mcpwm_timer_frequency_hz(22, BUZZER_PWM_PERIOD_TICKS), 1_739);
+        let low_period = buzzer_timer_period_ticks(1_240).unwrap();
+        let high_period = buzzer_timer_period_ticks(1_680).unwrap();
+
+        assert_ne!(low_period, high_period);
         assert_ne!(
-            mcpwm_timer_frequency_hz(31, BUZZER_PWM_PERIOD_TICKS),
-            mcpwm_timer_frequency_hz(22, BUZZER_PWM_PERIOD_TICKS)
+            mcpwm_timer_frequency_hz(BUZZER_TIMER_PRESCALER, low_period),
+            mcpwm_timer_frequency_hz(BUZZER_TIMER_PRESCALER, high_period)
         );
     }
 
     #[test]
-    fn active_cooling_tone_steps_quiet_gpio48_before_each_retune() {
+    fn buzzer_timer_keeps_one_prescaler_and_represents_every_production_frequency() {
+        for frequency_hz in [
+            320, 360, 420, 480, 900, 1_080, 1_200, 1_240, 1_550, 1_650, 1_680, 2_200, 2_300,
+        ] {
+            let period_ticks = buzzer_timer_period_ticks(frequency_hz)
+                .expect("every production cue frequency must fit Timer2");
+            let applied_frequency_hz =
+                mcpwm_timer_frequency_hz(BUZZER_TIMER_PRESCALER, period_ticks);
+            assert!(
+                applied_frequency_hz.abs_diff(frequency_hz) <= 1,
+                "requested {frequency_hz} Hz, got {applied_frequency_hz} Hz"
+            );
+        }
+    }
+
+    #[test]
+    fn buzzer_pad_edge_observation_distinguishes_active_cooling_tones() {
+        assert_eq!(buzzer_observed_frequency_hz(41, 45), Some(911));
+        assert_eq!(buzzer_observed_frequency_hz(54, 45), Some(1_200));
+        assert_eq!(buzzer_observed_frequency_hz(112, 70), Some(1_600));
+        assert_eq!(buzzer_observed_frequency_hz(0, 0), None);
+    }
+
+    #[test]
+    fn active_cooling_tone_steps_quiet_and_stop_timer_before_each_retune() {
         let mut buzzer = BuzzerArbiter::new();
         let mut configured_frequency_hz = BUZZER_IDLE_FREQUENCY_HZ;
         let hardware_state = |output: BuzzerOutput| BuzzerHardwareState {
@@ -15000,6 +15105,7 @@ mod tests {
             buzzer_hardware_actions(configured_frequency_hz, first_tone).as_slice(),
             [
                 BuzzerHardwareAction::SetDutyPercent(0),
+                BuzzerHardwareAction::StopTimer,
                 BuzzerHardwareAction::Retune(900),
                 BuzzerHardwareAction::SetDutyPercent(50),
             ]
@@ -15017,6 +15123,7 @@ mod tests {
             buzzer_hardware_actions(configured_frequency_hz, second_tone).as_slice(),
             [
                 BuzzerHardwareAction::SetDutyPercent(0),
+                BuzzerHardwareAction::StopTimer,
                 BuzzerHardwareAction::Retune(1_200),
                 BuzzerHardwareAction::SetDutyPercent(50),
             ]
@@ -15034,6 +15141,7 @@ mod tests {
             buzzer_hardware_actions(configured_frequency_hz, third_tone).as_slice(),
             [
                 BuzzerHardwareAction::SetDutyPercent(0),
+                BuzzerHardwareAction::StopTimer,
                 BuzzerHardwareAction::Retune(1_550),
                 BuzzerHardwareAction::SetDutyPercent(50),
             ]
