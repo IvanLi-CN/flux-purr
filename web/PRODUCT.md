@@ -49,7 +49,7 @@ The Web App combines transport-aware device control, thermal safety feedback, ca
 - Runnable React implementation: `src/features/control-plane-demo/components/control-plane-demo.tsx`.
 - Visual tokens and component states: `src/index.css`.
 - Stable component scenarios: `src/stories/ControlPlaneDemo.stories.tsx`.
-- Runtime and acceptance contract: `../docs/specs/hhwq8-web-control-plane-demo/` and `../docs/specs/m8r4q-real-control-plane-runtime/`.
+- Runtime and acceptance contract: `../docs/specs/web-control-plane-demo/` and `../docs/specs/real-control-plane-runtime/`.
 - Existing mock, devd, and Web Serial scenarios are available in `src/features/control-plane-demo/`.
 - No testimonials, customer claims, fleet-management claims, or marketing proof should be fabricated.
 

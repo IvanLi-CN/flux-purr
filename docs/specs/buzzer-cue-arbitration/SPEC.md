@@ -128,5 +128,5 @@
 
 - `./IMPLEMENTATION.md`
 - `./HISTORY.md`
-- [`../q2aw6-heater-pid-frontpanel-runtime/SPEC.md`](../q2aw6-heater-pid-frontpanel-runtime/SPEC.md)
-- [`../fk3u7-frontpanel-input-interaction/SPEC.md`](../fk3u7-frontpanel-input-interaction/SPEC.md)
+- [`../heater-pid-frontpanel-runtime/SPEC.md`](../heater-pid-frontpanel-runtime/SPEC.md)
+- [`../frontpanel-input-interaction/SPEC.md`](../frontpanel-input-interaction/SPEC.md)

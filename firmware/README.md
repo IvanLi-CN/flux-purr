@@ -119,7 +119,7 @@
   - optional `pd-request-12v` / `pd-request-28v` features switch the boot request to `12 V` / `28 V`
   - the app runtime reads CH224Q `0x60~0x8F` power data after the boot request; fixed `20 V` PDO alone is not enough to enable PPS heating
   - later PD status changes are observed and logged only; they do not latch heater output, but failed adjustable-voltage writes demote heater control to the fixed-PD PWM fallback
-- Historical `fan-cycle` smoke-test behavior remains documented in `#8tesd`; it is no longer the active runtime contract for the default `flux-purr` artifact.
+- Historical `fan-cycle` smoke-test behavior remains documented in `s3-fan-cycle-bringup`; it is no longer the active runtime contract for the default `flux-purr` artifact.
 
 ## CH224Q PD request bring-up
 
@@ -152,14 +152,14 @@
 ## Host preview workflow
 
 - Render a front-panel runtime framebuffer:
-  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard.framebuffer.bin`
+  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard docs/specs/heater-pid-frontpanel-runtime/assets/dashboard.framebuffer.bin`
 - The preview tool writes two framebuffer artifacts:
   - logical preview framebuffer: `<preset>.framebuffer.bin` (`RGB565 LE`, `160x50`) for owner-facing PNG generation
   - panel-order companion: `<preset>.panel.framebuffer.bin` (`RGB565 BE`, `50x160`) after applying the same GC9D01 orientation transform used on-device
 - Convert the logical preview framebuffer to PNG:
-  - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard.framebuffer.bin --out docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard.png`
+  - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in docs/specs/heater-pid-frontpanel-runtime/assets/dashboard.framebuffer.bin --out docs/specs/heater-pid-frontpanel-runtime/assets/dashboard.png`
 - Preview assets land under:
-  - `docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/`
+  - `docs/specs/heater-pid-frontpanel-runtime/assets/`
 
 ## MCU agentd diagnostic flow
 

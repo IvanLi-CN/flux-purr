@@ -1,67 +1,28 @@
 # 规格（Spec）总览
 
-本目录用于管理工作项的**规格与追踪**：记录范围、验收标准、任务清单与状态，作为交付依据；实现与验证应以对应 `SPEC.md` 为准。
+本目录保存按主题组织的长期规格。每个主题使用稳定的 kebab-case slug，并包含 `SPEC.md`、`IMPLEMENTATION.md` 和 `HISTORY.md`；实现覆盖与局部演进分别收敛到 companion 文档。
 
-> Legacy compatibility: historical repos may still contain `docs/plan/**/PLAN.md`. New entries must be created under `docs/specs/**/SPEC.md`.
-
-New slug-only topics use `-` in the legacy `ID` column below; their directory slug is the stable identity.
-
-## 快速新增一个规格
-
-1. 生成一个新的规格 `ID`（推荐 5 个字符的 nanoId 风格，降低并行建规格时的冲突概率）。
-2. 新建目录：`docs/specs/<id>-<title>/`（`<title>` 用简短 slug，建议 kebab-case）。
-3. 在该目录下创建 `SPEC.md`（模板见下方“SPEC.md 写法（简要）”）。
-4. 在下方 Index 表新增一行，并把 `Status` 设为 `待设计` 或 `待实现`（取决于是否已冻结验收标准），并填入 `Last`（通常为当天）。
+旧版 ID 仅在对应主题的 `HISTORY.md` 中作为迁移兼容信息保留，不再作为目录、索引或当前引用的一部分。
 
 ## 目录与命名规则
 
-- 每个规格一个目录：`docs/specs/<id>-<title>/`
-- `<id>`：推荐 5 个字符的 nanoId 风格，一经分配不要变更。
-  - 推荐字符集（小写 + 避免易混淆字符）：`23456789abcdefghjkmnpqrstuvwxyz`
-  - 正则：`[23456789abcdefghjkmnpqrstuvwxyz]{5}`
-  - 兼容：若仓库历史已使用四位数字 `0001`-`9999`，允许继续共存。
-- `<title>`：短标题 slug（建议 kebab-case，避免空格与特殊字符）；目录名尽量稳定。
-- 人类可读标题写在 Index 的 `Title` 列；标题变更优先改 `Title`，不强制改目录名。
+- 每个主题一个目录：`docs/specs/<topic>/`。
+- `<topic>` 使用小写 kebab-case，并作为主题的稳定身份。
+- `SPEC.md` 描述背景、范围、需求、行为、契约、验收、风险和参考资料。
+- `IMPLEMENTATION.md` 描述当前实现覆盖、验证和剩余缺口。
+- `HISTORY.md` 描述主题生命周期、历史身份、决策和局部替代边界。
 
-## 状态（Status）说明
+## Lifecycle
 
-仅允许使用以下状态值：
+- `active`：当前仍是维护中的主题合同。
+- `archived`：主题作为已完成的历史基线保留，不再驱动新的实现工作。
+- `superseded`：仅用于整个主题被另一个主题完全取代；局部替代写在 `HISTORY.md`，不在 catalog 中伪造 successor。
 
-- `待设计`：范围/约束/验收标准尚未冻结，仍在补齐信息与决策。
-- `待实现`：规格已冻结，可开工；实现与测试验证应以该规格为准。
-- `跳过`：计划已冻结或部分完成，但**当前明确不应自动开工**（例如需要特定时机/外部条件/等待依赖）；自动挑选“下一个规格”时应跳过它。需要实现时再把状态改回 `待实现`（或由主人显式点名实现该规格）。
-- `部分完成（x/y）`：实现进行中；`y` 为该规格里定义的“实现里程碑”数，`x` 为已完成“实现里程碑”数（见该规格 `SPEC.md` 的 Milestones；不要把计划阶段产出算进里程碑）。
-- `已完成`：该规格已完成（实现已落地或将随某个 PR 落地）；如需关联 PR 号，写在 Index 的 `Notes`（例如 `PR #123`）。
-- `作废`：不再推进（取消/价值不足/外部条件变化）。
-- `重新设计（#<id>）`：该规格被另一个规格取代；`#<id>` 指向新的规格编号。
+## Index
 
-## `Last` 字段约定（推进时间）
+<!-- Legacy ID index retained only for historical reference; the canonical index uses stable topic slugs.
 
-- `Last` 表示该规格**上一次“推进进度/口径”**的日期，用于快速发现长期未推进的规格。
-- 仅在以下情况更新 `Last`（不要因为改措辞/排版就更新）：
-  - `Status` 变化（例如 `待设计` -> `待实现`，或 `部分完成（x/y）` -> `已完成`）
-  - `Notes` 中写入/更新 PR 号（例如 `PR #123`）
-  - `SPEC.md` 的里程碑勾选变化
-  - 范围/验收标准冻结或发生实质变更
-
-## SPEC.md 写法（简要）
-
-每个规格的 `SPEC.md` 至少应包含：
-
-- 背景/问题陈述（为什么要做）
-- 目标 / 非目标（做什么、不做什么）
-- 范围（in/out）
-- 需求列表（MUST/SHOULD/COULD）
-- 功能与行为规格（Functional/Behavior Spec：核心流程/关键边界/错误反馈）
-- 验收标准（Given/When/Then + 边界/异常）
-- 实现前置条件（Definition of Ready / Preconditions；未满足则保持 `待设计`）
-- 非功能性验收/质量门槛（测试策略、质量检查、Storybook/视觉回归等按仓库已有约定）
-- 文档更新（需要同步更新的项目设计文档/架构说明/README/ADR）
-- 实现里程碑（Milestones，用于驱动 `部分完成（x/y）`；只写实现交付物，不要包含计划阶段产出）
-- 风险与开放问题（需要决策的点）
-- 假设（需主人确认）
-
-## Index（固定表格）
+## Legacy Index
 
 | ID   | Title | Status | Spec | Last | Notes |
 |-----:|-------|--------|------|------|-------|
@@ -88,3 +49,31 @@ New slug-only topics use `-` in the legacy `ID` column below; their directory sl
 | - | Flux Purr 单一产品版本源 | 已实现 | `version-source/SPEC.md` | 2026-08-29 | Root `VERSION`, PR-local preparation, one-product-merge/one-release sequencing, and the release-completion gate |
 | - | Flux Purr 蜂鸣器单输出 Cue 仲裁 | 已完成 | `buzzer-cue-arbitration/SPEC.md` | 2026-09-02 | Single-output priority, safety suppression, coalesced feedback, host-side verification, and feature-gated native USB/devd diagnostics; [ADR 0006](../adr/0006-single-output-buzzer-cue-arbitration.md) |
 | - | Firmware update and developer flash | 已完成 | `firmware-update-and-developer-flash/SPEC.md` | - | Explicit-port update, direct local ELF flash/recover, local CBOR control, and EEPROM-only persistence boundary |
+-->
+
+## Index
+| Topic | Lifecycle | Implementation | Spec | Successor | Notes |
+| --- | --- | --- | --- | --- | --- |
+| adc-calibration-control-plane | active | `adc-calibration-control-plane/IMPLEMENTATION.md` | `adc-calibration-control-plane/SPEC.md` | - | RTD/VIN calibration state, slots, and thermal-plant calibration contract |
+| buzzer-cue-arbitration | active | `buzzer-cue-arbitration/IMPLEMENTATION.md` | `buzzer-cue-arbitration/SPEC.md` | - | Single-output priority, safety suppression, and diagnostic cues |
+| dual-fan-pcb-variants | active | `dual-fan-pcb-variants/IMPLEMENTATION.md` | `dual-fan-pcb-variants/SPEC.md` | - | 5 V and 12 V board variants with a voltage-agnostic firmware contract |
+| eeprom-memory-config | active | `eeprom-memory-config/IMPLEMENTATION.md` | `eeprom-memory-config/SPEC.md` | - | M24C64 EEPROM-only persistence; MCU-internal configuration fallback and migration are unsupported |
+| enclosure-5p6cm-models | active | `enclosure-5p6cm-models/IMPLEMENTATION.md` | `enclosure-5p6cm-models/SPEC.md` | - | Tracked 5.6 cm enclosure model baseline |
+| flux-purr-init | archived | `flux-purr-init/IMPLEMENTATION.md` | `flux-purr-init/SPEC.md` | - | Repository bootstrap and initial toolchain decisions are historical |
+| frontpanel-input-interaction | active | `frontpanel-input-interaction/IMPLEMENTATION.md` | `frontpanel-input-interaction/SPEC.md` | - | Five-way input, gestures, Key Test, and navigation truth source |
+| frontpanel-ui-contract | active | `frontpanel-ui-contract/IMPLEMENTATION.md` | `frontpanel-ui-contract/SPEC.md` | - | 160x50 visual tokens, layout, and display-state baseline |
+| fusb302b-dual-pd-sink | active | `fusb302b-dual-pd-sink/IMPLEMENTATION.md` | `fusb302b-dual-pd-sink/SPEC.md` | - | Dual FUSB302B PD sink and PPS/fixed-PDO contract |
+| heater-7p0-3p2-variant | active | `heater-7p0-3p2-variant/IMPLEMENTATION.md` | `heater-7p0-3p2-variant/SPEC.md` | - | 7.0 cm, 3.2 ohm heater hardware variant |
+| heater-pid-frontpanel-runtime | active | `heater-pid-frontpanel-runtime/IMPLEMENTATION.md` | `heater-pid-frontpanel-runtime/SPEC.md` | - | Heater PID, fan policy, protection, and dashboard runtime truth source |
+| mini-hotplate-doc-baseline | archived | `mini-hotplate-doc-baseline/IMPLEMENTATION.md` | `mini-hotplate-doc-baseline/SPEC.md` | - | Source-collection and evidence baseline is complete |
+| pr-label-release-protection | active | `pr-label-release-protection/IMPLEMENTATION.md` | `pr-label-release-protection/SPEC.md` | - | Label-driven release intent and branch protection policy |
+| real-control-plane-runtime | active | `real-control-plane-runtime/IMPLEMENTATION.md` | `real-control-plane-runtime/SPEC.md` | - | Web, firmware, and native devd real transport contract |
+| release-failure-telegram-alerts | active | `release-failure-telegram-alerts/IMPLEMENTATION.md` | `release-failure-telegram-alerts/SPEC.md` | - | Release failure notification workflow and recovery context |
+| s3-ch224q-frontpanel-baseline | active | `s3-ch224q-frontpanel-baseline/IMPLEMENTATION.md` | `s3-ch224q-frontpanel-baseline/SPEC.md` | - | ESP32-S3 direct-panel and CH224Q hardware baseline |
+| s3-fan-cycle-bringup | archived | `s3-fan-cycle-bringup/IMPLEMENTATION.md` | `s3-fan-cycle-bringup/SPEC.md` | - | Historical four-phase fan bring-up state machine |
+| s3-gc9d01-display-bringup | active | `s3-gc9d01-display-bringup/IMPLEMENTATION.md` | `s3-gc9d01-display-bringup/SPEC.md` | - | GC9D01 async display driver and host-preview baseline |
+| version-source | active | `version-source/IMPLEMENTATION.md` | `version-source/SPEC.md` | - | Single product version source and release sequencing |
+| web-control-plane-demo | active | `web-control-plane-demo/IMPLEMENTATION.md` | `web-control-plane-demo/SPEC.md` | - | Mock-first thermal bench Web console |
+| web-firmware-install-recovery | active | `web-firmware-install-recovery/IMPLEMENTATION.md` | `web-firmware-install-recovery/SPEC.md` | - | Unified devd and Browser Web Serial firmware workbench |
+| worktree-bootstrap | active | `worktree-bootstrap/IMPLEMENTATION.md` | `worktree-bootstrap/SPEC.md` | - | Linked worktree bootstrap and shared Git hooks |
+| firmware-update-and-developer-flash | active | `firmware-update-and-developer-flash/IMPLEMENTATION.md` | `firmware-update-and-developer-flash/SPEC.md` | - | Explicit-port update, direct local ELF flash/recover, local CBOR control, and EEPROM-only persistence boundary |
