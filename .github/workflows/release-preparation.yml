@@ -118,50 +118,70 @@ jobs:
           fi
           python3 .github/scripts/release_preparation.py "${args[@]}"
 
-      - name: Sign prepared VERSION commit
+      - name: Create GitHub-signed VERSION commit on the pull request
+        id: create_version
         if: steps.prepare.outputs.prepared == 'created'
         env:
-          RELEASE_GPG_PRIVATE_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
-          RELEASE_GPG_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "${RELEASE_GPG_PRIVATE_KEY}"
-          export GNUPGHOME="${RUNNER_TEMP}/release-gpg"
-          mkdir -p "${GNUPGHOME}"
-          chmod 700 "${GNUPGHOME}"
-          printf '%s' "${RELEASE_GPG_PRIVATE_KEY}" | gpg --batch --import
-          signing_key="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')"
-          signing_uid="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "uid" { print $10; exit }')"
-          signing_email="$(printf '%s' "${signing_uid}" | sed -n 's/.*<\([^>]*\)>.*/\1/p')"
-          signing_name="$(printf '%s' "${signing_uid}" | sed 's/ <.*//')"
-          test -n "${signing_key}"
-          test -n "${signing_email}"
-          test -n "${signing_name}"
-          gpg_wrapper="${RUNNER_TEMP}/release-gpg-wrapper"
-          cat > "${gpg_wrapper}" <<'EOF'
-          #!/usr/bin/env bash
-          exec gpg --batch --yes --pinentry-mode loopback --passphrase "${RELEASE_GPG_PASSPHRASE}" "$@"
-          EOF
-          chmod 700 "${gpg_wrapper}"
-          source_root="${RUNNER_TEMP}/release-source"
-          git -C "${source_root}" config user.name "${signing_name}"
-          git -C "${source_root}" config user.email "${signing_email}"
-          git -C "${source_root}" config user.signingkey "${signing_key}"
-          git -C "${source_root}" config gpg.program "${gpg_wrapper}"
-          git -C "${source_root}" commit --amend --no-edit -S --reset-author
-          git -C "${source_root}" verify-commit HEAD
-
-      - name: Push prepared VERSION commit to the existing pull request
-        if: steps.prepare.outputs.prepared == 'created'
-        env:
+          RELEASE_SHA: ${{ steps.prepare.outputs.release_sha }}
           SOURCE_SHA: ${{ steps.pr.outputs.source_sha }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         shell: bash
         run: |
           set -euo pipefail
+          source_root="${RUNNER_TEMP}/release-source"
           test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${SOURCE_SHA}"
-          prepared_sha="$(git -C "${RUNNER_TEMP}/release-source" rev-parse HEAD)"
-          test "$(git -C "${RUNNER_TEMP}/release-source" show -s --format=%P "${prepared_sha}")" = "${SOURCE_SHA}"
-          git -C "${RUNNER_TEMP}/release-source" push origin "${prepared_sha}:refs/heads/${HEAD_REF}"
-          test "$(gh api "repos/${GITHUB_REPOSITORY}/commits/${prepared_sha}" --jq '.commit.verification.verified')" = true
+          payload_path="${RUNNER_TEMP}/create-version-commit.json"
+          response_path="${RUNNER_TEMP}/create-version-commit-response.json"
+          version_content="$(base64 < "${source_root}/VERSION" | tr -d '\n')"
+          commit_headline="$(git -C "${source_root}" show -s --format=%s "${RELEASE_SHA}")"
+          commit_body="$(git -C "${source_root}" show -s --format=%b "${RELEASE_SHA}")"
+          jq -n \
+            --arg repo "${GITHUB_REPOSITORY}" \
+            --arg branch "${HEAD_REF}" \
+            --arg expected_head_oid "${SOURCE_SHA}" \
+            --arg headline "${commit_headline}" \
+            --arg body "${commit_body}" \
+            --arg contents "${version_content}" \
+            '{
+              query: "mutation CreateVersionCommit($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+              variables: {
+                input: {
+                  branch: { repositoryNameWithOwner: $repo, branchName: $branch },
+                  expectedHeadOid: $expected_head_oid,
+                  message: { headline: $headline, body: $body },
+                  fileChanges: { additions: [{ path: "VERSION", contents: $contents }] }
+                }
+              }
+            }' > "${payload_path}"
+          gh api graphql --input "${payload_path}" > "${response_path}"
+          test "$(jq -r '(.errors // []) | length' "${response_path}")" = 0
+          prepared_sha="$(jq -r '.data.createCommitOnBranch.commit.oid // empty' "${response_path}")"
+          test -n "${prepared_sha}"
+          test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${prepared_sha}"
+
+          echo "prepared_sha=${prepared_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify prepared VERSION commit and GitHub signature
+        if: steps.prepare.outputs.prepared == 'created' || steps.prepare.outputs.prepared == 'existing'
+        env:
+          PREPARED_SHA: ${{ steps.create_version.outputs.prepared_sha || steps.prepare.outputs.release_sha }}
+          SOURCE_SHA: ${{ steps.prepare.outputs.source_sha }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${PREPARED_SHA}"
+          test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${PREPARED_SHA}"
+          git fetch --no-tags origin "${PREPARED_SHA}"
+          python3 .github/scripts/release_chain.py verify-prepared \
+            --commit "${PREPARED_SHA}" \
+            --source-sha "${SOURCE_SHA}"
+          verified=false
+          for _ in $(seq 1 30); do
+            verified="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PREPARED_SHA}" --jq '.commit.verification.verified')"
+            if [ "${verified}" = true ]; then
+              break
+            fi
+            sleep 2
+          done
+          test "${verified}" = true
