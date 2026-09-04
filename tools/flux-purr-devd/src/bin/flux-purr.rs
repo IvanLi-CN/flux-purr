@@ -11228,6 +11228,7 @@ fn parse_thermal_targets(
     parse_thermal_targets_impl(value, false)
 }
 
+#[cfg(test)]
 fn parse_thermal_targets_preserve_order(
     value: Option<&str>,
 ) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
