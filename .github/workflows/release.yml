@@ -267,7 +267,7 @@ jobs:
           rm -rf web-dist
           mkdir web-dist
           tar -xzf "${archive}" -C web-dist
-          npx --yes edgeone@1.6.18 makers deploy web-dist -n "${EDGEONE_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"
+          bunx edgeone@1.6.18 makers deploy web-dist -n "${EDGEONE_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"
           printf '%s\n' "${{ steps.release.outputs.source_sha }}" > .edgeone-deployed
           gh release upload "${{ steps.release.outputs.tag }}" .edgeone-deployed --clobber
 
@@ -291,6 +291,6 @@ jobs:
           rm -rf web-demo-dist
           mkdir web-demo-dist
           tar -xzf "${archive}" -C web-demo-dist
-          npx --yes edgeone@1.6.18 makers deploy web-demo-dist -n "${EDGEONE_DEMO_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"
+          bunx edgeone@1.6.18 makers deploy web-demo-dist -n "${EDGEONE_DEMO_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"
           printf '%s\n' "${{ steps.release.outputs.source_sha }}" > .edgeone-demo-deployed
           gh release upload "${{ steps.release.outputs.tag }}" .edgeone-demo-deployed --clobber

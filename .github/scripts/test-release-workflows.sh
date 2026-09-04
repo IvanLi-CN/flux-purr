@@ -68,6 +68,17 @@ assert "operation=recover" not in release
 assert "release_snapshot.py" not in release
 assert "flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" in release
 assert "Deploy published public demo archive to EdgeOne" in release
+assert release.count("bunx edgeone@1.6.18 makers deploy") == 2
+assert "npx --yes edgeone@1.6.18 makers deploy" not in release
+assert release.index("Setup Bun") < release.index("Deploy published Web archive to EdgeOne")
+assert 'archive="release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz"' in release
+assert 'bunx edgeone@1.6.18 makers deploy web-dist -n "${EDGEONE_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"' in release
+assert 'printf \'%s\\n\' "${{ steps.release.outputs.source_sha }}" > .edgeone-deployed' in release
+assert 'gh release upload "${{ steps.release.outputs.tag }}" .edgeone-deployed --clobber' in release
+assert 'archive="release-assets/flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz"' in release
+assert 'bunx edgeone@1.6.18 makers deploy web-demo-dist -n "${EDGEONE_DEMO_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"' in release
+assert 'printf \'%s\\n\' "${{ steps.release.outputs.source_sha }}" > .edgeone-demo-deployed' in release
+assert 'gh release upload "${{ steps.release.outputs.tag }}" .edgeone-demo-deployed --clobber' in release
 assert "web-production-bundle" not in ci_main
 assert "web-demo-bundle" not in ci_main
 assert not (root / ".github/workflows/deploy-edgeone.yml").exists()
