@@ -870,6 +870,15 @@ impl BuzzerDebugSession {
         cue: BuzzerCueId,
         now_ms: u64,
     ) -> BuzzerDecision {
+        if self.state != BuzzerDebugSessionState::Running {
+            self.state = BuzzerDebugSessionState::Idle;
+            self.scenario = None;
+            self.playback = None;
+            self.started_at_ms = now_ms;
+            self.next_action = 0;
+            self.protection_cadence.clear();
+            self.trace.clear();
+        }
         let decision = arbiter.request_feedback(BuzzerCueSource::DeveloperDebug, cue, now_ms);
         self.record(now_ms, decision);
         decision
@@ -1326,6 +1335,21 @@ mod tests {
                 BuzzerDecisionDisposition::Started,
             )
         );
+    }
+
+    #[cfg(feature = "buzzer-debug")]
+    #[test]
+    fn debug_one_shot_feedback_starts_a_fresh_decision_trace() {
+        let mut arbiter = BuzzerArbiter::new();
+        let mut session = BuzzerDebugSession::new();
+
+        let decision = session.trigger_feedback(&mut arbiter, BuzzerCueId::UiInput, 29_138);
+        let status = session.status(arbiter.active_cue());
+
+        assert_eq!(status.state, BuzzerDebugSessionState::Idle);
+        assert_eq!(status.trace.len(), 1);
+        assert_eq!(status.trace[0].elapsed_ms, 0);
+        assert_eq!(status.trace[0].decision, decision);
     }
 
     #[cfg(feature = "buzzer-debug")]
