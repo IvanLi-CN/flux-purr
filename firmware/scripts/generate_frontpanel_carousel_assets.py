@@ -7,9 +7,7 @@ from PIL import Image
 
 DISPLAY_SIZE = (160, 50)
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CANONICAL_SOURCE_DIR = REPO_ROOT / 'docs/specs/frontpanel-ui-contract/assets'
-LEGACY_SOURCE_DIR = REPO_ROOT / 'docs/specs/223uj-frontpanel-ui-contract/assets'
-SOURCE_DIR = CANONICAL_SOURCE_DIR if CANONICAL_SOURCE_DIR.is_dir() else LEGACY_SOURCE_DIR
+SOURCE_DIR = REPO_ROOT / 'docs/specs/frontpanel-ui-contract/assets'
 OUTPUT_DIR = REPO_ROOT / 'firmware/assets/frontpanel-carousel'
 
 @dataclass(frozen=True)
