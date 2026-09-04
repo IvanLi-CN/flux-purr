@@ -16,11 +16,22 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn select_asset_root(repo_root: &Path, canonical: &str, legacy: &str) -> PathBuf {
+    let canonical_root = repo_root.join(canonical);
+    if canonical_root.is_dir() {
+        canonical_root
+    } else {
+        repo_root.join(legacy)
+    }
+}
+
 fn default_output_path(scene: SceneId) -> PathBuf {
-    repo_root().join(format!(
-        "docs/specs/vmekj-s3-gc9d01-display-bringup/assets/{}.framebuffer.bin",
-        scene.slug()
-    ))
+    select_asset_root(
+        &repo_root(),
+        "docs/specs/s3-gc9d01-display-bringup/assets",
+        "docs/specs/vmekj-s3-gc9d01-display-bringup/assets",
+    )
+    .join(format!("{}.framebuffer.bin", scene.slug()))
 }
 
 fn panel_output_path(logical_output_path: &Path) -> PathBuf {
@@ -106,6 +117,32 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asset_root_prefers_canonical_directory() {
+        let root =
+            std::env::temp_dir().join(format!("flux-purr-display-preview-{}", std::process::id()));
+        let canonical = root.join("canonical");
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(&canonical).expect("canonical test directory should be created");
+        std::fs::create_dir_all(&legacy).expect("legacy test directory should be created");
+
+        assert_eq!(select_asset_root(&root, "canonical", "legacy"), canonical);
+        std::fs::remove_dir_all(root).expect("temporary test directory should be removed");
+    }
+
+    #[test]
+    fn asset_root_falls_back_to_legacy_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "flux-purr-display-preview-{}-legacy",
+            std::process::id()
+        ));
+        let legacy = root.join("legacy");
+        std::fs::create_dir_all(&legacy).expect("legacy test directory should be created");
+
+        assert_eq!(select_asset_root(&root, "canonical", "legacy"), legacy);
+        std::fs::remove_dir_all(root).expect("temporary test directory should be removed");
+    }
 
     #[test]
     fn panel_output_path_tracks_the_requested_filename() {
