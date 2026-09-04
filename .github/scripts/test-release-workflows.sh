@@ -26,12 +26,23 @@ assert "git diff --quiet" in ci_main
 assert "Prepare product version" in prepare
 assert "workflows: [CI PR, Label Gate]" in prepare
 assert "contents: write" in prepare
-assert "Push prepared VERSION commit to the existing pull request" in prepare
-assert "Sign prepared VERSION commit" in prepare
-assert "RELEASE_GPG_PRIVATE_KEY" in prepare
-assert "commit --amend --no-edit -S --reset-author" in prepare
+assert "Create GitHub-signed VERSION commit on the pull request" in prepare
+assert "id: create_version" in prepare
+assert "createCommitOnBranch" in prepare
+assert "expectedHeadOid" in prepare
+assert "branchName: $branch" in prepare
+assert '--arg branch "${HEAD_REF}"' in prepare
+assert "RELEASE_GPG_PRIVATE_KEY" not in prepare
+assert "RELEASE_GPG_PASSPHRASE" not in prepare
+assert "commit --amend --no-edit -S --reset-author" not in prepare
 assert "repos/${GITHUB_REPOSITORY}/contents/VERSION" not in prepare
-assert "git -C \"${RUNNER_TEMP}/release-source\" push origin" in prepare
+assert "git -C \"${RUNNER_TEMP}/release-source\" push origin" not in prepare
+assert "verify-prepared" in prepare
+assert ".commit.verification.verified" in prepare
+assert "Verify prepared VERSION commit and GitHub signature" in prepare
+assert "if: steps.prepare.outputs.prepared == 'created' || steps.prepare.outputs.prepared == 'existing'" in prepare
+assert "PREPARED_SHA: ${{ steps.create_version.outputs.prepared_sha || steps.prepare.outputs.release_sha }}" in prepare
+assert 'echo "prepared_sha=${prepared_sha}" >> "${GITHUB_OUTPUT}"' in prepare
 assert "refs/heads/main" not in prepare
 assert "verification_sha" in prepare
 assert "verify-prepared" in prepare
