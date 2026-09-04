@@ -97,10 +97,11 @@ the end of that step closes its observation window.
 - For a different-frequency step, set duty to zero, stop the timer, reset its
   counter, apply the new period, restart the timer, and restore duty.
 - Preserve the timer through same-frequency duty-zero rests and replays.
-- In debug builds, report requested frequency, timer-derived frequency, PCNT
+- In `buzzer-observe` builds, report requested frequency, timer-derived frequency, PCNT
   pad frequency, edge count, observation window, duty, and generation together.
 - Keep PCNT initialization and its USB/devd fields behind the diagnostic
-  feature; production builds retain only the corrected PWM path.
+  feature; the standard build retains the formal buzzer test path, while
+  production images without `buzzer-test` retain only the corrected PWM path.
 
 ## Validation
 
@@ -112,14 +113,14 @@ the end of that step closes its observation window.
 3. Unit-test that a different frequency orders hardware actions as silence,
    timer stop, retune, and duty restore; assert that same-frequency rests reuse
    the carrier.
-4. Build the diagnostic firmware from the regular runtime, with only its
-   non-default feature enabled:
+4. Build the observer firmware from the regular runtime with the optional
+   observation feature enabled:
 
    ```bash
    cargo +esp build --manifest-path firmware/Cargo.toml \
      --target xtensa-esp32s3-none-elf \
-     --target-dir firmware/target/buzzer-debug \
-     --release --features buzzer-debug
+     --target-dir firmware/target/buzzer-observe \
+     --release --features buzzer-test,buzzer-observe
    ```
 
 5. On an owner-authorized exact device and only after a dry-run firmware

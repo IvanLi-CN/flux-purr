@@ -10334,8 +10334,8 @@ async fn buzzer_test_request(
             &resolved,
             &lease.lease_id,
             Method::POST,
-            "/buzzer-debug",
-            Some(buzzer_debug_body(op, cue, scenario, repeat)),
+            "/buzzer-test",
+            Some(buzzer_test_body(op, cue, scenario, repeat)),
         )
         .await?;
         if capture_readback
@@ -10355,8 +10355,8 @@ async fn buzzer_test_request(
                 &resolved,
                 &lease.lease_id,
                 Method::POST,
-                "/buzzer-debug",
-                Some(buzzer_debug_body("status", None, None, false)),
+                "/buzzer-test",
+                Some(buzzer_test_body("status", None, None, false)),
             )
             .await?;
         }
@@ -10530,7 +10530,7 @@ fn render_buzzer_terminal(
     let status_line = notice.unwrap_or(default_input_help);
 
     queue!(output, MoveTo(0, 0), Clear(ClearType::All))?;
-    write_buzzer_terminal_line(output, 0, columns, "Flux Purr buzzer diagnostic")?;
+    write_buzzer_terminal_line(output, 0, columns, "Flux Purr buzzer test")?;
     write_buzzer_terminal_line(
         output,
         1,
@@ -10649,7 +10649,7 @@ async fn buzzer_play_line_interactive(
 
         match execute_buzzer_interactive_action(client, resolved.clone(), action).await? {
             BuzzerInteractiveExecution::Exit => {
-                println!("Buzzer diagnostic session closed without changing playback.");
+                println!("Buzzer test session closed without changing playback.");
                 return Ok(());
             }
             BuzzerInteractiveExecution::Updated {
@@ -10804,7 +10804,7 @@ fn write_buzzer_session_status<W: Write>(status: &Value, output: &mut W) -> io::
     let selected_cue = status.get("cue").and_then(Value::as_str).unwrap_or("none");
     let state = buzzer_session_state(status);
 
-    writeln!(output, "Buzzer diagnostic session")?;
+    writeln!(output, "Buzzer test session")?;
     writeln!(output, "  State: {state}")?;
     writeln!(output, "  Selected cue: {selected_cue}")?;
     writeln!(output, "  Active cue: {active_cue}")?;
@@ -11045,7 +11045,7 @@ fn prompt_menu_choice<R: BufRead, W: Write>(
     }
 }
 
-fn buzzer_debug_body(op: &str, cue: Option<&str>, scenario: Option<&str>, repeat: bool) -> Value {
+fn buzzer_test_body(op: &str, cue: Option<&str>, scenario: Option<&str>, repeat: bool) -> Value {
     json!({
         "op": op,
         "cue": cue,
@@ -17272,7 +17272,7 @@ mod tests {
 
     #[test]
     fn buzzer_test_uses_the_devd_request_field_names() {
-        let body = super::buzzer_debug_body("trigger", Some("ui_input"), None, true);
+        let body = super::buzzer_test_body("trigger", Some("ui_input"), None, true);
 
         assert_eq!(body["op"], "trigger");
         assert_eq!(body["cue"], "ui_input");

@@ -29,13 +29,14 @@ path = "src/bin/status_light_preview.rs"
 required-features = ["host-preview"]
 
 [features]
-default = ["esp32s3", "web_serial", "net_http", "pd-request-20v"]
+default = ["esp32s3", "web_serial", "net_http", "pd-request-20v", "buzzer-test"]
 esp32s3 = []
 esp32c3 = []
 host-preview = []
 frontpanel-key-test = []
 web_serial = []
-buzzer-debug = ["web_serial"]
+buzzer-test = ["web_serial"]
+buzzer-observe = ["buzzer-test"]
 net_http = [
     "web_serial",
     "dep:embassy-net",

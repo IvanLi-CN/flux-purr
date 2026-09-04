@@ -10,7 +10,7 @@ use alloc::{
     alloc::{Layout, alloc},
     boxed::Box,
 };
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
 use core::cell::RefCell;
 #[cfg(any(target_arch = "xtensa", test))]
 use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
@@ -24,7 +24,7 @@ use embassy_embedded_hal::adapter::BlockingAsync;
 use embassy_executor::Spawner;
 #[cfg(target_arch = "xtensa")]
 use embassy_futures::select::{Either, Either3, select, select3};
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 #[cfg(target_arch = "xtensa")]
 use embassy_sync::{
@@ -67,7 +67,7 @@ use esp_hal::{
     timer::timg::TimerGroup,
     usb_serial_jtag::UsbSerialJtag,
 };
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-observe"))]
 use esp_hal::{
     gpio::Pin,
     pcnt::{Pcnt, channel::EdgeMode, unit::Unit},
@@ -104,8 +104,14 @@ use flux_purr_firmware::buzzer::PROTECTION_ALARM_INTERVAL_MS;
 use flux_purr_firmware::buzzer::{
     BuzzerArbiter, BuzzerCueId, BuzzerCueSource, ProtectionAlarmCadence,
 };
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
-use flux_purr_firmware::buzzer::{BuzzerDebugSession, BuzzerDebugSessionState, BuzzerDebugStatus};
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-observe"))]
+use flux_purr_firmware::buzzer_test::{
+    BUZZER_TEST_OUTPUT_TRACE_CAPACITY, BuzzerTestOutputTraceEvent,
+};
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
+use flux_purr_firmware::buzzer_test::{
+    BuzzerTestSession, BuzzerTestSessionState, BuzzerTestStatus,
+};
 #[cfg(any(test, all(target_arch = "xtensa", feature = "web_serial")))]
 use flux_purr_firmware::control_plane::EepromMaintenanceOp;
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
@@ -131,8 +137,8 @@ use flux_purr_firmware::control_plane::{
     UsbResponsePayload, calibration_state_from_memory, heater_curve_state_from_memory,
     network_from_memory, parse_usb_frame, write_usb_frame,
 };
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
-use flux_purr_firmware::control_plane::{BuzzerDebugCommand, BuzzerDebugOp};
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
+use flux_purr_firmware::control_plane::{BuzzerTestCommand, BuzzerTestOp};
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
     CalibrationChannelWire, CalibrationConfigCommand, CalibrationConfigOp,
@@ -1800,7 +1806,7 @@ fn buzzer_hardware_actions(
     actions
 }
 
-#[cfg(any(test, all(target_arch = "xtensa", feature = "buzzer-debug")))]
+#[cfg(any(test, all(target_arch = "xtensa", feature = "buzzer-observe")))]
 fn mcpwm_timer_frequency_hz(prescaler: u8, period_ticks: u16) -> u32 {
     MCPWM_PERIPHERAL_CLOCK_HZ / (u32::from(prescaler) + 1) / (u32::from(period_ticks) + 1)
 }
@@ -1820,7 +1826,7 @@ fn buzzer_timer_period_ticks(frequency_hz: u32) -> Option<u16> {
     Some((period_counts - 1) as u16)
 }
 
-#[cfg(any(test, all(target_arch = "xtensa", feature = "buzzer-debug")))]
+#[cfg(any(test, all(target_arch = "xtensa", feature = "buzzer-observe")))]
 fn buzzer_observed_frequency_hz(rising_edges: u16, window_ms: u32) -> Option<u32> {
     if window_ms == 0 {
         return None;
@@ -8172,8 +8178,8 @@ enum BuzzerRuntimeCommand {
     RequestAttentionReminder {
         source: BuzzerCueSource,
     },
-    #[cfg(feature = "buzzer-debug")]
-    Debug(BuzzerDebugCommand),
+    #[cfg(feature = "buzzer-test")]
+    Test(BuzzerTestCommand),
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -8240,56 +8246,65 @@ impl BuzzerRuntime {
         Self::submit(BuzzerRuntimeCommand::RequestAttentionReminder { source });
     }
 
-    #[cfg(feature = "buzzer-debug")]
-    fn submit_debug(command: BuzzerDebugCommand) {
-        Self::submit(BuzzerRuntimeCommand::Debug(command));
+    #[cfg(feature = "buzzer-test")]
+    fn submit_test(command: BuzzerTestCommand) {
+        Self::submit(BuzzerRuntimeCommand::Test(command));
     }
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
-type BuzzerDebugStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<BuzzerDebugStatus>>;
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
+type BuzzerTestStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<BuzzerTestStatus>>;
 
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
-static BUZZER_DEBUG_STATUS: BuzzerDebugStatusMutex =
-    BlockingMutex::new(RefCell::new(BuzzerDebugStatus {
-        state: BuzzerDebugSessionState::Idle,
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
+static BUZZER_TEST_STATUS: BuzzerTestStatusMutex =
+    BlockingMutex::new(RefCell::new(BuzzerTestStatus {
+        state: BuzzerTestSessionState::Idle,
         scenario: None,
         cue: None,
         repeat: false,
         active_cue: None,
         trace: heapless::Vec::new(),
+        #[cfg(feature = "buzzer-observe")]
         output_trace: heapless::Vec::new(),
     }));
 
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
-fn buzzer_debug_status() -> BuzzerDebugStatus {
-    BUZZER_DEBUG_STATUS.lock(|status| status.borrow().clone())
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
+fn buzzer_test_status() -> BuzzerTestStatus {
+    BUZZER_TEST_STATUS.lock(|status| status.borrow().clone())
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
-fn publish_buzzer_debug_status(
-    session: &BuzzerDebugSession,
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
+#[cfg(feature = "buzzer-observe")]
+fn publish_buzzer_test_status(
+    session: &BuzzerTestSession,
     arbiter: &BuzzerArbiter,
-    output_trace: &BuzzerDebugOutputTrace,
+    output_trace: &BuzzerTestOutputTrace,
 ) {
     let mut status = session.status(arbiter.active_cue());
     status.output_trace = output_trace.events.clone();
-    BUZZER_DEBUG_STATUS.lock(|published| *published.borrow_mut() = status);
+    BUZZER_TEST_STATUS.lock(|published| *published.borrow_mut() = status);
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
-struct BuzzerDebugOutputTrace {
+#[cfg(all(
+    target_arch = "xtensa",
+    feature = "buzzer-test",
+    not(feature = "buzzer-observe")
+))]
+fn publish_buzzer_test_status(session: &BuzzerTestSession, arbiter: &BuzzerArbiter) {
+    let status = session.status(arbiter.active_cue());
+    BUZZER_TEST_STATUS.lock(|published| *published.borrow_mut() = status);
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-observe"))]
+struct BuzzerTestOutputTrace {
     started_at_ms: u64,
     last_recorded_ms: u64,
     last_pad_rising_edges: u16,
-    events: heapless::Vec<
-        flux_purr_firmware::buzzer::BuzzerDebugOutputTraceEvent,
-        { flux_purr_firmware::buzzer::BUZZER_DEBUG_OUTPUT_TRACE_CAPACITY },
-    >,
+    events: heapless::Vec<BuzzerTestOutputTraceEvent, BUZZER_TEST_OUTPUT_TRACE_CAPACITY>,
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
-impl BuzzerDebugOutputTrace {
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-observe"))]
+impl BuzzerTestOutputTrace {
     const fn new() -> Self {
         Self {
             started_at_ms: 0,
@@ -8325,25 +8340,23 @@ impl BuzzerDebugOutputTrace {
         }
         self.last_recorded_ms = now_ms;
         self.last_pad_rising_edges = pad_rising_edges;
-        if self.events.len() == flux_purr_firmware::buzzer::BUZZER_DEBUG_OUTPUT_TRACE_CAPACITY {
+        if self.events.len() == BUZZER_TEST_OUTPUT_TRACE_CAPACITY {
             let _ = self.events.remove(0);
         }
-        let _ = self
-            .events
-            .push(flux_purr_firmware::buzzer::BuzzerDebugOutputTraceEvent {
-                elapsed_ms: now_ms
-                    .saturating_sub(self.started_at_ms)
-                    .min(u64::from(u32::MAX)) as u32,
-                requested_frequency_hz: output.frequency_hz,
-                applied_frequency_hz: mcpwm_timer_frequency_hz(timer_prescaler, timer_period_ticks),
-                observed_frequency_hz: None,
-                observed_rising_edges: 0,
-                observed_window_ms: 0,
-                duty_percent: output.duty_percent.min(100),
-                generation: output.generation,
-                timer_prescaler,
-                timer_period_ticks,
-            });
+        let _ = self.events.push(BuzzerTestOutputTraceEvent {
+            elapsed_ms: now_ms
+                .saturating_sub(self.started_at_ms)
+                .min(u64::from(u32::MAX)) as u32,
+            requested_frequency_hz: output.frequency_hz,
+            applied_frequency_hz: mcpwm_timer_frequency_hz(timer_prescaler, timer_period_ticks),
+            observed_frequency_hz: None,
+            observed_rising_edges: 0,
+            observed_window_ms: 0,
+            duty_percent: output.duty_percent.min(100),
+            generation: output.generation,
+            timer_prescaler,
+            timer_period_ticks,
+        });
     }
 }
 
@@ -8352,7 +8365,7 @@ fn apply_buzzer_command(
     command: BuzzerRuntimeCommand,
     arbiter: &mut BuzzerArbiter,
     now_ms: u64,
-    #[cfg(feature = "buzzer-debug")] debug: &mut BuzzerDebugSession,
+    #[cfg(feature = "buzzer-test")] test_session: &mut BuzzerTestSession,
 ) {
     let decision = match command {
         BuzzerRuntimeCommand::Feedback { source, cue } => {
@@ -8364,9 +8377,9 @@ fn apply_buzzer_command(
         BuzzerRuntimeCommand::RequestAttentionReminder { source } => {
             Some(arbiter.request_attention_reminder(source, now_ms))
         }
-        #[cfg(feature = "buzzer-debug")]
-        BuzzerRuntimeCommand::Debug(command) => {
-            apply_buzzer_debug_command(debug, arbiter, command, now_ms);
+        #[cfg(feature = "buzzer-test")]
+        BuzzerRuntimeCommand::Test(command) => {
+            apply_buzzer_test_command(test_session, arbiter, command, now_ms);
             None
         }
     };
@@ -8380,7 +8393,10 @@ fn apply_buzzer_safety_command(
     command: BuzzerSafetyCommand,
     arbiter: &mut BuzzerArbiter,
     now_ms: u64,
+    #[cfg(feature = "buzzer-test")] test_session: &mut BuzzerTestSession,
 ) {
+    #[cfg(feature = "buzzer-test")]
+    test_session.cancel_for_safety(arbiter, now_ms);
     let decision = match command {
         BuzzerSafetyCommand::ActivateProtection { source } => {
             Some(arbiter.activate_protection(source, now_ms))
@@ -8393,39 +8409,39 @@ fn apply_buzzer_safety_command(
     }
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
-fn apply_buzzer_debug_command(
-    debug: &mut BuzzerDebugSession,
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
+fn apply_buzzer_test_command(
+    test_session: &mut BuzzerTestSession,
     arbiter: &mut BuzzerArbiter,
-    command: BuzzerDebugCommand,
+    command: BuzzerTestCommand,
     now_ms: u64,
 ) {
     match command.op {
-        BuzzerDebugOp::Status => return,
-        BuzzerDebugOp::Trigger => {
-            let cue = command.cue.expect("validated debug trigger cue");
+        BuzzerTestOp::Status => return,
+        BuzzerTestOp::Trigger => {
+            let cue = command.cue.expect("validated buzzer test trigger cue");
             if command.repeat
                 || matches!(
                     cue,
                     BuzzerCueId::ProtectionAlarm | BuzzerCueId::AttentionReminder
                 )
             {
-                match debug.start_playback(arbiter, cue, command.repeat, now_ms) {
+                match test_session.start_playback(arbiter, cue, command.repeat, now_ms) {
                     Ok(decisions) => {
                         for decision in decisions {
                             log_buzzer_decision(decision);
                         }
                     }
-                    Err(_) => warn!("buzzer debug command ignored while a session is active"),
+                    Err(_) => warn!("buzzer test command ignored while a session is active"),
                 }
             } else {
-                let decision = debug.trigger_feedback(arbiter, cue, now_ms);
+                let decision = test_session.trigger_feedback(arbiter, cue, now_ms);
                 log_buzzer_decision(decision);
             }
         }
-        BuzzerDebugOp::Run => match debug.start_scenario(
+        BuzzerTestOp::Run => match test_session.start_scenario(
             arbiter,
-            command.scenario.expect("validated debug scenario"),
+            command.scenario.expect("validated buzzer test scenario"),
             now_ms,
         ) {
             Ok(decisions) => {
@@ -8433,10 +8449,10 @@ fn apply_buzzer_debug_command(
                     log_buzzer_decision(decision);
                 }
             }
-            Err(_) => warn!("buzzer debug command ignored while a session is active"),
+            Err(_) => warn!("buzzer test command ignored while a session is active"),
         },
-        BuzzerDebugOp::Stop => {
-            if let Some(decision) = debug.stop_playback(arbiter, now_ms) {
+        BuzzerTestOp::Stop => {
+            if let Some(decision) = test_session.stop_playback(arbiter, now_ms) {
                 log_buzzer_decision(decision);
             }
         }
@@ -8449,31 +8465,31 @@ async fn run_buzzer_task(
     mut buzzer_timer: esp_hal::mcpwm::timer::Timer<2, esp_hal::peripherals::MCPWM0<'static>>,
     mut buzzer_pwm: PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 2, true>,
     peripheral_clock: PeripheralClockConfig,
-    #[cfg(feature = "buzzer-debug")] buzzer_edge_counter: Unit<'static, 0>,
+    #[cfg(feature = "buzzer-observe")] buzzer_edge_counter: Unit<'static, 0>,
 ) -> ! {
     let mut arbiter = BuzzerArbiter::new();
     let mut applied = BuzzerHardwareState::default();
     let mut configured_frequency_hz = BUZZER_IDLE_FREQUENCY_HZ;
-    #[cfg(feature = "buzzer-debug")]
-    let mut debug = BuzzerDebugSession::new();
-    #[cfg(feature = "buzzer-debug")]
-    let mut output_trace = BuzzerDebugOutputTrace::new();
+    #[cfg(feature = "buzzer-test")]
+    let mut test_session = BuzzerTestSession::new();
+    #[cfg(feature = "buzzer-observe")]
+    let mut output_trace = BuzzerTestOutputTrace::new();
 
     loop {
         let now_ms = Instant::now().as_millis();
-        #[cfg(feature = "buzzer-debug")]
-        for decision in debug.advance(&mut arbiter, now_ms) {
+        #[cfg(feature = "buzzer-test")]
+        for decision in test_session.advance(&mut arbiter, now_ms) {
             log_buzzer_decision(decision);
         }
 
         let tick = arbiter.tick(now_ms);
         if let Some(decision) = tick.deferred_start {
             log_buzzer_decision(decision);
-            #[cfg(feature = "buzzer-debug")]
-            debug.record_deferred_start(now_ms, decision);
+            #[cfg(feature = "buzzer-test")]
+            test_session.record_deferred_start(now_ms, decision);
         }
-        #[cfg(feature = "buzzer-debug")]
-        for decision in debug.settle_after_tick(&mut arbiter, now_ms) {
+        #[cfg(feature = "buzzer-test")]
+        for decision in test_session.settle_after_tick(&mut arbiter, now_ms) {
             log_buzzer_decision(decision);
         }
         let output = arbiter.output();
@@ -8485,19 +8501,21 @@ async fn run_buzzer_task(
             &mut applied,
             &mut configured_frequency_hz,
         );
-        #[cfg(feature = "buzzer-debug")]
+        #[cfg(feature = "buzzer-observe")]
         if _output_changed {
             output_trace.record(now_ms, output, buzzer_edge_counter.value() as u16);
         }
-        #[cfg(feature = "buzzer-debug")]
-        publish_buzzer_debug_status(&debug, &arbiter, &output_trace);
+        #[cfg(all(feature = "buzzer-test", feature = "buzzer-observe"))]
+        publish_buzzer_test_status(&test_session, &arbiter, &output_trace);
+        #[cfg(all(feature = "buzzer-test", not(feature = "buzzer-observe")))]
+        publish_buzzer_test_status(&test_session, &arbiter);
 
         let next_deadline_ms = arbiter.next_transition_ms();
-        #[cfg(feature = "buzzer-debug")]
-        let next_deadline_ms = match debug.next_deadline_ms() {
-            Some(debug_deadline_ms) => Some(match next_deadline_ms {
-                Some(deadline_ms) => deadline_ms.min(debug_deadline_ms),
-                None => debug_deadline_ms,
+        #[cfg(feature = "buzzer-test")]
+        let next_deadline_ms = match test_session.next_deadline_ms() {
+            Some(test_deadline_ms) => Some(match next_deadline_ms {
+                Some(deadline_ms) => deadline_ms.min(test_deadline_ms),
+                None => test_deadline_ms,
             }),
             None => next_deadline_ms,
         };
@@ -8533,26 +8551,27 @@ async fn run_buzzer_task(
             let now_ms = Instant::now().as_millis();
             match wake {
                 BuzzerTaskWake::Command(command) => {
-                    #[cfg(feature = "buzzer-debug")]
+                    #[cfg(feature = "buzzer-test")]
                     if matches!(
                         &command,
-                        BuzzerRuntimeCommand::Debug(BuzzerDebugCommand {
-                            op: BuzzerDebugOp::Trigger | BuzzerDebugOp::Run,
+                        BuzzerRuntimeCommand::Test(BuzzerTestCommand {
+                            op: BuzzerTestOp::Trigger | BuzzerTestOp::Run,
                             ..
                         })
                     ) {
+                        #[cfg(feature = "buzzer-observe")]
                         output_trace.reset(now_ms, buzzer_edge_counter.value() as u16);
                     }
-                    apply_buzzer_command(
-                        command,
-                        &mut arbiter,
-                        now_ms,
-                        #[cfg(feature = "buzzer-debug")]
-                        &mut debug,
-                    )
+                    #[cfg(feature = "buzzer-test")]
+                    apply_buzzer_command(command, &mut arbiter, now_ms, &mut test_session);
+                    #[cfg(not(feature = "buzzer-test"))]
+                    apply_buzzer_command(command, &mut arbiter, now_ms);
                 }
                 BuzzerTaskWake::Safety(command) => {
-                    apply_buzzer_safety_command(command, &mut arbiter, now_ms)
+                    #[cfg(feature = "buzzer-test")]
+                    apply_buzzer_safety_command(command, &mut arbiter, now_ms, &mut test_session);
+                    #[cfg(not(feature = "buzzer-test"))]
+                    apply_buzzer_safety_command(command, &mut arbiter, now_ms);
                 }
             }
         }
@@ -11832,18 +11851,18 @@ async fn process_control_line(
             needs_redraw = true;
             response
         }
-        #[cfg(feature = "buzzer-debug")]
-        Ok(UsbFrame::BuzzerDebug {
+        #[cfg(feature = "buzzer-test")]
+        Ok(UsbFrame::BuzzerTest {
             request_id,
             command,
         }) => {
             if !command.is_valid() {
                 usb_error_response(
                     request_id,
-                    "invalid_buzzer_debug_command",
-                    "buzzer_debug requires exactly the fields for its operation.",
+                    "invalid_buzzer_test_command",
+                    "buzzer_test requires exactly the fields for its operation.",
                 )
-            } else if command.op != BuzzerDebugOp::Status
+            } else if command.op != BuzzerTestOp::Status
                 && (ui_state.heater_enabled
                     || current_rtd_fault.is_some()
                     || heater_controller.fault_latched().is_some()
@@ -11851,52 +11870,52 @@ async fn process_control_line(
             {
                 usb_error_response(
                     request_id,
-                    "buzzer_debug_interlocked",
-                    "Buzzer debug requires heater-off with no active or pending thermal fault.",
+                    "buzzer_test_interlocked",
+                    "Buzzer test requires heater-off with no active or pending thermal fault.",
                 )
             } else {
                 match command.op {
-                    BuzzerDebugOp::Status => UsbFrame::BuzzerDebugResponse {
+                    BuzzerTestOp::Status => UsbFrame::BuzzerTestResponse {
                         request_id,
-                        status: Box::new(buzzer_debug_status()),
+                        status: Box::new(buzzer_test_status()),
                     },
-                    BuzzerDebugOp::Trigger => {
-                        let status = buzzer_debug_status();
-                        if status.state == BuzzerDebugSessionState::Running {
+                    BuzzerTestOp::Trigger => {
+                        let status = buzzer_test_status();
+                        if status.state == BuzzerTestSessionState::Running {
                             usb_error_response(
                                 request_id,
-                                "buzzer_debug_busy",
-                                "A buzzer debug scenario is already running.",
+                                "buzzer_test_busy",
+                                "A buzzer test scenario is already running.",
                             )
                         } else {
-                            BuzzerRuntime::submit_debug(command);
-                            UsbFrame::BuzzerDebugResponse {
+                            BuzzerRuntime::submit_test(command);
+                            UsbFrame::BuzzerTestResponse {
                                 request_id,
                                 status: Box::new(status),
                             }
                         }
                     }
-                    BuzzerDebugOp::Run => {
-                        let status = buzzer_debug_status();
-                        if status.state != BuzzerDebugSessionState::Running {
-                            BuzzerRuntime::submit_debug(command);
-                            UsbFrame::BuzzerDebugResponse {
+                    BuzzerTestOp::Run => {
+                        let status = buzzer_test_status();
+                        if status.state != BuzzerTestSessionState::Running {
+                            BuzzerRuntime::submit_test(command);
+                            UsbFrame::BuzzerTestResponse {
                                 request_id,
                                 status: Box::new(status),
                             }
                         } else {
                             usb_error_response(
                                 request_id,
-                                "buzzer_debug_busy",
-                                "A buzzer debug scenario is already running.",
+                                "buzzer_test_busy",
+                                "A buzzer test scenario is already running.",
                             )
                         }
                     }
-                    BuzzerDebugOp::Stop => {
-                        BuzzerRuntime::submit_debug(command);
-                        UsbFrame::BuzzerDebugResponse {
+                    BuzzerTestOp::Stop => {
+                        BuzzerRuntime::submit_test(command);
+                        UsbFrame::BuzzerTestResponse {
                             request_id,
-                            status: Box::new(buzzer_debug_status()),
+                            status: Box::new(buzzer_test_status()),
                         }
                     }
                 }
@@ -13331,11 +13350,11 @@ async fn main(_spawner: Spawner) {
     let _ = heater_pwm.set_duty_cycle_percent(0);
 
     mcpwm.operator2.set_timer(&mcpwm.timer2);
-    #[cfg(feature = "buzzer-debug")]
+    #[cfg(feature = "buzzer-observe")]
     let mut buzzer_pin = peripherals.GPIO48.degrade();
-    #[cfg(not(feature = "buzzer-debug"))]
+    #[cfg(not(feature = "buzzer-observe"))]
     let buzzer_pin = peripherals.GPIO48;
-    #[cfg(feature = "buzzer-debug")]
+    #[cfg(feature = "buzzer-observe")]
     let buzzer_edge_counter = {
         let pcnt = Pcnt::new(peripherals.PCNT);
         let unit = pcnt.unit0;
@@ -13362,14 +13381,18 @@ async fn main(_spawner: Spawner) {
         "buzzer runtime armed: gpio48 default=silent fixed_prescaler={=u8}",
         BUZZER_TIMER_PRESCALER,
     );
+    #[cfg(feature = "buzzer-observe")]
     buzzer_realtime_spawner
         .spawn(run_buzzer_task(
             mcpwm.timer2,
             buzzer_pwm,
             pwm_clock_cfg,
-            #[cfg(feature = "buzzer-debug")]
             buzzer_edge_counter,
         ))
+        .expect("failed to spawn realtime buzzer task");
+    #[cfg(not(feature = "buzzer-observe"))]
+    buzzer_realtime_spawner
+        .spawn(run_buzzer_task(mcpwm.timer2, buzzer_pwm, pwm_clock_cfg))
         .expect("failed to spawn realtime buzzer task");
     let mut last_pd_observation = initial_pd_observation;
     if let Some(PdStatusObservation {

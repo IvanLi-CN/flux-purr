@@ -45,17 +45,18 @@ caller preemption.
   restores duty. Same-frequency silence keeps Timer2 running.
   Arbiter decision logs identify the request source, cue, and selected
   disposition without creating a new product API or persistent state.
-- A non-default `buzzer-debug` firmware feature may expose a native-USB/devd
-  diagnostic after declaring the `buzzer_debug` identity capability. It can
+- The default `buzzer-test` firmware feature exposes a native-USB/devd
+  test session after declaring the `buzzer_test` identity capability. It can
   submit production cue IDs or fixed arbitration scenarios, is rejected while
   real thermal safety is active, and cannot set PWM parameters, persist state,
   or use LAN. It reuses the normal arbiter, cue patterns, GPIO48 output path,
   and protection/reminder cadence; `protection_alarm --repeat` is an explicit
   controlled test of the same one-second safety cadence. The feature adds only
   this test session to ordinary runtime initialization and never selects a
-  recovery-only audio path. Its bounded output trace reads MCPWM timer2's
-  prescaler and period and uses a feature-only PCNT input to count rising edges
-  from the GPIO48 pad after the ordinary real-time task applies each cue step.
+  recovery-only audio path. An optional `buzzer-observe` feature reads MCPWM
+  timer2's prescaler and period and uses a feature-only PCNT input to count
+  rising edges from the GPIO48 pad after the ordinary real-time task applies
+  each cue step.
   This distinguishes timer configuration from the emitted digital carrier
   without claiming an acoustic measurement or adding a raw-PWM control surface.
 

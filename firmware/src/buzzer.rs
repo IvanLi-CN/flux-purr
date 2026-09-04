@@ -1,6 +1,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "buzzer-debug", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "buzzer-debug", serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "buzzer-test", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "buzzer-test", serde(rename_all = "snake_case"))]
 pub enum BuzzerCueId {
     UiInput,
     HeaterOn,
@@ -46,16 +46,16 @@ impl BuzzerCueId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "buzzer-debug", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "buzzer-debug", serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "buzzer-test", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "buzzer-test", serde(rename_all = "snake_case"))]
 pub enum BuzzerCueSource {
     Startup,
     FrontPanel,
     RuntimeControl,
     ThermalProtection,
     ThermalAttention,
-    #[cfg(feature = "buzzer-debug")]
-    DeveloperDebug,
+    #[cfg(feature = "buzzer-test")]
+    BuzzerTest,
 }
 
 impl BuzzerCueSource {
@@ -66,15 +66,15 @@ impl BuzzerCueSource {
             Self::RuntimeControl => "runtime_control",
             Self::ThermalProtection => "thermal_protection",
             Self::ThermalAttention => "thermal_attention",
-            #[cfg(feature = "buzzer-debug")]
-            Self::DeveloperDebug => "developer_debug",
+            #[cfg(feature = "buzzer-test")]
+            Self::BuzzerTest => "buzzer_test",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "buzzer-debug", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "buzzer-debug", serde(rename_all = "snake_case"))]
+#[cfg_attr(feature = "buzzer-test", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "buzzer-test", serde(rename_all = "snake_case"))]
 pub enum BuzzerDecisionDisposition {
     Started,
     Preempted,
@@ -100,8 +100,8 @@ impl BuzzerDecisionDisposition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "buzzer-debug", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "buzzer-debug", serde(rename_all = "camelCase"))]
+#[cfg_attr(feature = "buzzer-test", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "buzzer-test", serde(rename_all = "camelCase"))]
 pub struct BuzzerDecision {
     pub source: BuzzerCueSource,
     pub cue: BuzzerCueId,
@@ -606,15 +606,15 @@ impl BuzzerArbiter {
         pending.decision(disposition)
     }
 
-    #[cfg(feature = "buzzer-debug")]
-    pub fn stop_debug_playback(&mut self) -> Option<BuzzerDecision> {
+    #[cfg(feature = "buzzer-test")]
+    pub fn stop_test_playback(&mut self) -> Option<BuzzerDecision> {
         self.pending_feedback = None;
         self.pending_attention = None;
         self.safety_state = AudibleSafetyState::Normal;
         let cue = self.controller.active_cue()?;
         self.controller.stop();
         Some(BuzzerDecision::new(
-            BuzzerCueSource::DeveloperDebug,
+            BuzzerCueSource::BuzzerTest,
             cue,
             BuzzerDecisionDisposition::Stopped,
         ))
@@ -651,7 +651,7 @@ impl BuzzerArbiter {
 }
 
 /// Drives the production protection alarm through the arbiter's public safety
-/// API. The runtime and the debug feature share this exact scheduling object.
+/// API. The runtime and the buzzer test feature share this exact scheduling object.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProtectionAlarmCadence {
     next_replay_ms: Option<u64>,
@@ -716,405 +716,11 @@ impl ProtectionAlarmCadence {
     }
 }
 
-#[cfg(feature = "buzzer-debug")]
-pub const BUZZER_DEBUG_TRACE_CAPACITY: usize = 8;
-
-#[cfg(feature = "buzzer-debug")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BuzzerDebugScenario {
-    FeedbackCoalesce,
-    FeedbackReplace,
-    ActiveCoolingRetrigger,
-}
-
-#[cfg(feature = "buzzer-debug")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BuzzerDebugSessionState {
-    Idle,
-    Running,
-    Complete,
-}
-
-#[cfg(feature = "buzzer-debug")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuzzerDebugSessionError {
-    Busy,
-}
-
-#[cfg(feature = "buzzer-debug")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuzzerDebugTraceEvent {
-    pub elapsed_ms: u32,
-    pub decision: BuzzerDecision,
-}
-
-/// A bounded timer-configuration and GPIO-pad observation captured after the
-/// shared buzzer task applies a production cue output. It is only present in
-/// debug firmware.
-#[cfg(feature = "buzzer-debug")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuzzerDebugOutputTraceEvent {
-    pub elapsed_ms: u32,
-    pub requested_frequency_hz: Option<u32>,
-    pub applied_frequency_hz: u32,
-    pub observed_frequency_hz: Option<u32>,
-    pub observed_rising_edges: u16,
-    pub observed_window_ms: u32,
-    pub duty_percent: u8,
-    pub generation: u32,
-    pub timer_prescaler: u8,
-    pub timer_period_ticks: u16,
-}
-
-#[cfg(feature = "buzzer-debug")]
-pub const BUZZER_DEBUG_OUTPUT_TRACE_CAPACITY: usize = 16;
-
-#[cfg(feature = "buzzer-debug")]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuzzerDebugStatus {
-    pub state: BuzzerDebugSessionState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scenario: Option<BuzzerDebugScenario>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cue: Option<BuzzerCueId>,
-    pub repeat: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_cue: Option<BuzzerCueId>,
-    pub trace: heapless::Vec<BuzzerDebugTraceEvent, BUZZER_DEBUG_TRACE_CAPACITY>,
-    pub output_trace:
-        heapless::Vec<BuzzerDebugOutputTraceEvent, BUZZER_DEBUG_OUTPUT_TRACE_CAPACITY>,
-}
-
-#[cfg(feature = "buzzer-debug")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BuzzerDebugPlayback {
-    cue: BuzzerCueId,
-    repeat: bool,
-    attention_due_ms: Option<u64>,
-    attention_started: bool,
-}
-
-#[cfg(feature = "buzzer-debug")]
-pub struct BuzzerDebugSession {
-    state: BuzzerDebugSessionState,
-    scenario: Option<BuzzerDebugScenario>,
-    playback: Option<BuzzerDebugPlayback>,
-    started_at_ms: u64,
-    next_action: u8,
-    protection_cadence: ProtectionAlarmCadence,
-    trace: heapless::Vec<BuzzerDebugTraceEvent, BUZZER_DEBUG_TRACE_CAPACITY>,
-}
-
-#[cfg(feature = "buzzer-debug")]
-impl Default for BuzzerDebugSession {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(feature = "buzzer-debug")]
-impl BuzzerDebugSession {
-    pub const fn new() -> Self {
-        Self {
-            state: BuzzerDebugSessionState::Idle,
-            scenario: None,
-            playback: None,
-            started_at_ms: 0,
-            next_action: 0,
-            protection_cadence: ProtectionAlarmCadence::new(),
-            trace: heapless::Vec::new(),
-        }
-    }
-
-    pub fn status(&self, active_cue: Option<BuzzerCueId>) -> BuzzerDebugStatus {
-        BuzzerDebugStatus {
-            state: self.state,
-            scenario: self.scenario,
-            cue: self.playback.map(|playback| playback.cue),
-            repeat: self.playback.is_some_and(|playback| playback.repeat),
-            active_cue,
-            trace: self.trace.clone(),
-            output_trace: heapless::Vec::new(),
-        }
-    }
-
-    pub fn next_deadline_ms(&self) -> Option<u64> {
-        if self.state != BuzzerDebugSessionState::Running {
-            return None;
-        }
-        if let Some(scenario) = self.scenario {
-            return scenario_action(scenario, self.next_action)
-                .map(|(due_ms, _)| self.started_at_ms.saturating_add(due_ms))
-                .or(Some(
-                    self.started_at_ms
-                        .saturating_add(scenario_duration_ms(scenario)),
-                ));
-        }
-
-        let playback = self.playback?;
-        match playback.cue {
-            BuzzerCueId::ProtectionAlarm => self.protection_cadence.next_replay_ms(),
-            BuzzerCueId::AttentionReminder => playback.attention_due_ms,
-            _ => None,
-        }
-    }
-
-    pub fn trigger_feedback(
-        &mut self,
-        arbiter: &mut BuzzerArbiter,
-        cue: BuzzerCueId,
-        now_ms: u64,
-    ) -> BuzzerDecision {
-        if self.state != BuzzerDebugSessionState::Running {
-            self.state = BuzzerDebugSessionState::Idle;
-            self.scenario = None;
-            self.playback = None;
-            self.started_at_ms = now_ms;
-            self.next_action = 0;
-            self.protection_cadence.clear();
-            self.trace.clear();
-        }
-        let decision = arbiter.request_feedback(BuzzerCueSource::DeveloperDebug, cue, now_ms);
-        self.record(now_ms, decision);
-        decision
-    }
-
-    pub fn start_scenario(
-        &mut self,
-        arbiter: &mut BuzzerArbiter,
-        scenario: BuzzerDebugScenario,
-        now_ms: u64,
-    ) -> Result<heapless::Vec<BuzzerDecision, 3>, BuzzerDebugSessionError> {
-        if self.state == BuzzerDebugSessionState::Running {
-            return Err(BuzzerDebugSessionError::Busy);
-        }
-        self.state = BuzzerDebugSessionState::Running;
-        self.scenario = Some(scenario);
-        self.playback = None;
-        self.started_at_ms = now_ms;
-        self.next_action = 0;
-        self.trace.clear();
-        Ok(self.advance(arbiter, now_ms))
-    }
-
-    pub fn start_playback(
-        &mut self,
-        arbiter: &mut BuzzerArbiter,
-        cue: BuzzerCueId,
-        repeat: bool,
-        now_ms: u64,
-    ) -> Result<heapless::Vec<BuzzerDecision, 1>, BuzzerDebugSessionError> {
-        if self.state == BuzzerDebugSessionState::Running {
-            return Err(BuzzerDebugSessionError::Busy);
-        }
-
-        self.state = BuzzerDebugSessionState::Running;
-        self.scenario = None;
-        self.started_at_ms = now_ms;
-        self.next_action = 0;
-        self.protection_cadence.clear();
-        self.trace.clear();
-        self.playback = Some(BuzzerDebugPlayback {
-            cue,
-            repeat,
-            attention_due_ms: None,
-            attention_started: false,
-        });
-
-        let mut decisions = heapless::Vec::new();
-        let decision = match cue {
-            BuzzerCueId::ProtectionAlarm => Some(self.protection_cadence.enter(arbiter, now_ms)),
-            BuzzerCueId::AttentionReminder => {
-                let _ = arbiter.enter_attention_pending();
-                if let Some(playback) = self.playback.as_mut() {
-                    playback.attention_due_ms =
-                        Some(now_ms.saturating_add(ATTENTION_REMINDER_INTERVAL_MS));
-                }
-                None
-            }
-            _ => Some(arbiter.request_feedback(BuzzerCueSource::DeveloperDebug, cue, now_ms)),
-        };
-        if let Some(decision) = decision {
-            self.record(now_ms, decision);
-            let _ = decisions.push(decision);
-        }
-        Ok(decisions)
-    }
-
-    pub fn stop_playback(
-        &mut self,
-        arbiter: &mut BuzzerArbiter,
-        now_ms: u64,
-    ) -> Option<BuzzerDecision> {
-        self.scenario = None;
-        self.playback = None;
-        self.protection_cadence.clear();
-        self.state = BuzzerDebugSessionState::Idle;
-        let decision = arbiter.stop_debug_playback()?;
-        self.record(now_ms, decision);
-        Some(decision)
-    }
-
-    pub fn advance(
-        &mut self,
-        arbiter: &mut BuzzerArbiter,
-        now_ms: u64,
-    ) -> heapless::Vec<BuzzerDecision, 3> {
-        let mut decisions = heapless::Vec::new();
-        let Some(scenario) = self.scenario else {
-            return self.advance_playback(arbiter, now_ms);
-        };
-        let elapsed_ms = now_ms.saturating_sub(self.started_at_ms);
-
-        while let Some((due_ms, cue)) = scenario_action(scenario, self.next_action) {
-            if elapsed_ms < due_ms {
-                break;
-            }
-            self.next_action = self.next_action.saturating_add(1);
-            let decision = self.trigger_feedback(arbiter, cue, now_ms);
-            let _ = decisions.push(decision);
-        }
-
-        if elapsed_ms >= scenario_duration_ms(scenario) {
-            self.state = BuzzerDebugSessionState::Complete;
-        }
-        decisions
-    }
-
-    fn advance_playback(
-        &mut self,
-        arbiter: &mut BuzzerArbiter,
-        now_ms: u64,
-    ) -> heapless::Vec<BuzzerDecision, 3> {
-        let mut decisions = heapless::Vec::new();
-        let Some(mut playback) = self.playback else {
-            return decisions;
-        };
-
-        match playback.cue {
-            BuzzerCueId::ProtectionAlarm => {
-                if let Some(decision) = self.protection_cadence.tick(true, arbiter, now_ms) {
-                    self.record(now_ms, decision);
-                    let _ = decisions.push(decision);
-                }
-            }
-            BuzzerCueId::AttentionReminder => {
-                if playback
-                    .attention_due_ms
-                    .is_some_and(|due_ms| now_ms >= due_ms)
-                {
-                    let decision = arbiter
-                        .request_attention_reminder(BuzzerCueSource::ThermalAttention, now_ms);
-                    self.record(now_ms, decision);
-                    let _ = decisions.push(decision);
-                    playback.attention_started = true;
-                    playback.attention_due_ms =
-                        Some(now_ms.saturating_add(ATTENTION_REMINDER_INTERVAL_MS));
-                }
-            }
-            _ if !arbiter.is_active() && playback.repeat => {
-                let decision =
-                    arbiter.request_feedback(BuzzerCueSource::DeveloperDebug, playback.cue, now_ms);
-                self.record(now_ms, decision);
-                let _ = decisions.push(decision);
-            }
-            _ => {}
-        }
-
-        self.playback = Some(playback);
-        self.complete_playback_if_quiet(arbiter);
-        decisions
-    }
-
-    /// Reconcile playback after the GPIO48 owner advances its cue.
-    ///
-    /// `advance` runs before `BuzzerArbiter::tick` so scheduled requests can
-    /// affect the current deadline. The later tick can finish a one-shot cue
-    /// or make an ordinary repeating cue idle, so settle both states before
-    /// calculating the next deadline.
-    pub fn settle_after_tick(
-        &mut self,
-        arbiter: &mut BuzzerArbiter,
-        now_ms: u64,
-    ) -> heapless::Vec<BuzzerDecision, 3> {
-        self.advance_playback(arbiter, now_ms)
-    }
-
-    fn complete_playback_if_quiet(&mut self, arbiter: &mut BuzzerArbiter) {
-        let Some(playback) = self.playback else {
-            return;
-        };
-        let finished = match playback.cue {
-            BuzzerCueId::ProtectionAlarm => !playback.repeat && !arbiter.is_active(),
-            BuzzerCueId::AttentionReminder => {
-                !playback.repeat && playback.attention_started && !arbiter.is_active()
-            }
-            _ => !playback.repeat && !arbiter.is_active(),
-        };
-        if finished {
-            self.protection_cadence.clear();
-            let _ = arbiter.stop_debug_playback();
-            self.state = BuzzerDebugSessionState::Complete;
-        }
-    }
-
-    pub fn record_deferred_start(&mut self, now_ms: u64, decision: BuzzerDecision) {
-        if decision.source == BuzzerCueSource::DeveloperDebug {
-            self.record(now_ms, decision);
-        }
-    }
-
-    fn record(&mut self, now_ms: u64, decision: BuzzerDecision) {
-        let elapsed_ms = now_ms
-            .saturating_sub(self.started_at_ms)
-            .min(u64::from(u32::MAX)) as u32;
-        if self.trace.len() == BUZZER_DEBUG_TRACE_CAPACITY {
-            let _ = self.trace.remove(0);
-        }
-        let _ = self.trace.push(BuzzerDebugTraceEvent {
-            elapsed_ms,
-            decision,
-        });
-    }
-}
-
-#[cfg(feature = "buzzer-debug")]
-const fn scenario_action(scenario: BuzzerDebugScenario, action: u8) -> Option<(u64, BuzzerCueId)> {
-    match (scenario, action) {
-        (BuzzerDebugScenario::FeedbackCoalesce, 0) => Some((0, BuzzerCueId::UiInput)),
-        (BuzzerDebugScenario::FeedbackCoalesce, 1) => Some((15, BuzzerCueId::UiInput)),
-        (BuzzerDebugScenario::FeedbackCoalesce, 2) => Some((30, BuzzerCueId::UiInput)),
-        (BuzzerDebugScenario::FeedbackReplace, 0) => Some((0, BuzzerCueId::UiInput)),
-        (BuzzerDebugScenario::FeedbackReplace, 1) => Some((15, BuzzerCueId::UiInput)),
-        (BuzzerDebugScenario::FeedbackReplace, 2) => Some((30, BuzzerCueId::HeaterOn)),
-        (BuzzerDebugScenario::ActiveCoolingRetrigger, 0) => Some((0, BuzzerCueId::ActiveCoolingOn)),
-        (BuzzerDebugScenario::ActiveCoolingRetrigger, 1) => {
-            Some((15, BuzzerCueId::ActiveCoolingOn))
-        }
-        (BuzzerDebugScenario::ActiveCoolingRetrigger, 2) => {
-            Some((30, BuzzerCueId::ActiveCoolingOn))
-        }
-        _ => None,
-    }
-}
-
-#[cfg(feature = "buzzer-debug")]
-const fn scenario_duration_ms(scenario: BuzzerDebugScenario) -> u64 {
-    match scenario {
-        BuzzerDebugScenario::FeedbackCoalesce => 250,
-        BuzzerDebugScenario::FeedbackReplace => 350,
-        BuzzerDebugScenario::ActiveCoolingRetrigger => 500,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "buzzer-test")]
+    use crate::buzzer_test::{BuzzerTestScenario, BuzzerTestSession, BuzzerTestSessionState};
 
     #[test]
     fn one_shot_pattern_returns_to_silence() {
@@ -1151,15 +757,15 @@ mod tests {
         assert_eq!(controller.tick(185).frequency_hz, Some(2_300));
     }
 
-    #[cfg(feature = "buzzer-debug")]
+    #[cfg(feature = "buzzer-test")]
     #[test]
-    fn debug_coalesce_scenario_records_the_single_pending_feedback_path() {
+    fn buzzer_test_coalesce_scenario_records_the_single_pending_feedback_path() {
         let mut arbiter = BuzzerArbiter::new();
-        let mut session = BuzzerDebugSession::new();
+        let mut session = BuzzerTestSession::new();
 
         let started = session
-            .start_scenario(&mut arbiter, BuzzerDebugScenario::FeedbackCoalesce, 0)
-            .expect("the idle debug session starts");
+            .start_scenario(&mut arbiter, BuzzerTestScenario::FeedbackCoalesce, 0)
+            .expect("the idle buzzer test session starts");
         assert_eq!(started.len(), 1);
         assert_eq!(started[0].disposition, BuzzerDecisionDisposition::Started);
         assert_eq!(
@@ -1191,15 +797,15 @@ mod tests {
         assert_eq!(status.trace[3].decision.cue, BuzzerCueId::UiInput);
     }
 
-    #[cfg(feature = "buzzer-debug")]
+    #[cfg(feature = "buzzer-test")]
     #[test]
-    fn debug_replace_scenario_records_the_latest_specialized_feedback() {
+    fn buzzer_test_replace_scenario_records_the_latest_specialized_feedback() {
         let mut arbiter = BuzzerArbiter::new();
-        let mut session = BuzzerDebugSession::new();
+        let mut session = BuzzerTestSession::new();
 
         session
-            .start_scenario(&mut arbiter, BuzzerDebugScenario::FeedbackReplace, 0)
-            .expect("the idle debug session starts");
+            .start_scenario(&mut arbiter, BuzzerTestScenario::FeedbackReplace, 0)
+            .expect("the idle buzzer test session starts");
         assert_eq!(
             session.advance(&mut arbiter, 15)[0].disposition,
             BuzzerDecisionDisposition::Queued
@@ -1224,15 +830,15 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "buzzer-debug")]
+    #[cfg(feature = "buzzer-test")]
     #[test]
-    fn debug_active_cooling_retrigger_preserves_the_three_tone_production_pattern() {
+    fn buzzer_test_active_cooling_retrigger_preserves_the_three_tone_production_pattern() {
         let mut arbiter = BuzzerArbiter::new();
-        let mut session = BuzzerDebugSession::new();
+        let mut session = BuzzerTestSession::new();
 
         session
-            .start_scenario(&mut arbiter, BuzzerDebugScenario::ActiveCoolingRetrigger, 0)
-            .expect("the idle debug session starts");
+            .start_scenario(&mut arbiter, BuzzerTestScenario::ActiveCoolingRetrigger, 0)
+            .expect("the idle buzzer test session starts");
         assert_eq!(arbiter.output().frequency_hz, Some(900));
         assert_eq!(
             session.advance(&mut arbiter, 15)[0].disposition,
@@ -1250,11 +856,11 @@ mod tests {
         assert_eq!(arbiter.tick(210).output.frequency_hz, Some(900));
     }
 
-    #[cfg(feature = "buzzer-debug")]
+    #[cfg(feature = "buzzer-test")]
     #[test]
-    fn debug_feedback_is_dropped_while_real_protection_is_active() {
+    fn buzzer_test_feedback_is_dropped_while_real_protection_is_active() {
         let mut arbiter = BuzzerArbiter::new();
-        let mut session = BuzzerDebugSession::new();
+        let mut session = BuzzerTestSession::new();
         let _ = arbiter.activate_protection(BuzzerCueSource::ThermalProtection, 0);
 
         let decision = session.trigger_feedback(&mut arbiter, BuzzerCueId::UiInput, 10);
@@ -1262,15 +868,15 @@ mod tests {
         assert_eq!(arbiter.active_cue(), Some(BuzzerCueId::ProtectionAlarm));
     }
 
-    #[cfg(feature = "buzzer-debug")]
+    #[cfg(feature = "buzzer-test")]
     #[test]
-    fn debug_repeat_protection_uses_the_production_safety_cadence() {
+    fn buzzer_test_repeat_protection_uses_the_production_safety_cadence() {
         let mut arbiter = BuzzerArbiter::new();
-        let mut session = BuzzerDebugSession::new();
+        let mut session = BuzzerTestSession::new();
 
         let started = session
             .start_playback(&mut arbiter, BuzzerCueId::ProtectionAlarm, true, 0)
-            .expect("the idle debug session starts a module playback");
+            .expect("the idle buzzer test session starts a module playback");
         assert_eq!(started.len(), 1);
         assert_eq!(
             started[0],
@@ -1302,20 +908,20 @@ mod tests {
             )
         );
         let status = session.status(arbiter.active_cue());
-        assert_eq!(status.state, BuzzerDebugSessionState::Running);
+        assert_eq!(status.state, BuzzerTestSessionState::Running);
         assert_eq!(status.cue, Some(BuzzerCueId::ProtectionAlarm));
         assert!(status.repeat);
     }
 
-    #[cfg(feature = "buzzer-debug")]
+    #[cfg(feature = "buzzer-test")]
     #[test]
-    fn debug_repeat_feedback_restarts_after_each_production_pattern() {
+    fn buzzer_test_repeat_feedback_restarts_after_each_production_pattern() {
         let mut arbiter = BuzzerArbiter::new();
-        let mut session = BuzzerDebugSession::new();
+        let mut session = BuzzerTestSession::new();
 
         session
             .start_playback(&mut arbiter, BuzzerCueId::UiInput, true, 0)
-            .expect("the idle debug session starts a repeating feedback cue");
+            .expect("the idle buzzer test session starts a repeating feedback cue");
         assert_eq!(arbiter.active_cue(), Some(BuzzerCueId::UiInput));
 
         assert_eq!(arbiter.tick(45).output.duty_percent, 0);
@@ -1330,37 +936,37 @@ mod tests {
         assert_eq!(
             status.trace[1].decision,
             BuzzerDecision::new(
-                BuzzerCueSource::DeveloperDebug,
+                BuzzerCueSource::BuzzerTest,
                 BuzzerCueId::UiInput,
                 BuzzerDecisionDisposition::Started,
             )
         );
     }
 
-    #[cfg(feature = "buzzer-debug")]
+    #[cfg(feature = "buzzer-test")]
     #[test]
-    fn debug_one_shot_feedback_starts_a_fresh_decision_trace() {
+    fn buzzer_test_one_shot_feedback_starts_a_fresh_decision_trace() {
         let mut arbiter = BuzzerArbiter::new();
-        let mut session = BuzzerDebugSession::new();
+        let mut session = BuzzerTestSession::new();
 
         let decision = session.trigger_feedback(&mut arbiter, BuzzerCueId::UiInput, 29_138);
         let status = session.status(arbiter.active_cue());
 
-        assert_eq!(status.state, BuzzerDebugSessionState::Idle);
+        assert_eq!(status.state, BuzzerTestSessionState::Idle);
         assert_eq!(status.trace.len(), 1);
         assert_eq!(status.trace[0].elapsed_ms, 0);
         assert_eq!(status.trace[0].decision, decision);
     }
 
-    #[cfg(feature = "buzzer-debug")]
+    #[cfg(feature = "buzzer-test")]
     #[test]
-    fn debug_one_shot_protection_completes_after_its_last_gpio_step() {
+    fn buzzer_test_one_shot_protection_completes_after_its_last_gpio_step() {
         let mut arbiter = BuzzerArbiter::new();
-        let mut session = BuzzerDebugSession::new();
+        let mut session = BuzzerTestSession::new();
 
         session
             .start_playback(&mut arbiter, BuzzerCueId::ProtectionAlarm, false, 0)
-            .expect("the idle debug session starts a one-shot protection cue");
+            .expect("the idle buzzer test session starts a one-shot protection cue");
 
         let _ = arbiter.tick(90);
         let _ = arbiter.tick(130);
@@ -1371,23 +977,23 @@ mod tests {
         let _ = session.settle_after_tick(&mut arbiter, 300);
         assert_eq!(
             session.status(arbiter.active_cue()).state,
-            BuzzerDebugSessionState::Complete
+            BuzzerTestSessionState::Complete
         );
     }
 
-    #[cfg(feature = "buzzer-debug")]
+    #[cfg(feature = "buzzer-test")]
     #[test]
-    fn debug_stop_returns_the_arbiter_to_normal_without_changing_the_cue_pattern() {
+    fn buzzer_test_stop_returns_the_arbiter_to_normal_without_changing_the_cue_pattern() {
         let mut arbiter = BuzzerArbiter::new();
-        let mut session = BuzzerDebugSession::new();
+        let mut session = BuzzerTestSession::new();
 
         session
             .start_playback(&mut arbiter, BuzzerCueId::ProtectionAlarm, true, 0)
-            .expect("the idle debug session starts a module playback");
+            .expect("the idle buzzer test session starts a module playback");
         assert_eq!(
             session.stop_playback(&mut arbiter, 50),
             Some(BuzzerDecision::new(
-                BuzzerCueSource::DeveloperDebug,
+                BuzzerCueSource::BuzzerTest,
                 BuzzerCueId::ProtectionAlarm,
                 BuzzerDecisionDisposition::Stopped,
             ))
@@ -1395,8 +1001,26 @@ mod tests {
         assert_eq!(arbiter.active_cue(), None);
         assert_eq!(
             session.status(arbiter.active_cue()).state,
-            BuzzerDebugSessionState::Idle
+            BuzzerTestSessionState::Idle
         );
+    }
+
+    #[cfg(feature = "buzzer-test")]
+    #[test]
+    fn buzzer_test_stop_does_not_stop_unowned_production_feedback() {
+        let mut arbiter = BuzzerArbiter::new();
+        let mut session = BuzzerTestSession::new();
+
+        assert_eq!(
+            arbiter.request_feedback(BuzzerCueSource::FrontPanel, BuzzerCueId::HeaterOn, 0),
+            BuzzerDecision::new(
+                BuzzerCueSource::FrontPanel,
+                BuzzerCueId::HeaterOn,
+                BuzzerDecisionDisposition::Started,
+            )
+        );
+        assert_eq!(session.stop_playback(&mut arbiter, 1), None);
+        assert_eq!(arbiter.active_cue(), Some(BuzzerCueId::HeaterOn));
     }
 
     #[test]

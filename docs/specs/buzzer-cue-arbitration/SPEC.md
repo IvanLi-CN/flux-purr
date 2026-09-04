@@ -5,12 +5,12 @@
 ## Context and Scope
 
 - Context: `GPIO48` 上的单一 PWM 输出只能在任一时刻驱动一个 Buzzer Cue；多个独立请求必须经确定性仲裁后才可到达该输出。
-- In scope: cue 请求的优先级、抢占、单槽合并、安全状态抑制、调度语义、已选 cue 的 GPIO48 输出切换约束与诊断边界，以及 feature-gated 的开发蜂鸣器诊断。
+- In scope: cue 请求的优先级、抢占、单槽合并、安全状态抑制、调度语义、已选 cue 的 GPIO48 输出切换约束与诊断边界，以及标准固件的受控 Buzzer Test Session 和可选载波观测。
 - Out of scope: cue 的具体音高/时长设计、蜂鸣器硬件拓扑、产品 Control Plane API、原始 PWM 参数控制、测温 fault 的安全策略。
 
 ## Terms and Interfaces
 
-- `Buzzer Cue`、`Cue Request`、`Cue Arbitration`、`Protection Cue`、`Attention Reminder`、`Feedback Cue`、`Pending Feedback`、`Audible Safety State` 与 `Developer Buzzer Diagnostic`：见根目录 `CONTEXT.md`。
+- `Buzzer Cue`、`Cue Request`、`Cue Arbitration`、`Protection Cue`、`Attention Reminder`、`Feedback Cue`、`Pending Feedback`、`Audible Safety State` 与 `Buzzer Test Session`：见根目录 `CONTEXT.md`。
 - Interface: 固件内部的 cue 仲裁边界接收携带语义来源的 Cue Request，并返回 `selected`、`preempted`、`queued`、`coalesced` 或 `dropped` 的仲裁结果。
 - Interface: priority-2 software-interrupt executor 中的专用蜂鸣器时序任务是 `BuzzerArbiter`、底层播放控制器和 GPIO48 PWM 写入的唯一拥有者；业务模块只提交 Cue Request。
 
@@ -61,10 +61,10 @@
 
 ### REQ-BUZZER-ARBITRATION-008
 
-- 开发固件在显式启用 `buzzer-debug` feature 后，MUST 通过 native USB JSONL 与受 lease 保护的 `devd` 端点提供 `Developer Buzzer Diagnostic`；能力必须由 `buzzer_debug` identity capability 明确声明，且不得经 LAN 或产品 Web 控制面暴露。
+- 标准固件 MUST 通过 native USB JSONL 与受 lease 保护的 `devd` 端点提供 `Buzzer Test Session`；能力必须由 `buzzer_test` identity capability 明确声明，且不得经 LAN 或产品 Web 控制面暴露。`buzzer-observe` 是可选扩展，只增加 GPIO48 数字载波观测字段，不改变测试请求或生产播放路径。
 - 该诊断 MUST 只接受生产 `BuzzerCueId` 或固定 `feedback_coalesce` / `feedback_replace` / `active_cooling_retrigger` 仲裁场景，并且仍 MUST 通过 `BuzzerArbiter` 提交。`ProtectionAlarm` MUST 复用 production `ProtectionAlarmCadence` 和已存在的安全请求接口；`AttentionReminder` MUST 复用其十秒 cadence。它不得暴露频率、占空比、原始步骤或持久化控制。
-- 诊断触发 MUST 在加热、测温 fault、热保护 latch 或未确认的 thermal attention 存在时拒绝；返回的有限 decision trace MUST 只记录本诊断会话的仲裁结果。调试 build 还 MUST 返回有限 output trace：每一项关联已请求的 cue 输出、Timer2 `prescaler` / `period` 推导的配置 carrier、GPIO48 pad 经 PCNT 上升沿计数得到的观测 carrier、duty 与 generation，且只在同一 real-time 时序任务实际应用输出后记录。PCNT 只读回该 pad 的数字波形，不得表述为声学频率测量。静音项的逻辑频率为 `null`，但 timer 配置按普通固件的 duty-zero 复用合同保留。普通 Feedback Cue 的显式 `repeat` MUST 在每轮生产音型结束后重新通过 `BuzzerArbiter` 提交；保护和提醒 cue MUST 保持生产 cadence。重复播放只能由显式 `repeat` 请求开始，并且 MUST 由显式 `stop` 请求结束。
-- `buzzer-debug` feature MUST 在标准运行时初始化、主循环、GPIO48 输出应用与 cue pattern 之上添加该受控测试会话；它不得使用恢复模式、替代传感器输入、替代 heater/GPIO 初始化或独立 PWM 路径。
+- 诊断触发 MUST 在加热、测温 fault、热保护 latch 或未确认的 thermal attention 存在时拒绝；返回的有限 decision trace MUST 只记录本诊断会话的仲裁结果。`buzzer-observe` build 还 MUST 返回有限 output trace：每一项关联已请求的 cue 输出、Timer2 `prescaler` / `period` 推导的配置 carrier、GPIO48 pad 经 PCNT 上升沿计数得到的观测 carrier、duty 与 generation，且只在同一 real-time 时序任务实际应用输出后记录。PCNT 只读回该 pad 的数字波形，不得表述为声学频率测量。静音项的逻辑频率为 `null`，但 timer 配置按普通固件的 duty-zero 复用合同保留。普通 Feedback Cue 的显式 `repeat` MUST 在每轮生产音型结束后重新通过 `BuzzerArbiter` 提交；保护和提醒 cue MUST 保持生产 cadence。重复播放只能由显式 `repeat` 请求开始，并且 MUST 由显式 `stop` 请求结束。
+- `buzzer-test` feature MUST 在标准运行时初始化、主循环、GPIO48 输出应用与 cue pattern 之上添加该受控测试会话；它不得使用恢复模式、替代传感器输入、替代 heater/GPIO 初始化或独立 PWM 路径。`buzzer-observe` MUST 仅在同一 GPIO48 输出所有权内初始化 PCNT 观测，不得创建第二条 PWM 路径。
 
 ## Verification
 
@@ -114,7 +114,7 @@
 
 - Method: feature-gated 固件 USB frame、`devd` request 验证测试与授权设备 GPIO48 PCNT 闭环验证。
 - covers: `REQ-BUZZER-ARBITRATION-008`
-- Pass condition: 只有声明 capability 的开发固件可接收 production cue/scenario 请求；普通 cue 连续模式会在每轮结束后重新通过仲裁，`protection_alarm --repeat` 与运行时共用一秒 cadence；请求无法携带原始 PWM 参数，并在真实热安全 interlock 存在时被拒绝；多音 cue 的 GPIO48 pad 观测频率分别跟随其目标音高。
+- Pass condition: 声明 `buzzer_test` capability 的标准固件可接收 production cue/scenario 请求；普通 cue 连续模式会在每轮结束后重新通过仲裁，`protection_alarm --repeat` 与运行时共用一秒 cadence；请求无法携带原始 PWM 参数，并在真实热安全 interlock 存在时被拒绝；启用 `buzzer-observe` 时，多音 cue 的 GPIO48 pad 观测频率分别跟随其目标音高。
 
 ## Related ADRs
 
