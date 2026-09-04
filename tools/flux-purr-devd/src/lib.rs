@@ -8567,16 +8567,8 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
     let candidates = [
         (
             "local-esp32s3-release",
-            "Local ESP32-S3 production release",
-            "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
-            "release + web_serial + net_http",
-            vec!["web_serial".to_string(), "net_http".to_string()],
-            "elf",
-        ),
-        (
-            "local-esp32s3-release-buzzer-test",
             "Local ESP32-S3 release (buzzer test)",
-            "firmware/target/buzzer-test/xtensa-esp32s3-none-elf/release/flux-purr",
+            "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
             "release + web_serial + net_http + buzzer-test",
             vec![
                 "web_serial".to_string(),
@@ -10539,8 +10531,14 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].artifact_id, "local-esp32s3-release");
         assert_eq!(artifacts[0].target_chip, "esp32s3");
-        assert_eq!(artifacts[0].profile, "release + web_serial + net_http");
-        assert_eq!(artifacts[0].features, ["web_serial", "net_http"]);
+        assert_eq!(
+            artifacts[0].profile,
+            "release + web_serial + net_http + buzzer-test"
+        );
+        assert_eq!(
+            artifacts[0].features,
+            ["web_serial", "net_http", "buzzer-test"]
+        );
         assert_eq!(artifacts[0].files[0].kind, "elf");
         assert_eq!(
             artifacts[0].files[0].path,
@@ -10574,32 +10572,6 @@ mod tests {
         assert_eq!(
             artifacts[0].files[0].path,
             "firmware/target/buzzer-observe/xtensa-esp32s3-none-elf/release/flux-purr"
-        );
-    }
-
-    #[test]
-    fn artifact_catalog_exposes_buzzer_test_build_separately() {
-        let dir = tempdir().unwrap();
-        let test_path = dir
-            .path()
-            .join("firmware/target/buzzer-test/xtensa-esp32s3-none-elf/release");
-        fs::create_dir_all(&test_path).unwrap();
-        fs::write(test_path.join("flux-purr"), b"buzzer-test-firmware-image").unwrap();
-
-        let artifacts = discover_firmware_artifacts(Some(dir.path())).unwrap();
-
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(
-            artifacts[0].artifact_id,
-            "local-esp32s3-release-buzzer-test"
-        );
-        assert_eq!(
-            artifacts[0].features,
-            ["web_serial", "net_http", "buzzer-test"]
-        );
-        assert_eq!(
-            artifacts[0].files[0].path,
-            "firmware/target/buzzer-test/xtensa-esp32s3-none-elf/release/flux-purr"
         );
     }
 
