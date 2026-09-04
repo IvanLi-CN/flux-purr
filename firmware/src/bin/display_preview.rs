@@ -17,10 +17,9 @@ fn repo_root() -> PathBuf {
 }
 
 fn default_output_path(scene: SceneId) -> PathBuf {
-    repo_root().join(format!(
-        "docs/specs/vmekj-s3-gc9d01-display-bringup/assets/{}.framebuffer.bin",
-        scene.slug()
-    ))
+    repo_root()
+        .join("docs/specs/s3-gc9d01-display-bringup/assets")
+        .join(format!("{}.framebuffer.bin", scene.slug()))
 }
 
 fn panel_output_path(logical_output_path: &Path) -> PathBuf {

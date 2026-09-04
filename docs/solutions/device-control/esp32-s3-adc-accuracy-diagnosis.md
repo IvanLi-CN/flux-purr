@@ -11,8 +11,8 @@ tags:
   - measurement-accuracy
 status: active
 related_specs:
-  - docs/specs/jt8r2-adc-calibration-control-plane/SPEC.md
-  - docs/specs/m8r4q-real-control-plane-runtime/SPEC.md
+  - docs/specs/adc-calibration-control-plane/SPEC.md
+  - docs/specs/real-control-plane-runtime/SPEC.md
 ---
 
 # ESP32-S3 ADC absolute-accuracy diagnosis
@@ -120,5 +120,5 @@ Flux Purr 的重复实验没有证明以下单项可以稳定消除 residual mov
 - [ESP-IDF ESP32-S3 ADC low-level definitions](https://github.com/espressif/esp-idf/blob/v6.0.2/components/esp_hal_ana_conv/esp32s3/include/hal/adc_ll.h)
 - [ESP-IDF ESP32-S3 eFuse ADC calibration source](https://github.com/espressif/esp-idf/blob/v6.0.2/components/efuse/esp32s3/esp_efuse_rtc_calib.c)
 - [esp-hal 1.0.0 ADC implementation](https://github.com/esp-rs/esp-hal/blob/esp-hal-v1.0.0/esp-hal/src/analog/adc/xtensa.rs)
-- [ADC calibration control-plane implementation](../../specs/jt8r2-adc-calibration-control-plane/IMPLEMENTATION.md)
-- [Runtime startup implementation](../../specs/m8r4q-real-control-plane-runtime/IMPLEMENTATION.md)
+- [ADC calibration control-plane implementation](../../specs/adc-calibration-control-plane/IMPLEMENTATION.md)
+- [Runtime startup implementation](../../specs/real-control-plane-runtime/IMPLEMENTATION.md)

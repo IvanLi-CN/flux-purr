@@ -5,7 +5,7 @@
 ## Lifecycle / Compatibility
 
 - 本主题是 Flux Purr 产品版本、开发 build identity、VERSION-only 准备提交和逐源提交发布顺序的当前契约。
-- `docs/specs/r9k3m-pr-label-release-protection/` 中由 PR label、snapshot、channel 和 tag baseline 决定数字版本的部分已被本主题与 ADR 0003 取代；Label Gate、snapshot、channel routing、主分支保护和非版本化 PR policy 仍继续生效。
+- `docs/specs/pr-label-release-protection/` 中由 PR label、snapshot、channel 和 tag baseline 决定数字版本的部分已被本主题与 ADR 0003 取代；Label Gate、snapshot、channel routing、主分支保护和非版本化 PR policy 仍继续生效。
 - 既有 Git tags、GitHub Releases、release manifests 与 Git notes 保持历史可读，但不再是新构建或新发布的版本输入。
 
 ## Replacements / Background

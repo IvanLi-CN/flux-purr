@@ -11,8 +11,8 @@ tags:
   - heater-curve
 status: active
 related_specs:
-  - docs/specs/jt8r2-adc-calibration-control-plane/SPEC.md
-  - docs/specs/m8r4q-real-control-plane-runtime/SPEC.md
+  - docs/specs/adc-calibration-control-plane/SPEC.md
+  - docs/specs/real-control-plane-runtime/SPEC.md
 ---
 
 # Flux Purr calibration data packet collection
@@ -161,5 +161,5 @@ The stable package should omit the startup transient bins. The practical curve a
 
 ## References
 
-- [Calibration control plane spec](../../specs/jt8r2-adc-calibration-control-plane/SPEC.md)
-- [Real control plane runtime spec](../../specs/m8r4q-real-control-plane-runtime/SPEC.md)
+- [Calibration control plane spec](../../specs/adc-calibration-control-plane/SPEC.md)
+- [Real control plane runtime spec](../../specs/real-control-plane-runtime/SPEC.md)

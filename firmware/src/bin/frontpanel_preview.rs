@@ -260,10 +260,9 @@ fn repo_root() -> PathBuf {
 }
 
 fn default_output_path(preset: PreviewPreset) -> PathBuf {
-    repo_root().join(format!(
-        "docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/{}.framebuffer.bin",
-        preset.slug()
-    ))
+    repo_root()
+        .join("docs/specs/heater-pid-frontpanel-runtime/assets")
+        .join(format!("{}.framebuffer.bin", preset.slug()))
 }
 
 #[derive(Debug, PartialEq, Eq)]

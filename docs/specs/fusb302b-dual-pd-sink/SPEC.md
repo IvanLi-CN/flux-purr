@@ -61,12 +61,6 @@ C20 is directly `VBUS`-to-`GND`, marked `Add into BOM=yes`, and is explicitly re
 - Before sink toggle, the runtime applies the PHY's default host-current setting, disables CC measurement, and selects the toggle interrupt mask. After CC attachment, it selects the attached CC pin for measurement and applies the receiver interrupt mask before packet transmission.
 - Flux Purr owns controller selection, PPS/fixed contract policy, RDO selection, `Accept`/`PS_RDY` contract commit, recovery timing, and heater interlock. The FUSB302BMPX PD 3.0 GoodCRC encoding is an explicit target-hardware opt-in. Source-only validation proves framing and policy, not real-source interoperability.
 
-## Milestones
-
-1. Controller-neutral contract model, FUSB302B policy vectors, hardware baseline, and status schema.
-2. Firmware runtime dispatch, shared-I2C transaction boundary, and contract-driven heater interlock for both controllers.
-3. Authorized HIL matrix with PPS `20V/3A`, PPS `20V/5A` and an eMarked cable, plus source-contract readback.
-
 ## Non-Goals
 
 - Claiming USB-IF certification.
