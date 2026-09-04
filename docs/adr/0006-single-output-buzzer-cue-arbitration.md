@@ -45,8 +45,9 @@ caller preemption.
   restores duty. Same-frequency silence keeps Timer2 running.
   Arbiter decision logs identify the request source, cue, and selected
   disposition without creating a new product API or persistent state.
-- The default `buzzer-test` firmware feature exposes a native-USB/devd
-  test session after declaring the `buzzer_test` identity capability. It can
+- A diagnostic firmware build may opt into the `buzzer-test` feature and expose
+  a native-USB/devd test session after declaring the `buzzer_test` identity
+  capability. The default production build does not include this feature. It can
   submit production cue IDs or fixed arbitration scenarios, is rejected while
   real thermal safety is active, and cannot set PWM parameters, persist state,
   or use LAN. It reuses the normal arbiter, cue patterns, GPIO48 output path,
