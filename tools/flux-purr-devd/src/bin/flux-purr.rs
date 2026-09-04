@@ -17,7 +17,7 @@ use crossterm::{
     },
     execute, queue,
     style::{Attribute, Print, SetAttribute},
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self, Clear, ClearType},
 };
 use flux_purr_devd::{
     DEFAULT_DEVD_URL, FirmwareArtifact, FirmwareArtifactCatalog, WifiConfigOp,
@@ -331,7 +331,7 @@ struct BuzzerTestArgs {
     cue: Option<BuzzerCueArg>,
     #[arg(long, value_enum)]
     scenario: Option<BuzzerScenarioArg>,
-    #[arg(long, requires = "cue")]
+    #[arg(long, visible_alias = "loop", requires = "cue")]
     repeat: bool,
     #[arg(long)]
     stop: bool,
@@ -343,6 +343,11 @@ struct BuzzerTestArgs {
 struct BuzzerPlayArgs {
     #[command(flatten)]
     target: TargetSelector,
+    #[arg(
+        long,
+        help = "Enable pointer capture at startup; turn it off with M to copy terminal text."
+    )]
+    pointer: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -652,7 +657,9 @@ fn buzzer_terminal_key_action(
     }
     match key {
         KeyCode::Enter | KeyCode::Char(' ') => Some(selection.primary_action(session_running)),
-        KeyCode::Char('c') | KeyCode::Char('C') => selection.continuous_action(session_running),
+        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('l') | KeyCode::Char('L') => {
+            selection.continuous_action(session_running)
+        }
         KeyCode::Char('s') | KeyCode::Char('S') => Some(BuzzerInteractiveAction::Stop),
         KeyCode::Char('r') | KeyCode::Char('R') => Some(BuzzerInteractiveAction::Refresh),
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
@@ -1753,7 +1760,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if cli.json {
                     return Err("buzzer play is interactive and cannot be used with --json".into());
                 }
-                buzzer_play_interactive(&client, resolve_target(args.target, &cli.devd)?).await?;
+                buzzer_play_interactive(
+                    &client,
+                    resolve_target(args.target, &cli.devd)?,
+                    args.pointer,
+                )
+                .await?;
                 return Ok(());
             }
         },
@@ -10287,11 +10299,16 @@ fn buzzer_capture_delay(
     stop: bool,
     status: bool,
 ) -> Option<Duration> {
-    if status || repeat {
+    if status {
         return None;
     }
     if stop {
         return Some(Duration::from_millis(BUZZER_STOP_SETTLE_MS));
+    }
+    if repeat {
+        return cue.map(|cue| {
+            Duration::from_millis(cue.one_shot_duration_ms() + BUZZER_CAPTURE_SETTLE_MS)
+        });
     }
     if let Some(scenario) = scenario {
         return Some(Duration::from_millis(
@@ -10389,30 +10406,59 @@ fn buzzer_scenario_arg_from_wire(value: &str) -> Option<BuzzerScenarioArg> {
 async fn buzzer_play_interactive(
     client: &Client,
     resolved: ResolvedUsbTarget,
+    pointer_capture: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if io::stdin().is_terminal() && io::stdout().is_terminal() {
-        return buzzer_play_terminal_interactive(client, resolved).await;
+        return buzzer_play_terminal_interactive(client, resolved, pointer_capture).await;
     }
     buzzer_play_line_interactive(client, resolved).await
 }
 
-struct BuzzerTerminalGuard;
+struct BuzzerTerminalGuard {
+    pointer_capture: bool,
+}
 
 impl BuzzerTerminalGuard {
-    fn enter(output: &mut impl Write) -> io::Result<Self> {
+    fn enter(output: &mut impl Write, pointer_capture: bool) -> io::Result<Self> {
         terminal::enable_raw_mode()?;
-        if let Err(error) = execute!(output, EnterAlternateScreen, EnableMouseCapture, Hide) {
+        if let Err(error) = execute!(output, Hide) {
             let _ = terminal::disable_raw_mode();
             return Err(error);
         }
-        Ok(Self)
+        let mut guard = Self {
+            pointer_capture: false,
+        };
+        if pointer_capture {
+            if let Err(error) = guard.set_pointer_capture(output, true) {
+                let _ = execute!(output, Show);
+                let _ = terminal::disable_raw_mode();
+                return Err(error);
+            }
+        }
+        Ok(guard)
+    }
+
+    fn set_pointer_capture(&mut self, output: &mut impl Write, enabled: bool) -> io::Result<()> {
+        if self.pointer_capture == enabled {
+            return Ok(());
+        }
+        if enabled {
+            execute!(output, EnableMouseCapture)?;
+        } else {
+            execute!(output, DisableMouseCapture)?;
+        }
+        self.pointer_capture = enabled;
+        output.flush()
     }
 }
 
 impl Drop for BuzzerTerminalGuard {
     fn drop(&mut self) {
         let mut output = io::stdout();
-        let _ = execute!(output, Show, DisableMouseCapture, LeaveAlternateScreen);
+        if self.pointer_capture {
+            let _ = execute!(output, DisableMouseCapture);
+        }
+        let _ = execute!(output, Show);
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -10420,25 +10466,42 @@ impl Drop for BuzzerTerminalGuard {
 async fn buzzer_play_terminal_interactive(
     client: &Client,
     resolved: ResolvedUsbTarget,
+    pointer_capture: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut output = io::stdout();
-    let _terminal = BuzzerTerminalGuard::enter(&mut output)?;
+    let mut terminal_guard = BuzzerTerminalGuard::enter(&mut output, pointer_capture)?;
     let mut selection = BuzzerTerminalSelection::default();
-    let mut notice = None;
+    let mut notice: Option<String> = None;
     let mut status =
         buzzer_test_live(client, resolved.clone(), None, None, false, false, true).await?;
 
     loop {
-        render_buzzer_terminal(&mut output, &status, selection, notice.as_deref())?;
+        render_buzzer_terminal(
+            &mut output,
+            &status,
+            selection,
+            notice.as_deref(),
+            terminal_guard.pointer_capture,
+        )?;
         let session_running = buzzer_session_state(&status) == "running";
         let mut action = None;
 
         loop {
-            if !event::poll(Duration::from_millis(250))? {
-                break;
-            }
             match event::read()? {
                 Event::Key(key) => {
+                    if matches!(key.kind, KeyEventKind::Press)
+                        && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M'))
+                    {
+                        let enabled = !terminal_guard.pointer_capture;
+                        terminal_guard.set_pointer_capture(&mut output, enabled)?;
+                        notice = Some(if enabled {
+                            "Pointer capture enabled. Press M again to release it for terminal copy."
+                        } else {
+                            "Pointer capture disabled. Terminal text selection and copy are enabled."
+                        }
+                        .to_string());
+                        break;
+                    }
                     if buzzer_terminal_move_selection(&mut selection, key.code, key.kind) {
                         break;
                     }
@@ -10501,6 +10564,7 @@ fn render_buzzer_terminal(
     status: &Value,
     selection: BuzzerTerminalSelection,
     notice: Option<&str>,
+    pointer_capture: bool,
 ) -> io::Result<()> {
     let (columns, _) = terminal::size().unwrap_or((100, 30));
     let state = buzzer_session_state(status);
@@ -10523,9 +10587,9 @@ fn render_buzzer_terminal(
         }
     };
     let default_input_help = if state == "running" {
-        "Enter/Space stops continuous playback."
+        "Enter/Space stops continuous playback. M toggles pointer capture."
     } else {
-        "Enter/Space plays the selected cue once or runs the selected scenario."
+        "Enter/Space plays once; C/L starts continuous playback. M toggles pointer capture."
     };
     let status_line = notice.unwrap_or(default_input_help);
 
@@ -10574,8 +10638,12 @@ fn render_buzzer_terminal(
         buzzer_terminal_actions_row(),
         columns,
         &format!(
-            "{:<24}{:<18}{:<10}{:<14}[Q] Exit",
-            "[Enter/Space] Play/stop", "[C] Continuous", "[S] Stop", "[R] Refresh",
+            "{:<24}{:<18}{:<10}{:<14}{:<18}[Q] Exit",
+            "[Enter/Space] Play/stop",
+            "[C/L] Continuous",
+            "[S] Stop",
+            "[R] Refresh",
+            buzzer_pointer_mode_label(pointer_capture),
         ),
     )?;
     write_buzzer_terminal_line(
@@ -10585,6 +10653,14 @@ fn render_buzzer_terminal(
         "Mouse: click an item to select; click an action label to execute.",
     )?;
     output.flush()
+}
+
+const fn buzzer_pointer_mode_label(pointer_capture: bool) -> &'static str {
+    if pointer_capture {
+        "[M] Copy mode"
+    } else {
+        "[M] Pointer mode"
+    }
 }
 
 fn write_buzzer_terminal_item_line(
@@ -17283,7 +17359,7 @@ mod tests {
     }
 
     #[test]
-    fn finite_buzzer_commands_wait_until_their_audio_is_quiet_before_readback() {
+    fn buzzer_commands_wait_for_an_authoritative_readback() {
         assert_eq!(
             super::buzzer_capture_delay(
                 Some(super::BuzzerCueArg::HeaterOn),
@@ -17322,7 +17398,7 @@ mod tests {
                 false,
                 false,
             ),
-            None
+            Some(Duration::from_millis(145))
         );
     }
 
@@ -17368,13 +17444,34 @@ mod tests {
         .unwrap();
 
         let Command::Buzzer {
-            command: BuzzerCommand::Play(BuzzerPlayArgs { target }),
+            command: BuzzerCommand::Play(BuzzerPlayArgs { target, .. }),
         } = cli.command
         else {
             panic!("buzzer play command parses");
         };
         assert_eq!(target.device.as_deref(), Some("serial-direct-id"));
         assert_eq!(target.hardware, None);
+    }
+
+    #[test]
+    fn buzzer_play_accepts_pointer_capture_as_an_explicit_mode() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "buzzer",
+            "play",
+            "--device",
+            "serial-direct-id",
+            "--pointer",
+        ])
+        .unwrap();
+
+        let Command::Buzzer {
+            command: BuzzerCommand::Play(BuzzerPlayArgs { pointer, .. }),
+        } = cli.command
+        else {
+            panic!("buzzer play command parses");
+        };
+        assert!(pointer);
     }
 
     #[test]
@@ -17391,6 +17488,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(cli.devd, "http://127.0.0.1:14830");
+    }
+
+    #[test]
+    fn buzzer_test_accepts_loop_as_a_repeat_alias() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "buzzer",
+            "test",
+            "--device",
+            "serial-direct-id",
+            "--cue",
+            "ui-input",
+            "--loop",
+        ])
+        .unwrap();
+
+        let Command::Buzzer {
+            command: BuzzerCommand::Test(BuzzerTestArgs { repeat, .. }),
+        } = cli.command
+        else {
+            panic!("buzzer test command parses");
+        };
+        assert!(repeat);
     }
 
     #[test]
@@ -17415,6 +17535,14 @@ mod tests {
         );
         assert_eq!(
             buzzer_terminal_key_action(KeyCode::Char('c'), KeyEventKind::Press, selection, false),
+            Some(BuzzerInteractiveAction::Play {
+                cue: BuzzerCueArg::UiInput,
+                repeat: true,
+                stop_current: false,
+            })
+        );
+        assert_eq!(
+            buzzer_terminal_key_action(KeyCode::Char('l'), KeyEventKind::Press, selection, false),
             Some(BuzzerInteractiveAction::Play {
                 cue: BuzzerCueArg::UiInput,
                 repeat: true,
@@ -17470,6 +17598,12 @@ mod tests {
                 descriptor.label,
             );
         }
+    }
+
+    #[test]
+    fn terminal_buzzer_render_exposes_copyable_default_mode() {
+        assert_eq!(buzzer_pointer_mode_label(false), "[M] Pointer mode");
+        assert_eq!(buzzer_pointer_mode_label(true), "[M] Copy mode");
     }
 
     #[test]
