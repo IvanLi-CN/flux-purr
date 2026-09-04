@@ -973,6 +973,7 @@ async fn tune_flagship_target(
     Ok((current_profile, entry))
 }
 
+#[cfg(test)]
 fn validation_preview_profile_for_target(
     profile_value: &Value,
     target_temp_c: i16,
@@ -2007,6 +2008,7 @@ fn review_target_entry(
     })
 }
 
+#[cfg(test)]
 fn validation_target_entry(
     target_temp_c: i16,
     budget_outcome: &str,
@@ -2061,6 +2063,7 @@ fn entry_acceptance_passed(entry: &Value) -> bool {
     entry.get("candidateDisposition").and_then(Value::as_str) == Some("acceptance_passed")
 }
 
+#[cfg(test)]
 fn validation_disposition_for_target(budget_outcome: &str) -> &'static str {
     match budget_outcome {
         "validation_passed" => "validation_passed",

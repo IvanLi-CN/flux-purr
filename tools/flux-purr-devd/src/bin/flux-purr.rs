@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::{self, BufRead, BufReader, BufWriter, Read, Write},
+    io::{self, BufRead, BufReader, BufWriter, IsTerminal, Read, Write},
     net::Ipv4Addr,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
@@ -8,7 +8,17 @@ use std::{
     time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH},
 };
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use crossterm::{
+    cursor::{Hide, MoveTo, Show},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+        MouseEventKind,
+    },
+    execute, queue,
+    style::{Attribute, Print, SetAttribute},
+    terminal::{self, Clear, ClearType},
+};
 use flux_purr_devd::{
     DEFAULT_DEVD_URL, FirmwareArtifact, FirmwareArtifactCatalog, WifiConfigOp,
     hardware_registry_path,
@@ -33,7 +43,7 @@ mod thermal_retune;
 #[command(name = "flux-purr", version = flux_purr_devd::PRODUCT_VERSION)]
 #[command(about = "Flux Purr CLI for USB/devd hardware workflows")]
 struct Cli {
-    #[arg(long, default_value = DEFAULT_DEVD_URL)]
+    #[arg(long, global = true, default_value = DEFAULT_DEVD_URL)]
     devd: String,
     #[arg(long, global = true)]
     json: bool,
@@ -53,6 +63,10 @@ enum Command {
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
+    },
+    Buzzer {
+        #[command(subcommand)]
+        command: BuzzerCommand,
     },
     Pd {
         #[command(subcommand)]
@@ -293,6 +307,383 @@ impl ThermalSelfTestEvaluationMode {
 enum RuntimeCommand {
     Get(TargetSelector),
     Set(RuntimeSetArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum BuzzerCommand {
+    #[command(about = "Run a feature-gated, module-level buzzer test through a USB/devd lease.")]
+    Test(BuzzerTestArgs),
+    #[command(about = "Interactively select and play a feature-gated buzzer cue through USB/devd.")]
+    Play(BuzzerPlayArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("buzzer_action")
+        .required(true)
+        .multiple(false)
+        .args(["cue", "scenario", "stop", "status"])
+))]
+struct BuzzerTestArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long, value_enum)]
+    cue: Option<BuzzerCueArg>,
+    #[arg(long, value_enum)]
+    scenario: Option<BuzzerScenarioArg>,
+    #[arg(long, visible_alias = "loop", requires = "cue")]
+    repeat: bool,
+    #[arg(long)]
+    stop: bool,
+    #[arg(long)]
+    status: bool,
+}
+
+#[derive(Debug, Args)]
+struct BuzzerPlayArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(
+        long,
+        help = "Enable pointer capture at startup; turn it off with M to copy terminal text."
+    )]
+    pointer: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BuzzerCueArg {
+    UiInput,
+    HeaterOn,
+    HeaterOff,
+    ActiveCoolingOn,
+    ActiveCoolingOff,
+    HeaterReject,
+    ActiveCoolingReject,
+    ProtectionAlarm,
+    AttentionReminder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuzzerInteractiveAction {
+    Exit,
+    Refresh,
+    Stop,
+    Play {
+        cue: BuzzerCueArg,
+        repeat: bool,
+        stop_current: bool,
+    },
+    RunScenario {
+        scenario: BuzzerScenarioArg,
+        stop_current: bool,
+    },
+}
+
+impl BuzzerCueArg {
+    const fn wire_value(self) -> &'static str {
+        match self {
+            Self::UiInput => "ui_input",
+            Self::HeaterOn => "heater_on",
+            Self::HeaterOff => "heater_off",
+            Self::ActiveCoolingOn => "active_cooling_on",
+            Self::ActiveCoolingOff => "active_cooling_off",
+            Self::HeaterReject => "heater_reject",
+            Self::ActiveCoolingReject => "active_cooling_reject",
+            Self::ProtectionAlarm => "protection_alarm",
+            Self::AttentionReminder => "attention_reminder",
+        }
+    }
+
+    const fn one_shot_duration_ms(self) -> u64 {
+        match self {
+            Self::UiInput => 45,
+            Self::HeaterOn | Self::HeaterOff => 170,
+            Self::ActiveCoolingOn | Self::ActiveCoolingOff => 210,
+            Self::HeaterReject => 305,
+            Self::ActiveCoolingReject => 310,
+            Self::ProtectionAlarm => 300,
+            // The cue pattern itself is 210 ms; the firmware owns the initial
+            // start and ten-second replay cadence.
+            Self::AttentionReminder => 210,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BuzzerCueDescriptor {
+    cue: BuzzerCueArg,
+    label: &'static str,
+    kind: &'static str,
+    rhythm: &'static str,
+}
+
+const BUZZER_CUE_CATALOG: [BuzzerCueDescriptor; 9] = [
+    BuzzerCueDescriptor {
+        cue: BuzzerCueArg::UiInput,
+        label: "UI input",
+        kind: "feedback",
+        rhythm: "1080 Hz for 45 ms",
+    },
+    BuzzerCueDescriptor {
+        cue: BuzzerCueArg::HeaterOn,
+        label: "Heater on",
+        kind: "feedback",
+        rhythm: "1240 Hz 60 ms, 30 ms rest, 1680 Hz 80 ms",
+    },
+    BuzzerCueDescriptor {
+        cue: BuzzerCueArg::HeaterOff,
+        label: "Heater off",
+        kind: "feedback",
+        rhythm: "1680 Hz 60 ms, 30 ms rest, 1240 Hz 80 ms",
+    },
+    BuzzerCueDescriptor {
+        cue: BuzzerCueArg::ActiveCoolingOn,
+        label: "Active cooling on",
+        kind: "feedback",
+        rhythm: "900 / 1200 / 1550 Hz ascending",
+    },
+    BuzzerCueDescriptor {
+        cue: BuzzerCueArg::ActiveCoolingOff,
+        label: "Active cooling off",
+        kind: "feedback",
+        rhythm: "1550 / 1200 / 900 Hz descending",
+    },
+    BuzzerCueDescriptor {
+        cue: BuzzerCueArg::HeaterReject,
+        label: "Heater reject",
+        kind: "feedback",
+        rhythm: "420 Hz 120 ms, 35 ms rest, 360 Hz 150 ms",
+    },
+    BuzzerCueDescriptor {
+        cue: BuzzerCueArg::ActiveCoolingReject,
+        label: "Active cooling reject",
+        kind: "feedback",
+        rhythm: "480 Hz twice, then 320 Hz",
+    },
+    BuzzerCueDescriptor {
+        cue: BuzzerCueArg::ProtectionAlarm,
+        label: "Protection alarm",
+        kind: "safety",
+        rhythm: "2300 Hz 90 ms, 40 ms rest, 2300 Hz 90 ms; repeat cadence 1 s",
+    },
+    BuzzerCueDescriptor {
+        cue: BuzzerCueArg::AttentionReminder,
+        label: "Attention reminder",
+        kind: "safety",
+        rhythm: "1650 Hz 70 ms, 30 ms rest, 2200 Hz 110 ms; reminder cadence 10 s",
+    },
+];
+
+#[derive(Debug, Clone, Copy)]
+struct BuzzerScenarioDescriptor {
+    scenario: BuzzerScenarioArg,
+    label: &'static str,
+    description: &'static str,
+}
+
+const BUZZER_SCENARIO_CATALOG: [BuzzerScenarioDescriptor; 3] = [
+    BuzzerScenarioDescriptor {
+        scenario: BuzzerScenarioArg::FeedbackCoalesce,
+        label: "Feedback coalesce",
+        description: "three UI-input requests at 0, 15, and 30 ms",
+    },
+    BuzzerScenarioDescriptor {
+        scenario: BuzzerScenarioArg::FeedbackReplace,
+        label: "Feedback replace",
+        description: "two UI-input requests followed by heater-on at 30 ms",
+    },
+    BuzzerScenarioDescriptor {
+        scenario: BuzzerScenarioArg::ActiveCoolingRetrigger,
+        label: "Active cooling retrigger",
+        description: "three active-cooling-on requests at 0, 15, and 30 ms",
+    },
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BuzzerScenarioArg {
+    FeedbackCoalesce,
+    FeedbackReplace,
+    ActiveCoolingRetrigger,
+}
+
+impl BuzzerScenarioArg {
+    const fn wire_value(self) -> &'static str {
+        match self {
+            Self::FeedbackCoalesce => "feedback_coalesce",
+            Self::FeedbackReplace => "feedback_replace",
+            Self::ActiveCoolingRetrigger => "active_cooling_retrigger",
+        }
+    }
+
+    const fn duration_ms(self) -> u64 {
+        match self {
+            Self::FeedbackCoalesce => 250,
+            Self::FeedbackReplace => 350,
+            Self::ActiveCoolingRetrigger => 500,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuzzerTerminalItem {
+    Cue(BuzzerCueArg),
+    Scenario(BuzzerScenarioArg),
+}
+
+const fn buzzer_terminal_item_count() -> usize {
+    BUZZER_CUE_CATALOG.len() + BUZZER_SCENARIO_CATALOG.len()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BuzzerTerminalSelection {
+    index: usize,
+}
+
+impl Default for BuzzerTerminalSelection {
+    fn default() -> Self {
+        Self { index: 0 }
+    }
+}
+
+impl BuzzerTerminalSelection {
+    fn item(self) -> BuzzerTerminalItem {
+        if let Some(descriptor) = BUZZER_CUE_CATALOG.get(self.index) {
+            return BuzzerTerminalItem::Cue(descriptor.cue);
+        }
+        BuzzerTerminalItem::Scenario(
+            BUZZER_SCENARIO_CATALOG[self.index - BUZZER_CUE_CATALOG.len()].scenario,
+        )
+    }
+
+    fn move_previous(&mut self) {
+        self.index = self.index.saturating_sub(1);
+    }
+
+    fn move_next(&mut self) {
+        self.index = (self.index + 1).min(buzzer_terminal_item_count() - 1);
+    }
+
+    fn select_row(&mut self, row: u16) -> bool {
+        let Some(index) = buzzer_terminal_item_index_at_row(row) else {
+            return false;
+        };
+        self.index = index;
+        true
+    }
+
+    fn primary_action(self, session_running: bool) -> BuzzerInteractiveAction {
+        if session_running {
+            return BuzzerInteractiveAction::Stop;
+        }
+        match self.item() {
+            BuzzerTerminalItem::Cue(cue) => BuzzerInteractiveAction::Play {
+                cue,
+                repeat: false,
+                stop_current: false,
+            },
+            BuzzerTerminalItem::Scenario(scenario) => BuzzerInteractiveAction::RunScenario {
+                scenario,
+                stop_current: false,
+            },
+        }
+    }
+
+    fn continuous_action(self, session_running: bool) -> Option<BuzzerInteractiveAction> {
+        if session_running {
+            return None;
+        }
+        match self.item() {
+            BuzzerTerminalItem::Cue(cue) => Some(BuzzerInteractiveAction::Play {
+                cue,
+                repeat: true,
+                stop_current: false,
+            }),
+            BuzzerTerminalItem::Scenario(_) => None,
+        }
+    }
+}
+
+const BUZZER_TERMINAL_CUE_START_ROW: u16 = 6;
+
+const fn buzzer_terminal_scenario_start_row() -> u16 {
+    BUZZER_TERMINAL_CUE_START_ROW + BUZZER_CUE_CATALOG.len() as u16 + 1
+}
+
+const fn buzzer_terminal_actions_row() -> u16 {
+    buzzer_terminal_scenario_start_row() + BUZZER_SCENARIO_CATALOG.len() as u16 + 2
+}
+
+fn buzzer_terminal_item_index_at_row(row: u16) -> Option<usize> {
+    let cue_end = BUZZER_TERMINAL_CUE_START_ROW + BUZZER_CUE_CATALOG.len() as u16;
+    if (BUZZER_TERMINAL_CUE_START_ROW..cue_end).contains(&row) {
+        return Some((row - BUZZER_TERMINAL_CUE_START_ROW) as usize);
+    }
+
+    let scenario_start = buzzer_terminal_scenario_start_row();
+    let scenario_end = scenario_start + BUZZER_SCENARIO_CATALOG.len() as u16;
+    if (scenario_start..scenario_end).contains(&row) {
+        return Some(BUZZER_CUE_CATALOG.len() + (row - scenario_start) as usize);
+    }
+    None
+}
+
+fn buzzer_terminal_move_selection(
+    selection: &mut BuzzerTerminalSelection,
+    key: KeyCode,
+    kind: KeyEventKind,
+) -> bool {
+    if !matches!(kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return false;
+    }
+    match key {
+        KeyCode::Up => selection.move_previous(),
+        KeyCode::Down => selection.move_next(),
+        KeyCode::Home => selection.index = 0,
+        KeyCode::End => selection.index = buzzer_terminal_item_count() - 1,
+        _ => return false,
+    }
+    true
+}
+
+fn buzzer_terminal_key_action(
+    key: KeyCode,
+    kind: KeyEventKind,
+    selection: BuzzerTerminalSelection,
+    session_running: bool,
+) -> Option<BuzzerInteractiveAction> {
+    if !matches!(kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return None;
+    }
+    match key {
+        KeyCode::Enter | KeyCode::Char(' ') => Some(selection.primary_action(session_running)),
+        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('l') | KeyCode::Char('L') => {
+            selection.continuous_action(session_running)
+        }
+        KeyCode::Char('s') | KeyCode::Char('S') => Some(BuzzerInteractiveAction::Stop),
+        KeyCode::Char('r') | KeyCode::Char('R') => Some(BuzzerInteractiveAction::Refresh),
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+            Some(BuzzerInteractiveAction::Exit)
+        }
+        _ => None,
+    }
+}
+
+fn buzzer_terminal_pointer_action(
+    row: u16,
+    column: u16,
+    selection: BuzzerTerminalSelection,
+    session_running: bool,
+) -> Option<BuzzerInteractiveAction> {
+    if row != buzzer_terminal_actions_row() {
+        return None;
+    }
+    match column {
+        0..=23 => Some(selection.primary_action(session_running)),
+        24..=41 => selection.continuous_action(session_running),
+        42..=51 => Some(BuzzerInteractiveAction::Stop),
+        52..=65 => Some(BuzzerInteractiveAction::Refresh),
+        66.. => Some(BuzzerInteractiveAction::Exit),
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -1341,6 +1732,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let resolved = resolve_target(args.target.clone(), &cli.devd)?;
                 let body = runtime_body(&client, &resolved, args).await?;
                 request_with_lease(&client, resolved, Method::PUT, "/runtime", Some(body)).await?
+            }
+        },
+        Command::Buzzer { command } => match command {
+            BuzzerCommand::Test(args) => {
+                let BuzzerTestArgs {
+                    target,
+                    cue,
+                    scenario,
+                    repeat,
+                    stop,
+                    status,
+                } = args;
+                buzzer_test(
+                    &client,
+                    resolve_target(target, &cli.devd)?,
+                    cue,
+                    scenario,
+                    repeat,
+                    stop,
+                    status,
+                )
+                .await?
+            }
+            BuzzerCommand::Play(args) => {
+                if cli.json {
+                    return Err("buzzer play is interactive and cannot be used with --json".into());
+                }
+                buzzer_play_interactive(
+                    &client,
+                    resolve_target(args.target, &cli.devd)?,
+                    args.pointer,
+                )
+                .await?;
+                return Ok(());
             }
         },
         Command::Pd { command } => match command {
@@ -9839,6 +10264,871 @@ async fn runtime_body(
     Ok(Value::Object(body))
 }
 
+async fn buzzer_test(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+    cue: Option<BuzzerCueArg>,
+    scenario: Option<BuzzerScenarioArg>,
+    repeat: bool,
+    stop: bool,
+    status: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    buzzer_test_request(client, resolved, cue, scenario, repeat, stop, status, true).await
+}
+
+async fn buzzer_test_live(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+    cue: Option<BuzzerCueArg>,
+    scenario: Option<BuzzerScenarioArg>,
+    repeat: bool,
+    stop: bool,
+    status: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    buzzer_test_request(client, resolved, cue, scenario, repeat, stop, status, false).await
+}
+
+const BUZZER_CAPTURE_SETTLE_MS: u64 = 100;
+const BUZZER_STOP_SETTLE_MS: u64 = 25;
+
+fn buzzer_capture_delay(
+    cue: Option<BuzzerCueArg>,
+    scenario: Option<BuzzerScenarioArg>,
+    repeat: bool,
+    stop: bool,
+    status: bool,
+) -> Option<Duration> {
+    if status {
+        return None;
+    }
+    if stop {
+        return Some(Duration::from_millis(BUZZER_STOP_SETTLE_MS));
+    }
+    if repeat {
+        return cue.map(|cue| {
+            Duration::from_millis(cue.one_shot_duration_ms() + BUZZER_CAPTURE_SETTLE_MS)
+        });
+    }
+    if let Some(scenario) = scenario {
+        return Some(Duration::from_millis(
+            scenario.duration_ms() + BUZZER_CAPTURE_SETTLE_MS,
+        ));
+    }
+    cue.map(|cue| Duration::from_millis(cue.one_shot_duration_ms() + BUZZER_CAPTURE_SETTLE_MS))
+}
+
+async fn buzzer_test_request(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+    cue: Option<BuzzerCueArg>,
+    scenario: Option<BuzzerScenarioArg>,
+    repeat: bool,
+    stop: bool,
+    status: bool,
+    capture_readback: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (op, cue, scenario, repeat) = match (cue, scenario, repeat, stop, status) {
+        (Some(cue), None, repeat, false, false) => {
+            ("trigger", Some(cue.wire_value()), None, repeat)
+        }
+        (None, Some(scenario), false, false, false) => {
+            ("run", None, Some(scenario.wire_value()), false)
+        }
+        (None, None, false, true, false) => ("stop", None, None, false),
+        (None, None, false, false, true) => ("status", None, None, false),
+        _ => {
+            return Err(
+                "buzzer test requires --cue [--repeat], --scenario, --stop, or --status".into(),
+            );
+        }
+    };
+    let lease = create_lease(client, &resolved).await?;
+    let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let result = async {
+        let mut result = request_leased(
+            client,
+            &resolved,
+            &lease.lease_id,
+            Method::POST,
+            "/buzzer-test",
+            Some(buzzer_test_body(op, cue, scenario, repeat)),
+        )
+        .await?;
+        if capture_readback
+            && let Some(delay) = buzzer_capture_delay(
+                cue.and_then(buzzer_cue_arg_from_wire),
+                scenario.and_then(buzzer_scenario_arg_from_wire),
+                repeat,
+                stop,
+                status,
+            )
+        {
+            // A diagnostic status exchange runs through the same USB executor
+            // as firmware control. It must never land within an audible step.
+            tokio::time::sleep(delay).await;
+            result = request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::POST,
+                "/buzzer-test",
+                Some(buzzer_test_body("status", None, None, false)),
+            )
+            .await?;
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(result)
+    }
+    .await;
+    let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+    heartbeat.abort();
+    let value = result?;
+    if let Some(id) = resolved.hardware_id.as_deref() {
+        let _ = remember_usb(id, &resolved.device, &resolved.devd);
+    }
+    Ok(value)
+}
+
+fn buzzer_cue_arg_from_wire(value: &str) -> Option<BuzzerCueArg> {
+    BUZZER_CUE_CATALOG
+        .iter()
+        .find(|descriptor| descriptor.cue.wire_value() == value)
+        .map(|descriptor| descriptor.cue)
+}
+
+fn buzzer_scenario_arg_from_wire(value: &str) -> Option<BuzzerScenarioArg> {
+    BUZZER_SCENARIO_CATALOG
+        .iter()
+        .find(|descriptor| descriptor.scenario.wire_value() == value)
+        .map(|descriptor| descriptor.scenario)
+}
+
+async fn buzzer_play_interactive(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+    pointer_capture: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        return buzzer_play_terminal_interactive(client, resolved, pointer_capture).await;
+    }
+    buzzer_play_line_interactive(client, resolved).await
+}
+
+struct BuzzerTerminalGuard {
+    pointer_capture: bool,
+}
+
+impl BuzzerTerminalGuard {
+    fn enter(output: &mut impl Write, pointer_capture: bool) -> io::Result<Self> {
+        terminal::enable_raw_mode()?;
+        if let Err(error) = execute!(output, Hide) {
+            let _ = terminal::disable_raw_mode();
+            return Err(error);
+        }
+        let mut guard = Self {
+            pointer_capture: false,
+        };
+        if pointer_capture {
+            if let Err(error) = guard.set_pointer_capture(output, true) {
+                let _ = execute!(output, Show);
+                let _ = terminal::disable_raw_mode();
+                return Err(error);
+            }
+        }
+        Ok(guard)
+    }
+
+    fn set_pointer_capture(&mut self, output: &mut impl Write, enabled: bool) -> io::Result<()> {
+        if self.pointer_capture == enabled {
+            return Ok(());
+        }
+        if enabled {
+            execute!(output, EnableMouseCapture)?;
+        } else {
+            execute!(output, DisableMouseCapture)?;
+        }
+        self.pointer_capture = enabled;
+        output.flush()
+    }
+}
+
+impl Drop for BuzzerTerminalGuard {
+    fn drop(&mut self) {
+        let mut output = io::stdout();
+        if self.pointer_capture {
+            let _ = execute!(output, DisableMouseCapture);
+        }
+        let _ = execute!(output, Show);
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
+async fn buzzer_play_terminal_interactive(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+    pointer_capture: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut output = io::stdout();
+    let mut terminal_guard = BuzzerTerminalGuard::enter(&mut output, pointer_capture)?;
+    let mut selection = BuzzerTerminalSelection::default();
+    let mut notice: Option<String> = None;
+    let mut status =
+        buzzer_test_live(client, resolved.clone(), None, None, false, false, true).await?;
+
+    loop {
+        render_buzzer_terminal(
+            &mut output,
+            &status,
+            selection,
+            notice.as_deref(),
+            terminal_guard.pointer_capture,
+        )?;
+        let session_running = buzzer_session_state(&status) == "running";
+        let mut action = None;
+
+        loop {
+            match event::read()? {
+                Event::Key(key) => {
+                    if matches!(key.kind, KeyEventKind::Press)
+                        && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M'))
+                    {
+                        let enabled = !terminal_guard.pointer_capture;
+                        terminal_guard.set_pointer_capture(&mut output, enabled)?;
+                        notice = Some(if enabled {
+                            "Pointer capture enabled. Press M again to release it for terminal copy."
+                        } else {
+                            "Pointer capture disabled. Terminal text selection and copy are enabled."
+                        }
+                        .to_string());
+                        break;
+                    }
+                    if buzzer_terminal_move_selection(&mut selection, key.code, key.kind) {
+                        break;
+                    }
+                    if let Some(next_action) =
+                        buzzer_terminal_key_action(key.code, key.kind, selection, session_running)
+                    {
+                        action = Some(next_action);
+                        break;
+                    }
+                }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if selection.select_row(mouse.row) {
+                            break;
+                        }
+                        if let Some(next_action) = buzzer_terminal_pointer_action(
+                            mouse.row,
+                            mouse.column,
+                            selection,
+                            session_running,
+                        ) {
+                            action = Some(next_action);
+                            break;
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        selection.move_previous();
+                        break;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        selection.move_next();
+                        break;
+                    }
+                    _ => {}
+                },
+                Event::Resize(_, _) => break,
+                _ => {}
+            }
+        }
+
+        if let Some(action) = action {
+            match execute_buzzer_interactive_action(client, resolved.clone(), action).await? {
+                BuzzerInteractiveExecution::Exit => return Ok(()),
+                BuzzerInteractiveExecution::Updated {
+                    message,
+                    status: next_status,
+                } => {
+                    notice = Some(message);
+                    if let Some(next_status) = next_status {
+                        status = next_status;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_buzzer_terminal(
+    output: &mut impl Write,
+    status: &Value,
+    selection: BuzzerTerminalSelection,
+    notice: Option<&str>,
+    pointer_capture: bool,
+) -> io::Result<()> {
+    let (columns, _) = terminal::size().unwrap_or((100, 30));
+    let state = buzzer_session_state(status);
+    let active_cue = status
+        .get("activeCue")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let selected_cue = status.get("cue").and_then(Value::as_str).unwrap_or("none");
+    let selection_detail = match selection.item() {
+        BuzzerTerminalItem::Cue(cue) => {
+            let descriptor = buzzer_cue_descriptor(cue);
+            format!("Selected cue: {} - {}", descriptor.label, descriptor.rhythm)
+        }
+        BuzzerTerminalItem::Scenario(scenario) => {
+            let descriptor = buzzer_scenario_descriptor(scenario);
+            format!(
+                "Selected scenario: {} - {}",
+                descriptor.label, descriptor.description
+            )
+        }
+    };
+    let default_input_help = if state == "running" {
+        "Enter/Space stops continuous playback. M toggles pointer capture."
+    } else {
+        "Enter/Space plays once; C/L starts continuous playback. M toggles pointer capture."
+    };
+    let status_line = notice.unwrap_or(default_input_help);
+
+    queue!(output, MoveTo(0, 0), Clear(ClearType::All))?;
+    write_buzzer_terminal_line(output, 0, columns, "Flux Purr buzzer test")?;
+    write_buzzer_terminal_line(
+        output,
+        1,
+        columns,
+        &format!("Session: {state}    Test cue: {selected_cue}    Active cue: {active_cue}"),
+    )?;
+    write_buzzer_terminal_line(output, 2, columns, &selection_detail)?;
+    write_buzzer_terminal_line(output, 3, columns, status_line)?;
+    write_buzzer_terminal_line(output, 4, columns, &buzzer_output_trace_summary(status))?;
+    write_buzzer_terminal_line(output, 5, columns, "Production cues:")?;
+
+    for (index, descriptor) in BUZZER_CUE_CATALOG.iter().enumerate() {
+        write_buzzer_terminal_item_line(
+            output,
+            BUZZER_TERMINAL_CUE_START_ROW + index as u16,
+            columns,
+            selection.index == index,
+            &format!("{} [{}]", descriptor.label, descriptor.kind),
+        )?;
+    }
+
+    let scenario_header_row = buzzer_terminal_scenario_start_row() - 1;
+    write_buzzer_terminal_line(
+        output,
+        scenario_header_row,
+        columns,
+        "Arbitration scenarios:",
+    )?;
+    for (index, descriptor) in BUZZER_SCENARIO_CATALOG.iter().enumerate() {
+        write_buzzer_terminal_item_line(
+            output,
+            buzzer_terminal_scenario_start_row() + index as u16,
+            columns,
+            selection.index == BUZZER_CUE_CATALOG.len() + index,
+            descriptor.label,
+        )?;
+    }
+
+    write_buzzer_terminal_line(
+        output,
+        buzzer_terminal_actions_row(),
+        columns,
+        &format!(
+            "{:<24}{:<18}{:<10}{:<14}{:<18}[Q] Exit",
+            "[Enter/Space] Play/stop",
+            "[C/L] Continuous",
+            "[S] Stop",
+            "[R] Refresh",
+            buzzer_pointer_mode_label(pointer_capture),
+        ),
+    )?;
+    write_buzzer_terminal_line(
+        output,
+        buzzer_terminal_actions_row() + 1,
+        columns,
+        "Mouse: click an item to select; click an action label to execute.",
+    )?;
+    output.flush()
+}
+
+const fn buzzer_pointer_mode_label(pointer_capture: bool) -> &'static str {
+    if pointer_capture {
+        "[M] Copy mode"
+    } else {
+        "[M] Pointer mode"
+    }
+}
+
+fn write_buzzer_terminal_item_line(
+    output: &mut impl Write,
+    row: u16,
+    columns: u16,
+    selected: bool,
+    label: &str,
+) -> io::Result<()> {
+    queue!(output, MoveTo(0, row))?;
+    if selected {
+        queue!(output, SetAttribute(Attribute::Reverse))?;
+    }
+    queue!(output, Print(truncate_buzzer_terminal_line(label, columns)))?;
+    if selected {
+        queue!(output, SetAttribute(Attribute::Reset))?;
+    }
+    Ok(())
+}
+
+fn write_buzzer_terminal_line(
+    output: &mut impl Write,
+    row: u16,
+    columns: u16,
+    line: &str,
+) -> io::Result<()> {
+    queue!(
+        output,
+        MoveTo(0, row),
+        Print(truncate_buzzer_terminal_line(line, columns))
+    )?;
+    Ok(())
+}
+
+fn truncate_buzzer_terminal_line(line: &str, columns: u16) -> String {
+    let limit = usize::from(columns.saturating_sub(1));
+    if line.chars().count() <= limit {
+        return line.to_string();
+    }
+    if limit <= 3 {
+        return line.chars().take(limit).collect();
+    }
+    let mut truncated: String = line.chars().take(limit - 3).collect();
+    truncated.push_str("...");
+    truncated
+}
+
+async fn buzzer_play_line_interactive(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut status =
+        buzzer_test_live(client, resolved.clone(), None, None, false, false, true).await?;
+    loop {
+        let action = {
+            let stdin = io::stdin();
+            let stdout = io::stdout();
+            let mut input = stdin.lock();
+            let mut output = stdout.lock();
+            prompt_buzzer_play_action(&status, &mut input, &mut output)?
+        };
+
+        match execute_buzzer_interactive_action(client, resolved.clone(), action).await? {
+            BuzzerInteractiveExecution::Exit => {
+                println!("Buzzer test session closed without changing playback.");
+                return Ok(());
+            }
+            BuzzerInteractiveExecution::Updated {
+                message,
+                status: next_status,
+            } => {
+                println!("{message}");
+                if let Some(next_status) = next_status {
+                    status = next_status;
+                }
+            }
+        }
+    }
+}
+
+enum BuzzerInteractiveExecution {
+    Exit,
+    Updated {
+        message: String,
+        status: Option<Value>,
+    },
+}
+
+async fn execute_buzzer_interactive_action(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+    action: BuzzerInteractiveAction,
+) -> Result<BuzzerInteractiveExecution, Box<dyn std::error::Error + Send + Sync>> {
+    match action {
+        BuzzerInteractiveAction::Exit => Ok(BuzzerInteractiveExecution::Exit),
+        BuzzerInteractiveAction::Refresh => {
+            let status = buzzer_test_live(client, resolved, None, None, false, false, true).await?;
+            Ok(BuzzerInteractiveExecution::Updated {
+                message: "Session status refreshed.".to_string(),
+                status: Some(status),
+            })
+        }
+        BuzzerInteractiveAction::Stop => {
+            let _ =
+                buzzer_test_live(client, resolved.clone(), None, None, false, true, false).await?;
+            let status = buzzer_test_live(client, resolved, None, None, false, false, true).await?;
+            Ok(BuzzerInteractiveExecution::Updated {
+                message: "Stop request applied.".to_string(),
+                status: Some(status),
+            })
+        }
+        BuzzerInteractiveAction::Play {
+            cue,
+            repeat,
+            stop_current,
+        } => {
+            if stop_current {
+                let _ = buzzer_test_live(client, resolved.clone(), None, None, false, true, false)
+                    .await?;
+            }
+            let _ =
+                buzzer_test_live(client, resolved, Some(cue), None, repeat, false, false).await?;
+            let descriptor = buzzer_cue_descriptor(cue);
+            let status = repeat.then(|| buzzer_interactive_repeat_status(cue));
+            Ok(BuzzerInteractiveExecution::Updated {
+                message: if repeat {
+                    format!(
+                        "Continuous {} playback started. Stop it with Enter, Space, or S; use R only when you need a readback.",
+                        descriptor.label
+                    )
+                } else {
+                    format!(
+                        "Triggered {} through the production arbiter. Press again to reproduce rapid hardware input; use R after playback for its readback.",
+                        descriptor.label
+                    )
+                },
+                status,
+            })
+        }
+        BuzzerInteractiveAction::RunScenario {
+            scenario,
+            stop_current,
+        } => {
+            if stop_current {
+                let _ = buzzer_test_live(client, resolved.clone(), None, None, false, true, false)
+                    .await?;
+            }
+            let status =
+                buzzer_test(client, resolved, None, Some(scenario), false, false, false).await?;
+            Ok(BuzzerInteractiveExecution::Updated {
+                message: format!(
+                    "Completed {}. Firmware session state: {}.",
+                    buzzer_scenario_descriptor(scenario).label,
+                    buzzer_session_state(&status),
+                ),
+                status: Some(status),
+            })
+        }
+    }
+}
+
+fn buzzer_interactive_repeat_status(cue: BuzzerCueArg) -> Value {
+    json!({
+        "state": "running",
+        "cue": cue.wire_value(),
+        "repeat": true,
+        "activeCue": cue.wire_value(),
+        "trace": [],
+        "outputTrace": [],
+    })
+}
+
+fn prompt_buzzer_play_action<R: BufRead, W: Write>(
+    status: &Value,
+    input: &mut R,
+    output: &mut W,
+) -> Result<BuzzerInteractiveAction, Box<dyn std::error::Error + Send + Sync>> {
+    write_buzzer_session_status(status, output)?;
+    let is_running = status.get("state").and_then(Value::as_str) == Some("running");
+
+    if is_running {
+        writeln!(
+            output,
+            "The running session will not be stopped automatically."
+        )?;
+        writeln!(output, "  1) Refresh session status")?;
+        writeln!(output, "  2) Stop active playback")?;
+        writeln!(output, "  3) Replace playback after an explicit stop")?;
+        writeln!(output, "  4) Exit without changing playback")?;
+        match prompt_menu_choice(input, output, "Choose action", 4)? {
+            1 => Ok(BuzzerInteractiveAction::Refresh),
+            2 => Ok(BuzzerInteractiveAction::Stop),
+            3 => prompt_buzzer_session_start(input, output, true),
+            4 => Ok(BuzzerInteractiveAction::Exit),
+            _ => unreachable!("menu choice is range-checked"),
+        }
+    } else {
+        writeln!(output, "  1) Play a production buzzer cue")?;
+        writeln!(output, "  2) Run feedback-arbitration scenario")?;
+        writeln!(output, "  3) Refresh session status")?;
+        writeln!(output, "  4) Exit without changing playback")?;
+        match prompt_menu_choice(input, output, "Choose action", 4)? {
+            1 => prompt_buzzer_cue(input, output, false),
+            2 => prompt_buzzer_scenario(input, output, false),
+            3 => Ok(BuzzerInteractiveAction::Refresh),
+            4 => Ok(BuzzerInteractiveAction::Exit),
+            _ => unreachable!("menu choice is range-checked"),
+        }
+    }
+}
+
+fn write_buzzer_session_status<W: Write>(status: &Value, output: &mut W) -> io::Result<()> {
+    let active_cue = status
+        .get("activeCue")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let selected_cue = status.get("cue").and_then(Value::as_str).unwrap_or("none");
+    let state = buzzer_session_state(status);
+
+    writeln!(output, "Buzzer test session")?;
+    writeln!(output, "  State: {state}")?;
+    writeln!(output, "  Selected cue: {selected_cue}")?;
+    writeln!(output, "  Active cue: {active_cue}")?;
+    if status.get("repeat").and_then(Value::as_bool) == Some(true) {
+        writeln!(output, "  Mode: continuous")?;
+    }
+    if state == "running" && active_cue == "none" {
+        writeln!(
+            output,
+            "  PWM output is silent between production cue steps or cadence bursts."
+        )?;
+    }
+    if selected_cue == "attention_reminder" && active_cue == "none" && state == "running" {
+        writeln!(
+            output,
+            "  Waiting for the production 10-second attention cadence."
+        )?;
+    }
+    if let Some(trace) = status.get("trace").and_then(Value::as_array)
+        && !trace.is_empty()
+    {
+        writeln!(output, "  Arbitration trace:")?;
+        for event in trace {
+            let elapsed = event.get("elapsedMs").and_then(Value::as_u64).unwrap_or(0);
+            let decision = event.get("decision").and_then(Value::as_object);
+            let source = decision
+                .and_then(|value| value.get("source"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let cue = decision
+                .and_then(|value| value.get("cue"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let disposition = decision
+                .and_then(|value| value.get("disposition"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            writeln!(
+                output,
+                "    {elapsed:>4} ms  {source} / {cue} / {disposition}"
+            )?;
+        }
+    }
+    if let Some(trace) = status.get("outputTrace").and_then(Value::as_array)
+        && !trace.is_empty()
+    {
+        writeln!(output, "  MCPWM timer2 output trace:")?;
+        for event in trace {
+            let elapsed = event.get("elapsedMs").and_then(Value::as_u64).unwrap_or(0);
+            let requested = event
+                .get("requestedFrequencyHz")
+                .and_then(Value::as_u64)
+                .map(|value| format!("{value} Hz"))
+                .unwrap_or_else(|| "silent".to_string());
+            let applied = event
+                .get("appliedFrequencyHz")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let observed = event
+                .get("observedFrequencyHz")
+                .and_then(Value::as_u64)
+                .map(|value| format!("{value} Hz"))
+                .unwrap_or_else(|| "pending".to_string());
+            let observed_edges = event
+                .get("observedRisingEdges")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let observed_window_ms = event
+                .get("observedWindowMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let duty = event
+                .get("dutyPercent")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let prescaler = event
+                .get("timerPrescaler")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let period = event
+                .get("timerPeriodTicks")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            writeln!(
+                output,
+                "    {elapsed:>4} ms  requested={requested:<10} timer={applied:>4} Hz  pad={observed:<10} ({observed_edges} edges/{observed_window_ms} ms)  duty={duty:>3}%  cfg={prescaler}/{period}"
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn buzzer_output_trace_summary(status: &Value) -> String {
+    let Some(trace) = status.get("outputTrace").and_then(Value::as_array) else {
+        return "MCPWM timer2 readback: unavailable on this firmware.".to_string();
+    };
+    let Some(last) = trace.last() else {
+        return "MCPWM timer2 readback: unavailable on this firmware.".to_string();
+    };
+    let requested = last
+        .get("requestedFrequencyHz")
+        .and_then(Value::as_u64)
+        .map(|value| format!("{value} Hz"))
+        .unwrap_or_else(|| "silent".to_string());
+    let applied = last
+        .get("appliedFrequencyHz")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let observed = trace
+        .iter()
+        .rev()
+        .find_map(|event| event.get("observedFrequencyHz").and_then(Value::as_u64))
+        .map(|value| format!("{value} Hz"))
+        .unwrap_or_else(|| "pending".to_string());
+    let duty = last.get("dutyPercent").and_then(Value::as_u64).unwrap_or(0);
+    format!("GPIO48: requested {requested}, timer {applied} Hz, pad {observed}, duty {duty}%")
+}
+
+fn buzzer_session_state(status: &Value) -> &str {
+    status
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+}
+
+fn prompt_buzzer_session_start<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    stop_current: bool,
+) -> Result<BuzzerInteractiveAction, Box<dyn std::error::Error + Send + Sync>> {
+    writeln!(output, "  1) Play a production buzzer cue")?;
+    writeln!(output, "  2) Run feedback-arbitration scenario")?;
+    match prompt_menu_choice(input, output, "Start", 2)? {
+        1 => prompt_buzzer_cue(input, output, stop_current),
+        2 => prompt_buzzer_scenario(input, output, stop_current),
+        _ => unreachable!("menu choice is range-checked"),
+    }
+}
+
+fn prompt_buzzer_cue<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    stop_current: bool,
+) -> Result<BuzzerInteractiveAction, Box<dyn std::error::Error + Send + Sync>> {
+    writeln!(output, "Production buzzer cue catalogue:")?;
+    for (index, descriptor) in BUZZER_CUE_CATALOG.iter().enumerate() {
+        writeln!(
+            output,
+            "  {}) {} [{}] - {}",
+            index + 1,
+            descriptor.label,
+            descriptor.kind,
+            descriptor.rhythm,
+        )?;
+    }
+    let cue_index = prompt_menu_choice(input, output, "Cue", BUZZER_CUE_CATALOG.len())?;
+    let descriptor = BUZZER_CUE_CATALOG[cue_index - 1];
+
+    writeln!(
+        output,
+        "Selected: {} ({})",
+        descriptor.label, descriptor.rhythm
+    )?;
+    writeln!(output, "  1) Play once")?;
+    writeln!(output, "  2) Play continuously (explicit stop required)")?;
+    let repeat = match prompt_menu_choice(input, output, "Playback mode", 2)? {
+        1 => false,
+        2 => true,
+        _ => unreachable!("menu choice is range-checked"),
+    };
+    Ok(BuzzerInteractiveAction::Play {
+        cue: descriptor.cue,
+        repeat,
+        stop_current,
+    })
+}
+
+fn prompt_buzzer_scenario<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    stop_current: bool,
+) -> Result<BuzzerInteractiveAction, Box<dyn std::error::Error + Send + Sync>> {
+    writeln!(output, "Feedback-arbitration scenarios:")?;
+    for (index, descriptor) in BUZZER_SCENARIO_CATALOG.iter().enumerate() {
+        writeln!(
+            output,
+            "  {}) {} - {}",
+            index + 1,
+            descriptor.label,
+            descriptor.description,
+        )?;
+    }
+    let scenario_index =
+        prompt_menu_choice(input, output, "Scenario", BUZZER_SCENARIO_CATALOG.len())?;
+    Ok(BuzzerInteractiveAction::RunScenario {
+        scenario: BUZZER_SCENARIO_CATALOG[scenario_index - 1].scenario,
+        stop_current,
+    })
+}
+
+fn buzzer_cue_descriptor(cue: BuzzerCueArg) -> &'static BuzzerCueDescriptor {
+    BUZZER_CUE_CATALOG
+        .iter()
+        .find(|descriptor| descriptor.cue == cue)
+        .expect("every CLI buzzer cue has a catalogue descriptor")
+}
+
+fn buzzer_scenario_descriptor(scenario: BuzzerScenarioArg) -> &'static BuzzerScenarioDescriptor {
+    BUZZER_SCENARIO_CATALOG
+        .iter()
+        .find(|descriptor| descriptor.scenario == scenario)
+        .expect("every CLI buzzer scenario has a catalogue descriptor")
+}
+
+fn prompt_menu_choice<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    prompt: &str,
+    max: usize,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    loop {
+        write!(output, "{prompt} [1-{max}]: ")?;
+        output.flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "interactive buzzer selection ended before a choice was made",
+            )
+            .into());
+        }
+        if let Ok(choice) = line.trim().parse::<usize>()
+            && (1..=max).contains(&choice)
+        {
+            return Ok(choice);
+        }
+        writeln!(output, "Enter a number from 1 through {max}.")?;
+    }
+}
+
+fn buzzer_test_body(op: &str, cue: Option<&str>, scenario: Option<&str>, repeat: bool) -> Value {
+    json!({
+        "op": op,
+        "cue": cue,
+        "scenario": scenario,
+        "repeat": repeat,
+    })
+}
+
 fn parse_pps_volts(value: &str) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.starts_with('-') {
@@ -9938,6 +11228,7 @@ fn parse_thermal_targets(
     parse_thermal_targets_impl(value, false)
 }
 
+#[cfg(test)]
 fn parse_thermal_targets_preserve_order(
     value: Option<&str>,
 ) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
@@ -16053,5 +17344,398 @@ mod tests {
 
         let cleared = super::wifi_set_body("Ivan".to_string(), Some(String::new()), None, None);
         assert_eq!(cleared["password"], "");
+    }
+
+    #[test]
+    fn buzzer_test_uses_the_devd_request_field_names() {
+        let body = super::buzzer_test_body("trigger", Some("ui_input"), None, true);
+
+        assert_eq!(body["op"], "trigger");
+        assert_eq!(body["cue"], "ui_input");
+        assert!(body["scenario"].is_null());
+        assert_eq!(body["repeat"], true);
+        assert!(body.get("buzzerCue").is_none());
+        assert!(body.get("buzzerScenario").is_none());
+    }
+
+    #[test]
+    fn buzzer_commands_wait_for_an_authoritative_readback() {
+        assert_eq!(
+            super::buzzer_capture_delay(
+                Some(super::BuzzerCueArg::HeaterOn),
+                None,
+                false,
+                false,
+                false,
+            ),
+            Some(Duration::from_millis(270))
+        );
+        assert_eq!(
+            super::buzzer_capture_delay(
+                None,
+                Some(super::BuzzerScenarioArg::FeedbackReplace),
+                false,
+                false,
+                false,
+            ),
+            Some(Duration::from_millis(450))
+        );
+        assert_eq!(
+            super::buzzer_capture_delay(
+                None,
+                Some(super::BuzzerScenarioArg::ActiveCoolingRetrigger),
+                false,
+                false,
+                false,
+            ),
+            Some(Duration::from_millis(600))
+        );
+        assert_eq!(
+            super::buzzer_capture_delay(
+                Some(super::BuzzerCueArg::UiInput),
+                None,
+                true,
+                false,
+                false,
+            ),
+            Some(Duration::from_millis(145))
+        );
+    }
+
+    #[test]
+    fn interactive_continuous_status_is_local_until_the_operator_refreshes() {
+        let status = super::buzzer_interactive_repeat_status(super::BuzzerCueArg::HeaterOn);
+
+        assert_eq!(status["state"], "running");
+        assert_eq!(status["cue"], "heater_on");
+        assert_eq!(status["activeCue"], "heater_on");
+        assert_eq!(status["repeat"], true);
+        assert_eq!(status["outputTrace"], json!([]));
+    }
+
+    #[test]
+    fn buzzer_output_trace_summary_exposes_the_timer_readback() {
+        let status = json!({
+            "outputTrace": [{
+                "requestedFrequencyHz": 1680,
+                "appliedFrequencyHz": 1739,
+                "observedFrequencyHz": 1683,
+                "dutyPercent": 50,
+            }],
+        });
+
+        let summary = super::buzzer_output_trace_summary(&status);
+
+        assert!(summary.contains("requested 1680 Hz"));
+        assert!(summary.contains("timer 1739 Hz"));
+        assert!(summary.contains("pad 1683 Hz"));
+        assert!(summary.contains("duty 50%"));
+    }
+
+    #[test]
+    fn buzzer_play_accepts_an_explicit_device_selector() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "buzzer",
+            "play",
+            "--device",
+            "serial-direct-id",
+        ])
+        .unwrap();
+
+        let Command::Buzzer {
+            command: BuzzerCommand::Play(BuzzerPlayArgs { target, .. }),
+        } = cli.command
+        else {
+            panic!("buzzer play command parses");
+        };
+        assert_eq!(target.device.as_deref(), Some("serial-direct-id"));
+        assert_eq!(target.hardware, None);
+    }
+
+    #[test]
+    fn buzzer_play_accepts_pointer_capture_as_an_explicit_mode() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "buzzer",
+            "play",
+            "--device",
+            "serial-direct-id",
+            "--pointer",
+        ])
+        .unwrap();
+
+        let Command::Buzzer {
+            command: BuzzerCommand::Play(BuzzerPlayArgs { pointer, .. }),
+        } = cli.command
+        else {
+            panic!("buzzer play command parses");
+        };
+        assert!(pointer);
+    }
+
+    #[test]
+    fn buzzer_play_accepts_a_devd_url_after_its_target_selector() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "buzzer",
+            "play",
+            "--device",
+            "serial-direct-id",
+            "--devd",
+            "http://127.0.0.1:14830",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.devd, "http://127.0.0.1:14830");
+    }
+
+    #[test]
+    fn buzzer_test_accepts_loop_as_a_repeat_alias() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "buzzer",
+            "test",
+            "--device",
+            "serial-direct-id",
+            "--cue",
+            "ui-input",
+            "--loop",
+        ])
+        .unwrap();
+
+        let Command::Buzzer {
+            command: BuzzerCommand::Test(BuzzerTestArgs { repeat, .. }),
+        } = cli.command
+        else {
+            panic!("buzzer test command parses");
+        };
+        assert!(repeat);
+    }
+
+    #[test]
+    fn terminal_buzzer_controls_map_keys_and_pointer_to_production_actions() {
+        let mut selection = BuzzerTerminalSelection::default();
+
+        assert_eq!(
+            buzzer_terminal_key_action(KeyCode::Enter, KeyEventKind::Press, selection, false,),
+            Some(BuzzerInteractiveAction::Play {
+                cue: BuzzerCueArg::UiInput,
+                repeat: false,
+                stop_current: false,
+            })
+        );
+        assert_eq!(
+            buzzer_terminal_key_action(KeyCode::Char(' '), KeyEventKind::Repeat, selection, false,),
+            Some(BuzzerInteractiveAction::Play {
+                cue: BuzzerCueArg::UiInput,
+                repeat: false,
+                stop_current: false,
+            })
+        );
+        assert_eq!(
+            buzzer_terminal_key_action(KeyCode::Char('c'), KeyEventKind::Press, selection, false),
+            Some(BuzzerInteractiveAction::Play {
+                cue: BuzzerCueArg::UiInput,
+                repeat: true,
+                stop_current: false,
+            })
+        );
+        assert_eq!(
+            buzzer_terminal_key_action(KeyCode::Char('l'), KeyEventKind::Press, selection, false),
+            Some(BuzzerInteractiveAction::Play {
+                cue: BuzzerCueArg::UiInput,
+                repeat: true,
+                stop_current: false,
+            })
+        );
+
+        assert!(buzzer_terminal_move_selection(
+            &mut selection,
+            KeyCode::End,
+            KeyEventKind::Press,
+        ));
+        selection.select_row(buzzer_terminal_scenario_start_row() + 1);
+        assert_eq!(
+            buzzer_terminal_key_action(KeyCode::Enter, KeyEventKind::Press, selection, false,),
+            Some(BuzzerInteractiveAction::RunScenario {
+                scenario: BuzzerScenarioArg::FeedbackReplace,
+                stop_current: false,
+            })
+        );
+        assert_eq!(
+            buzzer_terminal_pointer_action(buzzer_terminal_actions_row(), 0, selection, true,),
+            Some(BuzzerInteractiveAction::Stop)
+        );
+        assert!(
+            buzzer_terminal_pointer_action(buzzer_terminal_actions_row(), 30, selection, false,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_buzzer_catalogue_uses_every_production_cue() {
+        for (index, descriptor) in BUZZER_CUE_CATALOG.iter().enumerate() {
+            let selection = BuzzerTerminalSelection { index };
+            assert_eq!(
+                selection.primary_action(false),
+                BuzzerInteractiveAction::Play {
+                    cue: descriptor.cue,
+                    repeat: false,
+                    stop_current: false,
+                },
+                "missing terminal action for {}",
+                descriptor.label,
+            );
+            assert_eq!(
+                selection.continuous_action(false),
+                Some(BuzzerInteractiveAction::Play {
+                    cue: descriptor.cue,
+                    repeat: true,
+                    stop_current: false,
+                }),
+                "missing continuous terminal action for {}",
+                descriptor.label,
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_buzzer_render_exposes_copyable_default_mode() {
+        assert_eq!(buzzer_pointer_mode_label(false), "[M] Pointer mode");
+        assert_eq!(buzzer_pointer_mode_label(true), "[M] Copy mode");
+    }
+
+    #[test]
+    fn interactive_buzzer_play_selects_a_one_shot_cue_after_invalid_input() {
+        let status = json!({"state": "idle", "activeCue": null});
+        let mut input = BufReader::new("invalid\n1\n2\n1\n".as_bytes());
+        let mut output = Vec::new();
+
+        let action = super::prompt_buzzer_play_action(&status, &mut input, &mut output).unwrap();
+
+        assert_eq!(
+            action,
+            super::BuzzerInteractiveAction::Play {
+                cue: super::BuzzerCueArg::HeaterOn,
+                repeat: false,
+                stop_current: false,
+            }
+        );
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("Enter a number from 1 through 4.")
+        );
+    }
+
+    #[test]
+    fn interactive_buzzer_play_exposes_the_complete_test_session_surface() {
+        let status = json!({"state": "idle", "activeCue": null});
+        let mut input = BufReader::new("1\n1\n1\n".as_bytes());
+        let mut output = Vec::new();
+
+        let _ = super::prompt_buzzer_play_action(&status, &mut input, &mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        for cue in [
+            "UI input",
+            "Heater on",
+            "Heater off",
+            "Active cooling on",
+            "Active cooling off",
+            "Heater reject",
+            "Active cooling reject",
+            "Protection alarm",
+            "Attention reminder",
+        ] {
+            assert!(output.contains(cue), "missing production cue: {cue}");
+        }
+        assert!(output.contains("Run feedback-arbitration scenario"));
+        assert!(output.contains("Refresh session status"));
+        assert!(output.contains("Exit without changing playback"));
+        assert!(output.contains("Play once"));
+        assert!(output.contains("Play continuously"));
+    }
+
+    #[test]
+    fn interactive_buzzer_play_catalog_covers_every_cli_cue() {
+        let catalog: Vec<_> = super::BUZZER_CUE_CATALOG
+            .iter()
+            .map(|descriptor| descriptor.cue)
+            .collect();
+
+        assert_eq!(catalog.as_slice(), super::BuzzerCueArg::value_variants());
+    }
+
+    #[test]
+    fn interactive_buzzer_play_can_start_an_arbitration_scenario() {
+        let status = json!({"state": "idle", "activeCue": null});
+        let mut input = BufReader::new("2\n2\n".as_bytes());
+        let mut output = Vec::new();
+
+        let action = super::prompt_buzzer_play_action(&status, &mut input, &mut output).unwrap();
+
+        assert_eq!(
+            action,
+            super::BuzzerInteractiveAction::RunScenario {
+                scenario: super::BuzzerScenarioArg::FeedbackReplace,
+                stop_current: false,
+            }
+        );
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("Feedback-arbitration scenarios:")
+        );
+    }
+
+    #[test]
+    fn interactive_buzzer_play_reports_silence_between_repeated_cues() {
+        let status = json!({
+            "state": "running",
+            "cue": "protection_alarm",
+            "activeCue": null,
+            "repeat": true,
+            "trace": []
+        });
+        let mut input = BufReader::new("4\n".as_bytes());
+        let mut output = Vec::new();
+
+        let action = super::prompt_buzzer_play_action(&status, &mut input, &mut output).unwrap();
+
+        assert_eq!(action, super::BuzzerInteractiveAction::Exit);
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("PWM output is silent between production cue steps or cadence bursts.")
+        );
+    }
+
+    #[test]
+    fn interactive_buzzer_play_requires_an_explicit_replacement_of_running_audio() {
+        let status = json!({
+            "state": "running",
+            "activeCue": null,
+            "cue": "protection_alarm"
+        });
+        let mut input = BufReader::new("3\n1\n8\n2\n".as_bytes());
+        let mut output = Vec::new();
+
+        let action = super::prompt_buzzer_play_action(&status, &mut input, &mut output).unwrap();
+
+        assert_eq!(
+            action,
+            super::BuzzerInteractiveAction::Play {
+                cue: super::BuzzerCueArg::ProtectionAlarm,
+                repeat: true,
+                stop_current: true,
+            }
+        );
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("The running session will not be stopped automatically.")
+        );
     }
 }

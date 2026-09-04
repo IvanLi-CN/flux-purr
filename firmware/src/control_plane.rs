@@ -2,6 +2,12 @@ use alloc::boxed::Box;
 use heapless::{String, Vec};
 use serde::{Deserialize, Deserializer, Serialize};
 
+#[cfg(feature = "buzzer-test")]
+use crate::buzzer::BuzzerCueId;
+#[cfg(all(test, feature = "buzzer-test"))]
+use crate::buzzer_test::BuzzerTestSessionState;
+#[cfg(feature = "buzzer-test")]
+use crate::buzzer_test::{BuzzerTestScenario, BuzzerTestStatus};
 use crate::{
     DeviceMode, DeviceStatus, PdState,
     frontpanel::{FRONTPANEL_PRESET_COUNT, FrontPanelKey, HeaterLockReason},
@@ -24,7 +30,7 @@ pub const BUILD_ID_MAX_LEN: usize = 48;
 pub const GIT_SHA_MAX_LEN: usize = 40;
 pub const HOSTNAME_MAX_LEN: usize = 64;
 pub const CAPABILITY_MAX_LEN: usize = 24;
-pub const CAPABILITY_COUNT_MAX: usize = 12;
+pub const CAPABILITY_COUNT_MAX: usize = 13;
 // A fully materialized 9-point thermal profile save request is about 5 KiB.
 // Keep one shared bound for firmware and devd JSONL frames so it can persist.
 pub const USB_LINE_MAX_LEN: usize = 8 * 1024;
@@ -139,6 +145,8 @@ impl Identity {
             push_str(&mut capabilities, "lan_http");
             push_str(&mut capabilities, "lan_pairing");
         }
+        #[cfg(feature = "buzzer-test")]
+        push_str(&mut capabilities, "buzzer_test");
         Self {
             device_id: string("flux-purr-s3-001"),
             firmware_version: string(env!("FLUX_PURR_FW_VERSION")),
@@ -893,6 +901,50 @@ pub struct RuntimeConfigCommand {
     pub thermal_control_profile: Option<ThermalControlProfileCommand>,
 }
 
+#[cfg(feature = "buzzer-test")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuzzerTestOp {
+    Trigger,
+    Run,
+    Stop,
+    Status,
+}
+
+#[cfg(feature = "buzzer-test")]
+impl BuzzerTestOp {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Trigger => "trigger",
+            Self::Run => "run",
+            Self::Stop => "stop",
+            Self::Status => "status",
+        }
+    }
+}
+
+#[cfg(feature = "buzzer-test")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuzzerTestCommand {
+    pub op: BuzzerTestOp,
+    pub cue: Option<BuzzerCueId>,
+    pub scenario: Option<BuzzerTestScenario>,
+    pub repeat: bool,
+}
+
+#[cfg(feature = "buzzer-test")]
+impl BuzzerTestCommand {
+    pub const fn is_valid(&self) -> bool {
+        match self.op {
+            BuzzerTestOp::Trigger => self.cue.is_some() && self.scenario.is_none(),
+            BuzzerTestOp::Run => self.cue.is_none() && self.scenario.is_some(),
+            BuzzerTestOp::Stop | BuzzerTestOp::Status => {
+                self.cue.is_none() && self.scenario.is_none() && !self.repeat
+            }
+        }
+    }
+}
+
 impl RuntimeConfigCommand {
     pub fn apply_to(&self, config: &mut MemoryConfig) {
         if let Some(target_temp_c) = self.target_temp_c {
@@ -1588,6 +1640,16 @@ pub enum UsbFrame {
         request_id: String<REQUEST_ID_MAX_LEN>,
         config: RuntimeConfigCommand,
     },
+    #[cfg(feature = "buzzer-test")]
+    BuzzerTestResponse {
+        request_id: String<REQUEST_ID_MAX_LEN>,
+        status: Box<BuzzerTestStatus>,
+    },
+    #[cfg(feature = "buzzer-test")]
+    BuzzerTest {
+        request_id: String<REQUEST_ID_MAX_LEN>,
+        command: BuzzerTestCommand,
+    },
     CalibrationConfig {
         request_id: String<REQUEST_ID_MAX_LEN>,
         config: CalibrationConfigCommand,
@@ -1683,6 +1745,15 @@ struct UsbFrameWire {
     thermal_profile_mode: Option<ThermalProfileModeWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thermal_control_profile: Option<Box<ThermalControlProfileCommand>>,
+    #[cfg(feature = "buzzer-test")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buzzer_cue: Option<BuzzerCueId>,
+    #[cfg(feature = "buzzer-test")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buzzer_scenario: Option<BuzzerTestScenario>,
+    #[cfg(feature = "buzzer-test")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeat: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     channel: Option<CalibrationChannelWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1741,6 +1812,25 @@ struct UsbStatusResponseWire<'a> {
     request_id: &'a String<REQUEST_ID_MAX_LEN>,
     ok: bool,
     result: UsbStatusPayloadWire<'a>,
+}
+
+#[cfg(feature = "buzzer-test")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbBuzzerTestResponseWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a String<REQUEST_ID_MAX_LEN>,
+    ok: bool,
+    result: UsbBuzzerTestResponsePayloadWire<'a>,
+}
+
+#[cfg(feature = "buzzer-test")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbBuzzerTestResponsePayloadWire<'a> {
+    #[serde(rename = "buzzer_test")]
+    buzzer_test: &'a BuzzerTestStatus,
 }
 
 #[derive(Serialize)]
@@ -1809,6 +1899,17 @@ struct UsbRuntimeConfigInboundWire {
     calibration: Option<CalibrationControlCommand>,
     thermal_profile_mode: Option<ThermalProfileModeWire>,
     thermal_control_profile: Option<ThermalControlProfileCommand>,
+}
+
+#[cfg(feature = "buzzer-test")]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbBuzzerTestInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    op: Option<BuzzerTestOp>,
+    buzzer_cue: Option<BuzzerCueId>,
+    buzzer_scenario: Option<BuzzerTestScenario>,
+    repeat: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1953,6 +2054,16 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     thermal_control_profile: value.thermal_control_profile.map(|profile| *profile),
                 },
             }),
+            #[cfg(feature = "buzzer-test")]
+            "buzzer_test" => Ok(UsbFrame::BuzzerTest {
+                request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                command: BuzzerTestCommand {
+                    op: parse_buzzer_test_op(value.op.as_deref())?,
+                    cue: value.buzzer_cue,
+                    scenario: value.buzzer_scenario,
+                    repeat: value.repeat.unwrap_or(false),
+                },
+            }),
             "calibration_config" => Ok(UsbFrame::CalibrationConfig {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
                 config: CalibrationConfigCommand {
@@ -2038,6 +2149,12 @@ impl From<&UsbFrame> for UsbFrameWire {
             calibration: None,
             thermal_profile_mode: None,
             thermal_control_profile: None,
+            #[cfg(feature = "buzzer-test")]
+            buzzer_cue: None,
+            #[cfg(feature = "buzzer-test")]
+            buzzer_scenario: None,
+            #[cfg(feature = "buzzer-test")]
+            repeat: None,
             channel: None,
             reference_temp_c: None,
             reference_vin_mv: None,
@@ -2103,6 +2220,22 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.calibration = config.calibration.map(Box::new);
                 wire.thermal_profile_mode = config.thermal_profile_mode;
                 wire.thermal_control_profile = config.thermal_control_profile.map(Box::new);
+            }
+            #[cfg(feature = "buzzer-test")]
+            UsbFrame::BuzzerTest {
+                request_id,
+                command,
+            } => {
+                wire.frame_type = string("buzzer_test");
+                wire.request_id = Some(request_id.clone());
+                wire.op = Some(string(command.op.as_str()));
+                wire.buzzer_cue = command.cue;
+                wire.buzzer_scenario = command.scenario;
+                wire.repeat = command.repeat.then_some(true);
+            }
+            #[cfg(feature = "buzzer-test")]
+            UsbFrame::BuzzerTestResponse { .. } => {
+                unreachable!("buzzer test responses use their dedicated wire encoder")
             }
             UsbFrame::CalibrationConfig { request_id, config } => {
                 wire.frame_type = string("calibration_config");
@@ -2278,7 +2411,7 @@ impl WifiConfigOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsbResponsePayload {
-    Identity(Identity),
+    Identity(Box<Identity>),
     InstallStatus(InstallStatus),
     Network(NetworkSummary),
     Status(Box<ControlPlaneStatus>),
@@ -2458,6 +2591,19 @@ pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
                 },
             })
         }
+        #[cfg(feature = "buzzer-test")]
+        "buzzer_test" => {
+            let frame = parse_usb_wire::<UsbBuzzerTestInboundWire>(trimmed)?;
+            Ok(UsbFrame::BuzzerTest {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                command: BuzzerTestCommand {
+                    op: frame.op.ok_or(UsbFrameError::MalformedJson)?,
+                    cue: frame.buzzer_cue,
+                    scenario: frame.buzzer_scenario,
+                    repeat: frame.repeat.unwrap_or(false),
+                },
+            })
+        }
         "calibration_config" => {
             let frame = parse_usb_wire::<UsbCalibrationConfigInboundWire>(trimmed)?;
             Ok(UsbFrame::CalibrationConfig {
@@ -2580,6 +2726,10 @@ fn parse_usb_wifi_config_set(line: &str) -> Result<UsbWifiConfigSetInboundWire<'
 }
 
 pub fn write_usb_frame<'a>(frame: &UsbFrame, out: &'a mut [u8]) -> Result<&'a str, UsbFrameError> {
+    #[cfg(feature = "buzzer-test")]
+    if let UsbFrame::BuzzerTestResponse { request_id, status } = frame {
+        return write_usb_buzzer_test_response_frame(request_id, status, out);
+    }
     if let UsbFrame::Response {
         request_id,
         ok: true,
@@ -2591,6 +2741,26 @@ pub fn write_usb_frame<'a>(frame: &UsbFrame, out: &'a mut [u8]) -> Result<&'a st
     }
 
     write_usb_wire(&UsbFrameWire::from(frame), out)
+}
+
+#[cfg(feature = "buzzer-test")]
+#[inline(never)]
+fn write_usb_buzzer_test_response_frame<'a>(
+    request_id: &String<REQUEST_ID_MAX_LEN>,
+    status: &BuzzerTestStatus,
+    out: &'a mut [u8],
+) -> Result<&'a str, UsbFrameError> {
+    write_usb_wire(
+        &UsbBuzzerTestResponseWire {
+            frame_type: "response",
+            request_id,
+            ok: true,
+            result: UsbBuzzerTestResponsePayloadWire {
+                buzzer_test: status,
+            },
+        },
+        out,
+    )
 }
 
 #[inline(never)]
@@ -2709,6 +2879,17 @@ fn parse_wifi_config_op(value: Option<&str>) -> Result<WifiConfigOp, UsbFrameErr
     }
 }
 
+#[cfg(feature = "buzzer-test")]
+fn parse_buzzer_test_op(value: Option<&str>) -> Result<BuzzerTestOp, UsbFrameError> {
+    match value {
+        Some("trigger") => Ok(BuzzerTestOp::Trigger),
+        Some("run") => Ok(BuzzerTestOp::Run),
+        Some("stop") => Ok(BuzzerTestOp::Stop),
+        Some("status") => Ok(BuzzerTestOp::Status),
+        _ => Err(UsbFrameError::MalformedJson),
+    }
+}
+
 fn parse_calibration_config_op(value: Option<&str>) -> Result<CalibrationConfigOp, UsbFrameError> {
     match value {
         Some("capture") => Ok(CalibrationConfigOp::Capture),
@@ -2758,6 +2939,20 @@ mod tests {
                     .any(|value| value == "wifi_config")
             );
         }
+        #[cfg(feature = "buzzer-test")]
+        assert!(
+            identity
+                .capabilities
+                .iter()
+                .any(|value| value == "buzzer_test")
+        );
+        #[cfg(not(feature = "buzzer-test"))]
+        assert!(
+            !identity
+                .capabilities
+                .iter()
+                .any(|value| value == "buzzer_test")
+        );
         #[cfg(feature = "net_http")]
         {
             assert!(
@@ -2780,7 +2975,9 @@ mod tests {
         let frame = UsbFrame::Response {
             request_id: string("compact-identity"),
             ok: true,
-            result: Some(UsbResponsePayload::Identity(Identity::firmware_default())),
+            result: Some(UsbResponsePayload::Identity(Box::new(
+                Identity::firmware_default(),
+            ))),
             error: None,
         };
         let mut out = [0u8; USB_LINE_MAX_LEN];
@@ -2800,7 +2997,11 @@ mod tests {
 
     #[test]
     fn outbound_status_wire_stays_within_the_frontpanel_stack_budget() {
-        assert!(core::mem::size_of::<UsbResponsePayload>() <= 768);
+        let response_size = core::mem::size_of::<UsbResponsePayload>();
+        assert!(
+            response_size <= 768,
+            "response payload is {response_size} bytes"
+        );
         let wire_size = core::mem::size_of::<UsbFrameWire>();
         assert!(wire_size <= 1_024, "outbound wire is {wire_size} bytes");
     }
@@ -3934,6 +4135,71 @@ mod tests {
         assert!(json.len() < USB_LINE_MAX_LEN);
         assert!(json.contains(r#""phase":"cooling""#));
         assert_eq!(parse_usb_frame(json).unwrap(), response);
+    }
+
+    #[cfg(feature = "buzzer-test")]
+    #[test]
+    fn buzzer_test_frames_accept_production_cues_and_a_bounded_trace() {
+        let request = parse_usb_frame(
+            r#"{"type":"buzzer_test","requestId":"buzzer-1","op":"run","buzzerScenario":"feedback_replace"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            UsbFrame::BuzzerTest {
+                request_id: string("buzzer-1"),
+                command: BuzzerTestCommand {
+                    op: BuzzerTestOp::Run,
+                    cue: None,
+                    scenario: Some(BuzzerTestScenario::FeedbackReplace),
+                    repeat: false,
+                },
+            }
+        );
+
+        let response = UsbFrame::BuzzerTestResponse {
+            request_id: string("buzzer-1"),
+            status: Box::new(BuzzerTestStatus {
+                state: BuzzerTestSessionState::Complete,
+                scenario: Some(BuzzerTestScenario::FeedbackReplace),
+                cue: None,
+                repeat: false,
+                active_cue: Some(BuzzerCueId::HeaterOn),
+                trace: heapless::Vec::new(),
+                #[cfg(feature = "buzzer-observe")]
+                output_trace: heapless::Vec::new(),
+            }),
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&response, &mut out).unwrap();
+        assert!(json.contains(r#""buzzer_test""#));
+        assert!(json.contains(r#""feedback_replace""#));
+
+        let protection = parse_usb_frame(
+            r#"{"type":"buzzer_test","requestId":"buzzer-protection","op":"trigger","buzzerCue":"protection_alarm","repeat":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            protection,
+            UsbFrame::BuzzerTest {
+                request_id: string("buzzer-protection"),
+                command: BuzzerTestCommand {
+                    op: BuzzerTestOp::Trigger,
+                    cue: Some(BuzzerCueId::ProtectionAlarm),
+                    scenario: None,
+                    repeat: true,
+                },
+            }
+        );
+
+        let invalid = parse_usb_frame(
+            r#"{"type":"buzzer_test","requestId":"buzzer-2","op":"trigger","buzzerScenario":"feedback_replace"}"#,
+        )
+        .unwrap();
+        let UsbFrame::BuzzerTest { command, .. } = invalid else {
+            panic!("buzzer test frame parses");
+        };
+        assert!(!command.is_valid());
     }
 
     #[test]

@@ -81,6 +81,7 @@
   - on FUSB302B boards, each bounded EEPROM page write releases the shared I2C bus and services PD before the next page; a successful EEPROM save does not synchronously mirror to flash
   - `heater_enabled`, live temperatures, fan runtime output, fault latch, route/menu state, and buzzer reminders are never restored from EEPROM
 - Heater control:
+  - PD controller detection, a ready PD contract, and later contract continuity gate heating only: the Front Panel Dashboard and USB runtime remain available for diagnostics when PD is unavailable, while `heaterLockReason=pd-contract-unavailable` holds `GPIO47` and calibration heat at `0%`
   - the control loop runs at `20 Hz` and produces a normalized `0..100%` equivalent heat-power request; profile tick based parameters retain their `1 s` reference scale
   - the controller uses model-assisted ramp/soak plus hold PI trimming: far from target it uses an approach power, inside the target-specific brake distance it ramps toward hold power, and in hold it trims around hold power with a small PI term
   - optional `ThermalControlProfile` preview is RAM-only and can tune up to 10 target points; saved profiles persist all 10 fully materialized point-local parameter sets in redundant `2 KiB` records, while historical `1 KiB` records remain readable; missing points fall back to conservative defaults, and interpolated targets use linear interpolation
@@ -105,11 +106,14 @@
   - `GPIO48` is driven by `MCPWM0 timer2/operator2`, separate from the heater and fan PWM channels
   - boot and idle are silent
   - fixed one-shot cues cover `ui_input / heater_on / heater_off / active_cooling_on / active_cooling_off / heater_reject`
-  - accepted menu navigation, child-page enter/exit, preset edits, and other non-toggle frontpanel actions use the generic `ui_input` prompt cue
+  - accepted menu navigation, child-page enter/exit, preset edits, and other non-toggle frontpanel actions submit the generic `ui_input` feedback cue to the single-output arbiter
   - buzzer attention has only two owner-facing states: active thermal runaway and thermal-runaway acknowledgement pending
   - active thermal runaway (`temp >= 420°C`) replays the protection cue every `1s`; after temperature returns below `420°C`, an unacknowledged alert replays the reminder cue every `10s`
+  - each protection cue retains its established `2300Hz`, silence, `2300Hz`, silence pulse rhythm; the real-time GPIO48 owner preserves the carrier across both silence gaps and the next replay
   - front-panel input or CLI/app runtime acknowledgement clears pending attention and the forced-fan latch, but cannot silence or clear active absolute overtemperature protection
-  - retriggering the same cue always restarts logical playback from the first note; when that note uses the active carrier frequency, GPIO48 retains its MCPWM phase across duty-zero silence gaps. A different next audible frequency must reconfigure the timer so a previous frequency stage cannot continue
+  - the arbiter selects `thermal protection > thermal attention reminder > feedback`; feedback never interrupts an active cue, repeats of pending `ui_input` coalesce, and the latest specialized feedback replaces older pending feedback
+  - a dedicated Embassy task in a priority-2 software-interrupt executor owns cue arbitration, cue-step deadlines and every GPIO48 duty update. Each cue starts from its first note; the task cannot skip a tone/rest step when delayed. Timer2 keeps a fixed prescaler and selects cue pitch with its period. GPIO48 retains its MCPWM phase across duty-zero silence gaps when the selected next tone uses the active carrier frequency; a different next audible frequency is applied only after duty is zero and Timer2 is stopped, then the counter is reset, the new period is applied, and the timer is restarted before duty returns
+  - the default firmware build includes the `buzzer-test` feature and advertises `buzzer_test` over native USB JSONL for controlled module-level audio testing. It submits production cue IDs and fixed feedback-arbitration scenarios to the same real-time task and `BuzzerArbiter`; repeating ordinary feedback re-enters the arbiter after each complete production pattern, `protection_alarm --repeat` uses the normal one-second `ProtectionAlarmCadence`, and `attention_reminder` uses its normal ten-second cadence. The optional `buzzer-observe` feature adds bounded MCPWM timer2 readback and PCNT measurements of GPIO48 pad edges, so the logical cue output, configured carrier, and emitted digital carrier can be compared directly. The test path is interlocked while heating, a real thermal fault, a fault latch, or thermal attention is active. Neither feature exposes raw PWM control
 - PD policy:
   - default build requests `20 V` from `CH224Q`
   - optional `pd-request-12v` / `pd-request-28v` features switch the boot request to `12 V` / `28 V`

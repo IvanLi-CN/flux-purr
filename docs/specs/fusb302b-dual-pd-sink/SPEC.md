@@ -15,7 +15,7 @@ Flux Purr supports two mutually exclusive USB-C PD sink board variants without c
 
 - Both controllers can answer at I2C address `0x22`; an ACK alone is never a valid identity signal.
 - Startup performs only controller-specific register reads. A FUSB302BMPX signature requires two stable `Device ID` reads matching the documented `0x9x` format plus a readable FUSB status bank; this positive signature is selected before any CH224Q-only register is read. Only an absent FUSB signature permits the CH224Q fallback probe.
-- An unstable, invalid, incomplete, or read-failed signature reports `unknown`, performs zero PD writes, and keeps heater output interlocked. A physical shared-address collision cannot be made safe by ACK probing and requires board correction before use.
+- An unstable, invalid, incomplete, or read-failed signature reports `unknown`, performs zero PD writes, and keeps heater output interlocked. The Front Panel and USB runtime still reach their normal ready state for diagnostics, but `GPIO47` remains off until a valid controller and ready contract are observed. A physical shared-address collision cannot be made safe by ACK probing and requires board correction before heating use.
 - FUSB302B's `GPIO7` interrupt net is reserved for a later event-driven path and shares `GPIO8`/`GPIO9` with the M24C64 EEPROM. Sink initialization retains Rd pull-downs on both CC pins, and the current policy safely polls the PHY. EEPROM record writes and their verification must release the shared bus after every bounded chunk and service the FUSB302B before the next chunk; no EEPROM write-cycle delay or success-path flash mirror may starve receive or contract recovery.
 
 ## Contract Policy
@@ -24,6 +24,7 @@ Flux Purr supports two mutually exclusive USB-C PD sink board variants without c
 - Automatic idle operation requests `12V` from a usable PPS APDO. The APDO must still cover `20V @ 3A` before it qualifies for the performance tier; heater control raises the request only when its power policy requires it.
 - Source capabilities, PPS RDOs, fixed RDOs, `Accept`, `PS_RDY`, detach, reset, reject, wait, and I2C faults are explicit policy states.
 - Heating is authorized only after `Accept` then `PS_RDY`. Contract loss clears the authorization and heater output.
+- A missing startup contract, detached source, failed controller initialization, or later contract loss is a heater-only interlock: it must not block the Dashboard or runtime-ready signal. The device may continue to expose diagnostics while heater output remains zero, and it releases the lock only after a ready contract is observed again.
 - Contract selection rejects source capabilities below `3A`. FUSB302BMPX clamps contractual current to `3A..5A`, PPS voltage to `5V..21V`, and fixed-PDO voltage to `5V..20V`.
 - An active PPS request is renewed every five seconds without holding the shared I2C bus while waiting for a response.
 - `20V @ 3A` provides at most `60W`; `20V @ 5A` provides at most `100W`. Firmware uses the negotiated limit to cap PWM-derived heater power.

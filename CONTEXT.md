@@ -56,6 +56,44 @@ _Avoid_: Fan Output
 The Device-reported physical fan state and intensity.
 _Avoid_: Active Cooling
 
+## Audible Feedback
+
+**Buzzer Cue**:
+A predefined audible pattern emitted through the Device's single buzzer output; it may contain intentional tone and rest steps.
+_Avoid_: Sound effect, note
+
+**Cue Request**:
+A request from a Device behavior to deliver a Buzzer Cue. It does not own the physical buzzer output.
+_Avoid_: Direct playback, buzzer command
+
+**Cue Arbitration**:
+The priority-based selection of the one active Buzzer Cue and any coalesced feedback waiting behind it.
+_Avoid_: Mixing, concurrent playback
+
+**Protection Cue**:
+The highest-priority Buzzer Cue that reports active thermal runaway at its defined cadence.
+_Avoid_: General alert, reminder
+
+**Attention Reminder**:
+A Buzzer Cue that reports a cleared but unacknowledged thermal-runaway event.
+_Avoid_: Protection Cue, measurement fault
+
+**Feedback Cue**:
+A lower-priority Buzzer Cue that confirms an accepted interaction or runtime action.
+_Avoid_: Alert, alarm
+
+**Pending Feedback**:
+The one coalesced Feedback Cue retained while another cue is active; it represents the latest meaningful feedback, not a history of every request.
+_Avoid_: Playback queue, event log
+
+**Audible Safety State**:
+The Device state for active thermal runaway or an unacknowledged cleared runaway, during which only its safety cue may be emitted.
+_Avoid_: Measurement fault, general error
+
+**Buzzer Test Session**:
+The default native-USB test surface that submits production Buzzer Cue requests or fixed arbitration scenarios through Cue Arbitration. It cannot choose PWM parameters or create an Audible Safety State; the optional `buzzer-observe` feature adds GPIO48 carrier readback only.
+_Avoid_: Product control, raw buzzer driver, diagnostic-only playback path
+
 ## Measurement
 
 **RTD**:
