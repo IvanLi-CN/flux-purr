@@ -68,6 +68,9 @@ assert "operation=recover" not in release
 assert "release_snapshot.py" not in release
 assert "flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" in release
 assert "Deploy published public demo archive to EdgeOne" in release
+assert release.count("bunx edgeone@1.6.18 makers deploy") == 2
+assert "npx --yes edgeone@1.6.18 makers deploy" not in release
+assert release.index("Setup Bun") < release.index("Deploy published Web archive to EdgeOne")
 assert "web-production-bundle" not in ci_main
 assert "web-demo-bundle" not in ci_main
 assert not (root / ".github/workflows/deploy-edgeone.yml").exists()
