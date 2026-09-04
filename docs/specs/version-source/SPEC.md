@@ -58,6 +58,7 @@
 - 准备提交前必须对 `v<version>` 执行 tag reservation。名称已存在时准备必须失败，且失败前不得写入 `VERSION`、创建提交或推送 PR 分支；只有 recovery 明确证明既有 tag 精确指向目标 merged `main` SHA 时才可复用。
 - 每个通过完整 PR CI 且 release intent 启用的产品源提交必须单独发布。准备提交必须在 PR 合并前完成；多个源提交不得共用一个产品版本。`type:docs`/`type:skip` 明确表示不发布产品资产。
 - 准备提交必须以已验证源提交为唯一父提交，diff 只能包含 `VERSION`，并带 `Release-Source-SHA`、`Product-Version` 和冻结 label intent metadata。该 metadata 只用于顺序验证与审计，不是版本输入。
+- 在启用 signed-commit ruleset 时，准备提交必须通过 GitHub 的 `createCommitOnBranch` mutation 创建，使 GitHub 自动签名并验证该提交；工作流必须在签名未被验证时失败关闭，不得引入发布私钥、口令或绕过规则。
 - Release controller 必须从正常合并后的 `main` 提交构建、tag、发布并验证完整资产；它绝不向 `main` push。发布失败时不得压缩、重算或替换版本；recovery 只能继续同一个 main SHA。
 - 每个 PR 必须恰好有一个 `type:*` 和一个 `channel:*` 标签；`Validate PR labels` 必须拒绝缺失、重复或未知的 release-intent 标签，并将结果冻结到对应 PR head。
 - `Release Product` 只能消费带有效准备提交的 main 合并提交；`type:docs`/`type:skip` 跳过产品发布，`type:patch + channel:stable` 唯一允许自动写入 `nextPatch(VERSION)`，`type:minor`、`type:major` 或 `channel:rc` 必须等待受控 `exact` 操作写入精确 VERSION 文本。label、metadata 与 channel 不得计算或解析数字版本。

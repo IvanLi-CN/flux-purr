@@ -71,7 +71,7 @@
 - `Active Cooling` 页在当前正式 runtime 中为只读策略说明页；用户开启这一项时，口径统一称为“开启主动降温”；页面只保留返回/退出导航，不再承载可写 fan mock。
 - `WiFi Info` 是只读网络信息页，但进入时必须显示本次新生成的四位 LAN 配对码；离开页面立即撤销该码。`Device Info` 保持只读页；两者只处理返回/退出。
 - 若 runtime 处于“fault 已消失但 attention reminder 仍待确认”状态，则第一次任意输入只负责确认/静音，不执行 heater/fan/menu 原动作；第二次输入才恢复正常语义。
-- 所有已接受的前面板用户操作都必须有声音反馈；Dashboard 的 heater / 主动降温切换继续使用专用 cue，其余已接受交互（菜单导航、进入/退出子页、Preset Temp 编辑等）统一使用通用提示音。
+- 所有已接受的前面板用户操作都必须提交声音反馈请求；Dashboard 的 heater / 主动降温切换继续提交专用 cue，其余已接受交互（菜单导航、进入/退出子页、Preset Temp 编辑等）统一提交通用提示音。实际播放受 `buzzer-cue-arbitration` 的单输出优先级、合并和安全状态抑制合同约束。
 - 真实 heater / fan 执行链路、保护与运行态真相源以 `#q2aw6` 为准；本 spec 只冻结输入与导航语义。
 - Storybook 必须提供 docs/gallery 与交互故事，作为 Web 侧视觉主证据源。
 - 视觉证据必须同时包含 Storybook render 与 firmware preview render，并绑定到本 spec 的 `assets/`。

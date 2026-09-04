@@ -5,6 +5,8 @@ extern crate alloc;
 pub mod adapters;
 pub mod board;
 pub mod buzzer;
+#[cfg(feature = "buzzer-test")]
+pub mod buzzer_test;
 pub mod control_plane;
 pub mod display;
 pub mod frontpanel;
