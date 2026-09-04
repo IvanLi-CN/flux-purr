@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flux-purr.ivanli.cc/schemas/firmware-integrity-catalog-v1.json",
+  "title": "Flux Purr firmware integrity catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "bundles"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "bundles": {
+      "type": "array",
+      "minItems": 0,
+      "items": { "$ref": "#/$defs/bundle" }
+    }
+  },
+  "$defs": {
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "sourceSha", "buildId", "channel", "hardwareProfile", "bundleSha256"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$" },
+        "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "buildId": { "type": "string", "pattern": "^[0-9a-f]{16,64}$" },
+        "channel": { "enum": ["stable", "rc"] },
+        "hardwareProfile": { "const": "ESP32-S3FH4R2" },
+        "bundleSha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

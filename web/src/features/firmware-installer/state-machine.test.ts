@@ -23,7 +23,6 @@ describe('firmware installer state machine', () => {
       'transport',
       'rom_reset',
       'chip_flash_security',
-      'layout_config',
       'preflight',
     ])
     expect(executionStages('update')).toEqual([

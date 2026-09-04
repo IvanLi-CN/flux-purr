@@ -3,11 +3,12 @@ use std::{
     io::{self, BufRead, BufReader, BufWriter, IsTerminal, Read, Write},
     net::Ipv4Addr,
     path::{Path, PathBuf},
-    process::{Command as ProcessCommand, Stdio},
+    process::{Child, Command as ProcessCommand, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH},
 };
 
+use chacha20poly1305::aead::rand_core::RngCore;
 use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -20,17 +21,24 @@ use crossterm::{
     terminal::{self, Clear, ClearType},
 };
 use flux_purr_devd::{
-    DEFAULT_DEVD_URL, FirmwareArtifact, FirmwareArtifactCatalog, WifiConfigOp,
+    DEFAULT_DEVD_ENDPOINT, WifiConfigOp, developer_backup,
+    firmware_bundle::{self, INTEGRITY_CATALOG_FILE},
     hardware_registry_path,
     lan::{
         LanDeviceConfig, LanPairRequest, LanScanRequest, authorized_json, device_from_discovery,
         discover_cidr, discover_mdns, merge_lan_device, pair_device,
     },
-    read_user_config, write_user_config,
+    local_control_request, local_control_request_bytes, read_user_config,
+    validate_local_control_endpoint, write_user_config,
 };
-use reqwest::{Client, Method, Url};
+#[cfg(test)]
+use flux_purr_devd::{FirmwareArtifact, FirmwareArtifactCatalog};
+#[cfg(test)]
+use reqwest::Url;
+use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 #[path = "flux_purr/thermal_flagship.rs"]
 mod thermal_flagship;
@@ -43,7 +51,7 @@ mod thermal_retune;
 #[command(name = "flux-purr", version = flux_purr_devd::PRODUCT_VERSION)]
 #[command(about = "Flux Purr CLI for USB/devd hardware workflows")]
 struct Cli {
-    #[arg(long, global = true, default_value = DEFAULT_DEVD_URL)]
+    #[arg(long, global = true, default_value = DEFAULT_DEVD_ENDPOINT)]
     devd: String,
     #[arg(long, global = true)]
     json: bool,
@@ -92,7 +100,9 @@ enum Command {
         #[command(subcommand)]
         command: ThermalCommand,
     },
+    Update(UpdateArgs),
     Flash(FlashArgs),
+    Recover(RecoverArgs),
     Eeprom {
         #[command(subcommand)]
         command: EepromCommand,
@@ -1413,17 +1423,33 @@ struct WifiSetArgs {
 }
 
 #[derive(Debug, Args)]
+struct UpdateArgs {
+    #[arg(long, value_name = "SERIAL_PORT")]
+    port: String,
+    #[arg(long, value_name = "BUNDLE")]
+    bundle: PathBuf,
+}
+
+#[derive(Debug, Args)]
 struct FlashArgs {
-    #[command(flatten)]
-    target: TargetSelector,
-    #[arg(long = "artifact-id")]
-    artifact_id: Option<String>,
-    #[arg(long = "manifest-path")]
-    manifest_path: Option<PathBuf>,
-    #[arg(long = "no-dry-run", default_value_t = true, action = ArgAction::SetFalse)]
-    dry_run: bool,
+    #[arg(long, value_name = "SERIAL_PORT")]
+    port: String,
+    #[arg(long, value_name = "ELF")]
+    elf: Option<PathBuf>,
+    #[arg(long)]
+    skip_backup: bool,
     #[arg(long)]
     confirm: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct RecoverArgs {
+    #[arg(long, value_name = "SERIAL_PORT")]
+    port: String,
+    #[arg(long, value_name = "ELF")]
+    elf: PathBuf,
+    #[arg(long)]
+    confirm: String,
 }
 
 #[derive(Debug, Args)]
@@ -1624,7 +1650,20 @@ fn is_unicast_static_ipv4(address: Ipv4Addr) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    let direct_flash_command = matches!(&cli.command, Command::Flash(_) | Command::Recover(_));
+    let explicit_devd_endpoint = devd_flag_was_supplied();
+    if direct_flash_command && explicit_devd_endpoint {
+        return Err("flash and recover are direct-serial commands and do not accept --devd".into());
+    }
+    let mut managed_devd = None;
+    if should_start_managed_devd(direct_flash_command, explicit_devd_endpoint) {
+        let managed = ManagedDevd::start().await?;
+        cli.devd = managed.endpoint.to_string_lossy().into_owned();
+        managed_devd = Some(managed);
+    } else if !direct_flash_command {
+        validate_local_control_endpoint(&cli.devd)?;
+    }
     let client = Client::new();
     let payload = match cli.command {
         Command::Devices => {
@@ -1851,17 +1890,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             handle_heater_curve_command(&client, &cli.devd, command).await?
         }
         Command::Thermal { command } => handle_thermal_command(&client, &cli.devd, command).await?,
-        Command::Flash(args) => {
-            let resolved = resolve_target(args.target.clone(), &cli.devd)?;
-            let artifact = resolve_artifact(
-                &client,
-                &resolved.devd,
-                args.manifest_path.as_deref(),
-                args.artifact_id.as_deref(),
-            )
-            .await?;
-            flash_with_lease(&client, resolved, artifact, args.dry_run, args.confirm).await?
-        }
+        Command::Update(args) => update_from_local_bundle(&client, &cli.devd, args).await?,
+        Command::Flash(args) => direct_flash(args).await?,
+        Command::Recover(args) => direct_recover(args).await?,
         Command::Eeprom { command } => handle_eeprom_command(&client, &cli.devd, command).await?,
         Command::Monitor(args) => {
             monitor_once(
@@ -1885,21 +1916,429 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         println!("{}", render_human(&payload)?);
     }
+    drop(managed_devd);
     Ok(())
 }
 
+fn devd_flag_was_supplied() -> bool {
+    std::env::args_os().skip(1).any(|argument| {
+        let argument = argument.to_string_lossy();
+        argument == "--devd" || argument.starts_with("--devd=")
+    })
+}
+
+const fn should_start_managed_devd(
+    direct_flash_command: bool,
+    explicit_devd_endpoint: bool,
+) -> bool {
+    !direct_flash_command && !explicit_devd_endpoint
+}
+
+struct ManagedDevd {
+    endpoint: PathBuf,
+    _directory: tempfile::TempDir,
+    child: Child,
+}
+
+impl Drop for ManagedDevd {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+async fn update_from_local_bundle(
+    _client: &Client,
+    devd: &str,
+    args: UpdateArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    validate_serial_port(&args.port)?;
+    if args
+        .bundle
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("fluxpurr-fw")
+    {
+        return Err("一般用户 update requires a local .fluxpurr-fw bundle".into());
+    }
+    let bundle_bytes = fs::read(&args.bundle)?;
+    let bundle = firmware_bundle::read_bundle_bytes(&bundle_bytes)?;
+    let executable_catalog = std::env::current_exe()?.with_file_name(INTEGRITY_CATALOG_FILE);
+    let catalog = firmware_bundle::read_integrity_catalog(&executable_catalog)?;
+    firmware_bundle::verify_bundle_against_catalog(&bundle, &catalog)?;
+    let imported =
+        local_control_request_bytes(devd, "POST", "/api/v1/firmware-bundles", bundle_bytes).await?;
+    if !(200..300).contains(&imported.status) {
+        return Err(format!(
+            "local devd bundle import failed: status={} body={}",
+            imported.status, imported.body
+        )
+        .into());
+    }
+    request_json(
+        _client,
+        Method::POST,
+        devd,
+        "/api/v1/firmware-update",
+        Some(json!({
+            "port": args.port,
+            "artifactId": bundle.bundle_sha256,
+        })),
+    )
+    .await
+}
+
+async fn direct_flash(args: FlashArgs) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    validate_serial_port(&args.port)?;
+    if args.skip_backup && args.confirm.as_deref() != Some("NO_EEPROM_BACKUP") {
+        return Err("--skip-backup requires --confirm NO_EEPROM_BACKUP".into());
+    }
+    let elf = args.elf.unwrap_or_else(default_release_elf);
+    validate_local_elf(&elf)?;
+    let partition_table = embedded_partition_table()?;
+    ensure_real_flash_enabled()?;
+    let backup_path = if args.skip_backup {
+        None
+    } else {
+        let snapshot = read_eeprom_snapshot(&args.port)?;
+        let key = backup_credential_key()?;
+        Some(developer_backup::write_atomic(
+            &developer_backup_directory()?,
+            &key,
+            &snapshot,
+        )?)
+    };
+    let program = resolve_espflash_program();
+    let flash_args = direct_elf_flash_args(&args.port, partition_table.path(), &elf)?;
+    run_espflash_command(&program, &flash_args)?;
+    Ok(
+        json!({"ok": true, "operation": "flash", "port": args.port, "elf": elf, "backup": backup_path}),
+    )
+}
+
+async fn direct_recover(
+    args: RecoverArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    validate_serial_port(&args.port)?;
+    if args.confirm != "ERASE" {
+        return Err("recover requires --confirm ERASE".into());
+    }
+    validate_local_elf(&args.elf)?;
+    let partition_table = embedded_partition_table()?;
+    ensure_real_flash_enabled()?;
+    let program = resolve_espflash_program();
+    let erase_args = direct_erase_flash_args(&args.port);
+    run_espflash_command(&program, &erase_args)?;
+    let flash_args = direct_elf_flash_args(&args.port, partition_table.path(), &args.elf)?;
+    run_espflash_command(&program, &flash_args)?;
+    Ok(
+        json!({"ok": true, "operation": "recover", "port": args.port, "elf": args.elf, "eeprom": "untouched"}),
+    )
+}
+
+fn validate_serial_port(port: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if port.trim().is_empty()
+        || port.contains("://")
+        || port.starts_with("tcp:")
+        || port.parse::<std::net::SocketAddr>().is_ok()
+    {
+        return Err("an explicit local serial --port is required".into());
+    }
+    Ok(())
+}
+
+fn validate_local_elf(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !path.is_file() {
+        return Err(format!("local ELF does not exist: {}", path.display()).into());
+    }
+    if fs::read(path)?.get(0..4) != Some(b"\x7fELF") {
+        return Err(format!("local artifact is not an ELF: {}", path.display()).into());
+    }
+    Ok(())
+}
+
+fn embedded_partition_table()
+-> Result<tempfile::NamedTempFile, Box<dyn std::error::Error + Send + Sync>> {
+    let mut file = tempfile::Builder::new()
+        .prefix("flux-purr-partitions-")
+        .suffix(".csv")
+        .tempfile()?;
+    file.write_all(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../firmware/partitions.csv"
+    )))?;
+    file.as_file().sync_all()?;
+    Ok(file)
+}
+
+fn direct_elf_flash_args(
+    port: &str,
+    partition_table: &Path,
+    elf: &Path,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(vec![
+        "flash".into(),
+        "--chip".into(),
+        "esp32s3".into(),
+        "--port".into(),
+        port.into(),
+        "--non-interactive".into(),
+        "--no-stub".into(),
+        "--after".into(),
+        "hard-reset".into(),
+        "--partition-table".into(),
+        partition_table
+            .to_str()
+            .ok_or("invalid partition table path")?
+            .into(),
+        elf.to_str().ok_or("invalid ELF path")?.into(),
+    ])
+}
+
+fn direct_erase_flash_args(port: &str) -> Vec<String> {
+    vec![
+        "erase-flash".into(),
+        "--chip".into(),
+        "esp32s3".into(),
+        "--port".into(),
+        port.into(),
+        "--non-interactive".into(),
+        "--after".into(),
+        "no-reset".into(),
+    ]
+}
+
+fn ensure_real_flash_enabled() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if std::env::var("FLUX_PURR_DEVD_ALLOW_REAL_FLASH").as_deref() != Ok("1") {
+        return Err(
+            "real flashing is disabled; set FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1 only with explicit port authorization"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn default_release_elf() -> PathBuf {
+    flux_purr_repo_root().join("firmware/target/xtensa-esp32s3-none-elf/release/flux-purr")
+}
+
+fn resolve_espflash_program() -> PathBuf {
+    std::env::var_os("FLUX_PURR_ESPFLASH")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("espflash"))
+}
+
+fn run_espflash_command(
+    program: &Path,
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let output = ProcessCommand::new(program).args(args).output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "espflash failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn developer_backup_directory() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(flux_purr_devd::user_config_dir()?.join("developer-flash-backups"))
+}
+
+fn backup_credential_key() -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
+    let entry = keyring::Entry::new("flux-purr", "developer-flash-backups")?;
+    if let Ok(value) = entry.get_password() {
+        let bytes = hex::decode(value)?;
+        return bytes
+            .try_into()
+            .map_err(|_| "credential store key must be 32 bytes".into());
+    }
+    let mut key = [0_u8; 32];
+    chacha20poly1305::aead::rand_core::OsRng.fill_bytes(&mut key);
+    entry.set_password(&hex::encode(key))?;
+    Ok(key)
+}
+
+fn read_eeprom_snapshot(port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut serial = serialport::new(port, 115_200)
+        .timeout(Duration::from_secs(2))
+        .open()?;
+    let session_id = format!("snapshot-{}", current_unix_millis());
+    let open =
+        json!({"op":"eeprom_snapshot_open","requestId":session_id,"capacity":8192,"chunkMax":32});
+    write_snapshot_request(&mut *serial, &open)?;
+    let open_response = read_snapshot_response(&mut *serial, &session_id)?;
+    if open_response.get("capacity").and_then(Value::as_u64) != Some(8192)
+        || open_response.get("chunkMax").and_then(Value::as_u64) != Some(32)
+    {
+        return Err("EEPROM snapshot negotiated an invalid capacity or chunk size".into());
+    }
+    let mut snapshot = Vec::with_capacity(8192);
+    for offset in (0..8192_u32).step_by(32) {
+        write_snapshot_request(
+            &mut *serial,
+            &json!({"op":"eeprom_snapshot_read","requestId":session_id,"offset":offset,"length":32}),
+        )?;
+        let response = read_snapshot_response(&mut *serial, &session_id)?;
+        if response.get("offset").and_then(Value::as_u64) != Some(u64::from(offset)) {
+            return Err("snapshot response returned an unexpected offset".into());
+        }
+        let bytes = response
+            .get("bytes")
+            .and_then(Value::as_array)
+            .ok_or("snapshot response missing bytes")?;
+        if bytes.len() != 32 {
+            return Err("snapshot response returned an invalid chunk".into());
+        }
+        for byte in bytes {
+            let value = byte
+                .as_u64()
+                .and_then(|value| u8::try_from(value).ok())
+                .ok_or("snapshot byte is not an octet")?;
+            snapshot.push(value);
+        }
+    }
+    let digest = format!("sha256:{:x}", Sha256::digest(&snapshot));
+    write_snapshot_request(
+        &mut *serial,
+        &json!({"op":"eeprom_snapshot_close","requestId":session_id,"sha256":digest}),
+    )?;
+    let response = read_snapshot_response(&mut *serial, &session_id)?;
+    if response.get("sha256").and_then(Value::as_str) != Some(digest.as_str()) {
+        return Err("EEPROM snapshot hash verification failed".into());
+    }
+    Ok(snapshot)
+}
+
+fn write_snapshot_request(
+    serial: &mut dyn serialport::SerialPort,
+    value: &Value,
+) -> io::Result<()> {
+    serial.write_all(serde_json::to_string(value).unwrap().as_bytes())?;
+    serial.write_all(b"\n")?;
+    serial.flush()
+}
+
+fn read_snapshot_response(
+    serial: &mut dyn serialport::SerialPort,
+    request_id: &str,
+) -> io::Result<Value> {
+    loop {
+        let mut bytes = Vec::new();
+        loop {
+            let mut byte = [0_u8; 1];
+            match serial.read(&mut byte) {
+                Ok(1) if byte[0] == b'\n' => break,
+                Ok(1) => bytes.push(byte[0]),
+                Ok(_) => continue,
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => return Err(error),
+                Err(error) => return Err(error),
+            }
+        }
+        let value = match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value.get("requestId").and_then(Value::as_str) != Some(request_id) {
+            continue;
+        }
+        if value.get("ok").and_then(Value::as_bool) != Some(true) {
+            let error = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("snapshot request failed");
+            return Err(io::Error::new(io::ErrorKind::Other, error.to_string()));
+        }
+        return Ok(value);
+    }
+}
+
+impl ManagedDevd {
+    async fn start() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::Builder::new()
+            .prefix("flux-purr-devd-")
+            .tempdir()?;
+        let endpoint = directory.path().join("control.sock");
+        let sibling = std::env::current_exe()?.with_file_name("flux-purr-devd");
+        let (program, prefix_args): (PathBuf, Vec<String>) = if sibling.is_file() {
+            (sibling, Vec::new())
+        } else {
+            (
+                PathBuf::from("cargo"),
+                vec![
+                    "run".into(),
+                    "--quiet".into(),
+                    "--manifest-path".into(),
+                    env!("CARGO_MANIFEST_DIR").into(),
+                    "--bin".into(),
+                    "flux-purr-devd".into(),
+                    "--".into(),
+                ],
+            )
+        };
+        let child = ProcessCommand::new(program)
+            .args(prefix_args)
+            .args(["serve", "--control-socket"])
+            .arg(&endpoint)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !endpoint.exists() {
+            if tokio::time::Instant::now() >= deadline {
+                return Err("managed devd did not create its local control socket".into());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok(Self {
+            endpoint,
+            _directory: directory,
+            child,
+        })
+    }
+}
+
 async fn request_json(
-    client: &Client,
+    _client: &Client,
     method: Method,
     base: &str,
     path: &str,
     body: Option<Value>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let mut request = client.request(method, api_url(base, path)?);
-    if let Some(body) = body {
-        request = request.json(&body);
+    // Existing in-process command tests use an HTTP mock server. This branch is
+    // compiled only for tests; production CLI requests always use local CBOR.
+    #[cfg(test)]
+    if base.starts_with("http://") || base.starts_with("https://") {
+        let mut url = Url::parse(base)?;
+        let (request_path, query) = path.split_once('?').unwrap_or((path, ""));
+        url.set_path(request_path);
+        url.set_query((!query.is_empty()).then_some(query));
+        let mut request = _client.request(method, url);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        let response_body = response.text().await?;
+        if !status.is_success() {
+            return Err(format!("HTTP {status} body={response_body}").into());
+        }
+        return Ok(serde_json::from_str(&response_body)?);
     }
-    response_json_or_error(request.send().await?).await
+
+    let response = local_control_request(base, method.as_str(), path, body).await?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "local devd request failed: status={} body={}",
+            response.status, response.body
+        )
+        .into());
+    }
+    Ok(response.body)
 }
 
 const EEPROM_CAPACITY_BYTES: usize = 8 * 1024;
@@ -2070,65 +2509,6 @@ async fn request_device_read(
     request_with_lease(client, resolved, Method::GET, suffix, None).await
 }
 
-async fn flash_with_lease(
-    client: &Client,
-    resolved: ResolvedUsbTarget,
-    artifact: FirmwareArtifact,
-    dry_run: bool,
-    confirm: Option<String>,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    if dry_run {
-        let body = json!({
-            "artifact": artifact,
-            "dryRun": true,
-            "confirm": confirm,
-        });
-        return request_with_lease(client, resolved, Method::POST, "/flash", Some(body)).await;
-    }
-
-    let lease = create_lease(client, &resolved).await?;
-    let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-    let dry_run_body = json!({
-        "artifact": artifact.clone(),
-        "dryRun": true,
-    });
-    let dry_run_result = request_leased(
-        client,
-        &resolved,
-        &lease.lease_id,
-        Method::POST,
-        "/flash",
-        Some(dry_run_body),
-    )
-    .await;
-    let value = match dry_run_result {
-        Ok(_) => {
-            let flash_body = json!({
-                "artifact": artifact,
-                "dryRun": false,
-                "confirm": confirm,
-            });
-            request_leased(
-                client,
-                &resolved,
-                &lease.lease_id,
-                Method::POST,
-                "/flash",
-                Some(flash_body),
-            )
-            .await
-        }
-        Err(error) => Err(error),
-    };
-    let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-    heartbeat.abort();
-    let payload = value?;
-    if let Some(id) = resolved.hardware_id.as_deref() {
-        let _ = remember_usb(id, &resolved.device, &resolved.devd);
-    }
-    Ok(payload)
-}
-
 async fn request_leased(
     client: &Client,
     resolved: &ResolvedUsbTarget,
@@ -2142,21 +2522,21 @@ async fn request_leased(
         encode_path_segment(&resolved.device),
         suffix
     );
-    let mut url = api_url(&resolved.devd, &path)?;
+    let mut path = path.to_string();
     if body.is_none() {
         // Lease-bearing control endpoints can be GET, POST, or DELETE. A
         // body-less DELETE still needs the same query lease as a body-less
         // read, otherwise the daemon correctly rejects the operation.
-        url.query_pairs_mut().append_pair("lease_id", lease_id);
+        path.push_str("?lease_id=");
+        path.push_str(lease_id);
     }
-    let mut request = client.request(method, url);
-    if let Some(mut body) = body {
-        if let Some(object) = body.as_object_mut() {
+    let mut body = body;
+    if let Some(body_value) = body.as_mut() {
+        if let Some(object) = body_value.as_object_mut() {
             object.insert("leaseId".to_string(), Value::String(lease_id.to_string()));
         }
-        request = request.json(&body);
     }
-    response_json_or_error(request.send().await?).await
+    request_json(client, method, &resolved.devd, &path, body).await
 }
 
 async fn request_thermal_status_with_retry(
@@ -2257,17 +2637,6 @@ fn thermal_retryable_runtime_write_error_message(message: &str) -> bool {
                 || message.contains("UnexpectedEof")
                 || message.contains("Device not configured")
                 || message.contains("device not configured")))
-}
-
-async fn response_json_or_error(
-    response: reqwest::Response,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let status = response.status();
-    let body = response.text().await?;
-    if !status.is_success() {
-        return Err(format!("HTTP {status} body={body}").into());
-    }
-    Ok(serde_json::from_str(&body)?)
 }
 
 async fn handle_calibration_command(
@@ -5624,7 +5993,7 @@ async fn collect_single_thermal_self_test(
             summary["target"]["deviceId"].as_str().unwrap_or_default(),
             summary["target"]["devd"]
                 .as_str()
-                .unwrap_or(DEFAULT_DEVD_URL),
+                .unwrap_or(DEFAULT_DEVD_ENDPOINT),
         );
     }
     Ok(summary)
@@ -10082,25 +10451,17 @@ async fn create_lease(
         "/api/v1/devices/{}/leases",
         encode_path_segment(&resolved.device)
     );
-    let url = api_url(&resolved.devd, &path)?;
     let mut last_device_not_found = None::<String>;
     for _attempt in 0..20 {
-        let response = client.post(url.clone()).send().await?;
-        if response.status().is_success() {
-            return Ok(response.json::<Lease>().await?);
+        match request_json(client, Method::POST, &resolved.devd, &path, None).await {
+            Ok(value) => return Ok(serde_json::from_value(value)?),
+            Err(error) if error.to_string().contains("status=404") => {
+                last_device_not_found = Some(error.to_string());
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+            Err(error) => return Err(error),
         }
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        if status.as_u16() == 404 && body.contains("device_not_found") {
-            last_device_not_found = Some(body);
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            continue;
-        }
-        return Err(format!(
-            "create lease failed for {}: HTTP {status} body={body}",
-            resolved.device
-        )
-        .into());
     }
     Err(format!(
         "create lease failed for {} after waiting for native device refresh: {}",
@@ -10160,10 +10521,14 @@ async fn release_lease(
     devd: &str,
     lease_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _ = client
-        .delete(api_url(devd, &format!("/api/v1/leases/{lease_id}"))?)
-        .send()
-        .await?;
+    let _ = request_json(
+        client,
+        Method::DELETE,
+        devd,
+        &format!("/api/v1/leases/{lease_id}?lease_id={lease_id}"),
+        None,
+    )
+    .await?;
     Ok(())
 }
 
@@ -10205,13 +10570,16 @@ fn spawn_heartbeat(client: Client, devd: String, lease: Lease) -> tokio::task::J
         let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
         loop {
             interval.tick().await;
-            let Ok(url) = api_url(
+            if request_json(
+                &client,
+                Method::POST,
                 &devd,
                 &format!("/api/v1/leases/{}/heartbeat", lease.lease_id),
-            ) else {
-                break;
-            };
-            if client.post(url).send().await.is_err() {
+                None,
+            )
+            .await
+            .is_err()
+            {
                 break;
             }
         }
@@ -11283,31 +11651,7 @@ fn insert_if_some<T: Serialize>(
     }
 }
 
-async fn resolve_artifact(
-    client: &Client,
-    devd: &str,
-    manifest_path: Option<&Path>,
-    artifact_id: Option<&str>,
-) -> Result<FirmwareArtifact, Box<dyn std::error::Error + Send + Sync>> {
-    let artifacts = if let Some(manifest_path) = manifest_path {
-        read_artifact_manifest(manifest_path)?
-    } else {
-        let payload = request_json(client, Method::GET, devd, "/api/v1/artifacts", None).await?;
-        serde_json::from_value::<FirmwareArtifactCatalog>(payload)?.artifacts
-    };
-    if let Some(artifact_id) = artifact_id {
-        return artifacts
-            .into_iter()
-            .find(|artifact| artifact.artifact_id == artifact_id)
-            .ok_or_else(|| format!("artifact not found: {artifact_id}").into());
-    }
-    match artifacts.as_slice() {
-        [artifact] => Ok(artifact.clone()),
-        [] => Err("no firmware artifacts found".into()),
-        _ => Err("multiple artifacts found; pass --artifact-id".into()),
-    }
-}
-
+#[cfg(test)]
 fn read_artifact_manifest(
     path: &Path,
 ) -> Result<Vec<FirmwareArtifact>, Box<dyn std::error::Error + Send + Sync>> {
@@ -11537,12 +11881,6 @@ fn normalize_lan_api_path(value: &str) -> Result<String, Box<dyn std::error::Err
         return Err("LAN API path must be a relative /api/v1 path without traversal".into());
     }
     Ok(path.to_owned())
-}
-
-fn api_url(base: &str, path: &str) -> Result<Url, Box<dyn std::error::Error + Send + Sync>> {
-    let mut url = Url::parse(base)?;
-    url.set_path(path);
-    Ok(url)
 }
 
 fn encode_path_segment(value: &str) -> String {
@@ -11820,7 +12158,7 @@ mod tests {
                 device: Some("a".to_string()),
                 hardware: Some("b".to_string()),
             },
-            DEFAULT_DEVD_URL,
+            DEFAULT_DEVD_ENDPOINT,
         )
         .unwrap_err()
         .to_string();
@@ -11874,7 +12212,7 @@ mod tests {
                 name: Some("Bench".to_string()),
                 transport: SavedTransport::Usb,
                 device: "dev-1".to_string(),
-                devd: Some(DEFAULT_DEVD_URL.to_string()),
+                devd: Some(DEFAULT_DEVD_ENDPOINT.to_string()),
                 last_seen_unix_seconds: Some(1),
             },
         );
@@ -11885,7 +12223,7 @@ mod tests {
                 name: None,
                 transport: SavedTransport::Usb,
                 device: "dev-2".to_string(),
-                devd: Some(DEFAULT_DEVD_URL.to_string()),
+                devd: Some(DEFAULT_DEVD_ENDPOINT.to_string()),
                 last_seen_unix_seconds: Some(2),
             },
         );
@@ -15742,7 +16080,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "flux-purr",
             "--devd",
-            DEFAULT_DEVD_URL,
+            DEFAULT_DEVD_ENDPOINT,
             "thermal",
             "self-test",
             "--device",
@@ -16008,7 +16346,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "flux-purr",
             "--devd",
-            DEFAULT_DEVD_URL,
+            DEFAULT_DEVD_ENDPOINT,
             "calibration-mode",
             "temperature",
             "heater",
@@ -16079,7 +16417,7 @@ mod tests {
             "target": {
                 "deviceId": "bench",
                 "hardwareId": Value::Null,
-                "devd": DEFAULT_DEVD_URL,
+                "devd": DEFAULT_DEVD_ENDPOINT,
             },
             "source": {
                 "deviceId": "iso-fixture",
@@ -17028,7 +17366,7 @@ mod tests {
 
         let error = thermal_retune::run_thermal_retune(
             &Client::new(),
-            DEFAULT_DEVD_URL,
+            DEFAULT_DEVD_ENDPOINT,
             ThermalRetuneArgs {
                 target: TargetSelector {
                     device: None,
@@ -17050,7 +17388,7 @@ mod tests {
         assert_eq!(replay_summary["applyPreview"]["ok"], false);
         assert_eq!(
             replay_summary["applyPreview"]["target"]["devd"],
-            DEFAULT_DEVD_URL
+            DEFAULT_DEVD_ENDPOINT
         );
         assert!(
             dir.path()
@@ -17067,7 +17405,7 @@ mod tests {
 
         let error = thermal_retune::run_thermal_retune(
             &Client::new(),
-            DEFAULT_DEVD_URL,
+            DEFAULT_DEVD_ENDPOINT,
             ThermalRetuneArgs {
                 target: TargetSelector {
                     device: Some("bench".to_string()),
@@ -17110,7 +17448,7 @@ mod tests {
         let missing_hardware_id = "missing-retune-hardware-7c6c7596f0b64e75";
         let error = thermal_retune::run_thermal_retune(
             &Client::new(),
-            DEFAULT_DEVD_URL,
+            DEFAULT_DEVD_ENDPOINT,
             ThermalRetuneArgs {
                 target: TargetSelector {
                     device: None,
@@ -17214,110 +17552,6 @@ mod tests {
 
         server.abort();
     }
-    #[tokio::test]
-    async fn flash_with_lease_reuses_same_lease_for_dry_run_and_real_flash() {
-        #[derive(Clone)]
-        struct FlashTestState {
-            requests: Arc<Mutex<Vec<Value>>>,
-        }
-
-        async fn create_test_lease() -> Json<Value> {
-            Json(json!({
-                "leaseId": "lease-test",
-                "ttlMs": 60_000,
-            }))
-        }
-
-        async fn heartbeat_test_lease() -> Json<Value> {
-            Json(json!({
-                "leaseId": "lease-test",
-                "ttlMs": 60_000,
-            }))
-        }
-
-        async fn release_test_lease() -> Json<Value> {
-            Json(json!({ "released": true }))
-        }
-
-        async fn capture_flash(
-            State(state): State<FlashTestState>,
-            AxumPath(_device_id): AxumPath<String>,
-            Json(payload): Json<Value>,
-        ) -> Json<Value> {
-            state.requests.lock().unwrap().push(payload.clone());
-            let dry_run = payload
-                .get("dryRun")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            Json(json!({
-                "artifactId": payload["artifact"]["artifactId"],
-                "dryRun": dry_run,
-                "status": if dry_run { "passed" } else { "flashed" },
-                "message": "ok",
-            }))
-        }
-
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let state = FlashTestState {
-            requests: requests.clone(),
-        };
-        let app = Router::new()
-            .route(
-                "/api/v1/devices/{device_id}/leases",
-                post(create_test_lease),
-            )
-            .route(
-                "/api/v1/leases/{lease_id}/heartbeat",
-                post(heartbeat_test_lease),
-            )
-            .route("/api/v1/leases/{lease_id}", delete(release_test_lease))
-            .route("/api/v1/devices/{device_id}/flash", post(capture_flash))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let artifact = FirmwareArtifact {
-            artifact_id: "a".to_string(),
-            name: "A".to_string(),
-            version: "v".to_string(),
-            git_sha: "sha".to_string(),
-            build_id: "build".to_string(),
-            target_chip: "esp32s3".to_string(),
-            profile: "release".to_string(),
-            features: vec!["web_serial".to_string()],
-            protocol: "flux-purr.usb.v1".to_string(),
-            files: Vec::new(),
-        };
-
-        let result = flash_with_lease(
-            &Client::new(),
-            ResolvedUsbTarget {
-                device: "bench".to_string(),
-                devd: format!("http://{addr}"),
-                hardware_id: None,
-            },
-            artifact,
-            false,
-            Some("FLASH".to_string()),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result["status"], "flashed");
-        let captured = requests.lock().unwrap().clone();
-        assert_eq!(captured.len(), 2);
-        assert_eq!(captured[0]["leaseId"], "lease-test");
-        assert_eq!(captured[1]["leaseId"], "lease-test");
-        assert_eq!(captured[0]["dryRun"], true);
-        assert_eq!(captured[1]["dryRun"], false);
-        assert_eq!(captured[1]["confirm"], "FLASH");
-
-        server.abort();
-    }
-
     #[test]
     fn cooldown_target_reached_allows_quantized_edge_without_hiding_real_overshoot() {
         assert!(super::cooldown_target_reached(35.1, 35.0));
@@ -17475,7 +17709,90 @@ mod tests {
     }
 
     #[test]
-    fn buzzer_play_accepts_a_devd_url_after_its_target_selector() {
+    fn firmware_commands_require_the_declared_local_sources_and_port() {
+        assert!(Cli::try_parse_from(["flux-purr", "update", "--bundle", "x"]).is_err());
+        assert!(Cli::try_parse_from(["flux-purr", "update", "--port", "/dev/cu.test"]).is_err());
+        assert!(Cli::try_parse_from(["flux-purr", "flash", "--elf", "x"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "flux-purr",
+                "recover",
+                "--port",
+                "/dev/cu.test",
+                "--elf",
+                "firmware.elf",
+                "--confirm",
+                "ERASE",
+            ])
+            .is_ok()
+        );
+        assert!(validate_local_control_endpoint("http://127.0.0.1:30080").is_err());
+    }
+
+    #[test]
+    fn direct_firmware_commands_retain_explicit_confirmation_boundaries() {
+        let flash = Cli::try_parse_from([
+            "flux-purr",
+            "flash",
+            "--port",
+            "/dev/cu.test",
+            "--skip-backup",
+        ])
+        .unwrap();
+        let Command::Flash(args) = flash.command else {
+            panic!("flash command parses");
+        };
+        assert!(args.skip_backup);
+        assert!(args.confirm.is_none());
+
+        let recover = Cli::try_parse_from([
+            "flux-purr",
+            "recover",
+            "--port",
+            "/dev/cu.test",
+            "--elf",
+            "firmware.elf",
+            "--confirm",
+            "ERASE",
+        ])
+        .unwrap();
+        let Command::Recover(args) = recover.command else {
+            panic!("recover command parses");
+        };
+        assert_eq!(args.confirm, "ERASE");
+    }
+
+    #[test]
+    fn direct_elf_flash_rebuilds_the_checked_in_partition_layout() {
+        let args = direct_elf_flash_args(
+            "/dev/cu.test",
+            Path::new("firmware/partitions.csv"),
+            Path::new("firmware.elf"),
+        )
+        .unwrap();
+
+        assert_eq!(args[0], "flash");
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--port" && pair[1] == "/dev/cu.test" })
+        );
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--partition-table" && pair[1] == "firmware/partitions.csv"
+        }));
+        assert_eq!(args.last().map(String::as_str), Some("firmware.elf"));
+        assert_eq!(direct_erase_flash_args("/dev/cu.test")[0], "erase-flash");
+    }
+
+    #[test]
+    fn managed_devd_starts_only_when_no_endpoint_was_supplied() {
+        assert!(should_start_managed_devd(false, false));
+        assert!(!should_start_managed_devd(false, true));
+        assert!(!should_start_managed_devd(true, false));
+        assert!(!should_start_managed_devd(true, true));
+    }
+
+    #[test]
+    fn buzzer_play_rejects_a_network_devd_endpoint_after_parsing() {
         let cli = Cli::try_parse_from([
             "flux-purr",
             "buzzer",
@@ -17487,7 +17804,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(cli.devd, "http://127.0.0.1:14830");
+        assert!(validate_local_control_endpoint(&cli.devd).is_err());
     }
 
     #[test]

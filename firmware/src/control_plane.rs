@@ -2453,7 +2453,7 @@ impl InstallStatus {
             layout_id: string("flux-purr.esp32s3fh4r2.factory"),
             layout_version: 1,
             partition_table_sha256: string(
-                "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e",
+                "sha256:1028e62176495136a0180a3f49c291dddec8d4fa7cab5cda72edabafa466013b",
             ),
             persistence_source: string(persistence_source),
             record_state: string(record_state),

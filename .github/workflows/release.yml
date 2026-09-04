@@ -171,11 +171,12 @@ jobs:
           mkdir -p host-tools/bin
           cp target/release/flux-purr target/release/flux-purr-devd host-tools/bin/
           cp build-info.json VERSION host-tools/
+          cp web/public/firmware/firmware-integrity-catalog.json host-tools/bin/
           tar -czf "release-assets/flux-purr-host-tools-linux-x64-v${PRODUCT_VERSION}.tar.gz" -C host-tools .
           cp build-info.json VERSION release-assets/
           web_component="$(CHANNEL="${channel}" python3 -c 'import json,os; version=os.environ["PRODUCT_VERSION"]; print(json.dumps({"id":"web","version":version,"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.http.v1","flux-purr.web-serial.v1"],"assets":["flux-purr-web-v"+version+".tar.gz","flux-purr-web-demo-v"+version+".tar.gz"]}))')"
           firmware_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"firmware","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.usb.v1"],"assets":["flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".fluxpurr-fw","flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
-          host_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"host-tools","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.devd-http.v1"],"assets":["flux-purr-host-tools-linux-x64-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
+          host_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"host-tools","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.devd-local-cbor.v1","flux-purr.devd-http.v1"],"assets":["flux-purr-host-tools-linux-x64-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
           manifest="release-assets/flux-purr-release-manifest-${PRODUCT_TAG}.json"
           python3 .github/scripts/product_release_manifest.py \
             --repo-root "$GITHUB_WORKSPACE" \

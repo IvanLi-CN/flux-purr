@@ -31,8 +31,6 @@ struct Args {
     build_id: String,
     #[arg(long, value_enum, default_value = "local")]
     channel: Channel,
-    #[arg(long = "migration")]
-    migrations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -96,7 +94,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &bootloader,
         &partition_table,
         &factory_app,
-        args.migrations,
     );
     match result {
         Ok(bundle) => {

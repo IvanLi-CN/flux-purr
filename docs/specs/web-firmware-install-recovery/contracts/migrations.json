@@ -1,7 +1,0 @@
-{
-  "schemaVersion": 1,
-  "targetLayoutId": "flux-purr.esp32s3fh4r2.factory",
-  "targetLayoutVersion": 1,
-  "targetPartitionTableSha256": "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e",
-  "migrations": []
-}

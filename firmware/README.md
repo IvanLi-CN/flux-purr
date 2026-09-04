@@ -73,8 +73,8 @@
   - `heater_output_percent` is the live PID duty rendered in the Dashboard bottom bar
   - `fan_enabled` is the actual fan runtime state, not a mock toggle
 - EEPROM memory:
-  - `M24C64` on shared `GPIO8/9` I2C stores current v5 memory records in two `2 KiB` slots at `0x1000` and `0x1800`; the decoder accepts v1-v5, while previous `1 KiB` slots at `0x0400` / `0x0800` and legacy `512 B` slots at `0x0000` / `0x0200` remain read-only migration sources, with the highest valid sequence restored. Legacy EEPROM records are migrated in RAM and materialized as v5 on the next successful configuration commit.
-  - EEPROM is the only persistence backend. EEPROM absence, read/write failure, or verification failure enters `EEPROM_REQUIRED`; MCU Flash, NVS, raw sectors, and `flux_cfg` are not configuration fallbacks.
+  - `M24C64` on shared `GPIO8/9` I2C stores current v5 memory records in two `2 KiB` active slots at `0x1000` and `0x1800`; older EEPROM slot formats remain EEPROM-only compatibility sources and are migrated in RAM before the next successful v5 commit. Historical internal-Flash records are ignored and never migrated.
+  - EEPROM is the only persistence backend. EEPROM absence, read/write failure, or verification failure enters `EEPROM_REQUIRED`; MCU Flash, NVS, and raw sectors are never configuration fallbacks.
   - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, `active_cooling_enabled`, and Wi-Fi config fields
   - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended, and newly persisted thermal-profile TLVs use an explicit `TCP2` layout marker while unmarked historical layouts remain readable
   - accepted front-panel edits debounce for about `2s` before writing the next slot
@@ -177,7 +177,7 @@
   - if selector is missing, `mcu-agentd --non-interactive selector list esp32s3_frontpanel`
   - `mcu-agentd --non-interactive monitor esp32s3_frontpanel`
   - 板级验证使用默认 app runtime；输入校准通过正常前面板交互和 USB JSONL 状态完成
-- Use the repository-local `flux-purr` CLI for firmware installation: General User `update` accepts only a signed local `.fluxpurr-fw` bundle; Developer `flash` accepts only a local ELF and automatically archives EEPROM before the write. `recover` is the explicitly confirmed MCU-internal-Flash erase path and does not touch EEPROM. All three require the exact authorized serial port. See `docs/specs/firmware-update-and-developer-flash/` for the contract and its implementation status.
+- Use the repository-local `flux-purr` CLI for firmware installation: 一般用户 `update` accepts only a local `.fluxpurr-fw` bundle present in the published SHA-256 integrity catalog; 开发者 `flash` accepts only a local ELF and automatically archives EEPROM before the write. `recover` is the explicitly confirmed MCU-internal-Flash erase path and does not touch EEPROM. All three require the exact authorized serial port. See `docs/specs/firmware-update-and-developer-flash/` for the contract.
 
 ## Hardware baseline notes
 

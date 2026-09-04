@@ -22,8 +22,6 @@ struct Args {
     build_id: String,
     #[arg(long, value_enum, default_value = "local")]
     channel: Channel,
-    #[arg(long = "migration")]
-    migrations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -50,7 +48,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &std::fs::read(args.bootloader)?,
         &std::fs::read(args.partition_table)?,
         &std::fs::read(args.factory_app)?,
-        args.migrations,
     )?;
     println!(
         "{}",

@@ -18,15 +18,15 @@
 
 ### REQ-FUDF-001
 
-- The system MUST provide exactly the General User `update` and Developer `flash` firmware operations above.
+- The system MUST provide the General User `update` and Developer `flash` firmware operations above, plus the explicitly destructive Developer `recover` operation.
 - Inputs: `update` requires an Explicit Serial Port and a local Firmware Update Bundle; `flash` requires an Explicit Serial Port and accepts only a local ELF, defaulting to `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr`.
 - Outputs: both operations report the exact supplied port and a terminal result without selecting, remembering, discovering, or replacing a port.
 
 ### REQ-FUDF-002
 
-- The system MUST accept a General User bundle only after product-release signature, integrity, and Hardware Profile compatibility verification.
+- The system MUST accept a General User bundle only after the published SHA-256 integrity catalog and Hardware Profile compatibility verification.
 - Inputs: a local `.fluxpurr-fw` file.
-- Outputs: an incompatible, malformed, unsigned, or tampered bundle fails before a write begins.
+- Outputs: an incompatible, malformed, uncatalogued, or tampered bundle fails before a write begins.
 - The General User operation MUST reject development ELF/BIN input, artifact IDs, manifests, and URLs. The Developer operation MUST reject bundles, URLs, artifact IDs, manifests, and every `--devd` form.
 
 ### REQ-FUDF-003
@@ -63,7 +63,7 @@
 
 ### VER-FUDF-002
 
-- Method: signed, tampered, wrong-profile, and malformed bundle fixtures.
+- Method: catalogued, tampered, wrong-profile, and malformed bundle fixtures.
 - covers: `REQ-FUDF-002`
 - Pass condition: only a verified local release bundle is accepted by `update`.
 

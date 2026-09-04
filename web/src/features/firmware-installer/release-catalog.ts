@@ -1,11 +1,14 @@
 import Ajv2020 from 'ajv/dist/2020'
+import integritySchema from '../../../../docs/specs/web-firmware-install-recovery/contracts/firmware-integrity-catalog.schema.json'
 import schema from '../../../../docs/specs/web-firmware-install-recovery/contracts/firmware-release-catalog.schema.json'
 import { validateFirmwareBundle } from './bundle'
 import type { FirmwareChannel, ValidatedFirmwareBundle } from './types'
 
 const CATALOG_PATH = 'firmware/releases-manifest.json'
+const INTEGRITY_CATALOG_PATH = 'firmware/firmware-integrity-catalog.json'
 const ajv = new Ajv2020({ allErrors: true, strict: true })
 const validateCatalogSchema = ajv.compile<SameOriginReleaseCatalog>(schema)
+const validateIntegrityCatalogSchema = ajv.compile<SameOriginIntegrityCatalog>(integritySchema)
 
 export type FirmwareCatalogSource = 'release' | 'local'
 
@@ -29,6 +32,18 @@ interface FirmwareReleaseCatalogEntry {
   assetPath: string
   target: 'ESP32-S3FH4R2'
   publishedAt: string
+}
+
+interface SameOriginIntegrityCatalog {
+  schemaVersion: 1
+  bundles: Array<{
+    version: string
+    sourceSha: string
+    buildId: string
+    channel: 'stable' | 'rc'
+    hardwareProfile: 'ESP32-S3FH4R2'
+    bundleSha256: string
+  }>
 }
 
 export interface OfficialFirmwareArtifact {
@@ -82,15 +97,55 @@ function parseCatalog(payload: unknown): OfficialFirmwareArtifact[] {
   return artifacts.sort((left, right) => right.publishedAt.localeCompare(left.publishedAt))
 }
 
-export async function fetchOfficialCatalog(): Promise<OfficialFirmwareArtifact[]> {
-  const response = await fetch(appAssetPath(CATALOG_PATH), {
-    cache: 'no-store',
-    headers: { Accept: 'application/json' },
-  })
-  if (!response.ok) {
-    throw new Error(`Same-origin firmware catalog failed (${response.status}).`)
+function parseIntegrityCatalog(payload: unknown): SameOriginIntegrityCatalog {
+  if (!validateIntegrityCatalogSchema(payload)) {
+    throw new Error(
+      `Same-origin firmware integrity catalog is invalid: ${ajv.errorsText(validateIntegrityCatalogSchema.errors)}`
+    )
   }
-  return parseCatalog((await response.json()) as unknown)
+  const catalog = payload as SameOriginIntegrityCatalog
+  const hashes = new Set<string>()
+  for (const entry of catalog.bundles) {
+    if (hashes.has(entry.bundleSha256)) {
+      throw new Error('Same-origin firmware integrity catalog contains duplicate bundle hashes.')
+    }
+    hashes.add(entry.bundleSha256)
+  }
+  return catalog
+}
+
+export async function fetchOfficialCatalog(): Promise<OfficialFirmwareArtifact[]> {
+  const [response, integrityResponse] = await Promise.all([
+    fetch(appAssetPath(CATALOG_PATH), {
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    }),
+    fetch(appAssetPath(INTEGRITY_CATALOG_PATH), {
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    }),
+  ])
+  if (!response.ok) throw new Error(`Same-origin firmware catalog failed (${response.status}).`)
+  if (!integrityResponse.ok) {
+    throw new Error(`Same-origin firmware integrity catalog failed (${integrityResponse.status}).`)
+  }
+  const artifacts = parseCatalog((await response.json()) as unknown)
+  const integrity = parseIntegrityCatalog((await integrityResponse.json()) as unknown)
+  const byHash = new Map(integrity.bundles.map((entry) => [entry.bundleSha256, entry]))
+  for (const artifact of artifacts.filter((candidate) => candidate.source === 'release')) {
+    const entry = byHash.get(artifact.bundleSha256)
+    if (
+      !entry ||
+      entry.version !== artifact.version ||
+      entry.sourceSha !== artifact.sourceSha ||
+      entry.buildId !== artifact.buildId ||
+      entry.channel !== artifact.channel ||
+      entry.hardwareProfile !== artifact.target
+    ) {
+      throw new Error('Same-origin firmware release is missing from the integrity catalog.')
+    }
+  }
+  return artifacts
 }
 
 export async function fetchOfficialBundle(

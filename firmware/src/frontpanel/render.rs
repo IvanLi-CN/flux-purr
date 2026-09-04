@@ -199,8 +199,8 @@ pub fn render_frontpanel_ui_with_palette(
 ) {
     canvas.clear(COLOR_BG).ok();
 
-    if state.eeprom_data_incompatible {
-        draw_eeprom_data_incompatible(canvas);
+    if state.persistence_locked() {
+        draw_eeprom_status(canvas, state.eeprom_required);
         return;
     }
 
@@ -215,9 +215,15 @@ pub fn render_frontpanel_ui_with_palette(
     }
 }
 
-fn draw_eeprom_data_incompatible(canvas: &mut DisplayCanvas) {
+fn draw_eeprom_status(canvas: &mut DisplayCanvas, required: bool) {
     draw_text_mid_center(canvas, "EEPROM DATA", 80, 5, COLOR_WARNING);
-    draw_text_mid_center(canvas, "INCOMPATIBLE", 80, 19, COLOR_TEXT);
+    draw_text_mid_center(
+        canvas,
+        if required { "REQUIRED" } else { "INCOMPATIBLE" },
+        80,
+        19,
+        COLOR_TEXT,
+    );
     draw_text_mid_center(canvas, "HEATER LOCKED", 80, 33, COLOR_WARNING);
 }
 

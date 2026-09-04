@@ -14,7 +14,7 @@
 
 - 提供“更新现有 Flux Purr”和“安装或恢复”两个一等任务。
 - 默认优先 devd，不可用时允许桌面 Chromium 在 HTTPS/localhost 上使用 Web Serial。
-- 两条引擎共享唯一、已签名的 `.fluxpurr-fw`、layout、安全、状态机和结果合同。
+- 两条引擎共享唯一的 `.fluxpurr-fw`、layout、完整性清单、状态机和结果合同。
 - 允许安装到空片或非 Flux Purr 固件目标；恢复流程不询问、推断或限制 PCB/加热器连接状态。
 - 更新流程不承载 MCU 配置迁移，EEPROM 始终独立于 MCU internal-flash 擦写。
 
@@ -22,7 +22,7 @@
 
 - 不做 A/B、OTA rollback、断点续烧、静默重试或从未知候选中自动选择重新枚举的端口。
 - Web 不接受裸 BIN、ELF、手工地址、任意 ESP32 板型或 LAN 烧录。
-- 不接受未签名 bundle 或将本地文件视为免验证来源。
+- 不接受未命中发布完整性清单的 bundle 或将本地文件视为免验证来源。
 - 不让 `mcu-agentd` 参与实现、测试或验收。
 
 ## 范围（Scope）
@@ -36,7 +36,7 @@
 
 ### Out of scope
 
-- 旧 devd-only ELF/raw CLI 开发者接口的移除。
+- `flux-purr` CLI 的一般用户 update、开发者 flash 和 recover 入口；这些接口由 `firmware-update-and-developer-flash` topic 定义。
 - 未经主人精确端口授权的任何串口、复位、擦除或烧录操作。
 - GitHub Release 正式发布与 PR merge。
 
@@ -44,10 +44,10 @@
 
 ### MUST
 
-- Bundle 必须符合 `contracts/firmware-bundle.schema.json`，携带产品发布签名，ZIP 解压前后均不得超过 8 MiB，且严格只含一个 manifest、一个 detached signature 和 bootloader、partition-table、factory-app 三段镜像。
+- Bundle 必须符合 `contracts/firmware-bundle.schema.json`，ZIP 解压前后均不得超过 8 MiB，且严格只含 manifest 与 bootloader、partition-table、factory-app 三段镜像。一般用户 update 还必须命中随 host-tools/Web 发布的 `firmware-integrity-catalog.json`；不使用签名字段、签名文件或签名服务。
 - 目标固定为 ESP32-S3FH4R2、4 MiB Flash、2 MiB PSRAM、DIO/40 MHz；段地址固定为 `0x0`、`0x8000`、`0x10000`，边界由 `firmware/flash-layout.json` 定义。
 - 每段声明实际长度、SHA-256 和 ESP ROM MD5；未知字段、路径穿越、重复、缺段、重叠、越界或 hash 不一致均 fail closed。
-- Browser 与 devd 只接受 registry 中声明的 migration ID；update 的当前 partition-table SHA-256 必须精确匹配 migration source。
+- update 的当前 partition-table SHA-256 必须精确匹配 bundle layout；不存在配置复制或迁移路径。
 - update 仅适用于可验证 Flux Purr runtime；烧录前必须停热并取得有效温度 `<=40°C`。它不得保全、迁移或验证 MCU 内部配置分区。
 - install/recovery 允许无 Flux 身份并全擦 MCU internal Flash；不得提出、推断或执行任何 PCB/加热器物理连接确认或限制。
 - `get_install_status` 的 `setupReason` 在 commissioning 已完成时可以为 `null`；devd 必须按可选字段解码。固件维护目标必须保留已授权 native serial candidate，即使运行时 identity 的 capability 列表不包含 `flash`。
@@ -69,7 +69,7 @@
 
 - 固件包选择必须是单一入口，打开组件库对话框后在“发布版本”和“本地文件”之间切换；发布版本采用受视口约束的左右两栏，左栏仅承载 RC opt-in、当前选择与说明，右栏通过共享 `ScrollArea` 呈现独立可滚动的版本列表。发布对话框高度为 `min(36rem, 100dvh - 4rem)`，版本列表必须占满 tabs 与公共操作区之间的全部可用高度，列表不得按稳定版或候选版分组，必须按 `publishedAt` 倒序展示；非稳定版本必须显示 `RC` chip，默认选中最新 stable。本地文件由用户信任但不豁免校验，且不把发布渠道本身伪装成可写入固件。
 - 正式 release 构建必须在服务器侧分页读取 GitHub Releases REST API 的所有非 draft 版本，以 `Accept: application/octet-stream` 下载并严格验证有效 `.fluxpurr-fw`，再写入 Web 静态包中的同源目录与 `firmware/releases-manifest.json`。当前 release bundle 必须在 GitHub Release 创建前一并写入该目录。
-- 本地 Vite 开发服务必须接管固定 `/firmware/**`，只提供已打包或服务器端验证过签名的 release bundle 同源目录。开发构建的本地 ELF 不得被包装、缓存或暴露为 General User bundle；它只能走 Developer `flash`。GitHub 刷新失败时仍返回已打包的已签名 release，不把失败传给 Browser。
+- 本地 Vite 开发服务必须接管固定 `/firmware/**`，只提供已打包或服务器端验证过完整性清单的 release bundle 同源目录。开发构建的本地 ELF 不得被包装、缓存或暴露为一般用户 bundle；它只能走开发者 `flash`。GitHub 刷新失败时仍返回已打包的已校验 release，不把失败传给 Browser。
 - devd 可用时自动选中，但在操作开始前允许切换 Browser；开始后 transport 冻结。
 - Browser 写入完成后，ESP32-S3 原生 USB Serial/JTAG 必须使用 esptool-js `UsbJtagSerialReset` 等价序列复位到运行时；不得以 UART RTS `hard_reset` 代替。Browser manual BOOT/reset fallback 必须给出可操作状态，而非自动猜测端口变化。
 
@@ -114,11 +114,11 @@
 - [`contracts/device-install-status.md`](./contracts/device-install-status.md)
 - [`contracts/firmware-bundle.schema.json`](./contracts/firmware-bundle.schema.json)
 - [`contracts/firmware-release-catalog.schema.json`](./contracts/firmware-release-catalog.schema.json)
-- [`contracts/migrations.json`](./contracts/migrations.json)
+- [`contracts/firmware-integrity-catalog.schema.json`](./contracts/firmware-integrity-catalog.schema.json)
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 合法与恶意 ZIP fixtures，When 两个 validator 校验，Then 只接受签名有效、三段完整、hash 正确、无路径风险且不超过 8 MiB 的 bundle。
+- Given 合法与恶意 ZIP fixtures，When 两个 validator 校验，Then 只接受四文件、三段完整、hash 正确、无路径风险且不超过 8 MiB 的 bundle；一般用户 update 还必须命中完整性清单。
 - Given devd 可用或不可用，When 打开固件工作台，Then 默认选择 devd 或回退 Browser，并可在 preflight 前手动切换。
 - Given 空片或外来固件 ESP32-S3FH4R2，When 选择 install/recovery，Then 不要求 Flux 身份，也不存在 PCB/heater 物理确认限制。
 - Given update 目标温度无效或高于 40C，When preflight，Then 写入被阻止且 heater 已保持停止。
@@ -153,7 +153,7 @@
 - `bun run check:web`
 - `bun run check:web:build`
 - `bun run check:e2e`
-- bundle、security、migration、fake SerialPort 和 fake espflash fixture suites。
+- bundle、security、EEPROM-boundary、fake SerialPort 和 fake espflash fixture suites。
 - ui_demo desktop 视觉证据。
 
 ## 文档更新（Docs to Update）

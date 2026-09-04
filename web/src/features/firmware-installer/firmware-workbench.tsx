@@ -827,7 +827,6 @@ export function FirmwareWorkbench({
       loader = await connectBrowserLoader(runtimePort)
       showPreflightStage('chip_flash_security', 0, 'ROM 已连接；正在验证芯片、Flash 与安全状态。')
       await preflightBrowserLoader(loader, selected.bundle, operation)
-      showPreflightStage('layout_config', 1, '芯片安全与布局配置已通过；正在结算预检。')
       setLocalBundle(selected.bundle)
       setLocalBundleBytes(selected.bytes)
       setBrowserLoader(loader)
@@ -1187,7 +1186,7 @@ export function FirmwareWorkbench({
 
   const downloadDiagnostic = () => {
     const report = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       operation,
       transport,
       channel,
@@ -1878,7 +1877,6 @@ function firmwareStageLabel(stage: string) {
     transport: '连接',
     rom_reset: 'ROM 模式',
     chip_flash_security: '芯片安全',
-    layout_config: '布局配置',
     preflight: '预检',
     authorization: '授权',
     erase: '擦除',

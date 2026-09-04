@@ -4,11 +4,10 @@
   "title": "Flux Purr firmware bundle manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "mediaType", "signingKeyId", "identity", "target", "layout", "segments", "migrations"],
+  "required": ["schemaVersion", "mediaType", "identity", "target", "layout", "segments"],
   "properties": {
     "schemaVersion": { "const": 2 },
     "mediaType": { "const": "application/vnd.flux-purr.firmware-bundle+zip" },
-    "signingKeyId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
     "identity": {
       "type": "object",
       "additionalProperties": false,
@@ -17,7 +16,7 @@
         "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$", "maxLength": 64 },
         "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "buildId": { "type": "string", "pattern": "^[0-9a-f]{16,64}$" },
-        "channel": { "enum": ["stable", "rc"] }
+        "channel": { "enum": ["stable", "rc", "local"] }
       }
     },
     "target": {
@@ -53,12 +52,6 @@
         { "$ref": "#/$defs/factoryApp" }
       ],
       "items": false
-    },
-    "migrations": {
-      "type": "array",
-      "uniqueItems": true,
-      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
-      "maxItems": 8
     }
   },
   "$defs": {

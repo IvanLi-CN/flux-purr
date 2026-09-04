@@ -79,12 +79,12 @@ New slug-only topics use `-` in the legacy `ID` column below; their directory sl
 | v5k2p | 双版本风扇 PCB 方案（5V / 12V） | 已完成 | `v5k2p-dual-fan-pcb-variants/SPEC.md` | 2026-04-10 | PR #6 |
 | kht7p | Flux Purr 7.0cm 3.2Ω 加热板变体 | 已完成 | `kht7p-heater-7p0-3p2-variant/SPEC.md` | 2026-05-31 | `heater-7p0-3p2` Gerber archived |
 | 3dczp | Flux Purr 5.6cm 外壳模型归档 | active | `3dczp-enclosure-5p6cm-models/SPEC.md` | 2026-05-31 | Print-ready STL assets tracked through Git LFS |
-| 35bta | Flux Purr EEPROM 记忆配置 | 待实现 | `35bta-eeprom-memory-config/SPEC.md` | - | EEPROM-only persistence replaces the MCU Flash fallback |
+| 35bta | Flux Purr EEPROM 记忆配置 | 已完成 | `35bta-eeprom-memory-config/SPEC.md` | - | EEPROM-only persistence; MCU-internal configuration fallback and migration are unsupported |
 | r9k3m | Flux Purr PR 标签发布与主分支保护 | 已完成 | `r9k3m-pr-label-release-protection/SPEC.md` | 2026-04-27 | Label-driven release intent, PR-local version preparation, and quality-gates declaration |
 | hhwq8 | Flux Purr 热控 Bench Web Demo | active | `hhwq8-web-control-plane-demo/SPEC.md` | 2026-05-23 | Industrial mock thermal bench tool for the #27 control-plane architecture |
 | m8r4q | Flux Purr 真实控制平面运行时 | active | `m8r4q-real-control-plane-runtime/SPEC.md` | 2026-05-29 | Web + firmware + native devd real transport contract |
 | jt8r2 | Flux Purr ADC 校准控制面 | 已完成 | `jt8r2-adc-calibration-control-plane/SPEC.md` | 2026-06-02 | RTD/VIN ADC calibration with persisted draft/active packages |
-| web-firmware-install-recovery | Flux Purr Web 固件安装与恢复 | 待实现 | `web-firmware-install-recovery/SPEC.md` | 2026-08-15 | Unified devd and Browser Web Serial firmware workbench |
+| web-firmware-install-recovery | Flux Purr Web 固件安装与恢复 | 已完成 | `web-firmware-install-recovery/SPEC.md` | 2026-08-15 | Unified integrity-catalog bundle handling across devd and Browser Web Serial |
 | - | Flux Purr 单一产品版本源 | 已实现 | `version-source/SPEC.md` | 2026-08-29 | Root `VERSION`, PR-local preparation, one-product-merge/one-release sequencing, and the release-completion gate |
 | - | Flux Purr 蜂鸣器单输出 Cue 仲裁 | 已完成 | `buzzer-cue-arbitration/SPEC.md` | 2026-09-02 | Single-output priority, safety suppression, coalesced feedback, host-side verification, and feature-gated native USB/devd diagnostics; [ADR 0006](../adr/0006-single-output-buzzer-cue-arbitration.md) |
-| - | Firmware update and developer flash | 待实现 | `firmware-update-and-developer-flash/SPEC.md` | - | Integrity-catalog update, direct local ELF flash, and EEPROM-only persistence boundary |
+| - | Firmware update and developer flash | 已完成 | `firmware-update-and-developer-flash/SPEC.md` | - | Explicit-port update, direct local ELF flash/recover, local CBOR control, and EEPROM-only persistence boundary |

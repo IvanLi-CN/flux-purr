@@ -52,7 +52,7 @@ Accepts one `.fluxpurr-fw` body with the bundle media type. The daemon streams i
 - `phase` is `preflight | execution`; the phases always have distinct `operationId` values.
 - `event` is `operation_started | stage_started | stage_progress | stage_completed | stage_failed | operation_completed`.
 - `sequence` starts at one and strictly increases within an operation. SSE replay may repeat an event, so consumers deduplicate by `(operationId, sequence)`.
-- Preflight stages are `artifact`, `transport`, `rom_reset`, `chip_flash_security`, `layout_config`, and `preflight`.
+- Preflight stages are `artifact`, `transport`, `rom_reset`, `chip_flash_security`, and `preflight`.
 - Execution stages are `authorization`, optional `erase`, `write_segments`, `rom_md5`, `reset`, `runtime_reconnect`, and `runtime_verify`.
 - Unit fields are present only for measured work. `write_segments` reports confirmed cumulative bytes after a segment write succeeds; `rom_md5` reports confirmed segments after their ROM checksum succeeds. The daemon does not synthesize progress while a command exposes no measurement.
 - `stage_failed` contains a stable `code`. `operation_completed` contains `outcome`, using the outcome vocabulary below.
