@@ -64,6 +64,31 @@ describe('same-origin firmware catalog', () => {
           })
         )
       )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            schemaVersion: 1,
+            bundles: [
+              {
+                version: '1.4.2',
+                sourceSha: 'b'.repeat(40),
+                buildId: 'b'.repeat(16),
+                channel: 'stable',
+                hardwareProfile: 'ESP32-S3FH4R2',
+                bundleSha256: `sha256:${'b'.repeat(64)}`,
+              },
+              {
+                version: '1.5.0-rc.1',
+                sourceSha: 'a'.repeat(40),
+                buildId: 'a'.repeat(16),
+                channel: 'rc',
+                hardwareProfile: 'ESP32-S3FH4R2',
+                bundleSha256: RC_SHA256,
+              },
+            ],
+          })
+        )
+      )
       .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3])))
     vi.stubGlobal('fetch', fetch)
 
@@ -80,11 +105,13 @@ describe('same-origin firmware catalog', () => {
     const result = await fetchOfficialBundle(rcArtifact)
 
     expect(result.bytes).toEqual(new Uint8Array([1, 2, 3]))
-    expect(fetch.mock.calls[1][0]).toBe(
+    expect(fetch.mock.calls[1][0]).toBe('/firmware/firmware-integrity-catalog.json')
+    expect(fetch.mock.calls[2][0]).toBe(
       '/firmware/releases/v1.5.0-rc.1-2/flux-purr-v1.5.0-rc.1.fluxpurr-fw'
     )
     expect(String(fetch.mock.calls[0][0])).not.toContain('github')
     expect(String(fetch.mock.calls[1][0])).not.toContain('github')
+    expect(String(fetch.mock.calls[2][0])).not.toContain('github')
   })
 
   it('rejects a catalog that attempts to point the browser at an external asset', async () => {

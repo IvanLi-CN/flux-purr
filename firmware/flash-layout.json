@@ -18,8 +18,7 @@
   "partitions": {
     "nvs": { "address": 36864, "length": 24576 },
     "phy_init": { "address": 61440, "length": 4096 },
-    "factory": { "address": 65536, "length": 2097152 },
-    "flux_cfg": { "address": 2162688, "length": 8192 }
+    "factory": { "address": 65536, "length": 2097152 }
   },
-  "partitionTableSha256": "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e"
+  "partitionTableSha256": "sha256:1028e62176495136a0180a3f49c291dddec8d4fa7cab5cda72edabafa466013b"
 }

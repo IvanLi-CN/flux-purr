@@ -1,7 +1,6 @@
 import type { ESPLoader, Transport as EspTransport } from 'esptool-js'
 import SparkMD5 from 'spark-md5'
 
-import migrations from '../../../../docs/specs/web-firmware-install-recovery/contracts/migrations.json'
 import {
   type BrowserSerial,
   FLUX_PURR_USB_SERIAL_REQUEST_OPTIONS,
@@ -67,11 +66,6 @@ const preparedBrowserLoaders = new WeakMap<object, PreparedBrowserLoader>()
 
 export interface BrowserLayoutPreflight {
   sourcePartitionTableSha256: string | null
-  configCopy: {
-    sourceAddress: number
-    targetAddress: number
-    bytes: Uint8Array
-  } | null
 }
 
 export type BrowserRuntimeVerificationStage =
@@ -340,16 +334,6 @@ export async function writeBrowserBundle(
         totalSegments: bundle.manifest.segments.length,
       })
     }
-    if (prepared.layout.configCopy) {
-      await writeConfigCopy(loader, prepared.layout.configCopy)
-      const restored = await loader.readFlash(
-        prepared.layout.configCopy.targetAddress,
-        prepared.layout.configCopy.bytes.byteLength
-      )
-      if (!equalBytes(restored, prepared.layout.configCopy.bytes)) {
-        throw new Error('Restored flux_cfg differs from the staged source bytes.')
-      }
-    }
     options.reportStage?.({ stage: 'reset_started' })
     await loader.after('hard_reset')
     await loader.after('custom_reset', undefined, ESP32_S3_USB_JTAG_APP_RESET_SEQUENCE)
@@ -371,7 +355,7 @@ export async function preflightBrowserLayout(
   operation: FirmwareOperation
 ): Promise<BrowserLayoutPreflight> {
   if (operation === 'install_recovery') {
-    return { sourcePartitionTableSha256: null, configCopy: null }
+    return { sourcePartitionTableSha256: null }
   }
   const partitionTable = await loader.readFlash(0x8000, 0x1000)
   if (partitionTable.byteLength !== 0x1000) {
@@ -379,45 +363,9 @@ export async function preflightBrowserLayout(
   }
   const sourceHash = `sha256:${await sha256Hex(partitionTable)}`
   if (sourceHash === bundle.manifest.layout.partitionTableSha256) {
-    return { sourcePartitionTableSha256: sourceHash, configCopy: null }
+    return { sourcePartitionTableSha256: sourceHash }
   }
-  const migration = migrations.migrations.find(
-    (candidate) =>
-      candidate.sourcePartitionTableSha256 === sourceHash &&
-      bundle.manifest.migrations.includes(candidate.id)
-  )
-  if (!migration || migration.copies.length !== 1) {
-    throw new Error('Current partition-table hash has no declared supported migration.')
-  }
-  const copy = migration.copies[0]
-  const bytes = await loader.readFlash(copy.sourceAddress, copy.length)
-  if (bytes.byteLength !== copy.length) {
-    throw new Error('Source flux_cfg could not be staged exactly.')
-  }
-  return {
-    sourcePartitionTableSha256: sourceHash,
-    configCopy: {
-      sourceAddress: copy.sourceAddress,
-      targetAddress: copy.targetAddress,
-      bytes,
-    },
-  }
-}
-
-async function writeConfigCopy(
-  loader: LoaderPort,
-  copy: NonNullable<BrowserLayoutPreflight['configCopy']>
-) {
-  await loader.writeFlash({
-    fileArray: [{ data: copy.bytes, address: copy.targetAddress }],
-    flashMode: 'dio',
-    flashFreq: '40m',
-    flashSize: '4MB',
-    eraseAll: false,
-    compress: true,
-    calculateMD5Hash: (image) =>
-      SparkMD5.ArrayBuffer.hash(Uint8Array.from(image).buffer as ArrayBuffer),
-  })
+  throw new Error('Current partition-table hash does not match the bundle layout.')
 }
 
 export async function verifyBrowserRuntime(
@@ -853,8 +801,4 @@ function popcount(value: number) {
 async function sha256Hex(bytes: Uint8Array) {
   const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes))
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array) {
-  return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])
 }

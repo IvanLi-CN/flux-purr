@@ -12,7 +12,7 @@
 
 - 把 `GPIO47` 固定占空比加热替换为按 `target_temp_c` 驱动的正式闭环；当 CH224Q 读取到 PPS APDO 覆盖 `20V` 时，heater 后端使用受安全上限约束的 PPS/AVS 粗粒度调压与 `100Hz` MOS PWM 功率合成，否则回退同一 `GPIO47` PWM 调功路径。
 - 加热闭环采用模型辅助 ramp/soak 与保温 PI 微调的混合控制器。控制器输出统一的等效热功率请求；PPS 后端映射为 `100mV` 对齐电压，PWM 负责连续的物理功率调节，固定 PD 后端选择不低于目标等效电压的 PDO 并使用同一 MOS PWM 合成等效功率。
-- 支持 `ThermalControlProfile` preview 与显式保存。RAM preview 最多 10 个目标点；持久化保存固定为 `pps3a` / `pps5a` 双 bank，各完整保存最多 10 个非空已配置目标点并压紧稀疏槽位。持久化后端优先使用 EEPROM，EEPROM 不可达时使用 ESP flash fallback。`thermalProfileMode` 是 `auto|65w|100w`：auto 仅在 advertised PPS APDO 覆盖 `20V` 且 `ppsMaxMa >= 5000` 时解析 `pps5a`。多个 APDO 覆盖 `20V` 时，必须依次选择较高 `ppsMaxMa`、较高最大电压、较低最小电压的同一 APDO，不得聚合不同 APDO 的能力。显式档位不回退、不阻止运行；PPS/AVS 电压上限继续以所选 APDO 合同为准。preview 始终优先于 selected bank。
+- 支持 `ThermalControlProfile` preview 与显式保存。RAM preview 最多 10 个目标点；持久化保存固定为 `pps3a` / `pps5a` 双 bank，各完整保存最多 10 个非空已配置目标点并压紧稀疏槽位。持久化后端只能使用 EEPROM，EEPROM 不可达时进入 `EEPROM_REQUIRED`，不得使用 MCU Flash fallback。`thermalProfileMode` 是 `auto|65w|100w`：auto 仅在 advertised PPS APDO 覆盖 `20V` 且 `ppsMaxMa >= 5000` 时解析 `pps5a`。多个 APDO 覆盖 `20V` 时，必须依次选择较高 `ppsMaxMa`、较高最大电压、较低最小电压的同一 APDO，不得聚合不同 APDO 的能力。显式档位不回退、不阻止运行；PPS/AVS 电压上限继续以所选 APDO 合同为准。preview 始终优先于 selected bank。
 - 提供 CLI/devd 自测试入口，抽象 bench source provider；当前默认且验收支持的 provider 是 IsolaPurr released CLI，用于准备 `auto|65w|100w`、PD Fixed enabled、PPS enabled、`auto_follow` 外部 source。单次 live run 工作目录只保留 `run.json`、`samples.ndjson` 与 `thermal-profile.candidate.json` 这类数据文件；owner-facing 冻结 baseline bundle 以浏览器可直接打开的 `index.html` 为唯一 canonical report，并同时提交 `run.bundle.json`、`samples.ndjson` 与 `thermal-profile.accepted.json`。每个 applied stage 的 `analysis` 必须同时沉淀 `approachSource` / `holdSource`，记录 source 实际电压、电流、功率在该窗口内的 `sampleCount`、`min/max/avg/first/last`。当 RTD 进入 fault 时，前面板与 runtime display 必须保留最后一个有效温度显示，不能把 `0°C` 伪装成当前温度；待确认告警由前面板输入或 runtime/CLI/app 的 `faultAttentionAcknowledged` 清除。
 - 让 Dashboard 稳定显示实时温度、设定温度、`OFF/AUTO/RUN` 三态风扇显示与实际 heater 输出强度。
 - 冻结正式风扇/保护包线：
@@ -343,7 +343,7 @@ None
 - 用 `HeaterPowerBackend` 把控制器输出与硬件输出解耦：`pps-mos` 后端只做 MOS 静态通断并通过 CH224Q PPS/AVS 调压；`fixed-pd-pwm-fallback` 保留原 `GPIO47` PWM 调功。
 - Approach 调优与验收以目标温度相关的 full-speed-to-stable gate、overshoot、hold p2p、hold 高低侧误差和 source telemetry 为真相源；默认 flagship sprint 不再额外采集 `0% / 25% / 50%` approach-only 曲线作为门槛。
 - CH224Q 仍作为电源准备层而不是 heater interlock；只有启动 capability gate 与后续调压写入失败会影响 heater 后端选择。
-- 两个 bank 各 10 个完整 point-local 目标点必须能与最长 Wi-Fi 凭据和完整校准状态同时持久化；EEPROM 当前写入 `MemoryRecord` v5，使用 `2 KiB` active 双槽和 `u16` TLV 长度，读取兼容 v1-v4 及 `1 KiB` previous / `512B` legacy 槽；旧 EEPROM record 在 RAM 中迁移，并在下一次成功提交时写成 v5。EEPROM 不可达时 flash fallback 使用同一 record 编码和 sequence 选择规则，并且只允许写入专用 `flux_cfg` data partition，不得直接占用 NVS 管理范围。host 在开始调优前必须拒绝超过 profile 10 点容量的目标集合。
+- 两个 bank 各 10 个完整 point-local 目标点必须能与最长 Wi-Fi 凭据和完整校准状态同时持久化；EEPROM 当前写入 `MemoryRecord` v5，使用 `2 KiB` active 双槽和 `u16` TLV 长度，读取兼容 v1-v4 及 `1 KiB` previous / `512B` legacy 槽；旧 EEPROM record 在 RAM 中迁移，并在下一次成功提交时写成 v5。EEPROM 不可达时进入 `EEPROM_REQUIRED`，不得使用 `flux_cfg`、raw Flash 或 NVS。host 在开始调优前必须拒绝超过 profile 10 点容量的目标集合。
 - saved profile 与 USB/WebSerial direct preview 必须经过同一组 thermal settings 限幅；控制器不得依赖 devd 客户端校验来保护 spike-reject、工作电压下限或电流余量。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）

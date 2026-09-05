@@ -614,6 +614,7 @@ pub struct FrontPanelUiState {
     pub heater_lock_reason: Option<HeaterLockReason>,
     pub dashboard_warning_visible: bool,
     pub eeprom_data_incompatible: bool,
+    pub eeprom_required: bool,
     pub manual_pps_enabled: bool,
     pub selected_menu_item: FrontPanelMenuItem,
     pub selected_preset_slot: usize,
@@ -647,6 +648,7 @@ impl FrontPanelUiState {
             heater_lock_reason: None,
             dashboard_warning_visible: false,
             eeprom_data_incompatible: false,
+            eeprom_required: false,
             manual_pps_enabled: false,
             selected_menu_item: FrontPanelMenuItem::ActiveCooling,
             selected_preset_slot: 1,
@@ -685,7 +687,7 @@ impl FrontPanelUiState {
     }
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
-        if self.eeprom_data_incompatible {
+        if self.persistence_locked() {
             return false;
         }
         self.key_test.last_raw_key = Some(event.raw_key);
@@ -696,6 +698,10 @@ impl FrontPanelUiState {
             FrontPanelRuntimeMode::KeyTest => true,
             FrontPanelRuntimeMode::App => self.apply_app_event(event),
         }
+    }
+
+    pub const fn persistence_locked(&self) -> bool {
+        self.eeprom_data_incompatible || self.eeprom_required
     }
 
     pub const fn gesture_capabilities(&self) -> FrontPanelGestureCapabilities {

@@ -215,7 +215,7 @@ export const firmwareDemoActivity: FirmwareActivityEntry[] = [
     id: 'firmware-demo-13',
     time: '20:19:51',
     event: '配置策略',
-    detail: '更新任务保全有效 flux_cfg；安装或恢复仅擦除 MCU internal Flash。',
+    detail: '更新只写入固件镜像；恢复仅擦除 MCU internal Flash，EEPROM 始终独立保留。',
     tone: 'info',
   },
   {

@@ -92,7 +92,7 @@ Daemon 应该是本地 HTTP 服务，而不是 UI 专用私有通道。Mains Aeg
 
 - 健康与兼容：`/health`、`/api/v1/ping`、`/api/v1/identity`、`/api/v1/network`、`/api/v1/status`。
 - 设备生命周期：scan、bind、connect、disconnect、unbind、reset。
-- 固件生命周期：select artifact、verify files、dry-run flash、real flash 和 `flux_cfg` layout-migration preflight。
+- 固件生命周期：select artifact、verify files、预检、real flash 与写后状态验证；配置持久化由设备外置 EEPROM 自己负责。
 - 串口生命周期：create heartbeat lease、read session、stream events、start/stop monitor。
 - 设置桥接：WiFi config、log level、safe manual preferences。
 - 工具能力：defmt decode，以及可选 host power routes。
@@ -101,7 +101,7 @@ Daemon 应该是本地 HTTP 服务，而不是 UI 专用私有通道。Mains Aeg
 
 daemon endpoint 在更新 registry 后再发布 bounded event 时，必须先释放 registry/state lock。event publisher 往往会再次读取或写入同一个 registry；如果成功路径持锁 emit event，WiFi/runtime 这类 mutating endpoint 会在真实硬件返回成功后卡死，浏览器只看到挂起请求。
 
-不能假设 app 写入不会影响数据区：无论 `flux_cfg` 是否迁移，real flash 都必须先读取设备当前 partition table，确认目标容量与地址安全后，将完整原始 record 写入目标并读回逐字验证；app 写入完成后，再把同一受限临时备份恢复到目标地址并再次逐字验证。预写失败必须在 app 写入前终止；恢复或最终验证失败必须明确报告为保护失败。临时原始记录只在受限临时目录中短暂存在，永不进入 daemon log、trace 或 registry；外置 EEPROM 不在这条 flash 迁移的破坏范围内。
+开发者 `flash` 必须在 direct serial/ROM 写入前通过同一显式端口读取完整外置 EEPROM snapshot，并将通过认证的 `FPBK1` 归档写入当前用户的备份目录；备份、认证或持久化失败时默认停止，只有成对的 `--skip-backup --confirm NO_EEPROM_BACKUP` 才能绕过。`recover` 只擦写 MCU internal Flash，永不读取、迁移或清理 EEPROM；一般用户 `update` 只接受命中发布 SHA-256 完整性清单的本地 bundle。
 
 同一个 native serial port 必须有跨进程互斥保护。进程内 mutex 只能保护单个 daemon；开发时残留的旧 daemon、浏览器预览或 smoke 进程可能同时打开同一个 USB Serial/JTAG port，造成 `Broken pipe`、短时断线或看起来像硬件重启的现象。serial RPC 应该在 open/write/read 前获取 port-scoped process lock，并在超时窗口内等待或返回 retryable lock timeout。
 

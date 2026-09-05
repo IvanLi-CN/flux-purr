@@ -1,7 +1,10 @@
 #![cfg_attr(target_arch = "xtensa", no_std)]
 #![cfg_attr(target_arch = "xtensa", no_main)]
 
-#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+#[cfg(all(
+    target_arch = "xtensa",
+    any(feature = "net_http", feature = "web_serial")
+))]
 use core::fmt::Write as _;
 #[cfg(target_arch = "xtensa")]
 extern crate alloc;
@@ -39,10 +42,6 @@ use embedded_hal::pwm::SetDutyCycle;
 #[cfg(target_arch = "xtensa")]
 use embedded_hal_bus::spi::ExclusiveDevice;
 #[cfg(target_arch = "xtensa")]
-use embedded_storage::{ReadStorage, Storage};
-#[cfg(target_arch = "xtensa")]
-use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
-#[cfg(target_arch = "xtensa")]
 use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
@@ -74,8 +73,6 @@ use esp_hal::{
 };
 #[cfg(target_arch = "xtensa")]
 use esp_rtos::embassy::InterruptExecutor;
-#[cfg(target_arch = "xtensa")]
-use esp_storage::FlashStorage;
 #[cfg(test)]
 use flux_purr_firmware::DEFAULT_PD_VOLTAGE_REQUEST;
 #[cfg(test)]
@@ -175,7 +172,6 @@ use flux_purr_firmware::memory::{
     MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE, MEMORY_WRITE_DEBOUNCE_MS,
     MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET, PREVIOUS_MEMORY_SLOT_B_OFFSET,
     PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record, encode_memory_record,
-    select_latest_optional_memory_record,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::{
@@ -235,8 +231,10 @@ use fusb302::{
 use gc9d01::{GC9D01, Timer as Gc9d01Timer};
 #[cfg(target_arch = "xtensa")]
 use micromath::F32Ext;
-#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-use serde::Serialize;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use serde::{Deserialize, Serialize};
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use sha2::{Digest, Sha256};
 #[cfg(target_arch = "xtensa")]
 use static_cell::StaticCell;
 
@@ -293,7 +291,6 @@ static mut DISPLAY_CANVAS_STORAGE: MaybeUninit<DisplayCanvas> = MaybeUninit::uni
 #[cfg(target_arch = "xtensa")]
 struct MemoryIoScratch {
     record_bytes: [u8; MEMORY_SLOT_SIZE],
-    partition_table: [u8; PARTITION_TABLE_MAX_LEN],
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -311,7 +308,6 @@ impl Drop for MemoryIoScratch {
         // Wi-Fi reuses this allocator region during radio startup. Do not leave
         // EEPROM/config bytes where a C timer object can observe stale pointers.
         zeroize_bytes_volatile(&mut self.record_bytes);
-        zeroize_bytes_volatile(&mut self.partition_table);
     }
 }
 
@@ -602,7 +598,6 @@ const BUZZER_TIMER_PRESCALER: u8 = 3;
 #[cfg(any(target_arch = "xtensa", test))]
 const BUZZER_IDLE_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(any(target_arch = "xtensa", test))]
-#[cfg(any(target_arch = "xtensa", test))]
 const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
 #[cfg(target_arch = "xtensa")]
 const STATUS_LIGHT_BOOT_DURATION_MS: u64 = 1_000;
@@ -697,27 +692,298 @@ const EEPROM_READ_CHUNK_MAX_BYTES: usize = 256;
 const EEPROM_UNUSED_GAP_OFFSET: u16 = 0x0c00;
 #[cfg(any(target_arch = "xtensa", test))]
 const EEPROM_UNUSED_GAP_LEN: usize = 0x0400;
-#[cfg(any(target_arch = "xtensa", test))]
-const FLASH_MEMORY_ERASE_SECTOR_SIZE: u32 = 4_096;
-#[cfg(any(target_arch = "xtensa", test))]
-const FLASH_MEMORY_SLOT_A_OFFSET: u32 = 0;
-#[cfg(any(target_arch = "xtensa", test))]
-const FLASH_MEMORY_SLOT_B_OFFSET: u32 = FLASH_MEMORY_ERASE_SECTOR_SIZE;
-#[cfg(any(target_arch = "xtensa", test))]
-const FLASH_MEMORY_REGION_SIZE: u32 = FLASH_MEMORY_ERASE_SECTOR_SIZE * 2;
-#[cfg(any(target_arch = "xtensa", test))]
-const FLASH_MEMORY_PARTITION_LABEL: &str = "flux_cfg";
-// Firmware releases predating the LAN app partition expansion stored the
-// flash fallback immediately after the former 1 MiB factory app partition.
-// New firmware reads these two sectors as a migration source until the next
-// successful configuration commit persists the record under the new table.
-#[cfg(any(target_arch = "xtensa", test))]
-const LEGACY_FLASH_MEMORY_PARTITION_OFFSET: u32 = 0x110000;
-#[cfg(any(target_arch = "xtensa", test))]
-const LEGACY_FLASH_MEMORY_SLOT_A_OFFSET: u32 = LEGACY_FLASH_MEMORY_PARTITION_OFFSET;
-#[cfg(any(target_arch = "xtensa", test))]
-const LEGACY_FLASH_MEMORY_SLOT_B_OFFSET: u32 =
-    LEGACY_FLASH_MEMORY_PARTITION_OFFSET + FLASH_MEMORY_ERASE_SECTOR_SIZE;
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const EEPROM_SNAPSHOT_SIZE: u16 = M24C64_CAPACITY_BYTES;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const EEPROM_SNAPSHOT_CHUNK_MAX: u16 = 32;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const EEPROM_SNAPSHOT_HASH_LEN: usize = 71;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const EEPROM_SNAPSHOT_TIMEOUT_MS: u64 = 30_000;
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EepromSnapshotRequest {
+    op: heapless::String<32>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    #[serde(default)]
+    session_id: Option<heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>>,
+    #[serde(default)]
+    offset: Option<u16>,
+    #[serde(default)]
+    length: Option<u16>,
+    #[serde(default)]
+    sha256: Option<heapless::String<EEPROM_SNAPSHOT_HASH_LEN>>,
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EepromSnapshotResponse {
+    ok: bool,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capacity: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunk_max: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offset: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes: Option<heapless::Vec<u8, 32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha256: Option<heapless::String<EEPROM_SNAPSHOT_HASH_LEN>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }>>,
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[derive(Debug, Default)]
+struct EepromSnapshotSession {
+    active: bool,
+    session_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    next_offset: u16,
+    last_activity_ms: u64,
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn snapshot_string<const N: usize>(value: &str) -> heapless::String<N> {
+    let mut output = heapless::String::new();
+    let _ = output.push_str(value);
+    output
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn eeprom_snapshot_error(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    code: &'static str,
+) -> EepromSnapshotResponse {
+    EepromSnapshotResponse {
+        ok: false,
+        request_id,
+        session_id: None,
+        capacity: None,
+        chunk_max: None,
+        offset: None,
+        bytes: None,
+        sha256: None,
+        error: Some(snapshot_string(code)),
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn eeprom_snapshot_storage_failure(response: &EepromSnapshotResponse) -> bool {
+    matches!(
+        response.error.as_ref().map(|error| error.as_str()),
+        Some("eeprom_unavailable" | "eeprom_read_failed" | "snapshot_hash_mismatch")
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn eeprom_snapshot_digest(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+) -> Result<heapless::String<EEPROM_SNAPSHOT_HASH_LEN>, &'static str> {
+    let Some(address) = probe_eeprom_address(i2c) else {
+        return Err("eeprom_unavailable");
+    };
+    let mut eeprom = M24c64::with_address(i2c, address);
+    let mut hasher = Sha256::new();
+    let mut offset = 0_u16;
+    let mut bytes = [0_u8; EEPROM_SNAPSHOT_CHUNK_MAX as usize];
+    while offset < EEPROM_SNAPSHOT_SIZE {
+        let length = usize::from((EEPROM_SNAPSHOT_SIZE - offset).min(EEPROM_SNAPSHOT_CHUNK_MAX));
+        read_eeprom_bytes_chunked(&mut eeprom, offset, &mut bytes[..length])
+            .map_err(|_| "eeprom_read_failed")?;
+        hasher.update(&bytes[..length]);
+        offset = offset.saturating_add(length as u16);
+    }
+    let digest = hasher.finalize();
+    let mut rendered = heapless::String::new();
+    rendered
+        .push_str("sha256:")
+        .map_err(|_| "digest_format_failed")?;
+    for byte in digest {
+        write!(rendered, "{byte:02x}").map_err(|_| "digest_format_failed")?;
+    }
+    Ok(rendered)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn write_eeprom_snapshot_response(
+    usb: &mut RawUsbSerialJtag,
+    response: &EepromSnapshotResponse,
+    tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
+) {
+    let Ok(written) = serde_json_core::to_slice(response, tx_buf) else {
+        let _ = usb_write_bytes_bounded(usb, b"{\"ok\":false,\"error\":\"output_too_small\"}\n");
+        return;
+    };
+    if written >= tx_buf.len() {
+        let _ = usb_write_bytes_bounded(usb, b"{\"ok\":false,\"error\":\"output_too_small\"}\n");
+        return;
+    }
+    tx_buf[written] = b'\n';
+    let _ = usb_write_bytes_bounded(usb, &tx_buf[..=written]);
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn process_eeprom_snapshot_line(
+    line: &str,
+    session: &mut EepromSnapshotSession,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    last_heater_duty: u8,
+    memory_commit_due_ms: &mut Option<u64>,
+    elapsed_ms: u64,
+) -> Option<EepromSnapshotResponse> {
+    let parsed = serde_json_core::from_slice::<EepromSnapshotRequest>(line.as_bytes());
+    let request = match parsed {
+        Ok((request, _)) if request.op.as_str().starts_with("eeprom_snapshot_") => request,
+        Ok(_) => return None,
+        Err(_) if line.contains("eeprom_snapshot_") => {
+            return Some(eeprom_snapshot_error(
+                heapless::String::new(),
+                "malformed_snapshot",
+            ));
+        }
+        Err(_) => return None,
+    };
+    if session.active
+        && elapsed_ms.saturating_sub(session.last_activity_ms) > EEPROM_SNAPSHOT_TIMEOUT_MS
+    {
+        session.active = false;
+        session.session_id.clear();
+        session.next_offset = 0;
+        *memory_commit_due_ms = None;
+    }
+    let request_id = request.request_id.clone();
+    let requested_session = request
+        .session_id
+        .as_ref()
+        .unwrap_or(&request.request_id)
+        .clone();
+    match request.op.as_str() {
+        "eeprom_snapshot_open" => {
+            if last_heater_duty != 0 {
+                return Some(eeprom_snapshot_error(request_id, "heater_active"));
+            }
+            let session_id = request.session_id.unwrap_or(request.request_id.clone());
+            if session_id.is_empty() {
+                return Some(eeprom_snapshot_error(request_id, "session_required"));
+            }
+            session.active = true;
+            session.session_id = session_id.clone();
+            session.next_offset = 0;
+            session.last_activity_ms = elapsed_ms;
+            *memory_commit_due_ms = None;
+            Some(EepromSnapshotResponse {
+                ok: true,
+                request_id,
+                session_id: Some(session_id),
+                capacity: Some(EEPROM_SNAPSHOT_SIZE),
+                chunk_max: Some(EEPROM_SNAPSHOT_CHUNK_MAX),
+                offset: None,
+                bytes: None,
+                sha256: None,
+                error: None,
+            })
+        }
+        "eeprom_snapshot_read" => {
+            if !session.active || requested_session != session.session_id {
+                return Some(eeprom_snapshot_error(
+                    request_id,
+                    "snapshot_session_invalid",
+                ));
+            }
+            if last_heater_duty != 0 {
+                session.active = false;
+                return Some(eeprom_snapshot_error(request_id, "heater_active"));
+            }
+            let (Some(offset), Some(length)) = (request.offset, request.length) else {
+                return Some(eeprom_snapshot_error(request_id, "snapshot_range_required"));
+            };
+            if length == 0
+                || length > EEPROM_SNAPSHOT_CHUNK_MAX
+                || offset != session.next_offset
+                || offset.saturating_add(length) > EEPROM_SNAPSHOT_SIZE
+            {
+                return Some(eeprom_snapshot_error(request_id, "snapshot_range_invalid"));
+            }
+            let Some(address) = probe_eeprom_address(i2c) else {
+                session.active = false;
+                return Some(eeprom_snapshot_error(request_id, "eeprom_unavailable"));
+            };
+            let mut eeprom = M24c64::with_address(i2c, address);
+            let mut bytes = heapless::Vec::<u8, 32>::new();
+            let _ = bytes.resize_default(usize::from(length));
+            if read_eeprom_bytes_chunked(&mut eeprom, offset, bytes.as_mut_slice()).is_err() {
+                session.active = false;
+                return Some(eeprom_snapshot_error(request_id, "eeprom_read_failed"));
+            }
+            session.next_offset = session.next_offset.saturating_add(length);
+            session.last_activity_ms = elapsed_ms;
+            *memory_commit_due_ms = None;
+            Some(EepromSnapshotResponse {
+                ok: true,
+                request_id,
+                session_id: Some(session.session_id.clone()),
+                capacity: None,
+                chunk_max: None,
+                offset: Some(offset),
+                bytes: Some(bytes),
+                sha256: None,
+                error: None,
+            })
+        }
+        "eeprom_snapshot_close" => {
+            if !session.active || requested_session != session.session_id {
+                return Some(eeprom_snapshot_error(
+                    request_id,
+                    "snapshot_session_invalid",
+                ));
+            }
+            if last_heater_duty != 0 {
+                session.active = false;
+                return Some(eeprom_snapshot_error(request_id, "heater_active"));
+            }
+            if session.next_offset != EEPROM_SNAPSHOT_SIZE {
+                session.active = false;
+                return Some(eeprom_snapshot_error(request_id, "snapshot_incomplete"));
+            }
+            let digest = match eeprom_snapshot_digest(i2c) {
+                Ok(digest) => digest,
+                Err(code) => {
+                    session.active = false;
+                    return Some(eeprom_snapshot_error(request_id, code));
+                }
+            };
+            if request.sha256.as_ref() != Some(&digest) {
+                session.active = false;
+                return Some(eeprom_snapshot_error(request_id, "snapshot_hash_mismatch"));
+            }
+            let session_id = session.session_id.clone();
+            session.active = false;
+            session.session_id.clear();
+            session.next_offset = 0;
+            session.last_activity_ms = elapsed_ms;
+            *memory_commit_due_ms = None;
+            Some(EepromSnapshotResponse {
+                ok: true,
+                request_id,
+                session_id: Some(session_id),
+                capacity: None,
+                chunk_max: None,
+                offset: None,
+                bytes: None,
+                sha256: Some(digest),
+                error: None,
+            })
+        }
+        _ => Some(eeprom_snapshot_error(request_id, "snapshot_op_unsupported")),
+    }
+}
 
 #[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
@@ -6055,7 +6321,6 @@ fn detect_ch224q_secondary(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
 }
 
 #[cfg(target_arch = "xtensa")]
-#[cfg(target_arch = "xtensa")]
 fn memory_commit_error_from_eeprom<I2cError>(error: EepromError<I2cError>) -> MemoryCommitError
 where
     I2cError: embedded_hal::i2c::Error,
@@ -6191,6 +6456,43 @@ fn begin_mutating_eeprom_maintenance(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn mark_eeprom_required(
+    ui_state: &mut FrontPanelUiState,
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+    memory_commit_due_ms: &mut Option<u64>,
+) {
+    begin_mutating_eeprom_maintenance(ui_state, calibration, manual_pps, memory_commit_due_ms);
+    ui_state.eeprom_required = true;
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn eeprom_storage_failure_response(response: &UsbFrame) -> bool {
+    let UsbFrame::Response {
+        ok: false,
+        error: Some(error),
+        ..
+    } = response
+    else {
+        return false;
+    };
+    matches!(
+        error.code.as_str(),
+        "eeprom_unavailable"
+            | "eeprom_read_failed"
+            | "memory_commit_write_failed"
+            | "memory_commit_write_address_nack"
+            | "memory_commit_write_data_nack"
+            | "memory_commit_write_unknown_nack"
+            | "memory_commit_write_bus_error"
+            | "memory_commit_write_arbitration_lost"
+            | "memory_commit_write_other_error"
+            | "memory_commit_verify_unreadable"
+            | "memory_commit_verify_mismatch"
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn apply_successful_eeprom_maintenance_operation(
     op: EepromMaintenanceOp,
     ui_state: &mut FrontPanelUiState,
@@ -6291,186 +6593,21 @@ async fn usb_eeprom_maintenance_response(
     }
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
-const fn flash_memory_slot_offset_for_sequence(sequence: u32) -> u32 {
-    if sequence & 1 == 0 {
-        FLASH_MEMORY_SLOT_A_OFFSET
-    } else {
-        FLASH_MEMORY_SLOT_B_OFFSET
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-#[inline(never)]
-fn load_flash_memory_record(
-    flash: &mut FlashStorage,
-    scratch: &mut MemoryIoScratch,
-) -> Option<MemoryRecord> {
-    let Ok(table) = read_partition_table(flash, &mut scratch.partition_table) else {
-        info!("flash memory restore skipped: partition table unavailable");
-        return None;
-    };
-
-    for index in 0..table.len() {
-        let Ok(entry) = table.get_partition(index) else {
-            continue;
-        };
-        if entry.is_read_only()
-            || entry.raw_type() != 1
-            || entry.label_as_str() != FLASH_MEMORY_PARTITION_LABEL
-            || entry.len() < FLASH_MEMORY_REGION_SIZE
-        {
-            continue;
-        }
-        let mut region = entry.as_embedded_storage(flash);
-        let slot_a = region
-            .read(FLASH_MEMORY_SLOT_A_OFFSET, &mut scratch.record_bytes)
-            .map(|_| decode_memory_record(&scratch.record_bytes))
-            .ok()
-            .and_then(Result::ok);
-        let slot_b = region
-            .read(FLASH_MEMORY_SLOT_B_OFFSET, &mut scratch.record_bytes)
-            .map(|_| decode_memory_record(&scratch.record_bytes))
-            .ok()
-            .and_then(Result::ok);
-        let selected = select_latest_optional_memory_record(slot_a, slot_b);
-        if let Some(record) = &selected {
-            info!(
-                "flash memory restore ok label={=str} seq={=u32}",
-                entry.label_as_str(),
-                record.sequence,
-            );
-        }
-        return selected;
-    }
-
-    info!("flash memory restore skipped: no writable flux_cfg partition");
-    None
-}
-
-#[cfg(target_arch = "xtensa")]
-#[inline(never)]
-fn load_legacy_flash_memory_record(
-    flash: &mut FlashStorage,
-    scratch: &mut MemoryIoScratch,
-) -> Option<MemoryRecord> {
-    let slot_a = flash
-        .read(LEGACY_FLASH_MEMORY_SLOT_A_OFFSET, &mut scratch.record_bytes)
-        .map(|_| decode_memory_record(&scratch.record_bytes))
-        .ok()
-        .and_then(Result::ok);
-    let slot_b = flash
-        .read(LEGACY_FLASH_MEMORY_SLOT_B_OFFSET, &mut scratch.record_bytes)
-        .map(|_| decode_memory_record(&scratch.record_bytes))
-        .ok()
-        .and_then(Result::ok);
-    let selected = select_latest_optional_memory_record(slot_a, slot_b);
-    if let Some(record) = &selected {
-        info!(
-            "legacy flash memory restore source active seq={=u32}",
-            record.sequence
-        );
-    }
-    selected
-}
-
-#[cfg(target_arch = "xtensa")]
-#[inline(never)]
-fn load_flash_memory_record_with_legacy_migration(
-    flash: &mut FlashStorage,
-    scratch: &mut MemoryIoScratch,
-) -> Option<MemoryRecord> {
-    if let Some(record) = load_flash_memory_record(flash, scratch) {
-        return Some(record);
-    }
-    let record = load_legacy_flash_memory_record(flash, scratch)?;
-    match write_flash_memory_record(flash, &record, scratch) {
-        Ok(()) => info!(
-            "legacy flash memory migration committed seq={=u32}",
-            record.sequence
-        ),
-        Err(error) => info!(
-            "legacy flash memory migration deferred seq={=u32} reason={=str}",
-            record.sequence,
-            error.code()
-        ),
-    }
-    Some(record)
-}
-
-#[cfg(target_arch = "xtensa")]
-#[inline(never)]
-fn write_flash_memory_record(
-    flash: &mut FlashStorage,
-    record: &MemoryRecord,
-    scratch: &mut MemoryIoScratch,
-) -> Result<(), MemoryCommitError> {
-    scratch.record_bytes.fill(0xff);
-    let Ok(record_len) = encode_memory_record(record, &mut scratch.record_bytes) else {
-        info!("flash memory commit encode failed");
-        return Err(MemoryCommitError::EncodeFailed);
-    };
-    let Ok(table) = read_partition_table(flash, &mut scratch.partition_table) else {
-        info!("flash memory commit skipped: partition table unavailable");
-        return Err(MemoryCommitError::FlashUnavailable);
-    };
-
-    for index in 0..table.len() {
-        let Ok(entry) = table.get_partition(index) else {
-            continue;
-        };
-        if entry.is_read_only()
-            || entry.raw_type() != 1
-            || entry.label_as_str() != FLASH_MEMORY_PARTITION_LABEL
-            || entry.len() < FLASH_MEMORY_REGION_SIZE
-        {
-            continue;
-        }
-        let absolute_offset = flash_memory_slot_offset_for_sequence(record.sequence);
-        let mut region = entry.as_embedded_storage(flash);
-        // Storage::write performs a read-modify-erase-write for the selected sector,
-        // so unaligned record payloads are valid and the other 4KiB slot stays intact.
-        if Storage::write(
-            &mut region,
-            absolute_offset,
-            &scratch.record_bytes[..record_len],
-        )
-        .map_err(|_| MemoryCommitError::FlashWriteFailed)
-        .is_err()
-        {
-            info!(
-                "flash memory commit write failed seq={=u32}",
-                record.sequence
-            );
-            return Err(MemoryCommitError::FlashWriteFailed);
-        }
-        info!(
-            "flash memory commit ok label={=str} seq={=u32} bytes={=u16}",
-            entry.label_as_str(),
-            record.sequence,
-            record_len as u16,
-        );
-        return Ok(());
-    }
-
-    info!("flash memory commit skipped: no writable flux_cfg partition");
-    Err(MemoryCommitError::FlashUnavailable)
-}
-
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
 fn load_eeprom_memory_record(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     scratch: &mut MemoryIoScratch,
-) -> (Option<MemoryRecord>, bool) {
+) -> (Option<MemoryRecord>, bool, bool) {
     let Some(address) = probe_eeprom_address(i2c) else {
         info!("memory restore skipped: eeprom unavailable");
-        return (None, false);
+        return (None, false, true);
     };
 
     let mut eeprom = M24c64::with_address(i2c, address);
     let mut contains_data = false;
-    let mut selected = None;
+    let mut read_failed = false;
+    let mut selected: Option<MemoryRecord> = None;
     for (offset, length) in [
         (MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_SIZE),
         (MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE),
@@ -6480,14 +6617,23 @@ fn load_eeprom_memory_record(
         (LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
     ] {
         let bytes = &mut scratch.record_bytes[..length];
-        let candidate = read_eeprom_bytes_chunked(&mut eeprom, offset, bytes)
-            .map(|_| {
+        let candidate = match read_eeprom_bytes_chunked(&mut eeprom, offset, bytes) {
+            Ok(()) => {
                 contains_data |= eeprom_bytes_contain_data(bytes);
-                decode_memory_record(bytes)
-            })
-            .ok()
-            .and_then(Result::ok);
-        selected = select_latest_optional_memory_record(selected, candidate);
+                decode_memory_record(bytes).ok()
+            }
+            Err(_) => {
+                read_failed = true;
+                None
+            }
+        };
+        selected = match (selected, candidate) {
+            (Some(current), Some(candidate)) if candidate.sequence > current.sequence => {
+                Some(candidate)
+            }
+            (Some(current), _) => Some(current),
+            (None, candidate) => candidate,
+        };
     }
 
     let unused_gap = read_eeprom_bytes_chunked(
@@ -6495,8 +6641,14 @@ fn load_eeprom_memory_record(
         EEPROM_UNUSED_GAP_OFFSET,
         &mut scratch.record_bytes[..EEPROM_UNUSED_GAP_LEN],
     );
-    if unused_gap.is_ok() {
-        contains_data |= eeprom_bytes_contain_data(&scratch.record_bytes[..EEPROM_UNUSED_GAP_LEN]);
+    match unused_gap {
+        Ok(()) => {
+            contains_data |=
+                eeprom_bytes_contain_data(&scratch.record_bytes[..EEPROM_UNUSED_GAP_LEN]);
+        }
+        Err(_) => {
+            read_failed = true;
+        }
     }
 
     if let Some(record) = &selected {
@@ -6514,7 +6666,8 @@ fn load_eeprom_memory_record(
     }
 
     let incompatible = eeprom_data_is_incompatible(selected.is_some(), contains_data);
-    (selected, incompatible)
+    let required = read_failed || incompatible;
+    (selected, incompatible, required)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6528,8 +6681,6 @@ enum MemoryCommitError {
     WriteBus,
     WriteArbitration,
     WriteOther,
-    FlashUnavailable,
-    FlashWriteFailed,
     VerifyUnreadable,
     VerifyMismatch,
 }
@@ -6546,8 +6697,6 @@ impl MemoryCommitError {
             Self::WriteBus => "memory_commit_write_bus_error",
             Self::WriteArbitration => "memory_commit_write_arbitration_lost",
             Self::WriteOther => "memory_commit_write_other_error",
-            Self::FlashUnavailable => "memory_commit_flash_unavailable",
-            Self::FlashWriteFailed => "memory_commit_flash_write_failed",
             Self::VerifyUnreadable => "memory_commit_verify_unreadable",
             Self::VerifyMismatch => "memory_commit_verify_mismatch",
         }
@@ -6563,8 +6712,6 @@ impl MemoryCommitError {
             Self::WriteBus => "EEPROM write failed with an I2C bus error.",
             Self::WriteArbitration => "EEPROM write lost I2C bus arbitration.",
             Self::WriteOther => "EEPROM write failed with an uncategorized I2C error.",
-            Self::FlashUnavailable => "No writable flash fallback partition was available.",
-            Self::FlashWriteFailed => "Memory record could not be written to flash fallback.",
             Self::VerifyUnreadable => "Memory record could not be read back after write.",
             Self::VerifyMismatch => "Memory record readback did not match the requested config.",
         }
@@ -6710,7 +6857,6 @@ async fn verify_eeprom_memory_record(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MemoryCommitBackend {
     Eeprom,
-    Flash,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6720,39 +6866,12 @@ async fn write_memory_record(
     pd_port: &mut PdPort,
     elapsed_ms: u64,
     commit_started_at: Instant,
-    flash: &mut FlashStorage,
     record: &MemoryRecord,
     scratch: &mut MemoryIoScratch,
 ) -> Result<MemoryCommitBackend, MemoryCommitError> {
-    match write_eeprom_memory_record(i2c, pd_port, elapsed_ms, commit_started_at, record, scratch)
+    write_eeprom_memory_record(i2c, pd_port, elapsed_ms, commit_started_at, record, scratch)
         .await
-    {
-        Ok(()) => {
-            // Keep flash recoverable from the newest EEPROM record. A later
-            // EEPROM failure must not restore stale credentials or settings.
-            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
-            if let Err(error) = write_flash_memory_record(flash, record, scratch) {
-                info!(
-                    "memory commit flash mirror unavailable reason={=str}",
-                    error.code()
-                );
-            }
-            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
-            Ok(MemoryCommitBackend::Eeprom)
-        }
-        Err(eeprom_error) => {
-            info!(
-                "memory commit falling back to flash reason={=str}",
-                eeprom_error.code()
-            );
-            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
-            let flash_result = write_flash_memory_record(flash, record, scratch);
-            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
-            flash_result
-                .map(|()| MemoryCommitBackend::Flash)
-                .map_err(|_| eeprom_error)
-        }
-    }
+        .map(|()| MemoryCommitBackend::Eeprom)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6761,7 +6880,6 @@ async fn commit_memory_config_now(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     elapsed_ms: u64,
-    flash: &mut FlashStorage,
     memory_sequence: &mut u32,
     memory_config: &MemoryConfig,
 ) -> Result<(), MemoryCommitError> {
@@ -6784,7 +6902,6 @@ async fn commit_memory_config_now(
             pd_port,
             elapsed_ms,
             commit_started_at,
-            flash,
             &record,
             &mut scratch,
         )
@@ -6807,13 +6924,6 @@ async fn commit_memory_config_now(
                     &mut scratch,
                 )
                 .await
-            }
-            MemoryCommitBackend::Flash => {
-                service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
-                let verified = load_flash_memory_record(flash, &mut scratch)
-                    .ok_or(MemoryCommitError::VerifyUnreadable);
-                service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
-                verified
             }
         };
         let verified = match verified {
@@ -11166,19 +11276,19 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
             UsbRequestOp::GetInstallStatus => usb_error_response_with_retryable(
                 request_id,
                 "startup_busy",
-                "Install status is unavailable until persistence restoration completes.",
+                "Install status is unavailable until EEPROM restoration completes.",
                 true,
             ),
             UsbRequestOp::CompleteSetup | UsbRequestOp::ResetPersistence => {
                 usb_error_response_with_retryable(
                     request_id,
                     "startup_busy",
-                    "Persistence changes are unavailable until restoration completes.",
+                    "Persistence changes are unavailable until EEPROM restoration completes.",
                     true,
                 )
             }
             // The boot-time memory argument is still the zero-value placeholder
-            // until the main loop has completed EEPROM/flash restoration. Never
+            // until the main loop has completed EEPROM restoration. Never
             // expose it as a network snapshot: a configured device would appear
             // transiently disabled or connected with no address and the host
             // could persist that false state. The devd read path retries this
@@ -11186,7 +11296,7 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
             UsbRequestOp::GetNetwork => usb_error_response_with_retryable(
                 request_id,
                 "startup_busy",
-                "Network status is not available until memory and WiFi initialization completes.",
+                "Network status is not available until EEPROM and WiFi initialization completes.",
                 true,
             ),
             UsbRequestOp::GetCalibration => usb_response(
@@ -11507,7 +11617,6 @@ async fn process_control_line(
     pd_i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_controller: ControllerKind,
     pd_port: &mut PdPort,
-    flash_storage: &mut FlashStorage,
     calibration_runtime_state: &mut CalibrationRuntimeState,
     thermal_plant_workspace: &mut CalibrationThermalPlantWorkspace,
     elapsed_ms: u64,
@@ -11590,54 +11699,72 @@ async fn process_control_line(
                 )),
             ),
             UsbRequestOp::CompleteSetup => {
-                let sensor_ready = current_rtd_fault.is_none() && latest_status_temp_c.is_finite();
-                let calibration_ready = flux_purr_firmware::memory::adc_calibration_fit(
-                    &memory_config.adc_calibration,
-                    flux_purr_firmware::memory::AdcCalibrationChannel::Rtd,
-                )
-                .sample_count
-                    >= 2
-                    && flux_purr_firmware::memory::adc_calibration_fit(
+                if ui_state.persistence_locked() {
+                    usb_error_response(
+                        request_id,
+                        "eeprom_required",
+                        "EEPROM_REQUIRED: persistent configuration is unavailable; setup cannot be completed.",
+                    )
+                } else {
+                    let sensor_ready =
+                        current_rtd_fault.is_none() && latest_status_temp_c.is_finite();
+                    let calibration_ready = flux_purr_firmware::memory::adc_calibration_fit(
                         &memory_config.adc_calibration,
-                        flux_purr_firmware::memory::AdcCalibrationChannel::Vin,
+                        flux_purr_firmware::memory::AdcCalibrationChannel::Rtd,
                     )
                     .sample_count
                         >= 2
-                    && memory_config
-                        .active_heater_curve
-                        .points
-                        .iter()
-                        .flatten()
-                        .count()
-                        >= 2;
-                match memory_config.complete_setup(sensor_ready, calibration_ready) {
-                    Ok(()) => {
-                        *memory_commit_due_ms =
-                            Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-                        usb_response(request_id, UsbResponsePayload::Ack)
-                    }
-                    Err(flux_purr_firmware::memory::SetupCompletionError::SensorNotReady) => {
-                        usb_error_response(
-                            request_id,
-                            "sensor_unready",
-                            "Sensor readiness is required before setup completion.",
+                        && flux_purr_firmware::memory::adc_calibration_fit(
+                            &memory_config.adc_calibration,
+                            flux_purr_firmware::memory::AdcCalibrationChannel::Vin,
                         )
-                    }
-                    Err(flux_purr_firmware::memory::SetupCompletionError::CalibrationRequired) => {
-                        usb_error_response(
+                        .sample_count
+                            >= 2
+                        && memory_config
+                            .active_heater_curve
+                            .points
+                            .iter()
+                            .flatten()
+                            .count()
+                            >= 2;
+                    match memory_config.complete_setup(sensor_ready, calibration_ready) {
+                        Ok(()) => {
+                            *memory_commit_due_ms =
+                                Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                            usb_response(request_id, UsbResponsePayload::Ack)
+                        }
+                        Err(flux_purr_firmware::memory::SetupCompletionError::SensorNotReady) => {
+                            usb_error_response(
+                                request_id,
+                                "sensor_unready",
+                                "Sensor readiness is required before setup completion.",
+                            )
+                        }
+                        Err(
+                            flux_purr_firmware::memory::SetupCompletionError::CalibrationRequired,
+                        ) => usb_error_response(
                             request_id,
                             "calibration_required",
                             "Calibration is required before setup completion.",
-                        )
+                        ),
                     }
                 }
             }
             UsbRequestOp::ResetPersistence => {
-                memory_config.reset_for_commissioning();
-                apply_memory_config_to_ui(ui_state, memory_config);
-                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-                needs_redraw = true;
-                usb_response(request_id, UsbResponsePayload::Ack)
+                if ui_state.persistence_locked() {
+                    usb_error_response(
+                        request_id,
+                        "eeprom_required",
+                        "EEPROM_REQUIRED: persistent configuration is unavailable; persistence cannot be reset.",
+                    )
+                } else {
+                    memory_config.reset_for_commissioning();
+                    apply_memory_config_to_ui(ui_state, memory_config);
+                    *memory_commit_due_ms =
+                        Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                    needs_redraw = true;
+                    usb_response(request_id, UsbResponsePayload::Ack)
+                }
             }
             UsbRequestOp::GetNetwork => {
                 #[cfg(feature = "net_http")]
@@ -11737,12 +11864,20 @@ async fn process_control_line(
             UsbRequestOp::ClearLanPairingToken => {
                 #[cfg(feature = "net_http")]
                 {
-                    flux_purr_firmware::net::clear_token_from_usb().await;
-                    memory_config.lan_pairing_token = None;
-                    *memory_commit_due_ms =
-                        Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-                    info!("LAN pairing token cleared by USB control request");
-                    usb_response(request_id, UsbResponsePayload::Ack)
+                    if ui_state.persistence_locked() {
+                        usb_error_response(
+                            request_id,
+                            "eeprom_required",
+                            "EEPROM_REQUIRED: persistent configuration is unavailable; LAN pairing token cannot be cleared.",
+                        )
+                    } else {
+                        flux_purr_firmware::net::clear_token_from_usb().await;
+                        memory_config.lan_pairing_token = None;
+                        *memory_commit_due_ms =
+                            Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                        info!("LAN pairing token cleared by USB control request");
+                        usb_response(request_id, UsbResponsePayload::Ack)
+                    }
                 }
                 #[cfg(not(feature = "net_http"))]
                 {
@@ -11755,6 +11890,16 @@ async fn process_control_line(
             }
         },
         Ok(UsbFrame::WifiConfig { request_id, config }) => {
+            if ui_state.persistence_locked() && !matches!(config.op, WifiConfigOp::Cancel) {
+                return (
+                    needs_redraw,
+                    usb_error_response(
+                        request_id,
+                        "eeprom_required",
+                        "EEPROM_REQUIRED: persistent configuration is unavailable; Wi-Fi persistence is locked.",
+                    ),
+                );
+            }
             #[cfg(feature = "net_http")]
             let network = match config.op {
                 WifiConfigOp::Cancel => {
@@ -11807,7 +11952,7 @@ async fn process_control_line(
             request_id,
             mut config,
         }) => {
-            if ui_state.eeprom_data_incompatible
+            if ui_state.persistence_locked()
                 && (config.heater_enabled == Some(true)
                     || config.manual_pps_enabled == Some(true)
                     || config.calibration.is_some())
@@ -11816,8 +11961,8 @@ async fn process_control_line(
                     needs_redraw,
                     usb_error_response(
                         request_id,
-                        "eeprom_data_incompatible",
-                        "EEPROM data is incompatible; heating and calibration are locked.",
+                        "eeprom_required",
+                        "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
                     ),
                 );
             }
@@ -11947,11 +12092,11 @@ async fn process_control_line(
             }
         }
         Ok(UsbFrame::CalibrationConfig { request_id, config }) => {
-            if ui_state.eeprom_data_incompatible {
+            if ui_state.persistence_locked() {
                 usb_error_response(
                     request_id,
-                    "eeprom_data_incompatible",
-                    "EEPROM data is incompatible; heating and calibration are locked.",
+                    "eeprom_required",
+                    "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
                 )
             } else if thermal_plant_calibration_job_running(*calibration_runtime_state) {
                 usb_error_response(
@@ -11983,7 +12128,6 @@ async fn process_control_line(
                         pd_i2c,
                         pd_port,
                         elapsed_ms,
-                        flash_storage,
                         memory_sequence,
                         memory_config,
                     )
@@ -11993,6 +12137,12 @@ async fn process_control_line(
                         *memory_commit_due_ms = None;
                     } else {
                         *memory_config = previous_memory_config;
+                        mark_eeprom_required(
+                            ui_state,
+                            calibration_runtime_state,
+                            manual_pps,
+                            memory_commit_due_ms,
+                        );
                         return (
                             needs_redraw,
                             usb_error_response(
@@ -12010,11 +12160,11 @@ async fn process_control_line(
             request_id,
             command,
         }) => {
-            if ui_state.eeprom_data_incompatible {
+            if ui_state.persistence_locked() {
                 usb_error_response(
                     request_id,
-                    "eeprom_data_incompatible",
-                    "EEPROM data is incompatible; heating and calibration are locked.",
+                    "eeprom_required",
+                    "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
                 )
             } else if matches!(command.op, CalibrationJobOpWire::Start)
                 && !pd_contract_allows_calibration(pd_controller, last_pd_observation)
@@ -12051,11 +12201,11 @@ async fn process_control_line(
             )),
         ),
         Ok(UsbFrame::HeaterCurveConfig { request_id, config }) => {
-            if ui_state.eeprom_data_incompatible {
+            if ui_state.persistence_locked() {
                 usb_error_response(
                     request_id,
-                    "eeprom_data_incompatible",
-                    "EEPROM data is incompatible; heating and calibration are locked.",
+                    "eeprom_required",
+                    "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
                 )
             } else {
                 usb_heater_curve_config_response(
@@ -12067,11 +12217,11 @@ async fn process_control_line(
             }
         }
         Ok(UsbFrame::HeaterCurveSave { request_id }) => {
-            if ui_state.eeprom_data_incompatible {
+            if ui_state.persistence_locked() {
                 usb_error_response(
                     request_id,
-                    "eeprom_data_incompatible",
-                    "EEPROM data is incompatible; heating and calibration are locked.",
+                    "eeprom_required",
+                    "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
                 )
             } else if thermal_plant_calibration_job_running(*calibration_runtime_state) {
                 usb_error_response(
@@ -12104,13 +12254,18 @@ async fn process_control_line(
                     pd_i2c,
                     pd_port,
                     elapsed_ms,
-                    flash_storage,
                     memory_sequence,
                     memory_config,
                 )
                 .await
                 {
                     *memory_config = previous_memory_config;
+                    mark_eeprom_required(
+                        ui_state,
+                        calibration_runtime_state,
+                        manual_pps,
+                        memory_commit_due_ms,
+                    );
                     return (
                         needs_redraw,
                         usb_error_response(request_id, error.code(), error.message()),
@@ -12183,6 +12338,8 @@ async fn process_control_line(
                     *preview_heater_curve = None;
                     *thermal_control_profile_preview = None;
                 }
+            } else if eeprom_storage_failure_response(&response) {
+                ui_state.eeprom_required = true;
             }
             response
         }
@@ -13233,7 +13390,6 @@ async fn main(_spawner: Spawner) {
             PdPort::Unavailable
         }
     };
-    let mut flash_storage = FlashStorage::new();
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_wait_start\n");
     let initial_pd_observation = await_pd_ready(&mut pd_i2c, &mut pd_port, || {
@@ -13255,37 +13411,74 @@ async fn main(_spawner: Spawner) {
     // Releasing it earlier lets the C driver reinterpret allocator free-list
     // bytes as an uninitialized timer `priv_` pointer.
     let mut boot_memory_io_scratch = try_allocate_memory_io_scratch();
-    let (eeprom_memory_record, eeprom_data_incompatible, flash_memory_record) =
+    let (mut eeprom_memory_record, eeprom_data_incompatible, mut eeprom_required) =
         if let Some(scratch) = boot_memory_io_scratch.as_deref_mut() {
-            let (eeprom_memory_record, eeprom_data_incompatible) =
-                load_eeprom_memory_record(&mut pd_i2c, scratch);
-            let flash_memory_record =
-                load_flash_memory_record_with_legacy_migration(&mut flash_storage, scratch);
-            (
-                eeprom_memory_record,
-                eeprom_data_incompatible,
-                flash_memory_record,
+            load_eeprom_memory_record(&mut pd_i2c, scratch)
+        } else {
+            (None, false, true)
+        };
+    if !eeprom_required && eeprom_memory_record.is_none() {
+        let initialization_result = if let Some(scratch) = boot_memory_io_scratch.as_deref_mut() {
+            let record = MemoryRecord {
+                sequence: 1,
+                config: MemoryConfig::default(),
+            };
+            let commit_started_at = Instant::now();
+            match write_eeprom_memory_record(
+                &mut pd_i2c,
+                &mut pd_port,
+                0,
+                commit_started_at,
+                &record,
+                scratch,
             )
+            .await
+            {
+                Ok(()) => verify_eeprom_memory_record(
+                    &mut pd_i2c,
+                    &mut pd_port,
+                    0,
+                    commit_started_at,
+                    &record,
+                    scratch,
+                )
+                .await
+                .ok(),
+                Err(error) => {
+                    warn!(
+                        "blank EEPROM initialization failed: {=str}",
+                        error.message()
+                    );
+                    None
+                }
+            }
         } else {
-            (None, false, None)
+            None
         };
-    let persistence_source = match (&eeprom_memory_record, &flash_memory_record) {
-        (Some(eeprom), Some(flash)) if eeprom.sequence >= flash.sequence => "eeprom",
-        (Some(_), Some(_)) | (None, Some(_)) => "flux_cfg",
-        (Some(_), None) => "eeprom",
-        (None, None) => "defaults",
+        if let Some(record) = initialization_result {
+            info!("blank EEPROM initialized and verified");
+            eeprom_memory_record = Some(record);
+        } else {
+            eeprom_required = true;
+        }
+    }
+    let mut persistence_source = if eeprom_required {
+        "eeprom_required"
+    } else if eeprom_memory_record.is_some() {
+        "eeprom"
+    } else {
+        "defaults"
     };
-    let persistence_record_state =
-        if eeprom_memory_record.is_some() || flash_memory_record.is_some() {
-            "valid"
-        } else if eeprom_data_incompatible {
-            "incompatible"
-        } else {
-            "blank"
-        };
-    let restored_memory_record =
-        select_latest_optional_memory_record(eeprom_memory_record, flash_memory_record);
-    let (mut memory_config, mut memory_sequence) = restored_memory_record
+    let mut persistence_record_state = if eeprom_required {
+        "eeprom_required"
+    } else if eeprom_memory_record.is_some() {
+        "valid"
+    } else if eeprom_data_incompatible {
+        "incompatible"
+    } else {
+        "blank"
+    };
+    let (mut memory_config, mut memory_sequence) = eeprom_memory_record
         .map(|record| (record.config, record.sequence))
         .unwrap_or_default();
     #[cfg(feature = "net_http")]
@@ -13308,6 +13501,8 @@ async fn main(_spawner: Spawner) {
     drop(boot_memory_io_scratch);
     let mut preview_heater_curve: Option<HeaterCurvePreview> = None;
     let mut memory_commit_due_ms: Option<u64> = None;
+    #[cfg(feature = "web_serial")]
+    let mut eeprom_snapshot_session = EepromSnapshotSession::default();
     #[cfg(feature = "web_serial")]
     usb_write_frame(
         &mut usb_serial,
@@ -13600,7 +13795,8 @@ async fn main(_spawner: Spawner) {
         FrontPanelInputTimings::default(),
     );
     let mut ui_state = FrontPanelUiState::new(runtime_mode);
-    ui_state.eeprom_data_incompatible = eeprom_data_incompatible;
+    ui_state.eeprom_data_incompatible = eeprom_data_incompatible || eeprom_required;
+    ui_state.eeprom_required = eeprom_required;
     ui_state.pd_contract_mv =
         effective_pd_contract_mv(&manual_pps_state, last_pd_observation, heater_power_backend);
     apply_memory_config_to_ui(&mut ui_state, &memory_config);
@@ -13847,6 +14043,26 @@ async fn main(_spawner: Spawner) {
         loop {
             match usb_serial.read_byte() {
                 Ok(b'\n') => {
+                    if let Some(response) = process_eeprom_snapshot_line(
+                        usb_rx_line.as_str(),
+                        &mut eeprom_snapshot_session,
+                        &mut pd_i2c,
+                        last_heater_duty,
+                        &mut memory_commit_due_ms,
+                        elapsed_ms,
+                    ) {
+                        if eeprom_snapshot_storage_failure(&response) {
+                            mark_eeprom_required(
+                                &mut ui_state,
+                                &mut calibration_runtime_state,
+                                &mut manual_pps_state,
+                                &mut memory_commit_due_ms,
+                            );
+                        }
+                        write_eeprom_snapshot_response(&mut usb_serial, &response, usb_tx_buf);
+                        usb_rx_line.clear();
+                        continue;
+                    }
                     let (control_needs_redraw, response) = process_control_line(
                         usb_rx_line.as_str(),
                         &mut controller,
@@ -13860,7 +14076,6 @@ async fn main(_spawner: Spawner) {
                         &mut pd_i2c,
                         pd_port.controller_kind(),
                         &mut pd_port,
-                        &mut flash_storage,
                         &mut calibration_runtime_state,
                         thermal_plant_workspace,
                         elapsed_ms,
@@ -14008,7 +14223,6 @@ async fn main(_spawner: Spawner) {
                 &mut pd_i2c,
                 pd_port.controller_kind(),
                 &mut pd_port,
-                &mut flash_storage,
                 &mut calibration_runtime_state,
                 thermal_plant_workspace,
                 elapsed_ms,
@@ -14590,13 +14804,18 @@ async fn main(_spawner: Spawner) {
                         &mut pd_i2c,
                         &mut pd_port,
                         elapsed_ms,
-                        &mut flash_storage,
                         &mut memory_sequence,
                         &memory_config,
                     )
                     .await
                     {
                         memory_config = memory_before_calibration_job;
+                        mark_eeprom_required(
+                            &mut ui_state,
+                            &mut calibration_runtime_state,
+                            &mut manual_pps_state,
+                            &mut memory_commit_due_ms,
+                        );
                         calibration_job_fail(
                             &mut calibration_runtime_state,
                             ManualPpsError::WriteFailed,
@@ -14806,24 +15025,42 @@ async fn main(_spawner: Spawner) {
         }
 
         discard_deferred_memory_commit_for_incompatible_eeprom(
-            ui_state.eeprom_data_incompatible,
+            ui_state.persistence_locked(),
             &mut memory_commit_due_ms,
         );
-        if memory_commit_due_ms.is_some_and(|due_ms| elapsed_ms >= due_ms) {
+        #[cfg(feature = "web_serial")]
+        let eeprom_snapshot_active = eeprom_snapshot_session.active;
+        #[cfg(not(feature = "web_serial"))]
+        let eeprom_snapshot_active = false;
+        if !eeprom_snapshot_active
+            && memory_commit_due_ms.is_some_and(|due_ms| elapsed_ms >= due_ms)
+        {
             memory_commit_due_ms = None;
             if commit_memory_config_now(
                 &mut pd_i2c,
                 &mut pd_port,
                 elapsed_ms,
-                &mut flash_storage,
                 &mut memory_sequence,
                 &memory_config,
             )
             .await
             .is_err()
             {
-                memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                mark_eeprom_required(
+                    &mut ui_state,
+                    &mut calibration_runtime_state,
+                    &mut manual_pps_state,
+                    &mut memory_commit_due_ms,
+                );
             }
+        }
+
+        if ui_state.eeprom_required && !eeprom_required {
+            eeprom_required = true;
+            persistence_source = "eeprom_required";
+            persistence_record_state = "eeprom_required";
+        } else if ui_state.eeprom_data_incompatible && persistence_record_state == "valid" {
+            persistence_record_state = "incompatible";
         }
 
         let (
@@ -18325,6 +18562,18 @@ mod tests {
         assert!(raw_eeprom_operation_mutates(EepromMaintenanceOp::Erase));
         assert!(!raw_eeprom_operation_mutates(EepromMaintenanceOp::Read));
         assert!(state.eeprom_data_incompatible);
+        state.eeprom_data_incompatible = false;
+        state.eeprom_required = false;
+        commit_due_ms = Some(42);
+        mark_eeprom_required(
+            &mut state,
+            &mut calibration,
+            &mut manual_pps,
+            &mut commit_due_ms,
+        );
+        assert!(state.eeprom_required);
+        assert!(state.persistence_locked());
+        assert_eq!(commit_due_ms, None);
         assert!(!manual_pps.enabled);
         assert!(manual_pps.automatic_restore_pending);
         assert_eq!(calibration.mode, CalibrationMode::Off);
@@ -18342,6 +18591,7 @@ mod tests {
         assert_eq!(config.target_temp_c, 180);
 
         state.eeprom_data_incompatible = false;
+        state.eeprom_required = false;
         apply_successful_eeprom_maintenance_operation(
             EepromMaintenanceOp::Erase,
             &mut state,
@@ -20906,26 +21156,9 @@ mod tests {
     }
 
     #[test]
-    fn flash_fallback_slots_use_distinct_erase_sectors() {
-        assert_eq!(flash_memory_slot_offset_for_sequence(2), 0);
-        assert_eq!(
-            flash_memory_slot_offset_for_sequence(3),
-            FLASH_MEMORY_ERASE_SECTOR_SIZE
-        );
-        assert_eq!(FLASH_MEMORY_REGION_SIZE, 2 * FLASH_MEMORY_ERASE_SECTOR_SIZE);
-        assert_eq!(FLASH_MEMORY_PARTITION_LABEL, "flux_cfg");
-        assert_eq!(LEGACY_FLASH_MEMORY_PARTITION_OFFSET, 0x110000);
-        assert_eq!(
-            LEGACY_FLASH_MEMORY_SLOT_A_OFFSET,
-            LEGACY_FLASH_MEMORY_PARTITION_OFFSET
-        );
-        assert_eq!(
-            LEGACY_FLASH_MEMORY_SLOT_B_OFFSET,
-            LEGACY_FLASH_MEMORY_PARTITION_OFFSET + FLASH_MEMORY_ERASE_SECTOR_SIZE
-        );
+    fn partition_table_binary_matches_eeprom_only_layout() {
         let partition_table = include_str!("../../partitions.csv");
-        assert!(partition_table.contains("flux_cfg,  data, 0x06,    0x210000, 0x2000"));
-
+        assert!(!partition_table.contains("flux_cfg"));
         let expected = esp_idf_part::PartitionTable::try_from(partition_table.as_bytes().to_vec())
             .unwrap()
             .to_bin()

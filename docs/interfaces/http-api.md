@@ -46,9 +46,9 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 
 `state`: `disabled | idle | connecting | connected | error` for device-published WiFi facts. `saving` and `timeout` are not public firmware WiFi states; timeout is settled as `error`. `idle` means the Device has confirmed that its current WiFi station has stopped while saved credentials remain intact. `configurationGeneration` changes for every accepted set/clear configuration; `transitionSequence` increases on every accepted state transition, including a confirmed cancel. `failureCode` is absent for nonterminal states and is one of `disconnect_timed_out | configuration_failed | association_rejected | association_timed_out | ipv4_timed_out | station_disconnected | lan_startup_failed`. A configuration transaction makes at most three attempts in 30 seconds: disconnect is bounded at 3 seconds, association at 8 seconds per attempt, and IPv4/DHCP at 15 seconds per attempt, with the 30-second transaction deadline taking precedence. Recoverable failures remain `connecting`; once the attempt budget or transaction deadline is exhausted, the device publishes one terminal `error`. The same configuration generation never starts a background recovery; a new set/clear configuration is required.
 
-During firmware boot, before EEPROM/flash restoration and WiFi task startup complete, USB `get_network` and `get_status` return the retryable `startup_busy` error instead of a placeholder `disabled` snapshot. `devd` retries that boundary; clients must not persist or display a network state until a versioned `NetworkSummary` is returned by the running device.
+During firmware boot, before EEPROM restoration and WiFi task startup complete, USB `get_network` and `get_status` return the retryable `startup_busy` error instead of a placeholder `disabled` snapshot. `devd` retries that boundary; clients must not persist or display a network state until a versioned `NetworkSummary` is returned by the running device.
 
-`ssid` is the device-confirmed configured network name and is safe to display in a configuration form. `wifiPasswordLength` is the saved WiFi password's UTF-8 byte length. The password itself is never returned by USB, LAN, devd, logs, events, errors, or exports.
+`ssid` is the device-confirmed configured network name and is safe to display in a configuration form. `wifiPasswordLength` is the saved WiFi password's UTF-8 byte length. The password itself is never returned by normal USB, LAN, devd status, logs, events, or errors. A raw EEPROM maintenance read is an unparsed device image and can contain WiFi credentials and the LAN pairing token; it must not enter logs, diagnostics, or unencrypted archives.
 
 ### `Status`
 
@@ -192,7 +192,7 @@ Calibration live control requires an active adjustable PPS contract. FUSB302BMPX
 }
 ```
 
-Heater curve points store temperature in centi-Celsius and effective resistance in milliohms. `preview` is runtime-only and can be used immediately by heater power limiting logic. `save` copies the preview curve to `active`; only `active` is persisted in device memory and restored after reboot. Firmware uses external EEPROM as the primary memory backend and falls back to an ESP flash data/NVS sector when EEPROM is unavailable.
+Heater curve points store temperature in centi-Celsius and effective resistance in milliohms. `preview` is runtime-only and can be used immediately by heater power limiting logic. `save` copies the preview curve to `active`; only `active` is persisted in device memory and restored after reboot. Firmware uses external EEPROM as the only memory backend; EEPROM failure enters `EEPROM_REQUIRED` and never selects an ESP flash or NVS fallback.
 
 ### `ThermalPlantModel`
 
@@ -237,7 +237,7 @@ The calibration state machine uses the current valid RTD measurement directly fo
 }
 ```
 
-`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; an authorized native USB Serial/JTAG `cu.usbmodem*` port uses `--before usb-reset`. A connection failure waits one second and retries that USB reset once before a final `default-reset` fallback; no retry changes the authorized port. Other serial paths retain `default-reset`. `flashAddress` is only set for raw app binaries. For a raw app, devd writes the checked-in `firmware/partitions.bin` at `0x8000`, writes the app at its explicit address, then explicitly resets the target so the `flux_cfg` layout is installed and the application starts.
+`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; an authorized native USB Serial/JTAG `cu.usbmodem*` port uses `--before usb-reset`. A connection failure waits one second and retries that USB reset once before a final `default-reset` fallback; no retry changes the authorized port. Other serial paths retain `default-reset`. `flashAddress` is only set for raw app binaries. For a raw app, devd writes the checked-in `firmware/partitions.bin` at `0x8000`, writes the app at its explicit address, then explicitly resets the target so the supported partition layout and application start together.
 
 ### `ApiError`
 
@@ -316,9 +316,9 @@ Those unsupported operations require Native `devd` HTTP capability gates.
 ## Native `devd` HTTP
 
 Base URL: `http://127.0.0.1:<port>`. Default bind is `127.0.0.1:30080`; loopback binds enable development CORS for local `localhost` / loopback origins so the Vite console can call the daemon from its own local port.
-Start the daemon with `flux-purr-devd serve`. Flags override environment variables; `--serial-port` and `FLUX_PURR_DEVD_SERIAL_PORT` override the user default USB port saved by `flux-purr usb-port set`. If no configured port is present, the project fallback is `/dev/cu.usbmodem21221401`.
+Start the daemon with `flux-purr-devd serve`. Flags override the corresponding daemon environment settings; `--serial-port <serial-port>` is an optional exact discovery filter. There is no project fallback port, and the user preference written by `flux-purr usb-port set` is not consumed as a device target.
 
-Native serial discovery is constrained to the configured authorized port. If that path is absent, `devd` must not expose another native serial device.
+When `--serial-port <serial-port>` is supplied, native serial discovery is constrained to that exact path. If the flag is omitted, `devd` may enumerate candidate USB devices for diagnostics, but it must not open, lease, probe, select, or substitute any candidate. Firmware operations still require their own explicit `--port`.
 
 - `GET /health`
 - `GET /api/v1/devices`
@@ -583,7 +583,7 @@ Core commands:
 - `flux-purr buzzer test --device <id> --scenario feedback-coalesce|feedback-replace|active-cooling-retrigger`
 - `flux-purr buzzer test --device <id> --stop`
 - `flux-purr buzzer test --device <id> --status`
-- `flux-purr buzzer play --device <id> [--devd <url>] [--pointer]` or `--hardware <saved-id> [--devd <url>] [--pointer]`: interactive native-terminal diagnostic session. The Justfile forwards the same explicit selector as `just buzzer-play --device <id> [--devd <url>]` or `just buzzer-play --hardware <saved-id> [--devd <url>]`. It displays the actual task-owned session state and arbitration trace; its production-cue catalogue covers `ui_input`, `heater_on`, `heater_off`, `active_cooling_on`, `active_cooling_off`, `heater_reject`, `active_cooling_reject`, `protection_alarm`, and `attention_reminder`. In a TTY, the session stays on the main terminal screen so output remains selectable and copyable. Up/Down/Home/End select an item; Enter or Space plays the selected cue once, and OS key-repeat submits the same request repeatedly so the production arbiter applies its ordinary feedback coalescing and replacement rules. `C` or `L` starts continuous playback for a cue, `S` stops, `R` refreshes, `M` toggles pointer capture, and `Q` or Escape exits. `--pointer` enables pointer capture at startup; release it with `M` before selecting/copying terminal text. The session also runs the fixed feedback-coalescing and feedback-replacement scenarios. When a repeated session is running, its default Enter/Space action is stop; an ordinary one-shot feedback is never stopped or synthetically restarted by the CLI. Non-TTY input retains the line menu for scripts and automated checks.
+- `flux-purr buzzer play --device <id> [--devd <local-control-socket>] [--pointer]` or `--hardware <saved-id> [--devd <local-control-socket>] [--pointer]`: interactive native-terminal diagnostic session. The Justfile forwards the same explicit selector as `just buzzer-play --device <id> [--devd <local-control-socket>]` or `just buzzer-play --hardware <saved-id> [--devd <local-control-socket>]`. It displays the actual task-owned session state and arbitration trace; its production-cue catalogue covers `ui_input`, `heater_on`, `heater_off`, `active_cooling_on`, `active_cooling_off`, `heater_reject`, `active_cooling_reject`, `protection_alarm`, and `attention_reminder`. In a TTY, the session stays on the main terminal screen so output remains selectable and copyable. Up/Down/Home/End select an item; Enter or Space plays the selected cue once, and OS key-repeat submits the same request repeatedly so the production arbiter applies its ordinary feedback coalescing and replacement rules. `C` or `L` starts continuous playback for a cue, `S` stops, `R` refreshes, `M` toggles pointer capture, and `Q` or Escape exits. `--pointer` enables pointer capture at startup; release it with `M` before selecting/copying terminal text. The session also runs the fixed feedback-coalescing and feedback-replacement scenarios. When a repeated session is running, its default Enter/Space action is stop; an ordinary one-shot feedback is never stopped or synthetically restarted by the CLI. Non-TTY input retains the line menu for scripts and automated checks.
 - `flux-purr pd pps set --volts <decimal> --device <id>` or `--hardware <saved-id>`
 - `flux-purr pd pps clear --device <id>` or `--hardware <saved-id>`
 - `flux-purr thermal profile preview|clear-preview|save|clear-saved --device <id>` or `--hardware <saved-id>`
@@ -597,14 +597,16 @@ Core commands:
 - `flux-purr calibration-mode status|exit --device <id>` or `--hardware <saved-id>`
 - `flux-purr calibration-mode voltage|temperature|heater-curve ...`
 - `flux-purr wifi set|clear|cancel --device <id> ...`
-- `flux-purr flash --device <id> [--artifact-id <id>] [--manifest-path <path>]`
+- `flux-purr update --port <serial-port> --bundle <local.fluxpurr-fw> [--devd <local-control-socket>]`: 一般用户本地发布 bundle 更新；只接受命中 SHA-256 完整性清单的 `.fluxpurr-fw`。
+- `flux-purr flash --port <serial-port> [--elf <local-elf>] [--skip-backup --confirm NO_EEPROM_BACKUP]`: 开发者直接串口烧录本地 ELF，默认先备份 EEPROM，不连接 devd。
+- `flux-purr recover --port <serial-port> --elf <local-elf> --confirm ERASE`: 开发者确认后擦除并写入 MCU 内部 Flash，不读取或修改 EEPROM。
 - `flux-purr monitor --device <id>`
 - `flux-purr hardware available|recent|list|save|forget|path`
-- `flux-purr usb-port show|set <port>`
+- `flux-purr usb-port show|set <port>`：保留为用户配置诊断命令；它不会为任何固件操作提供默认目标，`update`、`flash` 和 `recover` 始终要求显式 `--port`。
 
 `hardware` stores USB targets. LAN records are stored separately in the same user configuration with their token excluded from CLI, daemon, trace, and error output. `flux-purr lan devices|refresh|scan|pair|status|runtime-set` operates a saved LAN target. `flux-purr lan request --id <id> --method get|post|put|delete --path <api-path> [--body|--body-file]` exposes the remaining authorized runtime, calibration, heater-curve, and thermal-profile API; every write creates and releases the device LAN lease around the request.
 
-`usb-port set` writes user configuration in the OS config directory, or under `FLUX_PURR_HOME` when set. A running daemon reads the default port only during startup, so it must be restarted after the default USB port changes.
+`usb-port set` writes a user preference in the OS config directory, or under `FLUX_PURR_HOME` when set. The preference is not read as a firmware-operation target and cannot replace an explicit `--port`.
 
 ## Product Release Manifest
 

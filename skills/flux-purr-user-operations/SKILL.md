@@ -32,5 +32,5 @@ Use this skill for owner-facing hardware operations that should rely on released
 ## Safety
 
 - Never perform flash, reset, serial write, WiFi write, or runtime mutation without an explicit target device or saved hardware id.
-- For real flashing, require `flux-purr flash --no-dry-run --confirm FLASH` and a `flux-purr-devd serve --allow-real-flash` daemon.
+- For a General User firmware update, require `flux-purr update --port <explicit-port> --bundle <local.fluxpurr-fw>` and the bundled SHA-256 integrity catalog. Developer local-ELF flash, ROM download mode, and EEPROM backup bypass belong to the source-tree developer workflow.
 - Redact WiFi passwords and secrets from summaries, logs, issue comments, and PR bodies.

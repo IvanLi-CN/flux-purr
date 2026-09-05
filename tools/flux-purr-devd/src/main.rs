@@ -1,7 +1,7 @@
 use std::{env, net::SocketAddr, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
-use flux_purr_devd::{AppConfig, AppState, app};
+use flux_purr_devd::{AppConfig, AppState, app, serve_local_control};
 use tokio::net::TcpListener;
 
 #[derive(Debug, Parser)]
@@ -31,6 +31,8 @@ struct ServeArgs {
     no_dev_cors: bool,
     #[arg(long = "allow-real-flash")]
     allow_real_flash: bool,
+    #[arg(long = "control-socket")]
+    control_socket: Option<PathBuf>,
 }
 
 impl Default for ServeArgs {
@@ -42,6 +44,7 @@ impl Default for ServeArgs {
             allow_dev_cors: false,
             no_dev_cors: false,
             allow_real_flash: false,
+            control_socket: None,
         }
     }
 }
@@ -57,11 +60,37 @@ async fn main() {
         None => ServeArgs::default(),
     };
     let config = parse_config(args);
-    let listener = TcpListener::bind(config.bind)
-        .await
-        .expect("failed to bind flux-purr-devd listener");
+    let control_socket = config.control_socket.clone();
+    let bind = config.bind;
     let state = AppState::new(config);
     tokio::spawn(state.clone().run_lease_reaper());
+
+    if let Some(socket) = control_socket {
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&socket);
+            let listener = tokio::net::UnixListener::bind(&socket)
+                .expect("failed to bind flux-purr-devd control socket");
+            set_private_socket_permissions(&socket)
+                .expect("failed to restrict flux-purr-devd control socket");
+            eprintln!("flux-purr-devd local control socket {}", socket.display());
+            serve_local_control(listener, state)
+                .await
+                .expect("flux-purr-devd local control server failed");
+            return;
+        }
+        #[cfg(not(unix))]
+        {
+            serve_local_control(socket.to_string_lossy().into_owned(), state)
+                .await
+                .expect("flux-purr-devd named-pipe control server failed");
+            return;
+        }
+    }
+
+    let listener = TcpListener::bind(bind)
+        .await
+        .expect("failed to bind flux-purr-devd listener");
 
     eprintln!(
         "flux-purr-devd listening on {}",
@@ -70,6 +99,12 @@ async fn main() {
     axum::serve(listener, app(state))
         .await
         .expect("flux-purr-devd server failed");
+}
+
+#[cfg(unix)]
+fn set_private_socket_permissions(path: &PathBuf) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(unix)]
@@ -117,6 +152,9 @@ fn parse_config(args: ServeArgs) -> AppConfig {
 
     AppConfig {
         bind,
+        control_socket: args
+            .control_socket
+            .or_else(|| env::var_os("FLUX_PURR_DEVD_CONTROL_SOCKET").map(PathBuf::from)),
         artifact_root,
         allow_dev_cors,
         allow_real_flash,

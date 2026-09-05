@@ -7,7 +7,6 @@ export type FirmwareStage =
   | 'transport'
   | 'rom_reset'
   | 'chip_flash_security'
-  | 'layout_config'
   | 'preflight'
   | 'authorization'
   | 'erase'
@@ -27,7 +26,7 @@ export type FirmwareOutcome =
   | 'verified'
 
 export interface FirmwareManifest {
-  schemaVersion: 1
+  schemaVersion: 2
   mediaType: 'application/vnd.flux-purr.firmware-bundle+zip'
   identity: {
     version: string
@@ -56,7 +55,6 @@ export interface FirmwareManifest {
     sha256: string
     md5: string
   }>
-  migrations: string[]
 }
 
 export interface ValidatedFirmwareBundle {

@@ -48,14 +48,14 @@
 
 - EEPROM 设备为 `M24C64`，7-bit I2C 地址固定为硬件基线 `0x50`；启动和高级维护不得扫描其它 I2C 地址。容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。启动读取使用静态复用 scratch 和有界分块访问，不得把完整 record buffer 放入启动栈。
 - `MemoryRecord` 当前格式版本为 `v5`：header 的 byte `4` 保存 format version，byte `5` 保存 header length，bytes `6..8` 保存 payload length，bytes `8..12` 保存 `sequence`，bytes `12..16` 保存 CRC。v1-v5 均可解码；v1/v2 使用窄 TLV 长度，v3-v5 使用 `u16` TLV 长度。active 双槽位于 `0x1000` / `0x1800`，每槽 `2048 bytes`；previous 双槽为 `1024 bytes`（`0x0400` / `0x0800`），legacy 双槽为 `512 bytes`（`0x0000` / `0x0200`）。启动时选择 CRC 合法且 `sequence` 最大的 record。旧 EEPROM 槽只作为兼容读取源，选择出的旧配置先在 RAM 中完成字段迁移；后续成功提交配置时才以当前 v5 编码写入 active 槽，不在启动阶段强制重写 EEPROM。
-- 外置 EEPROM 是主持久化后端；若 EEPROM 当前不可达或写入失败，固件必须使用 ESP flash 中标签为 `flux_cfg` 的专用 8KiB data partition 保存同一 `MemoryRecord`，不得直接占用或写入 NVS 管理范围。flash slot A/B 必须各自独占一个 4KiB erase sector，写入任一 slot 不得擦除另一份有效 record。启动时同时读取可用后端，选择 CRC 合法且 `sequence` 最大的 record；所有后端都无效时使用默认配置。升级前曾使用旧 factory-app 边界后 `0x110000` / `0x111000` raw 双槽的设备，若该区域仍含 CRC 合法 record，启动时必须将其迁移复制到当前 `flux_cfg`；新写入不得回到旧 raw 区域。
-- `devd` 的 real-flash 路径在写入任何应用镜像前，必须读取设备当前 `0x8000` partition table 并解析实际 `flux_cfg`。若目标 [`firmware/partitions.csv`](../../../firmware/partitions.csv) 改变该分区地址，`devd` 必须将当前完整 `flux_cfg`（或未分区 legacy raw 双槽）预写到目标 `flux_cfg` 地址，再原样读回验证；只有验证成功才可写入新 partition table 和 app。目标地址被当前 layout 占用、目标容量较小、读取/解析失败或逐字验证不一致时，必须拒绝应用烧录。临时副本不得进入日志、trace 或用户配置目录。EEPROM 不受该 flash layout 迁移影响。
+- 外置 EEPROM 是唯一的持久化后端。`MemoryRecord`、等价配置与其任何镜像不得写入 ESP flash、NVS、raw sector 或 `flux_cfg`。启动只从 EEPROM 槽位选择 CRC 合法且 `sequence` 最大的 record；旧内部 Flash record 必须忽略且不得迁移。EEPROM 全空时可按批准的硬件配置初始化并写后验证；EEPROM 不可达、写入失败或验证失败时必须进入 `EEPROM_REQUIRED`。
+- 固件更新、恢复与 devd 不得读取、保存、迁移、恢复或验证 MCU 内部配置分区。分区表、镜像布局和 bundle 不得声明 `flux_cfg` 或等价配置区域。
 - record payload 必须使用 TLV，未知 TLV 必须跳过，缺失 TLV 必须使用默认值；v1/v2 的 TLV header 使用 `tag:u8 + len:u8`，v3-v5 使用 `tag:u8 + len:u16le`。
 - 温度字段恢复后必须 clamp 到 `0..400°C`。
 - `selected_preset_slot` 越界时必须回到默认槽位。
 - 用户接受操作导致记忆字段变化时必须 debounce 后写回，不得每个按键事件立即写入持久化后端。
-- EEPROM 读写失败不得阻断 heater/fan 保护逻辑；fallback flash 不可用时保存失败必须可见，但不得屏蔽安全保护。
-- M24C64 与 FUSB302B 共用 `GPIO8/9` 时，record 写入和成功后的 EEPROM 验证必须以不超过 `16 bytes` 的 bounded chunk 执行；每个 EEPROM write-cycle delay 或验证 chunk 后必须先释放 EEPROM adapter 并服务 PD，再开始下一段。EEPROM 成功即完成本次持久化，`flux_cfg` 只作为 EEPROM 不可达或写入失败时的 fallback，不能在成功路径同步 mirror 而阻塞 PD 控制。
+- EEPROM 读写失败不得阻断 heater/fan 保护逻辑；但必须进入 `EEPROM_REQUIRED`，锁定 heater、calibration、Wi-Fi 持久化、preset 与其他依赖持久化正确性的操作，并明确显示故障。不得以任何 MCU 存储作为替代。
+- M24C64 与 FUSB302B 共用 `GPIO8/9` 时，record 写入和成功后的 EEPROM 验证必须以不超过 `16 bytes` 的 bounded chunk 执行；每个 EEPROM write-cycle delay 或验证 chunk 后必须先释放 EEPROM adapter 并服务 PD，再开始下一段。EEPROM 成功即完成本次持久化，不得同步 mirror 到任何 MCU 存储。
 - 日志不得输出 Wi-Fi 密码明文。
 - EEPROM 含有非 `0xFF` 数据但所有受支持槽都无法解码、CRC/结构无效或格式版本高于当前固件时，固件必须锁定 heater、PPS 与 calibration，并在前面板固定显示 `EEPROM DATA`、`INCOMPATIBLE`、`HEATER LOCKED`。全 `0xFF` EEPROM 视为空白，不显示该场景。
 - USB JSONL 与仓库 devd CLI 必须提供高级原始维护操作：按 offset/length 有界读取、按 offset 原样写入和全片擦除。导出和导入必须逐字节覆盖完整 `8 KiB`，不得解析、迁移、过滤或绑定设备身份；原始字节不得写入 transport event 日志。原始写入或擦除开始前必须清除 debug/calibration PPS、锁定 heater/calibration、请求 fixed PD，并清除所有普通 record 写回 deadline；传输或验证失败后保持该锁，避免部分镜像重新供热或被普通持久化覆盖。擦除必须写入并回读验证全片 `0xFF`，且不得自动创建默认 record。
@@ -68,13 +68,13 @@
 ## 功能与行为规格（Functional / Behavior Spec）
 
 - 启动流程：
-  - CH224Q 完成默认 PD 请求后，固件读取 EEPROM 与 flash fallback 中可用的记忆配置。
+- CH224Q 完成默认 PD 请求后，固件只读取 EEPROM 中可用的记忆配置。
   - 创建 `FrontPanelUiState` 后，把记忆配置应用到目标温度、当前预设槽、预设数组和主动降温策略位。
   - `heater_enabled` 保持运行时默认/安全策略，不从 EEPROM 恢复。
 - 写回流程：
   - 前面板已接受交互完成后，从 UI 状态生成下一份 `MemoryConfig`。
   - 若配置相对上一份有变化，设置约 `2s` 写回 deadline。
-  - deadline 到期后写入下一 record sequence 对应的槽；每页 EEPROM 写和验证 chunk 后先服务共享总线上的 PD，再进入下一段。EEPROM 不可用时写入 flash fallback；两者都失败则重新排队。
+- deadline 到期后写入下一 record sequence 对应的槽；每页 EEPROM 写和验证 chunk 后先服务共享总线上的 PD，再进入下一段。EEPROM 不可用、写入失败或验证失败时进入 `EEPROM_REQUIRED`，不得重新路由到 MCU 存储。
 - Wi-Fi 字段：
   - `ssid`、`password`、`telemetryIntervalMs` 进入持久化模型；自动重连是固件固定策略，不属于用户配置。
   - 旧版本的 `wifi_auto_reconnect` TLV 继续读取以兼容已有记录，但加载与 sanitize 时始终归一化为 `true`。
@@ -85,7 +85,7 @@
 - `MemoryConfig` 是固件内部持久化模型。
 - `M24c64` 是固件内部 EEPROM adapter，提供 bounded read 与 page-bounded write。
 - EEPROM 原始维护仅通过 USB/devd lease 暴露，不进入设备 LAN API 或 Web 控制台；它是避免 EEPROM 数据丢失的高级兜底工具，不属于普通用户工作流。物理 heater 输出非零时固件必须拒绝维护操作。
-- Flash fallback 复用同一当前 v5 `MemoryRecord` 编码与 sequence 选择规则，存放在 ESP-IDF partition table 中标签为 `flux_cfg` 的专用 8KiB data partition；两个逻辑 slot 分别位于该分区的 `0x0000` 与 `0x1000`，只在 EEPROM 不可达或写入失败时使用。为兼容此前位于 `0x110000` / `0x111000` 的 raw fallback 双槽，当前 runtime 只读探测其 CRC 合法 record，并在发现时立即以 v5 编码复制到 `flux_cfg`；此兼容读取不写旧区域。当前 `flux_cfg` 中的旧格式 record 仍按版本解码，后续成功提交时物化为 v5。仓库根 `espflash.toml` 必须让 ELF 烧录同步写入 [`firmware/partitions.csv`](../../../firmware/partitions.csv)。支持 raw app artifact 时，devd 必须先写入由该 CSV 生成并受版本控制的 [`firmware/partitions.bin`](../../../firmware/partitions.bin) 到 `0x8000`，再写入 app 并显式 reset；两条安装路径都必须保证该分区属于正式 flash 合同。写入前 `devd` 以当前设备的 partition table 规划 `flux_cfg` 迁移；地址变化时先 read/verify 目标位置的完整 record，随后才允许安装目标 layout 和应用镜像。
+- MCU Flash、NVS、raw sector、`flux_cfg` 与它们的 layout migration 不属于 `MemoryConfig` 合同。仓库根 `espflash.toml` 与支持的镜像布局不得安装配置 fallback 分区；历史内部 Flash record 不得读取、解码或迁移。EEPROM 在 MCU Flash 写入、擦除和恢复操作外，独立保持其物理内容。
 - ADC calibration payload 固定编码 RTD/VIN 两个 channel，各 `8` 个共享 sample slot，并额外编码 `slots.a` / `slots.b` 的 `gain + offset` 以及 `activeSlot`。owner-facing physical reference 继续与 ADC-domain points 分离保存，保证刷新后仍可按原值显示。
 - TLV 字段：
   - `0x01`: `target_temp_c` (`i16le`)
@@ -121,12 +121,13 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given EEPROM 与 flash fallback 都为空或损坏，When 固件启动，Then UI 使用默认记忆配置且不 panic。
-- Given 多个后端/槽都有合法 record，When 固件启动，Then 选择 `sequence` 最大的一槽。
+- Given EEPROM 为空且可写，When 固件启动，Then 固件从批准的硬件配置初始化 EEPROM、验证写入，并在 UI 使用该配置。
+- Given EEPROM 缺失、损坏、不可读、不可写或验证失败，When 固件启动或提交配置，Then 固件进入 `EEPROM_REQUIRED`，不使用内部 Flash/NVS/raw sector 且不允许依赖持久化正确性的操作。
+- Given EEPROM 槽都有合法 record，When 固件启动，Then 选择 `sequence` 最大的一槽。
 - Given 最新槽 CRC 损坏且旧槽合法，When 固件启动，Then 回退到旧槽。
-- Given 当前 `flux_cfg` 没有有效 record 且旧 raw fallback 双槽仍有 CRC 合法 record，When 固件启动，Then 恢复该 record 并以当前 v5 编码复制到当前 `flux_cfg`。
+- Given `flux_cfg` 或旧 raw fallback 双槽含 CRC 合法 record，When 固件启动，Then 固件忽略它们，绝不读取、恢复或复制。
 - Given EEPROM previous/legacy 槽存在 CRC 合法的 v1-v4 record，When 固件启动，Then 按版本完成 RAM 内字段迁移并恢复配置；旧 EEPROM 槽不在启动阶段被重写，下一次成功配置提交必须以 v5 编码写入 active 槽。
-- Given 当前设备的 `flux_cfg` 位于旧 factory app 末尾且目标 app partition 会覆盖该地址，When `devd` 执行 real flash，Then 必须先在未分配的目标 `flux_cfg` 地址写入并逐字验证完整原始 record，验证成功后才写入 app；任一 preflight 步骤失败时 app 不得写入。
+- Given firmware update、Developer flash 或 MCU Flash recovery 发生，When MCU 写入或擦除完成，Then 操作不得读取、写入、迁移或验证内部配置分区，且外置 EEPROM 不受该 MCU 操作影响。
 - Given record payload 包含未知 TLV，When 解码，Then 忽略未知字段并保留已知字段。
 - Given 目标温度或 preset 超出范围，When 解码完成，Then 温度被 clamp 到 `0..400°C`。
 - Given 用户修改目标温度、preset 或主动降温策略，When 约 `2s` debounce 到期，Then 写入下一持久化槽。
@@ -165,9 +166,13 @@
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
-- 假设：M24C64 地址脚按硬件基线固定为 7-bit 地址 `0x50`；固件只访问该硬件地址。当实机 EEPROM 不响应时，flash fallback 必须维持保存/重启恢复能力，避免调优和校准流程被单一外设阻断。
+- 假设：M24C64 地址脚按硬件基线固定为 7-bit 地址 `0x50`；固件只访问该硬件地址。当实机 EEPROM 不响应时，固件进入 `EEPROM_REQUIRED`，直到经过独立硬件与安全批准的非持久化默认配置可用。
 - 风险：当前实现未加密 Wi-Fi 密码；若后续威胁模型要求物理攻击防护，需要另开安全存储规格。
 - 风险：若后续新增更多高频配置项，需要重新评估 EEPROM 写入寿命与合并写策略。
+
+## Related ADRs
+
+- [`../../adr/0008-eeprom-only-configuration-persistence.md`](../../adr/0008-eeprom-only-configuration-persistence.md)
 
 ## 参考（References）
 

@@ -19,9 +19,9 @@ use std::{
 
 use axum::{
     Json, Router,
-    body::Bytes,
+    body::{Body, Bytes, to_bytes},
     extract::{Path as AxumPath, Query, State},
-    http::{HeaderValue, Method, StatusCode},
+    http::{HeaderValue, Method, Request, StatusCode},
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
@@ -31,10 +31,16 @@ use axum::{
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::{process::Command, sync::broadcast};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    process::Command,
+    sync::broadcast,
+};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+use tower::ServiceExt;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
+pub mod developer_backup;
 pub mod firmware_bundle;
 pub mod lan;
 
@@ -50,7 +56,8 @@ pub const DEVICE_LIST_EVENT_LIMIT: usize = 24;
 pub const DEVICE_EVENT_REPLAY_LIMIT: usize = 120;
 pub const DEFAULT_LEASE_TTL_MS: u64 = 30_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
-pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30080";
+pub const DEFAULT_DEVD_ENDPOINT: &str = "flux-purr-devd.sock";
+static LOCAL_CONTROL_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
 const PPS_HARDWARE_MIN_MV: u16 = 5_000;
 const PPS_HARDWARE_MAX_MV: u16 = 28_000;
@@ -70,11 +77,6 @@ const USER_CONFIG_FILE: &str = "config.json";
 const HARDWARE_REGISTRY_FILE: &str = "devices.json";
 const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
 const DEFAULT_PARTITION_TABLE_FLASH_ADDRESS: u64 = 0x8000;
-const PARTITION_TABLE_FLASH_SIZE: u64 = 0x1000;
-const FLASH_CONFIG_MIN_SIZE: u64 = 0x2000;
-const LEGACY_FLASH_CONFIG_OFFSET: u64 = 0x110000;
-const LEGACY_FLASH_CONFIG_SIZE: u64 = 0x2000;
-const FLASH_CONFIG_LABEL: &str = "flux_cfg";
 const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 const ESPFLASH_USB_RESET_RETRY_DELAY: Duration = Duration::from_secs(1);
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
@@ -120,6 +122,7 @@ unsafe extern "C" {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub bind: SocketAddr,
+    pub control_socket: Option<PathBuf>,
     pub artifact_root: Option<PathBuf>,
     pub allow_dev_cors: bool,
     pub allow_real_flash: bool,
@@ -130,7 +133,7 @@ pub struct AppConfig {
 #[serde(rename_all = "camelCase")]
 pub struct UserConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_devd_url: Option<String>,
+    pub default_devd_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_serial_port: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -218,6 +221,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             bind: "127.0.0.1:30080".parse().unwrap(),
+            control_socket: None,
             artifact_root: None,
             allow_dev_cors: true,
             allow_real_flash: false,
@@ -2392,6 +2396,13 @@ pub struct FirmwareOperationRequest {
     pub allow_downgrade: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalFirmwareUpdateRequest {
+    port: String,
+    artifact_id: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FirmwareOperationResult {
@@ -2665,6 +2676,308 @@ pub struct BindRequest {
     pub alias: Option<String>,
 }
 
+/// Versioned local-only control protocol used by the CLI and the native daemon.
+/// The wire format is a four-byte big-endian length followed by a CBOR frame.
+pub const LOCAL_CONTROL_PROTOCOL_VERSION: u16 = 1;
+const LOCAL_CONTROL_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalControlRequest {
+    pub version: u16,
+    pub request_id: String,
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub body: Option<Value>,
+    #[serde(default)]
+    pub body_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalControlResponse {
+    pub version: u16,
+    pub request_id: String,
+    pub status: u16,
+    pub body: Value,
+}
+
+pub fn validate_local_control_endpoint(endpoint: &str) -> io::Result<PathBuf> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty()
+        || endpoint.contains("://")
+        || endpoint.starts_with("tcp:")
+        || endpoint.parse::<SocketAddr>().is_ok()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "devd endpoint must be a local Unix socket or named pipe, not a URL or TCP address",
+        ));
+    }
+    let path = PathBuf::from(endpoint);
+    #[cfg(unix)]
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "devd endpoint must be an absolute Unix socket path",
+        ));
+    }
+    Ok(path)
+}
+
+fn local_control_request_id() -> String {
+    let sequence = LOCAL_CONTROL_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("cli-{}-{sequence}", now_millis())
+}
+
+#[cfg(unix)]
+pub async fn local_control_request(
+    endpoint: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> Result<LocalControlResponse, Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::net::UnixStream;
+
+    let endpoint = validate_local_control_endpoint(endpoint)?;
+    let mut stream = UnixStream::connect(endpoint).await?;
+    let request = LocalControlRequest {
+        version: LOCAL_CONTROL_PROTOCOL_VERSION,
+        request_id: local_control_request_id(),
+        method: method.to_string(),
+        path: path.to_string(),
+        body,
+        body_bytes: None,
+    };
+    let request_id = request.request_id.clone();
+    write_local_control_frame(&mut stream, &request).await?;
+    let response: LocalControlResponse = read_local_control_frame(&mut stream).await?;
+    if response.version != LOCAL_CONTROL_PROTOCOL_VERSION {
+        return Err("devd returned an unsupported local-control protocol version".into());
+    }
+    if response.request_id != request_id {
+        return Err("devd returned a response for a different local-control request".into());
+    }
+    Ok(response)
+}
+
+#[cfg(unix)]
+pub async fn local_control_request_bytes(
+    endpoint: &str,
+    method: &str,
+    path: &str,
+    body_bytes: Vec<u8>,
+) -> Result<LocalControlResponse, Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::net::UnixStream;
+
+    let endpoint = validate_local_control_endpoint(endpoint)?;
+    let mut stream = UnixStream::connect(endpoint).await?;
+    let request = LocalControlRequest {
+        version: LOCAL_CONTROL_PROTOCOL_VERSION,
+        request_id: local_control_request_id(),
+        method: method.to_string(),
+        path: path.to_string(),
+        body: None,
+        body_bytes: Some(body_bytes),
+    };
+    let request_id = request.request_id.clone();
+    write_local_control_frame(&mut stream, &request).await?;
+    let response: LocalControlResponse = read_local_control_frame(&mut stream).await?;
+    if response.version != LOCAL_CONTROL_PROTOCOL_VERSION {
+        return Err("devd returned an unsupported local-control protocol version".into());
+    }
+    if response.request_id != request_id {
+        return Err("devd returned a response for a different local-control request".into());
+    }
+    Ok(response)
+}
+
+#[cfg(not(unix))]
+pub async fn local_control_request(
+    endpoint: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> Result<LocalControlResponse, Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    let endpoint = validate_local_control_endpoint(endpoint)?;
+    let mut stream = ClientOptions::new().open(endpoint)?;
+    let request = LocalControlRequest {
+        version: LOCAL_CONTROL_PROTOCOL_VERSION,
+        request_id: local_control_request_id(),
+        method: method.to_string(),
+        path: path.to_string(),
+        body,
+        body_bytes: None,
+    };
+    let request_id = request.request_id.clone();
+    write_local_control_frame(&mut stream, &request).await?;
+    let response: LocalControlResponse = read_local_control_frame(&mut stream).await?;
+    if response.version != LOCAL_CONTROL_PROTOCOL_VERSION {
+        return Err("devd returned an unsupported local-control protocol version".into());
+    }
+    if response.request_id != request_id {
+        return Err("devd returned a response for a different local-control request".into());
+    }
+    Ok(response)
+}
+
+#[cfg(not(unix))]
+pub async fn local_control_request_bytes(
+    endpoint: &str,
+    method: &str,
+    path: &str,
+    body_bytes: Vec<u8>,
+) -> Result<LocalControlResponse, Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    let endpoint = validate_local_control_endpoint(endpoint)?;
+    let mut stream = ClientOptions::new().open(endpoint)?;
+    let request = LocalControlRequest {
+        version: LOCAL_CONTROL_PROTOCOL_VERSION,
+        request_id: local_control_request_id(),
+        method: method.to_string(),
+        path: path.to_string(),
+        body: None,
+        body_bytes: Some(body_bytes),
+    };
+    let request_id = request.request_id.clone();
+    write_local_control_frame(&mut stream, &request).await?;
+    let response: LocalControlResponse = read_local_control_frame(&mut stream).await?;
+    if response.version != LOCAL_CONTROL_PROTOCOL_VERSION {
+        return Err("devd returned an unsupported local-control protocol version".into());
+    }
+    if response.request_id != request_id {
+        return Err("devd returned a response for a different local-control request".into());
+    }
+    Ok(response)
+}
+
+#[cfg(unix)]
+pub async fn serve_local_control(
+    listener: tokio::net::UnixListener,
+    state: AppState,
+) -> io::Result<()> {
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let state = state.clone();
+        tokio::spawn(async move {
+            let result = handle_local_control_connection(&mut stream, state).await;
+            if let Err(error) = result {
+                let _ = write_local_control_frame(
+                    &mut stream,
+                    &LocalControlResponse {
+                        version: LOCAL_CONTROL_PROTOCOL_VERSION,
+                        request_id: "unknown".into(),
+                        status: 500,
+                        body: json!({"error": error.to_string()}),
+                    },
+                )
+                .await;
+            }
+        });
+    }
+}
+
+#[cfg(windows)]
+pub async fn serve_local_control(endpoint: String, state: AppState) -> io::Result<()> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    loop {
+        let mut server = ServerOptions::new().create(&endpoint)?;
+        server.connect().await?;
+        let state = state.clone();
+        tokio::spawn(async move {
+            let _ = handle_local_control_connection(&mut server, state).await;
+        });
+    }
+}
+
+async fn handle_local_control_connection<T>(
+    stream: &mut T,
+    state: AppState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let request: LocalControlRequest = read_local_control_frame(stream).await?;
+    if request.version != LOCAL_CONTROL_PROTOCOL_VERSION {
+        return Err("unsupported local-control protocol version".into());
+    }
+    let method = request.method.parse::<Method>()?;
+    let builder = Request::builder().method(method).uri(&request.path).header(
+        "content-type",
+        if request.body_bytes.is_some() {
+            "application/octet-stream"
+        } else {
+            "application/json"
+        },
+    );
+    let body = match (request.body, request.body_bytes) {
+        (Some(body), None) => Body::from(serde_json::to_vec(&body)?),
+        (None, Some(body)) => Body::from(body),
+        (None, None) => Body::empty(),
+        (Some(_), Some(_)) => {
+            return Err("local control request cannot contain JSON and bytes".into());
+        }
+    };
+    let response = app(state)
+        .oneshot(builder.body(body)?)
+        .await
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let status = response.status().as_u16();
+    let bytes = to_bytes(response.into_body(), LOCAL_CONTROL_MAX_FRAME_BYTES).await?;
+    let body = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({"raw": String::from_utf8_lossy(&bytes).to_string()}));
+    write_local_control_frame(
+        stream,
+        &LocalControlResponse {
+            version: LOCAL_CONTROL_PROTOCOL_VERSION,
+            request_id: request.request_id,
+            status,
+            body,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn write_local_control_frame<T, V>(stream: &mut T, value: &V) -> io::Result<()>
+where
+    T: AsyncWrite + Unpin,
+    V: Serialize,
+{
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    if bytes.len() > LOCAL_CONTROL_MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "local-control frame too large",
+        ));
+    }
+    stream.write_u32(bytes.len() as u32).await?;
+    stream.write_all(&bytes).await
+}
+
+async fn read_local_control_frame<T, V>(stream: &mut T) -> io::Result<V>
+where
+    T: AsyncRead + Unpin,
+    V: DeserializeOwned,
+{
+    let length = stream.read_u32().await? as usize;
+    if length == 0 || length > LOCAL_CONTROL_MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid local-control frame length",
+        ));
+    }
+    let mut bytes = vec![0; length];
+    stream.read_exact(&mut bytes).await?;
+    ciborium::de::from_reader(bytes.as_slice())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+}
+
 pub fn app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
@@ -2746,6 +3059,7 @@ pub fn app(state: AppState) -> Router {
             "/api/v1/firmware-bundles",
             get(list_firmware_bundles).post(import_firmware_bundle),
         )
+        .route("/api/v1/firmware-update", post(local_firmware_update))
         .route(
             "/api/v1/devices/{device_id}/firmware",
             post(firmware_operation),
@@ -5752,6 +6066,146 @@ async fn import_firmware_bundle(
     Ok((StatusCode::CREATED, Json(bundle_summary(&bundle))))
 }
 
+async fn local_firmware_update(
+    State(state): State<AppState>,
+    Json(payload): Json<LocalFirmwareUpdateRequest>,
+) -> Result<Json<Value>, HttpError> {
+    if !state.config.allow_real_flash {
+        return Err(HttpError::forbidden(
+            "real_flash_disabled",
+            "Real flashing is disabled unless FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1.",
+        ));
+    }
+    let port = payload.port.trim().to_owned();
+    if port.is_empty()
+        || port.contains("://")
+        || port.starts_with("tcp:")
+        || port.parse::<SocketAddr>().is_ok()
+    {
+        return Err(HttpError::bad_request(
+            "invalid_serial_port",
+            "Firmware update requires the exact local serial port supplied by the caller.",
+        ));
+    }
+    let artifact_id = payload.artifact_id.trim();
+    if artifact_id.len() != 71
+        || !artifact_id.starts_with("sha256:")
+        || !artifact_id[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(HttpError::bad_request(
+            "invalid_artifact_id",
+            "Local firmware update requires a SHA-256 artifact ID.",
+        ));
+    }
+    let bundle_path = state
+        .bundle_store
+        .path()
+        .join(format!("{}.fluxpurr-fw", &artifact_id[7..]));
+    let bundle = firmware_bundle::read_bundle(&bundle_path).map_err(bundle_http_error)?;
+    if bundle.bundle_sha256 != artifact_id {
+        return Err(HttpError::bad_request(
+            "artifact_id_mismatch",
+            "artifactId does not match the imported bundle content.",
+        ));
+    }
+
+    let target = {
+        let serial_devices = scan_serial_devices(Some(Path::new(&port)));
+        let mut state_lock = state.lock()?;
+        refresh_serial_devices(&mut state_lock, serial_devices);
+        state_lock
+            .devices
+            .values()
+            .find(|device| {
+                device.transport == DeviceTransport::NativeSerial
+                    && device.port_path.as_deref() == Some(port.as_str())
+            })
+            .cloned()
+            .ok_or_else(|| {
+                HttpError::bad_request(
+                    "serial_port_not_found",
+                    "The supplied serial port is not present in the current device set.",
+                )
+            })?
+    };
+    if target.connection == ConnectionState::Error {
+        return Err(HttpError::bad_request(
+            "serial_port_missing",
+            "The supplied serial port is not available; no replacement port will be selected.",
+        ));
+    }
+
+    let mut progress = FirmwareOperationProgress::new(
+        &state,
+        &target.id,
+        FirmwareOperation::Update,
+        &bundle.bundle_sha256,
+        false,
+    );
+    progress.operation_started();
+    progress.stage_started("authorization", json!({ "port": port }));
+    progress.stage_completed("authorization", json!({ "port": port }));
+    let preflight_lease_id = format!("local-update-{}", progress.operation_id());
+    progress.stage_started("preflight", json!({}));
+    let (identity, status) =
+        refresh_native_update_runtime_facts(&state, &target, &preflight_lease_id).await?;
+    validate_update_runtime_facts(
+        DeviceTransport::NativeSerial,
+        &identity.firmware_version,
+        &status,
+    )?;
+    let security = probe_native_rom_security(&state, &port).await?;
+    security.validate_for_flash()?;
+    progress.stage_completed("preflight", json!({}));
+    run_bundle_flash_transaction(
+        &state,
+        &bundle,
+        FirmwareOperation::Update,
+        &port,
+        &mut progress,
+    )
+    .await?;
+    progress.stage_started("runtime_reconnect", json!({}));
+    let identity_result =
+        serial_request_payload::<Identity>(&state, &target, "get_identity", "identity").await;
+    let install_result = serial_request_payload::<InstallStatus>(
+        &state,
+        &target,
+        "get_install_status",
+        "install_status",
+    )
+    .await;
+    let verified = identity_result.as_ref().is_ok_and(|identity| {
+        identity.firmware_version == bundle.manifest.identity.version
+            && identity.git_sha == bundle.manifest.identity.source_sha
+            && identity.build_id == bundle.manifest.identity.build_id
+    }) && install_result.as_ref().is_ok_and(|status| {
+        status.layout_id == bundle.manifest.layout.id
+            && status.layout_version == bundle.manifest.layout.version
+            && status.partition_table_sha256 == bundle.manifest.layout.partition_table_sha256
+    });
+    if verified {
+        progress.stage_completed("runtime_reconnect", json!({}));
+    } else {
+        progress.stage_failed("runtime_reconnect", "runtime_verification_failed");
+    }
+    let outcome = if verified {
+        "verified"
+    } else {
+        "write_complete_unverified"
+    };
+    progress.operation_completed(outcome);
+    Ok(Json(json!({
+        "ok": true,
+        "operation": "update",
+        "port": port,
+        "artifactId": bundle.bundle_sha256,
+        "outcome": outcome,
+    })))
+}
+
 fn bundle_summary(bundle: &firmware_bundle::FirmwareBundle) -> FirmwareBundleSummary {
     FirmwareBundleSummary {
         artifact_id: bundle.bundle_sha256.clone(),
@@ -5968,54 +6422,29 @@ async fn firmware_operation(
     let rom_mac = security.rom_mac.clone();
     if payload.dry_run {
         progress.stage_completed("chip_flash_security", json!({}));
-        progress.stage_started("layout_config", json!({}));
     }
 
-    let source_partition_hash = progress.require(
-        async {
-            let mut source_partition_hash = None;
-            if payload.operation == FirmwareOperation::Update {
-                if transport == DeviceTransport::NativeSerial {
-                    let source_hash = probe_native_partition_hash(&state, &port_path).await?;
-                    if !firmware_bundle::source_partition_hash_supported(
-                        &source_hash,
-                        &bundle.manifest.migrations,
-                    )
-                    .map_err(bundle_http_error)?
-                    {
-                        return Err(HttpError::forbidden(
-                            "source_layout_unsupported",
-                            "The current partition-table hash has no declared supported migration.",
-                        ));
-                    }
-                    source_partition_hash = Some(source_hash);
-                }
-                let current_semver = semver::Version::parse(
-                    current_version
-                        .trim_start_matches("fw/")
-                        .trim_start_matches('v'),
-                );
-                let target_semver = semver::Version::parse(
-                    bundle.manifest.identity.version.trim_start_matches('v'),
-                );
-                if current_semver
-                    .ok()
-                    .zip(target_semver.ok())
-                    .is_some_and(|(current, target)| target < current)
-                    && !payload.allow_downgrade
-                {
-                    return Err(HttpError::forbidden(
-                        "downgrade_confirmation_required",
-                        "The target firmware is older; explicit allowDowngrade is required.",
-                    ));
-                }
-            }
-            Ok(source_partition_hash)
+    if payload.operation == FirmwareOperation::Update {
+        let current_semver = semver::Version::parse(
+            current_version
+                .trim_start_matches("fw/")
+                .trim_start_matches('v'),
+        );
+        let target_semver =
+            semver::Version::parse(bundle.manifest.identity.version.trim_start_matches('v'));
+        if current_semver
+            .ok()
+            .zip(target_semver.ok())
+            .is_some_and(|(current, target)| target < current)
+            && !payload.allow_downgrade
+        {
+            return Err(HttpError::forbidden(
+                "downgrade_confirmation_required",
+                "The target firmware is older; explicit allowDowngrade is required.",
+            ));
         }
-        .await,
-    )?;
+    }
     if payload.dry_run {
-        progress.stage_completed("layout_config", json!({}));
         progress.stage_started("preflight", json!({}));
     }
 
@@ -6025,7 +6454,6 @@ async fn firmware_operation(
         &port_path,
         &rom_mac,
         &bundle.bundle_sha256,
-        source_partition_hash.as_deref(),
     );
     if payload.dry_run {
         let token = {
@@ -6122,7 +6550,6 @@ async fn firmware_operation(
         &bundle,
         payload.operation,
         &port_path,
-        source_partition_hash.as_deref(),
         &mut progress,
     )
     .await?;
@@ -6194,47 +6621,11 @@ async fn firmware_operation(
     }))
 }
 
-async fn probe_native_partition_hash(
-    state: &AppState,
-    port_path: &str,
-) -> Result<String, HttpError> {
-    let _serial_rpc =
-        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
-    drop_cached_serial_session(&state.serial_sessions, port_path)?;
-    let workspace = tempfile::tempdir().map_err(|error| {
-        HttpError::internal(&format!("failed to create preflight workspace: {error}"))
-    })?;
-    let output_path = workspace.path().join("partition-table.bin");
-    let args = vec![
-        "read-flash".into(),
-        "--chip".into(),
-        "esp32s3".into(),
-        "--port".into(),
-        port_path.into(),
-        "--non-interactive".into(),
-        "0x8000".into(),
-        "0x1000".into(),
-        output_path.to_string_lossy().into_owned(),
-    ];
-    require_espflash_success(&resolve_espflash_program(), &args).await?;
-    let bytes = fs::read(output_path).map_err(|error| {
-        HttpError::internal(&format!("failed to read partition preflight: {error}"))
-    })?;
-    if bytes.len() != 0x1000 {
-        return Err(HttpError::forbidden(
-            "source_layout_unknown",
-            "The target partition table could not be read exactly.",
-        ));
-    }
-    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
-}
-
 async fn run_bundle_flash_transaction(
     state: &AppState,
     bundle: &firmware_bundle::FirmwareBundle,
     operation: FirmwareOperation,
     port_path: &str,
-    source_partition_hash: Option<&str>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<(), HttpError> {
     let _serial_rpc = progress.require(
@@ -6272,39 +6663,13 @@ async fn run_bundle_flash_transaction(
     } else {
         "default-reset"
     };
-    let preserved_config = if operation == FirmwareOperation::Update {
+    if operation == FirmwareOperation::Update {
         progress.stage_started("write_segments", json!({
             "completedUnits": 0,
             "totalUnits": bundle.manifest.segments.iter().map(|segment| segment.length).sum::<u64>(),
             "unit": "bytes",
         }));
-        let source_partition_hash = progress.require(
-            source_partition_hash.ok_or_else(|| HttpError::internal("missing source layout")),
-        )?;
-        let copy = progress.require(
-            firmware_bundle::config_copy_plan(source_partition_hash, &bundle.manifest.migrations)
-                .map_err(bundle_http_error),
-        )?;
-        let path = workspace.path().join("preserved-flux-cfg.bin");
-        let args = build_bundle_read_flash_args(
-            &common,
-            initial_reset,
-            copy.source_address,
-            copy.length,
-            &path,
-        );
-        progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
-        let bytes =
-            progress.require(fs::read(&path).map_err(|error| {
-                HttpError::internal(&format!("failed to stage flux_cfg: {error}"))
-            }))?;
-        if bytes.len() as u64 != copy.length {
-            return Err(progress.fail(HttpError::internal("flux_cfg staging length differs.")));
-        }
-        Some((path, bytes, copy))
-    } else {
-        None
-    };
+    }
     if operation == FirmwareOperation::InstallRecovery {
         progress.stage_started("erase", json!({}));
         let mut args = vec!["erase-flash".into()];
@@ -6379,25 +6744,6 @@ async fn run_bundle_flash_transaction(
             }),
         );
     }
-    if let Some((path, expected, copy)) = preserved_config {
-        let write = build_bundle_write_bin_args(&common, "no-reset", copy.target_address, &path);
-        progress.require(require_bundle_espflash_success(&program, &write, port_path).await)?;
-        let verified_path = workspace.path().join("verified-flux-cfg.bin");
-        let read = build_bundle_read_flash_args(
-            &common,
-            "no-reset",
-            copy.target_address,
-            copy.length,
-            &verified_path,
-        );
-        progress.require(require_bundle_espflash_success(&program, &read, port_path).await)?;
-        let actual = progress.require(fs::read(verified_path).map_err(|error| {
-            HttpError::internal(&format!("failed to verify preserved flux_cfg: {error}"))
-        }))?;
-        if actual != expected {
-            return Err(progress.fail(HttpError::internal("flux_cfg byte verification failed.")));
-        }
-    }
     progress.stage_completed(
         "rom_md5",
         json!({
@@ -6426,15 +6772,6 @@ fn build_checksum_md5_args(common: &[String], address: u64, length: u64) -> Vec<
         length.to_string(),
     ]);
     args
-}
-
-async fn require_espflash_success(program: &Path, args: &[String]) -> Result<Output, HttpError> {
-    let output = run_espflash_command_with_timeout(program, args, ESPFLASH_COMMAND_TIMEOUT).await?;
-    if output.status.success() {
-        Ok(output)
-    } else {
-        Err(espflash_command_error(program, args, &output))
-    }
 }
 
 async fn require_bundle_espflash_success(
@@ -6604,7 +6941,6 @@ fn firmware_preflight_stages() -> Vec<String> {
         "transport",
         "rom_reset",
         "chip_flash_security",
-        "layout_config",
         "preflight",
     ]
     .into_iter()
@@ -6633,7 +6969,6 @@ fn firmware_preflight_digest(
     port_path: &str,
     rom_mac: &str,
     bundle_sha256: &str,
-    source_partition_hash: Option<&str>,
 ) -> String {
     let value = json!({
         "leaseId": payload.lease_id,
@@ -6641,7 +6976,6 @@ fn firmware_preflight_digest(
         "portPath": port_path,
         "romMac": rom_mac,
         "bundleSha256": bundle_sha256,
-        "sourcePartitionTableSha256": source_partition_hash,
         "operation": payload.operation,
         "allowDowngrade": payload.allow_downgrade,
     });
@@ -8800,225 +9134,6 @@ async fn run_espflash_command_with_timeout(
         })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FlashPartitionRange {
-    label: String,
-    offset: u64,
-    size: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FlashConfigMigrationPlan {
-    source: FlashPartitionRange,
-    destination: FlashPartitionRange,
-}
-
-struct FlashConfigStaging {
-    _workspace: tempfile::TempDir,
-    plan: FlashConfigMigrationPlan,
-    source_path: PathBuf,
-}
-
-fn flash_config_restore_required(plan: &FlashConfigMigrationPlan) -> bool {
-    plan.source.offset != plan.destination.offset || plan.source.size != plan.destination.size
-}
-
-fn flash_partition_ranges(table: &esp_idf_part::PartitionTable) -> Vec<FlashPartitionRange> {
-    table
-        .partitions()
-        .iter()
-        .map(|partition| FlashPartitionRange {
-            label: partition.name(),
-            offset: u64::from(partition.offset()),
-            size: u64::from(partition.size()),
-        })
-        .collect()
-}
-
-fn ranges_overlap(left: &FlashPartitionRange, right: &FlashPartitionRange) -> bool {
-    left.offset < right.offset.saturating_add(right.size)
-        && right.offset < left.offset.saturating_add(left.size)
-}
-
-fn range_contains(container: &FlashPartitionRange, value: &FlashPartitionRange) -> bool {
-    container.offset <= value.offset
-        && value.offset.saturating_add(value.size)
-            <= container.offset.saturating_add(container.size)
-}
-
-fn flash_partition_by_label<'a>(
-    partitions: &'a [FlashPartitionRange],
-    label: &str,
-) -> Option<&'a FlashPartitionRange> {
-    partitions.iter().find(|partition| partition.label == label)
-}
-
-fn plan_flash_config_migration(
-    current: &[FlashPartitionRange],
-    target: &[FlashPartitionRange],
-) -> Result<Option<FlashConfigMigrationPlan>, HttpError> {
-    let destination = flash_partition_by_label(target, FLASH_CONFIG_LABEL)
-        .cloned()
-        .ok_or_else(|| {
-            HttpError::bad_request(
-                "flash_config_destination_missing",
-                "The firmware partition table does not declare flux_cfg.",
-            )
-        })?;
-    if destination.size < FLASH_CONFIG_MIN_SIZE {
-        return Err(HttpError::bad_request(
-            "flash_config_destination_too_small",
-            "The target flux_cfg partition is too small to preserve device configuration.",
-        ));
-    }
-
-    let source = match flash_partition_by_label(current, FLASH_CONFIG_LABEL).cloned() {
-        Some(source) => {
-            if source.size < FLASH_CONFIG_MIN_SIZE {
-                return Err(HttpError::bad_request(
-                    "flash_config_source_too_small",
-                    "The current flux_cfg partition is too small to preserve device configuration.",
-                ));
-            }
-            source
-        }
-        None => {
-            let legacy = FlashPartitionRange {
-                label: "legacy_raw".to_string(),
-                offset: LEGACY_FLASH_CONFIG_OFFSET,
-                size: LEGACY_FLASH_CONFIG_SIZE,
-            };
-            let legacy_is_outside_current_layout = !current
-                .iter()
-                .any(|partition| ranges_overlap(partition, &legacy));
-            let legacy_is_inside_old_factory = current.iter().any(|partition| {
-                partition.label == "factory" && range_contains(partition, &legacy)
-            });
-            if !legacy_is_outside_current_layout && !legacy_is_inside_old_factory {
-                return Ok(None);
-            }
-            legacy
-        }
-    };
-
-    if source.size > destination.size {
-        return Err(HttpError::bad_request(
-            "flash_config_destination_too_small",
-            "The target flux_cfg partition is too small to preserve device configuration.",
-        ));
-    }
-    if source.offset != destination.offset
-        && current
-            .iter()
-            .any(|partition| ranges_overlap(partition, &destination))
-    {
-        return Err(HttpError::bad_request(
-            "flash_config_destination_in_use",
-            "The target flux_cfg address is used by the current device layout; refusing to flash.",
-        ));
-    }
-
-    Ok(Some(FlashConfigMigrationPlan {
-        source,
-        destination,
-    }))
-}
-
-fn parse_flash_partition_table(
-    bytes: Vec<u8>,
-    code: &str,
-    message: &str,
-) -> Result<Vec<FlashPartitionRange>, HttpError> {
-    if bytes.len() < 2 {
-        return Err(HttpError::bad_request(code, message));
-    }
-    let table = esp_idf_part::PartitionTable::try_from(bytes)
-        .map_err(|_| HttpError::bad_request(code, message))?;
-    Ok(flash_partition_ranges(&table))
-}
-
-fn target_flash_partition_ranges(
-    root: Option<&Path>,
-) -> Result<Vec<FlashPartitionRange>, HttpError> {
-    let path = firmware_partition_table_path(root)?;
-    let bytes = fs::read(path).map_err(|_| {
-        HttpError::bad_request(
-            "firmware_partition_table_invalid",
-            "Unable to read firmware/partitions.csv.",
-        )
-    })?;
-    parse_flash_partition_table(
-        bytes,
-        "firmware_partition_table_invalid",
-        "The firmware partition table is invalid.",
-    )
-}
-
-fn flash_config_staging_path(workspace: &Path, name: &str) -> PathBuf {
-    workspace.join(name)
-}
-
-fn build_espflash_read_flash_args(
-    artifact: &FirmwareArtifact,
-    port_path: &str,
-    before_reset: &str,
-    address: u64,
-    size: u64,
-    output_path: &Path,
-) -> Result<Vec<String>, HttpError> {
-    if port_path.is_empty() {
-        return Err(HttpError::bad_request(
-            "missing_port",
-            "Real flash requires an explicit serial port.",
-        ));
-    }
-    Ok(vec![
-        "read-flash".to_string(),
-        "--chip".to_string(),
-        artifact.target_chip.clone(),
-        "--port".to_string(),
-        port_path.to_string(),
-        "--before".to_string(),
-        before_reset.to_string(),
-        "--non-interactive".to_string(),
-        "--no-stub".to_string(),
-        "--after".to_string(),
-        "no-reset".to_string(),
-        format!("0x{address:x}"),
-        format!("0x{size:x}"),
-        output_path.to_string_lossy().into_owned(),
-    ])
-}
-
-fn build_espflash_write_bin_args(
-    artifact: &FirmwareArtifact,
-    port_path: &str,
-    before_reset: &str,
-    address: u64,
-    input_path: &Path,
-) -> Result<Vec<String>, HttpError> {
-    if port_path.is_empty() {
-        return Err(HttpError::bad_request(
-            "missing_port",
-            "Real flash requires an explicit serial port.",
-        ));
-    }
-    Ok(vec![
-        "write-bin".to_string(),
-        "--chip".to_string(),
-        artifact.target_chip.clone(),
-        "--port".to_string(),
-        port_path.to_string(),
-        "--before".to_string(),
-        before_reset.to_string(),
-        "--non-interactive".to_string(),
-        "--after".to_string(),
-        "no-reset".to_string(),
-        format!("0x{address:x}"),
-        input_path.to_string_lossy().into_owned(),
-    ])
-}
-
 fn build_espflash_reset_args(
     artifact: &FirmwareArtifact,
     port_path: &str,
@@ -9044,28 +9159,6 @@ fn build_espflash_reset_args(
     ])
 }
 
-fn build_bundle_read_flash_args(
-    common: &[String],
-    before_reset: &str,
-    address: u64,
-    size: u64,
-    output_path: &Path,
-) -> Vec<String> {
-    let mut args = vec!["read-flash".to_string()];
-    args.extend(common.iter().cloned());
-    args.extend([
-        "--before".to_string(),
-        before_reset.to_string(),
-        "--no-stub".to_string(),
-        "--after".to_string(),
-        "no-reset".to_string(),
-        format!("0x{address:x}"),
-        format!("0x{size:x}"),
-        output_path.to_string_lossy().into_owned(),
-    ]);
-    args
-}
-
 fn build_bundle_write_bin_args(
     common: &[String],
     before_reset: &str,
@@ -9085,161 +9178,13 @@ fn build_bundle_write_bin_args(
     args
 }
 
-async fn stage_flash_config_before_app_flash_with_program(
-    program: &Path,
-    artifact: &FirmwareArtifact,
-    root: Option<&Path>,
-    port_path: &str,
-) -> Result<Option<FlashConfigStaging>, HttpError> {
-    let workspace = tempfile::tempdir().map_err(|_| {
-        HttpError::internal_with_details(
-            "flash_config_workspace_unavailable",
-            "Unable to create secure temporary storage for configuration preservation.",
-            json!({}),
-        )
-    })?;
-    let current_table_path = flash_config_staging_path(workspace.path(), "current-partitions.bin");
-    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
-        Ok(vec![build_espflash_read_flash_args(
-            artifact,
-            port_path,
-            before_reset,
-            DEFAULT_PARTITION_TABLE_FLASH_ADDRESS,
-            PARTITION_TABLE_FLASH_SIZE,
-            &current_table_path,
-        )?])
-    })
-    .await?;
-
-    let current_table = fs::read(&current_table_path).map_err(|_| {
-        HttpError::bad_request(
-            "flash_partition_table_unreadable",
-            "Unable to read the current device partition table; refusing to flash.",
-        )
-    })?;
-    let current = parse_flash_partition_table(
-        current_table,
-        "flash_partition_table_invalid",
-        "The current device partition table is invalid; refusing to flash.",
-    )?;
-    let target = target_flash_partition_ranges(root)?;
-    let Some(plan) = plan_flash_config_migration(&current, &target)? else {
-        return Ok(None);
-    };
-
-    let source_path = flash_config_staging_path(workspace.path(), "flux_cfg-source.bin");
-    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
-        Ok(vec![build_espflash_read_flash_args(
-            artifact,
-            port_path,
-            before_reset,
-            plan.source.offset,
-            plan.source.size,
-            &source_path,
-        )?])
-    })
-    .await?;
-    let source = fs::read(&source_path).map_err(|_| {
-        HttpError::bad_request(
-            "flash_config_backup_unreadable",
-            "Unable to read the current device configuration; refusing to flash.",
-        )
-    })?;
-    if source.len() != usize::try_from(plan.source.size).unwrap_or(usize::MAX) {
-        return Err(HttpError::bad_request(
-            "flash_config_backup_incomplete",
-            "The current device configuration could not be read completely; refusing to flash.",
-        ));
-    }
-
-    Ok(Some(FlashConfigStaging {
-        _workspace: workspace,
-        plan,
-        source_path,
-    }))
-}
-
-async fn restore_flash_config_after_app_flash_with_program(
-    program: &Path,
-    artifact: &FirmwareArtifact,
-    port_path: &str,
-    staging: &FlashConfigStaging,
-) -> Result<(), HttpError> {
-    // The app image does not overlap flux_cfg when the partition range is unchanged.
-    if !flash_config_restore_required(&staging.plan) {
-        return Ok(());
-    }
-    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
-        Ok(vec![build_espflash_write_bin_args(
-            artifact,
-            port_path,
-            before_reset,
-            staging.plan.destination.offset,
-            &staging.source_path,
-        )?])
-    })
-    .await?;
-
-    let verification_path =
-        flash_config_staging_path(staging._workspace.path(), "flux_cfg-verify-after-flash.bin");
-    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
-        Ok(vec![build_espflash_read_flash_args(
-            artifact,
-            port_path,
-            before_reset,
-            staging.plan.destination.offset,
-            staging.plan.source.size,
-            &verification_path,
-        )?])
-    })
-    .await?;
-
-    let source = fs::read(&staging.source_path).map_err(|_| {
-        HttpError::internal_with_details(
-            "flash_config_backup_unreadable",
-            "Unable to read the preserved device configuration.",
-            json!({}),
-        )
-    })?;
-    let verification = fs::read(&verification_path).map_err(|_| {
-        HttpError::internal_with_details(
-            "flash_config_verify_unreadable",
-            "Unable to verify the restored device configuration.",
-            json!({}),
-        )
-    })?;
-    if verification != source {
-        return Err(HttpError::bad_request(
-            "flash_config_verify_failed",
-            "Device configuration restoration could not be verified.",
-        ));
-    }
-    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
-        Ok(vec![build_espflash_reset_args(
-            artifact,
-            port_path,
-            before_reset,
-        )?])
-    })
-    .await?;
-    Ok(())
-}
-
 async fn run_flash_transaction_with_program(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
     port_path: &str,
     program: &Path,
 ) -> Result<(), HttpError> {
-    let staging =
-        stage_flash_config_before_app_flash_with_program(program, artifact, root, port_path)
-            .await?;
-    run_espflash_with_program(artifact, root, port_path, program).await?;
-    if let Some(staging) = staging.as_ref() {
-        restore_flash_config_after_app_flash_with_program(program, artifact, port_path, staging)
-            .await?;
-    }
-    Ok(())
+    run_espflash_with_program(artifact, root, port_path, program).await
 }
 
 fn resolve_espflash_program() -> PathBuf {
@@ -9435,7 +9380,7 @@ fn firmware_partition_table_path(root: Option<&Path>) -> Result<PathBuf, HttpErr
     } else {
         Err(HttpError::bad_request(
             "firmware_partition_table_required",
-            "Firmware flashing requires firmware/partitions.csv so flux_cfg is installed.",
+            "Firmware flashing requires firmware/partitions.csv for the partition table.",
         ))
     }
 }
@@ -9453,7 +9398,7 @@ fn firmware_partition_table_binary_path(root: Option<&Path>) -> Result<PathBuf, 
     } else {
         Err(HttpError::bad_request(
             "firmware_partition_table_required",
-            "Raw app flashing requires firmware/partitions.bin so flux_cfg is installed.",
+            "Raw app flashing requires firmware/partitions.bin for the partition table.",
         ))
     }
 }
@@ -9729,21 +9674,37 @@ mod tests {
     use std::process::ExitStatus;
     use tempfile::tempdir;
 
+    #[test]
+    fn local_control_endpoint_rejects_network_transports() {
+        assert!(validate_local_control_endpoint("http://127.0.0.1:30080").is_err());
+        assert!(validate_local_control_endpoint("tcp:127.0.0.1:30080").is_err());
+        assert!(validate_local_control_endpoint("127.0.0.1:30080").is_err());
+        assert!(validate_local_control_endpoint("flux-purr-devd.sock").is_err());
+        assert!(validate_local_control_endpoint("/tmp/flux-purr-devd.sock").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_control_managed_socket_round_trip_returns_one_response() {
+        let directory = tempdir().unwrap();
+        let endpoint = directory.path().join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let server = tokio::spawn(serve_local_control(listener, AppState::test()));
+
+        let response = local_control_request(endpoint.to_str().unwrap(), "GET", "/health", None)
+            .await
+            .unwrap();
+        assert_eq!(response.version, LOCAL_CONTROL_PROTOCOL_VERSION);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["name"], "flux-purr-devd");
+
+        server.abort();
+    }
+
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
-
-    fn flash_partition_layout(entries: &[(&str, u64, u64)]) -> Vec<FlashPartitionRange> {
-        entries
-            .iter()
-            .map(|(label, offset, size)| FlashPartitionRange {
-                label: (*label).to_string(),
-                offset: *offset,
-                size: *size,
-            })
-            .collect()
-    }
 
     #[cfg(unix)]
     fn test_flash_artifact() -> FirmwareArtifact {
@@ -9765,63 +9726,6 @@ mod tests {
                 flash_address: None,
             }],
         }
-    }
-
-    #[cfg(unix)]
-    fn write_flash_transaction_fixture(
-        root: &Path,
-        reject_staging_write: bool,
-    ) -> (PathBuf, PathBuf, PathBuf) {
-        let firmware_dir = root.join("firmware");
-        fs::create_dir_all(&firmware_dir).unwrap();
-        fs::write(
-            firmware_dir.join("partitions.csv"),
-            "nvs,data,nvs,0x9000,0x6000\nfactory,app,factory,0x10000,0x200000\nflux_cfg,data,0x06,0x210000,0x2000\n",
-        )
-        .unwrap();
-        fs::write(root.join("firmware.elf"), b"ELF!").unwrap();
-
-        let current_table = esp_idf_part::PartitionTable::try_from(
-            b"nvs,data,nvs,0x9000,0x6000\nfactory,app,factory,0x10000,0x100000\nflux_cfg,data,0x06,0x110000,0x2000\n".to_vec(),
-        )
-        .unwrap()
-        .to_bin()
-        .unwrap();
-        let table_path = root.join("current-partitions.bin");
-        let source_path = root.join("current-flux-cfg.bin");
-        let destination_path = root.join("target-flux-cfg.bin");
-        let log_path = root.join("espflash-actions.log");
-        fs::write(&table_path, current_table).unwrap();
-        fs::write(&source_path, vec![0x5A; LEGACY_FLASH_CONFIG_SIZE as usize]).unwrap();
-        fs::write(
-            &destination_path,
-            vec![0xFF; LEGACY_FLASH_CONFIG_SIZE as usize],
-        )
-        .unwrap();
-
-        let stage_write = if reject_staging_write {
-            "exit 42".to_string()
-        } else {
-            format!("cp \"$last\" \"{}\"", destination_path.display())
-        };
-        let script = root.join("fake-espflash.sh");
-        fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> \"{}\"\naction=\"$1\"\nlast=\"\"\naddress=\"\"\nfor arg in \"$@\"; do\n  last=\"$arg\"\n  case \"$arg\" in\n    0x8000|0x110000|0x210000) address=\"$arg\" ;;\n  esac\ndone\nif [ \"$action\" = \"read-flash\" ]; then\n  case \"$address\" in\n    0x8000) cp \"{}\" \"$last\" ;;\n    0x110000) cp \"{}\" \"$last\" ;;\n    0x210000) cp \"{}\" \"$last\" ;;\n    *) exit 43 ;;\n  esac\n  exit 0\nfi\nif [ \"$action\" = \"write-bin\" ]; then\n  if [ \"$address\" = \"0x210000\" ]; then\n    {}\n  else\n    exit 44\n  fi\n  exit 0\nfi\nif [ \"$action\" = \"flash\" ] || [ \"$action\" = \"reset\" ]; then\n  exit 0\nfi\nexit 45\n",
-                log_path.display(),
-                table_path.display(),
-                source_path.display(),
-                destination_path.display(),
-                stage_write,
-            ),
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&script, permissions).unwrap();
-
-        (script, source_path, destination_path)
     }
 
     #[test]
@@ -10704,7 +10608,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("firmware")).unwrap();
         std::fs::write(
             dir.path().join("firmware/partitions.csv"),
-            "flux_cfg,data,0x06,0x210000,0x2000",
+            "legacy_config,data,0x06,0x210000,0x2000",
         )
         .unwrap();
         let commands = build_espflash_args_with_reset_mode(
@@ -10764,7 +10668,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("firmware")).unwrap();
         std::fs::write(
             dir.path().join("firmware/partitions.csv"),
-            "flux_cfg,data,0x06,0x210000,0x2000",
+            "legacy_config,data,0x06,0x210000,0x2000",
         )
         .unwrap();
         std::fs::write(
@@ -11011,198 +10915,6 @@ mod tests {
     }
 
     #[test]
-    fn flash_config_migration_stages_config_before_expanding_the_app_partition() {
-        let current = flash_partition_layout(&[
-            ("nvs", 0x9000, 0x6000),
-            ("factory", 0x10000, 0x100000),
-            ("flux_cfg", 0x110000, 0x2000),
-        ]);
-        let target = flash_partition_layout(&[
-            ("nvs", 0x9000, 0x6000),
-            ("factory", 0x10000, 0x200000),
-            ("flux_cfg", 0x210000, 0x2000),
-        ]);
-
-        assert_eq!(
-            plan_flash_config_migration(&current, &target).unwrap(),
-            Some(FlashConfigMigrationPlan {
-                source: FlashPartitionRange {
-                    label: "flux_cfg".to_string(),
-                    offset: 0x110000,
-                    size: 0x2000,
-                },
-                destination: FlashPartitionRange {
-                    label: "flux_cfg".to_string(),
-                    offset: 0x210000,
-                    size: 0x2000,
-                },
-            })
-        );
-    }
-
-    #[test]
-    fn flash_config_migration_keeps_a_backup_when_the_partition_is_unchanged() {
-        let layout = flash_partition_layout(&[
-            ("nvs", 0x9000, 0x6000),
-            ("factory", 0x10000, 0x200000),
-            ("flux_cfg", 0x210000, 0x2000),
-        ]);
-
-        assert_eq!(
-            plan_flash_config_migration(&layout, &layout).unwrap(),
-            Some(FlashConfigMigrationPlan {
-                source: FlashPartitionRange {
-                    label: "flux_cfg".to_string(),
-                    offset: 0x210000,
-                    size: 0x2000,
-                },
-                destination: FlashPartitionRange {
-                    label: "flux_cfg".to_string(),
-                    offset: 0x210000,
-                    size: 0x2000,
-                },
-            })
-        );
-    }
-
-    #[test]
-    fn flash_config_migration_rejects_a_destination_used_by_the_current_layout() {
-        let current = flash_partition_layout(&[
-            ("nvs", 0x9000, 0x6000),
-            ("factory", 0x10000, 0x100000),
-            ("flux_cfg", 0x110000, 0x2000),
-            ("reserved", 0x210000, 0x2000),
-        ]);
-        let target = flash_partition_layout(&[
-            ("nvs", 0x9000, 0x6000),
-            ("factory", 0x10000, 0x200000),
-            ("flux_cfg", 0x210000, 0x2000),
-        ]);
-
-        let error = plan_flash_config_migration(&current, &target).unwrap_err();
-
-        assert_eq!(error.error.code, "flash_config_destination_in_use");
-    }
-
-    #[test]
-    fn flash_config_migration_rejects_a_smaller_destination_partition() {
-        let current = flash_partition_layout(&[
-            ("nvs", 0x9000, 0x6000),
-            ("factory", 0x10000, 0x100000),
-            ("flux_cfg", 0x110000, 0x2000),
-        ]);
-        let target = flash_partition_layout(&[
-            ("nvs", 0x9000, 0x6000),
-            ("factory", 0x10000, 0x200000),
-            ("flux_cfg", 0x210000, 0x1000),
-        ]);
-
-        let error = plan_flash_config_migration(&current, &target).unwrap_err();
-
-        assert_eq!(error.error.code, "flash_config_destination_too_small");
-    }
-
-    #[test]
-    fn flash_config_migration_preserves_an_unpartitioned_legacy_record() {
-        let current =
-            flash_partition_layout(&[("nvs", 0x9000, 0x6000), ("factory", 0x10000, 0x100000)]);
-        let target = flash_partition_layout(&[
-            ("nvs", 0x9000, 0x6000),
-            ("factory", 0x10000, 0x200000),
-            ("flux_cfg", 0x210000, 0x2000),
-        ]);
-
-        assert_eq!(
-            plan_flash_config_migration(&current, &target).unwrap(),
-            Some(FlashConfigMigrationPlan {
-                source: FlashPartitionRange {
-                    label: "legacy_raw".to_string(),
-                    offset: LEGACY_FLASH_CONFIG_OFFSET,
-                    size: LEGACY_FLASH_CONFIG_SIZE,
-                },
-                destination: FlashPartitionRange {
-                    label: "flux_cfg".to_string(),
-                    offset: 0x210000,
-                    size: 0x2000,
-                },
-            })
-        );
-    }
-
-    #[test]
-    fn flash_config_migration_preserves_legacy_record_inside_old_factory_partition() {
-        let current =
-            flash_partition_layout(&[("nvs", 0x9000, 0x6000), ("factory", 0x10000, 0x200000)]);
-        let target = flash_partition_layout(&[
-            ("nvs", 0x9000, 0x6000),
-            ("factory", 0x10000, 0x200000),
-            ("flux_cfg", 0x210000, 0x2000),
-        ]);
-
-        assert_eq!(
-            plan_flash_config_migration(&current, &target).unwrap(),
-            Some(FlashConfigMigrationPlan {
-                source: FlashPartitionRange {
-                    label: "legacy_raw".to_string(),
-                    offset: LEGACY_FLASH_CONFIG_OFFSET,
-                    size: LEGACY_FLASH_CONFIG_SIZE,
-                },
-                destination: FlashPartitionRange {
-                    label: "flux_cfg".to_string(),
-                    offset: 0x210000,
-                    size: 0x2000,
-                },
-            })
-        );
-    }
-
-    #[test]
-    fn flash_config_transport_commands_use_rom_reads_without_intermediate_reset() {
-        let artifact = FirmwareArtifact {
-            artifact_id: "test-artifact".to_string(),
-            name: "Test".to_string(),
-            version: "fw/test".to_string(),
-            git_sha: "abc".to_string(),
-            build_id: "build".to_string(),
-            target_chip: "esp32s3".to_string(),
-            profile: "release".to_string(),
-            features: vec![],
-            protocol: "flux-purr.usb.v1".to_string(),
-            files: vec![],
-        };
-        let source = Path::new("/private/tmp/flux_cfg-source.bin");
-        let read = build_espflash_read_flash_args(
-            &artifact,
-            "/dev/cu.usbmodem2111401",
-            "usb-reset",
-            LEGACY_FLASH_CONFIG_OFFSET,
-            LEGACY_FLASH_CONFIG_SIZE,
-            source,
-        )
-        .unwrap();
-        let write = build_espflash_write_bin_args(
-            &artifact,
-            "/dev/cu.usbmodem2111401",
-            "usb-reset",
-            0x210000,
-            source,
-        )
-        .unwrap();
-
-        assert_eq!(read[0], "read-flash");
-        assert!(read.windows(2).any(|pair| pair == ["--after", "no-reset"]));
-        assert!(read.iter().any(|argument| argument == "--no-stub"));
-        assert!(read.windows(2).any(|pair| pair == ["0x110000", "0x2000"]));
-        assert_eq!(write[0], "write-bin");
-        assert!(write.windows(2).any(|pair| pair == ["--after", "no-reset"]));
-        assert!(
-            write
-                .windows(2)
-                .any(|pair| pair == ["0x210000", source.to_str().unwrap()])
-        );
-    }
-
-    #[test]
     fn transient_usb_jtag_connection_errors_are_retryable() {
         assert!(espflash_connection_failure_text(
             "Error while connecting to device: No such device or address"
@@ -11258,79 +10970,6 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_config_range_does_not_need_post_flash_restore() {
-        let unchanged = FlashConfigMigrationPlan {
-            source: FlashPartitionRange {
-                label: "flux_cfg".to_string(),
-                offset: 0x210000,
-                size: 0x2000,
-            },
-            destination: FlashPartitionRange {
-                label: "flux_cfg".to_string(),
-                offset: 0x210000,
-                size: 0x2000,
-            },
-        };
-        let moved = FlashConfigMigrationPlan {
-            source: FlashPartitionRange {
-                label: "legacy_raw".to_string(),
-                offset: 0x110000,
-                size: 0x2000,
-            },
-            destination: unchanged.destination.clone(),
-        };
-
-        assert!(!flash_config_restore_required(&unchanged));
-        assert!(flash_config_restore_required(&moved));
-    }
-
-    #[test]
-    fn bundle_flash_commands_keep_usb_serial_jtag_in_loader_until_final_reset() {
-        let common = vec![
-            "--chip".to_string(),
-            "esp32s3".to_string(),
-            "--port".to_string(),
-            "/dev/cu.usbmodem2111401".to_string(),
-            "--non-interactive".to_string(),
-        ];
-        let config_read = build_bundle_read_flash_args(
-            &common,
-            "usb-reset",
-            LEGACY_FLASH_CONFIG_OFFSET,
-            LEGACY_FLASH_CONFIG_SIZE,
-            Path::new("/private/tmp/flux_cfg.bin"),
-        );
-        let segment_write = build_bundle_write_bin_args(
-            &common,
-            "no-reset",
-            0x10_000,
-            Path::new("/private/tmp/app.bin"),
-        );
-
-        assert!(config_read.iter().any(|argument| argument == "--no-stub"));
-        assert!(
-            config_read
-                .windows(2)
-                .any(|pair| pair == ["--before", "usb-reset"])
-        );
-        assert!(
-            config_read
-                .windows(2)
-                .any(|pair| pair == ["--after", "no-reset"])
-        );
-        assert!(
-            segment_write
-                .windows(2)
-                .any(|pair| pair == ["--before", "no-reset"])
-        );
-        assert!(
-            segment_write
-                .windows(2)
-                .any(|pair| pair == ["--after", "no-reset"])
-        );
-    }
-
-    #[test]
     fn bundle_retry_replaces_only_the_recoverable_no_reset_mode() {
         let command = vec![
             "write-bin".to_string(),
@@ -11349,121 +10988,6 @@ mod tests {
                 "--after".to_string(),
                 "no-reset".to_string(),
             ])
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn flash_transaction_restores_and_verifies_preserved_config_after_writing_the_app() {
-        let root = tempdir().unwrap();
-        let (program, source, destination) = write_flash_transaction_fixture(root.path(), false);
-
-        run_flash_transaction_with_program(
-            &test_flash_artifact(),
-            Some(root.path()),
-            "/dev/cu.usbmodem2111401",
-            &program,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
-        assert_eq!(
-            fs::read_to_string(root.path().join("espflash-actions.log"))
-                .unwrap()
-                .lines()
-                .collect::<Vec<_>>(),
-            vec![
-                "read-flash",
-                "read-flash",
-                "flash",
-                "write-bin",
-                "read-flash",
-                "reset"
-            ]
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn flash_transaction_reports_restore_failure_after_writing_the_app() {
-        let root = tempdir().unwrap();
-        let (program, source, destination) = write_flash_transaction_fixture(root.path(), true);
-
-        let error = run_flash_transaction_with_program(
-            &test_flash_artifact(),
-            Some(root.path()),
-            "/dev/cu.usbmodem2111401",
-            &program,
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.error.code, "flash_tool_failed");
-        assert_ne!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
-        assert_eq!(
-            fs::read_to_string(root.path().join("espflash-actions.log"))
-                .unwrap()
-                .lines()
-                .collect::<Vec<_>>(),
-            vec!["read-flash", "read-flash", "flash", "write-bin"]
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn flash_transaction_never_writes_the_app_before_config_backup_is_complete() {
-        let root = tempdir().unwrap();
-        let (program, source, _) = write_flash_transaction_fixture(root.path(), false);
-        fs::remove_file(&source).unwrap();
-
-        let error = run_flash_transaction_with_program(
-            &test_flash_artifact(),
-            Some(root.path()),
-            "/dev/cu.usbmodem2111401",
-            &program,
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.error.code, "flash_tool_failed");
-        assert_eq!(
-            fs::read_to_string(root.path().join("espflash-actions.log"))
-                .unwrap()
-                .lines()
-                .collect::<Vec<_>>(),
-            vec!["read-flash", "read-flash"]
-        );
-    }
-
-    #[test]
-    fn flash_partition_table_parser_rejects_truncated_device_data() {
-        let error = parse_flash_partition_table(
-            vec![0xAA],
-            "flash_partition_table_invalid",
-            "The current device partition table is invalid; refusing to flash.",
-        )
-        .unwrap_err();
-
-        assert_eq!(error.error.code, "flash_partition_table_invalid");
-    }
-
-    #[test]
-    fn flash_config_migration_does_not_claim_data_from_an_overwritten_legacy_range() {
-        let current = flash_partition_layout(&[
-            ("nvs", 0x9000, 0x6000),
-            ("factory", 0x10000, 0x100000),
-            ("reserved", 0x110000, 0x2000),
-        ]);
-        let target = flash_partition_layout(&[
-            ("nvs", 0x9000, 0x6000),
-            ("factory", 0x10000, 0x200000),
-            ("flux_cfg", 0x210000, 0x2000),
-        ]);
-
-        assert_eq!(
-            plan_flash_config_migration(&current, &target).unwrap(),
-            None
         );
     }
 
@@ -13905,7 +13429,6 @@ mod tests {
             &vec![0x11; 0x4000],
             include_bytes!("../../../firmware/partitions.bin"),
             &vec![0x33; 0x4000],
-            Vec::new(),
         )
         .unwrap();
         let canonical = state.bundle_store.path().join(format!(
@@ -14017,7 +13540,7 @@ mod tests {
             })
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(events.len(), 14);
+        assert_eq!(events.len(), 12);
         for (index, event) in events.iter().enumerate() {
             assert_eq!(event.payload["sequence"], (index + 1) as u64);
             assert_eq!(event.payload["phase"], "preflight");

@@ -12,6 +12,14 @@ _Avoid_: Board, MCU, target, hardware when the complete product is meant
 The person who observes or controls a Device.
 _Avoid_: User, owner, customer when the operating role is meant
 
+**General User**:
+A person who updates Device firmware only from a verified Firmware Update Bundle.
+_Avoid_: Developer, automatic target selection
+
+**Developer**:
+A person who may flash a local development ELF through an Explicit Serial Port.
+_Avoid_: General User, bundle updater
+
 **Front Panel**:
 The local display and keys on the Device.
 _Avoid_: Dashboard, Web UI
@@ -261,6 +269,34 @@ _Avoid_: Device, MCU, calibration reference
 **devd**:
 The local daemon that mediates supported host access to a Device.
 _Avoid_: Device firmware, Control Console
+
+**Local devd Control Socket**:
+The local IPC endpoint that identifies one running devd instance for host tooling. It is neither an HTTP endpoint nor a URL.
+_Avoid_: devd HTTP address, daemon URL
+
+**Explicit Serial Port**:
+The exact host serial-port identifier supplied for a Device operation. It is never inferred, auto-selected, or replaced after the Device re-enumerates.
+_Avoid_: detected port, default port, serial candidate
+
+**Firmware Update Bundle**:
+A local `.fluxpurr-fw` product-release artifact whose signature, integrity, and Hardware Profile compatibility have been verified before update.
+_Avoid_: development ELF, arbitrary firmware file, firmware URL
+
+**EEPROM-Only Persistence**:
+The rule that Device configuration with cross-reboot meaning is stored only in the external M24C64 EEPROM, never in MCU internal Flash or NVS.
+_Avoid_: Flash fallback, NVS fallback, mirrored configuration
+
+**Developer EEPROM Backup**:
+An encrypted local archive of the external EEPROM created and verified by default before a Developer firmware flash. It is not Device persistence and is never created by a General User firmware update.
+_Avoid_: Flash fallback, update backup, Device configuration copy
+
+**EEPROM_REQUIRED**:
+The safety state entered when the external EEPROM is absent, unreadable, unwritable, or fails verification. It does not claim configuration persistence or enable operations that require it.
+_Avoid_: default-persistence mode, recovered configuration
+
+**MCU Flash Recovery**:
+An explicitly confirmed operation that erases and replaces MCU internal Flash. It does not read, write, preserve, or erase the external EEPROM.
+_Avoid_: Device reset, EEPROM reset, configuration recovery
 
 **Transport**:
 A supported communication path that carries the shared Control Plane.

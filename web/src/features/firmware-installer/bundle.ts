@@ -3,7 +3,6 @@ import { unzipSync } from 'fflate'
 import SparkMD5 from 'spark-md5'
 
 import schema from '../../../../docs/specs/web-firmware-install-recovery/contracts/firmware-bundle.schema.json'
-import migrations from '../../../../docs/specs/web-firmware-install-recovery/contracts/migrations.json'
 import type { FirmwareManifest, ValidatedFirmwareBundle } from './types'
 
 const MAX_BUNDLE_BYTES = 8 * 1024 * 1024
@@ -78,14 +77,10 @@ export async function validateFirmwareBundle(bytes: Uint8Array): Promise<Validat
   if (!validateManifest(manifest)) {
     throw new FirmwareBundleError('manifest_invalid', ajv.errorsText(validateManifest.errors))
   }
-  const allowedMigrations = new Set(migrations.migrations.map((migration) => migration.id))
-  if (manifest.migrations.some((migration) => !allowedMigrations.has(migration))) {
-    throw new FirmwareBundleError('migration_unknown', 'Manifest names an unsupported migration.')
-  }
   if (
-    manifest.layout.id !== migrations.targetLayoutId ||
-    manifest.layout.version !== migrations.targetLayoutVersion ||
-    manifest.layout.partitionTableSha256 !== migrations.targetPartitionTableSha256
+    manifest.layout.id !== 'flux-purr.esp32s3fh4r2.factory' ||
+    manifest.layout.version !== 1 ||
+    !/^sha256:[0-9a-f]{64}$/.test(manifest.layout.partitionTableSha256)
   ) {
     throw new FirmwareBundleError(
       'layout_hash_mismatch',

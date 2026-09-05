@@ -18,8 +18,8 @@
 
 - 定义 Web、firmware 与 `devd` 共享的 identity、network、status、USB JSONL、devd HTTP、firmware artifact 与 error envelope。
 - firmware 提供 `web_serial` 与 `net_http` contract adapter，复用同一控制邮箱、热控 runtime 和 EEPROM WiFi 字段。
-- `devd` 作为 localhost HTTP daemon，提供 USB/serial discovery、lease、monitor、WiFi bridge、artifact verify、dry-run 与 real flash command boundary。
-- `flux-purr` 作为 released CLI，通过 `devd` 执行命令行硬件控制、用户级硬件记忆、USB 端口配置、artifact dry-run 与 guarded real flash。
+- `devd` 作为本地 daemon，向 Web 保留 localhost HTTP bridge，并向 CLI 提供版本化 Unix socket/named-pipe CBOR control，覆盖 USB/serial discovery、lease、monitor、WiFi bridge 与 artifact verify。
+- `flux-purr` 作为 released CLI，通过本地 CBOR control 执行 daemon-backed 命令；一般用户 `update` 使用显式串口和清单命中的本地 bundle，开发者 `flash`/`recover` 使用显式串口和本地 ELF 的 direct-serial/ROM 路径。
 - ADC calibration control family 由 `adc-calibration-control-plane` 约束，并复用本规格的 lease、USB JSONL、devd HTTP、CLI 与 Web capability boundary。
 - calibration live control 和 auto job 是本规格的一等 runtime contract；它们必须在 firmware USB JSONL、native `devd` HTTP、CLI、Web Serial 与 Web app 间保持 transport parity。
 - Release 使用单一产品 tag `vX.Y.Z`，Web、firmware 与 host-tools 资产挂同一 Release，并通过 release manifest 的组件指纹避免无效升级。
@@ -73,9 +73,9 @@
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。
 - `wifi_state_v2` capability 表示设备支持版本化 WiFi 事实。`NetworkSummary` 必须包含 `configurationGeneration`、单调 `transitionSequence` 与有限安全枚举 `failureCode`；未知或畸形 snapshot 必须在 adapter 边界拒绝，不能由 `devd` 或 Web 猜测补齐。
 - WiFi 状态由硬件无关的 `no_std` 状态机唯一发布。已配置设备对外只发布 `connecting|connected|error`；未配置设备发布 `disabled`。保存动作本身不是设备网络状态，Web 的提交 loading 只能表示等待设备事实，不能发布额外的“临时失败”状态。
-- EEPROM/flash 中的 WiFi 配置在冷启动时必须作为初始配置装载，不得产生运行时重新配置 signal。设备取得首个 DHCP lease 后不得因残留启动 signal 主动断开；断线监听必须保留在 DHCP 完成与监听注册之间已经发生的 driver event，并据此进入自动重连，禁止继续发布与实际链路不符的 `connected`。
-- 设备真实上电或显式复位后，在 EEPROM/flash 恢复和 WiFi 初始化完成前，USB `get_network` / `get_status` 必须返回可重试的 `startup_busy`，不得把默认配置伪装成 `disabled` 或空 SSID。打开、关闭或重新连接 USB Serial/JTAG 本身不得触发该启动流程；devd 必须等待真实版本化快照后才更新客户端状态。
-- 默认 `web_serial` 生产固件的启动与硬件初始化顺序固定为：`esp-hal global initialization/peripheral token acquisition -> runtime heap initialization -> TIMG0 Timer0 as the esp-rtos scheduler and Embassy timer-queue time base -> status-light GPIO/task -> USB Serial/JTAG -> front-panel key GPIO -> SPI2/LCD GPIO/GC9D01/startup render -> I2C0/CH224Q request and settle -> flash/EEPROM config restore -> LAN state and all WiFi tasks -> fan/heater/buzzer GPIO and MCPWM safe-off -> CH224Q status and power capabilities -> heater power backend -> heater-disabled power synchronization and settle -> ADC1/GPIO1/GPIO2/eFuse curve`。固件与 `esp-rtos` 均为 `no_std`；这里的 `esp-rtos` 不是 ESP-IDF/FreeRTOS。ADC 必须是最后初始化的硬件外设；其后只允许首次 RTD/VIN 采样、基于采样结果计算安全/输出/UI 状态、驱动已初始化的输出，并在首帧 UI 成功后通过 USB 发布完整的 `boot_stage=runtime_ready\n`，不得再初始化新的硬件外设。该 boot-stage marker 与 ADC diagnostics atomics 都属于 `web_serial` 控制面，不得成为 ADC conversion 或安全控制计算的依赖。
+- EEPROM 中的 WiFi 配置在冷启动时必须作为初始配置装载，不得产生运行时重新配置 signal。设备取得首个 DHCP lease 后不得因残留启动 signal 主动断开；断线监听必须保留在 DHCP 完成与监听注册之间已经发生的 driver event，并据此进入自动重连，禁止继续发布与实际链路不符的 `connected`。
+- 设备真实上电或显式复位后，在 EEPROM 恢复和 WiFi 初始化完成前，USB `get_network` / `get_status` 必须返回可重试的 `startup_busy`，不得把默认配置伪装成 `disabled` 或空 SSID。打开、关闭或重新连接 USB Serial/JTAG 本身不得触发该启动流程；devd 必须等待真实版本化快照后才更新客户端状态。
+- 默认 `web_serial` 生产固件的启动与硬件初始化顺序固定为：`esp-hal global initialization/peripheral token acquisition -> runtime heap initialization -> TIMG0 Timer0 as the esp-rtos scheduler and Embassy timer-queue time base -> status-light GPIO/task -> USB Serial/JTAG -> front-panel key GPIO -> SPI2/LCD GPIO/GC9D01/startup render -> I2C0/CH224Q request and settle -> EEPROM config restore -> LAN state and all WiFi tasks -> fan/heater/buzzer GPIO and MCPWM safe-off -> CH224Q status and power capabilities -> heater power backend -> heater-disabled power synchronization and settle -> ADC1/GPIO1/GPIO2/eFuse curve`。固件与 `esp-rtos` 均为 `no_std`；这里的 `esp-rtos` 不是 ESP-IDF/FreeRTOS。ADC 必须是最后初始化的硬件外设；其后只允许首次 RTD/VIN 采样、基于采样结果计算安全/输出/UI 状态、驱动已初始化的输出，并在首帧 UI 成功后通过 USB 发布完整的 `boot_stage=runtime_ready\n`，不得再初始化新的硬件外设。该 boot-stage marker 与 ADC diagnostics atomics 都属于 `web_serial` 控制面，不得成为 ADC conversion 或安全控制计算的依赖。
 - runtime heap 位于 NOLOAD 内存时，必须在注册给 allocator 前清零；配置恢复采用调用方提供的单一 `MemoryConfig` 原地解码，避免启动栈因大型值返回而耗尽。GC9D01 初始化与刷新使用异步 SPI 并有一秒截止时间，CH224Q I2C transaction 有 500 ms 截止时间；任一外设超时必须进入已有的安全恢复或失败路径，不得无限阻塞启动。
 - WiFi 连接事务计时固定为：断开旧连接最多 3 秒；每次关联最多 8 秒；每次 IPv4/DHCP 获取最多 15 秒；整个配置事务最多 3 次尝试、总计 30 秒，整体 30 秒截止时间优先于阶段计时。可恢复单次失败保持 `connecting`，只有三次尝试或 30 秒事务耗尽后发布一次 `error`。失败是终态，设备不会在同一 configuration generation 内自动恢复；必须收到新的配置才会重新进入 `connecting`。
 - runtime config frame 和 devd runtime endpoint 必须能更新目标温度、当前 preset slot、`presets_c[10]`、主动散热开关、heater hold 状态、调试用手动 PPS 覆盖、RAM thermal control profile preview、EEPROM-backed saved thermal control profile，以及热失控告警确认 `faultAttentionAcknowledged`。
@@ -94,7 +94,7 @@
 - devd 必须以 `serve` 子命令启动，默认 bind `127.0.0.1:30080`；flags 必须能配置 bind、显式 serial port、artifact root、dev CORS 和 real flash。
 - devd 未显式传入 `--serial-port` 时必须保持 `AppConfig.serial_port=None`，不得从环境变量、用户配置、模板、示例或硬编码默认值隐式选择设备；`None` 表示没有固定 USB 目标，而不是关闭发现。daemon 必须枚举全部符合项目 USB 身份规则的串口作为未验证候选，但不得自动打开、租用、探测或选择其中任何端口。候选在固件 identity probe 成功前只能显示 transport locator，`identity.deviceId` 与 `identity.hostname` 必须为空；只有 operator 明确选择后才允许进入连接与身份验证流程。
 - devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
-- `flux-purr` CLI 必须为 status/runtime/wifi/flash/monitor 操作自动创建、heartbeat 和释放 lease，支持 human 输出与 `--json` 输出，不要求用户手填 `leaseId`。
+- `flux-purr` CLI 必须为 status/runtime/wifi/monitor 等 devd-backed 操作自动创建、heartbeat 和释放 lease，支持 human 输出与 `--json` 输出，不要求用户手填 `leaseId`。固件操作由 `firmware-update-and-developer-flash` topic 管理：一般用户 `update` 使用显式 `--port`、本地已发布 bundle 与本地 CBOR control socket；开发者 `flash`/`recover` 使用显式 `--port`，直接串口执行且不创建或连接 devd。
 - `flux-purr pd pps set --volts <decimal> --amps <decimal> --device|--hardware` 与 `flux-purr pd pps clear --device|--hardware` 必须通过 lease 写 runtime contract；`--volts` 只接受 `0.1V` 步进、必须落在硬件 `5V~28V` 边界内且不高于实时 source capability，`--amps` 只接受 `0.05A` 步进且不高于 source capability。
 - `flux-purr hardware` 必须把 USB 设备记忆写入 OS 用户配置目录，`FLUX_PURR_HOME` 可覆盖；LAN record 使用独立字段持久化 base URL、hostname、last IPv4 和 redacted token。
 - 默认 `required` pairing policy 下，WiFi Info 进入时必须生成并显示新四位码；离开该页立即使 code 失效。每个窗口最多五次失败，成功返回 EEPROM 稳定 token；只有 USB/devd token-reset 可清除 token 和全部 LAN lease。HTTP v1 必须预留 `optional`（无 code claim）和 `unavailable`（无 claim、匿名基础只读）策略，前端和 CLI 不得把当前 default 当作唯一可能。
@@ -113,10 +113,10 @@
 - Browser Web Serial 的连接成功必须结算同一通道此前残留的失败反馈：当前 target 已是 `connected` 时，“最近操作”不得继续显示 `Web Serial unavailable` 或先前 probe 超时；该结算不得覆盖 LAN、桥接或运行控制等无关操作的已完成反馈。
 - 浏览器必须在 localStorage 记忆已成功 probe 的 Web Serial 设备身份，只允许保存稳定 `deviceId`、hostname、firmware version 与 build ID，不得保存串口对象、运行状态、配对 token 或其他凭据。稳定 `deviceId` 是唯一身份必填项；缺失的 hostname 回退到 ID，缺失的 firmware/build 元数据保存为 `unknown`，不得丢弃已确认设备。记忆记录在设备列表中投影为离线 Web Serial 通道；用户从设备卡片选择该通道时优先复用唯一已授权端口，但必须重新读取固件 identity 后才标记在线。实际 `deviceId` 相同才恢复原设备通道；不同时必须保留原离线记录，并把实际硬件注册、选中为另一台设备。Add device 的强制 chooser 语义不受快速重连影响。
 - Web Serial 身份记忆必须在成功的 identity/network/status probe 同一连接事务内写入，不能依赖后续 UI effect；页面重新挂载、开发热更新或 target 列表重算后，已记忆的 Web Serial 连接方式仍必须与同一 device ID 的 LAN/Bridge 通道合并显示。DEVD bootstrap 或不可用占位不是可控制 target，不得在无可用 DEVD target 的页面写入“重新接管 devd 租约”或其它硬件控制失败反馈。若已进入 live DEVD 工作区后设备列表刷新失败，界面必须保留该占位作为只读诊断上下文并继续显示 Dashboard；所有写控制保持禁用，占位不得进入设备卡片、连接方式或已知设备列表。
-- `flux-purr usb-port set` 必须写用户配置，并明确需要重启运行中的 `devd`。
+- `flux-purr usb-port set` 可以写用户配置中的诊断偏好，但不得为固件操作提供默认目标；`update`、`flash` 与 `recover` 始终要求调用者显式传入 `--port`，不会因该偏好切换设备。
 - lease 必须有 heartbeat、TTL、过期 cleanup 和 conflict response。
 - logs、trace、events 必须有固定上限；Runtime trace 只记录真实 bounded events 与 operator actions，`devd reachable`、当前连接状态或 scenario 重算摘要不得伪装成事件重复插入。所有事件在 adapter 边界统一为旧到新的时间顺序，并把时间格式化为本地 `HH:mm:ss`；Browser Web Serial 与 live operator action 在追加边界立即生成同一格式的本地时钟时间，只有 demo fixture 可使用固定时间。 “跟随尾部”启用时必须立即滚至最新事件，后续事件持续保持在可视底部，operator 主动向上滚动超过阈值后才自动关闭跟随。不得把 `live`、`web`、epoch timestamp、事件 ID 或内部序号显示在时间列。`devd` native USB JSONL TX/RX 必须作为 redacted `transport` events 进入 Runtime trace，保留 request ID、frame type 与 payload，WiFi password 等 secret 只能显示为 redacted。
-- firmware artifact verify 必须校验 file existence、size 和 sha256，且只允许 artifact root 内的相对路径；real flash 必须先通过 dry-run。real flash 在应用写入前必须读取当前设备 partition table，并对当前 `flux_cfg` record 完成备份写入与逐字验证；应用写入后必须将同一 record 恢复至目标 `flux_cfg` 地址并再次逐字验证，即使地址未变化。任何预写、恢复或验证失败都必须明确失败，预写失败时不得开始 app 写入。
+- firmware artifact verify 必须校验 file existence、size 和 sha256，且只允许 artifact root 内的相对路径；保留的 devd/Web artifact flash route 必须先通过 dry-run。Developer CLI `flash` 是独立的 direct serial/ROM 路径，默认先备份外置 EEPROM；`recover` 只擦写 MCU Flash。任何 MCU Flash 写入都不得读取、备份、迁移、恢复或验证 `flux_cfg` 或其他内部配置 record；EEPROM 不属于 MCU Flash 目标。CLI 的 General User update、Developer flash 与 recovery 合同由 `firmware-update-and-developer-flash` topic 管理。
 - devd artifact catalog 必须从本地构建产物计算 size/sha256，Web dry-check 必须调用 devd verify，而不是只做前端计时模拟。
 - Web UI 必须在 capability 缺失、lease conflict、offline target、blocked artifact 时禁用危险操作并显示原因。
 - Calibration mode control 必须只支持 PPS；Web 的 mode 入口固定为 `电压读数标定`、`温度标定`、`加热曲线标定`，owner-facing 术语不得回退到旧命名。
@@ -173,7 +173,7 @@
 - `flux-purr thermal report rerender-legacy`：从旧的 `preliminary-review-*` legacy bundle 或已存在的 `thermal_self_test_preliminary_bundle` 输入目录，重新写出 canonical owner-facing `index.html + run.bundle.json + samples.ndjson + thermal-profile.accepted.json`。该命令是 compliant preliminary review 报告的正式 host 入口；legacy 目录不得再直接充当最终交付页。
 - `flux-purr calibration-mode ...`：提供 owner-facing 三个手动模式入口；`thermal_plant_auto` 只通过 calibration job start/cancel 触发。现有低层 `calibration ...` 与 `heater-curve ...` 原始命令继续保留。
 - `flux-purr wifi set|clear|cancel`：通过 leased WiFi endpoint 写入、清除或取消当前 WiFi 连接；取消保留凭据且只能在 Device 确认 station 已停止后返回 `idle`，输出必须 redaction password。
-- `flux-purr flash`：默认 dry-run；真实烧录必须显式 `--no-dry-run --confirm FLASH` 且 daemon 启用 real flash。授权的 ESP32-S3 Native USB Serial/JTAG `cu.usbmodem*` 路径必须通过 `espflash --before usb-reset` 自动进入烧录流程，不得要求人工切换下载模式；其他串口保留 `default-reset`。需要保留设备持久化数据的正式烧录仅支持此 `flux-purr -> devd` 路径；直接 `mcu-agentd flash`、直接 `espflash` 或 erase-chip 不属于该保证。
+- `flux-purr update`：一般用户必须显式提供串口和本地 `.fluxpurr-fw`，bundle hash 与发布完整性清单匹配后通过本地 CBOR devd control 更新。`flux-purr flash`：开发者必须显式提供串口，可选本地 ELF，默认在 direct serial/ROM 写入前自动备份 EEPROM；唯一跳过备份的方式是成对的 `--skip-backup --confirm NO_EEPROM_BACKUP`。`flux-purr recover`：开发者必须显式提供本地 ELF 与 `--confirm ERASE`，只擦写 MCU internal Flash，保持 EEPROM 不变。所有三条命令均禁止 URL、自动选端口和端口替换。
 - `flux-purr monitor`：读取 bounded event backlog，不拥有长期未释放 lease。
 - `flux-purr hardware available|recent|list|save|forget|path`：管理用户级 USB 硬件记忆。
 - `flux-purr usb-port show|set`：查看或保存默认 USB serial port。
@@ -234,7 +234,7 @@
 - Given live 模式没有选中真实目标，When 打开 Dashboard、Settings 或 Update，Then 主工作区仍显示全宽设备选择页，不显示 Dashboard/Settings/Update 内容，不显示右侧全局日志列；WiFi、Web Serial 与 Bridge 三种新增卡片保持同一行，点击任一新增卡片进入 Add device 页面并触发对应新增动作。
 - Given Add device 页面选择 Bridge，When operator 尚未选择路径和具体 DEVD target，Then 页面保持 Add Device 且顶部目标不得切换为 pending `Native bridge`。桥接面板只显示自身的发现、候选选择、连接和错误状态；后台 target polling、旧 transport 错误与全局“最近操作”不得出现在该面板。When operator 在 USB 或 WiFi/LAN 路径选择一个具体候选并确认连接，Then 目标选择器才显示该真实 bridge target；LAN 候选确认必须在桥接面板内反馈，路径切换后旧候选立即失效。Given Bridge 选择流程仍未完成，When operator 改选 Web Serial 并连接成功，Then 目标选择器显示真实 Web Serial target，Dashboard 显示真实 runtime，而不是继续显示 `Native bridge / BRIDGE`。
 - Given Web Serial 直连 target，When 打开 Update 页，Then artifact verify、dry-run 与 real flash 仍因缺少 `flash` capability 被禁用或要求切换到 `devd`。
-- Given CLI 指向 `devd` mock target，When 执行 devices/status/runtime/wifi/flash dry-run/monitor，Then CLI 自动 lease、输出可读 human 文本或 `--json`，且 secret 被 redaction。
+- Given CLI 指向 `devd` mock target，When 执行 devices/status/runtime/wifi/monitor 以及保留的 artifact verify/dry-run 路径，Then CLI 自动 lease、输出可读 human 文本或 `--json`，且 secret 被 redaction；开发者 `flash` 不属于该 devd 路径。
 - Given CLI 或 Web live target 具备 PPS capability，When operator 设置 `10.4V / 2.50A` 手动 PPS 覆盖，Then runtime status 回显 `manualPpsEnabled=true`、`manualPpsMv=10400`、`manualPpsMa=2500`、capability 范围和更新后的 PD request/contract；When 清除覆盖，Then status 回到自动 PPS 控制。
 - Given 温度已从热失控回落到 `<420°C` 且告警未确认，When 任一 transport 读取 status，Then `faultAttentionPending=true`；When CLI、Web、devd HTTP 或 Web Serial 发送 acknowledge，Then 所有 transport 在下一次 status 中回显 `false`。
 - Given 温度仍为 `>=420°C`，When operator 发送 acknowledge，Then 绝对停热、热失控 fault-latch 与每 `1s` 提示保持；ack 只记录确认并解除 attention 对应的强制风扇锁定。
@@ -253,7 +253,7 @@
 - Given 用户保存默认 USB port，When 重启 `flux-purr-devd serve` 且未显式传入 serial port，Then daemon 只扫描该用户配置 port。
 - Given product release 发布，When 查看 release assets，Then Web、firmware、host-tools 与 release manifest 同挂一个 `vX.Y.Z` Release；manifest 可区分 unchanged component。
 - Given PR 收敛，When checks 完成，Then firmware、devd/CLI、release policy、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；WiFi provisioning 真机写入只通过 devd/USB smoke 覆盖临时 SSID set、clear、cancel、redacted event、clear 后最终 disabled readback，以及 cancel 后凭据保留的 device-confirmed idle readback。
-- Given HIL 验收，When 主人提供并授权确切 USB 端口，Then 通过 `flux-purr` CLI 经 `devd` 证明 identity/status、runtime write/readback/restore、artifact verify/dry-run、real flash、重启后 identity/status/events；未授权端口时不得创建 ready PR。
+- Given HIL 验收，When 主人提供并授权确切 USB 端口，Then 通过 `flux-purr` CLI 的本地 CBOR daemon-backed 命令证明 identity/status、runtime write/readback/restore、artifact verify；`update`、`flash` 与 `recover` 分别按各自的 bundle、ELF、EEPROM 备份和 internal-Flash 边界验收。未授权端口时不得执行任何真实写入。
 - Given LAN HIL 验收，When 主人提供已连接到可信 WiFi 的设备、同网 Chromium 与明确授权的 USB port，Then 验证 DHCP 地址或 MAC-derived hostname、mDNS TXT、WiFi Info 四位码、Chromium PNA pairing、无 token URL、重新加载后 token 恢复、authorized status/SSE、LAN lease conflict/expiry、runtime write/readback、离开 WiFi Info 后 code 立即失效，以及经 USB/devd token reset 后所有 LAN session 必须重新配对。未完成该闭环不得声称 WiFi-only LAN 控制已完成。
 
 ## 非功能性验收 / 质量门槛

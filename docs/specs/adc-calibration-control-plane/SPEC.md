@@ -78,7 +78,7 @@
 - VIN capture 必须把 `referenceVinMv` / `referenceVinVolts` 通过 `56 kOhm / 5.1 kOhm` 分压模型转换为 `expectedMv`。
 - `observedMv` 可由固件当前 raw ADC 读数填充；调试路径可显式传入 `observedMv` / `expectedMv`。
 - 导入/导出必须以完整 calibration state 为单位，包含共享样本、A/B 槽位与当前激活槽位。
-- 样本操作、槽位编辑和激活槽位切换都必须立即写入设备持久化后端；不存在额外 preview/apply 层。固件优先使用 EEPROM，EEPROM 不可达时使用 ESP flash fallback。
+- 样本操作、槽位编辑和激活槽位切换都必须立即写入设备持久化后端；不存在额外 preview/apply 层。固件只使用 EEPROM；EEPROM 不可达时进入 `EEPROM_REQUIRED`，不得使用 ESP Flash fallback。
 - 运行时 ADC 修正必须统一读取当前 `activeSlot` 对应的 `gain + offset`。
 - `Status` / `runtime_config` 必须暴露当前 calibration mode live state：`mode`、`ppsEnabled`、`ppsMv`、`ppsMa`、`heaterEnabled`、`targetAdcMv`、`stable`、`stabilityErrorMv`、`error` 与 `job`。其中 `ppsMa` 只作为状态读数暴露，不作为 owner-facing 校准控制输入。
 - 默认 `web_serial` 产品固件的 `Status.adcDiagnostics` 必须作为只读诊断契约公开 ADC calibration source、eFuse version、6 dB attenuation、init/reference code、reference mV、RTD 12-bit code mean/min/max/spread 和 VIN 12-bit code mean；Web 不需要展示该对象。ADC conversion 与温度/VIN 计算不得依赖这些 USB 遥测存储；未编译 `web_serial` 时不得保留对其 atomics 或 wire types 的引用。

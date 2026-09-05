@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from functools import cache
 import hashlib
 import json
 import os
@@ -40,8 +39,6 @@ MD5 = re.compile(r"^[0-9a-f]{32}$")
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 BUILD_ID = re.compile(r"^[0-9a-f]{16,64}$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
-MIGRATION_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-MIGRATIONS_PATH = Path(__file__).resolve().parents[2] / "docs/specs/web-firmware-install-recovery/contracts/migrations.json"
 
 
 class CatalogError(RuntimeError):
@@ -110,37 +107,21 @@ def require_exact_keys(value: dict[str, Any], keys: set[str], label: str) -> Non
         raise CatalogError(f"{label} contains missing or unknown fields")
 
 
-@cache
-def allowed_migration_ids() -> set[str]:
-    try:
-        registry = json.loads(MIGRATIONS_PATH.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise CatalogError("firmware migration registry cannot be read") from error
-    migrations = registry.get("migrations") if isinstance(registry, dict) else None
-    if not isinstance(migrations, list):
-        raise CatalogError("firmware migration registry is invalid")
-    ids = {item.get("id") for item in migrations if isinstance(item, dict)}
-    if any(not isinstance(item, str) or not MIGRATION_ID.fullmatch(item) for item in ids):
-        raise CatalogError("firmware migration registry contains an invalid ID")
-    return ids
-
-
 def validate_bundle_manifest(manifest: Any, images: dict[str, bytes], path: Path) -> dict[str, str]:
     if not isinstance(manifest, dict):
         raise CatalogError(f"firmware bundle manifest is invalid: {path.name}")
     require_exact_keys(
         manifest,
-        {"schemaVersion", "mediaType", "identity", "target", "layout", "segments", "migrations"},
+        {"schemaVersion", "mediaType", "identity", "target", "layout", "segments"},
         "firmware bundle manifest",
     )
-    if manifest.get("schemaVersion") != 1 or manifest.get("mediaType") != BUNDLE_MEDIA_TYPE:
+    if manifest.get("schemaVersion") != 2 or manifest.get("mediaType") != BUNDLE_MEDIA_TYPE:
         raise CatalogError(f"firmware bundle manifest header is unsupported: {path.name}")
 
     identity = manifest["identity"]
     target = manifest["target"]
     layout = manifest["layout"]
     segments = manifest["segments"]
-    migrations = manifest["migrations"]
     if not isinstance(identity, dict) or not isinstance(target, dict) or not isinstance(layout, dict):
         raise CatalogError(f"firmware bundle manifest is incomplete: {path.name}")
     require_exact_keys(identity, {"version", "sourceSha", "buildId", "channel"}, "firmware bundle identity")
@@ -208,14 +189,6 @@ def validate_bundle_manifest(manifest: Any, images: dict[str, bytes], path: Path
             raise CatalogError(f"firmware bundle segment does not match its manifest: {path.name}")
     if layout["partitionTableSha256"] != segments[1]["sha256"]:
         raise CatalogError(f"firmware bundle layout hash does not match partition table: {path.name}")
-    if (
-        not isinstance(migrations, list)
-        or len(migrations) > 8
-        or len(set(migrations)) != len(migrations)
-        or any(not isinstance(item, str) or not MIGRATION_ID.fullmatch(item) for item in migrations)
-        or any(item not in allowed_migration_ids() for item in migrations)
-    ):
-        raise CatalogError(f"firmware bundle migrations are invalid: {path.name}")
     return {"version": version, "sourceSha": source_sha, "buildId": build_id, "channel": channel}
 
 
@@ -458,11 +431,29 @@ def stage_catalog(args: argparse.Namespace) -> dict[str, object]:
         }
         manifest = staging_root / "releases-manifest.json"
         manifest.write_text(json.dumps(rendered, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        integrity = {
+            "schemaVersion": 1,
+            "bundles": [
+                {
+                    "version": entry.version,
+                    "sourceSha": entry.source_sha,
+                    "buildId": entry.build_id,
+                    "channel": entry.channel,
+                    "hardwareProfile": "ESP32-S3FH4R2",
+                    "bundleSha256": entry.bundle_sha256,
+                }
+                for entry in entries
+                if entry.source == "release" and entry.channel in {"stable", "rc"}
+            ],
+        }
+        integrity_manifest = staging_root / "firmware-integrity-catalog.json"
+        integrity_manifest.write_text(json.dumps(integrity, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         if releases_root.exists():
             shutil.rmtree(releases_root)
         if staging_releases.exists():
             shutil.move(str(staging_releases), str(releases_root))
         shutil.copy2(manifest, output_root / "releases-manifest.json")
+        shutil.copy2(integrity_manifest, output_root / "firmware-integrity-catalog.json")
     return rendered
 
 

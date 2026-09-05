@@ -83,6 +83,17 @@ type DevFirmwareProxyIndex = {
     releaseCount: number
     releases: DevFirmwareArtifact[]
   }
+  integrityCatalog: {
+    schemaVersion: 1
+    bundles: Array<{
+      version: string
+      sourceSha: string
+      buildId: string
+      channel: 'stable' | 'rc'
+      hardwareProfile: 'ESP32-S3FH4R2'
+      bundleSha256: string
+    }>
+  }
   bundles: Map<string, Uint8Array>
 }
 
@@ -444,6 +455,22 @@ function devFirmwarePlugin(): Plugin {
         releaseCount: selected.length,
         releases: selected.map((candidate) => candidate.entry),
       },
+      integrityCatalog: {
+        schemaVersion: 1,
+        bundles: selected
+          .filter((candidate) => candidate.entry.source === 'release')
+          .filter(
+            (candidate) => candidate.entry.channel === 'stable' || candidate.entry.channel === 'rc'
+          )
+          .map((candidate) => ({
+            version: candidate.entry.version,
+            sourceSha: candidate.entry.sourceSha,
+            buildId: candidate.entry.buildId,
+            channel: candidate.entry.channel as 'stable' | 'rc',
+            hardwareProfile: candidate.entry.target,
+            bundleSha256: candidate.entry.bundleSha256,
+          })),
+      },
       bundles: new Map(selected.map((candidate) => [candidate.entry.assetPath, candidate.bytes])),
     }
   }
@@ -508,6 +535,12 @@ function devFirmwarePlugin(): Plugin {
             response.statusCode = 200
             response.setHeader('Content-Type', 'application/json; charset=utf-8')
             response.end(JSON.stringify(cache.index.manifest))
+            return
+          }
+          if (requestPath === '/firmware/firmware-integrity-catalog.json') {
+            response.statusCode = 200
+            response.setHeader('Content-Type', 'application/json; charset=utf-8')
+            response.end(JSON.stringify(cache.index.integrityCatalog))
             return
           }
           const bundle = cache.index.bundles.get(requestPath.slice(1))

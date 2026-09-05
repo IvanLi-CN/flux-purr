@@ -197,7 +197,7 @@ describe('Browser ROM connection', () => {
 
     await expect(
       preflightBrowserLoader(loader as never, {} as ValidatedFirmwareBundle, 'install_recovery')
-    ).resolves.toEqual({ sourcePartitionTableSha256: null, configCopy: null })
+    ).resolves.toEqual({ sourcePartitionTableSha256: null })
     expect(calls).toEqual(['flash-size', 'features', 'security', 'stub'])
   })
 
@@ -240,11 +240,10 @@ describe('Browser ROM connection', () => {
 })
 
 describe('browser layout and configuration preflight', () => {
-  const bundle = (partitionTableSha256: string, migrationIds: string[] = []) =>
+  const bundle = (partitionTableSha256: string) =>
     ({
       manifest: {
         layout: { partitionTableSha256 },
-        migrations: migrationIds,
       },
     }) as ValidatedFirmwareBundle
 
@@ -257,7 +256,7 @@ describe('browser layout and configuration preflight', () => {
       bundle(hash),
       'update'
     )
-    expect(result).toEqual({ sourcePartitionTableSha256: hash, configCopy: null })
+    expect(result).toEqual({ sourcePartitionTableSha256: hash })
   })
 
   it('blocks an unknown source layout', async () => {
@@ -267,14 +266,14 @@ describe('browser layout and configuration preflight', () => {
         bundle('sha256:not-the-source'),
         'update'
       )
-    ).rejects.toThrow('no declared supported migration')
+    ).rejects.toThrow('does not match the bundle layout')
   })
 
   it('does not inspect a source layout for install or recovery', async () => {
     const readFlash = () => Promise.reject(new Error('must not read'))
     await expect(
       preflightBrowserLayout({ readFlash } as never, bundle('sha256:target'), 'install_recovery')
-    ).resolves.toEqual({ sourcePartitionTableSha256: null, configCopy: null })
+    ).resolves.toEqual({ sourcePartitionTableSha256: null })
   })
 })
 

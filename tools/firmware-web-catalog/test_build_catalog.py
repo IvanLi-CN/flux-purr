@@ -38,7 +38,7 @@ def write_bundle(path: Path, *, version: str, channel: str, source_sha: str) -> 
 
     partition = segment("partition-table", "images/partition-table.bin", 0x8000, partition_table)
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "mediaType": "application/vnd.flux-purr.firmware-bundle+zip",
         "identity": {
             "version": version,
@@ -64,7 +64,6 @@ def write_bundle(path: Path, *, version: str, channel: str, source_sha: str) -> 
             partition,
             segment("factory-app", "images/factory-app.bin", 0x10000, factory_app),
         ],
-        "migrations": [],
     }
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
         archive.writestr("manifest.json", json.dumps(manifest))
@@ -104,6 +103,10 @@ class BuildFirmwareCatalogTest(unittest.TestCase):
             self.assertTrue(entry["assetPath"].startswith("firmware/releases/local-"))
             copied = root / "web-public-firmware" / entry["assetPath"].removeprefix("firmware/")
             self.assertTrue(copied.is_file())
+            integrity = json.loads(
+                (root / "web-public-firmware" / "firmware-integrity-catalog.json").read_text()
+            )
+            self.assertEqual(integrity, {"schemaVersion": 1, "bundles": []})
 
     def test_current_release_overrides_matching_remote_tag_and_preserves_other_releases(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -150,6 +153,11 @@ class BuildFirmwareCatalogTest(unittest.TestCase):
             self.assertEqual(rendered["releaseCount"], 2)
             self.assertEqual([entry["version"] for entry in rendered["releases"]], ["1.4.0", "1.3.0"])
             self.assertEqual(rendered["releases"][0]["releaseTag"], "v1.4.0")
+            integrity = json.loads(
+                (root / "web-public-firmware" / "firmware-integrity-catalog.json").read_text()
+            )
+            self.assertEqual(integrity["schemaVersion"], 1)
+            self.assertEqual([entry["version"] for entry in integrity["bundles"]], ["1.4.0", "1.3.0"])
 
     def test_paginates_until_github_returns_an_empty_page(self) -> None:
         responses = [[{"tag_name": "v1"}], [{"tag_name": "v2"}], []]

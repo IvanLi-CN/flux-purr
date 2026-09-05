@@ -14,15 +14,15 @@
 
 - 提供“更新现有 Flux Purr”和“安装或恢复”两个一等任务。
 - 默认优先 devd，不可用时允许桌面 Chromium 在 HTTPS/localhost 上使用 Web Serial。
-- 两条引擎共享唯一 `.fluxpurr-fw`、layout、migration、安全、状态机和结果合同。
+- 两条引擎共享唯一的 `.fluxpurr-fw`、layout、完整性清单、状态机和结果合同。
 - 允许安装到空片或非 Flux Purr 固件目标；恢复流程不询问、推断或限制 PCB/加热器连接状态。
-- 对更新流程保全 `flux_cfg`，并使 EEPROM 始终独立于 MCU internal-flash 擦写。
+- 更新流程不承载 MCU 配置迁移，EEPROM 始终独立于 MCU internal-flash 擦写。
 
 ### Non-goals
 
 - 不做 A/B、OTA rollback、断点续烧、静默重试或从未知候选中自动选择重新枚举的端口。
 - Web 不接受裸 BIN、ELF、手工地址、任意 ESP32 板型或 LAN 烧录。
-- 不引入固件签名、证书或“官方签名”措辞。
+- 不接受未命中发布完整性清单的 bundle 或将本地文件视为免验证来源。
 - 不让 `mcu-agentd` 参与实现、测试或验收。
 
 ## 范围（Scope）
@@ -36,7 +36,7 @@
 
 ### Out of scope
 
-- 旧 devd-only ELF/raw CLI 开发者接口的移除。
+- `flux-purr` CLI 的一般用户 update、开发者 flash 和 recover 入口；这些接口由 `firmware-update-and-developer-flash` topic 定义。
 - 未经主人精确端口授权的任何串口、复位、擦除或烧录操作。
 - GitHub Release 正式发布与 PR merge。
 
@@ -44,18 +44,18 @@
 
 ### MUST
 
-- Bundle 必须符合 `contracts/firmware-bundle.schema.json`，ZIP 解压前后均不得超过 8 MiB，且严格只含一个 manifest 和 bootloader、partition-table、factory-app 三段镜像。
+- Bundle 必须符合 `contracts/firmware-bundle.schema.json`，ZIP 解压前后均不得超过 8 MiB，且严格只含 manifest 与 bootloader、partition-table、factory-app 三段镜像。一般用户 update 还必须命中随 host-tools/Web 发布的 `firmware-integrity-catalog.json`；不使用签名字段、签名文件或签名服务。
 - 目标固定为 ESP32-S3FH4R2、4 MiB Flash、2 MiB PSRAM、DIO/40 MHz；段地址固定为 `0x0`、`0x8000`、`0x10000`，边界由 `firmware/flash-layout.json` 定义。
 - 每段声明实际长度、SHA-256 和 ESP ROM MD5；未知字段、路径穿越、重复、缺段、重叠、越界或 hash 不一致均 fail closed。
-- Browser 与 devd 只接受 registry 中声明的 migration ID；update 的当前 partition-table SHA-256 必须精确匹配 migration source。
-- update 仅适用于可验证 Flux Purr runtime；烧录前必须停热并取得有效温度 `<=40°C`，保全、迁移并逐字验证 `flux_cfg`。
+- update 的当前 partition-table SHA-256 必须精确匹配 bundle layout；不存在配置复制或迁移路径。
+- update 仅适用于可验证 Flux Purr runtime；烧录前必须停热并取得有效温度 `<=40°C`。它不得保全、迁移或验证 MCU 内部配置分区。
 - install/recovery 允许无 Flux 身份并全擦 MCU internal Flash；不得提出、推断或执行任何 PCB/加热器物理连接确认或限制。
 - `get_install_status` 的 `setupReason` 在 commissioning 已完成时可以为 `null`；devd 必须按可选字段解码。固件维护目标必须保留已授权 native serial candidate，即使运行时 identity 的 capability 列表不包含 `flash`。
 - Secure Boot、Flash Encryption、Secure Download Mode、未知安全响应、非 ESP32-S3 或非 4 MiB Flash 一律阻止。
 - 写入中断后不得续传或静默重试；重新执行必须从完整 preflight 开始。
 - preflight 与 execution 必须使用独立的阶段集合、operation ID、百分比和终态。preflight 通过可以显示 100%，但不得推进 execution；用户开始写入时 execution 必须从 0% 开始，且只有写入校验与运行时验证均成功的 `verified` 才能显示 execution 100%。
 - devd update preflight 必须在进入 ROM 前从目标运行时重新读取 identity 与 status；不得使用发现缓存代替当前版本、停热和温度事实。独立 ROM preflight 一旦成功建立 ROM 连接，无论探测结论通过或阻止，都必须在返回前复位目标回到 runtime。
-- devd 的单次烧录事务只能在开始时进入 ROM 一次，并在全部验证完成后复位到 runtime 一次；中间的擦除、段写入、ROM MD5 与 `flux_cfg` 保全命令必须保持 `no-reset`，不得为每个子命令复位目标。
+- devd 的单次烧录事务只能在开始时进入 ROM 一次，并在全部验证完成后复位到 runtime 一次；中间的擦除、段写入与 ROM MD5 必须保持 `no-reset`，不得为每个子命令复位目标。
 - `verified` 必须同时满足段写入/ROM MD5 验证与 runtime identity/layout/install-status 验证；重连超时返回 `write_complete_unverified`。
 - 失败报告只能由用户下载到本地，不自动上传，且不得包含配置原始字节、凭据或任意主机路径。
 - Browser 预检必须在本地记录用户点击、已授权端口复用或 `requestPort()` 发起、端口选择或拒绝、运行时连接、ROM 连接和终态的有序追踪；该追踪必须写入本地诊断报告，且不得包含配置原始字节、凭据或任意主机路径。
@@ -69,21 +69,17 @@
 
 - 固件包选择必须是单一入口，打开组件库对话框后在“发布版本”和“本地文件”之间切换；发布版本采用受视口约束的左右两栏，左栏仅承载 RC opt-in、当前选择与说明，右栏通过共享 `ScrollArea` 呈现独立可滚动的版本列表。发布对话框高度为 `min(36rem, 100dvh - 4rem)`，版本列表必须占满 tabs 与公共操作区之间的全部可用高度，列表不得按稳定版或候选版分组，必须按 `publishedAt` 倒序展示；非稳定版本必须显示 `RC` chip，默认选中最新 stable。本地文件由用户信任但不豁免校验，且不把发布渠道本身伪装成可写入固件。
 - 正式 release 构建必须在服务器侧分页读取 GitHub Releases REST API 的所有非 draft 版本，以 `Accept: application/octet-stream` 下载并严格验证有效 `.fluxpurr-fw`，再写入 Web 静态包中的同源目录与 `firmware/releases-manifest.json`。当前 release bundle 必须在 GitHub Release 创建前一并写入该目录。
-- 本地 Vite 开发服务必须接管固定 `/firmware/**`，将已打包 release、服务器端 GitHub Releases 结果和本地产物合并为一份同源目录；本地产物由 `bun run build:firmware:web` 直接原子替换默认 `firmware/target/flux-purr-web-artifacts/flux-purr-current.fluxpurr-fw`，Vite 必须监听该目录、只暴露这一个当前本地产物、仅在进程内缓存并响应原字节，绝不拷贝到 `web/public` 或其他目录。优先级依次为已打包 release、GitHub release、本地产物。以 `sourceSha + buildId` 相同的 artifact 冲突时，后者覆盖前者。GitHub 刷新失败时仍返回已打包和本地产物，不把失败传给 Browser。
+- 本地 Vite 开发服务必须接管固定 `/firmware/**`，只提供已打包或服务器端验证过完整性清单的 release bundle 同源目录。开发构建的本地 ELF 不得被包装、缓存或暴露为一般用户 bundle；它只能走开发者 `flash`。GitHub 刷新失败时仍返回已打包的已校验 release，不把失败传给 Browser。
 - devd 可用时自动选中，但在操作开始前允许切换 Browser；开始后 transport 冻结。
 - Browser 写入完成后，ESP32-S3 原生 USB Serial/JTAG 必须使用 esptool-js `UsbJtagSerialReset` 等价序列复位到运行时；不得以 UART RTS `hard_reset` 代替。Browser manual BOOT/reset fallback 必须给出可操作状态，而非自动猜测端口变化。
-
-### COULD
-
-- 后续增加签名版本的 bundle schema，但不得改变 v1 未签名 bundle 的语义。
 
 ## 功能与行为规格（Functional/Behavior Spec）
 
 ### Core flows
 
-统一状态机：`artifact -> transport -> rom_reset -> chip_flash_security -> layout_config -> preflight -> erase? -> write_segments -> rom_md5 -> reset -> runtime_reconnect -> runtime_verify`。
+统一状态机：`artifact -> transport -> rom_reset -> chip_flash_security -> preflight -> erase? -> write_segments -> rom_md5 -> reset -> runtime_reconnect -> runtime_verify`。
 
-- Update：要求已识别 runtime；停热与温度门禁通过后保存 `flux_cfg`，按同布局或声明 migration 写入三段，恢复并逐字验证配置，最后验证目标 identity/install status。
+- Update：要求已识别 runtime；停热与温度门禁通过后写入三段，最后验证目标 identity/install status。MCU 内部配置迁移不属于该流程。
 - Install/recovery：直接从 ROM security/chip/flash preflight 开始，全擦 internal Flash 后写三段；EEPROM 不属于擦除范围；首次启动进入 setup-required，heater 保持 locked。
 - 传输选择：devd health 可用时默认 devd；否则符合条件的 Chromium 提供 Browser；LAN 永不提供 flash capability。
 - Browser ROM/stub 顺序：Browser 先通过 ROM bootloader 完成芯片、Flash package 和 `GET_SECURITY_INFO` 安全预检；只有通过后才上传 esptool stub 读取布局或写入。ESP32-S3 原生 USB Serial/JTAG 的 stub 启动必须使用 `ESP_MEM_END` 的 2 秒交接超时，写后先执行 `hard_reset`，再按 `D0|R0|W50|D1|R0|W50|D0|R1|W50|D0|R0|W250` 复位回应用，并释放 ROM transport 后才进入运行时验证。写入必须消费同一连接的成功预检状态，不能重新在 stub 状态探测安全信息或绕过 ROM 预检。
@@ -118,11 +114,11 @@
 - [`contracts/device-install-status.md`](./contracts/device-install-status.md)
 - [`contracts/firmware-bundle.schema.json`](./contracts/firmware-bundle.schema.json)
 - [`contracts/firmware-release-catalog.schema.json`](./contracts/firmware-release-catalog.schema.json)
-- [`contracts/migrations.json`](./contracts/migrations.json)
+- [`contracts/firmware-integrity-catalog.schema.json`](./contracts/firmware-integrity-catalog.schema.json)
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 合法与恶意 ZIP fixtures，When 两个 validator 校验，Then 只接受三段完整、hash 正确、无路径风险且不超过 8 MiB 的 bundle。
+- Given 合法与恶意 ZIP fixtures，When 两个 validator 校验，Then 只接受四文件、三段完整、hash 正确、无路径风险且不超过 8 MiB 的 bundle；一般用户 update 还必须命中完整性清单。
 - Given devd 可用或不可用，When 打开固件工作台，Then 默认选择 devd 或回退 Browser，并可在 preflight 前手动切换。
 - Given 空片或外来固件 ESP32-S3FH4R2，When 选择 install/recovery，Then 不要求 Flux 身份，也不存在 PCB/heater 物理确认限制。
 - Given update 目标温度无效或高于 40C，When preflight，Then 写入被阻止且 heater 已保持停止。
@@ -157,7 +153,7 @@
 - `bun run check:web`
 - `bun run check:web:build`
 - `bun run check:e2e`
-- bundle、security、migration、fake SerialPort 和 fake espflash fixture suites。
+- bundle、security、EEPROM-boundary、fake SerialPort 和 fake espflash fixture suites。
 - ui_demo desktop 视觉证据。
 
 ## 文档更新（Docs to Update）
@@ -175,34 +171,24 @@
 
 非 Demo 入口支持 `?workspace=firmware` 直达固件维护工作区；本地构建包由同源目录提供，页面不会请求或操作浏览器串口直到用户明确运行预检。
 
-PR: none
 ![设备控制工作区](./assets/firmware-workspace-device.png)
 
-PR: none
 ![固件维护发布版本选择器](./assets/firmware-workspace-firmware-release-picker.png)
 
-PR: none
 ![固件维护统一滚动版本列表](./assets/firmware-workspace-firmware-scroll-area.png)
 
-PR: none
 ![固件维护本地文件选择器](./assets/firmware-workspace-firmware-local-picker.png)
 
-PR: none
 ![同源发布目录选择器](./assets/firmware-release-catalog-same-origin-desktop.png)
 
-PR: none
 ![固件维护预检等待态](./assets/firmware-workspace-browser-preflight-ui-demo.png)
 
-PR: none
 ![固件维护预检通过态](./assets/firmware-workspace-browser-preflight-passed-ui-demo.png)
 
-PR: none
 ![固件维护执行完成态](./assets/firmware-workspace-browser-execution-verified-ui-demo.png)
 
-PR: none
 ![固件事务日志跟随最新记录](./assets/firmware-transaction-log-scroll.png)
 
-PR: none
 ![固件事务日志历史滚动与返回最新入口](./assets/firmware-transaction-log-history.png)
 
 ## 风险 / 开放问题 / 假设
@@ -210,6 +196,11 @@ PR: none
 - 每次 HIL 都要求主人提供精确端口与全擦授权；该授权不允许自动发现、重新枚举或切换端口。devd 与 Browser HIL 分别验收。
 - Web Serial 正式支持 HTTPS/localhost 下桌面 Chrome 与 Edge；其他浏览器只能使用可用 devd。
 - stable 为默认源，RC opt-in；发布版本在 Browser 中始终通过同源静态目录读取，本地文件由用户信任但不豁免校验。
+
+## Related ADRs
+
+- [`../../adr/0007-firmware-update-and-developer-flash-boundaries.md`](../../adr/0007-firmware-update-and-developer-flash-boundaries.md)
+- [`../../adr/0008-eeprom-only-configuration-persistence.md`](../../adr/0008-eeprom-only-configuration-persistence.md)
 
 ## 参考（References）
 

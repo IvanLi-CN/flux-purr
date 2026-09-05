@@ -5,7 +5,6 @@ export const PREFLIGHT_STAGES = [
   'transport',
   'rom_reset',
   'chip_flash_security',
-  'layout_config',
   'preflight',
 ] as const satisfies readonly FirmwareStage[]
 

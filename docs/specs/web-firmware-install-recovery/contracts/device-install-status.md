@@ -17,10 +17,10 @@ USB JSONL adds `get_install_status`; devd may proxy it but LAN does not gain fla
 }
 ```
 
-- `persistenceSource`: `eeprom | flux_cfg | defaults`
-- `recordState`: `valid | blank | corrupt | incompatible`; when neither backend yields a record, current startup distinguishes blank from an incompatible EEPROM record.
-- `setupReason`: `blank_persistence | corrupt_persistence | explicit_reset | sensor_unready | calibration_required | null`
+- `persistenceSource`: `eeprom | none`
+- `recordState`: `valid | blank | corrupt | incompatible | unavailable`; only EEPROM contributes persistent configuration.
+- `setupReason`: `blank_persistence | corrupt_persistence | eeprom_required | explicit_reset | sensor_unready | calibration_required | null`
 - Old valid records without `commissioningRequired` decode as `false`.
-- Blank/corrupt persistence and explicit reset materialize safe defaults with `commissioningRequired=true` and `heaterLocked=true`.
+- A blank writable EEPROM may be initialized from the approved hardware profile. Corrupt, incompatible, or unavailable EEPROM enters `EEPROM_REQUIRED` with `commissioningRequired=true` and `heaterLocked=true`; MCU Flash is never a persistence source.
 - `complete_setup` clears the flag only after existing sensor and calibration gates pass.
-- High-level `reset_persistence` verifies EEPROM and `flux_cfg`, then returns setup-required. Raw bytes never enter logs or diagnostics.
+- High-level `reset_persistence` verifies EEPROM only, then returns setup-required. Raw bytes never enter logs or diagnostics.

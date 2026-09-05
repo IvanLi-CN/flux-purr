@@ -16,7 +16,8 @@ pub const MAX_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
 pub const LAYOUT_ID: &str = "flux-purr.esp32s3fh4r2.factory";
 pub const LAYOUT_VERSION: u32 = 1;
 pub const CURRENT_PARTITION_TABLE_SHA256: &str =
-    "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e";
+    "sha256:1028e62176495136a0180a3f49c291dddec8d4fa7cab5cda72edabafa466013b";
+pub const INTEGRITY_CATALOG_FILE: &str = "firmware-integrity-catalog.json";
 const REQUIRED_PATHS: [&str; 4] = [
     "images/bootloader.bin",
     "images/factory-app.bin",
@@ -40,6 +41,8 @@ pub enum BundleError {
     MissingEntry(&'static str),
     #[error("bundle contract violation: {0}")]
     Contract(String),
+    #[error("firmware integrity catalog violation: {0}")]
+    IntegrityCatalog(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,7 +54,6 @@ pub struct FirmwareBundleManifest {
     pub target: BundleTarget,
     pub layout: BundleLayout,
     pub segments: Vec<BundleSegment>,
-    pub migrations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,48 +119,22 @@ pub struct FirmwareBundle {
     pub images: HashMap<String, Vec<u8>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct MigrationRegistry {
-    schema_version: u32,
-    target_layout_id: String,
-    target_layout_version: u32,
-    target_partition_table_sha256: String,
-    migrations: Vec<Migration>,
+pub struct FirmwareIntegrityCatalog {
+    pub schema_version: u32,
+    pub bundles: Vec<FirmwareIntegrityCatalogEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Migration {
-    id: String,
-    source_partition_table_sha256: String,
-    copies: Vec<MigrationCopy>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct MigrationCopy {
-    source_address: u64,
-    target_address: u64,
-    length: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct FlashLayout {
-    partitions: HashMap<String, LayoutPartition>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct LayoutPartition {
-    address: u64,
-    length: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConfigCopyPlan {
-    pub source_address: u64,
-    pub target_address: u64,
-    pub length: u64,
+pub struct FirmwareIntegrityCatalogEntry {
+    pub version: String,
+    pub source_sha: String,
+    pub build_id: String,
+    pub channel: BundleChannel,
+    pub hardware_profile: String,
+    pub bundle_sha256: String,
 }
 
 pub fn read_bundle(path: &Path) -> Result<FirmwareBundle, BundleError> {
@@ -168,6 +144,74 @@ pub fn read_bundle(path: &Path) -> Result<FirmwareBundle, BundleError> {
     }
     let bytes = std::fs::read(path)?;
     read_bundle_bytes(&bytes)
+}
+
+pub fn read_integrity_catalog(path: &Path) -> Result<FirmwareIntegrityCatalog, BundleError> {
+    let bytes = std::fs::read(path)?;
+    let catalog: FirmwareIntegrityCatalog = serde_json::from_slice(&bytes)
+        .map_err(|error| BundleError::IntegrityCatalog(error.to_string()))?;
+    validate_integrity_catalog(&catalog)?;
+    Ok(catalog)
+}
+
+pub fn verify_bundle_against_catalog(
+    bundle: &FirmwareBundle,
+    catalog: &FirmwareIntegrityCatalog,
+) -> Result<(), BundleError> {
+    validate_integrity_catalog(catalog)?;
+    let expected = catalog
+        .bundles
+        .iter()
+        .find(|entry| entry.bundle_sha256 == bundle.bundle_sha256)
+        .ok_or_else(|| BundleError::IntegrityCatalog("bundle hash is not published".into()))?;
+    if expected.version != bundle.manifest.identity.version
+        || expected.source_sha != bundle.manifest.identity.source_sha
+        || expected.build_id != bundle.manifest.identity.build_id
+        || expected.channel != bundle.manifest.identity.channel
+        || expected.hardware_profile != bundle.manifest.target.package
+    {
+        return Err(BundleError::IntegrityCatalog(
+            "catalog metadata does not match bundle manifest".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_integrity_catalog(catalog: &FirmwareIntegrityCatalog) -> Result<(), BundleError> {
+    if catalog.schema_version != 1 || catalog.bundles.is_empty() {
+        return Err(BundleError::IntegrityCatalog(
+            "unsupported or empty catalog".into(),
+        ));
+    }
+    let mut hashes = HashSet::new();
+    for entry in &catalog.bundles {
+        if semver::Version::parse(&entry.version).is_err()
+            || entry.source_sha.len() != 40
+            || !entry
+                .source_sha
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || entry.build_id.len() < 16
+            || entry.build_id.len() > 64
+            || !entry
+                .build_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || entry.hardware_profile != "ESP32-S3FH4R2"
+            || !entry.bundle_sha256.starts_with("sha256:")
+            || entry.bundle_sha256.len() != 71
+            || !entry.bundle_sha256[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !hashes.insert(entry.bundle_sha256.as_str())
+            || matches!(entry.channel, BundleChannel::Local)
+        {
+            return Err(BundleError::IntegrityCatalog(
+                "invalid or duplicate catalog entry".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn read_bundle_bytes(bytes: &[u8]) -> Result<FirmwareBundle, BundleError> {
@@ -244,7 +288,7 @@ fn validate_manifest(
     manifest: &FirmwareBundleManifest,
     entries: &HashMap<String, Vec<u8>>,
 ) -> Result<(), BundleError> {
-    if manifest.schema_version != 1 || manifest.media_type != BUNDLE_MEDIA_TYPE {
+    if manifest.schema_version != 2 || manifest.media_type != BUNDLE_MEDIA_TYPE {
         return Err(BundleError::Contract(
             "unsupported schema or media type".into(),
         ));
@@ -352,104 +396,7 @@ fn validate_manifest(
             "partition table must be exactly 4 KiB".into(),
         ));
     }
-    let registry: MigrationRegistry = serde_json::from_str(include_str!(
-        "../../../docs/specs/web-firmware-install-recovery/contracts/migrations.json"
-    ))?;
-    if registry.schema_version != 1
-        || registry.target_layout_id != LAYOUT_ID
-        || registry.target_layout_version != LAYOUT_VERSION
-        || registry.target_partition_table_sha256 != CURRENT_PARTITION_TABLE_SHA256
-    {
-        return Err(BundleError::Contract(
-            "migration registry target is invalid".into(),
-        ));
-    }
-    let allowed: HashSet<&str> = registry
-        .migrations
-        .iter()
-        .map(|item| item.id.as_str())
-        .collect();
-    if manifest
-        .migrations
-        .iter()
-        .any(|id| !allowed.contains(id.as_str()))
-    {
-        return Err(BundleError::Contract(
-            "manifest names an unknown migration".into(),
-        ));
-    }
-    for migration in &registry.migrations {
-        if migration.source_partition_table_sha256 == CURRENT_PARTITION_TABLE_SHA256
-            || migration.copies.is_empty()
-            || migration.copies.iter().any(|copy| {
-                copy.length == 0
-                    || copy.source_address.saturating_add(copy.length) > 4 * 1024 * 1024
-                    || copy.target_address.saturating_add(copy.length) > 4 * 1024 * 1024
-            })
-        {
-            return Err(BundleError::Contract(
-                "migration registry entry is unsafe".into(),
-            ));
-        }
-    }
     Ok(())
-}
-
-pub fn source_partition_hash_supported(
-    source_hash: &str,
-    declared_migrations: &[String],
-) -> Result<bool, BundleError> {
-    if source_hash == CURRENT_PARTITION_TABLE_SHA256 {
-        return Ok(true);
-    }
-    let registry: MigrationRegistry = serde_json::from_str(include_str!(
-        "../../../docs/specs/web-firmware-install-recovery/contracts/migrations.json"
-    ))?;
-    Ok(registry.migrations.iter().any(|migration| {
-        migration.source_partition_table_sha256 == source_hash
-            && declared_migrations.iter().any(|id| id == &migration.id)
-    }))
-}
-
-pub fn config_copy_plan(
-    source_hash: &str,
-    declared_migrations: &[String],
-) -> Result<ConfigCopyPlan, BundleError> {
-    let layout: FlashLayout =
-        serde_json::from_str(include_str!("../../../firmware/flash-layout.json"))?;
-    let target = layout
-        .partitions
-        .get("flux_cfg")
-        .ok_or_else(|| BundleError::Contract("target layout has no flux_cfg partition".into()))?;
-    if source_hash == CURRENT_PARTITION_TABLE_SHA256 {
-        return Ok(ConfigCopyPlan {
-            source_address: target.address,
-            target_address: target.address,
-            length: target.length,
-        });
-    }
-    let registry: MigrationRegistry = serde_json::from_str(include_str!(
-        "../../../docs/specs/web-firmware-install-recovery/contracts/migrations.json"
-    ))?;
-    let migration = registry
-        .migrations
-        .iter()
-        .find(|migration| {
-            migration.source_partition_table_sha256 == source_hash
-                && declared_migrations.iter().any(|id| id == &migration.id)
-        })
-        .ok_or_else(|| BundleError::Contract("source layout has no declared migration".into()))?;
-    if migration.copies.len() != 1 {
-        return Err(BundleError::Contract(
-            "migration must define exactly one flux_cfg copy".into(),
-        ));
-    }
-    let copy = &migration.copies[0];
-    Ok(ConfigCopyPlan {
-        source_address: copy.source_address,
-        target_address: copy.target_address,
-        length: copy.length,
-    })
 }
 
 pub fn build_bundle(
@@ -458,7 +405,6 @@ pub fn build_bundle(
     bootloader: &[u8],
     partition_table: &[u8],
     factory_app: &[u8],
-    migrations: Vec<String>,
 ) -> Result<FirmwareBundle, BundleError> {
     if partition_table.len() > 0x1000 {
         return Err(BundleError::Contract(
@@ -489,7 +435,7 @@ pub fn build_bundle(
         ),
     ];
     let manifest = FirmwareBundleManifest {
-        schema_version: 1,
+        schema_version: 2,
         media_type: BUNDLE_MEDIA_TYPE.into(),
         identity,
         target: BundleTarget {
@@ -506,7 +452,6 @@ pub fn build_bundle(
             partition_table_sha256: CURRENT_PARTITION_TABLE_SHA256.into(),
         },
         segments: segments.to_vec(),
-        migrations,
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     let mut manifest_bytes = manifest_bytes;
@@ -580,8 +525,8 @@ mod tests {
         let bootloader = vec![0x11; 0x4000];
         let partition = include_bytes!("../../../firmware/partitions.bin");
         let app = vec![0x33; 0x4000];
-        build_bundle(&one, identity(), &bootloader, partition, &app, Vec::new()).unwrap();
-        build_bundle(&two, identity(), &bootloader, partition, &app, Vec::new()).unwrap();
+        build_bundle(&one, identity(), &bootloader, partition, &app).unwrap();
+        build_bundle(&two, identity(), &bootloader, partition, &app).unwrap();
         assert_eq!(std::fs::read(&one).unwrap(), std::fs::read(&two).unwrap());
         let parsed = read_bundle(&one).unwrap();
         assert_eq!(parsed.manifest.segments.len(), 3);
@@ -609,6 +554,43 @@ mod tests {
         assert!(matches!(
             read_bundle_bytes(bytes.get_ref()),
             Err(BundleError::UnsafeEntry(_))
+        ));
+    }
+
+    #[test]
+    fn integrity_catalog_requires_matching_release_identity_and_hash() {
+        let dir = tempdir().unwrap();
+        let bundle_path = dir.path().join("release.fluxpurr-fw");
+        let mut release_identity = identity();
+        release_identity.channel = BundleChannel::Stable;
+        release_identity.version = "1.2.3".into();
+        let bundle = build_bundle(
+            &bundle_path,
+            release_identity.clone(),
+            &[0x11; 0x100],
+            include_bytes!("../../../firmware/partitions.bin"),
+            &[0x33; 0x100],
+        )
+        .unwrap();
+        let catalog = FirmwareIntegrityCatalog {
+            schema_version: 1,
+            bundles: vec![FirmwareIntegrityCatalogEntry {
+                version: release_identity.version,
+                source_sha: release_identity.source_sha,
+                build_id: release_identity.build_id,
+                channel: release_identity.channel,
+                hardware_profile: "ESP32-S3FH4R2".into(),
+                bundle_sha256: bundle.bundle_sha256.clone(),
+            }],
+        };
+        verify_bundle_against_catalog(&bundle, &catalog).unwrap();
+
+        let mut tampered = catalog.clone();
+        tampered.bundles[0].bundle_sha256 =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        assert!(matches!(
+            verify_bundle_against_catalog(&bundle, &tampered),
+            Err(BundleError::IntegrityCatalog(_))
         ));
     }
 }
