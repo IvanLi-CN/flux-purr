@@ -11,9 +11,9 @@ use flux_purr_firmware::{
         DISPLAY_PHYSICAL_WIDTH, DisplayCanvas,
     },
     frontpanel::{
-        FanDisplayState, FrontPanelKeyMap, FrontPanelMenuItem, FrontPanelRawState, FrontPanelRoute,
-        FrontPanelRuntimeMode, FrontPanelUiState, HeaterLockReason, KeyEvent, KeyGesture,
-        RawFrontPanelKey,
+        DashboardPresentationState, FanDisplayState, FrontPanelKeyMap, FrontPanelMenuItem,
+        FrontPanelRawState, FrontPanelRoute, FrontPanelRuntimeMode, FrontPanelUiState,
+        HeaterLockReason, KeyEvent, KeyGesture, RawFrontPanelKey,
         render::{TemperaturePaletteId, render_frontpanel_ui_with_palette, temperature_palette},
     },
 };
@@ -31,6 +31,8 @@ enum PreviewPreset {
     DashboardFanRun,
     DashboardOvertempA,
     DashboardOvertempB,
+    DashboardInitializing,
+    DashboardInitialRtdFault,
     DashboardTemp,
     Menu,
     PresetTemp,
@@ -98,6 +100,8 @@ impl PreviewPreset {
             Self::DashboardFanRun => "dashboard-fan-run",
             Self::DashboardOvertempA => "dashboard-overtemp-a",
             Self::DashboardOvertempB => "dashboard-overtemp-b",
+            Self::DashboardInitializing => "dashboard-initializing",
+            Self::DashboardInitialRtdFault => "dashboard-initial-rtd-fault",
             Self::DashboardTemp => "dashboard-temp",
             Self::Menu => "menu",
             Self::PresetTemp => "preset-temp",
@@ -121,6 +125,8 @@ impl PreviewPreset {
             "dashboard-fan-run" => Some(Self::DashboardFanRun),
             "dashboard-overtemp-a" => Some(Self::DashboardOvertempA),
             "dashboard-overtemp-b" => Some(Self::DashboardOvertempB),
+            "dashboard-initializing" => Some(Self::DashboardInitializing),
+            "dashboard-initial-rtd-fault" => Some(Self::DashboardInitialRtdFault),
             "dashboard-temp" => Some(Self::DashboardTemp),
             "menu" => Some(Self::Menu),
             "preset-temp" => Some(Self::PresetTemp),
@@ -203,6 +209,16 @@ impl PreviewPreset {
             Self::DashboardOvertempB => {
                 let mut state = Self::DashboardOvertempA.build_state(None);
                 state.dashboard_warning_visible = false;
+                state
+            }
+            Self::DashboardInitializing => {
+                FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App)
+            }
+            Self::DashboardInitialRtdFault => {
+                let mut state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+                state.set_dashboard_presentation(DashboardPresentationState::InitialRtdFault);
+                state.heater_lock_reason = Some(HeaterLockReason::SensorFault);
+                state.dashboard_warning_visible = true;
                 state
             }
             Self::DashboardTemp => build_dashboard_temp_state(dashboard_temp_c.unwrap_or(25)),

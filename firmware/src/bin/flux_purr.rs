@@ -678,10 +678,10 @@ const CH224Q_RETRY_ATTEMPTS: u8 = 3;
 const CH224Q_RETRY_DELAY_MS: u64 = 50;
 #[cfg(target_arch = "xtensa")]
 const CH224Q_STATUS_POLL_ATTEMPTS: u8 = 40;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const CH224Q_STATUS_POLL_DELAY_MS: u64 = 100;
-#[cfg(target_arch = "xtensa")]
-const STATUS_LIGHT_BOOT_REFRESH_MS: u64 = 50;
+#[cfg(any(target_arch = "xtensa", test))]
+const PD_WAIT_SERVICE_INTERVAL_MS: u64 = 20;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3086,7 +3086,9 @@ fn next_heater_lock_reason(
     thermal_model_heater_allowed: bool,
     pd_contract_ready: bool,
 ) -> Option<HeaterLockReason> {
-    if heater_fault == Some(HeaterFaultReason::OverTemp) {
+    if is_sensor_fault(heater_fault) {
+        Some(HeaterLockReason::SensorFault)
+    } else if heater_fault == Some(HeaterFaultReason::OverTemp) {
         Some(HeaterLockReason::HardOvertemp)
     } else if cooling_disabled_lock_latched {
         Some(HeaterLockReason::CoolingDisabledOvertemp)
@@ -3176,7 +3178,12 @@ fn update_runtime_display_temperature(
 ) -> bool {
     *latest_display_temp_c = temp_c;
     *latest_display_temp_i16 = temp_c_to_whole_c(temp_c);
-    sync_runtime_temperature_ui(ui_state, *latest_display_temp_i16, temp_c_to_deci_c(temp_c))
+    let mut needs_redraw = ui_state.set_dashboard_presentation(
+        flux_purr_firmware::frontpanel::DashboardPresentationState::Ready,
+    );
+    needs_redraw |=
+        sync_runtime_temperature_ui(ui_state, *latest_display_temp_i16, temp_c_to_deci_c(temp_c));
+    needs_redraw
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -12968,7 +12975,7 @@ async fn await_pd_ready(
                 {
                     return Some(observation);
                 }
-                EmbassyTimer::after_millis(20).await;
+                EmbassyTimer::after_millis(PD_WAIT_SERVICE_INTERVAL_MS).await;
             }
             None
         }
@@ -12978,9 +12985,9 @@ async fn await_pd_ready(
 
 #[cfg(target_arch = "xtensa")]
 async fn wait_for_ch224q_status_poll(refresh_boot_light: &mut impl FnMut()) {
-    for _ in 0..(CH224Q_STATUS_POLL_DELAY_MS / STATUS_LIGHT_BOOT_REFRESH_MS) {
+    for _ in 0..(CH224Q_STATUS_POLL_DELAY_MS / PD_WAIT_SERVICE_INTERVAL_MS) {
         refresh_boot_light();
-        EmbassyTimer::after_millis(STATUS_LIGHT_BOOT_REFRESH_MS).await;
+        EmbassyTimer::after_millis(PD_WAIT_SERVICE_INTERVAL_MS).await;
     }
 }
 
@@ -13099,7 +13106,7 @@ async fn main(_spawner: Spawner) {
         ))
         .expect("failed to spawn status-light task");
     let runtime_mode = FrontPanelRuntimeMode::compile_time_default();
-    let startup_ui_state = FrontPanelUiState::new(runtime_mode);
+    let startup_ui_state = FrontPanelUiState::new_startup(runtime_mode);
     #[cfg(feature = "web_serial")]
     let mut usb_serial = RawUsbSerialJtag::new(peripherals.USB_DEVICE);
     #[cfg(feature = "web_serial")]
@@ -13280,18 +13287,13 @@ async fn main(_spawner: Spawner) {
     }
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_complete\n");
-    info!("scene={=str}", SceneId::StartupCalibration.label());
-    for _ in 0..45 {
-        #[cfg(feature = "web_serial")]
-        poll_usb_early_control(
-            &mut usb_serial,
-            &mut usb_rx_line,
-            usb_tx_buf,
-            &usb_boot_memory_config,
-        );
-        set_status_light_state(StatusLightState::Booting);
-        EmbassyTimer::after_millis(20).await;
-    }
+    #[cfg(feature = "web_serial")]
+    poll_usb_early_control(
+        &mut usb_serial,
+        &mut usb_rx_line,
+        usb_tx_buf,
+        &usb_boot_memory_config,
+    );
     info!(
         "frontpanel runtime mode={=str}",
         runtime_mode_label(runtime_mode)
@@ -13394,8 +13396,22 @@ async fn main(_spawner: Spawner) {
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_wait_start\n");
     let initial_pd_observation = await_pd_ready(&mut pd_i2c, &mut pd_port, || {
         set_status_light_state(StatusLightState::Booting);
+        #[cfg(feature = "web_serial")]
+        poll_usb_early_control(
+            &mut usb_serial,
+            &mut usb_rx_line,
+            usb_tx_buf,
+            &usb_boot_memory_config,
+        );
     })
     .await;
+    #[cfg(feature = "web_serial")]
+    poll_usb_early_control(
+        &mut usb_serial,
+        &mut usb_rx_line,
+        usb_tx_buf,
+        &usb_boot_memory_config,
+    );
     let mut pd_contract_ready = startup_pd_contract_ready(initial_pd_observation);
     if !pd_contract_ready {
         #[cfg(feature = "web_serial")]
@@ -13481,6 +13497,13 @@ async fn main(_spawner: Spawner) {
     let (mut memory_config, mut memory_sequence) = eeprom_memory_record
         .map(|record| (record.config, record.sequence))
         .unwrap_or_default();
+    #[cfg(feature = "web_serial")]
+    poll_usb_early_control(
+        &mut usb_serial,
+        &mut usb_rx_line,
+        usb_tx_buf,
+        &memory_config,
+    );
     #[cfg(feature = "net_http")]
     flux_purr_firmware::net::initialize_control_state(memory_config.lan_pairing_token).await;
     #[cfg(all(feature = "net_http", feature = "web_serial"))]
@@ -13849,6 +13872,9 @@ async fn main(_spawner: Spawner) {
         }
         RtdSample::Fault { adc_mv, reason } => {
             current_rtd_fault = Some(reason);
+            ui_state.set_dashboard_presentation(
+                flux_purr_firmware::frontpanel::DashboardPresentationState::InitialRtdFault,
+            );
             let _ = heater_controller.latch_fault(reason);
             let _ = retain_runtime_display_temperature(
                 &mut ui_state,
@@ -22817,6 +22843,73 @@ mod tests {
     }
 
     #[test]
+    fn valid_rtd_measurement_promotes_startup_dashboard_to_ready() {
+        let mut ui_state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+        let mut latest_temp_c = 0.0;
+        let mut latest_temp_i16 = 0;
+        let mut latest_display_temp_c = 0.0;
+        let mut latest_display_temp_i16 = 0;
+        let mut guard = RtdPpsTransitionGuard::new(12_000);
+        let mut measurement_guard = RtdControlMeasurementGuard::default();
+        let mut control_measurement_guarded = false;
+        let mut controller = HeaterController::new();
+
+        assert!(apply_valid_rtd_measurement(
+            RuntimeDisplayTemperatureState {
+                ui_state: &mut ui_state,
+                latest_display_temp_c: &mut latest_display_temp_c,
+                latest_display_temp_i16: &mut latest_display_temp_i16,
+            },
+            RuntimeControlTemperatureState {
+                latest_control_temp_c: &mut latest_temp_c,
+                latest_control_temp_i16: &mut latest_temp_i16,
+                transition_guard: &mut guard,
+                measurement_guard: &mut measurement_guard,
+                control_measurement_guarded: &mut control_measurement_guarded,
+                heater_controller: &mut controller,
+            },
+            12_000,
+            100,
+            41.39,
+        ));
+
+        assert_eq!(
+            ui_state.dashboard_presentation,
+            flux_purr_firmware::frontpanel::DashboardPresentationState::Ready
+        );
+        assert_eq!(ui_state.current_temp_deci_c, 414);
+    }
+
+    #[test]
+    fn runtime_sensor_fault_retains_last_valid_dashboard_temperature() {
+        let mut ui_state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+        let mut latest_display_temp_c = 0.0;
+        let mut latest_display_temp_i16 = 0;
+
+        assert!(update_runtime_display_temperature(
+            &mut ui_state,
+            &mut latest_display_temp_c,
+            &mut latest_display_temp_i16,
+            85.4,
+        ));
+        assert_eq!(
+            ui_state.dashboard_presentation,
+            flux_purr_firmware::frontpanel::DashboardPresentationState::Ready
+        );
+        assert_eq!(ui_state.current_temp_deci_c, 854);
+
+        ui_state.heater_lock_reason = Some(HeaterLockReason::SensorFault);
+        ui_state.dashboard_warning_visible = true;
+        assert!(!retain_runtime_display_temperature(
+            &mut ui_state,
+            &mut latest_display_temp_c,
+            &mut latest_display_temp_i16,
+        ));
+        assert_eq!(ui_state.current_temp_deci_c, 854);
+        assert_eq!(latest_display_temp_i16, 85);
+    }
+
+    #[test]
     fn valid_rtd_measurement_updates_display_and_control_on_request_change() {
         let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
         let mut latest_temp_c = 41.39;
@@ -23735,6 +23828,66 @@ mod tests {
             true,
             pd_contract_ready,
         ));
+    }
+
+    #[test]
+    fn sensor_fault_lock_reason_is_exposed_without_relaxing_fail_closed_behavior() {
+        assert_eq!(
+            next_heater_lock_reason(Some(HeaterFaultReason::SensorOpen), false, true, true,),
+            Some(HeaterLockReason::SensorFault)
+        );
+        assert!(!reconcile_runtime_heater_enabled(
+            true,
+            CalibrationRuntimeState {
+                mode: CalibrationMode::RtdAdc,
+                heater_enabled: true,
+                ..CalibrationRuntimeState::default()
+            },
+            Some(HeaterFaultReason::SensorOpen),
+            false,
+            true,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn initial_rtd_fault_latches_dashboard_and_heater_lock() {
+        let mut ui_state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+        let mut heater_controller = HeaterController::new();
+
+        ui_state.set_dashboard_presentation(
+            flux_purr_firmware::frontpanel::DashboardPresentationState::InitialRtdFault,
+        );
+        assert!(heater_controller.latch_fault(HeaterFaultReason::SensorOpen));
+        assert_eq!(
+            ui_state.dashboard_presentation,
+            flux_purr_firmware::frontpanel::DashboardPresentationState::InitialRtdFault
+        );
+        assert_eq!(
+            next_heater_lock_reason(heater_controller.fault_latched(), false, true, true),
+            Some(HeaterLockReason::SensorFault)
+        );
+        assert!(!reconcile_runtime_heater_enabled(
+            true,
+            CalibrationRuntimeState {
+                mode: CalibrationMode::RtdAdc,
+                heater_enabled: true,
+                ..CalibrationRuntimeState::default()
+            },
+            heater_controller.fault_latched(),
+            false,
+            true,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn pd_wait_services_early_control_at_twenty_ms_cadence() {
+        assert_eq!(PD_WAIT_SERVICE_INTERVAL_MS, 20);
+        assert_eq!(CH224Q_STATUS_POLL_DELAY_MS % PD_WAIT_SERVICE_INTERVAL_MS, 0);
+        assert_eq!(CH224Q_STATUS_POLL_DELAY_MS / PD_WAIT_SERVICE_INTERVAL_MS, 5);
     }
 
     #[test]

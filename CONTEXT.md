@@ -132,6 +132,14 @@ _Avoid_: ADC Raw Code, calibrated temperature
 The temperature derived from the RTD Measurement Path and its active calibration.
 _Avoid_: ADC Raw Code, Curve-Calibrated ADC Millivolts, ambient temperature
 
+**Temperature Unavailable**:
+The Front Panel state before the current boot has produced a valid Temperature Reading. It is not a temperature value and must not be rendered as a numeric placeholder or a sensor fault.
+_Avoid_: 0°C, default temperature, sensor fault
+
+**Initial RTD Fault**:
+An RTD fault detected before the current boot has produced a valid Temperature Reading. It keeps the heater locked and is distinct from Temperature Unavailable.
+_Avoid_: last valid temperature, unavailable temperature
+
 **VIN Reading**:
 The Device input voltage derived from the VIN Measurement Path and its active calibration.
 _Avoid_: PD Request, PD Contract, IsolaPurr VBUS

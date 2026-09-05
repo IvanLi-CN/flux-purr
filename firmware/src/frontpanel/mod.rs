@@ -576,6 +576,7 @@ impl FanDisplayState {
 pub enum HeaterLockReason {
     CoolingDisabledOvertemp,
     HardOvertemp,
+    SensorFault,
     PdContractUnavailable,
     ThermalModelMissingForSourceClass,
 }
@@ -585,10 +586,18 @@ impl HeaterLockReason {
         match self {
             Self::CoolingDisabledOvertemp => "cooling-disabled-overtemp",
             Self::HardOvertemp => "hard-overtemp",
+            Self::SensorFault => "sensor-fault",
             Self::PdContractUnavailable => "pd-contract-unavailable",
             Self::ThermalModelMissingForSourceClass => "thermal_model_missing_for_source_class",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardPresentationState {
+    Initializing,
+    Ready,
+    InitialRtdFault,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -603,6 +612,7 @@ pub struct KeyTestState {
 pub struct FrontPanelUiState {
     pub runtime_mode: FrontPanelRuntimeMode,
     pub route: FrontPanelRoute,
+    pub dashboard_presentation: DashboardPresentationState,
     pub current_temp_c: i16,
     pub current_temp_deci_c: i16,
     pub pd_contract_mv: u16,
@@ -637,8 +647,9 @@ impl FrontPanelUiState {
         Self {
             runtime_mode,
             route,
-            current_temp_c: 300,
-            current_temp_deci_c: 3000,
+            dashboard_presentation: DashboardPresentationState::Ready,
+            current_temp_c: 0,
+            current_temp_deci_c: 0,
             pd_contract_mv: crate::DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
             target_temp_c: 100,
             heater_enabled: false,
@@ -669,6 +680,20 @@ impl FrontPanelUiState {
             wifi_pairing_code: None,
             key_test: KeyTestState::default(),
         }
+    }
+
+    pub fn new_startup(runtime_mode: FrontPanelRuntimeMode) -> Self {
+        let mut state = Self::new(runtime_mode);
+        state.dashboard_presentation = DashboardPresentationState::Initializing;
+        state
+    }
+
+    pub fn set_dashboard_presentation(&mut self, presentation: DashboardPresentationState) -> bool {
+        if self.dashboard_presentation == presentation {
+            return false;
+        }
+        self.dashboard_presentation = presentation;
+        true
     }
 
     pub fn apply_network_summary(&mut self, network: NetworkSummary) -> bool {
@@ -1011,6 +1036,30 @@ mod tests {
         assert!(state.apply_network_summary(connected.clone()));
         assert_eq!(state.network, connected);
         assert!(!state.apply_network_summary(connected));
+    }
+
+    #[test]
+    fn startup_state_masks_numeric_bring_up_values_until_promoted() {
+        let state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+
+        assert_eq!(
+            state.dashboard_presentation,
+            DashboardPresentationState::Initializing
+        );
+        assert_eq!(state.current_temp_c, 0);
+        assert_eq!(state.current_temp_deci_c, 0);
+    }
+
+    #[test]
+    fn dashboard_presentation_promotes_once_a_valid_sample_exists() {
+        let mut state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+
+        assert!(state.set_dashboard_presentation(DashboardPresentationState::Ready));
+        assert!(!state.set_dashboard_presentation(DashboardPresentationState::Ready));
+        assert_eq!(
+            state.dashboard_presentation,
+            DashboardPresentationState::Ready
+        );
     }
 
     fn raw_state(keys: &[RawFrontPanelKey]) -> FrontPanelRawState {
