@@ -598,7 +598,7 @@ Core commands:
 - `flux-purr calibration-mode voltage|temperature|heater-curve ...`
 - `flux-purr wifi set|clear|cancel --device <id> ...`
 - `flux-purr update --port <serial-port> --bundle <local.fluxpurr-fw> [--devd <local-control-socket>]`: 一般用户本地发布 bundle 更新；只接受命中 SHA-256 完整性清单的 `.fluxpurr-fw`。
-- `flux-purr flash --port <serial-port> [--elf <local-elf>] [--skip-backup --confirm NO_EEPROM_BACKUP]`: 开发者直接串口烧录本地 ELF，默认先备份 EEPROM，不连接 devd。
+- `flux-purr flash --port <serial-port> [--elf <local-elf>] [--skip-backup --confirm NO_EEPROM_BACKUP]`: 开发者直接串口烧录本地 ELF，默认先备份 EEPROM，不连接 devd；成对旁路无需 ROM 模式，跳过 ROM 探测和 EEPROM snapshot/归档后直接进入 espflash。
 - `flux-purr recover --port <serial-port> --elf <local-elf> --confirm ERASE`: 开发者确认后擦除并写入 MCU 内部 Flash，不读取或修改 EEPROM。
 - `flux-purr monitor --device <id>`
 - `flux-purr hardware available|recent|list|save|forget|path`

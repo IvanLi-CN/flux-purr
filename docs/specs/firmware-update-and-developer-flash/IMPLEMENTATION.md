@@ -19,7 +19,8 @@
 - Managed local devd control and explicit endpoint support are implemented.
 - Bundle v2 and the release-scoped SHA-256 integrity catalog are implemented; signing fields and migration instructions are forbidden.
 - Direct `--port` Developer flash and recovery command parsing and dispatch are implemented without devd or HTTP.
-- Encrypted automatic EEPROM backup, retention cleanup, and the explicit bypass contract are implemented in the host tool.
+- Encrypted automatic EEPROM backup and retention cleanup are implemented in the host tool. The paired explicit bypass skips ROM probing and the complete snapshot/archive path before invoking espflash.
+- A deterministic fake-espflash host test covers the actual direct-flash bypass branch and proves that it makes no ROM probe or snapshot access.
 - Espflash execution diagnostics retain bounded stdout and stderr, classify observed flash stages, and distinguish connection, write, verification, and finalization failures.
 - The firmware and partition layout use EEPROM-only persistence; internal Flash configuration fallback is removed.
 
