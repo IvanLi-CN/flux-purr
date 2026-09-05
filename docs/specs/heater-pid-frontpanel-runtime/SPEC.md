@@ -193,7 +193,7 @@
 | `ThermalControlProfile` | USB/devd runtime config + persistent memory config | external | New | `docs/interfaces/http-api.md` | firmware / devd | CLI / devd / Web Serial | RAM preview 与 persistent saved profile，最多 10 个点；每点同时携带 power baseline 与 damping 字段 |
 | `Status.faultAttentionPending` | USB/devd runtime status | external | Updated | `docs/interfaces/http-api.md` | firmware / devd | CLI / Web / tuning runner | 仅表示热失控已回落且尚未确认；测温 fault 不得置位 |
 | `RuntimeConfig.faultAttentionAcknowledged` | USB/devd runtime config | external | Updated | `docs/interfaces/http-api.md` | firmware / devd | CLI / Web / tuning runner | 确认热失控告警；不得绕过 `temp >= 420°C` 的绝对停热与 `1s` 提示 |
-| `FrontPanelRuntimeState` / `FrontPanelScreen` | TypeScript type | internal | Updated | None | web | Storybook / preview harness | 对齐 firmware 三态 fan 与告警关键帧 |
+| `FrontPanelRuntimeState` / `FrontPanelScreen` | TypeScript type | internal | Updated | None | web | Storybook / preview harness | 对齐 firmware 四态启动呈现、三态 fan 与告警关键帧 |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -274,6 +274,8 @@ None
 - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-fan-run docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-fan-run.framebuffer.bin`
 - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-overtemp-a docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-overtemp-a.framebuffer.bin`
 - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-overtemp-b docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-overtemp-b.framebuffer.bin`
+- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-power-wait docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-power-wait.framebuffer.bin`
+- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-eeprom-restore docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-eeprom-restore.framebuffer.bin`
 
 ### UI / Firmware Preview
 
@@ -348,6 +350,14 @@ None
 - Dashboard startup `InitialRtdFault`：
 
 ![Dashboard initial RTD fault](./assets/dashboard-initial-rtd-fault.png)
+
+- Dashboard startup `POWER/WAIT`（真实 RTD，PD 合同未就绪）：
+
+![Dashboard power wait](./assets/dashboard-power-wait.png)
+
+- Dashboard startup `EEPROM/RESTORE`（真实 RTD，旧格式后台恢复）：
+
+![Dashboard EEPROM restore](./assets/dashboard-eeprom-restore.png)
 
 - Dashboard startup `Ready`：
 
