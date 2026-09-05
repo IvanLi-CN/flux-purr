@@ -6,15 +6,15 @@
 
 ## Goal
 
-Flux Purr supports two mutually exclusive USB-C PD sink board variants without changing the legacy CH224Q board behavior:
-
-- `CH224Q` remains the archived controller-board baseline and retains its existing high-voltage behavior.
-- `FUSB302BMPX` is a PD-message PHY with a repository-owned sink policy. It selects compatible PPS APDOs within `5V..21V` and uses fixed PDOs as a fallback.
+Flux Purr production firmware targets the FUSB302BMPX PD-message PHY. The archived CH224Q
+controller board remains documentation-only and is not selected, probed, or packaged by the
+product build. FUSB302BMPX uses a repository-owned sink policy that selects compatible PPS APDOs
+within `5V..21V` and fixed PDOs as a fallback.
 
 ## Hardware Identity
 
 - Both controllers can answer at I2C address `0x22`; an ACK alone is never a valid identity signal.
-- Startup performs only controller-specific register reads. A FUSB302BMPX signature requires two stable `Device ID` reads matching the documented `0x9x` format plus a readable FUSB status bank; this positive signature is selected before any CH224Q-only register is read. Only an absent FUSB signature permits the CH224Q fallback probe.
+- Startup performs only the FUSB302BMPX identity transaction. A valid signature requires two stable `Device ID` reads matching the documented `0x9x` format plus a readable FUSB status bank. There is no CH224Q fallback probe because the product board is FUSB-only.
 - An unstable, invalid, incomplete, or read-failed signature reports `unknown`, performs zero PD writes, and keeps heater output interlocked. The Front Panel and USB runtime still reach their normal ready state for diagnostics, but `GPIO47` remains off until a valid controller and ready contract are observed. A physical shared-address collision cannot be made safe by ACK probing and requires board correction before heating use.
 - FUSB302B's `GPIO7` interrupt net is reserved for a later event-driven path and shares `GPIO8`/`GPIO9` with the M24C64 EEPROM. Sink initialization retains Rd pull-downs on both CC pins, and the current policy safely polls the PHY. EEPROM record writes and their verification must release the shared bus after every bounded chunk and service the FUSB302B before the next chunk; no EEPROM write-cycle delay or success-path flash mirror may starve receive or contract recovery.
 
@@ -40,7 +40,7 @@ Flux Purr supports two mutually exclusive USB-C PD sink board variants without c
 
 Status retains `currentMa`, `ppsCapability*`, and `manualPps*` compatibility fields and adds:
 
-- `pdController`: `ch224q | fusb302b | unknown`
+- `pdController`: `fusb302b | unknown` (the legacy `ch224q` value remains decodable for transport compatibility only)
 - `pdContractKind`: `fixed | pps | none`
 - `pdContractCurrentMa`: negotiated upper current limit
 - `pdContractPowerMw`: negotiated upper power limit
@@ -65,5 +65,5 @@ C20 is directly `VBUS`-to-`GND`, marked `Add into BOM=yes`, and is explicitly re
 
 - Claiming USB-IF certification.
 - Claiming physical VBUS-current measurement or over-current protection.
-- Changing CH224Q behavior.
+- Building or selecting a CH224Q product path.
 - Any real flash, reset, serial read/write, or target-port switching without separate owner authorization.
