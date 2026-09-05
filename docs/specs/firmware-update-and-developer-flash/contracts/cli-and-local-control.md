@@ -38,3 +38,7 @@ The protocol is a versioned, length-prefixed CBOR stream over the native endpoin
 The Developer backup preflight runs while the application protocol remains available. It finishes before any ROM reset. A board that cannot serve the backup protocol requires the explicit skip confirmation or `recover`; the tool must not silently treat an unavailable EEPROM snapshot as a successful backup.
 
 Real serial writes remain disabled by default and require the repository's explicit real-flash environment gate in addition to the command-specific confirmation and exact-port authorization. This gate does not start or contact devd.
+
+## Espflash Diagnostics
+
+`flash` and `recover` MUST preserve both stdout and stderr from every espflash invocation. The terminal result MUST include the observed phase sequence (`connect`, `erase`, `write`, `verify`, and `finalize`), the final phase, exit code, and a bounded copy of both streams. A failed `finalize` phase MUST be reported as a flash-finalization failure: the image may have been written, but write completeness and boot success are unconfirmed. Connection, erase/write, and verification failures MUST carry distinct diagnosis categories and hardware-oriented next checks. A successful command MUST report the stages espflash completed rather than only `ok: true`.

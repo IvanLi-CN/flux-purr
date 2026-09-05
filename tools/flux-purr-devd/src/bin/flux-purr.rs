@@ -1997,10 +1997,28 @@ async fn direct_flash(args: FlashArgs) -> Result<Value, Box<dyn std::error::Erro
     validate_local_elf(&elf)?;
     let partition_table = embedded_partition_table()?;
     ensure_real_flash_enabled()?;
+    if !args.skip_backup && detect_rom_download_mode(&args.port) {
+        return Err(
+            "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. Use the explicit backup bypass only when bootstrapping this device; firmware was not written."
+                .into(),
+        );
+    }
     let backup_path = if args.skip_backup {
         None
     } else {
-        let snapshot = read_eeprom_snapshot(&args.port)?;
+        let snapshot = match read_eeprom_snapshot(&args.port) {
+            Ok(snapshot) => snapshot,
+            Err(error) if snapshot_error_may_be_rom_mode(error.as_ref()) => {
+                if detect_rom_download_mode(&args.port) {
+                    return Err(
+                        "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. Use the explicit backup bypass only when bootstrapping this device; firmware was not written."
+                            .into(),
+                    );
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let key = backup_credential_key()?;
         Some(developer_backup::write_atomic(
             &developer_backup_directory()?,
@@ -2010,9 +2028,9 @@ async fn direct_flash(args: FlashArgs) -> Result<Value, Box<dyn std::error::Erro
     };
     let program = resolve_espflash_program();
     let flash_args = direct_elf_flash_args(&args.port, partition_table.path(), &elf)?;
-    run_espflash_command(&program, &flash_args)?;
+    let espflash = run_espflash_command(&program, &flash_args)?;
     Ok(
-        json!({"ok": true, "operation": "flash", "port": args.port, "elf": elf, "backup": backup_path}),
+        json!({"ok": true, "operation": "flash", "port": args.port, "elf": elf, "backup": backup_path, "espflash": espflash}),
     )
 }
 
@@ -2028,11 +2046,11 @@ async fn direct_recover(
     ensure_real_flash_enabled()?;
     let program = resolve_espflash_program();
     let erase_args = direct_erase_flash_args(&args.port);
-    run_espflash_command(&program, &erase_args)?;
+    let erase_diagnostics = run_espflash_command(&program, &erase_args)?;
     let flash_args = direct_elf_flash_args(&args.port, partition_table.path(), &args.elf)?;
-    run_espflash_command(&program, &flash_args)?;
+    let flash_diagnostics = run_espflash_command(&program, &flash_args)?;
     Ok(
-        json!({"ok": true, "operation": "recover", "port": args.port, "elf": args.elf, "eeprom": "untouched"}),
+        json!({"ok": true, "operation": "recover", "port": args.port, "elf": args.elf, "eeprom": "untouched", "espflash": {"erase": erase_diagnostics, "flash": flash_diagnostics}}),
     )
 }
 
@@ -2129,19 +2147,183 @@ fn resolve_espflash_program() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("espflash"))
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EspflashDiagnostics {
+    command: String,
+    success: bool,
+    exit_code: Option<i32>,
+    phase: String,
+    phases: Vec<String>,
+    diagnosis: String,
+    hint: String,
+    stdout: String,
+    stderr: String,
+}
+
 fn run_espflash_command(
     program: &Path,
     args: &[String],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<EspflashDiagnostics, Box<dyn std::error::Error + Send + Sync>> {
     let output = ProcessCommand::new(program).args(args).output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let diagnostics = classify_espflash_diagnostics(
+        args.first().map(String::as_str).unwrap_or("unknown"),
+        output.status.code(),
+        &stdout,
+        &stderr,
+    );
     if !output.status.success() {
-        return Err(format!(
-            "espflash failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-        .into());
+        return Err(format_espflash_failure(&diagnostics).into());
     }
-    Ok(())
+    Ok(diagnostics)
+}
+
+fn classify_espflash_diagnostics(
+    command: &str,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> EspflashDiagnostics {
+    let mut phases = Vec::new();
+    for line in stdout.lines().chain(stderr.lines()) {
+        let Some(phase) = espflash_phase_for_line(line) else {
+            continue;
+        };
+        if phases.last().map(String::as_str) != Some(phase) {
+            phases.push(phase.to_string());
+        }
+    }
+    let success = exit_code == Some(0);
+    let phase = if success {
+        "complete".to_string()
+    } else {
+        phases
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    let diagnosis = espflash_diagnosis_for(&phase, success);
+    let hint = espflash_hint(&phase, success);
+    EspflashDiagnostics {
+        command: command.to_string(),
+        success,
+        exit_code,
+        phase,
+        phases,
+        diagnosis,
+        hint,
+        stdout: truncate_espflash_output(stdout),
+        stderr: truncate_espflash_output(stderr),
+    }
+}
+
+fn espflash_phase_for_line(line: &str) -> Option<&'static str> {
+    let line = line.to_ascii_lowercase();
+    if line.contains("flashend")
+        || line.contains("bootloader returned an error")
+        || line.contains("flash end")
+        || line.contains("reboot")
+    {
+        return Some("finalize");
+    }
+    if line.contains("hash of data verified")
+        || line.contains("verify")
+        || line.contains("checksum")
+    {
+        return Some("verify");
+    }
+    if line.contains("writing") || line.contains("write segment") {
+        return Some("write");
+    }
+    if line.contains("erasing") || line.contains("erase flash") {
+        return Some("erase");
+    }
+    if line.contains("connect")
+        || line.contains("chip type")
+        || line.contains("packet header")
+        || line.contains("serial")
+    {
+        return Some("connect");
+    }
+    None
+}
+
+fn espflash_diagnosis_for(phase: &str, success: bool) -> String {
+    if success {
+        return "completed".to_string();
+    }
+    match phase {
+        "connect" => "connection".to_string(),
+        "erase" | "write" => "flash_write".to_string(),
+        "verify" => "verification".to_string(),
+        "finalize" => "flash_finalization".to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn espflash_hint(phase: &str, success: bool) -> String {
+    if success {
+        return "espflash reported completion for all observed stages".to_string();
+    }
+    match phase {
+        "connect" => {
+            "check ESP32-S3 boot mode/download mode, the explicit serial link, USB cable/driver, and board power"
+                .to_string()
+        }
+        "erase" | "write" => {
+            "check SPI flash power, wiring, erase/write protection, and supply stability"
+                .to_string()
+        }
+        "verify" => {
+            "flash contents did not verify; check SPI flash integrity, power stability, and image layout"
+                .to_string()
+        }
+        "finalize" => {
+            "ROM rejected flash finalization or reset; the image may have been written, but write completeness is unconfirmed; check boot strap, reset circuit, USB link, and power"
+                .to_string()
+        }
+        _ => "inspect the preserved espflash output; the failure phase was not identified".to_string(),
+    }
+}
+
+fn truncate_espflash_output(output: &str) -> String {
+    const MAX_OUTPUT_BYTES: usize = 16 * 1024;
+    if output.len() <= MAX_OUTPUT_BYTES {
+        return output.to_string();
+    }
+    let mut end = MAX_OUTPUT_BYTES;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n<output truncated>", &output[..end])
+}
+
+fn format_espflash_failure(diagnostics: &EspflashDiagnostics) -> String {
+    format!(
+        "espflash `{}` failed at phase `{}` (exit_code={:?} diagnosis={}): {}\nphases: {}\nstdout:\n{}\nstderr:\n{}",
+        diagnostics.command,
+        diagnostics.phase,
+        diagnostics.exit_code,
+        diagnostics.diagnosis,
+        diagnostics.hint,
+        if diagnostics.phases.is_empty() {
+            "<none>".to_string()
+        } else {
+            diagnostics.phases.join(" -> ")
+        },
+        if diagnostics.stdout.is_empty() {
+            "<empty>"
+        } else {
+            &diagnostics.stdout
+        },
+        if diagnostics.stderr.is_empty() {
+            "<empty>"
+        } else {
+            &diagnostics.stderr
+        },
+    )
 }
 
 fn developer_backup_directory() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
@@ -2163,14 +2345,16 @@ fn backup_credential_key() -> Result<[u8; 32], Box<dyn std::error::Error + Send 
 }
 
 fn read_eeprom_snapshot(port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    const SNAPSHOT_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
     let mut serial = serialport::new(port, 115_200)
         .timeout(Duration::from_secs(2))
         .open()?;
+    let deadline = StdInstant::now() + SNAPSHOT_SESSION_TIMEOUT;
     let session_id = format!("snapshot-{}", current_unix_millis());
     let open =
         json!({"op":"eeprom_snapshot_open","requestId":session_id,"capacity":8192,"chunkMax":32});
     write_snapshot_request(&mut *serial, &open)?;
-    let open_response = read_snapshot_response(&mut *serial, &session_id)?;
+    let open_response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
     if open_response.get("capacity").and_then(Value::as_u64) != Some(8192)
         || open_response.get("chunkMax").and_then(Value::as_u64) != Some(32)
     {
@@ -2182,7 +2366,7 @@ fn read_eeprom_snapshot(port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error
             &mut *serial,
             &json!({"op":"eeprom_snapshot_read","requestId":session_id,"offset":offset,"length":32}),
         )?;
-        let response = read_snapshot_response(&mut *serial, &session_id)?;
+        let response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
         if response.get("offset").and_then(Value::as_u64) != Some(u64::from(offset)) {
             return Err("snapshot response returned an unexpected offset".into());
         }
@@ -2206,7 +2390,7 @@ fn read_eeprom_snapshot(port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error
         &mut *serial,
         &json!({"op":"eeprom_snapshot_close","requestId":session_id,"sha256":digest}),
     )?;
-    let response = read_snapshot_response(&mut *serial, &session_id)?;
+    let response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
     if response.get("sha256").and_then(Value::as_str) != Some(digest.as_str()) {
         return Err("EEPROM snapshot hash verification failed".into());
     }
@@ -2222,35 +2406,137 @@ fn write_snapshot_request(
     serial.flush()
 }
 
-fn read_snapshot_response(
-    serial: &mut dyn serialport::SerialPort,
+#[derive(Debug, Default)]
+struct SnapshotResponseObservation {
+    nonempty_lines: u16,
+    json_lines: u16,
+}
+
+fn snapshot_timeout_error(observation: &SnapshotResponseObservation) -> io::Error {
+    let message = match (observation.nonempty_lines, observation.json_lines) {
+        (0, _) => {
+            "EEPROM backup preflight failed: no USB JSONL response from the Device. The Device application may be stopped, in ROM download mode, or unreachable through this USB data path; EEPROM health is unknown and firmware was not written."
+        }
+        (_, 0) => {
+            "EEPROM backup preflight failed: the Device emitted non-JSON serial output but did not acknowledge the EEPROM snapshot request. Its application firmware does not provide the required USB JSONL snapshot protocol; EEPROM health is unknown and firmware was not written."
+        }
+        _ => {
+            "EEPROM backup preflight failed: the Device emitted USB JSONL responses but none matched the EEPROM snapshot request. Its application firmware is incompatible with the required snapshot protocol; EEPROM health is unknown and firmware was not written."
+        }
+    };
+    io::Error::new(io::ErrorKind::TimedOut, message)
+}
+
+fn snapshot_rejection_error(error_code: &str) -> io::Error {
+    let message = match error_code {
+        "heater_active" => {
+            "EEPROM backup preflight blocked: the Device reports active heater output. Disable heating before developer flash; firmware was not written."
+        }
+        "eeprom_unavailable" => {
+            "EEPROM backup preflight failed: the Device reports that the external M24C64 EEPROM is not detected. Inspect EEPROM population, power, and I2C wiring; firmware was not written."
+        }
+        "eeprom_read_failed" => {
+            "EEPROM backup preflight failed: the Device reports an M24C64 EEPROM read failure. Inspect EEPROM power and I2C signal integrity; firmware was not written."
+        }
+        "snapshot_hash_mismatch" => {
+            "EEPROM backup preflight failed: the Device reports an EEPROM snapshot hash mismatch. Inspect M24C64 and I2C stability; firmware was not written."
+        }
+        "snapshot_session_invalid"
+        | "snapshot_range_required"
+        | "snapshot_range_invalid"
+        | "snapshot_incomplete"
+        | "session_required"
+        | "malformed_snapshot"
+        | "snapshot_op_unsupported"
+        | "output_too_small" => {
+            "EEPROM backup preflight failed: the Device rejected the snapshot protocol. Its application firmware is incompatible with this developer flash flow; EEPROM health is unknown and firmware was not written."
+        }
+        "digest_format_failed" => {
+            "EEPROM backup preflight failed: the Device could not format the EEPROM snapshot digest. Its application firmware requires diagnosis; firmware was not written."
+        }
+        _ => {
+            "EEPROM backup preflight failed: the Device returned an unrecognized snapshot error. EEPROM health is unknown and firmware was not written."
+        }
+    };
+    io::Error::other(message)
+}
+
+fn snapshot_error_may_be_rom_mode(error: &dyn std::error::Error) -> bool {
+    let message = error.to_string();
+    message.contains("no USB JSONL response") || message.contains("non-JSON serial output")
+}
+
+fn detect_rom_download_mode(port: &str) -> bool {
+    let program = resolve_espflash_program();
+    ProcessCommand::new(program)
+        .args(rom_download_probe_args(port))
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn rom_download_probe_args(port: &str) -> Vec<String> {
+    vec![
+        "--skip-update-check".into(),
+        "board-info".into(),
+        "--chip".into(),
+        "esp32s3".into(),
+        "--port".into(),
+        port.into(),
+        "--before".into(),
+        "no-reset".into(),
+        "--after".into(),
+        "no-reset".into(),
+        "--no-stub".into(),
+        "--non-interactive".into(),
+    ]
+}
+
+fn read_snapshot_response<R: Read + ?Sized>(
+    serial: &mut R,
     request_id: &str,
+    deadline: StdInstant,
 ) -> io::Result<Value> {
+    let mut observation = SnapshotResponseObservation::default();
     loop {
+        if StdInstant::now() >= deadline {
+            return Err(snapshot_timeout_error(&observation));
+        }
         let mut bytes = Vec::new();
         loop {
+            if StdInstant::now() >= deadline {
+                return Err(snapshot_timeout_error(&observation));
+            }
             let mut byte = [0_u8; 1];
             match serial.read(&mut byte) {
                 Ok(1) if byte[0] == b'\n' => break,
                 Ok(1) => bytes.push(byte[0]),
                 Ok(_) => continue,
-                Err(error) if error.kind() == io::ErrorKind::TimedOut => return Err(error),
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    return Err(snapshot_timeout_error(&observation));
+                }
                 Err(error) => return Err(error),
             }
         }
+        if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            observation.nonempty_lines = observation.nonempty_lines.saturating_add(1);
+        }
         let value = match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) => value,
+            Ok(value) => {
+                observation.json_lines = observation.json_lines.saturating_add(1);
+                value
+            }
             Err(_) => continue,
         };
         if value.get("requestId").and_then(Value::as_str) != Some(request_id) {
             continue;
         }
         if value.get("ok").and_then(Value::as_bool) != Some(true) {
-            let error = value
+            let error_code = value
                 .get("error")
                 .and_then(Value::as_str)
-                .unwrap_or("snapshot request failed");
-            return Err(io::Error::new(io::ErrorKind::Other, error.to_string()));
+                .unwrap_or_default();
+            return Err(snapshot_rejection_error(error_code));
         }
         return Ok(value);
     }
@@ -11993,6 +12279,13 @@ fn redact_cli_sensitive(value: &Value) -> Value {
 }
 
 fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if matches!(
+        payload.get("operation").and_then(Value::as_str),
+        Some("flash" | "recover")
+    ) && payload.get("espflash").is_some()
+    {
+        return render_espflash_human(payload);
+    }
     if let Some(active) = payload.get("active").and_then(Value::as_bool) {
         if active {
             let code = payload
@@ -12128,9 +12421,86 @@ fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + S
     ))?)
 }
 
+fn render_espflash_human(
+    payload: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let operation = payload
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or("flash");
+    let diagnostics = match operation {
+        "flash" => vec![(
+            "flash",
+            payload.get("espflash").ok_or("flash diagnostics missing")?,
+        )],
+        "recover" => {
+            let espflash = payload
+                .get("espflash")
+                .ok_or("recover diagnostics missing")?;
+            vec![
+                (
+                    "erase",
+                    espflash.get("erase").ok_or("erase diagnostics missing")?,
+                ),
+                (
+                    "flash",
+                    espflash.get("flash").ok_or("flash diagnostics missing")?,
+                ),
+            ]
+        }
+        _ => Vec::new(),
+    };
+    let mut sections = Vec::with_capacity(diagnostics.len());
+    for (label, diagnostic) in diagnostics {
+        let phases = diagnostic
+            .get("phases")
+            .and_then(Value::as_array)
+            .map(|phases| {
+                phases
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            })
+            .filter(|phases| !phases.is_empty())
+            .unwrap_or_else(|| "<none observed>".to_string());
+        let stdout = diagnostic
+            .get("stdout")
+            .and_then(Value::as_str)
+            .filter(|output| !output.is_empty())
+            .unwrap_or("<empty>");
+        let stderr = diagnostic
+            .get("stderr")
+            .and_then(Value::as_str)
+            .filter(|output| !output.is_empty())
+            .unwrap_or("<empty>");
+        sections.push(format!(
+            "{}: phases={} final={} diagnosis={}\nstdout:\n{}\nstderr:\n{}",
+            label,
+            phases,
+            diagnostic
+                .get("phase")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            diagnostic
+                .get("diagnosis")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            stdout,
+            stderr,
+        ));
+    }
+    Ok(format!(
+        "{} completed\n{}",
+        operation,
+        sections.join("\n\n")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -12142,6 +12512,28 @@ mod tests {
         http::StatusCode,
         routing::{delete, get, post, put},
     };
+
+    struct SnapshotFixtureReader {
+        bytes: VecDeque<u8>,
+    }
+
+    impl SnapshotFixtureReader {
+        fn from_bytes(bytes: &[u8]) -> Self {
+            Self {
+                bytes: bytes.iter().copied().collect(),
+            }
+        }
+    }
+
+    impl Read for SnapshotFixtureReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let Some(byte) = self.bytes.pop_front() else {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "fixture timeout"));
+            };
+            buf[0] = byte;
+            Ok(1)
+        }
+    }
 
     #[test]
     fn encodes_device_id_as_single_path_segment() {
@@ -12245,6 +12637,27 @@ mod tests {
             render_human(&json!({ "active": true, "code": "4827" })).unwrap(),
             "LAN pairing code: 4827"
         );
+    }
+
+    #[test]
+    fn renders_completed_developer_flash_with_espflash_stages_and_output() {
+        let rendered = render_human(&json!({
+            "ok": true,
+            "operation": "flash",
+            "espflash": {
+                "phase": "complete",
+                "phases": ["connect", "erase", "write", "verify"],
+                "diagnosis": "completed",
+                "stdout": "Writing at 0x00010000...\nHash of data verified.",
+                "stderr": "",
+            }
+        }))
+        .unwrap();
+
+        assert!(rendered.contains("flash completed"));
+        assert!(rendered.contains("connect -> erase -> write -> verify"));
+        assert!(rendered.contains("Hash of data verified"));
+        assert!(rendered.contains("stderr:\n<empty>"));
     }
 
     #[test]
@@ -17763,6 +18176,106 @@ mod tests {
     }
 
     #[test]
+    fn eeprom_snapshot_reports_absent_device_output_without_claiming_an_eeprom_fault() {
+        let mut reader = SnapshotFixtureReader::from_bytes(b"");
+
+        let error = read_snapshot_response(
+            &mut reader,
+            "snapshot-test",
+            StdInstant::now() + Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("no USB JSONL response"));
+        assert!(error.to_string().contains("EEPROM health is unknown"));
+        assert!(error.to_string().contains("firmware was not written"));
+    }
+
+    #[test]
+    fn eeprom_snapshot_reports_protocol_incompatibility_for_unmatched_jsonl() {
+        let mut reader = SnapshotFixtureReader::from_bytes(
+            b"{\"ok\":true,\"requestId\":\"different-request\"}\n",
+        );
+
+        let error = read_snapshot_response(
+            &mut reader,
+            "snapshot-test",
+            StdInstant::now() + Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            error
+                .to_string()
+                .contains("none matched the EEPROM snapshot request")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("application firmware is incompatible")
+        );
+        assert!(!error.to_string().contains("different-request"));
+    }
+
+    #[test]
+    fn eeprom_snapshot_reports_the_m24c64_hardware_fault_returned_by_the_device() {
+        let mut reader = SnapshotFixtureReader::from_bytes(
+            b"{\"ok\":false,\"requestId\":\"snapshot-test\",\"error\":\"eeprom_unavailable\"}\n",
+        );
+
+        let error = read_snapshot_response(
+            &mut reader,
+            "snapshot-test",
+            StdInstant::now() + Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error
+                .to_string()
+                .contains("external M24C64 EEPROM is not detected")
+        );
+        assert!(error.to_string().contains("I2C wiring"));
+        assert!(error.to_string().contains("firmware was not written"));
+    }
+
+    #[test]
+    fn snapshot_failures_only_trigger_rom_probe_for_missing_or_non_json_output() {
+        let no_response = io::Error::new(io::ErrorKind::TimedOut, "no USB JSONL response");
+        let non_json = io::Error::new(io::ErrorKind::TimedOut, "non-JSON serial output");
+        let eeprom_fault = io::Error::other("external M24C64 EEPROM is not detected");
+
+        assert!(snapshot_error_may_be_rom_mode(&no_response));
+        assert!(snapshot_error_may_be_rom_mode(&non_json));
+        assert!(!snapshot_error_may_be_rom_mode(&eeprom_fault));
+    }
+
+    #[test]
+    fn rom_download_probe_uses_only_the_explicit_port_without_reset() {
+        let args = rom_download_probe_args("/dev/cu.test");
+
+        assert_eq!(args[0], "--skip-update-check");
+        assert_eq!(args[1], "board-info");
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--port" && pair[1] == "/dev/cu.test" })
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--before" && pair[1] == "no-reset" })
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--after" && pair[1] == "no-reset" })
+        );
+        assert!(args.iter().any(|arg| arg == "--no-stub"));
+        assert!(args.iter().any(|arg| arg == "--non-interactive"));
+    }
+
+    #[test]
     fn direct_elf_flash_rebuilds_the_checked_in_partition_layout() {
         let args = direct_elf_flash_args(
             "/dev/cu.test",
@@ -17781,6 +18294,71 @@ mod tests {
         }));
         assert_eq!(args.last().map(String::as_str), Some("firmware.elf"));
         assert_eq!(direct_erase_flash_args("/dev/cu.test")[0], "erase-flash");
+    }
+
+    #[test]
+    fn espflash_diagnostics_preserve_both_streams_and_classify_flash_end_failure() {
+        let diagnostics = classify_espflash_diagnostics(
+            "flash",
+            Some(1),
+            "Writing at 0x00010000...\nHash of data verified.\n",
+            "Error:   x The bootloader returned an error\n  `FlashEnd` command failed\n",
+        );
+
+        assert_eq!(diagnostics.phase, "finalize");
+        assert_eq!(diagnostics.phases, vec!["write", "verify", "finalize"]);
+        assert!(diagnostics.stdout.contains("Writing at 0x00010000"));
+        assert!(diagnostics.stderr.contains("FlashEnd"));
+        assert!(
+            diagnostics
+                .hint
+                .contains("image may have been written, but write completeness is unconfirmed")
+        );
+        let failure = format_espflash_failure(&diagnostics);
+        assert!(failure.contains("exit_code=Some(1)"));
+        assert!(failure.contains("Writing at 0x00010000"));
+        assert!(failure.contains("FlashEnd"));
+    }
+
+    #[test]
+    fn espflash_diagnostics_report_connection_failure_as_a_transport_problem() {
+        let diagnostics = classify_espflash_diagnostics(
+            "flash",
+            Some(1),
+            "",
+            "Error: failed to connect to ESP32-S3: timed out waiting for packet header\n",
+        );
+
+        assert_eq!(diagnostics.phase, "connect");
+        assert!(diagnostics.hint.contains("boot mode"));
+        assert!(diagnostics.hint.contains("serial link"));
+        assert!(diagnostics.hint.contains("power"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn espflash_command_failure_keeps_stdout_and_stderr_from_the_child_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let fake_espflash = directory.path().join("espflash");
+        fs::write(
+            &fake_espflash,
+            "#!/bin/sh\nprintf 'Writing at 0x00010000...\\nHash of data verified.\\n'\nprintf 'Error: FlashEnd command failed\\n' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_espflash).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&fake_espflash, permissions).unwrap();
+
+        let error = run_espflash_command(&fake_espflash, &["flash".to_string()])
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("phase `finalize`"));
+        assert!(error.contains("Writing at 0x00010000"));
+        assert!(error.contains("Hash of data verified"));
+        assert!(error.contains("FlashEnd command failed"));
     }
 
     #[test]

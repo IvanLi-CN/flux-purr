@@ -53,6 +53,11 @@
 - Existing data in those internal locations MUST be ignored. A missing, unreadable, unwritable, or unverifiable EEPROM MUST enter `EEPROM_REQUIRED` rather than select a fallback.
 - A future non-persistent default profile requires separate hardware and safety approval, runs only in RAM, and cannot be selected as an EEPROM failure fallback.
 
+### REQ-FUDF-007
+
+- `flash` and `recover` MUST preserve both stdout and stderr from each espflash invocation and report the observed phase sequence, final phase, exit code, diagnosis category, and bounded output.
+- A `finalize`/`FlashEnd` failure MUST state that the image may have been written but write completeness and boot success are unconfirmed. Connection, erase/write, and verification failures MUST remain distinguishable and include hardware-oriented next checks.
+
 ## Verification
 
 ### VER-FUDF-001
@@ -85,6 +90,12 @@
 - covers: `REQ-FUDF-005`
 - covers: `REQ-FUDF-006`
 - Pass condition: recovery targets only MCU Flash; no source, partition table, layout, bundle, or host migration path contains `flux_cfg` or an MCU configuration fallback; EEPROM failure reaches `EEPROM_REQUIRED`.
+
+### VER-FUDF-006
+
+- Method: fake espflash subprocess and CLI rendering tests.
+- covers: `REQ-FUDF-007`
+- Pass condition: stdout and stderr are both preserved; connection, write/verify, and `FlashEnd` failures remain distinguishable; a `FlashEnd` failure never claims that flash completion was confirmed.
 
 ## Related ADRs
 

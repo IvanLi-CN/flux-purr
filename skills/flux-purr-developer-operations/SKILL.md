@@ -21,7 +21,7 @@ cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr-devd -
   --artifact-root <repo-root>
 ```
 
-- Pass `--bind`, `--serial-port`, `--artifact-root`, `--allow-dev-cors`, and `--allow-real-flash` explicitly for test setups. Real flash remains disabled unless the owner explicitly authorizes it.
+- Pass `--bind`, `--serial-port`, `--artifact-root`, and `--allow-dev-cors` explicitly for devd test setups. Developer `flash` and `recover` are direct serial/ROM commands and do not start or connect devd. Real flash remains disabled unless the owner explicitly authorizes it.
 - Use released-style CLI paths even from source: `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ...`.
 - Use `scripts/devd-hardware-smoke.py --device-id mock-fp-lab-01 --allow-mock-device` only for mock HTTP contract proof. Never report mock smoke as hardware validation.
 - For Web live development, start Vite with an explicit `VITE_FLUX_PURR_DEVD_URL=http://127.0.0.1:<leased-devd-port>` and `VITE_FLUX_PURR_ENABLE_DEVD=1`; do not rely on the default devd port when a port lease is required.
@@ -38,7 +38,10 @@ cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr-devd -
 - Stop after non-hardware validation and ask the owner to prepare hardware.
 - Require an exact authorized USB port before any real device operation.
 - If the authorized port disappears or re-enumerates to another path, stop and report evidence. Do not switch ports automatically.
-- Real HIL should prove CLI-through-devd `identity`/`status`, runtime write/readback/restore, artifact verify, dry-run flash, real flash with `--allow-real-flash` and `--confirm FLASH`, reboot, and post-flash identity/status/events.
+- Verify devd-backed `identity`/`status`, runtime write/readback/restore, and artifact behavior separately from Developer flash. Use `FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1 cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- flash --port <owner-authorized-port> [--elf <local-elf>]` for the normal direct flash path; it automatically archives EEPROM before ROM write.
+- When that normal command reports `ESP32-S3 ROM download mode`, it has confirmed that the application snapshot protocol is unavailable. With explicit owner authorization, a Developer may bootstrap only that exact port with `FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1 cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- flash --port <owner-authorized-port> [--elf <local-elf>] --skip-backup --confirm NO_EEPROM_BACKUP`. State in the HIL result that EEPROM health is unknown and no developer backup archive exists.
+- The paired bypass is specific to the confirmed download-mode bootstrap path. Other snapshot failures remain blocking and require their reported hardware or application condition to be resolved before a normal flash.
+- `flash` and `recover` preserve both stdout and stderr from each espflash invocation and report the observed phases, final phase, diagnosis category, exit code, and bounded output. A `finalize`/`FlashEnd` failure means the image may have been written but completeness and boot success are unconfirmed; do not report it as a complete flash.
 - Do not use `mcu-agentd` as the acceptance path for CLI/devd HIL unless the owner explicitly changes the plan.
 
 ## Release Work

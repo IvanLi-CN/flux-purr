@@ -20,6 +20,7 @@
 - Bundle v2 and the release-scoped SHA-256 integrity catalog are implemented; signing fields and migration instructions are forbidden.
 - Direct `--port` Developer flash and recovery command parsing and dispatch are implemented without devd or HTTP.
 - Encrypted automatic EEPROM backup, retention cleanup, and the explicit bypass contract are implemented in the host tool.
+- Espflash execution diagnostics retain bounded stdout and stderr, classify observed flash stages, and distinguish connection, write, verification, and finalization failures.
 - The firmware and partition layout use EEPROM-only persistence; internal Flash configuration fallback is removed.
 
 ## References
