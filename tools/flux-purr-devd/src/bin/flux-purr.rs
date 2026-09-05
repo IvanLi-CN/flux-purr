@@ -2117,7 +2117,6 @@ fn direct_elf_flash_args(
         "--port".into(),
         port.into(),
         "--non-interactive".into(),
-        "--no-stub".into(),
         "--after".into(),
         "hard-reset".into(),
         "--partition-table".into(),
@@ -18350,6 +18349,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair[0] == "--partition-table" && pair[1] == "firmware/partitions.csv"
         }));
+        assert!(!args.iter().any(|arg| arg == "--no-stub"));
         assert_eq!(args.last().map(String::as_str), Some("firmware.elf"));
         assert_eq!(direct_erase_flash_args("/dev/cu.test")[0], "erase-flash");
     }

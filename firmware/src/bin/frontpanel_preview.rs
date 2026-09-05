@@ -25,6 +25,9 @@ enum PreviewPreset {
     KeyTestDouble,
     KeyTestLong,
     Dashboard,
+    DashboardReady,
+    DashboardPowerWait,
+    DashboardEepromRestore,
     DashboardManual,
     DashboardFanOff,
     DashboardFanAuto,
@@ -94,6 +97,9 @@ impl PreviewPreset {
             Self::KeyTestDouble => "key-test-double",
             Self::KeyTestLong => "key-test-long",
             Self::Dashboard => "dashboard",
+            Self::DashboardReady => "dashboard-ready",
+            Self::DashboardPowerWait => "dashboard-power-wait",
+            Self::DashboardEepromRestore => "dashboard-eeprom-restore",
             Self::DashboardManual => "dashboard-manual",
             Self::DashboardFanOff => "dashboard-fan-off",
             Self::DashboardFanAuto => "dashboard-fan-auto",
@@ -119,6 +125,9 @@ impl PreviewPreset {
             "key-test-double" | "keytest-double" => Some(Self::KeyTestDouble),
             "key-test-long" | "keytest-long" => Some(Self::KeyTestLong),
             "dashboard" => Some(Self::Dashboard),
+            "ready" | "dashboard-ready" => Some(Self::DashboardReady),
+            "power-wait" | "dashboard-power-wait" => Some(Self::DashboardPowerWait),
+            "eeprom-restore" | "dashboard-eeprom-restore" => Some(Self::DashboardEepromRestore),
             "dashboard-manual" => Some(Self::DashboardManual),
             "dashboard-fan-off" => Some(Self::DashboardFanOff),
             "dashboard-fan-auto" => Some(Self::DashboardFanAuto),
@@ -151,6 +160,20 @@ impl PreviewPreset {
                 build_key_test_state(RawFrontPanelKey::Down, KeyGesture::LongPress)
             }
             Self::Dashboard => base_dashboard_state(),
+            Self::DashboardReady => base_dashboard_state(),
+            Self::DashboardPowerWait => {
+                let mut state = base_dashboard_state();
+                state.pd_contract_mv = 0;
+                state.heater_lock_reason = Some(HeaterLockReason::PdContractUnavailable);
+                state.dashboard_warning_visible = true;
+                state
+            }
+            Self::DashboardEepromRestore => {
+                let mut state = base_dashboard_state();
+                state.set_dashboard_presentation(DashboardPresentationState::EepromRestore);
+                state.eeprom_data_incompatible = true;
+                state
+            }
             Self::DashboardManual => {
                 let mut state = base_dashboard_state();
                 state.current_temp_c = 365;
@@ -299,7 +322,7 @@ where
     let preset_slug = args.next().unwrap_or_else(|| String::from("dashboard"));
     let Some(preset) = PreviewPreset::from_slug(&preset_slug) else {
         return Err(format!(
-            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, dashboard-temp, menu, preset-temp, active-cooling, wifi-info, device-info, eeprom-data-incompatible)",
+            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-ready, dashboard-power-wait, dashboard-eeprom-restore, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, dashboard-initializing, dashboard-initial-rtd-fault, dashboard-temp, menu, preset-temp, active-cooling, wifi-info, device-info, eeprom-data-incompatible)",
             preset_slug
         ));
     };

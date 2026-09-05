@@ -4,6 +4,7 @@
 
 ## Current Status
 
+- FUSB302B pending-to-ready transitions discard pre-ready heater arm intent; an operator must explicitly arm heating after power readiness.
 - Implementation: Web + browser Web Serial + `devd` + CLI + USB JSONL + firmware `net_http` runtime 已覆盖 identity、network、status、runtime mutation、artifact verify、flash dry-run、real flash 与 monitor event 的真实传输路径
 - Lifecycle: active
 - Catalog note: direct firmware HTTP 默认随 ESP32-S3 runtime 构建；LAN 保持可信私网边界，初始 WiFi 配置、firmware flash 与 token reset 仍仅限 USB 配置通路（Browser Web Serial 或 native `devd`）
@@ -31,7 +32,7 @@
 ## Coverage / rollout summary
 
 - `web/e2e/control-plane-lan.spec.ts` 以独立 HTTP v1 fixture 覆盖 Chromium 配对、PNA/CORS、四位码终态、token recovery/401 purge、lease busy/expiry、SSE reconnect、runtime write/readback 和 Safari block；测试通过 `E2E_DISABLE_DEVD=1` 明确禁止启动或调用 `devd`。`devd` 的 native USB 测试仍单独验证自身 transport，不构成浏览器 LAN 的依赖。
-- thermal profile persistence 使用固定 `pps3a` / `pps5a` 双 bank；每个 bank 最多持久化 `10` 个完整 point-local 目标点。EEPROM 当前写入 v5，使用固定 `2 KiB` active slot 与 `u16` TLV length，解码兼容 v1-v4，读取顺序为 `2 KiB active -> 1 KiB previous -> 512 B legacy`。旧单 profile 会在 RAM 中迁移到 `pps3a` 且默认 mode 为 `65w`，下一次成功配置提交时物化为 v5；EEPROM 启动不强制重写旧槽。
+- thermal profile persistence 使用固定 `pps3a` / `pps5a` 双 bank；每个 bank 最多持久化 `10` 个完整 point-local 目标点。EEPROM 当前写入 v5，使用固定 `2 KiB` active slot 与 `u16` TLV length；启动只读取两个 v5 active slot 中最高序号的完整 record。v1-v4 记录仍由兼容解码器在首帧后的 `EEPROM/RESTORE` 锁定态后台扫描，恢复完成前禁止加热和配置编辑；下一次成功配置提交时物化为 v5。
 - runtime status、runtime config、CLI 与 self-test 已统一支持 `thermalProfileMode=auto|65w|100w` 与 `thermalProfileResolvedBank`。显式 `65w` / `100w` 为强制档；`auto` 仅按 source capability class 在 `pps3a` / `pps5a` 间解析，不按 live current 自动回退。
 - `thermal_plant_auto` 使用单次瞬态轨迹：采集环境基线，以选中 PPS APDO 的 `max_mv` 和 `100%` PWM 升温至 `220C`，同一控制周期断热并自然冷却至 `80C`。APDO 必须覆盖 `20V / >=3A`；`5V..21V / 3A` 使用 `21V`，`5V..20V / 3A` 使用 `20V`。heater-curve、名义 `R20/TCR` 与生产 profile 电流余量不参与本次请求计算。同一次升温也收集 heater-curve 温区样本。物理拟合有效后直接持久化为新的 transient active TLV；旧 `0x36/0x37` 稳态记录仅解码兼容，绝不迁移、优先或解锁加热。控制面和 CLI 不暴露候选、promotion 或独立 heater-curve 自动加热操作。
 - `flux-purr thermal profile preview|save|clear-saved` 已是 bank-aware 路径。`preview` 仍是单一 RAM overlay；显式 `save` / `clear-saved` 会携带目标 bank，`auto` 下必须先应用 `thermalProfileMode=auto`，再从该请求的 status 回读 `thermalProfileResolvedBank`，最后才允许向 resolved bank 持久化。
@@ -56,7 +57,7 @@
 - 当前固件与 host 工具链已统一 warmup 语义：只要 heater state machine 仍在 `warmup`，输出就保持 `100%`，host readback / candidate import / replay / report 都必须把 `warmupPowerPermille=1000` 视为唯一有效运行值。
 - heater 控制环当前为 `20Hz`；每个 control cycle 聚合 `64` 次 RTD ADC conversion，并丢弃前置 settle 样本后保留分数毫伏均值贯穿 calibration 与 PT1000 转换。默认 `tempFilterAlphaPermille=750`，仍可通过 thermal profile API / EEPROM 覆盖。冻结的 `pps3a` accepted bundle 仍记录 `700`，因此历史 3A bundle 与当前固件默认值应分开理解。
 - PT1000 换算使用生产板 `TPS62933` 反馈网络确定的 `3328mV` 名义分压电源与 `2.49 kOhm` 参考电阻。RTD ADC calibration 保持独立的 gain/offset 层；未校准设备使用 identity fit，既不以旧样机的有效电压替代 3V3 电路拓扑，也不把该名义值描述为组装板实测电压。
-- 默认产品启动在显示、PD/I2C、持久化配置、LAN/WiFi tasks、MCPWM 输出、CH224Q capability 读取和 heater safe-off 电源同步全部完成后，才创建 ADC1/GPIO1/GPIO2 和 eFuse curve。ADC 后只做首次测量与依赖测量的安全/UI/output 投影，不再创建硬件外设。固定 ADC 初始化延迟未达到一致稳定标准，因此产品不启用固定延迟。
+- 默认产品启动先把风扇、加热器和蜂鸣器 GPIO/MCPWM 置于安全关闭，再执行 FUSB302B 身份/非阻塞 PHY 与 EEPROM v5 header-first 恢复；随后创建 ADC1/GPIO1/GPIO2 和 eFuse curve，完成首次 RTD/VIN 测量并刷新 Dashboard。旧 EEPROM 格式扫描和 LAN/WiFi tasks 均在首帧之后执行；ADC 后只做首次测量与依赖测量的安全/UI/output 投影，不再创建硬件外设。Dashboard 不等待 PD 合同，也不执行固定 pre-ADC 功率延迟。
 - ADC 冷启动实验只支持“存在未被单项软件变量消除的 common-mode conversion/input movement”，不支持固定 warm-up 时间、经验 offset 或 Dashboard request isolation。产品保持确定性最后初始化顺序，但不把该顺序描述为绝对精度校准；诊断方法与不可辨识边界见 [`ESP32-S3 ADC absolute-accuracy diagnosis`](../../solutions/device-control/esp32-s3-adc-accuracy-diagnosis.md)。
 - 当前温度链路已经收口为三条可审计职责：owner-facing `currentTempC` / `boardTempCenti` / front panel 直接反映当前有效 RTD 样本；`heaterControlTempC` 反映实际送入控制器的最后可信样本；controller EMA 与 slope 继续单独暴露。PPS transition guard 与控制侧物理斜率门只能作用于 controller 内部状态，不得冻结或改写 owner-facing 温度。
 - 控制环前不使用多样本窗口、中位数或输出钳位。控制侧仅以实际 `20Hz` 周期检查单样本是否超过 `35°C/s` 的物理斜率上限；被拒样本保留在 raw/report，并以 `heaterControlMeasurementGuarded=true` 审计，后续可信样本仍直接进入配置的 EMA。

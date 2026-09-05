@@ -156,6 +156,8 @@ use flux_purr_firmware::frontpanel::{
     FanDisplayState, FrontPanelKeyMap, FrontPanelRawState, FrontPanelRoute, FrontPanelRuntimeMode,
     FrontPanelUiState, HeaterLockReason,
 };
+#[cfg(test)]
+use flux_purr_firmware::frontpanel::{FrontPanelKey, KeyEvent, KeyGesture, RawFrontPanelKey};
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 use flux_purr_firmware::lan::LanEndpoint;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -168,10 +170,11 @@ use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{
     EepromError, LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
-    M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS, M24c64, MEMORY_RECORD_HEADER_LEN,
-    MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE, MEMORY_WRITE_DEBOUNCE_MS,
-    MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET, PREVIOUS_MEMORY_SLOT_B_OFFSET,
-    PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record, encode_memory_record,
+    M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS, M24c64, MEMORY_RECORD_FORMAT_VERSION,
+    MEMORY_RECORD_HEADER_LEN, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE,
+    MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET,
+    PREVIOUS_MEMORY_SLOT_B_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record,
+    encode_memory_record,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::{
@@ -191,7 +194,8 @@ use flux_purr_firmware::memory::{
 };
 #[cfg(test)]
 use flux_purr_firmware::memory::{
-    MEMORY_SLOT_SIZE, MemoryRecord, decode_memory_record, encode_memory_record,
+    MEMORY_RECORD_FORMAT_VERSION, MEMORY_RECORD_HEADER_LEN, MEMORY_SLOT_SIZE, MemoryRecord,
+    decode_memory_record, encode_memory_record,
 };
 #[cfg(test)]
 use flux_purr_firmware::memory::{ThermalPlantRawAnchor, ThermalPlantRawTransaction};
@@ -213,7 +217,7 @@ use flux_purr_firmware::{DeviceMode, DeviceStatus, PdState};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
     adapters::{
-        ch224q::{self, Address, Status},
+        ch224q::{self, Status},
         fusb302b::{self, SinkPhase},
     },
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
@@ -669,28 +673,21 @@ const RTD_TEMP_MIN_C: f32 = -50.0;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_TEMP_MAX_C: f32 = 500.0;
 #[cfg(target_arch = "xtensa")]
-const CH224Q_I2C_FREQUENCY_HZ: u32 = 100_000;
+const FUSB302B_I2C_FREQUENCY_HZ: u32 = 100_000;
 #[cfg(target_arch = "xtensa")]
-const I2C_TRANSACTION_TIMEOUT_MS: u64 = 500;
-#[cfg(target_arch = "xtensa")]
-const CH224Q_RETRY_ATTEMPTS: u8 = 3;
-#[cfg(target_arch = "xtensa")]
-const CH224Q_RETRY_DELAY_MS: u64 = 50;
-#[cfg(target_arch = "xtensa")]
-const CH224Q_STATUS_POLL_ATTEMPTS: u8 = 40;
-#[cfg(any(target_arch = "xtensa", test))]
-const CH224Q_STATUS_POLL_DELAY_MS: u64 = 100;
-#[cfg(any(target_arch = "xtensa", test))]
-const PD_WAIT_SERVICE_INTERVAL_MS: u64 = 20;
+// Keep identity probing fail-closed without turning an absent optional
+// controller into a multi-second startup stall. EEPROM reads are chunked
+// below this budget so the shared bus retains the same bounded transaction.
+const I2C_TRANSACTION_TIMEOUT_MS: u64 = 25;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
 const EEPROM_WRITE_CHUNK_MAX_BYTES: usize = 16;
 #[cfg(target_arch = "xtensa")]
-const EEPROM_READ_CHUNK_MAX_BYTES: usize = 256;
+const EEPROM_READ_CHUNK_MAX_BYTES: usize = 64;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_UNUSED_GAP_OFFSET: u16 = 0x0c00;
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 const EEPROM_UNUSED_GAP_LEN: usize = 0x0400;
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -3061,6 +3058,9 @@ fn startup_pd_contract_ready(observation: Option<PdStatusObservation>) -> bool {
     observation.is_some_and(|observation| observation.status.pd_active)
 }
 
+#[cfg(test)]
+const STARTUP_PD_WAIT_BUDGET_MS: u64 = 0;
+
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StartupFrontPanelPresentation {
@@ -3178,9 +3178,16 @@ fn update_runtime_display_temperature(
 ) -> bool {
     *latest_display_temp_c = temp_c;
     *latest_display_temp_i16 = temp_c_to_whole_c(temp_c);
-    let mut needs_redraw = ui_state.set_dashboard_presentation(
-        flux_purr_firmware::frontpanel::DashboardPresentationState::Ready,
-    );
+    let mut needs_redraw = false;
+    if matches!(
+        ui_state.dashboard_presentation,
+        flux_purr_firmware::frontpanel::DashboardPresentationState::Initializing
+            | flux_purr_firmware::frontpanel::DashboardPresentationState::InitialRtdFault
+    ) {
+        needs_redraw = ui_state.set_dashboard_presentation(
+            flux_purr_firmware::frontpanel::DashboardPresentationState::Ready,
+        );
+    }
     needs_redraw |=
         sync_runtime_temperature_ui(ui_state, *latest_display_temp_i16, temp_c_to_deci_c(temp_c));
     needs_redraw
@@ -4632,6 +4639,23 @@ fn reconcile_runtime_heater_enabled(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn disarm_stale_heater_arm_after_pd_transition(
+    previous_pd_ready: bool,
+    current_pd_ready: bool,
+    ui_state: &mut FrontPanelUiState,
+    calibration_runtime_state: &mut CalibrationRuntimeState,
+) -> bool {
+    if previous_pd_ready || !current_pd_ready {
+        return false;
+    }
+
+    let was_armed = ui_state.heater_enabled || calibration_runtime_state.heater_enabled;
+    ui_state.heater_enabled = false;
+    calibration_runtime_state.heater_enabled = false;
+    was_armed
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn thermal_plant_calibration_snapshot(
     measured_temp_c: f32,
     heater_enabled: bool,
@@ -5630,24 +5654,6 @@ fn read_rtd_sample<'a>(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_ch224q_status(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    address: Address,
-) -> Option<PdStatusObservation> {
-    let status_raw = read_ch224q_register(i2c, address, ch224q::STATUS_REGISTER)?;
-    let current_raw =
-        read_ch224q_register(i2c, address, ch224q::CURRENT_DATA_REGISTER).unwrap_or(0);
-    Some(PdStatusObservation {
-        status_raw,
-        status: Status::from_register(status_raw),
-        current_raw,
-        current_ma: ch224q::current_ma_from_register(current_raw),
-        contract_voltage_mv: None,
-        contract: Contract::none(),
-    })
-}
-
-#[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS0_VBUS_OK: u8 = 1 << 7;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS0_CRC_CHECK: u8 = 1 << 4;
@@ -6242,7 +6248,6 @@ fn fusb302b_adjustable_power_capabilities(
 
 #[cfg(target_arch = "xtensa")]
 enum PdPort {
-    Ch224q(Address),
     Fusb302b(Fusb302bRuntime),
     Unavailable,
 }
@@ -6251,7 +6256,6 @@ enum PdPort {
 impl PdPort {
     const fn controller_kind(&self) -> ControllerKind {
         match self {
-            Self::Ch224q(_) => ControllerKind::Ch224q,
             Self::Fusb302b(_) => ControllerKind::Fusb302b,
             Self::Unavailable => ControllerKind::Unknown,
         }
@@ -6261,8 +6265,21 @@ impl PdPort {
 #[cfg(target_arch = "xtensa")]
 enum DetectedPdController {
     Fusb302b(u8),
-    Ch224q,
     Unknown,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn fusb302b_identity_is_stable(
+    first_id: Option<u8>,
+    second_id: Option<u8>,
+    status0: Option<u8>,
+    status1: Option<u8>,
+) -> bool {
+    matches!((first_id, second_id, status0, status1), (Some(first), Some(second), Some(status0), Some(status1))
+        if first == second
+            && first & 0xf0 == 0x90
+            && status0 != u8::MAX
+            && status1 != u8::MAX)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6278,53 +6295,21 @@ async fn detect_pd_controller(i2c: &mut I2c<'_, esp_hal::Blocking>) -> DetectedP
     let (Some(first), Some(second)) = (first, second) else {
         return DetectedPdController::Unknown;
     };
-    if first != second {
+    if first != second || !first.is_fusb302b_family() {
         return DetectedPdController::Unknown;
     }
-    if first.is_fusb302b_family() {
-        let status = {
-            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
-            phy.read_status().await
-        };
-        return match status {
-            Ok(status) if status.status0 != u8::MAX && status.status1 != u8::MAX => {
-                DetectedPdController::Fusb302b(first.bits())
-            }
-            _ => DetectedPdController::Unknown,
-        };
-    }
-
-    if detect_ch224q_primary(i2c) {
-        DetectedPdController::Ch224q
+    let status = {
+        let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+        phy.read_status().await.ok()
+    };
+    let (status0, status1) = status
+        .map(|status| (Some(status.status0), Some(status.status1)))
+        .unwrap_or((None, None));
+    if fusb302b_identity_is_stable(Some(first.bits()), Some(second.bits()), status0, status1) {
+        DetectedPdController::Fusb302b(first.bits())
     } else {
         DetectedPdController::Unknown
     }
-}
-
-#[cfg(target_arch = "xtensa")]
-fn detect_ch224q_primary(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
-    let Some(status) = read_ch224q_register(i2c, Address::Primary, ch224q::STATUS_REGISTER) else {
-        return false;
-    };
-    let Some(current) = read_ch224q_register(i2c, Address::Primary, ch224q::CURRENT_DATA_REGISTER)
-    else {
-        return false;
-    };
-    status & 0x80 == 0 && current != u8::MAX
-}
-
-#[cfg(target_arch = "xtensa")]
-fn detect_ch224q_secondary(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
-    let Some(status) = read_ch224q_register(i2c, Address::Secondary, ch224q::STATUS_REGISTER)
-    else {
-        return false;
-    };
-    let Some(current) =
-        read_ch224q_register(i2c, Address::Secondary, ch224q::CURRENT_DATA_REGISTER)
-    else {
-        return false;
-    };
-    status & 0x80 == 0 && current != 0xff
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6600,6 +6585,21 @@ async fn usb_eeprom_maintenance_response(
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+#[inline(never)]
+fn memory_record_length_from_header(header: &[u8], slot_size: usize) -> Option<usize> {
+    if header.len() < MEMORY_RECORD_HEADER_LEN
+        || header[0..4] != *b"FPM1"
+        || header[4] != MEMORY_RECORD_FORMAT_VERSION
+        || usize::from(header[5]) != MEMORY_RECORD_HEADER_LEN
+    {
+        return None;
+    }
+    let payload_len = usize::from(u16::from_le_bytes([header[6], header[7]]));
+    let record_len = MEMORY_RECORD_HEADER_LEN.checked_add(payload_len)?;
+    (record_len <= slot_size).then_some(record_len)
+}
+
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
 fn load_eeprom_memory_record(
@@ -6615,19 +6615,32 @@ fn load_eeprom_memory_record(
     let mut contains_data = false;
     let mut read_failed = false;
     let mut selected: Option<MemoryRecord> = None;
-    for (offset, length) in [
-        (MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_SIZE),
-        (MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE),
-        (PREVIOUS_MEMORY_SLOT_A_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE),
-        (PREVIOUS_MEMORY_SLOT_B_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE),
-        (LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
-        (LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
-    ] {
-        let bytes = &mut scratch.record_bytes[..length];
-        let candidate = match read_eeprom_bytes_chunked(&mut eeprom, offset, bytes) {
+    let current_format_valid;
+    // Only the current v5 slots are read on the critical path. Older layouts
+    // are scanned after the first Dashboard frame so EEPROM migration cannot
+    // delay RTD sampling or the owner-facing startup state.
+    for offset in [MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET] {
+        let header = &mut scratch.record_bytes[..MEMORY_RECORD_HEADER_LEN];
+        let candidate = match read_eeprom_bytes_chunked(&mut eeprom, offset, header) {
             Ok(()) => {
-                contains_data |= eeprom_bytes_contain_data(bytes);
-                decode_memory_record(bytes).ok()
+                contains_data |= eeprom_bytes_contain_data(header);
+                if let Some(record_len) = memory_record_length_from_header(header, MEMORY_SLOT_SIZE)
+                {
+                    let bytes = &mut scratch.record_bytes[..record_len];
+                    match read_eeprom_bytes_chunked(
+                        &mut eeprom,
+                        offset.saturating_add(MEMORY_RECORD_HEADER_LEN as u16),
+                        &mut bytes[MEMORY_RECORD_HEADER_LEN..],
+                    ) {
+                        Ok(()) => decode_memory_record(bytes).ok(),
+                        Err(_) => {
+                            read_failed = true;
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
             }
             Err(_) => {
                 read_failed = true;
@@ -6643,19 +6656,26 @@ fn load_eeprom_memory_record(
         };
     }
 
-    let unused_gap = read_eeprom_bytes_chunked(
-        &mut eeprom,
-        EEPROM_UNUSED_GAP_OFFSET,
-        &mut scratch.record_bytes[..EEPROM_UNUSED_GAP_LEN],
-    );
-    match unused_gap {
-        Ok(()) => {
-            contains_data |=
-                eeprom_bytes_contain_data(&scratch.record_bytes[..EEPROM_UNUSED_GAP_LEN]);
+    current_format_valid = selected.is_some();
+    // Probe one byte in each archived slot to distinguish a blank EEPROM from
+    // legacy data without reading the full old records during boot.
+    for offset in [
+        PREVIOUS_MEMORY_SLOT_A_OFFSET,
+        PREVIOUS_MEMORY_SLOT_B_OFFSET,
+        LEGACY_MEMORY_SLOT_A_OFFSET,
+        LEGACY_MEMORY_SLOT_B_OFFSET,
+    ] {
+        let probe = &mut scratch.record_bytes[..1];
+        match read_eeprom_bytes_chunked(&mut eeprom, offset, probe) {
+            Ok(()) => contains_data |= eeprom_bytes_contain_data(probe),
+            Err(_) => read_failed = true,
         }
-        Err(_) => {
-            read_failed = true;
-        }
+    }
+
+    let gap_probe = &mut scratch.record_bytes[..1];
+    match read_eeprom_bytes_chunked(&mut eeprom, EEPROM_UNUSED_GAP_OFFSET, gap_probe) {
+        Ok(()) => contains_data |= eeprom_bytes_contain_data(gap_probe),
+        Err(_) => read_failed = true,
     }
 
     if let Some(record) = &selected {
@@ -6672,9 +6692,47 @@ fn load_eeprom_memory_record(
         info!("memory restore unavailable -> using defaults");
     }
 
-    let incompatible = eeprom_data_is_incompatible(selected.is_some(), contains_data);
-    let required = read_failed || incompatible;
+    let incompatible = eeprom_data_is_incompatible(current_format_valid, contains_data);
+    let required = read_failed && selected.is_none();
     (selected, incompatible, required)
+}
+
+#[cfg(target_arch = "xtensa")]
+#[inline(never)]
+async fn load_legacy_eeprom_memory_record(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    scratch: &mut MemoryIoScratch,
+) -> (Option<MemoryRecord>, bool) {
+    let Some(address) = probe_eeprom_address(i2c) else {
+        return (None, true);
+    };
+    let mut eeprom = M24c64::with_address(i2c, address);
+    let mut selected: Option<MemoryRecord> = None;
+    let mut read_failed = false;
+    for (offset, length) in [
+        (PREVIOUS_MEMORY_SLOT_A_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE),
+        (PREVIOUS_MEMORY_SLOT_B_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE),
+        (LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
+        (LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
+    ] {
+        let bytes = &mut scratch.record_bytes[..length];
+        let candidate = match read_eeprom_bytes_chunked(&mut eeprom, offset, bytes) {
+            Ok(()) => decode_memory_record(bytes).ok(),
+            Err(_) => {
+                read_failed = true;
+                None
+            }
+        };
+        selected = match (selected, candidate) {
+            (Some(current), Some(candidate)) if candidate.sequence > current.sequence => {
+                Some(candidate)
+            }
+            (Some(current), _) => Some(current),
+            (None, candidate) => candidate,
+        };
+        EmbassyTimer::after_millis(0).await;
+    }
+    (selected, read_failed)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -7388,7 +7446,7 @@ fn pps_request_transition_ms(mode_changed: bool) -> u64 {
     }
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 fn clamp_ch224q_adjustable_request_mv(request_mv: u16) -> u16 {
     request_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV)
 }
@@ -12666,200 +12724,12 @@ where
 const DISPLAY_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(target_arch = "xtensa")]
-async fn request_ch224q_voltage(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    request: ch224q::VoltageRequest,
-) -> Option<Address> {
-    let payload = ch224q::voltage_request_payload(request);
-
-    for attempt in 1..=CH224Q_RETRY_ATTEMPTS {
-        for address in [Address::Primary, Address::Secondary] {
-            if i2c.write(address.as_u8(), &payload).is_ok() {
-                info!(
-                    "ch224q request ok addr=0x{=u8:02x} reg=0x{=u8:02x} code={=u8} mv={=u16}",
-                    address.as_u8(),
-                    ch224q::VOLTAGE_CONTROL_REGISTER,
-                    request.control_register_value(),
-                    request.millivolts(),
-                );
-                return Some(address);
-            }
-        }
-
-        info!(
-            "ch224q request retry={=u8}/{=u8} mv={=u16}",
-            attempt,
-            CH224Q_RETRY_ATTEMPTS,
-            request.millivolts(),
-        );
-        EmbassyTimer::after_millis(CH224Q_RETRY_DELAY_MS).await;
-    }
-
-    info!(
-        "ch224q request failed after {=u8} attempts",
-        CH224Q_RETRY_ATTEMPTS,
-    );
-    None
-}
-
-#[cfg(target_arch = "xtensa")]
-async fn write_ch224q_payload(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    address: Address,
-    payload: &[u8],
-) -> bool {
-    for attempt in 1..=CH224Q_RETRY_ATTEMPTS {
-        if i2c.write(address.as_u8(), payload).is_ok() {
-            return true;
-        }
-
-        info!(
-            "ch224q write retry={=u8}/{=u8} addr=0x{=u8:02x} reg=0x{=u8:02x}",
-            attempt,
-            CH224Q_RETRY_ATTEMPTS,
-            address.as_u8(),
-            payload.first().copied().unwrap_or(0),
-        );
-        EmbassyTimer::after_millis(CH224Q_RETRY_DELAY_MS).await;
-    }
-
-    false
-}
-
-#[cfg(target_arch = "xtensa")]
-async fn request_ch224q_adjustable_voltage(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    address: Address,
-    request_mv: u16,
-    mode: ch224q::AdjustableVoltageMode,
-    mode_changed: bool,
-) -> bool {
-    let original_request_mv = request_mv;
-    let request_mv = clamp_ch224q_adjustable_request_mv(request_mv);
-    if request_mv != original_request_mv {
-        warn!(
-            "ch224q adjustable request below hardware minimum requested_mv={=u16} clamped_mv={=u16}",
-            original_request_mv, request_mv,
-        );
-    }
-
-    let voltage_written = match mode {
-        ch224q::AdjustableVoltageMode::Pps => {
-            let Some(payload) = ch224q::pps_voltage_payload(request_mv) else {
-                info!("ch224q pps request invalid mv={=u16}", request_mv);
-                return false;
-            };
-            write_ch224q_payload(i2c, address, &payload).await
-        }
-        ch224q::AdjustableVoltageMode::Avs => {
-            let Some((high_payload, low_payload)) = ch224q::avs_voltage_payloads(request_mv) else {
-                info!("ch224q avs request invalid mv={=u16}", request_mv);
-                return false;
-            };
-            write_ch224q_payload(i2c, address, &high_payload).await
-                && write_ch224q_payload(i2c, address, &low_payload).await
-        }
-    };
-    if !voltage_written {
-        return false;
-    }
-
-    if mode_changed {
-        let payload = ch224q::voltage_request_payload(mode.control_request());
-        if !write_ch224q_payload(i2c, address, &payload).await {
-            return false;
-        }
-    }
-
-    info!(
-        "ch224q adjustable request ok mode={=str} mv={=u16}",
-        match mode {
-            ch224q::AdjustableVoltageMode::Pps => "pps",
-            ch224q::AdjustableVoltageMode::Avs => "avs",
-        },
-        request_mv,
-    );
-    true
-}
-
-#[cfg(target_arch = "xtensa")]
-fn read_ch224q_register(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    address: Address,
-    register: u8,
-) -> Option<u8> {
-    let mut value = [0u8; 1];
-    i2c.write_read(address.as_u8(), &[register], &mut value)
-        .ok()
-        .map(|_| value[0])
-}
-
-#[cfg(target_arch = "xtensa")]
-fn read_ch224q_power_data(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    address: Address,
-) -> Option<[u8; ch224q::PD_POWER_DATA_REGISTER_COUNT]> {
-    let mut bytes = [0u8; ch224q::PD_POWER_DATA_REGISTER_COUNT];
-    i2c.write_read(
-        address.as_u8(),
-        &[ch224q::PD_POWER_DATA_START_REGISTER],
-        &mut bytes,
-    )
-    .ok()
-    .map(|_| bytes)
-}
-
-#[cfg(target_arch = "xtensa")]
-async fn await_ch224q_pd_ready(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    address: Address,
-    mut refresh_boot_light: impl FnMut(),
-) -> Option<(u8, Status, u8, u16)> {
-    for attempt in 1..=CH224Q_STATUS_POLL_ATTEMPTS {
-        refresh_boot_light();
-        let Some(status_raw) = read_ch224q_register(i2c, address, ch224q::STATUS_REGISTER) else {
-            info!(
-                "ch224q status read failed addr=0x{=u8:02x} attempt={=u8}/{=u8}",
-                address.as_u8(),
-                attempt,
-                CH224Q_STATUS_POLL_ATTEMPTS,
-            );
-            wait_for_ch224q_status_poll(&mut refresh_boot_light).await;
-            continue;
-        };
-        let current_raw =
-            read_ch224q_register(i2c, address, ch224q::CURRENT_DATA_REGISTER).unwrap_or(0);
-        let status = Status::from_register(status_raw);
-        let current_ma = ch224q::current_ma_from_register(current_raw);
-        info!(
-            "ch224q status addr=0x{=u8:02x} attempt={=u8}/{=u8} status=0x{=u8:02x} current_raw=0x{=u8:02x} current_ma={=u16}",
-            address.as_u8(),
-            attempt,
-            CH224Q_STATUS_POLL_ATTEMPTS,
-            status_raw,
-            current_raw,
-            current_ma,
-        );
-        if status.pd_active && !status.epr_active {
-            return Some((status_raw, status, current_raw, current_ma));
-        }
-        wait_for_ch224q_status_poll(&mut refresh_boot_light).await;
-    }
-
-    None
-}
-
-#[cfg(target_arch = "xtensa")]
 async fn request_pd_fixed_voltage(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     port: &mut PdPort,
     request: ch224q::VoltageRequest,
 ) -> bool {
     match port {
-        PdPort::Ch224q(address) => {
-            let payload = ch224q::voltage_request_payload(request);
-            write_ch224q_payload(i2c, *address, &payload).await
-        }
         PdPort::Fusb302b(runtime) => {
             runtime
                 .request_fixed_voltage(i2c, request.millivolts(), Instant::now().as_millis())
@@ -12878,15 +12748,6 @@ async fn request_pd_adjustable_voltage(
     mode_changed: bool,
 ) -> PdContractRequestState {
     match port {
-        PdPort::Ch224q(address) => {
-            if request_ch224q_adjustable_voltage(i2c, *address, request_mv, mode, mode_changed)
-                .await
-            {
-                PdContractRequestState::Confirmed
-            } else {
-                PdContractRequestState::Failed
-            }
-        }
         PdPort::Fusb302b(runtime) => {
             let _ = mode_changed;
             if mode == ch224q::AdjustableVoltageMode::Pps {
@@ -12908,7 +12769,6 @@ async fn read_pd_status(
     now_ms: u64,
 ) -> Option<PdStatusObservation> {
     match port {
-        PdPort::Ch224q(address) => read_ch224q_status(i2c, *address),
         PdPort::Fusb302b(runtime) => {
             if !runtime.poll(i2c, now_ms).await {
                 return None;
@@ -12934,60 +12794,14 @@ async fn read_pd_status(
 
 #[cfg(target_arch = "xtensa")]
 fn read_pd_power_capabilities(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    _i2c: &mut I2c<'_, esp_hal::Blocking>,
     port: &mut PdPort,
 ) -> Option<ch224q::AdjustablePowerCapabilities> {
     match port {
-        PdPort::Ch224q(address) => read_ch224q_power_data(i2c, *address)
-            .map(|bytes| ch224q::AdjustablePowerCapabilities::from_pd_power_data(&bytes)),
         PdPort::Fusb302b(runtime) => runtime
             .source_capabilities()
             .and_then(fusb302b_adjustable_power_capabilities),
         PdPort::Unavailable => None,
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-async fn await_pd_ready(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    port: &mut PdPort,
-    mut refresh_boot_light: impl FnMut(),
-) -> Option<PdStatusObservation> {
-    match port {
-        PdPort::Ch224q(address) => {
-            let (status_raw, status, current_raw, current_ma) =
-                await_ch224q_pd_ready(i2c, *address, refresh_boot_light).await?;
-            Some(PdStatusObservation {
-                status_raw,
-                status,
-                current_raw,
-                current_ma,
-                contract_voltage_mv: None,
-                contract: Contract::none(),
-            })
-        }
-        PdPort::Fusb302b(_) => {
-            for _ in 0..150 {
-                refresh_boot_light();
-                let now_ms = Instant::now().as_millis();
-                if let Some(observation) = read_pd_status(i2c, port, now_ms).await
-                    && observation.status.pd_active
-                {
-                    return Some(observation);
-                }
-                EmbassyTimer::after_millis(PD_WAIT_SERVICE_INTERVAL_MS).await;
-            }
-            None
-        }
-        PdPort::Unavailable => None,
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-async fn wait_for_ch224q_status_poll(refresh_boot_light: &mut impl FnMut()) {
-    for _ in 0..(CH224Q_STATUS_POLL_DELAY_MS / PD_WAIT_SERVICE_INTERVAL_MS) {
-        refresh_boot_light();
-        EmbassyTimer::after_millis(PD_WAIT_SERVICE_INTERVAL_MS).await;
     }
 }
 
@@ -13328,217 +13142,8 @@ async fn main(_spawner: Spawner) {
             Ok(()) => unreachable!("key-test runtime only returns for a display fault"),
         }
     }
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_detect_start\n");
-    let mut pd_i2c = I2c::new(
-        peripherals.I2C0,
-        I2cConfig::default()
-            .with_frequency(Rate::from_hz(CH224Q_I2C_FREQUENCY_HZ))
-            .with_software_timeout(SoftwareTimeout::Transaction(HalDuration::from_millis(
-                I2C_TRANSACTION_TIMEOUT_MS,
-            ))),
-    )
-    .expect("failed to create I2C0")
-    .with_sda(peripherals.GPIO8)
-    .with_scl(peripherals.GPIO9);
-    let detected_pd_controller = match detect_pd_controller(&mut pd_i2c).await {
-        DetectedPdController::Unknown if detect_ch224q_secondary(&mut pd_i2c) => {
-            DetectedPdController::Ch224q
-        }
-        detected => detected,
-    };
-    let mut pd_port = match detected_pd_controller {
-        DetectedPdController::Fusb302b(device_id) => {
-            #[cfg(feature = "web_serial")]
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_fusb302b_detected\n");
-            let mut runtime = Fusb302bRuntime::new();
-            if !runtime.initialize(&mut pd_i2c).await {
-                #[cfg(feature = "web_serial")]
-                let _ =
-                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_failed\n");
-                warn!(
-                    "fusb302b identified device_id=0x{=u8:02x} but PHY initialization failed; holding heater interlocked",
-                    device_id,
-                );
-                PdPort::Unavailable
-            } else {
-                #[cfg(feature = "web_serial")]
-                let _ =
-                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_complete\n");
-                info!(
-                    "fusb302b selected device_id=0x{=u8:02x} policy=pps target_mv={=u16} max_current_ma={=u16}",
-                    device_id,
-                    DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
-                    MAX_HEATER_CONTRACT_MA,
-                );
-                PdPort::Fusb302b(runtime)
-            }
-        }
-        DetectedPdController::Ch224q => {
-            #[cfg(feature = "web_serial")]
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_ch224q_detected\n");
-            match request_ch224q_voltage(&mut pd_i2c, DEFAULT_PD_VOLTAGE_REQUEST).await {
-                Some(address) => PdPort::Ch224q(address),
-                None => {
-                    warn!("CH224Q fixed-PD request failed; continuing with heater interlocked");
-                    PdPort::Unavailable
-                }
-            }
-        }
-        DetectedPdController::Unknown => {
-            #[cfg(feature = "web_serial")]
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_identity_unknown\n");
-            warn!("PD controller identity is ambiguous or unreadable; holding heater interlocked");
-            PdPort::Unavailable
-        }
-    };
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_wait_start\n");
-    let initial_pd_observation = await_pd_ready(&mut pd_i2c, &mut pd_port, || {
-        set_status_light_state(StatusLightState::Booting);
-        #[cfg(feature = "web_serial")]
-        poll_usb_early_control(
-            &mut usb_serial,
-            &mut usb_rx_line,
-            usb_tx_buf,
-            &usb_boot_memory_config,
-        );
-    })
-    .await;
-    #[cfg(feature = "web_serial")]
-    poll_usb_early_control(
-        &mut usb_serial,
-        &mut usb_rx_line,
-        usb_tx_buf,
-        &usb_boot_memory_config,
-    );
-    let mut pd_contract_ready = startup_pd_contract_ready(initial_pd_observation);
-    if !pd_contract_ready {
-        #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_not_ready\n");
-        warn!(
-            "PD contract was not ready before outputs initialize; continuing with heater interlocked"
-        );
-    } else {
-        #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_ready\n");
-    }
-    // Keep this allocation owned until Wi-Fi has created its timer objects.
-    // Releasing it earlier lets the C driver reinterpret allocator free-list
-    // bytes as an uninitialized timer `priv_` pointer.
-    let mut boot_memory_io_scratch = try_allocate_memory_io_scratch();
-    let (mut eeprom_memory_record, eeprom_data_incompatible, mut eeprom_required) =
-        if let Some(scratch) = boot_memory_io_scratch.as_deref_mut() {
-            load_eeprom_memory_record(&mut pd_i2c, scratch)
-        } else {
-            (None, false, true)
-        };
-    if !eeprom_required && eeprom_memory_record.is_none() {
-        let initialization_result = if let Some(scratch) = boot_memory_io_scratch.as_deref_mut() {
-            let record = MemoryRecord {
-                sequence: 1,
-                config: MemoryConfig::default(),
-            };
-            let commit_started_at = Instant::now();
-            match write_eeprom_memory_record(
-                &mut pd_i2c,
-                &mut pd_port,
-                0,
-                commit_started_at,
-                &record,
-                scratch,
-            )
-            .await
-            {
-                Ok(()) => verify_eeprom_memory_record(
-                    &mut pd_i2c,
-                    &mut pd_port,
-                    0,
-                    commit_started_at,
-                    &record,
-                    scratch,
-                )
-                .await
-                .ok(),
-                Err(error) => {
-                    warn!(
-                        "blank EEPROM initialization failed: {=str}",
-                        error.message()
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        if let Some(record) = initialization_result {
-            info!("blank EEPROM initialized and verified");
-            eeprom_memory_record = Some(record);
-        } else {
-            eeprom_required = true;
-        }
-    }
-    let mut persistence_source = if eeprom_required {
-        "eeprom_required"
-    } else if eeprom_memory_record.is_some() {
-        "eeprom"
-    } else {
-        "defaults"
-    };
-    let mut persistence_record_state = if eeprom_required {
-        "eeprom_required"
-    } else if eeprom_memory_record.is_some() {
-        "valid"
-    } else if eeprom_data_incompatible {
-        "incompatible"
-    } else {
-        "blank"
-    };
-    let (mut memory_config, mut memory_sequence) = eeprom_memory_record
-        .map(|record| (record.config, record.sequence))
-        .unwrap_or_default();
-    #[cfg(feature = "web_serial")]
-    poll_usb_early_control(
-        &mut usb_serial,
-        &mut usb_rx_line,
-        usb_tx_buf,
-        &memory_config,
-    );
-    #[cfg(feature = "net_http")]
-    flux_purr_firmware::net::initialize_control_state(memory_config.lan_pairing_token).await;
-    #[cfg(all(feature = "net_http", feature = "web_serial"))]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_control_state_ready\n");
-    #[cfg(feature = "net_http")]
-    {
-        if let Err(error) =
-            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config, |stage| {
-                #[cfg(feature = "web_serial")]
-                let _ = usb_write_bytes_bounded(&mut usb_serial, stage);
-            })
-            .await
-        {
-            warn!("LAN control plane startup failed: {=str}", error.message());
-            flux_purr_firmware::net::report_startup_failure(error).await;
-        }
-    }
-    drop(boot_memory_io_scratch);
-    let mut preview_heater_curve: Option<HeaterCurvePreview> = None;
-    let mut memory_commit_due_ms: Option<u64> = None;
-    #[cfg(feature = "web_serial")]
-    let mut eeprom_snapshot_session = EepromSnapshotSession::default();
-    #[cfg(feature = "web_serial")]
-    usb_write_frame(
-        &mut usb_serial,
-        &hello_frame(hardware_identity()),
-        usb_tx_buf,
-    );
-    #[cfg(feature = "web_serial")]
-    poll_usb_early_control(
-        &mut usb_serial,
-        &mut usb_rx_line,
-        usb_tx_buf,
-        &memory_config,
-    );
+    // Put every power-related output into a known safe state before any I2C
+    // probe or EEPROM access can take the boot path through a timeout.
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=outputs_init_start\n");
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
@@ -13637,6 +13242,184 @@ async fn main(_spawner: Spawner) {
     buzzer_realtime_spawner
         .spawn(run_buzzer_task(mcpwm.timer2, buzzer_pwm, pwm_clock_cfg))
         .expect("failed to spawn realtime buzzer task");
+
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_detect_start\n");
+    let mut pd_i2c = I2c::new(
+        peripherals.I2C0,
+        I2cConfig::default()
+            .with_frequency(Rate::from_hz(FUSB302B_I2C_FREQUENCY_HZ))
+            .with_software_timeout(SoftwareTimeout::Transaction(HalDuration::from_millis(
+                I2C_TRANSACTION_TIMEOUT_MS,
+            ))),
+    )
+    .expect("failed to create I2C0")
+    .with_sda(peripherals.GPIO8)
+    .with_scl(peripherals.GPIO9);
+    let detected_pd_controller = detect_pd_controller(&mut pd_i2c).await;
+    let mut pd_port = match detected_pd_controller {
+        DetectedPdController::Fusb302b(device_id) => {
+            #[cfg(feature = "web_serial")]
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_fusb302b_detected\n");
+            let mut runtime = Fusb302bRuntime::new();
+            if !runtime.initialize(&mut pd_i2c).await {
+                #[cfg(feature = "web_serial")]
+                let _ =
+                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_failed\n");
+                warn!(
+                    "fusb302b identified device_id=0x{=u8:02x} but PHY initialization failed; holding heater interlocked",
+                    device_id,
+                );
+                PdPort::Unavailable
+            } else {
+                #[cfg(feature = "web_serial")]
+                let _ =
+                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_complete\n");
+                info!(
+                    "fusb302b selected device_id=0x{=u8:02x} policy=pps target_mv={=u16} max_current_ma={=u16}",
+                    device_id,
+                    DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+                    MAX_HEATER_CONTRACT_MA,
+                );
+                PdPort::Fusb302b(runtime)
+            }
+        }
+        DetectedPdController::Unknown => {
+            #[cfg(feature = "web_serial")]
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_identity_unknown\n");
+            warn!("PD controller identity is ambiguous or unreadable; holding heater interlocked");
+            PdPort::Unavailable
+        }
+    };
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_pending\n");
+    // PD negotiation is serviced by the runtime loop. Do one bounded service
+    // turn for already-attached sources, but never hold the Dashboard behind
+    // a contract wait.
+    let initial_pd_observation =
+        read_pd_status(&mut pd_i2c, &mut pd_port, Instant::now().as_millis()).await;
+    #[cfg(feature = "web_serial")]
+    poll_usb_early_control(
+        &mut usb_serial,
+        &mut usb_rx_line,
+        usb_tx_buf,
+        &usb_boot_memory_config,
+    );
+    let mut pd_contract_ready = startup_pd_contract_ready(initial_pd_observation);
+    if !pd_contract_ready {
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_not_ready\n");
+        warn!(
+            "PD contract was not ready before outputs initialize; continuing with heater interlocked"
+        );
+    } else {
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_ready\n");
+    }
+    // Keep this allocation owned until Wi-Fi has created its timer objects.
+    // Releasing it earlier lets the C driver reinterpret allocator free-list
+    // bytes as an uninitialized timer `priv_` pointer.
+    let mut boot_memory_io_scratch = try_allocate_memory_io_scratch();
+    let (mut eeprom_memory_record, eeprom_data_incompatible, mut eeprom_required) =
+        if let Some(scratch) = boot_memory_io_scratch.as_deref_mut() {
+            load_eeprom_memory_record(&mut pd_i2c, scratch)
+        } else {
+            (None, false, true)
+        };
+    let mut eeprom_restore_pending = eeprom_data_incompatible;
+    if !eeprom_required && !eeprom_data_incompatible && eeprom_memory_record.is_none() {
+        let initialization_result = if let Some(scratch) = boot_memory_io_scratch.as_deref_mut() {
+            let record = MemoryRecord {
+                sequence: 1,
+                config: MemoryConfig::default(),
+            };
+            let commit_started_at = Instant::now();
+            match write_eeprom_memory_record(
+                &mut pd_i2c,
+                &mut pd_port,
+                0,
+                commit_started_at,
+                &record,
+                scratch,
+            )
+            .await
+            {
+                Ok(()) => verify_eeprom_memory_record(
+                    &mut pd_i2c,
+                    &mut pd_port,
+                    0,
+                    commit_started_at,
+                    &record,
+                    scratch,
+                )
+                .await
+                .ok(),
+                Err(error) => {
+                    warn!(
+                        "blank EEPROM initialization failed: {=str}",
+                        error.message()
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(record) = initialization_result {
+            info!("blank EEPROM initialized and verified");
+            eeprom_memory_record = Some(record);
+        } else {
+            eeprom_required = true;
+        }
+    } else if eeprom_data_incompatible && eeprom_memory_record.is_none() {
+        // A non-blank EEPROM without a decodable record is not safe to
+        // overwrite during boot. Keep the device in the explicit restore
+        // state until maintenance provides a valid record.
+        eeprom_required = true;
+    }
+    let mut persistence_source = if eeprom_required {
+        "eeprom_required"
+    } else if eeprom_memory_record.is_some() {
+        "eeprom"
+    } else {
+        "defaults"
+    };
+    let mut persistence_record_state = if eeprom_required {
+        "eeprom_required"
+    } else if eeprom_memory_record.is_some() {
+        "valid"
+    } else if eeprom_data_incompatible {
+        "incompatible"
+    } else {
+        "blank"
+    };
+    let (mut memory_config, mut memory_sequence) = eeprom_memory_record
+        .map(|record| (record.config, record.sequence))
+        .unwrap_or_default();
+    #[cfg(feature = "web_serial")]
+    poll_usb_early_control(
+        &mut usb_serial,
+        &mut usb_rx_line,
+        usb_tx_buf,
+        &memory_config,
+    );
+    let mut preview_heater_curve: Option<HeaterCurvePreview> = None;
+    let mut memory_commit_due_ms: Option<u64> = None;
+    #[cfg(feature = "web_serial")]
+    let mut eeprom_snapshot_session = EepromSnapshotSession::default();
+    #[cfg(feature = "web_serial")]
+    usb_write_frame(
+        &mut usb_serial,
+        &hello_frame(hardware_identity()),
+        usb_tx_buf,
+    );
+    #[cfg(feature = "web_serial")]
+    poll_usb_early_control(
+        &mut usb_serial,
+        &mut usb_rx_line,
+        usb_tx_buf,
+        &memory_config,
+    );
     let mut last_pd_observation = initial_pd_observation;
     if let Some(PdStatusObservation {
         status_raw,
@@ -13662,7 +13445,7 @@ async fn main(_spawner: Spawner) {
         );
     }
     let mut last_pd_status_log_key = pd_status_log_key(last_pd_observation);
-    let active_thermal_settings =
+    let mut active_thermal_settings =
         ThermalControlProfileSettings::from(memory_config.active_thermal_control_profile.settings);
     info!(
         "heater control policy mode=hybrid interval_ms={=u64} warmup_reenter={=f32}C hold_entry={=f32}C hold_exit={=f32}C approach_max_s={=u8} hold_kp={=f32} hold_ki={=f32} auto_floor_mv={=u16} current_reserve_ma={=u16}",
@@ -13756,41 +13539,7 @@ async fn main(_spawner: Spawner) {
     )
     .await;
     #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pre_adc_power_settle_start\n");
-    EmbassyTimer::after_millis(HEATER_PPS_SMALL_TRANSITION_MS).await;
-    let _ = apply_heater_power_output(
-        &mut pd_i2c,
-        &mut pd_port,
-        &mut heater_pwm,
-        &mut heater_power_backend,
-        &mut hold_pps_governor,
-        &mut manual_pps_state,
-        last_pd_observation,
-        0,
-        0.0,
-        0,
-        false,
-        HeaterControlPhase::Warmup,
-        0.0,
-        0.0,
-        0,
-        &mut last_heater_duty,
-        preview_heater_curve_config(preview_heater_curve.as_ref()),
-        &memory_config,
-        active_thermal_settings,
-        HEATER_PPS_SMALL_TRANSITION_MS,
-    )
-    .await;
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(
-        &mut usb_serial,
-        b"boot_stage=pre_adc_power_settle_complete\n",
-    );
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(
-        &mut usb_serial,
-        b"boot_stage=pre_adc_heater_sync_complete\n",
-    );
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=heater_safe_output_ready\n");
 
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=adc_init_start\n");
@@ -13817,8 +13566,8 @@ async fn main(_spawner: Spawner) {
         FrontPanelKeyMap::default(),
         FrontPanelInputTimings::default(),
     );
-    let mut ui_state = FrontPanelUiState::new(runtime_mode);
-    ui_state.eeprom_data_incompatible = eeprom_data_incompatible || eeprom_required;
+    let mut ui_state = FrontPanelUiState::new_startup(runtime_mode);
+    ui_state.eeprom_data_incompatible = eeprom_data_incompatible;
     ui_state.eeprom_required = eeprom_required;
     ui_state.pd_contract_mv =
         effective_pd_contract_mv(&manual_pps_state, last_pd_observation, heater_power_backend);
@@ -13861,6 +13610,11 @@ async fn main(_spawner: Spawner) {
                     HeaterFaultReason::OverTemp.label()
                 );
             }
+            ui_state.set_dashboard_presentation(if eeprom_restore_pending {
+                flux_purr_firmware::frontpanel::DashboardPresentationState::EepromRestore
+            } else {
+                flux_purr_firmware::frontpanel::DashboardPresentationState::Ready
+            });
             info!(
                 "rtd initial raw_adc_mv={=u16} adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32}",
                 measurement.raw_adc_mv,
@@ -13872,6 +13626,7 @@ async fn main(_spawner: Spawner) {
         }
         RtdSample::Fault { adc_mv, reason } => {
             current_rtd_fault = Some(reason);
+            eeprom_restore_pending = false;
             ui_state.set_dashboard_presentation(
                 flux_purr_firmware::frontpanel::DashboardPresentationState::InitialRtdFault,
             );
@@ -14029,6 +13784,65 @@ async fn main(_spawner: Spawner) {
         #[cfg(not(feature = "web_serial"))]
         panic!("failed to draw initial frontpanel UI");
     }
+    let restore_frame_was_shown = eeprom_restore_pending;
+    if eeprom_restore_pending {
+        // Legacy EEPROM decoding is deliberately outside the pre-RTD path.
+        // Yield between slots so USB early-control and the status-light task
+        // remain serviceable while the explicit restore lock is visible.
+        if let Some(scratch) = boot_memory_io_scratch.as_deref_mut() {
+            let (legacy_record, read_failed) =
+                load_legacy_eeprom_memory_record(&mut pd_i2c, scratch).await;
+            if let Some(record) = legacy_record {
+                memory_sequence = record.sequence;
+                memory_config = record.config;
+                ui_state.eeprom_data_incompatible = false;
+                ui_state.eeprom_required = false;
+                ui_state.set_dashboard_presentation(
+                    flux_purr_firmware::frontpanel::DashboardPresentationState::Ready,
+                );
+                apply_memory_config_to_ui(&mut ui_state, &memory_config);
+                active_thermal_settings = ThermalControlProfileSettings::from(
+                    memory_config.active_thermal_control_profile.settings,
+                );
+                persistence_source = "eeprom";
+                persistence_record_state = "legacy_restored";
+                info!(
+                    "legacy memory restore complete seq={=u32}; v5 migration remains deferred",
+                    record.sequence,
+                );
+            } else if read_failed {
+                eeprom_required = true;
+                ui_state.eeprom_required = true;
+                persistence_source = "eeprom_required";
+                persistence_record_state = "eeprom_required";
+                warn!("legacy memory restore unreadable; keeping heater interlocked");
+            }
+        }
+    }
+    // The first Dashboard frame is independent of Wi-Fi readiness. Start the
+    // network control plane only after the trusted RTD presentation is on the
+    // panel so radio retries cannot delay the owner-facing startup state.
+    #[cfg(feature = "net_http")]
+    flux_purr_firmware::net::initialize_control_state(memory_config.lan_pairing_token).await;
+    #[cfg(all(feature = "net_http", feature = "web_serial"))]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_control_state_ready\n");
+    #[cfg(feature = "net_http")]
+    {
+        if let Err(error) =
+            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config, |stage| {
+                #[cfg(feature = "web_serial")]
+                let _ = usb_write_bytes_bounded(&mut usb_serial, stage);
+            })
+            .await
+        {
+            warn!("LAN control plane startup failed: {=str}", error.message());
+            flux_purr_firmware::net::report_startup_failure(error).await;
+        }
+    }
+    drop(boot_memory_io_scratch);
+    // Keep the explicit restore frame visible in the trace. A successful
+    // legacy decode above already promoted the live state; the redraw below
+    // replaces the locked frame without waiting for a full EEPROM rewrite.
     log_ui_state(&ui_state);
     #[cfg(feature = "web_serial")]
     {
@@ -14042,7 +13856,7 @@ async fn main(_spawner: Spawner) {
     let mut last_control_ms: u64 = 0;
     let mut next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
     let mut heater_control_timing = HeaterControlTiming::default();
-    let mut ui_refresh_pending = false;
+    let mut ui_refresh_pending = restore_frame_was_shown;
     let mut next_ui_refresh_ms = DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS;
     // USB automation can open WiFi Info after this loop has already sampled
     // the keys. Do not let an event from that older sample immediately close
@@ -14755,9 +14569,21 @@ async fn main(_spawner: Spawner) {
             last_pd_observation = current_pd_observation;
             let current_pd_contract_ready = startup_pd_contract_ready(current_pd_observation);
             if pd_contract_ready != current_pd_contract_ready {
+                let pd_was_ready = pd_contract_ready;
                 pd_contract_ready = current_pd_contract_ready;
                 needs_redraw = true;
                 if pd_contract_ready {
+                    if disarm_stale_heater_arm_after_pd_transition(
+                        pd_was_ready,
+                        pd_contract_ready,
+                        &mut ui_state,
+                        &mut calibration_runtime_state,
+                    ) {
+                        needs_redraw = true;
+                        info!(
+                            "PD contract became ready; discarded pre-ready heater arm and require a new explicit arm"
+                        );
+                    }
                     info!("PD contract became ready; released startup heater interlock");
                 } else {
                     info!("PD contract became unavailable; heater interlocked");
@@ -15330,6 +15156,88 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fusb302b_identity_requires_stable_family_id_and_readable_status() {
+        assert!(fusb302b_identity_is_stable(
+            Some(0x91),
+            Some(0x91),
+            Some(0),
+            Some(0)
+        ));
+        assert!(!fusb302b_identity_is_stable(
+            Some(0x91),
+            Some(0x92),
+            Some(0),
+            Some(0)
+        ));
+        assert!(!fusb302b_identity_is_stable(
+            Some(0x81),
+            Some(0x81),
+            Some(0),
+            Some(0)
+        ));
+        assert!(!fusb302b_identity_is_stable(
+            Some(0x91),
+            Some(0x91),
+            Some(u8::MAX),
+            Some(0),
+        ));
+        assert!(!fusb302b_identity_is_stable(
+            Some(0x91),
+            Some(0x91),
+            Some(0),
+            None
+        ));
+    }
+
+    #[test]
+    fn v5_memory_header_bounds_payload_before_reading_slot_body() {
+        let mut header = [0xff; MEMORY_RECORD_HEADER_LEN];
+        header[0..4].copy_from_slice(b"FPM1");
+        header[4] = MEMORY_RECORD_FORMAT_VERSION;
+        header[5] = MEMORY_RECORD_HEADER_LEN as u8;
+        header[6..8].copy_from_slice(&100u16.to_le_bytes());
+        assert_eq!(
+            memory_record_length_from_header(&header, MEMORY_SLOT_SIZE),
+            Some(MEMORY_RECORD_HEADER_LEN + 100)
+        );
+
+        header[6..8].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert_eq!(
+            memory_record_length_from_header(&header, MEMORY_SLOT_SIZE),
+            None
+        );
+        header[4] = 0x7f;
+        assert_eq!(
+            memory_record_length_from_header(&header, MEMORY_SLOT_SIZE),
+            None
+        );
+        header[4] = 1;
+        assert_eq!(
+            memory_record_length_from_header(&header, MEMORY_SLOT_SIZE),
+            None
+        );
+    }
+
+    #[test]
+    fn startup_safe_outputs_precede_pd_and_legacy_eeprom_work() {
+        let source = include_str!("flux_purr.rs");
+        let outputs = source
+            .find("boot_stage=outputs_init_start")
+            .expect("safe output stage marker");
+        let pd = source
+            .find("boot_stage=pd_detect_start")
+            .expect("PD stage marker");
+        let legacy = source
+            .find("load_legacy_eeprom_memory_record(&mut pd_i2c, scratch)")
+            .expect("legacy restore call");
+        let first_frame = source
+            .find("present_initial_frontpanel_ui(&mut display, canvas, &ui_state)")
+            .expect("initial Dashboard frame");
+        assert!(outputs < pd);
+        assert!(first_frame < legacy);
+    }
 
     #[test]
     fn fusb302b_initial_pps_request_matches_the_idle_voltage() {
@@ -22881,6 +22789,29 @@ mod tests {
     }
 
     #[test]
+    fn valid_rtd_measurement_does_not_bypass_eeprom_restore_lock() {
+        let mut ui_state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+        ui_state.set_dashboard_presentation(
+            flux_purr_firmware::frontpanel::DashboardPresentationState::EepromRestore,
+        );
+        ui_state.eeprom_data_incompatible = true;
+        let mut latest_display_temp_c = 0.0;
+        let mut latest_display_temp_i16 = 0;
+
+        assert!(update_runtime_display_temperature(
+            &mut ui_state,
+            &mut latest_display_temp_c,
+            &mut latest_display_temp_i16,
+            41.39,
+        ));
+        assert_eq!(
+            ui_state.dashboard_presentation,
+            flux_purr_firmware::frontpanel::DashboardPresentationState::EepromRestore
+        );
+        assert!(ui_state.persistence_locked());
+    }
+
+    #[test]
     fn runtime_sensor_fault_retains_last_valid_dashboard_temperature() {
         let mut ui_state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
         let mut latest_display_temp_c = 0.0;
@@ -23884,10 +23815,8 @@ mod tests {
     }
 
     #[test]
-    fn pd_wait_services_early_control_at_twenty_ms_cadence() {
-        assert_eq!(PD_WAIT_SERVICE_INTERVAL_MS, 20);
-        assert_eq!(CH224Q_STATUS_POLL_DELAY_MS % PD_WAIT_SERVICE_INTERVAL_MS, 0);
-        assert_eq!(CH224Q_STATUS_POLL_DELAY_MS / PD_WAIT_SERVICE_INTERVAL_MS, 5);
+    fn pd_runtime_service_does_not_block_startup() {
+        assert_eq!(STARTUP_PD_WAIT_BUDGET_MS, 0);
     }
 
     #[test]
@@ -23916,6 +23845,58 @@ mod tests {
             next_heater_lock_reason(None, false, true, false),
             Some(HeaterLockReason::PdContractUnavailable)
         );
+    }
+
+    #[test]
+    fn pd_ready_transition_discards_power_wait_heater_arm_until_rearmed() {
+        let mut ui_state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+        ui_state.set_dashboard_presentation(
+            flux_purr_firmware::frontpanel::DashboardPresentationState::Ready,
+        );
+        let mut calibration_runtime_state = CalibrationRuntimeState::default();
+
+        assert!(ui_state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Center,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert!(ui_state.heater_enabled);
+
+        assert!(disarm_stale_heater_arm_after_pd_transition(
+            false,
+            true,
+            &mut ui_state,
+            &mut calibration_runtime_state,
+        ));
+        assert!(!ui_state.heater_enabled);
+        assert!(!calibration_runtime_state.heater_enabled);
+        assert!(!reconcile_runtime_heater_enabled(
+            ui_state.heater_enabled,
+            calibration_runtime_state,
+            None,
+            false,
+            false,
+            true,
+            true,
+        ));
+
+        assert!(ui_state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Center,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 1,
+        }));
+        assert!(ui_state.heater_enabled);
+        assert!(reconcile_runtime_heater_enabled(
+            ui_state.heater_enabled,
+            calibration_runtime_state,
+            None,
+            false,
+            false,
+            true,
+            true,
+        ));
     }
 
     #[test]

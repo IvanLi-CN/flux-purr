@@ -202,7 +202,12 @@ pub fn render_frontpanel_ui_with_palette(
 ) {
     canvas.clear(COLOR_BG).ok();
 
-    if state.persistence_locked() {
+    if state.persistence_locked()
+        && !matches!(
+            state.dashboard_presentation,
+            DashboardPresentationState::EepromRestore | DashboardPresentationState::InitialRtdFault
+        )
+    {
         draw_eeprom_status(canvas, state.eeprom_required);
         return;
     }
@@ -743,11 +748,12 @@ fn draw_dashboard(
     state: &FrontPanelUiState,
     palette: &TemperaturePalette,
 ) {
-    let startup_presentation = matches!(
+    let initializing_presentation = matches!(
         state.dashboard_presentation,
         DashboardPresentationState::Initializing | DashboardPresentationState::InitialRtdFault
     );
-    let (display_text, fractional_digit, value_color) = if startup_presentation {
+    let eeprom_restore = state.dashboard_presentation == DashboardPresentationState::EepromRestore;
+    let (display_text, fractional_digit, value_color) = if initializing_presentation {
         ("---".try_into().unwrap(), '-', COLOR_MUTED)
     } else {
         let (display_text, fractional_digit) = deci_c_to_parts(state.current_temp_deci_c);
@@ -757,7 +763,7 @@ fn draw_dashboard(
             temperature_color_with_palette(state.current_temp_c, palette),
         )
     };
-    let set_text = if startup_presentation {
+    let set_text = if initializing_presentation || eeprom_restore {
         "---".try_into().unwrap()
     } else {
         i16_to_text(state.target_temp_c)
@@ -775,6 +781,10 @@ fn draw_dashboard(
     fill_rect(canvas, 78, 4, 78, 36, COLOR_PANEL);
     if state.dashboard_presentation == DashboardPresentationState::InitialRtdFault {
         draw_status_line(canvas, 7, "WARN", "SENSOR", COLOR_WARNING);
+    } else if eeprom_restore {
+        draw_status_line(canvas, 7, "EEPROM", "RESTORE", COLOR_WARNING);
+    } else if state.heater_lock_reason == Some(HeaterLockReason::PdContractUnavailable) {
+        draw_status_line(canvas, 7, "POWER", "WAIT", COLOR_WARNING);
     } else if state.heater_lock_reason.is_some() && state.dashboard_warning_visible {
         let fault_label = match state.heater_lock_reason {
             Some(HeaterLockReason::SensorFault) => "SENSOR",
@@ -785,10 +795,10 @@ fn draw_dashboard(
         draw_status_line(canvas, 7, "SET", &set_text, COLOR_WARNING);
     }
     draw_text_mid(canvas, "PPS", 80, 18, COLOR_CYAN);
-    if !startup_presentation && state.manual_pps_enabled {
+    if !initializing_presentation && !eeprom_restore && state.manual_pps_enabled {
         draw_text_small(canvas, "*", 103, 15, COLOR_CYAN);
     }
-    if startup_presentation {
+    if initializing_presentation || eeprom_restore {
         draw_text_mid_right(canvas, "---", 154, 18, COLOR_CYAN);
     } else {
         let pps_numeric = pd_voltage_content_text(state.pd_contract_mv);
@@ -799,12 +809,12 @@ fn draw_dashboard(
         canvas,
         29,
         "FAN",
-        if startup_presentation {
+        if initializing_presentation || eeprom_restore {
             "---"
         } else {
             state.fan_display_state.label()
         },
-        if startup_presentation {
+        if initializing_presentation || eeprom_restore {
             COLOR_MUTED
         } else {
             match state.fan_display_state {
@@ -1075,6 +1085,41 @@ mod tests {
 
         assert_ne!(canvas.pixels(), overtemp_canvas.pixels());
         assert_eq!(state.current_temp_deci_c, 854);
+    }
+
+    #[test]
+    fn power_wait_dashboard_keeps_real_temperature_and_locks_power() {
+        let mut canvas = DisplayCanvas::new();
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.current_temp_c = 85;
+        state.current_temp_deci_c = 854;
+        state.heater_lock_reason = Some(HeaterLockReason::PdContractUnavailable);
+        state.dashboard_warning_visible = true;
+
+        render_frontpanel_ui(&mut canvas, &state);
+
+        let mut ready_canvas = DisplayCanvas::new();
+        state.heater_lock_reason = None;
+        state.dashboard_warning_visible = false;
+        render_frontpanel_ui(&mut ready_canvas, &state);
+        assert_ne!(canvas.pixels(), ready_canvas.pixels());
+    }
+
+    #[test]
+    fn eeprom_restore_dashboard_shows_real_temperature_without_configuration() {
+        let mut canvas = DisplayCanvas::new();
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.dashboard_presentation = DashboardPresentationState::EepromRestore;
+        state.eeprom_data_incompatible = true;
+        state.current_temp_c = 85;
+        state.current_temp_deci_c = 854;
+
+        render_frontpanel_ui(&mut canvas, &state);
+
+        let mut initializing_canvas = DisplayCanvas::new();
+        state.dashboard_presentation = DashboardPresentationState::Initializing;
+        render_frontpanel_ui(&mut initializing_canvas, &state);
+        assert_ne!(canvas.pixels(), initializing_canvas.pixels());
     }
 
     #[test]

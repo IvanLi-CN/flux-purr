@@ -596,6 +596,7 @@ impl HeaterLockReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DashboardPresentationState {
     Initializing,
+    EepromRestore,
     Ready,
     InitialRtdFault,
 }
@@ -688,6 +689,13 @@ impl FrontPanelUiState {
         state
     }
 
+    pub const fn dashboard_is_ready(&self) -> bool {
+        matches!(
+            self.dashboard_presentation,
+            DashboardPresentationState::Ready
+        )
+    }
+
     pub fn set_dashboard_presentation(&mut self, presentation: DashboardPresentationState) -> bool {
         if self.dashboard_presentation == presentation {
             return false;
@@ -712,7 +720,7 @@ impl FrontPanelUiState {
     }
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
-        if self.persistence_locked() {
+        if self.persistence_locked() || !self.dashboard_is_ready() {
             return false;
         }
         self.key_test.last_raw_key = Some(event.raw_key);
@@ -1060,6 +1068,28 @@ mod tests {
             state.dashboard_presentation,
             DashboardPresentationState::Ready
         );
+    }
+
+    #[test]
+    fn eeprom_restore_keeps_dashboard_locked_until_configuration_is_ready() {
+        let mut state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+        state.set_dashboard_presentation(DashboardPresentationState::EepromRestore);
+        state.eeprom_data_incompatible = true;
+
+        assert!(!state.dashboard_is_ready());
+        assert!(state.persistence_locked());
+    }
+
+    #[test]
+    fn startup_dashboard_rejects_input_until_ready() {
+        let mut state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+        assert!(!state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Center,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert!(!state.heater_enabled);
     }
 
     fn raw_state(keys: &[RawFrontPanelKey]) -> FrontPanelRawState {

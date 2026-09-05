@@ -2,7 +2,7 @@
 
 ## 背景 / 问题陈述
 
-- 当前 `flux-purr` 已完成前面板输入、RTD 读取、CH224Q 默认电压请求与 heater/fan bring-up，但 Dashboard 的风扇语义仍残留旧的单布尔开关口径。
+- 当前 `flux-purr` 已完成前面板输入、RTD 读取、FUSB302B PD sink 与 heater/fan bring-up，但 Dashboard 的风扇语义仍残留旧的单布尔开关口径。
 - `frontpanel-ui-contract` 与 `frontpanel-input-interaction` 已冻结前面板视觉和五向输入基线，但 Dashboard 的 fan line、Active Cooling 页面和过温告警仍缺少统一真相源。
 - 若不把风扇策略、过温停热、feature-selected PD 默认请求与前面板显示一次收口，后续板级调试会持续混淆“策略开关”“实际输出”“保护联动”三套状态。
 
@@ -10,7 +10,7 @@
 
 ### Goals
 
-- 把 `GPIO47` 固定占空比加热替换为按 `target_temp_c` 驱动的正式闭环；当 CH224Q 读取到 PPS APDO 覆盖 `20V` 时，heater 后端使用受安全上限约束的 PPS/AVS 粗粒度调压与 `100Hz` MOS PWM 功率合成，否则回退同一 `GPIO47` PWM 调功路径。
+- 把 `GPIO47` 固定占空比加热替换为按 `target_temp_c` 驱动的正式闭环；当 FUSB302B 读取到 PPS APDO 覆盖 `20V` 时，heater 后端使用受安全上限约束的 PPS/AVS 粗粒度调压与 `100Hz` MOS PWM 功率合成，否则回退同一 `GPIO47` PWM 调功路径。
 - 加热闭环采用模型辅助 ramp/soak 与保温 PI 微调的混合控制器。控制器输出统一的等效热功率请求；PPS 后端映射为 `100mV` 对齐电压，PWM 负责连续的物理功率调节，固定 PD 后端选择不低于目标等效电压的 PDO 并使用同一 MOS PWM 合成等效功率。
 - 支持 `ThermalControlProfile` preview 与显式保存。RAM preview 最多 10 个目标点；持久化保存固定为 `pps3a` / `pps5a` 双 bank，各完整保存最多 10 个非空已配置目标点并压紧稀疏槽位。持久化后端只能使用 EEPROM，EEPROM 不可达时进入 `EEPROM_REQUIRED`，不得使用 MCU Flash fallback。`thermalProfileMode` 是 `auto|65w|100w`：auto 仅在 advertised PPS APDO 覆盖 `20V` 且 `ppsMaxMa >= 5000` 时解析 `pps5a`。多个 APDO 覆盖 `20V` 时，必须依次选择较高 `ppsMaxMa`、较高最大电压、较低最小电压的同一 APDO，不得聚合不同 APDO 的能力。显式档位不回退、不阻止运行；PPS/AVS 电压上限继续以所选 APDO 合同为准。preview 始终优先于 selected bank。
 - 提供 CLI/devd 自测试入口，抽象 bench source provider；当前默认且验收支持的 provider 是 IsolaPurr released CLI，用于准备 `auto|65w|100w`、PD Fixed enabled、PPS enabled、`auto_follow` 外部 source。单次 live run 工作目录只保留 `run.json`、`samples.ndjson` 与 `thermal-profile.candidate.json` 这类数据文件；owner-facing 冻结 baseline bundle 以浏览器可直接打开的 `index.html` 为唯一 canonical report，并同时提交 `run.bundle.json`、`samples.ndjson` 与 `thermal-profile.accepted.json`。每个 applied stage 的 `analysis` 必须同时沉淀 `approachSource` / `holdSource`，记录 source 实际电压、电流、功率在该窗口内的 `sampleCount`、`min/max/avg/first/last`。当 RTD 进入 fault 时，前面板与 runtime display 必须保留最后一个有效温度显示，不能把 `0°C` 伪装成当前温度；待确认告警由前面板输入或 runtime/CLI/app 的 `faultAttentionAcknowledged` 清除。
@@ -21,7 +21,7 @@
   - active cooling `OFF`：`>100°C` 进入最低电压 `0.2Hz` 使能脉冲，脉冲占空比按 `floor((temp-100)/10)%` 递增并封顶 `25%`。
   - active cooling `OFF` 且 `>350°C`：锁住停热并保持风扇 `50%`；`>360°C` 改为全速。
   - `temp >= 420°C`：进入热失控并保持 heater hard cutoff；在告警未确认期间禁止重新发起加热，并按现有主动降温包线强制风扇持续工作：`>60°C` 全速、`40~60°C` 为 `50%`。温度 `<40°C` 或收到告警确认时，两者任一先发生即解除该强制风扇状态。
-- 默认启动时把 CH224Q 请求固定为 `20V`，再读取 CH224Q `0x60~0x8F` power data；只有 PPS capability 覆盖 `20V` 时才启用可调加热后端。自动加热的可调请求上限是所选 APDO 的最大电压；`R(T)` 用于估算 heater watts，但不得降低 PPS/AVS 电压请求上限。
+- 默认启动只读取稳定的 FUSB302B 身份和可读状态 bank；PD 协商在运行时以非阻塞方式进行。只有已观察到 Accept + PS_RDY 的 PPS capability 覆盖 `20V` 时才启用可调加热后端。自动加热的可调请求上限是所选 APDO 的最大电压；`R(T)` 用于估算 heater watts，但不得降低 PPS/AVS 电压请求上限。
 - 产出 merge-ready 所需的 spec、视觉证据、板级验证与 review 收敛材料。
 
 ### Non-goals
@@ -108,19 +108,19 @@
 - self-test candidate 的在线识别不得在一次失败中同时搜索全部 profile 字段。脚本必须先按 full-speed-to-stable gate、是否进入 hold、overshoot、hold p2p、hold 高低侧误差、source telemetry 与同步样本归类故障，再生成候选。分类至少必须区分 `missed_lower_band_before_limit`、`missed_upper_band_before_limit`、`stable_window_broke_low`、`stable_window_broke_high` 与 `within_gate_low_margin`。`targetTempC <= 150°C` 的 full-speed-to-stable 门槛为 `10_000ms`，确认裕量为 `1_000ms`；`targetTempC > 150°C` 的门槛为 `5_000ms`，确认裕量为 `500ms`。裕量是短测候选排序与直接确认的优先信号，不是最终验收指标：短测已经满足动态 full-speed-to-stable 门槛、`maxOvershootC <= 3.0°C`、`holdPeakToPeakC <= 3.0°C`、stage `completed` 且存在 settle time 时，即使为 `within_gate_low_margin`，也只能进入一次完整 `60s` hold confirm；它绝不得直接成为最终候选或 `passed`。超过动态门槛、过冲超 `3.0°C`、hold p2p 超 `3.0°C`、stage 未 completed 或 settle time 缺失的短测不得进入 hold confirm 或最终候选。首次进入目标带后突破上界时必须增加刹车/lead 并降低低中温 Approach 能量；门槛时仍低于下界时只能渐进式减少刹车、提高 Approach 能量，不得把低中温刹车距离一步压到稳定带边界，也不得直接把 `approachPower / approachFloor` 拉到高功率上限。若已经存在有效 hold 样本且 hold p2p 超线，则不得让 full-speed failure 掩盖 hold ripple；低中温 hold confirm 的过冲或 p2p 失败必须 reseed 下一轮候选，方向为增加刹车/lead、降低 `approachPower / approachFloor`、降低过冲 cut-off 或 reheat 强度，而不是继续用同一短 scout 候选重试。`approachPower / approachFloor` 与 `holdPower / holdReheat` 是独立通道：尚无有效 hold 样本的 approach 失败不得抬高 hold 参数，`holdReheat` 不得被 `approachFloor` 强制抬高。采样、供电、通信或 runtime 故障不得修改 candidate。每次 candidate 更新后，所有运行时影响字段必须 materialize 到 profile 并通过 preview/save API 写入，禁止用替换固件的隐藏常量承载调参结果。
 - profile preview 必须只驻留 RAM。`runtime_config.thermalControlProfile.op=preview` 需要完整 profile，`op=clear_preview` 清除 preview；`op=save` 需要完整 profile 并写入 persistent active thermal profile，`op=clear_saved` 清除 persistent active profile；状态回显必须暴露 `thermalControlProfilePreview` 区分当前是否处于 RAM preview。
 - 低温目标发生 full-speed 低侧缺口时仍必须渐进调节；若缺口不超过 `0.5°C` 且该轮过冲不超过 `1.5°C`、hold p2p 不超过 `2.0°C`，允许把下一轮 approach 增量放宽到 `120‰`、刹车距离减少 `120c`、damping 减少 `180‰`，但仍不得一步提升到满功率，且候选必须重新通过完整安全门禁。
-- CH224Q PPS 电压请求只按 `0x53` 的 `100mV` 单位对齐；AVS `25mV` 不作为首版 PPS 保温细分路径。
+- FUSB302B PPS 电压请求只按 `100mV` 单位对齐；AVS `25mV` 不作为首版 PPS 保温细分路径。
 - 目标温度与 preset 写入都必须 clamp 到 `0~400°C`。
 - RTD 开路、短路或 ADC 读失败时，heater 必须立即关断并进入测温 fault-latch；这些状态不进入蜂鸣或 attention 状态。`temp >= 420°C` 时进入独立的热失控 fault-latch 与 attention 状态。运行时不得依据 RTD 温度跳变幅度、升降方向、斜率或连续样本趋势推断 `sensor-discontinuity`；正常温度回落和快速升温都必须直接进入控制环。
 - 测温 fault-latch 期间 heater 不得自动恢复；测温恢复有效后必须由用户重新 arm。热失控的恢复必须同时遵守绝对温度保护与告警确认规则，不得复用测温 fault 的通用重臂路径。
-- CH224Q 在启动时默认请求 `20V`；`pd-request-12v` / `pd-request-28v` 仅改变默认固定请求值。随后必须读取 CH224Q power data 并只在 PPS APDO 覆盖 `20V` 时启用 `pps-mos`。多个覆盖 `20V` 的 PPS APDO 必须优先选择最大电流，再以最大电压、最小电压稳定打破平局；固定 `20V` PDO 不得被当作 PPS 覆盖 `20V`。
-- `pps-mos` 后端中，控制输出 `0%` 必须关 MOS；HOLD 外若 heater 仍处于 armed 加热会话，则请求以单次最多 `500mV` 的有界步进回到有效工作下限并保持 `0%` PWM；HOLD 内必须保持锁定的 PPS 电压并只将 PWM 降到 `0%`。只有 heater 真正关闭时才恢复 idle `12V` 或 source 宣告的更高 PPS 最小电压。控制输出 `1..100%` 必须映射到 `source PPS minimum .. selected APDO maximum`，并继续受 PPS/AVS capability 上下限钳制；`R(T)` 与 current reserve 不得降低该电压上限。当请求已到工作下限或处于 bounded down-ramp 时，PWM 必须按请求功率与当前请求电压的等效功率比连续补偿到 `0..100%`。WARMUP 必须继续使用动态 PPS 电压表达控制功率。自动控制单次同 APDO 请求变化必须限制为最多 `500mV`；相同 PPS APDO 内的电压变化不得关闭 MOS，请求发出后必须等待至少 `500ms` 才可发出下一次同 APDO 小步请求，使 `300ms` RTD 控制采样稳定窗口有明确余量。只有 PPS/AVS 模式切换、固定 PDO/current-limit fallback、首次模式建立、失败降级或其它离散电源路径变化，才允许先关 MOS；大跨度或模式切换请求使用至少 `275ms` transition window。所有 CH224Q 可调电压请求在最终写寄存器前都必须 clamp 到不低于 `5V`。不具备合格 PPS APDO 时，fixed-PD fallback 必须通过 `GPIO47` PWM 遵守其协商电流合同；任一关键调压写入失败必须切回默认固定 PD + PWM fallback。
+- FUSB302B 启动只执行身份/状态读取，不发出猜测性 PD 请求；运行时观察到 Accept + PS_RDY 后，只有 PPS APDO 覆盖 `20V` 时才启用 `pps-mos`。多个覆盖 `20V` 的 PPS APDO 必须优先选择最大电流，再以最大电压、最小电压稳定打破平局；固定 `20V` PDO 不得被当作 PPS 覆盖 `20V`。
+- `pps-mos` 后端中，控制输出 `0%` 必须关 MOS；HOLD 外若 heater 仍处于 armed 加热会话，则请求以单次最多 `500mV` 的有界步进回到有效工作下限并保持 `0%` PWM；HOLD 内必须保持锁定的 PPS 电压并只将 PWM 降到 `0%`。只有 heater 真正关闭时才恢复 idle `12V` 或 source 宣告的更高 PPS 最小电压。控制输出 `1..100%` 必须映射到 `source PPS minimum .. selected APDO maximum`，并继续受 PPS/AVS capability 上下限钳制；`R(T)` 与 current reserve 不得降低该电压上限。当请求已到工作下限或处于 bounded down-ramp 时，PWM 必须按请求功率与当前请求电压的等效功率比连续补偿到 `0..100%`。WARMUP 必须继续使用动态 PPS 电压表达控制功率。自动控制单次同 APDO 请求变化必须限制为最多 `500mV`；相同 PPS APDO 内的电压变化不得关闭 MOS，请求发出后必须等待至少 `500ms` 才可发出下一次同 APDO 小步请求，使 `300ms` RTD 控制采样稳定窗口有明确余量。只有 PPS/AVS 模式切换、固定 PDO/current-limit fallback、首次模式建立、失败降级或其它离散电源路径变化，才允许先关 MOS；大跨度或模式切换请求使用至少 `275ms` transition window。所有 FUSB302B 可调电压请求在最终写寄存器前都必须 clamp 到不低于 `5V`。不具备合格 PPS APDO 时，fixed-PD fallback 必须通过 `GPIO47` PWM 遵守其协商电流合同；任一关键调压写入失败必须切回默认固定 PD + PWM fallback。
 - thermal profile 的 `autoAdjustableWorkingFloorMv` 默认 `5000mV`，可在 RAM preview 或保存 profile 中设为 `5000..28000mV`；运行时有效下限必须取该设置、source PPS capability minimum 与可用 maximum 的安全交集。低于 source capability 的设置不得形成实际请求。
 - `GPIO47` 必须在全路径保持 `100Hz` MCPWM。逻辑输出 `0%` 必须立即关断 MOS；PPS 高于 floor 时保持 `100%` PWM，PPS floor 与 bounded down-ramp 区域按等效功率连续调节 `0..100%` PWM，确保物理输出不高于当前控制请求。不得恢复 pulse-density 或软件 GPIO 门控。
 - 每个有效 RTD 批次的原始温度必须先独立执行 overtemp 判定；前面板与 owner-facing `currentTempC` / `boardTempCenti` 必须镜像当前有效样本。控制器使用单独回传的 `heaterControlTempC`：除 PPS request 的 `300ms` transition guard 外，仅允许以实际 `20Hz` 周期拒绝超过 `35°C/s` 的单样本物理突跳；该控制侧保护不得修改 raw/human 温度，不得生成 sensor fault，且必须回传 `heaterControlMeasurementGuarded=true`。未被保护的控制样本直接送入 `tempFilterAlphaPermille` 控制的 EMA，不得叠加跨 tick 多样本窗口、中位数、均值窗口或输出钳位。任一传感器 fault 必须立即清空控制器温度状态并保持既有加热关断路径。PPS request 发生变化时，控制温度保持最近可信值，直到 request 连续 `300ms` 未变化；恢复时必须同时重新播种 controller filtered temperature/slope，并重新使用经过控制侧物理门的稳定 RTD 样本。原始 short/open/ADC-read/overtemp 检查在该窗口内仍须逐周期执行。
 - thermal batch 的默认调优目标固定为 `60 / 80 / 100 / 120 / 140 / 160 / 180 / 220 / 240°C`，全部属于同等级调优集合；`250°C` 不参与默认参数调优。默认执行顺序必须采用“端点 -> 中点 -> 左半递归 -> 右半递归”的确定性流程，而不是简单低温到高温顺排。每轮开始前必须主动降温；重启阈值固定为：`targetTempC < 80°C => currentTempC <= 35°C`，`targetTempC >= 80°C => currentTempC <= targetTempC - 40°C`。温度首次达到或低于阈值后必须立即开始该轮，不得要求回到 `30°C`、不得增加固定 `30s` 或其它稳定等待，也不得跳过冷却。
-- `heaterCurrentReserveMa` 作为历史 profile 兼容字段继续保持默认 `200mA`、合法范围 `0..1000mA`，仅用于 fixed-PD PWM fallback；PPS/AVS 路径的电流边界来自所选 APDO 合同，该字段和瞬时 CH224Q draw 都不得降低 adjustable-voltage request ceiling。
+- `heaterCurrentReserveMa` 作为历史 profile 兼容字段继续保持默认 `200mA`、合法范围 `0..1000mA`，仅用于 fixed-PD PWM fallback；PPS/AVS 路径的电流边界来自所选 APDO 合同，该字段和瞬时 FUSB302B draw 都不得降低 adjustable-voltage request ceiling。
 - 手动 PPS 覆盖是非持久化调试状态，不写 EEPROM。启用时暂停自动 PPS/PID 电压写入，但 heater/PID 输出与 MOS gate 仍按既有逻辑运行；改压时不得主动干预 MOS gate。
-- 手动 PPS 覆盖不依赖 `pps_covers_20v`，但必须存在 PPS APDO capability，目标电压必须在 capability 内、按 `100mV` 对齐且不高于 `21.0V`。CH224Q 写入失败或 PD 状态丢失时必须自动清除覆盖，回到默认固定 PD 请求或既有 fallback，并通过 status/trace 暴露错误。
+- 手动 PPS 覆盖不依赖 `pps_covers_20v`，但必须存在 PPS APDO capability，目标电压必须在 capability 内、按 `100mV` 对齐且不高于 `21.0V`。FUSB302B 写入失败或 PD 状态丢失时必须自动清除覆盖，回到默认固定 PD 请求或既有 fallback，并通过 status/trace 暴露错误。
 - `active_cooling_enabled=true` 时，Dashboard fan line 必须只显示 `AUTO` 或 `RUN`；`active_cooling_enabled=false` 时必须显示 `OFF`，即使保护链路正在临时驱动真实风扇。
 - Dashboard 中键短按只切 heater arm；中键双击切换主动降温（`active_cooling_enabled`）；中键长按只进菜单。
 - `GPIO48` 蜂鸣器必须使用独立 PWM 通道；boot 和 idle 保持静音，不得复用 heater/fan 已占用的 PWM 输出。
@@ -132,8 +132,8 @@
 - 当前风扇硬件为反相 `FB` 注入控制：`GPIO36 duty=0%` 表示最高风扇轨电压，`GPIO36 duty=100%`（`1000‰`）才表示最低风扇轨电压；所有 `minimum-voltage profile` 语义都必须落到该 `1000‰` 档位。
 - 蜂鸣告警只允许存在两个 owner-facing 状态：`热失控` 与 `热失控待确认`。温度 `>=420°C` 的热失控期间必须每隔 `1s` 播放一次热失控提示；温度回落到 `<420°C` 后，若用户尚未确认，则进入待确认状态并每 `10s` 蜂鸣提醒一次。`SensorShort / SensorOpen / AdcReadFailed` 仍可停热并报告测温无效，但不得触发蜂鸣告警、待确认状态或 reminder。
 - defmt 日志必须覆盖 RTD 读数、PID 输入/输出、heater backend 选择、PPS/AVS 请求电压、MOS gate 输出、fault 原因、fan policy 输出与 PD 状态变化。
-- Dashboard 启动呈现必须区分 `Initializing`、`Ready` 与 `InitialRtdFault` 三态。显示初始化后的首帧必须使用 `---.-°C`、`SET ---`、`PPS ---`、`FAN ---` 占位，不得显示伪造的数值（包括 `300°C`）；EEPROM 配置恢复且首个 RTD 样本有效后才进入 `Ready` 并显示实际数据。首个 RTD 样本失败时必须显示 `WARN/SENSOR`、保持加热锁定和占位温度；进入 `Ready` 后的 RTD fault 必须保留最后一个有效 owner-facing 温度。
-- 启动期间的 USB early-control 必须在启动阶段边界与 PD 状态等待期间继续提供 `get_identity` 和既有 `startup_busy` 语义；等待服务间隔不得超过 `20ms`。移除固定 Dashboard 延迟不得改变 PD、EEPROM、Wi-Fi、输出和 ADC 的相对初始化顺序或任何 fail-closed 门控。
+- Dashboard 启动呈现必须区分 `Initializing`、`EepromRestore`、`Ready` 与 `InitialRtdFault` 四态。显示初始化后的首帧必须使用 `---.-°C`、`SET ---`、`PPS ---`、`FAN ---` 占位，不得显示伪造的数值（包括 `300°C`）；可信 v5 EEPROM 配置和首个 RTD 样本有效后才进入 `Ready`。旧格式恢复期间显示真实 RTD 与 `EEPROM/RESTORE`，但锁定配置编辑和加热；PD 未就绪时显示真实 Dashboard 数据与 `POWER/WAIT`。首个 RTD 样本失败时必须显示 `WARN/SENSOR`、保持加热锁定和占位温度；进入 `Ready` 后的 RTD fault 必须保留最后一个有效 owner-facing 温度。
+- 启动期间的 USB early-control 必须在启动阶段边界继续提供 `get_identity` 和既有 `startup_busy` 语义；PD 合同只在运行时非阻塞服务，不得有固定状态等待。移除固定 Dashboard 延迟不得改变任何 fail-closed 门控；GPIO47 默认保持 `0%`，只有显式 arm 且观察到 FUSB `Accept + PS_RDY` 后才允许输出。
 
 ### SHOULD
 
@@ -149,7 +149,7 @@
 
 ### Core flows
 
-- 启动后先请求 feature-selected 固定 PD 电压（默认 `20V`），随后读取 CH224Q status 与 power data。若 PPS APDO 覆盖 `20V`，heater 后端进入 `pps-mos`；否则进入 `fixed-pd-pwm-fallback`。
+- 启动后只识别并初始化 FUSB302BMPX；PD Source Capabilities、RDO、`Accept` 与 `PS_RDY` 在运行时非阻塞处理。若 PPS APDO 覆盖 `20V`，heater 后端进入 `pps-mos`；否则进入 `fixed-pd-pwm-fallback`。
 - PD 控制器未识别、启动合同未就绪或运行中合同丢失时，设备仍必须完成 Front Panel Dashboard 与 runtime-ready；`heater_enabled`、校准加热和 `GPIO47` 必须保持关闭，并以 `pd-contract-unavailable` 报告 heater lock。App runtime 在首次显示初始化后直接呈现 Dashboard，并在启动测量完成后只做一次完整 Dashboard SPI flush，不得因为 PD 超时再次初始化面板或保留校准首屏；只有 KeyTest runtime 渲染校准场景。只有后续观测到 ready contract 才能解除 heater lock，不能靠保留的 heater arm 自动绕过。
 - 用户短按中键后，heater 进入 arm 状态；若无 fault-latch，则控制器按 `target_temp_c - current_temp_c` 输出 `0..100%` 控制量。`pps-mos` 后端在所选 APDO 的最小到最大电压范围内表达该控制量；`R(T)` 参与 `Pmax(T)=min(Vsource^2/R(T), Vsource*Isource)` 的 heater-watt 估算，但不形成电压天花板。只有不具备合格 PPS APDO或关键调压失败时才进入 fixed-PD + `GPIO47` PWM fallback，并按其协商电流合同钳制 duty。
 - Dashboard 上/下短按和 hold-repeat 都只调整 `target_temp_c`，每次事件步进 `1°C` 并继续 clamp 到 `0~400°C`；中键 heater / active cooling / menu 语义不受 hold-repeat 影响。
@@ -162,8 +162,8 @@
 - 当 heater 已 arm 但实时 heater 输出为 `0%` 时，`100<T<=350°C` 的普通加热期风扇脉冲必须关闭；当实时 heater 输出大于 `0%` 时，该区间的最低电压脉冲周期为 `5s`，占空比必须为 cooling-disabled 脉冲的两倍并封顶 `50%`。
 - 当 `active_cooling_enabled=false` 且 `temp > 350°C` 时，heater 必须被强制关断并锁住；用户重新开启风扇策略或手动重新使能 heater 后才允许退出该锁态。
 - 当 `active_cooling_enabled=false` 且 `temp > 360°C` 时，真实风扇输出升级为全速，但 Dashboard fan line 仍保持 `OFF`。
-- PD ready 是 heater 授权前提：合同不可用时必须撤销 heater arm 并将物理输出归零；较低但 ready 的合同仍可按后端限额降级运行。PPS/AVS 调压写入失败会把 heater 后端降级到固定 PD PWM fallback。
-- 手动 PPS 覆盖激活期间，自动 heater backend 不再写 CH224Q 电压；固定 PD fallback 仍可继续使用 `GPIO47` PWM duty，`pps-mos` 仍可继续由 PID/MOS gate 表达加热输出。
+- PD ready 是 heater 授权前提：合同不可用时必须撤销 heater arm 并将物理输出归零；较低但 ready 的合同仍可按后端限额降级运行。合同从 pending 变为 ready 时，必须丢弃电源不可用期间产生的 heater arm 意图，并等待新的显式 arm；不得因合同恢复自动加热。PPS/AVS 调压写入失败会把 heater 后端降级到固定 PD PWM fallback。
+- 手动 PPS 覆盖激活期间，自动 heater backend 不再写 FUSB302B 电压；固定 PD fallback 仍可继续使用 `GPIO47` PWM duty，`pps-mos` 仍可继续由 PID/MOS gate 表达加热输出。
 - 温度达到 `420°C` 时，runtime 进入 `热失控`：立即将 heater 输出归零，并每隔 `1s` 播放一次热失控提示。用户可以通过前面板输入或 runtime/CLI/app 的 `faultAttentionAcknowledged` 确认收到告警；确认后停止待确认锁定与强制风扇状态，但温度仍为 `>=420°C` 时，绝对过温保护、停热和 `1s` 热失控提示不得解除。温度回到 `<420°C` 后，若告警已确认则恢复一般状态；若尚未确认则进入 `热失控待确认`，每 `10s` 蜂鸣提醒一次，并拒绝任何 heater arm 请求。强制风扇期间沿用现有主动降温包线：`>60°C` 全速、`40~60°C` 为 `50%`；温度 `<40°C` 或收到告警确认时结束强制风扇状态，两者任一先发生即可。风扇状态解除不等于自动重新 arm heater。
 - 前面板 RGB 指示灯必须复用相同的安全真相源：热失控显示红色急闪，已回落但待确认的热失控显示红色单闪；`SensorShort / SensorOpen / AdcReadFailed` 显示紫色双闪，散热关闭过温 lock 显示黄色三闪。普通状态不得覆盖这些灯语。
 
@@ -185,7 +185,7 @@
 
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `FrontPanelUiState.dashboard_presentation` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | `Initializing` / `Ready` / `InitialRtdFault` 启动呈现合同 |
+| `FrontPanelUiState.dashboard_presentation` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | `Initializing` / `EepromRestore` / `Ready` / `InitialRtdFault` 启动呈现合同 |
 | `FrontPanelUiState.fan_display_state` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | Dashboard 风扇三态真相源 |
 | `FrontPanelUiState.heater_lock_reason` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | `sensor-fault` / `pd-contract-unavailable` / `cooling-disabled-overtemp` / `hard-overtemp` |
 | `FrontPanelUiState.dashboard_warning_visible` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | SET 行告警闪烁相位 |
@@ -193,7 +193,7 @@
 | `ThermalControlProfile` | USB/devd runtime config + persistent memory config | external | New | `docs/interfaces/http-api.md` | firmware / devd | CLI / devd / Web Serial | RAM preview 与 persistent saved profile，最多 10 个点；每点同时携带 power baseline 与 damping 字段 |
 | `Status.faultAttentionPending` | USB/devd runtime status | external | Updated | `docs/interfaces/http-api.md` | firmware / devd | CLI / Web / tuning runner | 仅表示热失控已回落且尚未确认；测温 fault 不得置位 |
 | `RuntimeConfig.faultAttentionAcknowledged` | USB/devd runtime config | external | Updated | `docs/interfaces/http-api.md` | firmware / devd | CLI / Web / tuning runner | 确认热失控告警；不得绕过 `temp >= 420°C` 的绝对停热与 `1s` 提示 |
-| `FrontPanelRuntimeState` / `FrontPanelScreen` | TypeScript type | internal | Updated | None | web | Storybook / preview harness | 对齐 firmware 三态 fan 与告警关键帧 |
+| `FrontPanelRuntimeState` / `FrontPanelScreen` | TypeScript type | internal | Updated | None | web | Storybook / preview harness | 对齐 firmware 四态启动呈现、三态 fan 与告警关键帧 |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -221,7 +221,7 @@ None
 - Given heater runtime 正常运行，When RTD 控制周期触发，Then 控制环必须以单调时钟按 `20Hz` 更新，每个周期聚合 `64` 次 ADC conversion，并把分数毫伏均值贯穿 calibration 与 PT1000 转换；RTD 转换总频率必须为至少 `1280Hz`。`tempFilterAlphaPermille` 默认值为 `750`，且必须继续由 thermal profile API/EEPROM 控制。status 必须同步发布 `heaterControlIntervalMs` 与 `heaterControlCycleMs`，且 HIL 原始样本必须保留这两个字段。
 - Given native/Web Serial status 被读取，When 固件发布当前温度，Then `boardTempCenti/currentTempC` 必须直接由内部浮点 RTD 测量值四舍五入到 `0.01°C`，不得从前面板 `0.1°C` 显示值反推；前面板显示精度不得限制控制环或遥测精度。When RTD 进入 fault，Then owner-facing 温度显示必须保留最近一次有效读数，而不是写成 `0°C`。
 - Given Dashboard 过温告警，When 页面刷新，Then 告警只占据 SET 行并以两关键帧闪烁，FAN 行不切换到告警文案。
-- Given CH224Q power data 包含覆盖 `20V` 的 PPS APDO，When runtime 初始化 heater 后端，Then 选择 `pps-mos`；heater armed 且控制输出为 `0%` 时以单次最多 `500mV` 的步进回到有效工作下限并输出 `0%` PWM，heater disabled 时才恢复 idle `12V` 或更高 PPS minimum；`1..100%` 可在所选 APDO 的完整电压范围内请求 PPS/AVS 电压，`R(T)` 与 profile current reserve 不得降低 adjustable-voltage request ceiling，达到 floor 或处于 bounded down-ramp 时由 PWM 按等效功率连续降低。电流边界由所选 APDO 合同负责；对于不具备合格 PPS APDO 的固定 PDO fallback，duty 必须继续被压到不高于该电流合同对应的等效占空比。PPS 高于 floor 时 GPIO47 为 `100%` PWM。
+- Given FUSB302B Source Capabilities 包含覆盖 `20V` 的 PPS APDO，When runtime 初始化 heater 后端，Then 选择 `pps-mos`；heater armed 且控制输出为 `0%` 时以单次最多 `500mV` 的步进回到有效工作下限并输出 `0%` PWM，heater disabled 时才恢复 idle `12V` 或更高 PPS minimum；`1..100%` 可在所选 APDO 的完整电压范围内请求 PPS/AVS 电压，`R(T)` 与 profile current reserve 不得降低 adjustable-voltage request ceiling，达到 floor 或处于 bounded down-ramp 时由 PWM 按等效功率连续降低。电流边界由所选 APDO 合同负责；对于不具备合格 PPS APDO 的固定 PDO fallback，duty 必须继续被压到不高于该电流合同对应的等效占空比。PPS 高于 floor 时 GPIO47 为 `100%` PWM。
 - Given active thermal plant and a `20V / >=3A` PPS source, When runtime arms production heating, Then `pps3a` MUST use the same projected physical plant as `pps5a`; it may arm only when persisted raw heater observations yield at least two valid `R(T)` points. The thermal controller's saturation power MUST be `Pmax(T)=min(Vsource^2/R(T), Vsource*Isource)`，production PPS request ceiling MUST equal the selected APDO maximum voltage；`R(T)` 与 persisted board-current reserve 均不得降低该电压上限。Changing RTD calibration may reproject the heater-watt estimate but MUST NOT create, invalidate, or require a separate 3A heat-loss calibration.
 - Given WARMUP 正在通过同一个 PPS APDO 动态调整功率，When 新目标电压与当前请求不同，Then 单次请求最多变化 `500mV`、MOS 必须保持导通且相邻请求至少间隔 `500ms`，从而为 `300ms` RTD 稳定窗口保留明确余量；只有 APDO/AVS/固定 PDO/fallback 等离散路径发生变化时才允许关 MOS，并使用至少 `275ms` 的 transition window。任何新控制 tick 都不得覆盖尚未完成的 transition。
 - Given 控制器从 Approach 进入 HOLD，When PPS 已建立交接电压，Then 固件必须锁定该电压并只用 PWM 响应 PI 输出，不得主动向下扫描 PPS。When 物理 PWM 持续饱和、温度仍低于目标且升温率不足，Then 才允许至少间隔 `2s` 向上调整一次，每次最多 `500mV`。
@@ -230,8 +230,8 @@ None
 - Given `thermal_plant_auto` 正在运行，When 当前有效 RTD 实测温度首次达到 `220°C`，Then 同一控制周期必须把逻辑 duty 与物理 PWM 清零并进入被动冷却；该判断不得使用可能滞后的 guarded control temperature。被动冷却期间保持同一 calibration-owned PPS 合同，避免 PD 重新协商扰动 RTD 轨迹；只有模型事务完成、取消或失败时才清除该 PPS。被动过冲保持零功率并继续收集冷却轨迹，不存在独立 `225°C` 校准失败阈值；RTD fault、PPS fault、取消、超时与通用 `420°C` 绝对过温保护仍保持。
 - Given hold predictive coast 已经激活，When 温度仍在上升、原始温度未下降至少 `0.05°C`、实际低温误差或滤波低温误差任一尚未达到 `max(holdOnCentiC, 0.05°C)`，Then 输出必须继续保持 `0%`；When 四项释放条件同时满足，Then 才恢复 PI，并从清零后的 phase/blend 状态开始。
 - Given thermal batch 将运行目标 `T`，When 上一轮结束并主动降温，Then 若 `T < 80°C`，host 必须等待到 `currentTempC <= 35°C` 后立即开始；若 `T >= 80°C`，则必须等待到 `currentTempC <= T - 40°C` 后立即开始；不得附加低于 `30°C`、连续稳定时长或无冷却启动条件。默认 5A full-batch 正式目标集固定为 `60 / 80 / 100 / 120 / 140 / 160 / 180 / 220 / 240°C`，全部属于同等级调优集合；默认实际执行顺序必须是 `60, 240, 140, 100, 80, 120, 180, 160, 220`；`250°C` 不参与默认调优。
-- Given CH224Q 只提供固定 `20V` PDO 或 PPS APDO 不覆盖 `20V`，When runtime 初始化 heater 后端，Then 选择 `fixed-pd-pwm-fallback`，不得把固定 `20V` 误判为 PPS 可调能力。
-- Given CH224Q power data 同时包含宽范围 `3A` PPS APDO 与 `20V/5A` PPS APDO，When runtime 解析 capability，Then status 的 PPS capability 必须来自 `20V/5A` APDO，`auto` 解析 `pps5a`；不得因前者电压范围更宽而回读 `3A` 合同。
+- Given FUSB302B 只提供固定 `20V` PDO 或 PPS APDO 不覆盖 `20V`，When runtime 初始化 heater 后端，Then 选择 `fixed-pd-pwm-fallback`，不得把固定 `20V` 误判为 PPS 可调能力。
+- Given FUSB302B Source Capabilities 同时包含宽范围 `3A` PPS APDO 与 `20V/5A` PPS APDO，When runtime 解析 capability，Then status 的 PPS capability 必须来自 `20V/5A` APDO，`auto` 解析 `pps5a`；不得因前者电压范围更宽而回读 `3A` 合同。
 - Given source 回报 PPS APDO capability，When 手动 PPS 覆盖启用为 `10.4V`，Then 自动 PPS/PID 电压写入暂停，MOS gate 不被设置动作额外改写，status 回显 manual/capability；When 覆盖清除、PD 丢失或写入失败，Then 自动控制恢复且错误码可见。
 - Given `runtime_config.thermalControlProfile.op=preview`，When profile 含有最多 10 个槽位，Then firmware 只在 RAM 中启用 profile preview，目标温度落在点间时按 profile 线性插值所有 power/damping 字段；status 的 `thermalControl` 必须回显当前目标经过插值、旧格式 profile inflate（仅导入兼容时）和安全 clamp 后的有效参数、profile source 与 target coverage；When `op=clear_preview`，Then status 回显 `thermalControlProfilePreview=false` 且控制器回到 persistent saved profile 或默认曲线。
 - Given `runtime_config.thermalControlProfile.op=save`，When profile 含有最多 10 个槽位，Then firmware 立即启用该 profile 并经现有 memory commit 路径写入持久化后端；编码必须只占用实际已配置点位，而不是强制写满 10 个空槽，避免 profile 扩展后挤爆现有 record 空间；When 设备重启后，Then 控制器继续使用 saved profile；When `op=clear_saved`，Then persistent active profile 被清除，RAM preview 不被隐式保存。
@@ -274,6 +274,8 @@ None
 - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-fan-run docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-fan-run.framebuffer.bin`
 - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-overtemp-a docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-overtemp-a.framebuffer.bin`
 - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-overtemp-b docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-overtemp-b.framebuffer.bin`
+- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-power-wait docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-power-wait.framebuffer.bin`
+- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-eeprom-restore docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-eeprom-restore.framebuffer.bin`
 
 ### UI / Firmware Preview
 
@@ -349,6 +351,14 @@ None
 
 ![Dashboard initial RTD fault](./assets/dashboard-initial-rtd-fault.png)
 
+- Dashboard startup `POWER/WAIT`（真实 RTD，PD 合同未就绪）：
+
+![Dashboard power wait](./assets/dashboard-power-wait.png)
+
+- Dashboard startup `EEPROM/RESTORE`（真实 RTD，旧格式后台恢复）：
+
+![Dashboard EEPROM restore](./assets/dashboard-eeprom-restore.png)
+
 - Dashboard startup `Ready`：
 
 ![Dashboard ready](./assets/dashboard-ready.png)
@@ -361,9 +371,9 @@ None
 
 - 用单一 `HeaterController` 管理 PID 与 hard fault-latch，再把 cooling-disabled lock 作为独立安全层挂在 fan policy 旁边。
 - 用 `fan_display_state + heater_lock_reason + dashboard_warning_visible` 作为 Dashboard 真相源，不再复用单布尔 fan 标记表达全部运行态。
-- 用 `HeaterPowerBackend` 把控制器输出与硬件输出解耦：`pps-mos` 后端只做 MOS 静态通断并通过 CH224Q PPS/AVS 调压；`fixed-pd-pwm-fallback` 保留原 `GPIO47` PWM 调功。
+- 用 `HeaterPowerBackend` 把控制器输出与硬件输出解耦：`pps-mos` 后端只做 MOS 静态通断并通过 FUSB302B PPS/AVS 调压；`fixed-pd-pwm-fallback` 保留原 `GPIO47` PWM 调功。
 - Approach 调优与验收以目标温度相关的 full-speed-to-stable gate、overshoot、hold p2p、hold 高低侧误差和 source telemetry 为真相源；默认 flagship sprint 不再额外采集 `0% / 25% / 50%` approach-only 曲线作为门槛。
-- CH224Q 仍作为电源准备层而不是 heater interlock；只有启动 capability gate 与后续调压写入失败会影响 heater 后端选择。
+- FUSB302B 作为电源准备层而不是 heater interlock；只有启动 capability gate 与后续调压写入失败会影响 heater 后端选择。
 - 两个 bank 各 10 个完整 point-local 目标点必须能与最长 Wi-Fi 凭据和完整校准状态同时持久化；EEPROM 当前写入 `MemoryRecord` v5，使用 `2 KiB` active 双槽和 `u16` TLV 长度，读取兼容 v1-v4 及 `1 KiB` previous / `512B` legacy 槽；旧 EEPROM record 在 RAM 中迁移，并在下一次成功提交时写成 v5。EEPROM 不可达时进入 `EEPROM_REQUIRED`，不得使用 `flux_cfg`、raw Flash 或 NVS。host 在开始调优前必须拒绝超过 profile 10 点容量的目标集合。
 - saved profile 与 USB/WebSerial direct preview 必须经过同一组 thermal settings 限幅；控制器不得依赖 devd 客户端校验来保护 spike-reject、工作电压下限或电流余量。
 
