@@ -156,6 +156,8 @@ use flux_purr_firmware::frontpanel::{
     FanDisplayState, FrontPanelKeyMap, FrontPanelRawState, FrontPanelRoute, FrontPanelRuntimeMode,
     FrontPanelUiState, HeaterLockReason,
 };
+#[cfg(test)]
+use flux_purr_firmware::frontpanel::{FrontPanelKey, KeyEvent, KeyGesture, RawFrontPanelKey};
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 use flux_purr_firmware::lan::LanEndpoint;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -4634,6 +4636,23 @@ fn reconcile_runtime_heater_enabled(
         return false;
     }
     calibration_runtime_state.heater_enabled && calibration_heater_allowed
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn disarm_stale_heater_arm_after_pd_transition(
+    previous_pd_ready: bool,
+    current_pd_ready: bool,
+    ui_state: &mut FrontPanelUiState,
+    calibration_runtime_state: &mut CalibrationRuntimeState,
+) -> bool {
+    if previous_pd_ready || !current_pd_ready {
+        return false;
+    }
+
+    let was_armed = ui_state.heater_enabled || calibration_runtime_state.heater_enabled;
+    ui_state.heater_enabled = false;
+    calibration_runtime_state.heater_enabled = false;
+    was_armed
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -14550,9 +14569,21 @@ async fn main(_spawner: Spawner) {
             last_pd_observation = current_pd_observation;
             let current_pd_contract_ready = startup_pd_contract_ready(current_pd_observation);
             if pd_contract_ready != current_pd_contract_ready {
+                let pd_was_ready = pd_contract_ready;
                 pd_contract_ready = current_pd_contract_ready;
                 needs_redraw = true;
                 if pd_contract_ready {
+                    if disarm_stale_heater_arm_after_pd_transition(
+                        pd_was_ready,
+                        pd_contract_ready,
+                        &mut ui_state,
+                        &mut calibration_runtime_state,
+                    ) {
+                        needs_redraw = true;
+                        info!(
+                            "PD contract became ready; discarded pre-ready heater arm and require a new explicit arm"
+                        );
+                    }
                     info!("PD contract became ready; released startup heater interlock");
                 } else {
                     info!("PD contract became unavailable; heater interlocked");
@@ -23814,6 +23845,58 @@ mod tests {
             next_heater_lock_reason(None, false, true, false),
             Some(HeaterLockReason::PdContractUnavailable)
         );
+    }
+
+    #[test]
+    fn pd_ready_transition_discards_power_wait_heater_arm_until_rearmed() {
+        let mut ui_state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+        ui_state.set_dashboard_presentation(
+            flux_purr_firmware::frontpanel::DashboardPresentationState::Ready,
+        );
+        let mut calibration_runtime_state = CalibrationRuntimeState::default();
+
+        assert!(ui_state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Center,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert!(ui_state.heater_enabled);
+
+        assert!(disarm_stale_heater_arm_after_pd_transition(
+            false,
+            true,
+            &mut ui_state,
+            &mut calibration_runtime_state,
+        ));
+        assert!(!ui_state.heater_enabled);
+        assert!(!calibration_runtime_state.heater_enabled);
+        assert!(!reconcile_runtime_heater_enabled(
+            ui_state.heater_enabled,
+            calibration_runtime_state,
+            None,
+            false,
+            false,
+            true,
+            true,
+        ));
+
+        assert!(ui_state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Center,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 1,
+        }));
+        assert!(ui_state.heater_enabled);
+        assert!(reconcile_runtime_heater_enabled(
+            ui_state.heater_enabled,
+            calibration_runtime_state,
+            None,
+            false,
+            false,
+            true,
+            true,
+        ));
     }
 
     #[test]
