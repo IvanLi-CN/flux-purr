@@ -27,7 +27,7 @@ The human-facing source of truth is `docs/guides/flux-purr-developer-policy.md`.
 - Prefer repo checkout tooling; do not substitute global `flux-purr` or `flux-purr-devd` binaries for source-tree developer work.
 - Finish non-hardware validation before any real device or HIL step.
 - Do not perform flash, reset, serial write, selector changes, or port switching without an exact owner-authorized USB port.
-- When `flux-purr flash` confirms that the authorized port is in ESP32-S3 ROM download mode, an owner-authorized Developer may use the paired `--skip-backup --confirm NO_EEPROM_BACKUP` bootstrap exception defined by the developer-operations skill. Record that no EEPROM archive was created.
+- On the exact owner-authorized port, an owner-authorized Developer may use the paired `--skip-backup --confirm NO_EEPROM_BACKUP` bypass defined by the developer-operations skill. It skips ROM probing and EEPROM snapshot/archive creation regardless of application or ROM state; record that no EEPROM archive was created.
 - Do not report mock smoke as hardware validation.
 - Keep specs, solutions, and project docs aligned when behavior, contracts, release policy, or safety boundaries change.
 - Do not change git remotes, upstreams, push targets, or credentials unless the owner explicitly asks.

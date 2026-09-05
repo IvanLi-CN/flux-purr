@@ -78,7 +78,7 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 - 任何烧录、复位、串口读写、`mcu-agentd selector set`、`espflash`、`esptool` 或等价 MCU 操作，都只能使用主人明确授权的设备端口。
 - 授权端口消失、变号、重新枚举或被占用时，必须停止并报告证据；不得自动切换端口。
 - `mcu-agentd` 操作只允许针对当前项目目标 `esp32s3_frontpanel`；不得把其它 MCU 目标或其它仓库设备当作当前目标。
-- `mcu-agentd` 不是 CLI/`devd` HIL 的默认 acceptance path；除非主人明确改计划，否则不要用它替代 `flux-purr` 的验收路径。一般用户更新必须使用命中完整性清单的本地 bundle、精确串口与本地 devd control socket；开发者烧录必须使用精确串口、本地 ELF 与直接串口路径，并默认自动备份 EEPROM。若 `flux-purr flash` 已确认该精确端口处于 ESP32-S3 ROM 下载模式，主人明确授权的开发者可使用成对的 `--skip-backup --confirm NO_EEPROM_BACKUP` 进行一次 bootstrap 烧录；结果必须记录 EEPROM 未备份且健康状态未知。其他 EEPROM 备份失败仍必须阻止烧录。不得通过 CLI HTTP/devd 调用、默认端口、自动选设备、内部 Flash 配置迁移或直接 `mcu-agentd flash` 绕过这些边界。
+- `mcu-agentd` 不是 CLI/`devd` HIL 的默认 acceptance path；除非主人明确改计划，否则不要用它替代 `flux-purr` 的验收路径。一般用户更新必须使用命中完整性清单的本地 bundle、精确串口与本地 devd control socket；开发者烧录必须使用精确串口、本地 ELF 与直接串口路径，并默认自动备份 EEPROM。主人明确授权的开发者可在该精确端口上使用成对的 `--skip-backup --confirm NO_EEPROM_BACKUP` 跳过 ROM 探测、EEPROM snapshot 与归档后直接烧录；该旁路无需先检测或证明 ROM 模式，也适用于旧应用固件不支持 snapshot 协议的情形，结果必须记录 EEPROM 未备份且健康状态未知。未提供成对旁路时，任何 EEPROM snapshot、credential-store、encryption、durability 或 verification 失败仍必须阻止烧录。不得通过 CLI HTTP/devd 调用、默认端口、自动选设备、内部 Flash 配置迁移或直接 `mcu-agentd flash` 绕过这些边界。
 - IsolaPurr HUB 只可作为外部电源/链路控制边界，不能当作当前项目目标 MCU、host tool 或 release surface。
 - 真实烧录默认禁用；只有主人明确授权且满足精确端口授权边界时，才允许走 real flash。
 - 固件与热控改动不得为了让日志“更正常”而屏蔽传感器故障、按键故障或保护逻辑；安全失败路径必须保留。

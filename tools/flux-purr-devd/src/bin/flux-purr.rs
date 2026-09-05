@@ -1436,9 +1436,15 @@ struct FlashArgs {
     port: String,
     #[arg(long, value_name = "ELF")]
     elf: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Skip the Developer EEPROM backup when paired with --confirm NO_EEPROM_BACKUP; no ROM-mode precondition applies"
+    )]
     skip_backup: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Literal confirmation required by --skip-backup: NO_EEPROM_BACKUP"
+    )]
     confirm: Option<String>,
 }
 
@@ -1989,6 +1995,15 @@ async fn update_from_local_bundle(
 }
 
 async fn direct_flash(args: FlashArgs) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let program = resolve_espflash_program();
+    direct_flash_with_program(args, &program, true)
+}
+
+fn direct_flash_with_program(
+    args: FlashArgs,
+    program: &Path,
+    require_real_flash_enablement: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_serial_port(&args.port)?;
     if args.skip_backup && args.confirm.as_deref() != Some("NO_EEPROM_BACKUP") {
         return Err("--skip-backup requires --confirm NO_EEPROM_BACKUP".into());
@@ -1996,10 +2011,12 @@ async fn direct_flash(args: FlashArgs) -> Result<Value, Box<dyn std::error::Erro
     let elf = args.elf.unwrap_or_else(default_release_elf);
     validate_local_elf(&elf)?;
     let partition_table = embedded_partition_table()?;
-    ensure_real_flash_enabled()?;
+    if require_real_flash_enablement {
+        ensure_real_flash_enabled()?;
+    }
     if !args.skip_backup && detect_rom_download_mode(&args.port) {
         return Err(
-            "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. Use the explicit backup bypass only when bootstrapping this device; firmware was not written."
+            "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
                 .into(),
         );
     }
@@ -2011,7 +2028,7 @@ async fn direct_flash(args: FlashArgs) -> Result<Value, Box<dyn std::error::Erro
             Err(error) if snapshot_error_may_be_rom_mode(error.as_ref()) => {
                 if detect_rom_download_mode(&args.port) {
                     return Err(
-                        "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. Use the explicit backup bypass only when bootstrapping this device; firmware was not written."
+                        "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
                             .into(),
                     );
                 }
@@ -2026,9 +2043,8 @@ async fn direct_flash(args: FlashArgs) -> Result<Value, Box<dyn std::error::Erro
             &snapshot,
         )?)
     };
-    let program = resolve_espflash_program();
     let flash_args = direct_elf_flash_args(&args.port, partition_table.path(), &elf)?;
-    let espflash = run_espflash_command(&program, &flash_args)?;
+    let espflash = run_espflash_command(program, &flash_args)?;
     Ok(
         json!({"ok": true, "operation": "flash", "port": args.port, "elf": elf, "backup": backup_path, "espflash": espflash}),
     )
@@ -18173,6 +18189,48 @@ mod tests {
             panic!("recover command parses");
         };
         assert_eq!(args.confirm, "ERASE");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_flash_skip_backup_calls_only_espflash_flash() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let elf = directory.path().join("firmware.elf");
+        let calls = directory.path().join("calls");
+        let fake_espflash = directory.path().join("espflash");
+        fs::write(&elf, b"\x7fELFtest fixture").unwrap();
+        fs::write(
+            &fake_espflash,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'Hash of data verified.\\n'\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_espflash).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&fake_espflash, permissions).unwrap();
+
+        let result = direct_flash_with_program(
+            FlashArgs {
+                port: "/dev/cu.contract-test".to_string(),
+                elf: Some(elf),
+                skip_backup: true,
+                confirm: Some("NO_EEPROM_BACKUP".to_string()),
+            },
+            &fake_espflash,
+            false,
+        )
+        .unwrap();
+
+        let invocations = fs::read_to_string(calls).unwrap();
+        assert_eq!(invocations.lines().count(), 1);
+        assert!(invocations.starts_with("flash "));
+        assert!(!invocations.contains("board-info"));
+        assert!(result["backup"].is_null());
+        assert_eq!(result["espflash"]["command"], "flash");
     }
 
     #[test]

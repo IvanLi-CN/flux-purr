@@ -46,6 +46,7 @@
 - 不得为了让日志“看起来正常”而屏蔽传感器故障、按键故障或保护逻辑；必须保留安全失败路径。
 - `mcu-agentd` 不是 CLI/`devd` HIL 的默认 acceptance path；除非主人明确改计划，否则不得用它替代 `flux-purr` through `devd` 的验收路径。
 - 真实烧录默认禁用；除非主人明确授权并满足端口硬纪律，不得设置或依赖 `FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1` 执行真实写入。
+- Developer 在主人明确授权的精确端口上提供成对的 `--skip-backup --confirm NO_EEPROM_BACKUP` 时，`flash` 跳过 ROM 探测和 EEPROM snapshot/归档并直接进入 espflash；该旁路不要求先检测或证明 ROM 模式，也不因旧应用固件缺少 snapshot 协议而阻塞。
 
 ### 文档与交付
 
