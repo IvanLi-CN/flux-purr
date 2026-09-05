@@ -173,7 +173,7 @@
 - `flux-purr thermal report rerender-legacy`：从旧的 `preliminary-review-*` legacy bundle 或已存在的 `thermal_self_test_preliminary_bundle` 输入目录，重新写出 canonical owner-facing `index.html + run.bundle.json + samples.ndjson + thermal-profile.accepted.json`。该命令是 compliant preliminary review 报告的正式 host 入口；legacy 目录不得再直接充当最终交付页。
 - `flux-purr calibration-mode ...`：提供 owner-facing 三个手动模式入口；`thermal_plant_auto` 只通过 calibration job start/cancel 触发。现有低层 `calibration ...` 与 `heater-curve ...` 原始命令继续保留。
 - `flux-purr wifi set|clear|cancel`：通过 leased WiFi endpoint 写入、清除或取消当前 WiFi 连接；取消保留凭据且只能在 Device 确认 station 已停止后返回 `idle`，输出必须 redaction password。
-- `flux-purr update`：一般用户必须显式提供串口和本地 `.fluxpurr-fw`，bundle hash 与发布完整性清单匹配后通过本地 CBOR devd control 更新。`flux-purr flash`：开发者必须显式提供串口，可选本地 ELF，默认在 direct serial/ROM 写入前自动备份 EEPROM；唯一跳过备份的方式是成对的 `--skip-backup --confirm NO_EEPROM_BACKUP`。`flux-purr recover`：开发者必须显式提供本地 ELF 与 `--confirm ERASE`，只擦写 MCU internal Flash，保持 EEPROM 不变。所有三条命令均禁止 URL、自动选端口和端口替换。
+- `flux-purr update`：一般用户必须显式提供串口和本地 `.fluxpurr-fw`，bundle hash 与发布完整性清单匹配后通过本地 CBOR devd control 更新。`flux-purr flash`：开发者必须显式提供串口，可选本地 ELF，默认在 direct serial/ROM 写入前自动备份 EEPROM；唯一跳过备份的方式是成对的 `--skip-backup --confirm NO_EEPROM_BACKUP`，该旁路无需 ROM 模式并跳过 ROM 探测和 EEPROM snapshot/归档后直接进入 espflash。`flux-purr recover`：开发者必须显式提供本地 ELF 与 `--confirm ERASE`，只擦写 MCU internal Flash，保持 EEPROM 不变。所有三条命令均禁止 URL、自动选端口和端口替换。
 - `flux-purr monitor`：读取 bounded event backlog，不拥有长期未释放 lease。
 - `flux-purr hardware available|recent|list|save|forget|path`：管理用户级 USB 硬件记忆。
 - `flux-purr usb-port show|set`：查看或保存默认 USB serial port。

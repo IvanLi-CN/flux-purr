@@ -42,3 +42,4 @@ Real serial writes remain disabled by default and require the repository's expli
 ## Espflash Diagnostics
 
 `flash` and `recover` MUST preserve both stdout and stderr from every espflash invocation. The terminal result MUST include the observed phase sequence (`connect`, `erase`, `write`, `verify`, and `finalize`), the final phase, exit code, and a bounded copy of both streams. A failed `finalize` phase MUST be reported as a flash-finalization failure: the image may have been written, but write completeness and boot success are unconfirmed. Connection, erase/write, and verification failures MUST carry distinct diagnosis categories and hardware-oriented next checks. A successful command MUST report the stages espflash completed rather than only `ok: true`.
+Developer `flash` 默认在精确端口上完成 EEPROM 备份。成对的 `--skip-backup --confirm NO_EEPROM_BACKUP` 是唯一旁路；它不要求 ROM 模式，直接跳过 ROM 探测和 snapshot/归档，因此旧应用固件缺少 snapshot 协议也不会阻止旁路烧录。

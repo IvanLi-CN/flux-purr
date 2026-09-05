@@ -101,7 +101,7 @@ Daemon 应该是本地 HTTP 服务，而不是 UI 专用私有通道。Mains Aeg
 
 daemon endpoint 在更新 registry 后再发布 bounded event 时，必须先释放 registry/state lock。event publisher 往往会再次读取或写入同一个 registry；如果成功路径持锁 emit event，WiFi/runtime 这类 mutating endpoint 会在真实硬件返回成功后卡死，浏览器只看到挂起请求。
 
-开发者 `flash` 必须在 direct serial/ROM 写入前通过同一显式端口读取完整外置 EEPROM snapshot，并将通过认证的 `FPBK1` 归档写入当前用户的备份目录；备份、认证或持久化失败时默认停止，只有成对的 `--skip-backup --confirm NO_EEPROM_BACKUP` 才能绕过。`recover` 只擦写 MCU internal Flash，永不读取、迁移或清理 EEPROM；一般用户 `update` 只接受命中发布 SHA-256 完整性清单的本地 bundle。
+开发者 `flash` 默认在 direct serial/ROM 写入前通过同一显式端口读取完整外置 EEPROM snapshot，并将通过认证的 `FPBK1` 归档写入当前用户的备份目录；备份、认证或持久化失败时默认停止，只有成对的 `--skip-backup --confirm NO_EEPROM_BACKUP` 才能绕过。该旁路无需 ROM 模式，跳过 ROM 探测和 snapshot/归档后直接进入 espflash，因此旧应用固件缺少 snapshot 协议也不会阻止旁路烧录。`recover` 只擦写 MCU internal Flash，永不读取、迁移或清理 EEPROM；一般用户 `update` 只接受命中发布 SHA-256 完整性清单的本地 bundle。
 
 同一个 native serial port 必须有跨进程互斥保护。进程内 mutex 只能保护单个 daemon；开发时残留的旧 daemon、浏览器预览或 smoke 进程可能同时打开同一个 USB Serial/JTAG port，造成 `Broken pipe`、短时断线或看起来像硬件重启的现象。serial RPC 应该在 open/write/read 前获取 port-scoped process lock，并在超时窗口内等待或返回 retryable lock timeout。
 
