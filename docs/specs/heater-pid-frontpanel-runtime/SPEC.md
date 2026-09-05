@@ -132,6 +132,8 @@
 - 当前风扇硬件为反相 `FB` 注入控制：`GPIO36 duty=0%` 表示最高风扇轨电压，`GPIO36 duty=100%`（`1000‰`）才表示最低风扇轨电压；所有 `minimum-voltage profile` 语义都必须落到该 `1000‰` 档位。
 - 蜂鸣告警只允许存在两个 owner-facing 状态：`热失控` 与 `热失控待确认`。温度 `>=420°C` 的热失控期间必须每隔 `1s` 播放一次热失控提示；温度回落到 `<420°C` 后，若用户尚未确认，则进入待确认状态并每 `10s` 蜂鸣提醒一次。`SensorShort / SensorOpen / AdcReadFailed` 仍可停热并报告测温无效，但不得触发蜂鸣告警、待确认状态或 reminder。
 - defmt 日志必须覆盖 RTD 读数、PID 输入/输出、heater backend 选择、PPS/AVS 请求电压、MOS gate 输出、fault 原因、fan policy 输出与 PD 状态变化。
+- Dashboard 启动呈现必须区分 `Initializing`、`Ready` 与 `InitialRtdFault` 三态。显示初始化后的首帧必须使用 `---.-°C`、`SET ---`、`PPS ---`、`FAN ---` 占位，不得显示伪造的数值（包括 `300°C`）；EEPROM 配置恢复且首个 RTD 样本有效后才进入 `Ready` 并显示实际数据。首个 RTD 样本失败时必须显示 `WARN/SENSOR`、保持加热锁定和占位温度；进入 `Ready` 后的 RTD fault 必须保留最后一个有效 owner-facing 温度。
+- 启动期间的 USB early-control 必须在启动阶段边界与 PD 状态等待期间继续提供 `get_identity` 和既有 `startup_busy` 语义；等待服务间隔不得超过 `20ms`。移除固定 Dashboard 延迟不得改变 PD、EEPROM、Wi-Fi、输出和 ADC 的相对初始化顺序或任何 fail-closed 门控。
 
 ### SHOULD
 
@@ -183,8 +185,9 @@
 
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
+| `FrontPanelUiState.dashboard_presentation` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | `Initializing` / `Ready` / `InitialRtdFault` 启动呈现合同 |
 | `FrontPanelUiState.fan_display_state` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | Dashboard 风扇三态真相源 |
-| `FrontPanelUiState.heater_lock_reason` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | `pd-contract-unavailable` / `cooling-disabled-overtemp` / `hard-overtemp` |
+| `FrontPanelUiState.heater_lock_reason` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | `sensor-fault` / `pd-contract-unavailable` / `cooling-disabled-overtemp` / `hard-overtemp` |
 | `FrontPanelUiState.dashboard_warning_visible` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | SET 行告警闪烁相位 |
 | `FrontPanelUiState.manual_pps_enabled` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | Dashboard `PPS*` 调试覆盖提示 |
 | `ThermalControlProfile` | USB/devd runtime config + persistent memory config | external | New | `docs/interfaces/http-api.md` | firmware / devd | CLI / devd / Web Serial | RAM preview 与 persistent saved profile，最多 10 个点；每点同时携带 power baseline 与 damping 字段 |
@@ -198,7 +201,9 @@ None
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 固件刚启动，When RTD 已有有效样本，Then Dashboard 左侧显示实时温度，右侧显示 `SET/PPS/FAN`，其中 `FAN` 只会显示 `OFF/AUTO/RUN`。
+- Given 显示初始化完成但 EEPROM/首个 RTD 尚未就绪，When Dashboard 首帧提交，Then 左侧显示 `---.-°C`，右侧显示 `SET ---`、`PPS ---`、`FAN ---`，且不得出现 `300°C` 或其它伪造温度。
+- Given 固件刚启动，When EEPROM 配置已恢复且首个 RTD 样本有效，Then Dashboard 进入 `Ready`，左侧显示实际温度，右侧显示恢复后的 `SET/PPS/FAN`，其中 `FAN` 只会显示 `OFF/AUTO/RUN`。
+- Given 固件刚启动，When 首个 RTD 样本为 `SensorShort`、`SensorOpen` 或 `AdcReadFailed`，Then Dashboard 进入 `InitialRtdFault`，显示 `WARN/SENSOR` 与占位温度，heater 保持锁定；后续有效样本和用户重新 arm 前不得解除该锁定。
 - Given Dashboard，When 用户短按中键，Then 只切换 heater arm；When 双击中键，Then 只切换主动降温；When 长按中键，Then 仍进入菜单；When 长按保持上/下，Then 只连续调整 `target_temp_c`。
 - Given heater 关闭且主动降温开启，When 温度 `34°C / 35°C / 60°C / 61°C`，Then fan 必须分别进入停止或 30 秒拖尾 / `0% PWM` / `0% PWM` / `0% PWM`。
 - Given 主动降温已经把风扇拉起，When 温度跌到 `<35°C`，Then fan 必须以 `100% PWM` 再持续 `30s` 后关闭。
@@ -335,6 +340,22 @@ None
 - Current default temperature palette（Aurora / C）：
 
 ![Temperature palette current](./assets/temperature-palette-current.png)
+
+- Dashboard startup `Initializing`：
+
+![Dashboard initializing](./assets/dashboard-initializing.png)
+
+- Dashboard startup `InitialRtdFault`：
+
+![Dashboard initial RTD fault](./assets/dashboard-initial-rtd-fault.png)
+
+- Dashboard startup `Ready`：
+
+![Dashboard ready](./assets/dashboard-ready.png)
+
+## Related ADRs
+
+- None
 
 ## 方案概述（Approach, high-level）
 

@@ -10,7 +10,10 @@ use crate::display::DisplayCanvas;
 
 use crate::control_plane::NetworkState;
 
-use super::{FrontPanelKey, FrontPanelMenuItem, FrontPanelRoute, FrontPanelUiState, KeyGesture};
+use super::{
+    DashboardPresentationState, FrontPanelKey, FrontPanelMenuItem, FrontPanelRoute,
+    FrontPanelUiState, HeaterLockReason, KeyGesture,
+};
 
 const COLOR_BG: Rgb565 = Rgb565::new(1, 4, 3);
 const COLOR_PANEL: Rgb565 = Rgb565::new(2, 8, 6);
@@ -740,9 +743,25 @@ fn draw_dashboard(
     state: &FrontPanelUiState,
     palette: &TemperaturePalette,
 ) {
-    let (display_text, fractional_digit) = deci_c_to_parts(state.current_temp_deci_c);
-    let value_color = temperature_color_with_palette(state.current_temp_c, palette);
-    let set_text = i16_to_text(state.target_temp_c);
+    let startup_presentation = matches!(
+        state.dashboard_presentation,
+        DashboardPresentationState::Initializing | DashboardPresentationState::InitialRtdFault
+    );
+    let (display_text, fractional_digit, value_color) = if startup_presentation {
+        ("---".try_into().unwrap(), '-', COLOR_MUTED)
+    } else {
+        let (display_text, fractional_digit) = deci_c_to_parts(state.current_temp_deci_c);
+        (
+            display_text,
+            fractional_digit,
+            temperature_color_with_palette(state.current_temp_c, palette),
+        )
+    };
+    let set_text = if startup_presentation {
+        "---".try_into().unwrap()
+    } else {
+        i16_to_text(state.target_temp_c)
+    };
     let digits_width = measure_seven_segment_text(&display_text);
     let digits_right_edge = 57;
     let digits_x = digits_right_edge - digits_width;
@@ -754,27 +773,45 @@ fn draw_dashboard(
     draw_bitmap_rows(canvas, &CELSIUS_UNIT_BITMAP, 60, 24, COLOR_TEXT);
 
     fill_rect(canvas, 78, 4, 78, 36, COLOR_PANEL);
-    if state.heater_lock_reason.is_some() && state.dashboard_warning_visible {
-        draw_status_line(canvas, 7, "WARN", "OTEMP", COLOR_WARNING);
+    if state.dashboard_presentation == DashboardPresentationState::InitialRtdFault {
+        draw_status_line(canvas, 7, "WARN", "SENSOR", COLOR_WARNING);
+    } else if state.heater_lock_reason.is_some() && state.dashboard_warning_visible {
+        let fault_label = match state.heater_lock_reason {
+            Some(HeaterLockReason::SensorFault) => "SENSOR",
+            _ => "OTEMP",
+        };
+        draw_status_line(canvas, 7, "WARN", fault_label, COLOR_WARNING);
     } else {
         draw_status_line(canvas, 7, "SET", &set_text, COLOR_WARNING);
     }
     draw_text_mid(canvas, "PPS", 80, 18, COLOR_CYAN);
-    if state.manual_pps_enabled {
+    if !startup_presentation && state.manual_pps_enabled {
         draw_text_small(canvas, "*", 103, 15, COLOR_CYAN);
     }
-    let pps_numeric = pd_voltage_content_text(state.pd_contract_mv);
-    draw_text_mid_right(canvas, &pps_numeric, 147, 18, COLOR_CYAN);
-    draw_text_mid_right(canvas, "V", 154, 18, COLOR_CYAN);
+    if startup_presentation {
+        draw_text_mid_right(canvas, "---", 154, 18, COLOR_CYAN);
+    } else {
+        let pps_numeric = pd_voltage_content_text(state.pd_contract_mv);
+        draw_text_mid_right(canvas, &pps_numeric, 147, 18, COLOR_CYAN);
+        draw_text_mid_right(canvas, "V", 154, 18, COLOR_CYAN);
+    }
     draw_status_line(
         canvas,
         29,
         "FAN",
-        state.fan_display_state.label(),
-        match state.fan_display_state {
-            super::FanDisplayState::Off => COLOR_DISABLED,
-            super::FanDisplayState::Auto => COLOR_CYAN,
-            super::FanDisplayState::Run => COLOR_SUCCESS,
+        if startup_presentation {
+            "---"
+        } else {
+            state.fan_display_state.label()
+        },
+        if startup_presentation {
+            COLOR_MUTED
+        } else {
+            match state.fan_display_state {
+                super::FanDisplayState::Off => COLOR_DISABLED,
+                super::FanDisplayState::Auto => COLOR_CYAN,
+                super::FanDisplayState::Run => COLOR_SUCCESS,
+            }
         },
     );
 
@@ -990,6 +1027,54 @@ mod tests {
 
         assert!(canvas.pixels().contains(&COLOR_WARNING));
         assert!(canvas.pixels().contains(&COLOR_TEXT));
+    }
+
+    #[test]
+    fn initializing_dashboard_renders_placeholders_instead_of_temperature_data() {
+        let mut canvas = DisplayCanvas::new();
+        let mut state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+        state.current_temp_c = 300;
+        state.current_temp_deci_c = 3000;
+        state.target_temp_c = 180;
+
+        render_frontpanel_ui(&mut canvas, &state);
+
+        let mut ready_canvas = DisplayCanvas::new();
+        state.dashboard_presentation = DashboardPresentationState::Ready;
+        render_frontpanel_ui(&mut ready_canvas, &state);
+        assert_ne!(canvas.pixels(), ready_canvas.pixels());
+        assert!(canvas.pixels().contains(&COLOR_MUTED));
+    }
+
+    #[test]
+    fn initial_rtd_fault_dashboard_shows_sensor_warning_and_placeholders() {
+        let mut canvas = DisplayCanvas::new();
+        let mut state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+        state.dashboard_presentation = DashboardPresentationState::InitialRtdFault;
+
+        render_frontpanel_ui(&mut canvas, &state);
+
+        assert!(canvas.pixels().contains(&COLOR_WARNING));
+        assert!(canvas.pixels().contains(&COLOR_MUTED));
+    }
+
+    #[test]
+    fn ready_sensor_fault_dashboard_uses_sensor_warning_and_keeps_temperature() {
+        let mut canvas = DisplayCanvas::new();
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.current_temp_c = 85;
+        state.current_temp_deci_c = 854;
+        state.heater_lock_reason = Some(HeaterLockReason::SensorFault);
+        state.dashboard_warning_visible = true;
+
+        render_frontpanel_ui(&mut canvas, &state);
+
+        let mut overtemp_canvas = DisplayCanvas::new();
+        state.heater_lock_reason = Some(HeaterLockReason::HardOvertemp);
+        render_frontpanel_ui(&mut overtemp_canvas, &state);
+
+        assert_ne!(canvas.pixels(), overtemp_canvas.pixels());
+        assert_eq!(state.current_temp_deci_c, 854);
     }
 
     #[test]
