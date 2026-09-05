@@ -4,6 +4,7 @@
 
 ## Current Status
 
+- FUSB302B pending-to-ready transitions discard pre-ready heater arm intent; an operator must explicitly arm heating after power readiness.
 - Implementation: Web + browser Web Serial + `devd` + CLI + USB JSONL + firmware `net_http` runtime 已覆盖 identity、network、status、runtime mutation、artifact verify、flash dry-run、real flash 与 monitor event 的真实传输路径
 - Lifecycle: active
 - Catalog note: direct firmware HTTP 默认随 ESP32-S3 runtime 构建；LAN 保持可信私网边界，初始 WiFi 配置、firmware flash 与 token reset 仍仅限 USB 配置通路（Browser Web Serial 或 native `devd`）
