@@ -9,6 +9,8 @@ from pathlib import Path
 from PIL import Image, ImageChops
 
 DISPLAY_SIZE = (160, 50)
+LOGO_POSITION = (8, 8)
+WORDMARK_POSITION = (60, 10)
 BACKGROUND = (8, 17, 31)
 CHASSIS = (247, 251, 255)
 HEAT = (255, 85, 66)
@@ -40,7 +42,7 @@ def draw_wordmark(image: Image.Image) -> None:
     pixels = image.load()
     scale_x = 2
     scale_y = 3
-    cursor_x = 60
+    cursor_x, wordmark_y = WORDMARK_POSITION
     for char in "FLUX PURR":
         if char == " ":
             cursor_x += 5
@@ -53,7 +55,7 @@ def draw_wordmark(image: Image.Image) -> None:
                         for dx in range(scale_x):
                             pixels[
                                 cursor_x + column * scale_x + dx,
-                                6 + row * scale_y + dy,
+                                wordmark_y + row * scale_y + dy,
                             ] = CHASSIS
         cursor_x += len(glyph[0]) * scale_x + 3
 
@@ -71,7 +73,7 @@ def create_template() -> Image.Image:
     for y in range(logo.height):
         for x in range(logo.width):
             logo_pixels[x, y] = nearest_palette_color(logo_pixels[x, y])
-    image.paste(logo, (8, 4))
+    image.paste(logo, LOGO_POSITION)
     draw_wordmark(image)
     return image
 

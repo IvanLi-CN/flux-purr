@@ -38,6 +38,7 @@ pub const STARTUP_SCENE_SLUG: &str = "startup-splash";
 const STARTUP_SPLASH_VERSION: &str = env!("FLUX_PURR_FW_VERSION");
 const STARTUP_SPLASH_VERSION_COLOR: Rgb565 = Rgb565::new(17, 38, 21);
 const STARTUP_SPLASH_WORDMARK_CENTER_X: i32 = 105;
+const STARTUP_SPLASH_VERSION_BASELINE_Y: i32 = 35;
 #[cfg(test)]
 const STARTUP_SPLASH_PALETTE: [Rgb565; 4] = [
     Rgb565::new(1, 4, 3),
@@ -455,7 +456,7 @@ fn render_startup_splash(canvas: &mut DisplayCanvas) {
     draw_startup_splash_version(canvas, STARTUP_SPLASH_VERSION);
 }
 
-fn startup_large_version_glyph(character: u8) -> [u8; 7] {
+fn startup_version_glyph(character: u8) -> [u8; 7] {
     match character {
         b'.' => [0b0000, 0b0000, 0b0000, 0b0000, 0b0000, 0b0000, 0b0010],
         b'-' => [0b0000, 0b0000, 0b0000, 0b1111, 0b0000, 0b0000, 0b0000],
@@ -481,89 +482,27 @@ fn startup_large_version_glyph(character: u8) -> [u8; 7] {
     }
 }
 
-fn startup_compact_version_glyph(character: u8) -> [u8; 5] {
-    match character {
-        b'.' => [0b000, 0b000, 0b000, 0b000, 0b010],
-        b'-' => [0b000, 0b000, 0b111, 0b000, 0b000],
-        b'0' => [0b111, 0b101, 0b101, 0b101, 0b111],
-        b'1' => [0b010, 0b110, 0b010, 0b010, 0b111],
-        b'2' => [0b111, 0b001, 0b111, 0b100, 0b111],
-        b'3' => [0b111, 0b001, 0b111, 0b001, 0b111],
-        b'4' => [0b101, 0b101, 0b111, 0b001, 0b001],
-        b'5' => [0b111, 0b100, 0b111, 0b001, 0b111],
-        b'6' => [0b111, 0b100, 0b111, 0b101, 0b111],
-        b'7' => [0b111, 0b001, 0b001, 0b001, 0b001],
-        b'8' => [0b111, 0b101, 0b111, 0b101, 0b111],
-        b'9' => [0b111, 0b101, 0b111, 0b001, 0b111],
-        b'a' => [0b000, 0b110, 0b001, 0b111, 0b101],
-        b'b' => [0b100, 0b100, 0b110, 0b101, 0b110],
-        b'c' => [0b000, 0b011, 0b100, 0b100, 0b011],
-        b'd' => [0b001, 0b001, 0b011, 0b101, 0b011],
-        b'e' => [0b000, 0b010, 0b101, 0b110, 0b100],
-        b'f' => [0b011, 0b100, 0b110, 0b100, 0b100],
-        b'r' => [0b000, 0b110, 0b101, 0b100, 0b100],
-        b'v' => [0b000, 0b101, 0b101, 0b101, 0b010],
-        _ => [0b111, 0b001, 0b010, 0b000, 0b010],
-    }
-}
-
-fn draw_startup_version_glyphs<const GLYPH_HEIGHT: usize>(
-    canvas: &mut DisplayCanvas,
-    version: &[u8],
-    glyph_width: i32,
-    baseline_y: i32,
-    glyph: fn(u8) -> [u8; GLYPH_HEIGHT],
-) {
+fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str) {
+    const GLYPH_WIDTH: i32 = 4;
     const LETTER_SPACING: i32 = 1;
+    const MAX_VISIBLE_CHARACTERS: usize = 18;
 
-    let character_count = version.len() as i32;
-    let width = character_count * (glyph_width + LETTER_SPACING) - LETTER_SPACING;
+    let version = &version.as_bytes()[..version.len().min(MAX_VISIBLE_CHARACTERS)];
+    let width = version.len() as i32 * (GLYPH_WIDTH + LETTER_SPACING) - LETTER_SPACING;
     let start_x = STARTUP_SPLASH_WORDMARK_CENTER_X - width / 2;
 
     for (character_index, character) in version.iter().copied().enumerate() {
-        let glyph = glyph(character);
-        for (row, bits) in glyph.into_iter().enumerate() {
-            for column in 0..glyph_width {
-                if bits & (1 << (glyph_width - 1 - column)) == 0 {
+        for (row, bits) in startup_version_glyph(character).into_iter().enumerate() {
+            for column in 0..GLYPH_WIDTH {
+                if bits & (1 << (GLYPH_WIDTH - 1 - column)) == 0 {
                     continue;
                 }
-                let x = start_x + character_index as i32 * (glyph_width + LETTER_SPACING) + column;
-                let y = baseline_y + row as i32;
+                let x = start_x + character_index as i32 * (GLYPH_WIDTH + LETTER_SPACING) + column;
+                let y = STARTUP_SPLASH_VERSION_BASELINE_Y + row as i32;
                 canvas.pixels_mut()[y as usize * DISPLAY_WIDTH_USIZE + x as usize] =
                     STARTUP_SPLASH_VERSION_COLOR;
             }
         }
-    }
-}
-
-fn startup_version_layout(version: &str) -> (usize, i32, i32) {
-    if version.len() <= 18 {
-        (18, 4, 39)
-    } else {
-        (40, 3, 41)
-    }
-}
-
-fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str) {
-    let (max_visible_characters, glyph_width, baseline_y) = startup_version_layout(version);
-    let version = &version.as_bytes()[..version.len().min(max_visible_characters)];
-
-    if glyph_width == 4 {
-        draw_startup_version_glyphs(
-            canvas,
-            version,
-            glyph_width,
-            baseline_y,
-            startup_large_version_glyph,
-        );
-    } else {
-        draw_startup_version_glyphs(
-            canvas,
-            version,
-            glyph_width,
-            baseline_y,
-            startup_compact_version_glyph,
-        );
     }
 }
 
@@ -864,46 +803,33 @@ mod tests {
 
         assert_eq!(canvas.pixels()[0], STARTUP_SPLASH_PALETTE[0]);
         assert_eq!(
-            canvas.pixels()[36 * DISPLAY_WIDTH_USIZE + 28],
+            canvas.pixels()[40 * DISPLAY_WIDTH_USIZE + 28],
             STARTUP_SPLASH_PALETTE[2]
         );
         assert_eq!(
-            canvas.pixels()[10 * DISPLAY_WIDTH_USIZE + 60],
+            canvas.pixels()[14 * DISPLAY_WIDTH_USIZE + 60],
             STARTUP_SPLASH_PALETTE[1]
         );
         assert_eq!(
-            canvas.pixels()[10 * DISPLAY_WIDTH_USIZE + 149],
+            canvas.pixels()[14 * DISPLAY_WIDTH_USIZE + 149],
             STARTUP_SPLASH_PALETTE[1]
         );
         assert_eq!(STARTUP_SPLASH_VERSION, env!("FLUX_PURR_FW_VERSION"));
-        let (max_visible_characters, glyph_width, baseline_y) =
-            startup_version_layout(STARTUP_SPLASH_VERSION);
-        let visible_character_count =
-            STARTUP_SPLASH_VERSION.len().min(max_visible_characters) as i32;
-        let version_width = visible_character_count * (glyph_width + 1) - 1;
+        let version_width = STARTUP_SPLASH_VERSION.len().min(18) as i32 * 5 - 1;
         let version_start_x = STARTUP_SPLASH_WORDMARK_CENTER_X - version_width / 2;
-        let first_lit_pixel = |glyph: &[u8]| {
-            glyph
+        let (first_lit_row, first_lit_column) =
+            startup_version_glyph(STARTUP_SPLASH_VERSION.as_bytes()[0])
                 .iter()
                 .enumerate()
                 .find_map(|(row, bits)| {
-                    (0..glyph_width)
-                        .find(|column| bits & (1 << (glyph_width - 1 - column)) != 0)
+                    (0..4)
+                        .find(|column| bits & (1 << (3 - column)) != 0)
                         .map(|column| (row, column))
                 })
-                .expect("version glyph should contain a lit pixel")
-        };
-        let (first_lit_row, first_lit_column) = if glyph_width == 4 {
-            first_lit_pixel(&startup_large_version_glyph(
-                STARTUP_SPLASH_VERSION.as_bytes()[0],
-            ))
-        } else {
-            first_lit_pixel(&startup_compact_version_glyph(
-                STARTUP_SPLASH_VERSION.as_bytes()[0],
-            ))
-        };
+                .expect("version glyph should contain a lit pixel");
         assert_eq!(
-            canvas.pixels()[(baseline_y as usize + first_lit_row) * DISPLAY_WIDTH_USIZE
+            canvas.pixels()[(STARTUP_SPLASH_VERSION_BASELINE_Y as usize + first_lit_row)
+                * DISPLAY_WIDTH_USIZE
                 + (version_start_x + first_lit_column) as usize],
             STARTUP_SPLASH_VERSION_COLOR
         );
@@ -915,10 +841,10 @@ mod tests {
                 (*pixel != STARTUP_SPLASH_PALETTE[0]).then_some(index / DISPLAY_WIDTH_USIZE)
             })
             .collect::<std::vec::Vec<_>>();
-        assert_eq!(visible_rows.first().copied(), Some(4));
-        assert_eq!(visible_rows.last().copied(), Some(45));
+        assert_eq!(visible_rows.first().copied(), Some(8));
+        assert_eq!(visible_rows.last().copied(), Some(42));
         assert!(
-            canvas.pixels()[39 * DISPLAY_WIDTH_USIZE..]
+            canvas.pixels()[STARTUP_SPLASH_VERSION_BASELINE_Y as usize * DISPLAY_WIDTH_USIZE..]
                 .iter()
                 .any(|pixel| *pixel == STARTUP_SPLASH_VERSION_COLOR)
         );
@@ -931,11 +857,19 @@ mod tests {
     }
 
     #[test]
-    fn startup_splash_version_uses_the_largest_fitting_glyphs() {
-        assert_eq!(startup_version_layout("0.24.3-dev.abcdef0"), (18, 4, 39));
+    fn startup_splash_version_uses_four_by_seven_bitmap_font() {
+        let mut canvas = DisplayCanvas::new();
+        canvas.clear(STARTUP_SPLASH_PALETTE[0]).ok();
+        draw_startup_splash_version(&mut canvas, "0");
+
         assert_eq!(
-            startup_version_layout("100.100.100-dev.abcdef0"),
-            (40, 3, 41)
+            canvas.pixels()[STARTUP_SPLASH_VERSION_BASELINE_Y as usize * DISPLAY_WIDTH_USIZE + 104],
+            STARTUP_SPLASH_VERSION_COLOR
+        );
+        assert_eq!(
+            canvas.pixels()
+                [(STARTUP_SPLASH_VERSION_BASELINE_Y as usize + 6) * DISPLAY_WIDTH_USIZE + 104],
+            STARTUP_SPLASH_VERSION_COLOR
         );
     }
 
