@@ -63,6 +63,7 @@
 - 首轮面板 profile 按 `panel_160x50`、`width=160`、`height=50`、`dx=15`、`dy=0`、初始 `Orientation::Landscape` 实现。
 - 静态校准屏必须至少包含：方向/边缘标识、彩色块、灰阶块、面板/分辨率文字。
 - 正常 App 启动必须先显示正式 splash：使用从 `web/public/brand/flux-purr-logo-dark.png` 裁切缩采样的 Flux Purr 官方标记、静态 `FLUX PURR` 像素字标，以及由固件 build-time version source 提供的版本文本。启动画面是受版本控制的 `160x50` RGB565 模板位图；运行时不得以通用字体或图元 API 近似重绘 Logo 或项目名，也不得依赖模型生成的文字或运行时外部资产。
+- `FLUX PURR` 主字标必须以 `21` 个逻辑像素高度显示，作为与官方 Logo 同等视觉权重的启动屏主标识；不得压缩为通用 `8px` 级别的正文样式。
 - splash 的最终帧必须严格使用四种颜色：背景 `#08111F`、机身/项目名 `#F7FBFF`、热区 `#FF5542`、版本与抗锯齿细节 `#8999AD`。版本使用专用 3×5 像素字形叠加到模板中，确保开发构建仍显示带 short SHA 的 build identity。
 - splash 仅覆盖 App 的启动早期；后续首次 runtime Dashboard 刷新自然替换它。不得为 splash 增加阻塞安全初始化的固定等待。Key Test 启动继续显示静态校准屏。
 - bring-up 阶段必须支持：`静态校准屏 -> 前面板显示基线`。

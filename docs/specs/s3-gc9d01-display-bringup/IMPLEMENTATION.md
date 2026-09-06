@@ -7,7 +7,7 @@
 - ESP32-S3 `SPI2` is wrapped in an asynchronous `ExclusiveDevice`, allowing Embassy to schedule USB recovery work while panel operations are pending.
 - `DisplayTimer::after_millis` uses the Embassy timer queue, so panel reset and Sleep-Out timing remains cooperative.
 - GC9D01 initialization, startup frame flush, initial runtime UI flush, and later UI refreshes are bounded by a one-second timeout. Transport errors and timeouts enter the USB-readable hardware recovery path; a timed-out runtime refresh first disables heater output, clears PPS ownership, requests fixed PD, and keeps cooling active. The cancelled SPI transaction is never reused.
-- The App boot path renders the brand splash before power and runtime initialization proceed. The splash copies a checked-in RGB565 template generated from the official dark Logo asset, then overlays `FLUX_PURR_FW_VERSION` with a dedicated 3x5 pixel glyph set. The resulting frame has a fixed four-color palette and is replaced by the first normal Dashboard refresh without an artificial dwell. Key Test retains the calibration scene.
+- The App boot path renders the brand splash before power and runtime initialization proceed. The splash copies a checked-in RGB565 template generated from the official dark Logo asset; the static `FLUX PURR` wordmark uses a 4x7 custom bitmap expanded to 21 pixels tall, and `FLUX_PURR_FW_VERSION` is overlaid with a dedicated 3x5 pixel glyph set. The resulting frame has a fixed four-color palette and is replaced by the first normal Dashboard refresh without an artificial dwell. Key Test retains the calibration scene.
 
 ## Validation
 

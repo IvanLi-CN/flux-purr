@@ -38,19 +38,24 @@ def nearest_palette_color(color: tuple[int, int, int]) -> tuple[int, int, int]:
 
 def draw_wordmark(image: Image.Image) -> None:
     pixels = image.load()
+    scale_x = 2
+    scale_y = 3
     cursor_x = 60
     for char in "FLUX PURR":
         if char == " ":
-            cursor_x += 4
+            cursor_x += 2 * scale_x
             continue
         glyph = WORDMARK[char]
         for row, bitmap_row in enumerate(glyph):
             for column, enabled in enumerate(bitmap_row):
                 if enabled == "1":
-                    for dy in range(2):
-                        for dx in range(2):
-                            pixels[cursor_x + column * 2 + dx, 9 + row * 2 + dy] = CHASSIS
-        cursor_x += len(glyph[0]) * 2 + 2
+                    for dy in range(scale_y):
+                        for dx in range(scale_x):
+                            pixels[
+                                cursor_x + column * scale_x + dx,
+                                7 + row * scale_y + dy,
+                            ] = CHASSIS
+        cursor_x += len(glyph[0]) * scale_x + scale_x
 
 
 def create_template() -> Image.Image:
