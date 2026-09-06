@@ -53,7 +53,7 @@ def draw_wordmark(image: Image.Image) -> None:
                         for dx in range(scale_x):
                             pixels[
                                 cursor_x + column * scale_x + dx,
-                                7 + row * scale_y + dy,
+                                6 + row * scale_y + dy,
                             ] = CHASSIS
         cursor_x += len(glyph[0]) * scale_x + 3
 
@@ -71,7 +71,7 @@ def create_template() -> Image.Image:
     for y in range(logo.height):
         for x in range(logo.width):
             logo_pixels[x, y] = nearest_palette_color(logo_pixels[x, y])
-    image.paste(logo, (8, 5))
+    image.paste(logo, (8, 4))
     draw_wordmark(image)
     return image
 

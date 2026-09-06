@@ -483,7 +483,7 @@ fn startup_version_glyph(character: u8) -> [u8; 5] {
 fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str) {
     const GLYPH_WIDTH: i32 = 3;
     const LETTER_SPACING: i32 = 1;
-    const BASELINE_Y: i32 = 42;
+    const BASELINE_Y: i32 = 41;
     const MAX_VISIBLE_CHARACTERS: usize = 40;
 
     let version = &version.as_bytes()[..version.len().min(MAX_VISIBLE_CHARACTERS)];
@@ -804,7 +804,7 @@ mod tests {
 
         assert_eq!(canvas.pixels()[0], STARTUP_SPLASH_PALETTE[0]);
         assert_eq!(
-            canvas.pixels()[37 * DISPLAY_WIDTH_USIZE + 28],
+            canvas.pixels()[36 * DISPLAY_WIDTH_USIZE + 28],
             STARTUP_SPLASH_PALETTE[2]
         );
         assert_eq!(
@@ -819,11 +819,21 @@ mod tests {
         let version_width = STARTUP_SPLASH_VERSION.len() as i32 * 4 - 1;
         let version_start_x = STARTUP_SPLASH_WORDMARK_CENTER_X - version_width / 2;
         assert_eq!(
-            canvas.pixels()[42 * DISPLAY_WIDTH_USIZE + version_start_x as usize],
+            canvas.pixels()[41 * DISPLAY_WIDTH_USIZE + version_start_x as usize],
             STARTUP_SPLASH_VERSION_COLOR
         );
+        let visible_rows = canvas
+            .pixels()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pixel)| {
+                (*pixel != STARTUP_SPLASH_PALETTE[0]).then_some(index / DISPLAY_WIDTH_USIZE)
+            })
+            .collect::<std::vec::Vec<_>>();
+        assert_eq!(visible_rows.first().copied(), Some(4));
+        assert_eq!(visible_rows.last().copied(), Some(45));
         assert!(
-            canvas.pixels()[42 * DISPLAY_WIDTH_USIZE..]
+            canvas.pixels()[41 * DISPLAY_WIDTH_USIZE..]
                 .iter()
                 .any(|pixel| *pixel == STARTUP_SPLASH_VERSION_COLOR)
         );
