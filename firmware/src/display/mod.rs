@@ -845,8 +845,7 @@ mod tests {
         assert_eq!(visible_rows.last().copied(), Some(42));
         assert!(
             canvas.pixels()[STARTUP_SPLASH_VERSION_BASELINE_Y as usize * DISPLAY_WIDTH_USIZE..]
-                .iter()
-                .any(|pixel| *pixel == STARTUP_SPLASH_VERSION_COLOR)
+                .contains(&STARTUP_SPLASH_VERSION_COLOR)
         );
         assert!(
             canvas
