@@ -18263,7 +18263,7 @@ mod tests {
         fs::write(
             &fake_espflash,
             format!(
-                "count=$(find '{}' -maxdepth 1 -name 'backup-*.bin' -type f | wc -l)\n[ \"$count\" -eq 1 ] || exit 9\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'Hash of data verified.\\n'\n",
+                "#!/bin/sh\ncount=$(find '{}' -maxdepth 1 -name 'backup-*.bin' -type f | wc -l)\n[ \"$count\" -eq 1 ] || exit 9\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'Hash of data verified.\\n'\n",
                 backup_directory.display(),
                 calls.display()
             ),
