@@ -6863,15 +6863,29 @@ fn persistence_fault_from_commit(failure: MemoryCommitFailure) -> PersistenceFau
 }
 
 #[cfg(target_arch = "xtensa")]
-fn log_memory_commit_failure(failure: MemoryCommitFailure) {
-    info!(
-        "PERSISTENCE_COMMIT_ATTEMPT_FAILED code={=str} phase={=str} attempt={=u8} sequence={=u32} slot={=str}",
+fn log_memory_commit_failure(
+    sink: &mut dyn PersistenceLogSink,
+    failure: MemoryCommitFailure,
+    terminal: bool,
+) {
+    use core::fmt::Write;
+
+    let prefix = if terminal {
+        "PERSISTENCE_COMMIT_FAILED"
+    } else {
+        "PERSISTENCE_COMMIT_ATTEMPT_FAILED"
+    };
+    let mut line = heapless::String::<192>::new();
+    let _ = writeln!(
+        line,
+        "{prefix} code={} phase={} attempt={} sequence={} slot={}",
         failure.code(),
         failure.phase,
         failure.attempt,
         failure.sequence,
         memory_commit_slot(failure.sequence),
     );
+    sink.write_line(line.as_bytes());
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -7038,6 +7052,7 @@ async fn commit_memory_config_now(
     elapsed_ms: u64,
     memory_sequence: &mut u32,
     memory_config: &MemoryConfig,
+    persistence_log_sink: &mut dyn PersistenceLogSink,
 ) -> Result<(), MemoryCommitFailure> {
     let Some(mut scratch) = try_allocate_memory_io_scratch() else {
         return Err(MemoryCommitFailure {
@@ -7090,7 +7105,7 @@ async fn commit_memory_config_now(
                     attempt: attempt as u8 + 1,
                     sequence: next_sequence,
                 };
-                log_memory_commit_failure(last_error);
+                log_memory_commit_failure(persistence_log_sink, last_error, false);
                 continue;
             }
         };
@@ -7116,7 +7131,7 @@ async fn commit_memory_config_now(
                     attempt: attempt as u8 + 1,
                     sequence: next_sequence,
                 };
-                log_memory_commit_failure(last_error);
+                log_memory_commit_failure(persistence_log_sink, last_error, false);
                 continue;
             }
         };
@@ -7127,21 +7142,14 @@ async fn commit_memory_config_now(
                 attempt: attempt as u8 + 1,
                 sequence: next_sequence,
             };
-            log_memory_commit_failure(last_error);
+            log_memory_commit_failure(persistence_log_sink, last_error, false);
             continue;
         }
         *memory_sequence = next_sequence;
         return Ok(());
     }
 
-    info!(
-        "PERSISTENCE_COMMIT_FAILED code={=str} phase={=str} attempt={=u8} sequence={=u32} slot={=str}",
-        last_error.code(),
-        last_error.phase,
-        last_error.attempt,
-        last_error.sequence,
-        memory_commit_slot(last_error.sequence),
-    );
+    log_memory_commit_failure(persistence_log_sink, last_error, true);
     Err(last_error)
 }
 
@@ -11364,6 +11372,26 @@ impl UsbControlTx for RawUsbSerialJtag {
     }
 }
 
+#[cfg(target_arch = "xtensa")]
+trait PersistenceLogSink {
+    fn write_line(&mut self, line: &[u8]);
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+impl PersistenceLogSink for RawUsbSerialJtag {
+    fn write_line(&mut self, line: &[u8]) {
+        let _ = usb_write_bytes_bounded(self, line);
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", not(feature = "web_serial")))]
+struct NoopPersistenceLogSink;
+
+#[cfg(all(target_arch = "xtensa", not(feature = "web_serial")))]
+impl PersistenceLogSink for NoopPersistenceLogSink {
+    fn write_line(&mut self, _line: &[u8]) {}
+}
+
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn usb_write_bytes_bounded<T: UsbControlTx>(tx: &mut T, bytes: &[u8]) -> bool {
     let mut packet_len = 0;
@@ -11839,6 +11867,7 @@ async fn process_control_line(
     latest_vin_mv: u32,
     last_heater_duty: u8,
     heater_control_timing: HeaterControlTiming,
+    persistence_log_sink: &mut dyn PersistenceLogSink,
 ) -> (bool, UsbFrame) {
     let mut needs_redraw = false;
     let active_thermal_control_profile =
@@ -12328,6 +12357,7 @@ async fn process_control_line(
                         elapsed_ms,
                         memory_sequence,
                         memory_config,
+                        persistence_log_sink,
                     )
                     .await
                     {
@@ -12457,6 +12487,7 @@ async fn process_control_line(
                     elapsed_ms,
                     memory_sequence,
                     memory_config,
+                    persistence_log_sink,
                 )
                 .await
                 {
@@ -13063,6 +13094,8 @@ async fn main(_spawner: Spawner) {
     let mut usb_rx_line: heapless::String<USB_CONTROL_LINE_CAPACITY> = heapless::String::new();
     #[cfg(feature = "web_serial")]
     let usb_tx_buf = initialize_usb_control_response_buffer();
+    #[cfg(all(target_arch = "xtensa", not(feature = "web_serial")))]
+    let mut persistence_log_sink = NoopPersistenceLogSink;
     #[cfg(feature = "web_serial")]
     let usb_boot_memory_config = MemoryConfig::default();
     #[cfg(feature = "web_serial")]
@@ -14088,6 +14121,7 @@ async fn main(_spawner: Spawner) {
                         latest_vin_mv,
                         last_heater_duty,
                         heater_control_timing,
+                        &mut usb_serial,
                     )
                     .await;
                     needs_redraw |= control_needs_redraw;
@@ -14235,6 +14269,7 @@ async fn main(_spawner: Spawner) {
                 latest_vin_mv,
                 last_heater_duty,
                 heater_control_timing,
+                &mut usb_serial,
             )
             .await;
             needs_redraw |= control_needs_redraw;
@@ -14803,6 +14838,10 @@ async fn main(_spawner: Spawner) {
                         elapsed_ms,
                         &mut memory_sequence,
                         &memory_config,
+                        #[cfg(feature = "web_serial")]
+                        &mut usb_serial,
+                        #[cfg(not(feature = "web_serial"))]
+                        &mut persistence_log_sink,
                     )
                     .await
                     {
@@ -15041,6 +15080,10 @@ async fn main(_spawner: Spawner) {
                 elapsed_ms,
                 &mut memory_sequence,
                 &memory_config,
+                #[cfg(feature = "web_serial")]
+                &mut usb_serial,
+                #[cfg(not(feature = "web_serial"))]
+                &mut persistence_log_sink,
             )
             .await
             {
