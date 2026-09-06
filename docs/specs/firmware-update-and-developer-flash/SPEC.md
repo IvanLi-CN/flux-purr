@@ -82,6 +82,7 @@
 ### VER-FUDF-004
 
 - Method: fake serial EEPROM, filesystem, permission, and clock tests.
+- The acceptance suite runs Unix mode checks locally and current-user Windows DACL checks in the Windows DEVD job, including platform-portable fake-flash fixtures.
 - covers: `REQ-FUDF-004`
 - Pass condition: successful normal Developer flash creates a verified raw `8192`-byte `.bin` before espflash; failed permission or backup verification blocks by default; legacy `.fpbk` cleanup does not read contents; the explicit paired bypass is auditable and reaches espflash without a ROM probe or EEPROM snapshot; retention never exceeds either bound; `update` and `recover` create no archive.
 
