@@ -43,7 +43,7 @@ def draw_wordmark(image: Image.Image) -> None:
     cursor_x = 60
     for char in "FLUX PURR":
         if char == " ":
-            cursor_x += 2 * scale_x
+            cursor_x += 5
             continue
         glyph = WORDMARK[char]
         for row, bitmap_row in enumerate(glyph):
@@ -55,7 +55,7 @@ def draw_wordmark(image: Image.Image) -> None:
                                 cursor_x + column * scale_x + dx,
                                 7 + row * scale_y + dy,
                             ] = CHASSIS
-        cursor_x += len(glyph[0]) * scale_x + scale_x
+        cursor_x += len(glyph[0]) * scale_x + 3
 
 
 def create_template() -> Image.Image:

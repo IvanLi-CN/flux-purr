@@ -37,6 +37,7 @@ pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationThenFron
 pub const STARTUP_SCENE_SLUG: &str = "startup-splash";
 const STARTUP_SPLASH_VERSION: &str = env!("FLUX_PURR_FW_VERSION");
 const STARTUP_SPLASH_VERSION_COLOR: Rgb565 = Rgb565::new(17, 38, 21);
+const STARTUP_SPLASH_WORDMARK_CENTER_X: i32 = 105;
 #[cfg(test)]
 const STARTUP_SPLASH_PALETTE: [Rgb565; 4] = [
     Rgb565::new(1, 4, 3),
@@ -488,7 +489,7 @@ fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str) {
     let version = &version.as_bytes()[..version.len().min(MAX_VISIBLE_CHARACTERS)];
     let character_count = version.len() as i32;
     let width = character_count * (GLYPH_WIDTH + LETTER_SPACING) - LETTER_SPACING;
-    let start_x = (DISPLAY_WIDTH as i32 - width) / 2;
+    let start_x = STARTUP_SPLASH_WORDMARK_CENTER_X - width / 2;
 
     for (character_index, character) in version.iter().copied().enumerate() {
         let glyph = startup_version_glyph(character);
@@ -810,7 +811,17 @@ mod tests {
             canvas.pixels()[10 * DISPLAY_WIDTH_USIZE + 60],
             STARTUP_SPLASH_PALETTE[1]
         );
+        assert_eq!(
+            canvas.pixels()[10 * DISPLAY_WIDTH_USIZE + 149],
+            STARTUP_SPLASH_PALETTE[1]
+        );
         assert_eq!(STARTUP_SPLASH_VERSION, env!("FLUX_PURR_FW_VERSION"));
+        let version_width = STARTUP_SPLASH_VERSION.len() as i32 * 4 - 1;
+        let version_start_x = STARTUP_SPLASH_WORDMARK_CENTER_X - version_width / 2;
+        assert_eq!(
+            canvas.pixels()[42 * DISPLAY_WIDTH_USIZE + version_start_x as usize],
+            STARTUP_SPLASH_VERSION_COLOR
+        );
         assert!(
             canvas.pixels()[42 * DISPLAY_WIDTH_USIZE..]
                 .iter()
