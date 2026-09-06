@@ -38,9 +38,9 @@
 ### REQ-FUDF-004
 
 - A Developer `flash` MUST, before any reset or write, read the external EEPROM through the supplied serial port, create and verify a Developer EEPROM Backup, then continue only after that archive is durable.
-- The archive MUST reside below `user_config_dir()/developer-flash-backups/`, honoring `FLUX_PURR_HOME`; it MUST use a per-user AEAD key kept in the operating-system credential store, atomic create/sync/rename, Unix directory/file modes `0700`/`0600`, and an equivalent current-user-only Windows ACL.
-- After a successful archive write, the system MUST remove oldest valid archives until both the archive count is at most `100` and total archive bytes are at most `10 MiB`. A malformed archive must not be trusted for restore or counted as a valid retention item.
-- Backup, credential-store, encryption, durability, or verification failure MUST block `flash` unless the Developer provides both `--skip-backup` and `--confirm NO_EEPROM_BACKUP`. `update` and `recover` MUST never automatically create this archive.
+- The archive MUST reside below `user_config_dir()/developer-flash-backups/`, honoring `FLUX_PURR_HOME`; each `backup-<id>.bin` MUST contain exactly the raw `8192`-byte snapshot. The directory and archive MUST be private before any raw byte is written: Unix uses `0700`/`0600`, and Windows uses a protected ACL granting access only to the current user. Writes MUST use atomic create/sync/rename and a reread verification.
+- After a successful archive write, the system MUST directly delete regular `.fpbk` files in the dedicated directory without reading, decrypting, or migrating their contents. It MUST remove malformed generated `.bin` files and oldest valid generated `.bin` archives until both the archive count is at most `100` and total archive bytes are at most `10 MiB`.
+- Backup permission, durability, or verification failure MUST block `flash` unless the Developer provides both `--skip-backup` and `--confirm NO_EEPROM_BACKUP`. `update` and `recover` MUST never automatically create this archive.
 - The paired bypass MUST skip ROM-mode probing and EEPROM snapshot/archive creation and proceed directly to espflash on the supplied Explicit Serial Port. It MUST NOT require a detected or proven ROM download mode and MUST remain available when application firmware is stopped, incompatible, or lacks the snapshot protocol.
 
 ### REQ-FUDF-005
@@ -81,9 +81,9 @@
 
 ### VER-FUDF-004
 
-- Method: fake serial EEPROM, credential-store, filesystem, and clock tests.
+- Method: fake serial EEPROM, filesystem, permission, and clock tests.
 - covers: `REQ-FUDF-004`
-- Pass condition: successful normal Developer flash creates an encrypted, verified archive; failed backup blocks by default; the explicit paired bypass is auditable and reaches espflash without a ROM probe or EEPROM snapshot; retention never exceeds either bound; `update` and `recover` create no archive.
+- Pass condition: successful normal Developer flash creates a verified raw `8192`-byte `.bin` before espflash; failed permission or backup verification blocks by default; legacy `.fpbk` cleanup does not read contents; the explicit paired bypass is auditable and reaches espflash without a ROM probe or EEPROM snapshot; retention never exceeds either bound; `update` and `recover` create no archive.
 
 ### VER-FUDF-005
 

@@ -48,7 +48,7 @@
 | web-firmware-install-recovery | Flux Purr Web 固件安装与恢复 | 已完成 | `web-firmware-install-recovery/SPEC.md` | 2026-08-15 | Unified integrity-catalog bundle handling across devd and Browser Web Serial |
 | - | Flux Purr 单一产品版本源 | 已实现 | `version-source/SPEC.md` | 2026-08-29 | Root `VERSION`, PR-local preparation, one-product-merge/one-release sequencing, and the release-completion gate |
 | - | Flux Purr 蜂鸣器单输出 Cue 仲裁 | 已完成 | `buzzer-cue-arbitration/SPEC.md` | 2026-09-02 | Single-output priority, safety suppression, coalesced feedback, host-side verification, and feature-gated native USB/devd diagnostics; [ADR 0006](../adr/0006-single-output-buzzer-cue-arbitration.md) |
-| - | Firmware update and developer flash | 已完成 | `firmware-update-and-developer-flash/SPEC.md` | - | Explicit-port update, direct local ELF flash/recover, local CBOR control, and EEPROM-only persistence boundary |
+| - | Firmware update and developer flash | 已完成 | `firmware-update-and-developer-flash/SPEC.md` | - | Explicit-port update, direct local ELF flash/recover, private raw Developer EEPROM backups, local CBOR control, and EEPROM-only persistence boundary |
 -->
 
 ## Index
@@ -76,4 +76,4 @@
 | web-control-plane-demo | active | `web-control-plane-demo/IMPLEMENTATION.md` | `web-control-plane-demo/SPEC.md` | - | Mock-first thermal bench Web console |
 | web-firmware-install-recovery | active | `web-firmware-install-recovery/IMPLEMENTATION.md` | `web-firmware-install-recovery/SPEC.md` | - | Unified devd and Browser Web Serial firmware workbench |
 | worktree-bootstrap | active | `worktree-bootstrap/IMPLEMENTATION.md` | `worktree-bootstrap/SPEC.md` | - | Linked worktree bootstrap and shared Git hooks |
-| firmware-update-and-developer-flash | active | `firmware-update-and-developer-flash/IMPLEMENTATION.md` | `firmware-update-and-developer-flash/SPEC.md` | - | Explicit-port update, direct local ELF flash/recover, local CBOR control, and EEPROM-only persistence boundary |
+| firmware-update-and-developer-flash | active | `firmware-update-and-developer-flash/IMPLEMENTATION.md` | `firmware-update-and-developer-flash/SPEC.md` | - | Explicit-port update, direct local ELF flash/recover, private raw Developer EEPROM backups, local CBOR control, and EEPROM-only persistence boundary |
