@@ -5170,6 +5170,15 @@
     text-transform: uppercase;
   }
 
+  .industrial-brand-mark {
+    display: block;
+    flex: 0 0 auto;
+    width: 1.75rem;
+    height: 1.75rem;
+    object-fit: contain;
+    border-radius: 0.32rem;
+  }
+
   .industrial-app-mark strong {
     overflow: hidden;
     color: var(--industrial-text);
@@ -7829,6 +7838,11 @@
 
     .industrial-app-mark {
       font-size: 0.64rem;
+    }
+
+    .industrial-brand-mark {
+      width: 1.45rem;
+      height: 1.45rem;
     }
 
     .industrial-status-strip {
