@@ -62,7 +62,8 @@
 - 板级显示引脚固定为：`DC=GPIO10`、`MOSI=GPIO11`、`SCLK=GPIO12`、`BLK=GPIO13`、`RES=GPIO14`、`CS=GPIO15`。
 - 首轮面板 profile 按 `panel_160x50`、`width=160`、`height=50`、`dx=15`、`dy=0`、初始 `Orientation::Landscape` 实现。
 - 静态校准屏必须至少包含：方向/边缘标识、彩色块、灰阶块、面板/分辨率文字。
-- 正常 App 启动必须先显示正式 splash：使用 Flux Purr 的白色机身与红色热区标记、`FLUX PURR` 项目名，以及由固件 build-time version source 提供的版本文本。该画面固定按 `160x50` / RGB565 构图，不依赖模型生成的文字或运行时外部资产。
+- 正常 App 启动必须先显示正式 splash：使用从 `web/public/brand/flux-purr-logo-dark.png` 裁切缩采样的 Flux Purr 官方标记、静态 `FLUX PURR` 像素字标，以及由固件 build-time version source 提供的版本文本。启动画面是受版本控制的 `160x50` RGB565 模板位图；运行时不得以通用字体或图元 API 近似重绘 Logo 或项目名，也不得依赖模型生成的文字或运行时外部资产。
+- splash 的最终帧必须严格使用四种颜色：背景 `#08111F`、机身/项目名 `#F7FBFF`、热区 `#FF5542`、版本与抗锯齿细节 `#8999AD`。版本使用专用 3×5 像素字形叠加到模板中，确保开发构建仍显示带 short SHA 的 build identity。
 - splash 仅覆盖 App 的启动早期；后续首次 runtime Dashboard 刷新自然替换它。不得为 splash 增加阻塞安全初始化的固定等待。Key Test 启动继续显示静态校准屏。
 - bring-up 阶段必须支持：`静态校准屏 -> 前面板显示基线`。
 - 当前 display baseline 只负责证明驱动、方向、偏移、host preview 与 on-device 渲染一致；后续运行态是否轮播、是否 safe-off，由 `frontpanel-input-interaction` 冻结。
@@ -168,6 +169,7 @@ None
 ![Host startup preview](./assets/startup.preview.png)
 
 - Host boot-splash preview（逻辑预览，`RGB565 LE`，`160x50`，含 brand mark、项目名与编译版本）
+- Bitmap template: `./assets/startup-splash-template.png`（由 `firmware/scripts/generate_startup_splash_asset.py` 从官方 Logo 生成）
 - Raw framebuffer: `./assets/startup-splash.framebuffer.bin`
 - Panel-order framebuffer: `./assets/startup-splash.panel.framebuffer.bin`
 - PNG preview: `./assets/startup-splash.preview.png`

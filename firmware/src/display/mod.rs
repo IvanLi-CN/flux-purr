@@ -7,7 +7,7 @@ use embedded_graphics::{
     },
     pixelcolor::{Rgb565, raw::RawU16},
     prelude::*,
-    primitives::{Circle, Line, PrimitiveStyle, Rectangle, RoundedRectangle, Triangle},
+    primitives::{Circle, Line, PrimitiveStyle, Rectangle, Triangle},
     text::{Alignment, Text},
 };
 use gc9d01::{Config as PanelConfig, Orientation};
@@ -36,6 +36,14 @@ pub const DISPLAY_PANEL_CONFIG: PanelConfig = PanelConfig {
 pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationThenFrontPanelLoop;
 pub const STARTUP_SCENE_SLUG: &str = "startup-splash";
 const STARTUP_SPLASH_VERSION: &str = env!("FLUX_PURR_FW_VERSION");
+const STARTUP_SPLASH_VERSION_COLOR: Rgb565 = Rgb565::new(17, 38, 21);
+#[cfg(test)]
+const STARTUP_SPLASH_PALETTE: [Rgb565; 4] = [
+    Rgb565::new(1, 4, 3),
+    Rgb565::new(30, 62, 31),
+    Rgb565::new(31, 21, 8),
+    STARTUP_SPLASH_VERSION_COLOR,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceBootFlow {
@@ -356,31 +364,31 @@ pub fn render_scene(scene: SceneId, canvas: &mut DisplayCanvas) {
         SceneId::DemoText => render_text(canvas),
         SceneId::DemoTriangles => render_triangles(canvas),
         SceneId::DemoGrid => render_grid(canvas),
-        SceneId::FrontPanelHome => render_frontpanel_asset(canvas, FRONTPANEL_HOME_FRAME),
+        SceneId::FrontPanelHome => render_rgb565le_asset(canvas, FRONTPANEL_HOME_FRAME),
         SceneId::FrontPanelPreferencesPresetTemp => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_PRESET_TEMP_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PREFERENCES_PRESET_TEMP_FRAME)
         }
         SceneId::FrontPanelPreferencesActiveCooling => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_ACTIVE_COOLING_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PREFERENCES_ACTIVE_COOLING_FRAME)
         }
         SceneId::FrontPanelPreferencesWifiInfo => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_WIFI_INFO_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PREFERENCES_WIFI_INFO_FRAME)
         }
         SceneId::FrontPanelPreferencesDeviceInfo => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_DEVICE_INFO_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PREFERENCES_DEVICE_INFO_FRAME)
         }
         SceneId::FrontPanelPresetTemp => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PRESET_TEMP_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PRESET_TEMP_FRAME)
         }
         SceneId::FrontPanelPresetTempDisabled => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PRESET_TEMP_DISABLED_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PRESET_TEMP_DISABLED_FRAME)
         }
         SceneId::FrontPanelActiveCooling => {
-            render_frontpanel_asset(canvas, FRONTPANEL_ACTIVE_COOLING_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_ACTIVE_COOLING_FRAME)
         }
-        SceneId::FrontPanelWifiInfo => render_frontpanel_asset(canvas, FRONTPANEL_WIFI_INFO_FRAME),
+        SceneId::FrontPanelWifiInfo => render_rgb565le_asset(canvas, FRONTPANEL_WIFI_INFO_FRAME),
         SceneId::FrontPanelDeviceInfo => {
-            render_frontpanel_asset(canvas, FRONTPANEL_DEVICE_INFO_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_DEVICE_INFO_FRAME)
         }
     }
 }
@@ -430,58 +438,72 @@ const FRONTPANEL_DEVICE_INFO_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] = include_b
     env!("CARGO_MANIFEST_DIR"),
     "/assets/frontpanel-carousel/device-info.rgb565le.bin"
 ));
+const STARTUP_SPLASH_TEMPLATE_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/startup-splash/template.rgb565le.bin"
+));
 
-fn render_frontpanel_asset(canvas: &mut DisplayCanvas, frame: &[u8; DISPLAY_FRAMEBUFFER_BYTES]) {
+fn render_rgb565le_asset(canvas: &mut DisplayCanvas, frame: &[u8; DISPLAY_FRAMEBUFFER_BYTES]) {
     for (pixel, bytes) in canvas.pixels_mut().iter_mut().zip(frame.chunks_exact(2)) {
         *pixel = RawU16::new(u16::from_le_bytes([bytes[0], bytes[1]])).into();
     }
 }
 
 fn render_startup_splash(canvas: &mut DisplayCanvas) {
-    const BACKGROUND: Rgb565 = Rgb565::new(1, 4, 3);
-    const CHASSIS: Rgb565 = Rgb565::new(30, 62, 31);
-    const HEAT: Rgb565 = Rgb565::new(31, 21, 8);
+    render_rgb565le_asset(canvas, STARTUP_SPLASH_TEMPLATE_FRAME);
+    draw_startup_splash_version(canvas, STARTUP_SPLASH_VERSION);
+}
 
-    canvas.clear(BACKGROUND).ok();
+fn startup_version_glyph(character: u8) -> [u8; 5] {
+    match character {
+        b'.' => [0b000, 0b000, 0b000, 0b000, 0b010],
+        b'-' => [0b000, 0b000, 0b111, 0b000, 0b000],
+        b'0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        b'1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+        b'2' => [0b111, 0b001, 0b111, 0b100, 0b111],
+        b'3' => [0b111, 0b001, 0b111, 0b001, 0b111],
+        b'4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+        b'5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+        b'6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+        b'7' => [0b111, 0b001, 0b001, 0b001, 0b001],
+        b'8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+        b'9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+        b'a' => [0b000, 0b110, 0b001, 0b111, 0b101],
+        b'b' => [0b100, 0b100, 0b110, 0b101, 0b110],
+        b'c' => [0b000, 0b011, 0b100, 0b100, 0b011],
+        b'd' => [0b001, 0b001, 0b011, 0b101, 0b011],
+        b'e' => [0b000, 0b010, 0b101, 0b110, 0b100],
+        b'f' => [0b011, 0b100, 0b110, 0b100, 0b100],
+        b'v' => [0b000, 0b101, 0b101, 0b101, 0b010],
+        _ => [0b111, 0b001, 0b010, 0b000, 0b010],
+    }
+}
 
-    RoundedRectangle::with_equal_corners(
-        Rectangle::new(Point::new(31, 25), Size::new(32, 8)),
-        Size::new(4, 4),
-    )
-    .into_styled(PrimitiveStyle::with_fill(HEAT))
-    .draw(canvas)
-    .ok();
-    RoundedRectangle::with_equal_corners(
-        Rectangle::new(Point::new(31, 7), Size::new(32, 22)),
-        Size::new(6, 6),
-    )
-    .into_styled(PrimitiveStyle::with_fill(CHASSIS))
-    .draw(canvas)
-    .ok();
-    RoundedRectangle::with_equal_corners(
-        Rectangle::new(Point::new(37, 13), Size::new(20, 9)),
-        Size::new(3, 3),
-    )
-    .into_styled(PrimitiveStyle::with_fill(BACKGROUND))
-    .draw(canvas)
-    .ok();
+fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str) {
+    const GLYPH_WIDTH: i32 = 3;
+    const LETTER_SPACING: i32 = 1;
+    const BASELINE_Y: i32 = 42;
+    const MAX_VISIBLE_CHARACTERS: usize = 40;
 
-    Text::with_alignment(
-        "FLUX PURR",
-        Point::new(128, 20),
-        MonoTextStyle::new(&FONT_5X8, CHASSIS),
-        Alignment::Right,
-    )
-    .draw(canvas)
-    .ok();
-    Text::with_alignment(
-        STARTUP_SPLASH_VERSION,
-        Point::new(80, 45),
-        MonoTextStyle::new(&FONT_4X6, CHASSIS),
-        Alignment::Center,
-    )
-    .draw(canvas)
-    .ok();
+    let version = &version.as_bytes()[..version.len().min(MAX_VISIBLE_CHARACTERS)];
+    let character_count = version.len() as i32;
+    let width = character_count * (GLYPH_WIDTH + LETTER_SPACING) - LETTER_SPACING;
+    let start_x = (DISPLAY_WIDTH as i32 - width) / 2;
+
+    for (character_index, character) in version.iter().copied().enumerate() {
+        let glyph = startup_version_glyph(character);
+        for (row, bits) in glyph.into_iter().enumerate() {
+            for column in 0..GLYPH_WIDTH {
+                if bits & (1 << (GLYPH_WIDTH - 1 - column)) == 0 {
+                    continue;
+                }
+                let x = start_x + character_index as i32 * (GLYPH_WIDTH + LETTER_SPACING) + column;
+                let y = BASELINE_Y + row as i32;
+                canvas.pixels_mut()[y as usize * DISPLAY_WIDTH_USIZE + x as usize] =
+                    STARTUP_SPLASH_VERSION_COLOR;
+            }
+        }
+    }
 }
 
 fn render_startup_calibration(canvas: &mut DisplayCanvas) {
@@ -779,23 +801,26 @@ mod tests {
         let mut canvas = DisplayCanvas::new();
         render_scene(SceneId::StartupSplash, &mut canvas);
 
+        assert_eq!(canvas.pixels()[0], STARTUP_SPLASH_PALETTE[0]);
         assert_eq!(
-            canvas.pixels()[30 * DISPLAY_WIDTH_USIZE + 35],
-            Rgb565::new(31, 21, 8)
+            canvas.pixels()[37 * DISPLAY_WIDTH_USIZE + 28],
+            STARTUP_SPLASH_PALETTE[2]
         );
         assert_eq!(
-            canvas.pixels()[9 * DISPLAY_WIDTH_USIZE + 35],
-            Rgb565::new(30, 62, 31)
-        );
-        assert_eq!(
-            canvas.pixels()[17 * DISPLAY_WIDTH_USIZE + 47],
-            Rgb565::new(1, 4, 3)
+            canvas.pixels()[10 * DISPLAY_WIDTH_USIZE + 60],
+            STARTUP_SPLASH_PALETTE[1]
         );
         assert_eq!(STARTUP_SPLASH_VERSION, env!("FLUX_PURR_FW_VERSION"));
         assert!(
-            canvas.pixels()[38 * DISPLAY_WIDTH_USIZE..]
+            canvas.pixels()[42 * DISPLAY_WIDTH_USIZE..]
                 .iter()
-                .any(|pixel| { *pixel != Rgb565::new(1, 4, 3) })
+                .any(|pixel| *pixel == STARTUP_SPLASH_VERSION_COLOR)
+        );
+        assert!(
+            canvas
+                .pixels()
+                .iter()
+                .all(|pixel| STARTUP_SPLASH_PALETTE.contains(pixel))
         );
     }
 
