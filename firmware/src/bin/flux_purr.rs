@@ -6477,8 +6477,11 @@ fn mark_eeprom_required(
     fault: Option<PersistenceFault>,
 ) {
     let data_incompatible = ui_state.eeprom_data_incompatible;
+    let has_commit_fault = fault.is_some();
     begin_mutating_eeprom_maintenance(ui_state, calibration, manual_pps, memory_commit_due_ms);
-    ui_state.eeprom_data_incompatible = data_incompatible;
+    if has_commit_fault {
+        ui_state.eeprom_data_incompatible = data_incompatible;
+    }
     ui_state.eeprom_required = true;
     ui_state.heater_lock_reason = Some(HeaterLockReason::PersistenceRequired);
     ui_state.persistence_fault = fault.or_else(|| ui_state.persistence_fault.clone());
