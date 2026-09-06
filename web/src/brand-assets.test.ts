@@ -24,6 +24,8 @@ describe('Flux Purr brand assets', () => {
       'brand/flux-purr-logo-duotone.svg',
       'brand/flux-purr-logo-monochrome.svg',
       'brand/flux-purr-logo-dark.svg',
+      'brand/flux-purr-logo-with-tagline.svg',
+      'brand/flux-purr-logo-with-tagline-light.svg',
       'favicon.svg',
       'safari-pinned-tab.svg',
     ]
@@ -31,7 +33,7 @@ describe('Flux Purr brand assets', () => {
     for (const relativePath of paths) {
       const source = await readPublic(relativePath)
       const text = new TextDecoder().decode(source)
-      expect(text).not.toMatch(/<image\b|data:image|href=/i)
+      expect(text).not.toMatch(/<image\b|<text\b|data:image|href=/i)
     }
   })
 
@@ -43,6 +45,7 @@ describe('Flux Purr brand assets', () => {
       'icons/icon-192.png': [192, 192],
       'icons/icon-512.png': [512, 512],
       'icons/icon-512-maskable.png': [512, 512],
+      'brand/flux-purr-logo-with-tagline.reference.png': [1774, 887],
     } as const
 
     for (const [relativePath, dimensions] of Object.entries(expected)) {
@@ -63,6 +66,23 @@ describe('Flux Purr brand assets', () => {
       [16, 16],
       [32, 32],
     ])
+  })
+
+  it('keeps both theme Logo lockups as transparent vector paths', async () => {
+    for (const relativePath of [
+      'brand/flux-purr-logo-with-tagline.svg',
+      'brand/flux-purr-logo-with-tagline-light.svg',
+    ]) {
+      const source = await readPublic(relativePath)
+      const text = new TextDecoder().decode(source)
+
+      expect(text).toContain('viewBox="0 0 1425 316"')
+      expect(text).not.toMatch(/<rect\b/i)
+      expect(text.match(/<path\b/g)?.length).toBeGreaterThanOrEqual(4)
+      expect(text).toContain('id="wordmark"')
+      expect(text).toContain('id="tagline"')
+      expect(text.match(/[Cc]/g)?.length).toBeGreaterThanOrEqual(150)
+    }
   })
 
   it('declares every browser asset in the HTML and manifest contracts', async () => {
