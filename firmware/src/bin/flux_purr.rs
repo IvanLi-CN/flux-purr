@@ -3071,7 +3071,7 @@ const STARTUP_PD_WAIT_BUDGET_MS: u64 = 0;
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StartupFrontPanelPresentation {
-    Dashboard,
+    Splash,
     Calibration,
 }
 
@@ -3080,7 +3080,7 @@ const fn startup_frontpanel_presentation(
     runtime_mode: FrontPanelRuntimeMode,
 ) -> StartupFrontPanelPresentation {
     match runtime_mode {
-        FrontPanelRuntimeMode::App => StartupFrontPanelPresentation::Dashboard,
+        FrontPanelRuntimeMode::App => StartupFrontPanelPresentation::Splash,
         FrontPanelRuntimeMode::KeyTest => StartupFrontPanelPresentation::Calibration,
     }
 }
@@ -13250,7 +13250,7 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_complete\n");
     match startup_frontpanel_presentation(runtime_mode) {
-        StartupFrontPanelPresentation::Dashboard => render_frontpanel_ui(canvas, &startup_ui_state),
+        StartupFrontPanelPresentation::Splash => render_scene(SceneId::StartupSplash, canvas),
         StartupFrontPanelPresentation::Calibration => {
             render_scene(SceneId::StartupCalibration, canvas)
         }
@@ -23982,7 +23982,7 @@ mod tests {
         assert!(!pd_contract_ready);
         assert_eq!(
             startup_frontpanel_presentation(FrontPanelRuntimeMode::App),
-            StartupFrontPanelPresentation::Dashboard
+            StartupFrontPanelPresentation::Splash
         );
         assert_eq!(
             startup_frontpanel_presentation(FrontPanelRuntimeMode::KeyTest),

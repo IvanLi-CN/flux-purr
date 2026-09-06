@@ -7,7 +7,7 @@ use embedded_graphics::{
     },
     pixelcolor::{Rgb565, raw::RawU16},
     prelude::*,
-    primitives::{Circle, Line, PrimitiveStyle, Rectangle, Triangle},
+    primitives::{Circle, Line, PrimitiveStyle, Rectangle, RoundedRectangle, Triangle},
     text::{Alignment, Text},
 };
 use gc9d01::{Config as PanelConfig, Orientation};
@@ -34,7 +34,8 @@ pub const DISPLAY_PANEL_CONFIG: PanelConfig = PanelConfig {
 };
 
 pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationThenFrontPanelLoop;
-pub const STARTUP_SCENE_SLUG: &str = "startup";
+pub const STARTUP_SCENE_SLUG: &str = "startup-splash";
+const STARTUP_SPLASH_VERSION: &str = env!("FLUX_PURR_FW_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceBootFlow {
@@ -46,6 +47,7 @@ pub enum DeviceBootFlow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SceneId {
+    StartupSplash,
     StartupCalibration,
     DemoSolidRed,
     DemoSolidGreen,
@@ -72,7 +74,8 @@ pub enum SceneId {
 impl SceneId {
     pub const fn slug(self) -> &'static str {
         match self {
-            Self::StartupCalibration => "startup",
+            Self::StartupSplash => "startup-splash",
+            Self::StartupCalibration => "startup-calibration",
             Self::DemoSolidRed => "demo-solid-red",
             Self::DemoSolidGreen => "demo-solid-green",
             Self::DemoSolidBlue => "demo-solid-blue",
@@ -98,6 +101,7 @@ impl SceneId {
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::StartupSplash => "startup splash",
             Self::StartupCalibration => "startup calibration",
             Self::DemoSolidRed => "solid red",
             Self::DemoSolidGreen => "solid green",
@@ -124,7 +128,7 @@ impl SceneId {
 
     pub const fn dwell_millis(self) -> u64 {
         match self {
-            Self::StartupCalibration => 0,
+            Self::StartupSplash | Self::StartupCalibration => 0,
             Self::DemoSolidRed | Self::DemoSolidGreen | Self::DemoSolidBlue => 450,
             Self::DemoCheckerWide | Self::DemoCheckerFine => 550,
             Self::DemoShapes
@@ -147,7 +151,8 @@ impl SceneId {
 
     pub fn from_slug(slug: &str) -> Option<Self> {
         match slug {
-            "startup" | "startup-calibration" => Some(Self::StartupCalibration),
+            "startup" | "startup-splash" => Some(Self::StartupSplash),
+            "startup-calibration" => Some(Self::StartupCalibration),
             "demo-solid-red" | "solid-red" => Some(Self::DemoSolidRed),
             "demo-solid-green" | "solid-green" => Some(Self::DemoSolidGreen),
             "demo-solid-blue" | "solid-blue" => Some(Self::DemoSolidBlue),
@@ -333,6 +338,7 @@ pub fn render_scene(scene: SceneId, canvas: &mut DisplayCanvas) {
     canvas.clear(Rgb565::BLACK).ok();
 
     match scene {
+        SceneId::StartupSplash => render_startup_splash(canvas),
         SceneId::StartupCalibration => render_startup_calibration(canvas),
         SceneId::DemoSolidRed => {
             canvas.clear(Rgb565::RED).ok();
@@ -429,6 +435,53 @@ fn render_frontpanel_asset(canvas: &mut DisplayCanvas, frame: &[u8; DISPLAY_FRAM
     for (pixel, bytes) in canvas.pixels_mut().iter_mut().zip(frame.chunks_exact(2)) {
         *pixel = RawU16::new(u16::from_le_bytes([bytes[0], bytes[1]])).into();
     }
+}
+
+fn render_startup_splash(canvas: &mut DisplayCanvas) {
+    const BACKGROUND: Rgb565 = Rgb565::new(1, 4, 3);
+    const CHASSIS: Rgb565 = Rgb565::new(30, 62, 31);
+    const HEAT: Rgb565 = Rgb565::new(31, 21, 8);
+
+    canvas.clear(BACKGROUND).ok();
+
+    RoundedRectangle::with_equal_corners(
+        Rectangle::new(Point::new(31, 25), Size::new(32, 8)),
+        Size::new(4, 4),
+    )
+    .into_styled(PrimitiveStyle::with_fill(HEAT))
+    .draw(canvas)
+    .ok();
+    RoundedRectangle::with_equal_corners(
+        Rectangle::new(Point::new(31, 7), Size::new(32, 22)),
+        Size::new(6, 6),
+    )
+    .into_styled(PrimitiveStyle::with_fill(CHASSIS))
+    .draw(canvas)
+    .ok();
+    RoundedRectangle::with_equal_corners(
+        Rectangle::new(Point::new(37, 13), Size::new(20, 9)),
+        Size::new(3, 3),
+    )
+    .into_styled(PrimitiveStyle::with_fill(BACKGROUND))
+    .draw(canvas)
+    .ok();
+
+    Text::with_alignment(
+        "FLUX PURR",
+        Point::new(128, 20),
+        MonoTextStyle::new(&FONT_5X8, CHASSIS),
+        Alignment::Right,
+    )
+    .draw(canvas)
+    .ok();
+    Text::with_alignment(
+        STARTUP_SPLASH_VERSION,
+        Point::new(80, 45),
+        MonoTextStyle::new(&FONT_4X6, CHASSIS),
+        Alignment::Center,
+    )
+    .draw(canvas)
+    .ok();
 }
 
 fn render_startup_calibration(canvas: &mut DisplayCanvas) {
@@ -722,9 +775,34 @@ mod tests {
     }
 
     #[test]
+    fn startup_splash_renders_brand_mark_wordmark_and_build_version() {
+        let mut canvas = DisplayCanvas::new();
+        render_scene(SceneId::StartupSplash, &mut canvas);
+
+        assert_eq!(
+            canvas.pixels()[30 * DISPLAY_WIDTH_USIZE + 35],
+            Rgb565::new(31, 21, 8)
+        );
+        assert_eq!(
+            canvas.pixels()[9 * DISPLAY_WIDTH_USIZE + 35],
+            Rgb565::new(30, 62, 31)
+        );
+        assert_eq!(
+            canvas.pixels()[17 * DISPLAY_WIDTH_USIZE + 47],
+            Rgb565::new(1, 4, 3)
+        );
+        assert_eq!(STARTUP_SPLASH_VERSION, env!("FLUX_PURR_FW_VERSION"));
+        assert!(
+            canvas.pixels()[38 * DISPLAY_WIDTH_USIZE..]
+                .iter()
+                .any(|pixel| { *pixel != Rgb565::new(1, 4, 3) })
+        );
+    }
+
+    #[test]
     fn startup_scene_can_be_serialized_as_rgb565_le() {
         let mut canvas = DisplayCanvas::new();
-        render_scene(SceneId::StartupCalibration, &mut canvas);
+        render_scene(SceneId::StartupSplash, &mut canvas);
         let mut bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
         canvas.write_rgb565_le_bytes(&mut bytes);
         assert_eq!(bytes.len(), DISPLAY_FRAMEBUFFER_BYTES);
@@ -806,6 +884,7 @@ mod tests {
 
     #[test]
     fn demo_sequence_does_not_include_startup_scene() {
+        assert!(!DEMO_SEQUENCE.contains(&SceneId::StartupSplash));
         assert!(!DEMO_SEQUENCE.contains(&SceneId::StartupCalibration));
         assert_eq!(DEMO_SEQUENCE[0], SceneId::DemoSolidRed);
         assert_eq!(DEMO_SEQUENCE[DEMO_SEQUENCE.len() - 1], SceneId::DemoGrid);
@@ -813,8 +892,9 @@ mod tests {
 
     #[test]
     fn scene_slug_lookup_handles_aliases() {
+        assert_eq!(SceneId::from_slug("startup"), Some(SceneId::StartupSplash));
         assert_eq!(
-            SceneId::from_slug("startup"),
+            SceneId::from_slug("startup-calibration"),
             Some(SceneId::StartupCalibration)
         );
         assert_eq!(SceneId::from_slug("grid"), Some(SceneId::DemoGrid));

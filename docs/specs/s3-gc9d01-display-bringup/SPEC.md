@@ -30,6 +30,10 @@
 - 不修改 Web 控制台、HTTP API、CH224Q / heater / RTD 等其它硬件驱动。
 - 不在本轮实现自动持久化“校准已完成”状态。
 
+## Related ADRs
+
+- None
+
 ## 范围（Scope）
 
 ### In scope
@@ -58,6 +62,8 @@
 - 板级显示引脚固定为：`DC=GPIO10`、`MOSI=GPIO11`、`SCLK=GPIO12`、`BLK=GPIO13`、`RES=GPIO14`、`CS=GPIO15`。
 - 首轮面板 profile 按 `panel_160x50`、`width=160`、`height=50`、`dx=15`、`dy=0`、初始 `Orientation::Landscape` 实现。
 - 静态校准屏必须至少包含：方向/边缘标识、彩色块、灰阶块、面板/分辨率文字。
+- 正常 App 启动必须先显示正式 splash：使用 Flux Purr 的白色机身与红色热区标记、`FLUX PURR` 项目名，以及由固件 build-time version source 提供的版本文本。该画面固定按 `160x50` / RGB565 构图，不依赖模型生成的文字或运行时外部资产。
+- splash 仅覆盖 App 的启动早期；后续首次 runtime Dashboard 刷新自然替换它。不得为 splash 增加阻塞安全初始化的固定等待。Key Test 启动继续显示静态校准屏。
 - bring-up 阶段必须支持：`静态校准屏 -> 前面板显示基线`。
 - 当前 display baseline 只负责证明驱动、方向、偏移、host preview 与 on-device 渲染一致；后续运行态是否轮播、是否 safe-off，由 `frontpanel-input-interaction` 冻结。
 - host preview 必须复用同一套场景渲染代码，并产出 `framebuffer.bin` 与 `preview.png`。
@@ -69,16 +75,13 @@
 - host preview 输出应默认落到 spec 资产目录，便于在 `SPEC.md` 中作为视觉证据引用。
 - 设备端日志应输出当前场景、方向配置与 profile 口径，便于 monitor 时定位问题。
 
-### COULD
-
-- 后续把静态启动屏扩展成更正式的 boot splash，只要仍兼容当前 `160x50` 面板口径。
-
 ## 功能与行为规格（Functional / Behavior Spec）
 
 ### Core flows
 
 - 设备上电后初始化 Embassy 运行时、异步 SPI、GC9D01 driver 与背光控制。
-- bring-up 阶段固件先绘制静态校准屏并显示，再进入前面板显示基线画面，用于确认驱动与方向口径。
+- 正常 App 路径在显示初始化完成后先绘制静态 splash，并在其后的安全输出、PD、EEPROM 与 ADC 启动工作期间保持显示；首个 Dashboard 刷新覆盖 splash。
+- Key Test 路径继续绘制静态校准屏，用于确认驱动、方向与颜色口径。
 - host preview binary 使用与设备端相同的场景渲染入口生成 framebuffer dump，再转换成 PNG 供主人预审。
 - 硬件调试阶段，主人拍摄静态校准屏和前面板运行画面；Agent 根据实拍判断是否需要微调 orientation / dx / dy / 颜色设置。
 
@@ -163,6 +166,13 @@ None
 - PNG preview: `./assets/startup.preview.png`
 
 ![Host startup preview](./assets/startup.preview.png)
+
+- Host boot-splash preview（逻辑预览，`RGB565 LE`，`160x50`，含 brand mark、项目名与编译版本）
+- Raw framebuffer: `./assets/startup-splash.framebuffer.bin`
+- Panel-order framebuffer: `./assets/startup-splash.panel.framebuffer.bin`
+- PNG preview: `./assets/startup-splash.preview.png`
+
+![Host boot-splash preview](./assets/startup-splash.preview.png)
 
 ## 参考（References）
 
