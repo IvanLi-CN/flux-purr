@@ -48,7 +48,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 
 During firmware boot, before EEPROM restoration and WiFi task startup complete, USB `get_network` and `get_status` return the retryable `startup_busy` error instead of a placeholder `disabled` snapshot. `devd` retries that boundary; clients must not persist or display a network state until a versioned `NetworkSummary` is returned by the running device.
 
-`ssid` is the device-confirmed configured network name and is safe to display in a configuration form. `wifiPasswordLength` is the saved WiFi password's UTF-8 byte length. The password itself is never returned by normal USB, LAN, devd status, logs, events, or errors. A raw EEPROM maintenance read is an unparsed device image and can contain WiFi credentials and the LAN pairing token; it must not enter logs, diagnostics, or unencrypted archives.
+`ssid` is the device-confirmed configured network name and is safe to display in a configuration form. `wifiPasswordLength` is the saved WiFi password's UTF-8 byte length. The password itself is never returned by normal USB, LAN, devd status, logs, events, or errors. A raw EEPROM maintenance read is an unparsed device image and can contain WiFi credentials and the LAN pairing token; it must not enter logs, diagnostics, or archives outside the private Developer backup contract.
 
 ### `Status`
 

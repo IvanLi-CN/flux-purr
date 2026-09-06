@@ -1869,14 +1869,22 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs, path::Path};
 
-    fn embedded_report_data(bundle_dir: &Path) -> serde_json::Value {
-        let html = fs::read_to_string(bundle_dir.join("index.html")).expect("index html");
+    fn parse_embedded_report_data(html: &str) -> serde_json::Value {
         let data_start = html.find("const DATA=").expect("embedded data") + "const DATA=".len();
-        let data_end = html[data_start..]
-            .find(";\n  const COLORS")
+        let colors_start = html[data_start..]
+            .find("const COLORS")
             .expect("embedded data terminator")
             + data_start;
-        serde_json::from_str(&html[data_start..data_end]).expect("valid embedded report data")
+        let data = html[data_start..colors_start]
+            .trim()
+            .strip_suffix(';')
+            .expect("embedded data assignment terminator");
+        serde_json::from_str(data).expect("valid embedded report data")
+    }
+
+    fn embedded_report_data(bundle_dir: &Path) -> serde_json::Value {
+        let html = fs::read_to_string(bundle_dir.join("index.html")).expect("index html");
+        parse_embedded_report_data(&html)
     }
 
     #[test]
@@ -2105,12 +2113,7 @@ mod tests {
 
         assert!(!html.contains("</script><script>alert('x')</script>"));
         assert!(html.contains("\\u0026lt;/script\\u0026gt;"));
-        let data_start = html.find("const DATA=").expect("embedded data") + "const DATA=".len();
-        let data_end = html[data_start..]
-            .find(";\n  const COLORS")
-            .expect("embedded data terminator")
-            + data_start;
-        let decoded: Value = serde_json::from_str(&html[data_start..data_end]).expect("valid JSON");
+        let decoded: Value = parse_embedded_report_data(&html);
         assert_eq!(
             decoded,
             json!({"label": "&lt;/script&gt;&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;&amp;\u{2028}\u{2029}"})

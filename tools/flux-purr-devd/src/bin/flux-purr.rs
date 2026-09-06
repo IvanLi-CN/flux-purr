@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH},
 };
 
-use chacha20poly1305::aead::rand_core::RngCore;
 use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -2004,6 +2003,32 @@ fn direct_flash_with_program(
     program: &Path,
     require_real_flash_enablement: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let backup_directory = if args.skip_backup {
+        None
+    } else {
+        Some(developer_backup_directory()?)
+    };
+    direct_flash_with_program_inner(
+        args,
+        program,
+        require_real_flash_enablement,
+        read_eeprom_snapshot,
+        detect_rom_download_mode,
+        backup_directory.as_deref(),
+    )
+}
+
+type SnapshotReader = fn(&str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
+type RomProbe = fn(&str) -> bool;
+
+fn direct_flash_with_program_inner(
+    args: FlashArgs,
+    program: &Path,
+    require_real_flash_enablement: bool,
+    snapshot_reader: SnapshotReader,
+    rom_probe: RomProbe,
+    backup_directory: Option<&Path>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_serial_port(&args.port)?;
     if args.skip_backup && args.confirm.as_deref() != Some("NO_EEPROM_BACKUP") {
         return Err("--skip-backup requires --confirm NO_EEPROM_BACKUP".into());
@@ -2014,7 +2039,7 @@ fn direct_flash_with_program(
     if require_real_flash_enablement {
         ensure_real_flash_enabled()?;
     }
-    if !args.skip_backup && detect_rom_download_mode(&args.port) {
+    if !args.skip_backup && rom_probe(&args.port) {
         return Err(
             "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
                 .into(),
@@ -2023,10 +2048,10 @@ fn direct_flash_with_program(
     let backup_path = if args.skip_backup {
         None
     } else {
-        let snapshot = match read_eeprom_snapshot(&args.port) {
+        let snapshot = match snapshot_reader(&args.port) {
             Ok(snapshot) => snapshot,
             Err(error) if snapshot_error_may_be_rom_mode(error.as_ref()) => {
-                if detect_rom_download_mode(&args.port) {
+                if rom_probe(&args.port) {
                     return Err(
                         "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
                             .into(),
@@ -2036,12 +2061,8 @@ fn direct_flash_with_program(
             }
             Err(error) => return Err(error),
         };
-        let key = backup_credential_key()?;
-        Some(developer_backup::write_atomic(
-            &developer_backup_directory()?,
-            &key,
-            &snapshot,
-        )?)
+        let directory = backup_directory.ok_or("developer backup directory is unavailable")?;
+        Some(developer_backup::write_atomic(directory, &snapshot)?)
     };
     let flash_args = direct_elf_flash_args(&args.port, partition_table.path(), &elf)?;
     let espflash = run_espflash_command(program, &flash_args)?;
@@ -2343,20 +2364,6 @@ fn format_espflash_failure(diagnostics: &EspflashDiagnostics) -> String {
 
 fn developer_backup_directory() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     Ok(flux_purr_devd::user_config_dir()?.join("developer-flash-backups"))
-}
-
-fn backup_credential_key() -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
-    let entry = keyring::Entry::new("flux-purr", "developer-flash-backups")?;
-    if let Ok(value) = entry.get_password() {
-        let bytes = hex::decode(value)?;
-        return bytes
-            .try_into()
-            .map_err(|_| "credential store key must be 32 bytes".into());
-    }
-    let mut key = [0_u8; 32];
-    chacha20poly1305::aead::rand_core::OsRng.fill_bytes(&mut key);
-    entry.set_password(&hex::encode(key))?;
-    Ok(key)
 }
 
 fn read_eeprom_snapshot(port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
@@ -18230,6 +18237,113 @@ mod tests {
         assert!(!invocations.contains("board-info"));
         assert!(result["backup"].is_null());
         assert_eq!(result["espflash"]["command"], "flash");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_flash_archives_before_invoking_espflash() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn fixture_snapshot(
+            _port: &str,
+        ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(vec![0xa5; developer_backup::EEPROM_SNAPSHOT_BYTES])
+        }
+        fn fixture_rom_probe(_port: &str) -> bool {
+            false
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let elf = directory.path().join("firmware.elf");
+        let calls = directory.path().join("calls");
+        let fake_espflash = directory.path().join("espflash");
+        let backup_directory = directory.path().join("developer-flash-backups");
+        fs::create_dir(&backup_directory).unwrap();
+        fs::write(&elf, b"\x7fELFtest fixture").unwrap();
+        fs::write(
+            &fake_espflash,
+            format!(
+                "#!/bin/sh\ncount=$(find '{}' -maxdepth 1 -name 'backup-*.bin' -type f | wc -l)\n[ \"$count\" -eq 1 ] || exit 9\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'Hash of data verified.\\n'\n",
+                backup_directory.display(),
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_espflash).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&fake_espflash, permissions).unwrap();
+
+        let result = direct_flash_with_program_inner(
+            FlashArgs {
+                port: "/dev/cu.contract-test".to_string(),
+                elf: Some(elf),
+                skip_backup: false,
+                confirm: None,
+            },
+            &fake_espflash,
+            false,
+            fixture_snapshot,
+            fixture_rom_probe,
+            Some(&backup_directory),
+        )
+        .unwrap();
+
+        let backup_path = result["backup"].as_str().unwrap();
+        assert_eq!(
+            fs::read(backup_path).unwrap(),
+            vec![0xa5; developer_backup::EEPROM_SNAPSHOT_BYTES]
+        );
+        assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
+        assert_eq!(result["espflash"]["command"], "flash");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_flash_blocks_espflash_when_backup_directory_is_unavailable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn fixture_snapshot(
+            _port: &str,
+        ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(vec![0x3c; developer_backup::EEPROM_SNAPSHOT_BYTES])
+        }
+        fn fixture_rom_probe(_port: &str) -> bool {
+            false
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let elf = directory.path().join("firmware.elf");
+        let fake_espflash = directory.path().join("espflash");
+        let calls = directory.path().join("calls");
+        let unavailable_backup_directory = directory.path().join("backup-path");
+        fs::write(&unavailable_backup_directory, b"not a directory").unwrap();
+        fs::write(&elf, b"\x7fELFtest fixture").unwrap();
+        fs::write(
+            &fake_espflash,
+            format!("printf '%s\\n' \"$*\" >> '{}'\n", calls.display()),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_espflash).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&fake_espflash, permissions).unwrap();
+
+        let error = direct_flash_with_program_inner(
+            FlashArgs {
+                port: "/dev/cu.contract-test".to_string(),
+                elf: Some(elf),
+                skip_backup: false,
+                confirm: None,
+            },
+            &fake_espflash,
+            false,
+            fixture_snapshot,
+            fixture_rom_probe,
+            Some(&unavailable_backup_directory),
+        )
+        .unwrap_err();
+
+        assert!(!error.to_string().is_empty());
+        assert!(!calls.exists());
     }
 
     #[test]

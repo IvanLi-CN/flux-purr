@@ -37,6 +37,8 @@ The protocol is a versioned, length-prefixed CBOR stream over the native endpoin
 
 The Developer backup preflight runs while the application protocol remains available. It finishes before any ROM reset. A board that cannot serve the backup protocol requires the explicit skip confirmation or `recover`; the tool must not silently treat an unavailable EEPROM snapshot as a successful backup.
 
+The successful preflight writes a private raw `8192`-byte `backup-<id>.bin` below the user configuration directory before invoking espflash. Unix permissions are `0700` for the directory and `0600` for archives; Windows uses a current-user-only protected ACL. Regular legacy `.fpbk` files in that dedicated directory are directly deleted without being read or migrated, and no raw EEPROM bytes or digests enter observable output.
+
 Real serial writes remain disabled by default and require the repository's explicit real-flash environment gate in addition to the command-specific confirmation and exact-port authorization. This gate does not start or contact devd.
 
 ## Espflash Diagnostics

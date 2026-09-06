@@ -9679,7 +9679,11 @@ mod tests {
         assert!(validate_local_control_endpoint("http://127.0.0.1:30080").is_err());
         assert!(validate_local_control_endpoint("tcp:127.0.0.1:30080").is_err());
         assert!(validate_local_control_endpoint("127.0.0.1:30080").is_err());
+        #[cfg(unix)]
         assert!(validate_local_control_endpoint("flux-purr-devd.sock").is_err());
+        #[cfg(windows)]
+        assert!(validate_local_control_endpoint(r"\\.\pipe\flux-purr-devd").is_ok());
+        #[cfg(unix)]
         assert!(validate_local_control_endpoint("/tmp/flux-purr-devd.sock").is_ok());
     }
 
