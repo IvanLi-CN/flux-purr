@@ -4527,6 +4527,12 @@ export function ControlPlaneDemo({
           >
             <div className="industrial-console__identity">
               <div className="industrial-app-mark">
+                <img
+                  className="industrial-brand-mark"
+                  src="/brand/flux-purr-logo-duotone.svg"
+                  alt=""
+                  aria-hidden="true"
+                />
                 <span className="industrial-led industrial-led--green" aria-hidden="true" />
                 <strong>Flux Purr Link</strong>
                 {!isFirmwareWorkspace ? <StatusPill severity={visibleDevice.severity} /> : null}
@@ -4738,6 +4744,12 @@ function RouteDeviceRecovery({
           <header className="industrial-console__top">
             <div className="industrial-console__identity">
               <div className="industrial-app-mark">
+                <img
+                  className="industrial-brand-mark"
+                  src="/brand/flux-purr-logo-duotone.svg"
+                  alt=""
+                  aria-hidden="true"
+                />
                 <span className="industrial-led industrial-led--green" aria-hidden="true" />
                 <strong>Flux Purr Link</strong>
                 <StatusPill severity="offline" />
