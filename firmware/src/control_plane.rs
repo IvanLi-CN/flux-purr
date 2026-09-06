@@ -2463,6 +2463,7 @@ pub struct InstallStatus {
 }
 
 impl InstallStatus {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_runtime(
         config: &crate::memory::MemoryConfig,
         persistence_source: &str,

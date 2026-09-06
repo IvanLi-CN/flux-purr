@@ -252,7 +252,7 @@ static mut RUNTIME_HEAP_STORAGE: MaybeUninit<[u8; RUNTIME_HEAP_SIZE]> = MaybeUni
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 // The display canvas is reinitialized before every use and lives in DRAM2 so
 // the ProCPU control task retains enough guarded stack for USB requests.
-const RUNTIME_HEAP_SIZE: usize = 48 * 1024;
+const RUNTIME_HEAP_SIZE: usize = 52 * 1024;
 
 #[cfg(all(target_arch = "xtensa", not(feature = "net_http")))]
 #[unsafe(link_section = ".dram2_uninit")]
@@ -264,11 +264,12 @@ const RUNTIME_HEAP_SIZE: usize = 8 * 1024;
 #[cfg(target_arch = "xtensa")]
 fn init_runtime_heap() {
     // Wi-Fi heap and the USB response buffer share post-boot DRAM2. Keeping
-    // the 8 KiB response buffer out of the Embassy task leaves enough primary
-    // DRAM for the startup stack during radio initialization. This region is
-    // NOLOAD, so it retains arbitrary bytes across software resets. Clear it
-    // before registration because the Wi-Fi binary embeds ETS timers in heap
-    // objects and treats an initial non-null `priv_` field as a live RTOS timer.
+    // the response buffer out of the Embassy task leaves enough primary DRAM
+    // for the startup stack while the enlarged heap covers status snapshots.
+    // This region is NOLOAD, so it retains arbitrary bytes across software
+    // resets. Clear it before registration because the Wi-Fi binary embeds
+    // ETS timers in heap objects and treats an initial non-null `priv_` field
+    // as a live RTOS timer.
     let heap_ptr = core::ptr::addr_of_mut!(RUNTIME_HEAP_STORAGE).cast::<u8>();
     // SAFETY: this runs once before the storage is registered with the global
     // allocator, and the static region remains exclusively owned by that
@@ -422,8 +423,12 @@ impl core::fmt::Write for RomPanicWriter {
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
     rom_log_line(b"panic=firmware_fault\n");
+    let mut writer = RomPanicWriter;
+    let _ = core::fmt::Write::write_fmt(
+        &mut writer,
+        format_args!("panic_message={}\n", info.message()),
+    );
     if let Some(location) = info.location() {
-        let mut writer = RomPanicWriter;
         let _ = core::fmt::Write::write_fmt(
             &mut writer,
             format_args!("panic_location={}:{}\n", location.file(), location.line()),
@@ -553,7 +558,9 @@ const DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS: u64 = 1_000;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 const USB_CONTROL_LINE_CAPACITY: usize = flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-const USB_CONTROL_TX_BUFFER_LEN: usize = flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
+// Requests retain the full 8 KiB protocol bound; outbound responses currently
+// stay below 4 KiB, leaving the reclaimed DRAM2 for the runtime allocator.
+const USB_CONTROL_TX_BUFFER_LEN: usize = 4 * 1024;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 const USB_CONTROL_TX_PACKET_LEN: usize = 64;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -7172,6 +7179,16 @@ fn apply_memory_config_to_ui(state: &mut FrontPanelUiState, config: &MemoryConfi
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn restore_last_persisted_memory_config(
+    memory_config: &mut MemoryConfig,
+    ui_state: &mut FrontPanelUiState,
+    last_persisted_memory_config: &MemoryConfig,
+) {
+    *memory_config = last_persisted_memory_config.clone();
+    apply_memory_config_to_ui(ui_state, memory_config);
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> MemoryConfig {
     MemoryConfig {
         commissioning_required: previous.commissioning_required,
@@ -11832,6 +11849,7 @@ async fn process_control_line(
     controller: &mut FrontPanelInputController,
     ui_state: &mut FrontPanelUiState,
     memory_config: &mut MemoryConfig,
+    last_persisted_memory_config: &mut MemoryConfig,
     preview_heater_curve: &mut Option<HeaterCurvePreview>,
     memory_commit_due_ms: &mut Option<u64>,
     memory_sequence: &mut u32,
@@ -12362,10 +12380,15 @@ async fn process_control_line(
                     .await
                     {
                         Ok(()) => {
+                            *last_persisted_memory_config = memory_config.clone();
                             *memory_commit_due_ms = None;
                         }
                         Err(error) => {
-                            *memory_config = previous_memory_config;
+                            restore_last_persisted_memory_config(
+                                memory_config,
+                                ui_state,
+                                last_persisted_memory_config,
+                            );
                             mark_eeprom_required(
                                 ui_state,
                                 calibration_runtime_state,
@@ -12493,7 +12516,11 @@ async fn process_control_line(
                 {
                     let code = error.code();
                     let message = error.message();
-                    *memory_config = previous_memory_config;
+                    restore_last_persisted_memory_config(
+                        memory_config,
+                        ui_state,
+                        last_persisted_memory_config,
+                    );
                     mark_eeprom_required(
                         ui_state,
                         calibration_runtime_state,
@@ -12503,6 +12530,7 @@ async fn process_control_line(
                     );
                     return (needs_redraw, usb_error_response(request_id, code, message));
                 }
+                *last_persisted_memory_config = memory_config.clone();
                 *memory_commit_due_ms = None;
                 usb_response(
                     request_id,
@@ -13996,6 +14024,7 @@ async fn main(_spawner: Spawner) {
             }
         }
     }
+    let mut last_persisted_memory_config = memory_config.clone();
     // The first Dashboard frame is independent of Wi-Fi readiness. Start the
     // network control plane only after the trusted RTD presentation is on the
     // panel so radio retries cannot delay the owner-facing startup state.
@@ -14086,6 +14115,7 @@ async fn main(_spawner: Spawner) {
                         &mut controller,
                         &mut ui_state,
                         &mut memory_config,
+                        &mut last_persisted_memory_config,
                         &mut preview_heater_curve,
                         &mut memory_commit_due_ms,
                         &mut memory_sequence,
@@ -14234,6 +14264,7 @@ async fn main(_spawner: Spawner) {
                 &mut controller,
                 &mut ui_state,
                 &mut memory_config,
+                &mut last_persisted_memory_config,
                 &mut preview_heater_curve,
                 &mut memory_commit_due_ms,
                 &mut memory_sequence,
@@ -14846,7 +14877,11 @@ async fn main(_spawner: Spawner) {
                     .await
                     {
                         let code = error.code();
-                        memory_config = memory_before_calibration_job;
+                        restore_last_persisted_memory_config(
+                            &mut memory_config,
+                            &mut ui_state,
+                            &last_persisted_memory_config,
+                        );
                         mark_eeprom_required(
                             &mut ui_state,
                             &mut calibration_runtime_state,
@@ -14862,6 +14897,7 @@ async fn main(_spawner: Spawner) {
                         );
                         info!("thermal plant activation commit failed reason={=str}", code);
                     } else {
+                        last_persisted_memory_config = memory_config.clone();
                         memory_commit_due_ms = None;
                     }
                 } else {
@@ -15087,6 +15123,11 @@ async fn main(_spawner: Spawner) {
             )
             .await
             {
+                restore_last_persisted_memory_config(
+                    &mut memory_config,
+                    &mut ui_state,
+                    &last_persisted_memory_config,
+                );
                 mark_eeprom_required(
                     &mut ui_state,
                     &mut calibration_runtime_state,
@@ -15094,6 +15135,8 @@ async fn main(_spawner: Spawner) {
                     &mut memory_commit_due_ms,
                     Some(persistence_fault_from_commit(error)),
                 );
+            } else {
+                last_persisted_memory_config = memory_config.clone();
             }
         }
 
@@ -23895,18 +23938,24 @@ mod tests {
         let mut state = flux_purr_firmware::frontpanel::FrontPanelUiState::new(
             flux_purr_firmware::frontpanel::FrontPanelRuntimeMode::App,
         );
-        let config = MemoryConfig {
+        let persisted = MemoryConfig {
             target_temp_c: 180,
             active_cooling_enabled: false,
             ..MemoryConfig::default()
         };
+        let mut pending = MemoryConfig {
+            target_temp_c: 251,
+            active_cooling_enabled: true,
+            ..persisted.clone()
+        };
 
-        apply_memory_config_to_ui(&mut state, &config);
+        apply_memory_config_to_ui(&mut state, &pending);
+        restore_last_persisted_memory_config(&mut pending, &mut state, &persisted);
 
         assert!(!state.heater_enabled);
-        let persisted = memory_config_from_ui(&state, &config);
-        assert_eq!(persisted.target_temp_c, 180);
-        assert!(!persisted.active_cooling_enabled);
+        let restored = memory_config_from_ui(&state, &pending);
+        assert_eq!(restored.target_temp_c, 180);
+        assert!(!restored.active_cooling_enabled);
     }
 
     #[test]
