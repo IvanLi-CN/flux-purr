@@ -8,6 +8,8 @@
 
 - `active`: real transport and runtime behavior remain a maintained control-plane contract.
 
+- Runtime status and install status now carry bounded persistence fault context, while devd SSE promotes stable persistence commit log lines to redacted structured events.
+
 - 热模型校准曾采用 source-independent 的双锚点流程。该历史记录保留用于解释 `0x36/0x37`；当前实现改用单次瞬态轨迹，旧记录仅可解码，不迁移为 active，也不解锁加热。
 
 ## 2026-08-25

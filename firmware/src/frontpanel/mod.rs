@@ -1,6 +1,6 @@
 use heapless::Vec;
 
-use crate::control_plane::NetworkSummary;
+use crate::control_plane::{NetworkSummary, PersistenceFault};
 
 pub mod render;
 
@@ -579,6 +579,7 @@ pub enum HeaterLockReason {
     SensorFault,
     PdContractUnavailable,
     ThermalModelMissingForSourceClass,
+    PersistenceRequired,
 }
 
 impl HeaterLockReason {
@@ -589,6 +590,7 @@ impl HeaterLockReason {
             Self::SensorFault => "sensor-fault",
             Self::PdContractUnavailable => "pd-contract-unavailable",
             Self::ThermalModelMissingForSourceClass => "thermal_model_missing_for_source_class",
+            Self::PersistenceRequired => "persistence-required",
         }
     }
 }
@@ -626,6 +628,8 @@ pub struct FrontPanelUiState {
     pub dashboard_warning_visible: bool,
     pub eeprom_data_incompatible: bool,
     pub eeprom_required: bool,
+    pub persistence_fault: Option<PersistenceFault>,
+    pub persistence_fault_attention_pending: bool,
     pub manual_pps_enabled: bool,
     pub selected_menu_item: FrontPanelMenuItem,
     pub selected_preset_slot: usize,
@@ -661,6 +665,8 @@ impl FrontPanelUiState {
             dashboard_warning_visible: false,
             eeprom_data_incompatible: false,
             eeprom_required: false,
+            persistence_fault: None,
+            persistence_fault_attention_pending: false,
             manual_pps_enabled: false,
             selected_menu_item: FrontPanelMenuItem::ActiveCooling,
             selected_preset_slot: 1,
@@ -720,7 +726,14 @@ impl FrontPanelUiState {
     }
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
-        if self.persistence_locked() || !self.dashboard_is_ready() {
+        if !self.dashboard_is_ready() {
+            return false;
+        }
+        if self.persistence_locked() {
+            if self.persistence_fault_attention_pending {
+                self.persistence_fault_attention_pending = false;
+                return true;
+            }
             return false;
         }
         self.key_test.last_raw_key = Some(event.raw_key);
@@ -1090,6 +1103,35 @@ mod tests {
             at_ms: 0,
         }));
         assert!(!state.heater_enabled);
+    }
+
+    #[test]
+    fn first_key_acknowledges_persistence_fault_without_running_original_action() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.eeprom_required = true;
+        state.persistence_fault_attention_pending = true;
+        state.heater_enabled = true;
+        state.target_temp_c = 235;
+
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Up,
+            key: FrontPanelKey::Up,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 1,
+        }));
+        assert!(!state.persistence_fault_attention_pending);
+        assert!(state.persistence_locked());
+        assert!(state.heater_enabled);
+        assert_eq!(state.target_temp_c, 235);
+        assert_eq!(state.key_test.last_key, None);
+
+        assert!(!state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Center,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 2,
+        }));
+        assert!(state.persistence_locked());
     }
 
     fn raw_state(keys: &[RawFrontPanelKey]) -> FrontPanelRawState {

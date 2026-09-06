@@ -126,13 +126,13 @@ use flux_purr_firmware::control_plane::{
     AdcCalibrationSourceWire, AdcDiagnosticsWire, ApiError, CalibrationControlCommand,
     CalibrationJobKindWire, CalibrationJobStateWire, CalibrationJobStatusWire, CalibrationModeWire,
     CalibrationRuntimeStateWire, ControlPlaneStatus, HeaterCurvePackageWire, Identity,
-    InstallStatus, RuntimeConfigCommand, ThermalControlProfileOp, ThermalControlProfilePointWire,
-    ThermalControlProfileSettingsWire, ThermalControlProfileWire, ThermalControlRuntimeWire,
-    ThermalPlantActiveResultWire, ThermalPlantProvisionalCurveWire, ThermalPlantRunAttemptWire,
-    ThermalPlantRunPhaseWire, ThermalPlantRunSnapshotWire, ThermalPlantRuntimeWire,
-    ThermalPlantTracePageWire, ThermalPlantTracePointWire, UsbFrame, UsbFrameError, UsbRequestOp,
-    UsbResponsePayload, calibration_state_from_memory, heater_curve_state_from_memory,
-    network_from_memory, parse_usb_frame, write_usb_frame,
+    InstallStatus, PersistenceFault, RuntimeConfigCommand, ThermalControlProfileOp,
+    ThermalControlProfilePointWire, ThermalControlProfileSettingsWire, ThermalControlProfileWire,
+    ThermalControlRuntimeWire, ThermalPlantActiveResultWire, ThermalPlantProvisionalCurveWire,
+    ThermalPlantRunAttemptWire, ThermalPlantRunPhaseWire, ThermalPlantRunSnapshotWire,
+    ThermalPlantRuntimeWire, ThermalPlantTracePageWire, ThermalPlantTracePointWire, UsbFrame,
+    UsbFrameError, UsbRequestOp, UsbResponsePayload, calibration_state_from_memory,
+    heater_curve_state_from_memory, network_from_memory, parse_usb_frame, write_usb_frame,
 };
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
 use flux_purr_firmware::control_plane::{BuzzerTestCommand, BuzzerTestOp};
@@ -3098,6 +3098,27 @@ fn next_heater_lock_reason(
         Some(HeaterLockReason::ThermalModelMissingForSourceClass)
     } else {
         None
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+fn next_heater_lock_reason_with_persistence(
+    persistence_locked: bool,
+    heater_fault: Option<HeaterFaultReason>,
+    cooling_disabled_lock_latched: bool,
+    thermal_model_heater_allowed: bool,
+    pd_contract_ready: bool,
+) -> Option<HeaterLockReason> {
+    if persistence_locked {
+        Some(HeaterLockReason::PersistenceRequired)
+    } else {
+        next_heater_lock_reason(
+            heater_fault,
+            cooling_disabled_lock_latched,
+            thermal_model_heater_allowed,
+            pd_contract_ready,
+        )
     }
 }
 
@@ -6453,9 +6474,15 @@ fn mark_eeprom_required(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
     memory_commit_due_ms: &mut Option<u64>,
+    fault: Option<PersistenceFault>,
 ) {
+    let data_incompatible = ui_state.eeprom_data_incompatible;
     begin_mutating_eeprom_maintenance(ui_state, calibration, manual_pps, memory_commit_due_ms);
+    ui_state.eeprom_data_incompatible = data_incompatible;
     ui_state.eeprom_required = true;
+    ui_state.heater_lock_reason = Some(HeaterLockReason::PersistenceRequired);
+    ui_state.persistence_fault = fault.or_else(|| ui_state.persistence_fault.clone());
+    ui_state.persistence_fault_attention_pending = true;
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -6748,6 +6775,8 @@ enum MemoryCommitError {
     WriteOther,
     VerifyUnreadable,
     VerifyMismatch,
+    #[cfg(feature = "hil-eeprom-commit-fault")]
+    Injected,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6764,6 +6793,8 @@ impl MemoryCommitError {
             Self::WriteOther => "memory_commit_write_other_error",
             Self::VerifyUnreadable => "memory_commit_verify_unreadable",
             Self::VerifyMismatch => "memory_commit_verify_mismatch",
+            #[cfg(feature = "hil-eeprom-commit-fault")]
+            Self::Injected => "memory_commit_hil_injected_failure",
         }
     }
 
@@ -6779,8 +6810,65 @@ impl MemoryCommitError {
             Self::WriteOther => "EEPROM write failed with an uncategorized I2C error.",
             Self::VerifyUnreadable => "Memory record could not be read back after write.",
             Self::VerifyMismatch => "Memory record readback did not match the requested config.",
+            #[cfg(feature = "hil-eeprom-commit-fault")]
+            Self::Injected => "HIL injected EEPROM commit failure before any write.",
         }
     }
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MemoryCommitFailure {
+    error: MemoryCommitError,
+    phase: &'static str,
+    attempt: u8,
+    sequence: u32,
+}
+
+#[cfg(target_arch = "xtensa")]
+impl MemoryCommitFailure {
+    const fn code(self) -> &'static str {
+        self.error.code()
+    }
+
+    const fn message(self) -> &'static str {
+        self.error.message()
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+const fn memory_commit_slot(sequence: u32) -> &'static str {
+    if sequence % 2 == 1 { "A" } else { "B" }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn persistence_fault_from_commit(failure: MemoryCommitFailure) -> PersistenceFault {
+    let mut phase = heapless::String::new();
+    let _ = phase.push_str(failure.phase);
+    let mut slot = heapless::String::new();
+    let _ = slot.push_str(memory_commit_slot(failure.sequence));
+    let mut message = heapless::String::new();
+    let _ = message.push_str(failure.message());
+    PersistenceFault {
+        code: error_code_string(failure.code()),
+        phase,
+        attempt: failure.attempt,
+        sequence: failure.sequence,
+        slot: Some(slot),
+        message,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn log_memory_commit_failure(failure: MemoryCommitFailure) {
+    info!(
+        "PERSISTENCE_COMMIT_ATTEMPT_FAILED code={=str} phase={=str} attempt={=u8} sequence={=u32} slot={=str}",
+        failure.code(),
+        failure.phase,
+        failure.attempt,
+        failure.sequence,
+        memory_commit_slot(failure.sequence),
+    );
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -6947,13 +7035,23 @@ async fn commit_memory_config_now(
     elapsed_ms: u64,
     memory_sequence: &mut u32,
     memory_config: &MemoryConfig,
-) -> Result<(), MemoryCommitError> {
+) -> Result<(), MemoryCommitFailure> {
     let Some(mut scratch) = try_allocate_memory_io_scratch() else {
-        return Err(MemoryCommitError::EncodeFailed);
+        return Err(MemoryCommitFailure {
+            error: MemoryCommitError::EncodeFailed,
+            phase: "encode",
+            attempt: 0,
+            sequence: memory_sequence.saturating_add(1),
+        });
     };
     let mut expected_config = memory_config.clone();
     expected_config.sanitize();
-    let mut last_error = MemoryCommitError::WriteFailed;
+    let mut last_error = MemoryCommitFailure {
+        error: MemoryCommitError::WriteFailed,
+        phase: "write",
+        attempt: 0,
+        sequence: memory_sequence.saturating_add(1),
+    };
     let commit_started_at = Instant::now();
 
     for attempt in 0..2 {
@@ -6962,19 +7060,34 @@ async fn commit_memory_config_now(
             sequence: next_sequence,
             config: expected_config.clone(),
         };
-        let backend = match write_memory_record(
-            i2c,
-            pd_port,
-            elapsed_ms,
-            commit_started_at,
-            &record,
-            &mut scratch,
-        )
-        .await
-        {
+        let backend: Result<MemoryCommitBackend, MemoryCommitError> = {
+            #[cfg(feature = "hil-eeprom-commit-fault")]
+            {
+                Err(MemoryCommitError::Injected)
+            }
+            #[cfg(not(feature = "hil-eeprom-commit-fault"))]
+            {
+                write_memory_record(
+                    i2c,
+                    pd_port,
+                    elapsed_ms,
+                    commit_started_at,
+                    &record,
+                    &mut scratch,
+                )
+                .await
+            }
+        };
+        let backend = match backend {
             Ok(backend) => backend,
             Err(error) => {
-                last_error = error;
+                last_error = MemoryCommitFailure {
+                    error,
+                    phase: "write",
+                    attempt: attempt as u8 + 1,
+                    sequence: next_sequence,
+                };
+                log_memory_commit_failure(last_error);
                 continue;
             }
         };
@@ -6994,29 +7107,38 @@ async fn commit_memory_config_now(
         let verified = match verified {
             Ok(verified) => verified,
             Err(error) => {
-                info!(
-                    "memory commit verify failed seq={=u32} reason={=str}",
-                    next_sequence,
-                    error.code(),
-                );
-                last_error = error;
+                last_error = MemoryCommitFailure {
+                    error,
+                    phase: "verify",
+                    attempt: attempt as u8 + 1,
+                    sequence: next_sequence,
+                };
+                log_memory_commit_failure(last_error);
                 continue;
             }
         };
         if verified.sequence != next_sequence || verified.config != expected_config {
-            info!(
-                "memory commit verify failed seq={=u32} read_seq={=u32} config_match={=bool}",
-                next_sequence,
-                verified.sequence,
-                verified.config == expected_config,
-            );
-            last_error = MemoryCommitError::VerifyMismatch;
+            last_error = MemoryCommitFailure {
+                error: MemoryCommitError::VerifyMismatch,
+                phase: "verify",
+                attempt: attempt as u8 + 1,
+                sequence: next_sequence,
+            };
+            log_memory_commit_failure(last_error);
             continue;
         }
         *memory_sequence = next_sequence;
         return Ok(());
     }
 
+    info!(
+        "PERSISTENCE_COMMIT_FAILED code={=str} phase={=str} attempt={=u8} sequence={=u32} slot={=str}",
+        last_error.code(),
+        last_error.phase,
+        last_error.attempt,
+        last_error.sequence,
+        memory_commit_slot(last_error.sequence),
+    );
     Err(last_error)
 }
 
@@ -9095,6 +9217,8 @@ fn usb_runtime_status_with_calibration(
         value
     });
     status.fault_attention_pending = context.attention_pending_after_fault_clear;
+    status.persistence_fault = ui_state.persistence_fault.clone();
+    status.persistence_fault_attention_pending = ui_state.persistence_fault_attention_pending;
     status.heater_lock_reason = ui_state.heater_lock_reason.map(Into::into);
     let mut heater_control_phase = heapless::String::new();
     let _ = heater_control_phase.push_str(context.pid_snapshot.phase.label());
@@ -11578,6 +11702,9 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
                     0,
                     false,
                     true,
+                    true,
+                    None,
+                    true,
                 )),
             ),
             UsbRequestOp::CompleteSetup | UsbRequestOp::ResetPersistence => usb_error_response(
@@ -11761,6 +11888,9 @@ async fn process_control_line(
                     *memory_sequence,
                     current_rtd_fault.is_none() && latest_status_temp_c.is_finite(),
                     heater_controller.fault_latched().is_some(),
+                    ui_state.persistence_locked(),
+                    ui_state.persistence_fault.clone(),
+                    ui_state.persistence_fault_attention_pending,
                 )),
             ),
             UsbRequestOp::CompleteSetup => {
@@ -12189,7 +12319,7 @@ async fn process_control_line(
                     );
                 }
                 if *memory_config != previous_memory_config {
-                    if commit_memory_config_now(
+                    match commit_memory_config_now(
                         pd_i2c,
                         pd_port,
                         elapsed_ms,
@@ -12197,25 +12327,28 @@ async fn process_control_line(
                         memory_config,
                     )
                     .await
-                    .is_ok()
                     {
-                        *memory_commit_due_ms = None;
-                    } else {
-                        *memory_config = previous_memory_config;
-                        mark_eeprom_required(
-                            ui_state,
-                            calibration_runtime_state,
-                            manual_pps,
-                            memory_commit_due_ms,
-                        );
-                        return (
-                            needs_redraw,
-                            usb_error_response(
-                                request_id,
-                                "memory_commit_failed",
-                                "Calibration draft could not be persisted.",
-                            ),
-                        );
+                        Ok(()) => {
+                            *memory_commit_due_ms = None;
+                        }
+                        Err(error) => {
+                            *memory_config = previous_memory_config;
+                            mark_eeprom_required(
+                                ui_state,
+                                calibration_runtime_state,
+                                manual_pps,
+                                memory_commit_due_ms,
+                                Some(persistence_fault_from_commit(error)),
+                            );
+                            return (
+                                needs_redraw,
+                                usb_error_response(
+                                    request_id,
+                                    "memory_commit_failed",
+                                    "Calibration draft could not be persisted.",
+                                ),
+                            );
+                        }
                     }
                 }
                 response
@@ -12324,17 +12457,17 @@ async fn process_control_line(
                 )
                 .await
                 {
+                    let code = error.code();
+                    let message = error.message();
                     *memory_config = previous_memory_config;
                     mark_eeprom_required(
                         ui_state,
                         calibration_runtime_state,
                         manual_pps,
                         memory_commit_due_ms,
+                        Some(persistence_fault_from_commit(error)),
                     );
-                    return (
-                        needs_redraw,
-                        usb_error_response(request_id, error.code(), error.message()),
-                    );
+                    return (needs_redraw, usb_error_response(request_id, code, message));
                 }
                 *memory_commit_due_ms = None;
                 usb_response(
@@ -13378,14 +13511,16 @@ async fn main(_spawner: Spawner) {
         eeprom_required = true;
     }
     let mut persistence_source = if eeprom_required {
-        "eeprom_required"
+        "none"
     } else if eeprom_memory_record.is_some() {
         "eeprom"
     } else {
         "defaults"
     };
-    let mut persistence_record_state = if eeprom_required {
-        "eeprom_required"
+    let mut persistence_record_state = if eeprom_required && eeprom_data_incompatible {
+        "incompatible"
+    } else if eeprom_required {
+        "unavailable"
     } else if eeprom_memory_record.is_some() {
         "valid"
     } else if eeprom_data_incompatible {
@@ -13569,6 +13704,10 @@ async fn main(_spawner: Spawner) {
     let mut ui_state = FrontPanelUiState::new_startup(runtime_mode);
     ui_state.eeprom_data_incompatible = eeprom_data_incompatible;
     ui_state.eeprom_required = eeprom_required;
+    ui_state.persistence_fault_attention_pending = eeprom_data_incompatible || eeprom_required;
+    if ui_state.persistence_locked() {
+        ui_state.heater_lock_reason = Some(HeaterLockReason::PersistenceRequired);
+    }
     ui_state.pd_contract_mv =
         effective_pd_contract_mv(&manual_pps_state, last_pd_observation, heater_power_backend);
     apply_memory_config_to_ui(&mut ui_state, &memory_config);
@@ -13698,10 +13837,12 @@ async fn main(_spawner: Spawner) {
     }
     fan_policy_state = initial_fan_decision.state;
     let mut fan_command = initial_fan_decision.command;
+    let persistence_locked = ui_state.persistence_locked();
     let _ = sync_frontpanel_runtime_state(
         &mut ui_state,
         initial_fan_decision,
-        next_heater_lock_reason(
+        next_heater_lock_reason_with_persistence(
+            persistence_locked,
             heater_controller.fault_latched(),
             cooling_disabled_lock_latched,
             thermal_model_heater_allowed(
@@ -13813,8 +13954,8 @@ async fn main(_spawner: Spawner) {
             } else if read_failed {
                 eeprom_required = true;
                 ui_state.eeprom_required = true;
-                persistence_source = "eeprom_required";
-                persistence_record_state = "eeprom_required";
+                persistence_source = "none";
+                persistence_record_state = "unavailable";
                 warn!("legacy memory restore unreadable; keeping heater interlocked");
             }
         }
@@ -13897,6 +14038,7 @@ async fn main(_spawner: Spawner) {
                                 &mut calibration_runtime_state,
                                 &mut manual_pps_state,
                                 &mut memory_commit_due_ms,
+                                None,
                             );
                         }
                         write_eeprom_snapshot_response(&mut usb_serial, &response, usb_tx_buf);
@@ -14661,12 +14803,14 @@ async fn main(_spawner: Spawner) {
                     )
                     .await
                     {
+                        let code = error.code();
                         memory_config = memory_before_calibration_job;
                         mark_eeprom_required(
                             &mut ui_state,
                             &mut calibration_runtime_state,
                             &mut manual_pps_state,
                             &mut memory_commit_due_ms,
+                            Some(persistence_fault_from_commit(error)),
                         );
                         calibration_job_fail(
                             &mut calibration_runtime_state,
@@ -14674,10 +14818,7 @@ async fn main(_spawner: Spawner) {
                             false,
                             &mut manual_pps_state,
                         );
-                        info!(
-                            "thermal plant activation commit failed reason={=str}",
-                            error.code()
-                        );
+                        info!("thermal plant activation commit failed reason={=str}", code);
                     } else {
                         memory_commit_due_ms = None;
                     }
@@ -14735,6 +14876,9 @@ async fn main(_spawner: Spawner) {
                 &mut calibration_runtime_state,
                 desired_heater_enabled,
             );
+            if ui_state.persistence_locked() {
+                desired_heater_enabled = false;
+            }
             if ui_state.heater_enabled != desired_heater_enabled {
                 ui_state.heater_enabled = desired_heater_enabled;
                 needs_redraw = true;
@@ -14888,7 +15032,7 @@ async fn main(_spawner: Spawner) {
             && memory_commit_due_ms.is_some_and(|due_ms| elapsed_ms >= due_ms)
         {
             memory_commit_due_ms = None;
-            if commit_memory_config_now(
+            if let Err(error) = commit_memory_config_now(
                 &mut pd_i2c,
                 &mut pd_port,
                 elapsed_ms,
@@ -14896,21 +15040,21 @@ async fn main(_spawner: Spawner) {
                 &memory_config,
             )
             .await
-            .is_err()
             {
                 mark_eeprom_required(
                     &mut ui_state,
                     &mut calibration_runtime_state,
                     &mut manual_pps_state,
                     &mut memory_commit_due_ms,
+                    Some(persistence_fault_from_commit(error)),
                 );
             }
         }
 
         if ui_state.eeprom_required && !eeprom_required {
             eeprom_required = true;
-            persistence_source = "eeprom_required";
-            persistence_record_state = "eeprom_required";
+            persistence_source = "none";
+            persistence_record_state = "unavailable";
         } else if ui_state.eeprom_data_incompatible && persistence_record_state == "valid" {
             persistence_record_state = "incompatible";
         }
@@ -15021,10 +15165,12 @@ async fn main(_spawner: Spawner) {
             &mut last_fan_command,
         );
 
+        let persistence_locked = ui_state.persistence_locked();
         if sync_frontpanel_runtime_state(
             &mut ui_state,
             fan_decision,
-            next_heater_lock_reason(
+            next_heater_lock_reason_with_persistence(
+                persistence_locked,
                 heater_controller.fault_latched(),
                 cooling_disabled_lock_latched,
                 thermal_model_heater_allowed(
@@ -18504,6 +18650,7 @@ mod tests {
             &mut calibration,
             &mut manual_pps,
             &mut commit_due_ms,
+            None,
         );
         assert!(state.eeprom_required);
         assert!(state.persistence_locked());
@@ -23780,6 +23927,18 @@ mod tests {
             true,
             true,
         ));
+    }
+
+    #[test]
+    fn persistence_lock_reason_is_exposed_before_other_runtime_gates() {
+        assert_eq!(
+            next_heater_lock_reason_with_persistence(true, None, false, true, true),
+            Some(HeaterLockReason::PersistenceRequired)
+        );
+        assert_eq!(
+            next_heater_lock_reason_with_persistence(false, None, false, true, true),
+            None
+        );
     }
 
     #[test]
