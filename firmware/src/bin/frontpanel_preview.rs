@@ -43,6 +43,8 @@ enum PreviewPreset {
     WifiInfo,
     DeviceInfo,
     EepromDataIncompatible,
+    EepromPersistenceFault,
+    EepromPersistenceAcknowledged,
 }
 
 fn build_key_test_state(raw_key: RawFrontPanelKey, gesture: KeyGesture) -> FrontPanelUiState {
@@ -115,6 +117,8 @@ impl PreviewPreset {
             Self::WifiInfo => "wifi-info",
             Self::DeviceInfo => "device-info",
             Self::EepromDataIncompatible => "eeprom-data-incompatible",
+            Self::EepromPersistenceFault => "frontpanel-eeprom-fault",
+            Self::EepromPersistenceAcknowledged => "frontpanel-persistence-acknowledged",
         }
     }
 
@@ -143,6 +147,8 @@ impl PreviewPreset {
             "wifi-info" => Some(Self::WifiInfo),
             "device-info" => Some(Self::DeviceInfo),
             "eeprom-data-incompatible" => Some(Self::EepromDataIncompatible),
+            "frontpanel-eeprom-fault" => Some(Self::EepromPersistenceFault),
+            "frontpanel-persistence-acknowledged" => Some(Self::EepromPersistenceAcknowledged),
             _ => None,
         }
     }
@@ -287,6 +293,19 @@ impl PreviewPreset {
                 state.eeprom_data_incompatible = true;
                 state
             }
+            Self::EepromPersistenceFault => {
+                let mut state = base_dashboard_state();
+                state.eeprom_required = true;
+                state.heater_lock_reason = Some(HeaterLockReason::PersistenceRequired);
+                state.persistence_fault_attention_pending = true;
+                state
+            }
+            Self::EepromPersistenceAcknowledged => {
+                let mut state = base_dashboard_state();
+                state.eeprom_required = true;
+                state.heater_lock_reason = Some(HeaterLockReason::PersistenceRequired);
+                state
+            }
         }
     }
 }
@@ -322,7 +341,7 @@ where
     let preset_slug = args.next().unwrap_or_else(|| String::from("dashboard"));
     let Some(preset) = PreviewPreset::from_slug(&preset_slug) else {
         return Err(format!(
-            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-ready, dashboard-power-wait, dashboard-eeprom-restore, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, dashboard-initializing, dashboard-initial-rtd-fault, dashboard-temp, menu, preset-temp, active-cooling, wifi-info, device-info, eeprom-data-incompatible)",
+            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-ready, dashboard-power-wait, dashboard-eeprom-restore, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, dashboard-initializing, dashboard-initial-rtd-fault, dashboard-temp, menu, preset-temp, active-cooling, wifi-info, device-info, eeprom-data-incompatible, frontpanel-eeprom-fault, frontpanel-persistence-acknowledged)",
             preset_slug
         ));
     };

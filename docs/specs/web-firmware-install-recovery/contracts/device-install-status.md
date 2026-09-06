@@ -13,13 +13,17 @@ USB JSONL adds `get_install_status`; devd may proxy it but LAN does not gain fla
   "commissioningRequired": false,
   "setupReason": null,
   "sensorState": "ready",
-  "heaterLocked": false
+  "heaterLocked": false,
+  "lastPersistenceFault": null,
+  "persistenceFaultAttentionPending": false
 }
 ```
 
 - `persistenceSource`: `eeprom | none`
 - `recordState`: `valid | blank | corrupt | incompatible | unavailable`; only EEPROM contributes persistent configuration.
 - `setupReason`: `blank_persistence | corrupt_persistence | eeprom_required | explicit_reset | sensor_unready | calibration_required | null`
+- `lastPersistenceFault`: optional bounded commit context with `code`, `phase`, `attempt`, `sequence`, `slot`, and redacted `message`; it never contains EEPROM bytes or Wi-Fi credentials.
+- `persistenceFaultAttentionPending`: `true` while the front-panel fault prompt still awaits its one-key acknowledgement.
 - Old valid records without `commissioningRequired` decode as `false`.
 - A blank writable EEPROM may be initialized from the approved hardware profile. Corrupt, incompatible, or unavailable EEPROM enters `EEPROM_REQUIRED` with `commissioningRequired=true` and `heaterLocked=true`; MCU Flash is never a persistence source.
 - `complete_setup` clears the flag only after existing sensor and calibration gates pass.

@@ -267,6 +267,10 @@ pub struct ControlPlaneStatus {
     pub heater_fault_reason: Option<String<ERROR_CODE_MAX_LEN>>,
     #[serde(default)]
     pub fault_attention_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistence_fault: Option<PersistenceFault>,
+    #[serde(default)]
+    pub persistence_fault_attention_pending: bool,
     pub heater_lock_reason: Option<String<ERROR_CODE_MAX_LEN>>,
     pub heater_control_phase: Option<String<ERROR_CODE_MAX_LEN>>,
     pub heater_error_c: Option<f32>,
@@ -299,6 +303,18 @@ pub struct ControlPlaneStatus {
     pub thermal_plant_model: ThermalPlantRuntimeWire,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
     pub network: NetworkSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistenceFault {
+    pub code: String<ERROR_CODE_MAX_LEN>,
+    pub phase: String<ERROR_CODE_MAX_LEN>,
+    pub attempt: u8,
+    pub sequence: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String<8>>,
+    pub message: String<ERROR_MESSAGE_MAX_LEN>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -519,6 +535,8 @@ impl ControlPlaneStatus {
                 manual_pps_error: None,
                 heater_fault_reason: None,
                 fault_attention_pending: false,
+                persistence_fault: None,
+                persistence_fault_attention_pending: false,
                 heater_lock_reason: None,
                 heater_control_phase: None,
                 heater_error_c: None,
@@ -2438,9 +2456,14 @@ pub struct InstallStatus {
     pub setup_reason: Option<String<32>>,
     pub sensor_state: String<24>,
     pub heater_locked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_persistence_fault: Option<PersistenceFault>,
+    #[serde(default)]
+    pub persistence_fault_attention_pending: bool,
 }
 
 impl InstallStatus {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_runtime(
         config: &crate::memory::MemoryConfig,
         persistence_source: &str,
@@ -2448,6 +2471,9 @@ impl InstallStatus {
         record_sequence: u32,
         sensor_ready: bool,
         heater_fault_latched: bool,
+        persistence_locked: bool,
+        last_persistence_fault: Option<PersistenceFault>,
+        persistence_fault_attention_pending: bool,
     ) -> Self {
         Self {
             layout_id: string("flux-purr.esp32s3fh4r2.factory"),
@@ -2469,7 +2495,12 @@ impl InstallStatus {
                 None
             },
             sensor_state: string(if sensor_ready { "ready" } else { "unavailable" }),
-            heater_locked: config.commissioning_required || !sensor_ready || heater_fault_latched,
+            heater_locked: config.commissioning_required
+                || !sensor_ready
+                || heater_fault_latched
+                || persistence_locked,
+            last_persistence_fault,
+            persistence_fault_attention_pending,
         }
     }
 }
@@ -3086,6 +3117,42 @@ mod tests {
         assert!(json.contains(r#""rtdRawCodeSpread":4"#));
         assert!(json.len() <= USB_LINE_MAX_LEN);
         assert!(!json.contains("fallback5v"));
+        assert_eq!(
+            parse_usb_frame(json).expect("status response parses"),
+            frame
+        );
+    }
+
+    #[test]
+    fn status_frame_serializes_persistence_fault_context_without_sensitive_data() {
+        let mut status = ControlPlaneStatus::from_device_status(
+            snapshot_at(17, 0),
+            &MemoryConfig::default(),
+            3220,
+            NetworkSummary::default(),
+        );
+        status.persistence_fault = Some(PersistenceFault {
+            code: string("memory_commit_hil_injected_failure"),
+            phase: string("write"),
+            attempt: 2,
+            sequence: 3221,
+            slot: Some(string("A")),
+            message: string("HIL injected EEPROM commit failure before any write."),
+        });
+        status.persistence_fault_attention_pending = true;
+        let frame = UsbFrame::Response {
+            request_id: string("req-persistence"),
+            ok: true,
+            result: Some(UsbResponsePayload::Status(Box::new(status))),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&frame, &mut out).expect("persistence status fits");
+
+        assert!(json.contains(r#""persistenceFault":{"code":"memory_commit_hil_injected_failure"#));
+        assert!(json.contains("\"persistenceFaultAttentionPending\":true"));
+        assert!(!json.contains("wifi_password"));
+        assert!(!json.contains("EEPROM raw"));
         assert_eq!(
             parse_usb_frame(json).expect("status response parses"),
             frame

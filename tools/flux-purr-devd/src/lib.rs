@@ -654,6 +654,8 @@ impl DeviceRecord {
             manual_pps_error: None,
             heater_fault_reason: None,
             fault_attention_pending: false,
+            persistence_fault: None,
+            persistence_fault_attention_pending: false,
             heater_lock_reason: None,
             heater_control_phase: None,
             heater_error_c: None,
@@ -760,6 +762,8 @@ impl DeviceRecord {
             manual_pps_error: None,
             heater_fault_reason: None,
             fault_attention_pending: false,
+            persistence_fault: None,
+            persistence_fault_attention_pending: false,
             heater_lock_reason: None,
             heater_control_phase: None,
             heater_error_c: None,
@@ -895,6 +899,22 @@ pub struct InstallStatus {
     pub setup_reason: Option<String>,
     pub sensor_state: String,
     pub heater_locked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_persistence_fault: Option<PersistenceFault>,
+    #[serde(default)]
+    pub persistence_fault_attention_pending: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistenceFault {
+    pub code: String,
+    pub phase: String,
+    pub attempt: u8,
+    pub sequence: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1027,6 +1047,10 @@ pub struct ControlPlaneStatus {
     pub heater_fault_reason: Option<String>,
     #[serde(default)]
     pub fault_attention_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistence_fault: Option<PersistenceFault>,
+    #[serde(default)]
+    pub persistence_fault_attention_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heater_lock_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7989,7 +8013,7 @@ fn emit_serial_log_line(
         return;
     }
 
-    let event = event(
+    let raw_event = event(
         device_id,
         "serial",
         "native serial monitor line",
@@ -7998,11 +8022,61 @@ fn emit_serial_log_line(
             "line": message,
         }),
     );
+    let persistence_event = parse_persistence_fault_log(message).map(|payload| {
+        event(
+            device_id,
+            "persistence_fault",
+            "firmware persistence fault",
+            payload,
+        )
+    });
 
     if let Ok(mut inner) = state.lock() {
-        inner.push_event(event.clone());
+        inner.push_event(raw_event.clone());
+        if let Some(persistence_event) = persistence_event.as_ref() {
+            inner.push_event(persistence_event.clone());
+        }
     }
-    let _ = events.send(event);
+    let _ = events.send(raw_event);
+    if let Some(persistence_event) = persistence_event {
+        let _ = events.send(persistence_event);
+    }
+}
+
+fn parse_persistence_fault_log(message: &str) -> Option<Value> {
+    let terminal = if message.starts_with("PERSISTENCE_COMMIT_FAILED ") {
+        true
+    } else if message.starts_with("PERSISTENCE_COMMIT_ATTEMPT_FAILED ") {
+        false
+    } else {
+        return None;
+    };
+
+    let mut code = None;
+    let mut phase = None;
+    let mut attempt = None;
+    let mut sequence = None;
+    let mut slot = None;
+    for token in message.split_whitespace().skip(1) {
+        let (key, value) = token.split_once('=')?;
+        match key {
+            "code" => code = Some(value.to_string()),
+            "phase" => phase = Some(value.to_string()),
+            "attempt" => attempt = value.parse::<u8>().ok(),
+            "sequence" => sequence = value.parse::<u32>().ok(),
+            "slot" => slot = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    Some(json!({
+        "event": if terminal { "commit_failed" } else { "commit_attempt_failed" },
+        "code": code?,
+        "phase": phase?,
+        "attempt": attempt?,
+        "sequence": sequence?,
+        "slot": slot?,
+    }))
 }
 
 fn serial_line_is_usb_reset_marker(line: &[u8]) -> bool {
@@ -10280,6 +10354,38 @@ mod tests {
             device.events[0].payload["line"],
             "INFO heater runtime disabled by safety gate"
         );
+    }
+
+    #[test]
+    fn serial_monitor_persistence_fault_emits_structured_event_without_raw_data() {
+        let state = AppState::test();
+        let mut serial_device = DeviceRecord::mock("serial-known", DeviceTransport::NativeSerial);
+        serial_device.port_path = Some("/dev/cu.usbmodem-test".to_string());
+        {
+            let mut inner = state.lock().unwrap();
+            inner
+                .devices
+                .insert(serial_device.id.clone(), serial_device);
+        }
+
+        emit_serial_log_line(
+            &state.inner,
+            &state.events,
+            "serial-known",
+            b"PERSISTENCE_COMMIT_ATTEMPT_FAILED code=eeprom_write_failed phase=write attempt=2 sequence=3221 slot=A",
+        );
+
+        let inner = state.lock().unwrap();
+        let device = inner.devices.get("serial-known").unwrap();
+        assert_eq!(device.events.len(), 2);
+        assert_eq!(device.events[0].kind, "serial");
+        assert_eq!(device.events[1].kind, "persistence_fault");
+        assert_eq!(device.events[1].payload["code"], "eeprom_write_failed");
+        assert_eq!(device.events[1].payload["phase"], "write");
+        assert_eq!(device.events[1].payload["attempt"], 2);
+        assert_eq!(device.events[1].payload["sequence"], 3221);
+        assert_eq!(device.events[1].payload["slot"], "A");
+        assert!(device.events[1].payload.get("line").is_none());
     }
 
     #[test]
@@ -12686,6 +12792,8 @@ mod tests {
             manual_pps_error: None,
             fault_attention_pending: false,
             heater_fault_reason: None,
+            persistence_fault: None,
+            persistence_fault_attention_pending: false,
             heater_lock_reason: None,
             heater_control_phase: None,
             heater_error_c: None,

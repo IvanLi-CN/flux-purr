@@ -4,6 +4,7 @@
 
 - Five-way input decoding, gesture thresholds, menu routing, Key Test diagnostics, and dashboard navigation are implemented in the frontpanel runtime.
 - Host-side framebuffer fixtures and interaction evidence cover Dashboard, Menu, Preset Temp, Active Cooling, and Device Info states.
+- Persistence fault and acknowledged states are rendered by `frontpanel_preview`; the first key only clears the pending EEPROM attention state and subsequent keys remain blocked while `PersistenceRequired` is active.
 - Heater and fan runtime semantics are consumed from the dedicated heater runtime topic.
 
 ## Validation

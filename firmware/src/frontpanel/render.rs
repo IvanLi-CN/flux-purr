@@ -202,7 +202,8 @@ pub fn render_frontpanel_ui_with_palette(
 ) {
     canvas.clear(COLOR_BG).ok();
 
-    if state.persistence_locked()
+    if state.persistence_fault_attention_pending
+        && state.persistence_locked()
         && !matches!(
             state.dashboard_presentation,
             DashboardPresentationState::EepromRestore | DashboardPresentationState::InitialRtdFault
@@ -1032,6 +1033,7 @@ mod tests {
         let mut canvas = DisplayCanvas::new();
         let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
         state.eeprom_data_incompatible = true;
+        state.persistence_fault_attention_pending = true;
 
         render_frontpanel_ui(&mut canvas, &state);
 

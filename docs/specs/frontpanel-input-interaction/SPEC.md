@@ -56,6 +56,7 @@
 - `Dashboard` 左/右必须按“已启用记忆温度的实际温度值排序”找到最近的下一个温度，而不是按槽位顺序切换。
 - `Dashboard` 暂不显示当前命中的预设槽位或 `MAN / Mx` 文案，保持既有视觉基线不变。
 - `Dashboard` 中键短按只切 heater arm；中键双击切换主动降温（`active_cooling_enabled`）；中键长按只进菜单。
+- 当持久化故障提示待确认时，Dashboard 收到的第一个任意物理按键只确认并关闭提示，不执行该按键原本的动作；确认后显示只读 Dashboard。持久化锁仍阻止 heater、目标温度、preset、主动降温和其它依赖 EEPROM 的操作，直到持久化恢复。
 - 一级菜单必须固定为 `Preset Temp / Active Cooling / WiFi Info / Device Info` 四项，左右移动，中键短按进入，中键长按回 Dashboard。
 - 子页默认中键短按退出，中键长按兜底退出；左键返回菜单。
 - `Preset Temp` 页必须允许进入全部 `M1-M10` 槽位；灰色槽位只代表当前值无效，不代表不可进入。
@@ -256,6 +257,14 @@ None
 #### Preset Temp
 
 ![Front panel firmware preset temp](./assets/preset-temp.zoom.png)
+
+#### EEPROM persistence fault
+
+![Front panel EEPROM persistence fault](./assets/frontpanel-eeprom-fault.png)
+
+#### Persistence fault acknowledged
+
+![Front panel persistence fault acknowledged](./assets/frontpanel-persistence-acknowledged.png)
 
 ### Hardware verification
 

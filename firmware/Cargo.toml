@@ -37,6 +37,7 @@ frontpanel-key-test = []
 web_serial = []
 buzzer-test = ["web_serial"]
 buzzer-observe = ["buzzer-test"]
+hil-eeprom-commit-fault = []
 net_http = [
     "web_serial",
     "dep:embassy-net",

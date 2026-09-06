@@ -55,6 +55,8 @@
 - `selected_preset_slot` 越界时必须回到默认槽位。
 - 用户接受操作导致记忆字段变化时必须 debounce 后写回，不得每个按键事件立即写入持久化后端。
 - EEPROM 读写失败不得阻断 heater/fan 保护逻辑；但必须进入 `EEPROM_REQUIRED`，锁定 heater、calibration、Wi-Fi 持久化、preset 与其他依赖持久化正确性的操作，并明确显示故障。不得以任何 MCU 存储作为替代。
+- 每次持久化提交失败必须保留 `code`、`phase`、`attempt`、`sequence`、目标 `slot` 和脱敏 `message`；最终失败必须把 RAM `MemoryConfig` 和前面板值恢复到最后一次成功持久化的完整配置，并继续保持 heater 与持久化操作锁定。
+- 持久化故障必须通过串口打印 `PERSISTENCE_COMMIT_ATTEMPT_FAILED`（每次尝试）和 `PERSISTENCE_COMMIT_FAILED`（终态）暴露相同的分类元数据；不得输出 EEPROM 原始字节、Wi-Fi 密码或其它敏感配置。
 - M24C64 与 FUSB302B 共用 `GPIO8/9` 时，record 写入和成功后的 EEPROM 验证必须以不超过 `16 bytes` 的 bounded chunk 执行；每个 EEPROM write-cycle delay 或验证 chunk 后必须先释放 EEPROM adapter 并服务 PD，再开始下一段。EEPROM 成功即完成本次持久化，不得同步 mirror 到任何 MCU 存储。
 - 日志不得输出 Wi-Fi 密码明文。
 - EEPROM 含有非 `0xFF` 数据但所有受支持槽都无法解码、CRC/结构无效或格式版本高于当前固件时，固件必须锁定 heater、PPS 与 calibration，并在前面板固定显示 `EEPROM DATA`、`INCOMPATIBLE`、`HEATER LOCKED`。全 `0xFF` EEPROM 视为空白，不显示该场景。
@@ -75,6 +77,7 @@
   - 前面板已接受交互完成后，从 UI 状态生成下一份 `MemoryConfig`。
   - 若配置相对上一份有变化，设置约 `2s` 写回 deadline。
 - deadline 到期后写入下一 record sequence 对应的槽；每页 EEPROM 写和验证 chunk 后先服务共享总线上的 PD，再进入下一段。EEPROM 不可用、写入失败或验证失败时进入 `EEPROM_REQUIRED`，不得重新路由到 MCU 存储。
+- 提交失败时状态接口公开 `persistenceFault` 与 `persistenceFaultAttentionPending`，安装状态公开 `lastPersistenceFault`；`recordState` 使用 `valid|blank|corrupt|incompatible|unavailable`，不可使用 `eeprom_required` 作为记录状态。
 - Wi-Fi 字段：
   - `ssid`、`password`、`telemetryIntervalMs` 进入持久化模型；自动重连是固件固定策略，不属于用户配置。
   - 旧版本的 `wifi_auto_reconnect` TLV 继续读取以兼容已有记录，但加载与 sanitize 时始终归一化为 `true`。

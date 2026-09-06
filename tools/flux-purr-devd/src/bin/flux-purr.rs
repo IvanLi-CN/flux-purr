@@ -2367,6 +2367,24 @@ fn developer_backup_directory() -> Result<PathBuf, Box<dyn std::error::Error + S
 }
 
 fn read_eeprom_snapshot(port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    match read_eeprom_snapshot_protocol(port) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) if snapshot_protocol_compatibility_fallback(error.as_ref()) => {
+            read_legacy_eeprom_snapshot(port)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn snapshot_protocol_compatibility_fallback(error: &dyn std::error::Error) -> bool {
+    error
+        .to_string()
+        .contains("none matched the EEPROM snapshot request")
+}
+
+fn read_eeprom_snapshot_protocol(
+    port: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     const SNAPSHOT_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
     let mut serial = serialport::new(port, 115_200)
         .timeout(Duration::from_secs(2))
@@ -2417,6 +2435,52 @@ fn read_eeprom_snapshot(port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error
         return Err("EEPROM snapshot hash verification failed".into());
     }
     Ok(snapshot)
+}
+
+fn read_legacy_eeprom_snapshot(
+    port: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    const LEGACY_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+    let mut serial = serialport::new(port, 115_200)
+        .timeout(Duration::from_secs(2))
+        .open()?;
+    let deadline = StdInstant::now() + LEGACY_SESSION_TIMEOUT;
+    let session_id = format!("eeprom-legacy-{}", current_unix_millis());
+    let mut image = Vec::with_capacity(EEPROM_CAPACITY_BYTES);
+
+    for offset in (0..EEPROM_CAPACITY_BYTES as u32).step_by(EEPROM_CHUNK_BYTES) {
+        let length = (EEPROM_CAPACITY_BYTES - offset as usize).min(EEPROM_CHUNK_BYTES);
+        let request = json!({
+            "type": "eeprom_maintenance",
+            "requestId": session_id.clone(),
+            "op": "read",
+            "offset": offset,
+            "length": length,
+        });
+        write_snapshot_request(&mut *serial, &request)?;
+        let response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
+        let bytes = response
+            .get("result")
+            .and_then(|result| result.get("eeprom_bytes"))
+            .and_then(Value::as_array)
+            .ok_or("legacy EEPROM response did not include bytes")?;
+        if bytes.len() != length {
+            return Err(format!(
+                "legacy EEPROM read returned {} bytes, expected {length}",
+                bytes.len()
+            )
+            .into());
+        }
+        for byte in bytes {
+            let value = byte
+                .as_u64()
+                .and_then(|value| u8::try_from(value).ok())
+                .ok_or("legacy EEPROM response contained a non-octet")?;
+            image.push(value);
+        }
+    }
+
+    Ok(image)
 }
 
 fn write_snapshot_request(
