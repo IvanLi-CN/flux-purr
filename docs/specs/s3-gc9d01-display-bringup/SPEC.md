@@ -1,21 +1,23 @@
 # Flux Purr S3 GC9D01 显示 bring-up 与启动后界面轮播
 
-## 背景 / 问题陈述
+## Context and Scope
+
+### 背景 / 问题陈述
 
 - 当前仓库的 `ESP32-S3` 固件入口只覆盖风扇 bring-up，LCD 相关引脚虽已冻结，但没有可烧录的显示驱动实现。
 - 主人已经明确要求使用 `gc9d01-rs` 作为显示驱动，并且硬约束必须走 **异步 SPI**，不能用 blocking SPI 兜底。
 - 若没有统一的显示测试界面、host 侧可控预览图，以及上板后用于拍照校验方向/颜色的流程，就无法可靠完成面板方向、偏移和颜色口径的闭环。
 - 本 spec 完成时曾以“启动校准后进入界面轮播”作为 bring-up 验收；当前分支的运行态行为已迁移到 `frontpanel-input-interaction`。
 
-## 目标 / 非目标
+### 目标 / 非目标
 
-## 继承 / supersession 说明
+#### 继承 / supersession 说明
 
 - 本 spec 继续保留 `GC9D01 + panel_160x50 + host preview` 的显示 bring-up 基线。当前 `esp-rtos` 运行态使用异步 SPI；GC9D01 规定的面板延时必须在异步操作完成前真实等待。
 - 启动后轮播、五向输入、Key Test 与 mock-only safe-off runtime 行为，现已由 `frontpanel-input-interaction` 接管。
 - 若本 spec 与 `frontpanel-input-interaction` 在运行态行为上冲突，以 `frontpanel-input-interaction` 为准。
 
-### Goals
+#### Goals
 
 - 复用 `esp32s3-fan-cycle` binary 名称与 `mcu-agentd` artifact 路径，改造成 `ESP32-S3` 的 GC9D01 显示 bring-up 入口。
 - 接入 `gc9d01-rs` driver，使用 `Embassy + esp-rtos + SPI2` 完成面板初始化与刷屏。
@@ -23,20 +25,16 @@
 - 新增 host-side preview harness，复用同一套渲染代码导出 `framebuffer.bin` 与 `preview.png`。
 - 保持 host 侧质量门和 Xtensa 构建口径可运行，并通过 `mcu-agentd` 完成烧录/监看流程。
 
-### Non-goals
+#### Non-goals
 
 - 不定义后续前面板输入状态机、Key Test 或 mock-only safe-off 输出行为；这些运行态约束由 `frontpanel-input-interaction` 负责。
 - 不接入触摸、按键驱动的真实菜单状态机、动画切换或实时业务状态绑定。
 - 不修改 Web 控制台、HTTP API、CH224Q / heater / RTD 等其它硬件驱动。
 - 不在本轮实现自动持久化“校准已完成”状态。
 
-## Related ADRs
+### 范围（Scope）
 
-None
-
-## 范围（Scope）
-
-### In scope
+#### In scope
 
 - `docs/specs/s3-gc9d01-display-bringup/SPEC.md` 与 `docs/specs/README.md`
 - `firmware/Cargo.toml` 的显示/异步运行时依赖
@@ -46,38 +44,42 @@ None
 - `firmware/README.md`、必要的根 README 口径同步
 - `docs/specs/s3-gc9d01-display-bringup/assets/` 下的视觉证据
 
-### Out of scope
+#### Out of scope
 
 - 量产级 UI 设计冻结
 - 真实业务数据绑定
 - 方向校准后的二次硬件改线或额外外设支持
 
-## 需求（Requirements）
+## Related ADRs
+
+None
+
+## Requirements
 
 ### MUST
 
-- 显示驱动固定使用 `gc9d01-rs` 的 `panel_160x50` profile。
-- 当前 `esp-rtos` 设备端 SPI 使用异步模式，面板传输和计时让出 Embassy executor；不得用 blocking SPI 兜底。
-- 面板硬复位、Sleep-Out 与 Display-On 的规定延时必须在异步驱动操作完成前真实等待；不得丢弃或伪造未被轮询的 timer future。
-- 板级显示引脚固定为：`DC=GPIO10`、`MOSI=GPIO11`、`SCLK=GPIO12`、`BLK=GPIO13`、`RES=GPIO14`、`CS=GPIO15`。
-- 首轮面板 profile 按 `panel_160x50`、`width=160`、`height=50`、`dx=15`、`dy=0`、初始 `Orientation::Landscape` 实现。
-- 静态校准屏必须至少包含：方向/边缘标识、彩色块、灰阶块、面板/分辨率文字。
-- 正常 App 启动必须先显示正式 splash：使用从 `web/public/brand/flux-purr-logo-dark.png` 裁切缩采样的 Flux Purr 官方标记、面板专用的 path-only `FLUX PURR` 字标，以及由固件 build-time version source 提供的版本文本。该派生字标将白色主水平与垂直笔画定义在整数坐标、固定为 `2px`；`F` 的左上外圆角、`L` 的内凹与外凸下转角，以及 `X` 的斜线由 SVG 路径栅格化并保留抗锯齿过渡。生成器按 SVG alpha 覆盖率量化：`>=50%` 为机身白、`19%..49%` 为蓝灰抗锯齿、其余为背景。附加说明文字不得进入启动屏。启动画面是受版本控制的 `160x50` RGB565 模板位图；运行时不得以通用字体或图元 API 近似重绘 Logo 或项目名，也不得依赖模型生成的文字或运行时外部资产。
-- `FLUX PURR` 主字标必须以 `108×12` 个逻辑像素显示；其主笔画固定为 `2px`，字距、曲线与斜线按面板物理网格作光学校正。不得替换为通用字体或运行时文字渲染。
-- `FLUX PURR` 主字标的实际可见宽度为 `108` 个逻辑像素；版本行必须以主字标视觉中心 `x=99` 对齐，而不是以整个 `160px` 画布中心对齐。
-- 官方 Logo、项目名和版本号必须组成一个垂直居中的整体：Logo 位于 `x=8,y=11`、尺寸为 `30×28`，项目名位于 `x=45,y=13`，版本行位于项目名正下方的 `x=55,y=30`。Logo 与“项目名 + 版本号”文本组具有相同的垂直中心，整体占用逻辑行 `y=11..38`，使 `160x50` 画布的顶部和底部各保留 `11` 个逻辑像素的留白。
-- splash 的最终帧必须严格使用四种颜色：背景 `#08111F`、机身/项目名 `#F7FBFF`、热区 `#FF5542`、版本与抗锯齿细节 `#8999AD`。版本文本必须使用 `4×7` 像素位图，以项目名视觉中心 `x=99` 对齐并叠加到 `y=30`；正常开发构建的 18 字符 build identity 完整显示。该启动屏字形独立于运行态界面，既有 `3×5` 文本调用点不属于本项变更。
-- splash 仅覆盖 App 的启动早期；后续首次 runtime Dashboard 刷新自然替换它。不得为 splash 增加阻塞安全初始化的固定等待。Key Test 启动继续显示静态校准屏。
-- bring-up 阶段必须支持：`静态校准屏 -> 前面板显示基线`。
-- 当前 display baseline 只负责证明驱动、方向、偏移、host preview 与 on-device 渲染一致；后续运行态是否轮播、是否 safe-off，由 `frontpanel-input-interaction` 冻结。
-- host preview 必须复用同一套场景渲染代码，并产出 `framebuffer.bin` 与 `preview.png`。
-- 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
+- REQ-DISPLAY-001: 显示驱动固定使用 `gc9d01-rs` 的 `panel_160x50` profile。
+- REQ-DISPLAY-002: 当前 `esp-rtos` 设备端 SPI 使用异步模式，面板传输和计时让出 Embassy executor；不得用 blocking SPI 兜底。
+- REQ-DISPLAY-003: 面板硬复位、Sleep-Out 与 Display-On 的规定延时必须在异步驱动操作完成前真实等待；不得丢弃或伪造未被轮询的 timer future。
+- REQ-DISPLAY-004: 板级显示引脚固定为：`DC=GPIO10`、`MOSI=GPIO11`、`SCLK=GPIO12`、`BLK=GPIO13`、`RES=GPIO14`、`CS=GPIO15`。
+- REQ-DISPLAY-005: 首轮面板 profile 按 `panel_160x50`、`width=160`、`height=50`、`dx=15`、`dy=0`、初始 `Orientation::Landscape` 实现。
+- REQ-DISPLAY-006: 静态校准屏必须至少包含：方向/边缘标识、彩色块、灰阶块、面板/分辨率文字。
+- REQ-DISPLAY-007: 正常 App 启动必须先显示正式 splash：使用从 `web/public/brand/flux-purr-logo-dark.png` 裁切缩采样的 Flux Purr 官方标记、面板专用的 path-only `FLUX PURR` 字标，以及由固件 build-time version source 提供的版本文本。该派生字标将白色主水平与垂直笔画定义在整数坐标、固定为 `2px`；`F` 的左上外圆角、`L` 的内凹与外凸下转角，以及 `X` 的斜线由 SVG 路径栅格化并保留抗锯齿过渡。生成器按 SVG alpha 覆盖率量化：`>=50%` 为机身白、`19%..49%` 为蓝灰抗锯齿、其余为背景。附加说明文字不得进入启动屏。启动画面是受版本控制的 `160x50` RGB565 模板位图；运行时不得以通用字体或图元 API 近似重绘 Logo 或项目名，也不得依赖模型生成的文字或运行时外部资产。
+- REQ-DISPLAY-008: `FLUX PURR` 主字标必须以 `108×12` 个逻辑像素显示；其主笔画固定为 `2px`，字距、曲线与斜线按面板物理网格作光学校正。不得替换为通用字体或运行时文字渲染。
+- REQ-DISPLAY-009: `FLUX PURR` 主字标的实际可见宽度为 `108` 个逻辑像素；版本行必须以主字标视觉中心 `x=99` 对齐，而不是以整个 `160px` 画布中心对齐。
+- REQ-DISPLAY-010: 官方 Logo、项目名和版本号必须组成一个垂直居中的整体：Logo 位于 `x=8,y=11`、尺寸为 `30×28`，项目名位于 `x=45,y=13`，版本行位于项目名正下方的 `x=55,y=30`。Logo 与“项目名 + 版本号”文本组具有相同的垂直中心，整体占用逻辑行 `y=11..38`，使 `160x50` 画布的顶部和底部各保留 `11` 个逻辑像素的留白。
+- REQ-DISPLAY-011: splash 的最终帧必须严格使用四种颜色：背景 `#08111F`、机身/项目名 `#F7FBFF`、热区 `#FF5542`、版本与抗锯齿细节 `#8999AD`。版本文本必须使用 `4×7` 像素位图，以项目名视觉中心 `x=99` 对齐并叠加到 `y=30`；正常开发构建的 18 字符 build identity 完整显示。该启动屏字形独立于运行态界面，既有 `3×5` 文本调用点不属于本项变更。
+- REQ-DISPLAY-012: splash 仅覆盖 App 的启动早期；后续首次 runtime Dashboard 刷新自然替换它。不得为 splash 增加阻塞安全初始化的固定等待。Key Test 启动继续显示静态校准屏。
+- REQ-DISPLAY-013: bring-up 阶段必须支持：`静态校准屏 -> 前面板显示基线`。
+- REQ-DISPLAY-014: 当前 display baseline 只负责证明驱动、方向、偏移、host preview 与 on-device 渲染一致；后续运行态是否轮播、是否 safe-off，由 `frontpanel-input-interaction` 冻结。
+- REQ-DISPLAY-015: host preview 必须复用同一套场景渲染代码，并产出 `framebuffer.bin` 与 `preview.png`。
+- REQ-DISPLAY-016: 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
 
 ### SHOULD
 
-- demo 序列尽量复用上游 `gc9d01-rs` embedded-graphics 示例里的典型图案（纯色、棋盘格、形状、文字、网格等）。
-- host preview 输出应默认落到 spec 资产目录，便于在 `SPEC.md` 中作为视觉证据引用。
-- 设备端日志应输出当前场景、方向配置与 profile 口径，便于 monitor 时定位问题。
+- REQ-DISPLAY-017: demo 序列尽量复用上游 `gc9d01-rs` embedded-graphics 示例里的典型图案（纯色、棋盘格、形状、文字、网格等）。
+- REQ-DISPLAY-018: host preview 输出应默认落到 spec 资产目录，便于在 `SPEC.md` 中作为视觉证据引用。
+- REQ-DISPLAY-019: 设备端日志应输出当前场景、方向配置与 profile 口径，便于 monitor 时定位问题。
 
 ## 功能与行为规格（Functional / Behavior Spec）
 
@@ -110,14 +112,14 @@ None
 
 None
 
-## 验收标准（Acceptance Criteria）
+## Verification
 
-- Given host preview harness，When 生成启动屏 framebuffer 与 PNG，Then 预览图能显示方向标识、RGB 色块、灰阶块和文字标签。
-- Given device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release` 成功。
-- Given host 质量门，When 运行 `cargo test`、`cargo clippy --all-targets --all-features -D warnings`、`cargo build --release`，Then 全部通过。
-- Given bring-up 验证版固件，When 固件启动，Then 能先显示静态校准屏，再进入前面板显示基线画面。
-- Given 主人提供实拍照片，When 对比 host preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
-- Given 后续运行态规格需要交互或 safe-off 约束，When 查询本仓库 spec，Then 以 `frontpanel-input-interaction` 为真相源，而不是回退到本 spec 的历史轮播描述。
+- VER-DISPLAY-001 (covers: REQ-DISPLAY-005, REQ-DISPLAY-006, REQ-DISPLAY-007, REQ-DISPLAY-008, REQ-DISPLAY-009, REQ-DISPLAY-010, REQ-DISPLAY-011, REQ-DISPLAY-015, REQ-DISPLAY-017, REQ-DISPLAY-018): Given host preview harness，When 生成启动屏、校准屏与 demo 场景的 framebuffer 与 PNG，Then 预览图能显示方向标识、RGB 色块、灰阶块和文字标签。
+- VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004): Given device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release` 成功。
+- VER-DISPLAY-003 (covers: REQ-DISPLAY-014): Given host 质量门，When 运行 `cargo test`、`cargo clippy --all-targets --all-features -D warnings`、`cargo build --release`，Then 全部通过。
+- VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 能先显示静态校准屏，再进入前面板显示基线画面，并报告当前场景、方向配置与 profile。
+- VER-DISPLAY-005 (covers: REQ-DISPLAY-016): Given 主人提供实拍照片，When 对比 host preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
+- VER-DISPLAY-006: Given 后续运行态规格需要交互或 safe-off 约束，When 查询本仓库 spec，Then 以 `frontpanel-input-interaction` 为真相源，而不是回退到本 spec 的历史轮播描述。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
