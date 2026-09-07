@@ -8,6 +8,10 @@ const devdEnabled = process.env.E2E_DISABLE_DEVD === '1' ? '0' : '1'
 export default defineConfig({
   testDir: './e2e',
   testIgnore: 'public-demo.spec.ts',
+  // Vite can still be transforming the first route module after its HTTP server is ready.
+  expect: {
+    timeout: 10_000,
+  },
   use: {
     baseURL: `http://127.0.0.1:${webPort}`,
   },
