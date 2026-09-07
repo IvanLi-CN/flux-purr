@@ -34,7 +34,18 @@ pub const DISPLAY_PANEL_CONFIG: PanelConfig = PanelConfig {
 };
 
 pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationThenFrontPanelLoop;
-pub const STARTUP_SCENE_SLUG: &str = "startup";
+pub const STARTUP_SCENE_SLUG: &str = "startup-splash";
+const STARTUP_SPLASH_VERSION: &str = env!("FLUX_PURR_FW_VERSION");
+const STARTUP_SPLASH_VERSION_COLOR: Rgb565 = Rgb565::new(17, 38, 21);
+const STARTUP_SPLASH_WORDMARK_CENTER_X: i32 = 99;
+const STARTUP_SPLASH_VERSION_BASELINE_Y: i32 = 30;
+#[cfg(test)]
+const STARTUP_SPLASH_PALETTE: [Rgb565; 4] = [
+    Rgb565::new(1, 4, 3),
+    Rgb565::new(30, 62, 31),
+    Rgb565::new(31, 21, 8),
+    STARTUP_SPLASH_VERSION_COLOR,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceBootFlow {
@@ -46,6 +57,7 @@ pub enum DeviceBootFlow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SceneId {
+    StartupSplash,
     StartupCalibration,
     DemoSolidRed,
     DemoSolidGreen,
@@ -72,7 +84,8 @@ pub enum SceneId {
 impl SceneId {
     pub const fn slug(self) -> &'static str {
         match self {
-            Self::StartupCalibration => "startup",
+            Self::StartupSplash => "startup-splash",
+            Self::StartupCalibration => "startup-calibration",
             Self::DemoSolidRed => "demo-solid-red",
             Self::DemoSolidGreen => "demo-solid-green",
             Self::DemoSolidBlue => "demo-solid-blue",
@@ -98,6 +111,7 @@ impl SceneId {
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::StartupSplash => "startup splash",
             Self::StartupCalibration => "startup calibration",
             Self::DemoSolidRed => "solid red",
             Self::DemoSolidGreen => "solid green",
@@ -124,7 +138,7 @@ impl SceneId {
 
     pub const fn dwell_millis(self) -> u64 {
         match self {
-            Self::StartupCalibration => 0,
+            Self::StartupSplash | Self::StartupCalibration => 0,
             Self::DemoSolidRed | Self::DemoSolidGreen | Self::DemoSolidBlue => 450,
             Self::DemoCheckerWide | Self::DemoCheckerFine => 550,
             Self::DemoShapes
@@ -147,7 +161,8 @@ impl SceneId {
 
     pub fn from_slug(slug: &str) -> Option<Self> {
         match slug {
-            "startup" | "startup-calibration" => Some(Self::StartupCalibration),
+            "startup" | "startup-splash" => Some(Self::StartupSplash),
+            "startup-calibration" => Some(Self::StartupCalibration),
             "demo-solid-red" | "solid-red" => Some(Self::DemoSolidRed),
             "demo-solid-green" | "solid-green" => Some(Self::DemoSolidGreen),
             "demo-solid-blue" | "solid-blue" => Some(Self::DemoSolidBlue),
@@ -333,6 +348,7 @@ pub fn render_scene(scene: SceneId, canvas: &mut DisplayCanvas) {
     canvas.clear(Rgb565::BLACK).ok();
 
     match scene {
+        SceneId::StartupSplash => render_startup_splash(canvas),
         SceneId::StartupCalibration => render_startup_calibration(canvas),
         SceneId::DemoSolidRed => {
             canvas.clear(Rgb565::RED).ok();
@@ -350,31 +366,31 @@ pub fn render_scene(scene: SceneId, canvas: &mut DisplayCanvas) {
         SceneId::DemoText => render_text(canvas),
         SceneId::DemoTriangles => render_triangles(canvas),
         SceneId::DemoGrid => render_grid(canvas),
-        SceneId::FrontPanelHome => render_frontpanel_asset(canvas, FRONTPANEL_HOME_FRAME),
+        SceneId::FrontPanelHome => render_rgb565le_asset(canvas, FRONTPANEL_HOME_FRAME),
         SceneId::FrontPanelPreferencesPresetTemp => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_PRESET_TEMP_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PREFERENCES_PRESET_TEMP_FRAME)
         }
         SceneId::FrontPanelPreferencesActiveCooling => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_ACTIVE_COOLING_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PREFERENCES_ACTIVE_COOLING_FRAME)
         }
         SceneId::FrontPanelPreferencesWifiInfo => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_WIFI_INFO_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PREFERENCES_WIFI_INFO_FRAME)
         }
         SceneId::FrontPanelPreferencesDeviceInfo => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_DEVICE_INFO_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PREFERENCES_DEVICE_INFO_FRAME)
         }
         SceneId::FrontPanelPresetTemp => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PRESET_TEMP_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PRESET_TEMP_FRAME)
         }
         SceneId::FrontPanelPresetTempDisabled => {
-            render_frontpanel_asset(canvas, FRONTPANEL_PRESET_TEMP_DISABLED_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_PRESET_TEMP_DISABLED_FRAME)
         }
         SceneId::FrontPanelActiveCooling => {
-            render_frontpanel_asset(canvas, FRONTPANEL_ACTIVE_COOLING_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_ACTIVE_COOLING_FRAME)
         }
-        SceneId::FrontPanelWifiInfo => render_frontpanel_asset(canvas, FRONTPANEL_WIFI_INFO_FRAME),
+        SceneId::FrontPanelWifiInfo => render_rgb565le_asset(canvas, FRONTPANEL_WIFI_INFO_FRAME),
         SceneId::FrontPanelDeviceInfo => {
-            render_frontpanel_asset(canvas, FRONTPANEL_DEVICE_INFO_FRAME)
+            render_rgb565le_asset(canvas, FRONTPANEL_DEVICE_INFO_FRAME)
         }
     }
 }
@@ -424,10 +440,69 @@ const FRONTPANEL_DEVICE_INFO_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] = include_b
     env!("CARGO_MANIFEST_DIR"),
     "/assets/frontpanel-carousel/device-info.rgb565le.bin"
 ));
+const STARTUP_SPLASH_TEMPLATE_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/startup-splash/template.rgb565le.bin"
+));
 
-fn render_frontpanel_asset(canvas: &mut DisplayCanvas, frame: &[u8; DISPLAY_FRAMEBUFFER_BYTES]) {
+fn render_rgb565le_asset(canvas: &mut DisplayCanvas, frame: &[u8; DISPLAY_FRAMEBUFFER_BYTES]) {
     for (pixel, bytes) in canvas.pixels_mut().iter_mut().zip(frame.chunks_exact(2)) {
         *pixel = RawU16::new(u16::from_le_bytes([bytes[0], bytes[1]])).into();
+    }
+}
+
+fn render_startup_splash(canvas: &mut DisplayCanvas) {
+    render_rgb565le_asset(canvas, STARTUP_SPLASH_TEMPLATE_FRAME);
+    draw_startup_splash_version(canvas, STARTUP_SPLASH_VERSION);
+}
+
+fn startup_version_glyph(character: u8) -> [u8; 7] {
+    match character {
+        b'.' => [0b0000, 0b0000, 0b0000, 0b0000, 0b0000, 0b0000, 0b0010],
+        b'-' => [0b0000, 0b0000, 0b0000, 0b1111, 0b0000, 0b0000, 0b0000],
+        b'0' => [0b0110, 0b1001, 0b1001, 0b1001, 0b1001, 0b1001, 0b0110],
+        b'1' => [0b0010, 0b0110, 0b0010, 0b0010, 0b0010, 0b0010, 0b0111],
+        b'2' => [0b0110, 0b1001, 0b0001, 0b0010, 0b0100, 0b1000, 0b1111],
+        b'3' => [0b0110, 0b1001, 0b0001, 0b0010, 0b0001, 0b1001, 0b0110],
+        b'4' => [0b0001, 0b0011, 0b0101, 0b1001, 0b1111, 0b0001, 0b0001],
+        b'5' => [0b1111, 0b1000, 0b1110, 0b0001, 0b0001, 0b1001, 0b0110],
+        b'6' => [0b0110, 0b1000, 0b1110, 0b1001, 0b1001, 0b1001, 0b0110],
+        b'7' => [0b1111, 0b0001, 0b0010, 0b0010, 0b0100, 0b0100, 0b0100],
+        b'8' => [0b0110, 0b1001, 0b1001, 0b0110, 0b1001, 0b1001, 0b0110],
+        b'9' => [0b0110, 0b1001, 0b1001, 0b0111, 0b0001, 0b0001, 0b0110],
+        b'a' => [0b0000, 0b0110, 0b0001, 0b0111, 0b1001, 0b1001, 0b0111],
+        b'b' => [0b1000, 0b1000, 0b1110, 0b1001, 0b1001, 0b1001, 0b1110],
+        b'c' => [0b0000, 0b0110, 0b1001, 0b1000, 0b1000, 0b1001, 0b0110],
+        b'd' => [0b0001, 0b0001, 0b0111, 0b1001, 0b1001, 0b1001, 0b0111],
+        b'e' => [0b0000, 0b0110, 0b1001, 0b1111, 0b1000, 0b1001, 0b0110],
+        b'f' => [0b0011, 0b0100, 0b1110, 0b0100, 0b0100, 0b0100, 0b0100],
+        b'r' => [0b0000, 0b1010, 0b1101, 0b1000, 0b1000, 0b1000, 0b1000],
+        b'v' => [0b0000, 0b1001, 0b1001, 0b1001, 0b1001, 0b0101, 0b0010],
+        _ => [0b1111, 0b0001, 0b0010, 0b0000, 0b0010, 0b0000, 0b0010],
+    }
+}
+
+fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str) {
+    const GLYPH_WIDTH: i32 = 4;
+    const LETTER_SPACING: i32 = 1;
+    const MAX_VISIBLE_CHARACTERS: usize = 18;
+
+    let version = &version.as_bytes()[..version.len().min(MAX_VISIBLE_CHARACTERS)];
+    let width = version.len() as i32 * (GLYPH_WIDTH + LETTER_SPACING) - LETTER_SPACING;
+    let start_x = STARTUP_SPLASH_WORDMARK_CENTER_X - width / 2;
+
+    for (character_index, character) in version.iter().copied().enumerate() {
+        for (row, bits) in startup_version_glyph(character).into_iter().enumerate() {
+            for column in 0..GLYPH_WIDTH {
+                if bits & (1 << (GLYPH_WIDTH - 1 - column)) == 0 {
+                    continue;
+                }
+                let x = start_x + character_index as i32 * (GLYPH_WIDTH + LETTER_SPACING) + column;
+                let y = STARTUP_SPLASH_VERSION_BASELINE_Y + row as i32;
+                canvas.pixels_mut()[y as usize * DISPLAY_WIDTH_USIZE + x as usize] =
+                    STARTUP_SPLASH_VERSION_COLOR;
+            }
+        }
     }
 }
 
@@ -722,9 +797,136 @@ mod tests {
     }
 
     #[test]
+    fn startup_splash_renders_brand_mark_wordmark_and_build_version() {
+        let mut canvas = DisplayCanvas::new();
+        render_scene(SceneId::StartupSplash, &mut canvas);
+
+        assert_eq!(canvas.pixels()[0], STARTUP_SPLASH_PALETTE[0]);
+        let logo_pixels =
+            &canvas.pixels()[11 * DISPLAY_WIDTH_USIZE + 8..39 * DISPLAY_WIDTH_USIZE + 38];
+        assert!(logo_pixels.contains(&STARTUP_SPLASH_PALETTE[2]));
+        let wordmark_pixels =
+            &canvas.pixels()[13 * DISPLAY_WIDTH_USIZE + 45..25 * DISPLAY_WIDTH_USIZE + 153];
+        assert!(wordmark_pixels.contains(&STARTUP_SPLASH_PALETTE[1]));
+        assert!(wordmark_pixels.contains(&STARTUP_SPLASH_VERSION_COLOR));
+        for row in 3..12 {
+            assert_eq!(
+                canvas.pixels()[(13 + row) * DISPLAY_WIDTH_USIZE + 45],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+            assert_eq!(
+                canvas.pixels()[(13 + row) * DISPLAY_WIDTH_USIZE + 46],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+        }
+        assert_eq!(
+            canvas.pixels()[16 * DISPLAY_WIDTH_USIZE + 47],
+            STARTUP_SPLASH_PALETTE[0]
+        );
+        for row in 0..10 {
+            assert_eq!(
+                canvas.pixels()[(13 + row) * DISPLAY_WIDTH_USIZE + 58],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+            assert_eq!(
+                canvas.pixels()[(13 + row) * DISPLAY_WIDTH_USIZE + 59],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+        }
+        for column in 62..68 {
+            assert_eq!(
+                canvas.pixels()[23 * DISPLAY_WIDTH_USIZE + column],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+            assert_eq!(
+                canvas.pixels()[24 * DISPLAY_WIDTH_USIZE + column],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+        }
+        assert_eq!(
+            canvas.pixels()[21 * DISPLAY_WIDTH_USIZE + 60],
+            STARTUP_SPLASH_VERSION_COLOR
+        );
+        assert_eq!(
+            canvas.pixels()[21 * DISPLAY_WIDTH_USIZE + 61],
+            STARTUP_SPLASH_PALETTE[0]
+        );
+        assert_eq!(
+            canvas.pixels()[22 * DISPLAY_WIDTH_USIZE + 60],
+            STARTUP_SPLASH_PALETTE[1]
+        );
+        assert_eq!(
+            canvas.pixels()[22 * DISPLAY_WIDTH_USIZE + 61],
+            STARTUP_SPLASH_VERSION_COLOR
+        );
+        assert_eq!(
+            canvas.pixels()[24 * DISPLAY_WIDTH_USIZE + 58],
+            STARTUP_SPLASH_VERSION_COLOR
+        );
+        assert_eq!(STARTUP_SPLASH_VERSION, env!("FLUX_PURR_FW_VERSION"));
+        let version_width = STARTUP_SPLASH_VERSION.len().min(18) as i32 * 5 - 1;
+        let version_start_x = STARTUP_SPLASH_WORDMARK_CENTER_X - version_width / 2;
+        let (first_lit_row, first_lit_column) =
+            startup_version_glyph(STARTUP_SPLASH_VERSION.as_bytes()[0])
+                .iter()
+                .enumerate()
+                .find_map(|(row, bits)| {
+                    (0..4)
+                        .find(|column| bits & (1 << (3 - column)) != 0)
+                        .map(|column| (row, column))
+                })
+                .expect("version glyph should contain a lit pixel");
+        assert_eq!(
+            canvas.pixels()[(STARTUP_SPLASH_VERSION_BASELINE_Y as usize + first_lit_row)
+                * DISPLAY_WIDTH_USIZE
+                + (version_start_x + first_lit_column) as usize],
+            STARTUP_SPLASH_VERSION_COLOR
+        );
+        let visible_rows = canvas
+            .pixels()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pixel)| {
+                (*pixel != STARTUP_SPLASH_PALETTE[0]).then_some(index / DISPLAY_WIDTH_USIZE)
+            })
+            .collect::<std::vec::Vec<_>>();
+        assert_eq!(visible_rows.first().copied(), Some(11));
+        assert_eq!(visible_rows.last().copied(), Some(38));
+        assert!(
+            canvas.pixels()[STARTUP_SPLASH_VERSION_BASELINE_Y as usize * DISPLAY_WIDTH_USIZE..]
+                .contains(&STARTUP_SPLASH_VERSION_COLOR)
+        );
+        assert!(
+            canvas
+                .pixels()
+                .iter()
+                .all(|pixel| STARTUP_SPLASH_PALETTE.contains(pixel))
+        );
+    }
+
+    #[test]
+    fn startup_splash_version_uses_four_by_seven_bitmap_font() {
+        let mut canvas = DisplayCanvas::new();
+        canvas.clear(STARTUP_SPLASH_PALETTE[0]).ok();
+        draw_startup_splash_version(&mut canvas, "0");
+        let first_lit_column = STARTUP_SPLASH_WORDMARK_CENTER_X - 4 / 2 + 1;
+
+        assert_eq!(
+            canvas.pixels()[STARTUP_SPLASH_VERSION_BASELINE_Y as usize * DISPLAY_WIDTH_USIZE
+                + first_lit_column as usize],
+            STARTUP_SPLASH_VERSION_COLOR
+        );
+        assert_eq!(
+            canvas.pixels()[(STARTUP_SPLASH_VERSION_BASELINE_Y as usize + 6) * DISPLAY_WIDTH_USIZE
+                + first_lit_column as usize],
+            STARTUP_SPLASH_VERSION_COLOR
+        );
+    }
+
+    #[test]
     fn startup_scene_can_be_serialized_as_rgb565_le() {
         let mut canvas = DisplayCanvas::new();
-        render_scene(SceneId::StartupCalibration, &mut canvas);
+        render_scene(SceneId::StartupSplash, &mut canvas);
         let mut bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
         canvas.write_rgb565_le_bytes(&mut bytes);
         assert_eq!(bytes.len(), DISPLAY_FRAMEBUFFER_BYTES);
@@ -806,6 +1008,7 @@ mod tests {
 
     #[test]
     fn demo_sequence_does_not_include_startup_scene() {
+        assert!(!DEMO_SEQUENCE.contains(&SceneId::StartupSplash));
         assert!(!DEMO_SEQUENCE.contains(&SceneId::StartupCalibration));
         assert_eq!(DEMO_SEQUENCE[0], SceneId::DemoSolidRed);
         assert_eq!(DEMO_SEQUENCE[DEMO_SEQUENCE.len() - 1], SceneId::DemoGrid);
@@ -813,8 +1016,9 @@ mod tests {
 
     #[test]
     fn scene_slug_lookup_handles_aliases() {
+        assert_eq!(SceneId::from_slug("startup"), Some(SceneId::StartupSplash));
         assert_eq!(
-            SceneId::from_slug("startup"),
+            SceneId::from_slug("startup-calibration"),
             Some(SceneId::StartupCalibration)
         );
         assert_eq!(SceneId::from_slug("grid"), Some(SceneId::DemoGrid));
