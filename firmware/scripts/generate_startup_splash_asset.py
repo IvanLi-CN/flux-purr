@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageChops
 
 DISPLAY_SIZE = (160, 50)
-LOGO_POSITION = (8, 8)
-WORDMARK_POSITION = (60, 10)
+LOGO_POSITION = (8, 11)
+LOGO_SIZE = (30, 28)
 BACKGROUND = (8, 17, 31)
 CHASSIS = (247, 251, 255)
 HEAT = (255, 85, 66)
@@ -18,17 +21,13 @@ VERSION = (137, 153, 173)
 PALETTE = (BACKGROUND, CHASSIS, HEAT, VERSION)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOGO_SOURCE = REPO_ROOT / "web/public/brand/flux-purr-logo-dark.png"
+WORDMARK_SOURCE = REPO_ROOT / "firmware/assets/startup-splash/flux-purr-wordmark-display.svg"
 PNG_OUTPUT = REPO_ROOT / "docs/specs/s3-gc9d01-display-bringup/assets/startup-splash-template.png"
 RGB565_OUTPUT = REPO_ROOT / "firmware/assets/startup-splash/template.rgb565le.bin"
-
-WORDMARK: dict[str, tuple[str, ...]] = {
-    "F": ("1111", "1000", "1110", "1000", "1000", "1000", "1000"),
-    "L": ("1000", "1000", "1000", "1000", "1000", "1000", "1111"),
-    "U": ("1001", "1001", "1001", "1001", "1001", "1001", "1111"),
-    "X": ("1001", "1001", "0110", "0010", "0110", "1001", "1001"),
-    "P": ("1110", "1001", "1001", "1110", "1000", "1000", "1000"),
-    "R": ("1110", "1001", "1001", "1110", "1010", "1001", "1001"),
-}
+WORDMARK_POSITION = (45, 13)
+WORDMARK_SIZE = (108, 12)
+WORDMARK_CHASSIS_ALPHA = 128
+WORDMARK_ANTIALIAS_ALPHA = 48
 
 
 def nearest_palette_color(color: tuple[int, int, int]) -> tuple[int, int, int]:
@@ -38,26 +37,55 @@ def nearest_palette_color(color: tuple[int, int, int]) -> tuple[int, int, int]:
     )
 
 
-def draw_wordmark(image: Image.Image) -> None:
-    pixels = image.load()
-    scale_x = 2
-    scale_y = 3
-    cursor_x, wordmark_y = WORDMARK_POSITION
-    for char in "FLUX PURR":
-        if char == " ":
-            cursor_x += 5
-            continue
-        glyph = WORDMARK[char]
-        for row, bitmap_row in enumerate(glyph):
-            for column, enabled in enumerate(bitmap_row):
-                if enabled == "1":
-                    for dy in range(scale_y):
-                        for dx in range(scale_x):
-                            pixels[
-                                cursor_x + column * scale_x + dx,
-                                wordmark_y + row * scale_y + dy,
-                            ] = CHASSIS
-        cursor_x += len(glyph[0]) * scale_x + 3
+def rasterize_wordmark() -> Image.Image:
+    renderer = shutil.which("rsvg-convert")
+    if renderer is None:
+        raise SystemExit("rsvg-convert is required to rasterize the official Logo wordmark")
+
+    with tempfile.TemporaryDirectory(prefix="flux-purr-startup-splash-") as directory:
+        directory_path = Path(directory)
+        output = directory_path / "wordmark.png"
+        subprocess.run(
+            [
+                renderer,
+                "-w",
+                str(WORDMARK_SIZE[0]),
+                "-h",
+                str(WORDMARK_SIZE[1]),
+                str(WORDMARK_SOURCE),
+                "-o",
+                str(output),
+            ],
+            check=True,
+        )
+        wordmark = Image.open(output).convert("RGBA")
+
+    return wordmark
+
+
+def paste_quantized(image: Image.Image, source: Image.Image, position: tuple[int, int]) -> None:
+    pixels = source.load()
+    for y in range(source.height):
+        for x in range(source.width):
+            pixels[x, y] = nearest_palette_color(pixels[x, y])
+    image.paste(source, position)
+
+
+def paste_quantized_wordmark(image: Image.Image, source: Image.Image) -> None:
+    alpha_pixels = source.getchannel("A").load()
+    quantized = Image.new("RGB", source.size, BACKGROUND)
+    pixels = quantized.load()
+    for y in range(source.height):
+        for x in range(source.width):
+            alpha = alpha_pixels[x, y]
+            pixels[x, y] = (
+                CHASSIS
+                if alpha >= WORDMARK_CHASSIS_ALPHA
+                else VERSION
+                if alpha >= WORDMARK_ANTIALIAS_ALPHA
+                else BACKGROUND
+            )
+    image.paste(quantized, WORDMARK_POSITION)
 
 
 def create_template() -> Image.Image:
@@ -68,13 +96,9 @@ def create_template() -> Image.Image:
     if logo_bounds is None:
         raise SystemExit("official Flux Purr logo has no visible content")
 
-    logo = logo_source.crop(logo_bounds).resize((38, 35), Image.Resampling.LANCZOS)
-    logo_pixels = logo.load()
-    for y in range(logo.height):
-        for x in range(logo.width):
-            logo_pixels[x, y] = nearest_palette_color(logo_pixels[x, y])
-    image.paste(logo, LOGO_POSITION)
-    draw_wordmark(image)
+    logo = logo_source.crop(logo_bounds).resize(LOGO_SIZE, Image.Resampling.LANCZOS)
+    paste_quantized(image, logo, LOGO_POSITION)
+    paste_quantized_wordmark(image, rasterize_wordmark())
     return image
 
 

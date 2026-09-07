@@ -37,8 +37,8 @@ pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationThenFron
 pub const STARTUP_SCENE_SLUG: &str = "startup-splash";
 const STARTUP_SPLASH_VERSION: &str = env!("FLUX_PURR_FW_VERSION");
 const STARTUP_SPLASH_VERSION_COLOR: Rgb565 = Rgb565::new(17, 38, 21);
-const STARTUP_SPLASH_WORDMARK_CENTER_X: i32 = 105;
-const STARTUP_SPLASH_VERSION_BASELINE_Y: i32 = 35;
+const STARTUP_SPLASH_WORDMARK_CENTER_X: i32 = 99;
+const STARTUP_SPLASH_VERSION_BASELINE_Y: i32 = 30;
 #[cfg(test)]
 const STARTUP_SPLASH_PALETTE: [Rgb565; 4] = [
     Rgb565::new(1, 4, 3),
@@ -802,17 +802,66 @@ mod tests {
         render_scene(SceneId::StartupSplash, &mut canvas);
 
         assert_eq!(canvas.pixels()[0], STARTUP_SPLASH_PALETTE[0]);
+        let logo_pixels =
+            &canvas.pixels()[11 * DISPLAY_WIDTH_USIZE + 8..39 * DISPLAY_WIDTH_USIZE + 38];
+        assert!(logo_pixels.contains(&STARTUP_SPLASH_PALETTE[2]));
+        let wordmark_pixels =
+            &canvas.pixels()[13 * DISPLAY_WIDTH_USIZE + 45..25 * DISPLAY_WIDTH_USIZE + 153];
+        assert!(wordmark_pixels.contains(&STARTUP_SPLASH_PALETTE[1]));
+        assert!(wordmark_pixels.contains(&STARTUP_SPLASH_VERSION_COLOR));
+        for row in 3..12 {
+            assert_eq!(
+                canvas.pixels()[(13 + row) * DISPLAY_WIDTH_USIZE + 45],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+            assert_eq!(
+                canvas.pixels()[(13 + row) * DISPLAY_WIDTH_USIZE + 46],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+        }
         assert_eq!(
-            canvas.pixels()[40 * DISPLAY_WIDTH_USIZE + 28],
-            STARTUP_SPLASH_PALETTE[2]
+            canvas.pixels()[16 * DISPLAY_WIDTH_USIZE + 47],
+            STARTUP_SPLASH_PALETTE[0]
+        );
+        for row in 0..10 {
+            assert_eq!(
+                canvas.pixels()[(13 + row) * DISPLAY_WIDTH_USIZE + 58],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+            assert_eq!(
+                canvas.pixels()[(13 + row) * DISPLAY_WIDTH_USIZE + 59],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+        }
+        for column in 62..68 {
+            assert_eq!(
+                canvas.pixels()[23 * DISPLAY_WIDTH_USIZE + column],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+            assert_eq!(
+                canvas.pixels()[24 * DISPLAY_WIDTH_USIZE + column],
+                STARTUP_SPLASH_PALETTE[1]
+            );
+        }
+        assert_eq!(
+            canvas.pixels()[21 * DISPLAY_WIDTH_USIZE + 60],
+            STARTUP_SPLASH_VERSION_COLOR
         );
         assert_eq!(
-            canvas.pixels()[14 * DISPLAY_WIDTH_USIZE + 60],
+            canvas.pixels()[21 * DISPLAY_WIDTH_USIZE + 61],
+            STARTUP_SPLASH_PALETTE[0]
+        );
+        assert_eq!(
+            canvas.pixels()[22 * DISPLAY_WIDTH_USIZE + 60],
             STARTUP_SPLASH_PALETTE[1]
         );
         assert_eq!(
-            canvas.pixels()[14 * DISPLAY_WIDTH_USIZE + 149],
-            STARTUP_SPLASH_PALETTE[1]
+            canvas.pixels()[22 * DISPLAY_WIDTH_USIZE + 61],
+            STARTUP_SPLASH_VERSION_COLOR
+        );
+        assert_eq!(
+            canvas.pixels()[24 * DISPLAY_WIDTH_USIZE + 58],
+            STARTUP_SPLASH_VERSION_COLOR
         );
         assert_eq!(STARTUP_SPLASH_VERSION, env!("FLUX_PURR_FW_VERSION"));
         let version_width = STARTUP_SPLASH_VERSION.len().min(18) as i32 * 5 - 1;
@@ -841,8 +890,8 @@ mod tests {
                 (*pixel != STARTUP_SPLASH_PALETTE[0]).then_some(index / DISPLAY_WIDTH_USIZE)
             })
             .collect::<std::vec::Vec<_>>();
-        assert_eq!(visible_rows.first().copied(), Some(8));
-        assert_eq!(visible_rows.last().copied(), Some(42));
+        assert_eq!(visible_rows.first().copied(), Some(11));
+        assert_eq!(visible_rows.last().copied(), Some(38));
         assert!(
             canvas.pixels()[STARTUP_SPLASH_VERSION_BASELINE_Y as usize * DISPLAY_WIDTH_USIZE..]
                 .contains(&STARTUP_SPLASH_VERSION_COLOR)
@@ -860,14 +909,16 @@ mod tests {
         let mut canvas = DisplayCanvas::new();
         canvas.clear(STARTUP_SPLASH_PALETTE[0]).ok();
         draw_startup_splash_version(&mut canvas, "0");
+        let first_lit_column = STARTUP_SPLASH_WORDMARK_CENTER_X - 4 / 2 + 1;
 
         assert_eq!(
-            canvas.pixels()[STARTUP_SPLASH_VERSION_BASELINE_Y as usize * DISPLAY_WIDTH_USIZE + 104],
+            canvas.pixels()[STARTUP_SPLASH_VERSION_BASELINE_Y as usize * DISPLAY_WIDTH_USIZE
+                + first_lit_column as usize],
             STARTUP_SPLASH_VERSION_COLOR
         );
         assert_eq!(
-            canvas.pixels()
-                [(STARTUP_SPLASH_VERSION_BASELINE_Y as usize + 6) * DISPLAY_WIDTH_USIZE + 104],
+            canvas.pixels()[(STARTUP_SPLASH_VERSION_BASELINE_Y as usize + 6) * DISPLAY_WIDTH_USIZE
+                + first_lit_column as usize],
             STARTUP_SPLASH_VERSION_COLOR
         );
     }
