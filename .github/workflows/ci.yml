@@ -167,6 +167,7 @@ jobs:
           python3 scripts/test-product-version.py
           bash scripts/test-build-identities.sh
           bash .github/scripts/test-release-chain.sh
+          bash .github/scripts/test-release-workflows.sh
           bash .github/scripts/test-release-preparation.sh
           bash .github/scripts/test-release-completion.sh
           bash .github/scripts/test-release-labels.sh

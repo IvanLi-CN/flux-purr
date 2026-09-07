@@ -5,6 +5,7 @@
 The numeric version calculation is owned by [the version-source specification](../version-source/SPEC.md) and `release_chain.py`. Labels remain the required release-intent gate; after label validation and PR CI, `release_preparation.py` copies that intent into the VERSION-only preparation commit.
 
 - `CI PR` runs the full firmware, DEVD, Web, and worktree matrix for a source head. A prepared VERSION commit receives structural validation only.
+- `Prepare product version` accepts automatic events only when their `workflow_run` payload exposes a PR number; post-merge events without that source skip before checkout or PR resolution, while supplied sources remain subject to the open in-repository `main` PR checks.
 - `Release completion` rejects an ordinary product PR until its prepared commit is present, matches its current labels and base, and its source parent has completed the full PR checks.
 - `CI Main` verifies that a normal merge preserves the prepared tree; `Release Product` builds, tags, publishes, and recovers from that merged SHA without pushing `main`.
 - The workspace `Cargo.lock` remains tracked and every Ubuntu `flux-purr-devd` build uses the shared Linux serial dependency action before `--locked` builds.
