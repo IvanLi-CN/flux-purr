@@ -26,6 +26,7 @@ assert "git diff --quiet" in ci_main
 assert "Prepare product version" in prepare
 assert "workflows: [CI PR, Label Gate]" in prepare
 assert "contents: write" in prepare
+assert "github.event.workflow_run.pull_requests[0].number != ''" in prepare
 assert "Create GitHub-signed VERSION commit on the pull request" in prepare
 assert "id: create_version" in prepare
 assert "createCommitOnBranch" in prepare

@@ -16,3 +16,4 @@
 - 远端 ruleset 不要求仓库 owner 创建的 PR 取得额外 reviewer approval；PR、签名提交和 required checks 仍保持强制。
 - `Label Gate` 保持只读验证；准备 workflow 在其成功后使用已有 PR-branch 写入能力创建 VERSION-only commit，因此不依赖 PR comment API。
 - Release recovery reuses an immutable prepared main merge. 历史 snapshot-promotion record remains historical only.
+- `workflow_run` 在 PR 合并后可能不再携带 PR source；这类事件不代表可准备的开放 PR，保持为无写入的正常跳过路径。

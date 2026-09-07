@@ -60,6 +60,9 @@ by later release checks.
   concurrent PR update fails instead of being overwritten.
 - Treat GraphQL errors, a missing returned OID, a changed remote branch head,
   a malformed preparation commit, or an unverified signature as hard failures.
+- Treat a completed `workflow_run` without a pull request number as a normal
+  non-applicable event and skip before checkout or mutation. When a source is
+  present, retain the open in-repository PR validation before preparation.
 - Do not replace the mutation with the Git Database REST API unless the caller
   supplies and protects an explicit detached signature; that path does not
   provide GitHub-native signing by itself.

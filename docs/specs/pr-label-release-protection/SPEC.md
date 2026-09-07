@@ -77,6 +77,7 @@ Flux Purr 使用 PR label gate、PR-local version preparation、product release 
 - PR CI 运行 firmware 和 web 检查，保持可抢占以节省无效分支运行时间。
 - 合入 `main` 后，`CI Main` 以目标 SHA 隔离并结构验证 normal merge 是否保留准备提交；完整检查已在 PR source 执行一次。
 - `Prepare product version` 以 main release train 为并发隔离键，避免不同 PR 同时修改同一版本基线。
+- `workflow_run` 触发只有在成功的 PR workflow 携带 PR number 时才进入 `Prepare product version` job；合并后的无 PR 来源事件是正常不适用路径，必须跳过且不得读取 PR 或写入 VERSION。
 - 准备 workflow 为该 PR source 创建唯一的 VERSION-only commit；trailers 只保存已冻结的 label intent，不保存或计算数字产品版本。
 - `Release Product` 由 push 事件产生且成功的 `CI Main` 触发，只发布具有效准备提交的 main merge；它不从 label 解析数字版本。
 - 手动 `recover` 必须显式提供已有 prepared main merge SHA，并复用该 commit。
@@ -84,7 +85,7 @@ Flux Purr 使用 PR label gate、PR-local version preparation、product release 
 
 ### Edge cases / errors
 
-- 准备 workflow 找不到 open in-repository PR、PR head 与已验证 checks 不一致、或 PR 已不基于 current main 时，必须失败而不是写入 VERSION。
+- 未携带 PR number 的 `workflow_run` 必须跳过准备 job。携带来源的 workflow run 或手动 dispatch 若解析到的 PR 不是 open in-repository main PR、PR head 与已验证 checks 不一致、或 PR 已不基于 current main，则必须失败而不是写入 VERSION。
 - 准备提交 metadata 与当前 validated labels 不匹配，或其父源提交没有完整通过 `Validate PR labels`、Firmware、DEVD、Web 与 Worktree CI 时，`Release completion` 必须失败。
 - `Release Product` 找不到以准备提交为第二父提交且 tree-equivalent 的 main merge 时，必须跳过而不是重新读取 PR 标签。
 - `recover` 必须保持 main merge、VERSION、tag 与 source SHA 不变。
@@ -107,6 +108,7 @@ Flux Purr 使用 PR label gate、PR-local version preparation、product release 
 - Given 缺失、重复或未知 release intent 标签，When 执行 label gate，Then 检查失败。
 - Given `type:docs` 或 `type:skip`，When release completion runs, Then it permits the no-product-release path without a VERSION commit。
 - Given `Release Product` 被 `workflow_run` 触发，When 对应 `CI Main` 失败，Then release job 不发布。
+- Given 合并后的 PR workflow 触发 `workflow_run` 且没有 PR source，When `Prepare product version` 被评估，Then prepare job 被跳过且不写入 VERSION。
 - Given an enabled RC PR, When `Prepare product version` is dispatched with `operation=exact`, Then it writes the supplied `X.Y.Z-rc.N` text to that PR's VERSION-only preparation commit.
 - Given `.github/quality-gates.json`，When 执行质量门禁校验，Then required checks 能映射到 repo-local workflow job。
 
