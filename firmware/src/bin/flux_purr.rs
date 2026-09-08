@@ -4102,8 +4102,6 @@ const FUSB302B_DIAG_NO_USABLE_CONTRACT: u8 = 16;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_RX_PARTIAL: u8 = 17;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT: u8 = 18;
-#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_REQUEST_TIMEOUT: u8 = 19;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_MAX_RX_MESSAGES_PER_POLL: u8 = 4;
@@ -4134,7 +4132,6 @@ fn fusb302b_degraded_reason() -> &'static str {
         FUSB302B_DIAG_TX_I2C_ERROR => "pd_fusb_tx_i2c_error",
         FUSB302B_DIAG_NO_USABLE_CONTRACT => "pd_fusb_no_usable_contract",
         FUSB302B_DIAG_RX_PARTIAL => "pd_fusb_rx_partial",
-        FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT => "pd_fusb_source_caps_hard_reset_sent",
         FUSB302B_DIAG_REQUEST_TIMEOUT => "pd_fusb_contract_request_timeout",
         _ => "pd_contract_unavailable",
     }
@@ -5995,7 +5992,6 @@ struct Fusb302bRuntime {
     source_capabilities_tx_confirmed: bool,
     source_capabilities_gcrc_seen: bool,
     partial_rx_started_at_ms: Option<u64>,
-    source_caps_hard_reset_sent: bool,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6024,7 +6020,6 @@ impl Fusb302bRuntime {
             source_capabilities_tx_confirmed: false,
             source_capabilities_gcrc_seen: false,
             partial_rx_started_at_ms: None,
-            source_caps_hard_reset_sent: false,
         }
     }
 
@@ -6066,7 +6061,6 @@ impl Fusb302bRuntime {
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
-        self.source_caps_hard_reset_sent = false;
         if self.initialize(i2c).await {
             self.policy =
                 fusb302b::SinkPolicy::new(FUSB302B_INITIAL_PPS_REQUEST_MV, MAX_HEATER_CONTRACT_MA);
@@ -6299,33 +6293,15 @@ impl Fusb302bRuntime {
                         self.source_capabilities_tx_confirmed |= tx_sent;
                         self.source_capabilities_gcrc_seen |= gcrc_sent;
                         let query_due = match self.last_source_capabilities_request_at_ms {
-                            Some(last) => fusb302b::source_capabilities_retry_due(last, now_ms),
+                            Some(last) => matches!(
+                                fusb302b::source_capabilities_recovery(last, now_ms),
+                                fusb302b::SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+                            ),
                             None => self.attached_at_ms.is_some_and(|attached_at_ms| {
                                 now_ms.saturating_sub(attached_at_ms)
                                     >= fusb302b::SOURCE_CAPS_INITIAL_WAIT_MS
                             }),
                         };
-                        let hard_reset_due = !self.source_caps_hard_reset_sent
-                            && self
-                                .last_source_capabilities_request_at_ms
-                                .is_some_and(|last| {
-                                    fusb302b::source_capabilities_hard_reset_due(last, now_ms)
-                                });
-                        if hard_reset_due {
-                            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
-                            if phy.transmit_hard_reset().await.is_err() {
-                                self.policy.mark_fault();
-                                FUSB302B_DIAGNOSTIC
-                                    .store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
-                                return false;
-                            }
-                            self.source_caps_hard_reset_sent = true;
-                            FUSB302B_DIAGNOSTIC.store(
-                                FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT,
-                                Ordering::Relaxed,
-                            );
-                            return true;
-                        }
                         if !query_due {
                             let diagnostic = if self.source_capabilities_gcrc_seen {
                                 FUSB302B_DIAG_SOURCE_CAPS_GCRC_SEEN

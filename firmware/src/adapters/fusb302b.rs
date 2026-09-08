@@ -15,7 +15,18 @@ const PPS_KEEPALIVE_INTERVAL_MS: u64 = 5_000;
 
 pub const SOURCE_CAPS_INITIAL_WAIT_MS: u64 = 400;
 pub const SOURCE_CAPS_RETRY_INTERVAL_MS: u64 = 5_000;
-pub const SOURCE_CAPS_HARD_RESET_DELAY_MS: u64 = 1_000;
+
+/// The only recovery actions available after a Source_Capabilities timeout.
+///
+/// A sink powered by the same VBUS must not initiate a Hard Reset merely
+/// because a source-capability response is late: that reset can withdraw the
+/// supply which powers the sink itself. Keep the heater interlocked and retry
+/// `Get_Source_Capabilities` instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceCapabilitiesRecovery {
+    Wait,
+    RetryGetSourceCapabilities,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SinkPhase {
@@ -242,8 +253,15 @@ pub const fn source_capabilities_retry_due(last_request_at_ms: u64, now_ms: u64)
     now_ms.saturating_sub(last_request_at_ms) >= SOURCE_CAPS_RETRY_INTERVAL_MS
 }
 
-pub const fn source_capabilities_hard_reset_due(last_request_at_ms: u64, now_ms: u64) -> bool {
-    now_ms.saturating_sub(last_request_at_ms) >= SOURCE_CAPS_HARD_RESET_DELAY_MS
+pub const fn source_capabilities_recovery(
+    last_request_at_ms: u64,
+    now_ms: u64,
+) -> SourceCapabilitiesRecovery {
+    if source_capabilities_retry_due(last_request_at_ms, now_ms) {
+        SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+    } else {
+        SourceCapabilitiesRecovery::Wait
+    }
 }
 
 /// Decode a complete Source_Capabilities data message from the public PHY packet view.
@@ -347,11 +365,15 @@ mod tests {
     }
 
     #[test]
-    fn source_capability_recovery_deadlines_are_preserved() {
-        assert!(!source_capabilities_retry_due(1_000, 5_999));
-        assert!(source_capabilities_retry_due(1_000, 6_000));
-        assert!(!source_capabilities_hard_reset_due(1_000, 1_999));
-        assert!(source_capabilities_hard_reset_due(1_000, 2_000));
+    fn missing_source_capabilities_only_retry_without_resetting_the_source() {
+        assert_eq!(
+            source_capabilities_recovery(1_000, 1_999),
+            SourceCapabilitiesRecovery::Wait
+        );
+        assert_eq!(
+            source_capabilities_recovery(1_000, 6_000),
+            SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+        );
     }
 
     #[test]
