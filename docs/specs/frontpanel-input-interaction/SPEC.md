@@ -264,6 +264,8 @@ None
 
 #### EEPROM save failure
 
+![Front panel EEPROM save failure](./assets/frontpanel-eeprom-save-failed.png)
+
 普通偏好/网络域写入失败时，错误页保留相同的 `HOLD CENTER RETRY` 入口，但显示
 `SAVE FAILED` 与 `HEATER AVAILABLE`，不改变 heater 许可。
 
