@@ -6,7 +6,11 @@ if [[ "${GITHUB_EVENT_NAME:-}" != "pull_request" && "${GITHUB_EVENT_NAME:-}" != 
   exit 0
 fi
 
-labels_json="$(jq -c '.pull_request.labels // []' "${GITHUB_EVENT_PATH}")"
+if [[ -n "${LABELS_JSON:-}" ]]; then
+  labels_json="$(jq -c 'if type == "array" then . else error("labels JSON must be an array") end' "${LABELS_JSON}")"
+else
+  labels_json="$(jq -c 'if (.pull_request.labels // []) | type == "array" then (.pull_request.labels // []) else error("event labels must be an array") end' "${GITHUB_EVENT_PATH}")"
+fi
 type_labels=()
 while IFS= read -r label; do
   [[ -n "${label}" ]] && type_labels+=("${label}")

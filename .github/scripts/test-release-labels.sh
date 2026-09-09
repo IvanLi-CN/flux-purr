@@ -20,6 +20,21 @@ write_event() {
   } > "${file}"
 }
 
+write_labels() {
+  local file="$1"
+  shift
+  {
+    printf '['
+    local first=1
+    for label in "$@"; do
+      if [[ "${first}" -eq 0 ]]; then printf ','; fi
+      first=0
+      jq -nc --arg name "${label}" '{name: $name}'
+    done
+    printf ']\n'
+  } > "${file}"
+}
+
 expect_pass() {
   local name="$1"
   shift
@@ -47,6 +62,21 @@ expect_fail unknown-type type:feature channel:stable
 expect_fail missing-channel type:patch
 expect_fail duplicate-channel type:patch channel:stable channel:rc
 expect_fail unknown-channel type:patch channel:beta
+
+stale_valid_event="${tmp_dir}/stale-valid-event.json"
+current_invalid_labels="${tmp_dir}/current-invalid-labels.json"
+write_event "${stale_valid_event}" type:patch channel:stable
+write_labels "${current_invalid_labels}" type:feature channel:stable
+if LABELS_JSON="${current_invalid_labels}" GITHUB_EVENT_NAME=pull_request_target GITHUB_EVENT_PATH="${stale_valid_event}" bash "${root_dir}/.github/scripts/label-gate.sh" >/dev/null 2>&1; then
+  echo "Current labels must override a stale valid event payload" >&2
+  exit 1
+fi
+
+stale_invalid_event="${tmp_dir}/stale-invalid-event.json"
+current_valid_labels="${tmp_dir}/current-valid-labels.json"
+write_event "${stale_invalid_event}" type:patch channel:beta
+write_labels "${current_valid_labels}" type:patch channel:stable
+LABELS_JSON="${current_valid_labels}" GITHUB_EVENT_NAME=pull_request_target GITHUB_EVENT_PATH="${stale_invalid_event}" bash "${root_dir}/.github/scripts/label-gate.sh" >/dev/null
 
 python3 - <<'PY'
 import importlib.util

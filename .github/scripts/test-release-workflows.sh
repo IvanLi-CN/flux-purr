@@ -90,6 +90,19 @@ assert "--checks-json" in completion
 assert "checks: read" in completion
 assert "source-checks.json" in completion
 assert "Verify VERSION and release completion" in completion
+for required_workflow in (label_gate, completion):
+    assert "queue: max" in required_workflow
+    assert "cancel-in-progress: true" not in required_workflow
+    assert "gh api \"repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}\" --jq '.labels'" in required_workflow
+    assert "uses: actions/checkout@v4" in required_workflow
+    assert "ref: ${{ github.event.pull_request.base.sha || github.sha }}" in required_workflow
+    assert "pull-requests: read" in required_workflow
+    assert "contents: read" in required_workflow
+    assert "contents: write" not in required_workflow
+    assert "pull-requests: write" not in required_workflow
+assert "LABELS_JSON: ${{ runner.temp }}/labels.json" in label_gate
+assert "EVENT_PATH" not in label_gate
+assert 'jq ".pull_request.labels"' not in completion
 assert "Validate PR labels" in quality
 assert "Release completion" in quality
 assert "Validate PR labels" in label_gate

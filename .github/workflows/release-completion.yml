@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: release-completion-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  queue: max
 
 permissions:
   checks: read
@@ -30,6 +30,14 @@ jobs:
         if: github.event_name == 'pull_request_target'
         run: git fetch --no-tags origin "${{ github.event.pull_request.head.sha }}"
 
+      - name: Fetch current pull request labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.labels' > "${RUNNER_TEMP}/labels.json"
+
       - name: Verify VERSION and release completion
         env:
           GH_TOKEN: ${{ github.token }}
@@ -37,7 +45,6 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          jq '.pull_request.labels' "${GITHUB_EVENT_PATH}" > "${RUNNER_TEMP}/labels.json"
           if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null)"; then
             source_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
             gh api "repos/${GITHUB_REPOSITORY}/commits/${source_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
