@@ -253,6 +253,22 @@ pub const fn source_capabilities_retry_due(last_request_at_ms: u64, now_ms: u64)
     now_ms.saturating_sub(last_request_at_ms) >= SOURCE_CAPS_RETRY_INTERVAL_MS
 }
 
+/// Returns whether the sink should request Source_Capabilities now.
+///
+/// A newly attached source gets its normal advertisement window first. Once a
+/// request has been sent, recovery remains a bounded re-query and never
+/// escalates to a sink-initiated reset.
+pub const fn source_capabilities_request_due(
+    attached_at_ms: u64,
+    last_request_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    match last_request_at_ms {
+        Some(last_request_at_ms) => source_capabilities_retry_due(last_request_at_ms, now_ms),
+        None => now_ms.saturating_sub(attached_at_ms) >= SOURCE_CAPS_INITIAL_WAIT_MS,
+    }
+}
+
 pub const fn source_capabilities_recovery(
     last_request_at_ms: u64,
     now_ms: u64,
@@ -374,6 +390,14 @@ mod tests {
             source_capabilities_recovery(1_000, 6_000),
             SourceCapabilitiesRecovery::RetryGetSourceCapabilities
         );
+    }
+
+    #[test]
+    fn source_capabilities_request_schedule_waits_then_retries() {
+        assert!(!source_capabilities_request_due(1_000, None, 1_399));
+        assert!(source_capabilities_request_due(1_000, None, 1_400));
+        assert!(!source_capabilities_request_due(1_000, Some(1_400), 6_399));
+        assert!(source_capabilities_request_due(1_000, Some(1_400), 6_400));
     }
 
     #[test]

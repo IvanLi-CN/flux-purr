@@ -6292,16 +6292,13 @@ impl Fusb302bRuntime {
                     if self.policy.phase() == SinkPhase::WaitingForSourceCapabilities {
                         self.source_capabilities_tx_confirmed |= tx_sent;
                         self.source_capabilities_gcrc_seen |= gcrc_sent;
-                        let query_due = match self.last_source_capabilities_request_at_ms {
-                            Some(last) => matches!(
-                                fusb302b::source_capabilities_recovery(last, now_ms),
-                                fusb302b::SourceCapabilitiesRecovery::RetryGetSourceCapabilities
-                            ),
-                            None => self.attached_at_ms.is_some_and(|attached_at_ms| {
-                                now_ms.saturating_sub(attached_at_ms)
-                                    >= fusb302b::SOURCE_CAPS_INITIAL_WAIT_MS
-                            }),
-                        };
+                        let query_due = self.attached_at_ms.is_some_and(|attached_at_ms| {
+                            fusb302b::source_capabilities_request_due(
+                                attached_at_ms,
+                                self.last_source_capabilities_request_at_ms,
+                                now_ms,
+                            )
+                        });
                         if !query_due {
                             let diagnostic = if self.source_capabilities_gcrc_seen {
                                 FUSB302B_DIAG_SOURCE_CAPS_GCRC_SEEN
