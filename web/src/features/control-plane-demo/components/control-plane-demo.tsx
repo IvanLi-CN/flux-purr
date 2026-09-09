@@ -15,6 +15,7 @@ import {
   Power,
   RefreshCw,
   Router,
+  Save,
   ScanSearch,
   SlidersHorizontal,
   ToggleRight,
@@ -7286,11 +7287,10 @@ function SettingsView({
         </TabsContent>
 
         <TabsContent value="fan" className="industrial-calibration-tabs__content">
-          <section className="industrial-settings-section industrial-settings-section--controls">
-            <h3 className="industrial-section-title">Fan policy</h3>
-            <div className="industrial-settings-grid industrial-settings-grid--controls">
+          <section className="industrial-settings-section industrial-settings-section--controls fan-policy-section">
+            <div className="fan-policy-stack">
               <ModeSegmentedSetting
-                label="Post-heat cooling"
+                label="主动降温"
                 value={postHeatCoolingMode}
                 options={[
                   ['off', 'OFF'],
@@ -7300,7 +7300,7 @@ function SettingsView({
                 onChange={onPostHeatCoolingChange}
               />
               <ModeSegmentedSetting
-                label="Heating overheat guard"
+                label="加热防过热"
                 value={heatingFanGuardMode}
                 options={[
                   ['off', 'OFF'],
@@ -7311,23 +7311,42 @@ function SettingsView({
                 onChange={onHeatingFanGuardChange}
               />
             </div>
-            <button
-              type="button"
-              className="industrial-button industrial-button--primary"
-              onClick={() => void onFanSettingsSave()}
-            >
-              保存风扇策略
-            </button>
-            <div className="industrial-settings-summary" aria-live="polite">
-              <div>
-                <span>{device.fanDisplayState ?? device.fanState}</span>
-                <small>Live state</small>
-              </div>
-              <div>
-                <span>{device.fanPolicySource?.replace('_', ' ') ?? 'idle'}</span>
-                <small>Source · {device.fanOutputLevel ?? 'off'} output</small>
-              </div>
+
+            <div className="fan-policy-command">
+              <button
+                type="button"
+                className="industrial-button industrial-button--primary"
+                onClick={() => void onFanSettingsSave()}
+              >
+                <Save aria-hidden="true" size={16} />
+                保存风扇策略
+              </button>
             </div>
+
+            <section
+              className="fan-policy-runtime industrial-panel industrial-log-panel"
+              aria-live="polite"
+            >
+              <p className="industrial-label">Fan runtime</p>
+              <strong
+                className="fan-policy-runtime__state"
+                data-state={String(
+                  device.fanDisplayState ?? device.fanState ?? 'OFF'
+                ).toLowerCase()}
+              >
+                {device.fanDisplayState ?? device.fanState ?? 'OFF'}
+              </strong>
+              <dl className="fan-policy-runtime__readout">
+                <div>
+                  <dt>Policy source</dt>
+                  <dd>{device.fanPolicySource?.replace('_', ' ') ?? 'idle'}</dd>
+                </div>
+                <div>
+                  <dt>Output level</dt>
+                  <dd>{device.fanOutputLevel ?? 'off'}</dd>
+                </div>
+              </dl>
+            </section>
           </section>
         </TabsContent>
 
@@ -9791,7 +9810,10 @@ function ModeSegmentedSetting<T extends string>({
   onChange: (value: T) => void
 }) {
   return (
-    <fieldset className="industrial-setting-control industrial-segmented-setting">
+    <fieldset
+      className="industrial-setting-control industrial-segmented-setting"
+      data-option-count={options.length}
+    >
       <legend className="sr-only">{label}</legend>
       <p className="industrial-label industrial-segmented-setting__title">{label}</p>
       <div className="industrial-segmented-control">
