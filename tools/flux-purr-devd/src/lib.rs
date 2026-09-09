@@ -621,6 +621,10 @@ impl DeviceRecord {
             heater_output_percent: 22,
             heater_physical_output_percent: 22,
             active_cooling_enabled: true,
+            post_heat_cooling_mode: "normal".to_string(),
+            heating_fan_guard_mode: "medium".to_string(),
+            fan_policy_source: "post_heat".to_string(),
+            fan_output_level: "medium".to_string(),
             fan_display_state: "AUTO".to_string(),
             fan_enabled: true,
             fan_pwm_permille: 500,
@@ -732,6 +736,10 @@ impl DeviceRecord {
             heater_output_percent: 0,
             heater_physical_output_percent: 0,
             active_cooling_enabled: true,
+            post_heat_cooling_mode: "normal".to_string(),
+            heating_fan_guard_mode: "medium".to_string(),
+            fan_policy_source: "idle".to_string(),
+            fan_output_level: "off".to_string(),
             fan_display_state: "OFF".to_string(),
             fan_enabled: false,
             fan_pwm_permille: 0,
@@ -996,6 +1004,14 @@ pub struct ControlPlaneStatus {
     #[serde(default)]
     pub heater_physical_output_percent: u8,
     pub active_cooling_enabled: bool,
+    #[serde(default)]
+    pub post_heat_cooling_mode: String,
+    #[serde(default)]
+    pub heating_fan_guard_mode: String,
+    #[serde(default)]
+    pub fan_policy_source: String,
+    #[serde(default)]
+    pub fan_output_level: String,
     pub fan_display_state: String,
     pub fan_enabled: bool,
     pub fan_pwm_permille: u16,
@@ -1753,6 +1769,10 @@ pub struct RuntimeConfigRequest {
     pub selected_preset_slot: Option<usize>,
     pub presets_c: Option<Vec<Option<i16>>>,
     pub active_cooling_enabled: Option<bool>,
+    #[serde(default)]
+    pub post_heat_cooling_mode: Option<String>,
+    #[serde(default)]
+    pub heating_fan_guard_mode: Option<String>,
     pub heater_enabled: Option<bool>,
     pub manual_pps_enabled: Option<bool>,
     pub manual_pps_mv: Option<u16>,
@@ -2124,6 +2144,10 @@ struct UsbRuntimeConfigWire<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     active_cooling_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    post_heat_cooling_mode: Option<&'a String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heating_fan_guard_mode: Option<&'a String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     heater_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_enabled: Option<bool>,
@@ -2164,6 +2188,8 @@ fn encode_usb_runtime_mode_for_test(mode: &String) -> String {
         selected_preset_slot: None,
         presets_c: None,
         active_cooling_enabled: None,
+        post_heat_cooling_mode: None,
+        heating_fan_guard_mode: None,
         heater_enabled: None,
         manual_pps_enabled: None,
         manual_pps_mv: None,
@@ -4691,6 +4717,13 @@ async fn configure_runtime(
     if let Some(active_cooling_enabled) = payload.active_cooling_enabled {
         device.status.active_cooling_enabled = active_cooling_enabled;
     }
+    if let Some(mode) = payload.post_heat_cooling_mode.as_deref() {
+        device.status.post_heat_cooling_mode = mode.to_string();
+        device.status.active_cooling_enabled = mode != "off";
+    }
+    if let Some(mode) = payload.heating_fan_guard_mode.as_deref() {
+        device.status.heating_fan_guard_mode = mode.to_string();
+    }
     if let Some(heater_enabled) = payload.heater_enabled {
         device.status.heater_enabled = heater_enabled;
         if !heater_enabled {
@@ -4916,6 +4949,36 @@ fn apply_mock_calibration_runtime_config(
 }
 
 fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpError> {
+    if payload
+        .post_heat_cooling_mode
+        .as_deref()
+        .is_some_and(|mode| !matches!(mode, "off" | "normal" | "fast"))
+    {
+        return Err(HttpError::bad_request(
+            "invalid_post_heat_cooling_mode",
+            "postHeatCoolingMode must be off, normal, or fast.",
+        ));
+    }
+    if payload
+        .heating_fan_guard_mode
+        .as_deref()
+        .is_some_and(|mode| !matches!(mode, "off" | "low" | "medium" | "high"))
+    {
+        return Err(HttpError::bad_request(
+            "invalid_heating_fan_guard_mode",
+            "heatingFanGuardMode must be off, low, medium, or high.",
+        ));
+    }
+    if let (Some(active_cooling_enabled), Some(mode)) = (
+        payload.active_cooling_enabled,
+        payload.post_heat_cooling_mode.as_deref(),
+    ) && active_cooling_enabled != (mode != "off")
+    {
+        return Err(HttpError::bad_request(
+            "fan_policy_conflict",
+            "activeCoolingEnabled conflicts with postHeatCoolingMode.",
+        ));
+    }
     if payload
         .thermal_profile_mode
         .as_deref()
@@ -6290,6 +6353,8 @@ async fn refresh_native_update_runtime_facts(
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: Some(false),
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -7201,6 +7266,8 @@ async fn serial_runtime_config(
         selected_preset_slot: payload.selected_preset_slot,
         presets_c: payload.presets_c.as_ref(),
         active_cooling_enabled: payload.active_cooling_enabled,
+        post_heat_cooling_mode: payload.post_heat_cooling_mode.as_ref(),
+        heating_fan_guard_mode: payload.heating_fan_guard_mode.as_ref(),
         heater_enabled: payload.heater_enabled,
         manual_pps_enabled: payload.manual_pps_enabled,
         manual_pps_mv: payload.manual_pps_mv,
@@ -8460,6 +8527,20 @@ fn runtime_config_matches_status(
         return false;
     }
     if payload
+        .post_heat_cooling_mode
+        .as_deref()
+        .is_some_and(|mode| status.post_heat_cooling_mode != mode)
+    {
+        return false;
+    }
+    if payload
+        .heating_fan_guard_mode
+        .as_deref()
+        .is_some_and(|mode| status.heating_fan_guard_mode != mode)
+    {
+        return false;
+    }
+    if payload
         .heater_enabled
         .is_some_and(|enabled| status.heater_enabled != enabled)
     {
@@ -9563,6 +9644,8 @@ fn emit_runtime_config_event(
                 "selectedPresetSlot": payload.selected_preset_slot,
                 "presetsC": payload.presets_c,
                 "activeCoolingEnabled": payload.active_cooling_enabled,
+                "postHeatCoolingMode": payload.post_heat_cooling_mode,
+                "heatingFanGuardMode": payload.heating_fan_guard_mode,
                 "heaterEnabled": payload.heater_enabled,
                 "manualPpsEnabled": payload.manual_pps_enabled,
                 "manualPpsMv": payload.manual_pps_mv,
@@ -9574,6 +9657,10 @@ fn emit_runtime_config_event(
                 "selectedPresetSlot": status.selected_preset_slot,
                 "presetsC": status.presets_c,
                 "activeCoolingEnabled": status.active_cooling_enabled,
+                "postHeatCoolingMode": status.post_heat_cooling_mode,
+                "heatingFanGuardMode": status.heating_fan_guard_mode,
+                "fanPolicySource": status.fan_policy_source,
+                "fanOutputLevel": status.fan_output_level,
                 "heaterEnabled": status.heater_enabled,
                 "manualPpsEnabled": status.manual_pps_enabled,
                 "manualPpsMv": status.manual_pps_mv,
@@ -10605,6 +10692,8 @@ mod tests {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: Some(true),
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: Some(false),
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -11113,6 +11202,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -11214,6 +11305,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -11279,6 +11372,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -11309,6 +11404,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -11351,6 +11448,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -11384,6 +11483,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -11450,6 +11551,8 @@ mod tests {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -11476,6 +11579,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn runtime_config_validates_multi_level_fan_modes_and_legacy_conflicts() {
+        let mut payload = RuntimeConfigRequest {
+            lease_id: "lease-1".to_string(),
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            post_heat_cooling_mode: Some("fast".to_string()),
+            heating_fan_guard_mode: Some("high".to_string()),
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            fault_attention_acknowledged: None,
+            calibration: None,
+            thermal_profile_mode: None,
+            thermal_control_profile: None,
+        };
+        validate_runtime_config(&payload).expect("fan modes should validate");
+
+        payload.heating_fan_guard_mode = Some("turbo".to_string());
+        assert_eq!(
+            validate_runtime_config(&payload).unwrap_err().error.code,
+            "invalid_heating_fan_guard_mode"
+        );
+
+        payload.heating_fan_guard_mode = Some("high".to_string());
+        payload.active_cooling_enabled = Some(false);
+        assert_eq!(
+            validate_runtime_config(&payload).unwrap_err().error.code,
+            "fan_policy_conflict"
+        );
+    }
+
     #[tokio::test]
     async fn mock_persistence_to_inactive_bank_does_not_switch_the_resolved_bank() {
         let state = AppState::test();
@@ -11489,6 +11627,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -11644,6 +11784,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: Some(false),
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: Some(false),
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -11695,6 +11837,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: None,
@@ -11724,6 +11868,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: Some(10_400),
@@ -11751,6 +11897,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: Some(false),
                 manual_pps_mv: None,
@@ -11793,6 +11941,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -11841,6 +11991,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -11989,6 +12141,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: Some(20_000),
@@ -12012,6 +12166,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: Some(true),
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -12736,6 +12892,8 @@ mod tests {
                 None,
             ]),
             active_cooling_enabled: Some(false),
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -12762,6 +12920,10 @@ mod tests {
             heater_output_percent: 12,
             heater_physical_output_percent: 12,
             active_cooling_enabled: false,
+            post_heat_cooling_mode: "off".to_string(),
+            heating_fan_guard_mode: "medium".to_string(),
+            fan_policy_source: "heating_guard".to_string(),
+            fan_output_level: "low".to_string(),
             fan_display_state: "AUTO".to_string(),
             fan_enabled: true,
             fan_pwm_permille: 500,
@@ -12852,6 +13014,8 @@ mod tests {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -12884,6 +13048,8 @@ mod tests {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -12931,6 +13097,8 @@ mod tests {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -12992,6 +13160,8 @@ mod tests {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -13421,6 +13591,8 @@ mod tests {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,

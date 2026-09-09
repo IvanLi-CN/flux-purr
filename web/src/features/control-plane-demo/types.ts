@@ -4,7 +4,9 @@ import type {
   CalibrationState,
   HeaterCurveState,
   HeaterLockReason,
+  HeatingFanGuardMode,
   NetworkFailureCode,
+  PostHeatCoolingMode,
 } from './contracts'
 
 export type TransportKind = 'http' | 'serial' | 'devd' | 'mock' | 'wifi' | 'bridge'
@@ -58,7 +60,12 @@ export interface DeviceTarget {
   heaterEnabled: boolean
   heaterOutputPercent: number
   activeCoolingEnabled: boolean
-  fanState: 'OFF' | 'AUTO' | 'RUN'
+  fanState: 'OFF' | 'AUTO' | 'RUN' | 'SAFE'
+  fanDisplayState?: 'OFF' | 'AUTO' | 'RUN' | 'SAFE'
+  postHeatCoolingMode?: PostHeatCoolingMode
+  heatingFanGuardMode?: HeatingFanGuardMode
+  fanPolicySource?: 'idle' | 'post_heat' | 'heating_guard' | 'safety'
+  fanOutputLevel?: 'off' | 'low' | 'medium' | 'high' | 'limited'
   wifiSsid?: string | null
   wifiRssi: number | null
   wifiPasswordLength?: number

@@ -204,7 +204,13 @@ export function webSerialProbeToDeviceTarget(probe: WebSerialProbe): DeviceTarge
     heaterEnabled: probe.status.heaterEnabled,
     heaterOutputPercent: probe.status.heaterOutputPercent,
     activeCoolingEnabled: probe.status.activeCoolingEnabled,
+    postHeatCoolingMode:
+      probe.status.postHeatCoolingMode || (probe.status.activeCoolingEnabled ? 'normal' : 'off'),
+    heatingFanGuardMode: probe.status.heatingFanGuardMode || 'medium',
+    fanPolicySource: probe.status.fanPolicySource || 'idle',
+    fanOutputLevel: probe.status.fanOutputLevel || 'off',
     fanState: probe.status.fanDisplayState,
+    fanDisplayState: probe.status.fanDisplayState,
     wifiSsid: probe.network.ssid ?? null,
     wifiRssi: probe.network.wifiRssi ?? null,
     wifiPasswordLength: probe.network.wifiPasswordLength ?? 0,

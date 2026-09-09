@@ -19,7 +19,7 @@
 ### Goals
 
 - 冻结 `160×50` 前面板主界面与两级设置菜单的视觉和导航契约。
-- 为 `Dashboard`、`Key Test`、`Menu L1`、`Preset Temp`、`Active Cooling`、`WiFi Info`、`Device Info` 提供确定性渲染源。
+- 为 `Dashboard`、`Key Test`、`Menu L1`、`Preset Temp`、`FAN CTRL`、`WiFi Info`、`Device Info` 提供确定性渲染源。
 - 约束屏幕网格、字体预算、颜色 token、状态文案和五向键导航映射。
 - 在 `web/` 中提供可截图的 1:1 预览实现，作为当前最稳定的 render truth source。
 - 输出一张界面设计规范图，明确配色、字体、温度分段与小屏布局规则。
@@ -28,7 +28,7 @@
 
 - 不落地真实 LCD 驱动、framebuffer 管线或固件侧 draw API。
 - 不扩展 HTTP / WebSocket 契约，也不新增设备遥测字段。
-- 不在本轮定义热控算法、风扇控制策略或 Wi‑Fi 配置写回逻辑。
+- 不在本轮定义 heater PID 或 Wi‑Fi 配置写回逻辑；FAN CTRL 的多档策略显示与编辑以运行时 spec 为准。
 - 不处理多语言字体资产；本轮 on-device 文案默认只用短英文与缩写。
 
 ## 范围（Scope）
@@ -36,6 +36,7 @@
 ### In scope
 
 - `docs/specs/frontpanel-ui-contract/SPEC.md` 与 `docs/specs/README.md`。
+- `firmware/src/frontpanel/**` 的 FAN CTRL 渲染与交互投影。
 - `web/src/features/frontpanel-preview/**` 的显示模型、渲染器与 mock state。
 - `web/src/stories/FrontPanelDisplay.stories.tsx` 的 docs/gallery 与状态故事。
 - 与该 spec 绑定的前面板视觉证据资产。
@@ -43,7 +44,6 @@
 ### Out of scope
 
 - `docs/interfaces/http-api.md`。
-- `firmware/` 下任何真实显示驱动或菜单状态机实现。
 - 现有 device console 的布局重构。
 
 ## 需求（Requirements）
@@ -52,14 +52,14 @@
 
 - 逻辑分辨率固定为 `160×50`。
 - 主界面必须把温度作为第一视觉焦点，且在 1× 逻辑尺寸下仍能一眼识别。
-- 主界面必须同时显示：实时温度、设定温度、feature-selected 的 `PPS` 电压（默认 `20V`）与 `OFF/AUTO/RUN` 三态风扇显示；调试用手动 PPS 覆盖激活时，PPS 行标签显示为 `PPS*` 且保留电压数值。
+- 主界面必须同时显示：实时温度、设定温度、feature-selected 的 `PPS` 电压（默认 `20V`）与 `OFF/AUTO/RUN/SAFE` 风扇显示；风扇策略详情页不得暴露 PD 或电压调节。
 - 主界面暂不显示当前命中的 preset 标识，保持既有视觉基线不变。
 - `Preset Temp` 页面顶部必须显示 `M1 ~ M9` 预设槽位。
 - 预设槽位状态必须固定为：当前项=主题色、已启用=正常文本色、未启用=置灰。
 - `Preset Temp` 必须支持 `---℃` 表示预设未启用。
 - `Preset Temp` 中灰色 `---` 槽位仍可进入与编辑；灰色仅表示当前值不可用。
 - `Preset Temp` 的实际温度显示必须复用 Dashboard 温度字体与温度分段颜色。
-- 一级菜单必须一次显示 `Preset Temp`、`Active Cooling`、`WiFi Info`、`Device Info` 四项。
+- 一级菜单必须一次显示 `Preset Temp`、`FAN CTRL`、`WiFi Info`、`Device Info` 四项。
 - 五向键的手势与路由行为不再由本 spec 冻结；输入与导航合同以 `frontpanel-input-interaction` 为准。
 - 二级页面必须维持“单主任务”结构，不得塞入多个同级编辑面板。
 - 预览实现必须支持确定性截图，不依赖真实固件或真实设备。
@@ -127,10 +127,9 @@
   - 当前选中槽位使用主题色；启用槽位用正常文本色；未启用槽位用灰色。
   - 中央主值必须使用与 Dashboard 相同的 7-segment 温度字体。
   - 未启用预设显示 `---℃`；启用预设显示实际温度值并复用 Dashboard 温度分段颜色。
-- `Active Cooling`
-  - 用明确的 `ON/OFF` 和两行只读策略说明表达主动降温状态。
-  - 第一行固定概括 `PD 20V | <35 OFF >40 50% >60 MAX`；`20V` 为默认 build，`12V / 28V` 变体只替换电压值，不改变布局。
-  - 第二行固定概括 `SAFE >100 PLS >350 50% >360 MAX`。
+- `FAN CTRL`
+  - 只显示 `POST` 与 `HEAT` 两行多档设置和当前暂存项；保存后显示 `OFF/AUTO/RUN/SAFE`、策略来源与抽象 `OFF/LOW/MED/HIGH/LIMITED` 档位。
+  - 页面不得显示 PD、电压、PWM、转速、温度阈值或硬编码策略说明。
 - `WiFi Info`
   - 显示 `SSID`、`RSSI` 与四位 `PAIR` 码；配对码只在该页面可见且离页立即失效。
 - `Device Info`
@@ -140,7 +139,7 @@
 
 - 若连接状态异常，允许把右侧最底行切换为 `FAULT` / `NEGOT.` / `OFFLINE`，但不得挤压温度主视觉区。
 - 若字符串超出预算，必须使用缩写或截断，不允许自动缩小主字号来硬塞内容。
-- 若风扇策略开启但当前无需工作，状态必须明确显示 `AUTO`；若策略关闭，则必须显示 `OFF`，不得仍显示占空比数值造成歧义。
+- 若风扇策略开启但当前无需工作，状态必须明确显示 `AUTO`；策略关闭显示 `OFF`；安全覆盖显示 `SAFE`。页面不得用占空比数值替代抽象档位。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -163,7 +162,7 @@ None
 - Given `Menu L1`，When 在同屏展示 4 个菜单项，Then 所有菜单项完整可见且选中项不与其他行混淆。
 - Given `Preset Temp` 页面，When 观察屏幕，Then 目标温度为单一主任务，不出现第二个竞争主视觉块。
 - Given `Preset Temp` 页面，When 某个槽位显示为灰色 `---`，Then 该槽位仍可被选中与重新调整为有效值。
-- Given `Active Cooling` 页面，When 观察屏幕，Then 开关状态与两行安全策略摘要清晰分层，不依赖外部图例理解。
+- Given `FAN CTRL` 页面，When 观察屏幕，Then `POST`/`HEAT` 两行暂存档位与当前 `OFF/AUTO/RUN/SAFE`、来源、抽象输出档位清晰可读，且不显示 PD 或硬编码规则。
 - Given `WiFi Info` 页面，When 观察屏幕，Then SSID 与连接状态来自 WiFi runtime；连接成功时 IP/RSSI 与 `PAIR` 均可读，四位配对码没有超过屏宽的断行；离开页面后不得继续显示或接受该码。
 - Given `Device Info` 页面，When 观察屏幕，Then `Board/FW/Serial` 结构清楚且信息密度不显拥挤。
 - Given Storybook docs/gallery，When 打开前面板故事集，Then 至少存在 `Key Test`、`Dashboard`、`Menu`、四个子页与 1 个总览画面。
@@ -171,7 +170,7 @@ None
 ## 实现前置条件（Definition of Ready / Preconditions）
 
 - 前面板硬件基线已明确为 `160×50` / RGB565 级别小彩屏。
-- 本轮只冻结视觉契约，不做真实固件画屏。
+- 固件 framebuffer preview 与 Web Storybook 必须共享同一 FAN CTRL 可见字段契约。
 - on-device 文案默认使用英文短词和缩写。
 - 持久化故障使用同一错误页 renderer：安全域或迁移故障显示 `EEPROM DATA`、`REQUIRED`/`INCOMPATIBLE`、`HEATER LOCKED`；普通偏好/网络失败显示 `EEPROM DATA`、`SAVE FAILED`、`HEATER AVAILABLE`。错误页底部显示 `HOLD CENTER RETRY`，中键长按触发一次持久化 retry，其他按键确认提示后仍可进入菜单、风扇和诊断页；heater、PPS 与 calibration 继续保持独立锁定，详细错误仅由 USB/devd 提供。全 `0xFF` EEPROM 不显示该场景。
 
@@ -235,9 +234,9 @@ None
 
 ![Front panel preset temp](./assets/frontpanel-preset-temp.png)
 
-#### Active Cooling
+#### FAN CTRL
 
-![Front panel active cooling](./assets/frontpanel-active-cooling.png)
+![Front panel FAN CTRL](./assets/frontpanel-active-cooling.png)
 
 #### WiFi Info
 

@@ -1,6 +1,9 @@
 use heapless::Vec;
 
 use crate::control_plane::{NetworkSummary, PersistenceFault};
+use crate::fan_policy::{
+    FanOutputLevel, FanPolicySource, HeatingFanGuardMode, PostHeatCoolingMode,
+};
 
 pub mod render;
 
@@ -530,7 +533,7 @@ impl FrontPanelMenuItem {
     pub const fn label(self) -> &'static str {
         match self {
             Self::PresetTemp => "Preset Temp",
-            Self::ActiveCooling => "Active Cooling",
+            Self::ActiveCooling => "FAN CTRL",
             Self::WifiInfo => "WiFi Info",
             Self::DeviceInfo => "Device Info",
         }
@@ -539,7 +542,7 @@ impl FrontPanelMenuItem {
     pub const fn short_label(self) -> &'static str {
         match self {
             Self::PresetTemp => "TEMP",
-            Self::ActiveCooling => "COOL",
+            Self::ActiveCooling => "FAN",
             Self::WifiInfo => "WIFI",
             Self::DeviceInfo => "INFO",
         }
@@ -560,6 +563,7 @@ pub enum FanDisplayState {
     Off,
     Auto,
     Run,
+    Safe,
 }
 
 impl FanDisplayState {
@@ -568,6 +572,7 @@ impl FanDisplayState {
             Self::Off => "OFF",
             Self::Auto => "AUTO",
             Self::Run => "RUN",
+            Self::Safe => "SAFE",
         }
     }
 }
@@ -624,6 +629,8 @@ pub struct FrontPanelUiState {
     pub heater_output_percent: u8,
     pub fan_enabled: bool,
     pub fan_display_state: FanDisplayState,
+    pub fan_policy_source: FanPolicySource,
+    pub fan_output_level: FanOutputLevel,
     pub heater_lock_reason: Option<HeaterLockReason>,
     pub dashboard_warning_visible: bool,
     pub eeprom_data_incompatible: bool,
@@ -638,6 +645,12 @@ pub struct FrontPanelUiState {
     pub selected_preset_slot: usize,
     pub presets_c: [Option<i16>; FRONTPANEL_PRESET_COUNT],
     pub active_cooling_enabled: bool,
+    pub post_heat_cooling_mode: PostHeatCoolingMode,
+    pub heating_fan_guard_mode: HeatingFanGuardMode,
+    pub fan_settings_row: u8,
+    pub fan_settings_draft_post_heat: PostHeatCoolingMode,
+    pub fan_settings_draft_guard: HeatingFanGuardMode,
+    pub fan_settings_apply_requested: bool,
     pub network: NetworkSummary,
     /// The four digits are set only while the physical WiFi Info page is
     /// active. Leaving that page clears the code immediately.
@@ -664,6 +677,8 @@ impl FrontPanelUiState {
             heater_output_percent: 0,
             fan_enabled: false,
             fan_display_state: FanDisplayState::Auto,
+            fan_policy_source: FanPolicySource::Idle,
+            fan_output_level: FanOutputLevel::Off,
             heater_lock_reason: None,
             dashboard_warning_visible: false,
             eeprom_data_incompatible: false,
@@ -687,6 +702,12 @@ impl FrontPanelUiState {
                 Some(300),
             ],
             active_cooling_enabled: true,
+            post_heat_cooling_mode: PostHeatCoolingMode::Normal,
+            heating_fan_guard_mode: HeatingFanGuardMode::Medium,
+            fan_settings_row: 0,
+            fan_settings_draft_post_heat: PostHeatCoolingMode::Normal,
+            fan_settings_draft_guard: HeatingFanGuardMode::Medium,
+            fan_settings_apply_requested: false,
             network: NetworkSummary::default(),
             wifi_pairing_code: None,
             key_test: KeyTestState::default(),
@@ -794,15 +815,20 @@ impl FrontPanelUiState {
                     KeyGestureSet::SHORT,
                     KeyGestureSet::SHORT_LONG,
                 ]),
-                FrontPanelRoute::ActiveCooling | FrontPanelRoute::WifiInfo => {
-                    FrontPanelGestureCapabilities::new([
-                        KeyGestureSet::SHORT_LONG,
-                        KeyGestureSet::NONE,
-                        KeyGestureSet::NONE,
-                        KeyGestureSet::SHORT,
-                        KeyGestureSet::NONE,
-                    ])
-                }
+                FrontPanelRoute::ActiveCooling => FrontPanelGestureCapabilities::new([
+                    KeyGestureSet::SHORT_LONG,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::SHORT,
+                ]),
+                FrontPanelRoute::WifiInfo => FrontPanelGestureCapabilities::new([
+                    KeyGestureSet::SHORT_LONG,
+                    KeyGestureSet::NONE,
+                    KeyGestureSet::NONE,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::NONE,
+                ]),
                 FrontPanelRoute::DeviceInfo => FrontPanelGestureCapabilities::new([
                     KeyGestureSet::SHORT_LONG,
                     KeyGestureSet::NONE,
@@ -849,6 +875,21 @@ impl FrontPanelUiState {
 
     pub fn leave_wifi_pairing(&mut self) {
         self.wifi_pairing_code = None;
+    }
+
+    pub fn set_fan_settings(&mut self, post_heat: PostHeatCoolingMode, guard: HeatingFanGuardMode) {
+        self.post_heat_cooling_mode = post_heat;
+        self.heating_fan_guard_mode = guard;
+        self.active_cooling_enabled = post_heat.is_enabled();
+        self.fan_settings_draft_post_heat = post_heat;
+        self.fan_settings_draft_guard = guard;
+        self.fan_settings_apply_requested = false;
+    }
+
+    pub const fn take_fan_settings_apply_request(&mut self) -> bool {
+        let requested = self.fan_settings_apply_requested;
+        self.fan_settings_apply_requested = false;
+        requested
     }
 
     fn apply_app_event(&mut self, event: KeyEvent) -> bool {
@@ -898,10 +939,7 @@ impl FrontPanelUiState {
                 self.heater_enabled = !self.heater_enabled;
                 true
             }
-            (FrontPanelKey::Center, KeyGesture::DoublePress) => {
-                self.active_cooling_enabled = !self.active_cooling_enabled;
-                true
-            }
+            (FrontPanelKey::Center, KeyGesture::DoublePress) => false,
             (FrontPanelKey::Center, KeyGesture::LongPress) => {
                 self.route = FrontPanelRoute::Menu;
                 true
@@ -994,9 +1032,34 @@ impl FrontPanelUiState {
 
     fn apply_active_cooling_event(&mut self, event: KeyEvent) -> bool {
         match (event.key, event.gesture) {
+            (FrontPanelKey::Up, KeyGesture::ShortPress)
+            | (FrontPanelKey::Down, KeyGesture::ShortPress) => {
+                self.fan_settings_row = if self.fan_settings_row == 0 { 1 } else { 0 };
+                true
+            }
             (FrontPanelKey::Left, KeyGesture::ShortPress)
-            | (FrontPanelKey::Center, KeyGesture::ShortPress)
-            | (FrontPanelKey::Center, KeyGesture::LongPress) => {
+            | (FrontPanelKey::Right, KeyGesture::ShortPress) => {
+                let forward = event.key == FrontPanelKey::Right;
+                if self.fan_settings_row == 0 {
+                    self.fan_settings_draft_post_heat =
+                        cycle_post_heat(self.fan_settings_draft_post_heat, forward);
+                } else {
+                    self.fan_settings_draft_guard =
+                        cycle_heating_guard(self.fan_settings_draft_guard, forward);
+                }
+                true
+            }
+            (FrontPanelKey::Center, KeyGesture::ShortPress) => {
+                self.post_heat_cooling_mode = self.fan_settings_draft_post_heat;
+                self.heating_fan_guard_mode = self.fan_settings_draft_guard;
+                self.active_cooling_enabled = self.post_heat_cooling_mode.is_enabled();
+                self.fan_settings_apply_requested = true;
+                self.route = FrontPanelRoute::Menu;
+                true
+            }
+            (FrontPanelKey::Center, KeyGesture::LongPress) => {
+                self.fan_settings_draft_post_heat = self.post_heat_cooling_mode;
+                self.fan_settings_draft_guard = self.heating_fan_guard_mode;
                 self.route = FrontPanelRoute::Menu;
                 true
             }
@@ -1062,6 +1125,30 @@ impl FrontPanelUiState {
         } else {
             self.selected_preset_slot - 1
         }
+    }
+}
+
+const fn cycle_post_heat(value: PostHeatCoolingMode, forward: bool) -> PostHeatCoolingMode {
+    match (value, forward) {
+        (PostHeatCoolingMode::Off, true) => PostHeatCoolingMode::Normal,
+        (PostHeatCoolingMode::Normal, true) => PostHeatCoolingMode::Fast,
+        (PostHeatCoolingMode::Fast, true) => PostHeatCoolingMode::Off,
+        (PostHeatCoolingMode::Off, false) => PostHeatCoolingMode::Fast,
+        (PostHeatCoolingMode::Normal, false) => PostHeatCoolingMode::Off,
+        (PostHeatCoolingMode::Fast, false) => PostHeatCoolingMode::Normal,
+    }
+}
+
+const fn cycle_heating_guard(value: HeatingFanGuardMode, forward: bool) -> HeatingFanGuardMode {
+    match (value, forward) {
+        (HeatingFanGuardMode::Off, true) => HeatingFanGuardMode::Low,
+        (HeatingFanGuardMode::Low, true) => HeatingFanGuardMode::Medium,
+        (HeatingFanGuardMode::Medium, true) => HeatingFanGuardMode::High,
+        (HeatingFanGuardMode::High, true) => HeatingFanGuardMode::Off,
+        (HeatingFanGuardMode::Off, false) => HeatingFanGuardMode::High,
+        (HeatingFanGuardMode::Low, false) => HeatingFanGuardMode::Off,
+        (HeatingFanGuardMode::Medium, false) => HeatingFanGuardMode::Low,
+        (HeatingFanGuardMode::High, false) => HeatingFanGuardMode::Medium,
     }
 }
 
@@ -1719,7 +1806,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_center_short_toggles_heater_and_double_press_toggles_cooling_policy() {
+    fn dashboard_center_short_toggles_heater_and_double_press_does_not_change_fan_policy() {
         let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
 
         assert!(state.handle_event(KeyEvent {
@@ -1731,14 +1818,14 @@ mod tests {
         assert!(state.heater_enabled);
         assert_eq!(state.route, FrontPanelRoute::Dashboard);
 
-        assert!(state.handle_event(KeyEvent {
+        assert!(!state.handle_event(KeyEvent {
             raw_key: RawFrontPanelKey::CenterBoot,
             key: FrontPanelKey::Center,
             gesture: KeyGesture::DoublePress,
             at_ms: 0,
         }));
-        assert!(!state.fan_enabled);
-        assert!(!state.active_cooling_enabled);
+        assert!(state.active_cooling_enabled);
+        assert_eq!(state.post_heat_cooling_mode, PostHeatCoolingMode::Normal);
         assert_eq!(state.fan_display_state, FanDisplayState::Auto);
         assert_eq!(state.route, FrontPanelRoute::Dashboard);
 
@@ -1749,6 +1836,62 @@ mod tests {
             at_ms: 0,
         }));
         assert_eq!(state.route, FrontPanelRoute::Menu);
+    }
+
+    #[test]
+    fn fan_control_stages_modes_and_applies_or_discards() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.route = FrontPanelRoute::ActiveCooling;
+
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Right,
+            key: FrontPanelKey::Right,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert_eq!(
+            state.fan_settings_draft_post_heat,
+            PostHeatCoolingMode::Fast
+        );
+        assert_eq!(state.post_heat_cooling_mode, PostHeatCoolingMode::Normal);
+
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Center,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert_eq!(state.post_heat_cooling_mode, PostHeatCoolingMode::Fast);
+        assert!(state.take_fan_settings_apply_request());
+
+        state.route = FrontPanelRoute::ActiveCooling;
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Right,
+            key: FrontPanelKey::Right,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Down,
+            key: FrontPanelKey::Down,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Left,
+            key: FrontPanelKey::Left,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert_eq!(state.fan_settings_draft_guard, HeatingFanGuardMode::Low);
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Center,
+            gesture: KeyGesture::LongPress,
+            at_ms: 0,
+        }));
+        assert_eq!(state.heating_fan_guard_mode, HeatingFanGuardMode::Medium);
+        assert!(!state.take_fan_settings_apply_request());
     }
 
     #[test]

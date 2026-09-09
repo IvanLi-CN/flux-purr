@@ -2,8 +2,8 @@
 
 ## 背景 / 问题陈述
 
-- 当前 `flux-purr` 已完成前面板输入、RTD 读取、FUSB302B PD sink 与 heater/fan bring-up，但 Dashboard 的风扇语义仍残留旧的单布尔开关口径。
-- `frontpanel-ui-contract` 与 `frontpanel-input-interaction` 已冻结前面板视觉和五向输入基线，但 Dashboard 的 fan line、Active Cooling 页面和过温告警仍缺少统一真相源。
+- 当前 `flux-purr` 已完成前面板输入、RTD 读取、FUSB302B PD sink 与 heater/fan bring-up；风扇策略由 POST/HEAT 两个多档设置统一驱动。
+- `frontpanel-ui-contract` 与 `frontpanel-input-interaction` 冻结前面板视觉和五向输入基线，运行态风扇状态与保护优先级由本 spec 统一定义。
 - 若不把风扇策略、过温停热、feature-selected PD 默认请求与前面板显示一次收口，后续板级调试会持续混淆“策略开关”“实际输出”“保护联动”三套状态。
 
 ## 目标 / 非目标
@@ -14,13 +14,11 @@
 - 加热闭环采用模型辅助 ramp/soak 与保温 PI 微调的混合控制器。控制器输出统一的等效热功率请求；PPS 后端映射为 `100mV` 对齐电压，PWM 负责连续的物理功率调节，固定 PD 后端选择不低于目标等效电压的 PDO 并使用同一 MOS PWM 合成等效功率。
 - 支持 `ThermalControlProfile` preview 与显式保存。RAM preview 最多 10 个目标点；持久化保存固定为 `pps3a` / `pps5a` 双 bank，各完整保存最多 10 个非空已配置目标点并压紧稀疏槽位。持久化后端只能使用 EEPROM，EEPROM 不可达时进入 `EEPROM_REQUIRED`，不得使用 MCU Flash fallback。`thermalProfileMode` 是 `auto|65w|100w`：auto 仅在 advertised PPS APDO 覆盖 `20V` 且 `ppsMaxMa >= 5000` 时解析 `pps5a`。多个 APDO 覆盖 `20V` 时，必须依次选择较高 `ppsMaxMa`、较高最大电压、较低最小电压的同一 APDO，不得聚合不同 APDO 的能力。显式档位不回退、不阻止运行；PPS/AVS 电压上限继续以所选 APDO 合同为准。preview 始终优先于 selected bank。
 - 提供 CLI/devd 自测试入口，抽象 bench source provider；当前默认且验收支持的 provider 是 IsolaPurr released CLI，用于准备 `auto|65w|100w`、PD Fixed enabled、PPS enabled、`auto_follow` 外部 source。单次 live run 工作目录只保留 `run.json`、`samples.ndjson` 与 `thermal-profile.candidate.json` 这类数据文件；owner-facing 冻结 baseline bundle 以浏览器可直接打开的 `index.html` 为唯一 canonical report，并同时提交 `run.bundle.json`、`samples.ndjson` 与 `thermal-profile.accepted.json`。每个 applied stage 的 `analysis` 必须同时沉淀 `approachSource` / `holdSource`，记录 source 实际电压、电流、功率在该窗口内的 `sampleCount`、`min/max/avg/first/last`。当 RTD 进入 fault 时，前面板与 runtime display 必须保留最后一个有效温度显示，不能把 `0°C` 伪装成当前温度；待确认告警由前面板输入或 runtime/CLI/app 的 `faultAttentionAcknowledged` 清除。
-- 让 Dashboard 稳定显示实时温度、设定温度、`OFF/AUTO/RUN` 三态风扇显示与实际 heater 输出强度。
+- 让 Dashboard 稳定显示实时温度、设定温度、`OFF/AUTO/RUN/SAFE` 风扇显示、策略来源和抽象输出档位。
 - 冻结正式风扇/保护包线：
-  - heater `OFF` 且 active cooling `ON`：临时主动散热包线在 `>=35°C` 统一以 `GPIO36 duty=0%`（`0‰`）全速运行；一旦温度回落到 `<35°C`，继续以 `GPIO36 duty=100%`（`1000‰`）拖尾 `30s` 后再关闭。热失控强制风扇包线保持独立且不受此临时调整影响。
-  - heater `ON`：`<=100°C` 不主动散热；超过 `100°C` 后，只有实时 heater 输出大于 `0%` 时才进入最低电压 `0.2Hz` 使能脉冲，脉冲占空比为 cooling-disabled 脉冲的两倍并封顶 `50%`。
-  - active cooling `OFF`：`>100°C` 进入最低电压 `0.2Hz` 使能脉冲，脉冲占空比按 `floor((temp-100)/10)%` 递增并封顶 `25%`。
-  - active cooling `OFF` 且 `>350°C`：锁住停热并保持风扇 `50%`；`>360°C` 改为全速。
-  - `temp >= 420°C`：进入热失控并保持 heater hard cutoff；在告警未确认期间禁止重新发起加热，并按现有主动降温包线强制风扇持续工作：`>60°C` 全速、`40~60°C` 为 `50%`。温度 `<40°C` 或收到告警确认时，两者任一先发生即解除该强制风扇状态。
+  - `PostHeatCoolingMode` 为 `Off/Normal/Fast`，默认 `Normal`。加热由开到关时，Normal 在高于 `40°C` 运行中风，达到 `40°C` 后以低风运行 `30s`；Fast 在高于 `60°C` 运行高风，`40..60°C` 运行中风，达到 `40°C` 后继续中风 `30s`。
+  - `HeatingFanGuardMode` 为 `Off/Low/Medium/High`，默认 `Medium`，仅在 `heater_enabled` 时生效。Low 在超过 `100°C` 后以十秒周期低风脉冲，时间占比从 `1s` 线性到 `5s`（`200°C` 封顶）；Medium 在超过 `80°C` 后从 `1s` 线性到 `5s`（`150°C`），`150..240°C` 固定 `5s` 且输出从低风插值到抽象 `30%`，高于 `240°C` 保持该窗口；High 在超过 `80°C` 后持续低风。
+  - 传感器 fault、`>350°C` 停热锁定且至少中风、`>360°C` 高风、`>=420°C` heater hard cutoff 的安全覆盖优先于用户策略。
 - 默认启动只读取稳定的 FUSB302B 身份和可读状态 bank；PD 协商在运行时以非阻塞方式进行。只有已观察到 Accept + PS_RDY 的 PPS capability 覆盖 `20V` 时才启用可调加热后端。自动加热的可调请求上限是所选 APDO 的最大电压；`R(T)` 用于估算 heater watts，但不得降低 PPS/AVS 电压请求上限。
 - 产出 merge-ready 所需的 spec、视觉证据、板级验证与 review 收敛材料。
 
@@ -28,7 +26,7 @@
 
 - 不提供任意源码常量热调参入口；运行时调参必须通过 `ThermalControlProfile` 的持久化/API 可控字段完成。
 - 不把 `>250°C` 纳入 thermal self-test 或首版调参验收。
-- 不实现 fan tach 闭环、4 线 PWM、持久化风扇档位或按 VIN 自动切换固定 PD 请求。
+- 不实现 fan tach 闭环、4 线 PWM、独立外壳/控制板温度传感器或按 VIN 自动切换固定 PD 请求；只暴露抽象低/中/高输出档位。
 - 不修改外部 HTTP / RPC / 持久化字段结构。
 - 不扩展新的前面板菜单层级或联网业务逻辑。
 
@@ -121,14 +119,14 @@
 - `heaterCurrentReserveMa` 作为历史 profile 兼容字段继续保持默认 `200mA`、合法范围 `0..1000mA`，仅用于 fixed-PD PWM fallback；PPS/AVS 路径的电流边界来自所选 APDO 合同，该字段和瞬时 FUSB302B draw 都不得降低 adjustable-voltage request ceiling。
 - 手动 PPS 覆盖是非持久化调试状态，不写 EEPROM。启用时暂停自动 PPS/PID 电压写入，但 heater/PID 输出与 MOS gate 仍按既有逻辑运行；改压时不得主动干预 MOS gate。
 - 手动 PPS 覆盖不依赖 `pps_covers_20v`，但必须存在 PPS APDO capability，目标电压必须在 capability 内、按 `100mV` 对齐且不高于 `21.0V`。FUSB302B 写入失败或 PD 状态丢失时必须自动清除覆盖，回到默认固定 PD 请求或既有 fallback，并通过 status/trace 暴露错误。
-- `active_cooling_enabled=true` 时，Dashboard fan line 必须只显示 `AUTO` 或 `RUN`；`active_cooling_enabled=false` 时必须显示 `OFF`，即使保护链路正在临时驱动真实风扇。
-- Dashboard 中键短按只切 heater arm；中键双击切换主动降温（`active_cooling_enabled`）；中键长按只进菜单。
+- Dashboard fan line 必须显示 `OFF/AUTO/RUN/SAFE`，并由 `fanPolicySource` 与 `fanOutputLevel` 提供运行态事实；旧 `active_cooling_enabled` 只作为兼容投影。
+- Dashboard 中键短按只切 heater arm；中键双击不改变风扇策略；中键长按只进菜单。
 - `GPIO48` 蜂鸣器必须使用独立 PWM 通道；boot 和 idle 保持静音，不得复用 heater/fan 已占用的 PWM 输出。
 - heater 成功切换必须请求 `heater_on / heater_off`；主动降温成功切换必须请求 `active_cooling_on / active_cooling_off`；heater 重臂被拒绝时必须请求 `heater_reject`。请求的实际播放受 `buzzer-cue-arbitration` 仲裁合同约束。
 - 任何已接受的前面板用户操作都必须提交提示音请求；其中非 heater / 主动降温专用反馈的已接受操作（如菜单导航、子页进入/退出、预设编辑）统一提交通用 `ui_input` 请求。安全状态可抑制或合并普通反馈。
 - 只有仲裁器选中开始播放的蜂鸣器 cue 才从第一拍开始。普通反馈不得重启当前 cue；重复 pending `ui_input` 合并，最新专用反馈替换旧 Pending Feedback。若被选中 cue 的下一有声阶段频率与当前载波相同，GPIO48 的 MCPWM 载波相位必须跨 duty=0 的静音间隙复用。Timer2 必须保持固定 prescaler 并以 period 选择音高；下一有声阶段频率不同时必须先静音并停止 timer，再将计数器归零、应用新 period、重启 timer，最后恢复 duty，不得沿用上一频率段。完整优先级和安全状态合同见 `buzzer-cue-arbitration`。
 - 过温保护不得占用 Dashboard 的风扇元素；SET 行必须在告警激活时以 `1Hz` 闪烁 `WARN / OTEMP` 两关键帧。
-- `Active Cooling` 页面在正式 runtime 中为只读安全策略说明页；用户开启这一项时，口径统一称为“开启主动降温”，并必须同步默认 `20V`（及 `12V / 28V` build variants）、`>=35°C => 0% PWM`、`<35°C => 100% PWM + 30s`、加热期 `>100°C` 输出门控脉冲与 `>350 / >360°C` 包线。
+- `FAN CTRL` 页面只显示可编辑的 `POST` 与 `HEAT` 档位、当前状态、策略来源和抽象输出档位；不得显示 PD、电压、PWM、温度曲线或硬编码规则说明。
 - 当前风扇硬件为反相 `FB` 注入控制：`GPIO36 duty=0%` 表示最高风扇轨电压，`GPIO36 duty=100%`（`1000‰`）才表示最低风扇轨电压；所有 `minimum-voltage profile` 语义都必须落到该 `1000‰` 档位。
 - 蜂鸣告警只允许存在两个 owner-facing 状态：`热失控` 与 `热失控待确认`。温度 `>=420°C` 的热失控期间必须每隔 `1s` 播放一次热失控提示；温度回落到 `<420°C` 后，若用户尚未确认，则进入待确认状态并每 `10s` 蜂鸣提醒一次。`SensorShort / SensorOpen / AdcReadFailed` 仍可停热并报告测温无效，但不得触发蜂鸣告警、待确认状态或 reminder。
 - defmt 日志必须覆盖 RTD 读数、PID 输入/输出、heater backend 选择、PPS/AVS 请求电压、MOS gate 输出、fault 原因、fan policy 输出与 PD 状态变化。
@@ -152,16 +150,12 @@
 - 启动后只识别并初始化 FUSB302BMPX；PD Source Capabilities、RDO、`Accept` 与 `PS_RDY` 在运行时非阻塞处理。若 PPS APDO 覆盖 `20V`，heater 后端进入 `pps-mos`；否则进入 `fixed-pd-pwm-fallback`。
 - PD 控制器未识别、启动合同未就绪或运行中合同丢失时，设备仍必须完成 Front Panel Dashboard 与 runtime-ready；`heater_enabled`、校准加热和 `GPIO47` 必须保持关闭，并以 `pd-contract-unavailable` 报告 heater lock。App runtime 在首次显示初始化后直接呈现 Dashboard，并在启动测量完成后只做一次完整 Dashboard SPI flush，不得因为 PD 超时再次初始化面板或保留校准首屏；只有 KeyTest runtime 渲染校准场景。只有后续观测到 ready contract 才能解除 heater lock，不能靠保留的 heater arm 自动绕过。
 - 用户短按中键后，heater 进入 arm 状态；若无 fault-latch，则控制器按 `target_temp_c - current_temp_c` 输出 `0..100%` 控制量。`pps-mos` 后端在所选 APDO 的最小到最大电压范围内表达该控制量；`R(T)` 参与 `Pmax(T)=min(Vsource^2/R(T), Vsource*Isource)` 的 heater-watt 估算，但不形成电压天花板。只有不具备合格 PPS APDO或关键调压失败时才进入 fixed-PD + `GPIO47` PWM fallback，并按其协商电流合同钳制 duty。
-- Dashboard 上/下短按和 hold-repeat 都只调整 `target_temp_c`，每次事件步进 `1°C` 并继续 clamp 到 `0~400°C`；中键 heater / active cooling / menu 语义不受 hold-repeat 影响。
-- 用户双击中键后，切换的是“主动降温”策略位，而不是直接强制 fan GPIO。
-- Dashboard fan line 只反映“策略开关 + 当前是否实际运行”：
-  - `OFF`：风扇策略关闭
-  - `AUTO`：风扇策略开启但当前无需工作
-  - `RUN`：风扇策略开启且当前已使能输出
-- 当 `active_cooling_enabled=true` 且 heater 已关闭时，温度 `>=35°C` 的真实风扇必须使用 `GPIO36 duty=0%`（`0‰`）全速；当温度从 `>=35°C` 回落到 `<35°C` 时，真实风扇必须继续以 `GPIO36 duty=100%`（`1000‰`）运行 `30s`，然后才关闭。该临时主动散热策略不修改热失控强制风扇的 `40~60°C` 安全包线。
-- 当 heater 已 arm 但实时 heater 输出为 `0%` 时，`100<T<=350°C` 的普通加热期风扇脉冲必须关闭；当实时 heater 输出大于 `0%` 时，该区间的最低电压脉冲周期为 `5s`，占空比必须为 cooling-disabled 脉冲的两倍并封顶 `50%`。
-- 当 `active_cooling_enabled=false` 且 `temp > 350°C` 时，heater 必须被强制关断并锁住；用户重新开启风扇策略或手动重新使能 heater 后才允许退出该锁态。
-- 当 `active_cooling_enabled=false` 且 `temp > 360°C` 时，真实风扇输出升级为全速，但 Dashboard fan line 仍保持 `OFF`。
+- Dashboard 上/下短按和 hold-repeat 都只调整 `target_temp_c`，每次事件步进 `1°C` 并继续 clamp 到 `0~400°C`；中键 heater / 菜单语义不受 hold-repeat 影响，双击中键无策略副作用。
+- 用户双击中键不修改风扇策略；策略只能在 `FAN CTRL` 页面保存。
+- Dashboard fan line 显示 `OFF`（策略关闭且无安全输出）、`AUTO`（策略启用但当前无需输出）、`RUN`（策略输出运行）或 `SAFE`（安全覆盖），并同时回传 `fanPolicySource` 与 `fanOutputLevel`。
+- 后冷却策略只在 heater 从开到关的边沿启动：Normal 按中风到 `40°C` 后低风 `30s`；Fast 按高风到 `60°C`、中风到 `40°C` 后中风 `30s`。
+- 加热防过热只在 `heater_enabled` 时生效：Low/Medium 使用十秒周期低风脉冲并按温度线性插值，High 在超过 `80°C` 后持续低风；Medium 在 `150..240°C` 将抽象输出从低风插值到 `30%`。
+- `>350°C` 停热锁定、`>360°C` 高风、`>=420°C` hard cutoff 和传感器 fault 始终覆盖用户策略；用户模式不得降低安全输出。
 - PD ready 是 heater 授权前提：合同不可用时必须撤销 heater arm 并将物理输出归零；较低但 ready 的合同仍可按后端限额降级运行。合同从 pending 变为 ready 时，必须丢弃电源不可用期间产生的 heater arm 意图，并等待新的显式 arm；不得因合同恢复自动加热。PPS/AVS 调压写入失败会把 heater 后端降级到固定 PD PWM fallback。
 - 手动 PPS 覆盖激活期间，自动 heater backend 不再写 FUSB302B 电压；固定 PD fallback 仍可继续使用 `GPIO47` PWM duty，`pps-mos` 仍可继续由 PID/MOS gate 表达加热输出。
 - 温度达到 `420°C` 时，runtime 进入 `热失控`：立即将 heater 输出归零，并每隔 `1s` 播放一次热失控提示。用户可以通过前面板输入或 runtime/CLI/app 的 `faultAttentionAcknowledged` 确认收到告警；确认后停止待确认锁定与强制风扇状态，但温度仍为 `>=420°C` 时，绝对过温保护、停热和 `1s` 热失控提示不得解除。温度回到 `<420°C` 后，若告警已确认则恢复一般状态；若尚未确认则进入 `热失控待确认`，每 `10s` 蜂鸣提醒一次，并拒绝任何 heater arm 请求。强制风扇期间沿用现有主动降温包线：`>60°C` 全速、`40~60°C` 为 `50%`；温度 `<40°C` 或收到告警确认时结束强制风扇状态，两者任一先发生即可。风扇状态解除不等于自动重新 arm heater。
@@ -204,13 +198,12 @@ None
 - Given 显示初始化完成但 EEPROM/首个 RTD 尚未就绪，When Dashboard 首帧提交，Then 左侧显示 `---.-°C`，右侧显示 `SET ---`、`PPS ---`、`FAN ---`，且不得出现 `300°C` 或其它伪造温度。
 - Given 固件刚启动，When EEPROM 配置已恢复且首个 RTD 样本有效，Then Dashboard 进入 `Ready`，左侧显示实际温度，右侧显示恢复后的 `SET/PPS/FAN`，其中 `FAN` 只会显示 `OFF/AUTO/RUN`。
 - Given 固件刚启动，When 首个 RTD 样本为 `SensorShort`、`SensorOpen` 或 `AdcReadFailed`，Then Dashboard 进入 `InitialRtdFault`，显示 `WARN/SENSOR` 与占位温度，heater 保持锁定；后续有效样本和用户重新 arm 前不得解除该锁定。
-- Given Dashboard，When 用户短按中键，Then 只切换 heater arm；When 双击中键，Then 只切换主动降温；When 长按中键，Then 仍进入菜单；When 长按保持上/下，Then 只连续调整 `target_temp_c`。
-- Given heater 关闭且主动降温开启，When 温度 `34°C / 35°C / 60°C / 61°C`，Then fan 必须分别进入停止或 30 秒拖尾 / `0% PWM` / `0% PWM` / `0% PWM`。
-- Given 主动降温已经把风扇拉起，When 温度跌到 `<35°C`，Then fan 必须以 `100% PWM` 再持续 `30s` 后关闭。
-- Given heater 开启但实时输出为 `0%`，When 温度 `110°C`，Then fan 不得触发普通加热期脉冲。
-- Given heater 开启且实时输出大于 `0%`，When 温度 `100 / 110 / 350 / 351 / 361°C`，Then fan 必须分别满足无脉冲 / `2%` 脉冲 / `50%` 脉冲 / `50%` / 全速。
-- Given active cooling 关闭，When 温度 `100 / 110 / 350 / 351 / 361°C`，Then fan 必须分别满足无脉冲 / `1%` 脉冲 / `25%` 脉冲 / `50%` / 全速。
-- Given active cooling 关闭且温度 `>350°C`，When 控制循环更新，Then heater 必须被锁住停热；When 用户重新开启风扇策略或手动重新 arm heater，Then 才允许离开锁态。
+- Given Dashboard，When 用户短按中键，Then 只切换 heater arm；When 双击中键，Then 不修改风扇策略；When 长按中键，Then 仍进入菜单。
+- Given `POST=NORMAL` 且 heater 从开到关，When 温度高于 `40°C`，Then fan 使用中风；When 温度达到 `40°C`，Then fan 使用低风 `30s` 后关闭。
+- Given `POST=FAST` 且 heater 从开到关，When 温度高于 `60°C`，Then fan 使用高风；When 温度为 `40..60°C`，Then fan 使用中风；达到 `40°C` 后继续中风 `30s`。
+- Given `HEAT=LOW`，When 温度超过 `100°C`，Then 十秒周期低风占比从 `1s` 线性到 `5s` 并在 `200°C` 封顶；Given `HEAT=MEDIUM`，Then `80..150°C` 同样插值，`150..240°C` 固定 `5s` 且输出线性到抽象 `30%`。
+- Given `HEAT=HIGH`，When 温度超过 `80°C`，Then fan 持续低风；Given `HEAT=OFF`，Then 不产生用户防过热输出。
+- Given 传感器 fault、`>350°C`、`>360°C` 或 `>=420°C`，Then 安全输出/停热覆盖所有用户档位。
 - Given `temp >= 420°C`，When 故障出现，Then heater 立即归零并进入 `hard-overtemp` fault-latch。
 - Given 热失控仍活动，When 告警未确认，Then 蜂鸣器必须每隔 `1s` 播放一次热失控提示，任何 heater arm 请求都必须被拒绝。
 - Given 热失控仍活动，When 用户确认收到告警但温度仍为 `>=420°C`，Then 确认可以清除待确认锁定与强制风扇状态，但绝对过温停热、fault-latch 与 `1s` 热失控提示必须保持。
@@ -335,9 +328,13 @@ None
 
 ![Dashboard overtemp B](./assets/dashboard-overtemp-b.png)
 
-- Active Cooling policy page：
+- FAN CTRL policy page（firmware framebuffer）：
 
-![Active Cooling](./assets/active-cooling.png)
+![FAN CTRL](./assets/active-cooling.png)
+
+- Web FAN CTRL segmented settings and live source/output summary（Storybook canvas）：
+
+![Web FAN CTRL](./assets/web-fan-control.png)
 
 - Current default temperature palette（Aurora / C）：
 

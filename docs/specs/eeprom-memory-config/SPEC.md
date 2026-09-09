@@ -11,7 +11,7 @@
 ### Goals
 
 - 在 `M24C64` 外部 EEPROM 中保存版本化记忆配置。
-- 保存并恢复 `target_temp_c`、`selected_preset_slot`、`presets_c[10]`、`active_cooling_enabled` 和 Wi-Fi 配置字段。
+- 保存并恢复 `target_temp_c`、`selected_preset_slot`、`presets_c[10]`、`post_heat_cooling_mode`、`heating_fan_guard_mode` 和 Wi-Fi 配置字段；`active_cooling_enabled` 保留为旧客户端兼容投影。
 - 保存并恢复 ADC calibration 的共享样本、A/B 槽位与当前激活槽位，供 ADC 校准控制面跨重启保留。
 - 使用 FPR2 分类 record、TLV payload 和 CRC；只有安全校准、温控策略与布局标记使用 A/B，偏好和网络域使用单槽。
 - 运行时对用户接受的记忆字段变更做防抖写回，减少 EEPROM 写入频率。
@@ -24,7 +24,7 @@
 - 不实现运行时 PID 参数持久化。
 - 不保存实时 ADC sample、实时温度、实时输入电压或 fault latch；ADC calibration 只保存共享样本和显式确认写入的槽位参数。
 - 不对 Wi-Fi 密码做加密；但密码不得进入日志、前面板明文或状态输出。
-- 不新增前面板菜单或改变现有视觉布局。
+- 前面板风扇设置只增加 `FAN CTRL` 页内的两行档位编辑，不保存实时 fan runtime 或安全锁状态。
 
 ## 范围（Scope）
 
@@ -94,7 +94,9 @@
   - `0x01`: `target_temp_c` (`i16le`)
   - `0x02`: `selected_preset_slot` (`u8`)
   - `0x03`: `presets_c[10]` (`10 * i16le`，`i16::MIN` 表示 `---`)
-  - `0x04`: `active_cooling_enabled` (`u8 bool`)
+  - `0x04`: `active_cooling_enabled` (`u8 bool`, legacy compatibility projection)
+  - `0x05`: `post_heat_cooling_mode` (`u8`: `0=off`, `1=normal`, `2=fast`)
+  - `0x06`: `heating_fan_guard_mode` (`u8`: `0=off`, `1=low`, `2=medium`, `3=high`)
   - `0x10`: `wifi_ssid` (`utf8 bytes`)
   - `0x11`: `wifi_password` (`utf8 bytes`)
   - `0x12`: `wifi_auto_reconnect` (`u8 bool`, legacy compatibility; firmware always normalizes to `true`)
@@ -120,6 +122,7 @@
   - `0x3a`: legacy `thermal_plant_transient_active` (decode-only)
   - `0x3b`: `heater_curve_transaction_id`
 - FPR2 只把 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode 写入 `ThermalPolicy`，把 `0x35`、`0x3b` 与 commissioning/ADC 字段写入 `SafetyCalibration`，把偏好和网络字段分别写入对应单槽域。`0x36`、`0x37` 与 `0x3a` 只保留为历史稳态/瞬态 thermal-plant 数据的 decode-only 标签，绝不迁移、不再写入，也不得解锁加热；旧记录中的派生模型只用于兼容读取和诊断。
+- 读取旧记录时，缺失 `0x05` 由旧 `0x04` 映射为 `Off`/`Normal`；缺失 `0x06` 默认 `Medium`。新标签优先于旧布尔值，写回同时保留 `0x04` 兼容投影。
 - 新写入的 thermal profile payload 必须以紧凑 `TCP3` 布局标识开头，两个 bank 独立存入 `ThermalPolicy` A/B 槽。`TCP2` 和无标识历史 payload 继续按各自旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。
 
 ## 验收标准（Acceptance Criteria）

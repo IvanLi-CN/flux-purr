@@ -653,7 +653,7 @@ fn menu_icon_rows(item: FrontPanelMenuItem) -> &'static [&'static str] {
 fn menu_footer_title(item: FrontPanelMenuItem) -> &'static str {
     match item {
         FrontPanelMenuItem::PresetTemp => "TEMP SET",
-        FrontPanelMenuItem::ActiveCooling => "A-COOL",
+        FrontPanelMenuItem::ActiveCooling => "FAN",
         FrontPanelMenuItem::WifiInfo => "WIFI",
         FrontPanelMenuItem::DeviceInfo => "DEVICE",
     }
@@ -846,6 +846,7 @@ fn draw_dashboard(
                 super::FanDisplayState::Off => COLOR_DISABLED,
                 super::FanDisplayState::Auto => COLOR_CYAN,
                 super::FanDisplayState::Run => COLOR_SUCCESS,
+                super::FanDisplayState::Safe => COLOR_WARNING,
             }
         },
     );
@@ -953,39 +954,56 @@ fn draw_preset_temp(
 }
 
 fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
-    use core::fmt::Write;
-
-    draw_text_mid(canvas, "A-COOL", 8, 6, COLOR_TEXT);
-    draw_text_mid_right(
-        canvas,
-        if state.active_cooling_enabled {
-            "ON"
-        } else {
-            "OFF"
-        },
-        152,
-        6,
-        if state.active_cooling_enabled {
-            COLOR_SUCCESS
-        } else {
-            COLOR_WARNING
-        },
-    );
-    let mut cooling_summary = heapless::String::<40>::new();
-    let _ = write!(
-        &mut cooling_summary,
-        "PD {}V | >=40 MIN >60 MAX",
-        state.pd_contract_mv / 1000
-    );
-    draw_text_small(canvas, &cooling_summary, 8, 22, COLOR_CYAN);
-    draw_text_small(canvas, "<40 LOW 30S THEN OFF", 8, 34, COLOR_SUCCESS);
+    draw_text_mid(canvas, "FAN CTRL", 8, 6, COLOR_TEXT);
     draw_text_small(
         canvas,
-        "SAFE >100 PLS >350 50% >360 MAX",
+        "POST",
         8,
-        42,
-        COLOR_WARNING,
+        22,
+        if state.fan_settings_row == 0 {
+            COLOR_TEXT
+        } else {
+            COLOR_MUTED
+        },
     );
+    draw_text_small(
+        canvas,
+        state.fan_settings_draft_post_heat.label(),
+        66,
+        22,
+        if state.fan_settings_row == 0 {
+            COLOR_SUCCESS
+        } else {
+            COLOR_TEXT
+        },
+    );
+    draw_text_small(
+        canvas,
+        "HEAT",
+        8,
+        34,
+        if state.fan_settings_row == 1 {
+            COLOR_TEXT
+        } else {
+            COLOR_MUTED
+        },
+    );
+    draw_text_small(
+        canvas,
+        state.fan_settings_draft_guard.label(),
+        66,
+        34,
+        if state.fan_settings_row == 1 {
+            COLOR_SUCCESS
+        } else {
+            COLOR_TEXT
+        },
+    );
+    let mut runtime = heapless::String::<32>::new();
+    let _ = runtime.push_str(state.fan_policy_source.label());
+    let _ = runtime.push(' ');
+    let _ = runtime.push_str(state.fan_output_level.label());
+    draw_text_small(canvas, &runtime, 8, 46, COLOR_CYAN);
 }
 
 fn draw_wifi_info(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {

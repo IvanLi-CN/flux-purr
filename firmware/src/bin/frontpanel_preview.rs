@@ -269,7 +269,14 @@ impl PreviewPreset {
             Self::ActiveCooling => {
                 let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
                 state.route = FrontPanelRoute::ActiveCooling;
-                state.active_cooling_enabled = true;
+                state.post_heat_cooling_mode =
+                    flux_purr_firmware::fan_policy::PostHeatCoolingMode::Normal;
+                state.heating_fan_guard_mode =
+                    flux_purr_firmware::fan_policy::HeatingFanGuardMode::Medium;
+                state.fan_settings_draft_post_heat = state.post_heat_cooling_mode;
+                state.fan_settings_draft_guard = state.heating_fan_guard_mode;
+                state.fan_policy_source = flux_purr_firmware::fan_policy::FanPolicySource::PostHeat;
+                state.fan_output_level = flux_purr_firmware::fan_policy::FanOutputLevel::Medium;
                 state.pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
                 state
             }

@@ -389,8 +389,16 @@ export function FrontPanelRuntimeHarness({
             <span className="text-slate-400">selectedPresetIndex:</span> {state.selectedPresetIndex}
           </div>
           <div>
-            <span className="text-slate-400">activeCoolingEnabled:</span>{' '}
-            {String(state.activeCoolingEnabled)}
+            <span className="text-slate-400">postHeatCoolingMode:</span> {state.postHeatCoolingMode}
+          </div>
+          <div>
+            <span className="text-slate-400">heatingFanGuardMode:</span> {state.heatingFanGuardMode}
+          </div>
+          <div>
+            <span className="text-slate-400">fanPolicySource:</span> {state.fanPolicySource}
+          </div>
+          <div>
+            <span className="text-slate-400">fanOutputLevel:</span> {state.fanOutputLevel}
           </div>
           <div>
             <span className="text-slate-400">heaterLockReason:</span>{' '}
@@ -399,9 +407,6 @@ export function FrontPanelRuntimeHarness({
           <div>
             <span className="text-slate-400">warningVisible:</span>{' '}
             {String(state.dashboardWarningVisible)}
-          </div>
-          <div>
-            <span className="text-slate-400">pdContractMv:</span> {state.pdContractMv}
           </div>
           <div>
             <span className="text-slate-400">manualPpsEnabled:</span>{' '}

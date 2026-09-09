@@ -146,7 +146,13 @@ export function lanProbeToDeviceTarget(session: LanDeviceSession, probe: LanProb
     heaterEnabled: status.heaterEnabled,
     heaterOutputPercent: status.heaterOutputPercent,
     activeCoolingEnabled: status.activeCoolingEnabled,
+    postHeatCoolingMode:
+      status.postHeatCoolingMode || (status.activeCoolingEnabled ? 'normal' : 'off'),
+    heatingFanGuardMode: status.heatingFanGuardMode || 'medium',
+    fanPolicySource: status.fanPolicySource || 'idle',
+    fanOutputLevel: status.fanOutputLevel || 'off',
     fanState: status.fanDisplayState,
+    fanDisplayState: status.fanDisplayState,
     wifiSsid: network.ssid ?? null,
     wifiRssi: network.wifiRssi ?? null,
     wifiPasswordLength: network.wifiPasswordLength ?? 0,

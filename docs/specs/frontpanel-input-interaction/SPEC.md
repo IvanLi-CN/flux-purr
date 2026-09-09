@@ -55,15 +55,15 @@
 - `Dashboard` 上/下必须以 `1°C` 步进调整当前目标温度。
 - `Dashboard` 左/右必须按“已启用记忆温度的实际温度值排序”找到最近的下一个温度，而不是按槽位顺序切换。
 - `Dashboard` 暂不显示当前命中的预设槽位或 `MAN / Mx` 文案，保持既有视觉基线不变。
-- `Dashboard` 中键短按只切 heater arm；中键双击切换主动降温（`active_cooling_enabled`）；中键长按只进菜单。
+- `Dashboard` 中键短按只切 heater arm；中键双击保持无副作用；中键长按只进菜单。
 - 当持久化故障提示待确认时，第一个任意物理按键只清除提示覆盖层，但不会吞掉菜单或页面导航事件。安全域锁仍阻止 heater、PPS 与 calibration；偏好/网络域失败不锁定 heater。
-- 一级菜单必须固定为 `Preset Temp / Active Cooling / WiFi Info / Device Info` 四项，左右移动，中键短按进入，中键长按回 Dashboard。
+- 一级菜单必须固定为 `Preset Temp / FAN CTRL / WiFi Info / Device Info` 四项，左右移动，中键短按进入，中键长按回 Dashboard。
 - 子页默认中键短按退出，中键长按兜底退出；左键返回菜单。
 - `Preset Temp` 页必须允许进入全部 `M1-M10` 槽位；灰色槽位只代表当前值无效，不代表不可进入。
 - `Preset Temp` 默认预设温度必须固定为 `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250 / 300°C`，并按 `M1-M10` 顺序展示。
 - `Preset Temp` 页中，当槽位值降到 `0°C` 以下时必须进入 `---` 状态并置灰；再次上调时必须能从 `---` 回到 `0°C`。
 - `Dashboard` 仅在左右切换记忆温度时忽略灰色 / `---` 槽位，不得把无效预设当作可命中的目标值。
-- `Active Cooling` 页在当前正式 runtime 中为只读策略说明页；用户开启这一项时，口径统一称为“开启主动降温”；页面只保留返回/退出导航，不再承载可写 fan mock。
+- `FAN CTRL` 页提供 `POST`（`OFF/NORMAL/FAST`）与 `HEAT`（`OFF/LOW/MED/HIGH`）两行暂存编辑；上/下选择行，左/右循环档位，中键短按保存，长按放弃返回菜单。页面只显示状态、来源和抽象档位，不显示 PD、电压、PWM 或硬编码规则。
 - `WiFi Info` 是只读网络信息页，但进入时必须显示本次新生成的四位 LAN 配对码；离开页面立即撤销该码。`Device Info` 保持只读页；两者只处理返回/退出。
 - 若 runtime 处于“fault 已消失但 attention reminder 仍待确认”状态，则第一次任意输入只负责确认/静音，不执行 heater/fan/menu 原动作；第二次输入才恢复正常语义。
 - 所有已接受的前面板用户操作都必须提交声音反馈请求；Dashboard 的 heater / 主动降温切换继续提交专用 cue，其余已接受交互（菜单导航、进入/退出子页、Preset Temp 编辑等）统一提交通用提示音。实际播放受 `buzzer-cue-arbitration` 的单输出优先级、合并和安全状态抑制合同约束。
@@ -109,7 +109,7 @@
 - `Left short`：跳到严格小于当前温度、且最接近的已启用预设值
 - `Right short`：跳到严格大于当前温度、且最接近的已启用预设值
 - `Center short`：切换 `heaterEnabled`
-- `Center double`：切换 `active_cooling_enabled`
+- `Center double`：Dashboard 无动作，不修改风扇策略
 - `Center long`：进入 `Menu`
 - 目标温度、路由、heater arm 与主动降温策略位进入统一 UI/runtime state；真实 fan runtime 由 `heater-pid-frontpanel-runtime` 约束，不由双击直接切换
 
@@ -126,9 +126,11 @@
   - `Up short / repeat`：对当前槽位做 `+1°C`；若当前为 `---`，则恢复到 `0°C`
   - `Down short / repeat`：对当前槽位做 `-1°C`；若值降到 `0°C` 以下，则变成 `---`
   - `Left short / Center short / Center long`：返回 `Menu`
-- `Active Cooling`
-  - 只读显示当前安全策略（overtemp-only 风扇包线说明）
-  - `Left short / Center short / Center long`：返回 `Menu`
+- `FAN CTRL`
+  - `Up / Down`：选择 POST 或 HEAT 行
+  - `Left / Right`：修改当前行暂存档位
+  - `Center short`：保存两行设置并返回 `Menu`
+  - `Center long / Left short`：放弃暂存值并返回 `Menu`
 - `WiFi Info / Device Info`
   - WiFi Info 显示当前四位配对码但不提供写开关；离页即撤销 pairing window。
   - Device Info 保持只读显示；`Left short / Center short / Center long`：返回 `Menu`。

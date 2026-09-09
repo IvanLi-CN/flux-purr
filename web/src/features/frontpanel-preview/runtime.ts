@@ -1,13 +1,17 @@
 import { frontPanelDefaultThresholdsC } from './design-tokens'
 import type {
   FanDisplayState,
+  FanOutputLevel,
+  FanPolicySource,
   FrontPanelDashboardScreen,
   FrontPanelKeyId,
   FrontPanelKeyTestScreen,
   FrontPanelScreen,
   HeaterLockReason,
+  HeatingFanGuardMode,
   KeyGestureId,
   MenuItemId,
+  PostHeatCoolingMode,
 } from './types'
 
 export type FrontPanelRoute =
@@ -43,6 +47,13 @@ export interface FrontPanelRuntimeState {
   presetsC: ReadonlyArray<number | null>
   activeCoolingEnabled: boolean
   activeCoolingCooldownEndsAtMs: number | null
+  postHeatCoolingMode: PostHeatCoolingMode
+  heatingFanGuardMode: HeatingFanGuardMode
+  fanPolicySource: FanPolicySource
+  fanOutputLevel: FanOutputLevel
+  fanSettingsRow: 0 | 1
+  fanSettingsDraftPostHeat: PostHeatCoolingMode
+  fanSettingsDraftGuard: HeatingFanGuardMode
   pdContractMv: number
   manualPpsEnabled: boolean
   coolingDisabledLockLatched: boolean
@@ -84,7 +95,7 @@ const DEFAULT_PD_CONTRACT_MV = resolveDefaultPdContractMv()
 
 const menuItems: ReadonlyArray<{ id: MenuItemId; label: string }> = [
   { id: 'preset-temp', label: 'Preset Temp' },
-  { id: 'active-cooling', label: 'Active Cooling' },
+  { id: 'active-cooling', label: 'Fan Control' },
   { id: 'wifi-info', label: 'WiFi Info' },
   { id: 'device-info', label: 'Device Info' },
 ]
@@ -255,10 +266,13 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
       : null
   let fanRuntimeEnabled = state.fanRuntimeEnabled
   let fanDisplayState: FanDisplayState = state.activeCoolingEnabled ? 'auto' : 'off'
+  let fanPolicySource: FanPolicySource = 'idle'
+  let fanOutputLevel: FanOutputLevel = 'off'
   let heaterEnabled = state.heaterEnabled
   let activeCoolingCooldownEndsAtMs = state.activeCoolingCooldownEndsAtMs
 
   if (heaterEnabled) {
+    fanPolicySource = 'heating_guard'
     activeCoolingCooldownEndsAtMs = null
     if (state.currentTempC > COOLING_DISABLED_FAN_FULL_TEMP_C) {
       fanRuntimeEnabled = true
@@ -270,7 +284,9 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
       fanRuntimeEnabled = false
     }
     fanDisplayState = state.activeCoolingEnabled ? (fanRuntimeEnabled ? 'run' : 'auto') : 'off'
+    fanOutputLevel = fanRuntimeEnabled ? 'low' : 'off'
   } else if (state.activeCoolingEnabled) {
+    fanPolicySource = 'post_heat'
     if (state.currentTempC > AUTO_COOLING_FULL_TEMP_C) {
       fanRuntimeEnabled = true
       activeCoolingCooldownEndsAtMs = null
@@ -290,6 +306,11 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
       activeCoolingCooldownEndsAtMs = null
     }
     fanDisplayState = fanRuntimeEnabled ? 'run' : 'auto'
+    fanOutputLevel = fanRuntimeEnabled
+      ? state.postHeatCoolingMode === 'fast' && state.currentTempC > 60
+        ? 'high'
+        : 'medium'
+      : 'off'
   } else {
     activeCoolingCooldownEndsAtMs = null
     if (state.currentTempC > COOLING_DISABLED_FAN_FULL_TEMP_C) {
@@ -302,6 +323,8 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
       fanRuntimeEnabled = false
     }
     fanDisplayState = 'off'
+    fanPolicySource = heaterLockReason ? 'safety' : 'idle'
+    fanOutputLevel = fanRuntimeEnabled ? 'high' : 'off'
   }
 
   if (heaterLockReason) {
@@ -314,6 +337,8 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
     heaterOutputPercent: heaterEnabled ? state.heaterOutputPercent : 0,
     fanRuntimeEnabled,
     fanDisplayState,
+    fanPolicySource,
+    fanOutputLevel,
     activeCoolingCooldownEndsAtMs,
     coolingDisabledLockLatched: coolingDisabledLock.coolingDisabledLockLatched,
     coolingDisabledLockArmed: coolingDisabledLock.coolingDisabledLockArmed,
@@ -343,6 +368,13 @@ export function createFrontPanelRuntimeState(
     presetsC: [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
     activeCoolingEnabled: true,
     activeCoolingCooldownEndsAtMs: null,
+    postHeatCoolingMode: 'normal',
+    heatingFanGuardMode: 'medium',
+    fanPolicySource: 'idle',
+    fanOutputLevel: 'off',
+    fanSettingsRow: 0,
+    fanSettingsDraftPostHeat: 'normal',
+    fanSettingsDraftGuard: 'medium',
     pdContractMv: DEFAULT_PD_CONTRACT_MV,
     manualPpsEnabled: false,
     coolingDisabledLockLatched: false,
@@ -446,12 +478,7 @@ export function applyFrontPanelInteraction(
         heaterLockReason: clearsHardOvertempLock ? null : state.heaterLockReason,
       })
     }
-    if (interaction.key === 'center' && interaction.gesture === 'double') {
-      return reconcileCoolingState({
-        ...state,
-        activeCoolingEnabled: !state.activeCoolingEnabled,
-      })
-    }
+    if (interaction.key === 'center' && interaction.gesture === 'double') return state
     if (interaction.key === 'center' && interaction.gesture === 'long') {
       return { ...state, route: 'menu' }
     }
@@ -523,11 +550,48 @@ export function applyFrontPanelInteraction(
 
   if (state.route === 'active-cooling') {
     if (
-      (interaction.key === 'left' && interaction.gesture === 'short') ||
-      (interaction.key === 'center' &&
-        (interaction.gesture === 'short' || interaction.gesture === 'long'))
+      (interaction.key === 'up' || interaction.key === 'down') &&
+      interaction.gesture === 'short'
     ) {
-      return { ...state, route: 'menu' }
+      return { ...state, fanSettingsRow: state.fanSettingsRow === 0 ? 1 : 0 }
+    }
+    if (
+      (interaction.key === 'left' || interaction.key === 'right') &&
+      interaction.gesture === 'short'
+    ) {
+      const forward = interaction.key === 'right'
+      if (state.fanSettingsRow === 0) {
+        const modes: PostHeatCoolingMode[] = ['off', 'normal', 'fast']
+        const index = modes.indexOf(state.fanSettingsDraftPostHeat)
+        return {
+          ...state,
+          fanSettingsDraftPostHeat:
+            modes[(index + (forward ? 1 : modes.length - 1)) % modes.length],
+        }
+      }
+      const modes: HeatingFanGuardMode[] = ['off', 'low', 'medium', 'high']
+      const index = modes.indexOf(state.fanSettingsDraftGuard)
+      return {
+        ...state,
+        fanSettingsDraftGuard: modes[(index + (forward ? 1 : modes.length - 1)) % modes.length],
+      }
+    }
+    if (interaction.key === 'center' && interaction.gesture === 'short') {
+      return reconcileCoolingState({
+        ...state,
+        postHeatCoolingMode: state.fanSettingsDraftPostHeat,
+        heatingFanGuardMode: state.fanSettingsDraftGuard,
+        activeCoolingEnabled: state.fanSettingsDraftPostHeat !== 'off',
+        route: 'menu',
+      })
+    }
+    if (interaction.key === 'center' && interaction.gesture === 'long') {
+      return {
+        ...state,
+        fanSettingsDraftPostHeat: state.postHeatCoolingMode,
+        fanSettingsDraftGuard: state.heatingFanGuardMode,
+        route: 'menu',
+      }
     }
     return state
   }
@@ -562,8 +626,7 @@ export function frontPanelRuntimeToScreen(state: FrontPanelRuntimeState): FrontP
     return {
       kind: 'dashboard',
       title: 'Dashboard',
-      subtitle:
-        'Up/down ±1°C, hold repeats · center short heat · center double active cooling · center long menu',
+      subtitle: 'Up/down ±1°C, hold repeats · center short heat · center long menu',
       currentTempC: state.currentTempC,
       currentTempDeciC: state.currentTempDeciC,
       targetTempC: state.targetTempC,
@@ -603,16 +666,13 @@ export function frontPanelRuntimeToScreen(state: FrontPanelRuntimeState): FrontP
   if (state.route === 'active-cooling') {
     return {
       kind: 'active-cooling',
-      title: 'Active Cooling',
-      subtitle: 'Readonly policy summary · center/left back',
-      enabled: state.activeCoolingEnabled,
-      pdContractMv: state.pdContractMv,
-      cooldownTempC: AUTO_COOLING_MIN_TEMP_C,
-      cooldownSeconds: AUTO_COOLING_FAN_COOLDOWN_MS / 1000,
-      autoFullTempC: AUTO_COOLING_FULL_TEMP_C,
-      pulseStartTempC: COOLING_DISABLED_PULSE_START_TEMP_C,
-      lockTempC: COOLING_DISABLED_HEATER_LOCK_TEMP_C,
-      fullTempC: COOLING_DISABLED_FAN_FULL_TEMP_C,
+      title: 'FAN CTRL',
+      subtitle: 'POST / HEAT · center save · long discard',
+      postHeatCoolingMode: state.fanSettingsDraftPostHeat,
+      heatingFanGuardMode: state.fanSettingsDraftGuard,
+      fanPolicySource: state.fanPolicySource,
+      fanOutputLevel: state.fanOutputLevel,
+      fanSettingsRow: state.fanSettingsRow,
     }
   }
 

@@ -17,7 +17,7 @@ const menuMeta: Record<MenuIconId, { title: string }> = {
     title: 'TEMP SET',
   },
   'active-cooling': {
-    title: 'A-COOL',
+    title: 'FAN',
   },
   'wifi-info': {
     title: 'WIFI',
@@ -573,40 +573,38 @@ function drawActiveCoolingScreen(
   screen: Extract<FrontPanelScreen, { kind: 'active-cooling' }>
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
-  drawBitmapText(ctx, 'A-COOL', 8, 6, {
+  drawBitmapText(ctx, 'FAN CTRL', 8, 6, {
     color: palette.text,
     scale: 2,
     letterSpacing: 1,
   })
-  drawBitmapText(ctx, screen.enabled ? 'ON' : 'OFF', 152, 6, {
-    color: screen.enabled ? palette.success : palette.warning,
-    scale: 2,
-    align: 'right',
+  drawBitmapText(ctx, 'POST', 8, 21, {
+    color: screen.fanSettingsRow === 0 ? palette.text : palette.muted,
+    scale: 1,
     letterSpacing: 1,
   })
-  drawBitmapText(
-    ctx,
-    `PD ${Math.round(screen.pdContractMv / 1000)}V | >=${screen.cooldownTempC} MIN >${screen.autoFullTempC} MAX`,
-    8,
-    20,
-    {
-      color: palette.cyan,
-      scale: 1,
-      letterSpacing: 1,
-    }
-  )
-  drawBitmapText(ctx, `<${screen.cooldownTempC} LOW ${screen.cooldownSeconds}S THEN OFF`, 8, 33, {
-    color: palette.success,
+  drawBitmapText(ctx, screen.postHeatCoolingMode.toUpperCase(), 62, 21, {
+    color: screen.fanSettingsRow === 0 ? palette.success : palette.text,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, 'HEAT', 8, 32, {
+    color: screen.fanSettingsRow === 1 ? palette.text : palette.muted,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, screen.heatingFanGuardMode.toUpperCase(), 62, 32, {
+    color: screen.fanSettingsRow === 1 ? palette.success : palette.text,
     scale: 1,
     letterSpacing: 1,
   })
   drawBitmapText(
     ctx,
-    `SAFE >${screen.pulseStartTempC} PLS >${screen.lockTempC} 50% >${screen.fullTempC} MAX`,
+    `${screen.fanPolicySource.toUpperCase()} ${screen.fanOutputLevel.toUpperCase()}`,
     8,
-    42,
+    44,
     {
-      color: palette.warning,
+      color: screen.fanPolicySource === 'safety' ? palette.warning : palette.cyan,
       scale: 1,
       letterSpacing: 1,
     }
@@ -722,7 +720,7 @@ function ariaLabel(screen: FrontPanelScreen) {
         : `front panel preset ${screen.selectedPresetIndex + 1} ${preset} degrees`
     }
     case 'active-cooling':
-      return `front panel active cooling ${screen.enabled ? 'enabled' : 'disabled'}`
+      return `front panel fan control post ${screen.postHeatCoolingMode} heat ${screen.heatingFanGuardMode}`
     case 'wifi-info':
       return `front panel wifi info ${screen.ssid}`
     case 'device-info':

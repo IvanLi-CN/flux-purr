@@ -148,6 +148,10 @@ use flux_purr_firmware::control_plane::{
     samples_from_wire,
 };
 #[cfg(any(target_arch = "xtensa", test))]
+use flux_purr_firmware::fan_policy::{
+    FanOutputLevel, FanPolicySource, HeatingFanGuardMode, PostHeatCoolingMode,
+};
+#[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::frontpanel::{
     FRONTPANEL_PRESET_COUNT, FRONTPANEL_TARGET_TEMP_MAX_C, FRONTPANEL_TARGET_TEMP_MIN_C,
     FanDisplayState, FrontPanelKeyMap, FrontPanelRawState, FrontPanelRoute, FrontPanelRuntimeMode,
@@ -2890,10 +2894,24 @@ impl FanHardwareCommand {
 enum FanPolicyState {
     Disabled,
     ActiveCooling,
+    PostHeatMedium,
+    PostHeatCooldown {
+        until_ms: u64,
+        profile: FanVoltageProfile,
+    },
     SafeHalf,
     Full,
-    ActiveCoolingCooldown { until_ms: u64 },
-    CoolingDisabledPulse { duty_percent: u8 },
+    ActiveCoolingCooldown {
+        until_ms: u64,
+    },
+    CoolingDisabledPulse {
+        duty_percent: u8,
+    },
+    HeatingGuardPulse {
+        duty_percent: u8,
+        pwm_permille: u16,
+    },
+    HeatingGuardContinuous,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2902,6 +2920,14 @@ impl FanPolicyState {
         match self {
             Self::Disabled => FanHardwareCommand::disabled(),
             Self::ActiveCooling => FanHardwareCommand::from_profile(FanVoltageProfile::Full),
+            Self::PostHeatMedium => FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf),
+            Self::PostHeatCooldown { until_ms, profile } => {
+                if elapsed_ms < until_ms {
+                    FanHardwareCommand::from_profile(profile)
+                } else {
+                    FanHardwareCommand::disabled()
+                }
+            }
             Self::SafeHalf => FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf),
             Self::Full => FanHardwareCommand::from_profile(FanVoltageProfile::Full),
             Self::ActiveCoolingCooldown { until_ms } => {
@@ -2923,6 +2949,23 @@ impl FanPolicyState {
                     pwm_permille: FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
                 }
             }
+            Self::HeatingGuardPulse {
+                duty_percent,
+                pwm_permille,
+            } => {
+                if duty_percent == 0 {
+                    return FanHardwareCommand::disabled();
+                }
+                let elapsed_in_period_ms = elapsed_ms % 10_000;
+                let on_window_ms = 10_000u64.saturating_mul(duty_percent as u64) / 100;
+                FanHardwareCommand {
+                    enabled: elapsed_in_period_ms < on_window_ms,
+                    pwm_permille,
+                }
+            }
+            Self::HeatingGuardContinuous => {
+                FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
+            }
         }
     }
 }
@@ -2933,6 +2976,8 @@ struct FanPolicyDecision {
     state: FanPolicyState,
     command: FanHardwareCommand,
     display_state: FanDisplayState,
+    source: FanPolicySource,
+    output_level: FanOutputLevel,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3071,6 +3116,174 @@ fn fan_policy_decision(
         state,
         command,
         display_state: fan_display_state_for_command(active_cooling_enabled, command),
+        source: if active_cooling_enabled {
+            FanPolicySource::PostHeat
+        } else {
+            FanPolicySource::Idle
+        },
+        output_level: fan_output_level_for_command(command),
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn fan_output_level_for_command(command: FanHardwareCommand) -> FanOutputLevel {
+    if !command.enabled {
+        FanOutputLevel::Off
+    } else if command.pwm_permille == FAN_FULL_SPEED_PWM_PERMILLE {
+        FanOutputLevel::High
+    } else if command.pwm_permille <= FAN_HALF_SPEED_PWM_PERMILLE {
+        FanOutputLevel::Medium
+    } else if command.pwm_permille >= FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE {
+        FanOutputLevel::Low
+    } else {
+        FanOutputLevel::Limited
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn fan_display_state_for_policy(
+    source: FanPolicySource,
+    post_heat_mode: PostHeatCoolingMode,
+    command: FanHardwareCommand,
+) -> FanDisplayState {
+    if matches!(source, FanPolicySource::Safety) {
+        FanDisplayState::Safe
+    } else {
+        fan_display_state_for_command(post_heat_mode.is_enabled(), command)
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn interpolate_limited_fan_pwm(current_temp_c: i16) -> u16 {
+    const LIMITED_OUTPUT_START_C: i16 = 150;
+    const LIMITED_OUTPUT_END_C: i16 = 240;
+    const LIMITED_OUTPUT_PWM_PERMILLE: u16 = 700;
+    let progress = u32::from(
+        current_temp_c
+            .saturating_sub(LIMITED_OUTPUT_START_C)
+            .clamp(0, LIMITED_OUTPUT_END_C - LIMITED_OUTPUT_START_C) as u16,
+    );
+    let span = u32::from(FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE - LIMITED_OUTPUT_PWM_PERMILLE);
+    FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE.saturating_sub(
+        ((span * progress) / u32::from((LIMITED_OUTPUT_END_C - LIMITED_OUTPUT_START_C) as u16))
+            as u16,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn guard_pulse_percent(current_temp_c: i16, mode: HeatingFanGuardMode) -> u8 {
+    let (start_c, full_c) = match mode {
+        HeatingFanGuardMode::Low => (100, 200),
+        HeatingFanGuardMode::Medium => (80, 150),
+        HeatingFanGuardMode::Off | HeatingFanGuardMode::High => return 0,
+    };
+    if current_temp_c <= start_c {
+        return 0;
+    }
+    let span = (full_c - start_c) as u32;
+    let progress = u32::from((current_temp_c - start_c).min(full_c - start_c) as u16);
+    (10 + ((40 * progress) / span)) as u8
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[allow(clippy::too_many_arguments)]
+fn fan_policy_decision_with_modes(
+    current_temp_c: i16,
+    elapsed_ms: u64,
+    heater_enabled: bool,
+    heater_just_disabled: bool,
+    post_heat_mode: PostHeatCoolingMode,
+    guard_mode: HeatingFanGuardMode,
+    previous_state: FanPolicyState,
+    hold_previous_output: bool,
+) -> FanPolicyDecision {
+    let (state, source) = if hold_previous_output {
+        (previous_state, FanPolicySource::Safety)
+    } else if heater_enabled {
+        match guard_mode {
+            HeatingFanGuardMode::High if current_temp_c > 80 => (
+                FanPolicyState::HeatingGuardContinuous,
+                FanPolicySource::HeatingGuard,
+            ),
+            HeatingFanGuardMode::Low | HeatingFanGuardMode::Medium => {
+                let duty_percent = guard_pulse_percent(current_temp_c, guard_mode);
+                if duty_percent == 0 {
+                    (FanPolicyState::Disabled, FanPolicySource::HeatingGuard)
+                } else {
+                    let pwm_permille = if matches!(guard_mode, HeatingFanGuardMode::Medium)
+                        && current_temp_c > 150
+                    {
+                        interpolate_limited_fan_pwm(current_temp_c)
+                    } else {
+                        FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE
+                    };
+                    (
+                        FanPolicyState::HeatingGuardPulse {
+                            duty_percent,
+                            pwm_permille,
+                        },
+                        FanPolicySource::HeatingGuard,
+                    )
+                }
+            }
+            HeatingFanGuardMode::Off | HeatingFanGuardMode::High => {
+                (FanPolicyState::Disabled, FanPolicySource::HeatingGuard)
+            }
+        }
+    } else if post_heat_mode.is_enabled()
+        && (heater_just_disabled
+            || matches!(
+                previous_state,
+                FanPolicyState::PostHeatMedium
+                    | FanPolicyState::PostHeatCooldown { .. }
+                    | FanPolicyState::ActiveCooling
+            ))
+    {
+        let state = match previous_state {
+            FanPolicyState::PostHeatCooldown { until_ms, profile } => {
+                if elapsed_ms < until_ms {
+                    FanPolicyState::PostHeatCooldown { until_ms, profile }
+                } else {
+                    FanPolicyState::Disabled
+                }
+            }
+            _ => match post_heat_mode {
+                PostHeatCoolingMode::Normal => {
+                    if current_temp_c > 40 {
+                        FanPolicyState::PostHeatMedium
+                    } else {
+                        FanPolicyState::PostHeatCooldown {
+                            until_ms: elapsed_ms.saturating_add(AUTO_COOLING_FAN_COOLDOWN_MS),
+                            profile: FanVoltageProfile::Minimum,
+                        }
+                    }
+                }
+                PostHeatCoolingMode::Fast => {
+                    if current_temp_c > 60 {
+                        FanPolicyState::ActiveCooling
+                    } else if current_temp_c > 40 {
+                        FanPolicyState::PostHeatMedium
+                    } else {
+                        FanPolicyState::PostHeatCooldown {
+                            until_ms: elapsed_ms.saturating_add(AUTO_COOLING_FAN_COOLDOWN_MS),
+                            profile: FanVoltageProfile::SafeHalf,
+                        }
+                    }
+                }
+                PostHeatCoolingMode::Off => FanPolicyState::Disabled,
+            },
+        };
+        (state, FanPolicySource::PostHeat)
+    } else {
+        (FanPolicyState::Disabled, FanPolicySource::Idle)
+    };
+    let command = state.command(elapsed_ms);
+    FanPolicyDecision {
+        state,
+        command,
+        display_state: fan_display_state_for_policy(source, post_heat_mode, command),
+        source,
+        output_level: fan_output_level_for_command(command),
     }
 }
 
@@ -7139,6 +7352,8 @@ fn persist_domain_mask_between(
         || current.selected_preset_slot != persisted.selected_preset_slot
         || current.presets_c != persisted.presets_c
         || current.active_cooling_enabled != persisted.active_cooling_enabled
+        || current.post_heat_cooling_mode != persisted.post_heat_cooling_mode
+        || current.heating_fan_guard_mode != persisted.heating_fan_guard_mode
         || current.telemetry_interval_ms != persisted.telemetry_interval_ms
     {
         mask.0 |= PersistDomainMask::PREFERENCES.0;
@@ -7177,6 +7392,8 @@ fn copy_persisted_domains(
         persisted.selected_preset_slot = current.selected_preset_slot;
         persisted.presets_c = current.presets_c;
         persisted.active_cooling_enabled = current.active_cooling_enabled;
+        persisted.post_heat_cooling_mode = current.post_heat_cooling_mode;
+        persisted.heating_fan_guard_mode = current.heating_fan_guard_mode;
         persisted.telemetry_interval_ms = current.telemetry_interval_ms;
     }
     if domains.includes(PersistDomain::NetworkAndPairing) {
@@ -7649,7 +7866,7 @@ fn apply_memory_config_to_ui(state: &mut FrontPanelUiState, config: &MemoryConfi
     state.selected_preset_slot = config.selected_preset_slot;
     state.ensure_selected_preset_slot();
     state.presets_c = config.presets_c;
-    state.active_cooling_enabled = config.active_cooling_enabled;
+    state.set_fan_settings(config.post_heat_cooling_mode, config.heating_fan_guard_mode);
 }
 
 #[cfg(test)]
@@ -7681,6 +7898,8 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
         selected_preset_slot: state.selected_preset_slot,
         presets_c: state.presets_c,
         active_cooling_enabled: state.active_cooling_enabled,
+        post_heat_cooling_mode: state.post_heat_cooling_mode,
+        heating_fan_guard_mode: state.heating_fan_guard_mode,
         wifi_ssid: previous.wifi_ssid.clone(),
         wifi_password: previous.wifi_password.clone(),
         wifi_auto_reconnect: previous.wifi_auto_reconnect,
@@ -9527,6 +9746,14 @@ fn sync_frontpanel_runtime_state(
         ui_state.fan_display_state = fan_decision.display_state;
         changed = true;
     }
+    if ui_state.fan_policy_source != fan_decision.source {
+        ui_state.fan_policy_source = fan_decision.source;
+        changed = true;
+    }
+    if ui_state.fan_output_level != fan_decision.output_level {
+        ui_state.fan_output_level = fan_decision.output_level;
+        changed = true;
+    }
     if ui_state.heater_lock_reason != heater_lock_reason {
         ui_state.heater_lock_reason = heater_lock_reason;
         changed = true;
@@ -9637,6 +9864,10 @@ fn usb_runtime_status_with_calibration(
         ui_state.network.clone(),
     );
     status.target_temp_c = ui_state.target_temp_c;
+    status.post_heat_cooling_mode = ui_state.post_heat_cooling_mode;
+    status.heating_fan_guard_mode = ui_state.heating_fan_guard_mode;
+    status.fan_policy_source = ui_state.fan_policy_source;
+    status.fan_output_level = ui_state.fan_output_level;
     status.rtd_raw_adc_mv = context.latest_rtd_raw_adc_mv;
     status.rtd_raw_adc_min_mv = context.latest_rtd_raw_adc_min_mv;
     status.rtd_raw_adc_max_mv = context.latest_rtd_raw_adc_max_mv;
@@ -9800,6 +10031,18 @@ fn usb_runtime_config_response_with_calibration(
     calibration: &mut CalibrationRuntimeState,
     mut context: UsbRuntimeStatusContext,
 ) -> UsbFrame {
+    if config.fan_policy_conflicts() {
+        return UsbFrame::Response {
+            request_id,
+            ok: false,
+            result: None,
+            error: Some(ApiError::new(
+                "fan_policy_conflict",
+                "activeCoolingEnabled conflicts with postHeatCoolingMode.",
+                false,
+            )),
+        };
+    }
     let manual_pps_requested = config.manual_pps_enabled.is_some()
         || config.manual_pps_mv.is_some()
         || config.manual_pps_ma.is_some();
@@ -14406,15 +14649,17 @@ async fn main(_spawner: Spawner) {
     let mut cooling_disabled_lock_latched = false;
     let mut cooling_disabled_lock_armed = true;
     let mut fan_policy_state = FanPolicyState::Disabled;
+    let mut heater_enabled_last_cycle = ui_state.heater_enabled;
     let mut last_fan_command: Option<FanHardwareCommand> = None;
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
-    let mut initial_fan_decision = fan_policy_decision(
+    let mut initial_fan_decision = fan_policy_decision_with_modes(
         latest_display_temp_i16,
         0,
         ui_state.heater_enabled,
-        ui_state.heater_output_percent,
-        ui_state.active_cooling_enabled,
+        false,
+        ui_state.post_heat_cooling_mode,
+        ui_state.heating_fan_guard_mode,
         fan_policy_state,
         is_sensor_fault(current_rtd_fault),
     );
@@ -14426,7 +14671,13 @@ async fn main(_spawner: Spawner) {
         initial_fan_decision = FanPolicyDecision {
             state,
             command,
-            display_state: fan_display_state_for_command(ui_state.active_cooling_enabled, command),
+            display_state: fan_display_state_for_policy(
+                FanPolicySource::Safety,
+                ui_state.post_heat_cooling_mode,
+                command,
+            ),
+            source: FanPolicySource::Safety,
+            output_level: fan_output_level_for_command(command),
         };
     }
     fan_policy_state = initial_fan_decision.state;
@@ -15963,12 +16214,13 @@ async fn main(_spawner: Spawner) {
             needs_redraw = true;
         }
 
-        let mut fan_decision = fan_policy_decision(
+        let mut fan_decision = fan_policy_decision_with_modes(
             latest_display_temp_i16,
             elapsed_ms,
             ui_state.heater_enabled,
-            ui_state.heater_output_percent,
-            ui_state.active_cooling_enabled,
+            heater_enabled_last_cycle && !ui_state.heater_enabled,
+            ui_state.post_heat_cooling_mode,
+            ui_state.heating_fan_guard_mode,
             fan_policy_state,
             is_sensor_fault(current_rtd_fault),
         );
@@ -15979,6 +16231,8 @@ async fn main(_spawner: Spawner) {
                 state: FanPolicyState::Disabled,
                 command: FanHardwareCommand::disabled(),
                 display_state: FanDisplayState::Off,
+                source: FanPolicySource::Idle,
+                output_level: FanOutputLevel::Off,
             };
         }
         if let Some(state) =
@@ -15988,14 +16242,18 @@ async fn main(_spawner: Spawner) {
             fan_decision = FanPolicyDecision {
                 state,
                 command,
-                display_state: fan_display_state_for_command(
-                    ui_state.active_cooling_enabled,
+                display_state: fan_display_state_for_policy(
+                    FanPolicySource::Safety,
+                    ui_state.post_heat_cooling_mode,
                     command,
                 ),
+                source: FanPolicySource::Safety,
+                output_level: fan_output_level_for_command(command),
             };
         }
         fan_policy_state = fan_decision.state;
         fan_command = fan_decision.command;
+        heater_enabled_last_cycle = ui_state.heater_enabled;
         apply_fan_output(
             &mut fan_enable,
             &mut fan_pwm,
@@ -16900,6 +17158,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: Some(false),
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: Some(false),
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -16955,6 +17215,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: Some(true),
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -17013,6 +17275,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: Some(true),
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -17083,6 +17347,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: Some(10_400),
@@ -17162,6 +17428,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -17244,6 +17512,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -17587,6 +17857,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: Some(10_400),
@@ -17650,6 +17922,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: Some(10_450),
@@ -17671,6 +17945,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: Some(false),
                 manual_pps_mv: None,
@@ -17698,6 +17974,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: Some(false),
                 manual_pps_mv: None,
@@ -23113,6 +23391,164 @@ mod tests {
     }
 
     #[test]
+    fn multi_level_post_heat_cooling_follows_temperature_bands() {
+        let normal_hot = fan_policy_decision_with_modes(
+            41,
+            0,
+            false,
+            true,
+            PostHeatCoolingMode::Normal,
+            HeatingFanGuardMode::Medium,
+            FanPolicyState::Disabled,
+            false,
+        );
+        assert_eq!(normal_hot.source, FanPolicySource::PostHeat);
+        assert_eq!(normal_hot.output_level, FanOutputLevel::Medium);
+        assert_eq!(
+            normal_hot.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf)
+        );
+
+        let normal_cool = fan_policy_decision_with_modes(
+            40,
+            1_000,
+            false,
+            false,
+            PostHeatCoolingMode::Normal,
+            HeatingFanGuardMode::Medium,
+            FanPolicyState::PostHeatMedium,
+            false,
+        );
+        assert_eq!(
+            normal_cool.state,
+            FanPolicyState::PostHeatCooldown {
+                until_ms: 31_000,
+                profile: FanVoltageProfile::Minimum,
+            }
+        );
+        assert_eq!(normal_cool.output_level, FanOutputLevel::Low);
+        assert!(normal_cool.command.enabled);
+
+        let normal_done = fan_policy_decision_with_modes(
+            40,
+            31_000,
+            false,
+            false,
+            PostHeatCoolingMode::Normal,
+            HeatingFanGuardMode::Medium,
+            FanPolicyState::PostHeatCooldown {
+                until_ms: 31_000,
+                profile: FanVoltageProfile::Minimum,
+            },
+            false,
+        );
+        assert!(!normal_done.command.enabled);
+
+        let fast_high = fan_policy_decision_with_modes(
+            61,
+            0,
+            false,
+            true,
+            PostHeatCoolingMode::Fast,
+            HeatingFanGuardMode::Medium,
+            FanPolicyState::Disabled,
+            false,
+        );
+        assert_eq!(
+            fast_high.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::Full)
+        );
+        let fast_medium = fan_policy_decision_with_modes(
+            50,
+            0,
+            false,
+            false,
+            PostHeatCoolingMode::Fast,
+            HeatingFanGuardMode::Medium,
+            FanPolicyState::ActiveCooling,
+            false,
+        );
+        assert_eq!(
+            fast_medium.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf)
+        );
+        let fast_tail = fan_policy_decision_with_modes(
+            40,
+            0,
+            false,
+            false,
+            PostHeatCoolingMode::Fast,
+            HeatingFanGuardMode::Medium,
+            FanPolicyState::PostHeatMedium,
+            false,
+        );
+        assert_eq!(
+            fast_tail.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf)
+        );
+    }
+
+    #[test]
+    fn multi_level_heating_guard_interpolates_pulse_and_output() {
+        assert_eq!(guard_pulse_percent(100, HeatingFanGuardMode::Low), 0);
+        assert_eq!(guard_pulse_percent(200, HeatingFanGuardMode::Low), 50);
+        assert_eq!(guard_pulse_percent(80, HeatingFanGuardMode::Medium), 0);
+        assert_eq!(guard_pulse_percent(150, HeatingFanGuardMode::Medium), 50);
+        assert_eq!(
+            interpolate_limited_fan_pwm(150),
+            FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE
+        );
+        assert_eq!(interpolate_limited_fan_pwm(240), 700);
+
+        let low = fan_policy_decision_with_modes(
+            150,
+            0,
+            true,
+            false,
+            PostHeatCoolingMode::Normal,
+            HeatingFanGuardMode::Low,
+            FanPolicyState::Disabled,
+            false,
+        );
+        assert_eq!(low.source, FanPolicySource::HeatingGuard);
+        assert!(low.command.enabled);
+        assert_eq!(
+            low.command.pwm_permille,
+            FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE
+        );
+
+        let medium_limited = fan_policy_decision_with_modes(
+            200,
+            0,
+            true,
+            false,
+            PostHeatCoolingMode::Normal,
+            HeatingFanGuardMode::Medium,
+            FanPolicyState::Disabled,
+            false,
+        );
+        assert_eq!(
+            medium_limited.command.pwm_permille,
+            interpolate_limited_fan_pwm(200)
+        );
+        assert!(medium_limited.command.enabled);
+
+        let high = fan_policy_decision_with_modes(
+            81,
+            5_000,
+            true,
+            false,
+            PostHeatCoolingMode::Normal,
+            HeatingFanGuardMode::High,
+            FanPolicyState::Disabled,
+            false,
+        );
+        assert_eq!(high.state, FanPolicyState::HeatingGuardContinuous);
+        assert_eq!(high.output_level, FanOutputLevel::Low);
+        assert!(high.command.enabled);
+    }
+
+    #[test]
     fn heater_enabled_uses_actual_output_for_heating_pulses() {
         let heating_below_100 =
             fan_policy_decision(41, 0, true, 32, true, FanPolicyState::Disabled, false);
@@ -24690,6 +25126,7 @@ mod tests {
         let persisted = MemoryConfig {
             target_temp_c: 180,
             active_cooling_enabled: false,
+            post_heat_cooling_mode: PostHeatCoolingMode::Off,
             ..MemoryConfig::default()
         };
         let mut pending = MemoryConfig {

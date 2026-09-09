@@ -450,7 +450,13 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     heaterEnabled: record.status.heaterEnabled,
     heaterOutputPercent: record.status.heaterOutputPercent,
     activeCoolingEnabled: record.status.activeCoolingEnabled,
+    postHeatCoolingMode:
+      record.status.postHeatCoolingMode || (record.status.activeCoolingEnabled ? 'normal' : 'off'),
+    heatingFanGuardMode: record.status.heatingFanGuardMode || 'medium',
+    fanPolicySource: record.status.fanPolicySource || 'idle',
+    fanOutputLevel: record.status.fanOutputLevel || 'off',
     fanState: record.status.fanDisplayState,
+    fanDisplayState: record.status.fanDisplayState,
     wifiSsid: record.network.ssid ?? null,
     wifiRssi: record.network.wifiRssi ?? null,
     wifiPasswordLength: record.network.wifiPasswordLength ?? 0,

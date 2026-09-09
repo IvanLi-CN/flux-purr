@@ -9,6 +9,7 @@ pub mod buzzer;
 pub mod buzzer_test;
 pub mod control_plane;
 pub mod display;
+pub mod fan_policy;
 pub mod frontpanel;
 pub mod lan;
 pub mod mdns;
