@@ -99,7 +99,7 @@
 | Role | Spec | Usage |
 | --- | --- | --- |
 | Dashboard Numerals | 7-segment digits, `15×26` logical px per glyph | Dashboard / Preset 温度主值 |
-| UI Labels | `4×6` small / `5×8` mid bitmap glyphs | 菜单标题、状态标签、`M1~M10` |
+| UI Labels | `4×6` small / `5×8` mid bitmap glyphs; `FAN CTRL` uses `6×10` labels / `8×13` title | 菜单标题、状态标签、`M1~M10`；风扇策略编辑页使用高可读字号 |
 | Temp Unit | stacked bitmap `℃` icon | 所有温度主值单位 |
 
 ### Temperature states

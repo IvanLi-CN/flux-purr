@@ -668,6 +668,7 @@ export function frontPanelRuntimeToScreen(state: FrontPanelRuntimeState): FrontP
       kind: 'active-cooling',
       title: 'FAN CTRL',
       subtitle: 'POST / HEAT · center save · long discard',
+      fanDisplayState: state.fanDisplayState,
       postHeatCoolingMode: state.fanSettingsDraftPostHeat,
       heatingFanGuardMode: state.fanSettingsDraftGuard,
       fanPolicySource: state.fanPolicySource,

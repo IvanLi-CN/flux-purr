@@ -57,6 +57,7 @@ export interface FrontPanelPresetTempScreen extends FrontPanelBaseScreen {
 
 export interface FrontPanelCoolingScreen extends FrontPanelBaseScreen {
   kind: 'active-cooling'
+  fanDisplayState: FanDisplayState
   postHeatCoolingMode: PostHeatCoolingMode
   heatingFanGuardMode: HeatingFanGuardMode
   fanPolicySource: FanPolicySource

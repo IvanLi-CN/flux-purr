@@ -34,8 +34,8 @@ export const frontPanelTypography = [
   },
   {
     name: 'UI Labels',
-    spec: '4×6 small / 5×8 mid bitmap glyphs',
-    usage: 'M1~M10, protocol, fan status, menu titles',
+    spec: '4×6 small / 5×8 mid bitmap glyphs; FAN CTRL uses 6×10 labels / 8×13 title',
+    usage: 'M1~M10, protocol, fan status, menu titles; high-legibility fan policy editor',
   },
   {
     name: 'Temp Unit',

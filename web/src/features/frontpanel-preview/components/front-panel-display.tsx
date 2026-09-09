@@ -2,7 +2,12 @@ import { useEffect, useMemo, useRef } from 'react'
 import { cn } from '@/lib/utils'
 import { drawBitmapText, measureBitmapText } from '../bitmap-font'
 import { frontPanelPalette, frontPanelTemperatureColors } from '../design-tokens'
-import type { FrontPanelKeyId, FrontPanelScreen, KeyGestureId } from '../types'
+import type {
+  FrontPanelCoolingScreen,
+  FrontPanelKeyId,
+  FrontPanelScreen,
+  KeyGestureId,
+} from '../types'
 
 const LOGICAL_WIDTH = 160
 const LOGICAL_HEIGHT = 50
@@ -573,42 +578,75 @@ function drawActiveCoolingScreen(
   screen: Extract<FrontPanelScreen, { kind: 'active-cooling' }>
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
-  drawBitmapText(ctx, 'FAN CTRL', 8, 6, {
+  fillRect(ctx, 4, 15, 152, 1, palette.border)
+  drawBitmapText(ctx, 'FAN CTRL', 6, 1, {
     color: palette.text,
-    scale: 2,
+    font: 'control-title',
     letterSpacing: 1,
   })
-  drawBitmapText(ctx, 'POST', 8, 21, {
+  if (screen.fanSettingsRow === 0) {
+    fillRect(ctx, 4, 17, 152, 10, palette.panelStrong)
+    fillRect(ctx, 4, 17, 2, 10, palette.accent)
+  }
+  if (screen.fanSettingsRow === 1) {
+    fillRect(ctx, 4, 28, 152, 10, palette.panelStrong)
+    fillRect(ctx, 4, 28, 2, 10, palette.accent)
+  }
+  drawBitmapText(ctx, 'POST', 8, 17, {
     color: screen.fanSettingsRow === 0 ? palette.text : palette.muted,
-    scale: 1,
+    font: 'control-label',
     letterSpacing: 1,
   })
-  drawBitmapText(ctx, screen.postHeatCoolingMode.toUpperCase(), 62, 21, {
+  drawBitmapText(ctx, screen.postHeatCoolingMode.toUpperCase(), 154, 17, {
     color: screen.fanSettingsRow === 0 ? palette.success : palette.text,
-    scale: 1,
+    font: 'control-label',
     letterSpacing: 1,
+    align: 'right',
   })
-  drawBitmapText(ctx, 'HEAT', 8, 32, {
+  drawBitmapText(ctx, 'HEAT', 8, 28, {
     color: screen.fanSettingsRow === 1 ? palette.text : palette.muted,
-    scale: 1,
+    font: 'control-label',
     letterSpacing: 1,
   })
-  drawBitmapText(ctx, screen.heatingFanGuardMode.toUpperCase(), 62, 32, {
+  drawBitmapText(ctx, screen.heatingFanGuardMode.toUpperCase(), 154, 28, {
     color: screen.fanSettingsRow === 1 ? palette.success : palette.text,
-    scale: 1,
+    font: 'control-label',
     letterSpacing: 1,
+    align: 'right',
   })
   drawBitmapText(
     ctx,
-    `${screen.fanPolicySource.toUpperCase()} ${screen.fanOutputLevel.toUpperCase()}`,
+    `${screen.fanDisplayState.toUpperCase()} ${fanPolicySourceLabel(screen.fanPolicySource)} ${fanOutputLevelLabel(screen.fanOutputLevel)}`,
     8,
-    44,
+    40,
     {
-      color: screen.fanPolicySource === 'safety' ? palette.warning : palette.cyan,
-      scale: 1,
+      color:
+        screen.fanDisplayState === 'safe' || screen.fanPolicySource === 'safety'
+          ? palette.warning
+          : palette.cyan,
+      font: 'control-label',
       letterSpacing: 1,
     }
   )
+}
+
+function fanPolicySourceLabel(source: FrontPanelCoolingScreen['fanPolicySource']) {
+  return {
+    idle: 'IDLE',
+    post_heat: 'POST',
+    heating_guard: 'HEAT',
+    safety: 'SAFE',
+  }[source]
+}
+
+function fanOutputLevelLabel(level: FrontPanelCoolingScreen['fanOutputLevel']) {
+  return {
+    off: 'OFF',
+    low: 'LOW',
+    medium: 'MED',
+    high: 'HIGH',
+    limited: 'LIMIT',
+  }[level]
 }
 
 function fitBitmapText(

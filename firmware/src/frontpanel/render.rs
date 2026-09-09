@@ -3,7 +3,7 @@ use core::fmt::Write as _;
 use embedded_graphics::{
     mono_font::{
         MonoTextStyle,
-        ascii::{FONT_4X6, FONT_5X8},
+        ascii::{FONT_4X6, FONT_5X8, FONT_6X10, FONT_8X13},
     },
     pixelcolor::Rgb565,
     prelude::*,
@@ -283,6 +283,8 @@ enum BitmapAlign {
 enum BitmapFont {
     Small,
     Mid,
+    ControlLabel,
+    ControlTitle,
 }
 
 impl BitmapFont {
@@ -290,6 +292,8 @@ impl BitmapFont {
         match self {
             Self::Small => 4,
             Self::Mid => 5,
+            Self::ControlLabel => 6,
+            Self::ControlTitle => 8,
         }
     }
 }
@@ -334,6 +338,8 @@ fn draw_bitmap_text(
     let style = match font {
         BitmapFont::Small => MonoTextStyle::new(&FONT_4X6, color),
         BitmapFont::Mid => MonoTextStyle::new(&FONT_5X8, color),
+        BitmapFont::ControlLabel => MonoTextStyle::new(&FONT_6X10, color),
+        BitmapFont::ControlTitle => MonoTextStyle::new(&FONT_8X13, color),
     };
 
     for ch in text.chars() {
@@ -951,56 +957,105 @@ fn draw_preset_temp(
 }
 
 fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
-    draw_text_mid(canvas, "FAN CTRL", 8, 6, COLOR_TEXT);
-    draw_text_small(
+    draw_bitmap_text(
+        canvas,
+        "FAN CTRL",
+        6,
+        1,
+        COLOR_TEXT,
+        BitmapFont::ControlTitle,
+        1,
+        BitmapAlign::Left,
+    );
+    fill_rect(canvas, 4, 15, 152, 1, COLOR_BORDER);
+
+    let post_selected = state.fan_settings_row == 0;
+    let heat_selected = state.fan_settings_row == 1;
+    if post_selected {
+        fill_rect(canvas, 4, 17, 152, 10, COLOR_PANEL_STRONG);
+        fill_rect(canvas, 4, 17, 2, 10, COLOR_ACCENT);
+    }
+    if heat_selected {
+        fill_rect(canvas, 4, 28, 152, 10, COLOR_PANEL_STRONG);
+        fill_rect(canvas, 4, 28, 2, 10, COLOR_ACCENT);
+    }
+
+    draw_bitmap_text(
         canvas,
         "POST",
         8,
-        22,
-        if state.fan_settings_row == 0 {
+        17,
+        if post_selected {
             COLOR_TEXT
         } else {
             COLOR_MUTED
         },
+        BitmapFont::ControlLabel,
+        1,
+        BitmapAlign::Left,
     );
-    draw_text_small(
+    draw_bitmap_text(
         canvas,
         state.fan_settings_draft_post_heat.label(),
-        66,
-        22,
-        if state.fan_settings_row == 0 {
+        154,
+        17,
+        if post_selected {
             COLOR_SUCCESS
         } else {
             COLOR_TEXT
         },
+        BitmapFont::ControlLabel,
+        1,
+        BitmapAlign::Right,
     );
-    draw_text_small(
+    draw_bitmap_text(
         canvas,
         "HEAT",
         8,
-        34,
-        if state.fan_settings_row == 1 {
+        28,
+        if heat_selected {
             COLOR_TEXT
         } else {
             COLOR_MUTED
         },
+        BitmapFont::ControlLabel,
+        1,
+        BitmapAlign::Left,
     );
-    draw_text_small(
+    draw_bitmap_text(
         canvas,
         state.fan_settings_draft_guard.label(),
-        66,
-        34,
-        if state.fan_settings_row == 1 {
+        154,
+        28,
+        if heat_selected {
             COLOR_SUCCESS
         } else {
             COLOR_TEXT
         },
+        BitmapFont::ControlLabel,
+        1,
+        BitmapAlign::Right,
     );
     let mut runtime = heapless::String::<32>::new();
+    let _ = runtime.push_str(state.fan_display_state.label());
+    let _ = runtime.push(' ');
     let _ = runtime.push_str(state.fan_policy_source.label());
     let _ = runtime.push(' ');
     let _ = runtime.push_str(state.fan_output_level.label());
-    draw_text_small(canvas, &runtime, 8, 44, COLOR_CYAN);
+    draw_bitmap_text(
+        canvas,
+        &runtime,
+        8,
+        40,
+        if matches!(state.fan_display_state, super::FanDisplayState::Safe) {
+            COLOR_WARNING
+        } else {
+            COLOR_CYAN
+        },
+        BitmapFont::ControlLabel,
+        1,
+        BitmapAlign::Left,
+    );
 }
 
 fn draw_wifi_info(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
@@ -1272,7 +1327,11 @@ mod tests {
     fn frontpanel_fonts_use_retired_size_replacements() {
         assert_eq!(BitmapFont::Small.width(), 4);
         assert_eq!(BitmapFont::Mid.width(), 5);
+        assert_eq!(BitmapFont::ControlLabel.width(), 6);
+        assert_eq!(BitmapFont::ControlTitle.width(), 8);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::Small, 1), 14);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::Mid, 1), 17);
+        assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlLabel, 1), 20);
+        assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlTitle, 1), 26);
     }
 }
