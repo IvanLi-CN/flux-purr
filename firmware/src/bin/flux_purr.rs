@@ -4102,8 +4102,6 @@ const FUSB302B_DIAG_NO_USABLE_CONTRACT: u8 = 16;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_RX_PARTIAL: u8 = 17;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_STARTUP_SESSION_SYNC_SENT: u8 = 18;
-#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_REQUEST_TIMEOUT: u8 = 19;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_MAX_RX_MESSAGES_PER_POLL: u8 = 4;
@@ -4134,7 +4132,6 @@ fn fusb302b_degraded_reason() -> &'static str {
         FUSB302B_DIAG_TX_I2C_ERROR => "pd_fusb_tx_i2c_error",
         FUSB302B_DIAG_NO_USABLE_CONTRACT => "pd_fusb_no_usable_contract",
         FUSB302B_DIAG_RX_PARTIAL => "pd_fusb_rx_partial",
-        FUSB302B_DIAG_STARTUP_SESSION_SYNC_SENT => "pd_fusb_startup_session_sync_sent",
         FUSB302B_DIAG_REQUEST_TIMEOUT => "pd_fusb_contract_request_timeout",
         _ => "pd_contract_unavailable",
     }
@@ -5994,7 +5991,6 @@ struct Fusb302bRuntime {
     last_request_at_ms: Option<u64>,
     source_capabilities_tx_confirmed: bool,
     source_capabilities_gcrc_seen: bool,
-    startup_session_sync_pending: bool,
     partial_rx_started_at_ms: Option<u64>,
 }
 
@@ -6023,7 +6019,6 @@ impl Fusb302bRuntime {
             last_request_at_ms: None,
             source_capabilities_tx_confirmed: false,
             source_capabilities_gcrc_seen: false,
-            startup_session_sync_pending: true,
             partial_rx_started_at_ms: None,
         }
     }
@@ -6065,7 +6060,6 @@ impl Fusb302bRuntime {
         self.last_request_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
-        self.startup_session_sync_pending = false;
         self.partial_rx_started_at_ms = None;
         if self.initialize(i2c).await {
             self.policy =
@@ -6095,7 +6089,6 @@ impl Fusb302bRuntime {
                 self.source_capabilities_refresh_requested_at_ms = None;
                 self.source_capabilities_tx_confirmed = false;
                 self.source_capabilities_gcrc_seen = false;
-                self.startup_session_sync_pending = false;
                 self.partial_rx_started_at_ms = None;
 
                 let flushed = {
@@ -6335,32 +6328,6 @@ impl Fusb302bRuntime {
                     if self.policy.phase() == SinkPhase::WaitingForSourceCapabilities {
                         self.source_capabilities_tx_confirmed |= tx_sent;
                         self.source_capabilities_gcrc_seen |= gcrc_sent;
-                        if self.startup_session_sync_pending {
-                            if let Some(last_request_at_ms) =
-                                self.last_source_capabilities_request_at_ms
-                            {
-                                if matches!(
-                                    fusb302b::startup_source_capabilities_recovery(
-                                        last_request_at_ms,
-                                        false,
-                                        now_ms,
-                                    ),
-                                    fusb302b::StartupSourceCapabilitiesRecovery::SendSoftReset
-                                ) {
-                                    let header = fusb302b::soft_reset_header(self.next_message_id);
-                                    if !self.transmit(i2c, header, &[]).await {
-                                        return false;
-                                    }
-                                    self.startup_session_sync_pending = false;
-                                    self.last_source_capabilities_request_at_ms = Some(now_ms);
-                                    FUSB302B_DIAGNOSTIC.store(
-                                        FUSB302B_DIAG_STARTUP_SESSION_SYNC_SENT,
-                                        Ordering::Relaxed,
-                                    );
-                                    return true;
-                                }
-                            }
-                        }
                         let query_due = self.attached_at_ms.is_some_and(|attached_at_ms| {
                             fusb302b::source_capabilities_request_due(
                                 attached_at_ms,
@@ -6440,7 +6407,6 @@ impl Fusb302bRuntime {
                         self.source_capabilities_refresh_requested_at_ms = None;
                         self.source_capabilities_tx_confirmed = false;
                         self.source_capabilities_gcrc_seen = false;
-                        self.startup_session_sync_pending = false;
                         if retain_active_pps {
                             if !self
                                 .policy

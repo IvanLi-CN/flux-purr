@@ -8,7 +8,6 @@ use super::pd::{Contract, ContractKind, SourceCapabilities};
 
 const PD_HEADER_REQUEST: u16 = 2;
 const PD_HEADER_GET_SOURCE_CAP: u16 = 7;
-const PD_HEADER_SOFT_RESET: u16 = 13;
 const PD_HEADER_SPEC_REV_30: u16 = 0b10 << 6;
 const PPS_RDO_VOLTAGE_STEP_MV: u16 = 20;
 const PPS_RDO_CURRENT_STEP_MA: u16 = 50;
@@ -16,7 +15,6 @@ const PPS_KEEPALIVE_INTERVAL_MS: u64 = 5_000;
 
 pub const SOURCE_CAPS_INITIAL_WAIT_MS: u64 = 400;
 pub const SOURCE_CAPS_RETRY_INTERVAL_MS: u64 = 5_000;
-pub const STARTUP_SOURCE_CAPS_SYNC_DELAY_MS: u64 = 1_000;
 
 /// The only recovery actions available after a Source_Capabilities timeout.
 ///
@@ -27,15 +25,6 @@ pub const STARTUP_SOURCE_CAPS_SYNC_DELAY_MS: u64 = 1_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceCapabilitiesRecovery {
     Wait,
-    RetryGetSourceCapabilities,
-}
-
-/// The one-time recovery available only to a newly booted sink whose source
-/// remained powered through the MCU reset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StartupSourceCapabilitiesRecovery {
-    Wait,
-    SendSoftReset,
     RetryGetSourceCapabilities,
 }
 
@@ -253,11 +242,6 @@ pub const fn get_source_capabilities_header(message_id: u8) -> u16 {
     PD_HEADER_GET_SOURCE_CAP | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9)
 }
 
-/// Encode a PD 3.0 SOP Soft Reset control message with no data objects.
-pub const fn soft_reset_header(message_id: u8) -> u16 {
-    PD_HEADER_SOFT_RESET | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9)
-}
-
 pub fn request_data_object(contract: Contract) -> Option<[u8; 4]> {
     if contract.object_position == 0 {
         return None;
@@ -315,26 +299,6 @@ pub const fn source_capabilities_recovery(
         SourceCapabilitiesRecovery::RetryGetSourceCapabilities
     } else {
         SourceCapabilitiesRecovery::Wait
-    }
-}
-
-/// A fresh MCU has no knowledge of the source's incoming-message sequence.
-/// After its first unanswered Source_Capabilities query, one SOP Soft Reset
-/// synchronizes that PD session without withdrawing VBUS. Later timeouts use
-/// the ordinary re-query path and must not repeat the reset.
-pub const fn startup_source_capabilities_recovery(
-    last_request_at_ms: u64,
-    startup_session_sync_sent: bool,
-    now_ms: u64,
-) -> StartupSourceCapabilitiesRecovery {
-    if !startup_session_sync_sent
-        && now_ms.saturating_sub(last_request_at_ms) >= STARTUP_SOURCE_CAPS_SYNC_DELAY_MS
-    {
-        StartupSourceCapabilitiesRecovery::SendSoftReset
-    } else if source_capabilities_retry_due(last_request_at_ms, now_ms) {
-        StartupSourceCapabilitiesRecovery::RetryGetSourceCapabilities
-    } else {
-        StartupSourceCapabilitiesRecovery::Wait
     }
 }
 
@@ -459,22 +423,18 @@ mod tests {
     }
 
     #[test]
-    fn fresh_mcu_session_syncs_once_before_normal_source_caps_retries() {
+    fn unanswered_startup_source_caps_never_resets_the_powering_source() {
         assert_eq!(
-            startup_source_capabilities_recovery(1_400, false, 2_399),
-            StartupSourceCapabilitiesRecovery::Wait
+            source_capabilities_recovery(1_400, 2_399),
+            SourceCapabilitiesRecovery::Wait
         );
         assert_eq!(
-            startup_source_capabilities_recovery(1_400, false, 2_400),
-            StartupSourceCapabilitiesRecovery::SendSoftReset
+            source_capabilities_recovery(1_400, 2_400),
+            SourceCapabilitiesRecovery::Wait
         );
         assert_eq!(
-            startup_source_capabilities_recovery(1_400, true, 2_400),
-            StartupSourceCapabilitiesRecovery::Wait
-        );
-        assert_eq!(
-            startup_source_capabilities_recovery(1_400, true, 6_400),
-            StartupSourceCapabilitiesRecovery::RetryGetSourceCapabilities
+            source_capabilities_recovery(1_400, 6_400),
+            SourceCapabilitiesRecovery::RetryGetSourceCapabilities
         );
     }
 
@@ -545,6 +505,5 @@ mod tests {
     fn pd30_headers_keep_message_id_and_object_count() {
         assert_eq!(request_header(5), 0x1a82);
         assert_eq!(get_source_capabilities_header(5), 0x0a87);
-        assert_eq!(soft_reset_header(5), 0x0a8d);
     }
 }
