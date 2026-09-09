@@ -8,7 +8,6 @@ use super::pd::{Contract, ContractKind, SourceCapabilities};
 
 const PD_HEADER_REQUEST: u16 = 2;
 const PD_HEADER_GET_SOURCE_CAP: u16 = 7;
-const PD_HEADER_SOFT_RESET: u16 = 13;
 const PD_HEADER_SPEC_REV_30: u16 = 0b10 << 6;
 const PPS_RDO_VOLTAGE_STEP_MV: u16 = 20;
 const PPS_RDO_CURRENT_STEP_MA: u16 = 50;
@@ -16,16 +15,13 @@ const PPS_KEEPALIVE_INTERVAL_MS: u64 = 5_000;
 
 pub const SOURCE_CAPS_INITIAL_WAIT_MS: u64 = 400;
 pub const SOURCE_CAPS_RETRY_INTERVAL_MS: u64 = 5_000;
-pub const SOURCE_CAPS_SOFT_RESET_DELAY_MS: u64 = 1_000;
 
 /// The only recovery actions available after a Source_Capabilities timeout.
 ///
-/// A sink powered by the same VBUS must not initiate a Hard Reset merely
-/// because a source-capability response is late: that reset can withdraw the
-/// supply which powers the sink itself. Keep the heater interlocked and retry
-/// `Get_Source_Capabilities` instead. A single SOP Soft Reset can recover a
-/// stalled PD message session without withdrawing VBUS; it is not a Hard
-/// Reset and must not be retried indefinitely.
+/// A sink powered by the same VBUS must not initiate a PD reset merely because
+/// a source-capability response is late: either reset can disturb the source
+/// session that powers the sink itself. Keep the heater interlocked and retry
+/// `Get_Source_Capabilities` instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceCapabilitiesRecovery {
     Wait,
@@ -224,11 +220,6 @@ pub const fn get_source_capabilities_header(message_id: u8) -> u16 {
     PD_HEADER_GET_SOURCE_CAP | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9)
 }
 
-/// Encode a PD 3.0 SOP Soft Reset control message with no data objects.
-pub const fn soft_reset_header(message_id: u8) -> u16 {
-    PD_HEADER_SOFT_RESET | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9)
-}
-
 pub fn request_data_object(contract: Contract) -> Option<[u8; 4]> {
     if contract.object_position == 0 {
         return None;
@@ -276,18 +267,6 @@ pub const fn source_capabilities_request_due(
         Some(last_request_at_ms) => source_capabilities_retry_due(last_request_at_ms, now_ms),
         None => now_ms.saturating_sub(attached_at_ms) >= SOURCE_CAPS_INITIAL_WAIT_MS,
     }
-}
-
-/// A stalled discovery exchange may receive one SOP Soft Reset after the
-/// first unanswered Source Capabilities query. This keeps VBUS intact and
-/// lets the source restart its message sequence before ordinary re-querying
-/// resumes.
-pub const fn source_capabilities_soft_reset_due(
-    last_request_at_ms: u64,
-    soft_reset_sent: bool,
-    now_ms: u64,
-) -> bool {
-    !soft_reset_sent && now_ms.saturating_sub(last_request_at_ms) >= SOURCE_CAPS_SOFT_RESET_DELAY_MS
 }
 
 pub const fn source_capabilities_recovery(
@@ -422,10 +401,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_source_capabilities_escalate_once_to_soft_reset_without_hard_reset() {
-        assert!(!source_capabilities_soft_reset_due(1_000, false, 1_999));
-        assert!(source_capabilities_soft_reset_due(1_000, false, 2_000));
-        assert!(!source_capabilities_soft_reset_due(1_000, true, 9_000));
+    fn missing_source_capabilities_only_waits_or_requeries_without_resetting_source() {
+        assert!(
+            matches!(
+                source_capabilities_recovery(1_000, 2_000),
+                SourceCapabilitiesRecovery::Wait
+            ),
+            "a missing Source_Capabilities response must not make the sink reset the source session"
+        );
+        assert!(matches!(
+            source_capabilities_recovery(1_000, 6_000),
+            SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+        ));
     }
 
     #[test]
@@ -455,6 +442,5 @@ mod tests {
     fn pd30_headers_keep_message_id_and_object_count() {
         assert_eq!(request_header(5), 0x1a82);
         assert_eq!(get_source_capabilities_header(5), 0x0a87);
-        assert_eq!(soft_reset_header(5), 0x0a8d);
     }
 }
