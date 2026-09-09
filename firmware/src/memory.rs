@@ -2448,36 +2448,19 @@ fn encode_config_payload(
     Ok(cursor)
 }
 
-fn decode_config_payload(
-    bytes: &[u8],
-    wide_tlv_lengths: bool,
-    config: &mut MemoryConfig,
-) -> Result<(), MemoryDecodeError> {
-    let mut legacy_active_adc_calibration = AdcCalibrationConfig::default();
-    let mut legacy_draft_adc_calibration = AdcCalibrationConfig::default();
-    let mut saw_new_adc_slots = false;
-    let mut saw_new_adc_active_slots = false;
-    let mut saw_legacy_active = false;
-    let mut saw_legacy_draft = false;
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        let header_len = if wide_tlv_lengths { 3 } else { 2 };
-        if bytes.len().saturating_sub(cursor) < header_len {
-            return Err(MemoryDecodeError::MalformedTlv);
-        }
-        let tag = bytes[cursor];
-        let len = if wide_tlv_lengths {
-            u16::from_le_bytes([bytes[cursor + 1], bytes[cursor + 2]]) as usize
-        } else {
-            bytes[cursor + 1] as usize
-        };
-        cursor += header_len;
-        if bytes.len().saturating_sub(cursor) < len {
-            return Err(MemoryDecodeError::MalformedTlv);
-        }
-        let value = &bytes[cursor..cursor + len];
-        cursor += len;
+#[derive(Default)]
+struct ConfigDecodeState {
+    legacy_active_adc_calibration: AdcCalibrationConfig,
+    legacy_draft_adc_calibration: AdcCalibrationConfig,
+    saw_new_adc_slots: bool,
+    saw_new_adc_active_slots: bool,
+    saw_legacy_active: bool,
+    saw_legacy_draft: bool,
+}
 
+impl ConfigDecodeState {
+    fn apply_tlv(&mut self, config: &mut MemoryConfig, tag: u8, value: &[u8]) {
+        let len = value.len();
         match tag {
             TLV_COMMISSIONING_REQUIRED if len == 1 => {
                 config.commissioning_required = value[0] != 0;
@@ -2543,44 +2526,44 @@ fn decode_config_payload(
             }
             TLV_ADC_CALIBRATION_SAMPLES if len == ADC_CALIBRATION_SAMPLE_PAYLOAD_LEN => {
                 let decoded = decode_adc_calibration_samples(value);
-                legacy_active_adc_calibration = decoded;
+                self.legacy_active_adc_calibration = decoded;
                 config.adc_calibration.rtd.samples = decoded.rtd.samples;
                 config.adc_calibration.vin.samples = decoded.vin.samples;
-                saw_legacy_active = true;
+                self.saw_legacy_active = true;
             }
             TLV_LEGACY_DRAFT_ADC_CALIBRATION if len == ADC_CALIBRATION_SAMPLE_PAYLOAD_LEN => {
-                legacy_draft_adc_calibration = decode_adc_calibration_samples(value);
-                saw_legacy_draft = true;
+                self.legacy_draft_adc_calibration = decode_adc_calibration_samples(value);
+                self.saw_legacy_draft = true;
             }
             TLV_ADC_CALIBRATION_REFERENCES if len == ADC_CALIBRATION_REFERENCE_PAYLOAD_LEN => {
                 decode_adc_calibration_references(value, &mut config.adc_calibration);
-                decode_adc_calibration_references(value, &mut legacy_active_adc_calibration);
-                saw_legacy_active = true;
+                decode_adc_calibration_references(value, &mut self.legacy_active_adc_calibration);
+                self.saw_legacy_active = true;
             }
             TLV_LEGACY_DRAFT_ADC_CALIBRATION_REFERENCES
                 if len == ADC_CALIBRATION_REFERENCE_PAYLOAD_LEN =>
             {
-                decode_adc_calibration_references(value, &mut legacy_draft_adc_calibration);
-                saw_legacy_draft = true;
+                decode_adc_calibration_references(value, &mut self.legacy_draft_adc_calibration);
+                self.saw_legacy_draft = true;
             }
             TLV_ADC_CALIBRATION_TARGETS if len == ADC_CALIBRATION_TARGET_PAYLOAD_LEN => {
                 decode_adc_calibration_targets(value, &mut config.adc_calibration);
-                decode_adc_calibration_targets(value, &mut legacy_active_adc_calibration);
-                saw_legacy_active = true;
+                decode_adc_calibration_targets(value, &mut self.legacy_active_adc_calibration);
+                self.saw_legacy_active = true;
             }
             TLV_LEGACY_DRAFT_ADC_CALIBRATION_TARGETS
                 if len == ADC_CALIBRATION_TARGET_PAYLOAD_LEN =>
             {
-                decode_adc_calibration_targets(value, &mut legacy_draft_adc_calibration);
-                saw_legacy_draft = true;
+                decode_adc_calibration_targets(value, &mut self.legacy_draft_adc_calibration);
+                self.saw_legacy_draft = true;
             }
             TLV_ADC_CALIBRATION_SLOTS if len == ADC_CALIBRATION_SLOT_PAYLOAD_LEN => {
                 decode_adc_calibration_slots(value, &mut config.adc_calibration);
-                saw_new_adc_slots = true;
+                self.saw_new_adc_slots = true;
             }
             TLV_ADC_CALIBRATION_ACTIVE_SLOTS if len == ADC_CALIBRATION_ACTIVE_SLOT_PAYLOAD_LEN => {
                 decode_adc_calibration_active_slots(value, &mut config.adc_calibration);
-                saw_new_adc_active_slots = true;
+                self.saw_new_adc_active_slots = true;
             }
             TLV_ACTIVE_HEATER_CURVE if len == HEATER_CURVE_MAX_POINTS * 4 => {
                 config.active_heater_curve = decode_heater_curve(value);
@@ -2631,15 +2614,50 @@ fn decode_config_payload(
             _ => {}
         }
     }
-    if saw_legacy_active && !saw_new_adc_slots && !saw_new_adc_active_slots {
-        migrate_legacy_adc_calibration(
-            &mut config.adc_calibration,
-            &legacy_active_adc_calibration,
-            saw_legacy_draft.then_some(&legacy_draft_adc_calibration),
-        );
-    } else if saw_legacy_active && (!saw_new_adc_slots || !saw_new_adc_active_slots) {
-        backfill_new_adc_calibration_defaults(&mut config.adc_calibration);
+
+    fn finish(&self, config: &mut MemoryConfig) {
+        if self.saw_legacy_active && !self.saw_new_adc_slots && !self.saw_new_adc_active_slots {
+            migrate_legacy_adc_calibration(
+                &mut config.adc_calibration,
+                &self.legacy_active_adc_calibration,
+                self.saw_legacy_draft
+                    .then_some(&self.legacy_draft_adc_calibration),
+            );
+        } else if self.saw_legacy_active
+            && (!self.saw_new_adc_slots || !self.saw_new_adc_active_slots)
+        {
+            backfill_new_adc_calibration_defaults(&mut config.adc_calibration);
+        }
     }
+}
+
+fn decode_config_payload(
+    bytes: &[u8],
+    wide_tlv_lengths: bool,
+    config: &mut MemoryConfig,
+) -> Result<(), MemoryDecodeError> {
+    let mut state = ConfigDecodeState::default();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let header_len = if wide_tlv_lengths { 3 } else { 2 };
+        if bytes.len().saturating_sub(cursor) < header_len {
+            return Err(MemoryDecodeError::MalformedTlv);
+        }
+        let tag = bytes[cursor];
+        let len = if wide_tlv_lengths {
+            u16::from_le_bytes([bytes[cursor + 1], bytes[cursor + 2]]) as usize
+        } else {
+            bytes[cursor + 1] as usize
+        };
+        cursor += header_len;
+        if bytes.len().saturating_sub(cursor) < len {
+            return Err(MemoryDecodeError::MalformedTlv);
+        }
+        let value = &bytes[cursor..cursor + len];
+        cursor += len;
+        state.apply_tlv(config, tag, value);
+    }
+    state.finish(config);
     Ok(())
 }
 
@@ -2653,23 +2671,16 @@ pub fn apply_legacy_config_tlv(
     wide_tlv_lengths: bool,
 ) -> Result<(), MemoryDecodeError> {
     let header_len: usize = if wide_tlv_lengths { 3 } else { 2 };
-    let mut tlv = [0u8; 1_024];
     let total = header_len
-        .checked_add(1)
-        .and_then(|length| length.checked_add(value.len()))
+        .checked_add(value.len())
         .ok_or(MemoryDecodeError::PayloadOutOfBounds)?;
-    if total > tlv.len() || (!wide_tlv_lengths && value.len() > u8::MAX as usize) {
+    if total > 1_024 || (!wide_tlv_lengths && value.len() > u8::MAX as usize) {
         return Err(MemoryDecodeError::PayloadOutOfBounds);
     }
-    tlv[0] = tag;
-    if wide_tlv_lengths {
-        tlv[1..3].copy_from_slice(&(value.len() as u16).to_le_bytes());
-        tlv[3..total].copy_from_slice(value);
-    } else {
-        tlv[1] = value.len() as u8;
-        tlv[2..total].copy_from_slice(value);
-    }
-    decode_config_payload(&tlv[..total], wide_tlv_lengths, config)
+    let mut state = ConfigDecodeState::default();
+    state.apply_tlv(config, tag, value);
+    state.finish(config);
+    Ok(())
 }
 
 fn encode_heater_curve_raw_observations(config: &HeaterCurveRawObservations, out: &mut [u8]) {
@@ -5581,6 +5592,16 @@ mod tests {
 
         assert_eq!(decoded.thermal_plant_active, Some(transaction));
         assert!(project_thermal_plant(&transaction, |adc| Some(adc as f32 / 10.0)).is_none());
+    }
+
+    #[test]
+    fn legacy_tlv_streaming_apply_accepts_wide_values() {
+        let mut config = MemoryConfig::default();
+
+        apply_legacy_config_tlv(&mut config, TLV_TARGET_TEMP_C, &275_i16.to_le_bytes(), true)
+            .expect("wide legacy TLV applies without staging a whole record");
+
+        assert_eq!(config.target_temp_c, 275);
     }
 
     #[test]

@@ -297,8 +297,32 @@ static mut USB_CONTROL_RESPONSE_BUFFER: MaybeUninit<[u8; USB_CONTROL_TX_BUFFER_L
 static mut DISPLAY_CANVAS_STORAGE: MaybeUninit<DisplayCanvas> = MaybeUninit::uninit();
 
 #[cfg(target_arch = "xtensa")]
+#[unsafe(link_section = ".uninit")]
+static mut EEPROM_RECORD_STAGING_STORAGE: MaybeUninit<[u8; EEPROM_RECORD_STAGING_BYTES]> =
+    MaybeUninit::uninit();
+
+#[cfg(target_arch = "xtensa")]
 struct MemoryIoScratch {
     bytes: [u8; EEPROM_WRITE_CHUNK_MAX_BYTES],
+}
+
+#[cfg(target_arch = "xtensa")]
+struct SensitiveEepromStaging<'a> {
+    bytes: &'a mut [u8],
+}
+
+#[cfg(target_arch = "xtensa")]
+impl<'a> SensitiveEepromStaging<'a> {
+    fn new(bytes: &'a mut [u8]) -> Self {
+        Self { bytes }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+impl Drop for SensitiveEepromStaging<'_> {
+    fn drop(&mut self) {
+        zeroize_bytes_volatile(self.bytes);
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -349,6 +373,16 @@ fn initialize_display_canvas() -> &'static mut DisplayCanvas {
         let canvas = core::ptr::addr_of_mut!(DISPLAY_CANVAS_STORAGE).cast::<DisplayCanvas>();
         DisplayCanvas::initialize_black_in_place(canvas);
         &mut *canvas
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn initialize_eeprom_record_staging() -> &'static mut [u8; EEPROM_RECORD_STAGING_BYTES] {
+    // The staging area holds transient EEPROM records, never I2C transaction
+    // buffers. Reinitialize retained DRAM on each boot before using it.
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(EEPROM_RECORD_STAGING_STORAGE))
+            .write([0; EEPROM_RECORD_STAGING_BYTES])
     }
 }
 
@@ -687,6 +721,8 @@ const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 const EEPROM_WRITE_CHUNK_MAX_BYTES: usize = 16;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_READ_CHUNK_MAX_BYTES: usize = 16;
+#[cfg(target_arch = "xtensa")]
+const EEPROM_RECORD_STAGING_BYTES: usize = 1_024;
 #[cfg(test)]
 const EEPROM_UNUSED_GAP_LEN: usize = 0x0400;
 
@@ -6640,6 +6676,7 @@ fn memory_record_length_from_header(header: &[u8], slot_size: usize) -> Option<u
 fn load_eeprom_memory_record(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     scratch: &mut MemoryIoScratch,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> (Option<MemoryRecord>, bool, bool, bool) {
     let Some(address) = probe_eeprom_address(i2c) else {
         info!("memory restore skipped: eeprom unavailable");
@@ -6653,6 +6690,7 @@ fn load_eeprom_memory_record(
     let mut layout_valid_slots = 0u8;
     let mut layout_active_slots = 0u8;
     let mut domains: [Option<PersistRecord>; 5] = [None, None, None, None, None];
+    let staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
     let domain_slots = [
         (
             PersistDomain::SafetyCalibration,
@@ -6686,8 +6724,8 @@ fn load_eeprom_memory_record(
             .copied()
             .take(usize::from(domain.slot_count()))
         {
-            let mut record_bytes = [0xffu8; FPR2_MAX_RECORD_SIZE];
-            let header = &mut record_bytes[..FPR2_HEADER_LEN];
+            staging.bytes.fill(0xff);
+            let header = &mut staging.bytes[..FPR2_HEADER_LEN];
             let candidate = match read_eeprom_bytes_chunked(&mut eeprom, offset, header) {
                 Ok(()) => {
                     contains_data |= eeprom_bytes_contain_data(header);
@@ -6695,14 +6733,14 @@ fn load_eeprom_memory_record(
                     let record_len = FPR2_HEADER_LEN.saturating_add(payload_len);
                     if header[..4] == *b"FPR2"
                         && record_len <= slot_size
-                        && record_len <= record_bytes.len()
+                        && record_len <= staging.bytes.len()
                     {
                         match read_eeprom_bytes_chunked(
                             &mut eeprom,
                             offset.saturating_add(FPR2_HEADER_LEN as u16),
-                            &mut record_bytes[FPR2_HEADER_LEN..record_len],
+                            &mut staging.bytes[FPR2_HEADER_LEN..record_len],
                         ) {
-                            Ok(()) => decode_persist_record(&record_bytes[..record_len]).ok(),
+                            Ok(()) => decode_persist_record(&staging.bytes[..record_len]).ok(),
                             Err(_) => {
                                 read_failed = true;
                                 None
@@ -6828,6 +6866,7 @@ fn merge_persist_records(domains: &[Option<PersistRecord>; 5]) -> Option<MemoryR
 async fn load_legacy_eeprom_memory_record(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     scratch: &mut MemoryIoScratch,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> (Option<MemoryRecord>, bool) {
     let Some(address) = probe_eeprom_address(i2c) else {
         return (None, true);
@@ -6843,9 +6882,10 @@ async fn load_legacy_eeprom_memory_record(
         (LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
         (LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
     ] {
-        let candidate = read_legacy_record_stream(&mut eeprom, offset, length, scratch)
-            .await
-            .ok();
+        let candidate =
+            read_legacy_record_stream(&mut eeprom, offset, length, scratch, record_staging)
+                .await
+                .ok();
         if candidate.is_none() {
             read_failed = true;
         }
@@ -6867,6 +6907,7 @@ async fn read_legacy_record_stream(
     offset: u16,
     slot_size: usize,
     scratch: &mut MemoryIoScratch,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> Result<MemoryRecord, ()> {
     let mut header = [0u8; MEMORY_RECORD_HEADER_LEN];
     read_eeprom_bytes_chunked(eeprom, offset, &mut header).map_err(|_| ())?;
@@ -6890,7 +6931,7 @@ async fn read_legacy_record_stream(
     };
     let mut crc = persistence_crc32_update(0xffff_ffff, &header[..12]);
     let mut payload_cursor = 0usize;
-    let mut value = [0u8; 1_024];
+    let staging = SensitiveEepromStaging::new(record_staging);
     while payload_cursor < payload_len {
         let header_len = if wide_tlv_lengths { 3 } else { 2 };
         if payload_len - payload_cursor < header_len {
@@ -6925,15 +6966,20 @@ async fn read_legacy_record_stream(
             read_eeprom_bytes_chunked(eeprom, value_offset, &mut scratch.bytes[..chunk_len])
                 .map_err(|_| ())?;
             crc = persistence_crc32_update(crc, &scratch.bytes[..chunk_len]);
-            if collect && value_read + chunk_len <= value.len() {
-                value[value_read..value_read + chunk_len]
+            if collect && value_read + chunk_len <= staging.bytes.len() {
+                staging.bytes[value_read..value_read + chunk_len]
                     .copy_from_slice(&scratch.bytes[..chunk_len]);
             }
             value_read += chunk_len;
         }
-        if collect && value_len <= value.len() {
-            apply_legacy_config_tlv(&mut config, tag, &value[..value_len], wide_tlv_lengths)
-                .map_err(|_| ())?;
+        if collect && value_len <= staging.bytes.len() {
+            apply_legacy_config_tlv(
+                &mut config,
+                tag,
+                &staging.bytes[..value_len],
+                wide_tlv_lengths,
+            )
+            .map_err(|_| ())?;
         }
         payload_cursor = payload_cursor.checked_add(value_len).ok_or(())?;
     }
@@ -7243,9 +7289,11 @@ async fn write_eeprom_persist_record(
     data: &PersistDomainData,
     slot: PersistSlot,
     scratch: &mut MemoryIoScratch,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> Result<(), MemoryCommitError> {
-    let mut record_bytes = [0xffu8; FPR2_MAX_RECORD_SIZE];
-    let record_len = encode_persist_record(sequence, data, &mut record_bytes)
+    let staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
+    staging.bytes.fill(0xff);
+    let record_len = encode_persist_record(sequence, data, staging.bytes)
         .map_err(|_| MemoryCommitError::EncodeFailed)?;
     let domain = data.domain();
     let base_offset = domain.offset(slot);
@@ -7258,7 +7306,7 @@ async fn write_eeprom_persist_record(
         let chunk_len = memory_record_write_chunk_len(absolute_offset, record_len - written);
         let chunk_offset =
             u16::try_from(absolute_offset).map_err(|_| MemoryCommitError::WriteFailed)?;
-        scratch.bytes[..chunk_len].copy_from_slice(&record_bytes[written..written + chunk_len]);
+        scratch.bytes[..chunk_len].copy_from_slice(&staging.bytes[written..written + chunk_len]);
         let write_result = {
             let mut eeprom = M24c64::with_address(&mut *i2c, address);
             eeprom.write_page(chunk_offset, &scratch.bytes[..chunk_len])
@@ -7269,7 +7317,6 @@ async fn write_eeprom_persist_record(
         service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
     }
 
-    let mut verify_bytes = [0u8; FPR2_MAX_RECORD_SIZE];
     let mut read = 0usize;
     while read < record_len {
         let chunk_len = (record_len - read).min(EEPROM_WRITE_CHUNK_MAX_BYTES);
@@ -7281,11 +7328,13 @@ async fn write_eeprom_persist_record(
             eeprom.read_bytes(chunk_offset, &mut scratch.bytes[..chunk_len])
         };
         read_result.map_err(|_| MemoryCommitError::VerifyUnreadable)?;
-        verify_bytes[read..read + chunk_len].copy_from_slice(&scratch.bytes[..chunk_len]);
+        if scratch.bytes[..chunk_len] != staging.bytes[read..read + chunk_len] {
+            return Err(MemoryCommitError::VerifyMismatch);
+        }
         read += chunk_len;
         service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
     }
-    let verified = decode_persist_record(&verify_bytes[..record_len])
+    let verified = decode_persist_record(&staging.bytes[..record_len])
         .map_err(|_| MemoryCommitError::VerifyUnreadable)?;
     if verified.sequence != sequence || verified.data != *data {
         return Err(MemoryCommitError::VerifyMismatch);
@@ -7303,6 +7352,7 @@ async fn commit_memory_config_now(
     memory_config: &MemoryConfig,
     domains_to_write: PersistDomainMask,
     persistence_log_sink: &mut dyn PersistenceLogSink,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> Result<(), MemoryCommitFailure> {
     if domains_to_write.is_empty() {
         return Ok(());
@@ -7355,6 +7405,7 @@ async fn commit_memory_config_now(
             data,
             slot,
             &mut scratch,
+            record_staging,
         )
         .await;
         if let Err(error) = result {
@@ -7384,6 +7435,7 @@ async fn initialize_fpr2_defaults(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     persistence_log_sink: &mut dyn PersistenceLogSink,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> Option<u32> {
     let mut sequence = 0;
     if commit_memory_config_now(
@@ -7394,6 +7446,7 @@ async fn initialize_fpr2_defaults(
         &flux_purr_firmware::memory::MemoryConfig::default(),
         PersistDomainMask::ALL,
         persistence_log_sink,
+        record_staging,
     )
     .await
     .is_err()
@@ -7416,6 +7469,7 @@ async fn initialize_fpr2_defaults(
             &marker,
             slot,
             &mut scratch,
+            record_staging,
         )
         .await
         {
@@ -7441,6 +7495,7 @@ async fn migrate_legacy_memory_config(
     legacy_sequence: u32,
     config: &MemoryConfig,
     persistence_log_sink: &mut dyn PersistenceLogSink,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> Result<u32, MemoryCommitFailure> {
     let mut sequence = legacy_sequence;
     commit_memory_config_now(
@@ -7451,6 +7506,7 @@ async fn migrate_legacy_memory_config(
         config,
         PersistDomainMask::ALL,
         persistence_log_sink,
+        record_staging,
     )
     .await?;
     let mut scratch = new_memory_io_scratch();
@@ -7469,6 +7525,7 @@ async fn migrate_legacy_memory_config(
             &prepared,
             slot,
             &mut scratch,
+            record_staging,
         )
         .await
         .map_err(|error| MemoryCommitFailure {
@@ -7504,6 +7561,7 @@ async fn migrate_legacy_memory_config(
             &active,
             slot,
             &mut scratch,
+            record_staging,
         )
         .await
         .map_err(|error| MemoryCommitFailure {
@@ -7524,6 +7582,7 @@ async fn recover_prepared_fpr2_layout(
     pd_port: &mut PdPort,
     sequence: u32,
     persistence_log_sink: &mut dyn PersistenceLogSink,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> Result<(), MemoryCommitFailure> {
     let mut scratch = new_memory_io_scratch();
     let active = PersistDomainData::LayoutMarker(LayoutMarker {
@@ -7540,6 +7599,7 @@ async fn recover_prepared_fpr2_layout(
             &active,
             slot,
             &mut scratch,
+            record_staging,
         )
         .await
         {
@@ -12311,6 +12371,7 @@ async fn process_control_line(
     last_heater_duty: u8,
     heater_control_timing: HeaterControlTiming,
     persistence_log_sink: &mut dyn PersistenceLogSink,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> (bool, UsbFrame) {
     let mut needs_redraw = false;
     let active_thermal_control_profile =
@@ -12804,6 +12865,7 @@ async fn process_control_line(
                         memory_config,
                         changed_domains,
                         persistence_log_sink,
+                        record_staging,
                     )
                     .await
                     {
@@ -12952,6 +13014,7 @@ async fn process_control_line(
                     memory_config,
                     PersistDomainMask::SAFETY,
                     persistence_log_sink,
+                    record_staging,
                 )
                 .await
                 {
@@ -13540,6 +13603,7 @@ async fn main(_spawner: Spawner) {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     init_runtime_heap();
+    let eeprom_record_staging = initialize_eeprom_record_staging();
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
     let software_interrupts = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
@@ -13966,7 +14030,7 @@ async fn main(_spawner: Spawner) {
         mut eeprom_required,
         mut prepared_layout_recovery_pending,
     ) = if let Some(scratch) = boot_memory_io_scratch.as_mut() {
-        load_eeprom_memory_record(&mut pd_i2c, scratch)
+        load_eeprom_memory_record(&mut pd_i2c, scratch, eeprom_record_staging)
     } else {
         (None, false, true, false)
     };
@@ -13977,7 +14041,13 @@ async fn main(_spawner: Spawner) {
             let init_log_sink = &mut usb_serial as &mut dyn PersistenceLogSink;
             #[cfg(not(feature = "web_serial"))]
             let init_log_sink = &mut persistence_log_sink as &mut dyn PersistenceLogSink;
-            initialize_fpr2_defaults(&mut pd_i2c, &mut pd_port, &mut *init_log_sink).await
+            initialize_fpr2_defaults(
+                &mut pd_i2c,
+                &mut pd_port,
+                &mut *init_log_sink,
+                eeprom_record_staging,
+            )
+            .await
         };
         if let Some(sequence) = initialization_result {
             info!("blank EEPROM initialized and verified");
@@ -14026,6 +14096,7 @@ async fn main(_spawner: Spawner) {
                 &mut pd_port,
                 memory_sequence,
                 &mut *recovery_log_sink,
+                eeprom_record_staging,
             )
             .await
         } else {
@@ -14455,7 +14526,7 @@ async fn main(_spawner: Spawner) {
         // remain serviceable while the explicit restore lock is visible.
         if let Some(scratch) = boot_memory_io_scratch.as_mut() {
             let (legacy_record, read_failed) =
-                load_legacy_eeprom_memory_record(&mut pd_i2c, scratch).await;
+                load_legacy_eeprom_memory_record(&mut pd_i2c, scratch, eeprom_record_staging).await;
             if let Some(record) = legacy_record {
                 memory_sequence = record.sequence;
                 memory_config = record.config;
@@ -14471,6 +14542,7 @@ async fn main(_spawner: Spawner) {
                         record.sequence,
                         &memory_config,
                         &mut *migration_log_sink,
+                        eeprom_record_staging,
                     )
                     .await
                 };
@@ -14655,6 +14727,7 @@ async fn main(_spawner: Spawner) {
                         last_heater_duty,
                         heater_control_timing,
                         &mut usb_serial,
+                        eeprom_record_staging,
                     )
                     .await;
                     needs_redraw |= control_needs_redraw;
@@ -14804,6 +14877,7 @@ async fn main(_spawner: Spawner) {
                 last_heater_duty,
                 heater_control_timing,
                 &mut usb_serial,
+                eeprom_record_staging,
             )
             .await;
             needs_redraw |= control_needs_redraw;
@@ -14968,12 +15042,17 @@ async fn main(_spawner: Spawner) {
                             &mut pd_port,
                             memory_sequence,
                             retry_log_sink,
+                            eeprom_record_staging,
                         )
                         .await
                     } else if eeprom_data_incompatible {
                         let mut scratch = new_memory_io_scratch();
-                        let (legacy_record, read_failed) =
-                            load_legacy_eeprom_memory_record(&mut pd_i2c, &mut scratch).await;
+                        let (legacy_record, read_failed) = load_legacy_eeprom_memory_record(
+                            &mut pd_i2c,
+                            &mut scratch,
+                            eeprom_record_staging,
+                        )
+                        .await;
                         if let Some(record) = legacy_record {
                             memory_sequence = record.sequence;
                             memory_config = record.config;
@@ -14983,6 +15062,7 @@ async fn main(_spawner: Spawner) {
                                 memory_sequence,
                                 &memory_config,
                                 retry_log_sink,
+                                eeprom_record_staging,
                             )
                             .await
                             .map(|sequence| {
@@ -15003,8 +15083,13 @@ async fn main(_spawner: Spawner) {
                             })
                         }
                     } else if retry_blank_initialization {
-                        match initialize_fpr2_defaults(&mut pd_i2c, &mut pd_port, retry_log_sink)
-                            .await
+                        match initialize_fpr2_defaults(
+                            &mut pd_i2c,
+                            &mut pd_port,
+                            retry_log_sink,
+                            eeprom_record_staging,
+                        )
+                        .await
                         {
                             Some(sequence) => {
                                 memory_sequence = sequence;
@@ -15028,6 +15113,7 @@ async fn main(_spawner: Spawner) {
                             &memory_config,
                             retry_domains,
                             retry_log_sink,
+                            eeprom_record_staging,
                         )
                         .await
                     }
@@ -15514,6 +15600,7 @@ async fn main(_spawner: Spawner) {
                         &mut usb_serial,
                         #[cfg(not(feature = "web_serial"))]
                         &mut persistence_log_sink,
+                        eeprom_record_staging,
                     )
                     .await
                     {
@@ -15769,6 +15856,7 @@ async fn main(_spawner: Spawner) {
                 &mut usb_serial,
                 #[cfg(not(feature = "web_serial"))]
                 &mut persistence_log_sink,
+                eeprom_record_staging,
             )
             .await
             {
@@ -16126,7 +16214,7 @@ mod tests {
             .find("boot_stage=pd_detect_start")
             .expect("PD stage marker");
         let legacy = source
-            .find("load_legacy_eeprom_memory_record(&mut pd_i2c, scratch)")
+            .find("load_legacy_eeprom_memory_record(&mut pd_i2c, scratch, eeprom_record_staging)")
             .expect("legacy restore call");
         let first_frame = source
             .find("present_initial_frontpanel_ui(&mut display, canvas, &ui_state)")
