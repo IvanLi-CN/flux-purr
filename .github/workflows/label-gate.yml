@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: label-gate-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  queue: max
 
 permissions:
   contents: read
@@ -24,17 +24,27 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
 
+      - name: Fetch current pull request labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.labels' > "${RUNNER_TEMP}/labels.json"
+
       - name: Validate PR labels
+        env:
+          LABELS_JSON: ${{ runner.temp }}/labels.json
         run: bash .github/scripts/label-gate.sh
 
       - name: Record validated release intent
         env:
-          EVENT_PATH: ${{ github.event_path }}
+          LABELS_JSON: ${{ runner.temp }}/labels.json
         run: |
           set -euo pipefail
-          type_label="$(jq -r '.pull_request.labels[] | .name | select(startswith("type:"))' "${EVENT_PATH}")"
-          channel_label="$(jq -r '.pull_request.labels[] | .name | select(startswith("channel:"))' "${EVENT_PATH}")"
-          components="$(jq -r '[.pull_request.labels[] | .name | select(startswith("component:"))] | join(",")' "${EVENT_PATH}")"
+          type_label="$(jq -r '.[] | .name | select(startswith("type:"))' "${LABELS_JSON}")"
+          channel_label="$(jq -r '.[] | .name | select(startswith("channel:"))' "${LABELS_JSON}")"
+          components="$(jq -r '[.[] | .name | select(startswith("component:"))] | join(",")' "${LABELS_JSON}")"
           {
             echo "### Release intent"
             echo "- type: ${type_label}"
