@@ -6071,6 +6071,41 @@ impl Fusb302bRuntime {
         }
     }
 
+    /// Recover a local receive/transmit failure without toggling CC. A PHY
+    /// reinitialization withdraws Rd briefly, which can make the source that
+    /// powers this device remove VBUS and reboot the MCU.
+    async fn recover_transient_transport_fault(
+        &mut self,
+        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        fault: fusb302b::TransientTransportFault,
+        now_ms: u64,
+    ) -> bool {
+        match fusb302b::transient_transport_fault_recovery(fault) {
+            fusb302b::TransientTransportRecovery::FlushReceiveAndRequery => {
+                self.policy.interlock_after_transient_transport_fault();
+                self.last_request_at_ms = None;
+                self.last_source_capabilities_request_at_ms = Some(now_ms);
+                self.source_capabilities_refresh_pending = false;
+                self.source_capabilities_refresh_requested_at_ms = None;
+                self.source_capabilities_tx_confirmed = false;
+                self.source_capabilities_gcrc_seen = false;
+                self.partial_rx_started_at_ms = None;
+
+                let flushed = {
+                    let mut phy = Fusb302::new(BlockingAsync::new(i2c));
+                    phy.flush_fifos().await.is_ok()
+                };
+                if !flushed {
+                    self.policy.mark_fault();
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                    return false;
+                }
+                FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
+                true
+            }
+        }
+    }
+
     fn active_contract(&self) -> Contract {
         self.policy.active_contract()
     }
@@ -6208,13 +6243,14 @@ impl Fusb302bRuntime {
             .last_request_at_ms
             .is_some_and(|last| now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS)
         {
-            // Reset the PHY and discard every contract before retrying. This
-            // flushes delayed Accept/PS_RDY frames so an expired transaction
-            // can never install a newer pending contract.
-            self.policy.timeout_pending_request();
-            self.last_request_at_ms = None;
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
-            return self.restart_after_reset(i2c).await;
+            return self
+                .recover_transient_transport_fault(
+                    i2c,
+                    fusb302b::TransientTransportFault::PendingRequestTimeout,
+                    now_ms,
+                )
+                .await;
         }
 
         if self.source_capabilities_refresh_pending
@@ -6349,7 +6385,13 @@ impl Fusb302bRuntime {
                         >= FUSB302B_PARTIAL_RX_TIMEOUT_MS
                     {
                         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                        return self.restart_after_reset(i2c).await;
+                        return self
+                            .recover_transient_transport_fault(
+                                i2c,
+                                fusb302b::TransientTransportFault::PartialReceiveTimeout,
+                                now_ms,
+                            )
+                            .await;
                     }
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_PARTIAL, Ordering::Relaxed);
                     return true;
@@ -6398,7 +6440,13 @@ impl Fusb302bRuntime {
                 }
                 Fusb302bReceiveEvent::RetryFailed => {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                    return self.restart_after_reset(i2c).await;
+                    return self
+                        .recover_transient_transport_fault(
+                            i2c,
+                            fusb302b::TransientTransportFault::RetryFailed,
+                            now_ms,
+                        )
+                        .await;
                 }
                 Fusb302bReceiveEvent::Protection | Fusb302bReceiveEvent::UnsupportedSop => {
                     self.policy.mark_fault();

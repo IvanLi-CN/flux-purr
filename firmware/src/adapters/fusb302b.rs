@@ -28,6 +28,31 @@ pub enum SourceCapabilitiesRecovery {
     RetryGetSourceCapabilities,
 }
 
+/// A local transport failure that does not prove a CC detach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransientTransportFault {
+    RetryFailed,
+    PendingRequestTimeout,
+    PartialReceiveTimeout,
+}
+
+/// The recovery action for a local transport failure.
+///
+/// Reinitializing the PHY can withdraw Rd long enough for the source that
+/// powers this sink to remove VBUS. These faults must instead preserve CC,
+/// interlock heating, flush the incomplete transaction, and re-query source
+/// capabilities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransientTransportRecovery {
+    FlushReceiveAndRequery,
+}
+
+pub const fn transient_transport_fault_recovery(
+    _fault: TransientTransportFault,
+) -> TransientTransportRecovery {
+    TransientTransportRecovery::FlushReceiveAndRequery
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SinkPhase {
     #[default]
@@ -163,16 +188,13 @@ impl SinkPolicy {
         };
     }
 
-    /// Disarm after a request timeout. The runtime resets the PHY before it
-    /// resumes negotiation, so delayed frames cannot install a contract after
-    /// the timeout.
-    pub fn timeout_pending_request(&mut self) {
-        if matches!(
-            self.phase,
-            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-        ) {
-            self.mark_fault();
-        }
+    /// Make a local transport failure a heater-only interlock without
+    /// withdrawing CC. The caller flushes the PHY receive FIFO and later
+    /// re-queries the source before a new contract can authorize heat.
+    pub fn interlock_after_transient_transport_fault(&mut self) {
+        self.pending_contract = Contract::none();
+        self.active_contract = Contract::none();
+        self.phase = SinkPhase::WaitingForSourceCapabilities;
     }
 
     /// `Accept` alone never arms heating; only `PS_RDY` installs a contract.
@@ -427,6 +449,31 @@ mod tests {
             request_data_object(contract),
             Some(0x2107_d064_u32.to_le_bytes())
         );
+    }
+
+    #[test]
+    fn transient_transport_faults_interlock_without_requesting_a_phy_reset() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+
+        for fault in [
+            TransientTransportFault::RetryFailed,
+            TransientTransportFault::PendingRequestTimeout,
+            TransientTransportFault::PartialReceiveTimeout,
+        ] {
+            assert_eq!(
+                transient_transport_fault_recovery(fault),
+                TransientTransportRecovery::FlushReceiveAndRequery
+            );
+        }
+
+        policy.interlock_after_transient_transport_fault();
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert_eq!(policy.active_contract(), Contract::none());
+        assert!(policy.source_capabilities().is_some());
     }
 
     #[test]
