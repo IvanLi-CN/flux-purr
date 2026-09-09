@@ -60,6 +60,8 @@ Flux Purr 使用 PR label gate、PR-local version preparation、product release 
 - Manual `Release Product` recovery MUST accept an explicit prepared main merge SHA and recover its existing identity without recomputing release intent.
 - A partial-run retry with an existing stable tag MUST verify that the tag points at the candidate and that any existing Release manifest matches the resolved source, version, channel, components, and asset hashes before reusing it.
 - 主分支 required checks 必须包含 `Validate PR labels`、`Release completion`、`Firmware checks`、`DEVD checks`、`Web checks` 与 `Worktree bootstrap`。
+- `Label Gate` 与 `Release completion` 必须以 PR number 为并发键使用 `queue: max`；required gate 不得启用 `cancel-in-progress: true`。
+- 每个 required gate run 必须在执行时通过只读 GitHub API 获取当前 PR labels，并以该 snapshot 作为判定输入；事件 payload 不能覆盖当前 snapshot。
 
 ### SHOULD
 
@@ -72,7 +74,8 @@ Flux Purr 使用 PR label gate、PR-local version preparation、product release 
 
 ### Core flows
 
-- PR 打开、同步、重新打开、编辑或标签变更时，`Label Gate` 校验 release intent 标签。
+- PR 打开、同步、重新打开、编辑或标签变更时，`Label Gate` 以运行时获取的当前 PR label snapshot 校验 release intent 标签。
+- `Label Gate` 与 `Release completion` 对同一 PR 使用非抢占式 `queue: max` 调度；批量或乱序 label event 必须依次执行，最终 gate 状态反映最近一次运行时 snapshot。
 - `Label Gate` 必须校验 release intent；准备工作流只在该 check 与完整 PR CI 成功后将 intent 写入 VERSION-only commit，避免 merge 后标签变更影响发布决策。
 - PR CI 运行 firmware 和 web 检查，保持可抢占以节省无效分支运行时间。
 - 合入 `main` 后，`CI Main` 以目标 SHA 隔离并结构验证 normal merge 是否保留准备提交；完整检查已在 PR source 执行一次。
@@ -126,7 +129,7 @@ Flux Purr 使用 PR label gate、PR-local version preparation、product release 
 ## 风险与开放问题
 
 - 当前 GitHub MCP 工具未暴露 branch protection/ruleset 写入接口时，只能提交 repo-local 声明并在 PR 中记录远端待对齐设置。
-- GitHub Actions concurrency 不是严格 FIFO；准备 workflow 和 strict required checks 共同确保 stale PR 必须重新准备，不能复用旧版本提交。
+- Required gate 的每 PR `queue: max` 调度保持待处理运行并按 FIFO 收敛；GitHub Cloud 对单组待处理运行有平台上限，超出上限属于运行平台异常而非业务上的取消策略。
 
 ## 假设
 
