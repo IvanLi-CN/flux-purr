@@ -860,7 +860,7 @@ test.describe('control plane live devd bridge', () => {
     await page.getByRole('tab', { name: '风扇策略' }).click()
     await page
       .locator('fieldset')
-      .filter({ hasText: 'Post-heat cooling' })
+      .filter({ hasText: '主动降温' })
       .getByRole('button', { name: 'OFF' })
       .click()
     await expect(page.getByText('Post-heat cooling staged', { exact: true })).toBeVisible()
