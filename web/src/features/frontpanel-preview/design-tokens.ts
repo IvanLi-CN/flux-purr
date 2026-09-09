@@ -34,7 +34,7 @@ export const frontPanelTypography = [
   },
   {
     name: 'UI Labels',
-    spec: '3×5 bitmap glyphs · scale 1 / scale 2',
+    spec: '4×6 small / 5×8 mid bitmap glyphs',
     usage: 'M1~M10, protocol, fan status, menu titles',
   },
   {

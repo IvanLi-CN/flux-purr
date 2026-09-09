@@ -1,9 +1,14 @@
 use core::fmt::Write as _;
 
 use embedded_graphics::{
+    mono_font::{
+        MonoTextStyle,
+        ascii::{FONT_4X6, FONT_5X8},
+    },
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Circle, PrimitiveStyle, Rectangle, Triangle},
+    text::{Baseline, Text},
 };
 
 use crate::display::DisplayCanvas;
@@ -274,69 +279,28 @@ enum BitmapAlign {
     Right,
 }
 
-const BITMAP_FONT_WIDTH: i32 = 3;
-const BITMAP_FONT_FALLBACK: [&str; 5] = ["111", "001", "011", "000", "010"];
+#[derive(Clone, Copy)]
+enum BitmapFont {
+    Small,
+    Mid,
+}
 
-fn bitmap_glyph(ch: char) -> &'static [&'static str; 5] {
-    match ch.to_ascii_uppercase() {
-        ' ' => &["000", "000", "000", "000", "000"],
-        '.' => &["000", "000", "000", "000", "010"],
-        '-' => &["000", "000", "111", "000", "000"],
-        ':' => &["000", "010", "000", "010", "000"],
-        '/' => &["001", "001", "010", "100", "100"],
-        '%' => &["101", "001", "010", "100", "101"],
-        '+' => &["000", "010", "111", "010", "000"],
-        '*' => &["101", "010", "111", "010", "101"],
-        '=' => &["000", "111", "000", "111", "000"],
-        '°' => &["010", "101", "010", "000", "000"],
-        '0' => &["111", "101", "101", "101", "111"],
-        '1' => &["010", "110", "010", "010", "111"],
-        '2' => &["111", "001", "111", "100", "111"],
-        '3' => &["111", "001", "111", "001", "111"],
-        '4' => &["101", "101", "111", "001", "001"],
-        '5' => &["111", "100", "111", "001", "111"],
-        '6' => &["111", "100", "111", "101", "111"],
-        '7' => &["111", "001", "001", "001", "001"],
-        '8' => &["111", "101", "111", "101", "111"],
-        '9' => &["111", "101", "111", "001", "111"],
-        'A' => &["111", "101", "111", "101", "101"],
-        'B' => &["110", "101", "110", "101", "110"],
-        'C' => &["111", "100", "100", "100", "111"],
-        'D' => &["110", "101", "101", "101", "110"],
-        'E' => &["111", "100", "110", "100", "111"],
-        'F' => &["111", "100", "110", "100", "100"],
-        'G' => &["111", "100", "101", "101", "111"],
-        'H' => &["101", "101", "111", "101", "101"],
-        'I' => &["111", "010", "010", "010", "111"],
-        'J' => &["001", "001", "001", "101", "111"],
-        'K' => &["101", "101", "110", "101", "101"],
-        'L' => &["100", "100", "100", "100", "111"],
-        'M' => &["101", "111", "111", "101", "101"],
-        'N' => &["101", "111", "111", "111", "101"],
-        'O' => &["111", "101", "101", "101", "111"],
-        'P' => &["110", "101", "110", "100", "100"],
-        'Q' => &["111", "101", "101", "111", "001"],
-        'R' => &["110", "101", "110", "101", "101"],
-        'S' => &["111", "100", "111", "001", "111"],
-        'T' => &["111", "010", "010", "010", "010"],
-        'U' => &["101", "101", "101", "101", "111"],
-        'V' => &["101", "101", "101", "101", "010"],
-        'W' => &["101", "101", "111", "111", "101"],
-        'X' => &["101", "101", "010", "101", "101"],
-        'Y' => &["101", "101", "010", "010", "010"],
-        'Z' => &["111", "001", "010", "100", "111"],
-        _ => &BITMAP_FONT_FALLBACK,
+impl BitmapFont {
+    const fn width(self) -> i32 {
+        match self {
+            Self::Small => 4,
+            Self::Mid => 5,
+        }
     }
 }
 
-fn measure_bitmap_text(text: &str, scale: u32, letter_spacing: u32) -> i32 {
+fn measure_bitmap_text(text: &str, font: BitmapFont, letter_spacing: u32) -> i32 {
     let count = text.chars().count() as i32;
     if count == 0 {
         return 0;
     }
-    let scale = scale as i32;
     let spacing = letter_spacing as i32;
-    (count * BITMAP_FONT_WIDTH + (count - 1) * spacing) * scale
+    count * font.width() + (count - 1) * spacing
 }
 
 fn temperature_color_with_palette(value_c: i16, palette: &TemperaturePalette) -> Rgb565 {
@@ -356,54 +320,87 @@ fn draw_bitmap_text(
     x: i32,
     y: i32,
     color: Rgb565,
-    scale: u32,
+    font: BitmapFont,
     letter_spacing: u32,
     align: BitmapAlign,
 ) {
-    let width = measure_bitmap_text(text, scale, letter_spacing);
+    let width = measure_bitmap_text(text, font, letter_spacing);
     let mut cursor_x = match align {
         BitmapAlign::Left => x,
         BitmapAlign::Center => x - (width / 2),
         BitmapAlign::Right => x - width,
     };
-    let scale_i32 = scale as i32;
     let spacing = letter_spacing as i32;
+    let style = match font {
+        BitmapFont::Small => MonoTextStyle::new(&FONT_4X6, color),
+        BitmapFont::Mid => MonoTextStyle::new(&FONT_5X8, color),
+    };
 
     for ch in text.chars() {
-        let glyph = bitmap_glyph(ch);
-        for (row_index, row) in glyph.iter().enumerate() {
-            for (column_index, pixel) in row.chars().enumerate() {
-                if pixel != '1' {
-                    continue;
-                }
-                fill_rect(
-                    canvas,
-                    cursor_x + column_index as i32 * scale_i32,
-                    y + row_index as i32 * scale_i32,
-                    scale,
-                    scale,
-                    color,
-                );
-            }
-        }
-        cursor_x += (BITMAP_FONT_WIDTH + spacing) * scale_i32;
+        let mut glyph = heapless::String::<4>::new();
+        let _ = glyph.push(ch.to_ascii_uppercase());
+        Text::with_baseline(
+            glyph.as_str(),
+            Point::new(cursor_x, y),
+            style,
+            Baseline::Top,
+        )
+        .draw(canvas)
+        .ok();
+        cursor_x += font.width() + spacing;
     }
 }
 
 fn draw_text_small(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, color: Rgb565) {
-    draw_bitmap_text(canvas, text, x, y, color, 1, 1, BitmapAlign::Left);
+    draw_bitmap_text(
+        canvas,
+        text,
+        x,
+        y,
+        color,
+        BitmapFont::Small,
+        1,
+        BitmapAlign::Left,
+    );
 }
 
 fn draw_text_mid(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, color: Rgb565) {
-    draw_bitmap_text(canvas, text, x, y, color, 2, 1, BitmapAlign::Left);
+    draw_bitmap_text(
+        canvas,
+        text,
+        x,
+        y,
+        color,
+        BitmapFont::Mid,
+        1,
+        BitmapAlign::Left,
+    );
 }
 
 fn draw_text_mid_center(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, color: Rgb565) {
-    draw_bitmap_text(canvas, text, x, y, color, 2, 1, BitmapAlign::Center);
+    draw_bitmap_text(
+        canvas,
+        text,
+        x,
+        y,
+        color,
+        BitmapFont::Mid,
+        1,
+        BitmapAlign::Center,
+    );
 }
 
 fn draw_text_mid_right(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, color: Rgb565) {
-    draw_bitmap_text(canvas, text, x, y, color, 2, 1, BitmapAlign::Right);
+    draw_bitmap_text(
+        canvas,
+        text,
+        x,
+        y,
+        color,
+        BitmapFont::Mid,
+        1,
+        BitmapAlign::Right,
+    );
 }
 
 fn draw_segment(
@@ -1003,7 +1000,7 @@ fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     let _ = runtime.push_str(state.fan_policy_source.label());
     let _ = runtime.push(' ');
     let _ = runtime.push_str(state.fan_output_level.label());
-    draw_text_small(canvas, &runtime, 8, 46, COLOR_CYAN);
+    draw_text_small(canvas, &runtime, 8, 44, COLOR_CYAN);
 }
 
 fn draw_wifi_info(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
@@ -1272,7 +1269,10 @@ mod tests {
     }
 
     #[test]
-    fn bitmap_font_supports_manual_pps_marker() {
-        assert_eq!(bitmap_glyph('*'), &["101", "010", "111", "010", "101"]);
+    fn frontpanel_fonts_use_retired_size_replacements() {
+        assert_eq!(BitmapFont::Small.width(), 4);
+        assert_eq!(BitmapFont::Mid.width(), 5);
+        assert_eq!(measure_bitmap_text("FAN", BitmapFont::Small, 1), 14);
+        assert_eq!(measure_bitmap_text("FAN", BitmapFont::Mid, 1), 17);
     }
 }

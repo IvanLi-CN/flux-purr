@@ -99,7 +99,7 @@
 | Role | Spec | Usage |
 | --- | --- | --- |
 | Dashboard Numerals | 7-segment digits, `15×26` logical px per glyph | Dashboard / Preset 温度主值 |
-| UI Labels | 3×5 bitmap glyphs, scale `1` 或 `2` | 菜单标题、状态标签、`M1~M9` |
+| UI Labels | `4×6` small / `5×8` mid bitmap glyphs | 菜单标题、状态标签、`M1~M10` |
 | Temp Unit | stacked bitmap `℃` icon | 所有温度主值单位 |
 
 ### Temperature states
