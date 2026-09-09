@@ -4102,6 +4102,8 @@ const FUSB302B_DIAG_NO_USABLE_CONTRACT: u8 = 16;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_RX_PARTIAL: u8 = 17;
 #[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_SOURCE_CAPS_SOFT_RESET_SENT: u8 = 18;
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_REQUEST_TIMEOUT: u8 = 19;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_MAX_RX_MESSAGES_PER_POLL: u8 = 4;
@@ -4132,6 +4134,7 @@ fn fusb302b_degraded_reason() -> &'static str {
         FUSB302B_DIAG_TX_I2C_ERROR => "pd_fusb_tx_i2c_error",
         FUSB302B_DIAG_NO_USABLE_CONTRACT => "pd_fusb_no_usable_contract",
         FUSB302B_DIAG_RX_PARTIAL => "pd_fusb_rx_partial",
+        FUSB302B_DIAG_SOURCE_CAPS_SOFT_RESET_SENT => "pd_fusb_source_caps_soft_reset_sent",
         FUSB302B_DIAG_REQUEST_TIMEOUT => "pd_fusb_contract_request_timeout",
         _ => "pd_contract_unavailable",
     }
@@ -5991,6 +5994,7 @@ struct Fusb302bRuntime {
     last_request_at_ms: Option<u64>,
     source_capabilities_tx_confirmed: bool,
     source_capabilities_gcrc_seen: bool,
+    source_capabilities_soft_reset_sent: bool,
     partial_rx_started_at_ms: Option<u64>,
 }
 
@@ -6019,6 +6023,7 @@ impl Fusb302bRuntime {
             last_request_at_ms: None,
             source_capabilities_tx_confirmed: false,
             source_capabilities_gcrc_seen: false,
+            source_capabilities_soft_reset_sent: false,
             partial_rx_started_at_ms: None,
         }
     }
@@ -6060,6 +6065,7 @@ impl Fusb302bRuntime {
         self.last_request_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
+        self.source_capabilities_soft_reset_sent = false;
         self.partial_rx_started_at_ms = None;
         if self.initialize(i2c).await {
             self.policy =
@@ -6292,6 +6298,27 @@ impl Fusb302bRuntime {
                     if self.policy.phase() == SinkPhase::WaitingForSourceCapabilities {
                         self.source_capabilities_tx_confirmed |= tx_sent;
                         self.source_capabilities_gcrc_seen |= gcrc_sent;
+                        let soft_reset_due = self
+                            .last_source_capabilities_request_at_ms
+                            .is_some_and(|last_request_at_ms| {
+                                fusb302b::source_capabilities_soft_reset_due(
+                                    last_request_at_ms,
+                                    self.source_capabilities_soft_reset_sent,
+                                    now_ms,
+                                )
+                            });
+                        if soft_reset_due {
+                            let header = fusb302b::soft_reset_header(self.next_message_id);
+                            if !self.transmit(i2c, header, &[]).await {
+                                return false;
+                            }
+                            self.source_capabilities_soft_reset_sent = true;
+                            FUSB302B_DIAGNOSTIC.store(
+                                FUSB302B_DIAG_SOURCE_CAPS_SOFT_RESET_SENT,
+                                Ordering::Relaxed,
+                            );
+                            return true;
+                        }
                         let query_due = self.attached_at_ms.is_some_and(|attached_at_ms| {
                             fusb302b::source_capabilities_request_due(
                                 attached_at_ms,
