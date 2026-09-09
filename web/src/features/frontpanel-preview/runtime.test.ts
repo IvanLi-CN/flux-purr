@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { createFrontPanelRuntimeState, tickFrontPanelRuntime } from './runtime'
+import {
+  applyFrontPanelInteraction,
+  createFrontPanelRuntimeState,
+  tickFrontPanelRuntime,
+} from './runtime'
 
 describe('front panel fan policy preview', () => {
   it('gates heating fan pulses on live heater output', () => {
@@ -56,5 +60,23 @@ describe('front panel fan policy preview', () => {
     expect(heatingOn.fanRuntimeEnabled).toBe(true)
     expect(heatingOff.fanRuntimeEnabled).toBe(false)
     expect(coolingDisabledOff.fanRuntimeEnabled).toBe(false)
+  })
+
+  it('keeps dashboard double press inert and stages FAN CTRL edits', () => {
+    const state = createFrontPanelRuntimeState()
+    const unchanged = applyFrontPanelInteraction(state, { key: 'center', gesture: 'double' })
+    expect(unchanged.activeCoolingEnabled).toBe(true)
+    expect(unchanged.postHeatCoolingMode).toBe('normal')
+
+    const editing = applyFrontPanelInteraction(
+      { ...state, route: 'active-cooling' },
+      { key: 'right', gesture: 'short' }
+    )
+    expect(editing.fanSettingsDraftPostHeat).toBe('fast')
+    expect(editing.postHeatCoolingMode).toBe('normal')
+
+    const saved = applyFrontPanelInteraction(editing, { key: 'center', gesture: 'short' })
+    expect(saved.route).toBe('menu')
+    expect(saved.postHeatCoolingMode).toBe('fast')
   })
 })

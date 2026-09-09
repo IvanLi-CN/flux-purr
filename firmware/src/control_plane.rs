@@ -10,6 +10,7 @@ use crate::buzzer_test::BuzzerTestSessionState;
 use crate::buzzer_test::{BuzzerTestScenario, BuzzerTestStatus};
 use crate::{
     DeviceMode, DeviceStatus, PdState,
+    fan_policy::{FanOutputLevel, FanPolicySource, HeatingFanGuardMode, PostHeatCoolingMode},
     frontpanel::{FRONTPANEL_PRESET_COUNT, FrontPanelKey, HeaterLockReason},
     memory::{
         ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationChannel, AdcCalibrationFit,
@@ -184,6 +185,7 @@ pub enum FanDisplayState {
     Off,
     Auto,
     Run,
+    Safe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -225,6 +227,14 @@ pub struct ControlPlaneStatus {
     #[serde(default)]
     pub heater_physical_output_percent: u8,
     pub active_cooling_enabled: bool,
+    #[serde(default)]
+    pub post_heat_cooling_mode: PostHeatCoolingMode,
+    #[serde(default)]
+    pub heating_fan_guard_mode: HeatingFanGuardMode,
+    #[serde(default)]
+    pub fan_policy_source: FanPolicySource,
+    #[serde(default)]
+    pub fan_output_level: FanOutputLevel,
     pub fan_display_state: FanDisplayState,
     pub fan_enabled: bool,
     pub fan_pwm_permille: u16,
@@ -491,6 +501,15 @@ impl ControlPlaneStatus {
         } else {
             FanDisplayState::Auto
         };
+        let fan_output_level = if !status.fan_enabled {
+            FanOutputLevel::Off
+        } else if status.fan_pwm_permille <= crate::FAN_HIGH_PWM_PERMILLE {
+            FanOutputLevel::High
+        } else if status.fan_pwm_permille <= crate::FAN_MID_PWM_PERMILLE {
+            FanOutputLevel::Medium
+        } else {
+            FanOutputLevel::Low
+        };
 
         // SAFETY: callers provide an exclusive uninitialized destination.
         unsafe {
@@ -505,6 +524,18 @@ impl ControlPlaneStatus {
                 heater_output_percent,
                 heater_physical_output_percent: status.heater_physical_output_percent.min(100),
                 active_cooling_enabled: memory.active_cooling_enabled,
+                post_heat_cooling_mode: memory.post_heat_cooling_mode,
+                heating_fan_guard_mode: memory.heating_fan_guard_mode,
+                fan_policy_source: if status.fan_enabled {
+                    if status.heater_output_percent > 0 {
+                        FanPolicySource::HeatingGuard
+                    } else {
+                        FanPolicySource::PostHeat
+                    }
+                } else {
+                    FanPolicySource::Idle
+                },
+                fan_output_level,
                 fan_display_state,
                 fan_enabled: status.fan_enabled,
                 fan_pwm_permille: status.fan_pwm_permille,
@@ -909,6 +940,10 @@ pub struct RuntimeConfigCommand {
     pub selected_preset_slot: Option<usize>,
     pub presets_c: Option<[Option<i16>; FRONTPANEL_PRESET_COUNT]>,
     pub active_cooling_enabled: Option<bool>,
+    #[serde(default)]
+    pub post_heat_cooling_mode: Option<PostHeatCoolingMode>,
+    #[serde(default)]
+    pub heating_fan_guard_mode: Option<HeatingFanGuardMode>,
     pub heater_enabled: Option<bool>,
     pub manual_pps_enabled: Option<bool>,
     pub manual_pps_mv: Option<u16>,
@@ -964,6 +999,13 @@ impl BuzzerTestCommand {
 }
 
 impl RuntimeConfigCommand {
+    pub const fn fan_policy_conflicts(&self) -> bool {
+        match (self.active_cooling_enabled, self.post_heat_cooling_mode) {
+            (Some(legacy), Some(mode)) => legacy != mode.is_enabled(),
+            _ => false,
+        }
+    }
+
     pub fn apply_to(&self, config: &mut MemoryConfig) {
         if let Some(target_temp_c) = self.target_temp_c {
             config.target_temp_c = target_temp_c;
@@ -982,8 +1024,16 @@ impl RuntimeConfigCommand {
                 config.target_temp_c = target_temp_c;
             }
         }
-        if let Some(active_cooling_enabled) = self.active_cooling_enabled {
+        if let Some(mode) = self.post_heat_cooling_mode {
+            config.post_heat_cooling_mode = mode;
+            config.active_cooling_enabled = mode.is_enabled();
+        } else if let Some(active_cooling_enabled) = self.active_cooling_enabled {
             config.active_cooling_enabled = active_cooling_enabled;
+            config.post_heat_cooling_mode =
+                PostHeatCoolingMode::from_legacy(active_cooling_enabled);
+        }
+        if let Some(mode) = self.heating_fan_guard_mode {
+            config.heating_fan_guard_mode = mode;
         }
         if let Some(mode) = self.thermal_profile_mode {
             config.thermal_profile_mode = mode.into();
@@ -1748,6 +1798,10 @@ struct UsbFrameWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     active_cooling_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    post_heat_cooling_mode: Option<PostHeatCoolingMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heating_fan_guard_mode: Option<HeatingFanGuardMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     heater_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_enabled: Option<bool>,
@@ -1909,6 +1963,8 @@ struct UsbRuntimeConfigInboundWire {
     selected_preset_slot: Option<usize>,
     presets_c: Option<[Option<i16>; FRONTPANEL_PRESET_COUNT]>,
     active_cooling_enabled: Option<bool>,
+    post_heat_cooling_mode: Option<PostHeatCoolingMode>,
+    heating_fan_guard_mode: Option<HeatingFanGuardMode>,
     heater_enabled: Option<bool>,
     manual_pps_enabled: Option<bool>,
     manual_pps_mv: Option<u16>,
@@ -2062,6 +2118,8 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     selected_preset_slot: value.selected_preset_slot,
                     presets_c: value.presets_c,
                     active_cooling_enabled: value.active_cooling_enabled,
+                    post_heat_cooling_mode: value.post_heat_cooling_mode,
+                    heating_fan_guard_mode: value.heating_fan_guard_mode,
                     heater_enabled: value.heater_enabled,
                     manual_pps_enabled: value.manual_pps_enabled,
                     manual_pps_mv: value.manual_pps_mv,
@@ -2159,6 +2217,8 @@ impl From<&UsbFrame> for UsbFrameWire {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -2231,6 +2291,8 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.selected_preset_slot = config.selected_preset_slot;
                 wire.presets_c = config.presets_c;
                 wire.active_cooling_enabled = config.active_cooling_enabled;
+                wire.post_heat_cooling_mode = config.post_heat_cooling_mode;
+                wire.heating_fan_guard_mode = config.heating_fan_guard_mode;
                 wire.heater_enabled = config.heater_enabled;
                 wire.manual_pps_enabled = config.manual_pps_enabled;
                 wire.manual_pps_mv = config.manual_pps_mv;
@@ -2611,6 +2673,8 @@ pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
                     selected_preset_slot: frame.selected_preset_slot,
                     presets_c: frame.presets_c,
                     active_cooling_enabled: frame.active_cooling_enabled,
+                    post_heat_cooling_mode: frame.post_heat_cooling_mode,
+                    heating_fan_guard_mode: frame.heating_fan_guard_mode,
                     heater_enabled: frame.heater_enabled,
                     manual_pps_enabled: frame.manual_pps_enabled,
                     manual_pps_mv: frame.manual_pps_mv,
@@ -3498,6 +3562,8 @@ mod tests {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: Some(false),
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: Some(true),
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -3533,6 +3599,8 @@ mod tests {
                 Some(300),
             ]),
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -3583,6 +3651,8 @@ mod tests {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -3642,6 +3712,8 @@ mod tests {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -3701,6 +3773,8 @@ mod tests {
             selected_preset_slot: None,
             presets_c: None,
             active_cooling_enabled: None,
+            post_heat_cooling_mode: None,
+            heating_fan_guard_mode: None,
             heater_enabled: None,
             manual_pps_enabled: None,
             manual_pps_mv: None,
@@ -3931,6 +4005,8 @@ mod tests {
                     selected_preset_slot: None,
                     presets_c: None,
                     active_cooling_enabled: Some(false),
+                    post_heat_cooling_mode: None,
+                    heating_fan_guard_mode: None,
                     heater_enabled: Some(true),
                     manual_pps_enabled: Some(true),
                     manual_pps_mv: Some(10_400),
@@ -3953,6 +4029,8 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: None,
+                post_heat_cooling_mode: None,
+                heating_fan_guard_mode: None,
                 heater_enabled: None,
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
@@ -3997,6 +4075,8 @@ mod tests {
                         Some(300),
                     ]),
                     active_cooling_enabled: None,
+                    post_heat_cooling_mode: None,
+                    heating_fan_guard_mode: None,
                     heater_enabled: None,
                     manual_pps_enabled: None,
                     manual_pps_mv: None,
@@ -4008,6 +4088,52 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn runtime_command_rejects_legacy_fan_policy_conflicts() {
+        let command = RuntimeConfigCommand {
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: Some(false),
+            post_heat_cooling_mode: Some(PostHeatCoolingMode::Normal),
+            heating_fan_guard_mode: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            fault_attention_acknowledged: None,
+            calibration: None,
+            thermal_profile_mode: None,
+            thermal_control_profile: None,
+        };
+        assert!(command.fan_policy_conflicts());
+
+        let compatible = RuntimeConfigCommand {
+            active_cooling_enabled: Some(true),
+            ..command
+        };
+        assert!(!compatible.fan_policy_conflicts());
+    }
+
+    #[test]
+    fn parse_runtime_config_frame_with_fan_policy_modes() {
+        let UsbFrame::RuntimeConfig { config, .. } = parse_usb_frame(
+            r#"{"type":"runtime_config","requestId":"fan-modes","postHeatCoolingMode":"fast","heatingFanGuardMode":"high"}"#,
+        )
+        .expect("fan policy frame parses") else {
+            panic!("expected runtime config frame");
+        };
+        assert_eq!(
+            config.post_heat_cooling_mode,
+            Some(PostHeatCoolingMode::Fast)
+        );
+        assert_eq!(
+            config.heating_fan_guard_mode,
+            Some(HeatingFanGuardMode::High)
+        );
+        assert!(!config.fan_policy_conflicts());
     }
 
     #[test]

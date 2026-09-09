@@ -15,6 +15,7 @@ import {
   Power,
   RefreshCw,
   Router,
+  Save,
   ScanSearch,
   SlidersHorizontal,
   ToggleRight,
@@ -98,7 +99,9 @@ import type {
   HeaterCurveConfigRequest,
   HeaterCurvePackage,
   HeaterCurveState,
+  HeatingFanGuardMode,
   NetworkSummary,
+  PostHeatCoolingMode,
   RtdCalibrationSample,
   ThermalPlantRunSnapshot,
   VinCalibrationSample,
@@ -924,6 +927,12 @@ export function ControlPlaneDemo({
   const [fanPolicyByDevice, setFanPolicyByDevice] = useState<
     Record<string, DeviceTarget['fanState']>
   >({})
+  const [postHeatCoolingByDevice, setPostHeatCoolingByDevice] = useState<
+    Record<string, PostHeatCoolingMode>
+  >({})
+  const [heatingFanGuardByDevice, setHeatingFanGuardByDevice] = useState<
+    Record<string, HeatingFanGuardMode>
+  >({})
   const [currentTempByDevice, setCurrentTempByDevice] = useState<Record<string, number>>({})
   const [heaterHeldByDevice, setHeaterHeldByDevice] = useState<Record<string, boolean>>({})
   const [manualPpsByDevice, setManualPpsByDevice] = useState<
@@ -1591,6 +1600,10 @@ export function ControlPlaneDemo({
     const fanState = liveRuntimeDevice
       ? selectedDevice.fanState
       : (fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState)
+    const postHeatCoolingMode =
+      postHeatCoolingByDevice[selectedDevice.id] ?? selectedDevice.postHeatCoolingMode ?? 'normal'
+    const heatingFanGuardMode =
+      heatingFanGuardByDevice[selectedDevice.id] ?? selectedDevice.heatingFanGuardMode ?? 'medium'
     const heaterOutputPercent =
       selectedDevice.severity === 'offline'
         ? selectedDevice.heaterOutputPercent
@@ -1622,6 +1635,8 @@ export function ControlPlaneDemo({
       currentTempC,
       targetTempC,
       fanState,
+      postHeatCoolingMode,
+      heatingFanGuardMode,
       activeCoolingEnabled: selectedDevice.activeCoolingEnabled,
       heaterEnabled: heaterHeldByDevice[selectedDevice.id] ? false : selectedDevice.heaterEnabled,
       heaterOutputPercent: heaterHeldByDevice[selectedDevice.id] ? 0 : heaterOutputPercent,
@@ -1651,11 +1666,13 @@ export function ControlPlaneDemo({
     activeScenario.devices,
     currentTempByDevice,
     fanPolicyByDevice,
+    heatingFanGuardByDevice,
     heaterHeldByDevice,
     independentFirmwareFallbackDevice,
     manualPpsByDevice,
     lanLeasesByDevice,
     selectedDevice,
+    postHeatCoolingByDevice,
     targetTempByDevice,
     wifiSnapshotsByDevice,
   ])
@@ -1896,7 +1913,10 @@ export function ControlPlaneDemo({
     : (selectedPresetByDevice[visibleDevice.id] ?? 3)
   const visiblePresetTemps = presetTempsFromValues(visiblePresetValues)
   const visiblePresetEnabled = presetEnabledFromValues(visiblePresetValues)
-  const visibleFanPolicy = fanPolicyByDevice[visibleDevice.id] ?? fanPolicyFromDevice(visibleDevice)
+  const visiblePostHeatCoolingMode =
+    postHeatCoolingByDevice[visibleDevice.id] ?? visibleDevice.postHeatCoolingMode ?? 'normal'
+  const visibleHeatingFanGuardMode =
+    heatingFanGuardByDevice[visibleDevice.id] ?? visibleDevice.heatingFanGuardMode ?? 'medium'
   const visibleCalibration =
     calibrationByDevice[visibleDevice.id] ??
     activeScenario.devices.find((device) => device.id === visibleDevice.id)?.storedCalibration ??
@@ -2884,6 +2904,8 @@ export function ControlPlaneDemo({
         selectedPresetSlot?: number
         presetsC?: Array<number | null>
         activeCoolingEnabled?: boolean
+        postHeatCoolingMode?: PostHeatCoolingMode
+        heatingFanGuardMode?: HeatingFanGuardMode
         heaterEnabled?: boolean
         manualPpsEnabled?: boolean
         manualPpsMv?: number
@@ -3665,27 +3687,56 @@ export function ControlPlaneDemo({
     }
   }
 
-  const handleFanPolicyChange = async (fanState: DeviceTarget['fanState']) => {
-    if (fanState === 'RUN') {
-      return
-    }
+  const handlePostHeatCoolingChange = (mode: PostHeatCoolingMode) => {
+    setPostHeatCoolingByDevice((current) => ({ ...current, [visibleDevice.id]: mode }))
+    setFeedback({
+      title: 'Post-heat cooling staged',
+      detail: `${visibleDevice.alias} POST is ${mode.toUpperCase()}; save to apply it.`,
+      tone: 'info',
+    })
+  }
+
+  const handleHeatingFanGuardChange = (mode: HeatingFanGuardMode) => {
+    setHeatingFanGuardByDevice((current) => ({ ...current, [visibleDevice.id]: mode }))
+    setFeedback({
+      title: 'Heating fan guard staged',
+      detail: `${visibleDevice.alias} HEAT is ${mode.toUpperCase()}; save to apply it.`,
+      tone: 'info',
+    })
+  }
+
+  const handleFanSettingsSave = async () => {
+    const postHeatCoolingMode =
+      postHeatCoolingByDevice[visibleDevice.id] ?? visibleDevice.postHeatCoolingMode ?? 'normal'
+    const heatingFanGuardMode =
+      heatingFanGuardByDevice[visibleDevice.id] ?? visibleDevice.heatingFanGuardMode ?? 'medium'
     const liveUpdated = await configureLiveRuntime(
-      { activeCoolingEnabled: fanState !== 'OFF' },
-      'fan policy update was not accepted by devd'
+      { postHeatCoolingMode, heatingFanGuardMode },
+      'fan policy update was not accepted by the selected device'
     )
     if (visibleDeviceIsLive && !liveUpdated) {
+      setPostHeatCoolingByDevice((current) => {
+        const next = { ...current }
+        delete next[visibleDevice.id]
+        return next
+      })
+      setHeatingFanGuardByDevice((current) => {
+        const next = { ...current }
+        delete next[visibleDevice.id]
+        return next
+      })
       return
     }
-    setFanPolicyByDevice((current) => ({
-      ...current,
-      [visibleDevice.id]: fanState,
-    }))
     setFeedback({
-      title: 'Fan policy updated',
-      detail: `${visibleDevice.alias} fan policy is now ${fanState}.`,
-      tone: fanState === 'OFF' ? 'warning' : 'success',
+      title: 'Fan policy saved',
+      detail: `${visibleDevice.alias} POST ${postHeatCoolingMode.toUpperCase()} · HEAT ${heatingFanGuardMode.toUpperCase()}.`,
+      tone: 'success',
     })
-    emitEvent('cooling', `fan policy updated to ${fanState}`, 'info')
+    emitEvent(
+      'cooling',
+      `fan policy saved: post_heat=${postHeatCoolingMode}, heating_guard=${heatingFanGuardMode}`,
+      'success'
+    )
   }
 
   const handleManualPpsApply = async (millivolts: number) => {
@@ -4625,7 +4676,8 @@ export function ControlPlaneDemo({
                 selectedPresetIndex={selectedPresetIndex}
                 presetTemps={visiblePresetTemps}
                 presetEnabled={visiblePresetEnabled}
-                fanPolicyValue={visibleFanPolicy}
+                postHeatCoolingMode={visiblePostHeatCoolingMode}
+                heatingFanGuardMode={visibleHeatingFanGuardMode}
                 settingsWorkspaceTab={visibleSettingsWorkspaceTab}
                 artifact={selectedArtifact}
                 feedback={feedback}
@@ -4643,7 +4695,9 @@ export function ControlPlaneDemo({
                 onPresetSlotChange={handlePresetSlotChange}
                 onPresetTempChange={handlePresetTempChange}
                 onPresetEnabledChange={handlePresetEnabledChange}
-                onFanPolicyChange={handleFanPolicyChange}
+                onPostHeatCoolingChange={handlePostHeatCoolingChange}
+                onHeatingFanGuardChange={handleHeatingFanGuardChange}
+                onFanSettingsSave={handleFanSettingsSave}
                 onSettingsWorkspaceTabChange={setSettingsWorkspaceTab}
                 onWifiSave={handleWifiSave}
                 onWifiClear={handleWifiClear}
@@ -5345,10 +5399,6 @@ function presetValuesFromEditorState(presetTemps: number[], presetEnabled: boole
   )
 }
 
-function fanPolicyFromDevice(device: DeviceTarget): DeviceTarget['fanState'] {
-  return device.activeCoolingEnabled ? 'AUTO' : 'OFF'
-}
-
 function formatTemp(value: number) {
   if (!isRenderableTemperature(value)) {
     return 'N/A'
@@ -5763,7 +5813,8 @@ function ViewPanel({
   selectedPresetIndex,
   presetTemps,
   presetEnabled,
-  fanPolicyValue,
+  postHeatCoolingMode,
+  heatingFanGuardMode,
   settingsWorkspaceTab,
   artifact,
   feedback,
@@ -5781,7 +5832,9 @@ function ViewPanel({
   onPresetSlotChange,
   onPresetTempChange,
   onPresetEnabledChange,
-  onFanPolicyChange,
+  onPostHeatCoolingChange,
+  onHeatingFanGuardChange,
+  onFanSettingsSave,
   onSettingsWorkspaceTabChange,
   onWifiSave,
   onWifiClear,
@@ -5831,7 +5884,8 @@ function ViewPanel({
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
-  fanPolicyValue: DeviceTarget['fanState']
+  postHeatCoolingMode: PostHeatCoolingMode
+  heatingFanGuardMode: HeatingFanGuardMode
   settingsWorkspaceTab: SettingsWorkspaceTab
   artifact?: FirmwareArtifact
   feedback: ActionFeedback
@@ -5849,7 +5903,9 @@ function ViewPanel({
   onPresetSlotChange: (presetIndex: number) => void | Promise<void>
   onPresetTempChange: (nextTempC: number) => void | Promise<void>
   onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
-  onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
+  onPostHeatCoolingChange: (mode: PostHeatCoolingMode) => void
+  onHeatingFanGuardChange: (mode: HeatingFanGuardMode) => void
+  onFanSettingsSave: () => void | Promise<void>
   onSettingsWorkspaceTabChange: (tab: SettingsWorkspaceTab) => void | Promise<void>
   onWifiSave: (draft: WifiNetworkSettingsDraft) => Promise<NetworkSummary>
   onWifiClear: () => Promise<NetworkSummary>
@@ -5962,7 +6018,8 @@ function ViewPanel({
     return (
       <SettingsView
         device={device}
-        fanPolicyValue={fanPolicyValue}
+        postHeatCoolingMode={postHeatCoolingMode}
+        heatingFanGuardMode={heatingFanGuardMode}
         settingsWorkspaceTab={settingsWorkspaceTab}
         selectedPresetIndex={selectedPresetIndex}
         presetTemps={presetTemps}
@@ -5971,7 +6028,9 @@ function ViewPanel({
         onPresetSlotChange={onPresetSlotChange}
         onPresetTempChange={onPresetTempChange}
         onPresetEnabledChange={onPresetEnabledChange}
-        onFanPolicyChange={onFanPolicyChange}
+        onPostHeatCoolingChange={onPostHeatCoolingChange}
+        onHeatingFanGuardChange={onHeatingFanGuardChange}
+        onFanSettingsSave={onFanSettingsSave}
         onSettingsWorkspaceTabChange={onSettingsWorkspaceTabChange}
         onWifiSave={onWifiSave}
         onWifiClear={onWifiClear}
@@ -7120,7 +7179,8 @@ function SettingsView({
   navigation,
   device,
   settingsWorkspaceTab,
-  fanPolicyValue,
+  postHeatCoolingMode,
+  heatingFanGuardMode,
   selectedPresetIndex,
   presetTemps,
   presetEnabled,
@@ -7128,7 +7188,9 @@ function SettingsView({
   onPresetSlotChange,
   onPresetTempChange,
   onPresetEnabledChange,
-  onFanPolicyChange,
+  onPostHeatCoolingChange,
+  onHeatingFanGuardChange,
+  onFanSettingsSave,
   onSettingsWorkspaceTabChange,
   onWifiSave,
   onWifiClear,
@@ -7139,7 +7201,8 @@ function SettingsView({
   navigation?: ConsoleNavigationAdapter
   device: DeviceTarget
   settingsWorkspaceTab: SettingsWorkspaceTab
-  fanPolicyValue: DeviceTarget['fanState']
+  postHeatCoolingMode: PostHeatCoolingMode
+  heatingFanGuardMode: HeatingFanGuardMode
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
@@ -7147,7 +7210,9 @@ function SettingsView({
   onPresetSlotChange: (presetIndex: number) => void | Promise<void>
   onPresetTempChange: (nextTempC: number) => void | Promise<void>
   onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
-  onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
+  onPostHeatCoolingChange: (mode: PostHeatCoolingMode) => void
+  onHeatingFanGuardChange: (mode: HeatingFanGuardMode) => void
+  onFanSettingsSave: () => void | Promise<void>
   onSettingsWorkspaceTabChange: (tab: SettingsWorkspaceTab) => void | Promise<void>
   onWifiSave: (draft: WifiNetworkSettingsDraft) => Promise<NetworkSummary>
   onWifiClear: () => Promise<NetworkSummary>
@@ -7222,16 +7287,66 @@ function SettingsView({
         </TabsContent>
 
         <TabsContent value="fan" className="industrial-calibration-tabs__content">
-          <section className="industrial-settings-section industrial-settings-section--controls">
-            <h3 className="industrial-section-title">Fan policy</h3>
-            <div className="industrial-settings-grid industrial-settings-grid--controls">
-              <SegmentedSetting
-                label="Fan policy"
-                value={fanPolicyValue}
-                onChange={onFanPolicyChange}
-                hideLabel
+          <section className="industrial-settings-section industrial-settings-section--controls fan-policy-section">
+            <div className="fan-policy-stack">
+              <ModeSegmentedSetting
+                label="主动降温"
+                value={postHeatCoolingMode}
+                options={[
+                  ['off', 'OFF'],
+                  ['normal', 'NORMAL'],
+                  ['fast', 'FAST'],
+                ]}
+                onChange={onPostHeatCoolingChange}
+              />
+              <ModeSegmentedSetting
+                label="加热防过热"
+                value={heatingFanGuardMode}
+                options={[
+                  ['off', 'OFF'],
+                  ['low', 'LOW'],
+                  ['medium', 'MED'],
+                  ['high', 'HIGH'],
+                ]}
+                onChange={onHeatingFanGuardChange}
               />
             </div>
+
+            <div className="fan-policy-command">
+              <button
+                type="button"
+                className="industrial-button industrial-button--primary"
+                onClick={() => void onFanSettingsSave()}
+              >
+                <Save aria-hidden="true" size={16} />
+                保存风扇策略
+              </button>
+            </div>
+
+            <section
+              className="fan-policy-runtime industrial-panel industrial-log-panel"
+              aria-live="polite"
+            >
+              <p className="industrial-label">Fan runtime</p>
+              <strong
+                className="fan-policy-runtime__state"
+                data-state={String(
+                  device.fanDisplayState ?? device.fanState ?? 'OFF'
+                ).toLowerCase()}
+              >
+                {device.fanDisplayState ?? device.fanState ?? 'OFF'}
+              </strong>
+              <dl className="fan-policy-runtime__readout">
+                <div>
+                  <dt>Policy source</dt>
+                  <dd>{device.fanPolicySource?.replace('_', ' ') ?? 'idle'}</dd>
+                </div>
+                <div>
+                  <dt>Output level</dt>
+                  <dd>{device.fanOutputLevel ?? 'off'}</dd>
+                </div>
+              </dl>
+            </section>
           </section>
         </TabsContent>
 
@@ -9683,27 +9798,26 @@ function StatusCard({ label, value, detail }: { label: string; value: string; de
   )
 }
 
-function SegmentedSetting({
+function ModeSegmentedSetting<T extends string>({
   label,
   value,
+  options,
   onChange,
-  hideLabel = false,
 }: {
   label: string
-  value: DeviceTarget['fanState']
-  onChange: (fanState: DeviceTarget['fanState']) => void
-  hideLabel?: boolean
+  value: T
+  options: Array<[T, string]>
+  onChange: (value: T) => void
 }) {
-  const options: Array<Exclude<DeviceTarget['fanState'], 'RUN'>> = ['OFF', 'AUTO']
-
   return (
-    <fieldset className="industrial-setting-control industrial-segmented-setting">
+    <fieldset
+      className="industrial-setting-control industrial-segmented-setting"
+      data-option-count={options.length}
+    >
       <legend className="sr-only">{label}</legend>
-      {hideLabel ? null : (
-        <p className="industrial-label industrial-segmented-setting__title">{label}</p>
-      )}
+      <p className="industrial-label industrial-segmented-setting__title">{label}</p>
       <div className="industrial-segmented-control">
-        {options.map((option) => (
+        {options.map(([option, optionLabel]) => (
           <button
             key={option}
             type="button"
@@ -9711,7 +9825,7 @@ function SegmentedSetting({
             aria-pressed={option === value}
             onClick={() => onChange(option)}
           >
-            {option}
+            {optionLabel}
           </button>
         ))}
       </div>

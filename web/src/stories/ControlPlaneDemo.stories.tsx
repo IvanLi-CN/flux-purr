@@ -1031,14 +1031,19 @@ export const LiveWebSerialAddDevice: Story = {
       }
     )
 
-    await step('Settings fan policy keeps the acknowledged operator selection', async () => {
+    await step('Settings fan policy keeps both acknowledged operator selections', async () => {
       await userEvent.click(await canvas.findByRole('tab', { name: '风扇策略' }))
-      await userEvent.click(await canvas.findByRole('button', { name: 'OFF' }))
+      await userEvent.click((await canvas.findAllByRole('button', { name: 'OFF' }))[0])
 
       await waitFor(() => {
-        expect(canvas.getByRole('button', { name: 'OFF' })).toHaveAttribute('aria-pressed', 'true')
+        expect(canvas.getAllByRole('button', { name: 'OFF' })[0]).toHaveAttribute(
+          'aria-pressed',
+          'true'
+        )
       })
-      await expect(await canvas.findByText('flux-purr-s3-001 fan policy is now OFF.')).toBeVisible()
+      await expect(await canvas.findByText(/POST is OFF; save to apply it\./)).toBeVisible()
+      await userEvent.click(await canvas.findByRole('button', { name: '保存风扇策略' }))
+      await expect(await canvas.findByText(/POST OFF/)).toBeVisible()
     })
 
     await step('Settings WiFi writes through the connected Web Serial transport', async () => {
@@ -2304,7 +2309,13 @@ class FakeWebSerialClient {
       heaterOutputPercent:
         request.heaterEnabled === false ? 0 : this.currentStatus.heaterOutputPercent,
       fanDisplayState:
-        request.activeCoolingEnabled === false ? 'OFF' : this.currentStatus.fanDisplayState,
+        request.postHeatCoolingMode === 'off' || request.activeCoolingEnabled === false
+          ? 'OFF'
+          : this.currentStatus.fanDisplayState,
+      postHeatCoolingMode:
+        request.postHeatCoolingMode ?? this.currentStatus.postHeatCoolingMode ?? 'normal',
+      heatingFanGuardMode:
+        request.heatingFanGuardMode ?? this.currentStatus.heatingFanGuardMode ?? 'medium',
       manualPpsEnabled: request.manualPpsEnabled ?? this.currentStatus.manualPpsEnabled ?? false,
       manualPpsMv:
         request.manualPpsEnabled === false

@@ -182,6 +182,10 @@ struct LanRuntimeSetArgs {
     target_temp_c: Option<i16>,
     #[arg(long = "active-cooling")]
     active_cooling: Option<bool>,
+    #[arg(long = "post-heat-cooling", value_parser = ["off", "normal", "fast"])]
+    post_heat_cooling: Option<String>,
+    #[arg(long = "heating-fan-guard", value_parser = ["off", "low", "medium", "high"])]
+    heating_fan_guard: Option<String>,
     #[arg(long = "heater-enabled")]
     heater_enabled: Option<bool>,
 }
@@ -745,6 +749,10 @@ struct RuntimeSetArgs {
     preset_disabled: bool,
     #[arg(long = "active-cooling")]
     active_cooling: Option<bool>,
+    #[arg(long = "post-heat-cooling", value_parser = ["off", "normal", "fast"])]
+    post_heat_cooling: Option<String>,
+    #[arg(long = "heating-fan-guard", value_parser = ["off", "low", "medium", "high"])]
+    heating_fan_guard: Option<String>,
     #[arg(long = "heater-enabled")]
     heater_enabled: Option<bool>,
     #[arg(long = "fault-attention-acknowledged")]
@@ -1746,6 +1754,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let body = json!({
                     "targetTempC": args.target_temp_c,
                     "activeCoolingEnabled": args.active_cooling,
+                    "postHeatCoolingMode": args.post_heat_cooling,
+                    "heatingFanGuardMode": args.heating_fan_guard,
                     "heaterEnabled": args.heater_enabled,
                 });
                 lan_api_request(&device, Method::PUT, "runtime", Some(body)).await?
@@ -10967,6 +10977,8 @@ async fn runtime_body(
     insert_if_some(&mut body, "targetTempC", args.target_temp_c);
     insert_if_some(&mut body, "selectedPresetSlot", args.selected_preset_slot);
     insert_if_some(&mut body, "activeCoolingEnabled", args.active_cooling);
+    insert_if_some(&mut body, "postHeatCoolingMode", args.post_heat_cooling);
+    insert_if_some(&mut body, "heatingFanGuardMode", args.heating_fan_guard);
     insert_if_some(&mut body, "heaterEnabled", args.heater_enabled);
     if args.fault_attention_acknowledged {
         body.insert("faultAttentionAcknowledged".to_string(), json!(true));

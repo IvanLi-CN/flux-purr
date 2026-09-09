@@ -141,6 +141,8 @@ const TLV_TARGET_TEMP_C: u8 = 0x01;
 const TLV_SELECTED_PRESET_SLOT: u8 = 0x02;
 const TLV_PRESETS_C: u8 = 0x03;
 const TLV_ACTIVE_COOLING_ENABLED: u8 = 0x04;
+const TLV_POST_HEAT_COOLING_MODE: u8 = 0x05;
+const TLV_HEATING_FAN_GUARD_MODE: u8 = 0x06;
 const TLV_WIFI_SSID: u8 = 0x10;
 const TLV_WIFI_PASSWORD: u8 = 0x11;
 const TLV_WIFI_AUTO_RECONNECT: u8 = 0x12;
@@ -198,6 +200,8 @@ pub struct MemoryConfig {
     pub selected_preset_slot: usize,
     pub presets_c: [Option<i16>; FRONTPANEL_PRESET_COUNT],
     pub active_cooling_enabled: bool,
+    pub post_heat_cooling_mode: crate::fan_policy::PostHeatCoolingMode,
+    pub heating_fan_guard_mode: crate::fan_policy::HeatingFanGuardMode,
     pub wifi_ssid: String<MEMORY_WIFI_SSID_MAX_LEN>,
     pub wifi_password: String<MEMORY_WIFI_PASSWORD_MAX_LEN>,
     pub wifi_auto_reconnect: bool,
@@ -629,6 +633,8 @@ impl Default for MemoryConfig {
                 Some(300),
             ],
             active_cooling_enabled: true,
+            post_heat_cooling_mode: crate::fan_policy::PostHeatCoolingMode::Normal,
+            heating_fan_guard_mode: crate::fan_policy::HeatingFanGuardMode::Medium,
             wifi_ssid: String::new(),
             wifi_password: String::new(),
             wifi_auto_reconnect: true,
@@ -1410,6 +1416,8 @@ pub struct UserPreferences {
     pub selected_preset_slot: usize,
     pub presets_c: [Option<i16>; FRONTPANEL_PRESET_COUNT],
     pub active_cooling_enabled: bool,
+    pub post_heat_cooling_mode: crate::fan_policy::PostHeatCoolingMode,
+    pub heating_fan_guard_mode: crate::fan_policy::HeatingFanGuardMode,
     pub telemetry_interval_ms: u32,
 }
 
@@ -1549,11 +1557,14 @@ impl ThermalPolicy {
 
 impl UserPreferences {
     pub fn from_config(config: &MemoryConfig) -> Self {
+        let post_heat_cooling_mode = persisted_post_heat_cooling_mode(config);
         Self {
             target_temp_c: config.target_temp_c,
             selected_preset_slot: config.selected_preset_slot,
             presets_c: config.presets_c,
             active_cooling_enabled: config.active_cooling_enabled,
+            post_heat_cooling_mode,
+            heating_fan_guard_mode: config.heating_fan_guard_mode,
             telemetry_interval_ms: config.telemetry_interval_ms,
         }
     }
@@ -1563,7 +1574,26 @@ impl UserPreferences {
         config.selected_preset_slot = self.selected_preset_slot;
         config.presets_c = self.presets_c;
         config.active_cooling_enabled = self.active_cooling_enabled;
+        config.post_heat_cooling_mode = self.post_heat_cooling_mode;
+        config.heating_fan_guard_mode = self.heating_fan_guard_mode;
         config.telemetry_interval_ms = self.telemetry_interval_ms;
+    }
+}
+
+// Older callers can still construct MemoryConfig with only the legacy boolean.
+// Normalize an inconsistent in-memory pair before encoding; decoded records
+// always derive the compatibility boolean from the new mode tag.
+fn persisted_post_heat_cooling_mode(
+    config: &MemoryConfig,
+) -> crate::fan_policy::PostHeatCoolingMode {
+    match (config.post_heat_cooling_mode, config.active_cooling_enabled) {
+        (crate::fan_policy::PostHeatCoolingMode::Normal, false) => {
+            crate::fan_policy::PostHeatCoolingMode::Off
+        }
+        (crate::fan_policy::PostHeatCoolingMode::Off, true) => {
+            crate::fan_policy::PostHeatCoolingMode::Normal
+        }
+        (mode, _) => mode,
     }
 }
 
@@ -1785,6 +1815,27 @@ fn encode_persist_payload(
                 &mut cursor,
             )?;
             push_fpr2_tlv(
+                TLV_POST_HEAT_COOLING_MODE,
+                &[match value.post_heat_cooling_mode {
+                    crate::fan_policy::PostHeatCoolingMode::Off => 0,
+                    crate::fan_policy::PostHeatCoolingMode::Normal => 1,
+                    crate::fan_policy::PostHeatCoolingMode::Fast => 2,
+                }],
+                out,
+                &mut cursor,
+            )?;
+            push_fpr2_tlv(
+                TLV_HEATING_FAN_GUARD_MODE,
+                &[match value.heating_fan_guard_mode {
+                    crate::fan_policy::HeatingFanGuardMode::Off => 0,
+                    crate::fan_policy::HeatingFanGuardMode::Low => 1,
+                    crate::fan_policy::HeatingFanGuardMode::Medium => 2,
+                    crate::fan_policy::HeatingFanGuardMode::High => 3,
+                }],
+                out,
+                &mut cursor,
+            )?;
+            push_fpr2_tlv(
                 TLV_TELEMETRY_INTERVAL_MS,
                 &value.telemetry_interval_ms.to_le_bytes(),
                 out,
@@ -1896,8 +1947,11 @@ fn decode_persist_payload(
         selected_preset_slot: 1,
         presets_c: MemoryConfig::default().presets_c,
         active_cooling_enabled: true,
+        post_heat_cooling_mode: crate::fan_policy::PostHeatCoolingMode::Normal,
+        heating_fan_guard_mode: crate::fan_policy::HeatingFanGuardMode::Medium,
         telemetry_interval_ms: 500,
     };
+    let mut saw_post_heat_mode = false;
     let mut network = NetworkAndPairing {
         wifi_ssid: String::new(),
         wifi_password: String::new(),
@@ -1994,6 +2048,24 @@ fn decode_persist_payload(
                 prefs.active_cooling_enabled = value[0] != 0;
                 saw_field = true;
             }
+            TLV_POST_HEAT_COOLING_MODE if value.len() == 1 => {
+                prefs.post_heat_cooling_mode = match value[0] {
+                    2 => crate::fan_policy::PostHeatCoolingMode::Fast,
+                    1 => crate::fan_policy::PostHeatCoolingMode::Normal,
+                    _ => crate::fan_policy::PostHeatCoolingMode::Off,
+                };
+                saw_post_heat_mode = true;
+                saw_field = true;
+            }
+            TLV_HEATING_FAN_GUARD_MODE if value.len() == 1 => {
+                prefs.heating_fan_guard_mode = match value[0] {
+                    3 => crate::fan_policy::HeatingFanGuardMode::High,
+                    2 => crate::fan_policy::HeatingFanGuardMode::Medium,
+                    1 => crate::fan_policy::HeatingFanGuardMode::Low,
+                    _ => crate::fan_policy::HeatingFanGuardMode::Off,
+                };
+                saw_field = true;
+            }
             TLV_TELEMETRY_INTERVAL_MS if value.len() == 4 => {
                 prefs.telemetry_interval_ms = u32::from_le_bytes(value.try_into().unwrap());
                 saw_field = true;
@@ -2063,6 +2135,11 @@ fn decode_persist_payload(
     if !saw_field {
         return Err(Fpr2DecodeError::InvalidDomainPayload);
     }
+    if !saw_post_heat_mode {
+        prefs.post_heat_cooling_mode =
+            crate::fan_policy::PostHeatCoolingMode::from_legacy(prefs.active_cooling_enabled);
+    }
+    prefs.active_cooling_enabled = prefs.post_heat_cooling_mode.is_enabled();
     Ok(match domain {
         PersistDomain::SafetyCalibration => PersistDomainData::SafetyCalibration(safety),
         PersistDomain::ThermalPolicy => PersistDomainData::ThermalPolicy(thermal),
@@ -2273,6 +2350,7 @@ fn encode_config_payload(
     config: &MemoryConfig,
     out: &mut [u8],
 ) -> Result<usize, MemoryEncodeError> {
+    let post_heat_cooling_mode = persisted_post_heat_cooling_mode(config);
     let mut cursor = 0;
     push_tlv(
         TLV_COMMISSIONING_REQUIRED,
@@ -2302,6 +2380,27 @@ fn encode_config_payload(
     push_tlv(
         TLV_ACTIVE_COOLING_ENABLED,
         &[u8::from(config.active_cooling_enabled)],
+        out,
+        &mut cursor,
+    )?;
+    push_tlv(
+        TLV_POST_HEAT_COOLING_MODE,
+        &[match post_heat_cooling_mode {
+            crate::fan_policy::PostHeatCoolingMode::Off => 0,
+            crate::fan_policy::PostHeatCoolingMode::Normal => 1,
+            crate::fan_policy::PostHeatCoolingMode::Fast => 2,
+        }],
+        out,
+        &mut cursor,
+    )?;
+    push_tlv(
+        TLV_HEATING_FAN_GUARD_MODE,
+        &[match config.heating_fan_guard_mode {
+            crate::fan_policy::HeatingFanGuardMode::Off => 0,
+            crate::fan_policy::HeatingFanGuardMode::Low => 1,
+            crate::fan_policy::HeatingFanGuardMode::Medium => 2,
+            crate::fan_policy::HeatingFanGuardMode::High => 3,
+        }],
         out,
         &mut cursor,
     )?;
@@ -2456,6 +2555,8 @@ struct ConfigDecodeState {
     saw_new_adc_active_slots: bool,
     saw_legacy_active: bool,
     saw_legacy_draft: bool,
+    saw_post_heat_mode: bool,
+    saw_heating_fan_guard_mode: bool,
 }
 
 impl ConfigDecodeState {
@@ -2483,6 +2584,23 @@ impl ConfigDecodeState {
             }
             TLV_ACTIVE_COOLING_ENABLED if len == 1 => {
                 config.active_cooling_enabled = value[0] != 0;
+            }
+            TLV_POST_HEAT_COOLING_MODE if len == 1 => {
+                config.post_heat_cooling_mode = match value[0] {
+                    2 => crate::fan_policy::PostHeatCoolingMode::Fast,
+                    1 => crate::fan_policy::PostHeatCoolingMode::Normal,
+                    _ => crate::fan_policy::PostHeatCoolingMode::Off,
+                };
+                self.saw_post_heat_mode = true;
+            }
+            TLV_HEATING_FAN_GUARD_MODE if len == 1 => {
+                config.heating_fan_guard_mode = match value[0] {
+                    3 => crate::fan_policy::HeatingFanGuardMode::High,
+                    2 => crate::fan_policy::HeatingFanGuardMode::Medium,
+                    1 => crate::fan_policy::HeatingFanGuardMode::Low,
+                    _ => crate::fan_policy::HeatingFanGuardMode::Off,
+                };
+                self.saw_heating_fan_guard_mode = true;
             }
             TLV_WIFI_SSID => {
                 config.wifi_ssid.clear();
@@ -2616,6 +2734,11 @@ impl ConfigDecodeState {
     }
 
     fn finish(&self, config: &mut MemoryConfig) {
+        if !self.saw_post_heat_mode {
+            config.post_heat_cooling_mode =
+                crate::fan_policy::PostHeatCoolingMode::from_legacy(config.active_cooling_enabled);
+        }
+        config.active_cooling_enabled = config.post_heat_cooling_mode.is_enabled();
         if self.saw_legacy_active && !self.saw_new_adc_slots && !self.saw_new_adc_active_slots {
             migrate_legacy_adc_calibration(
                 &mut config.adc_calibration,
@@ -4167,6 +4290,7 @@ mod tests {
             target_temp_c: 222,
             selected_preset_slot: 4,
             active_cooling_enabled: false,
+            post_heat_cooling_mode: crate::fan_policy::PostHeatCoolingMode::Off,
             wifi_auto_reconnect: true,
             telemetry_interval_ms: 1_250,
             ..MemoryConfig::default()
@@ -4289,6 +4413,63 @@ mod tests {
             config.adc_calibration.vin.slots.a,
             AdcCalibrationSlotFit::default()
         );
+    }
+
+    #[test]
+    fn fan_policy_tlvs_migrate_legacy_boolean_and_default_missing_guard() {
+        let mut payload = [0u8; 64];
+        let mut cursor = 0;
+        push_tlv(TLV_ACTIVE_COOLING_ENABLED, &[0], &mut payload, &mut cursor)
+            .expect("legacy fan flag fits");
+
+        let mut decoded = MemoryConfig::default();
+        decode_config_payload(&payload[..cursor], true, &mut decoded)
+            .expect("legacy fan policy decodes");
+        assert_eq!(
+            decoded.post_heat_cooling_mode,
+            crate::fan_policy::PostHeatCoolingMode::Off
+        );
+        assert_eq!(
+            decoded.heating_fan_guard_mode,
+            crate::fan_policy::HeatingFanGuardMode::Medium
+        );
+        assert!(!decoded.active_cooling_enabled);
+
+        let mut new_payload = [0u8; 64];
+        let mut new_cursor = 0;
+        push_tlv(
+            TLV_ACTIVE_COOLING_ENABLED,
+            &[0],
+            &mut new_payload,
+            &mut new_cursor,
+        )
+        .expect("legacy fan flag fits");
+        push_tlv(
+            TLV_POST_HEAT_COOLING_MODE,
+            &[2],
+            &mut new_payload,
+            &mut new_cursor,
+        )
+        .expect("post-heat mode fits");
+        push_tlv(
+            TLV_HEATING_FAN_GUARD_MODE,
+            &[3],
+            &mut new_payload,
+            &mut new_cursor,
+        )
+        .expect("heating guard mode fits");
+        let mut new_decoded = MemoryConfig::default();
+        decode_config_payload(&new_payload[..new_cursor], true, &mut new_decoded)
+            .expect("new fan policy decodes");
+        assert_eq!(
+            new_decoded.post_heat_cooling_mode,
+            crate::fan_policy::PostHeatCoolingMode::Fast
+        );
+        assert_eq!(
+            new_decoded.heating_fan_guard_mode,
+            crate::fan_policy::HeatingFanGuardMode::High
+        );
+        assert!(new_decoded.active_cooling_enabled);
     }
 
     #[test]

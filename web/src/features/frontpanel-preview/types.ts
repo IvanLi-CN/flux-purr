@@ -1,6 +1,10 @@
 export type FrontPanelKeyId = 'center' | 'right' | 'down' | 'left' | 'up'
 export type KeyGestureId = 'short' | 'double' | 'long' | 'repeat'
-export type FanDisplayState = 'off' | 'auto' | 'run'
+export type FanDisplayState = 'off' | 'auto' | 'run' | 'safe'
+export type PostHeatCoolingMode = 'off' | 'normal' | 'fast'
+export type HeatingFanGuardMode = 'off' | 'low' | 'medium' | 'high'
+export type FanPolicySource = 'idle' | 'post_heat' | 'heating_guard' | 'safety'
+export type FanOutputLevel = 'off' | 'low' | 'medium' | 'high' | 'limited'
 export type HeaterLockReason = 'cooling-disabled-overtemp' | 'hard-overtemp'
 export type MenuItemId = 'preset-temp' | 'active-cooling' | 'wifi-info' | 'device-info'
 
@@ -53,14 +57,12 @@ export interface FrontPanelPresetTempScreen extends FrontPanelBaseScreen {
 
 export interface FrontPanelCoolingScreen extends FrontPanelBaseScreen {
   kind: 'active-cooling'
-  enabled: boolean
-  pdContractMv: number
-  cooldownTempC: number
-  cooldownSeconds: number
-  autoFullTempC: number
-  pulseStartTempC: number
-  lockTempC: number
-  fullTempC: number
+  fanDisplayState: FanDisplayState
+  postHeatCoolingMode: PostHeatCoolingMode
+  heatingFanGuardMode: HeatingFanGuardMode
+  fanPolicySource: FanPolicySource
+  fanOutputLevel: FanOutputLevel
+  fanSettingsRow: 0 | 1
 }
 
 export interface FrontPanelWifiInfoScreen extends FrontPanelBaseScreen {

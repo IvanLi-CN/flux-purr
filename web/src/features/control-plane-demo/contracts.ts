@@ -19,7 +19,11 @@ export type NetworkFailureCode =
   | 'station_disconnected'
   | 'lan_startup_failed'
 export type PdState = 'negotiating' | 'ready' | 'fallback_5v' | 'fault'
-export type FanDisplayState = 'OFF' | 'AUTO' | 'RUN'
+export type FanDisplayState = 'OFF' | 'AUTO' | 'RUN' | 'SAFE'
+export type PostHeatCoolingMode = 'off' | 'normal' | 'fast'
+export type HeatingFanGuardMode = 'off' | 'low' | 'medium' | 'high'
+export type FanPolicySource = 'idle' | 'post_heat' | 'heating_guard' | 'safety'
+export type FanOutputLevel = 'off' | 'low' | 'medium' | 'high' | 'limited'
 export type HeaterLockReason = 'cooling-disabled-overtemp' | 'hard-overtemp'
 
 export interface Identity {
@@ -58,6 +62,10 @@ export interface ControlPlaneStatus {
   heaterEnabled: boolean
   heaterOutputPercent: number
   activeCoolingEnabled: boolean
+  postHeatCoolingMode?: PostHeatCoolingMode
+  heatingFanGuardMode?: HeatingFanGuardMode
+  fanPolicySource?: FanPolicySource
+  fanOutputLevel?: FanOutputLevel
   fanDisplayState: FanDisplayState
   fanEnabled: boolean
   fanPwmPermille: number
@@ -309,6 +317,8 @@ export interface RuntimeConfigRequest {
   selectedPresetSlot?: number
   presetsC?: Array<number | null>
   activeCoolingEnabled?: boolean
+  postHeatCoolingMode?: PostHeatCoolingMode
+  heatingFanGuardMode?: HeatingFanGuardMode
   heaterEnabled?: boolean
   manualPpsEnabled?: boolean
   manualPpsMv?: number

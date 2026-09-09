@@ -858,8 +858,14 @@ test.describe('control plane live devd bridge', () => {
 
     await page.getByRole('link', { name: /设置/i }).click()
     await page.getByRole('tab', { name: '风扇策略' }).click()
-    await page.getByRole('button', { name: 'OFF' }).click()
-    await expect(page.getByText('Fan policy updated', { exact: true })).toBeVisible()
+    await page
+      .locator('fieldset')
+      .filter({ hasText: '主动降温' })
+      .getByRole('button', { name: 'OFF' })
+      .click()
+    await expect(page.getByText('Post-heat cooling staged', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '保存风扇策略' }).click()
+    await expect(page.getByText('Fan policy saved', { exact: true })).toBeVisible()
 
     await page.getByRole('link', { name: /总览/i }).click()
     await page.getByRole('button', { name: 'Hold heater' }).click()
@@ -883,7 +889,8 @@ test.describe('control plane live devd bridge', () => {
         expect.objectContaining({
           body: expect.objectContaining({
             leaseId: 'lease-e2e',
-            activeCoolingEnabled: false,
+            postHeatCoolingMode: 'off',
+            heatingFanGuardMode: 'medium',
           }),
         }),
         expect.objectContaining({

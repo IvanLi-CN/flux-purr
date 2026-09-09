@@ -2,7 +2,12 @@ import { useEffect, useMemo, useRef } from 'react'
 import { cn } from '@/lib/utils'
 import { drawBitmapText, measureBitmapText } from '../bitmap-font'
 import { frontPanelPalette, frontPanelTemperatureColors } from '../design-tokens'
-import type { FrontPanelKeyId, FrontPanelScreen, KeyGestureId } from '../types'
+import type {
+  FrontPanelCoolingScreen,
+  FrontPanelKeyId,
+  FrontPanelScreen,
+  KeyGestureId,
+} from '../types'
 
 const LOGICAL_WIDTH = 160
 const LOGICAL_HEIGHT = 50
@@ -17,7 +22,7 @@ const menuMeta: Record<MenuIconId, { title: string }> = {
     title: 'TEMP SET',
   },
   'active-cooling': {
-    title: 'A-COOL',
+    title: 'FAN',
   },
   'wifi-info': {
     title: 'WIFI',
@@ -573,44 +578,75 @@ function drawActiveCoolingScreen(
   screen: Extract<FrontPanelScreen, { kind: 'active-cooling' }>
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
-  drawBitmapText(ctx, 'A-COOL', 8, 6, {
+  fillRect(ctx, 4, 15, 152, 1, palette.border)
+  drawBitmapText(ctx, 'FAN CTRL', 6, 1, {
     color: palette.text,
-    scale: 2,
+    font: 'control-title',
     letterSpacing: 1,
   })
-  drawBitmapText(ctx, screen.enabled ? 'ON' : 'OFF', 152, 6, {
-    color: screen.enabled ? palette.success : palette.warning,
-    scale: 2,
+  if (screen.fanSettingsRow === 0) {
+    fillRect(ctx, 4, 17, 152, 10, palette.panelStrong)
+    fillRect(ctx, 4, 17, 2, 10, palette.accent)
+  }
+  if (screen.fanSettingsRow === 1) {
+    fillRect(ctx, 4, 28, 152, 10, palette.panelStrong)
+    fillRect(ctx, 4, 28, 2, 10, palette.accent)
+  }
+  drawBitmapText(ctx, 'POST', 8, 17, {
+    color: screen.fanSettingsRow === 0 ? palette.text : palette.muted,
+    font: 'control-label',
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, screen.postHeatCoolingMode.toUpperCase(), 154, 17, {
+    color: screen.fanSettingsRow === 0 ? palette.success : palette.text,
+    font: 'control-label',
+    letterSpacing: 1,
     align: 'right',
+  })
+  drawBitmapText(ctx, 'HEAT', 8, 28, {
+    color: screen.fanSettingsRow === 1 ? palette.text : palette.muted,
+    font: 'control-label',
     letterSpacing: 1,
+  })
+  drawBitmapText(ctx, screen.heatingFanGuardMode.toUpperCase(), 154, 28, {
+    color: screen.fanSettingsRow === 1 ? palette.success : palette.text,
+    font: 'control-label',
+    letterSpacing: 1,
+    align: 'right',
   })
   drawBitmapText(
     ctx,
-    `PD ${Math.round(screen.pdContractMv / 1000)}V | >=${screen.cooldownTempC} MIN >${screen.autoFullTempC} MAX`,
+    `${screen.fanDisplayState.toUpperCase()} ${fanPolicySourceLabel(screen.fanPolicySource)} ${fanOutputLevelLabel(screen.fanOutputLevel)}`,
     8,
-    20,
+    40,
     {
-      color: palette.cyan,
-      scale: 1,
+      color:
+        screen.fanDisplayState === 'safe' || screen.fanPolicySource === 'safety'
+          ? palette.warning
+          : palette.cyan,
+      font: 'control-label',
       letterSpacing: 1,
     }
   )
-  drawBitmapText(ctx, `<${screen.cooldownTempC} LOW ${screen.cooldownSeconds}S THEN OFF`, 8, 33, {
-    color: palette.success,
-    scale: 1,
-    letterSpacing: 1,
-  })
-  drawBitmapText(
-    ctx,
-    `SAFE >${screen.pulseStartTempC} PLS >${screen.lockTempC} 50% >${screen.fullTempC} MAX`,
-    8,
-    42,
-    {
-      color: palette.warning,
-      scale: 1,
-      letterSpacing: 1,
-    }
-  )
+}
+
+function fanPolicySourceLabel(source: FrontPanelCoolingScreen['fanPolicySource']) {
+  return {
+    idle: 'IDLE',
+    post_heat: 'POST',
+    heating_guard: 'HEAT',
+    safety: 'SAFE',
+  }[source]
+}
+
+function fanOutputLevelLabel(level: FrontPanelCoolingScreen['fanOutputLevel']) {
+  return {
+    off: 'OFF',
+    low: 'LOW',
+    medium: 'MED',
+    high: 'HIGH',
+    limited: 'LIMIT',
+  }[level]
 }
 
 function fitBitmapText(
@@ -722,7 +758,7 @@ function ariaLabel(screen: FrontPanelScreen) {
         : `front panel preset ${screen.selectedPresetIndex + 1} ${preset} degrees`
     }
     case 'active-cooling':
-      return `front panel active cooling ${screen.enabled ? 'enabled' : 'disabled'}`
+      return `front panel fan control post ${screen.postHeatCoolingMode} heat ${screen.heatingFanGuardMode}`
     case 'wifi-info':
       return `front panel wifi info ${screen.ssid}`
     case 'device-info':

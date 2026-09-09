@@ -575,9 +575,10 @@ export function useLiveWebSerialScenario(
             'runtime_config accepted over browser Web Serial',
             `target ${status.targetTempC}C`,
             `preset M${(status.selectedPresetSlot ?? 0) + 1}`,
-            `cooling ${status.activeCoolingEnabled ? 'on' : 'off'}`,
+            `post ${status.postHeatCoolingMode ?? (status.activeCoolingEnabled ? 'normal' : 'off')}`,
+            `heat guard ${status.heatingFanGuardMode ?? 'medium'}`,
             `heater ${status.heaterEnabled ? 'on' : 'off'}`,
-            `fan ${status.fanDisplayState}`,
+            `fan ${status.fanDisplayState} / ${status.fanPolicySource ?? 'idle'} / ${status.fanOutputLevel ?? 'off'}`,
           ].join(' / '),
           'success'
         )

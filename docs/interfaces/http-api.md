@@ -64,6 +64,10 @@ During firmware boot, before EEPROM restoration and WiFi task startup complete, 
   "heaterOutputPercent": 22,
   "faultAttentionPending": false,
   "activeCoolingEnabled": true,
+  "postHeatCoolingMode": "normal",
+  "heatingFanGuardMode": "medium",
+  "fanPolicySource": "idle",
+  "fanOutputLevel": "off",
   "fanDisplayState": "AUTO",
   "fanEnabled": true,
   "fanPwmPermille": 500,
@@ -108,7 +112,7 @@ During firmware boot, before EEPROM restoration and WiFi task startup complete, 
 ```
 
 `pdState`: `negotiating | ready | fallback_5v | fault`.
-`fanDisplayState`: `OFF | AUTO | RUN`.
+`fanDisplayState`: `OFF | AUTO | RUN | SAFE`. `postHeatCoolingMode` is `off | normal | fast` and `heatingFanGuardMode` is `off | low | medium | high`. `fanPolicySource` is `idle | post_heat | heating_guard | safety`; `fanOutputLevel` is the abstract `off | low | medium | high | limited` board output level. These fields never expose voltage, PWM, or fan tach data. `activeCoolingEnabled` remains a derived compatibility projection of `postHeatCoolingMode`.
 `presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
 `voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` is the accepted PD contract voltage. `currentMa` retains its legacy controller telemetry/capability meaning and is not a verified live VBUS-load measurement. New `pdContractCurrentMa` and `pdContractPowerMw` are contractual upper-bound fields; neither is a physical current measurement or hardware over-current guarantee. `pdController` is `ch224q | fusb302b | unknown`; `pdContractKind` is `fixed | pps | none`. `pdPerformanceGuaranteed=true` requires a ready PPS contract of at least `20V` and `3A`. A lower-voltage PPS or fixed contract can operate in degraded mode, identified by `pdDegradedReason`, but cannot be used for performance or calibration claims. FUSB302BMPX selects a `5V..21V` PPS APDO when available and exposes its capability fields; a failed identity, reset, detach, I2C fault, or absent `PS_RDY` reports `heaterLockReason=pd-contract-unavailable` and keeps heating off without blocking Dashboard or runtime status.
 `rtdRawAdcMv` and `vinRawAdcMv` retain their existing contract names but expose eFuse curve-calibrated millivolt readings before the project-level A/B calibration fit. They are not hardware ADC codes. `adcDiagnostics` is a read-only, optional diagnostic object so hosts remain compatible with older firmware. Its RTD mean/min/max/spread and VIN mean are 12-bit codes obtained through `AdcCalBasic` from the same conversions used for curve-calibrated mV; firmware always masks off upper SAR status bits before diagnostics and curve conversion. `calibrationSource=runtime_fallback` means required eFuse calibration data is missing; temperature-accuracy validation must stop, and firmware does not substitute the assumed 1100 mV gain reference. VBUS, VIN, ambient temperature, uptime, and an initial reading are never calibration references for this object.
@@ -302,7 +306,7 @@ Direct browser targets are represented in the Web app as `transport=serial`, `ba
 Supported direct operations:
 
 - `request` with `op=get_identity|get_network|get_status|get_calibration|get_calibration_job|get_heater_curve`
-- `runtime_config` for `targetTempC`, `selectedPresetSlot`, `presetsC`, `activeCoolingEnabled`, `heaterEnabled`, and `calibration`
+- `runtime_config` for `targetTempC`, `selectedPresetSlot`, `presetsC`, `postHeatCoolingMode`, `heatingFanGuardMode`, compatibility `activeCoolingEnabled`, `heaterEnabled`, and `calibration`
 - `calibration_config`, `calibration_job`, `heater_curve_config`, and `heater_curve_save`
 
 Unsupported direct operations:
@@ -375,6 +379,8 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
   "selectedPresetSlot": 3,
   "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   "activeCoolingEnabled": true,
+  "postHeatCoolingMode": "normal",
+  "heatingFanGuardMode": "medium",
   "heaterEnabled": true,
   "faultAttentionAcknowledged": true,
   "manualPpsEnabled": true,
@@ -406,7 +412,7 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
 }
 ```
 
-All runtime fields are optional except `leaseId`; the response is the updated `Status`. Status temperature fields `boardTempCenti` and `currentTempC` preserve the firmware RTD measurement at `0.01°C` resolution; front-panel rounding to `0.1°C` does not reduce API precision. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the selected controller's advertised PPS capability, on a `100mV` step; `manualPpsMa` must be within its advertised APDO current capability and on a `50mA` step. FUSB302BMPX accepts manual PPS within its advertised `5V..21V` capability and rejects AVS requests. `runtime_config.calibration` controls the owner-facing calibration modes and requires FUSB302BMPX to hold a qualifying PPS contract. `thermalControlProfile` is legacy-record compatibility only and cannot arm production heating. Current remains read-only contract metadata. `manualPpsMa` does not operate a direct VBUS-current register.
+All runtime fields are optional except `leaseId`; the response is the updated `Status`. `postHeatCoolingMode` and `heatingFanGuardMode` are validated independently, while `activeCoolingEnabled` is accepted only when the new POST field is absent; conflicting legacy/new values are rejected. Status temperature fields `boardTempCenti` and `currentTempC` preserve the firmware RTD measurement at `0.01°C` resolution; front-panel rounding to `0.1°C` does not reduce API precision. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the selected controller's advertised PPS capability, on a `100mV` step; `manualPpsMa` must be within its advertised APDO current capability and on a `50mA` step. FUSB302BMPX accepts manual PPS within its advertised `5V..21V` capability and rejects AVS requests. `runtime_config.calibration` controls the owner-facing calibration modes and requires FUSB302BMPX to hold a qualifying PPS contract. `thermalControlProfile` is legacy-record compatibility only and cannot arm production heating. Current remains read-only contract metadata. `manualPpsMa` does not operate a direct VBUS-current register.
 
 `POST /api/v1/devices/:id/buzzer-test` body:
 
@@ -579,6 +585,7 @@ Core commands:
 - `flux-purr identity --device <id>` or `--hardware <saved-id>`
 - `flux-purr status --device <id>` or `--hardware <saved-id>`
 - `flux-purr runtime get|set --device <id> ...`
+- `runtime set` accepts `--post-heat-cooling off|normal|fast` and `--heating-fan-guard off|low|medium|high`; legacy `--active-cooling` is used only when the POST option is omitted.
 - `flux-purr buzzer test --device <id> --cue ui-input|heater-on|heater-off|active-cooling-on|active-cooling-off|heater-reject|active-cooling-reject|protection-alarm|attention-reminder [--repeat|--loop]`
 - `flux-purr buzzer test --device <id> --scenario feedback-coalesce|feedback-replace|active-cooling-retrigger`
 - `flux-purr buzzer test --device <id> --stop`

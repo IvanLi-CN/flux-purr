@@ -22,7 +22,7 @@ const meta = {
     docs: {
       description: {
         component:
-          '160×50 front-panel interaction contract for the Flux Purr hotplate. Storybook is the stable visual source for dashboard tri-state fan states, overtemp warning keyframes, and readonly policy pages.',
+          '160×50 front-panel interaction contract for the Flux Purr hotplate. Storybook is the stable visual source for multi-level fan settings, overtemp warning keyframes, and editable policy pages.',
       },
     },
   },
@@ -48,6 +48,7 @@ const coolingDisabledManualOverrideSeed = {
   currentTempC: 351,
   currentTempDeciC: 3512,
   activeCoolingEnabled: false,
+  postHeatCoolingMode: 'off' as const,
   fanRuntimeEnabled: true,
   fanDisplayState: 'off' as const,
   coolingDisabledLockLatched: true,
@@ -153,9 +154,8 @@ export const DocsGallery: Story = {
                 }}
               >
                 Stage one verifies the five-way key mapping with short, double, and long gestures.
-                Stage two locks the dashboard fan policy contract: center double toggles cooling
-                policy, FAN shows OFF/AUTO/RUN, and overtemp warnings flash on the SET row without
-                occupying the fan state slot.
+                Stage two covers FAN CTRL POST/HEAT editing, abstract runtime source/output state,
+                and overtemp warnings without exposing PD or hardcoded thermal rules.
               </p>
             </div>
 
@@ -320,6 +320,29 @@ export const ActiveCooling: Story = {
   },
 }
 
+export const ActiveCoolingEvidence: Story = {
+  name: 'Evidence / FAN CTRL',
+  render: () => (
+    <div
+      data-visual-evidence-surface
+      style={{
+        display: 'inline-flex',
+        background: '#08111f',
+        padding: '48px',
+      }}
+    >
+      <div data-visual-evidence-target>
+        <FrontPanelDisplay
+          screen={frontPanelStoryStates.activeCooling}
+          scale={6}
+          showFrame={false}
+          showMeta={false}
+        />
+      </div>
+    </div>
+  ),
+}
+
 export const WifiInfo: Story = {
   args: {
     screen: frontPanelStoryStates.wifiInfo,
@@ -431,22 +454,21 @@ export const AppInteractionFlow: Story = {
       await pressShort('center')
       await expect(debug).toHaveTextContent('heaterEnabled: true')
       await pressDouble('center')
-      await expect(debug).toHaveTextContent('activeCoolingEnabled: false')
-      await expect(debug).toHaveTextContent('fanDisplayState: off')
-      await expect(debug).toHaveTextContent('fanRuntimeEnabled: false')
+      await expect(debug).toHaveTextContent('postHeatCoolingMode: normal')
+      await expect(debug).toHaveTextContent('fanDisplayState: auto')
     })
 
-    await step('center long enters menu and active cooling page stays readonly', async () => {
+    await step('center long enters menu and FAN CTRL stages then discards edits', async () => {
       await pressLong('center')
       await expect(debug).toHaveTextContent('route: menu')
       await expect(debug).toHaveTextContent('selectedMenuItem: active-cooling')
       await pressShort('center')
       await expect(debug).toHaveTextContent('route: active-cooling')
       await pressShort('right')
-      await expect(debug).toHaveTextContent('activeCoolingEnabled: false')
+      await expect(debug).toHaveTextContent('postHeatCoolingMode: normal')
       await expect(debug).toHaveTextContent('route: active-cooling')
       await pressShort('up')
-      await expect(debug).toHaveTextContent('activeCoolingEnabled: false')
+      await expect(debug).toHaveTextContent('heatingFanGuardMode: medium')
       await expect(debug).toHaveTextContent('route: active-cooling')
       await pressLong('center')
       await expect(debug).toHaveTextContent('route: menu')
@@ -478,7 +500,7 @@ export const CoolingDisabledManualRearm: Story = {
 
     await step('locked cooling-disabled state starts with heater off', async () => {
       await expect(debug).toHaveTextContent('route: dashboard')
-      await expect(debug).toHaveTextContent('activeCoolingEnabled: false')
+      await expect(debug).toHaveTextContent('postHeatCoolingMode: off')
       await expect(debug).toHaveTextContent('heaterEnabled: false')
       await expect(debug).toHaveTextContent('heaterLockReason: cooling-disabled-overtemp')
     })

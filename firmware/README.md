@@ -49,7 +49,7 @@
   - key-test idle / short / double / long
   - dashboard / dashboard manual / dashboard-fan-off / dashboard-fan-auto / dashboard-fan-run
   - dashboard-overtemp-a / dashboard-overtemp-b
-  - menu / preset temp / active cooling / WiFi info / device info
+  - menu / preset temp / FAN CTRL / WiFi info / device info
 
 ## Fan / heater / buzzer output contract
 
@@ -69,13 +69,13 @@
   - Dashboard and `Preset Temp` up/down short-presses adjust by `1°C`; holding up/down repeats after the `500ms` long-press threshold, first about every `120ms` and then about every `60ms`
   - `Preset Temp` defaults are `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250 / 300°C`
   - `heater_enabled` is the user arm state toggled by center short-press
-  - `active_cooling_enabled` is the user-facing “主动降温” policy bit toggled by center double-press
+  - `post_heat_cooling_mode` (`off|normal|fast`) and `heating_fan_guard_mode` (`off|low|medium|high`) are the user-facing persisted fan policies; the legacy `active_cooling_enabled` bit is a compatibility projection and Dashboard double-press is inert
   - `heater_output_percent` is the live PID duty rendered in the Dashboard bottom bar
   - `fan_enabled` is the actual fan runtime state, not a mock toggle
 - EEPROM memory:
   - `M24C64` on shared `GPIO8/9` I2C stores FPR2 record classes: safety calibration A/B (`0x0000/0x0200`, 512 B), thermal policy A/B (`0x0400/0x0700`, 768 B), single-slot preferences/network records, and A/B layout markers. Legacy v1-v5 EEPROM records are stream-migrated once; historical internal-Flash records are ignored and never migrated.
   - EEPROM is the only persistence backend. EEPROM absence or safety-domain read/write/verification failure enters `EEPROM_REQUIRED`; preference and network failures remain scoped to their domain. MCU Flash, NVS, and raw sectors are never configuration fallbacks.
-  - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, `active_cooling_enabled`, and Wi-Fi config fields
+  - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, the two fan policy modes, the legacy `active_cooling_enabled` projection, and Wi-Fi config fields
   - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended, and newly persisted thermal-profile TLVs use an explicit `TCP2` layout marker while unmarked historical layouts remain readable
   - accepted front-panel edits debounce for about `2s` before writing the next slot
   - on FUSB302B boards, each bounded EEPROM page write releases the shared I2C bus and services PD before the next page; a successful EEPROM save does not synchronously mirror to flash
@@ -93,13 +93,12 @@
   - `temp >= 420°C` enters thermal runaway, forces duty `0%`, and rejects heater arm while the runaway alert remains unacknowledged; acknowledgement never bypasses the active absolute overtemperature cutoff
   - measurement fault-latch requires the fault condition to clear before a later explicit re-arm; clearing a fault never restores heater output automatically
 - Fan control:
-  - heater disabled + active cooling enabled: temporary cooling policy runs full speed at `>=35°C` (`GPIO36 duty=0%`, `0‰`)
-  - once active cooling has the fan running and temperature drops below `35°C`, the firmware drives `GPIO36 duty=100%` (`1000‰`) for `30s`, then stops the fan
-  - heater enabled: `<=100°C` keeps the fan off; `>100°C` uses minimum-voltage enable pulses only while the live heater output is non-zero; the pulse on-window is twice the cooling-disabled pulse and capped at `50%`
-  - active cooling disabled: `>100°C` minimum-voltage `0.2Hz` enable pulse capped at `25%`, `>350°C` heater lock + `50%` fan, `>360°C` full speed
+  - heater falling edge starts POST cooling: `Normal` uses medium output above `40°C`, then low output for `30s`; `Fast` uses high output above `60°C`, medium output through `40°C`, then medium output for `30s`
+  - while `heater_enabled`, HEAT guard supports `Off/Low/Medium/High`; Low/Medium use ten-second minimum-output pulses with temperature interpolation, and High uses continuous low output above `80°C`
+  - `>350°C` heater lock with at least medium output, `>360°C` high output, sensor faults, and `>=420°C` hard cutoff override both user policies
   - unacknowledged thermal runaway forces the existing active-cooling envelope regardless of the owner policy: `>60°C` full speed and `40~60°C` at `50%`; the forced state ends at `<40°C` or on acknowledgement, whichever comes first
-  - Dashboard `fan_display_state` is `OFF / AUTO / RUN`; `fan_enabled` remains the actual runtime output
-  - the `Active Cooling` page is informational in the formal runtime; owner-facing wording should call this setting “开启主动降温”, not “风扇开机”
+  - Dashboard `fan_display_state` is `OFF / AUTO / RUN / SAFE`; status also reports `fan_policy_source` and abstract `fan_output_level`
+  - the `FAN CTRL` page edits only POST/HEAT modes and never displays PD, voltage, PWM, tach, or hardcoded thermal rules
   - on the current board, full-speed fan output is `GPIO35=high` plus `GPIO36 duty=0%`
   - on the current board, the minimum-output-voltage fan profile is `GPIO35=high` plus `GPIO36 duty=100%` (`1000‰`); the fan rail control law is inverted
 - Buzzer control:
