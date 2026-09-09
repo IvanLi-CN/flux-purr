@@ -173,7 +173,7 @@ None
 - 前面板硬件基线已明确为 `160×50` / RGB565 级别小彩屏。
 - 本轮只冻结视觉契约，不做真实固件画屏。
 - on-device 文案默认使用英文短词和缩写。
-- EEPROM 含有不可解析、CRC/结构无效或高于当前固件格式版本的数据时，前面板不进入 Dashboard 或菜单，而是使用固件同一 renderer 固定显示三行 `EEPROM DATA`、`INCOMPATIBLE`、`HEATER LOCKED`。该场景不提供恢复菜单；heater、PPS 与 calibration 保持锁定，详细错误仅由 USB/devd 提供。全 `0xFF` EEPROM 不显示该场景。
+- 持久化故障使用同一错误页 renderer：安全域或迁移故障显示 `EEPROM DATA`、`REQUIRED`/`INCOMPATIBLE`、`HEATER LOCKED`；普通偏好/网络失败显示 `EEPROM DATA`、`SAVE FAILED`、`HEATER AVAILABLE`。错误页底部显示 `HOLD CENTER RETRY`，中键长按触发一次持久化 retry，其他按键确认提示后仍可进入菜单、风扇和诊断页；heater、PPS 与 calibration 继续保持独立锁定，详细错误仅由 USB/devd 提供。全 `0xFF` EEPROM 不显示该场景。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -208,8 +208,8 @@ None
 
 ## Visual Evidence
 
-- 证据来源：Storybook `canvas` + docs gallery（`160×50` 逻辑像素，nearest-neighbor 放大展示）
-- 绑定说明：以下图片来自 `web/src/stories/FrontPanelDisplay.stories.tsx`；真机校准与最新 runtime 联动验证由 `frontpanel-input-interaction` 持续承接。
+- 证据来源：固件 `frontpanel_preview` 的 `firmware_preview` renderer（`160×50` 逻辑像素，nearest-neighbor 放大展示）。
+- 绑定说明：以下图片由 host-side preview 直接复用固件字体、布局和状态 renderer；真机校准与最新 runtime 联动验证由 `frontpanel-input-interaction` 持续承接。
 
 ### Screen renders
 
@@ -225,7 +225,6 @@ None
 
 #### Dashboard Manual PPS
 
-PR: include
 ![Front panel dashboard manual PPS](./assets/frontpanel-dashboard-manual-pps.png)
 
 #### Menu Level 1

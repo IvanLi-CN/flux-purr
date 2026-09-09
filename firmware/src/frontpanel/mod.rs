@@ -630,6 +630,9 @@ pub struct FrontPanelUiState {
     pub eeprom_required: bool,
     pub persistence_fault: Option<PersistenceFault>,
     pub persistence_fault_attention_pending: bool,
+    /// Set by the EEPROM error-page long-press action. The runtime consumes
+    /// this edge and performs a bounded persistence retry outside UI state.
+    pub persistence_retry_requested: bool,
     pub manual_pps_enabled: bool,
     pub selected_menu_item: FrontPanelMenuItem,
     pub selected_preset_slot: usize,
@@ -667,6 +670,7 @@ impl FrontPanelUiState {
             eeprom_required: false,
             persistence_fault: None,
             persistence_fault_attention_pending: false,
+            persistence_retry_requested: false,
             manual_pps_enabled: false,
             selected_menu_item: FrontPanelMenuItem::ActiveCooling,
             selected_preset_slot: 1,
@@ -729,16 +733,30 @@ impl FrontPanelUiState {
         if !self.dashboard_is_ready() {
             return false;
         }
-        if self.persistence_locked() {
-            if self.persistence_fault_attention_pending {
-                self.persistence_fault_attention_pending = false;
-                return true;
-            }
-            return false;
-        }
         self.key_test.last_raw_key = Some(event.raw_key);
         self.key_test.last_key = Some(event.key);
         self.key_test.last_gesture = Some(event.gesture);
+
+        let error_page_visible = self.persistence_fault_attention_pending
+            && !matches!(
+                self.dashboard_presentation,
+                DashboardPresentationState::EepromRestore
+                    | DashboardPresentationState::InitialRtdFault
+            );
+        if error_page_visible
+            && matches!(
+                (event.key, event.gesture),
+                (FrontPanelKey::Center, KeyGesture::LongPress)
+            )
+        {
+            self.persistence_fault_attention_pending = false;
+            self.persistence_retry_requested = true;
+            return true;
+        }
+
+        // A persistence fault is an attention state, not a global input lock.
+        // Heater/PPS/calibration gates remain enforced by their own callers.
+        self.persistence_fault_attention_pending = false;
 
         match self.runtime_mode {
             FrontPanelRuntimeMode::KeyTest => true,
@@ -776,9 +794,16 @@ impl FrontPanelUiState {
                     KeyGestureSet::SHORT,
                     KeyGestureSet::SHORT_LONG,
                 ]),
-                FrontPanelRoute::ActiveCooling
-                | FrontPanelRoute::WifiInfo
-                | FrontPanelRoute::DeviceInfo => FrontPanelGestureCapabilities::new([
+                FrontPanelRoute::ActiveCooling | FrontPanelRoute::WifiInfo => {
+                    FrontPanelGestureCapabilities::new([
+                        KeyGestureSet::SHORT_LONG,
+                        KeyGestureSet::NONE,
+                        KeyGestureSet::NONE,
+                        KeyGestureSet::SHORT,
+                        KeyGestureSet::NONE,
+                    ])
+                }
+                FrontPanelRoute::DeviceInfo => FrontPanelGestureCapabilities::new([
                     KeyGestureSet::SHORT_LONG,
                     KeyGestureSet::NONE,
                     KeyGestureSet::NONE,
@@ -836,9 +861,8 @@ impl FrontPanelUiState {
             FrontPanelRoute::Menu => self.apply_menu_event(event),
             FrontPanelRoute::PresetTemp => self.apply_preset_temp_event(event),
             FrontPanelRoute::ActiveCooling => self.apply_active_cooling_event(event),
-            FrontPanelRoute::WifiInfo | FrontPanelRoute::DeviceInfo => {
-                self.apply_readonly_page_event(event)
-            }
+            FrontPanelRoute::WifiInfo => self.apply_readonly_page_event(event),
+            FrontPanelRoute::DeviceInfo => self.apply_readonly_page_event(event),
         }
     }
 
@@ -995,6 +1019,12 @@ impl FrontPanelUiState {
         }
     }
 
+    pub const fn take_persistence_retry_request(&mut self) -> bool {
+        let requested = self.persistence_retry_requested;
+        self.persistence_retry_requested = false;
+        requested
+    }
+
     fn sorted_active_presets(&self) -> Vec<(usize, i16), FRONTPANEL_PRESET_COUNT> {
         let mut sorted: Vec<(usize, i16), FRONTPANEL_PRESET_COUNT> = Vec::new();
         for (slot, preset) in self.presets_c.iter().enumerate() {
@@ -1106,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn first_key_acknowledges_persistence_fault_without_running_original_action() {
+    fn persistence_fault_acknowledgement_does_not_swallow_navigation() {
         let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
         state.eeprom_required = true;
         state.persistence_fault_attention_pending = true;
@@ -1122,16 +1152,33 @@ mod tests {
         assert!(!state.persistence_fault_attention_pending);
         assert!(state.persistence_locked());
         assert!(state.heater_enabled);
-        assert_eq!(state.target_temp_c, 235);
-        assert_eq!(state.key_test.last_key, None);
+        assert_eq!(state.target_temp_c, 236);
+        assert_eq!(state.key_test.last_key, Some(FrontPanelKey::Up));
 
-        assert!(!state.handle_event(KeyEvent {
+        assert!(state.handle_event(KeyEvent {
             raw_key: RawFrontPanelKey::CenterBoot,
             key: FrontPanelKey::Center,
-            gesture: KeyGesture::ShortPress,
+            gesture: KeyGesture::LongPress,
             at_ms: 2,
         }));
         assert!(state.persistence_locked());
+        assert_eq!(state.route, FrontPanelRoute::Menu);
+    }
+
+    #[test]
+    fn persistence_error_page_long_press_requests_explicit_retry() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.persistence_fault_attention_pending = true;
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Center,
+            gesture: KeyGesture::LongPress,
+            at_ms: 500,
+        }));
+        assert!(!state.persistence_fault_attention_pending);
+        assert_eq!(state.route, FrontPanelRoute::Dashboard);
+        assert!(state.take_persistence_retry_request());
+        assert!(!state.take_persistence_retry_request());
     }
 
     fn raw_state(keys: &[RawFrontPanelKey]) -> FrontPanelRawState {

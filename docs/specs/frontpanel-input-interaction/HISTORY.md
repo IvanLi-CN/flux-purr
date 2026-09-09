@@ -8,7 +8,7 @@
 
 - `active`: input and navigation behavior remains the canonical frontpanel interaction contract.
 
-- A pending EEPROM fault prompt consumes the first physical key as acknowledgement only; the read-only Dashboard remains visible while `PersistenceRequired` keeps heater and persistence-dependent actions locked.
+- A pending EEPROM fault prompt clears its attention overlay without swallowing menu navigation. `PersistenceRequired` remains an independent heater/PPS/calibration gate, and the EEPROM error page owns the explicit long-press retry action.
 
 ## Partial replacement
 

@@ -192,7 +192,7 @@ Calibration live control requires an active adjustable PPS contract. FUSB302BMPX
 }
 ```
 
-Heater curve points store temperature in centi-Celsius and effective resistance in milliohms. `preview` is runtime-only and can be used immediately by heater power limiting logic. `save` copies the preview curve to `active`; only `active` is persisted in device memory and restored after reboot. Firmware uses external EEPROM as the only memory backend; EEPROM failure enters `EEPROM_REQUIRED` and never selects an ESP flash or NVS fallback.
+Heater curve points store temperature in centi-Celsius and effective resistance in milliohms. `preview` is runtime-only and can be used immediately by heater power limiting logic. `save` copies the preview curve to `active`; only `active` is persisted in the safety-calibration EEPROM domain and restored after reboot. Firmware uses external EEPROM as the only memory backend; safety-domain failure enters `EEPROM_REQUIRED`, while ordinary preference/network failures remain scoped to their domain. No ESP flash or NVS fallback is selected.
 
 ### `ThermalPlantModel`
 

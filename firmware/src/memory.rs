@@ -22,6 +22,25 @@ pub const MEMORY_RECORD_PAYLOAD_MAX: usize = MEMORY_SLOT_SIZE - MEMORY_RECORD_HE
 pub const MEMORY_WIFI_SSID_MAX_LEN: usize = 32;
 pub const MEMORY_WIFI_PASSWORD_MAX_LEN: usize = 64;
 pub const MEMORY_WRITE_DEBOUNCE_MS: u64 = 2_000;
+pub const FPR2_FORMAT_VERSION: u8 = 2;
+pub const FPR2_HEADER_LEN: usize = 20;
+pub const FPR2_SAFETY_SLOT_SIZE: usize = 512;
+pub const FPR2_THERMAL_SLOT_SIZE: usize = 768;
+pub const FPR2_PREFERENCES_SLOT_SIZE: usize = 128;
+pub const FPR2_NETWORK_SLOT_SIZE: usize = 256;
+pub const FPR2_LAYOUT_SLOT_SIZE: usize = 128;
+pub const FPR2_MAX_PAYLOAD: usize = FPR2_THERMAL_SLOT_SIZE - FPR2_HEADER_LEN;
+pub const FPR2_MAX_RECORD_SIZE: usize = FPR2_THERMAL_SLOT_SIZE;
+pub const FPR2_SAFETY_A_OFFSET: u16 = 0x0000;
+pub const FPR2_SAFETY_B_OFFSET: u16 = 0x0200;
+pub const FPR2_THERMAL_A_OFFSET: u16 = 0x0400;
+pub const FPR2_THERMAL_B_OFFSET: u16 = 0x0700;
+pub const FPR2_PREFERENCES_OFFSET: u16 = 0x0a00;
+pub const FPR2_NETWORK_OFFSET: u16 = 0x0a80;
+pub const FPR2_LAYOUT_A_OFFSET: u16 = 0x0c00;
+pub const FPR2_LAYOUT_B_OFFSET: u16 = 0x0c80;
+pub const FPR2_RESERVED_OFFSET: u16 = 0x0d00;
+pub const FPR2_LEGACY_OFFSET: u16 = 0x1000;
 pub const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 pub const HEATER_CURVE_MAX_POINTS: usize = 8;
 pub const THERMAL_PLANT_ANCHOR_COUNT: usize = 2;
@@ -113,6 +132,7 @@ const THERMAL_PLANT_TRANSIENT_HEADER_LEN: usize = 24;
 const THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN: usize = 6;
 
 const MEMORY_RECORD_MAGIC: [u8; 4] = *b"FPM1";
+const FPR2_MAGIC: [u8; 4] = *b"FPR2";
 const PRESET_NONE_WIRE_VALUE: i16 = i16::MIN;
 const CALIBRATION_NONE_WIRE_VALUE: u16 = u16::MAX;
 const VIN_DEFAULT_ADC_HIGH_MV: u16 = 2_337;
@@ -1293,6 +1313,765 @@ pub struct MemoryRecord {
     pub config: MemoryConfig,
 }
 
+/// The independently persisted configuration domains. Only domains whose
+/// activation can change heater safety use two slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PersistDomain {
+    SafetyCalibration = 1,
+    ThermalPolicy = 2,
+    UserPreferences = 3,
+    NetworkAndPairing = 4,
+    LayoutMarker = 5,
+}
+
+impl PersistDomain {
+    pub const fn slot_count(self) -> u8 {
+        match self {
+            Self::SafetyCalibration | Self::ThermalPolicy | Self::LayoutMarker => 2,
+            Self::UserPreferences | Self::NetworkAndPairing => 1,
+        }
+    }
+
+    pub const fn slot_size(self) -> usize {
+        match self {
+            Self::SafetyCalibration => FPR2_SAFETY_SLOT_SIZE,
+            Self::ThermalPolicy => FPR2_THERMAL_SLOT_SIZE,
+            Self::UserPreferences => FPR2_PREFERENCES_SLOT_SIZE,
+            Self::NetworkAndPairing => FPR2_NETWORK_SLOT_SIZE,
+            Self::LayoutMarker => FPR2_LAYOUT_SLOT_SIZE,
+        }
+    }
+
+    pub const fn offset(self, slot: PersistSlot) -> u16 {
+        match (self, slot) {
+            (Self::SafetyCalibration, PersistSlot::A) => FPR2_SAFETY_A_OFFSET,
+            (Self::SafetyCalibration, PersistSlot::B) => FPR2_SAFETY_B_OFFSET,
+            (Self::ThermalPolicy, PersistSlot::A) => FPR2_THERMAL_A_OFFSET,
+            (Self::ThermalPolicy, PersistSlot::B) => FPR2_THERMAL_B_OFFSET,
+            (Self::UserPreferences, PersistSlot::Single)
+            | (Self::UserPreferences, PersistSlot::A) => FPR2_PREFERENCES_OFFSET,
+            (Self::NetworkAndPairing, PersistSlot::Single)
+            | (Self::NetworkAndPairing, PersistSlot::A) => FPR2_NETWORK_OFFSET,
+            (Self::LayoutMarker, PersistSlot::A) => FPR2_LAYOUT_A_OFFSET,
+            (Self::LayoutMarker, PersistSlot::B) => FPR2_LAYOUT_B_OFFSET,
+            (_, _) => 0,
+        }
+    }
+
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::SafetyCalibration),
+            2 => Some(Self::ThermalPolicy),
+            3 => Some(Self::UserPreferences),
+            4 => Some(Self::NetworkAndPairing),
+            5 => Some(Self::LayoutMarker),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistSlot {
+    A,
+    B,
+    Single,
+}
+
+impl PersistSlot {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::Single => "single",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SafetyCalibration {
+    pub commissioning_required: bool,
+    pub adc_calibration: AdcCalibrationConfig,
+    pub active_heater_curve: HeaterCurveConfig,
+    pub heater_curve_raw_observations: HeaterCurveRawObservations,
+    pub heater_curve_transaction_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalPolicy {
+    pub pps3a_profile: ThermalControlProfileConfig,
+    pub pps5a_profile: ThermalControlProfileConfig,
+    pub mode: ThermalProfileMode,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserPreferences {
+    pub target_temp_c: i16,
+    pub selected_preset_slot: usize,
+    pub presets_c: [Option<i16>; FRONTPANEL_PRESET_COUNT],
+    pub active_cooling_enabled: bool,
+    pub telemetry_interval_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NetworkAndPairing {
+    pub wifi_ssid: String<MEMORY_WIFI_SSID_MAX_LEN>,
+    pub wifi_password: String<MEMORY_WIFI_PASSWORD_MAX_LEN>,
+    pub wifi_auto_reconnect: bool,
+    pub wifi_static_ipv4: Option<WifiStaticIpv4Config>,
+    pub lan_pairing_token: Option<[u8; crate::lan::LAN_TOKEN_BYTES]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutMarkerStatus {
+    Prepared,
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutMarker {
+    pub generation: u32,
+    pub status: LayoutMarkerStatus,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+// This enum is intentionally value-owned: persistence codecs run without heap
+// allocation, so boxing the thermal policy would violate the fixed-workspace
+// contract.
+#[allow(clippy::large_enum_variant)]
+pub enum PersistDomainData {
+    SafetyCalibration(SafetyCalibration),
+    ThermalPolicy(ThermalPolicy),
+    UserPreferences(UserPreferences),
+    NetworkAndPairing(NetworkAndPairing),
+    LayoutMarker(LayoutMarker),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PersistRecord {
+    pub sequence: u32,
+    pub data: PersistDomainData,
+}
+
+pub fn select_latest_persist_record(
+    left: Result<PersistRecord, Fpr2DecodeError>,
+    right: Result<PersistRecord, Fpr2DecodeError>,
+) -> Option<PersistRecord> {
+    match (left, right) {
+        (Ok(left), Ok(right)) if right.sequence > left.sequence => Some(right),
+        (Ok(left), Ok(_)) => Some(left),
+        (Ok(left), Err(_)) => Some(left),
+        (Err(_), Ok(right)) => Some(right),
+        (Err(_), Err(_)) => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutRecoveryState {
+    Legacy,
+    Prepared,
+    Active,
+    Invalid,
+}
+
+pub const fn layout_recovery_state(
+    marker: Option<LayoutMarker>,
+    legacy_valid: bool,
+) -> LayoutRecoveryState {
+    match marker {
+        Some(LayoutMarker {
+            status: LayoutMarkerStatus::Active,
+            ..
+        }) => LayoutRecoveryState::Active,
+        Some(LayoutMarker {
+            status: LayoutMarkerStatus::Prepared,
+            ..
+        }) => LayoutRecoveryState::Prepared,
+        None if legacy_valid => LayoutRecoveryState::Legacy,
+        None => LayoutRecoveryState::Invalid,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fpr2DecodeError {
+    TooShort,
+    BadMagic,
+    UnsupportedVersion(u8),
+    UnknownDomain(u8),
+    BadHeaderLength(u8),
+    PayloadOutOfBounds,
+    CrcMismatch,
+    MalformedTlv,
+    InvalidDomainPayload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fpr2EncodeError {
+    BufferTooSmall,
+    PayloadTooLarge,
+}
+
+impl SafetyCalibration {
+    pub fn from_config(config: &MemoryConfig) -> Self {
+        Self {
+            commissioning_required: config.commissioning_required,
+            adc_calibration: config.adc_calibration,
+            active_heater_curve: config.active_heater_curve,
+            heater_curve_raw_observations: config.heater_curve_raw_observations,
+            heater_curve_transaction_id: config.heater_curve_transaction_id,
+        }
+    }
+
+    pub fn apply_to_config(&self, config: &mut MemoryConfig) {
+        config.commissioning_required = self.commissioning_required;
+        config.adc_calibration = self.adc_calibration;
+        config.active_heater_curve = self.active_heater_curve;
+        config.heater_curve_raw_observations = self.heater_curve_raw_observations;
+        config.heater_curve_transaction_id = self.heater_curve_transaction_id;
+    }
+}
+
+impl ThermalPolicy {
+    pub fn from_config(config: &MemoryConfig) -> Self {
+        Self {
+            pps3a_profile: config.active_thermal_control_profile,
+            pps5a_profile: config.thermal_control_profile_pps5a,
+            mode: config.thermal_profile_mode,
+        }
+    }
+
+    pub fn apply_to_config(&self, config: &mut MemoryConfig) {
+        config.active_thermal_control_profile = self.pps3a_profile;
+        config.thermal_control_profile_pps5a = self.pps5a_profile;
+        config.thermal_profile_mode = self.mode;
+    }
+}
+
+impl UserPreferences {
+    pub fn from_config(config: &MemoryConfig) -> Self {
+        Self {
+            target_temp_c: config.target_temp_c,
+            selected_preset_slot: config.selected_preset_slot,
+            presets_c: config.presets_c,
+            active_cooling_enabled: config.active_cooling_enabled,
+            telemetry_interval_ms: config.telemetry_interval_ms,
+        }
+    }
+
+    pub fn apply_to_config(&self, config: &mut MemoryConfig) {
+        config.target_temp_c = self.target_temp_c;
+        config.selected_preset_slot = self.selected_preset_slot;
+        config.presets_c = self.presets_c;
+        config.active_cooling_enabled = self.active_cooling_enabled;
+        config.telemetry_interval_ms = self.telemetry_interval_ms;
+    }
+}
+
+impl NetworkAndPairing {
+    pub fn from_config(config: &MemoryConfig) -> Self {
+        Self {
+            wifi_ssid: config.wifi_ssid.clone(),
+            wifi_password: config.wifi_password.clone(),
+            wifi_auto_reconnect: config.wifi_auto_reconnect,
+            wifi_static_ipv4: config.wifi_static_ipv4,
+            lan_pairing_token: config.lan_pairing_token,
+        }
+    }
+
+    pub fn apply_to_config(&self, config: &mut MemoryConfig) {
+        config.wifi_ssid = self.wifi_ssid.clone();
+        config.wifi_password = self.wifi_password.clone();
+        config.wifi_auto_reconnect = self.wifi_auto_reconnect;
+        config.wifi_static_ipv4 = self.wifi_static_ipv4;
+        config.lan_pairing_token = self.lan_pairing_token;
+    }
+}
+
+impl PersistDomainData {
+    pub const fn domain(&self) -> PersistDomain {
+        match self {
+            Self::SafetyCalibration(_) => PersistDomain::SafetyCalibration,
+            Self::ThermalPolicy(_) => PersistDomain::ThermalPolicy,
+            Self::UserPreferences(_) => PersistDomain::UserPreferences,
+            Self::NetworkAndPairing(_) => PersistDomain::NetworkAndPairing,
+            Self::LayoutMarker(_) => PersistDomain::LayoutMarker,
+        }
+    }
+}
+
+const FPR2_TLV_STATUS: u8 = 0x01;
+const FPR2_TLV_GENERATION: u8 = 0x02;
+
+pub fn encode_persist_record(
+    sequence: u32,
+    data: &PersistDomainData,
+    out: &mut [u8],
+) -> Result<usize, Fpr2EncodeError> {
+    let domain = data.domain();
+    if out.len() < FPR2_HEADER_LEN {
+        return Err(Fpr2EncodeError::BufferTooSmall);
+    }
+    let payload_len = encode_persist_payload(data, &mut out[FPR2_HEADER_LEN..])?;
+    let record_len = FPR2_HEADER_LEN
+        .checked_add(payload_len)
+        .ok_or(Fpr2EncodeError::PayloadTooLarge)?;
+    if record_len > domain.slot_size() {
+        return Err(Fpr2EncodeError::PayloadTooLarge);
+    }
+    out[..4].copy_from_slice(&FPR2_MAGIC);
+    out[4] = FPR2_FORMAT_VERSION;
+    out[5] = domain as u8;
+    out[6] = 0;
+    out[7] = FPR2_HEADER_LEN as u8;
+    out[8..12].copy_from_slice(&sequence.to_le_bytes());
+    out[12..14].copy_from_slice(&(payload_len as u16).to_le_bytes());
+    out[14..16].fill(0);
+    let crc = crc32_update(crc32(&out[..16]), &out[FPR2_HEADER_LEN..record_len]) ^ 0xffff_ffff;
+    out[16..20].copy_from_slice(&crc.to_le_bytes());
+    Ok(record_len)
+}
+
+pub fn decode_persist_record(bytes: &[u8]) -> Result<PersistRecord, Fpr2DecodeError> {
+    if bytes.len() < FPR2_HEADER_LEN {
+        return Err(Fpr2DecodeError::TooShort);
+    }
+    if bytes[..4] != FPR2_MAGIC {
+        return Err(Fpr2DecodeError::BadMagic);
+    }
+    if bytes[4] != FPR2_FORMAT_VERSION {
+        return Err(Fpr2DecodeError::UnsupportedVersion(bytes[4]));
+    }
+    let domain =
+        PersistDomain::from_wire(bytes[5]).ok_or(Fpr2DecodeError::UnknownDomain(bytes[5]))?;
+    if usize::from(bytes[7]) != FPR2_HEADER_LEN {
+        return Err(Fpr2DecodeError::BadHeaderLength(bytes[7]));
+    }
+    let payload_len = usize::from(u16::from_le_bytes([bytes[12], bytes[13]]));
+    let record_len = FPR2_HEADER_LEN
+        .checked_add(payload_len)
+        .ok_or(Fpr2DecodeError::PayloadOutOfBounds)?;
+    if payload_len > domain.slot_size().saturating_sub(FPR2_HEADER_LEN) || record_len > bytes.len()
+    {
+        return Err(Fpr2DecodeError::PayloadOutOfBounds);
+    }
+    let expected_crc = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+    let actual_crc =
+        crc32_update(crc32(&bytes[..16]), &bytes[FPR2_HEADER_LEN..record_len]) ^ 0xffff_ffff;
+    if expected_crc != actual_crc {
+        return Err(Fpr2DecodeError::CrcMismatch);
+    }
+    let sequence = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let data = decode_persist_payload(domain, &bytes[FPR2_HEADER_LEN..record_len])?;
+    Ok(PersistRecord { sequence, data })
+}
+
+fn push_fpr2_tlv(
+    tag: u8,
+    value: &[u8],
+    out: &mut [u8],
+    cursor: &mut usize,
+) -> Result<(), Fpr2EncodeError> {
+    let next = cursor
+        .checked_add(3)
+        .and_then(|position| position.checked_add(value.len()))
+        .ok_or(Fpr2EncodeError::PayloadTooLarge)?;
+    if next > out.len() || value.len() > u16::MAX as usize {
+        return Err(if next > out.len() {
+            Fpr2EncodeError::BufferTooSmall
+        } else {
+            Fpr2EncodeError::PayloadTooLarge
+        });
+    }
+    out[*cursor] = tag;
+    out[*cursor + 1..*cursor + 3].copy_from_slice(&(value.len() as u16).to_le_bytes());
+    out[*cursor + 3..next].copy_from_slice(value);
+    *cursor = next;
+    Ok(())
+}
+
+fn encode_persist_payload(
+    data: &PersistDomainData,
+    out: &mut [u8],
+) -> Result<usize, Fpr2EncodeError> {
+    let mut cursor = 0;
+    match data {
+        PersistDomainData::SafetyCalibration(value) => {
+            push_fpr2_tlv(
+                TLV_COMMISSIONING_REQUIRED,
+                &[u8::from(value.commissioning_required)],
+                out,
+                &mut cursor,
+            )?;
+            let mut bytes = [0u8; ADC_CALIBRATION_SAMPLE_PAYLOAD_LEN];
+            encode_adc_calibration_samples(&value.adc_calibration, &mut bytes);
+            push_fpr2_tlv(TLV_ADC_CALIBRATION_SAMPLES, &bytes, out, &mut cursor)?;
+            let mut bytes = [0u8; ADC_CALIBRATION_REFERENCE_PAYLOAD_LEN];
+            encode_adc_calibration_references(&value.adc_calibration, &mut bytes);
+            push_fpr2_tlv(TLV_ADC_CALIBRATION_REFERENCES, &bytes, out, &mut cursor)?;
+            let mut bytes = [0u8; ADC_CALIBRATION_TARGET_PAYLOAD_LEN];
+            encode_adc_calibration_targets(&value.adc_calibration, &mut bytes);
+            push_fpr2_tlv(TLV_ADC_CALIBRATION_TARGETS, &bytes, out, &mut cursor)?;
+            let mut bytes = [0u8; ADC_CALIBRATION_SLOT_PAYLOAD_LEN];
+            encode_adc_calibration_slots(&value.adc_calibration, &mut bytes);
+            push_fpr2_tlv(TLV_ADC_CALIBRATION_SLOTS, &bytes, out, &mut cursor)?;
+            let mut bytes = [0u8; ADC_CALIBRATION_ACTIVE_SLOT_PAYLOAD_LEN];
+            encode_adc_calibration_active_slots(&value.adc_calibration, &mut bytes);
+            push_fpr2_tlv(TLV_ADC_CALIBRATION_ACTIVE_SLOTS, &bytes, out, &mut cursor)?;
+            let mut bytes = [0u8; HEATER_CURVE_MAX_POINTS * 4];
+            encode_heater_curve(&value.active_heater_curve, &mut bytes);
+            push_fpr2_tlv(TLV_ACTIVE_HEATER_CURVE, &bytes, out, &mut cursor)?;
+            let mut bytes = [0u8; HEATER_CURVE_MAX_POINTS * 8];
+            encode_heater_curve_raw_observations(&value.heater_curve_raw_observations, &mut bytes);
+            push_fpr2_tlv(TLV_HEATER_CURVE_RAW_OBSERVATIONS, &bytes, out, &mut cursor)?;
+            if let Some(transaction_id) = value.heater_curve_transaction_id {
+                push_fpr2_tlv(
+                    TLV_HEATER_CURVE_TRANSACTION_ID,
+                    &transaction_id.to_le_bytes(),
+                    out,
+                    &mut cursor,
+                )?;
+            }
+        }
+        PersistDomainData::ThermalPolicy(value) => {
+            let mut bytes = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
+            let len = encode_thermal_control_profile(&value.pps3a_profile, &mut bytes);
+            push_fpr2_tlv(
+                TLV_THERMAL_CONTROL_PROFILE_PPS3A,
+                &bytes[..len],
+                out,
+                &mut cursor,
+            )?;
+            let len = encode_thermal_control_profile(&value.pps5a_profile, &mut bytes);
+            push_fpr2_tlv(
+                TLV_THERMAL_CONTROL_PROFILE_PPS5A,
+                &bytes[..len],
+                out,
+                &mut cursor,
+            )?;
+            push_fpr2_tlv(
+                TLV_THERMAL_PROFILE_MODE,
+                &[match value.mode {
+                    ThermalProfileMode::Auto => 0,
+                    ThermalProfileMode::W65 => 1,
+                    ThermalProfileMode::W100 => 2,
+                }],
+                out,
+                &mut cursor,
+            )?;
+        }
+        PersistDomainData::UserPreferences(value) => {
+            push_fpr2_tlv(
+                TLV_TARGET_TEMP_C,
+                &value.target_temp_c.to_le_bytes(),
+                out,
+                &mut cursor,
+            )?;
+            push_fpr2_tlv(
+                TLV_SELECTED_PRESET_SLOT,
+                &[value.selected_preset_slot as u8],
+                out,
+                &mut cursor,
+            )?;
+            let mut bytes = [0u8; FRONTPANEL_PRESET_COUNT * 2];
+            for (index, preset) in value.presets_c.iter().enumerate() {
+                let wire = preset.map(clamp_temp_c).unwrap_or(PRESET_NONE_WIRE_VALUE);
+                bytes[index * 2..index * 2 + 2].copy_from_slice(&wire.to_le_bytes());
+            }
+            push_fpr2_tlv(TLV_PRESETS_C, &bytes, out, &mut cursor)?;
+            push_fpr2_tlv(
+                TLV_ACTIVE_COOLING_ENABLED,
+                &[u8::from(value.active_cooling_enabled)],
+                out,
+                &mut cursor,
+            )?;
+            push_fpr2_tlv(
+                TLV_TELEMETRY_INTERVAL_MS,
+                &value.telemetry_interval_ms.to_le_bytes(),
+                out,
+                &mut cursor,
+            )?;
+        }
+        PersistDomainData::NetworkAndPairing(value) => {
+            push_fpr2_tlv(TLV_WIFI_SSID, value.wifi_ssid.as_bytes(), out, &mut cursor)?;
+            push_fpr2_tlv(
+                TLV_WIFI_PASSWORD,
+                value.wifi_password.as_bytes(),
+                out,
+                &mut cursor,
+            )?;
+            push_fpr2_tlv(
+                TLV_WIFI_AUTO_RECONNECT,
+                &[u8::from(value.wifi_auto_reconnect)],
+                out,
+                &mut cursor,
+            )?;
+            if let Some(static_ipv4) = value.wifi_static_ipv4 {
+                let bytes = [
+                    static_ipv4.address[0],
+                    static_ipv4.address[1],
+                    static_ipv4.address[2],
+                    static_ipv4.address[3],
+                    static_ipv4.prefix_len,
+                    static_ipv4.gateway[0],
+                    static_ipv4.gateway[1],
+                    static_ipv4.gateway[2],
+                    static_ipv4.gateway[3],
+                    static_ipv4.dns[0],
+                    static_ipv4.dns[1],
+                    static_ipv4.dns[2],
+                    static_ipv4.dns[3],
+                ];
+                push_fpr2_tlv(TLV_WIFI_STATIC_IPV4, &bytes, out, &mut cursor)?;
+            }
+            if let Some(token) = value.lan_pairing_token {
+                push_fpr2_tlv(TLV_LAN_PAIRING_TOKEN, &token, out, &mut cursor)?;
+            }
+        }
+        PersistDomainData::LayoutMarker(value) => {
+            push_fpr2_tlv(
+                FPR2_TLV_STATUS,
+                &[match value.status {
+                    LayoutMarkerStatus::Prepared => 1,
+                    LayoutMarkerStatus::Active => 2,
+                }],
+                out,
+                &mut cursor,
+            )?;
+            push_fpr2_tlv(
+                FPR2_TLV_GENERATION,
+                &value.generation.to_le_bytes(),
+                out,
+                &mut cursor,
+            )?;
+        }
+    }
+    Ok(cursor)
+}
+
+fn for_each_fpr2_tlv(
+    payload: &[u8],
+    mut visit: impl FnMut(u8, &[u8]),
+) -> Result<(), Fpr2DecodeError> {
+    let mut cursor = 0;
+    while cursor < payload.len() {
+        if payload.len() - cursor < 3 {
+            return Err(Fpr2DecodeError::MalformedTlv);
+        }
+        let tag = payload[cursor];
+        let len = usize::from(u16::from_le_bytes([
+            payload[cursor + 1],
+            payload[cursor + 2],
+        ]));
+        cursor += 3;
+        let end = cursor
+            .checked_add(len)
+            .ok_or(Fpr2DecodeError::MalformedTlv)?;
+        if end > payload.len() {
+            return Err(Fpr2DecodeError::MalformedTlv);
+        }
+        visit(tag, &payload[cursor..end]);
+        cursor = end;
+    }
+    Ok(())
+}
+
+fn decode_persist_payload(
+    domain: PersistDomain,
+    payload: &[u8],
+) -> Result<PersistDomainData, Fpr2DecodeError> {
+    let mut safety = SafetyCalibration {
+        commissioning_required: true,
+        adc_calibration: AdcCalibrationConfig::default(),
+        active_heater_curve: HeaterCurveConfig::default(),
+        heater_curve_raw_observations: HeaterCurveRawObservations::default(),
+        heater_curve_transaction_id: None,
+    };
+    let mut thermal = ThermalPolicy {
+        pps3a_profile: ThermalControlProfileConfig::default(),
+        pps5a_profile: ThermalControlProfileConfig::default(),
+        mode: ThermalProfileMode::Auto,
+    };
+    let mut prefs = UserPreferences {
+        target_temp_c: 100,
+        selected_preset_slot: 1,
+        presets_c: MemoryConfig::default().presets_c,
+        active_cooling_enabled: true,
+        telemetry_interval_ms: 500,
+    };
+    let mut network = NetworkAndPairing {
+        wifi_ssid: String::new(),
+        wifi_password: String::new(),
+        wifi_auto_reconnect: true,
+        wifi_static_ipv4: None,
+        lan_pairing_token: None,
+    };
+    let mut marker = LayoutMarker {
+        generation: 0,
+        status: LayoutMarkerStatus::Prepared,
+    };
+    let mut saw_field = false;
+    for_each_fpr2_tlv(payload, |tag, value| match domain {
+        PersistDomain::SafetyCalibration => match tag {
+            TLV_COMMISSIONING_REQUIRED if value.len() == 1 => {
+                safety.commissioning_required = value[0] != 0;
+                saw_field = true;
+            }
+            TLV_ADC_CALIBRATION_SAMPLES if value.len() == ADC_CALIBRATION_SAMPLE_PAYLOAD_LEN => {
+                safety.adc_calibration = decode_adc_calibration_samples(value);
+                saw_field = true;
+            }
+            TLV_ADC_CALIBRATION_REFERENCES
+                if value.len() == ADC_CALIBRATION_REFERENCE_PAYLOAD_LEN =>
+            {
+                decode_adc_calibration_references(value, &mut safety.adc_calibration);
+                saw_field = true;
+            }
+            TLV_ADC_CALIBRATION_TARGETS if value.len() == ADC_CALIBRATION_TARGET_PAYLOAD_LEN => {
+                decode_adc_calibration_targets(value, &mut safety.adc_calibration);
+                saw_field = true;
+            }
+            TLV_ADC_CALIBRATION_SLOTS if value.len() == ADC_CALIBRATION_SLOT_PAYLOAD_LEN => {
+                decode_adc_calibration_slots(value, &mut safety.adc_calibration);
+                saw_field = true;
+            }
+            TLV_ADC_CALIBRATION_ACTIVE_SLOTS
+                if value.len() == ADC_CALIBRATION_ACTIVE_SLOT_PAYLOAD_LEN =>
+            {
+                decode_adc_calibration_active_slots(value, &mut safety.adc_calibration);
+                saw_field = true;
+            }
+            TLV_ACTIVE_HEATER_CURVE if value.len() == HEATER_CURVE_MAX_POINTS * 4 => {
+                safety.active_heater_curve = decode_heater_curve(value);
+                saw_field = true;
+            }
+            TLV_HEATER_CURVE_RAW_OBSERVATIONS if value.len() == HEATER_CURVE_MAX_POINTS * 8 => {
+                safety.heater_curve_raw_observations = decode_heater_curve_raw_observations(value);
+                saw_field = true;
+            }
+            TLV_HEATER_CURVE_TRANSACTION_ID if value.len() == 4 => {
+                safety.heater_curve_transaction_id =
+                    Some(u32::from_le_bytes(value.try_into().unwrap()));
+                saw_field = true;
+            }
+            _ => {}
+        },
+        PersistDomain::ThermalPolicy => match tag {
+            TLV_THERMAL_CONTROL_PROFILE_PPS3A => {
+                thermal.pps3a_profile = decode_thermal_control_profile(value);
+                saw_field = true;
+            }
+            TLV_THERMAL_CONTROL_PROFILE_PPS5A => {
+                thermal.pps5a_profile = decode_thermal_control_profile(value);
+                saw_field = true;
+            }
+            TLV_THERMAL_PROFILE_MODE if value.len() == 1 => {
+                thermal.mode = match value[0] {
+                    1 => ThermalProfileMode::W65,
+                    2 => ThermalProfileMode::W100,
+                    _ => ThermalProfileMode::Auto,
+                };
+                saw_field = true;
+            }
+            _ => {}
+        },
+        PersistDomain::UserPreferences => match tag {
+            TLV_TARGET_TEMP_C if value.len() == 2 => {
+                prefs.target_temp_c = i16::from_le_bytes(value.try_into().unwrap());
+                saw_field = true;
+            }
+            TLV_SELECTED_PRESET_SLOT if value.len() == 1 => {
+                prefs.selected_preset_slot = usize::from(value[0]);
+                saw_field = true;
+            }
+            TLV_PRESETS_C if value.len() == FRONTPANEL_PRESET_COUNT * 2 => {
+                for index in 0..FRONTPANEL_PRESET_COUNT {
+                    let wire = i16::from_le_bytes([value[index * 2], value[index * 2 + 1]]);
+                    prefs.presets_c[index] = (wire != PRESET_NONE_WIRE_VALUE).then_some(wire);
+                }
+                saw_field = true;
+            }
+            TLV_ACTIVE_COOLING_ENABLED if value.len() == 1 => {
+                prefs.active_cooling_enabled = value[0] != 0;
+                saw_field = true;
+            }
+            TLV_TELEMETRY_INTERVAL_MS if value.len() == 4 => {
+                prefs.telemetry_interval_ms = u32::from_le_bytes(value.try_into().unwrap());
+                saw_field = true;
+            }
+            _ => {}
+        },
+        PersistDomain::NetworkAndPairing => match tag {
+            TLV_WIFI_SSID => {
+                network.wifi_ssid.clear();
+                let copy_len = value.len().min(MEMORY_WIFI_SSID_MAX_LEN);
+                let _ = network
+                    .wifi_ssid
+                    .push_str(core::str::from_utf8(&value[..copy_len]).unwrap_or(""));
+                saw_field = true;
+            }
+            TLV_WIFI_PASSWORD => {
+                network.wifi_password.clear();
+                let copy_len = value.len().min(MEMORY_WIFI_PASSWORD_MAX_LEN);
+                let _ = network
+                    .wifi_password
+                    .push_str(core::str::from_utf8(&value[..copy_len]).unwrap_or(""));
+                saw_field = true;
+            }
+            TLV_WIFI_AUTO_RECONNECT if value.len() == 1 => {
+                network.wifi_auto_reconnect = value[0] != 0;
+                saw_field = true;
+            }
+            TLV_WIFI_STATIC_IPV4 if value.len() == 13 => {
+                let mut address = [0u8; 4];
+                let mut gateway = [0u8; 4];
+                let mut dns = [0u8; 4];
+                address.copy_from_slice(&value[..4]);
+                gateway.copy_from_slice(&value[5..9]);
+                dns.copy_from_slice(&value[9..13]);
+                network.wifi_static_ipv4 = Some(WifiStaticIpv4Config {
+                    address,
+                    prefix_len: value[4],
+                    gateway,
+                    dns,
+                });
+                saw_field = true;
+            }
+            TLV_LAN_PAIRING_TOKEN if value.len() == crate::lan::LAN_TOKEN_BYTES => {
+                let mut token = [0u8; crate::lan::LAN_TOKEN_BYTES];
+                token.copy_from_slice(value);
+                network.lan_pairing_token = Some(token);
+                saw_field = true;
+            }
+            _ => {}
+        },
+        PersistDomain::LayoutMarker => match tag {
+            FPR2_TLV_STATUS if value.len() == 1 => {
+                marker.status = if value[0] == 2 {
+                    LayoutMarkerStatus::Active
+                } else {
+                    LayoutMarkerStatus::Prepared
+                };
+                saw_field = true;
+            }
+            FPR2_TLV_GENERATION if value.len() == 4 => {
+                marker.generation = u32::from_le_bytes(value.try_into().unwrap());
+                saw_field = true;
+            }
+            _ => {}
+        },
+    })?;
+    if !saw_field {
+        return Err(Fpr2DecodeError::InvalidDomainPayload);
+    }
+    Ok(match domain {
+        PersistDomain::SafetyCalibration => PersistDomainData::SafetyCalibration(safety),
+        PersistDomain::ThermalPolicy => PersistDomainData::ThermalPolicy(thermal),
+        PersistDomain::UserPreferences => PersistDomainData::UserPreferences(prefs),
+        PersistDomain::NetworkAndPairing => PersistDomainData::NetworkAndPairing(network),
+        PersistDomain::LayoutMarker => PersistDomainData::LayoutMarker(marker),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryDecodeError {
     TooShort,
@@ -1862,6 +2641,35 @@ fn decode_config_payload(
         backfill_new_adc_calibration_defaults(&mut config.adc_calibration);
     }
     Ok(())
+}
+
+/// Applies one legacy FPM1 TLV to an already allocated runtime config. This is
+/// intentionally bounded so migration can consume old records a TLV at a
+/// time without materializing the complete v5 payload.
+pub fn apply_legacy_config_tlv(
+    config: &mut MemoryConfig,
+    tag: u8,
+    value: &[u8],
+    wide_tlv_lengths: bool,
+) -> Result<(), MemoryDecodeError> {
+    let header_len: usize = if wide_tlv_lengths { 3 } else { 2 };
+    let mut tlv = [0u8; 1_024];
+    let total = header_len
+        .checked_add(1)
+        .and_then(|length| length.checked_add(value.len()))
+        .ok_or(MemoryDecodeError::PayloadOutOfBounds)?;
+    if total > tlv.len() || (!wide_tlv_lengths && value.len() > u8::MAX as usize) {
+        return Err(MemoryDecodeError::PayloadOutOfBounds);
+    }
+    tlv[0] = tag;
+    if wide_tlv_lengths {
+        tlv[1..3].copy_from_slice(&(value.len() as u16).to_le_bytes());
+        tlv[3..total].copy_from_slice(value);
+    } else {
+        tlv[1] = value.len() as u8;
+        tlv[2..total].copy_from_slice(value);
+    }
+    decode_config_payload(&tlv[..total], wide_tlv_lengths, config)
 }
 
 fn encode_heater_curve_raw_observations(config: &HeaterCurveRawObservations, out: &mut [u8]) {
@@ -3335,6 +4143,10 @@ fn crc32_update(mut crc: u32, bytes: &[u8]) -> u32 {
     crc
 }
 
+pub fn persistence_crc32_update(crc: u32, bytes: &[u8]) -> u32 {
+    crc32_update(crc, bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4787,6 +5599,119 @@ mod tests {
         assert_ne!(
             original.thermal_capacity_mj_per_c,
             recalibrated.thermal_capacity_mj_per_c
+        );
+    }
+
+    #[test]
+    fn fpr2_domains_use_only_explicitly_safe_double_slots() {
+        assert_eq!(PersistDomain::SafetyCalibration.slot_count(), 2);
+        assert_eq!(PersistDomain::ThermalPolicy.slot_count(), 2);
+        assert_eq!(PersistDomain::LayoutMarker.slot_count(), 2);
+        assert_eq!(PersistDomain::UserPreferences.slot_count(), 1);
+        assert_eq!(PersistDomain::NetworkAndPairing.slot_count(), 1);
+        assert_eq!(
+            PersistDomain::UserPreferences.offset(PersistSlot::Single),
+            FPR2_PREFERENCES_OFFSET
+        );
+        assert_eq!(
+            PersistDomain::NetworkAndPairing.offset(PersistSlot::Single),
+            FPR2_NETWORK_OFFSET
+        );
+    }
+
+    #[test]
+    fn fpr2_domain_records_roundtrip_and_fit_assigned_slots() {
+        let config = sample_config();
+        let records = [
+            PersistDomainData::SafetyCalibration(SafetyCalibration::from_config(&config)),
+            PersistDomainData::ThermalPolicy(ThermalPolicy::from_config(&config)),
+            PersistDomainData::UserPreferences(UserPreferences::from_config(&config)),
+            PersistDomainData::NetworkAndPairing(NetworkAndPairing::from_config(&config)),
+            PersistDomainData::LayoutMarker(LayoutMarker {
+                generation: 7,
+                status: LayoutMarkerStatus::Active,
+            }),
+        ];
+        for (index, data) in records.iter().enumerate() {
+            let mut bytes = [0xffu8; FPR2_MAX_RECORD_SIZE];
+            let length = encode_persist_record(index as u32 + 1, data, &mut bytes)
+                .expect("domain record fits");
+            assert!(length <= data.domain().slot_size());
+            let decoded = decode_persist_record(&bytes[..length]).expect("domain record decodes");
+            assert_eq!(decoded.sequence, index as u32 + 1);
+            assert_eq!(&decoded.data, data);
+        }
+    }
+
+    #[test]
+    fn fpr2_crc_and_payload_bounds_reject_partial_records() {
+        let data =
+            PersistDomainData::UserPreferences(UserPreferences::from_config(&sample_config()));
+        let mut bytes = [0u8; FPR2_MAX_RECORD_SIZE];
+        let length = encode_persist_record(9, &data, &mut bytes).unwrap();
+        bytes[5] = PersistDomain::NetworkAndPairing as u8;
+        assert!(matches!(
+            decode_persist_record(&bytes[..length]),
+            Err(Fpr2DecodeError::CrcMismatch | Fpr2DecodeError::PayloadOutOfBounds)
+        ));
+        let mut truncated = bytes;
+        truncated[5] = PersistDomain::UserPreferences as u8;
+        assert!(matches!(
+            decode_persist_record(&truncated[..length - 1]),
+            Err(Fpr2DecodeError::CrcMismatch
+                | Fpr2DecodeError::MalformedTlv
+                | Fpr2DecodeError::PayloadOutOfBounds)
+        ));
+    }
+
+    #[test]
+    fn fpr2_selection_ignores_corrupt_newer_slot() {
+        let data = PersistDomainData::LayoutMarker(LayoutMarker {
+            generation: 3,
+            status: LayoutMarkerStatus::Active,
+        });
+        let mut bytes = [0u8; FPR2_MAX_RECORD_SIZE];
+        let length = encode_persist_record(3, &data, &mut bytes).unwrap();
+        bytes[0] = 0;
+        let selected = select_latest_persist_record(
+            decode_persist_record(&bytes[..length]),
+            Err(Fpr2DecodeError::CrcMismatch),
+        );
+        assert_eq!(selected, None);
+        let mut valid = [0u8; FPR2_MAX_RECORD_SIZE];
+        let valid_len = encode_persist_record(2, &data, &mut valid).unwrap();
+        let selected = select_latest_persist_record(
+            decode_persist_record(&valid[..valid_len]),
+            Err(Fpr2DecodeError::CrcMismatch),
+        );
+        assert_eq!(selected.unwrap().sequence, 2);
+    }
+
+    #[test]
+    fn layout_recovery_never_treats_prepared_as_active() {
+        assert_eq!(
+            layout_recovery_state(
+                Some(LayoutMarker {
+                    generation: 4,
+                    status: LayoutMarkerStatus::Prepared,
+                }),
+                false,
+            ),
+            LayoutRecoveryState::Prepared
+        );
+        assert_eq!(
+            layout_recovery_state(
+                Some(LayoutMarker {
+                    generation: 4,
+                    status: LayoutMarkerStatus::Active,
+                }),
+                true,
+            ),
+            LayoutRecoveryState::Active
+        );
+        assert_eq!(
+            layout_recovery_state(None, true),
+            LayoutRecoveryState::Legacy
         );
     }
 }

@@ -374,7 +374,7 @@ None
 - 用 `HeaterPowerBackend` 把控制器输出与硬件输出解耦：`pps-mos` 后端只做 MOS 静态通断并通过 FUSB302B PPS/AVS 调压；`fixed-pd-pwm-fallback` 保留原 `GPIO47` PWM 调功。
 - Approach 调优与验收以目标温度相关的 full-speed-to-stable gate、overshoot、hold p2p、hold 高低侧误差和 source telemetry 为真相源；默认 flagship sprint 不再额外采集 `0% / 25% / 50%` approach-only 曲线作为门槛。
 - FUSB302B 作为电源准备层而不是 heater interlock；只有启动 capability gate 与后续调压写入失败会影响 heater 后端选择。
-- 两个 bank 各 10 个完整 point-local 目标点必须能与最长 Wi-Fi 凭据和完整校准状态同时持久化；EEPROM 当前写入 `MemoryRecord` v5，使用 `2 KiB` active 双槽和 `u16` TLV 长度，读取兼容 v1-v4 及 `1 KiB` previous / `512B` legacy 槽；旧 EEPROM record 在 RAM 中迁移，并在下一次成功提交时写成 v5。EEPROM 不可达时进入 `EEPROM_REQUIRED`，不得使用 `flux_cfg`、raw Flash 或 NVS。host 在开始调优前必须拒绝超过 profile 10 点容量的目标集合。
+- 两个 bank 各 10 个完整 point-local 目标点必须能与最长 Wi-Fi 凭据和完整校准状态同时持久化；EEPROM 使用 FPR2 分类记录，两个 thermal bank 独立位于 `ThermalPolicy` A/B 槽，不再写入整份 `MemoryRecord` 快照。旧 v1-v5 FPM1 记录仅在迁移阶段流式解码，逐域验证后通过 `PREPARED`/`ACTIVE` 布局标记完成迁移；EEPROM 不可达或安全域无法恢复时进入 `EEPROM_REQUIRED`，不得使用 `flux_cfg`、raw Flash 或 NVS。host 在开始调优前必须拒绝超过 profile 10 点容量的目标集合。
 - saved profile 与 USB/WebSerial direct preview 必须经过同一组 thermal settings 限幅；控制器不得依赖 devd 客户端校验来保护 spike-reject、工作电压下限或电流余量。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
