@@ -56,7 +56,7 @@
 - `Dashboard` 左/右必须按“已启用记忆温度的实际温度值排序”找到最近的下一个温度，而不是按槽位顺序切换。
 - `Dashboard` 暂不显示当前命中的预设槽位或 `MAN / Mx` 文案，保持既有视觉基线不变。
 - `Dashboard` 中键短按只切 heater arm；中键双击切换主动降温（`active_cooling_enabled`）；中键长按只进菜单。
-- 当持久化故障提示待确认时，Dashboard 收到的第一个任意物理按键只确认并关闭提示，不执行该按键原本的动作；确认后显示只读 Dashboard。持久化锁仍阻止 heater、目标温度、preset、主动降温和其它依赖 EEPROM 的操作，直到持久化恢复。
+- 当持久化故障提示待确认时，第一个任意物理按键只清除提示覆盖层，但不会吞掉菜单或页面导航事件。安全域锁仍阻止 heater、PPS 与 calibration；偏好/网络域失败不锁定 heater。
 - 一级菜单必须固定为 `Preset Temp / Active Cooling / WiFi Info / Device Info` 四项，左右移动，中键短按进入，中键长按回 Dashboard。
 - 子页默认中键短按退出，中键长按兜底退出；左键返回菜单。
 - `Preset Temp` 页必须允许进入全部 `M1-M10` 槽位；灰色槽位只代表当前值无效，不代表不可进入。
@@ -131,8 +131,8 @@
   - `Left short / Center short / Center long`：返回 `Menu`
 - `WiFi Info / Device Info`
   - WiFi Info 显示当前四位配对码但不提供写开关；离页即撤销 pairing window。
-  - Device Info 保持只读显示。
-  - `Left short / Center short / Center long`：返回 `Menu`
+  - Device Info 保持只读显示；`Left short / Center short / Center long`：返回 `Menu`。
+  - EEPROM 错误页是唯一 retry 入口；错误页中键长按只触发一次显式持久化重试。
 
 ### 边界条件
 
@@ -141,7 +141,7 @@
 - 长按阈值仍为 `500ms`；`up/down` 到达长按后进入温度 hold-repeat，先约每 `120ms` 产生一次 `repeat`，持续约 `1.5s` 后加速到约每 `60ms`，释放即停止且不得回补 `short`。
 - hold-repeat 只用于 `up/down` 温度调整；`left/right/center` 长按仍只产生单次 `long`，不得重复触发导航或开关动作。
 - 当没有更低或更高的已启用预设时，Dashboard 左/右保持当前温度不变。
-- 当 runtime 仍在播放 fault-clear attention reminder 时，第一次任意输入必须被消费为确认动作，不得顺带触发页面导航或 heater/fan 切换。
+- 当 runtime 仍在播放 fault-clear attention reminder 时，第一次任意输入只确认/静音；EEPROM 持久化提示则只清除覆盖层并继续处理导航。
 - mock 页面不因无效手势崩溃或跳到未知路由。
 
 ## 接口契约（Interfaces & Contracts）
@@ -172,7 +172,7 @@ None
 - Given 一级菜单，When 主人左右移动并中键进入，Then 始终只在四个固定项之间切换。
 - Given 任意子页，When 主人中键短按或长按，Then 都能回到上一级菜单；When 主人按左键，Then 也能返回菜单。
 - Given `Preset Temp`，When 某个槽位已显示为灰色 `---`，Then 仍然可以被选中、进入并通过短按或 hold-repeat 上调重新调回有效温度。
-- Given `WiFi Info`，When 主人进入页面，Then 显示一组新的四位码；When 主人返回，Then 前一组码立即失效。Given `Device Info`，When 主人操作返回手势，Then 页面只发生返回。
+- Given `WiFi Info`，When 主人进入页面，Then 显示一组新的四位码；When 主人返回，Then 前一组码立即失效。Given EEPROM 错误页，When 主人长按中键，Then 只发起一次显式 retry；其他页面仍只处理各自导航。
 - Given runtime 刚从活动 fault 退出且仍在 attention reminder pending，When 主人第一次进行任意输入，Then 该输入只会确认/静音，不会执行原本对应的 heater/fan/menu 动作。
 - Given Storybook docs/gallery，When 打开故事集，Then 至少存在 `Key Test`、`Dashboard`、`Menu`、四个子页和两条交互流故事。
 - Given firmware preview 与 Storybook 截图，When 对比同一路由，Then 颜色、布局和文案口径保持一致。
@@ -261,6 +261,11 @@ None
 #### EEPROM persistence fault
 
 ![Front panel EEPROM persistence fault](./assets/frontpanel-eeprom-fault.png)
+
+#### EEPROM save failure
+
+普通偏好/网络域写入失败时，错误页保留相同的 `HOLD CENTER RETRY` 入口，但显示
+`SAVE FAILED` 与 `HEATER AVAILABLE`，不改变 heater 许可。
 
 #### Persistence fault acknowledged
 

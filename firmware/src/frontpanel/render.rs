@@ -203,13 +203,16 @@ pub fn render_frontpanel_ui_with_palette(
     canvas.clear(COLOR_BG).ok();
 
     if state.persistence_fault_attention_pending
-        && state.persistence_locked()
         && !matches!(
             state.dashboard_presentation,
             DashboardPresentationState::EepromRestore | DashboardPresentationState::InitialRtdFault
         )
     {
-        draw_eeprom_status(canvas, state.eeprom_required);
+        draw_eeprom_status(
+            canvas,
+            state.eeprom_data_incompatible,
+            state.eeprom_required,
+        );
         return;
     }
 
@@ -224,16 +227,37 @@ pub fn render_frontpanel_ui_with_palette(
     }
 }
 
-fn draw_eeprom_status(canvas: &mut DisplayCanvas, required: bool) {
+fn draw_eeprom_status(canvas: &mut DisplayCanvas, incompatible: bool, required: bool) {
     draw_text_mid_center(canvas, "EEPROM DATA", 80, 5, COLOR_WARNING);
     draw_text_mid_center(
         canvas,
-        if required { "REQUIRED" } else { "INCOMPATIBLE" },
+        if incompatible {
+            "INCOMPATIBLE"
+        } else if required {
+            "REQUIRED"
+        } else {
+            "SAVE FAILED"
+        },
         80,
         19,
         COLOR_TEXT,
     );
-    draw_text_mid_center(canvas, "HEATER LOCKED", 80, 33, COLOR_WARNING);
+    draw_text_mid_center(
+        canvas,
+        if incompatible || required {
+            "HEATER LOCKED"
+        } else {
+            "HEATER AVAILABLE"
+        },
+        80,
+        33,
+        if incompatible || required {
+            COLOR_WARNING
+        } else {
+            COLOR_SUCCESS
+        },
+    );
+    draw_text_small(canvas, "HOLD CENTER RETRY", 80, 44, COLOR_TEXT);
 }
 
 fn fill_rect(canvas: &mut DisplayCanvas, x: i32, y: i32, width: u32, height: u32, color: Rgb565) {
@@ -1039,6 +1063,18 @@ mod tests {
 
         assert!(canvas.pixels().contains(&COLOR_WARNING));
         assert!(canvas.pixels().contains(&COLOR_TEXT));
+    }
+
+    #[test]
+    fn ordinary_persistence_failure_renders_retry_without_heater_lock() {
+        let mut canvas = DisplayCanvas::new();
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.persistence_fault_attention_pending = true;
+
+        render_frontpanel_ui(&mut canvas, &state);
+
+        assert!(canvas.pixels().contains(&COLOR_SUCCESS));
+        assert!(!state.persistence_locked());
     }
 
     #[test]

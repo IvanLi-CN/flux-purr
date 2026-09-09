@@ -13,9 +13,9 @@
 - 在 `M24C64` 外部 EEPROM 中保存版本化记忆配置。
 - 保存并恢复 `target_temp_c`、`selected_preset_slot`、`presets_c[10]`、`active_cooling_enabled` 和 Wi-Fi 配置字段。
 - 保存并恢复 ADC calibration 的共享样本、A/B 槽位与当前激活槽位，供 ADC 校准控制面跨重启保留。
-- 使用双槽 record、TLV payload 和 CRC，保证坏数据自动回退默认值、未知字段可跳过。
+- 使用 FPR2 分类 record、TLV payload 和 CRC；只有安全校准、温控策略与布局标记使用 A/B，偏好和网络域使用单槽。
 - 运行时对用户接受的记忆字段变更做防抖写回，减少 EEPROM 写入频率。
-- 保存与电流档无关的 heater raw observations 和瞬态 thermal plant model transaction。
+- 保存安全校准所需的 raw heater observations 与 transaction identity；已废弃 thermal-plant snapshot 不迁移、不再写入。
 
 ### Non-goals
 
@@ -46,16 +46,16 @@
 
 ### MUST
 
-- EEPROM 设备为 `M24C64`，7-bit I2C 地址固定为硬件基线 `0x50`；启动和高级维护不得扫描其它 I2C 地址。容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。启动读取使用静态复用 scratch 和有界分块访问，不得把完整 record buffer 放入启动栈。
-- `MemoryRecord` 当前格式版本为 `v5`：header 的 byte `4` 保存 format version，byte `5` 保存 header length，bytes `6..8` 保存 payload length，bytes `8..12` 保存 `sequence`，bytes `12..16` 保存 CRC。v1-v5 均可解码；v1/v2 使用窄 TLV 长度，v3-v5 使用 `u16` TLV 长度。active 双槽位于 `0x1000` / `0x1800`，每槽 `2048 bytes`；previous 双槽为 `1024 bytes`（`0x0400` / `0x0800`），legacy 双槽为 `512 bytes`（`0x0000` / `0x0200`）。启动时选择 CRC 合法且 `sequence` 最大的 record。旧 EEPROM 槽只作为兼容读取源，选择出的旧配置先在 RAM 中完成字段迁移；后续成功提交配置时才以当前 v5 编码写入 active 槽，不在启动阶段强制重写 EEPROM。
-- 外置 EEPROM 是唯一的持久化后端。`MemoryRecord`、等价配置与其任何镜像不得写入 ESP flash、NVS、raw sector 或 `flux_cfg`。启动只从 EEPROM 槽位选择 CRC 合法且 `sequence` 最大的 record；旧内部 Flash record 必须忽略且不得迁移。EEPROM 全空时可按批准的硬件配置初始化并写后验证；EEPROM 不可达、写入失败或验证失败时必须进入 `EEPROM_REQUIRED`。
+- EEPROM 设备为 `M24C64`，7-bit I2C 地址固定为硬件基线 `0x50`；启动和高级维护不得扫描其它 I2C 地址。容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。启动读取使用固定大小的域缓冲和不超过 `16 bytes` 的有界分块访问，不得把完整 `2 KiB` v5 快照放入启动栈或堆。
+- FPR2 header 固定为 `20 bytes`：`FPR2 magic`、format version、domain、flags、header length、`sequence`、payload length、reserved 和 CRC32。分区固定为：`SafetyCalibration` A/B=`0x0000/0x0200`（512 B）；`ThermalPolicy` A/B=`0x0400/0x0700`（768 B）；`UserPreferences` single=`0x0a00`（128 B）；`NetworkAndPairing` single=`0x0a80`（256 B）；`LayoutMarker` A/B=`0x0c00/0x0c80`（128 B）；`0x0d00..0x0fff` 保留。旧 v1-v5 FPM1 只在迁移时流式读取，位于 `0x1000..0x1fff`，迁移后两个 magic 均失效。每个域选择 CRC 合法且 `sequence` 最大的槽；单槽损坏只回退该域默认值。
+- 外置 EEPROM 是唯一的持久化后端。`MemoryRecord`、等价配置与其任何镜像不得写入 ESP flash、NVS、raw sector 或 `flux_cfg`。启动只从 EEPROM 槽位选择 CRC 合法且 `sequence` 最大的 record；旧内部 Flash record 必须忽略且不得迁移。EEPROM 全空时可按批准的硬件配置初始化并写后验证；EEPROM 不可达或安全域记录无法恢复时进入 `EEPROM_REQUIRED`，普通偏好/网络域失败只标记该域未保存。
 - 固件更新、恢复与 devd 不得读取、保存、迁移、恢复或验证 MCU 内部配置分区。分区表、镜像布局和 bundle 不得声明 `flux_cfg` 或等价配置区域。
 - record payload 必须使用 TLV，未知 TLV 必须跳过，缺失 TLV 必须使用默认值；v1/v2 的 TLV header 使用 `tag:u8 + len:u8`，v3-v5 使用 `tag:u8 + len:u16le`。
 - 温度字段恢复后必须 clamp 到 `0..400°C`。
 - `selected_preset_slot` 越界时必须回到默认槽位。
 - 用户接受操作导致记忆字段变化时必须 debounce 后写回，不得每个按键事件立即写入持久化后端。
-- EEPROM 读写失败不得阻断 heater/fan 保护逻辑；但必须进入 `EEPROM_REQUIRED`，锁定 heater、calibration、Wi-Fi 持久化、preset 与其他依赖持久化正确性的操作，并明确显示故障。不得以任何 MCU 存储作为替代。
-- 每次持久化提交失败必须保留 `code`、`phase`、`attempt`、`sequence`、目标 `slot` 和脱敏 `message`；最终失败必须把 RAM `MemoryConfig` 和前面板值恢复到最后一次成功持久化的完整配置，并继续保持 heater 与持久化操作锁定。
+- EEPROM 读写失败不得阻断 heater/fan 保护逻辑。安全校准或温控策略失败时锁定 heater/PPS/calibration，候选值在读回验证前不得生效；偏好或网络失败只标记该域未保存，不锁定 heater，重启时该域回退默认值。EEPROM 错误页是唯一 retry 入口，中键长按触发一次重试，其他按键只清除提示并继续导航。
+- 每次持久化提交失败必须保留 `code`、`phase`、`attempt`、`sequence`、目标 `slot`（`A`、`B` 或 `single`）和脱敏 `message`；`PersistenceFault` 字段与 devd JSONL 形状保持兼容。
 - 持久化故障必须通过串口打印 `PERSISTENCE_COMMIT_ATTEMPT_FAILED`（每次尝试）和 `PERSISTENCE_COMMIT_FAILED`（终态）暴露相同的分类元数据；不得输出 EEPROM 原始字节、Wi-Fi 密码或其它敏感配置。
 - M24C64 与 FUSB302B 共用 `GPIO8/9` 时，record 写入和成功后的 EEPROM 验证必须以不超过 `16 bytes` 的 bounded chunk 执行；每个 EEPROM write-cycle delay 或验证 chunk 后必须先释放 EEPROM adapter 并服务 PD，再开始下一段。EEPROM 成功即完成本次持久化，不得同步 mirror 到任何 MCU 存储。
 - 日志不得输出 Wi-Fi 密码明文。
@@ -76,7 +76,7 @@
 - 写回流程：
   - 前面板已接受交互完成后，从 UI 状态生成下一份 `MemoryConfig`。
   - 若配置相对上一份有变化，设置约 `2s` 写回 deadline。
-- deadline 到期后写入下一 record sequence 对应的槽；每页 EEPROM 写和验证 chunk 后先服务共享总线上的 PD，再进入下一段。EEPROM 不可用、写入失败或验证失败时进入 `EEPROM_REQUIRED`，不得重新路由到 MCU 存储。
+- deadline 到期后按变更域写入下一 record sequence 对应的槽；每页 EEPROM 写和验证 chunk 后先服务共享总线上的 PD，再进入下一段。EEPROM 不可用、写入失败或验证失败不得重新路由到 MCU 存储。
 - 提交失败时状态接口公开 `persistenceFault` 与 `persistenceFaultAttentionPending`，安装状态公开 `lastPersistenceFault`；`recordState` 使用 `valid|blank|corrupt|incompatible|unavailable`，不可使用 `eeprom_required` 作为记录状态。
 - Wi-Fi 字段：
   - `ssid`、`password`、`telemetryIntervalMs` 进入持久化模型；自动重连是固件固定策略，不属于用户配置。
@@ -117,19 +117,19 @@
   - `0x37`: legacy steady-state thermal-plant active record (decode-only)
   - `0x38`: LAN pairing token
   - `0x39`: static IPv4 configuration
-  - `0x3a`: `thermal_plant_transient_active`
+  - `0x3a`: legacy `thermal_plant_transient_active` (decode-only)
   - `0x3b`: `heater_curve_transaction_id`
-- 新记录持续写入 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode。`0x35` 保存 raw RTD ADC、实测 V/I/R；`0x36` 与 `0x37` 只保留为历史稳态双平台记录，绝不迁移或优先于新模型，也不得解锁加热。`0x3a` 保存成功瞬态模型的 ambient raw RTD ADC、定长 `50ms` 轨迹、实测加热电压、duty、拟合系数和 transaction identity；`0x3b` 必须等于该模型 transaction identity，证明 `0x35` 的曲线原始观测来自同一次瞬态采集。轨迹电压是 ADC 实测值，允许因测量误差高于所选 APDO 的名义最高请求；APDO 覆盖能力和运行安全由 calibration admission 与运行门禁负责，持久化结构不得用名义电压上限过滤实测值。拟合失败不写 `0x3a`，也不得覆盖既有 active。派生温度、曲线与系数不得成为唯一持久化真相源。
-- 新写入的 thermal profile payload 必须以紧凑 `TCP3` 布局标识开头；它无损保存完整 point-local 字段，并让两个十点 bank、最长 Wi-Fi 凭据、LAN token、static IPv4、完整 calibration 与最长瞬态轨迹共同装入一个 `2KiB` active record。`TCP2` 和无标识历史 payload 继续按各自旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。
+- FPR2 只把 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode 写入 `ThermalPolicy`，把 `0x35`、`0x3b` 与 commissioning/ADC 字段写入 `SafetyCalibration`，把偏好和网络字段分别写入对应单槽域。`0x36`、`0x37` 与 `0x3a` 只保留为历史稳态/瞬态 thermal-plant 数据的 decode-only 标签，绝不迁移、不再写入，也不得解锁加热；旧记录中的派生模型只用于兼容读取和诊断。
+- 新写入的 thermal profile payload 必须以紧凑 `TCP3` 布局标识开头，两个 bank 独立存入 `ThermalPolicy` A/B 槽。`TCP2` 和无标识历史 payload 继续按各自旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。
 
 ## 验收标准（Acceptance Criteria）
 
 - Given EEPROM 为空且可写，When 固件启动，Then 固件从批准的硬件配置初始化 EEPROM、验证写入，并在 UI 使用该配置。
-- Given EEPROM 缺失、损坏、不可读、不可写或验证失败，When 固件启动或提交配置，Then 固件进入 `EEPROM_REQUIRED`，不使用内部 Flash/NVS/raw sector 且不允许依赖持久化正确性的操作。
+- Given EEPROM 缺失，或安全校准/温控策略记录不可读、不可写或验证失败，When 固件启动或提交配置，Then 固件进入 `EEPROM_REQUIRED`，不使用内部 Flash/NVS/raw sector 且 heater/PPS/calibration 保持锁定；Given 偏好/网络域失败，Then 只标记该域未保存并允许 heater/fan 保护继续运行。
 - Given EEPROM 槽都有合法 record，When 固件启动，Then 选择 `sequence` 最大的一槽。
 - Given 最新槽 CRC 损坏且旧槽合法，When 固件启动，Then 回退到旧槽。
 - Given `flux_cfg` 或旧 raw fallback 双槽含 CRC 合法 record，When 固件启动，Then 固件忽略它们，绝不读取、恢复或复制。
-- Given EEPROM previous/legacy 槽存在 CRC 合法的 v1-v4 record，When 固件启动，Then 按版本完成 RAM 内字段迁移并恢复配置；旧 EEPROM 槽不在启动阶段被重写，下一次成功配置提交必须以 v5 编码写入 active 槽。
+- Given EEPROM previous/legacy 槽存在 CRC 合法的 v1-v5 record，When 固件启动，Then 按版本流式完成 RAM 内字段迁移、逐域写入并读回验证，依次提交 `PREPARED`、使旧 magic 无效、提交两份 `ACTIVE`；任一中断阶段重启都不得把半成品当作已激活配置。
 - Given firmware update、Developer flash 或 MCU Flash recovery 发生，When MCU 写入或擦除完成，Then 操作不得读取、写入、迁移或验证内部配置分区，且外置 EEPROM 不受该 MCU 操作影响。
 - Given record payload 包含未知 TLV，When 解码，Then 忽略未知字段并保留已知字段。
 - Given 目标温度或 preset 超出范围，When 解码完成，Then 温度被 clamp 到 `0..400°C`。
@@ -176,6 +176,7 @@
 ## Related ADRs
 
 - [`../../adr/0008-eeprom-only-configuration-persistence.md`](../../adr/0008-eeprom-only-configuration-persistence.md)
+- [`../../adr/0009-eeprom-record-class-persistence.md`](../../adr/0009-eeprom-record-class-persistence.md)
 
 ## 参考（References）
 
