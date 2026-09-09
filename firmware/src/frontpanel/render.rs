@@ -228,7 +228,7 @@ pub fn render_frontpanel_ui_with_palette(
 }
 
 fn draw_eeprom_status(canvas: &mut DisplayCanvas, incompatible: bool, required: bool) {
-    draw_text_mid_center(canvas, "EEPROM DATA", 80, 5, COLOR_WARNING);
+    draw_text_mid_center(canvas, "EEPROM DATA", 80, 1, COLOR_WARNING);
     draw_text_mid_center(
         canvas,
         if incompatible {
@@ -239,7 +239,7 @@ fn draw_eeprom_status(canvas: &mut DisplayCanvas, incompatible: bool, required: 
             "SAVE FAILED"
         },
         80,
-        19,
+        13,
         COLOR_TEXT,
     );
     draw_text_mid_center(
@@ -250,14 +250,14 @@ fn draw_eeprom_status(canvas: &mut DisplayCanvas, incompatible: bool, required: 
             "HEATER AVAILABLE"
         },
         80,
-        33,
+        25,
         if incompatible || required {
             COLOR_WARNING
         } else {
             COLOR_SUCCESS
         },
     );
-    draw_text_small(canvas, "HOLD CENTER RETRY", 80, 44, COLOR_TEXT);
+    draw_text_mid_center(canvas, "HOLD CENTER RETRY", 80, 37, COLOR_TEXT);
 }
 
 fn fill_rect(canvas: &mut DisplayCanvas, x: i32, y: i32, width: u32, height: u32, color: Rgb565) {
