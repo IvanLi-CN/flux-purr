@@ -665,6 +665,12 @@ mod tests {
             let (light, light_panel) = render_frame(preset, DashboardThemeId::Light);
             let (dark, dark_panel) = render_frame(preset, DashboardThemeId::Dark);
             assert_ne!(light, dark, "{} should differ by theme", preset.slug());
+            assert_ne!(
+                light_panel,
+                dark_panel,
+                "{} panel frame should differ by theme",
+                preset.slug()
+            );
             assert!(light_panel.iter().any(|byte| *byte != 0));
             assert!(dark_panel.iter().any(|byte| *byte != 0));
         }
