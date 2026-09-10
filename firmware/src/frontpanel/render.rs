@@ -818,6 +818,11 @@ fn dashboard_status_layout(label: &str, value: &str) -> (i32, i32) {
     (label_x, value_right)
 }
 
+fn dashboard_manual_pps_marker_x(value: &str) -> i32 {
+    let (label_x, _) = dashboard_status_layout("PPS", value);
+    label_x + measure_bitmap_text("PPS", BitmapFont::Small, 1) + 1
+}
+
 fn draw_bitmap_rows(canvas: &mut DisplayCanvas, rows: &[&str], x: i32, y: i32, color: Rgb565) {
     for (row_index, row) in rows.iter().enumerate() {
         for (column_index, pixel) in row.chars().enumerate() {
@@ -1180,17 +1185,23 @@ fn draw_dashboard(
     } else {
         draw_dashboard_status_line(canvas, 4, "SET", &set_text, theme.muted, theme.setpoint);
     }
-    if !initializing_presentation && !eeprom_restore && state.manual_pps_enabled {
-        draw_text_small(canvas, "*", 107, 15, theme.info);
-    }
+    let mut pps_value = heapless::String::<8>::new();
     if initializing_presentation || eeprom_restore {
-        draw_dashboard_status_line(canvas, 17, "PPS", "---", theme.muted, theme.info);
+        let _ = pps_value.push_str("---");
     } else {
         let pps_numeric = pd_voltage_content_text(state.pd_contract_mv);
-        let mut pps_value = heapless::String::<8>::new();
         let _ = pps_value.push_str(&pps_numeric);
         let _ = pps_value.push('V');
-        draw_dashboard_status_line(canvas, 17, "PPS", &pps_value, theme.muted, theme.info);
+    }
+    draw_dashboard_status_line(canvas, 17, "PPS", &pps_value, theme.muted, theme.info);
+    if !initializing_presentation && !eeprom_restore && state.manual_pps_enabled {
+        draw_text_small(
+            canvas,
+            "*",
+            dashboard_manual_pps_marker_x(&pps_value),
+            15,
+            theme.info,
+        );
     }
     draw_dashboard_status_line(
         canvas,
@@ -1580,6 +1591,18 @@ mod tests {
 
         assert_eq!(value_x, 159);
         assert!(label_x + label_width < value_x - value_width);
+    }
+
+    #[test]
+    fn dashboard_manual_pps_marker_stays_attached_to_label() {
+        let value = "20.00V";
+        let (label_x, _) = dashboard_status_layout("PPS", value);
+
+        assert_eq!(label_x, 84);
+        assert_eq!(
+            dashboard_manual_pps_marker_x(value),
+            label_x + measure_bitmap_text("PPS", BitmapFont::Small, 1) + 1
+        );
     }
 
     #[test]

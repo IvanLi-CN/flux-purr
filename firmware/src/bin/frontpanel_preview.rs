@@ -304,6 +304,7 @@ impl PreviewPreset {
             Self::EepromDataIncompatible => {
                 let mut state = base_dashboard_state();
                 state.eeprom_data_incompatible = true;
+                state.persistence_fault_attention_pending = true;
                 state
             }
             Self::EepromPersistenceFault => {
@@ -642,8 +643,9 @@ mod tests {
     }
 
     #[test]
-    fn non_dashboard_presets_render_both_themes_and_panel_frames() {
+    fn preview_presets_render_both_themes_and_panel_frames() {
         let presets = [
+            PreviewPreset::DashboardEepromRestore,
             PreviewPreset::KeyTestIdle,
             PreviewPreset::KeyTestShort,
             PreviewPreset::KeyTestDouble,
@@ -666,5 +668,15 @@ mod tests {
             assert!(light_panel.iter().any(|byte| *byte != 0));
             assert!(dark_panel.iter().any(|byte| *byte != 0));
         }
+
+        let incompatible = PreviewPreset::EepromDataIncompatible.build_state(None);
+        assert!(incompatible.eeprom_data_incompatible);
+        assert!(incompatible.persistence_fault_attention_pending);
+
+        let restore = PreviewPreset::DashboardEepromRestore.build_state(None);
+        assert_eq!(
+            restore.dashboard_presentation,
+            DashboardPresentationState::EepromRestore
+        );
     }
 }
