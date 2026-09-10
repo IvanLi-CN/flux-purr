@@ -196,8 +196,180 @@ pub const fn temperature_palette(id: TemperaturePaletteId) -> &'static Temperatu
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardThemeId {
+    Dark,
+    Light,
+}
+
+impl DashboardThemeId {
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    pub fn from_slug(value: &str) -> Option<Self> {
+        match value {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DashboardTheme {
+    background: Rgb565,
+    divider: Rgb565,
+    text: Rgb565,
+    muted: Rgb565,
+    disabled: Rgb565,
+    setpoint: Rgb565,
+    success: Rgb565,
+    warning: Rgb565,
+    info: Rgb565,
+    heater_track: Rgb565,
+    heater_fill: Rgb565,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FrontPanelTheme {
+    background: Rgb565,
+    panel: Rgb565,
+    panel_strong: Rgb565,
+    border: Rgb565,
+    text: Rgb565,
+    muted: Rgb565,
+    disabled: Rgb565,
+    accent: Rgb565,
+    success: Rgb565,
+    warning: Rgb565,
+    info: Rgb565,
+}
+
+const DARK_DASHBOARD_THEME: DashboardTheme = DashboardTheme {
+    background: Rgb565::new(1, 5, 4),
+    divider: Rgb565::new(6, 16, 11),
+    text: Rgb565::new(28, 59, 30),
+    muted: Rgb565::new(17, 40, 22),
+    disabled: Rgb565::new(9, 23, 14),
+    setpoint: Rgb565::new(31, 52, 12),
+    success: Rgb565::new(13, 56, 22),
+    warning: Rgb565::new(31, 28, 16),
+    info: Rgb565::new(15, 52, 31),
+    heater_track: Rgb565::new(4, 12, 9),
+    heater_fill: Rgb565::new(30, 39, 1),
+};
+
+// The light theme is a neutral instrument face, not an inverse of the dark theme.
+const LIGHT_DASHBOARD_THEME: DashboardTheme = DashboardTheme {
+    background: Rgb565::new(30, 61, 30),
+    divider: Rgb565::new(25, 53, 28),
+    text: Rgb565::new(2, 8, 6),
+    muted: Rgb565::new(10, 25, 15),
+    disabled: Rgb565::new(18, 40, 21),
+    setpoint: Rgb565::new(19, 23, 0),
+    success: Rgb565::new(0, 30, 10),
+    warning: Rgb565::new(22, 8, 3),
+    info: Rgb565::new(0, 26, 20),
+    heater_track: Rgb565::new(25, 53, 28),
+    heater_fill: Rgb565::new(22, 20, 1),
+};
+
+const DARK_FRONTPANEL_THEME: FrontPanelTheme = FrontPanelTheme {
+    background: COLOR_BG,
+    panel: COLOR_PANEL,
+    panel_strong: COLOR_PANEL_STRONG,
+    border: COLOR_BORDER,
+    text: COLOR_TEXT,
+    muted: COLOR_MUTED,
+    disabled: COLOR_DISABLED,
+    accent: COLOR_ACCENT,
+    success: COLOR_SUCCESS,
+    warning: COLOR_WARNING,
+    info: COLOR_CYAN,
+};
+
+// This is an independent white instrument face, rather than an inverted dark UI.
+const LIGHT_FRONTPANEL_THEME: FrontPanelTheme = FrontPanelTheme {
+    background: Rgb565::new(31, 63, 31),
+    panel: Rgb565::new(29, 59, 30),
+    panel_strong: Rgb565::new(27, 55, 29),
+    border: Rgb565::new(17, 35, 22),
+    text: Rgb565::new(2, 8, 11),
+    muted: Rgb565::new(8, 20, 18),
+    disabled: Rgb565::new(14, 30, 19),
+    accent: Rgb565::new(20, 12, 0),
+    success: Rgb565::new(0, 24, 8),
+    warning: Rgb565::new(20, 7, 2),
+    info: Rgb565::new(0, 18, 23),
+};
+
+const DARK_DASHBOARD_TEMPERATURE_PALETTE: TemperaturePalette = TemperaturePalette {
+    id: TemperaturePaletteId::Current,
+    colors: [
+        Rgb565::new(28, 59, 30),
+        Rgb565::new(18, 49, 31),
+        Rgb565::new(12, 57, 31),
+        Rgb565::new(16, 59, 21),
+        Rgb565::new(26, 61, 19),
+        Rgb565::new(31, 52, 9),
+        Rgb565::new(31, 36, 7),
+        Rgb565::new(30, 28, 22),
+    ],
+};
+
+const LIGHT_TEMPERATURE_PALETTE: TemperaturePalette = TemperaturePalette {
+    id: TemperaturePaletteId::Current,
+    colors: [
+        Rgb565::new(4, 19, 17),
+        Rgb565::new(4, 23, 20),
+        Rgb565::new(0, 30, 17),
+        Rgb565::new(2, 30, 9),
+        Rgb565::new(11, 27, 0),
+        Rgb565::new(19, 23, 0),
+        Rgb565::new(22, 20, 1),
+        Rgb565::new(15, 16, 19),
+    ],
+};
+
+const fn dashboard_theme(id: DashboardThemeId) -> &'static DashboardTheme {
+    match id {
+        DashboardThemeId::Dark => &DARK_DASHBOARD_THEME,
+        DashboardThemeId::Light => &LIGHT_DASHBOARD_THEME,
+    }
+}
+
+const fn frontpanel_theme(id: DashboardThemeId) -> &'static FrontPanelTheme {
+    match id {
+        DashboardThemeId::Dark => &DARK_FRONTPANEL_THEME,
+        DashboardThemeId::Light => &LIGHT_FRONTPANEL_THEME,
+    }
+}
+
+fn dashboard_temperature_palette(
+    theme_id: DashboardThemeId,
+    palette: &TemperaturePalette,
+) -> &TemperaturePalette {
+    if palette.id != TemperaturePaletteId::Current {
+        return palette;
+    }
+
+    match theme_id {
+        DashboardThemeId::Dark => &DARK_DASHBOARD_TEMPERATURE_PALETTE,
+        DashboardThemeId::Light => &LIGHT_TEMPERATURE_PALETTE,
+    }
+}
+
 pub fn render_frontpanel_ui(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
-    render_frontpanel_ui_with_palette(canvas, state, &DEFAULT_TEMPERATURE_PALETTE);
+    render_frontpanel_ui_with_theme(
+        canvas,
+        state,
+        DashboardThemeId::Light,
+        &DEFAULT_TEMPERATURE_PALETTE,
+    );
 }
 
 pub fn render_frontpanel_ui_with_palette(
@@ -205,7 +377,19 @@ pub fn render_frontpanel_ui_with_palette(
     state: &FrontPanelUiState,
     palette: &TemperaturePalette,
 ) {
-    canvas.clear(COLOR_BG).ok();
+    render_frontpanel_ui_with_theme(canvas, state, DashboardThemeId::Light, palette);
+}
+
+pub fn render_frontpanel_ui_with_theme(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    theme_id: DashboardThemeId,
+    palette: &TemperaturePalette,
+) {
+    let theme = frontpanel_theme(theme_id);
+    let palette = dashboard_temperature_palette(theme_id, palette);
+
+    canvas.clear(theme.background).ok();
 
     if state.persistence_fault_attention_pending
         && !matches!(
@@ -217,23 +401,44 @@ pub fn render_frontpanel_ui_with_palette(
             canvas,
             state.eeprom_data_incompatible,
             state.eeprom_required,
+            theme,
         );
         return;
     }
 
     match state.route {
-        FrontPanelRoute::KeyTest => draw_key_test(canvas, state),
-        FrontPanelRoute::Dashboard => draw_dashboard(canvas, state, palette),
-        FrontPanelRoute::Menu => draw_menu(canvas, state),
-        FrontPanelRoute::PresetTemp => draw_preset_temp(canvas, state, palette),
-        FrontPanelRoute::ActiveCooling => draw_active_cooling(canvas, state),
-        FrontPanelRoute::WifiInfo => draw_wifi_info(canvas, state),
-        FrontPanelRoute::DeviceInfo => draw_device_info(canvas),
+        FrontPanelRoute::KeyTest => draw_key_test(canvas, state, theme),
+        FrontPanelRoute::Dashboard => {
+            draw_dashboard(canvas, state, palette, dashboard_theme(theme_id))
+        }
+        FrontPanelRoute::Menu => draw_menu(canvas, state, theme),
+        FrontPanelRoute::PresetTemp => draw_preset_temp(canvas, state, palette, theme),
+        FrontPanelRoute::ActiveCooling => draw_active_cooling(canvas, state, theme),
+        FrontPanelRoute::WifiInfo => draw_wifi_info(canvas, state, theme),
+        FrontPanelRoute::DeviceInfo => draw_device_info(canvas, theme),
     }
 }
 
-fn draw_eeprom_status(canvas: &mut DisplayCanvas, incompatible: bool, required: bool) {
-    draw_text_mid_center(canvas, "EEPROM DATA", 80, 1, COLOR_WARNING);
+pub fn render_frontpanel_dashboard_with_theme(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    theme_id: DashboardThemeId,
+    palette: &TemperaturePalette,
+) {
+    let theme = dashboard_theme(theme_id);
+    let palette = dashboard_temperature_palette(theme_id, palette);
+
+    canvas.clear(theme.background).ok();
+    draw_dashboard(canvas, state, palette, theme);
+}
+
+fn draw_eeprom_status(
+    canvas: &mut DisplayCanvas,
+    incompatible: bool,
+    required: bool,
+    theme: &FrontPanelTheme,
+) {
+    draw_text_mid_center(canvas, "EEPROM DATA", 80, 1, theme.warning);
     draw_text_mid_center(
         canvas,
         if incompatible {
@@ -245,7 +450,7 @@ fn draw_eeprom_status(canvas: &mut DisplayCanvas, incompatible: bool, required: 
         },
         80,
         13,
-        COLOR_TEXT,
+        theme.text,
     );
     draw_text_mid_center(
         canvas,
@@ -257,12 +462,12 @@ fn draw_eeprom_status(canvas: &mut DisplayCanvas, incompatible: bool, required: 
         80,
         25,
         if incompatible || required {
-            COLOR_WARNING
+            theme.warning
         } else {
-            COLOR_SUCCESS
+            theme.success
         },
     );
-    draw_text_mid_center(canvas, "HOLD CENTER RETRY", 80, 37, COLOR_TEXT);
+    draw_text_mid_center(canvas, "HOLD CENTER RETRY", 80, 37, theme.text);
 }
 
 fn fill_rect(canvas: &mut DisplayCanvas, x: i32, y: i32, width: u32, height: u32, color: Rgb565) {
@@ -482,19 +687,6 @@ fn draw_text_mid_center(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, 
     );
 }
 
-fn draw_text_mid_right(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, color: Rgb565) {
-    draw_bitmap_text(
-        canvas,
-        text,
-        x,
-        y,
-        color,
-        BitmapFont::Mid,
-        1,
-        BitmapAlign::Right,
-    );
-}
-
 fn draw_segment(
     canvas: &mut DisplayCanvas,
     x: i32,
@@ -563,9 +755,25 @@ fn measure_seven_segment_text(text: &str) -> i32 {
     if digits == 0 { 0 } else { digits * 17 - 2 }
 }
 
-fn draw_status_line(canvas: &mut DisplayCanvas, y: i32, label: &str, value: &str, color: Rgb565) {
-    draw_text_mid(canvas, label, 80, y, color);
-    draw_text_mid_right(canvas, value, 154, y, color);
+fn draw_dashboard_status_line(
+    canvas: &mut DisplayCanvas,
+    y: i32,
+    label: &str,
+    value: &str,
+    label_color: Rgb565,
+    value_color: Rgb565,
+) {
+    draw_text_small(canvas, label, 84, y + 3, label_color);
+    draw_bitmap_text(
+        canvas,
+        value,
+        156,
+        y,
+        value_color,
+        BitmapFont::Mid,
+        1,
+        BitmapAlign::Right,
+    );
 }
 
 fn draw_bitmap_rows(canvas: &mut DisplayCanvas, rows: &[&str], x: i32, y: i32, color: Rgb565) {
@@ -591,6 +799,12 @@ fn i16_to_text(value: i16) -> heapless::String<8> {
 
     let mut out = heapless::String::<8>::new();
     let _ = write!(&mut out, "{}", value);
+    out
+}
+
+fn percent_to_text(value: u8) -> heapless::String<5> {
+    let mut out = heapless::String::<5>::new();
+    let _ = write!(&mut out, "{}%", value.min(100));
     out
 }
 
@@ -634,13 +848,13 @@ fn pd_voltage_content_text(contract_mv: u16) -> heapless::String<8> {
     out
 }
 
-fn gesture_color(gesture: Option<KeyGesture>) -> Rgb565 {
+fn gesture_color(gesture: Option<KeyGesture>, theme: &FrontPanelTheme) -> Rgb565 {
     match gesture {
-        Some(KeyGesture::ShortPress) => COLOR_SUCCESS,
-        Some(KeyGesture::DoublePress) => COLOR_ACCENT,
-        Some(KeyGesture::LongPress) => COLOR_CYAN,
-        Some(KeyGesture::RepeatPress) => COLOR_CYAN,
-        None => COLOR_TEXT,
+        Some(KeyGesture::ShortPress) => theme.success,
+        Some(KeyGesture::DoublePress) => theme.accent,
+        Some(KeyGesture::LongPress) => theme.info,
+        Some(KeyGesture::RepeatPress) => theme.info,
+        None => theme.text,
     }
 }
 
@@ -748,25 +962,30 @@ fn menu_footer_title(item: FrontPanelMenuItem) -> &'static str {
     }
 }
 
-fn shape_color_for(state: &FrontPanelUiState, key: FrontPanelKey) -> Rgb565 {
+fn shape_color_for(
+    state: &FrontPanelUiState,
+    key: FrontPanelKey,
+    theme: &FrontPanelTheme,
+) -> Rgb565 {
     if state.key_test.last_key == Some(key) {
-        gesture_color(state.key_test.last_gesture)
+        gesture_color(state.key_test.last_gesture, theme)
     } else {
-        COLOR_TEXT
+        theme.text
     }
 }
 
-fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
-    fill_rect(canvas, 4, 4, 152, 42, COLOR_PANEL_STRONG);
-    draw_text_mid(canvas, "KEY TEST", 8, 7, COLOR_TEXT);
-    draw_text_small(canvas, "SHORT=SUCCESS", 84, 8, COLOR_SUCCESS);
-    draw_text_small(canvas, "DOUBLE=ACCENT", 84, 15, COLOR_ACCENT);
-    draw_text_small(canvas, "LONG=INFO", 84, 22, COLOR_CYAN);
+fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState, theme: &FrontPanelTheme) {
+    fill_rect(canvas, 4, 4, 152, 42, theme.panel_strong);
+    draw_text_mid(canvas, "KEY TEST", 8, 7, theme.text);
+    draw_text_small(canvas, "SHORT=SUCCESS", 84, 8, theme.success);
+    draw_text_small(canvas, "DOUBLE=ACCENT", 84, 15, theme.accent);
+    draw_text_small(canvas, "LONG=INFO", 84, 22, theme.info);
 
     Triangle::new(Point::new(40, 8), Point::new(30, 20), Point::new(50, 20))
         .into_styled(PrimitiveStyle::with_fill(shape_color_for(
             state,
             FrontPanelKey::Up,
+            theme,
         )))
         .draw(canvas)
         .ok();
@@ -774,6 +993,7 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         .into_styled(PrimitiveStyle::with_fill(shape_color_for(
             state,
             FrontPanelKey::Down,
+            theme,
         )))
         .draw(canvas)
         .ok();
@@ -781,6 +1001,7 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         .into_styled(PrimitiveStyle::with_fill(shape_color_for(
             state,
             FrontPanelKey::Left,
+            theme,
         )))
         .draw(canvas)
         .ok();
@@ -788,6 +1009,7 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         .into_styled(PrimitiveStyle::with_fill(shape_color_for(
             state,
             FrontPanelKey::Right,
+            theme,
         )))
         .draw(canvas)
         .ok();
@@ -795,14 +1017,15 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         .into_styled(PrimitiveStyle::with_fill(shape_color_for(
             state,
             FrontPanelKey::Center,
+            theme,
         )))
         .draw(canvas)
         .ok();
-    draw_text_small(canvas, "U", 39, 15, COLOR_BG);
-    draw_text_small(canvas, "D", 39, 34, COLOR_BG);
-    draw_text_small(canvas, "L", 17, 24, COLOR_BG);
-    draw_text_small(canvas, "R", 61, 24, COLOR_BG);
-    draw_text_small(canvas, "OK", 34, 24, COLOR_BG);
+    draw_text_small(canvas, "U", 39, 15, theme.background);
+    draw_text_small(canvas, "D", 39, 34, theme.background);
+    draw_text_small(canvas, "L", 17, 24, theme.background);
+    draw_text_small(canvas, "R", 61, 24, theme.background);
+    draw_text_small(canvas, "OK", 34, 24, theme.background);
 
     draw_text_small(
         canvas,
@@ -813,7 +1036,7 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
             .unwrap_or("---"),
         84,
         32,
-        COLOR_WARNING,
+        theme.warning,
     );
     draw_text_small(
         canvas,
@@ -824,7 +1047,7 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
             .unwrap_or("---"),
         112,
         32,
-        COLOR_TEXT,
+        theme.text,
     );
     draw_text_small(
         canvas,
@@ -835,7 +1058,7 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
             .unwrap_or("IDLE"),
         134,
         32,
-        gesture_color(state.key_test.last_gesture),
+        gesture_color(state.key_test.last_gesture, theme),
     );
 
     draw_text_small(
@@ -853,7 +1076,7 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         },
         84,
         41,
-        COLOR_MUTED,
+        theme.muted,
     );
 }
 
@@ -861,6 +1084,7 @@ fn draw_dashboard(
     canvas: &mut DisplayCanvas,
     state: &FrontPanelUiState,
     palette: &TemperaturePalette,
+    theme: &DashboardTheme,
 ) {
     let initializing_presentation = matches!(
         state.dashboard_presentation,
@@ -868,7 +1092,7 @@ fn draw_dashboard(
     );
     let eeprom_restore = state.dashboard_presentation == DashboardPresentationState::EepromRestore;
     let (display_text, fractional_digit, value_color) = if initializing_presentation {
-        ("---".try_into().unwrap(), '-', COLOR_MUTED)
+        ("---".try_into().unwrap(), '-', theme.muted)
     } else {
         let (display_text, fractional_digit) = deci_c_to_parts(state.current_temp_deci_c);
         (
@@ -883,67 +1107,84 @@ fn draw_dashboard(
         i16_to_text(state.target_temp_c)
     };
     let digits_width = measure_seven_segment_text(&display_text);
-    let digits_right_edge = 57;
+    let digits_right_edge = 55;
     let digits_x = digits_right_edge - digits_width;
 
-    fill_rect(canvas, 4, 4, 72, 36, COLOR_PANEL_STRONG);
-    draw_seven_segment_text(canvas, &display_text, digits_x, 8, value_color);
-    draw_text_mid(canvas, digit_char_text(fractional_digit), 66, 8, COLOR_TEXT);
-    fill_rect(canvas, 60, 16, 2, 2, COLOR_TEXT);
-    draw_bitmap_rows(canvas, &CELSIUS_UNIT_BITMAP, 60, 24, COLOR_TEXT);
+    draw_text_small(canvas, "TEMP", 4, 3, theme.muted);
+    draw_seven_segment_text(canvas, &display_text, digits_x, 11, value_color);
+    draw_text_mid(
+        canvas,
+        digit_char_text(fractional_digit),
+        64,
+        11,
+        theme.text,
+    );
+    fill_rect(canvas, 58, 19, 2, 2, theme.text);
+    draw_bitmap_rows(canvas, &CELSIUS_UNIT_BITMAP, 58, 27, theme.text);
+    fill_rect(canvas, 78, 4, 1, 36, theme.divider);
 
-    fill_rect(canvas, 78, 4, 78, 36, COLOR_PANEL);
     if state.dashboard_presentation == DashboardPresentationState::InitialRtdFault {
-        draw_status_line(canvas, 7, "WARN", "SENSOR", COLOR_WARNING);
+        draw_dashboard_status_line(canvas, 4, "WARN", "SENSOR", theme.warning, theme.warning);
     } else if eeprom_restore {
-        draw_status_line(canvas, 7, "EEPROM", "RESTORE", COLOR_WARNING);
+        draw_dashboard_status_line(canvas, 4, "EEPROM", "RESTORE", theme.warning, theme.warning);
     } else if state.heater_lock_reason == Some(HeaterLockReason::PdContractUnavailable) {
-        draw_status_line(canvas, 7, "POWER", "WAIT", COLOR_WARNING);
+        draw_dashboard_status_line(canvas, 4, "POWER", "WAIT", theme.warning, theme.warning);
     } else if state.heater_lock_reason.is_some() && state.dashboard_warning_visible {
         let fault_label = match state.heater_lock_reason {
             Some(HeaterLockReason::SensorFault) => "SENSOR",
             _ => "OTEMP",
         };
-        draw_status_line(canvas, 7, "WARN", fault_label, COLOR_WARNING);
+        draw_dashboard_status_line(canvas, 4, "WARN", fault_label, theme.warning, theme.warning);
     } else {
-        draw_status_line(canvas, 7, "SET", &set_text, COLOR_WARNING);
+        draw_dashboard_status_line(canvas, 4, "SET", &set_text, theme.muted, theme.setpoint);
     }
-    draw_text_mid(canvas, "PPS", 80, 18, COLOR_CYAN);
     if !initializing_presentation && !eeprom_restore && state.manual_pps_enabled {
-        draw_text_small(canvas, "*", 103, 15, COLOR_CYAN);
+        draw_text_small(canvas, "*", 107, 15, theme.info);
     }
     if initializing_presentation || eeprom_restore {
-        draw_text_mid_right(canvas, "---", 154, 18, COLOR_CYAN);
+        draw_dashboard_status_line(canvas, 17, "PPS", "---", theme.muted, theme.info);
     } else {
         let pps_numeric = pd_voltage_content_text(state.pd_contract_mv);
-        draw_text_mid_right(canvas, &pps_numeric, 147, 18, COLOR_CYAN);
-        draw_text_mid_right(canvas, "V", 154, 18, COLOR_CYAN);
+        let mut pps_value = heapless::String::<8>::new();
+        let _ = pps_value.push_str(&pps_numeric);
+        let _ = pps_value.push('V');
+        draw_dashboard_status_line(canvas, 17, "PPS", &pps_value, theme.muted, theme.info);
     }
-    draw_status_line(
+    draw_dashboard_status_line(
         canvas,
-        29,
+        30,
         "FAN",
         if initializing_presentation || eeprom_restore {
             "---"
         } else {
             state.fan_display_state.label()
         },
+        theme.muted,
         if initializing_presentation || eeprom_restore {
-            COLOR_MUTED
+            theme.muted
         } else {
             match state.fan_display_state {
-                super::FanDisplayState::Off => COLOR_DISABLED,
-                super::FanDisplayState::Auto => COLOR_CYAN,
-                super::FanDisplayState::Run => COLOR_SUCCESS,
-                super::FanDisplayState::Safe => COLOR_WARNING,
+                super::FanDisplayState::Off => theme.disabled,
+                super::FanDisplayState::Auto => theme.info,
+                super::FanDisplayState::Run => theme.success,
+                super::FanDisplayState::Safe => theme.warning,
             }
         },
     );
 
-    fill_rect(canvas, 4, 42, 152, 5, COLOR_PANEL);
+    fill_rect(canvas, 4, 41, 152, 1, theme.divider);
+    draw_text_small(canvas, "HEAT", 4, 43, theme.muted);
+    let output_text = percent_to_text(state.heater_output_percent);
+    let output_color = if state.heater_output_percent == 0 {
+        theme.muted
+    } else {
+        theme.heater_fill
+    };
+    draw_text_small(canvas, &output_text, 22, 43, output_color);
+    fill_rect(canvas, 42, 44, 114, 2, theme.heater_track);
     let heater_fill_width = heater_bar_fill_width(state.heater_output_percent);
     if heater_fill_width > 0 {
-        fill_rect(canvas, 6, 43, heater_fill_width, 3, COLOR_ACCENT);
+        fill_rect(canvas, 42, 44, heater_fill_width, 2, theme.heater_fill);
     }
 }
 
@@ -953,20 +1194,20 @@ fn heater_bar_fill_width(output_percent: u8) -> u32 {
         return 0;
     }
 
-    (13 + ((output_percent * 148) / 100)).min(148)
+    (output_percent * 114) / 100
 }
 
-fn draw_menu(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
-    fill_rect(canvas, 4, 4, 152, 24, COLOR_PANEL_STRONG);
-    fill_rect(canvas, 4, 30, 152, 16, COLOR_PANEL);
+fn draw_menu(canvas: &mut DisplayCanvas, state: &FrontPanelUiState, theme: &FrontPanelTheme) {
+    fill_rect(canvas, 4, 4, 152, 24, theme.panel_strong);
+    fill_rect(canvas, 4, 30, 152, 16, theme.panel);
 
     for (index, item) in FrontPanelMenuItem::ALL.iter().enumerate() {
         let x = 6 + index as i32 * 38;
         if index > 0 {
-            fill_rect(canvas, x - 2, 8, 1, 16, COLOR_BORDER);
+            fill_rect(canvas, x - 2, 8, 1, 16, theme.border);
         }
         if *item == state.selected_menu_item {
-            fill_rect(canvas, x + 4, 6, 26, 20, COLOR_ACCENT);
+            fill_rect(canvas, x + 4, 6, 26, 20, theme.accent);
         }
         draw_bitmap_rows(
             canvas,
@@ -974,9 +1215,9 @@ fn draw_menu(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
             x + 9,
             8,
             if *item == state.selected_menu_item {
-                COLOR_BG
+                theme.background
             } else {
-                COLOR_TEXT
+                theme.text
             },
         );
     }
@@ -985,14 +1226,14 @@ fn draw_menu(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         menu_icon_rows(state.selected_menu_item),
         8,
         30,
-        COLOR_WARNING,
+        theme.warning,
     );
     draw_text_mid_center(
         canvas,
         menu_footer_title(state.selected_menu_item),
         80,
         34,
-        COLOR_TEXT,
+        theme.text,
     );
 }
 
@@ -1000,16 +1241,17 @@ fn draw_preset_temp(
     canvas: &mut DisplayCanvas,
     state: &FrontPanelUiState,
     palette: &TemperaturePalette,
+    theme: &FrontPanelTheme,
 ) {
     const SLOT_LABELS: [&str; 10] = ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10"];
 
     for (index, label) in SLOT_LABELS.iter().enumerate().take(state.presets_c.len()) {
         let color = if index == state.selected_preset_slot {
-            COLOR_ACCENT
+            theme.accent
         } else if state.presets_c[index].is_some() {
-            COLOR_TEXT
+            theme.text
         } else {
-            COLOR_DISABLED
+            theme.disabled
         };
         let x = 2 + index as i32 * 16;
         draw_text_small(canvas, label, x, 2, color);
@@ -1020,11 +1262,11 @@ fn draw_preset_temp(
     let digit_color = state
         .selected_preset()
         .map(|value| temperature_color_with_palette(value, palette))
-        .unwrap_or(COLOR_DISABLED);
+        .unwrap_or(theme.disabled);
     let unit_color = if state.selected_preset().is_some() {
-        COLOR_TEXT
+        theme.text
     } else {
-        COLOR_DISABLED
+        theme.disabled
     };
     let digits_width = if display.is_empty() {
         0
@@ -1042,28 +1284,32 @@ fn draw_preset_temp(
     );
 }
 
-fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
+fn draw_active_cooling(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    theme: &FrontPanelTheme,
+) {
     draw_bitmap_text(
         canvas,
         "FAN CTRL",
         6,
         1,
-        COLOR_TEXT,
+        theme.text,
         BitmapFont::ControlTitle,
         1,
         BitmapAlign::Left,
     );
-    fill_rect(canvas, 4, 15, 152, 1, COLOR_BORDER);
+    fill_rect(canvas, 4, 15, 152, 1, theme.border);
 
     let post_selected = state.fan_settings_row == 0;
     let heat_selected = state.fan_settings_row == 1;
     if post_selected {
-        fill_rect(canvas, 4, 17, 152, 10, COLOR_PANEL_STRONG);
-        fill_rect(canvas, 4, 17, 2, 10, COLOR_ACCENT);
+        fill_rect(canvas, 4, 17, 152, 10, theme.panel_strong);
+        fill_rect(canvas, 4, 17, 2, 10, theme.accent);
     }
     if heat_selected {
-        fill_rect(canvas, 4, 28, 152, 10, COLOR_PANEL_STRONG);
-        fill_rect(canvas, 4, 28, 2, 10, COLOR_ACCENT);
+        fill_rect(canvas, 4, 28, 152, 10, theme.panel_strong);
+        fill_rect(canvas, 4, 28, 2, 10, theme.accent);
     }
 
     draw_bitmap_text(
@@ -1072,9 +1318,9 @@ fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         8,
         17,
         if post_selected {
-            COLOR_TEXT
+            theme.text
         } else {
-            COLOR_MUTED
+            theme.muted
         },
         BitmapFont::ControlLabel,
         1,
@@ -1086,9 +1332,9 @@ fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         154,
         17,
         if post_selected {
-            COLOR_SUCCESS
+            theme.success
         } else {
-            COLOR_TEXT
+            theme.text
         },
         BitmapFont::ControlLabel,
         1,
@@ -1100,9 +1346,9 @@ fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         8,
         28,
         if heat_selected {
-            COLOR_TEXT
+            theme.text
         } else {
-            COLOR_MUTED
+            theme.muted
         },
         BitmapFont::ControlLabel,
         1,
@@ -1114,9 +1360,9 @@ fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         154,
         28,
         if heat_selected {
-            COLOR_SUCCESS
+            theme.success
         } else {
-            COLOR_TEXT
+            theme.text
         },
         BitmapFont::ControlLabel,
         1,
@@ -1134,9 +1380,9 @@ fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         8,
         40,
         if matches!(state.fan_display_state, super::FanDisplayState::Safe) {
-            COLOR_WARNING
+            theme.warning
         } else {
-            COLOR_CYAN
+            theme.info
         },
         BitmapFont::ControlLabel,
         1,
@@ -1144,11 +1390,11 @@ fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     );
 }
 
-fn draw_wifi_info(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
+fn draw_wifi_info(canvas: &mut DisplayCanvas, state: &FrontPanelUiState, theme: &FrontPanelTheme) {
     let mut ssid = heapless::String::<40>::new();
     let _ = ssid.push_str("SSID ");
     let _ = ssid.push_str(state.network.ssid.as_deref().unwrap_or("--"));
-    draw_text_mid(canvas, &ssid, 8, 6, COLOR_TEXT);
+    draw_text_mid(canvas, &ssid, 8, 6, theme.text);
 
     let mut connection = heapless::String::<56>::new();
     match state.network.state {
@@ -1181,7 +1427,7 @@ fn draw_wifi_info(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
             let _ = connection.push_str("CONNECT TIMEOUT");
         }
     }
-    draw_text_mid(canvas, &connection, 8, 19, COLOR_CYAN);
+    draw_text_mid(canvas, &connection, 8, 19, theme.info);
     let mut pairing = heapless::String::<16>::new();
     let _ = pairing.push_str("PAIR ");
     match state.wifi_pairing_code {
@@ -1194,13 +1440,13 @@ fn draw_wifi_info(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
             let _ = pairing.push_str("----");
         }
     }
-    draw_text_mid(canvas, &pairing, 8, 32, COLOR_WARNING);
+    draw_text_mid(canvas, &pairing, 8, 32, theme.warning);
 }
 
-fn draw_device_info(canvas: &mut DisplayCanvas) {
-    draw_text_mid(canvas, "BOARD FP-S3", 8, 6, COLOR_TEXT);
-    draw_text_mid(canvas, "FW V0.3.0", 8, 19, COLOR_WARNING);
-    draw_text_mid(canvas, "ID S3-001", 8, 32, COLOR_CYAN);
+fn draw_device_info(canvas: &mut DisplayCanvas, theme: &FrontPanelTheme) {
+    draw_text_mid(canvas, "BOARD FP-S3", 8, 6, theme.text);
+    draw_text_mid(canvas, "FW V0.3.0", 8, 19, theme.warning);
+    draw_text_mid(canvas, "ID S3-001", 8, 32, theme.info);
 }
 
 #[cfg(test)]
@@ -1217,8 +1463,38 @@ mod tests {
 
         render_frontpanel_ui(&mut canvas, &state);
 
-        assert!(canvas.pixels().contains(&COLOR_WARNING));
-        assert!(canvas.pixels().contains(&COLOR_TEXT));
+        assert!(canvas.pixels().contains(&LIGHT_FRONTPANEL_THEME.warning));
+        assert!(canvas.pixels().contains(&LIGHT_FRONTPANEL_THEME.text));
+    }
+
+    #[test]
+    fn light_theme_renders_non_dashboard_screens_on_a_white_instrument_face() {
+        let mut canvas = DisplayCanvas::new();
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.route = FrontPanelRoute::Menu;
+
+        render_frontpanel_ui_with_theme(
+            &mut canvas,
+            &state,
+            DashboardThemeId::Light,
+            &DEFAULT_TEMPERATURE_PALETTE,
+        );
+
+        assert!(canvas.pixels().contains(&LIGHT_FRONTPANEL_THEME.background));
+        assert!(canvas.pixels().contains(&LIGHT_FRONTPANEL_THEME.panel));
+        assert!(canvas.pixels().contains(&LIGHT_FRONTPANEL_THEME.accent));
+        assert!(canvas.pixels().contains(&LIGHT_FRONTPANEL_THEME.text));
+    }
+
+    #[test]
+    fn light_theme_uses_a_dark_cold_temperature_band() {
+        let palette =
+            dashboard_temperature_palette(DashboardThemeId::Light, &DEFAULT_TEMPERATURE_PALETTE);
+
+        assert_eq!(
+            temperature_color_with_palette(25, palette),
+            LIGHT_TEMPERATURE_PALETTE.colors[0]
+        );
     }
 
     #[test]
@@ -1229,7 +1505,7 @@ mod tests {
 
         render_frontpanel_ui(&mut canvas, &state);
 
-        assert!(canvas.pixels().contains(&COLOR_SUCCESS));
+        assert!(canvas.pixels().contains(&LIGHT_FRONTPANEL_THEME.success));
         assert!(!state.persistence_locked());
     }
 
@@ -1247,7 +1523,7 @@ mod tests {
         state.dashboard_presentation = DashboardPresentationState::Ready;
         render_frontpanel_ui(&mut ready_canvas, &state);
         assert_ne!(canvas.pixels(), ready_canvas.pixels());
-        assert!(canvas.pixels().contains(&COLOR_MUTED));
+        assert!(canvas.pixels().contains(&LIGHT_DASHBOARD_THEME.muted));
     }
 
     #[test]
@@ -1258,8 +1534,8 @@ mod tests {
 
         render_frontpanel_ui(&mut canvas, &state);
 
-        assert!(canvas.pixels().contains(&COLOR_WARNING));
-        assert!(canvas.pixels().contains(&COLOR_MUTED));
+        assert!(canvas.pixels().contains(&LIGHT_DASHBOARD_THEME.warning));
+        assert!(canvas.pixels().contains(&LIGHT_DASHBOARD_THEME.muted));
     }
 
     #[test]
@@ -1380,11 +1656,18 @@ mod tests {
     #[test]
     fn heater_bar_fill_width_tracks_output_percent() {
         assert_eq!(heater_bar_fill_width(0), 0);
-        assert_eq!(heater_bar_fill_width(25), 50);
-        assert_eq!(heater_bar_fill_width(50), 87);
-        assert_eq!(heater_bar_fill_width(64), 107);
-        assert_eq!(heater_bar_fill_width(100), 148);
-        assert_eq!(heater_bar_fill_width(255), 148);
+        assert_eq!(heater_bar_fill_width(25), 28);
+        assert_eq!(heater_bar_fill_width(50), 57);
+        assert_eq!(heater_bar_fill_width(64), 72);
+        assert_eq!(heater_bar_fill_width(100), 114);
+        assert_eq!(heater_bar_fill_width(255), 114);
+    }
+
+    #[test]
+    fn percent_text_clamps_to_the_displayable_range() {
+        assert_eq!(percent_to_text(0), "0%");
+        assert_eq!(percent_to_text(64), "64%");
+        assert_eq!(percent_to_text(255), "100%");
     }
 
     #[test]
@@ -1410,13 +1693,14 @@ mod tests {
     }
 
     #[test]
-    fn frontpanel_fonts_keep_legacy_sizes_outside_fan_control() {
+    fn frontpanel_fonts_keep_expected_native_sizes() {
         assert_eq!(BitmapFont::Small.width(), 3);
         assert_eq!(BitmapFont::Mid.width(), 3);
         assert_eq!(BitmapFont::ControlLabel.width(), 6);
         assert_eq!(BitmapFont::ControlTitle.width(), 8);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::Small, 1), 11);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::Mid, 1), 22);
+        assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlLabel, 0), 18);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlLabel, 1), 20);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlTitle, 1), 26);
     }

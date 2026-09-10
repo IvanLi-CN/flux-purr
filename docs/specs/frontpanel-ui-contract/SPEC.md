@@ -66,7 +66,7 @@
 
 ### SHOULD
 
-- 颜色使用深色底 + 白色低温起点 + 蓝/青/绿渐变中段 + 橙/红/过温紫高温尾端，兼顾高对比、工业感与过温可读性。
+- 前面板默认使用亮色仪表主题，并为所有已实现页面提供完整的深色主题；两套主题均须保持温度、设定值、PPS、风扇、故障与 heater 输出的语义色和可读层级。
 - 文案长度应严格控制，避免超过 8 个大写/数字字符的行级标签。
 - 页面底部保留轻量按键提示，帮助后续固件移植时维持交互一致性。
 
@@ -78,44 +78,45 @@
 
 ## 设计令牌（Design Tokens）
 
-### Palette
+### Front panel palette
 
-| Token | Value | Usage |
-| --- | --- | --- |
-| `bg` | `#08111F` | 全局屏幕背景 |
-| `panel` | `#122036` | 次级信息面 |
-| `panelStrong` | `#1B2A43` | 主信息面 / 顶部图标栏 |
-| `border` | `#2A3D5D` | 内部分隔线 |
-| `text` | `#F7FBFF` | 启用文字 / 常规图标 |
-| `muted` | `#8EA3C6` | 次级说明文字 |
-| `disabled` | `#5B6C88` | 未启用状态 |
-| `accent` | `#FF9A3C` | 当前选中项 / 主题强调 |
-| `success` | `#40D9A1` | 风扇启用 / 正常状态 |
-| `warning` | `#FFD166` | 设定温度 / 警示信息 |
-| `cyan` | `#63D8FF` | 协议 / 联网 / 信息状态 |
+Dashboard 使用单一仪表面，不以深浅色卡片切割温度区与状态栈。默认亮色主题用于设备运行；host-side preview 为所有已实现页面提供白色仪表面与深色仪表面，供两种主题的可读性审阅。
+
+| Token | Dark | Light | Usage |
+| --- | --- | --- | --- |
+| `bg` | `#081421` | `#F7F7F7` | 单一仪表背景 |
+| `divider` | `#31415A` | `#CED7E6` | 温度区、状态栈与功率区分隔线 |
+| `text` | `#E6EFF7` | `#102031` | 温度单位与主要文字 |
+| `muted` | `#8CA2B5` | `#52657B` | `TEMP`、`SET`、`PPS`、`FAN`、`HEAT` 标签 |
+| `setpoint` | `#FFD263` | `#9C5D00` | 正常设定温度 |
+| `info` | `#7BD2FF` | `#0069A5` | PPS 数值与 `AUTO` 风扇状态 |
+| `success` | `#6BE3B5` | `#007952` | `RUN` 风扇状态 |
+| `warning` | `#FF7184` | `#B52019` | `WARN`、`POWER/WAIT` 与安全状态 |
+| `heater` | `#F79E08` | `#B55108` | heater 输出百分比与进度条 |
 
 ### Typography
 
 | Role | Spec | Usage |
 | --- | --- | --- |
 | Dashboard Numerals | 7-segment digits, `15×26` logical px per glyph | Dashboard / Preset 温度主值 |
+| Dashboard status values | Existing `3×5` bitmap glyphs at `2×` | `SET`、`PPS`、`FAN` 的数值与状态；保持与既有 UI 一致的字形 |
 | UI Labels | Existing screens retain their current bitmap glyphs; `FAN CTRL` uses `6×10` labels / `8×13` title | 菜单标题、状态标签、`M1~M10`；风扇策略编辑页使用高可读字号 |
 | Temp Unit | stacked bitmap `℃` icon | 所有温度主值单位 |
 
 ### Temperature states
 
-- 默认 8 段颜色：`#F7FBFF` → `#427DFF` → `#3AEFF7` → `#52F36B` → `#C5EF4A` → `#FFB23A` → `#FF5542` → `#FF4DA5`
+- 深色主题温度颜色从冰白、蓝、青、绿、黄绿、金黄、橙到粉紫；亮色主题从深蓝、蓝、青、绿、橄榄、棕金、棕橙到紫。
 - 默认 8 个阈值变量：`[0, 40, 60, 100, 150, 200, 250, 300]`
-- 默认分段语义：`<40 白`、`40–59 蓝`、`60–99 青`、`100–149 绿`、`150–199 黄绿`、`200–249 橙`、`250–299 红`、`300+ 过温紫`。
+- 默认分段语义：`<40 冷`、`40–59 蓝`、`60–99 青`、`100–149 绿`、`150–199 黄绿`、`200–249 金黄`、`250–299 橙`、`300+ 过温紫`。
 - 阈值后续允许在设置界面调整，但颜色映射顺序固定不变。
 
 ### Core flows
 
 - `Dashboard`
-  - 左侧为大温度区，显示当前实时温度。
-  - 右侧为紧凑状态栈，至少承载 `SET` / `PPS` / `FAN` 三行；手动 PPS 覆盖激活时第二行标签为 `PPS*`。
-  - 过温告警激活时，`SET` 行切换为 `WARN / OTEMP` 并闪烁；`FAN` 行仍保持 `OFF/AUTO/RUN` 三态显示。
-  - 底部细条用于表达 heater 实际输出强度。
+  - 以单一背景构成仪表面：左侧为标有 `TEMP` 的大温度区，右侧用一条竖向分隔线划出紧凑状态栈。
+  - 状态栈的 `SET` / `PPS` / `FAN` 标签使用小号 muted 字，数值使用既有 `3×5` 字形的 `2×` 语义色渲染；手动 PPS 覆盖激活时第二行保留 `PPS*` 标记与当前电压数值。
+  - 正常 `SET` 使用 setpoint 色，不得与 `WARN`、`POWER/WAIT` 或安全状态共用告警色；告警状态切换为 `WARN / OTEMP`，`FAN` 行仍保持 `OFF/AUTO/RUN/SAFE` 可读。
+  - 底部必须显示 `HEAT <n>%` 与 114px 线性功率条；输出为 `0%` 时保留轨道，非零输出按真实百分比填充。
   - 不显示当前命中的 `MAN / Mx` 或其他 preset 标签。
 - `Menu L1`
   - 采用横向图标菜单，四个入口按一行切换。
@@ -157,7 +158,7 @@ None
 
 ## 验收标准（Acceptance Criteria）
 
-- Given `Dashboard` 画面，When 在 1× 逻辑尺寸审视屏幕，Then 目标温度仍是最显著元素，且 heater / fan 状态均可读。
+- Given `Dashboard` 画面，When 在 1× 逻辑尺寸审视屏幕，Then 实时温度是最显著元素，设定温度是状态栈中最显著值，且 heater / fan 状态均可读。
 - Given `Dashboard` 画面且手动 PPS 覆盖激活，When 审视右侧状态栈，Then PPS 行必须显示 `PPS*` 标签并保留当前电压数值。
 - Given `Menu L1`，When 在同屏展示 4 个菜单项，Then 所有菜单项完整可见且选中项不与其他行混淆。
 - Given `Preset Temp` 页面，When 观察屏幕，Then 目标温度为单一主任务，不出现第二个竞争主视觉块。
@@ -214,7 +215,13 @@ None
 
 #### Dashboard
 
-![Front panel home](./assets/frontpanel-home.png)
+默认亮色主题：
+
+![Front panel dashboard light](./assets/dashboard-light.zoom.png)
+
+深色主题：
+
+![Front panel dashboard dark](./assets/dashboard-dark.zoom.png)
 
 #### EEPROM incompatible
 
