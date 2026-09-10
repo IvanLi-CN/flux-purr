@@ -244,6 +244,24 @@ None
 
 ![Front panel dashboard dark](./assets/dashboard-dark.zoom.png)
 
+#### Other implemented screens
+
+默认亮色主题（从左到右、从上到下依次为按键测试、设置、系统与故障状态）：
+
+![Front panel light theme screens](./assets/frontpanel-light-key-tests.png)
+
+![Front panel light theme settings](./assets/frontpanel-light-settings.png)
+
+![Front panel light theme system states](./assets/frontpanel-light-system.png)
+
+深色主题：
+
+![Front panel dark theme key tests](./assets/frontpanel-dark-key-tests.png)
+
+![Front panel dark theme settings](./assets/frontpanel-dark-settings.png)
+
+![Front panel dark theme system states](./assets/frontpanel-dark-system.png)
+
 #### EEPROM incompatible
 
 该画面由固件 `frontpanel_preview` 直接复用设备 renderer、字体与 `DisplayCanvas` 生成；同目录同时保存 `160×50 RGB565LE` logical framebuffer 与 GC9D01 Landscape panel framebuffer。
