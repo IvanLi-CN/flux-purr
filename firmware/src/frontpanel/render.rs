@@ -366,9 +366,9 @@ fn dashboard_temperature_palette(
         resolved.colors[0] = LIGHT_DASHBOARD_THEME.text;
         for color in resolved.colors.iter_mut().skip(1) {
             *color = Rgb565::new(
-                (u16::from(color.r()) * 3 / 4) as u8,
-                (u16::from(color.g()) * 3 / 4) as u8,
-                (u16::from(color.b()) * 3 / 4) as u8,
+                (u16::from(color.r()) / 3) as u8,
+                (u16::from(color.g()) / 3) as u8,
+                (u16::from(color.b()) / 3) as u8,
             );
         }
     }
@@ -401,14 +401,20 @@ pub fn render_frontpanel_ui_with_theme(
     let theme = frontpanel_theme(theme_id);
     let palette = dashboard_temperature_palette(theme_id, palette);
 
-    canvas.clear(theme.background).ok();
-
-    if state.persistence_fault_attention_pending
+    let dashboard_palette_theme = dashboard_theme(theme_id);
+    let uses_persistence_fault_page = state.persistence_fault_attention_pending
         && !matches!(
             state.dashboard_presentation,
             DashboardPresentationState::EepromRestore | DashboardPresentationState::InitialRtdFault
-        )
-    {
+        );
+    let background = if state.route == FrontPanelRoute::Dashboard && !uses_persistence_fault_page {
+        dashboard_palette_theme.background
+    } else {
+        theme.background
+    };
+    canvas.clear(background).ok();
+
+    if uses_persistence_fault_page {
         draw_eeprom_status(
             canvas,
             state.eeprom_data_incompatible,
@@ -1563,7 +1569,7 @@ mod tests {
         );
         assert_eq!(
             temperature_color_with_palette(50, &palette),
-            Rgb565::new(5, 26, 23)
+            Rgb565::new(2, 11, 10)
         );
     }
 
@@ -1581,6 +1587,58 @@ mod tests {
             assert!(color.g() <= 45);
             assert!(color.b() <= 24);
         }
+    }
+
+    #[test]
+    fn light_theme_keeps_all_custom_temperature_palettes_within_dark_contrast_bounds() {
+        let palette_ids = [
+            TemperaturePaletteId::BalancedWhiteLow,
+            TemperaturePaletteId::GlacierWhiteLow,
+            TemperaturePaletteId::AuroraWhiteLow,
+            TemperaturePaletteId::MarineWhiteLow,
+            TemperaturePaletteId::IndustrialWhiteLow,
+            TemperaturePaletteId::EmberWhiteLow,
+        ];
+
+        for palette_id in palette_ids {
+            let palette = dashboard_temperature_palette(
+                DashboardThemeId::Light,
+                temperature_palette(palette_id),
+            );
+            for color in palette.colors.iter().skip(1) {
+                assert!(color.r() <= 10, "red channel too bright for {palette_id:?}");
+                assert!(
+                    color.g() <= 20,
+                    "green channel too bright for {palette_id:?}"
+                );
+                assert!(
+                    color.b() <= 10,
+                    "blue channel too bright for {palette_id:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unified_dashboard_renderer_matches_dashboard_only_background() {
+        let state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let mut routed_canvas = DisplayCanvas::new();
+        let mut dashboard_canvas = DisplayCanvas::new();
+
+        render_frontpanel_ui_with_theme(
+            &mut routed_canvas,
+            &state,
+            DashboardThemeId::Light,
+            &DEFAULT_TEMPERATURE_PALETTE,
+        );
+        render_frontpanel_dashboard_with_theme(
+            &mut dashboard_canvas,
+            &state,
+            DashboardThemeId::Light,
+            &DEFAULT_TEMPERATURE_PALETTE,
+        );
+
+        assert_eq!(routed_canvas.pixels(), dashboard_canvas.pixels());
     }
 
     #[test]
