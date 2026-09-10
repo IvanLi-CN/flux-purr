@@ -206,6 +206,27 @@ None
 - 开放问题：后续是否需要加入中文字体或多语言切换，本轮暂不处理。
 - 假设（需主人确认）：当前样机的主要显示方向和 `160×50` 横屏布局一致。
 
+## Context and Scope
+
+本主题定义 Flux Purr `160×50` RGB565 前面板的 Dashboard、诊断页、设置页与双配色渲染契约。范围覆盖固件 host preview、设备默认主题和与这些页面绑定的视觉证据；真实 LCD 驱动时序与热控算法不在本主题内。
+
+## Requirements
+
+- `REQ-FP-001`: 前面板逻辑分辨率 MUST 固定为 `160×50`，并复用固件字体、位图与 RGB565 framebuffer 布局。
+- `REQ-FP-002`: 前面板 MUST 提供亮色和深色两套主题；亮色主题 MUST 是设备默认主题，深色主题 MUST 可通过显式主题参数渲染。
+- `REQ-FP-003`: Dashboard MUST 保持单一主温度值、`SET`/`PPS`/`FAN` 状态栈和 heater 输出语义层级。
+- `REQ-FP-004`: 所有已实现非 Dashboard 页面 MUST 在两套主题下保持相同布局、字体和状态文案，并维持白底文字可读性。
+
+## Verification
+
+- `VER-FP-001`: 固件单元测试与 preview 工具测试通过，covers: REQ-FP-001, REQ-FP-003。
+- `VER-FP-002`: 默认 framebuffer 与显式 `--theme light` framebuffer 像素完全一致，显式 `--theme dark` 输出不同，covers: REQ-FP-002。
+- `VER-FP-003`: `frontpanel_preview` 为全部已实现页面生成两套 RGB565 帧并通过 owner-facing PNG 快照检查，covers: REQ-FP-004。
+
+## Related ADRs
+
+None
+
 ## Visual Evidence
 
 - 证据来源：固件 `frontpanel_preview` 的 `firmware_preview` renderer（`160×50` 逻辑像素，nearest-neighbor 放大展示）。
