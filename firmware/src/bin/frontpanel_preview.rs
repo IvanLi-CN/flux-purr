@@ -15,8 +15,8 @@ use flux_purr_firmware::{
         FrontPanelRawState, FrontPanelRoute, FrontPanelRuntimeMode, FrontPanelUiState,
         HeaterLockReason, KeyEvent, KeyGesture, RawFrontPanelKey,
         render::{
-            DashboardThemeId, TemperaturePaletteId, render_frontpanel_ui,
-            render_frontpanel_ui_with_theme, temperature_palette,
+            DashboardThemeId, TemperaturePaletteId, render_frontpanel_ui_with_theme,
+            temperature_palette,
         },
     },
 };
@@ -527,6 +527,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flux_purr_firmware::frontpanel::render::render_frontpanel_ui;
 
     fn render_frame(
         preset: PreviewPreset,
