@@ -15,8 +15,8 @@ use flux_purr_firmware::{
         FrontPanelRawState, FrontPanelRoute, FrontPanelRuntimeMode, FrontPanelUiState,
         HeaterLockReason, KeyEvent, KeyGesture, RawFrontPanelKey,
         render::{
-            DashboardThemeId, TemperaturePaletteId, render_frontpanel_ui_with_theme,
-            temperature_palette,
+            DashboardThemeId, TemperaturePaletteId, render_frontpanel_ui,
+            render_frontpanel_ui_with_theme, temperature_palette,
         },
     },
 };
@@ -528,6 +528,29 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    fn render_frame(
+        preset: PreviewPreset,
+        theme: DashboardThemeId,
+    ) -> (
+        [u8; DISPLAY_FRAMEBUFFER_BYTES],
+        [u8; DISPLAY_FRAMEBUFFER_BYTES],
+    ) {
+        let mut canvas = DisplayCanvas::new();
+        let state = preset.build_state(None);
+        render_frontpanel_ui_with_theme(
+            &mut canvas,
+            &state,
+            theme,
+            temperature_palette(TemperaturePaletteId::Current),
+        );
+
+        let mut logical = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
+        canvas.write_rgb565_le_bytes(&mut logical);
+        let mut panel = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
+        canvas.write_panel_rgb565_be_bytes(&mut panel);
+        (logical, panel)
+    }
+
     #[test]
     fn panel_output_path_tracks_requested_filename() {
         assert_eq!(
@@ -598,5 +621,49 @@ mod tests {
         .expect("light Dashboard theme should parse");
 
         assert_eq!(parsed.dashboard_theme, DashboardThemeId::Light);
+    }
+
+    #[test]
+    fn default_dashboard_matches_explicit_light_and_differs_from_dark() {
+        let state = PreviewPreset::Dashboard.build_state(None);
+        let mut default_canvas = DisplayCanvas::new();
+        render_frontpanel_ui(&mut default_canvas, &state);
+
+        let (light, light_panel) = render_frame(PreviewPreset::Dashboard, DashboardThemeId::Light);
+        let (dark, dark_panel) = render_frame(PreviewPreset::Dashboard, DashboardThemeId::Dark);
+
+        let mut default_bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
+        default_canvas.write_rgb565_le_bytes(&mut default_bytes);
+        assert_eq!(default_bytes, light);
+        assert_ne!(light, dark);
+        assert!(light_panel.iter().any(|byte| *byte != 0));
+        assert!(dark_panel.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn non_dashboard_presets_render_both_themes_and_panel_frames() {
+        let presets = [
+            PreviewPreset::KeyTestIdle,
+            PreviewPreset::KeyTestShort,
+            PreviewPreset::KeyTestDouble,
+            PreviewPreset::KeyTestLong,
+            PreviewPreset::Menu,
+            PreviewPreset::PresetTemp,
+            PreviewPreset::ActiveCooling,
+            PreviewPreset::WifiInfo,
+            PreviewPreset::DeviceInfo,
+            PreviewPreset::EepromDataIncompatible,
+            PreviewPreset::EepromPersistenceFault,
+            PreviewPreset::EepromPersistenceSaveFailed,
+            PreviewPreset::EepromPersistenceAcknowledged,
+        ];
+
+        for preset in presets {
+            let (light, light_panel) = render_frame(preset, DashboardThemeId::Light);
+            let (dark, dark_panel) = render_frame(preset, DashboardThemeId::Dark);
+            assert_ne!(light, dark, "{} should differ by theme", preset.slug());
+            assert!(light_panel.iter().any(|byte| *byte != 0));
+            assert!(dark_panel.iter().any(|byte| *byte != 0));
+        }
     }
 }
