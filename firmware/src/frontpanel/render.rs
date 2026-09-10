@@ -352,15 +352,21 @@ const fn frontpanel_theme(id: DashboardThemeId) -> &'static FrontPanelTheme {
 fn dashboard_temperature_palette(
     theme_id: DashboardThemeId,
     palette: &TemperaturePalette,
-) -> &TemperaturePalette {
-    if palette.id != TemperaturePaletteId::Current {
-        return palette;
+) -> TemperaturePalette {
+    if palette.id == TemperaturePaletteId::Current {
+        return match theme_id {
+            DashboardThemeId::Dark => DARK_DASHBOARD_TEMPERATURE_PALETTE,
+            DashboardThemeId::Light => LIGHT_TEMPERATURE_PALETTE,
+        };
     }
 
-    match theme_id {
-        DashboardThemeId::Dark => &DARK_DASHBOARD_TEMPERATURE_PALETTE,
-        DashboardThemeId::Light => &LIGHT_TEMPERATURE_PALETTE,
+    let mut resolved = *palette;
+    if theme_id == DashboardThemeId::Light {
+        // Custom white-low palettes use the dark-theme text color for their cold band.
+        // Keep their higher-temperature hues, but preserve contrast on the light face.
+        resolved.colors[0] = LIGHT_DASHBOARD_THEME.text;
     }
+    resolved
 }
 
 pub fn render_frontpanel_ui(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
@@ -409,10 +415,10 @@ pub fn render_frontpanel_ui_with_theme(
     match state.route {
         FrontPanelRoute::KeyTest => draw_key_test(canvas, state, theme),
         FrontPanelRoute::Dashboard => {
-            draw_dashboard(canvas, state, palette, dashboard_theme(theme_id))
+            draw_dashboard(canvas, state, &palette, dashboard_theme(theme_id))
         }
         FrontPanelRoute::Menu => draw_menu(canvas, state, theme),
-        FrontPanelRoute::PresetTemp => draw_preset_temp(canvas, state, palette, theme),
+        FrontPanelRoute::PresetTemp => draw_preset_temp(canvas, state, &palette, theme),
         FrontPanelRoute::ActiveCooling => draw_active_cooling(canvas, state, theme),
         FrontPanelRoute::WifiInfo => draw_wifi_info(canvas, state, theme),
         FrontPanelRoute::DeviceInfo => draw_device_info(canvas, theme),
@@ -429,7 +435,7 @@ pub fn render_frontpanel_dashboard_with_theme(
     let palette = dashboard_temperature_palette(theme_id, palette);
 
     canvas.clear(theme.background).ok();
-    draw_dashboard(canvas, state, palette, theme);
+    draw_dashboard(canvas, state, &palette, theme);
 }
 
 fn draw_eeprom_status(
@@ -1492,8 +1498,25 @@ mod tests {
             dashboard_temperature_palette(DashboardThemeId::Light, &DEFAULT_TEMPERATURE_PALETTE);
 
         assert_eq!(
-            temperature_color_with_palette(25, palette),
+            temperature_color_with_palette(25, &palette),
             LIGHT_TEMPERATURE_PALETTE.colors[0]
+        );
+    }
+
+    #[test]
+    fn light_theme_remaps_custom_cold_temperature_band_for_contrast() {
+        let palette = dashboard_temperature_palette(
+            DashboardThemeId::Light,
+            temperature_palette(TemperaturePaletteId::MarineWhiteLow),
+        );
+
+        assert_eq!(
+            temperature_color_with_palette(25, &palette),
+            LIGHT_DASHBOARD_THEME.text
+        );
+        assert_eq!(
+            temperature_color_with_palette(50, &palette),
+            WHITE_LOW_MARINE_PALETTE.colors[1]
         );
     }
 
