@@ -21,12 +21,12 @@
 - 冻结 `160×50` 前面板主界面与两级设置菜单的视觉和导航契约。
 - 为 `Dashboard`、`Key Test`、`Menu L1`、`Preset Temp`、`FAN CTRL`、`WiFi Info`、`Device Info` 提供确定性渲染源。
 - 约束屏幕网格、字体预算、颜色 token、状态文案和五向键导航映射。
-- 在 `web/` 中提供可截图的 1:1 预览实现，作为当前最稳定的 render truth source。
+- 以固件 host preview 的 RGB565 framebuffer 作为设备渲染真相源；`web/` 预览实现作为可截图的伴随展示面。
 - 输出一张界面设计规范图，明确配色、字体、温度分段与小屏布局规则。
 
 ### Non-goals
 
-- 不落地真实 LCD 驱动、framebuffer 管线或固件侧 draw API。
+- 不落地真实 LCD 驱动时序或硬件总线管线；固件 framebuffer 与 draw API 的 host preview 属于本主题范围。
 - 不扩展 HTTP / WebSocket 契约，也不新增设备遥测字段。
 - 不在本轮定义 heater PID 或 Wi‑Fi 配置写回逻辑；FAN CTRL 的多档策略显示与编辑以运行时 spec 为准。
 - 不处理多语言字体资产；本轮 on-device 文案默认只用短英文与缩写。
@@ -195,13 +195,13 @@ None
 
 ## 方案概述（Approach, high-level）
 
-- 使用浏览器侧的 `canvas` 作为最小稳定渲染器，把所有前面板画面统一约束到 `160×50` 逻辑像素。
+- 使用固件 host preview 作为最小稳定渲染器，把所有前面板画面统一约束到 `160×50` 逻辑像素并序列化为 RGB565；浏览器侧 `canvas` 只复现已冻结的视觉契约。
 - 主界面采用“左大温度 / 右侧状态栈”的强层级布局，确保小屏条件下先读主值、再读功率和系统状态。
 - 菜单页统一使用短词条和单任务二级页，减少主人后续把 Web 控制台思路误搬到前面板上的风险。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
-- 风险：浏览器字体渲染和未来固件字体栅格并非同一实现，最终落固件时仍需做像素级微调。
+- 风险：浏览器预览和固件字体栅格并非同一实现，Web 伴随面仍需以固件 host preview 的像素证据为准。
 - 风险：`WiFi Info` 与 `Device Info` 一旦字段变长，必须依赖缩写策略，否则会挤压布局。
 - 开放问题：后续是否需要加入中文字体或多语言切换，本轮暂不处理。
 - 假设（需主人确认）：当前样机的主要显示方向和 `160×50` 横屏布局一致。
@@ -221,7 +221,7 @@ None
 
 - `VER-FP-001`: 固件单元测试与 preview 工具测试通过，covers: REQ-FP-001, REQ-FP-003。
 - `VER-FP-002`: 默认 framebuffer 与显式 `--theme light` framebuffer 像素完全一致，显式 `--theme dark` 输出不同，covers: REQ-FP-002。
-- `VER-FP-003`: `frontpanel_preview` 为全部已实现页面生成两套 RGB565 帧并通过 owner-facing PNG 快照检查，covers: REQ-FP-004。
+- `VER-FP-003`: `frontpanel_preview` 的 host tests 为全部已实现页面验证两套逻辑/面板 RGB565 帧；owner-facing PNG 是由同一 renderer 生成并经视觉证据门禁人工复核的跟踪资产，covers: REQ-FP-004。
 
 ## Related ADRs
 
@@ -264,7 +264,7 @@ None
 
 #### EEPROM incompatible
 
-该画面由固件 `frontpanel_preview` 直接复用设备 renderer、字体与 `DisplayCanvas` 生成；同目录同时保存 `160×50 RGB565LE` logical framebuffer 与 GC9D01 Landscape panel framebuffer。
+该画面由固件 `frontpanel_preview` 直接复用设备 renderer、字体与 `DisplayCanvas` 生成，默认使用亮色主题；同目录同时保存 `160×50 RGB565LE` logical framebuffer 与 GC9D01 Landscape panel framebuffer。
 
 ![EEPROM incompatible fault screen](./assets/eeprom-data-incompatible/eeprom-data-incompatible.png)
 

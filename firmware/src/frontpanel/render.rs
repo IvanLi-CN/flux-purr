@@ -362,9 +362,15 @@ fn dashboard_temperature_palette(
 
     let mut resolved = *palette;
     if theme_id == DashboardThemeId::Light {
-        // Custom white-low palettes use the dark-theme text color for their cold band.
-        // Keep their higher-temperature hues, but preserve contrast on the light face.
+        // Preserve custom palette hues while lowering their luminance for the light face.
         resolved.colors[0] = LIGHT_DASHBOARD_THEME.text;
+        for color in resolved.colors.iter_mut().skip(1) {
+            *color = Rgb565::new(
+                (u16::from(color.r()) * 3 / 4) as u8,
+                (u16::from(color.g()) * 3 / 4) as u8,
+                (u16::from(color.b()) * 3 / 4) as u8,
+            );
+        }
     }
     resolved
 }
@@ -433,7 +439,23 @@ pub fn render_frontpanel_dashboard_with_theme(
 ) {
     let theme = dashboard_theme(theme_id);
     let palette = dashboard_temperature_palette(theme_id, palette);
+    let panel_theme = frontpanel_theme(theme_id);
 
+    if state.persistence_fault_attention_pending
+        && !matches!(
+            state.dashboard_presentation,
+            DashboardPresentationState::EepromRestore | DashboardPresentationState::InitialRtdFault
+        )
+    {
+        canvas.clear(panel_theme.background).ok();
+        draw_eeprom_status(
+            canvas,
+            state.eeprom_data_incompatible,
+            state.eeprom_required,
+            panel_theme,
+        );
+        return;
+    }
     canvas.clear(theme.background).ok();
     draw_dashboard(canvas, state, &palette, theme);
 }
@@ -769,17 +791,31 @@ fn draw_dashboard_status_line(
     label_color: Rgb565,
     value_color: Rgb565,
 ) {
-    draw_text_small(canvas, label, 84, y + 3, label_color);
+    let (label_x, value_x) = dashboard_status_layout(label, value);
+    draw_text_small(canvas, label, label_x, y + 3, label_color);
     draw_bitmap_text(
         canvas,
         value,
-        156,
+        value_x,
         y,
         value_color,
         BitmapFont::Mid,
         1,
         BitmapAlign::Right,
     );
+}
+
+fn dashboard_status_layout(label: &str, value: &str) -> (i32, i32) {
+    let label_width = measure_bitmap_text(label, BitmapFont::Small, 1);
+    let value_width = measure_bitmap_text(value, BitmapFont::Mid, 1);
+    let value_right = if label_width + value_width + 1 > 156 - 79 {
+        // RESTORE is the only current status value that needs the final three pixels.
+        159
+    } else {
+        156
+    };
+    let label_x = (value_right - value_width - label_width - 1).clamp(79, 84);
+    (label_x, value_right)
 }
 
 fn draw_bitmap_rows(canvas: &mut DisplayCanvas, rows: &[&str], x: i32, y: i32, color: Rgb565) {
@@ -1516,8 +1552,57 @@ mod tests {
         );
         assert_eq!(
             temperature_color_with_palette(50, &palette),
-            WHITE_LOW_MARINE_PALETTE.colors[1]
+            Rgb565::new(5, 26, 23)
         );
+    }
+
+    #[test]
+    fn light_theme_remaps_every_custom_temperature_band_for_contrast() {
+        let palette = dashboard_temperature_palette(
+            DashboardThemeId::Light,
+            temperature_palette(TemperaturePaletteId::MarineWhiteLow),
+        );
+
+        assert_eq!(palette.colors[0], LIGHT_DASHBOARD_THEME.text);
+        for (index, color) in palette.colors.iter().enumerate().skip(1) {
+            assert_ne!(*color, WHITE_LOW_MARINE_PALETTE.colors[index]);
+            assert!(color.r() <= 24);
+            assert!(color.g() <= 45);
+            assert!(color.b() <= 24);
+        }
+    }
+
+    #[test]
+    fn dashboard_status_layout_keeps_long_restore_label_clear() {
+        let (label_x, value_x) = dashboard_status_layout("EEPROM", "RESTORE");
+        let label_width = measure_bitmap_text("EEPROM", BitmapFont::Small, 1);
+        let value_width = measure_bitmap_text("RESTORE", BitmapFont::Mid, 1);
+
+        assert_eq!(value_x, 159);
+        assert!(label_x + label_width < value_x - value_width);
+    }
+
+    #[test]
+    fn dashboard_only_renderer_preserves_persistence_fault_attention() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.persistence_fault_attention_pending = true;
+
+        let mut direct_canvas = DisplayCanvas::new();
+        let mut routed_canvas = DisplayCanvas::new();
+        render_frontpanel_dashboard_with_theme(
+            &mut direct_canvas,
+            &state,
+            DashboardThemeId::Light,
+            &DEFAULT_TEMPERATURE_PALETTE,
+        );
+        render_frontpanel_ui_with_theme(
+            &mut routed_canvas,
+            &state,
+            DashboardThemeId::Light,
+            &DEFAULT_TEMPERATURE_PALETTE,
+        );
+
+        assert_eq!(direct_canvas.pixels(), routed_canvas.pixels());
     }
 
     #[test]
