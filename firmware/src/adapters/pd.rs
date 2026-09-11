@@ -2,8 +2,10 @@
 
 /// Fixed PDO fallback is bounded by the standard 20 V supply range.
 pub const FUSB302B_FIXED_MAX_MV: u16 = 20_000;
-pub const FUSB302B_PPS_MIN_MV: u16 = 5_000;
-pub const FUSB302B_PPS_MAX_MV: u16 = 21_000;
+pub const FUSB302B_PD_ABSOLUTE_MIN_MV: u16 = 5_000;
+pub const FUSB302B_PD_ABSOLUTE_MAX_MV: u16 = 28_000;
+pub const FUSB302B_PPS_MIN_MV: u16 = 5_500;
+pub const FUSB302B_PPS_MAX_MV: u16 = FUSB302B_PD_ABSOLUTE_MAX_MV;
 pub const GUARANTEED_HEATER_MIN_MV: u16 = 20_000;
 pub const MIN_HEATER_CONTRACT_MA: u16 = 3_000;
 pub const MAX_HEATER_CONTRACT_MA: u16 = 5_000;
@@ -152,14 +154,17 @@ impl SourceCapabilities {
         capabilities
     }
 
-    /// Prefer a PPS APDO covering the requested 5-21 V operating window. A
-    /// fixed PDO is used only when the source offers no usable PPS APDO.
+    /// Prefer a PPS APDO covering the requested operating voltage. The
+    /// request is constrained by the absolute PD guard, then by the live APDO.
+    /// A fixed PDO is used only when the source offers no usable PPS APDO.
     pub fn select_fusb302b_contract(
         self,
         requested_mv: u16,
         preferred_ma: u16,
     ) -> Option<Contract> {
-        let requested_mv = requested_mv.clamp(FUSB302B_PPS_MIN_MV, FUSB302B_PPS_MAX_MV);
+        let requested_mv = requested_mv
+            .clamp(FUSB302B_PD_ABSOLUTE_MIN_MV, FUSB302B_PD_ABSOLUTE_MAX_MV)
+            .max(FUSB302B_PPS_MIN_MV);
         let requested_ma = preferred_ma.clamp(MIN_HEATER_CONTRACT_MA, MAX_HEATER_CONTRACT_MA);
 
         let mut best_pps: Option<(PpsApdo, Contract)> = None;
@@ -253,9 +258,7 @@ impl SourceCapabilities {
             {
                 continue;
             }
-            if best.is_none_or(|current: PpsApdo| {
-                pps_candidate_is_better(apdo, apdo.max_ma, current, current.max_ma)
-            }) {
+            if best.is_none_or(|current: PpsApdo| pps_capability_is_better(apdo, current)) {
                 best = Some(apdo);
             }
         }
@@ -287,18 +290,21 @@ fn pps_candidate_is_better(
     current: PpsApdo,
     current_ma: u16,
 ) -> bool {
-    let candidate_covers_full_window =
-        candidate.min_mv <= FUSB302B_PPS_MIN_MV && candidate.max_mv >= FUSB302B_PPS_MAX_MV;
-    let current_covers_full_window =
-        current.min_mv <= FUSB302B_PPS_MIN_MV && current.max_mv >= FUSB302B_PPS_MAX_MV;
-    if candidate_covers_full_window != current_covers_full_window {
-        return candidate_covers_full_window;
-    }
     if candidate_ma != current_ma {
         return candidate_ma > current_ma;
     }
     if candidate.max_mv != current.max_mv {
         return candidate.max_mv > current.max_mv;
+    }
+    candidate.min_mv < current.min_mv
+}
+
+fn pps_capability_is_better(candidate: PpsApdo, current: PpsApdo) -> bool {
+    if candidate.max_mv != current.max_mv {
+        return candidate.max_mv > current.max_mv;
+    }
+    if candidate.max_ma != current.max_ma {
+        return candidate.max_ma > current.max_ma;
     }
     candidate.min_mv < current.min_mv
 }
@@ -360,6 +366,26 @@ mod tests {
 
         assert_eq!(contract.kind, ContractKind::Pps);
         assert_eq!(contract.voltage_mv, 12_400);
+    }
+
+    #[test]
+    fn clamps_pps_requests_to_the_absolute_guard_then_the_live_apdo() {
+        let mut capabilities = SourceCapabilities::empty();
+        capabilities.pps[0] = Some(PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 28_000,
+            max_ma: 5_000,
+        });
+
+        let high = capabilities
+            .select_fusb302b_contract(30_000, 5_000)
+            .unwrap();
+        let low = capabilities.select_fusb302b_contract(5_000, 5_000).unwrap();
+
+        assert_eq!(high.kind, ContractKind::Pps);
+        assert_eq!(high.voltage_mv, 28_000);
+        assert_eq!(low.voltage_mv, 5_500);
     }
 
     #[test]
