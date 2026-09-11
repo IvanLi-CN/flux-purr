@@ -533,6 +533,7 @@ mod tests {
     fn render_frame(
         preset: PreviewPreset,
         theme: DashboardThemeId,
+        palette_id: TemperaturePaletteId,
     ) -> (
         [u8; DISPLAY_FRAMEBUFFER_BYTES],
         [u8; DISPLAY_FRAMEBUFFER_BYTES],
@@ -543,7 +544,7 @@ mod tests {
             &mut canvas,
             &state,
             theme,
-            temperature_palette(TemperaturePaletteId::Current),
+            temperature_palette(palette_id),
         );
 
         let mut logical = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
@@ -631,8 +632,16 @@ mod tests {
         let mut default_canvas = DisplayCanvas::new();
         render_frontpanel_ui(&mut default_canvas, &state);
 
-        let (light, light_panel) = render_frame(PreviewPreset::Dashboard, DashboardThemeId::Light);
-        let (dark, dark_panel) = render_frame(PreviewPreset::Dashboard, DashboardThemeId::Dark);
+        let (light, light_panel) = render_frame(
+            PreviewPreset::Dashboard,
+            DashboardThemeId::Light,
+            TemperaturePaletteId::Current,
+        );
+        let (dark, dark_panel) = render_frame(
+            PreviewPreset::Dashboard,
+            DashboardThemeId::Dark,
+            TemperaturePaletteId::Current,
+        );
 
         let mut default_bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
         default_canvas.write_rgb565_le_bytes(&mut default_bytes);
@@ -662,8 +671,16 @@ mod tests {
         ];
 
         for preset in presets {
-            let (light, light_panel) = render_frame(preset, DashboardThemeId::Light);
-            let (dark, dark_panel) = render_frame(preset, DashboardThemeId::Dark);
+            let (light, light_panel) = render_frame(
+                preset,
+                DashboardThemeId::Light,
+                TemperaturePaletteId::Current,
+            );
+            let (dark, dark_panel) = render_frame(
+                preset,
+                DashboardThemeId::Dark,
+                TemperaturePaletteId::Current,
+            );
             assert_ne!(light, dark, "{} should differ by theme", preset.slug());
             assert_ne!(
                 light_panel,
@@ -684,5 +701,30 @@ mod tests {
             restore.dashboard_presentation,
             DashboardPresentationState::EepromRestore
         );
+    }
+
+    #[test]
+    fn dashboard_preview_covers_every_temperature_palette_in_both_themes() {
+        let palettes = [
+            TemperaturePaletteId::Current,
+            TemperaturePaletteId::BalancedWhiteLow,
+            TemperaturePaletteId::GlacierWhiteLow,
+            TemperaturePaletteId::AuroraWhiteLow,
+            TemperaturePaletteId::MarineWhiteLow,
+            TemperaturePaletteId::IndustrialWhiteLow,
+            TemperaturePaletteId::EmberWhiteLow,
+        ];
+
+        for palette in palettes {
+            let (light, light_panel) =
+                render_frame(PreviewPreset::Dashboard, DashboardThemeId::Light, palette);
+            let (dark, dark_panel) =
+                render_frame(PreviewPreset::Dashboard, DashboardThemeId::Dark, palette);
+
+            assert_eq!(&light[..2], &[0xff, 0xff], "{palette:?} light background");
+            assert_ne!(light, dark, "{palette:?} theme render");
+            assert!(light_panel.iter().any(|byte| *byte != 0));
+            assert!(dark_panel.iter().any(|byte| *byte != 0));
+        }
     }
 }

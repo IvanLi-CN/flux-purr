@@ -33,8 +33,10 @@
   - `R55 100 kOhm` pulls `BLK` up to `3V3`, so firmware must drive low or use inverted PWM for visible light
   - Firmware holds `BLK` high (backlight off) through display initialization and the first startup frame, then drives it low immediately after that frame flush succeeds
 - Current startup behavior:
-  - boot -> startup calibration screen
-  - after a short settle, enter the interactive front-panel runtime
+  - normal App boot -> branded startup splash (light theme by default)
+  - flush the complete splash frame, then turn the backlight on immediately
+  - first Dashboard refresh naturally replaces the splash while runtime initialization continues
+  - Key Test boot -> static calibration screen
   - default build (`esp32s3`) enters the app runtime with real RTD/PID/fan state rendering
 
 ## Shared scene rendering
@@ -158,6 +160,7 @@ or supported by the production `flux-purr` firmware artifact.
   - panel-order companion: `<preset>.panel.framebuffer.bin` (`RGB565 BE`, `50x160`) after applying the same GC9D01 orientation transform used on-device
 - Convert the logical preview framebuffer to PNG:
   - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.framebuffer.bin --out docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.png`
+- The display bring-up preview follows the same conversion contract; `display_preview` writes logical and panel-order framebuffers, while `fb_to_png.py` creates the checked-in PNG and its 8x nearest-neighbor owner-facing render.
 - Preview assets land under:
   - `docs/specs/heater-pid-frontpanel-runtime/assets/`
 

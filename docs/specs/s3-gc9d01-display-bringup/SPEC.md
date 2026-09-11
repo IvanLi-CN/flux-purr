@@ -4,7 +4,7 @@
 
 ### 背景 / 问题陈述
 
-- 当前仓库的 `ESP32-S3` 固件入口只覆盖风扇 bring-up，LCD 相关引脚虽已冻结，但没有可烧录的显示驱动实现。
+- 当前仓库的 `ESP32-S3` 固件入口为 `flux-purr`，LCD 相关引脚已冻结，并由显示 bring-up 与前面板 runtime 共用。
 - 主人已经明确要求使用 `gc9d01-rs` 作为显示驱动，并且硬约束必须走 **异步 SPI**，不能用 blocking SPI 兜底。
 - 若没有统一的显示测试界面、host 侧可控预览图，以及上板后用于拍照校验方向/颜色的流程，就无法可靠完成面板方向、偏移和颜色口径的闭环。
 - 本 spec 完成时曾以“启动校准后进入界面轮播”作为 bring-up 验收；当前分支的运行态行为已迁移到 `frontpanel-input-interaction`。
@@ -19,10 +19,10 @@
 
 #### Goals
 
-- 复用 `esp32s3-fan-cycle` binary 名称与 `mcu-agentd` artifact 路径，改造成 `ESP32-S3` 的 GC9D01 显示 bring-up 入口。
+- 以 `flux-purr` binary 作为 `ESP32-S3` 的 GC9D01 显示 bring-up 与前面板 runtime 入口。
 - 接入 `gc9d01-rs` driver，使用 `Embassy + esp-rtos + SPI2` 完成面板初始化与刷屏。
 - 新增一套共享显示场景与 host/device 共用渲染基线，支撑后续前面板 runtime 的 host preview 与硬件验证。
-- 新增 host-side preview harness，复用同一套渲染代码导出 `framebuffer.bin` 与 `preview.png`。
+- 新增 host-side preview harness，复用同一套渲染代码导出 `framebuffer.bin`；使用仓库 converter 将逻辑 framebuffer 转换为 `preview.png`。
 - 保持 host 侧质量门和 Xtensa 构建口径可运行，并通过 `mcu-agentd` 完成烧录/监看流程。
 
 #### Non-goals
@@ -39,8 +39,8 @@
 - `docs/specs/s3-gc9d01-display-bringup/SPEC.md` 与 `docs/specs/README.md`
 - `firmware/Cargo.toml` 的显示/异步运行时依赖
 - `firmware/src/lib.rs` 与新增的显示模块
-- `firmware/src/bin/esp32s3_fan_cycle.rs`
-- host preview binary / framebuffer 导出逻辑
+- `firmware/src/bin/flux_purr.rs`
+- `firmware/src/bin/display_preview.rs` 与 framebuffer 导出逻辑
 - `firmware/README.md`、必要的根 README 口径同步
 - `docs/specs/s3-gc9d01-display-bringup/assets/` 下的视觉证据
 
@@ -72,7 +72,7 @@ None
 - REQ-DISPLAY-012: splash 仅覆盖 App 的启动早期；后续首次 runtime Dashboard 刷新自然替换它。不得为 splash 增加阻塞安全初始化的固定等待。Key Test 启动继续显示静态校准屏。
 - REQ-DISPLAY-013: bring-up 阶段必须支持：`静态校准屏 -> 前面板显示基线`。
 - REQ-DISPLAY-014: 当前 display baseline 只负责证明驱动、方向、偏移、host preview 与 on-device 渲染一致；后续运行态是否轮播、是否 safe-off，由 `frontpanel-input-interaction` 冻结。
-- REQ-DISPLAY-015: host preview 必须复用同一套场景渲染代码，并产出 `framebuffer.bin` 与 `preview.png`。
+- REQ-DISPLAY-015: host preview 必须复用同一套场景渲染代码并产出 `framebuffer.bin`；`fb_to_png.py` 将逻辑 framebuffer 可复现地转换为 `preview.png`，8x nearest-neighbor PNG 作为 owner-facing 证据。
 - REQ-DISPLAY-016: 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
 - REQ-DISPLAY-020: 背光 `GPIO13` 必须在显示控制器初始化和首个启动帧成功刷入前保持关闭；启动屏整帧提交成功后应立即点亮。显示初始化或首帧刷屏失败时必须保持关闭，避免把未定义帧暴露给用户。
 
@@ -105,7 +105,7 @@ None
 
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `esp32s3-fan-cycle` firmware binary | CLI/binary | internal | Modify | None | firmware | mcu-agentd / bring-up operator | 路径保持不变，职责改为显示 bring-up |
+| `flux-purr` firmware binary | CLI/binary | internal | Modify | None | firmware | mcu-agentd / bring-up operator | 正常 App 与显示 bring-up 入口 |
 | Display scene render helpers | Rust module | internal | New | None | firmware | device binary / host preview | 复用同源渲染逻辑 |
 | Host display preview binary | CLI/binary | internal | New | None | firmware | developer | 导出 framebuffer 与预览图 |
 
@@ -115,10 +115,10 @@ None
 
 ## Verification
 
-- VER-DISPLAY-001 (covers: REQ-DISPLAY-005, REQ-DISPLAY-006, REQ-DISPLAY-007, REQ-DISPLAY-008, REQ-DISPLAY-009, REQ-DISPLAY-010, REQ-DISPLAY-011, REQ-DISPLAY-015, REQ-DISPLAY-017, REQ-DISPLAY-018): Given host preview harness，When 生成启动屏、校准屏与 demo 场景的 framebuffer 与 PNG，Then 预览图能显示方向标识、RGB 色块、灰阶块和文字标签。
-- VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004, REQ-DISPLAY-020): Given device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release` 成功，并通过启动顺序测试确认背光在首帧成功刷入后才开启。
+- VER-DISPLAY-001 (covers: REQ-DISPLAY-005, REQ-DISPLAY-006, REQ-DISPLAY-007, REQ-DISPLAY-008, REQ-DISPLAY-009, REQ-DISPLAY-010, REQ-DISPLAY-011, REQ-DISPLAY-015, REQ-DISPLAY-017, REQ-DISPLAY-018): Given `display_preview` 与 `fb_to_png.py`，When 生成启动屏、校准屏与 demo 场景的 framebuffer 并转换为 PNG，Then 预览图能显示方向标识、RGB 色块、灰阶块和文字标签。
+- VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004, REQ-DISPLAY-020): Given `flux-purr` device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release` 成功，并通过启动顺序测试确认背光在首帧成功刷入后才开启。
 - VER-DISPLAY-003 (covers: REQ-DISPLAY-014): Given host 质量门，When 运行 `cargo test`、`cargo clippy --all-targets --all-features -D warnings`、`cargo build --release`，Then 全部通过。
-- VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 能先显示静态校准屏，再进入前面板显示基线画面，并报告当前场景、方向配置与 profile。
+- VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 正常 App 路径先显示 branded splash，首帧成功后点亮背光并进入 Dashboard；Key Test 路径显示静态校准屏，并报告当前场景、方向配置与 profile。
 - VER-DISPLAY-005 (covers: REQ-DISPLAY-016): Given 主人提供实拍照片，When 对比 host preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
 - VER-DISPLAY-006: Given 后续运行态规格需要交互或 safe-off 约束，When 查询本仓库 spec，Then 以 `frontpanel-input-interaction` 为真相源，而不是回退到本 spec 的历史轮播描述。
 
@@ -136,7 +136,7 @@ None
 - Unit tests: `cargo test --manifest-path firmware/Cargo.toml`
 - Lint: `cargo clippy --manifest-path firmware/Cargo.toml --all-targets --all-features -- -D warnings`
 - Host build: `cargo build --manifest-path firmware/Cargo.toml --release`
-- Xtensa build: `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release`
+- Xtensa build: `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release`
 
 ### Quality checks
 
@@ -189,6 +189,8 @@ None
 - Dark-theme PNG preview source: `./assets/startup-splash-dark.preview.png`
 - Dark-theme owner-facing render (`8x`, `1280x400`): `./assets/startup-splash-dark.zoom.png`
 - Preview theme selection: `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin display_preview -- startup-splash <output> --theme dark|light`
+- PNG conversion: `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in <output>.framebuffer.bin --out <output>.preview.png`
+- Checked-in splash previews use the source-tree `VERSION`; release preparation regenerates the final release bundle after the GitHub-signed VERSION-only preparation commit.
 
 ![Host boot-splash preview](./assets/startup-splash.zoom.png)
 
