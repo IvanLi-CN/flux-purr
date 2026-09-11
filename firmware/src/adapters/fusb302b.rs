@@ -71,6 +71,7 @@ pub enum SinkPhase {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SinkPolicy {
     phase: SinkPhase,
+    default_requested_mv: u16,
     requested_mv: u16,
     preferred_ma: u16,
     pending_contract: Contract,
@@ -83,6 +84,7 @@ impl SinkPolicy {
     pub const fn new(requested_mv: u16, preferred_ma: u16) -> Self {
         Self {
             phase: SinkPhase::WaitingForSourceCapabilities,
+            default_requested_mv: requested_mv,
             requested_mv,
             preferred_ma,
             pending_contract: Contract::none(),
@@ -194,6 +196,7 @@ impl SinkPolicy {
     pub fn interlock_after_transient_transport_fault(&mut self) {
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
+        self.requested_mv = self.default_requested_mv;
         self.source_capabilities = SourceCapabilities::empty();
         self.source_capabilities_received = false;
         self.phase = SinkPhase::WaitingForSourceCapabilities;
@@ -225,6 +228,7 @@ impl SinkPolicy {
     pub fn on_detach_or_reset(&mut self) {
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
+        self.requested_mv = self.default_requested_mv;
         self.source_capabilities = SourceCapabilities::empty();
         self.source_capabilities_received = false;
         self.phase = SinkPhase::Detached;
@@ -502,6 +506,26 @@ mod tests {
                 .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
                 .is_some()
         );
+    }
+
+    #[test]
+    fn transient_transport_fault_discards_manual_pps_target_before_rediscovery() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert!(policy.request_pps_voltage(12_000).is_some());
+        assert_eq!(policy.requested_mv, 12_000);
+
+        policy.interlock_after_transient_transport_fault();
+
+        assert_eq!(policy.requested_mv, 20_000);
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+        assert_eq!(policy.requested_mv, 20_000);
     }
 
     #[test]

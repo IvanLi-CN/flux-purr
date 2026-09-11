@@ -10797,6 +10797,19 @@ fn disarm_calibration_after_transient_input_change(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn disarm_calibration_after_capability_refresh(
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+) {
+    if calibration.mode != CalibrationMode::Off
+        || calibration.heater_enabled
+        || calibration.pps_enabled
+    {
+        disarm_calibration_after_transient_input_change(calibration, manual_pps);
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn calibration_job_start_with_workspace(
     calibration: &mut CalibrationRuntimeState,
     kind: CalibrationJobKind,
@@ -16102,9 +16115,11 @@ async fn main(_spawner: Spawner) {
                     info!("PD contract became unavailable; heater interlocked");
                 }
             }
+            let mut fusb302b_capabilities_changed = false;
             if pd_port.controller_kind() == ControllerKind::Fusb302b {
                 let capabilities = read_pd_power_capabilities(&mut pd_i2c, &mut pd_port);
                 if capabilities != last_fusb302b_power_capabilities {
+                    fusb302b_capabilities_changed = true;
                     last_fusb302b_power_capabilities = capabilities;
                     heater_power_backend =
                         refresh_fusb302b_heater_power_backend(heater_power_backend, capabilities);
@@ -16154,6 +16169,12 @@ async fn main(_spawner: Spawner) {
                         .unwrap_or(0),
                     latest_vin_mv,
                     last_heater_duty,
+                );
+            }
+            if fusb302b_capabilities_changed {
+                disarm_calibration_after_capability_refresh(
+                    &mut calibration_runtime_state,
+                    &mut manual_pps_state,
                 );
             }
             let thermal_plant_completed = calibration_runtime_state.mode == CalibrationMode::Off
@@ -18636,6 +18657,29 @@ mod tests {
         assert!(!manual_pps.enabled);
         assert_eq!(manual_pps.target_mv, None);
         assert_eq!(manual_pps.applied_mv, None);
+    }
+
+    #[test]
+    fn capability_refresh_disarms_active_calibration_before_output() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::HeaterCurve,
+            pps_enabled: true,
+            pps_mv: Some(20_000),
+            pps_ma: Some(3_000),
+            heater_enabled: true,
+            ..CalibrationRuntimeState::default()
+        };
+        let mut manual_pps = ManualPpsState::from_fusb302b_capabilities(Some(
+            ch224q::AdjustablePowerCapabilities::default(),
+        ));
+        disarm_calibration_after_capability_refresh(&mut calibration, &mut manual_pps);
+
+        assert!(!calibration.heater_enabled);
+        assert!(!calibration.pps_enabled);
+        assert_eq!(calibration.pps_mv, None);
+        assert_eq!(calibration.pps_ma, None);
+        assert!(calibration.immediate_heater_disarm_pending);
+        assert!(!manual_pps.enabled);
     }
 
     #[test]
