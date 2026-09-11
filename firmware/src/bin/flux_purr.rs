@@ -10801,9 +10801,9 @@ fn disarm_calibration_after_capability_refresh(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
 ) {
-    if calibration.mode != CalibrationMode::Off
-        || calibration.heater_enabled
+    if calibration.heater_enabled
         || calibration.pps_enabled
+        || manual_pps.owner == ManualPpsOwner::Calibration
     {
         disarm_calibration_after_transient_input_change(calibration, manual_pps);
     }
@@ -18679,6 +18679,24 @@ mod tests {
         assert_eq!(calibration.pps_mv, None);
         assert_eq!(calibration.pps_ma, None);
         assert!(calibration.immediate_heater_disarm_pending);
+        assert!(!manual_pps.enabled);
+    }
+
+    #[test]
+    fn capability_refresh_keeps_passive_adc_calibration_available() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::RtdAdc,
+            ..CalibrationRuntimeState::default()
+        };
+        let mut manual_pps = ManualPpsState::from_fusb302b_capabilities(Some(
+            ch224q::AdjustablePowerCapabilities::default(),
+        ));
+
+        disarm_calibration_after_capability_refresh(&mut calibration, &mut manual_pps);
+
+        assert!(!calibration.heater_enabled);
+        assert!(!calibration.pps_enabled);
+        assert!(!calibration.immediate_heater_disarm_pending);
         assert!(!manual_pps.enabled);
     }
 
