@@ -76,13 +76,15 @@ use flux_purr_firmware::DEFAULT_PD_VOLTAGE_REQUEST;
 use flux_purr_firmware::adapters::ch224q;
 #[cfg(test)]
 use flux_purr_firmware::adapters::ch224q::Status;
-#[cfg(target_arch = "xtensa")]
+#[cfg(test)]
+use flux_purr_firmware::adapters::fusb302b;
+#[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::adapters::pd::SourceCapabilities;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::adapters::pd::{
     Contract, ContractKind, ControllerKind, FUSB302B_PPS_MAX_MV,
 };
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::adapters::pd::{
     FUSB302B_PPS_MIN_MV, GUARANTEED_HEATER_MIN_MV, MAX_HEATER_CONTRACT_MA, MIN_HEATER_CONTRACT_MA,
 };
@@ -4102,8 +4104,6 @@ const FUSB302B_DIAG_NO_USABLE_CONTRACT: u8 = 16;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_RX_PARTIAL: u8 = 17;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT: u8 = 18;
-#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_REQUEST_TIMEOUT: u8 = 19;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_MAX_RX_MESSAGES_PER_POLL: u8 = 4;
@@ -4134,7 +4134,6 @@ fn fusb302b_degraded_reason() -> &'static str {
         FUSB302B_DIAG_TX_I2C_ERROR => "pd_fusb_tx_i2c_error",
         FUSB302B_DIAG_NO_USABLE_CONTRACT => "pd_fusb_no_usable_contract",
         FUSB302B_DIAG_RX_PARTIAL => "pd_fusb_rx_partial",
-        FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT => "pd_fusb_source_caps_hard_reset_sent",
         FUSB302B_DIAG_REQUEST_TIMEOUT => "pd_fusb_contract_request_timeout",
         _ => "pd_contract_unavailable",
     }
@@ -4266,6 +4265,7 @@ enum HeaterPowerBackend {
         reason: HeaterPowerBackendReason,
         fixed_request_confirmed: bool,
         fixed_request: ch224q::VoltageRequest,
+        terminal_fixed_pd_disarmed: bool,
     },
 }
 
@@ -4444,6 +4444,8 @@ impl ManualPpsError {
 struct ManualPpsState {
     enabled: bool,
     owner: ManualPpsOwner,
+    request_min_mv: u16,
+    request_max_mv: u16,
     target_mv: Option<u16>,
     target_ma: Option<u16>,
     applied_mv: Option<u16>,
@@ -4461,6 +4463,8 @@ impl Default for ManualPpsState {
         Self {
             enabled: false,
             owner: ManualPpsOwner::Debug,
+            request_min_mv: CH224Q_ADJUSTABLE_REQUEST_MIN_MV,
+            request_max_mv: ch224q::CH224Q_PPS_MAX_MV,
             target_mv: None,
             target_ma: None,
             applied_mv: None,
@@ -5088,7 +5092,33 @@ fn thermal_plant_transient_trace_reaches_targets(
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 impl ManualPpsState {
     fn from_capabilities(capabilities: Option<ch224q::AdjustablePowerCapabilities>) -> Self {
-        let mut state = Self::default();
+        Self::from_capabilities_with_request_bounds(
+            capabilities,
+            CH224Q_ADJUSTABLE_REQUEST_MIN_MV,
+            ch224q::CH224Q_PPS_MAX_MV,
+        )
+    }
+
+    fn from_fusb302b_capabilities(
+        capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+    ) -> Self {
+        Self::from_capabilities_with_request_bounds(
+            capabilities,
+            FUSB302B_PPS_MIN_MV,
+            FUSB302B_PPS_MAX_MV,
+        )
+    }
+
+    fn from_capabilities_with_request_bounds(
+        capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+        request_min_mv: u16,
+        request_max_mv: u16,
+    ) -> Self {
+        let mut state = Self {
+            request_min_mv,
+            request_max_mv,
+            ..Self::default()
+        };
         if let Some(capabilities) = capabilities
             && let (Some(min_mv), Some(max_mv), Some(max_ma)) = (
                 capabilities.pps_min_mv,
@@ -5096,8 +5126,8 @@ impl ManualPpsState {
                 capabilities.pps_max_ma,
             )
         {
-            let bounded_min_mv = min_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV);
-            let bounded_max_mv = max_mv.min(ch224q::CH224Q_PPS_MAX_MV);
+            let bounded_min_mv = min_mv.max(request_min_mv);
+            let bounded_max_mv = max_mv.min(request_max_mv);
             if bounded_min_mv <= bounded_max_mv && max_ma > 0 {
                 state.capability_min_mv = Some(bounded_min_mv);
                 state.capability_max_mv = Some(bounded_max_mv);
@@ -5125,7 +5155,6 @@ impl ManualPpsState {
         };
         if target_mv < min_mv
             || target_mv > max_mv
-            || target_mv > ch224q::CH224Q_PPS_MAX_MV
             || !target_mv.is_multiple_of(100)
             || target_ma == 0
             || !target_ma.is_multiple_of(50)
@@ -5138,31 +5167,107 @@ impl ManualPpsState {
 
     fn has_matching_pps_apdo(&self, target_mv: u16, target_ma: u16) -> bool {
         self.capability_apdos.iter().flatten().any(|apdo| {
-            let min_mv = apdo.min_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV);
-            let max_mv = apdo.max_mv.min(ch224q::CH224Q_PPS_MAX_MV);
+            let min_mv = apdo.min_mv.max(self.request_min_mv);
+            let max_mv = apdo.max_mv.min(self.request_max_mv);
             target_mv >= min_mv && target_mv <= max_mv && target_ma <= apdo.max_ma
         })
     }
 
+    fn maximum_pps_current_for_target(&self, target_mv: u16) -> Option<u16> {
+        self.capability_apdos
+            .iter()
+            .flatten()
+            .filter_map(|apdo| {
+                let min_mv = apdo.min_mv.max(self.request_min_mv);
+                let max_mv = apdo.max_mv.min(self.request_max_mv);
+                (target_mv >= min_mv && target_mv <= max_mv).then_some(apdo.max_ma)
+            })
+            .max()
+    }
+
     fn thermal_plant_source_limits(&self) -> Option<(u16, u16, u16)> {
-        let mut selected = None;
+        self.contiguous_pps_source_limits(20_000)
+    }
+
+    fn heater_source_limits(&self) -> Option<(u16, u16, u16)> {
+        self.contiguous_pps_source_limits(HEATER_ADJUSTABLE_MIN_MV)
+    }
+
+    fn contiguous_pps_source_limits(&self, anchor_mv: u16) -> Option<(u16, u16, u16)> {
+        let mut minimum_mv = u16::MAX;
+        let mut reachable_max_mv = 0;
         for apdo in self.capability_apdos.iter().flatten() {
-            let min_mv = apdo.min_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV);
-            let max_mv = apdo.max_mv.min(HEATER_ADJUSTABLE_MAX_MV);
-            if min_mv > 20_000 || max_mv < 20_000 || apdo.max_ma < 3_000 {
+            let min_mv = apdo.min_mv.max(self.request_min_mv);
+            let max_mv = apdo.max_mv.min(self.request_max_mv);
+            if min_mv > anchor_mv || max_mv < anchor_mv || apdo.max_ma < 3_000 {
                 continue;
             }
-            let candidate = (min_mv, max_mv, apdo.max_ma);
-            if selected.is_none_or(|(selected_min_mv, selected_max_mv, selected_ma)| {
-                candidate.2 > selected_ma
-                    || (candidate.2 == selected_ma
-                        && (candidate.1 > selected_max_mv
-                            || (candidate.1 == selected_max_mv && candidate.0 < selected_min_mv)))
-            }) {
-                selected = Some(candidate);
+            minimum_mv = minimum_mv.min(min_mv);
+            reachable_max_mv = reachable_max_mv.max(max_mv);
+        }
+        if reachable_max_mv == 0 {
+            return None;
+        }
+
+        // APDOs may offer a higher voltage at a lower current. Extend the
+        // automatic request range only through overlapping APDOs, leaving the
+        // negotiated PPS contract as the current-limit authority per request.
+        let mut extended = true;
+        while extended {
+            extended = false;
+            for apdo in self.capability_apdos.iter().flatten() {
+                let min_mv = apdo.min_mv.max(self.request_min_mv);
+                let max_mv = apdo.max_mv.min(self.request_max_mv);
+                if apdo.max_ma < 3_000 || min_mv > reachable_max_mv || max_mv <= reachable_max_mv {
+                    continue;
+                }
+                reachable_max_mv = max_mv;
+                extended = true;
             }
         }
-        selected
+
+        extended = true;
+        while extended {
+            extended = false;
+            for apdo in self.capability_apdos.iter().flatten() {
+                let min_mv = apdo.min_mv.max(self.request_min_mv);
+                let max_mv = apdo.max_mv.min(self.request_max_mv);
+                if apdo.max_ma < 3_000 || max_mv < minimum_mv || min_mv >= minimum_mv {
+                    continue;
+                }
+                minimum_mv = min_mv;
+                extended = true;
+            }
+        }
+
+        // The runtime heater budget accepts a single current ceiling for the
+        // whole automatic voltage range. Derive a ceiling that is valid at
+        // every boundary of the continuous APDO component, rather than taking
+        // the (potentially higher) current offered only at its top voltage.
+        let mut conservative_current_ma = u16::MAX;
+        let mut current_observed = false;
+        for apdo in self.capability_apdos.iter().flatten() {
+            let apdo_min_mv = apdo.min_mv.max(self.request_min_mv);
+            let apdo_max_mv = apdo.max_mv.min(self.request_max_mv);
+            if apdo.max_ma < 3_000 || apdo_max_mv < minimum_mv || apdo_min_mv > reachable_max_mv {
+                continue;
+            }
+
+            for checkpoint_mv in [
+                apdo_min_mv.max(minimum_mv),
+                apdo_max_mv.min(reachable_max_mv),
+                apdo_max_mv.saturating_add(1),
+            ] {
+                if checkpoint_mv < minimum_mv || checkpoint_mv > reachable_max_mv {
+                    continue;
+                }
+                let current_ma = self.maximum_pps_current_for_target(checkpoint_mv)?;
+                conservative_current_ma = conservative_current_ma.min(current_ma);
+                current_observed = true;
+            }
+        }
+
+        current_observed.then_some((minimum_mv, reachable_max_mv, conservative_current_ma))
     }
 
     fn enable(
@@ -5172,7 +5277,7 @@ impl ManualPpsState {
         target_ma: Option<u16>,
     ) -> Result<(), ManualPpsError> {
         let target_ma = target_ma
-            .or(self.capability_max_ma)
+            .or_else(|| self.maximum_pps_current_for_target(target_mv))
             .ok_or(ManualPpsError::NoPpsCapability)?;
         self.validate_target(target_mv, target_ma)?;
         self.enabled = true;
@@ -5252,6 +5357,32 @@ impl HeaterPowerBackend {
 
     const fn pd_contract_mv(self) -> u16 {
         self.pd_request_mv()
+    }
+
+    const fn terminal_fixed_pd_disarmed(self) -> bool {
+        match self {
+            Self::PpsMos {
+                terminal_fixed_pd_disarmed,
+                ..
+            }
+            | Self::FixedPdPwmFallback {
+                terminal_fixed_pd_disarmed,
+                ..
+            } => terminal_fixed_pd_disarmed,
+        }
+    }
+
+    fn set_terminal_fixed_pd_disarmed(&mut self, disarmed: bool) {
+        match self {
+            Self::PpsMos {
+                terminal_fixed_pd_disarmed,
+                ..
+            }
+            | Self::FixedPdPwmFallback {
+                terminal_fixed_pd_disarmed,
+                ..
+            } => *terminal_fixed_pd_disarmed = disarmed,
+        }
     }
 }
 
@@ -5924,12 +6055,15 @@ fn read_rtd_sample<'a>(
 }
 
 #[cfg(target_arch = "xtensa")]
-const FUSB302B_STATUS0_VBUS_OK: u8 = 1 << 7;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS0_CRC_CHECK: u8 = 1 << 4;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_STATUS0_ACTIVITY: u8 = 1 << 6;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_STATUS0_BC_LVL_MASK: u8 = 0b11;
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_STATUS0A_RETRY_FAIL: u8 = 1 << 4;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_STATUS1_RX_EMPTY: u8 = 1 << 5;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS1_OVERTEMP: u8 = 1 << 1;
@@ -5951,6 +6085,12 @@ const FUSB302B_INTERRUPTA_SOFT_RESET: u8 = 1 << 1;
 const FUSB302B_INTERRUPTA_HARD_RESET: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_INTERRUPTB_GCRC_SENT: u8 = 1;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_CONTROL1_REGISTER: u8 = 0x07;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_CONTROL1_RW_MASK: u8 = 0b0111_0011;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_CONTROL1_RX_FLUSH: u8 = 1 << 2;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_TOGGLE_INTERRUPT_MASKS: InterruptMasks = InterruptMasks::new(0x7f, 0xbf, 0xff);
 #[cfg(target_arch = "xtensa")]
@@ -5982,6 +6122,57 @@ const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {
     }
 }
 
+/// A CC measurement is meaningful only when the FUSB302B reports no BMC
+/// activity. An idle `BC_LVL=0` is a physical CC detach, while an active line
+/// defers the observation until the next service turn.
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_cc_attachment_state(status0: u8) -> Option<bool> {
+    if status0 & FUSB302B_STATUS0_ACTIVITY != 0 {
+        None
+    } else {
+        Some(status0 & FUSB302B_STATUS0_BC_LVL_MASK != 0)
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_receive_fifo_flush_value(control1: u8) -> u8 {
+    (control1 & FUSB302B_CONTROL1_RW_MASK) | FUSB302B_CONTROL1_RX_FLUSH
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_retry_failure_requires_recovery(
+    status0a: u8,
+    status1: u8,
+    retry_fail_recovery_pending: bool,
+) -> bool {
+    !retry_fail_recovery_pending
+        && status0a & FUSB302B_STATUS0A_RETRY_FAIL != 0
+        && status1 & FUSB302B_STATUS1_RX_EMPTY != 0
+}
+
+/// The upstream PHY API exposes only a combined FIFO flush. Local transport
+/// recovery must retain a possibly queued transmit frame, so it updates only
+/// CONTROL1.RX_FLUSH and preserves the driver's receive-mask bits.
+#[cfg(target_arch = "xtensa")]
+fn fusb302b_flush_receive_fifo(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+    let mut control1 = [0_u8];
+    i2c.write_read(
+        fusb302::DEFAULT_ADDRESS,
+        &[FUSB302B_CONTROL1_REGISTER],
+        &mut control1,
+    )
+    .is_ok()
+        && i2c
+            .write(
+                fusb302::DEFAULT_ADDRESS,
+                &[
+                    FUSB302B_CONTROL1_REGISTER,
+                    fusb302b_receive_fifo_flush_value(control1[0]),
+                ],
+            )
+            .is_ok()
+}
+
 #[cfg(target_arch = "xtensa")]
 struct Fusb302bRuntime {
     policy: fusb302b::SinkPolicy,
@@ -5995,7 +6186,7 @@ struct Fusb302bRuntime {
     source_capabilities_tx_confirmed: bool,
     source_capabilities_gcrc_seen: bool,
     partial_rx_started_at_ms: Option<u64>,
-    source_caps_hard_reset_sent: bool,
+    retry_fail_recovery_pending: bool,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6024,7 +6215,7 @@ impl Fusb302bRuntime {
             source_capabilities_tx_confirmed: false,
             source_capabilities_gcrc_seen: false,
             partial_rx_started_at_ms: None,
-            source_caps_hard_reset_sent: false,
+            retry_fail_recovery_pending: false,
         }
     }
 
@@ -6066,7 +6257,7 @@ impl Fusb302bRuntime {
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
-        self.source_caps_hard_reset_sent = false;
+        self.retry_fail_recovery_pending = false;
         if self.initialize(i2c).await {
             self.policy =
                 fusb302b::SinkPolicy::new(FUSB302B_INITIAL_PPS_REQUEST_MV, MAX_HEATER_CONTRACT_MA);
@@ -6074,6 +6265,43 @@ impl Fusb302bRuntime {
         } else {
             self.policy.mark_fault();
             false
+        }
+    }
+
+    /// Recover a local receive/transmit failure without toggling CC. A PHY
+    /// reinitialization withdraws Rd briefly and disrupts the active source
+    /// attachment.
+    async fn recover_transient_transport_fault(
+        &mut self,
+        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        fault: fusb302b::TransientTransportFault,
+        now_ms: u64,
+    ) -> bool {
+        match fusb302b::transient_transport_fault_recovery(fault) {
+            fusb302b::TransientTransportRecovery::FlushReceiveAndRequery => {
+                self.policy.interlock_after_transient_transport_fault();
+                self.last_request_at_ms = None;
+                // Preserve the normal discovery retry interval after a local
+                // fault. RetryFail remains asserted until the next START_TX,
+                // so the polling path consumes that already-handled status
+                // until this bounded re-query is sent.
+                self.last_source_capabilities_request_at_ms = Some(now_ms);
+                self.source_capabilities_refresh_pending = false;
+                self.source_capabilities_refresh_requested_at_ms = None;
+                self.source_capabilities_tx_confirmed = false;
+                self.source_capabilities_gcrc_seen = false;
+                self.partial_rx_started_at_ms = None;
+                self.retry_fail_recovery_pending =
+                    matches!(fault, fusb302b::TransientTransportFault::RetryFailed);
+
+                if !fusb302b_flush_receive_fifo(i2c) {
+                    self.policy.mark_fault();
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                    return false;
+                }
+                FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
+                true
+            }
         }
     }
 
@@ -6186,19 +6414,16 @@ impl Fusb302bRuntime {
             return false;
         }
 
-        if matches!(
-            self.policy.phase(),
-            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy | SinkPhase::Ready
-        ) {
-            let vbus_present = {
+        if self.polarity.is_some() {
+            let attachment_state = {
                 let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
                 phy.read_status()
                     .await
-                    .map(|status| status.status0 & FUSB302B_STATUS0_VBUS_OK != 0)
+                    .map(|status| fusb302b_cc_attachment_state(status.status0))
             };
-            match vbus_present {
-                Ok(true) => {}
-                Ok(false) => return self.restart_after_reset(i2c).await,
+            match attachment_state {
+                Ok(Some(false)) => return self.restart_after_reset(i2c).await,
+                Ok(Some(true) | None) => {}
                 Err(_) => {
                     self.policy.mark_fault();
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
@@ -6214,13 +6439,14 @@ impl Fusb302bRuntime {
             .last_request_at_ms
             .is_some_and(|last| now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS)
         {
-            // Reset the PHY and discard every contract before retrying. This
-            // flushes delayed Accept/PS_RDY frames so an expired transaction
-            // can never install a newer pending contract.
-            self.policy.timeout_pending_request();
-            self.last_request_at_ms = None;
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
-            return self.restart_after_reset(i2c).await;
+            return self
+                .recover_transient_transport_fault(
+                    i2c,
+                    fusb302b::TransientTransportFault::PendingRequestTimeout,
+                    now_ms,
+                )
+                .await;
         }
 
         if self.source_capabilities_refresh_pending
@@ -6284,7 +6510,7 @@ impl Fusb302bRuntime {
         }
 
         for _ in 0..FUSB302B_MAX_RX_MESSAGES_PER_POLL {
-            let event = match fusb302b_receive_event(i2c).await {
+            let event = match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending).await {
                 Ok(event) => event,
                 Err(()) => {
                     self.policy.mark_fault();
@@ -6298,34 +6524,13 @@ impl Fusb302bRuntime {
                     if self.policy.phase() == SinkPhase::WaitingForSourceCapabilities {
                         self.source_capabilities_tx_confirmed |= tx_sent;
                         self.source_capabilities_gcrc_seen |= gcrc_sent;
-                        let query_due = match self.last_source_capabilities_request_at_ms {
-                            Some(last) => fusb302b::source_capabilities_retry_due(last, now_ms),
-                            None => self.attached_at_ms.is_some_and(|attached_at_ms| {
-                                now_ms.saturating_sub(attached_at_ms)
-                                    >= fusb302b::SOURCE_CAPS_INITIAL_WAIT_MS
-                            }),
-                        };
-                        let hard_reset_due = !self.source_caps_hard_reset_sent
-                            && self
-                                .last_source_capabilities_request_at_ms
-                                .is_some_and(|last| {
-                                    fusb302b::source_capabilities_hard_reset_due(last, now_ms)
-                                });
-                        if hard_reset_due {
-                            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
-                            if phy.transmit_hard_reset().await.is_err() {
-                                self.policy.mark_fault();
-                                FUSB302B_DIAGNOSTIC
-                                    .store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
-                                return false;
-                            }
-                            self.source_caps_hard_reset_sent = true;
-                            FUSB302B_DIAGNOSTIC.store(
-                                FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT,
-                                Ordering::Relaxed,
-                            );
-                            return true;
-                        }
+                        let query_due = self.attached_at_ms.is_some_and(|attached_at_ms| {
+                            fusb302b::source_capabilities_request_due(
+                                attached_at_ms,
+                                self.last_source_capabilities_request_at_ms,
+                                now_ms,
+                            )
+                        });
                         if !query_due {
                             let diagnostic = if self.source_capabilities_gcrc_seen {
                                 FUSB302B_DIAG_SOURCE_CAPS_GCRC_SEEN
@@ -6343,6 +6548,7 @@ impl Fusb302bRuntime {
                         if !self.transmit(i2c, header, &[]).await {
                             return false;
                         }
+                        self.retry_fail_recovery_pending = false;
                         self.source_capabilities_tx_confirmed = false;
                         self.source_capabilities_gcrc_seen = false;
                         self.last_source_capabilities_request_at_ms = Some(now_ms);
@@ -6376,7 +6582,13 @@ impl Fusb302bRuntime {
                         >= FUSB302B_PARTIAL_RX_TIMEOUT_MS
                     {
                         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                        return self.restart_after_reset(i2c).await;
+                        return self
+                            .recover_transient_transport_fault(
+                                i2c,
+                                fusb302b::TransientTransportFault::PartialReceiveTimeout,
+                                now_ms,
+                            )
+                            .await;
                     }
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_PARTIAL, Ordering::Relaxed);
                     return true;
@@ -6392,6 +6604,7 @@ impl Fusb302bRuntime {
                         self.source_capabilities_refresh_requested_at_ms = None;
                         self.source_capabilities_tx_confirmed = false;
                         self.source_capabilities_gcrc_seen = false;
+                        self.retry_fail_recovery_pending = false;
                         if let Some(rdo) = self.policy.on_source_capabilities(&pdos[..count]) {
                             let header = fusb302b::request_header(self.next_message_id);
                             if !self.transmit(i2c, header, &rdo).await {
@@ -6425,7 +6638,13 @@ impl Fusb302bRuntime {
                 }
                 Fusb302bReceiveEvent::RetryFailed => {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                    return self.restart_after_reset(i2c).await;
+                    return self
+                        .recover_transient_transport_fault(
+                            i2c,
+                            fusb302b::TransientTransportFault::RetryFailed,
+                            now_ms,
+                        )
+                        .await;
                 }
                 Fusb302bReceiveEvent::Protection | Fusb302bReceiveEvent::UnsupportedSop => {
                     self.policy.mark_fault();
@@ -6449,6 +6668,7 @@ impl Fusb302bRuntime {
 #[cfg(target_arch = "xtensa")]
 async fn fusb302b_receive_event(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    retry_fail_recovery_pending: bool,
 ) -> Result<Fusb302bReceiveEvent, ()> {
     let mut phy = Fusb302::new(BlockingAsync::new(i2c));
     // Preserve the receiver's CRC/SOP state before clearing its interrupt latches.
@@ -6462,9 +6682,11 @@ async fn fusb302b_receive_event(
     {
         return Ok(Fusb302bReceiveEvent::Reset);
     }
-    if status.status0a & FUSB302B_STATUS0A_RETRY_FAIL != 0
-        && status.status1 & FUSB302B_STATUS1_RX_EMPTY != 0
-    {
+    if fusb302b_retry_failure_requires_recovery(
+        status.status0a,
+        status.status1,
+        retry_fail_recovery_pending,
+    ) {
         return Ok(Fusb302bReceiveEvent::RetryFailed);
     }
     if status.status1 & (FUSB302B_STATUS1_OVERTEMP | FUSB302B_STATUS1_VCONN_OCP) != 0 {
@@ -6486,34 +6708,53 @@ async fn fusb302b_receive_event(
     }
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 fn fusb302b_adjustable_power_capabilities(
     source_capabilities: SourceCapabilities,
 ) -> Option<ch224q::AdjustablePowerCapabilities> {
-    let apdo = source_capabilities.fusb302b_pps_capability()?;
-    let pps_min_mv = apdo.min_mv.max(FUSB302B_PPS_MIN_MV);
-    let pps_max_mv = apdo.max_mv.min(FUSB302B_PPS_MAX_MV);
-    let pps_max_ma = apdo.max_ma.min(MAX_HEATER_CONTRACT_MA);
-    if pps_min_mv > GUARANTEED_HEATER_MIN_MV
-        || pps_max_mv < GUARANTEED_HEATER_MIN_MV
-        || pps_max_ma < MIN_HEATER_CONTRACT_MA
-    {
-        return None;
+    let mut capabilities = ch224q::AdjustablePowerCapabilities::default();
+    let mut has_usable_pps_apdo = false;
+
+    for apdo in source_capabilities.pps.into_iter().flatten() {
+        let min_mv = apdo.min_mv.max(FUSB302B_PPS_MIN_MV);
+        let max_mv = apdo.max_mv.min(FUSB302B_PPS_MAX_MV);
+        let max_ma = apdo.max_ma.min(MAX_HEATER_CONTRACT_MA);
+        if min_mv > max_mv || max_ma < MIN_HEATER_CONTRACT_MA {
+            continue;
+        }
+        has_usable_pps_apdo = true;
+
+        capabilities.pps_min_mv = Some(
+            capabilities
+                .pps_min_mv
+                .map_or(min_mv, |value| value.min(min_mv)),
+        );
+        capabilities.pps_max_mv = Some(
+            capabilities
+                .pps_max_mv
+                .map_or(max_mv, |value| value.max(max_mv)),
+        );
+        capabilities.pps_max_ma = Some(
+            capabilities
+                .pps_max_ma
+                .map_or(max_ma, |value| value.max(max_ma)),
+        );
+        capabilities.pps_covers_20v |=
+            min_mv <= GUARANTEED_HEATER_MIN_MV && max_mv >= GUARANTEED_HEATER_MIN_MV;
+        if let Some(slot) = capabilities
+            .pps_apdos
+            .iter_mut()
+            .find(|slot| slot.is_none())
+        {
+            *slot = Some(ch224q::PpsApdo {
+                min_mv,
+                max_mv,
+                max_ma,
+            });
+        }
     }
 
-    let mut capabilities = ch224q::AdjustablePowerCapabilities {
-        pps_covers_20v: true,
-        pps_min_mv: Some(pps_min_mv),
-        pps_max_mv: Some(pps_max_mv),
-        pps_max_ma: Some(pps_max_ma),
-        ..ch224q::AdjustablePowerCapabilities::default()
-    };
-    capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
-        min_mv: pps_min_mv,
-        max_mv: pps_max_mv,
-        max_ma: pps_max_ma,
-    });
-    Some(capabilities)
+    has_usable_pps_apdo.then_some(capabilities)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -7986,15 +8227,21 @@ fn estimated_heater_resistance_ohms(
 #[cfg(any(target_arch = "xtensa", test))]
 fn effective_pps_current_limit_ma(
     capability_max_ma: u16,
-    _pd_observation: Option<PdStatusObservation>,
+    pd_observation: Option<PdStatusObservation>,
 ) -> u16 {
-    // CURRENT_DATA_REGISTER is the instantaneous draw. It is useful telemetry,
-    // but it is not the APDO contract limit: treating a partially loaded 5 A
-    // source as, for example, a 2.5 A contract feeds the draw back into the
-    // voltage ceiling and prevents a high-temperature plate from ever using
-    // its negotiated PPS headroom. The resistance-derived ceiling below keeps
-    // actual heater current within this contractual budget.
-    capability_max_ma
+    // `current_ma` on the FUSB302B observation is the committed PPS contract,
+    // not instantaneous VBUS draw. It is authoritative after a source
+    // capability refresh, whereas the capability bridge remains the safe
+    // provisional ceiling before a PPS contract is ready.
+    pd_observation
+        .filter(|observation| {
+            observation.status.pd_active
+                && observation.contract.kind == ContractKind::Pps
+                && observation.current_ma >= MIN_HEATER_CONTRACT_MA
+        })
+        .map_or(capability_max_ma, |observation| {
+            capability_max_ma.min(observation.current_ma)
+        })
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -8270,7 +8517,7 @@ fn integer_sqrt_floor(value: u64) -> u32 {
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 fn adjustable_mode_for_request(request_mv: u16, pps_max_mv: u16) -> ch224q::AdjustableVoltageMode {
-    if request_mv <= pps_max_mv.min(ch224q::CH224Q_PPS_MAX_MV) {
+    if request_mv <= pps_max_mv {
         ch224q::AdjustableVoltageMode::Pps
     } else {
         ch224q::AdjustableVoltageMode::Avs
@@ -8349,17 +8596,42 @@ fn select_heater_power_backend(
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: true,
             fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+            terminal_fixed_pd_disarmed: false,
         };
     };
 
-    let capability_state = ManualPpsState::from_capabilities(Some(capabilities));
-    let Some((pps_min_mv, pps_max_mv, capability_max_ma)) =
-        capability_state.thermal_plant_source_limits()
-    else {
+    select_heater_power_backend_with_capability_state(
+        capabilities,
+        status,
+        ManualPpsState::from_capabilities(Some(capabilities)),
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn select_heater_power_backend_with_capability_state(
+    capabilities: ch224q::AdjustablePowerCapabilities,
+    status: Option<Status>,
+    capability_state: ManualPpsState,
+) -> HeaterPowerBackend {
+    select_heater_power_backend_with_source_limits(
+        capabilities,
+        status,
+        capability_state.thermal_plant_source_limits(),
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn select_heater_power_backend_with_source_limits(
+    capabilities: ch224q::AdjustablePowerCapabilities,
+    status: Option<Status>,
+    source_limits: Option<(u16, u16, u16)>,
+) -> HeaterPowerBackend {
+    let Some((pps_min_mv, pps_max_mv, capability_max_ma)) = source_limits else {
         return HeaterPowerBackend::FixedPdPwmFallback {
             reason: HeaterPowerBackendReason::NoPps20vCapability,
             fixed_request_confirmed: true,
             fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+            terminal_fixed_pd_disarmed: false,
         };
     };
     let idle_request_mv = HEATER_ADJUSTABLE_MIN_MV.clamp(pps_min_mv, pps_max_mv);
@@ -8436,33 +8708,66 @@ fn constrain_heater_backend_to_controller(
                 terminal_fixed_pd_disarmed,
             }
         }
-        (ControllerKind::Fusb302b, HeaterPowerBackend::PpsMos { .. }) => {
-            HeaterPowerBackend::FixedPdPwmFallback {
-                reason: HeaterPowerBackendReason::NoPps20vCapability,
-                fixed_request_confirmed: false,
-                fixed_request: ch224q::VoltageRequest::V20,
-            }
-        }
-        (ControllerKind::Fusb302b, HeaterPowerBackend::FixedPdPwmFallback { reason, .. }) => {
+        (
+            ControllerKind::Fusb302b,
+            HeaterPowerBackend::PpsMos {
+                terminal_fixed_pd_disarmed,
+                ..
+            },
+        ) => HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::NoPps20vCapability,
+            fixed_request_confirmed: false,
+            fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed,
+        },
+        (
+            ControllerKind::Fusb302b,
             HeaterPowerBackend::FixedPdPwmFallback {
                 reason,
-                fixed_request_confirmed: false,
-                fixed_request: ch224q::VoltageRequest::V20,
-            }
-        }
+                terminal_fixed_pd_disarmed,
+                ..
+            },
+        ) => HeaterPowerBackend::FixedPdPwmFallback {
+            reason,
+            fixed_request_confirmed: false,
+            fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed,
+        },
         (_, backend) => backend,
     }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fusb302b_pps_backend_from_capabilities(
-    capabilities: ch224q::AdjustablePowerCapabilities,
-) -> Option<HeaterPowerBackend> {
-    let backend = constrain_heater_backend_to_controller(
+fn select_fusb302b_heater_power_backend(
+    capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+) -> HeaterPowerBackend {
+    let Some(capabilities) = capabilities else {
+        return HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::CapabilityReadFailed,
+            fixed_request_confirmed: false,
+            fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed: false,
+        };
+    };
+
+    constrain_heater_backend_to_controller(
         ControllerKind::Fusb302b,
-        select_heater_power_backend(Some(capabilities), None),
-    );
-    matches!(backend, HeaterPowerBackend::PpsMos { .. }).then_some(backend)
+        select_heater_power_backend_with_source_limits(
+            capabilities,
+            None,
+            ManualPpsState::from_fusb302b_capabilities(Some(capabilities)).heater_source_limits(),
+        ),
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn refresh_fusb302b_heater_power_backend(
+    previous: HeaterPowerBackend,
+    capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+) -> HeaterPowerBackend {
+    let mut refreshed = select_fusb302b_heater_power_backend(capabilities);
+    refreshed.set_terminal_fixed_pd_disarmed(previous.terminal_fixed_pd_disarmed());
+    refreshed
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -8537,13 +8842,7 @@ fn latch_terminal_fixed_pd_disarm(
     if !calibration_runtime_state.immediate_heater_disarm_pending {
         return false;
     }
-    if let HeaterPowerBackend::PpsMos {
-        terminal_fixed_pd_disarmed,
-        ..
-    } = backend
-    {
-        *terminal_fixed_pd_disarmed = true;
-    }
+    backend.set_terminal_fixed_pd_disarmed(true);
     true
 }
 
@@ -8552,34 +8851,46 @@ fn release_terminal_fixed_pd_disarm_for_manual_pps(
     backend: &mut HeaterPowerBackend,
     manual_pps_active: bool,
 ) -> bool {
-    let HeaterPowerBackend::PpsMos {
-        terminal_fixed_pd_disarmed,
-        current_mode,
-        current_request_mv,
-        settle_until_ms,
-        next_request_at_ms,
-        current_limit_fixed_pwm_active,
-        current_limit_fixed_request_confirmed,
-        idle_request_mv,
-        ..
-    } = backend
-    else {
-        return false;
-    };
-    if !manual_pps_active || !*terminal_fixed_pd_disarmed {
+    if !manual_pps_active {
         return false;
     }
 
-    // A new manual PPS request is an explicit, non-heating re-arm. It may
-    // renegotiate the source while the heater output remains at zero.
-    *terminal_fixed_pd_disarmed = false;
-    *current_mode = None;
-    *current_request_mv = *idle_request_mv;
-    *settle_until_ms = None;
-    *next_request_at_ms = 0;
-    *current_limit_fixed_pwm_active = false;
-    *current_limit_fixed_request_confirmed = false;
-    true
+    match backend {
+        HeaterPowerBackend::PpsMos {
+            terminal_fixed_pd_disarmed,
+            current_mode,
+            current_request_mv,
+            settle_until_ms,
+            next_request_at_ms,
+            current_limit_fixed_pwm_active,
+            current_limit_fixed_request_confirmed,
+            idle_request_mv,
+            ..
+        } if *terminal_fixed_pd_disarmed => {
+            // A new manual PPS request is an explicit, non-heating re-arm. It
+            // may renegotiate the source while the heater output remains at zero.
+            *terminal_fixed_pd_disarmed = false;
+            *current_mode = None;
+            *current_request_mv = *idle_request_mv;
+            *settle_until_ms = None;
+            *next_request_at_ms = 0;
+            *current_limit_fixed_pwm_active = false;
+            *current_limit_fixed_request_confirmed = false;
+            true
+        }
+        HeaterPowerBackend::FixedPdPwmFallback {
+            terminal_fixed_pd_disarmed,
+            fixed_request_confirmed,
+            ..
+        } if *terminal_fixed_pd_disarmed => {
+            // Leave fallback ready to request fixed PD again if the manual PPS
+            // override is later cleared.
+            *terminal_fixed_pd_disarmed = false;
+            *fixed_request_confirmed = false;
+            true
+        }
+        _ => false,
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -8633,14 +8944,7 @@ where
 {
     let manual_pps_active = manual_pps.enabled;
     let _ = release_terminal_fixed_pd_disarm_for_manual_pps(backend, manual_pps_active);
-    let terminal_fixed_pd_disarmed = match backend {
-        HeaterPowerBackend::PpsMos {
-            terminal_fixed_pd_disarmed,
-            ..
-        } => *terminal_fixed_pd_disarmed,
-        HeaterPowerBackend::FixedPdPwmFallback { .. } => false,
-    };
-    if terminal_fixed_pd_disarmed {
+    if backend.terminal_fixed_pd_disarmed() {
         apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
         return false;
     }
@@ -8724,12 +9028,14 @@ where
             HeaterPowerBackend::FixedPdPwmFallback {
                 reason,
                 fixed_request,
+                terminal_fixed_pd_disarmed,
                 ..
             } => {
                 *backend = HeaterPowerBackend::FixedPdPwmFallback {
                     reason,
                     fixed_request_confirmed: false,
                     fixed_request,
+                    terminal_fixed_pd_disarmed,
                 };
             }
             HeaterPowerBackend::PpsMos {
@@ -8763,6 +9069,7 @@ where
             reason,
             fixed_request_confirmed,
             fixed_request,
+            terminal_fixed_pd_disarmed,
         } => {
             if !fixed_request_confirmed && !manual_pps_active {
                 if request_pd_fixed_voltage(i2c, pd_port, fixed_request).await {
@@ -8770,6 +9077,7 @@ where
                         reason,
                         fixed_request_confirmed: true,
                         fixed_request,
+                        terminal_fixed_pd_disarmed,
                     };
                     info!("heater backend fallback fixed-pd request confirmed");
                 } else {
@@ -9037,6 +9345,7 @@ where
                             reason: HeaterPowerBackendReason::AdjustableRequestFailed,
                             fixed_request_confirmed,
                             fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                            terminal_fixed_pd_disarmed: false,
                         };
                         if fixed_request_confirmed {
                             let negotiated_current_ma = pd_observation
@@ -10358,10 +10667,7 @@ fn apply_calibration_control_config(
             .pps_mv
             .or(calibration.pps_mv)
             .ok_or(ManualPpsError::InvalidVoltage)?;
-        let target_ma = calibration
-            .pps_ma
-            .or(manual_pps.target_ma)
-            .or(manual_pps.capability_max_ma);
+        let target_ma = calibration.pps_ma.or(manual_pps.target_ma);
         manual_pps.enable(ManualPpsOwner::Calibration, target_mv, target_ma)?;
         calibration.pps_enabled = true;
         calibration.pps_mv = manual_pps.target_mv;
@@ -10491,6 +10797,19 @@ fn disarm_calibration_after_transient_input_change(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn disarm_calibration_after_capability_refresh(
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+) {
+    if calibration.mode != CalibrationMode::Off
+        || calibration.heater_enabled
+        || calibration.pps_enabled
+    {
+        disarm_calibration_after_transient_input_change(calibration, manual_pps);
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn calibration_job_start_with_workspace(
     calibration: &mut CalibrationRuntimeState,
     kind: CalibrationJobKind,
@@ -10516,11 +10835,10 @@ fn calibration_job_start_with_workspace(
                 .capability_max_mv
                 .ok_or(ManualPpsError::NoPpsCapability)?
                 .min(28_000);
-            let target_ma = calibration
-                .pps_ma
-                .or(manual_pps.capability_max_ma)
-                .ok_or(ManualPpsError::NoPpsCapability)?;
             let next_request_mv = min_mv.div_ceil(100) * 100;
+            let target_ma = manual_pps
+                .maximum_pps_current_for_target(next_request_mv)
+                .ok_or(ManualPpsError::NoPpsCapability)?;
             manual_pps.enable(
                 ManualPpsOwner::Calibration,
                 next_request_mv,
@@ -11280,16 +11598,31 @@ fn update_calibration_job_state_with_workspace(
                 return;
             }
 
-            if calibration.pps_mv != Some(job.next_request_mv) {
+            let target_ma = match manual_pps.maximum_pps_current_for_target(job.next_request_mv) {
+                Some(target_ma) => target_ma,
+                None => {
+                    calibration_job_fail(
+                        calibration,
+                        ManualPpsError::NoPpsCapability,
+                        false,
+                        manual_pps,
+                    );
+                    return;
+                }
+            };
+            if calibration.pps_mv != Some(job.next_request_mv)
+                || calibration.pps_ma != Some(target_ma)
+            {
                 match manual_pps.enable(
                     ManualPpsOwner::Calibration,
                     job.next_request_mv,
-                    Some(job.target_ma),
+                    Some(target_ma),
                 ) {
                     Ok(()) => {
                         calibration.pps_enabled = true;
                         calibration.pps_mv = Some(job.next_request_mv);
-                        calibration.pps_ma = Some(job.target_ma);
+                        calibration.pps_ma = Some(target_ma);
+                        job.target_ma = target_ma;
                         job.settle_ticks = 0;
                         job.stable_ticks = 0;
                         job.last_observed_mv = None;
@@ -11300,6 +11633,7 @@ fn update_calibration_job_state_with_workspace(
                     }
                 }
             }
+            job.target_ma = target_ma;
 
             let requested_mv = manual_pps.target_mv.unwrap_or(job.next_request_mv);
             let request_locked =
@@ -14442,20 +14776,24 @@ async fn main(_spawner: Spawner) {
         ),
         None => info!("pd power data read failed"),
     }
-    let mut manual_pps_state = ManualPpsState::from_capabilities(power_data_capabilities);
+    let mut manual_pps_state = ManualPpsState::from_fusb302b_capabilities(power_data_capabilities);
+    let mut last_fusb302b_power_capabilities = power_data_capabilities;
     let mut calibration_runtime_state = CalibrationRuntimeState::default();
     static THERMAL_PLANT_WORKSPACE: StaticCell<CalibrationThermalPlantWorkspace> =
         StaticCell::new();
     let thermal_plant_workspace =
         THERMAL_PLANT_WORKSPACE.init_with(CalibrationThermalPlantWorkspace::default);
     let mut thermal_control_profile_preview: Option<ThermalControlProfile> = None;
-    let mut heater_power_backend = constrain_heater_backend_to_controller(
-        pd_port.controller_kind(),
-        select_heater_power_backend(
-            power_data_capabilities,
-            last_pd_observation.map(|status| status.status),
+    let mut heater_power_backend = match pd_port.controller_kind() {
+        ControllerKind::Fusb302b => select_fusb302b_heater_power_backend(power_data_capabilities),
+        controller => constrain_heater_backend_to_controller(
+            controller,
+            select_heater_power_backend(
+                power_data_capabilities,
+                last_pd_observation.map(|status| status.status),
+            ),
         ),
-    );
+    };
     let mut hold_pps_governor = HoldPpsGovernor::new();
     let mut last_heater_duty = 0_u8;
     match heater_power_backend {
@@ -15777,21 +16115,19 @@ async fn main(_spawner: Spawner) {
                     info!("PD contract became unavailable; heater interlocked");
                 }
             }
-            if pd_port.controller_kind() == ControllerKind::Fusb302b
-                && matches!(
-                    heater_power_backend,
-                    HeaterPowerBackend::FixedPdPwmFallback { .. }
-                )
-                && let Some(capabilities) = read_pd_power_capabilities(&mut pd_i2c, &mut pd_port)
-                && let Some(next_backend) = fusb302b_pps_backend_from_capabilities(capabilities)
-            {
-                heater_power_backend = next_backend;
-                manual_pps_state = ManualPpsState::from_capabilities(Some(capabilities));
-                hold_pps_governor = HoldPpsGovernor::new();
-                needs_redraw = true;
-                info!(
-                    "fusb302b source capabilities became available; promoted heater backend to pps-mos"
-                );
+            let mut fusb302b_capabilities_changed = false;
+            if pd_port.controller_kind() == ControllerKind::Fusb302b {
+                let capabilities = read_pd_power_capabilities(&mut pd_i2c, &mut pd_port);
+                if capabilities != last_fusb302b_power_capabilities {
+                    fusb302b_capabilities_changed = true;
+                    last_fusb302b_power_capabilities = capabilities;
+                    heater_power_backend =
+                        refresh_fusb302b_heater_power_backend(heater_power_backend, capabilities);
+                    manual_pps_state = ManualPpsState::from_fusb302b_capabilities(capabilities);
+                    hold_pps_governor = HoldPpsGovernor::new();
+                    needs_redraw = true;
+                    info!("fusb302b source capabilities changed; refreshed heater power bounds");
+                }
             }
             update_calibration_runtime_state(
                 &mut calibration_runtime_state,
@@ -15833,6 +16169,12 @@ async fn main(_spawner: Spawner) {
                         .unwrap_or(0),
                     latest_vin_mv,
                     last_heater_duty,
+                );
+            }
+            if fusb302b_capabilities_changed {
+                disarm_calibration_after_capability_refresh(
+                    &mut calibration_runtime_state,
+                    &mut manual_pps_state,
                 );
             }
             let thermal_plant_completed = calibration_runtime_state.mode == CalibrationMode::Off
@@ -15953,7 +16295,7 @@ async fn main(_spawner: Spawner) {
             // watts. Bound achievable plate power by both V^2/R(T) and the
             // selected APDO's V*I contract without turning R(T) into a voltage
             // ceiling. The source contract owns its current boundary.
-            let runtime_source_limits = manual_pps_state.thermal_plant_source_limits();
+            let runtime_source_limits = manual_pps_state.heater_source_limits();
             let max_power_mw = heater_available_power_mw_for_temp(
                 latest_temp_c,
                 runtime_source_limits.map(|(_, max_mv, _)| max_mv),
@@ -16400,6 +16742,156 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fusb302b_cc_detach_requires_an_idle_open_measurement() {
+        assert_eq!(fusb302b_cc_attachment_state(0), Some(false));
+        assert_eq!(fusb302b_cc_attachment_state(0b01), Some(true));
+        assert_eq!(fusb302b_cc_attachment_state(0b10), Some(true));
+        assert_eq!(fusb302b_cc_attachment_state(0b11), Some(true));
+        assert_eq!(fusb302b_cc_attachment_state(1 << 6), None);
+    }
+
+    #[test]
+    fn fusb302b_recovery_flushes_only_the_receive_fifo() {
+        assert_eq!(fusb302b_receive_fifo_flush_value(0), 0b0000_0100);
+        assert_eq!(fusb302b_receive_fifo_flush_value(0xff), 0b0111_0111);
+    }
+
+    #[test]
+    fn fusb302b_retry_failure_is_consumed_until_the_bounded_requery() {
+        assert!(fusb302b_retry_failure_requires_recovery(
+            FUSB302B_STATUS0A_RETRY_FAIL,
+            FUSB302B_STATUS1_RX_EMPTY,
+            false,
+        ));
+        assert!(!fusb302b_retry_failure_requires_recovery(
+            FUSB302B_STATUS0A_RETRY_FAIL,
+            FUSB302B_STATUS1_RX_EMPTY,
+            true,
+        ));
+        assert!(!fusb302b::source_capabilities_request_due(
+            1_000,
+            Some(2_000),
+            6_999,
+        ));
+        assert!(fusb302b::source_capabilities_request_due(
+            1_000,
+            Some(2_000),
+            7_000,
+        ));
+    }
+
+    #[test]
+    fn fusb302b_capability_bridge_preserves_each_usable_apdo() {
+        let mut source = SourceCapabilities::empty();
+        source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 21_000,
+            max_ma: 5_000,
+        });
+        source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 2,
+            min_mv: 5_000,
+            max_mv: 28_000,
+            max_ma: 3_000,
+        });
+
+        let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+        let mut manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        assert!(manual.validate_target(20_000, 5_000).is_ok());
+        assert!(manual.validate_target(24_000, 3_000).is_ok());
+        assert!(manual.validate_target(5_000, 3_000).is_err());
+        manual
+            .enable(ManualPpsOwner::Debug, 24_000, None)
+            .expect("an omitted current must use the APDO covering the requested voltage");
+        assert_eq!(manual.target_ma, Some(3_000));
+        assert_eq!(
+            manual.thermal_plant_source_limits(),
+            Some((5_500, 28_000, 3_000))
+        );
+        assert_eq!(
+            adjustable_mode_for_request(24_000, 28_000),
+            ch224q::AdjustableVoltageMode::Pps
+        );
+    }
+
+    #[test]
+    fn automatic_heating_uses_a_current_ceiling_valid_across_the_pps_range() {
+        let mut source = SourceCapabilities::empty();
+        source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 24_000,
+            max_ma: 3_000,
+        });
+        source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 2,
+            min_mv: 24_000,
+            max_mv: 28_000,
+            max_ma: 5_000,
+        });
+
+        let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+        let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        assert_eq!(manual.heater_source_limits(), Some((5_500, 28_000, 3_000)));
+    }
+
+    #[test]
+    fn fusb302b_capability_bridge_retains_degraded_pps_apdo() {
+        let mut source = SourceCapabilities::empty();
+        source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 19_000,
+            max_ma: 3_000,
+        });
+
+        let capabilities = fusb302b_adjustable_power_capabilities(source)
+            .expect("a usable lower-voltage APDO remains visible to the PPS bridge");
+        let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        assert!(!capabilities.pps_covers_20v);
+        assert!(manual.validate_target(12_000, 3_000).is_ok());
+        assert_eq!(manual.thermal_plant_source_limits(), None);
+        let HeaterPowerBackend::PpsMos {
+            pps_min_mv,
+            pps_max_mv,
+            capability_max_ma,
+            ..
+        } = select_fusb302b_heater_power_backend(Some(capabilities))
+        else {
+            panic!("a usable degraded PPS APDO must remain available to automatic heating");
+        };
+        assert_eq!(pps_min_mv, 5_500);
+        assert_eq!(pps_max_mv, 19_000);
+        assert_eq!(capability_max_ma, 3_000);
+    }
+
+    #[test]
+    fn automatic_heating_does_not_join_disjoint_pps_apdos() {
+        let mut source = SourceCapabilities::empty();
+        source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 11_000,
+            max_ma: 3_000,
+        });
+        source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 2,
+            min_mv: 12_000,
+            max_mv: 19_000,
+            max_ma: 3_000,
+        });
+
+        let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+        let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        assert_eq!(manual.heater_source_limits(), Some((12_000, 19_000, 3_000)));
+    }
+
+    #[test]
     fn fusb302b_identity_requires_stable_family_id_and_readable_status() {
         assert!(fusb302b_identity_is_stable(
             Some(0x91),
@@ -16486,7 +16978,6 @@ mod tests {
         assert_eq!(FUSB302B_INITIAL_PPS_REQUEST_MV, HEATER_ADJUSTABLE_MIN_MV);
         assert_eq!(FUSB302B_INITIAL_PPS_REQUEST_MV, 12_000);
     }
-
     #[test]
     fn zeroize_bytes_scrubs_reusable_heap_workspace() {
         let mut bytes = [0xFA, 0x00, 0xF4, 0x01, 0xA5, 0x5A];
@@ -16774,6 +17265,7 @@ mod tests {
                 reason: HeaterPowerBackendReason::NoPps20vCapability,
                 fixed_request_confirmed: true,
                 fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                terminal_fixed_pd_disarmed: false,
             },
             pid_snapshot: HeaterPidSnapshot {
                 duty_percent: 0,
@@ -18058,6 +18550,45 @@ mod tests {
     }
 
     #[test]
+    fn calibration_control_uses_the_target_apdo_current_when_unspecified() {
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_500),
+            pps_max_mv: Some(28_000),
+            pps_max_ma: Some(5_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 21_000,
+            max_ma: 5_000,
+        });
+        capabilities.pps_apdos[1] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 28_000,
+            max_ma: 3_000,
+        });
+        let mut calibration = CalibrationRuntimeState::default();
+        let mut manual_pps = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        apply_calibration_control_config(
+            &CalibrationControlCommand {
+                mode: Some(CalibrationModeWire::HeaterCurve),
+                pps_enabled: Some(true),
+                pps_mv: Some(24_000),
+                heater_enabled: None,
+                target_adc_mv: None,
+            },
+            &mut calibration,
+            &mut manual_pps,
+        )
+        .expect("calibration PPS selects the APDO that covers 24V");
+
+        assert_eq!(calibration.pps_mv, Some(24_000));
+        assert_eq!(calibration.pps_ma, Some(3_000));
+    }
+
+    #[test]
     fn leaving_calibration_mode_disarms_its_pps_override() {
         let mut calibration = CalibrationRuntimeState {
             mode: CalibrationMode::HeaterCurve,
@@ -18126,6 +18657,29 @@ mod tests {
         assert!(!manual_pps.enabled);
         assert_eq!(manual_pps.target_mv, None);
         assert_eq!(manual_pps.applied_mv, None);
+    }
+
+    #[test]
+    fn capability_refresh_disarms_active_calibration_before_output() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::HeaterCurve,
+            pps_enabled: true,
+            pps_mv: Some(20_000),
+            pps_ma: Some(3_000),
+            heater_enabled: true,
+            ..CalibrationRuntimeState::default()
+        };
+        let mut manual_pps = ManualPpsState::from_fusb302b_capabilities(Some(
+            ch224q::AdjustablePowerCapabilities::default(),
+        ));
+        disarm_calibration_after_capability_refresh(&mut calibration, &mut manual_pps);
+
+        assert!(!calibration.heater_enabled);
+        assert!(!calibration.pps_enabled);
+        assert_eq!(calibration.pps_mv, None);
+        assert_eq!(calibration.pps_ma, None);
+        assert!(calibration.immediate_heater_disarm_pending);
+        assert!(!manual_pps.enabled);
     }
 
     #[test]
@@ -18360,6 +18914,79 @@ mod tests {
             memory_config.adc_calibration.vin.samples[7].map(|sample| sample.expected_mv),
             Some(vin_adc_mv_for_input_mv(21_000))
         );
+    }
+
+    #[test]
+    fn vin_auto_job_reselects_current_when_sweep_crosses_apdo_boundary() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::VinAdc,
+            pps_ma: Some(3_000),
+            ..CalibrationRuntimeState::default()
+        };
+        let mut memory_config = MemoryConfig::default();
+        let mut manual_pps =
+            ManualPpsState::from_fusb302b_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(28_000),
+                pps_max_ma: Some(5_000),
+                pps_apdos: [
+                    Some(ch224q::PpsApdo {
+                        min_mv: 5_000,
+                        max_mv: 21_000,
+                        max_ma: 5_000,
+                    }),
+                    Some(ch224q::PpsApdo {
+                        min_mv: 21_000,
+                        max_mv: 28_000,
+                        max_ma: 3_000,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }));
+
+        calibration_job_start(
+            &mut calibration,
+            CalibrationJobKind::VinAdc,
+            &mut memory_config,
+            &mut manual_pps,
+        )
+        .unwrap();
+
+        let mut crossed_apdo_boundary = false;
+        for _ in 0..200 {
+            let request_mv = manual_pps.target_mv.expect("VIN sweep keeps a PPS request");
+            let expected_ma = if request_mv <= 21_000 { 5_000 } else { 3_000 };
+            let step = (request_mv - 5_000) / 1_000;
+            let vin_raw_mv = 280 + (step * 45);
+            assert_eq!(manual_pps.target_ma, Some(expected_ma));
+            crossed_apdo_boundary |= request_mv > 21_000;
+
+            update_calibration_job_state(
+                &mut calibration,
+                &mut memory_config,
+                &mut manual_pps,
+                0,
+                vin_raw_mv,
+                25.0,
+                3_000,
+                u32::from(request_mv),
+                0,
+            );
+            if calibration.job.status == CalibrationJobStatus::Completed {
+                break;
+            }
+        }
+
+        assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
+        assert_eq!(calibration.job.samples_collected, 23);
+        assert!(crossed_apdo_boundary);
     }
 
     #[test]
@@ -22937,6 +23564,27 @@ mod tests {
         );
         assert_eq!(zero_draw_keeps_contract, 5_000);
 
+        let refreshed_pps_contract_limits_the_budget = effective_pps_current_limit_ma(
+            5_000,
+            Some(PdStatusObservation {
+                status_raw: 0,
+                status: Status {
+                    pd_active: true,
+                    ..Status::default()
+                },
+                current_raw: 0,
+                current_ma: 3_000,
+                contract_voltage_mv: Some(24_000),
+                contract: Contract {
+                    kind: ContractKind::Pps,
+                    voltage_mv: 24_000,
+                    current_ma: 3_000,
+                    object_position: 2,
+                },
+            }),
+        );
+        assert_eq!(refreshed_pps_contract_limits_the_budget, 3_000);
+
         assert_eq!(effective_pps_current_limit_ma(5_000, None), 5_000);
     }
 
@@ -23108,6 +23756,7 @@ mod tests {
                 reason: HeaterPowerBackendReason::NoPps20vCapability,
                 fixed_request_confirmed: true,
                 fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                terminal_fixed_pd_disarmed: false,
             }
         );
     }
@@ -24539,6 +25188,7 @@ mod tests {
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: true,
             fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed: false,
         };
         assert_eq!(
             effective_pd_contract_mv(&ManualPpsState::default(), Some(low_voltage), fallback),
@@ -24547,7 +25197,7 @@ mod tests {
     }
 
     #[test]
-    fn fusb302b_pps_contract_enables_calibration_and_caps_backend_to_21v() {
+    fn fusb302b_pps_contract_enables_calibration_and_keeps_the_absolute_guard() {
         let contract = Contract {
             kind: ContractKind::Pps,
             object_position: 2,
@@ -24607,10 +25257,10 @@ mod tests {
         else {
             panic!("FUSB302B must retain a PPS backend when a PPS APDO is present");
         };
-        assert_eq!(pps_max_mv, 21_000);
-        assert_eq!(adjustable_max_mv, 21_000);
+        assert_eq!(pps_max_mv, 28_000);
+        assert_eq!(adjustable_max_mv, 28_000);
         assert_eq!(current_mode, Some(ch224q::AdjustableVoltageMode::Pps));
-        assert_eq!(current_request_mv, 21_000);
+        assert_eq!(current_request_mv, 24_000);
     }
 
     #[test]
@@ -24628,8 +25278,7 @@ mod tests {
             max_ma: 3_000,
         });
 
-        let backend = fusb302b_pps_backend_from_capabilities(capabilities)
-            .expect("FUSB302B PPS source capabilities must enable the PPS backend");
+        let backend = select_fusb302b_heater_power_backend(Some(capabilities));
         let HeaterPowerBackend::PpsMos {
             pps_min_mv,
             pps_max_mv,
@@ -24640,10 +25289,123 @@ mod tests {
         else {
             panic!("FUSB302B must promote from fixed fallback to PPS");
         };
-        assert_eq!(pps_min_mv, 5_000);
+        assert_eq!(pps_min_mv, FUSB302B_PPS_MIN_MV);
         assert_eq!(pps_max_mv, 21_000);
         assert_eq!(capability_max_ma, 3_000);
         assert_eq!(current_mode, Some(ch224q::AdjustableVoltageMode::Pps));
+    }
+
+    #[test]
+    fn fusb302b_capability_refresh_preserves_terminal_fixed_pd_disarm() {
+        let previous = HeaterPowerBackend::PpsMos {
+            pps_min_mv: 5_500,
+            idle_request_mv: 12_000,
+            pps_max_mv: 21_000,
+            adjustable_max_mv: 21_000,
+            capability_max_ma: 3_000,
+            current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+            current_request_mv: 20_000,
+            settle_until_ms: None,
+            next_request_at_ms: 0,
+            current_limit_fixed_pwm_active: false,
+            current_limit_fixed_request_confirmed: false,
+            terminal_fixed_pd_disarmed: true,
+        };
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_500),
+            pps_max_mv: Some(21_000),
+            pps_max_ma: Some(3_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 21_000,
+            max_ma: 3_000,
+        });
+
+        assert!(matches!(
+            refresh_fusb302b_heater_power_backend(previous, Some(capabilities)),
+            HeaterPowerBackend::PpsMos {
+                terminal_fixed_pd_disarmed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fusb302b_rediscovery_preserves_terminal_fixed_pd_disarm() {
+        let previous = HeaterPowerBackend::PpsMos {
+            pps_min_mv: 5_500,
+            idle_request_mv: 12_000,
+            pps_max_mv: 21_000,
+            adjustable_max_mv: 21_000,
+            capability_max_ma: 3_000,
+            current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+            current_request_mv: 20_000,
+            settle_until_ms: None,
+            next_request_at_ms: 0,
+            current_limit_fixed_pwm_active: false,
+            current_limit_fixed_request_confirmed: false,
+            terminal_fixed_pd_disarmed: true,
+        };
+        let fallback = refresh_fusb302b_heater_power_backend(previous, None);
+        assert!(matches!(
+            fallback,
+            HeaterPowerBackend::FixedPdPwmFallback {
+                terminal_fixed_pd_disarmed: true,
+                ..
+            }
+        ));
+
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_500),
+            pps_max_mv: Some(21_000),
+            pps_max_ma: Some(3_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 21_000,
+            max_ma: 3_000,
+        });
+
+        assert!(matches!(
+            refresh_fusb302b_heater_power_backend(fallback, Some(capabilities)),
+            HeaterPowerBackend::PpsMos {
+                terminal_fixed_pd_disarmed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fusb302b_initial_backend_uses_fusb302b_request_bounds() {
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_500),
+            pps_max_mv: Some(28_000),
+            pps_max_ma: Some(3_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 28_000,
+            max_ma: 3_000,
+        });
+
+        let HeaterPowerBackend::PpsMos {
+            pps_min_mv,
+            pps_max_mv,
+            ..
+        } = select_fusb302b_heater_power_backend(Some(capabilities))
+        else {
+            panic!("FUSB302B should retain a usable PPS backend");
+        };
+
+        assert_eq!(pps_min_mv, FUSB302B_PPS_MIN_MV);
+        assert_eq!(pps_max_mv, FUSB302B_PPS_MAX_MV);
     }
 
     #[test]
@@ -24658,6 +25420,7 @@ mod tests {
                     reason: HeaterPowerBackendReason::NoPps20vCapability,
                     fixed_request_confirmed: false,
                     fixed_request: ch224q::VoltageRequest::V20,
+                    terminal_fixed_pd_disarmed: false,
                 },
                 vin_mv: 20_000,
                 ..test_usb_runtime_status_context()
@@ -24680,6 +25443,7 @@ mod tests {
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: true,
             fixed_request: ch224q::VoltageRequest::V28,
+            terminal_fixed_pd_disarmed: false,
         };
 
         let fusb = constrain_heater_backend_to_controller(ControllerKind::Fusb302b, legacy);
@@ -25527,6 +26291,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn manual_pps_releases_terminal_disarm_after_fixed_pd_fallback() {
+        let mut backend = HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::NoPps20vCapability,
+            fixed_request_confirmed: true,
+            fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed: true,
+        };
+
+        assert!(release_terminal_fixed_pd_disarm_for_manual_pps(
+            &mut backend,
+            true
+        ));
+        assert_eq!(
+            backend,
+            HeaterPowerBackend::FixedPdPwmFallback {
+                reason: HeaterPowerBackendReason::NoPps20vCapability,
+                fixed_request_confirmed: false,
+                fixed_request: ch224q::VoltageRequest::V20,
+                terminal_fixed_pd_disarmed: false,
+            }
+        );
     }
 
     #[test]

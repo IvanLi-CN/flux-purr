@@ -15,7 +15,43 @@ const PPS_KEEPALIVE_INTERVAL_MS: u64 = 5_000;
 
 pub const SOURCE_CAPS_INITIAL_WAIT_MS: u64 = 400;
 pub const SOURCE_CAPS_RETRY_INTERVAL_MS: u64 = 5_000;
-pub const SOURCE_CAPS_HARD_RESET_DELAY_MS: u64 = 1_000;
+
+/// The only recovery actions available after a Source_Capabilities timeout.
+///
+/// A sink powered by the same VBUS must not initiate a PD reset merely because
+/// a source-capability response is late: either reset can disturb the source
+/// session that powers the sink itself. Keep the heater interlocked and retry
+/// `Get_Source_Capabilities` instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceCapabilitiesRecovery {
+    Wait,
+    RetryGetSourceCapabilities,
+}
+
+/// A local transport failure that does not prove a CC detach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransientTransportFault {
+    RetryFailed,
+    PendingRequestTimeout,
+    PartialReceiveTimeout,
+}
+
+/// The recovery action for a local transport failure.
+///
+/// Reinitializing the PHY can withdraw Rd long enough for the source that
+/// powers this sink to remove VBUS. These faults must instead preserve CC,
+/// interlock heating, flush the incomplete transaction, and re-query source
+/// capabilities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransientTransportRecovery {
+    FlushReceiveAndRequery,
+}
+
+pub const fn transient_transport_fault_recovery(
+    _fault: TransientTransportFault,
+) -> TransientTransportRecovery {
+    TransientTransportRecovery::FlushReceiveAndRequery
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SinkPhase {
@@ -35,6 +71,7 @@ pub enum SinkPhase {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SinkPolicy {
     phase: SinkPhase,
+    default_requested_mv: u16,
     requested_mv: u16,
     preferred_ma: u16,
     pending_contract: Contract,
@@ -47,6 +84,7 @@ impl SinkPolicy {
     pub const fn new(requested_mv: u16, preferred_ma: u16) -> Self {
         Self {
             phase: SinkPhase::WaitingForSourceCapabilities,
+            default_requested_mv: requested_mv,
             requested_mv,
             preferred_ma,
             pending_contract: Contract::none(),
@@ -152,16 +190,16 @@ impl SinkPolicy {
         };
     }
 
-    /// Disarm after a request timeout. The runtime resets the PHY before it
-    /// resumes negotiation, so delayed frames cannot install a contract after
-    /// the timeout.
-    pub fn timeout_pending_request(&mut self) {
-        if matches!(
-            self.phase,
-            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-        ) {
-            self.mark_fault();
-        }
+    /// Make a local transport failure a heater-only interlock without
+    /// withdrawing CC. The caller flushes the PHY receive FIFO and later
+    /// re-queries the source before a new contract can authorize heat.
+    pub fn interlock_after_transient_transport_fault(&mut self) {
+        self.pending_contract = Contract::none();
+        self.active_contract = Contract::none();
+        self.requested_mv = self.default_requested_mv;
+        self.source_capabilities = SourceCapabilities::empty();
+        self.source_capabilities_received = false;
+        self.phase = SinkPhase::WaitingForSourceCapabilities;
     }
 
     /// `Accept` alone never arms heating; only `PS_RDY` installs a contract.
@@ -190,6 +228,8 @@ impl SinkPolicy {
     pub fn on_detach_or_reset(&mut self) {
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
+        self.requested_mv = self.default_requested_mv;
+        self.source_capabilities = SourceCapabilities::empty();
         self.source_capabilities_received = false;
         self.phase = SinkPhase::Detached;
     }
@@ -242,8 +282,31 @@ pub const fn source_capabilities_retry_due(last_request_at_ms: u64, now_ms: u64)
     now_ms.saturating_sub(last_request_at_ms) >= SOURCE_CAPS_RETRY_INTERVAL_MS
 }
 
-pub const fn source_capabilities_hard_reset_due(last_request_at_ms: u64, now_ms: u64) -> bool {
-    now_ms.saturating_sub(last_request_at_ms) >= SOURCE_CAPS_HARD_RESET_DELAY_MS
+/// Returns whether the sink should request Source_Capabilities now.
+///
+/// A newly attached source gets its normal advertisement window first. Once a
+/// request has been sent, recovery remains a bounded re-query and never
+/// escalates to a sink-initiated reset.
+pub const fn source_capabilities_request_due(
+    attached_at_ms: u64,
+    last_request_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    match last_request_at_ms {
+        Some(last_request_at_ms) => source_capabilities_retry_due(last_request_at_ms, now_ms),
+        None => now_ms.saturating_sub(attached_at_ms) >= SOURCE_CAPS_INITIAL_WAIT_MS,
+    }
+}
+
+pub const fn source_capabilities_recovery(
+    last_request_at_ms: u64,
+    now_ms: u64,
+) -> SourceCapabilitiesRecovery {
+    if source_capabilities_retry_due(last_request_at_ms, now_ms) {
+        SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+    } else {
+        SourceCapabilitiesRecovery::Wait
+    }
 }
 
 /// Decode a complete Source_Capabilities data message from the public PHY packet view.
@@ -347,11 +410,54 @@ mod tests {
     }
 
     #[test]
-    fn source_capability_recovery_deadlines_are_preserved() {
-        assert!(!source_capabilities_retry_due(1_000, 5_999));
-        assert!(source_capabilities_retry_due(1_000, 6_000));
-        assert!(!source_capabilities_hard_reset_due(1_000, 1_999));
-        assert!(source_capabilities_hard_reset_due(1_000, 2_000));
+    fn missing_source_capabilities_only_retry_without_resetting_the_source() {
+        assert_eq!(
+            source_capabilities_recovery(1_000, 1_999),
+            SourceCapabilitiesRecovery::Wait
+        );
+        assert_eq!(
+            source_capabilities_recovery(1_000, 6_000),
+            SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+        );
+    }
+
+    #[test]
+    fn source_capabilities_request_schedule_waits_then_retries() {
+        assert!(!source_capabilities_request_due(1_000, None, 1_399));
+        assert!(source_capabilities_request_due(1_000, None, 1_400));
+        assert!(!source_capabilities_request_due(1_000, Some(1_400), 6_399));
+        assert!(source_capabilities_request_due(1_000, Some(1_400), 6_400));
+    }
+
+    #[test]
+    fn unanswered_startup_source_caps_never_resets_the_powering_source() {
+        assert_eq!(
+            source_capabilities_recovery(1_400, 2_399),
+            SourceCapabilitiesRecovery::Wait
+        );
+        assert_eq!(
+            source_capabilities_recovery(1_400, 2_400),
+            SourceCapabilitiesRecovery::Wait
+        );
+        assert_eq!(
+            source_capabilities_recovery(1_400, 6_400),
+            SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+        );
+    }
+
+    #[test]
+    fn missing_source_capabilities_only_waits_or_requeries_without_resetting_source() {
+        assert!(
+            matches!(
+                source_capabilities_recovery(1_000, 2_000),
+                SourceCapabilitiesRecovery::Wait
+            ),
+            "a missing Source_Capabilities response must not make the sink reset the source session"
+        );
+        assert!(matches!(
+            source_capabilities_recovery(1_000, 6_000),
+            SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+        ));
     }
 
     #[test]
@@ -366,6 +472,60 @@ mod tests {
             request_data_object(contract),
             Some(0x2107_d064_u32.to_le_bytes())
         );
+    }
+
+    #[test]
+    fn transient_transport_faults_interlock_without_requesting_a_phy_reset() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+
+        for fault in [
+            TransientTransportFault::RetryFailed,
+            TransientTransportFault::PendingRequestTimeout,
+            TransientTransportFault::PartialReceiveTimeout,
+        ] {
+            assert_eq!(
+                transient_transport_fault_recovery(fault),
+                TransientTransportRecovery::FlushReceiveAndRequery
+            );
+        }
+
+        policy.interlock_after_transient_transport_fault();
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert_eq!(policy.active_contract(), Contract::none());
+        assert_eq!(policy.source_capabilities(), None);
+        assert!(!policy.prepare_pps_request(12_000));
+        assert_eq!(policy.request_pps_voltage(12_000), None);
+        assert_eq!(policy.request_fixed_voltage(20_000), None);
+
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn transient_transport_fault_discards_manual_pps_target_before_rediscovery() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert!(policy.request_pps_voltage(12_000).is_some());
+        assert_eq!(policy.requested_mv, 12_000);
+
+        policy.interlock_after_transient_transport_fault();
+
+        assert_eq!(policy.requested_mv, 20_000);
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+        assert_eq!(policy.requested_mv, 20_000);
     }
 
     #[test]
