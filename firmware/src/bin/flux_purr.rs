@@ -5239,8 +5239,34 @@ impl ManualPpsState {
             }
         }
 
-        self.maximum_pps_current_for_target(reachable_max_mv)
-            .map(|current_ma| (minimum_mv, reachable_max_mv, current_ma))
+        // The runtime heater budget accepts a single current ceiling for the
+        // whole automatic voltage range. Derive a ceiling that is valid at
+        // every boundary of the continuous APDO component, rather than taking
+        // the (potentially higher) current offered only at its top voltage.
+        let mut conservative_current_ma = u16::MAX;
+        let mut current_observed = false;
+        for apdo in self.capability_apdos.iter().flatten() {
+            let apdo_min_mv = apdo.min_mv.max(self.request_min_mv);
+            let apdo_max_mv = apdo.max_mv.min(self.request_max_mv);
+            if apdo.max_ma < 3_000 || apdo_max_mv < minimum_mv || apdo_min_mv > reachable_max_mv {
+                continue;
+            }
+
+            for checkpoint_mv in [
+                apdo_min_mv.max(minimum_mv),
+                apdo_max_mv.min(reachable_max_mv),
+                apdo_max_mv.saturating_add(1),
+            ] {
+                if checkpoint_mv < minimum_mv || checkpoint_mv > reachable_max_mv {
+                    continue;
+                }
+                let current_ma = self.maximum_pps_current_for_target(checkpoint_mv)?;
+                conservative_current_ma = conservative_current_ma.min(current_ma);
+                current_observed = true;
+            }
+        }
+
+        current_observed.then_some((minimum_mv, reachable_max_mv, conservative_current_ma))
     }
 
     fn enable(
@@ -8693,6 +8719,28 @@ fn select_fusb302b_heater_power_backend(
     )
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn refresh_fusb302b_heater_power_backend(
+    previous: HeaterPowerBackend,
+    capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+) -> HeaterPowerBackend {
+    let mut refreshed = select_fusb302b_heater_power_backend(capabilities);
+    if matches!(
+        previous,
+        HeaterPowerBackend::PpsMos {
+            terminal_fixed_pd_disarmed: true,
+            ..
+        }
+    ) && let HeaterPowerBackend::PpsMos {
+        terminal_fixed_pd_disarmed,
+        ..
+    } = &mut refreshed
+    {
+        *terminal_fixed_pd_disarmed = true;
+    }
+    refreshed
+}
+
 #[cfg(target_arch = "xtensa")]
 fn apply_heater_duty<PWM>(heater_pwm: &mut PWM, duty_percent: u8, last_duty_percent: &mut u8)
 where
@@ -10586,10 +10634,7 @@ fn apply_calibration_control_config(
             .pps_mv
             .or(calibration.pps_mv)
             .ok_or(ManualPpsError::InvalidVoltage)?;
-        let target_ma = calibration
-            .pps_ma
-            .or(manual_pps.target_ma)
-            .or(manual_pps.capability_max_ma);
+        let target_ma = calibration.pps_ma.or(manual_pps.target_ma);
         manual_pps.enable(ManualPpsOwner::Calibration, target_mv, target_ma)?;
         calibration.pps_enabled = true;
         calibration.pps_mv = manual_pps.target_mv;
@@ -16013,7 +16058,8 @@ async fn main(_spawner: Spawner) {
                 let capabilities = read_pd_power_capabilities(&mut pd_i2c, &mut pd_port);
                 if capabilities != last_fusb302b_power_capabilities {
                     last_fusb302b_power_capabilities = capabilities;
-                    heater_power_backend = select_fusb302b_heater_power_backend(capabilities);
+                    heater_power_backend =
+                        refresh_fusb302b_heater_power_backend(heater_power_backend, capabilities);
                     manual_pps_state = ManualPpsState::from_fusb302b_capabilities(capabilities);
                     hold_pps_governor = HoldPpsGovernor::new();
                     needs_redraw = true;
@@ -16699,6 +16745,28 @@ mod tests {
             adjustable_mode_for_request(24_000, 28_000),
             ch224q::AdjustableVoltageMode::Pps
         );
+    }
+
+    #[test]
+    fn automatic_heating_uses_a_current_ceiling_valid_across_the_pps_range() {
+        let mut source = SourceCapabilities::empty();
+        source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 24_000,
+            max_ma: 3_000,
+        });
+        source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 2,
+            min_mv: 24_000,
+            max_mv: 28_000,
+            max_ma: 5_000,
+        });
+
+        let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+        let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        assert_eq!(manual.heater_source_limits(), Some((5_500, 28_000, 3_000)));
     }
 
     #[test]
@@ -18409,6 +18477,45 @@ mod tests {
         assert_eq!(error, ManualPpsError::ThermalPlantManagedByJob);
         assert_eq!(calibration, CalibrationRuntimeState::default());
         assert_eq!(manual_pps, ManualPpsState::default());
+    }
+
+    #[test]
+    fn calibration_control_uses_the_target_apdo_current_when_unspecified() {
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_500),
+            pps_max_mv: Some(28_000),
+            pps_max_ma: Some(5_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 21_000,
+            max_ma: 5_000,
+        });
+        capabilities.pps_apdos[1] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 28_000,
+            max_ma: 3_000,
+        });
+        let mut calibration = CalibrationRuntimeState::default();
+        let mut manual_pps = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        apply_calibration_control_config(
+            &CalibrationControlCommand {
+                mode: Some(CalibrationModeWire::HeaterCurve),
+                pps_enabled: Some(true),
+                pps_mv: Some(24_000),
+                heater_enabled: None,
+                target_adc_mv: None,
+            },
+            &mut calibration,
+            &mut manual_pps,
+        )
+        .expect("calibration PPS selects the APDO that covers 24V");
+
+        assert_eq!(calibration.pps_mv, Some(24_000));
+        assert_eq!(calibration.pps_ma, Some(3_000));
     }
 
     #[test]
@@ -25018,6 +25125,44 @@ mod tests {
         assert_eq!(pps_max_mv, 21_000);
         assert_eq!(capability_max_ma, 3_000);
         assert_eq!(current_mode, Some(ch224q::AdjustableVoltageMode::Pps));
+    }
+
+    #[test]
+    fn fusb302b_capability_refresh_preserves_terminal_fixed_pd_disarm() {
+        let previous = HeaterPowerBackend::PpsMos {
+            pps_min_mv: 5_500,
+            idle_request_mv: 12_000,
+            pps_max_mv: 21_000,
+            adjustable_max_mv: 21_000,
+            capability_max_ma: 3_000,
+            current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+            current_request_mv: 20_000,
+            settle_until_ms: None,
+            next_request_at_ms: 0,
+            current_limit_fixed_pwm_active: false,
+            current_limit_fixed_request_confirmed: false,
+            terminal_fixed_pd_disarmed: true,
+        };
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_500),
+            pps_max_mv: Some(21_000),
+            pps_max_ma: Some(3_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 21_000,
+            max_ma: 3_000,
+        });
+
+        assert!(matches!(
+            refresh_fusb302b_heater_power_backend(previous, Some(capabilities)),
+            HeaterPowerBackend::PpsMos {
+                terminal_fixed_pd_disarmed: true,
+                ..
+            }
+        ));
     }
 
     #[test]
