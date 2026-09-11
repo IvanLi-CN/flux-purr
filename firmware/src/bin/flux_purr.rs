@@ -6124,15 +6124,17 @@ const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {
     }
 }
 
-/// A CC measurement is meaningful only when the FUSB302B reports no BMC
-/// activity. An idle `BC_LVL=0` is a physical CC detach, while an active line
-/// defers the observation until the next service turn.
+/// `BC_LVL` reports CC current-level/termination evidence, not a Sink detach.
+/// In particular, an idle low level can report `Ra`; it must retain Rd and the
+/// current PD session. BMC activity also makes the observation inconclusive.
 #[cfg(any(target_arch = "xtensa", test))]
 const fn fusb302b_cc_attachment_state(status0: u8) -> Option<bool> {
     if status0 & FUSB302B_STATUS0_ACTIVITY != 0 {
         None
+    } else if status0 & FUSB302B_STATUS0_BC_LVL_MASK != 0 {
+        Some(true)
     } else {
-        Some(status0 & FUSB302B_STATUS0_BC_LVL_MASK != 0)
+        None
     }
 }
 
@@ -16814,12 +16816,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fusb302b_cc_detach_requires_an_idle_open_measurement() {
-        assert_eq!(fusb302b_cc_attachment_state(0), Some(false));
+    fn fusb302b_cc_low_level_is_not_a_detach_signal() {
+        assert_eq!(fusb302b_cc_attachment_state(0), None);
         assert_eq!(fusb302b_cc_attachment_state(0b01), Some(true));
         assert_eq!(fusb302b_cc_attachment_state(0b10), Some(true));
         assert_eq!(fusb302b_cc_attachment_state(0b11), Some(true));
         assert_eq!(fusb302b_cc_attachment_state(1 << 6), None);
+        assert_eq!(fusb302b_cc_attachment_state((1 << 6) | 0b11), None);
     }
 
     #[test]
