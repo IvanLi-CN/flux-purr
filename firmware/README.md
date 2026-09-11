@@ -31,6 +31,7 @@
   - `BLK` is active-low on the panel board
   - `Q5` (`BSS84AKW`) switches `3V3 -> LEDA` on the high side
   - `R55 100 kOhm` pulls `BLK` up to `3V3`, so firmware must drive low or use inverted PWM for visible light
+  - Firmware holds `BLK` high (backlight off) through display initialization and the first startup frame, then drives it low immediately after that frame flush succeeds
 - Current startup behavior:
   - boot -> startup calibration screen
   - after a short settle, enter the interactive front-panel runtime

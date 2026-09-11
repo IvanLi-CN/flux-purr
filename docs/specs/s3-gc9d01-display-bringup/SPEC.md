@@ -64,16 +64,17 @@ None
 - REQ-DISPLAY-004: 板级显示引脚固定为：`DC=GPIO10`、`MOSI=GPIO11`、`SCLK=GPIO12`、`BLK=GPIO13`、`RES=GPIO14`、`CS=GPIO15`。
 - REQ-DISPLAY-005: 首轮面板 profile 按 `panel_160x50`、`width=160`、`height=50`、`dx=15`、`dy=0`、初始 `Orientation::Landscape` 实现。
 - REQ-DISPLAY-006: 静态校准屏必须至少包含：方向/边缘标识、彩色块、灰阶块、面板/分辨率文字。
-- REQ-DISPLAY-007: 正常 App 启动必须先显示正式 splash：使用从 `web/public/brand/flux-purr-logo-dark.png` 裁切缩采样的 Flux Purr 官方标记、面板专用的 path-only `FLUX PURR` 字标，以及由固件 build-time version source 提供的版本文本。该派生字标将白色主水平与垂直笔画定义在整数坐标、固定为 `2px`；`F` 的左上外圆角、`L` 的内凹与外凸下转角，以及 `X` 的斜线由 SVG 路径栅格化并保留抗锯齿过渡。生成器按 SVG alpha 覆盖率量化：`>=50%` 为机身白、`19%..49%` 为蓝灰抗锯齿、其余为背景。附加说明文字不得进入启动屏。启动画面是受版本控制的 `160x50` RGB565 模板位图；运行时不得以通用字体或图元 API 近似重绘 Logo 或项目名，也不得依赖模型生成的文字或运行时外部资产。
+- REQ-DISPLAY-007: 正常 App 启动必须先显示正式 splash：使用从 `web/public/brand/flux-purr-logo-dark.png` 裁切缩采样的 Flux Purr 官方标记、面板专用的 path-only `FLUX PURR` 字标，以及由固件 build-time version source 提供的版本文本。该派生字标将白色主水平与垂直笔画定义在整数坐标、固定为 `2px`；`F` 的左上外圆角与 `X` 的斜线由 SVG 路径栅格化并保留抗锯齿过渡，`L` 保留成对的内凹与外凸下转角，但将内凹曲率收敛到约 `2px`，避免低分辨率量化后产生凸起。生成器保留 SVG 每个像素的 alpha 覆盖率，在主题前景色与背景色之间逐像素混合后量化为 RGB565，不能把所有边缘压成单一灰色。附加说明文字不得进入启动屏。启动画面是受版本控制的 `160x50` RGB565 模板位图；运行时不得以通用字体或图元 API 近似重绘 Logo 或项目名，也不得依赖模型生成的文字或运行时外部资产。
 - REQ-DISPLAY-008: `FLUX PURR` 主字标必须以 `108×12` 个逻辑像素显示；其主笔画固定为 `2px`，字距、曲线与斜线按面板物理网格作光学校正。不得替换为通用字体或运行时文字渲染。
 - REQ-DISPLAY-009: `FLUX PURR` 主字标的实际可见宽度为 `108` 个逻辑像素；版本行必须以主字标视觉中心 `x=99` 对齐，而不是以整个 `160px` 画布中心对齐。
 - REQ-DISPLAY-010: 官方 Logo、项目名和版本号必须组成一个垂直居中的整体：Logo 位于 `x=8,y=11`、尺寸为 `30×28`，项目名位于 `x=45,y=13`，版本行位于项目名正下方的 `x=55,y=30`。Logo 与“项目名 + 版本号”文本组具有相同的垂直中心，整体占用逻辑行 `y=11..38`，使 `160x50` 画布的顶部和底部各保留 `11` 个逻辑像素的留白。
-- REQ-DISPLAY-011: splash 的最终帧必须严格使用四种颜色：背景 `#08111F`、机身/项目名 `#F7FBFF`、热区 `#FF5542`、版本与抗锯齿细节 `#8999AD`。版本文本必须使用 `4×7` 像素位图，以项目名视觉中心 `x=99` 对齐并叠加到 `y=30`；正常开发构建的 18 字符 build identity 完整显示。该启动屏字形独立于运行态界面；普通运行态标签保持既有字形，FAN CTRL 策略编辑页单独使用 `6×10` 标签与 `8×13` 标题以保证可读性。
+- REQ-DISPLAY-011: splash 必须提供亮色与深色两套 RGB565 主题，亮色为默认主题。深色基础色为背景 `#08111F`、机身/项目名 `#F7FBFF`、热区 `#FF5542`、版本文字 `#8999AD`；亮色基础色为纯白背景 `#FFFFFF`、深色机身/项目名 `#08111F`、热区 `#FF5542`、版本文字 `#465467`。Logo 与项目名字标的边缘必须使用前景/背景 alpha 混合后的 RGB565 中间色，不得以单一深灰色替代抗锯齿。版本文本必须使用 `4×7` 像素位图，以项目名视觉中心 `x=99` 对齐并叠加到 `y=30`；正常开发构建的 18 字符 build identity 完整显示。该启动屏字形独立于运行态界面；普通运行态标签保持既有字形，FAN CTRL 策略编辑页单独使用 `6×10` 标签与 `8×13` 标题以保证可读性。
 - REQ-DISPLAY-012: splash 仅覆盖 App 的启动早期；后续首次 runtime Dashboard 刷新自然替换它。不得为 splash 增加阻塞安全初始化的固定等待。Key Test 启动继续显示静态校准屏。
 - REQ-DISPLAY-013: bring-up 阶段必须支持：`静态校准屏 -> 前面板显示基线`。
 - REQ-DISPLAY-014: 当前 display baseline 只负责证明驱动、方向、偏移、host preview 与 on-device 渲染一致；后续运行态是否轮播、是否 safe-off，由 `frontpanel-input-interaction` 冻结。
 - REQ-DISPLAY-015: host preview 必须复用同一套场景渲染代码，并产出 `framebuffer.bin` 与 `preview.png`。
 - REQ-DISPLAY-016: 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
+- REQ-DISPLAY-020: 背光 `GPIO13` 必须在显示控制器初始化和首个启动帧成功刷入前保持关闭；启动屏整帧提交成功后应立即点亮。显示初始化或首帧刷屏失败时必须保持关闭，避免把未定义帧暴露给用户。
 
 ### SHOULD
 
@@ -85,8 +86,8 @@ None
 
 ### Core flows
 
-- 设备上电后初始化 Embassy 运行时、异步 SPI、GC9D01 driver 与背光控制。
-- 正常 App 路径在显示初始化完成后先绘制静态 splash，并在其后的安全输出、PD、EEPROM 与 ADC 启动工作期间保持显示；首个 Dashboard 刷新覆盖 splash。
+- 设备上电后初始化 Embassy 运行时、异步 SPI、GC9D01 driver 与背光控制；背光先保持关闭。
+- 正常 App 路径在显示初始化完成后先绘制静态 splash，启动屏整帧成功刷入后立即点亮背光，并在其后的安全输出、PD、EEPROM 与 ADC 启动工作期间保持显示；首个 Dashboard 刷新覆盖 splash。
 - Key Test 路径继续绘制静态校准屏，用于确认驱动、方向与颜色口径。
 - host preview binary 使用与设备端相同的场景渲染入口生成 framebuffer dump，再转换成 PNG 供主人预审。
 - 硬件调试阶段，主人拍摄静态校准屏和前面板运行画面；Agent 根据实拍判断是否需要微调 orientation / dx / dy / 颜色设置。
@@ -115,7 +116,7 @@ None
 ## Verification
 
 - VER-DISPLAY-001 (covers: REQ-DISPLAY-005, REQ-DISPLAY-006, REQ-DISPLAY-007, REQ-DISPLAY-008, REQ-DISPLAY-009, REQ-DISPLAY-010, REQ-DISPLAY-011, REQ-DISPLAY-015, REQ-DISPLAY-017, REQ-DISPLAY-018): Given host preview harness，When 生成启动屏、校准屏与 demo 场景的 framebuffer 与 PNG，Then 预览图能显示方向标识、RGB 色块、灰阶块和文字标签。
-- VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004): Given device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release` 成功。
+- VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004, REQ-DISPLAY-020): Given device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release` 成功，并通过启动顺序测试确认背光在首帧成功刷入后才开启。
 - VER-DISPLAY-003 (covers: REQ-DISPLAY-014): Given host 质量门，When 运行 `cargo test`、`cargo clippy --all-targets --all-features -D warnings`、`cargo build --release`，Then 全部通过。
 - VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 能先显示静态校准屏，再进入前面板显示基线画面，并报告当前场景、方向配置与 profile。
 - VER-DISPLAY-005 (covers: REQ-DISPLAY-016): Given 主人提供实拍照片，When 对比 host preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
@@ -166,20 +167,32 @@ None
 
 ## Visual Evidence
 
-- Host startup preview（逻辑预览，`RGB565 LE`，`160x50`，`Orientation::Landscape`，`dx=15`，`dy=0`）
+- Host startup preview（逻辑预览，`RGB565 LE`，`160x50`，`Orientation::Landscape`，`dx=15`，`dy=0`；默认亮色主题，背景为 RGB565 纯白）
 - Raw framebuffer: `./assets/startup.framebuffer.bin`
 - Panel-order framebuffer: `./assets/startup.panel.framebuffer.bin`
-- PNG preview: `./assets/startup.preview.png`
+- PNG preview source: `./assets/startup.preview.png`
+- Owner-facing render (`8x`, `1280x400`): `./assets/startup.zoom.png`
+- Dark-theme counterparts: `./assets/startup-dark.framebuffer.bin`、`./assets/startup-dark.panel.framebuffer.bin`、`./assets/startup-dark.preview.png`
+- Dark-theme owner-facing render (`8x`, `1280x400`): `./assets/startup-dark.zoom.png`
 
-![Host startup preview](./assets/startup.preview.png)
+![Host startup preview](./assets/startup.zoom.png)
 
-- Host boot-splash preview（逻辑预览，`RGB565 LE`，`160x50`，含 brand mark、项目名与编译版本）
+- Host boot-splash preview（逻辑预览，`RGB565 LE`，`160x50`，含 brand mark、项目名与编译版本；默认亮色主题，背景为 RGB565 纯白）
 - Bitmap template: `./assets/startup-splash-template.png`（由 `firmware/scripts/generate_startup_splash_asset.py` 从官方 Logo 生成）
+- Light-theme bitmap template: `./assets/startup-splash-light-template.png`
 - Raw framebuffer: `./assets/startup-splash.framebuffer.bin`
 - Panel-order framebuffer: `./assets/startup-splash.panel.framebuffer.bin`
-- PNG preview: `./assets/startup-splash.preview.png`
+- PNG preview source: `./assets/startup-splash.preview.png`
+- Owner-facing render (`8x`, `1280x400`): `./assets/startup-splash.zoom.png`
+- Dark-theme raw framebuffer: `./assets/startup-splash-dark.framebuffer.bin`
+- Dark-theme panel-order framebuffer: `./assets/startup-splash-dark.panel.framebuffer.bin`
+- Dark-theme PNG preview source: `./assets/startup-splash-dark.preview.png`
+- Dark-theme owner-facing render (`8x`, `1280x400`): `./assets/startup-splash-dark.zoom.png`
+- Preview theme selection: `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin display_preview -- startup-splash <output> --theme dark|light`
 
-![Host boot-splash preview](./assets/startup-splash.preview.png)
+![Host boot-splash preview](./assets/startup-splash.zoom.png)
+
+![Host boot-splash dark-theme preview](./assets/startup-splash-dark.zoom.png)
 
 ## 参考（References）
 
