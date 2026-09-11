@@ -725,6 +725,8 @@ const I2C_TRANSACTION_TIMEOUT_MS: u64 = 25;
 const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
 const EEPROM_WRITE_CHUNK_MAX_BYTES: usize = 16;
+#[cfg(any(target_arch = "xtensa", test))]
+const EEPROM_MAINTENANCE_PD_MAX_PAGE_WRITES_WITHOUT_SERVICE: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_READ_CHUNK_MAX_BYTES: usize = 16;
 #[cfg(target_arch = "xtensa")]
@@ -6142,12 +6144,10 @@ const fn fusb302b_receive_fifo_flush_value(control1: u8) -> u8 {
 #[cfg(any(target_arch = "xtensa", test))]
 const fn fusb302b_retry_failure_requires_recovery(
     status0a: u8,
-    status1: u8,
+    _status1: u8,
     retry_fail_recovery_pending: bool,
 ) -> bool {
-    !retry_fail_recovery_pending
-        && status0a & FUSB302B_STATUS0A_RETRY_FAIL != 0
-        && status1 & FUSB302B_STATUS1_RX_EMPTY != 0
+    !retry_fail_recovery_pending && status0a & FUSB302B_STATUS0A_RETRY_FAIL != 0
 }
 
 /// The upstream PHY API exposes only a combined FIFO flush. Local transport
@@ -6886,28 +6886,49 @@ fn eeprom_bytes_contain_data(bytes: &[u8]) -> bool {
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 async fn write_eeprom_bytes_verified(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
+    maintenance_started_at: Instant,
     offset: u16,
     bytes: &[u8],
 ) -> Result<(), MemoryCommitError> {
     let Some(address) = probe_eeprom_address(i2c) else {
         return Err(MemoryCommitError::WriteAddressNoAck);
     };
-    let mut eeprom = M24c64::with_address(&mut *i2c, address);
+    let mut pd_service_schedule = EepromMaintenancePdServiceSchedule::new();
     let mut written = 0usize;
     while written < bytes.len() {
         let absolute_offset = usize::from(offset) + written;
         let chunk_len = eeprom_maintenance_write_chunk_len(absolute_offset, bytes.len() - written);
         let chunk_offset =
             u16::try_from(absolute_offset).map_err(|_| MemoryCommitError::WriteFailed)?;
-        eeprom
-            .write_page(chunk_offset, &bytes[written..written + chunk_len])
-            .map_err(memory_commit_error_from_eeprom)?;
+        let write_result = {
+            let mut eeprom = M24c64::with_address(&mut *i2c, address);
+            eeprom.write_page(chunk_offset, &bytes[written..written + chunk_len])
+        };
+        write_result.map_err(memory_commit_error_from_eeprom)?;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
         written += chunk_len;
+        if pd_service_schedule.after_page_write() {
+            service_pd_during_eeprom_operation(i2c, pd_port, elapsed_ms, maintenance_started_at)
+                .await;
+        }
     }
     let mut verify = [0u8; flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX];
-    read_eeprom_bytes_chunked(&mut eeprom, offset, &mut verify[..bytes.len()])
-        .map_err(|_| MemoryCommitError::VerifyUnreadable)?;
+    let mut read = 0usize;
+    while read < bytes.len() {
+        let chunk_len = (bytes.len() - read).min(EEPROM_READ_CHUNK_MAX_BYTES);
+        let chunk_offset = offset
+            .checked_add(read as u16)
+            .ok_or(MemoryCommitError::VerifyUnreadable)?;
+        let read_result = {
+            let mut eeprom = M24c64::with_address(&mut *i2c, address);
+            eeprom.read_bytes(chunk_offset, &mut verify[read..read + chunk_len])
+        };
+        read_result.map_err(|_| MemoryCommitError::VerifyUnreadable)?;
+        read += chunk_len;
+        service_pd_during_eeprom_operation(i2c, pd_port, elapsed_ms, maintenance_started_at).await;
+    }
     if verify[..bytes.len()] != *bytes {
         return Err(MemoryCommitError::VerifyMismatch);
     }
@@ -6919,6 +6940,33 @@ fn eeprom_maintenance_write_chunk_len(absolute_offset: usize, remaining: usize) 
     let page_size = flux_purr_firmware::memory::M24C64_PAGE_SIZE;
     let page_room = page_size - (absolute_offset % page_size);
     remaining.min(page_room).min(EEPROM_WRITE_CHUNK_MAX_BYTES)
+}
+
+/// Raw EEPROM maintenance shares the PD I2C bus. A page write's five-millisecond
+/// program cycle is the longest maintenance interval, so service PD after every
+/// completed page instead of waiting for a command-sized batch to finish.
+#[cfg(any(target_arch = "xtensa", test))]
+struct EepromMaintenancePdServiceSchedule {
+    page_writes_since_service: u8,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl EepromMaintenancePdServiceSchedule {
+    const fn new() -> Self {
+        Self {
+            page_writes_since_service: 0,
+        }
+    }
+
+    fn after_page_write(&mut self) -> bool {
+        self.page_writes_since_service = self.page_writes_since_service.saturating_add(1);
+        if self.page_writes_since_service >= EEPROM_MAINTENANCE_PD_MAX_PAGE_WRITES_WITHOUT_SERVICE {
+            self.page_writes_since_service = 0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -7038,7 +7086,10 @@ async fn usb_eeprom_maintenance_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: EepromMaintenanceCommand,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
 ) -> UsbFrame {
+    let maintenance_started_at = Instant::now();
     match command.op {
         EepromMaintenanceOp::Read => {
             let (Some(offset), Some(length)) = (command.offset, command.length) else {
@@ -7091,7 +7142,16 @@ async fn usb_eeprom_maintenance_response(
                     "EEPROM write range is invalid.",
                 );
             }
-            match write_eeprom_bytes_verified(i2c, offset, bytes.as_slice()).await {
+            match write_eeprom_bytes_verified(
+                i2c,
+                pd_port,
+                elapsed_ms,
+                maintenance_started_at,
+                offset,
+                bytes.as_slice(),
+            )
+            .await
+            {
                 Ok(()) => usb_response(request_id, UsbResponsePayload::Ack),
                 Err(error) => usb_error_response(request_id, error.code(), error.message()),
             }
@@ -7100,7 +7160,16 @@ async fn usb_eeprom_maintenance_response(
             let erased = [0xff; flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX];
             let mut offset = 0u16;
             while offset < M24C64_CAPACITY_BYTES {
-                if let Err(error) = write_eeprom_bytes_verified(i2c, offset, &erased).await {
+                if let Err(error) = write_eeprom_bytes_verified(
+                    i2c,
+                    pd_port,
+                    elapsed_ms,
+                    maintenance_started_at,
+                    offset,
+                    &erased,
+                )
+                .await
+                {
                     return usb_error_response(request_id, error.code(), error.message());
                 }
                 offset = offset.saturating_add(erased.len() as u16);
@@ -7723,7 +7792,7 @@ fn memory_record_write_chunk_len(absolute_offset: usize, remaining: usize) -> us
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn service_pd_during_memory_commit(
+async fn service_pd_during_eeprom_operation(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     elapsed_ms: u64,
@@ -7772,7 +7841,7 @@ async fn write_eeprom_persist_record(
         write_result.map_err(memory_commit_error_from_eeprom)?;
         written += chunk_len;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
-        service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+        service_pd_during_eeprom_operation(i2c, pd_port, elapsed_ms, commit_started_at).await;
     }
 
     let mut read = 0usize;
@@ -7790,7 +7859,7 @@ async fn write_eeprom_persist_record(
             return Err(MemoryCommitError::VerifyMismatch);
         }
         read += chunk_len;
-        service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+        service_pd_during_eeprom_operation(i2c, pd_port, elapsed_ms, commit_started_at).await;
     }
     let verified = decode_persist_record(&staging.bytes[..record_len])
         .map_err(|_| MemoryCommitError::VerifyUnreadable)?;
@@ -8096,7 +8165,7 @@ async fn invalidate_legacy_v5_magic(
         };
         result.map_err(memory_commit_error_from_eeprom)?;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
-        service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+        service_pd_during_eeprom_operation(i2c, pd_port, elapsed_ms, commit_started_at).await;
     }
     Ok(())
 }
@@ -13672,7 +13741,9 @@ async fn process_control_line(
                 calibration_job_canceled(calibration_runtime_state, manual_pps);
             }
             needs_redraw = true;
-            let response = usb_eeprom_maintenance_response(request_id, command, pd_i2c).await;
+            let response =
+                usb_eeprom_maintenance_response(request_id, command, pd_i2c, pd_port, elapsed_ms)
+                    .await;
             if matches!(&response, UsbFrame::Response { ok: true, .. }) {
                 apply_successful_eeprom_maintenance_operation(
                     op,
@@ -16762,6 +16833,13 @@ mod tests {
         assert!(fusb302b_retry_failure_requires_recovery(
             FUSB302B_STATUS0A_RETRY_FAIL,
             FUSB302B_STATUS1_RX_EMPTY,
+            false,
+        ));
+        // RETRY_FAIL invalidates the exchange even when a stale frame remains
+        // in the receive FIFO. Recovery must take precedence over that frame.
+        assert!(fusb302b_retry_failure_requires_recovery(
+            FUSB302B_STATUS0A_RETRY_FAIL,
+            0,
             false,
         ));
         assert!(!fusb302b_retry_failure_requires_recovery(
@@ -20362,6 +20440,15 @@ mod tests {
         assert_eq!(eeprom_maintenance_write_chunk_len(0x001f, 2), 1);
         assert_eq!(eeprom_maintenance_write_chunk_len(0x0020, 17), 16);
         assert_eq!(eeprom_maintenance_write_chunk_len(0x003f, 16), 1);
+    }
+
+    #[test]
+    fn raw_eeprom_maintenance_services_pd_after_every_page_write() {
+        let mut schedule = EepromMaintenancePdServiceSchedule::new();
+
+        assert_eq!(EEPROM_MAINTENANCE_PD_MAX_PAGE_WRITES_WITHOUT_SERVICE, 1);
+        assert!(schedule.after_page_write());
+        assert!(schedule.after_page_write());
     }
 
     #[test]
