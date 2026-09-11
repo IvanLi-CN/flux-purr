@@ -148,12 +148,15 @@ or supported by the production `flux-purr` firmware artifact.
 ## Host preview workflow
 
 - Render a front-panel runtime framebuffer:
-  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard docs/specs/heater-pid-frontpanel-runtime/assets/dashboard.framebuffer.bin`
+  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-ready docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.framebuffer.bin`
+- Review the implemented screen themes without changing the on-device default:
+  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-ready .tmp/dashboard-dark.framebuffer.bin --theme dark`
+  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-ready .tmp/dashboard-light.framebuffer.bin --theme light`
 - The preview tool writes two framebuffer artifacts:
   - logical preview framebuffer: `<preset>.framebuffer.bin` (`RGB565 LE`, `160x50`) for owner-facing PNG generation
   - panel-order companion: `<preset>.panel.framebuffer.bin` (`RGB565 BE`, `50x160`) after applying the same GC9D01 orientation transform used on-device
 - Convert the logical preview framebuffer to PNG:
-  - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in docs/specs/heater-pid-frontpanel-runtime/assets/dashboard.framebuffer.bin --out docs/specs/heater-pid-frontpanel-runtime/assets/dashboard.png`
+  - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.framebuffer.bin --out docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.png`
 - Preview assets land under:
   - `docs/specs/heater-pid-frontpanel-runtime/assets/`
 
