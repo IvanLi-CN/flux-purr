@@ -2,7 +2,7 @@
 
 ## Related ADRs
 
-- None
+None
 
 ## Goal
 
