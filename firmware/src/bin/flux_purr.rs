@@ -3316,8 +3316,21 @@ fn startup_pd_contract_ready(observation: Option<PdStatusObservation>) -> bool {
     observation.is_some_and(|observation| observation.status.pd_active)
 }
 
-#[cfg(test)]
-const STARTUP_PD_WAIT_BUDGET_MS: u64 = 0;
+// Source_Capabilities may arrive immediately after CC attachment. Reserve one
+// bounded startup window for the policy before shared-I2C initialization work.
+#[cfg(any(target_arch = "xtensa", test))]
+const STARTUP_PD_SERVICE_BUDGET_MS: u64 = 750;
+#[cfg(target_arch = "xtensa")]
+const STARTUP_PD_SERVICE_INTERVAL_MS: u64 = 1;
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn startup_pd_service_should_continue(
+    fusb302b_present: bool,
+    contract_ready: bool,
+    elapsed_ms: u64,
+) -> bool {
+    fusb302b_present && !contract_ready && elapsed_ms < STARTUP_PD_SERVICE_BUDGET_MS
+}
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14649,16 +14662,29 @@ async fn main(_spawner: Spawner) {
     };
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_pending\n");
-    // PD negotiation is serviced by the runtime loop. Do one bounded service
-    // turn for already-attached sources, but never hold the Dashboard behind
-    // a contract wait.
+    // Service FUSB302B negotiation before EEPROM, display, or network setup.
+    // This window is bounded and preserves the contract-less Dashboard path.
     let pd_runtime_started_ms = Instant::now().as_millis();
-    let initial_pd_observation = read_pd_status(
+    let fusb302b_present = matches!(&pd_port, PdPort::Fusb302b(_));
+    let mut initial_pd_observation = read_pd_status(
         &mut pd_i2c,
         &mut pd_port,
         pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
     )
     .await;
+    while startup_pd_service_should_continue(
+        fusb302b_present,
+        startup_pd_contract_ready(initial_pd_observation),
+        pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
+    ) {
+        EmbassyTimer::after_millis(STARTUP_PD_SERVICE_INTERVAL_MS).await;
+        initial_pd_observation = read_pd_status(
+            &mut pd_i2c,
+            &mut pd_port,
+            pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
+        )
+        .await;
+    }
     #[cfg(feature = "web_serial")]
     poll_usb_early_control(
         &mut usb_serial,
@@ -26162,8 +26188,12 @@ mod tests {
     }
 
     #[test]
-    fn pd_runtime_service_does_not_block_startup() {
-        assert_eq!(STARTUP_PD_WAIT_BUDGET_MS, 0);
+    fn startup_pd_service_prioritizes_negotiation_before_low_priority_startup_work() {
+        assert!(startup_pd_service_should_continue(true, false, 0));
+        assert!(startup_pd_service_should_continue(true, false, 749));
+        assert!(!startup_pd_service_should_continue(true, false, 750));
+        assert!(!startup_pd_service_should_continue(true, true, 0));
+        assert!(!startup_pd_service_should_continue(false, false, 0));
     }
 
     #[test]
