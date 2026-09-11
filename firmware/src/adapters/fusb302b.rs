@@ -7,6 +7,7 @@
 use super::pd::{Contract, ContractKind, SourceCapabilities};
 
 const PD_HEADER_REQUEST: u16 = 2;
+const PD_HEADER_ACCEPT: u16 = 3;
 const PD_HEADER_GET_SOURCE_CAP: u16 = 7;
 const PD_HEADER_SPEC_REV_30: u16 = 0b10 << 6;
 const PPS_RDO_VOLTAGE_STEP_MV: u16 = 20;
@@ -194,6 +195,13 @@ impl SinkPolicy {
     /// withdrawing CC. The caller flushes the PHY receive FIFO and later
     /// re-queries the source before a new contract can authorize heat.
     pub fn interlock_after_transient_transport_fault(&mut self) {
+        self.on_received_protocol_reset();
+    }
+
+    /// A received PD reset clears contract authorization but preserves the
+    /// Type-C attachment. The physical CC relationship belongs to the PHY and
+    /// must not be reconstructed by the policy engine.
+    pub fn on_received_protocol_reset(&mut self) {
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
         self.requested_mv = self.default_requested_mv;
@@ -243,6 +251,10 @@ impl SinkPolicy {
 
 pub const fn request_header(message_id: u8) -> u16 {
     PD_HEADER_REQUEST | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9) | (1 << 12)
+}
+
+pub const fn accept_header(message_id: u8) -> u16 {
+    PD_HEADER_ACCEPT | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9)
 }
 
 pub const fn get_source_capabilities_header(message_id: u8) -> u16 {
@@ -404,6 +416,20 @@ mod tests {
     }
 
     #[test]
+    fn received_protocol_reset_interlocks_without_detaching_cc() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+
+        policy.on_received_protocol_reset();
+
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert_eq!(policy.active_contract(), Contract::none());
+        assert_eq!(policy.source_capabilities(), None);
+    }
+
+    #[test]
     fn pps_keepalive_interval_is_five_seconds() {
         assert!(!pps_keepalive_due(1_000, 5_999));
         assert!(pps_keepalive_due(1_000, 6_000));
@@ -541,5 +567,6 @@ mod tests {
     fn pd30_headers_keep_message_id_and_object_count() {
         assert_eq!(request_header(5), 0x1a82);
         assert_eq!(get_source_capabilities_header(5), 0x0a87);
+        assert_eq!(accept_header(0), 0x0083);
     }
 }

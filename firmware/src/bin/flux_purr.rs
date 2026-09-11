@@ -6065,10 +6065,6 @@ fn read_rtd_sample<'a>(
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS0_CRC_CHECK: u8 = 1 << 4;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_STATUS0_ACTIVITY: u8 = 1 << 6;
-#[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_STATUS0_BC_LVL_MASK: u8 = 0b11;
-#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_STATUS0A_RETRY_FAIL: u8 = 1 << 4;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_STATUS1_RX_EMPTY: u8 = 1 << 5;
@@ -6086,9 +6082,9 @@ const FUSB302B_TOGSS_SNK_CC1: u8 = 0b0010_1000;
 const FUSB302B_TOGSS_SNK_CC2: u8 = 0b0011_0000;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_INTERRUPTA_TX_SENT: u8 = 1 << 2;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_INTERRUPTA_SOFT_RESET: u8 = 1 << 1;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_INTERRUPTA_HARD_RESET: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_INTERRUPTB_GCRC_SENT: u8 = 1;
@@ -6109,10 +6105,19 @@ enum Fusb302bReceiveEvent {
     Empty { tx_sent: bool, gcrc_sent: bool },
     Partial { tx_sent: bool, gcrc_sent: bool },
     Message(PdPacket),
-    Reset,
+    ReceivedReset(Fusb302bReceivedResetAction),
     RetryFailed,
     Protection,
     UnsupportedSop,
+}
+
+/// The FUSB302B reports received PD resets independently of Type-C CC state.
+/// Neither event is evidence that the attached source has detached.
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fusb302bReceivedResetAction {
+    AcceptAndWaitForSourceCapabilities,
+    WaitForSourceCapabilities,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6129,15 +6134,12 @@ const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {
     }
 }
 
-/// `BC_LVL` reports CC current-level/termination evidence, not a Sink detach.
-/// In particular, an idle low level can report `Ra`; it must retain Rd and the
-/// current PD session. BMC activity also makes the observation inconclusive.
 #[cfg(any(target_arch = "xtensa", test))]
-const fn fusb302b_cc_attachment_state(status0: u8) -> Option<bool> {
-    if status0 & FUSB302B_STATUS0_ACTIVITY != 0 {
-        None
-    } else if status0 & FUSB302B_STATUS0_BC_LVL_MASK != 0 {
-        Some(true)
+const fn fusb302b_received_reset_action(interrupt_a: u8) -> Option<Fusb302bReceivedResetAction> {
+    if interrupt_a & FUSB302B_INTERRUPTA_HARD_RESET != 0 {
+        Some(Fusb302bReceivedResetAction::WaitForSourceCapabilities)
+    } else if interrupt_a & FUSB302B_INTERRUPTA_SOFT_RESET != 0 {
+        Some(Fusb302bReceivedResetAction::AcceptAndWaitForSourceCapabilities)
     } else {
         None
     }
@@ -6252,11 +6254,15 @@ impl Fusb302bRuntime {
         initialized
     }
 
-    async fn restart_after_reset(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
-        self.policy.on_detach_or_reset();
-        self.polarity = None;
+    async fn recover_after_received_reset(
+        &mut self,
+        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        action: Fusb302bReceivedResetAction,
+        now_ms: u64,
+    ) -> bool {
+        self.policy.on_received_protocol_reset();
         self.next_message_id = 0;
-        self.attached_at_ms = None;
+        self.attached_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = None;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_requested_at_ms = None;
@@ -6265,14 +6271,22 @@ impl Fusb302bRuntime {
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
         self.retry_fail_recovery_pending = false;
-        if self.initialize(i2c).await {
-            self.policy =
-                fusb302b::SinkPolicy::new(FUSB302B_INITIAL_PPS_REQUEST_MV, MAX_HEATER_CONTRACT_MA);
-            true
-        } else {
+        if !fusb302b_flush_receive_fifo(i2c) {
             self.policy.mark_fault();
-            false
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+            return false;
         }
+        if matches!(
+            action,
+            Fusb302bReceivedResetAction::AcceptAndWaitForSourceCapabilities
+        ) && !self
+            .transmit(i2c, fusb302b::accept_header(self.next_message_id), &[])
+            .await
+        {
+            return false;
+        }
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
+        true
     }
 
     /// Recover a local receive/transmit failure without toggling CC. A PHY
@@ -6419,24 +6433,6 @@ impl Fusb302bRuntime {
     async fn poll(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, now_ms: u64) -> bool {
         if self.policy.phase() == SinkPhase::Fault {
             return false;
-        }
-
-        if self.polarity.is_some() {
-            let attachment_state = {
-                let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
-                phy.read_status()
-                    .await
-                    .map(|status| fusb302b_cc_attachment_state(status.status0))
-            };
-            match attachment_state {
-                Ok(Some(false)) => return self.restart_after_reset(i2c).await,
-                Ok(Some(true) | None) => {}
-                Err(_) => {
-                    self.policy.mark_fault();
-                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
-                    return false;
-                }
-            }
         }
 
         if matches!(
@@ -6639,9 +6635,9 @@ impl Fusb302bRuntime {
                         );
                     }
                 }
-                Fusb302bReceiveEvent::Reset => {
+                Fusb302bReceiveEvent::ReceivedReset(action) => {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                    return self.restart_after_reset(i2c).await;
+                    return self.recover_after_received_reset(i2c, action, now_ms).await;
                 }
                 Fusb302bReceiveEvent::RetryFailed => {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
@@ -6684,10 +6680,8 @@ async fn fusb302b_receive_event(
     let tx_sent = interrupts.interrupt_a & FUSB302B_INTERRUPTA_TX_SENT != 0;
     let gcrc_sent = interrupts.interrupt_b & FUSB302B_INTERRUPTB_GCRC_SENT != 0;
 
-    if interrupts.interrupt_a & (FUSB302B_INTERRUPTA_SOFT_RESET | FUSB302B_INTERRUPTA_HARD_RESET)
-        != 0
-    {
-        return Ok(Fusb302bReceiveEvent::Reset);
+    if let Some(action) = fusb302b_received_reset_action(interrupts.interrupt_a) {
+        return Ok(Fusb302bReceiveEvent::ReceivedReset(action));
     }
     if fusb302b_retry_failure_requires_recovery(
         status.status0a,
@@ -16837,13 +16831,16 @@ mod tests {
     }
 
     #[test]
-    fn fusb302b_cc_low_level_is_not_a_detach_signal() {
-        assert_eq!(fusb302b_cc_attachment_state(0), None);
-        assert_eq!(fusb302b_cc_attachment_state(0b01), Some(true));
-        assert_eq!(fusb302b_cc_attachment_state(0b10), Some(true));
-        assert_eq!(fusb302b_cc_attachment_state(0b11), Some(true));
-        assert_eq!(fusb302b_cc_attachment_state(1 << 6), None);
-        assert_eq!(fusb302b_cc_attachment_state((1 << 6) | 0b11), None);
+    fn fusb302b_received_resets_do_not_request_cc_reinitialization() {
+        assert_eq!(
+            fusb302b_received_reset_action(FUSB302B_INTERRUPTA_SOFT_RESET),
+            Some(Fusb302bReceivedResetAction::AcceptAndWaitForSourceCapabilities)
+        );
+        assert_eq!(
+            fusb302b_received_reset_action(FUSB302B_INTERRUPTA_HARD_RESET),
+            Some(Fusb302bReceivedResetAction::WaitForSourceCapabilities)
+        );
+        assert_eq!(fusb302b_received_reset_action(0), None);
     }
 
     #[test]
