@@ -542,6 +542,11 @@ const HEATER_PROFILE_TICK_MS: u64 = 1_000;
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 // Keep the per-cycle RTD aggregate unchanged while doubling control and RTD update cadence.
 const HEATER_CONTROL_INTERVAL_MS: u64 = 50;
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn pd_runtime_elapsed_ms(started_at_ms: u64, now_ms: u64) -> u64 {
+    now_ms.saturating_sub(started_at_ms)
+}
 // The plant delay is calibrated in seconds, so its predictor must not amplify
 // sub-second RTD quantisation into a multi-degree correction.
 #[cfg(any(target_arch = "xtensa", test))]
@@ -14653,8 +14658,13 @@ async fn main(_spawner: Spawner) {
     // PD negotiation is serviced by the runtime loop. Do one bounded service
     // turn for already-attached sources, but never hold the Dashboard behind
     // a contract wait.
-    let initial_pd_observation =
-        read_pd_status(&mut pd_i2c, &mut pd_port, Instant::now().as_millis()).await;
+    let pd_runtime_started_ms = Instant::now().as_millis();
+    let initial_pd_observation = read_pd_status(
+        &mut pd_i2c,
+        &mut pd_port,
+        pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
+    )
+    .await;
     #[cfg(feature = "web_serial")]
     poll_usb_early_control(
         &mut usb_serial,
@@ -15296,7 +15306,7 @@ async fn main(_spawner: Spawner) {
         let _ = usb_write_bytes_bounded(&mut usb_serial, reset_reason.as_bytes());
     }
 
-    let runtime_started_ms = Instant::now().as_millis();
+    let runtime_started_ms = pd_runtime_started_ms;
     let mut last_control_ms: u64 = 0;
     let mut next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
     let mut heater_control_timing = HeaterControlTiming::default();
@@ -16814,6 +16824,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pd_startup_and_runtime_share_one_timestamp_epoch() {
+        let started_at_ms = 42_000;
+        assert_eq!(pd_runtime_elapsed_ms(started_at_ms, started_at_ms), 0);
+        assert_eq!(
+            pd_runtime_elapsed_ms(started_at_ms, started_at_ms + 400),
+            400
+        );
+        assert_eq!(pd_runtime_elapsed_ms(started_at_ms, started_at_ms - 1), 0);
+    }
 
     #[test]
     fn fusb302b_cc_low_level_is_not_a_detach_signal() {
