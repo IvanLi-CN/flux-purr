@@ -36,16 +36,72 @@ pub const DISPLAY_PANEL_CONFIG: PanelConfig = PanelConfig {
 pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationThenFrontPanelLoop;
 pub const STARTUP_SCENE_SLUG: &str = "startup-splash";
 const STARTUP_SPLASH_VERSION: &str = env!("FLUX_PURR_FW_VERSION");
-const STARTUP_SPLASH_VERSION_COLOR: Rgb565 = Rgb565::new(17, 38, 21);
 const STARTUP_SPLASH_WORDMARK_CENTER_X: i32 = 99;
 const STARTUP_SPLASH_VERSION_BASELINE_Y: i32 = 30;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DisplayThemeId {
+    Dark,
+    #[default]
+    Light,
+}
+
+impl DisplayThemeId {
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    pub fn from_slug(value: &str) -> Option<Self> {
+        match value {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StartupPalette {
+    background: Rgb565,
+    version: Rgb565,
+}
+
+#[cfg(test)]
+const DARK_STARTUP_FOREGROUND: Rgb565 = Rgb565::new(30, 62, 31);
+#[cfg(test)]
+const DARK_STARTUP_HEAT: Rgb565 = Rgb565::new(31, 21, 8);
+#[cfg(test)]
+const LIGHT_STARTUP_FOREGROUND: Rgb565 = Rgb565::new(1, 4, 3);
+
+const DARK_STARTUP_PALETTE: StartupPalette = StartupPalette {
+    background: Rgb565::new(1, 4, 3),
+    version: Rgb565::new(17, 38, 21),
+};
+
+const LIGHT_STARTUP_PALETTE: StartupPalette = StartupPalette {
+    background: Rgb565::WHITE,
+    version: Rgb565::new(8, 21, 12),
+};
+
+const fn startup_palette(theme: DisplayThemeId) -> StartupPalette {
+    match theme {
+        DisplayThemeId::Dark => DARK_STARTUP_PALETTE,
+        DisplayThemeId::Light => LIGHT_STARTUP_PALETTE,
+    }
+}
+
 #[cfg(test)]
 const STARTUP_SPLASH_PALETTE: [Rgb565; 4] = [
-    Rgb565::new(1, 4, 3),
-    Rgb565::new(30, 62, 31),
-    Rgb565::new(31, 21, 8),
-    STARTUP_SPLASH_VERSION_COLOR,
+    DARK_STARTUP_PALETTE.background,
+    DARK_STARTUP_FOREGROUND,
+    DARK_STARTUP_HEAT,
+    DARK_STARTUP_PALETTE.version,
 ];
+#[cfg(test)]
+const STARTUP_SPLASH_VERSION_COLOR: Rgb565 = DARK_STARTUP_PALETTE.version;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceBootFlow {
@@ -345,11 +401,15 @@ impl DrawTarget for DisplayCanvas {
 }
 
 pub fn render_scene(scene: SceneId, canvas: &mut DisplayCanvas) {
+    render_scene_with_theme(scene, canvas, DisplayThemeId::Light);
+}
+
+pub fn render_scene_with_theme(scene: SceneId, canvas: &mut DisplayCanvas, theme: DisplayThemeId) {
     canvas.clear(Rgb565::BLACK).ok();
 
     match scene {
-        SceneId::StartupSplash => render_startup_splash(canvas),
-        SceneId::StartupCalibration => render_startup_calibration(canvas),
+        SceneId::StartupSplash => render_startup_splash(canvas, theme),
+        SceneId::StartupCalibration => render_startup_calibration(canvas, theme),
         SceneId::DemoSolidRed => {
             canvas.clear(Rgb565::RED).ok();
         }
@@ -444,6 +504,11 @@ const STARTUP_SPLASH_TEMPLATE_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] = include_
     env!("CARGO_MANIFEST_DIR"),
     "/assets/startup-splash/template.rgb565le.bin"
 ));
+const STARTUP_SPLASH_LIGHT_TEMPLATE_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] =
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/startup-splash/template-light.rgb565le.bin"
+    ));
 
 fn render_rgb565le_asset(canvas: &mut DisplayCanvas, frame: &[u8; DISPLAY_FRAMEBUFFER_BYTES]) {
     for (pixel, bytes) in canvas.pixels_mut().iter_mut().zip(frame.chunks_exact(2)) {
@@ -451,9 +516,14 @@ fn render_rgb565le_asset(canvas: &mut DisplayCanvas, frame: &[u8; DISPLAY_FRAMEB
     }
 }
 
-fn render_startup_splash(canvas: &mut DisplayCanvas) {
-    render_rgb565le_asset(canvas, STARTUP_SPLASH_TEMPLATE_FRAME);
-    draw_startup_splash_version(canvas, STARTUP_SPLASH_VERSION);
+fn render_startup_splash(canvas: &mut DisplayCanvas, theme: DisplayThemeId) {
+    let palette = startup_palette(theme);
+    let frame = match theme {
+        DisplayThemeId::Dark => STARTUP_SPLASH_TEMPLATE_FRAME,
+        DisplayThemeId::Light => STARTUP_SPLASH_LIGHT_TEMPLATE_FRAME,
+    };
+    render_rgb565le_asset(canvas, frame);
+    draw_startup_splash_version(canvas, STARTUP_SPLASH_VERSION, palette.version);
 }
 
 fn startup_version_glyph(character: u8) -> [u8; 7] {
@@ -482,7 +552,7 @@ fn startup_version_glyph(character: u8) -> [u8; 7] {
     }
 }
 
-fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str) {
+fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str, color: Rgb565) {
     const GLYPH_WIDTH: i32 = 4;
     const LETTER_SPACING: i32 = 1;
     const MAX_VISIBLE_CHARACTERS: usize = 18;
@@ -499,18 +569,23 @@ fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str) {
                 }
                 let x = start_x + character_index as i32 * (GLYPH_WIDTH + LETTER_SPACING) + column;
                 let y = STARTUP_SPLASH_VERSION_BASELINE_Y + row as i32;
-                canvas.pixels_mut()[y as usize * DISPLAY_WIDTH_USIZE + x as usize] =
-                    STARTUP_SPLASH_VERSION_COLOR;
+                canvas.pixels_mut()[y as usize * DISPLAY_WIDTH_USIZE + x as usize] = color;
             }
         }
     }
 }
 
-fn render_startup_calibration(canvas: &mut DisplayCanvas) {
-    let border = PrimitiveStyle::with_stroke(Rgb565::WHITE, 1);
-    let text_small = MonoTextStyle::new(&FONT_4X6, Rgb565::WHITE);
+fn render_startup_calibration(canvas: &mut DisplayCanvas, theme: DisplayThemeId) {
+    let foreground = match theme {
+        DisplayThemeId::Dark => Rgb565::WHITE,
+        DisplayThemeId::Light => Rgb565::new(1, 4, 8),
+    };
+    let border = PrimitiveStyle::with_stroke(foreground, 1);
+    let text_small = MonoTextStyle::new(&FONT_4X6, foreground);
     let text_small_black = MonoTextStyle::new(&FONT_4X6, Rgb565::BLACK);
-    let text_mid = MonoTextStyle::new(&FONT_5X8, Rgb565::WHITE);
+    let text_mid = MonoTextStyle::new(&FONT_5X8, foreground);
+
+    canvas.clear(startup_palette(theme).background).ok();
 
     Rectangle::new(
         Point::new(0, 0),
@@ -579,6 +654,7 @@ fn render_startup_calibration(canvas: &mut DisplayCanvas) {
         0,
         20,
         12,
+        foreground,
         &[
             Rgb565::RED,
             Rgb565::GREEN,
@@ -595,6 +671,7 @@ fn render_startup_calibration(canvas: &mut DisplayCanvas) {
         0,
         32,
         7,
+        foreground,
         &[
             Rgb565::new(0x00, 0x00, 0x00),
             Rgb565::new(0x04, 0x08, 0x04),
@@ -617,7 +694,14 @@ fn render_startup_calibration(canvas: &mut DisplayCanvas) {
     .ok();
 }
 
-fn draw_palette_row(canvas: &mut DisplayCanvas, x: i32, y: i32, height: u32, colors: &[Rgb565; 8]) {
+fn draw_palette_row(
+    canvas: &mut DisplayCanvas,
+    x: i32,
+    y: i32,
+    height: u32,
+    border_color: Rgb565,
+    colors: &[Rgb565; 8],
+) {
     for (index, color) in colors.iter().copied().enumerate() {
         let block_x = x + (index as i32 * 20);
         Rectangle::new(Point::new(block_x, y), Size::new(20, height))
@@ -625,7 +709,7 @@ fn draw_palette_row(canvas: &mut DisplayCanvas, x: i32, y: i32, height: u32, col
             .draw(canvas)
             .ok();
         Rectangle::new(Point::new(block_x, y), Size::new(20, height))
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::WHITE, 1))
+            .into_styled(PrimitiveStyle::with_stroke(border_color, 1))
             .draw(canvas)
             .ok();
     }
@@ -799,7 +883,7 @@ mod tests {
     #[test]
     fn startup_splash_renders_brand_mark_wordmark_and_build_version() {
         let mut canvas = DisplayCanvas::new();
-        render_scene(SceneId::StartupSplash, &mut canvas);
+        render_scene_with_theme(SceneId::StartupSplash, &mut canvas, DisplayThemeId::Dark);
 
         assert_eq!(canvas.pixels()[0], STARTUP_SPLASH_PALETTE[0]);
         let logo_pixels =
@@ -808,7 +892,9 @@ mod tests {
         let wordmark_pixels =
             &canvas.pixels()[13 * DISPLAY_WIDTH_USIZE + 45..25 * DISPLAY_WIDTH_USIZE + 153];
         assert!(wordmark_pixels.contains(&STARTUP_SPLASH_PALETTE[1]));
-        assert!(wordmark_pixels.contains(&STARTUP_SPLASH_VERSION_COLOR));
+        assert!(wordmark_pixels.iter().any(|pixel| {
+            *pixel != STARTUP_SPLASH_PALETTE[0] && *pixel != STARTUP_SPLASH_PALETTE[1]
+        }));
         for row in 3..12 {
             assert_eq!(
                 canvas.pixels()[(13 + row) * DISPLAY_WIDTH_USIZE + 45],
@@ -843,25 +929,41 @@ mod tests {
                 STARTUP_SPLASH_PALETTE[1]
             );
         }
-        assert_eq!(
+        assert_ne!(
             canvas.pixels()[21 * DISPLAY_WIDTH_USIZE + 60],
-            STARTUP_SPLASH_VERSION_COLOR
+            STARTUP_SPLASH_PALETTE[0]
+        );
+        assert_ne!(
+            canvas.pixels()[21 * DISPLAY_WIDTH_USIZE + 60],
+            STARTUP_SPLASH_PALETTE[1]
         );
         assert_eq!(
             canvas.pixels()[21 * DISPLAY_WIDTH_USIZE + 61],
             STARTUP_SPLASH_PALETTE[0]
         );
-        assert_eq!(
+        assert_ne!(
+            canvas.pixels()[22 * DISPLAY_WIDTH_USIZE + 60],
+            STARTUP_SPLASH_PALETTE[0]
+        );
+        assert_ne!(
+            canvas.pixels()[22 * DISPLAY_WIDTH_USIZE + 61],
+            STARTUP_SPLASH_PALETTE[0]
+        );
+        assert_ne!(
             canvas.pixels()[22 * DISPLAY_WIDTH_USIZE + 60],
             STARTUP_SPLASH_PALETTE[1]
         );
-        assert_eq!(
+        assert_ne!(
             canvas.pixels()[22 * DISPLAY_WIDTH_USIZE + 61],
-            STARTUP_SPLASH_VERSION_COLOR
+            STARTUP_SPLASH_PALETTE[1]
         );
-        assert_eq!(
+        assert_ne!(
             canvas.pixels()[24 * DISPLAY_WIDTH_USIZE + 58],
-            STARTUP_SPLASH_VERSION_COLOR
+            STARTUP_SPLASH_PALETTE[0]
+        );
+        assert_ne!(
+            canvas.pixels()[24 * DISPLAY_WIDTH_USIZE + 58],
+            STARTUP_SPLASH_PALETTE[1]
         );
         assert_eq!(STARTUP_SPLASH_VERSION, env!("FLUX_PURR_FW_VERSION"));
         let version_width = STARTUP_SPLASH_VERSION.len().min(18) as i32 * 5 - 1;
@@ -896,19 +998,13 @@ mod tests {
             canvas.pixels()[STARTUP_SPLASH_VERSION_BASELINE_Y as usize * DISPLAY_WIDTH_USIZE..]
                 .contains(&STARTUP_SPLASH_VERSION_COLOR)
         );
-        assert!(
-            canvas
-                .pixels()
-                .iter()
-                .all(|pixel| STARTUP_SPLASH_PALETTE.contains(pixel))
-        );
     }
 
     #[test]
     fn startup_splash_version_uses_four_by_seven_bitmap_font() {
         let mut canvas = DisplayCanvas::new();
         canvas.clear(STARTUP_SPLASH_PALETTE[0]).ok();
-        draw_startup_splash_version(&mut canvas, "0");
+        draw_startup_splash_version(&mut canvas, "0", STARTUP_SPLASH_VERSION_COLOR);
         let first_lit_column = STARTUP_SPLASH_WORDMARK_CENTER_X - 4 / 2 + 1;
 
         assert_eq!(
@@ -931,6 +1027,16 @@ mod tests {
         canvas.write_rgb565_le_bytes(&mut bytes);
         assert_eq!(bytes.len(), DISPLAY_FRAMEBUFFER_BYTES);
         assert!(bytes.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn light_startup_splash_uses_a_pure_white_background() {
+        let mut canvas = DisplayCanvas::new();
+        render_scene(SceneId::StartupSplash, &mut canvas);
+
+        assert_eq!(canvas.pixels()[0], Rgb565::WHITE);
+        assert!(canvas.pixels().contains(&LIGHT_STARTUP_FOREGROUND));
+        assert!(canvas.pixels().contains(&LIGHT_STARTUP_PALETTE.version));
     }
 
     #[test]

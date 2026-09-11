@@ -6,8 +6,16 @@ use std::{
 
 use flux_purr_firmware::display::{
     DISPLAY_FRAMEBUFFER_BYTES, DISPLAY_PANEL_CONFIG, DISPLAY_PHYSICAL_HEIGHT,
-    DISPLAY_PHYSICAL_WIDTH, DisplayCanvas, STARTUP_SCENE_SLUG, SceneId, render_scene,
+    DISPLAY_PHYSICAL_WIDTH, DisplayCanvas, DisplayThemeId, STARTUP_SCENE_SLUG, SceneId,
+    render_scene_with_theme,
 };
+
+#[derive(Debug, PartialEq, Eq)]
+struct PreviewArgs {
+    scene_slug: String,
+    output: Option<PathBuf>,
+    theme: DisplayThemeId,
+}
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -39,11 +47,49 @@ fn panel_output_path(logical_output_path: &Path) -> PathBuf {
     logical_output_path.with_file_name(companion_name)
 }
 
+fn parse_cli_args<I>(args: I) -> Result<PreviewArgs, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut positional = Vec::new();
+    let mut theme = DisplayThemeId::default();
+    let mut args = args.into_iter();
+    while let Some(argument) = args.next() {
+        if argument == "--theme" {
+            let value = args
+                .next()
+                .ok_or_else(|| String::from("missing value for --theme"))?;
+            theme = DisplayThemeId::from_slug(&value)
+                .ok_or_else(|| format!("unknown theme '{value}' (known: dark, light)"))?;
+        } else if let Some(value) = argument.strip_prefix("--theme=") {
+            theme = DisplayThemeId::from_slug(value)
+                .ok_or_else(|| format!("unknown theme '{value}' (known: dark, light)"))?;
+        } else if argument.starts_with('-') {
+            return Err(format!("unknown argument '{argument}'"));
+        } else {
+            positional.push(argument);
+        }
+    }
+
+    Ok(PreviewArgs {
+        scene_slug: positional
+            .first()
+            .cloned()
+            .unwrap_or_else(|| STARTUP_SCENE_SLUG.to_string()),
+        output: positional.get(1).map(PathBuf::from),
+        theme,
+    })
+}
+
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
-    let scene_slug = args
-        .next()
-        .unwrap_or_else(|| STARTUP_SCENE_SLUG.to_string());
+    let parsed = match parse_cli_args(env::args().skip(1)) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let scene_slug = parsed.scene_slug;
     let Some(scene) = SceneId::from_slug(&scene_slug) else {
         eprintln!("unknown scene '{scene_slug}'");
         eprintln!(
@@ -51,14 +97,11 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     };
-    let output_path = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default_output_path(scene));
+    let output_path = parsed.output.unwrap_or_else(|| default_output_path(scene));
     let panel_output_path = panel_output_path(&output_path);
 
     let mut canvas = DisplayCanvas::new();
-    render_scene(scene, &mut canvas);
+    render_scene_with_theme(scene, &mut canvas, parsed.theme);
 
     let mut logical_bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
     canvas.write_rgb565_le_bytes(&mut logical_bytes);
@@ -90,9 +133,10 @@ fn main() -> ExitCode {
     }
 
     println!(
-        "wrote {} scene={} width=160 height=50 rgb565_endian=le; panel={} panel_width={} panel_height={} orientation=Landscape dx={} dy={} panel_rgb565_endian=be layout=gc9d01-panel-order",
+        "wrote {} scene={} theme={} width=160 height=50 rgb565_endian=le; panel={} panel_width={} panel_height={} orientation=Landscape dx={} dy={} panel_rgb565_endian=be layout=gc9d01-panel-order",
         output_path.display(),
         scene.slug(),
+        parsed.theme.slug(),
         panel_output_path.display(),
         DISPLAY_PHYSICAL_WIDTH,
         DISPLAY_PHYSICAL_HEIGHT,
@@ -105,6 +149,32 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_cli_args_defaults_to_light_theme() {
+        let parsed = parse_cli_args([String::from("startup-splash")]).expect("args should parse");
+
+        assert_eq!(parsed.scene_slug, "startup-splash");
+        assert_eq!(parsed.theme, DisplayThemeId::Light);
+        assert_eq!(parsed.output, None);
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_dark_theme_after_output() {
+        let parsed = parse_cli_args([
+            String::from("startup-splash"),
+            String::from("/tmp/startup-dark.framebuffer.bin"),
+            String::from("--theme"),
+            String::from("dark"),
+        ])
+        .expect("args should parse");
+
+        assert_eq!(parsed.theme, DisplayThemeId::Dark);
+        assert_eq!(
+            parsed.output,
+            Some(PathBuf::from("/tmp/startup-dark.framebuffer.bin"))
+        );
+    }
 
     #[test]
     fn panel_output_path_tracks_the_requested_filename() {

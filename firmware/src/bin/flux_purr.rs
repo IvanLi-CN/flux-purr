@@ -13946,8 +13946,7 @@ async fn main(_spawner: Spawner) {
     let dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
     let rst = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
     let mut backlight = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
-    backlight.set_low();
-    info!("backlight active-low: gpio13 low -> on");
+    info!("backlight active-low: gpio13 high -> off during display bring-up");
 
     let spi_device = ExclusiveDevice::new_no_delay(spi.into_async(), cs)
         .expect("failed to wrap async SPI bus as ExclusiveDevice");
@@ -14050,6 +14049,8 @@ async fn main(_spawner: Spawner) {
     }
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_complete\n");
+    backlight.set_low();
+    info!("backlight active-low: gpio13 low -> on after startup frame");
     #[cfg(feature = "web_serial")]
     poll_usb_early_control(
         &mut usb_serial,
@@ -16479,6 +16480,22 @@ mod tests {
             .expect("initial Dashboard frame");
         assert!(outputs < pd);
         assert!(first_frame < legacy);
+    }
+
+    #[test]
+    fn backlight_waits_for_display_init_and_startup_frame() {
+        let source = include_str!("flux_purr.rs");
+        let display_init = source
+            .find("with_timeout(DISPLAY_IO_TIMEOUT, display.init()).await")
+            .expect("display init call");
+        let startup_flush = source
+            .find("let startup_flush_ready = match with_timeout(DISPLAY_IO_TIMEOUT, display.flush()).await")
+            .expect("startup flush call");
+        let backlight_on = source
+            .find("backlight.set_low();")
+            .expect("backlight enable");
+        assert!(display_init < startup_flush);
+        assert!(startup_flush < backlight_on);
     }
 
     #[test]
