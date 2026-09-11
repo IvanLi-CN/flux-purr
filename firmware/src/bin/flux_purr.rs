@@ -5921,7 +5921,6 @@ fn read_rtd_sample<'a>(
 }
 
 #[cfg(target_arch = "xtensa")]
-const FUSB302B_STATUS0_VBUS_OK: u8 = 1 << 7;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS0_CRC_CHECK: u8 = 1 << 4;
 #[cfg(target_arch = "xtensa")]
@@ -6213,27 +6212,6 @@ impl Fusb302bRuntime {
     async fn poll(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, now_ms: u64) -> bool {
         if self.policy.phase() == SinkPhase::Fault {
             return false;
-        }
-
-        if matches!(
-            self.policy.phase(),
-            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy | SinkPhase::Ready
-        ) {
-            let vbus_present = {
-                let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
-                phy.read_status()
-                    .await
-                    .map(|status| status.status0 & FUSB302B_STATUS0_VBUS_OK != 0)
-            };
-            match vbus_present {
-                Ok(true) => {}
-                Ok(false) => return self.restart_after_reset(i2c).await,
-                Err(_) => {
-                    self.policy.mark_fault();
-                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
-                    return false;
-                }
-            }
         }
 
         if matches!(
