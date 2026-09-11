@@ -8,8 +8,8 @@ None
 
 Flux Purr production firmware targets the FUSB302BMPX PD-message PHY. The archived CH224Q
 controller board remains documentation-only and is not selected, probed, or packaged by the
-product build. FUSB302BMPX uses a repository-owned sink policy that selects compatible PPS APDOs
-within `5V..21V` and fixed PDOs as a fallback.
+product build. FUSB302BMPX uses a repository-owned sink policy that applies the absolute
+`5V..28V` PD guard, then selects within the live PPS APDO and falls back to fixed PDOs.
 
 - In scope: FUSB302B identification, CC attachment, source-capability discovery, contract recovery, heater interlock, and PD status semantics.
 - Out of scope: heater PID and tuning-candidate parameters, thermal-tuning state, physical VBUS-current measurement, USB-IF certification, and a CH224Q product path.
@@ -25,16 +25,16 @@ within `5V..21V` and fixed PDOs as a fallback.
 
 ### REQ-FUSB-CONTRACT
 
-- FUSB302BMPX selects the best usable PPS APDO covering the requested voltage within `5V..21V`; it selects the highest usable fixed PDO at or below `20V` only when no suitable APDO is present.
+- FUSB302BMPX clamps programmable PPS requests to the operational `5.5V` floor and the absolute `28V` PD ceiling before intersecting the selected live APDO. It selects the best usable APDO at that resulting voltage, or the highest usable fixed PDO at or below `20V` when no suitable APDO is present. The current `5V..21V` APDO is source capability data, not a global product limit.
 - Automatic idle operation requests `12V` from a usable PPS APDO. The APDO must still cover `20V @ 3A` before it qualifies for the performance tier; heater control raises the request only when its power policy requires it.
-- Source capabilities, PPS RDOs, fixed RDOs, `Accept`, `PS_RDY`, detach, reset, reject, wait, and I2C faults are explicit policy states.
+- Source capabilities, PPS RDOs, fixed RDOs, `Accept`, `PS_RDY`, CC detach, reset, reject, wait, and I2C faults are explicit policy states.
 - Heating is authorized only after `Accept` then `PS_RDY`. Contract loss clears the authorization and heater output.
 - A contract transition from pending to ready does not revive a heater arm requested while power was unavailable; that stale intent is discarded and a new explicit arm is required after readiness.
 - A missing startup contract, detached source, failed controller initialization, or later contract loss is a heater-only interlock: it must not block the Dashboard or runtime-ready signal. The device may continue to expose diagnostics while heater output remains zero, and it releases the lock only after a ready contract is observed again.
 
 ### REQ-FUSB-RECOVERY
 - While waiting for `Source_Capabilities`, the Sink may retry `Get_Source_Capabilities` after the bounded retry interval, but it must not initiate a PD Soft Reset or Hard Reset solely because that response is absent or late. A Sink-initiated reset can disturb the VBUS session that powers the Device and turn a recoverable contract delay into a reboot loop. A received reset, detach, reject, wait, or controller fault remains an explicit local recovery and heater-interlock event.
-- A local FUSB302B `RETRY_FAIL`, an expired `Accept`/`PS_RDY` wait, or an incomplete receive FIFO timeout does not prove a detach. Each must clear contract authorization and heater output, flush only the receive FIFO, retain the existing CC attachment, and re-query `Source_Capabilities`; it must not reinitialize the PHY, restart CC toggling, or reset the PD session. Only a received PD reset may take the physical reinitialization path.
+- A local FUSB302B `RETRY_FAIL`, an expired `Accept`/`PS_RDY` wait, or an incomplete receive FIFO timeout does not prove a detach. Each must clear contract authorization and heater output, invalidate cached Source Capabilities, flush only the receive FIFO, retain the existing CC attachment, and re-query `Source_Capabilities`; it must not reinitialize the PHY, restart CC toggling, or reset the PD session. A received PD reset or an idle CC measurement reporting no attached source may take the physical reinitialization path.
 - Contract selection rejects source capabilities below `3A`. FUSB302BMPX clamps contractual current to `3A..5A`, programmable PPS voltage to the intersection of the absolute `5V..28V` guard and the selected APDO, and fixed-PDO voltage to `5V..20V`. The currently observed `5V..21V` APDO is capability data, not a global PPS limit.
 - An active PPS request is renewed every five seconds without holding the shared I2C bus while waiting for a response.
 - `20V @ 3A` provides at most `60W`; `20V @ 5A` provides at most `100W`. Firmware uses the negotiated limit to cap PWM-derived heater power.
@@ -67,7 +67,7 @@ C20 is directly `VBUS`-to-`GND`, marked `Add into BOM=yes`, and is explicitly re
 
 ### REQ-FUSB-DRIVER
 
-- The firmware uses the public `fusb302` crate for FUSB302B physical-layer configuration, status, FIFO handling, packet transport, and read-only device identification. Flux Purr adapts its existing blocking ESP32-S3 I2C transport to the crate's async API at the transaction boundary.
+- The firmware uses the public `fusb302` crate for FUSB302B physical-layer configuration, status, packet transport, and read-only device identification. Flux Purr adapts its existing blocking ESP32-S3 I2C transport to the crate's async API at the transaction boundary. Local transient recovery writes only `CONTROL1.RX_FLUSH` through that same bounded transport because the public crate offers only a combined RX/TX flush; it preserves the receive-mask bits and never writes `CONTROL0.TX_FLUSH` on this path.
 - Before sink toggle, the runtime applies the PHY's default host-current setting, disables CC measurement, and selects the toggle interrupt mask. After CC attachment, it selects the attached CC pin for measurement and applies the receiver interrupt mask before packet transmission.
 - Flux Purr owns controller selection, PPS/fixed contract policy, RDO selection, `Accept`/`PS_RDY` contract commit, recovery timing, and heater interlock. The FUSB302BMPX PD 3.0 GoodCRC encoding is an explicit target-hardware opt-in. Source-only validation proves framing and policy, not real-source interoperability.
 

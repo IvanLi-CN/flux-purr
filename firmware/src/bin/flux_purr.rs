@@ -5923,6 +5923,10 @@ fn read_rtd_sample<'a>(
 #[cfg(target_arch = "xtensa")]
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS0_CRC_CHECK: u8 = 1 << 4;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_STATUS0_ACTIVITY: u8 = 1 << 6;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_STATUS0_BC_LVL_MASK: u8 = 0b11;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS0A_RETRY_FAIL: u8 = 1 << 4;
 #[cfg(target_arch = "xtensa")]
@@ -5947,6 +5951,12 @@ const FUSB302B_INTERRUPTA_SOFT_RESET: u8 = 1 << 1;
 const FUSB302B_INTERRUPTA_HARD_RESET: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_INTERRUPTB_GCRC_SENT: u8 = 1;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_CONTROL1_REGISTER: u8 = 0x07;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_CONTROL1_RW_MASK: u8 = 0b0111_0011;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_CONTROL1_RX_FLUSH: u8 = 1 << 2;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_TOGGLE_INTERRUPT_MASKS: InterruptMasks = InterruptMasks::new(0x7f, 0xbf, 0xff);
 #[cfg(target_arch = "xtensa")]
@@ -5976,6 +5986,46 @@ const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {
         auto_hard_reset: false,
         receive_sop: fusb302::ReceiveSopMask::NONE,
     }
+}
+
+/// A CC measurement is meaningful only when the FUSB302B reports no BMC
+/// activity. An idle `BC_LVL=0` is a physical CC detach, while an active line
+/// defers the observation until the next service turn.
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_cc_attachment_state(status0: u8) -> Option<bool> {
+    if status0 & FUSB302B_STATUS0_ACTIVITY != 0 {
+        None
+    } else {
+        Some(status0 & FUSB302B_STATUS0_BC_LVL_MASK != 0)
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_receive_fifo_flush_value(control1: u8) -> u8 {
+    (control1 & FUSB302B_CONTROL1_RW_MASK) | FUSB302B_CONTROL1_RX_FLUSH
+}
+
+/// The upstream PHY API exposes only a combined FIFO flush. Local transport
+/// recovery must retain a possibly queued transmit frame, so it updates only
+/// CONTROL1.RX_FLUSH and preserves the driver's receive-mask bits.
+#[cfg(target_arch = "xtensa")]
+fn fusb302b_flush_receive_fifo(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+    let mut control1 = [0_u8];
+    i2c.write_read(
+        fusb302::DEFAULT_ADDRESS,
+        &[FUSB302B_CONTROL1_REGISTER],
+        &mut control1,
+    )
+    .is_ok()
+        && i2c
+            .write(
+                fusb302::DEFAULT_ADDRESS,
+                &[
+                    FUSB302B_CONTROL1_REGISTER,
+                    fusb302b_receive_fifo_flush_value(control1[0]),
+                ],
+            )
+            .is_ok()
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6077,24 +6127,19 @@ impl Fusb302bRuntime {
         &mut self,
         i2c: &mut I2c<'_, esp_hal::Blocking>,
         fault: fusb302b::TransientTransportFault,
-        now_ms: u64,
     ) -> bool {
         match fusb302b::transient_transport_fault_recovery(fault) {
             fusb302b::TransientTransportRecovery::FlushReceiveAndRequery => {
                 self.policy.interlock_after_transient_transport_fault();
                 self.last_request_at_ms = None;
-                self.last_source_capabilities_request_at_ms = Some(now_ms);
+                self.last_source_capabilities_request_at_ms = None;
                 self.source_capabilities_refresh_pending = false;
                 self.source_capabilities_refresh_requested_at_ms = None;
                 self.source_capabilities_tx_confirmed = false;
                 self.source_capabilities_gcrc_seen = false;
                 self.partial_rx_started_at_ms = None;
 
-                let flushed = {
-                    let mut phy = Fusb302::new(BlockingAsync::new(i2c));
-                    phy.flush_fifos().await.is_ok()
-                };
-                if !flushed {
+                if !fusb302b_flush_receive_fifo(i2c) {
                     self.policy.mark_fault();
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
                     return false;
@@ -6214,6 +6259,24 @@ impl Fusb302bRuntime {
             return false;
         }
 
+        if self.polarity.is_some() {
+            let attachment_state = {
+                let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+                phy.read_status()
+                    .await
+                    .map(|status| fusb302b_cc_attachment_state(status.status0))
+            };
+            match attachment_state {
+                Ok(Some(false)) => return self.restart_after_reset(i2c).await,
+                Ok(Some(true) | None) => {}
+                Err(_) => {
+                    self.policy.mark_fault();
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                    return false;
+                }
+            }
+        }
+
         if matches!(
             self.policy.phase(),
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
@@ -6226,7 +6289,6 @@ impl Fusb302bRuntime {
                 .recover_transient_transport_fault(
                     i2c,
                     fusb302b::TransientTransportFault::PendingRequestTimeout,
-                    now_ms,
                 )
                 .await;
         }
@@ -6367,7 +6429,6 @@ impl Fusb302bRuntime {
                             .recover_transient_transport_fault(
                                 i2c,
                                 fusb302b::TransientTransportFault::PartialReceiveTimeout,
-                                now_ms,
                             )
                             .await;
                     }
@@ -6422,7 +6483,6 @@ impl Fusb302bRuntime {
                         .recover_transient_transport_fault(
                             i2c,
                             fusb302b::TransientTransportFault::RetryFailed,
-                            now_ms,
                         )
                         .await;
                 }
@@ -16399,6 +16459,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fusb302b_cc_detach_requires_an_idle_open_measurement() {
+        assert_eq!(fusb302b_cc_attachment_state(0), Some(false));
+        assert_eq!(fusb302b_cc_attachment_state(0b01), Some(true));
+        assert_eq!(fusb302b_cc_attachment_state(0b10), Some(true));
+        assert_eq!(fusb302b_cc_attachment_state(0b11), Some(true));
+        assert_eq!(fusb302b_cc_attachment_state(1 << 6), None);
+    }
+
+    #[test]
+    fn fusb302b_recovery_flushes_only_the_receive_fifo() {
+        assert_eq!(fusb302b_receive_fifo_flush_value(0), 0b0000_0100);
+        assert_eq!(fusb302b_receive_fifo_flush_value(0xff), 0b0111_0111);
+    }
+
+    #[test]
     fn fusb302b_identity_requires_stable_family_id_and_readable_status() {
         assert!(fusb302b_identity_is_stable(
             Some(0x91),
@@ -24545,7 +24620,7 @@ mod tests {
     }
 
     #[test]
-    fn fusb302b_pps_contract_enables_calibration_and_caps_backend_to_21v() {
+    fn fusb302b_pps_contract_enables_calibration_and_keeps_the_absolute_guard() {
         let contract = Contract {
             kind: ContractKind::Pps,
             object_position: 2,
@@ -24605,10 +24680,10 @@ mod tests {
         else {
             panic!("FUSB302B must retain a PPS backend when a PPS APDO is present");
         };
-        assert_eq!(pps_max_mv, 21_000);
-        assert_eq!(adjustable_max_mv, 21_000);
+        assert_eq!(pps_max_mv, 28_000);
+        assert_eq!(adjustable_max_mv, 28_000);
         assert_eq!(current_mode, Some(ch224q::AdjustableVoltageMode::Pps));
-        assert_eq!(current_request_mv, 21_000);
+        assert_eq!(current_request_mv, 24_000);
     }
 
     #[test]

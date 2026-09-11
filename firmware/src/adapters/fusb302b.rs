@@ -194,6 +194,8 @@ impl SinkPolicy {
     pub fn interlock_after_transient_transport_fault(&mut self) {
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
+        self.source_capabilities = SourceCapabilities::empty();
+        self.source_capabilities_received = false;
         self.phase = SinkPhase::WaitingForSourceCapabilities;
     }
 
@@ -223,6 +225,7 @@ impl SinkPolicy {
     pub fn on_detach_or_reset(&mut self) {
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
+        self.source_capabilities = SourceCapabilities::empty();
         self.source_capabilities_received = false;
         self.phase = SinkPhase::Detached;
     }
@@ -489,7 +492,16 @@ mod tests {
         policy.interlock_after_transient_transport_fault();
         assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
         assert_eq!(policy.active_contract(), Contract::none());
-        assert!(policy.source_capabilities().is_some());
+        assert_eq!(policy.source_capabilities(), None);
+        assert!(!policy.prepare_pps_request(12_000));
+        assert_eq!(policy.request_pps_voltage(12_000), None);
+        assert_eq!(policy.request_fixed_voltage(20_000), None);
+
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
     }
 
     #[test]
