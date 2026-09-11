@@ -160,7 +160,7 @@ or supported by the production `flux-purr` firmware artifact.
   - panel-order companion: `<preset>.panel.framebuffer.bin` (`RGB565 BE`, `50x160`) after applying the same GC9D01 orientation transform used on-device
 - Convert the logical preview framebuffer to PNG:
   - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.framebuffer.bin --out docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.png`
-- The display bring-up preview follows the same conversion contract; `display_preview` writes logical and panel-order framebuffers, while `fb_to_png.py` creates the checked-in PNG and its 8x nearest-neighbor owner-facing render.
+- The display bring-up preview follows the same conversion contract; `display_preview` writes logical and panel-order framebuffers, `fb_to_png.py` creates the `160x50` PNG, and ImageMagick `magick <preview>.png -filter point -resize 800% <zoom>.png` creates the `8x` nearest-neighbor owner-facing render.
 - Preview assets land under:
   - `docs/specs/heater-pid-frontpanel-runtime/assets/`
 

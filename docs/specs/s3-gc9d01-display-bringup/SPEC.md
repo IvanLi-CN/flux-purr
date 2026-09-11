@@ -68,7 +68,7 @@ None
 - REQ-DISPLAY-008: `FLUX PURR` 主字标必须以 `108×12` 个逻辑像素显示；其主笔画固定为 `2px`，字距、曲线与斜线按面板物理网格作光学校正。不得替换为通用字体或运行时文字渲染。
 - REQ-DISPLAY-009: `FLUX PURR` 主字标的实际可见宽度为 `108` 个逻辑像素；版本行必须以主字标视觉中心 `x=99` 对齐，而不是以整个 `160px` 画布中心对齐。
 - REQ-DISPLAY-010: 官方 Logo、项目名和版本号必须组成一个垂直居中的整体：Logo 位于 `x=8,y=11`、尺寸为 `30×28`，项目名位于 `x=45,y=13`，版本行位于项目名正下方的 `x=55,y=30`。Logo 与“项目名 + 版本号”文本组具有相同的垂直中心，整体占用逻辑行 `y=11..38`，使 `160x50` 画布的顶部和底部各保留 `11` 个逻辑像素的留白。
-- REQ-DISPLAY-011: splash 必须提供亮色与深色两套 RGB565 主题，亮色为默认主题。深色基础色为背景 `#08111F`、机身/项目名 `#F7FBFF`、热区 `#FF5542`、版本文字 `#8999AD`；亮色基础色为纯白背景 `#FFFFFF`、深色机身/项目名 `#08111F`、热区 `#FF5542`、版本文字 `#465467`。Logo 与项目名字标的边缘必须使用前景/背景 alpha 混合后的 RGB565 中间色，不得以单一深灰色替代抗锯齿。版本文本必须使用 `4×7` 像素位图，以项目名视觉中心 `x=99` 对齐并叠加到 `y=30`；正常开发构建的 18 字符 build identity 完整显示。该启动屏字形独立于运行态界面；普通运行态标签保持既有字形，FAN CTRL 策略编辑页单独使用 `6×10` 标签与 `8×13` 标题以保证可读性。
+- REQ-DISPLAY-011: splash 必须提供亮色与深色两套 RGB565 主题，亮色为默认主题。设计输入色为：深色背景 `#08111F`、机身/项目名 `#F7FBFF`、热区 `#FF5542`、版本文字 `#8999AD`；亮色背景 `#FFFFFF`、深色机身/项目名 `#08111F`、热区 `#FF5542`、版本文字 `#465467`。量化到 RGB565 后，深色背景/版本文字分别为 `#081019`/`#8C9AAD`，亮色版本文字为 `#425563`；验收以 RGB565 输出值为准。Logo 与项目名字标的边缘必须使用前景/背景 alpha 混合后的 RGB565 中间色，不得以单一深灰色替代抗锯齿。版本文本必须使用 `4×7` 像素位图，以项目名视觉中心 `x=99` 对齐并叠加到 `y=30`；checked-in preview 使用 `FLUX_PURR_BUILD_MODE=release` 固定为源树 `VERSION`，避免把动态开发 hash 固定进视觉证据，正式发布包再由 release workflow 写入最终版本。该启动屏字形独立于运行态界面；普通运行态标签保持既有字形，FAN CTRL 策略编辑页单独使用 `6×10` 标签与 `8×13` 标题以保证可读性。
 - REQ-DISPLAY-012: splash 仅覆盖 App 的启动早期；后续首次 runtime Dashboard 刷新自然替换它。不得为 splash 增加阻塞安全初始化的固定等待。Key Test 启动继续显示静态校准屏。
 - REQ-DISPLAY-013: bring-up 阶段必须支持：`静态校准屏 -> 前面板显示基线`。
 - REQ-DISPLAY-014: 当前 display baseline 只负责证明驱动、方向、偏移、host preview 与 on-device 渲染一致；后续运行态是否轮播、是否 safe-off，由 `frontpanel-input-interaction` 冻结。
@@ -189,8 +189,8 @@ None
 - Dark-theme PNG preview source: `./assets/startup-splash-dark.preview.png`
 - Dark-theme owner-facing render (`8x`, `1280x400`): `./assets/startup-splash-dark.zoom.png`
 - Preview theme selection: `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin display_preview -- startup-splash <output> --theme dark|light`
-- PNG conversion: `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in <output>.framebuffer.bin --out <output>.preview.png`
-- Checked-in splash previews use the source-tree `VERSION`; release preparation regenerates the final release bundle after the GitHub-signed VERSION-only preparation commit.
+- PNG conversion: `FLUX_PURR_BUILD_MODE=release cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin display_preview -- startup-splash <output> --theme light|dark`, then `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in <output>.framebuffer.bin --out <output>.preview.png` and `magick <output>.preview.png -filter point -resize 800% <output>.zoom.png`.
+- Checked-in splash previews use the source-tree `VERSION` with release-mode identity; release preparation regenerates the final release bundle after the GitHub-signed VERSION-only preparation commit.
 
 ![Host boot-splash preview](./assets/startup-splash.zoom.png)
 
