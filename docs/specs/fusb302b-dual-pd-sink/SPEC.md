@@ -47,6 +47,7 @@ product build. FUSB302BMPX uses a repository-owned sink policy that applies the 
 - A ready contract at or above `20V` and `3A` is performance-guaranteed.
 - A lower-voltage PPS or fixed contract may run the heater in degraded mode, with `pdPerformanceGuaranteed=false` and a visible degraded reason.
 - A ready PPS `>=20V @ >=3A` contract is the FUSB302BMPX performance tier and authorizes calibration. Its fixed-PDO fallback remains heat-only.
+- A terminal thermal-calibration disarm remains effective across source-capability refresh, temporary fixed-PDO fallback, and PPS rediscovery. Only an explicit manual PPS re-arm may clear that disarm.
 
 ### REQ-FUSB-STATUS
 

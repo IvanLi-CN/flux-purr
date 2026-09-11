@@ -4265,6 +4265,7 @@ enum HeaterPowerBackend {
         reason: HeaterPowerBackendReason,
         fixed_request_confirmed: bool,
         fixed_request: ch224q::VoltageRequest,
+        terminal_fixed_pd_disarmed: bool,
     },
 }
 
@@ -5356,6 +5357,32 @@ impl HeaterPowerBackend {
 
     const fn pd_contract_mv(self) -> u16 {
         self.pd_request_mv()
+    }
+
+    const fn terminal_fixed_pd_disarmed(self) -> bool {
+        match self {
+            Self::PpsMos {
+                terminal_fixed_pd_disarmed,
+                ..
+            }
+            | Self::FixedPdPwmFallback {
+                terminal_fixed_pd_disarmed,
+                ..
+            } => terminal_fixed_pd_disarmed,
+        }
+    }
+
+    fn set_terminal_fixed_pd_disarmed(&mut self, disarmed: bool) {
+        match self {
+            Self::PpsMos {
+                terminal_fixed_pd_disarmed,
+                ..
+            }
+            | Self::FixedPdPwmFallback {
+                terminal_fixed_pd_disarmed,
+                ..
+            } => *terminal_fixed_pd_disarmed = disarmed,
+        }
     }
 }
 
@@ -8569,6 +8596,7 @@ fn select_heater_power_backend(
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: true,
             fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+            terminal_fixed_pd_disarmed: false,
         };
     };
 
@@ -8603,6 +8631,7 @@ fn select_heater_power_backend_with_source_limits(
             reason: HeaterPowerBackendReason::NoPps20vCapability,
             fixed_request_confirmed: true,
             fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+            terminal_fixed_pd_disarmed: false,
         };
     };
     let idle_request_mv = HEATER_ADJUSTABLE_MIN_MV.clamp(pps_min_mv, pps_max_mv);
@@ -8679,20 +8708,31 @@ fn constrain_heater_backend_to_controller(
                 terminal_fixed_pd_disarmed,
             }
         }
-        (ControllerKind::Fusb302b, HeaterPowerBackend::PpsMos { .. }) => {
-            HeaterPowerBackend::FixedPdPwmFallback {
-                reason: HeaterPowerBackendReason::NoPps20vCapability,
-                fixed_request_confirmed: false,
-                fixed_request: ch224q::VoltageRequest::V20,
-            }
-        }
-        (ControllerKind::Fusb302b, HeaterPowerBackend::FixedPdPwmFallback { reason, .. }) => {
+        (
+            ControllerKind::Fusb302b,
+            HeaterPowerBackend::PpsMos {
+                terminal_fixed_pd_disarmed,
+                ..
+            },
+        ) => HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::NoPps20vCapability,
+            fixed_request_confirmed: false,
+            fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed,
+        },
+        (
+            ControllerKind::Fusb302b,
             HeaterPowerBackend::FixedPdPwmFallback {
                 reason,
-                fixed_request_confirmed: false,
-                fixed_request: ch224q::VoltageRequest::V20,
-            }
-        }
+                terminal_fixed_pd_disarmed,
+                ..
+            },
+        ) => HeaterPowerBackend::FixedPdPwmFallback {
+            reason,
+            fixed_request_confirmed: false,
+            fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed,
+        },
         (_, backend) => backend,
     }
 }
@@ -8706,6 +8746,7 @@ fn select_fusb302b_heater_power_backend(
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: false,
             fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed: false,
         };
     };
 
@@ -8725,19 +8766,7 @@ fn refresh_fusb302b_heater_power_backend(
     capabilities: Option<ch224q::AdjustablePowerCapabilities>,
 ) -> HeaterPowerBackend {
     let mut refreshed = select_fusb302b_heater_power_backend(capabilities);
-    if matches!(
-        previous,
-        HeaterPowerBackend::PpsMos {
-            terminal_fixed_pd_disarmed: true,
-            ..
-        }
-    ) && let HeaterPowerBackend::PpsMos {
-        terminal_fixed_pd_disarmed,
-        ..
-    } = &mut refreshed
-    {
-        *terminal_fixed_pd_disarmed = true;
-    }
+    refreshed.set_terminal_fixed_pd_disarmed(previous.terminal_fixed_pd_disarmed());
     refreshed
 }
 
@@ -8813,13 +8842,7 @@ fn latch_terminal_fixed_pd_disarm(
     if !calibration_runtime_state.immediate_heater_disarm_pending {
         return false;
     }
-    if let HeaterPowerBackend::PpsMos {
-        terminal_fixed_pd_disarmed,
-        ..
-    } = backend
-    {
-        *terminal_fixed_pd_disarmed = true;
-    }
+    backend.set_terminal_fixed_pd_disarmed(true);
     true
 }
 
@@ -8909,14 +8932,7 @@ where
 {
     let manual_pps_active = manual_pps.enabled;
     let _ = release_terminal_fixed_pd_disarm_for_manual_pps(backend, manual_pps_active);
-    let terminal_fixed_pd_disarmed = match backend {
-        HeaterPowerBackend::PpsMos {
-            terminal_fixed_pd_disarmed,
-            ..
-        } => *terminal_fixed_pd_disarmed,
-        HeaterPowerBackend::FixedPdPwmFallback { .. } => false,
-    };
-    if terminal_fixed_pd_disarmed {
+    if backend.terminal_fixed_pd_disarmed() {
         apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
         return false;
     }
@@ -9000,12 +9016,14 @@ where
             HeaterPowerBackend::FixedPdPwmFallback {
                 reason,
                 fixed_request,
+                terminal_fixed_pd_disarmed,
                 ..
             } => {
                 *backend = HeaterPowerBackend::FixedPdPwmFallback {
                     reason,
                     fixed_request_confirmed: false,
                     fixed_request,
+                    terminal_fixed_pd_disarmed,
                 };
             }
             HeaterPowerBackend::PpsMos {
@@ -9039,6 +9057,7 @@ where
             reason,
             fixed_request_confirmed,
             fixed_request,
+            terminal_fixed_pd_disarmed,
         } => {
             if !fixed_request_confirmed && !manual_pps_active {
                 if request_pd_fixed_voltage(i2c, pd_port, fixed_request).await {
@@ -9046,6 +9065,7 @@ where
                         reason,
                         fixed_request_confirmed: true,
                         fixed_request,
+                        terminal_fixed_pd_disarmed,
                     };
                     info!("heater backend fallback fixed-pd request confirmed");
                 } else {
@@ -9313,6 +9333,7 @@ where
                             reason: HeaterPowerBackendReason::AdjustableRequestFailed,
                             fixed_request_confirmed,
                             fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                            terminal_fixed_pd_disarmed: false,
                         };
                         if fixed_request_confirmed {
                             let negotiated_current_ma = pd_observation
@@ -17196,6 +17217,7 @@ mod tests {
                 reason: HeaterPowerBackendReason::NoPps20vCapability,
                 fixed_request_confirmed: true,
                 fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                terminal_fixed_pd_disarmed: false,
             },
             pid_snapshot: HeaterPidSnapshot {
                 duty_percent: 0,
@@ -23590,6 +23612,7 @@ mod tests {
                 reason: HeaterPowerBackendReason::NoPps20vCapability,
                 fixed_request_confirmed: true,
                 fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                terminal_fixed_pd_disarmed: false,
             }
         );
     }
@@ -25021,6 +25044,7 @@ mod tests {
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: true,
             fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed: false,
         };
         assert_eq!(
             effective_pd_contract_mv(&ManualPpsState::default(), Some(low_voltage), fallback),
@@ -25166,6 +25190,53 @@ mod tests {
     }
 
     #[test]
+    fn fusb302b_rediscovery_preserves_terminal_fixed_pd_disarm() {
+        let previous = HeaterPowerBackend::PpsMos {
+            pps_min_mv: 5_500,
+            idle_request_mv: 12_000,
+            pps_max_mv: 21_000,
+            adjustable_max_mv: 21_000,
+            capability_max_ma: 3_000,
+            current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+            current_request_mv: 20_000,
+            settle_until_ms: None,
+            next_request_at_ms: 0,
+            current_limit_fixed_pwm_active: false,
+            current_limit_fixed_request_confirmed: false,
+            terminal_fixed_pd_disarmed: true,
+        };
+        let fallback = refresh_fusb302b_heater_power_backend(previous, None);
+        assert!(matches!(
+            fallback,
+            HeaterPowerBackend::FixedPdPwmFallback {
+                terminal_fixed_pd_disarmed: true,
+                ..
+            }
+        ));
+
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_500),
+            pps_max_mv: Some(21_000),
+            pps_max_ma: Some(3_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 21_000,
+            max_ma: 3_000,
+        });
+
+        assert!(matches!(
+            refresh_fusb302b_heater_power_backend(fallback, Some(capabilities)),
+            HeaterPowerBackend::PpsMos {
+                terminal_fixed_pd_disarmed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn fusb302b_initial_backend_uses_fusb302b_request_bounds() {
         let mut capabilities = ch224q::AdjustablePowerCapabilities {
             pps_covers_20v: true,
@@ -25205,6 +25276,7 @@ mod tests {
                     reason: HeaterPowerBackendReason::NoPps20vCapability,
                     fixed_request_confirmed: false,
                     fixed_request: ch224q::VoltageRequest::V20,
+                    terminal_fixed_pd_disarmed: false,
                 },
                 vin_mv: 20_000,
                 ..test_usb_runtime_status_context()
@@ -25227,6 +25299,7 @@ mod tests {
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: true,
             fixed_request: ch224q::VoltageRequest::V28,
+            terminal_fixed_pd_disarmed: false,
         };
 
         let fusb = constrain_heater_backend_to_controller(ControllerKind::Fusb302b, legacy);
