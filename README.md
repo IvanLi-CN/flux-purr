@@ -111,7 +111,7 @@ Current firmware runtime baseline also assumes:
 - `>=20 V @ >=3 A` is the performance-guaranteed PD tier; lower accepted contracts are degraded operation and cannot run calibration
 - contractual `3 A`/`5 A` limits bound software heater power (`60 W`/`100 W` at `20 V`) but are not measured VBUS current or physical OCP
 - optional firmware variants can switch the boot PD request to `12 V` or `28 V` via Cargo features
-- heater control uses the selected controller's supported path: CH224Q can use PPS/AVS, while FUSB302BMPX uses `5V..21V` PPS with fixed-PDO fallback and the `GPIO47` PWM backend
+- heater control uses the selected controller's supported path: CH224Q can use PPS/AVS, while FUSB302BMPX applies the `5V..28V` PD guard before selecting its live PPS APDO (currently `5V..21V`), with fixed-PDO fallback and the `GPIO47` PWM backend
 - Dashboard center double toggles the active-cooling policy
 - Dashboard fan line renders `OFF / AUTO / RUN`, while the real output contract remains `fanEnabled + fanPwmPermille`
 
