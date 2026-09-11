@@ -5195,7 +5195,6 @@ impl ManualPpsState {
     fn contiguous_pps_source_limits(&self, anchor_mv: u16) -> Option<(u16, u16, u16)> {
         let mut minimum_mv = u16::MAX;
         let mut reachable_max_mv = 0;
-        let mut maximum_ma = 0;
         for apdo in self.capability_apdos.iter().flatten() {
             let min_mv = apdo.min_mv.max(self.request_min_mv);
             let max_mv = apdo.max_mv.min(self.request_max_mv);
@@ -5204,7 +5203,6 @@ impl ManualPpsState {
             }
             minimum_mv = minimum_mv.min(min_mv);
             reachable_max_mv = reachable_max_mv.max(max_mv);
-            maximum_ma = maximum_ma.max(apdo.max_ma);
         }
         if reachable_max_mv == 0 {
             return None;
@@ -5223,7 +5221,6 @@ impl ManualPpsState {
                     continue;
                 }
                 reachable_max_mv = max_mv;
-                maximum_ma = maximum_ma.max(apdo.max_ma);
                 extended = true;
             }
         }
@@ -5238,12 +5235,12 @@ impl ManualPpsState {
                     continue;
                 }
                 minimum_mv = min_mv;
-                maximum_ma = maximum_ma.max(apdo.max_ma);
                 extended = true;
             }
         }
 
-        Some((minimum_mv, reachable_max_mv, maximum_ma))
+        self.maximum_pps_current_for_target(reachable_max_mv)
+            .map(|current_ma| (minimum_mv, reachable_max_mv, current_ma))
     }
 
     fn enable(
@@ -8467,7 +8464,7 @@ fn integer_sqrt_floor(value: u64) -> u32 {
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 fn adjustable_mode_for_request(request_mv: u16, pps_max_mv: u16) -> ch224q::AdjustableVoltageMode {
-    if request_mv <= pps_max_mv.min(ch224q::CH224Q_PPS_MAX_MV) {
+    if request_mv <= pps_max_mv {
         ch224q::AdjustableVoltageMode::Pps
     } else {
         ch224q::AdjustableVoltageMode::Avs
@@ -16696,7 +16693,11 @@ mod tests {
         assert_eq!(manual.target_ma, Some(3_000));
         assert_eq!(
             manual.thermal_plant_source_limits(),
-            Some((5_500, 28_000, 5_000))
+            Some((5_500, 28_000, 3_000))
+        );
+        assert_eq!(
+            adjustable_mode_for_request(24_000, 28_000),
+            ch224q::AdjustableVoltageMode::Pps
         );
     }
 
