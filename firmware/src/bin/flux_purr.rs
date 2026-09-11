@@ -6385,21 +6385,7 @@ impl Fusb302bRuntime {
                         self.source_capabilities_refresh_requested_at_ms = None;
                         self.source_capabilities_tx_confirmed = false;
                         self.source_capabilities_gcrc_seen = false;
-                        if retain_active_pps {
-                            if !self
-                                .policy
-                                .refresh_source_capabilities_while_retaining_active_pps(
-                                    &pdos[..count],
-                                )
-                            {
-                                self.policy.mark_fault();
-                                FUSB302B_DIAGNOSTIC
-                                    .store(FUSB302B_DIAG_NO_USABLE_CONTRACT, Ordering::Relaxed);
-                                return false;
-                            }
-                            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_IDLE, Ordering::Relaxed);
-                        } else if let Some(rdo) = self.policy.on_source_capabilities(&pdos[..count])
-                        {
+                        if let Some(rdo) = self.policy.on_source_capabilities(&pdos[..count]) {
                             let header = fusb302b::request_header(self.next_message_id);
                             if !self.transmit(i2c, header, &rdo).await {
                                 return false;
