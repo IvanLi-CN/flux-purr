@@ -14,7 +14,10 @@ use flux_purr_firmware::{
         DashboardPresentationState, FanDisplayState, FrontPanelKeyMap, FrontPanelMenuItem,
         FrontPanelRawState, FrontPanelRoute, FrontPanelRuntimeMode, FrontPanelUiState,
         HeaterLockReason, KeyEvent, KeyGesture, RawFrontPanelKey,
-        render::{TemperaturePaletteId, render_frontpanel_ui_with_palette, temperature_palette},
+        render::{
+            DashboardThemeId, TemperaturePaletteId, render_frontpanel_ui_with_theme,
+            temperature_palette,
+        },
     },
 };
 
@@ -301,6 +304,7 @@ impl PreviewPreset {
             Self::EepromDataIncompatible => {
                 let mut state = base_dashboard_state();
                 state.eeprom_data_incompatible = true;
+                state.persistence_fault_attention_pending = true;
                 state
             }
             Self::EepromPersistenceFault => {
@@ -346,6 +350,7 @@ struct ParsedCliArgs {
     pd_contract_mv: Option<u16>,
     manual_pps_enabled: bool,
     palette_id: TemperaturePaletteId,
+    dashboard_theme: DashboardThemeId,
 }
 
 fn parse_cli_args<I>(args: I) -> Result<ParsedCliArgs, String>
@@ -366,6 +371,7 @@ where
     let mut pd_contract_mv = None;
     let mut manual_pps_enabled = false;
     let mut palette_id = TemperaturePaletteId::Current;
+    let mut dashboard_theme = DashboardThemeId::Light;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--temp" => {
@@ -401,6 +407,15 @@ where
                 };
                 palette_id = parsed;
             }
+            "--theme" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("missing value for --theme"));
+                };
+                let Some(parsed) = DashboardThemeId::from_slug(&value) else {
+                    return Err(format!("unknown --theme '{}' (known: dark, light)", value));
+                };
+                dashboard_theme = parsed;
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown argument '{}'", other));
             }
@@ -420,6 +435,7 @@ where
         pd_contract_mv,
         manual_pps_enabled,
         palette_id,
+        dashboard_theme,
     })
 }
 
@@ -448,6 +464,7 @@ fn main() -> ExitCode {
         pd_contract_mv,
         manual_pps_enabled,
         palette_id,
+        dashboard_theme,
     } = match parse_cli_args(env::args().skip(1)) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -463,7 +480,12 @@ fn main() -> ExitCode {
         state.pd_contract_mv = pd_contract_mv;
     }
     state.manual_pps_enabled = manual_pps_enabled;
-    render_frontpanel_ui_with_palette(&mut canvas, &state, temperature_palette(palette_id));
+    render_frontpanel_ui_with_theme(
+        &mut canvas,
+        &state,
+        dashboard_theme,
+        temperature_palette(palette_id),
+    );
 
     let mut logical_bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
     canvas.write_rgb565_le_bytes(&mut logical_bytes);
@@ -490,9 +512,10 @@ fn main() -> ExitCode {
     }
 
     println!(
-        "wrote {} preset={} width=160 height=50 rgb565_endian=le; panel={} panel_width={} panel_height={} orientation=Landscape dx={} dy={} panel_rgb565_endian=be layout=gc9d01-panel-order",
+        "wrote {} preset={} dashboard_theme={} width=160 height=50 rgb565_endian=le; panel={} panel_width={} panel_height={} orientation=Landscape dx={} dy={} panel_rgb565_endian=be layout=gc9d01-panel-order",
         output_path.display(),
         preset.slug(),
+        dashboard_theme.slug(),
         panel_path.display(),
         DISPLAY_PHYSICAL_WIDTH,
         DISPLAY_PHYSICAL_HEIGHT,
@@ -505,6 +528,30 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flux_purr_firmware::frontpanel::render::render_frontpanel_ui;
+
+    fn render_frame(
+        preset: PreviewPreset,
+        theme: DashboardThemeId,
+    ) -> (
+        [u8; DISPLAY_FRAMEBUFFER_BYTES],
+        [u8; DISPLAY_FRAMEBUFFER_BYTES],
+    ) {
+        let mut canvas = DisplayCanvas::new();
+        let state = preset.build_state(None);
+        render_frontpanel_ui_with_theme(
+            &mut canvas,
+            &state,
+            theme,
+            temperature_palette(TemperaturePaletteId::Current),
+        );
+
+        let mut logical = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
+        canvas.write_rgb565_le_bytes(&mut logical);
+        let mut panel = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
+        canvas.write_panel_rgb565_be_bytes(&mut panel);
+        (logical, panel)
+    }
 
     #[test]
     fn panel_output_path_tracks_requested_filename() {
@@ -532,6 +579,7 @@ mod tests {
                 pd_contract_mv: None,
                 manual_pps_enabled: false,
                 palette_id: TemperaturePaletteId::Current,
+                dashboard_theme: DashboardThemeId::Light,
             }
         );
     }
@@ -560,7 +608,81 @@ mod tests {
                 pd_contract_mv: Some(28_000),
                 manual_pps_enabled: true,
                 palette_id: TemperaturePaletteId::AuroraWhiteLow,
+                dashboard_theme: DashboardThemeId::Light,
             }
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_light_theme() {
+        let parsed = parse_cli_args([
+            String::from("dashboard"),
+            String::from("--theme"),
+            String::from("light"),
+        ])
+        .expect("light Dashboard theme should parse");
+
+        assert_eq!(parsed.dashboard_theme, DashboardThemeId::Light);
+    }
+
+    #[test]
+    fn default_dashboard_matches_explicit_light_and_differs_from_dark() {
+        let state = PreviewPreset::Dashboard.build_state(None);
+        let mut default_canvas = DisplayCanvas::new();
+        render_frontpanel_ui(&mut default_canvas, &state);
+
+        let (light, light_panel) = render_frame(PreviewPreset::Dashboard, DashboardThemeId::Light);
+        let (dark, dark_panel) = render_frame(PreviewPreset::Dashboard, DashboardThemeId::Dark);
+
+        let mut default_bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
+        default_canvas.write_rgb565_le_bytes(&mut default_bytes);
+        assert_eq!(default_bytes, light);
+        assert_ne!(light, dark);
+        assert!(light_panel.iter().any(|byte| *byte != 0));
+        assert!(dark_panel.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn preview_presets_render_both_themes_and_panel_frames() {
+        let presets = [
+            PreviewPreset::DashboardEepromRestore,
+            PreviewPreset::KeyTestIdle,
+            PreviewPreset::KeyTestShort,
+            PreviewPreset::KeyTestDouble,
+            PreviewPreset::KeyTestLong,
+            PreviewPreset::Menu,
+            PreviewPreset::PresetTemp,
+            PreviewPreset::ActiveCooling,
+            PreviewPreset::WifiInfo,
+            PreviewPreset::DeviceInfo,
+            PreviewPreset::EepromDataIncompatible,
+            PreviewPreset::EepromPersistenceFault,
+            PreviewPreset::EepromPersistenceSaveFailed,
+            PreviewPreset::EepromPersistenceAcknowledged,
+        ];
+
+        for preset in presets {
+            let (light, light_panel) = render_frame(preset, DashboardThemeId::Light);
+            let (dark, dark_panel) = render_frame(preset, DashboardThemeId::Dark);
+            assert_ne!(light, dark, "{} should differ by theme", preset.slug());
+            assert_ne!(
+                light_panel,
+                dark_panel,
+                "{} panel frame should differ by theme",
+                preset.slug()
+            );
+            assert!(light_panel.iter().any(|byte| *byte != 0));
+            assert!(dark_panel.iter().any(|byte| *byte != 0));
+        }
+
+        let incompatible = PreviewPreset::EepromDataIncompatible.build_state(None);
+        assert!(incompatible.eeprom_data_incompatible);
+        assert!(incompatible.persistence_fault_attention_pending);
+
+        let restore = PreviewPreset::DashboardEepromRestore.build_state(None);
+        assert_eq!(
+            restore.dashboard_presentation,
+            DashboardPresentationState::EepromRestore
         );
     }
 }

@@ -21,12 +21,12 @@
 - 冻结 `160×50` 前面板主界面与两级设置菜单的视觉和导航契约。
 - 为 `Dashboard`、`Key Test`、`Menu L1`、`Preset Temp`、`FAN CTRL`、`WiFi Info`、`Device Info` 提供确定性渲染源。
 - 约束屏幕网格、字体预算、颜色 token、状态文案和五向键导航映射。
-- 在 `web/` 中提供可截图的 1:1 预览实现，作为当前最稳定的 render truth source。
+- 以固件 host preview 的 RGB565 framebuffer 作为设备渲染真相源；`web/` 预览实现作为可截图的伴随展示面。
 - 输出一张界面设计规范图，明确配色、字体、温度分段与小屏布局规则。
 
 ### Non-goals
 
-- 不落地真实 LCD 驱动、framebuffer 管线或固件侧 draw API。
+- 不落地真实 LCD 驱动时序或硬件总线管线；固件 framebuffer 与 draw API 的 host preview 属于本主题范围。
 - 不扩展 HTTP / WebSocket 契约，也不新增设备遥测字段。
 - 不在本轮定义 heater PID 或 Wi‑Fi 配置写回逻辑；FAN CTRL 的多档策略显示与编辑以运行时 spec 为准。
 - 不处理多语言字体资产；本轮 on-device 文案默认只用短英文与缩写。
@@ -66,7 +66,7 @@
 
 ### SHOULD
 
-- 颜色使用深色底 + 白色低温起点 + 蓝/青/绿渐变中段 + 橙/红/过温紫高温尾端，兼顾高对比、工业感与过温可读性。
+- 前面板默认使用亮色仪表主题，并为所有已实现页面提供完整的深色主题；两套主题均须保持温度、设定值、PPS、风扇、故障与 heater 输出的语义色和可读层级。
 - 文案长度应严格控制，避免超过 8 个大写/数字字符的行级标签。
 - 页面底部保留轻量按键提示，帮助后续固件移植时维持交互一致性。
 
@@ -78,44 +78,45 @@
 
 ## 设计令牌（Design Tokens）
 
-### Palette
+### Front panel palette
 
-| Token | Value | Usage |
-| --- | --- | --- |
-| `bg` | `#08111F` | 全局屏幕背景 |
-| `panel` | `#122036` | 次级信息面 |
-| `panelStrong` | `#1B2A43` | 主信息面 / 顶部图标栏 |
-| `border` | `#2A3D5D` | 内部分隔线 |
-| `text` | `#F7FBFF` | 启用文字 / 常规图标 |
-| `muted` | `#8EA3C6` | 次级说明文字 |
-| `disabled` | `#5B6C88` | 未启用状态 |
-| `accent` | `#FF9A3C` | 当前选中项 / 主题强调 |
-| `success` | `#40D9A1` | 风扇启用 / 正常状态 |
-| `warning` | `#FFD166` | 设定温度 / 警示信息 |
-| `cyan` | `#63D8FF` | 协议 / 联网 / 信息状态 |
+Dashboard 使用单一仪表面，不以深浅色卡片切割温度区与状态栈。默认亮色主题用于设备运行；host-side preview 为所有已实现页面提供白色仪表面与深色仪表面，供两种主题的可读性审阅。
+
+| Token | Dark | Light | Usage |
+| --- | --- | --- | --- |
+| `bg` | `#081421` | `#F7F7F7` | 单一仪表背景 |
+| `divider` | `#31415A` | `#CED7E6` | 温度区、状态栈与功率区分隔线 |
+| `text` | `#E6EFF7` | `#102031` | 温度单位与主要文字 |
+| `muted` | `#8CA2B5` | `#52657B` | `TEMP`、`SET`、`PPS`、`FAN`、`HEAT` 标签 |
+| `setpoint` | `#FFD263` | `#9C5D00` | 正常设定温度 |
+| `info` | `#7BD2FF` | `#0069A5` | PPS 数值与 `AUTO` 风扇状态 |
+| `success` | `#6BE3B5` | `#007952` | `RUN` 风扇状态 |
+| `warning` | `#FF7184` | `#B52019` | `WARN`、`POWER/WAIT` 与安全状态 |
+| `heater` | `#F79E08` | `#B55108` | heater 输出百分比与进度条 |
 
 ### Typography
 
 | Role | Spec | Usage |
 | --- | --- | --- |
 | Dashboard Numerals | 7-segment digits, `15×26` logical px per glyph | Dashboard / Preset 温度主值 |
+| Dashboard status values | Existing `3×5` bitmap glyphs at `2×` | `SET`、`PPS`、`FAN` 的数值与状态；保持与既有 UI 一致的字形 |
 | UI Labels | Existing screens retain their current bitmap glyphs; `FAN CTRL` uses `6×10` labels / `8×13` title | 菜单标题、状态标签、`M1~M10`；风扇策略编辑页使用高可读字号 |
 | Temp Unit | stacked bitmap `℃` icon | 所有温度主值单位 |
 
 ### Temperature states
 
-- 默认 8 段颜色：`#F7FBFF` → `#427DFF` → `#3AEFF7` → `#52F36B` → `#C5EF4A` → `#FFB23A` → `#FF5542` → `#FF4DA5`
+- 深色主题温度颜色从冰白、蓝、青、绿、黄绿、金黄、橙到粉紫；亮色主题从深蓝、蓝、青、绿、橄榄、棕金、棕橙到紫。
 - 默认 8 个阈值变量：`[0, 40, 60, 100, 150, 200, 250, 300]`
-- 默认分段语义：`<40 白`、`40–59 蓝`、`60–99 青`、`100–149 绿`、`150–199 黄绿`、`200–249 橙`、`250–299 红`、`300+ 过温紫`。
+- 默认分段语义：`<40 冷`、`40–59 蓝`、`60–99 青`、`100–149 绿`、`150–199 黄绿`、`200–249 金黄`、`250–299 橙`、`300+ 过温紫`。
 - 阈值后续允许在设置界面调整，但颜色映射顺序固定不变。
 
 ### Core flows
 
 - `Dashboard`
-  - 左侧为大温度区，显示当前实时温度。
-  - 右侧为紧凑状态栈，至少承载 `SET` / `PPS` / `FAN` 三行；手动 PPS 覆盖激活时第二行标签为 `PPS*`。
-  - 过温告警激活时，`SET` 行切换为 `WARN / OTEMP` 并闪烁；`FAN` 行仍保持 `OFF/AUTO/RUN` 三态显示。
-  - 底部细条用于表达 heater 实际输出强度。
+  - 以单一背景构成仪表面：左侧为标有 `TEMP` 的大温度区，右侧用一条竖向分隔线划出紧凑状态栈。
+  - 状态栈的 `SET` / `PPS` / `FAN` 标签使用小号 muted 字，数值使用既有 `3×5` 字形的 `2×` 语义色渲染；手动 PPS 覆盖激活时第二行保留 `PPS*` 标记与当前电压数值。
+  - 正常 `SET` 使用 setpoint 色，不得与 `WARN`、`POWER/WAIT` 或安全状态共用告警色；告警状态切换为 `WARN / OTEMP`，`FAN` 行仍保持 `OFF/AUTO/RUN/SAFE` 可读。
+  - 底部必须显示 `HEAT <n>%` 与 114px 线性功率条；输出为 `0%` 时保留轨道，非零输出按真实百分比填充。
   - 不显示当前命中的 `MAN / Mx` 或其他 preset 标签。
 - `Menu L1`
   - 采用横向图标菜单，四个入口按一行切换。
@@ -157,7 +158,7 @@ None
 
 ## 验收标准（Acceptance Criteria）
 
-- Given `Dashboard` 画面，When 在 1× 逻辑尺寸审视屏幕，Then 目标温度仍是最显著元素，且 heater / fan 状态均可读。
+- Given `Dashboard` 画面，When 在 1× 逻辑尺寸审视屏幕，Then 实时温度是最显著元素，设定温度是状态栈中最显著值，且 heater / fan 状态均可读。
 - Given `Dashboard` 画面且手动 PPS 覆盖激活，When 审视右侧状态栈，Then PPS 行必须显示 `PPS*` 标签并保留当前电压数值。
 - Given `Menu L1`，When 在同屏展示 4 个菜单项，Then 所有菜单项完整可见且选中项不与其他行混淆。
 - Given `Preset Temp` 页面，When 观察屏幕，Then 目标温度为单一主任务，不出现第二个竞争主视觉块。
@@ -194,16 +195,37 @@ None
 
 ## 方案概述（Approach, high-level）
 
-- 使用浏览器侧的 `canvas` 作为最小稳定渲染器，把所有前面板画面统一约束到 `160×50` 逻辑像素。
+- 使用固件 host preview 作为最小稳定渲染器，把所有前面板画面统一约束到 `160×50` 逻辑像素并序列化为 RGB565；浏览器侧 `canvas` 只复现已冻结的视觉契约。
 - 主界面采用“左大温度 / 右侧状态栈”的强层级布局，确保小屏条件下先读主值、再读功率和系统状态。
 - 菜单页统一使用短词条和单任务二级页，减少主人后续把 Web 控制台思路误搬到前面板上的风险。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
-- 风险：浏览器字体渲染和未来固件字体栅格并非同一实现，最终落固件时仍需做像素级微调。
+- 风险：浏览器预览和固件字体栅格并非同一实现，Web 伴随面仍需以固件 host preview 的像素证据为准。
 - 风险：`WiFi Info` 与 `Device Info` 一旦字段变长，必须依赖缩写策略，否则会挤压布局。
 - 开放问题：后续是否需要加入中文字体或多语言切换，本轮暂不处理。
 - 假设（需主人确认）：当前样机的主要显示方向和 `160×50` 横屏布局一致。
+
+## Context and Scope
+
+本主题定义 Flux Purr `160×50` RGB565 前面板的 Dashboard、诊断页、设置页与双配色渲染契约。范围覆盖固件 host preview、设备默认主题和与这些页面绑定的视觉证据；真实 LCD 驱动时序与热控算法不在本主题内。
+
+## Requirements
+
+- `REQ-FP-001`: 前面板逻辑分辨率 MUST 固定为 `160×50`，并复用固件字体、位图与 RGB565 framebuffer 布局。
+- `REQ-FP-002`: 前面板 MUST 提供亮色和深色两套主题；亮色主题 MUST 是设备默认主题，深色主题 MUST 可通过显式主题参数渲染。
+- `REQ-FP-003`: Dashboard MUST 保持单一主温度值、`SET`/`PPS`/`FAN` 状态栈和 heater 输出语义层级。
+- `REQ-FP-004`: 所有已实现非 Dashboard 页面 MUST 在两套主题下保持相同布局、字体和状态文案，并维持白底文字可读性。
+
+## Verification
+
+- `VER-FP-001`: 固件单元测试与 preview 工具测试通过，covers: REQ-FP-001, REQ-FP-003。
+- `VER-FP-002`: 默认 framebuffer 与显式 `--theme light` framebuffer 像素完全一致，显式 `--theme dark` 输出不同，covers: REQ-FP-002。
+- `VER-FP-003`: `frontpanel_preview` 的 host tests 为全部已实现页面验证两套逻辑/面板 RGB565 帧；owner-facing PNG 是由同一 renderer 生成并经视觉证据门禁人工复核的跟踪资产，covers: REQ-FP-004。
+
+## Related ADRs
+
+None
 
 ## Visual Evidence
 
@@ -214,11 +236,35 @@ None
 
 #### Dashboard
 
-![Front panel home](./assets/frontpanel-home.png)
+默认亮色主题：
+
+![Front panel dashboard light](./assets/dashboard-light.zoom.png)
+
+深色主题：
+
+![Front panel dashboard dark](./assets/dashboard-dark.zoom.png)
+
+#### Other implemented screens
+
+默认亮色主题（从左到右、从上到下依次为按键测试、设置、系统与故障状态）：
+
+![Front panel light theme screens](./assets/frontpanel-light-key-tests.png)
+
+![Front panel light theme settings](./assets/frontpanel-light-settings.png)
+
+![Front panel light theme system states](./assets/frontpanel-light-system.png)
+
+深色主题：
+
+![Front panel dark theme key tests](./assets/frontpanel-dark-key-tests.png)
+
+![Front panel dark theme settings](./assets/frontpanel-dark-settings.png)
+
+![Front panel dark theme system states](./assets/frontpanel-dark-system.png)
 
 #### EEPROM incompatible
 
-该画面由固件 `frontpanel_preview` 直接复用设备 renderer、字体与 `DisplayCanvas` 生成；同目录同时保存 `160×50 RGB565LE` logical framebuffer 与 GC9D01 Landscape panel framebuffer。
+该画面由固件 `frontpanel_preview` 直接复用设备 renderer、字体与 `DisplayCanvas` 生成，默认使用亮色主题；同目录同时保存 `160×50 RGB565LE` logical framebuffer 与 GC9D01 Landscape panel framebuffer。
 
 ![EEPROM incompatible fault screen](./assets/eeprom-data-incompatible/eeprom-data-incompatible.png)
 

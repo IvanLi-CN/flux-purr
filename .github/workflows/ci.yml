@@ -72,6 +72,10 @@ jobs:
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/check-firmware-clippy.sh
 
+      - name: Host preview tests
+        if: needs.classify.outputs.kind == 'source'
+        run: cargo test --locked --manifest-path firmware/Cargo.toml --features host-preview --all-targets
+
       - name: Setup Xtensa toolchain
         if: needs.classify.outputs.kind == 'source'
         uses: ./.github/actions/setup-xtensa

@@ -66,6 +66,9 @@ jobs:
       - name: Firmware clippy
         run: bash scripts/check-firmware-clippy.sh
 
+      - name: Host preview tests
+        run: cargo test --locked --manifest-path firmware/Cargo.toml --features host-preview --all-targets
+
       - name: Setup Xtensa toolchain
         uses: ./.github/actions/setup-xtensa
         with:
