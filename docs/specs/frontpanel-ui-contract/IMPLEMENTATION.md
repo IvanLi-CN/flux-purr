@@ -16,6 +16,7 @@
 - Host framebuffer rendering from `frontpanel_preview` covers the documented display states; the
   firmware preview output is the visual evidence source for persistence fault behavior.
 - Owner-facing renders use nearest-neighbor `8x` scaling (`1280x400`) from the `160x50` logical framebuffer.
+- The preview matrix includes every selectable temperature palette in both light and dark Dashboard themes.
 
 ## Remaining gaps
 

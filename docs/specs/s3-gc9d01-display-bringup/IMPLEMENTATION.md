@@ -13,6 +13,7 @@
 ## Validation
 
 - Host rendering tests validate the shared framebuffer, splash version text, and UI state projection.
+- Host rendering covers both pure-white/light and deep-background/dark startup splash templates.
 - Host binary tests cover the reusable heap scrub; the Xtensa release build verifies the async display bus, timer, and timeout path together.
 - The Xtensa release build is the compile-time contract that the display bus, driver, timer, and flush path remain compatible.
 - Real-device acceptance requires the startup frame and runtime UI to be visibly present after a USB-triggered reboot; a responsive control plane alone is insufficient display evidence.
