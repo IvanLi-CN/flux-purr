@@ -5172,14 +5172,34 @@ impl ManualPpsState {
         })
     }
 
+    fn maximum_pps_current_for_target(&self, target_mv: u16) -> Option<u16> {
+        self.capability_apdos
+            .iter()
+            .flatten()
+            .filter_map(|apdo| {
+                let min_mv = apdo.min_mv.max(self.request_min_mv);
+                let max_mv = apdo.max_mv.min(self.request_max_mv);
+                (target_mv >= min_mv && target_mv <= max_mv).then_some(apdo.max_ma)
+            })
+            .max()
+    }
+
     fn thermal_plant_source_limits(&self) -> Option<(u16, u16, u16)> {
+        self.contiguous_pps_source_limits(20_000)
+    }
+
+    fn heater_source_limits(&self) -> Option<(u16, u16, u16)> {
+        self.contiguous_pps_source_limits(HEATER_ADJUSTABLE_MIN_MV)
+    }
+
+    fn contiguous_pps_source_limits(&self, anchor_mv: u16) -> Option<(u16, u16, u16)> {
         let mut minimum_mv = u16::MAX;
         let mut reachable_max_mv = 0;
         let mut maximum_ma = 0;
         for apdo in self.capability_apdos.iter().flatten() {
             let min_mv = apdo.min_mv.max(self.request_min_mv);
             let max_mv = apdo.max_mv.min(self.request_max_mv);
-            if min_mv > 20_000 || max_mv < 20_000 || apdo.max_ma < 3_000 {
+            if min_mv > anchor_mv || max_mv < anchor_mv || apdo.max_ma < 3_000 {
                 continue;
             }
             minimum_mv = minimum_mv.min(min_mv);
@@ -5208,6 +5228,21 @@ impl ManualPpsState {
             }
         }
 
+        extended = true;
+        while extended {
+            extended = false;
+            for apdo in self.capability_apdos.iter().flatten() {
+                let min_mv = apdo.min_mv.max(self.request_min_mv);
+                let max_mv = apdo.max_mv.min(self.request_max_mv);
+                if apdo.max_ma < 3_000 || max_mv < minimum_mv || min_mv >= minimum_mv {
+                    continue;
+                }
+                minimum_mv = min_mv;
+                maximum_ma = maximum_ma.max(apdo.max_ma);
+                extended = true;
+            }
+        }
+
         Some((minimum_mv, reachable_max_mv, maximum_ma))
     }
 
@@ -5218,7 +5253,7 @@ impl ManualPpsState {
         target_ma: Option<u16>,
     ) -> Result<(), ManualPpsError> {
         let target_ma = target_ma
-            .or(self.capability_max_ma)
+            .or_else(|| self.maximum_pps_current_for_target(target_mv))
             .ok_or(ManualPpsError::NoPpsCapability)?;
         self.validate_target(target_mv, target_ma)?;
         self.enabled = true;
@@ -8527,9 +8562,20 @@ fn select_heater_power_backend_with_capability_state(
     status: Option<Status>,
     capability_state: ManualPpsState,
 ) -> HeaterPowerBackend {
-    let Some((pps_min_mv, pps_max_mv, capability_max_ma)) =
-        capability_state.thermal_plant_source_limits()
-    else {
+    select_heater_power_backend_with_source_limits(
+        capabilities,
+        status,
+        capability_state.thermal_plant_source_limits(),
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn select_heater_power_backend_with_source_limits(
+    capabilities: ch224q::AdjustablePowerCapabilities,
+    status: Option<Status>,
+    source_limits: Option<(u16, u16, u16)>,
+) -> HeaterPowerBackend {
+    let Some((pps_min_mv, pps_max_mv, capability_max_ma)) = source_limits else {
         return HeaterPowerBackend::FixedPdPwmFallback {
             reason: HeaterPowerBackendReason::NoPps20vCapability,
             fixed_request_confirmed: true,
@@ -8642,10 +8688,10 @@ fn select_fusb302b_heater_power_backend(
 
     constrain_heater_backend_to_controller(
         ControllerKind::Fusb302b,
-        select_heater_power_backend_with_capability_state(
+        select_heater_power_backend_with_source_limits(
             capabilities,
             None,
-            ManualPpsState::from_fusb302b_capabilities(Some(capabilities)),
+            ManualPpsState::from_fusb302b_capabilities(Some(capabilities)).heater_source_limits(),
         ),
     )
 }
@@ -16137,7 +16183,7 @@ async fn main(_spawner: Spawner) {
             // watts. Bound achievable plate power by both V^2/R(T) and the
             // selected APDO's V*I contract without turning R(T) into a voltage
             // ceiling. The source contract owns its current boundary.
-            let runtime_source_limits = manual_pps_state.thermal_plant_source_limits();
+            let runtime_source_limits = manual_pps_state.heater_source_limits();
             let max_power_mw = heater_available_power_mw_for_temp(
                 latest_temp_c,
                 runtime_source_limits.map(|(_, max_mv, _)| max_mv),
@@ -16639,11 +16685,15 @@ mod tests {
         });
 
         let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
-        let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+        let mut manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
 
         assert!(manual.validate_target(20_000, 5_000).is_ok());
         assert!(manual.validate_target(24_000, 3_000).is_ok());
         assert!(manual.validate_target(5_000, 3_000).is_err());
+        manual
+            .enable(ManualPpsOwner::Debug, 24_000, None)
+            .expect("an omitted current must use the APDO covering the requested voltage");
+        assert_eq!(manual.target_ma, Some(3_000));
         assert_eq!(
             manual.thermal_plant_source_limits(),
             Some((5_500, 28_000, 5_000))
@@ -16666,6 +16716,41 @@ mod tests {
 
         assert!(!capabilities.pps_covers_20v);
         assert!(manual.validate_target(12_000, 3_000).is_ok());
+        assert_eq!(manual.thermal_plant_source_limits(), None);
+        let HeaterPowerBackend::PpsMos {
+            pps_min_mv,
+            pps_max_mv,
+            capability_max_ma,
+            ..
+        } = select_fusb302b_heater_power_backend(Some(capabilities))
+        else {
+            panic!("a usable degraded PPS APDO must remain available to automatic heating");
+        };
+        assert_eq!(pps_min_mv, 5_500);
+        assert_eq!(pps_max_mv, 19_000);
+        assert_eq!(capability_max_ma, 3_000);
+    }
+
+    #[test]
+    fn automatic_heating_does_not_join_disjoint_pps_apdos() {
+        let mut source = SourceCapabilities::empty();
+        source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 11_000,
+            max_ma: 3_000,
+        });
+        source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 2,
+            min_mv: 12_000,
+            max_mv: 19_000,
+            max_ma: 3_000,
+        });
+
+        let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+        let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        assert_eq!(manual.heater_source_limits(), Some((12_000, 19_000, 3_000)));
     }
 
     #[test]
