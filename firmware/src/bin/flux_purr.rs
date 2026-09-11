@@ -8851,34 +8851,46 @@ fn release_terminal_fixed_pd_disarm_for_manual_pps(
     backend: &mut HeaterPowerBackend,
     manual_pps_active: bool,
 ) -> bool {
-    let HeaterPowerBackend::PpsMos {
-        terminal_fixed_pd_disarmed,
-        current_mode,
-        current_request_mv,
-        settle_until_ms,
-        next_request_at_ms,
-        current_limit_fixed_pwm_active,
-        current_limit_fixed_request_confirmed,
-        idle_request_mv,
-        ..
-    } = backend
-    else {
-        return false;
-    };
-    if !manual_pps_active || !*terminal_fixed_pd_disarmed {
+    if !manual_pps_active {
         return false;
     }
 
-    // A new manual PPS request is an explicit, non-heating re-arm. It may
-    // renegotiate the source while the heater output remains at zero.
-    *terminal_fixed_pd_disarmed = false;
-    *current_mode = None;
-    *current_request_mv = *idle_request_mv;
-    *settle_until_ms = None;
-    *next_request_at_ms = 0;
-    *current_limit_fixed_pwm_active = false;
-    *current_limit_fixed_request_confirmed = false;
-    true
+    match backend {
+        HeaterPowerBackend::PpsMos {
+            terminal_fixed_pd_disarmed,
+            current_mode,
+            current_request_mv,
+            settle_until_ms,
+            next_request_at_ms,
+            current_limit_fixed_pwm_active,
+            current_limit_fixed_request_confirmed,
+            idle_request_mv,
+            ..
+        } if *terminal_fixed_pd_disarmed => {
+            // A new manual PPS request is an explicit, non-heating re-arm. It
+            // may renegotiate the source while the heater output remains at zero.
+            *terminal_fixed_pd_disarmed = false;
+            *current_mode = None;
+            *current_request_mv = *idle_request_mv;
+            *settle_until_ms = None;
+            *next_request_at_ms = 0;
+            *current_limit_fixed_pwm_active = false;
+            *current_limit_fixed_request_confirmed = false;
+            true
+        }
+        HeaterPowerBackend::FixedPdPwmFallback {
+            terminal_fixed_pd_disarmed,
+            fixed_request_confirmed,
+            ..
+        } if *terminal_fixed_pd_disarmed => {
+            // Leave fallback ready to request fixed PD again if the manual PPS
+            // override is later cleared.
+            *terminal_fixed_pd_disarmed = false;
+            *fixed_request_confirmed = false;
+            true
+        }
+        _ => false,
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -10810,11 +10822,10 @@ fn calibration_job_start_with_workspace(
                 .capability_max_mv
                 .ok_or(ManualPpsError::NoPpsCapability)?
                 .min(28_000);
-            let target_ma = calibration
-                .pps_ma
-                .or(manual_pps.capability_max_ma)
-                .ok_or(ManualPpsError::NoPpsCapability)?;
             let next_request_mv = min_mv.div_ceil(100) * 100;
+            let target_ma = manual_pps
+                .maximum_pps_current_for_target(next_request_mv)
+                .ok_or(ManualPpsError::NoPpsCapability)?;
             manual_pps.enable(
                 ManualPpsOwner::Calibration,
                 next_request_mv,
@@ -11574,16 +11585,31 @@ fn update_calibration_job_state_with_workspace(
                 return;
             }
 
-            if calibration.pps_mv != Some(job.next_request_mv) {
+            let target_ma = match manual_pps.maximum_pps_current_for_target(job.next_request_mv) {
+                Some(target_ma) => target_ma,
+                None => {
+                    calibration_job_fail(
+                        calibration,
+                        ManualPpsError::NoPpsCapability,
+                        false,
+                        manual_pps,
+                    );
+                    return;
+                }
+            };
+            if calibration.pps_mv != Some(job.next_request_mv)
+                || calibration.pps_ma != Some(target_ma)
+            {
                 match manual_pps.enable(
                     ManualPpsOwner::Calibration,
                     job.next_request_mv,
-                    Some(job.target_ma),
+                    Some(target_ma),
                 ) {
                     Ok(()) => {
                         calibration.pps_enabled = true;
                         calibration.pps_mv = Some(job.next_request_mv);
-                        calibration.pps_ma = Some(job.target_ma);
+                        calibration.pps_ma = Some(target_ma);
+                        job.target_ma = target_ma;
                         job.settle_ticks = 0;
                         job.stable_ticks = 0;
                         job.last_observed_mv = None;
@@ -11594,6 +11620,7 @@ fn update_calibration_job_state_with_workspace(
                     }
                 }
             }
+            job.target_ma = target_ma;
 
             let requested_mv = manual_pps.target_mv.unwrap_or(job.next_request_mv);
             let request_locked =
@@ -18843,6 +18870,79 @@ mod tests {
             memory_config.adc_calibration.vin.samples[7].map(|sample| sample.expected_mv),
             Some(vin_adc_mv_for_input_mv(21_000))
         );
+    }
+
+    #[test]
+    fn vin_auto_job_reselects_current_when_sweep_crosses_apdo_boundary() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::VinAdc,
+            pps_ma: Some(3_000),
+            ..CalibrationRuntimeState::default()
+        };
+        let mut memory_config = MemoryConfig::default();
+        let mut manual_pps =
+            ManualPpsState::from_fusb302b_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(28_000),
+                pps_max_ma: Some(5_000),
+                pps_apdos: [
+                    Some(ch224q::PpsApdo {
+                        min_mv: 5_000,
+                        max_mv: 21_000,
+                        max_ma: 5_000,
+                    }),
+                    Some(ch224q::PpsApdo {
+                        min_mv: 21_000,
+                        max_mv: 28_000,
+                        max_ma: 3_000,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }));
+
+        calibration_job_start(
+            &mut calibration,
+            CalibrationJobKind::VinAdc,
+            &mut memory_config,
+            &mut manual_pps,
+        )
+        .unwrap();
+
+        let mut crossed_apdo_boundary = false;
+        for _ in 0..200 {
+            let request_mv = manual_pps.target_mv.expect("VIN sweep keeps a PPS request");
+            let expected_ma = if request_mv <= 21_000 { 5_000 } else { 3_000 };
+            let step = (request_mv - 5_000) / 1_000;
+            let vin_raw_mv = 280 + (step * 45);
+            assert_eq!(manual_pps.target_ma, Some(expected_ma));
+            crossed_apdo_boundary |= request_mv > 21_000;
+
+            update_calibration_job_state(
+                &mut calibration,
+                &mut memory_config,
+                &mut manual_pps,
+                0,
+                vin_raw_mv,
+                25.0,
+                3_000,
+                u32::from(request_mv),
+                0,
+            );
+            if calibration.job.status == CalibrationJobStatus::Completed {
+                break;
+            }
+        }
+
+        assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
+        assert_eq!(calibration.job.samples_collected, 23);
+        assert!(crossed_apdo_boundary);
     }
 
     #[test]
@@ -26147,6 +26247,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn manual_pps_releases_terminal_disarm_after_fixed_pd_fallback() {
+        let mut backend = HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::NoPps20vCapability,
+            fixed_request_confirmed: true,
+            fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed: true,
+        };
+
+        assert!(release_terminal_fixed_pd_disarm_for_manual_pps(
+            &mut backend,
+            true
+        ));
+        assert_eq!(
+            backend,
+            HeaterPowerBackend::FixedPdPwmFallback {
+                reason: HeaterPowerBackendReason::NoPps20vCapability,
+                fixed_request_confirmed: false,
+                fixed_request: ch224q::VoltageRequest::V20,
+                terminal_fixed_pd_disarmed: false,
+            }
+        );
     }
 
     #[test]
