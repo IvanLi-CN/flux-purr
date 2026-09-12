@@ -2,7 +2,7 @@
 MEMORY
 {
   vectors_seg ( RX ) : ORIGIN = 0x40370000 + 0x400, len = 0x400
-  iram_seg ( RX ) : ORIGIN = 0x40370800, len = 0x5C000
+  iram_seg ( RX ) : ORIGIN = 0x40370800, len = 0x5D000
   dram_seg ( RW ) : ORIGIN = 0x3FC88000, len = 0x55000
   /* The RAM image has no second-stage app loader reserving the upper DRAM
      window, so the bring-up data/stack region may use the full internal

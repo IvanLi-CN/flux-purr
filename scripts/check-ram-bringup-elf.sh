@@ -21,7 +21,7 @@ fi
 # These are the only address windows accepted by the RAM loader.  They match
 # ram-memory.x and intentionally exclude the ESP32-S3 flash mappings.
 iram_start=$((16#40370000))
-iram_end=$((16#403CC800))
+iram_end=$((16#403CD800))
 dram_start=$((16#3FC88000))
 dram_end=$((16#3FD00000))
 rtc_fast_start=$((16#600FE000))
@@ -87,7 +87,7 @@ fi
 
 # Keep a little headroom for linker alignment while still making the budget
 # explicit and reviewable in CI.
-if ((iram_bytes > 0x5C400)); then
+if ((iram_bytes > 0x5D400)); then
   printf 'IRAM PT_LOAD budget exceeded: 0x%x bytes\n' "${iram_bytes}" >&2
   exit 1
 fi
