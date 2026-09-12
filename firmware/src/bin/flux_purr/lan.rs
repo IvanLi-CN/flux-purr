@@ -111,6 +111,9 @@ pub(crate) async fn dispatch_control_frame(
         Ok(UsbFrame::RuntimeConfig { request_id, config }) => {
             process_runtime_config_frame(context, request_id, config, active_profile)
         }
+        Ok(UsbFrame::RamBringup { request_id, .. }) => {
+            (false, product_ram_bringup_rejection(request_id))
+        }
         #[cfg(feature = "buzzer-test")]
         Ok(UsbFrame::BuzzerTest {
             request_id,

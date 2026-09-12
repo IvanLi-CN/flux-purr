@@ -1478,6 +1478,21 @@ pub(crate) fn open_serial_session(
     })
 }
 
+/// Hold the process-wide lock for a direct serial workflow that owns a port
+/// across multiple opens and external commands.
+pub fn acquire_serial_port_lock(
+    port_path: &str,
+    timeout: Duration,
+) -> Result<impl Send + 'static, String> {
+    SerialPortProcessLock::acquire(port_path, Instant::now() + timeout)
+        .map(|lock| SerialPortLockGuard { _lock: lock })
+        .map_err(|error| error.error.message)
+}
+
+struct SerialPortLockGuard {
+    _lock: SerialPortProcessLock,
+}
+
 pub(crate) fn reopen_serial_session(
     port_path: &str,
     deadline: Instant,

@@ -40,6 +40,7 @@ pub(crate) use flash::*;
 pub use foundation::*;
 pub(crate) use http::*;
 pub(crate) use serial::*;
+pub use serial::acquire_serial_port_lock;
 pub(crate) use wifi_thermal::*;
 
 #[cfg(test)]

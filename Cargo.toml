@@ -2,6 +2,14 @@
 resolver = "3"
 members = [
   "firmware",
+  "firmware/ram-bringup",
   "tools/flux-purr-devd",
   "tools/rust-style-check",
 ]
+
+[profile.release.package.flux-purr-ram-bringup]
+opt-level = "z"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

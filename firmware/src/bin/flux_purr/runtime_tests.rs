@@ -2028,6 +2028,44 @@ fn early_usb_control_defers_network_until_main_loop() {
 }
 
 #[test]
+fn product_rejects_ram_bringup_frame() {
+    let response = usb_early_response(
+        r#"{"type":"ram_bringup","requestId":"ram-1","command":"test_adc"}"#,
+        &MemoryConfig::default(),
+    );
+    match response {
+        UsbFrame::Response {
+            request_id,
+            ok: false,
+            error: Some(error),
+            ..
+        } => {
+            assert_eq!(request_id.as_str(), "ram-1");
+            assert_eq!(error.code.as_str(), "unsupported_frame");
+        }
+        other => panic!("unexpected product response: {other:?}"),
+    }
+}
+
+#[test]
+fn product_ram_bringup_rejection_preserves_request_id() {
+    let mut request_id = heapless::String::new();
+    request_id.push_str("ram-runtime").unwrap();
+    match product_ram_bringup_rejection(request_id) {
+        UsbFrame::Response {
+            request_id,
+            ok: false,
+            error: Some(error),
+            ..
+        } => {
+            assert_eq!(request_id.as_str(), "ram-runtime");
+            assert_eq!(error.code.as_str(), "unsupported_frame");
+        }
+        other => panic!("unexpected runtime product response: {other:?}"),
+    }
+}
+
+#[test]
 fn early_usb_control_defers_runtime_status_until_main_loop() {
     let response = usb_early_response(
         r#"{"type":"request","requestId":"boot-status","op":"get_status"}"#,

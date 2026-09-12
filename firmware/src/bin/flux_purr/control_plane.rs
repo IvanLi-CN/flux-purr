@@ -3195,6 +3195,17 @@ pub(crate) fn usb_start_transport_recovery(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn product_ram_bringup_rejection(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> UsbFrame {
+    usb_error_response(
+        request_id,
+        "unsupported_frame",
+        "RAM Bring-up commands are accepted only by the ram_bringup firmware.",
+    )
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
     match parse_usb_frame(line) {
         Ok(UsbFrame::Request { request_id, op }) => {

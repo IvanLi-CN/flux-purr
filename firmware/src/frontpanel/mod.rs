@@ -629,7 +629,7 @@ pub enum FrontPanelRuntimeMode {
 
 impl FrontPanelRuntimeMode {
     pub const fn compile_time_default() -> Self {
-        // Key diagnostics remain available to the host preview and tests, but
+        // Key diagnostics remain available to the RAM Bring-up path and tests, but
         // the production firmware must never boot into a test-only runtime.
         Self::App
     }
@@ -2249,4 +2249,253 @@ fn production_runtime_default_is_app() {
         FrontPanelRuntimeMode::compile_time_default(),
         FrontPanelRuntimeMode::App
     );
+}
+
+/// Deterministic physical preview states shared by the RAM bring-up binary.
+/// These are the scenarios that used to be rendered by the host preview
+/// executable, kept next to the production UI state model so the hardware
+/// preview cannot drift from it.
+pub mod preview {
+    use super::*;
+    use crate::{
+        DEFAULT_PD_VOLTAGE_REQUEST,
+        control_plane::NetworkState,
+        fan_policy::{FanOutputLevel, FanPolicySource, HeatingFanGuardMode, PostHeatCoolingMode},
+    };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum State {
+        KeyTestIdle,
+        KeyTestShort,
+        KeyTestDouble,
+        KeyTestLong,
+        Dashboard,
+        DashboardReady,
+        DashboardPowerWait,
+        DashboardEepromRestore,
+        DashboardManual,
+        DashboardFanOff,
+        DashboardFanAuto,
+        DashboardFanRun,
+        DashboardOvertempA,
+        DashboardOvertempB,
+        DashboardInitializing,
+        DashboardInitialRtdFault,
+        DashboardTemp,
+        Menu,
+        PresetTemp,
+        ActiveCooling,
+        WifiInfo,
+        DeviceInfo,
+        EepromDataIncompatible,
+        EepromPersistenceFault,
+        EepromPersistenceSaveFailed,
+        EepromPersistenceAcknowledged,
+    }
+
+    pub const SEQUENCE: [State; 26] = [
+        State::KeyTestIdle,
+        State::KeyTestShort,
+        State::KeyTestDouble,
+        State::KeyTestLong,
+        State::Dashboard,
+        State::DashboardReady,
+        State::DashboardPowerWait,
+        State::DashboardEepromRestore,
+        State::DashboardManual,
+        State::DashboardFanOff,
+        State::DashboardFanAuto,
+        State::DashboardFanRun,
+        State::DashboardOvertempA,
+        State::DashboardOvertempB,
+        State::DashboardInitializing,
+        State::DashboardInitialRtdFault,
+        State::DashboardTemp,
+        State::Menu,
+        State::PresetTemp,
+        State::ActiveCooling,
+        State::WifiInfo,
+        State::DeviceInfo,
+        State::EepromDataIncompatible,
+        State::EepromPersistenceFault,
+        State::EepromPersistenceSaveFailed,
+        State::EepromPersistenceAcknowledged,
+    ];
+
+    impl State {
+        fn base_dashboard() -> FrontPanelUiState {
+            let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+            state.pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
+            state.target_temp_c = 180;
+            state.current_temp_c = 32;
+            state.current_temp_deci_c = 321;
+            state
+        }
+
+        fn key_test(raw_key: RawFrontPanelKey, gesture: KeyGesture) -> FrontPanelUiState {
+            let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
+            let mut raw_state = FrontPanelRawState::default();
+            raw_state.set_pressed(raw_key, true);
+            state.set_raw_state(raw_state);
+            let _ = state.handle_event(KeyEvent {
+                raw_key,
+                key: FrontPanelKeyMap::default().logical_from_raw(raw_key),
+                gesture,
+                at_ms: 0,
+            });
+            state
+        }
+
+        pub fn build(self) -> FrontPanelUiState {
+            match self {
+                Self::KeyTestIdle => FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest),
+                Self::KeyTestShort => Self::key_test(RawFrontPanelKey::Up, KeyGesture::ShortPress),
+                Self::KeyTestDouble => {
+                    Self::key_test(RawFrontPanelKey::CenterBoot, KeyGesture::DoublePress)
+                }
+                Self::KeyTestLong => Self::key_test(RawFrontPanelKey::Down, KeyGesture::LongPress),
+                Self::Dashboard | Self::DashboardReady => Self::base_dashboard(),
+                Self::DashboardPowerWait => {
+                    let mut state = Self::base_dashboard();
+                    state.pd_contract_mv = 0;
+                    state.heater_lock_reason = Some(HeaterLockReason::PdContractUnavailable);
+                    state.dashboard_warning_visible = true;
+                    state
+                }
+                Self::DashboardEepromRestore => {
+                    let mut state = Self::base_dashboard();
+                    state.set_dashboard_presentation(DashboardPresentationState::EepromRestore);
+                    state.eeprom_data_incompatible = true;
+                    state
+                }
+                Self::DashboardManual => {
+                    let mut state = Self::base_dashboard();
+                    state.current_temp_c = 365;
+                    state.current_temp_deci_c = 3654;
+                    state.target_temp_c = 380;
+                    state.heater_enabled = true;
+                    state.heater_output_percent = 64;
+                    state.fan_enabled = true;
+                    state.fan_display_state = FanDisplayState::Run;
+                    state
+                }
+                Self::DashboardFanOff => {
+                    let mut state = Self::base_dashboard();
+                    state.current_temp_c = 96;
+                    state.current_temp_deci_c = 962;
+                    state.active_cooling_enabled = false;
+                    state.fan_display_state = FanDisplayState::Off;
+                    state
+                }
+                Self::DashboardFanAuto => {
+                    let mut state = Self::base_dashboard();
+                    state.current_temp_c = 34;
+                    state.current_temp_deci_c = 341;
+                    state.fan_display_state = FanDisplayState::Auto;
+                    state
+                }
+                Self::DashboardFanRun => {
+                    let mut state = Self::base_dashboard();
+                    state.current_temp_c = 58;
+                    state.current_temp_deci_c = 583;
+                    state.fan_enabled = true;
+                    state.fan_display_state = FanDisplayState::Run;
+                    state
+                }
+                Self::DashboardOvertempA => {
+                    let mut state = Self::base_dashboard();
+                    state.current_temp_c = 351;
+                    state.current_temp_deci_c = 3512;
+                    state.active_cooling_enabled = false;
+                    state.fan_enabled = true;
+                    state.heater_lock_reason = Some(HeaterLockReason::CoolingDisabledOvertemp);
+                    state.dashboard_warning_visible = true;
+                    state
+                }
+                Self::DashboardOvertempB => {
+                    let mut state = Self::DashboardOvertempA.build();
+                    state.dashboard_warning_visible = false;
+                    state
+                }
+                Self::DashboardInitializing => {
+                    FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App)
+                }
+                Self::DashboardInitialRtdFault => {
+                    let mut state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
+                    state.set_dashboard_presentation(DashboardPresentationState::InitialRtdFault);
+                    state.heater_lock_reason = Some(HeaterLockReason::SensorFault);
+                    state.dashboard_warning_visible = true;
+                    state
+                }
+                Self::DashboardTemp => {
+                    let mut state = Self::base_dashboard();
+                    state.current_temp_c = 25;
+                    state.current_temp_deci_c = 250;
+                    state
+                }
+                Self::Menu => {
+                    let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+                    state.route = FrontPanelRoute::Menu;
+                    state.selected_menu_item = FrontPanelMenuItem::ActiveCooling;
+                    state
+                }
+                Self::PresetTemp => {
+                    let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+                    state.route = FrontPanelRoute::PresetTemp;
+                    state.selected_preset_slot = 4;
+                    state
+                }
+                Self::ActiveCooling => {
+                    let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+                    state.route = FrontPanelRoute::ActiveCooling;
+                    state.post_heat_cooling_mode = PostHeatCoolingMode::Normal;
+                    state.heating_fan_guard_mode = HeatingFanGuardMode::Medium;
+                    state.fan_settings_draft_post_heat = state.post_heat_cooling_mode;
+                    state.fan_settings_draft_guard = state.heating_fan_guard_mode;
+                    state.fan_policy_source = FanPolicySource::PostHeat;
+                    state.fan_output_level = FanOutputLevel::Medium;
+                    state.pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
+                    state
+                }
+                Self::WifiInfo => {
+                    let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+                    state.network.state = NetworkState::Connected;
+                    state.network.ssid = Some("Ivan".try_into().expect("preview SSID fits"));
+                    state.network.ip = Some("192.168.31.88".try_into().expect("preview IP fits"));
+                    state.network.wifi_rssi = Some(-58);
+                    state.enter_wifi_pairing(Some(*b"4827"));
+                    state
+                }
+                Self::DeviceInfo => {
+                    let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+                    state.route = FrontPanelRoute::DeviceInfo;
+                    state
+                }
+                Self::EepromDataIncompatible => {
+                    let mut state = Self::base_dashboard();
+                    state.eeprom_data_incompatible = true;
+                    state.persistence_fault_attention_pending = true;
+                    state
+                }
+                Self::EepromPersistenceFault => {
+                    let mut state = Self::base_dashboard();
+                    state.eeprom_required = true;
+                    state.heater_lock_reason = Some(HeaterLockReason::PersistenceRequired);
+                    state.persistence_fault_attention_pending = true;
+                    state
+                }
+                Self::EepromPersistenceSaveFailed => {
+                    let mut state = Self::base_dashboard();
+                    state.persistence_fault_attention_pending = true;
+                    state
+                }
+                Self::EepromPersistenceAcknowledged => {
+                    let mut state = Self::base_dashboard();
+                    state.eeprom_required = true;
+                    state.heater_lock_reason = Some(HeaterLockReason::PersistenceRequired);
+                    state
+                }
+            }
+        }
+    }
 }

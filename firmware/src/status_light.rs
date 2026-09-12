@@ -35,6 +35,19 @@ pub enum StatusLightState {
     ThermalRunaway,
 }
 
+pub const STATUS_LIGHT_PREVIEW_SEQUENCE: [StatusLightState; 10] = [
+    StatusLightState::Booting,
+    StatusLightState::Ready,
+    StatusLightState::Heating,
+    StatusLightState::Cooling,
+    StatusLightState::Calibration,
+    StatusLightState::HeaterInterlocked,
+    StatusLightState::CoolingDisabledOvertemp,
+    StatusLightState::SensorFault,
+    StatusLightState::ThermalRunawayAttentionPending,
+    StatusLightState::ThermalRunaway,
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StatusLightInputs {
     pub booting: bool,
@@ -152,6 +165,16 @@ const fn burst_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_sequence_covers_all_status_language_states() {
+        assert_eq!(STATUS_LIGHT_PREVIEW_SEQUENCE.len(), 10);
+        assert!(
+            STATUS_LIGHT_PREVIEW_SEQUENCE
+                .contains(&StatusLightState::ThermalRunawayAttentionPending)
+        );
+        assert!(STATUS_LIGHT_PREVIEW_SEQUENCE.contains(&StatusLightState::ThermalRunaway));
+    }
 
     #[test]
     fn safety_states_override_every_normal_indicator() {
