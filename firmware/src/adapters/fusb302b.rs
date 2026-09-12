@@ -35,6 +35,9 @@ pub enum TransientTransportFault {
     RetryFailed,
     PendingRequestTimeout,
     PartialReceiveTimeout,
+    ReceiveIoError,
+    TransmitIoError,
+    ConfigurationIoError,
 }
 
 /// The recovery action for a local transport failure.
@@ -517,6 +520,15 @@ mod tests {
     }
 
     #[test]
+    fn unusable_source_capabilities_keep_discovery_alive() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        assert_eq!(policy.on_source_capabilities(&[0x0000_0000]), None);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert_eq!(policy.active_contract(), Contract::none());
+        assert!(policy.source_capabilities().is_some());
+    }
+
+    #[test]
     fn pps_keepalive_interval_is_five_seconds() {
         assert!(!pps_keepalive_due(1_000, 5_999));
         assert!(pps_keepalive_due(1_000, 6_000));
@@ -599,6 +611,9 @@ mod tests {
             TransientTransportFault::RetryFailed,
             TransientTransportFault::PendingRequestTimeout,
             TransientTransportFault::PartialReceiveTimeout,
+            TransientTransportFault::ReceiveIoError,
+            TransientTransportFault::TransmitIoError,
+            TransientTransportFault::ConfigurationIoError,
         ] {
             assert_eq!(
                 transient_transport_fault_recovery(fault),

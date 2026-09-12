@@ -31,11 +31,11 @@
   - `BLK` is active-low on the panel board
   - `Q5` (`BSS84AKW`) switches `3V3 -> LEDA` on the high side
   - `R55 100 kOhm` pulls `BLK` up to `3V3`, so firmware must drive low or use inverted PWM for visible light
-  - Firmware holds `BLK` high (backlight off) through display initialization and the first startup frame, then drives it low immediately after that frame flush succeeds
+  - Firmware configures `BLK` as active-low and drives it low before PD detection, so backlight control is established before any potentially blocking startup work
 - Current startup behavior:
   - normal App boot -> branded startup splash (light theme by default)
-  - flush the complete splash frame, then turn the backlight on immediately
-  - first Dashboard refresh naturally replaces the splash while runtime initialization continues
+  - establish the backlight, complete the bounded FUSB302B Sink startup service window, then initialize the panel and flush the splash frame
+  - first Dashboard refresh naturally replaces the splash after the remaining runtime initialization completes
   - Key Test boot -> static calibration screen
   - default build (`esp32s3`) enters the app runtime with real RTD/PID/fan state rendering
 

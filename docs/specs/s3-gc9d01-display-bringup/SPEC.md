@@ -74,7 +74,7 @@ None
 - REQ-DISPLAY-014: 当前 display baseline 只负责证明驱动、方向、偏移、host preview 与 on-device 渲染一致；后续运行态是否轮播、是否 safe-off，由 `frontpanel-input-interaction` 冻结。
 - REQ-DISPLAY-015: host preview 必须复用同一套场景渲染代码并产出 `framebuffer.bin`；`fb_to_png.py` 将逻辑 framebuffer 可复现地转换为 `preview.png`，8x nearest-neighbor PNG 作为 owner-facing 证据。
 - REQ-DISPLAY-016: 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
-- REQ-DISPLAY-020: 背光 `GPIO13` 必须在显示控制器初始化和首个启动帧成功刷入前保持关闭；启动屏整帧提交成功后应立即点亮。显示初始化或首帧刷屏失败时必须保持关闭，避免把未定义帧暴露给用户。
+- REQ-DISPLAY-020: 背光 `GPIO13` 必须在启动早期配置为 active-low，并在任何可能阻塞的 PD/I2C 工作前驱动为开启态；显示控制器初始化和启动帧刷屏必须在该背光控制已经确定后进行。显示初始化或首帧刷屏失败时仍必须进入既有可诊断 recovery 路径，不得依赖背光切换来掩盖显示故障。
 
 ### SHOULD
 
@@ -86,8 +86,8 @@ None
 
 ### Core flows
 
-- 设备上电后初始化 Embassy 运行时、异步 SPI、GC9D01 driver 与背光控制；背光先保持关闭。
-- 正常 App 路径在显示初始化完成后先绘制静态 splash，启动屏整帧成功刷入后立即点亮背光，并在其后的安全输出、PD、EEPROM 与 ADC 启动工作期间保持显示；首个 Dashboard 刷新覆盖 splash。
+- 设备上电后先配置 active-low 背光控制并驱动为开启态；随后完成 FUSB302B 检测、PHY 初始化和有界 Sink 协商服务窗口，再初始化 Embassy 异步 SPI 与 GC9D01 driver。
+- 正常 App 路径在 PD 启动服务窗口结束后绘制并刷入静态 splash；首个 Dashboard 刷新在其后的运行态初始化完成后覆盖 splash。PD 窗口必须有界，合同未就绪时保持 heater interlock，不得把启动阻塞扩展为无限等待。
 - Key Test 路径继续绘制静态校准屏，用于确认驱动、方向与颜色口径。
 - host preview binary 使用与设备端相同的场景渲染入口生成 framebuffer dump，再转换成 PNG 供主人预审。
 - 硬件调试阶段，主人拍摄静态校准屏和前面板运行画面；Agent 根据实拍判断是否需要微调 orientation / dx / dy / 颜色设置。
@@ -116,9 +116,9 @@ None
 ## Verification
 
 - VER-DISPLAY-001 (covers: REQ-DISPLAY-005, REQ-DISPLAY-006, REQ-DISPLAY-007, REQ-DISPLAY-008, REQ-DISPLAY-009, REQ-DISPLAY-010, REQ-DISPLAY-011, REQ-DISPLAY-015, REQ-DISPLAY-017, REQ-DISPLAY-018): Given `display_preview` 与 `fb_to_png.py`，When 生成启动屏、校准屏与 demo 场景的 framebuffer 并转换为 PNG，Then 预览图能显示方向标识、RGB 色块、灰阶块和文字标签。
-- VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004, REQ-DISPLAY-020): Given `flux-purr` device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release` 成功，并通过启动顺序测试确认背光在首帧成功刷入后才开启。
+- VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004, REQ-DISPLAY-020): Given `flux-purr` device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release` 成功，并通过启动顺序测试确认背光控制先于 PD，PD 启动服务先于显示初始化与启动帧。
 - VER-DISPLAY-003 (covers: REQ-DISPLAY-014): Given host 质量门，When 运行 `cargo test`、`cargo clippy --all-targets --all-features -D warnings`、`cargo build --release`，Then 全部通过。
-- VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 正常 App 路径先显示 branded splash，首帧成功后点亮背光并进入 Dashboard；Key Test 路径显示静态校准屏，并报告当前场景、方向配置与 profile。
+- VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 正常 App 路径先建立背光控制、完成有界 PD 启动服务，再显示 branded splash 并进入 Dashboard；Key Test 路径显示静态校准屏，并报告当前场景、方向配置与 profile。
 - VER-DISPLAY-005 (covers: REQ-DISPLAY-016): Given 主人提供实拍照片，When 对比 host preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
 - VER-DISPLAY-006: Given 后续运行态规格需要交互或 safe-off 约束，When 查询本仓库 spec，Then 以 `frontpanel-input-interaction` 为真相源，而不是回退到本 spec 的历史轮播描述。
 

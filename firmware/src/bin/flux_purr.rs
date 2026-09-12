@@ -12,6 +12,8 @@ extern crate alloc;
 use alloc::boxed::Box;
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
 use core::cell::RefCell;
+#[cfg(target_arch = "xtensa")]
+use core::future::Future;
 #[cfg(any(target_arch = "xtensa", test))]
 use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 #[cfg(target_arch = "xtensa")]
@@ -751,12 +753,12 @@ const RTD_TEMP_MIN_C: f32 = -50.0;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_TEMP_MAX_C: f32 = 500.0;
 #[cfg(target_arch = "xtensa")]
-const FUSB302B_I2C_FREQUENCY_HZ: u32 = 100_000;
+const FUSB302B_I2C_FREQUENCY_HZ: u32 = 400_000;
 #[cfg(target_arch = "xtensa")]
-// Keep identity probing fail-closed without turning an absent optional
-// controller into a multi-second startup stall. EEPROM reads are chunked
-// below this budget so the shared bus retains the same bounded transaction.
-const I2C_TRANSACTION_TIMEOUT_MS: u64 = 25;
+// FUSB302B and M24C64 both support fast-mode I2C. Keep each shared-bus
+// transaction at the PD service interval so a stalled peripheral cannot
+// monopolize the protocol service for the old 25ms timeout.
+const I2C_TRANSACTION_TIMEOUT_MS: u64 = 5;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -860,19 +862,20 @@ fn eeprom_snapshot_storage_failure(response: &EepromSnapshotResponse) -> bool {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn eeprom_snapshot_digest(
+async fn eeprom_snapshot_digest(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
 ) -> Result<heapless::String<EEPROM_SNAPSHOT_HASH_LEN>, &'static str> {
     let Some(address) = probe_eeprom_address(i2c) else {
         return Err("eeprom_unavailable");
     };
-    let mut eeprom = M24c64::with_address(i2c, address);
     let mut hasher = Sha256::new();
     let mut offset = 0_u16;
     let mut bytes = [0_u8; EEPROM_SNAPSHOT_CHUNK_MAX as usize];
     while offset < EEPROM_SNAPSHOT_SIZE {
         let length = usize::from((EEPROM_SNAPSHOT_SIZE - offset).min(EEPROM_SNAPSHOT_CHUNK_MAX));
-        read_eeprom_bytes_chunked(&mut eeprom, offset, &mut bytes[..length])
+        read_eeprom_bytes_chunked_with_pd(i2c, pd_port, address, offset, &mut bytes[..length])
+            .await
             .map_err(|_| "eeprom_read_failed")?;
         hasher.update(&bytes[..length]);
         offset = offset.saturating_add(length as u16);
@@ -907,10 +910,11 @@ fn write_eeprom_snapshot_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn process_eeprom_snapshot_line(
+async fn process_eeprom_snapshot_line(
     line: &str,
     session: &mut EepromSnapshotSession,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
     last_heater_duty: u8,
     memory_commit_due_ms: &mut Option<u64>,
     elapsed_ms: u64,
@@ -992,10 +996,18 @@ fn process_eeprom_snapshot_line(
                 session.active = false;
                 return Some(eeprom_snapshot_error(request_id, "eeprom_unavailable"));
             };
-            let mut eeprom = M24c64::with_address(i2c, address);
             let mut bytes = heapless::Vec::<u8, 32>::new();
             let _ = bytes.resize_default(usize::from(length));
-            if read_eeprom_bytes_chunked(&mut eeprom, offset, bytes.as_mut_slice()).is_err() {
+            if read_eeprom_bytes_chunked_with_pd(
+                i2c,
+                pd_port,
+                address,
+                offset,
+                bytes.as_mut_slice(),
+            )
+            .await
+            .is_err()
+            {
                 session.active = false;
                 return Some(eeprom_snapshot_error(request_id, "eeprom_read_failed"));
             }
@@ -1029,7 +1041,7 @@ fn process_eeprom_snapshot_line(
                 session.active = false;
                 return Some(eeprom_snapshot_error(request_id, "snapshot_incomplete"));
             }
-            let digest = match eeprom_snapshot_digest(i2c) {
+            let digest = match eeprom_snapshot_digest(i2c, pd_port).await {
                 Ok(digest) => digest,
                 Err(code) => {
                     session.active = false;
@@ -4179,8 +4191,8 @@ const FUSB302B_DIAG_NO_USABLE_CONTRACT: u8 = 16;
 const FUSB302B_DIAG_RX_PARTIAL: u8 = 17;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_REQUEST_TIMEOUT: u8 = 19;
-#[cfg(target_arch = "xtensa")]
-const FUSB302B_MAX_RX_MESSAGES_PER_POLL: u8 = 4;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_MAX_RX_MESSAGES_PER_POLL: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_PARTIAL_RX_TIMEOUT_MS: u64 = 250;
 #[cfg(target_arch = "xtensa")]
@@ -6161,6 +6173,12 @@ const FUSB302B_CONTROL1_RW_MASK: u8 = 0b0111_0011;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_CONTROL1_RX_FLUSH: u8 = 1 << 2;
 #[cfg(target_arch = "xtensa")]
+const FUSB302B_CONTROL0_REGISTER: u8 = 0x06;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_CONTROL0_RW_MASK: u8 = 0b0010_1110;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_CONTROL0_TX_FLUSH: u8 = 1 << 6;
+#[cfg(target_arch = "xtensa")]
 const FUSB302B_TOGGLE_INTERRUPT_MASKS: InterruptMasks = InterruptMasks::new(0x7f, 0xbf, 0xff);
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_RECEIVE_INTERRUPT_MASKS: InterruptMasks = InterruptMasks::new(0x7d, 0xe0, 0x00);
@@ -6226,6 +6244,11 @@ const fn fusb302b_receive_fifo_flush_value(control1: u8) -> u8 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_transmit_fifo_flush_value(control0: u8) -> u8 {
+    (control0 & FUSB302B_CONTROL0_RW_MASK) | FUSB302B_CONTROL0_TX_FLUSH
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 const fn fusb302b_retry_failure_requires_recovery(
     status0a: u8,
     _status1: u8,
@@ -6234,9 +6257,9 @@ const fn fusb302b_retry_failure_requires_recovery(
     !retry_fail_recovery_pending && status0a & FUSB302B_STATUS0A_RETRY_FAIL != 0
 }
 
-/// The upstream PHY API exposes only a combined FIFO flush. Local transport
-/// recovery must retain a possibly queued transmit frame, so it updates only
-/// CONTROL1.RX_FLUSH and preserves the driver's receive-mask bits.
+/// The upstream PHY API exposes only a combined FIFO flush. Receive recovery
+/// therefore updates only CONTROL1.RX_FLUSH and preserves the driver's
+/// receive-mask bits; transmit recovery uses the separate TX flush below.
 #[cfg(target_arch = "xtensa")]
 fn fusb302b_flush_receive_fifo(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
     let mut control1 = [0_u8];
@@ -6252,6 +6275,26 @@ fn fusb302b_flush_receive_fifo(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
                 &[
                     FUSB302B_CONTROL1_REGISTER,
                     fusb302b_receive_fifo_flush_value(control1[0]),
+                ],
+            )
+            .is_ok()
+}
+
+#[cfg(target_arch = "xtensa")]
+fn fusb302b_flush_transmit_fifo(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+    let mut control0 = [0_u8];
+    i2c.write_read(
+        fusb302::DEFAULT_ADDRESS,
+        &[FUSB302B_CONTROL0_REGISTER],
+        &mut control0,
+    )
+    .is_ok()
+        && i2c
+            .write(
+                fusb302::DEFAULT_ADDRESS,
+                &[
+                    FUSB302B_CONTROL0_REGISTER,
+                    fusb302b_transmit_fifo_flush_value(control0[0]),
                 ],
             )
             .is_ok()
@@ -6348,18 +6391,21 @@ impl Fusb302bRuntime {
         self.partial_rx_started_at_ms = None;
         self.retry_fail_recovery_pending = false;
         if !fusb302b_flush_receive_fifo(i2c) {
-            self.policy.mark_fault();
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
-            return false;
+            return true;
         }
         if matches!(
             action,
             Fusb302bReceivedResetAction::AcceptAndWaitForSourceCapabilities
-        ) && !self
-            .transmit(i2c, fusb302b::accept_header(self.next_message_id), &[])
-            .await
-        {
-            return false;
+        ) {
+            if let Err(fault) = self
+                .transmit(i2c, fusb302b::accept_header(self.next_message_id), &[])
+                .await
+            {
+                return self
+                    .recover_transient_transport_fault(i2c, fault, now)
+                    .await;
+            }
         }
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
         true
@@ -6392,10 +6438,15 @@ impl Fusb302bRuntime {
                 self.retry_fail_recovery_pending =
                     matches!(fault, fusb302b::TransientTransportFault::RetryFailed);
 
-                if !fusb302b_flush_receive_fifo(i2c) {
-                    self.policy.mark_fault();
+                let receive_flushed = fusb302b_flush_receive_fifo(i2c);
+                let transmit_flushed =
+                    !matches!(fault, fusb302b::TransientTransportFault::TransmitIoError)
+                        || fusb302b_flush_transmit_fifo(i2c);
+                if !receive_flushed {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
-                    return false;
+                }
+                if !transmit_flushed {
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
                 }
                 FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
                 true
@@ -6436,7 +6487,10 @@ impl Fusb302bRuntime {
                 return PdContractRequestState::Failed;
             }
             let header = fusb302b::get_source_capabilities_header(self.next_message_id);
-            if !self.transmit(i2c, header, &[]).await {
+            if let Err(fault) = self.transmit(i2c, header, &[]).await {
+                let _ = self
+                    .recover_transient_transport_fault(i2c, fault, now)
+                    .await;
                 return PdContractRequestState::Failed;
             }
             self.source_capabilities_refresh_pending = true;
@@ -6448,7 +6502,10 @@ impl Fusb302bRuntime {
             return PdContractRequestState::Failed;
         };
         let header = fusb302b::request_header(self.next_message_id);
-        if !self.transmit(i2c, header, &rdo).await {
+        if let Err(fault) = self.transmit(i2c, header, &rdo).await {
+            let _ = self
+                .recover_transient_transport_fault(i2c, fault, now)
+                .await;
             return PdContractRequestState::Failed;
         }
         self.last_request_at_ms = Some(now_ms);
@@ -6477,7 +6534,10 @@ impl Fusb302bRuntime {
             return false;
         };
         let header = fusb302b::request_header(self.next_message_id);
-        if !self.transmit(i2c, header, &rdo).await {
+        if let Err(fault) = self.transmit(i2c, header, &rdo).await {
+            let _ = self
+                .recover_transient_transport_fault(i2c, fault, now)
+                .await;
             return false;
         }
         self.last_request_at_ms = Some(now_ms);
@@ -6490,20 +6550,18 @@ impl Fusb302bRuntime {
         i2c: &mut I2c<'_, esp_hal::Blocking>,
         header: u16,
         data: &[u8],
-    ) -> bool {
+    ) -> Result<(), fusb302b::TransientTransportFault> {
         let Ok(packet) = PdPacket::new(SopType::Sop, header, data) else {
-            self.policy.mark_fault();
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
-            return false;
+            return Err(fusb302b::TransientTransportFault::TransmitIoError);
         };
         let mut phy = Fusb302::new(BlockingAsync::new(i2c));
         if phy.transmit(&packet).await.is_err() {
-            self.policy.mark_fault();
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
-            return false;
+            return Err(fusb302b::TransientTransportFault::TransmitIoError);
         }
         self.next_message_id = (self.next_message_id + 1) & 0x07;
-        true
+        Ok(())
     }
 
     /// Drain a bounded number of completed PD frames in one service turn. No
@@ -6558,9 +6616,14 @@ impl Fusb302bRuntime {
                         })
                     }
                     Err(_) => {
-                        self.policy.mark_fault();
-                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
-                        return false;
+                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                        return self
+                            .recover_transient_transport_fault(
+                                i2c,
+                                fusb302b::TransientTransportFault::ReceiveIoError,
+                                now,
+                            )
+                            .await;
                     }
                 }
             };
@@ -6580,9 +6643,14 @@ impl Fusb302bRuntime {
                             .is_ok()
                 };
                 if !selected {
-                    self.policy.mark_fault();
-                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
-                    return false;
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                    return self
+                        .recover_transient_transport_fault(
+                            i2c,
+                            fusb302b::TransientTransportFault::ConfigurationIoError,
+                            now,
+                        )
+                        .await;
                 }
                 self.polarity = Some(polarity);
                 self.policy.on_attachment_detected();
@@ -6598,10 +6666,11 @@ impl Fusb302bRuntime {
         for _ in 0..FUSB302B_MAX_RX_MESSAGES_PER_POLL {
             let event = match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending).await {
                 Ok(event) => event,
-                Err(()) => {
-                    self.policy.mark_fault();
-                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
-                    return false;
+                Err(fault) => {
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                    return self
+                        .recover_transient_transport_fault(i2c, fault, now)
+                        .await;
                 }
             };
             match event {
@@ -6631,8 +6700,10 @@ impl Fusb302bRuntime {
                             return true;
                         }
                         let header = fusb302b::get_source_capabilities_header(self.next_message_id);
-                        if !self.transmit(i2c, header, &[]).await {
-                            return false;
+                        if let Err(fault) = self.transmit(i2c, header, &[]).await {
+                            return self
+                                .recover_transient_transport_fault(i2c, fault, now)
+                                .await;
                         }
                         self.retry_fail_recovery_pending = false;
                         self.source_capabilities_tx_confirmed = false;
@@ -6647,12 +6718,19 @@ impl Fusb302bRuntime {
                             .is_some_and(|last| fusb302b::pps_keepalive_due(last, now_ms))
                     {
                         let Some(rdo) = self.policy.refresh_active_pps() else {
-                            self.policy.mark_fault();
-                            return false;
+                            return self
+                                .recover_transient_transport_fault(
+                                    i2c,
+                                    fusb302b::TransientTransportFault::ConfigurationIoError,
+                                    now,
+                                )
+                                .await;
                         };
                         let header = fusb302b::request_header(self.next_message_id);
-                        if !self.transmit(i2c, header, &rdo).await {
-                            return false;
+                        if let Err(fault) = self.transmit(i2c, header, &rdo).await {
+                            return self
+                                .recover_transient_transport_fault(i2c, fault, now)
+                                .await;
                         }
                         self.last_request_at_ms = Some(now_ms);
                     }
@@ -6696,17 +6774,23 @@ impl Fusb302bRuntime {
                             Some((message.header() >> 9) as u8 & 0x07),
                         ) {
                             let header = fusb302b::request_header(self.next_message_id);
-                            if !self.transmit(i2c, header, &rdo).await {
-                                return false;
+                            if let Err(fault) = self.transmit(i2c, header, &rdo).await {
+                                return self
+                                    .recover_transient_transport_fault(i2c, fault, now)
+                                    .await;
                             }
                             self.last_request_at_ms = Some(now_ms);
                             FUSB302B_DIAGNOSTIC
                                 .store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
                         } else {
-                            self.policy.mark_fault();
+                            // The attachment is still valid, but this source
+                            // cannot satisfy the heater contract. Keep the
+                            // policy in discovery so a later capability update
+                            // can recover without a CC reset.
+                            self.last_source_capabilities_request_at_ms = Some(now_ms);
                             FUSB302B_DIAGNOSTIC
                                 .store(FUSB302B_DIAG_NO_USABLE_CONTRACT, Ordering::Relaxed);
-                            return false;
+                            return true;
                         }
                     } else if message.payload().is_empty() {
                         self.policy.on_control_message_with_message_id(
@@ -6761,11 +6845,17 @@ impl Fusb302bRuntime {
 async fn fusb302b_receive_event(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     retry_fail_recovery_pending: bool,
-) -> Result<Fusb302bReceiveEvent, ()> {
+) -> Result<Fusb302bReceiveEvent, fusb302b::TransientTransportFault> {
     let mut phy = Fusb302::new(BlockingAsync::new(i2c));
     // Preserve the receiver's CRC/SOP state before clearing its interrupt latches.
-    let status = phy.read_status().await.map_err(|_| ())?;
-    let interrupts = phy.read_interrupts().await.map_err(|_| ())?;
+    let status = phy
+        .read_status()
+        .await
+        .map_err(|_| fusb302b::TransientTransportFault::ReceiveIoError)?;
+    let interrupts = phy
+        .read_interrupts()
+        .await
+        .map_err(|_| fusb302b::TransientTransportFault::ReceiveIoError)?;
     let tx_sent = interrupts.interrupt_a & FUSB302B_INTERRUPTA_TX_SENT != 0;
     let gcrc_sent = interrupts.interrupt_b & FUSB302B_INTERRUPTB_GCRC_SENT != 0;
 
@@ -6791,10 +6881,14 @@ async fn fusb302b_receive_event(
         return Ok(Fusb302bReceiveEvent::Partial { tx_sent, gcrc_sent });
     }
 
-    match phy.receive().await.map_err(|_| ())? {
-        None => Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent }),
-        Some(packet) if packet.sop() == SopType::Sop => Ok(Fusb302bReceiveEvent::Message(packet)),
-        Some(_) => Ok(Fusb302bReceiveEvent::UnsupportedSop),
+    match phy.receive().await {
+        Ok(None) => Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent }),
+        Ok(Some(packet)) if packet.sop() == SopType::Sop => {
+            Ok(Fusb302bReceiveEvent::Message(packet))
+        }
+        Ok(Some(_)) => Ok(Fusb302bReceiveEvent::UnsupportedSop),
+        Err(fusb302::Error::Receive(_)) => Ok(Fusb302bReceiveEvent::UnsupportedSop),
+        Err(_) => Err(fusb302b::TransientTransportFault::ReceiveIoError),
     }
 }
 
@@ -6955,22 +7049,25 @@ fn probe_eeprom_address(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<u8> {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_eeprom_bytes_chunked<I2C>(
-    eeprom: &mut M24c64<I2C>,
+async fn read_eeprom_bytes_chunked_with_pd(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    address: u8,
     offset: u16,
     bytes: &mut [u8],
-) -> Result<(), EepromError<I2C::Error>>
-where
-    I2C: embedded_hal::i2c::I2c,
-{
+) -> Result<(), ()> {
     let mut read = 0usize;
     while read < bytes.len() {
         let chunk_len = (bytes.len() - read).min(EEPROM_READ_CHUNK_MAX_BYTES);
-        let chunk_offset = offset
-            .checked_add(read as u16)
-            .ok_or(EepromError::OutOfRange)?;
-        eeprom.read_bytes(chunk_offset, &mut bytes[read..read + chunk_len])?;
+        let chunk_offset = offset.checked_add(read as u16).ok_or(())?;
+        let result = {
+            let mut eeprom = M24c64::with_address(&mut *i2c, address);
+            eeprom.read_bytes(chunk_offset, &mut bytes[read..read + chunk_len])
+        };
+        result.map_err(|_| ())?;
         read += chunk_len;
+        service_pd_during_eeprom_operation(i2c, pd_port, 0, Instant::now()).await;
+        EmbassyTimer::after_millis(0).await;
     }
     Ok(())
 }
@@ -7217,8 +7314,16 @@ async fn usb_eeprom_maintenance_response(
             };
             let mut bytes = heapless::Vec::new();
             let _ = bytes.resize_default(length);
-            let mut eeprom = M24c64::with_address(i2c, address);
-            if read_eeprom_bytes_chunked(&mut eeprom, offset, bytes.as_mut_slice()).is_err() {
+            if read_eeprom_bytes_chunked_with_pd(
+                i2c,
+                pd_port,
+                address,
+                offset,
+                bytes.as_mut_slice(),
+            )
+            .await
+            .is_err()
+            {
                 return usb_error_response(request_id, "eeprom_read_failed", "EEPROM read failed.");
             }
             usb_response(request_id, UsbResponsePayload::EepromBytes(bytes))
@@ -7294,8 +7399,9 @@ fn memory_record_length_from_header(header: &[u8], slot_size: usize) -> Option<u
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-fn load_eeprom_memory_record(
+async fn load_eeprom_memory_record(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> (Option<MemoryRecord>, bool, bool, bool) {
@@ -7304,7 +7410,6 @@ fn load_eeprom_memory_record(
         return (None, false, true, false);
     };
 
-    let mut eeprom = M24c64::with_address(i2c, address);
     let mut contains_data = false;
     let mut legacy_format_present = false;
     let mut read_failed = false;
@@ -7352,7 +7457,11 @@ fn load_eeprom_memory_record(
         {
             staging.bytes.fill(0xff);
             let header = &mut staging.bytes[..FPR2_HEADER_LEN];
-            let candidate = match read_eeprom_bytes_chunked(&mut eeprom, offset, header) {
+            let candidate = match read_eeprom_bytes_chunked_with_pd(
+                i2c, pd_port, address, offset, header,
+            )
+            .await
+            {
                 Ok(()) => {
                     contains_data |= eeprom_bytes_contain_data(header);
                     let payload_len = usize::from(u16::from_le_bytes([header[12], header[13]]));
@@ -7361,11 +7470,15 @@ fn load_eeprom_memory_record(
                         && record_len <= slot_size
                         && record_len <= staging.bytes.len()
                     {
-                        match read_eeprom_bytes_chunked(
-                            &mut eeprom,
+                        match read_eeprom_bytes_chunked_with_pd(
+                            i2c,
+                            pd_port,
+                            address,
                             offset.saturating_add(FPR2_HEADER_LEN as u16),
                             &mut staging.bytes[FPR2_HEADER_LEN..record_len],
-                        ) {
+                        )
+                        .await
+                        {
                             Ok(()) => decode_persist_record(&staging.bytes[..record_len]).ok(),
                             Err(_) => {
                                 read_failed = true;
@@ -7431,7 +7544,15 @@ fn load_eeprom_memory_record(
             } else {
                 1
             };
-            match read_eeprom_bytes_chunked(&mut eeprom, offset, &mut scratch.bytes[..probe_len]) {
+            match read_eeprom_bytes_chunked_with_pd(
+                i2c,
+                pd_port,
+                address,
+                offset,
+                &mut scratch.bytes[..probe_len],
+            )
+            .await
+            {
                 Ok(()) => {
                     contains_data |= eeprom_bytes_contain_data(&scratch.bytes[..probe_len]);
                     legacy_format_present |= probe_len == 4 && scratch.bytes[..4] == *b"FPM1";
@@ -7491,13 +7612,13 @@ fn merge_persist_records(domains: &[Option<PersistRecord>; 6]) -> Option<MemoryR
 #[inline(never)]
 async fn load_legacy_eeprom_memory_record(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> (Option<MemoryRecord>, bool) {
     let Some(address) = probe_eeprom_address(i2c) else {
         return (None, true);
     };
-    let mut eeprom = M24c64::with_address(i2c, address);
     let mut selected: Option<MemoryRecord> = None;
     let mut read_failed = false;
     for (offset, length) in [
@@ -7508,10 +7629,17 @@ async fn load_legacy_eeprom_memory_record(
         (LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
         (LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
     ] {
-        let candidate =
-            read_legacy_record_stream(&mut eeprom, offset, length, scratch, record_staging)
-                .await
-                .ok();
+        let candidate = read_legacy_record_stream(
+            i2c,
+            pd_port,
+            address,
+            offset,
+            length,
+            scratch,
+            record_staging,
+        )
+        .await
+        .ok();
         if candidate.is_none() {
             read_failed = true;
         }
@@ -7529,14 +7657,16 @@ async fn load_legacy_eeprom_memory_record(
 
 #[cfg(target_arch = "xtensa")]
 async fn read_legacy_record_stream(
-    eeprom: &mut M24c64<&mut I2c<'_, esp_hal::Blocking>>,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    address: u8,
     offset: u16,
     slot_size: usize,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> Result<MemoryRecord, ()> {
     let mut header = [0u8; MEMORY_RECORD_HEADER_LEN];
-    read_eeprom_bytes_chunked(eeprom, offset, &mut header).map_err(|_| ())?;
+    read_eeprom_bytes_chunked_with_pd(i2c, pd_port, address, offset, &mut header).await?;
     if header[..4] != *b"FPM1"
         || !matches!(header[4], 1 | 2 | 3 | 4 | MEMORY_RECORD_FORMAT_VERSION)
         || usize::from(header[5]) != MEMORY_RECORD_HEADER_LEN
@@ -7567,8 +7697,14 @@ async fn read_legacy_record_stream(
             .checked_add(MEMORY_RECORD_HEADER_LEN as u16)
             .and_then(|base| base.checked_add(payload_cursor as u16))
             .ok_or(())?;
-        read_eeprom_bytes_chunked(eeprom, tlv_offset, &mut scratch.bytes[..header_len])
-            .map_err(|_| ())?;
+        read_eeprom_bytes_chunked_with_pd(
+            i2c,
+            pd_port,
+            address,
+            tlv_offset,
+            &mut scratch.bytes[..header_len],
+        )
+        .await?;
         crc = persistence_crc32_update(crc, &scratch.bytes[..header_len]);
         let tag = scratch.bytes[0];
         let value_len = if wide_tlv_lengths {
@@ -7592,8 +7728,14 @@ async fn read_legacy_record_stream(
                 .and_then(|base| base.checked_add(payload_cursor as u16))
                 .and_then(|base| base.checked_add(value_read as u16))
                 .ok_or(())?;
-            read_eeprom_bytes_chunked(eeprom, value_offset, &mut scratch.bytes[..chunk_len])
-                .map_err(|_| ())?;
+            read_eeprom_bytes_chunked_with_pd(
+                i2c,
+                pd_port,
+                address,
+                value_offset,
+                &mut scratch.bytes[..chunk_len],
+            )
+            .await?;
             crc = persistence_crc32_update(crc, &scratch.bytes[..chunk_len]);
             if collect && value_read + chunk_len <= staging.bytes.len() {
                 staging.bytes[value_read..value_read + chunk_len]
@@ -14195,6 +14337,38 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
+async fn run_display_operation_with_pd<F>(
+    operation: F,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    mut last_pd_observation: Option<PdStatusObservation>,
+) -> (Option<F::Output>, Option<PdStatusObservation>)
+where
+    F: Future,
+{
+    let mut pinned_operation = core::pin::pin!(operation);
+    let started_at = Instant::now();
+    loop {
+        match select(
+            pinned_operation.as_mut(),
+            EmbassyTimer::after_millis(PD_RUNTIME_SERVICE_INTERVAL_MS),
+        )
+        .await
+        {
+            Either::First(output) => return (Some(output), last_pd_observation),
+            Either::Second(_) => {
+                if let Some(observation) = read_pd_status(i2c, pd_port, PdTimestamp::now()).await {
+                    last_pd_observation = Some(observation);
+                }
+                if Instant::now().saturating_duration_since(started_at) >= DISPLAY_IO_TIMEOUT {
+                    return (None, last_pd_observation);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 const DISPLAY_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(target_arch = "xtensa")]
@@ -14372,6 +14546,11 @@ async fn main(_spawner: Spawner) {
     let reset_reason = reset_reason_log_line(esp_hal::system::reset_reason());
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    // GPIO13 drives the panel's active-low backlight gate. Configure it
+    // before any potentially blocking startup work so a visible panel does
+    // not depend on later display or PD initialization completing.
+    let mut backlight = Output::new(peripherals.GPIO13, Level::Low, OutputConfig::default());
+    backlight.set_low();
     init_runtime_heap();
     let eeprom_record_staging = initialize_eeprom_record_staging();
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -14406,6 +14585,8 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "web_serial")]
     let usb_boot_memory_config = MemoryConfig::default();
     #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=backlight_on\n");
+    #[cfg(feature = "web_serial")]
     usb_write_frame(
         &mut usb_serial,
         &hello_frame(hardware_identity()),
@@ -14414,12 +14595,91 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, reset_reason.as_bytes());
     #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_detect_start\n");
+    let mut pd_i2c = I2c::new(
+        peripherals.I2C0,
+        I2cConfig::default()
+            .with_frequency(Rate::from_hz(FUSB302B_I2C_FREQUENCY_HZ))
+            .with_software_timeout(SoftwareTimeout::Transaction(HalDuration::from_millis(
+                I2C_TRANSACTION_TIMEOUT_MS,
+            ))),
+    )
+    .expect("failed to create I2C0")
+    .with_sda(peripherals.GPIO8)
+    .with_scl(peripherals.GPIO9);
+    let detected_pd_controller = detect_pd_controller(&mut pd_i2c).await;
+    let mut pd_port = match detected_pd_controller {
+        DetectedPdController::Fusb302b(device_id) => {
+            #[cfg(feature = "web_serial")]
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_fusb302b_detected\n");
+            let mut runtime = Fusb302bRuntime::new();
+            if !runtime.initialize(&mut pd_i2c).await {
+                #[cfg(feature = "web_serial")]
+                let _ =
+                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_failed\n");
+                warn!(
+                    "fusb302b identified device_id=0x{=u8:02x} but PHY initialization failed; holding heater interlocked",
+                    device_id,
+                );
+                PdPort::Unavailable
+            } else {
+                #[cfg(feature = "web_serial")]
+                let _ =
+                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_complete\n");
+                info!(
+                    "fusb302b selected device_id=0x{=u8:02x} policy=pps target_mv={=u16} max_current_ma={=u16}",
+                    device_id,
+                    DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+                    MAX_HEATER_CONTRACT_MA,
+                );
+                PdPort::Fusb302b(runtime)
+            }
+        }
+        DetectedPdController::Unknown => {
+            #[cfg(feature = "web_serial")]
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_identity_unknown\n");
+            warn!("PD controller identity is ambiguous or unreadable; holding heater interlocked");
+            PdPort::Unavailable
+        }
+    };
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_pending\n");
+    // Complete one bounded startup service window before touching the display.
+    // A missing contract remains a fail-closed heater interlock rather than an
+    // unbounded boot delay.
+    let pd_runtime_started_ms = Instant::now().as_millis();
+    let fusb302b_present = matches!(&pd_port, PdPort::Fusb302b(_));
+    let mut initial_pd_observation =
+        read_pd_status(&mut pd_i2c, &mut pd_port, PdTimestamp::now()).await;
+    while startup_pd_service_should_continue(
+        fusb302b_present,
+        startup_pd_contract_ready(initial_pd_observation),
+        pd_port.service_available(),
+        pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
+    ) {
+        EmbassyTimer::after_millis(STARTUP_PD_SERVICE_INTERVAL_MS).await;
+        initial_pd_observation =
+            read_pd_status(&mut pd_i2c, &mut pd_port, PdTimestamp::now()).await;
+    }
+    #[cfg(feature = "web_serial")]
     poll_usb_early_control(
         &mut usb_serial,
         &mut usb_rx_line,
         usb_tx_buf,
         &usb_boot_memory_config,
     );
+    let mut pd_contract_ready = startup_pd_contract_ready(initial_pd_observation);
+    if !pd_contract_ready {
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_not_ready\n");
+        warn!(
+            "PD contract was not ready before display initialization; continuing with heater interlocked"
+        );
+    } else {
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_ready\n");
+    }
+
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_setup_start\n");
     info!(
@@ -14439,26 +14699,6 @@ async fn main(_spawner: Spawner) {
         s3_frontpanel::PIN_KEY_LEFT,
         s3_frontpanel::PIN_KEY_UP,
     );
-
-    #[cfg(feature = "web_serial")]
-    poll_usb_early_control(
-        &mut usb_serial,
-        &mut usb_rx_line,
-        usb_tx_buf,
-        &usb_boot_memory_config,
-    );
-
-    let input_cfg = InputConfig::default().with_pull(Pull::Up);
-    let inputs = FrontPanelInputs {
-        center: Input::new(peripherals.GPIO0, input_cfg),
-        right: Input::new(peripherals.GPIO16, input_cfg),
-        // The calibrated logical key map swaps raw DOWN/LEFT, so keep the raw
-        // input binding on the verified GPIO order instead of the board labels.
-        down: Input::new(peripherals.GPIO17, input_cfg),
-        left: Input::new(peripherals.GPIO18, input_cfg),
-        up: Input::new(peripherals.GPIO21, input_cfg),
-    };
-
     let spi = Spi::new(
         peripherals.SPI2,
         SpiConfig::default()
@@ -14468,25 +14708,18 @@ async fn main(_spawner: Spawner) {
     .expect("failed to create SPI2")
     .with_sck(peripherals.GPIO12)
     .with_mosi(peripherals.GPIO11);
-
     let cs = Output::new(peripherals.GPIO15, Level::High, OutputConfig::default());
     let dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
     let rst = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
-    let mut backlight = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
-    info!("backlight active-low: gpio13 high -> off during display bring-up");
-
     let spi_device = ExclusiveDevice::new_no_delay(spi.into_async(), cs)
         .expect("failed to wrap async SPI bus as ExclusiveDevice");
-
     static DRIVER_FB: StaticCell<
         [embedded_graphics::pixelcolor::Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS],
     > = StaticCell::new();
-
     let driver_framebuffer = DRIVER_FB.init_with(|| {
         [embedded_graphics::pixelcolor::Rgb565::BLACK; flux_purr_firmware::display::DISPLAY_PIXELS]
     });
     let canvas = initialize_display_canvas();
-
     let mut display: GC9D01<_, _, _, DisplayTimer> = GC9D01::new(
         DISPLAY_PANEL_CONFIG,
         spi_device,
@@ -14494,7 +14727,6 @@ async fn main(_spawner: Spawner) {
         rst,
         driver_framebuffer,
     );
-
     info!(
         "init panel width={=u16} height={=u16} dx={=u16} dy={=u16}",
         DISPLAY_PANEL_CONFIG.width,
@@ -14504,10 +14736,17 @@ async fn main(_spawner: Spawner) {
     );
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_start\n");
-    let display_ready = matches!(
-        with_timeout(DISPLAY_IO_TIMEOUT, display.init()).await,
-        Ok(Ok(()))
-    );
+    let (display_init_result, display_init_observation) = run_display_operation_with_pd(
+        display.init(),
+        &mut pd_i2c,
+        &mut pd_port,
+        initial_pd_observation,
+    )
+    .await;
+    if display_init_observation.is_some() {
+        initial_pd_observation = display_init_observation;
+    }
+    let display_ready = matches!(display_init_result, Some(Ok(())));
     if !display_ready {
         #[cfg(feature = "web_serial")]
         let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_failed\n");
@@ -14521,7 +14760,6 @@ async fn main(_spawner: Spawner) {
             UsbRecoveryPhase::BeforePersistentState,
         )
         .await;
-
         #[cfg(not(feature = "web_serial"))]
         panic!("failed to initialize GC9D01 display");
     }
@@ -14542,17 +14780,27 @@ async fn main(_spawner: Spawner) {
     );
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_start\n");
-    let startup_flush_ready = match with_timeout(DISPLAY_IO_TIMEOUT, display.flush()).await {
-        Ok(Ok(())) => true,
-        Ok(Err(gc9d01::Error::Bus(_))) => {
+    let (startup_flush_result, startup_flush_observation) = run_display_operation_with_pd(
+        display.flush(),
+        &mut pd_i2c,
+        &mut pd_port,
+        initial_pd_observation,
+    )
+    .await;
+    if startup_flush_observation.is_some() {
+        initial_pd_observation = startup_flush_observation;
+    }
+    let startup_flush_ready = match startup_flush_result {
+        Some(Ok(())) => true,
+        Some(Err(gc9d01::Error::Bus(_))) => {
             warn!("startup display flush failed: spi bus");
             false
         }
-        Ok(Err(gc9d01::Error::Pin(_))) => {
+        Some(Err(gc9d01::Error::Pin(_))) => {
             warn!("startup display flush failed: display pin");
             false
         }
-        Err(_) => {
+        None => {
             warn!("startup display flush timed out");
             false
         }
@@ -14570,14 +14818,22 @@ async fn main(_spawner: Spawner) {
             UsbRecoveryPhase::BeforePersistentState,
         )
         .await;
-
         #[cfg(not(feature = "web_serial"))]
         panic!("failed to draw startup calibration screen");
     }
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_complete\n");
-    backlight.set_low();
-    info!("backlight active-low: gpio13 low -> on after startup frame");
+    info!("backlight active-low: gpio13 low -> on before PD and display initialization");
+    let input_cfg = InputConfig::default().with_pull(Pull::Up);
+    let inputs = FrontPanelInputs {
+        center: Input::new(peripherals.GPIO0, input_cfg),
+        right: Input::new(peripherals.GPIO16, input_cfg),
+        // The calibrated logical key map swaps raw DOWN/LEFT, so keep the raw
+        // input binding on the verified GPIO order instead of the board labels.
+        down: Input::new(peripherals.GPIO17, input_cfg),
+        left: Input::new(peripherals.GPIO18, input_cfg),
+        up: Input::new(peripherals.GPIO21, input_cfg),
+    };
     #[cfg(feature = "web_serial")]
     poll_usb_early_control(
         &mut usb_serial,
@@ -14720,90 +14976,6 @@ async fn main(_spawner: Spawner) {
         .spawn(run_buzzer_task(mcpwm.timer2, buzzer_pwm, pwm_clock_cfg))
         .expect("failed to spawn realtime buzzer task");
 
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_detect_start\n");
-    let mut pd_i2c = I2c::new(
-        peripherals.I2C0,
-        I2cConfig::default()
-            .with_frequency(Rate::from_hz(FUSB302B_I2C_FREQUENCY_HZ))
-            .with_software_timeout(SoftwareTimeout::Transaction(HalDuration::from_millis(
-                I2C_TRANSACTION_TIMEOUT_MS,
-            ))),
-    )
-    .expect("failed to create I2C0")
-    .with_sda(peripherals.GPIO8)
-    .with_scl(peripherals.GPIO9);
-    let detected_pd_controller = detect_pd_controller(&mut pd_i2c).await;
-    let mut pd_port = match detected_pd_controller {
-        DetectedPdController::Fusb302b(device_id) => {
-            #[cfg(feature = "web_serial")]
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_fusb302b_detected\n");
-            let mut runtime = Fusb302bRuntime::new();
-            if !runtime.initialize(&mut pd_i2c).await {
-                #[cfg(feature = "web_serial")]
-                let _ =
-                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_failed\n");
-                warn!(
-                    "fusb302b identified device_id=0x{=u8:02x} but PHY initialization failed; holding heater interlocked",
-                    device_id,
-                );
-                PdPort::Unavailable
-            } else {
-                #[cfg(feature = "web_serial")]
-                let _ =
-                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_complete\n");
-                info!(
-                    "fusb302b selected device_id=0x{=u8:02x} policy=pps target_mv={=u16} max_current_ma={=u16}",
-                    device_id,
-                    DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
-                    MAX_HEATER_CONTRACT_MA,
-                );
-                PdPort::Fusb302b(runtime)
-            }
-        }
-        DetectedPdController::Unknown => {
-            #[cfg(feature = "web_serial")]
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_identity_unknown\n");
-            warn!("PD controller identity is ambiguous or unreadable; holding heater interlocked");
-            PdPort::Unavailable
-        }
-    };
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_pending\n");
-    // Service FUSB302B negotiation before EEPROM, display, or network setup.
-    // This window is bounded and preserves the contract-less Dashboard path.
-    let pd_runtime_started_ms = Instant::now().as_millis();
-    let fusb302b_present = matches!(&pd_port, PdPort::Fusb302b(_));
-    let mut initial_pd_observation =
-        read_pd_status(&mut pd_i2c, &mut pd_port, PdTimestamp::now()).await;
-    while startup_pd_service_should_continue(
-        fusb302b_present,
-        startup_pd_contract_ready(initial_pd_observation),
-        pd_port.service_available(),
-        pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
-    ) {
-        EmbassyTimer::after_millis(STARTUP_PD_SERVICE_INTERVAL_MS).await;
-        initial_pd_observation =
-            read_pd_status(&mut pd_i2c, &mut pd_port, PdTimestamp::now()).await;
-    }
-    #[cfg(feature = "web_serial")]
-    poll_usb_early_control(
-        &mut usb_serial,
-        &mut usb_rx_line,
-        usb_tx_buf,
-        &usb_boot_memory_config,
-    );
-    let mut pd_contract_ready = startup_pd_contract_ready(initial_pd_observation);
-    if !pd_contract_ready {
-        #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_not_ready\n");
-        warn!(
-            "PD contract was not ready before outputs initialize; continuing with heater interlocked"
-        );
-    } else {
-        #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_ready\n");
-    }
     // Keep the fixed scratch alive through startup migration and network bring-up.
     let mut boot_memory_io_scratch = try_allocate_memory_io_scratch();
     let (
@@ -14812,7 +14984,7 @@ async fn main(_spawner: Spawner) {
         mut eeprom_required,
         mut prepared_layout_recovery_pending,
     ) = if let Some(scratch) = boot_memory_io_scratch.as_mut() {
-        load_eeprom_memory_record(&mut pd_i2c, scratch, eeprom_record_staging)
+        load_eeprom_memory_record(&mut pd_i2c, &mut pd_port, scratch, eeprom_record_staging).await
     } else {
         (None, false, true, false)
     };
@@ -15319,8 +15491,13 @@ async fn main(_spawner: Spawner) {
         // Yield between slots so USB early-control and the status-light task
         // remain serviceable while the explicit restore lock is visible.
         if let Some(scratch) = boot_memory_io_scratch.as_mut() {
-            let (legacy_record, read_failed) =
-                load_legacy_eeprom_memory_record(&mut pd_i2c, scratch, eeprom_record_staging).await;
+            let (legacy_record, read_failed) = load_legacy_eeprom_memory_record(
+                &mut pd_i2c,
+                &mut pd_port,
+                scratch,
+                eeprom_record_staging,
+            )
+            .await;
             if let Some(record) = legacy_record {
                 memory_sequence = record.sequence;
                 memory_config = record.config;
@@ -15535,10 +15712,13 @@ async fn main(_spawner: Spawner) {
                         usb_rx_line.as_str(),
                         &mut eeprom_snapshot_session,
                         &mut pd_i2c,
+                        &mut pd_port,
                         last_heater_duty,
                         &mut memory_commit_due_ms,
                         elapsed_ms,
-                    ) {
+                    )
+                    .await
+                    {
                         if eeprom_snapshot_storage_failure(&response) {
                             mark_eeprom_required(
                                 &mut ui_state,
@@ -15920,6 +16100,7 @@ async fn main(_spawner: Spawner) {
                         let mut scratch = new_memory_io_scratch();
                         let (legacy_record, read_failed) = load_legacy_eeprom_memory_record(
                             &mut pd_i2c,
+                            &mut pd_port,
                             &mut scratch,
                             eeprom_record_staging,
                         )
@@ -17030,6 +17211,8 @@ mod tests {
     fn fusb302b_recovery_flushes_only_the_receive_fifo() {
         assert_eq!(fusb302b_receive_fifo_flush_value(0), 0b0000_0100);
         assert_eq!(fusb302b_receive_fifo_flush_value(0xff), 0b0111_0111);
+        assert_eq!(fusb302b_transmit_fifo_flush_value(0), 0b0100_0000);
+        assert_eq!(fusb302b_transmit_fifo_flush_value(0xff), 0b0110_1110);
     }
 
     #[test]
@@ -17268,38 +17451,40 @@ mod tests {
     }
 
     #[test]
-    fn startup_safe_outputs_precede_pd_and_legacy_eeprom_work() {
+    fn startup_sequence_prioritizes_backlight_pd_display_then_other_work() {
         let source = include_str!("flux_purr.rs");
-        let outputs = source
-            .find("boot_stage=outputs_init_start")
-            .expect("safe output stage marker");
+        let backlight = source
+            .find("boot_stage=backlight_on")
+            .expect("backlight stage marker");
         let pd = source
             .find("boot_stage=pd_detect_start")
             .expect("PD stage marker");
-        let legacy = source
-            .find("load_legacy_eeprom_memory_record(&mut pd_i2c, scratch, eeprom_record_staging)")
-            .expect("legacy restore call");
-        let first_frame = source
-            .find("present_initial_frontpanel_ui(&mut display, canvas, &ui_state)")
-            .expect("initial Dashboard frame");
-        assert!(outputs < pd);
-        assert!(first_frame < legacy);
+        let display_init = source
+            .find("boot_stage=display_init_start")
+            .expect("display init stage marker");
+        let startup_flush = source
+            .find("boot_stage=display_flush_start")
+            .expect("startup flush stage marker");
+        let outputs = source
+            .find("boot_stage=outputs_init_start")
+            .expect("safe output stage marker");
+        let display_service = source
+            .find("async fn run_display_operation_with_pd")
+            .expect("display PD service helper");
+        let display_service_poll = display_service
+            + source[display_service..]
+                .find("read_pd_status(i2c, pd_port, PdTimestamp::now()).await")
+                .expect("display PD service poll");
+        assert!(backlight < pd);
+        assert!(pd < display_init);
+        assert!(display_init < startup_flush);
+        assert!(startup_flush < outputs);
+        assert!(display_service < display_service_poll);
     }
 
     #[test]
-    fn backlight_waits_for_display_init_and_startup_frame() {
-        let source = include_str!("flux_purr.rs");
-        let display_init = source
-            .find("with_timeout(DISPLAY_IO_TIMEOUT, display.init()).await")
-            .expect("display init call");
-        let startup_flush = source
-            .find("let startup_flush_ready = match with_timeout(DISPLAY_IO_TIMEOUT, display.flush()).await")
-            .expect("startup flush call");
-        let backlight_on = source
-            .find("backlight.set_low();")
-            .expect("backlight enable");
-        assert!(display_init < startup_flush);
-        assert!(startup_flush < backlight_on);
+    fn pd_service_turn_is_bounded_to_one_received_frame() {
+        assert_eq!(FUSB302B_MAX_RX_MESSAGES_PER_POLL, 1);
     }
 
     #[test]
