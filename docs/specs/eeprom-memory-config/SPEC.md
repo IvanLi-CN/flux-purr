@@ -13,9 +13,9 @@
 - 在 `M24C64` 外部 EEPROM 中保存版本化记忆配置。
 - 保存并恢复 `target_temp_c`、`selected_preset_slot`、`presets_c[10]`、`post_heat_cooling_mode`、`heating_fan_guard_mode` 和 Wi-Fi 配置字段；`active_cooling_enabled` 保留为旧客户端兼容投影。
 - 保存并恢复 ADC calibration 的共享样本、A/B 槽位与当前激活槽位，供 ADC 校准控制面跨重启保留。
-- 使用 FPR2 分类 record、TLV payload 和 CRC；只有安全校准、温控策略与布局标记使用 A/B，偏好和网络域使用单槽。
+- 使用 FPR2 分类 record、TLV payload 和 CRC；只有安全校准、温控策略与布局标记使用 A/B，偏好、网络和 `ThermalPlant` 域使用单槽。
 - 运行时对用户接受的记忆字段变更做防抖写回，减少 EEPROM 写入频率。
-- 保存安全校准所需的 raw heater observations 与 transaction identity；已废弃 thermal-plant snapshot 不迁移、不再写入。
+- 保存安全校准所需的 raw heater observations 与 transaction identity，并保存自动热模型成功运行的完整 transient active transaction；已废弃稳态 thermal-plant snapshot 不迁移、不再写入。
 
 ### Non-goals
 
@@ -47,7 +47,7 @@
 ### MUST
 
 - EEPROM 设备为 `M24C64`，7-bit I2C 地址固定为硬件基线 `0x50`；启动和高级维护不得扫描其它 I2C 地址。容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。启动读取使用固定大小的域缓冲和不超过 `16 bytes` 的有界分块访问，不得把完整 `2 KiB` v5 快照放入启动栈或堆。
-- FPR2 header 固定为 `20 bytes`：`FPR2 magic`、format version、domain、flags、header length、`sequence`、payload length、reserved 和 CRC32。分区固定为：`SafetyCalibration` A/B=`0x0000/0x0200`（512 B）；`ThermalPolicy` A/B=`0x0400/0x0700`（768 B）；`UserPreferences` single=`0x0a00`（128 B）；`NetworkAndPairing` single=`0x0a80`（256 B）；`LayoutMarker` A/B=`0x0c00/0x0c80`（128 B）；`0x0d00..0x0fff` 保留。旧 v1-v5 FPM1 只在迁移时流式读取，位于 `0x1000..0x1fff`，迁移后两个 magic 均失效。每个域选择 CRC 合法且 `sequence` 最大的槽；单槽损坏只回退该域默认值。
+- FPR2 header 固定为 `20 bytes`：`FPR2 magic`、format version、domain、flags、header length、`sequence`、payload length、reserved 和 CRC32。分区固定为：`SafetyCalibration` A/B=`0x0000/0x0200`（512 B）；`ThermalPolicy` A/B=`0x0400/0x0700`（768 B）；`UserPreferences` single=`0x0a00`（128 B）；`NetworkAndPairing` single=`0x0a80`（256 B）；`LayoutMarker` A/B=`0x0c00/0x0c80`（128 B）；`ThermalPlant` single=`0x0d00`（768 B）；旧 v1-v5 FPM1 只在迁移时流式读取，位于 `0x1000..0x1fff`，迁移后两个 magic 均失效。每个域选择 CRC 合法且 `sequence` 最大的槽；单槽损坏只回退该域默认值，安全域或热模型域不可恢复时保持 heater/PPS/calibration 锁定。
 - 外置 EEPROM 是唯一的持久化后端。`MemoryRecord`、等价配置与其任何镜像不得写入 ESP flash、NVS、raw sector 或 `flux_cfg`。启动只从 EEPROM 槽位选择 CRC 合法且 `sequence` 最大的 record；旧内部 Flash record 必须忽略且不得迁移。EEPROM 全空时可按批准的硬件配置初始化并写后验证；EEPROM 不可达或安全域记录无法恢复时进入 `EEPROM_REQUIRED`，普通偏好/网络域失败只标记该域未保存。
 - 固件更新、恢复与 devd 不得读取、保存、迁移、恢复或验证 MCU 内部配置分区。分区表、镜像布局和 bundle 不得声明 `flux_cfg` 或等价配置区域。
 - record payload 必须使用 TLV，未知 TLV 必须跳过，缺失 TLV 必须使用默认值；v1/v2 的 TLV header 使用 `tag:u8 + len:u8`，v3-v5 使用 `tag:u8 + len:u16le`。
@@ -119,9 +119,9 @@
   - `0x37`: legacy steady-state thermal-plant active record (decode-only)
   - `0x38`: LAN pairing token
   - `0x39`: static IPv4 configuration
-  - `0x3a`: legacy `thermal_plant_transient_active` (decode-only)
+  - `0x3a`: `ThermalPlant` active transient transaction，legacy FPM1 中兼容解码并可在迁移时写入该 FPR2 域
   - `0x3b`: `heater_curve_transaction_id`
-- FPR2 只把 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode 写入 `ThermalPolicy`，把 `0x35`、`0x3b` 与 commissioning/ADC 字段写入 `SafetyCalibration`，把偏好和网络字段分别写入对应单槽域。`0x36`、`0x37` 与 `0x3a` 只保留为历史稳态/瞬态 thermal-plant 数据的 decode-only 标签，绝不迁移、不再写入，也不得解锁加热；旧记录中的派生模型只用于兼容读取和诊断。
+- FPR2 只把 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode 写入 `ThermalPolicy`，把 `0x35`、`0x3b` 与 commissioning/ADC 字段写入 `SafetyCalibration`，把完整的 `0x3a` transient active transaction 写入 `ThermalPlant` 单槽域，把偏好和网络字段分别写入对应单槽域。`0x36`、`0x37` 仍只保留为历史稳态 thermal-plant 数据的 decode-only 标签，不得迁移、写入或解锁加热；`0x3a` 只有通过结构和物理完整性校验的结果才能成为 active，提交失败保持安全锁。
 - 读取旧记录时，缺失 `0x05` 由旧 `0x04` 映射为 `Off`/`Normal`；缺失 `0x06` 默认 `Medium`。新标签优先于旧布尔值，写回同时保留 `0x04` 兼容投影。
 - 新写入的 thermal profile payload 必须以紧凑 `TCP3` 布局标识开头，两个 bank 独立存入 `ThermalPolicy` A/B 槽。`TCP2` 和无标识历史 payload 继续按各自旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。
 
@@ -151,6 +151,10 @@
 - Given a transient thermal trace does not contain an ordered powered rise to `220°C` followed by
   zero-duty cooling to `80°C`, or its physical projection cannot be formed, When calibration ends,
   Then it leaves the existing active transaction unchanged and heating remains locked.
+- Given automatic thermal-model calibration completes with a valid transient transaction, When the
+  FPR2 commit and readback succeed, Then the active transaction, projection, transaction identity,
+  and bounded raw trace survive a firmware restart; a thermal-plant persistence failure keeps the
+  heater/PPS/calibration lock asserted.
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 

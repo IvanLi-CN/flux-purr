@@ -76,9 +76,9 @@
   - `heater_output_percent` is the live PID duty rendered in the Dashboard bottom bar
   - `fan_enabled` is the actual fan runtime state, not a mock toggle
 - EEPROM memory:
-  - `M24C64` on shared `GPIO8/9` I2C stores FPR2 record classes: safety calibration A/B (`0x0000/0x0200`, 512 B), thermal policy A/B (`0x0400/0x0700`, 768 B), single-slot preferences/network records, and A/B layout markers. Legacy v1-v5 EEPROM records are stream-migrated once; historical internal-Flash records are ignored and never migrated.
+  - `M24C64` on shared `GPIO8/9` I2C stores FPR2 record classes: safety calibration A/B (`0x0000/0x0200`, 512 B), thermal policy A/B (`0x0400/0x0700`, 768 B), single-slot preferences/network records, a single-slot `ThermalPlant` active transaction (`0x0d00`, 768 B), and A/B layout markers. Legacy v1-v5 EEPROM records are stream-migrated once; historical internal-Flash records are ignored and never migrated.
   - EEPROM is the only persistence backend. EEPROM absence or safety-domain read/write/verification failure enters `EEPROM_REQUIRED`; preference and network failures remain scoped to their domain. MCU Flash, NVS, and raw sectors are never configuration fallbacks.
-  - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, the two fan policy modes, the legacy `active_cooling_enabled` projection, and Wi-Fi config fields
+  - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, the two fan policy modes, the legacy `active_cooling_enabled` projection, Wi-Fi config fields, and the validated active thermal-model transaction with its bounded raw trace
   - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended, and newly persisted thermal-profile TLVs use an explicit `TCP2` layout marker while unmarked historical layouts remain readable
   - accepted front-panel edits debounce for about `2s` before writing the next slot
   - on FUSB302B boards, each bounded EEPROM page write releases the shared I2C bus and services PD before the next page; a successful EEPROM save does not synchronously mirror to flash

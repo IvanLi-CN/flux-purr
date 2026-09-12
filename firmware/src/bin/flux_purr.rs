@@ -174,16 +174,17 @@ use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 use flux_purr_firmware::memory::{
     EepromError, FPR2_HEADER_LEN, FPR2_LAYOUT_A_OFFSET, FPR2_LAYOUT_B_OFFSET,
     FPR2_LAYOUT_SLOT_SIZE, FPR2_MAX_RECORD_SIZE, FPR2_NETWORK_OFFSET, FPR2_PREFERENCES_OFFSET,
-    FPR2_RESERVED_OFFSET, FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET, FPR2_SAFETY_SLOT_SIZE,
-    FPR2_THERMAL_A_OFFSET, FPR2_THERMAL_B_OFFSET, FPR2_THERMAL_SLOT_SIZE,
+    FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET, FPR2_SAFETY_SLOT_SIZE, FPR2_THERMAL_A_OFFSET,
+    FPR2_THERMAL_B_OFFSET, FPR2_THERMAL_PLANT_OFFSET, FPR2_THERMAL_SLOT_SIZE,
     LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
     LayoutMarker, LayoutMarkerStatus, M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS, M24c64,
     MEMORY_RECORD_FORMAT_VERSION, MEMORY_RECORD_HEADER_LEN, MEMORY_SLOT_A_OFFSET,
     MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE, MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord,
     NetworkAndPairing, PREVIOUS_MEMORY_SLOT_A_OFFSET, PREVIOUS_MEMORY_SLOT_B_OFFSET,
     PREVIOUS_MEMORY_SLOT_SIZE, PersistDomain, PersistDomainData, PersistRecord, PersistSlot,
-    SafetyCalibration, ThermalPolicy, UserPreferences, apply_legacy_config_tlv,
-    decode_persist_record, encode_persist_record, persistence_crc32_update,
+    SafetyCalibration, ThermalPlantPersistence, ThermalPolicy, UserPreferences,
+    apply_legacy_config_tlv, decode_persist_record, encode_persist_record,
+    persistence_crc32_update,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::{
@@ -7122,6 +7123,7 @@ fn eeprom_storage_failure_response(response: &UsbFrame) -> bool {
             | "user_preferences_persistence_failed"
             | "network_pairing_persistence_failed"
             | "layout_marker_persistence_failed"
+            | "thermal_plant_persistence_failed"
     )
 }
 
@@ -7280,7 +7282,7 @@ fn load_eeprom_memory_record(
     let mut read_failed = false;
     let mut layout_valid_slots = 0u8;
     let mut layout_active_slots = 0u8;
-    let mut domains: [Option<PersistRecord>; 5] = [None, None, None, None, None];
+    let mut domains: [Option<PersistRecord>; 6] = [None, None, None, None, None, None];
     let staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
     let domain_slots = [
         (
@@ -7307,6 +7309,11 @@ fn load_eeprom_memory_record(
             PersistDomain::LayoutMarker,
             [FPR2_LAYOUT_A_OFFSET, FPR2_LAYOUT_B_OFFSET],
             FPR2_LAYOUT_SLOT_SIZE,
+        ),
+        (
+            PersistDomain::ThermalPlant,
+            [FPR2_THERMAL_PLANT_OFFSET, 0],
+            FPR2_THERMAL_SLOT_SIZE,
         ),
     ];
     for (domain, offsets, slot_size) in domain_slots {
@@ -7382,7 +7389,6 @@ fn load_eeprom_memory_record(
             LEGACY_MEMORY_SLOT_B_OFFSET,
             MEMORY_SLOT_A_OFFSET,
             MEMORY_SLOT_B_OFFSET,
-            FPR2_RESERVED_OFFSET,
         ] {
             let probe_len = if matches!(
                 offset,
@@ -7434,7 +7440,7 @@ fn load_eeprom_memory_record(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn merge_persist_records(domains: &[Option<PersistRecord>; 5]) -> Option<MemoryRecord> {
+fn merge_persist_records(domains: &[Option<PersistRecord>; 6]) -> Option<MemoryRecord> {
     let mut config = flux_purr_firmware::memory::MemoryConfig::default();
     let mut sequence = 0;
     let mut present = false;
@@ -7447,6 +7453,7 @@ fn merge_persist_records(domains: &[Option<PersistRecord>; 5]) -> Option<MemoryR
             PersistDomainData::UserPreferences(value) => value.apply_to_config(&mut config),
             PersistDomainData::NetworkAndPairing(value) => value.apply_to_config(&mut config),
             PersistDomainData::LayoutMarker(_) => {}
+            PersistDomainData::ThermalPlant(value) => value.apply_to_config(&mut config),
         }
     }
     present.then_some(MemoryRecord { sequence, config })
@@ -7660,8 +7667,14 @@ impl PersistDomainMask {
     const THERMAL: Self = Self(1 << 1);
     const PREFERENCES: Self = Self(1 << 2);
     const NETWORK: Self = Self(1 << 3);
-    const ALL: Self =
-        Self(Self::SAFETY.0 | Self::THERMAL.0 | Self::PREFERENCES.0 | Self::NETWORK.0);
+    const THERMAL_PLANT: Self = Self(1 << 4);
+    const ALL: Self = Self(
+        Self::SAFETY.0
+            | Self::THERMAL.0
+            | Self::PREFERENCES.0
+            | Self::NETWORK.0
+            | Self::THERMAL_PLANT.0,
+    );
 
     const fn single(domain: PersistDomain) -> Self {
         match domain {
@@ -7670,6 +7683,7 @@ impl PersistDomainMask {
             PersistDomain::UserPreferences => Self::PREFERENCES,
             PersistDomain::NetworkAndPairing => Self::NETWORK,
             PersistDomain::LayoutMarker => Self::ALL,
+            PersistDomain::ThermalPlant => Self::THERMAL_PLANT,
         }
     }
 
@@ -7680,6 +7694,7 @@ impl PersistDomainMask {
             PersistDomain::UserPreferences => self.0 & Self::PREFERENCES.0 != 0,
             PersistDomain::NetworkAndPairing => self.0 & Self::NETWORK.0 != 0,
             PersistDomain::LayoutMarker => false,
+            PersistDomain::ThermalPlant => self.0 & Self::THERMAL_PLANT.0 != 0,
         }
     }
 
@@ -7701,6 +7716,7 @@ impl PersistDomainMask {
             "user_preferences_persistence_failed" => Self::PREFERENCES,
             "network_pairing_persistence_failed" => Self::NETWORK,
             "layout_marker_persistence_failed" => Self::ALL,
+            "thermal_plant_persistence_failed" => Self::THERMAL_PLANT,
             _ => Self(0),
         }
     }
@@ -7719,6 +7735,9 @@ fn persist_domain_mask_between(
         || current.heater_curve_transaction_id != persisted.heater_curve_transaction_id
     {
         mask.0 |= PersistDomainMask::SAFETY.0;
+    }
+    if current.thermal_plant_transient_active != persisted.thermal_plant_transient_active {
+        mask.0 |= PersistDomainMask::THERMAL_PLANT.0;
     }
     if current.active_thermal_control_profile != persisted.active_thermal_control_profile
         || current.thermal_control_profile_pps5a != persisted.thermal_control_profile_pps5a
@@ -7760,6 +7779,9 @@ fn copy_persisted_domains(
         persisted.heater_curve_raw_observations = current.heater_curve_raw_observations;
         persisted.heater_curve_transaction_id = current.heater_curve_transaction_id;
     }
+    if domains.includes(PersistDomain::ThermalPlant) {
+        persisted.thermal_plant_transient_active = current.thermal_plant_transient_active;
+    }
     if domains.includes(PersistDomain::ThermalPolicy) {
         persisted.active_thermal_control_profile = current.active_thermal_control_profile;
         persisted.thermal_control_profile_pps5a = current.thermal_control_profile_pps5a;
@@ -7792,6 +7814,7 @@ impl MemoryCommitFailure {
             PersistDomain::UserPreferences => "user_preferences_persistence_failed",
             PersistDomain::NetworkAndPairing => "network_pairing_persistence_failed",
             PersistDomain::LayoutMarker => "layout_marker_persistence_failed",
+            PersistDomain::ThermalPlant => "thermal_plant_persistence_failed",
         }
     }
 
@@ -7806,6 +7829,7 @@ const fn memory_failure_requires_heater_lock(failure: MemoryCommitFailure) -> bo
         failure.domain,
         PersistDomain::SafetyCalibration
             | PersistDomain::ThermalPolicy
+            | PersistDomain::ThermalPlant
             | PersistDomain::LayoutMarker
     )
 }
@@ -7967,6 +7991,10 @@ async fn commit_memory_config_now(
         ),
         (
             PersistDomainData::NetworkAndPairing(NetworkAndPairing::from_config(&expected_config)),
+            PersistSlot::Single,
+        ),
+        (
+            PersistDomainData::ThermalPlant(ThermalPlantPersistence::from_config(&expected_config)),
             PersistSlot::Single,
         ),
     ];
@@ -11337,7 +11365,13 @@ fn record_thermal_plant_transient_sample(
     job.samples[index] = ThermalPlantTransientSample {
         elapsed_ticks,
         raw_rtd_adc_mv,
-        heater_voltage_100mv: (latest_vin_mv / 100).min(u32::from(u8::MAX)) as u8,
+        // The compact FPR2 representation derives duty from this byte. An
+        // unpowered sample therefore must not retain the source voltage.
+        heater_voltage_100mv: if duty_percent == 0 {
+            0
+        } else {
+            (latest_vin_mv / 100).min(u32::from(u8::MAX)) as u8
+        },
         duty_percent,
     };
     job.sample_count = job.sample_count.saturating_add(1);
@@ -13721,7 +13755,7 @@ async fn process_control_line(
                     elapsed_ms,
                     memory_sequence,
                     memory_config,
-                    PersistDomainMask::SAFETY,
+                    PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                     persistence_log_sink,
                     record_staging,
                 )
@@ -13733,7 +13767,7 @@ async fn process_control_line(
                         memory_config,
                         ui_state,
                         last_persisted_memory_config,
-                        PersistDomainMask::SAFETY,
+                        PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                     );
                     mark_eeprom_required(
                         ui_state,
@@ -13747,7 +13781,7 @@ async fn process_control_line(
                 copy_persisted_domains(
                     last_persisted_memory_config,
                     memory_config,
-                    PersistDomainMask::SAFETY,
+                    PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                 );
                 *memory_commit_due_ms = None;
                 usb_response(
@@ -16371,7 +16405,7 @@ async fn main(_spawner: Spawner) {
                         elapsed_ms,
                         &mut memory_sequence,
                         &memory_config,
-                        PersistDomainMask::SAFETY,
+                        PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                         #[cfg(feature = "web_serial")]
                         &mut usb_serial,
                         #[cfg(not(feature = "web_serial"))]
@@ -16385,7 +16419,7 @@ async fn main(_spawner: Spawner) {
                             &mut memory_config,
                             &mut ui_state,
                             &last_persisted_memory_config,
-                            PersistDomainMask::SAFETY,
+                            PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                         );
                         mark_eeprom_required(
                             &mut ui_state,
@@ -16405,7 +16439,7 @@ async fn main(_spawner: Spawner) {
                         copy_persisted_domains(
                             &mut last_persisted_memory_config,
                             &memory_config,
-                            PersistDomainMask::SAFETY,
+                            PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                         );
                         memory_commit_due_ms = None;
                     }
@@ -20158,6 +20192,43 @@ mod tests {
     #[test]
     fn runtime_ready_boot_stage_matches_post_flash_contract() {
         assert_eq!(RUNTIME_READY_BOOT_STAGE_LINE, b"boot_stage=runtime_ready\n");
+    }
+
+    #[test]
+    fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
+        let mut job = CalibrationThermalPlantAutoJob {
+            run_id: 1,
+            phase: ThermalPlantAutoPhase::Ambient,
+            source_max_mv: 20_000,
+            source_current_ma: 3_000,
+            ambient_raw_rtd_adc_mv: 250,
+            idle_samples: 1,
+            heater_curve: ThermalPlantCurveSampler::default(),
+            elapsed_ticks: 1,
+            phase_started_tick: 0,
+            sample_count: 0,
+            last_saved_temp_c: f32::MIN,
+            last_saved_tick: 0,
+            samples: [ThermalPlantTransientSample {
+                elapsed_ticks: 0,
+                raw_rtd_adc_mv: 0,
+                heater_voltage_100mv: 0,
+                duty_percent: 0,
+            }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+        };
+
+        assert!(record_thermal_plant_transient_sample(
+            &mut job, 250, 25.0, 20_000, 0, true
+        ));
+        assert_eq!(job.samples[0].heater_voltage_100mv, 0);
+        assert_eq!(job.samples[0].duty_percent, 0);
+
+        job.elapsed_ticks = 2;
+        assert!(record_thermal_plant_transient_sample(
+            &mut job, 260, 26.0, 20_000, 100, true
+        ));
+        assert_eq!(job.samples[1].heater_voltage_100mv, 200);
+        assert_eq!(job.samples[1].duty_percent, 100);
     }
 
     #[test]

@@ -39,7 +39,7 @@ pub const FPR2_PREFERENCES_OFFSET: u16 = 0x0a00;
 pub const FPR2_NETWORK_OFFSET: u16 = 0x0a80;
 pub const FPR2_LAYOUT_A_OFFSET: u16 = 0x0c00;
 pub const FPR2_LAYOUT_B_OFFSET: u16 = 0x0c80;
-pub const FPR2_RESERVED_OFFSET: u16 = 0x0d00;
+pub const FPR2_THERMAL_PLANT_OFFSET: u16 = 0x0d00;
 pub const FPR2_LEGACY_OFFSET: u16 = 0x1000;
 pub const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 pub const HEATER_CURVE_MAX_POINTS: usize = 8;
@@ -130,6 +130,7 @@ const THERMAL_CONTROL_PROFILE_PAYLOAD_LEN: usize = THERMAL_CONTROL_PROFILE_LAYOU
     + THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER;
 const THERMAL_PLANT_TRANSIENT_HEADER_LEN: usize = 24;
 const THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN: usize = 6;
+const THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN: usize = 5;
 
 const MEMORY_RECORD_MAGIC: [u8; 4] = *b"FPM1";
 const FPR2_MAGIC: [u8; 4] = *b"FPR2";
@@ -1329,13 +1330,14 @@ pub enum PersistDomain {
     UserPreferences = 3,
     NetworkAndPairing = 4,
     LayoutMarker = 5,
+    ThermalPlant = 6,
 }
 
 impl PersistDomain {
     pub const fn slot_count(self) -> u8 {
         match self {
             Self::SafetyCalibration | Self::ThermalPolicy | Self::LayoutMarker => 2,
-            Self::UserPreferences | Self::NetworkAndPairing => 1,
+            Self::UserPreferences | Self::NetworkAndPairing | Self::ThermalPlant => 1,
         }
     }
 
@@ -1346,6 +1348,7 @@ impl PersistDomain {
             Self::UserPreferences => FPR2_PREFERENCES_SLOT_SIZE,
             Self::NetworkAndPairing => FPR2_NETWORK_SLOT_SIZE,
             Self::LayoutMarker => FPR2_LAYOUT_SLOT_SIZE,
+            Self::ThermalPlant => FPR2_THERMAL_SLOT_SIZE,
         }
     }
 
@@ -1361,6 +1364,9 @@ impl PersistDomain {
             | (Self::NetworkAndPairing, PersistSlot::A) => FPR2_NETWORK_OFFSET,
             (Self::LayoutMarker, PersistSlot::A) => FPR2_LAYOUT_A_OFFSET,
             (Self::LayoutMarker, PersistSlot::B) => FPR2_LAYOUT_B_OFFSET,
+            (Self::ThermalPlant, PersistSlot::Single) | (Self::ThermalPlant, PersistSlot::A) => {
+                FPR2_THERMAL_PLANT_OFFSET
+            }
             (_, _) => 0,
         }
     }
@@ -1372,6 +1378,7 @@ impl PersistDomain {
             3 => Some(Self::UserPreferences),
             4 => Some(Self::NetworkAndPairing),
             5 => Some(Self::LayoutMarker),
+            6 => Some(Self::ThermalPlant),
             _ => None,
         }
     }
@@ -1408,6 +1415,11 @@ pub struct ThermalPolicy {
     pub pps3a_profile: ThermalControlProfileConfig,
     pub pps5a_profile: ThermalControlProfileConfig,
     pub mode: ThermalProfileMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalPlantPersistence {
+    pub active: Option<ThermalPlantTransientTransaction>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1453,6 +1465,7 @@ pub enum PersistDomainData {
     UserPreferences(UserPreferences),
     NetworkAndPairing(NetworkAndPairing),
     LayoutMarker(LayoutMarker),
+    ThermalPlant(ThermalPlantPersistence),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1536,6 +1549,18 @@ impl SafetyCalibration {
         config.active_heater_curve = self.active_heater_curve;
         config.heater_curve_raw_observations = self.heater_curve_raw_observations;
         config.heater_curve_transaction_id = self.heater_curve_transaction_id;
+    }
+}
+
+impl ThermalPlantPersistence {
+    pub fn from_config(config: &MemoryConfig) -> Self {
+        Self {
+            active: config.thermal_plant_transient_active,
+        }
+    }
+
+    pub fn apply_to_config(&self, config: &mut MemoryConfig) {
+        config.thermal_plant_transient_active = self.active;
     }
 }
 
@@ -1625,12 +1650,15 @@ impl PersistDomainData {
             Self::UserPreferences(_) => PersistDomain::UserPreferences,
             Self::NetworkAndPairing(_) => PersistDomain::NetworkAndPairing,
             Self::LayoutMarker(_) => PersistDomain::LayoutMarker,
+            Self::ThermalPlant(_) => PersistDomain::ThermalPlant,
         }
     }
 }
 
 const FPR2_TLV_STATUS: u8 = 0x01;
 const FPR2_TLV_GENERATION: u8 = 0x02;
+const FPR2_TLV_THERMAL_PLANT_STATE: u8 = 0x01;
+const THERMAL_PLANT_STATE_EMPTY: u8 = 0;
 
 pub fn encode_persist_record(
     sequence: u32,
@@ -1895,6 +1923,30 @@ fn encode_persist_payload(
                 &mut cursor,
             )?;
         }
+        PersistDomainData::ThermalPlant(value) => {
+            if let Some(transaction) = value.active {
+                let payload_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
+                    + usize::from(transaction.sample_count)
+                        * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
+                let mut bytes = [0u8; THERMAL_PLANT_TRANSIENT_HEADER_LEN
+                    + THERMAL_PLANT_TRANSIENT_MAX_SAMPLES
+                        * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN];
+                encode_thermal_plant_persisted_transaction(&transaction, &mut bytes[..payload_len]);
+                push_fpr2_tlv(
+                    TLV_THERMAL_PLANT_TRANSIENT_ACTIVE,
+                    &bytes[..payload_len],
+                    out,
+                    &mut cursor,
+                )?;
+            } else {
+                push_fpr2_tlv(
+                    FPR2_TLV_THERMAL_PLANT_STATE,
+                    &[THERMAL_PLANT_STATE_EMPTY],
+                    out,
+                    &mut cursor,
+                )?;
+            }
+        }
     }
     Ok(cursor)
 }
@@ -1963,6 +2015,7 @@ fn decode_persist_payload(
         generation: 0,
         status: LayoutMarkerStatus::Prepared,
     };
+    let mut thermal_plant = ThermalPlantPersistence { active: None };
     let mut saw_field = false;
     for_each_fpr2_tlv(payload, |tag, value| match domain {
         PersistDomain::SafetyCalibration => match tag {
@@ -2131,6 +2184,25 @@ fn decode_persist_payload(
             }
             _ => {}
         },
+        PersistDomain::ThermalPlant => match tag {
+            FPR2_TLV_THERMAL_PLANT_STATE if value.len() == 1 => {
+                if value[0] == THERMAL_PLANT_STATE_EMPTY {
+                    thermal_plant.active = None;
+                    saw_field = true;
+                }
+            }
+            TLV_THERMAL_PLANT_TRANSIENT_ACTIVE
+                if (THERMAL_PLANT_TRANSIENT_HEADER_LEN
+                    ..=THERMAL_PLANT_TRANSIENT_HEADER_LEN
+                        + THERMAL_PLANT_TRANSIENT_MAX_SAMPLES
+                            * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN)
+                    .contains(&value.len()) =>
+            {
+                thermal_plant.active = decode_thermal_plant_persisted_transaction(value);
+                saw_field = thermal_plant.active.is_some();
+            }
+            _ => {}
+        },
     })?;
     if !saw_field {
         return Err(Fpr2DecodeError::InvalidDomainPayload);
@@ -2146,6 +2218,7 @@ fn decode_persist_payload(
         PersistDomain::UserPreferences => PersistDomainData::UserPreferences(prefs),
         PersistDomain::NetworkAndPairing => PersistDomainData::NetworkAndPairing(network),
         PersistDomain::LayoutMarker => PersistDomainData::LayoutMarker(marker),
+        PersistDomain::ThermalPlant => PersistDomainData::ThermalPlant(thermal_plant),
     })
 }
 
@@ -2936,6 +3009,36 @@ fn encode_thermal_plant_transient_transaction(
     }
 }
 
+fn encode_thermal_plant_persisted_transaction(
+    value: &ThermalPlantTransientTransaction,
+    out: &mut [u8],
+) {
+    debug_assert_eq!(
+        out.len(),
+        THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + usize::from(value.sample_count) * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN
+    );
+    out[..4].copy_from_slice(&value.transaction_id.to_le_bytes());
+    out[4..6].copy_from_slice(&value.ambient_raw_rtd_adc_mv.to_le_bytes());
+    out[6] = value.sample_count;
+    out[7] = 0;
+    let projection = value.projection;
+    out[8..12].copy_from_slice(&projection.convection_mw_per_c_bits.to_le_bytes());
+    out[12..16].copy_from_slice(&projection.radiation_mw_per_k4_bits.to_le_bytes());
+    out[16..20].copy_from_slice(&projection.thermal_capacity_mj_per_c_bits.to_le_bytes());
+    out[20..24].copy_from_slice(&projection.transport_delay_ms.to_le_bytes());
+    for (index, sample) in value.samples[..usize::from(value.sample_count)]
+        .iter()
+        .enumerate()
+    {
+        let offset =
+            THERMAL_PLANT_TRANSIENT_HEADER_LEN + index * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
+        out[offset..offset + 2].copy_from_slice(&sample.elapsed_ticks.to_le_bytes());
+        out[offset + 2..offset + 4].copy_from_slice(&sample.raw_rtd_adc_mv.to_le_bytes());
+        out[offset + 4] = sample.heater_voltage_100mv;
+    }
+}
+
 fn decode_thermal_plant_transient_transaction(
     bytes: &[u8],
 ) -> Option<ThermalPlantTransientTransaction> {
@@ -2964,6 +3067,51 @@ fn decode_thermal_plant_transient_transaction(
             raw_rtd_adc_mv: u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]),
             heater_voltage_100mv: bytes[offset + 4],
             duty_percent: bytes[offset + 5],
+        };
+    }
+    let value = ThermalPlantTransientTransaction {
+        transaction_id: u32::from_le_bytes(bytes[..4].try_into().ok()?),
+        ambient_raw_rtd_adc_mv: u16::from_le_bytes([bytes[4], bytes[5]]),
+        sample_count,
+        projection: ThermalPlantProjectionRecord {
+            convection_mw_per_c_bits: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            radiation_mw_per_k4_bits: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+            thermal_capacity_mj_per_c_bits: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
+            transport_delay_ms: u32::from_le_bytes(bytes[20..24].try_into().ok()?),
+        },
+        samples,
+    };
+    thermal_plant_transient_transaction_has_valid_structure(&value).then_some(value)
+}
+
+fn decode_thermal_plant_persisted_transaction(
+    bytes: &[u8],
+) -> Option<ThermalPlantTransientTransaction> {
+    if bytes.len() < THERMAL_PLANT_TRANSIENT_HEADER_LEN {
+        return None;
+    }
+    let sample_count = bytes[6];
+    let expected_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
+        + usize::from(sample_count) * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
+    if bytes.len() != expected_len
+        || usize::from(sample_count) > THERMAL_PLANT_TRANSIENT_MAX_SAMPLES
+    {
+        return None;
+    }
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_100mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, sample) in samples[..usize::from(sample_count)].iter_mut().enumerate() {
+        let offset =
+            THERMAL_PLANT_TRANSIENT_HEADER_LEN + index * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
+        *sample = ThermalPlantTransientSample {
+            elapsed_ticks: u16::from_le_bytes([bytes[offset], bytes[offset + 1]]),
+            raw_rtd_adc_mv: u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]),
+            heater_voltage_100mv: bytes[offset + 4],
+            duty_percent: u8::from(bytes[offset + 4] != 0).saturating_mul(100),
         };
     }
     let value = ThermalPlantTransientTransaction {
@@ -5833,6 +5981,7 @@ mod tests {
                 generation: 7,
                 status: LayoutMarkerStatus::Active,
             }),
+            PersistDomainData::ThermalPlant(ThermalPlantPersistence::from_config(&config)),
         ];
         for (index, data) in records.iter().enumerate() {
             let mut bytes = [0xffu8; FPR2_MAX_RECORD_SIZE];
@@ -5843,6 +5992,61 @@ mod tests {
             assert_eq!(decoded.sequence, index as u32 + 1);
             assert_eq!(&decoded.data, data);
         }
+    }
+
+    #[test]
+    fn fpr2_thermal_plant_domain_roundtrip_preserves_active_transaction() {
+        let mut config = sample_config();
+        let transaction = sample_transient_thermal_plant_transaction();
+        config.heater_curve_transaction_id = Some(transaction.transaction_id);
+        config.thermal_plant_transient_active = Some(transaction);
+        let data = PersistDomainData::ThermalPlant(ThermalPlantPersistence::from_config(&config));
+        let mut bytes = [0xffu8; FPR2_MAX_RECORD_SIZE];
+        let length = encode_persist_record(61, &data, &mut bytes).expect("thermal plant fits");
+        let decoded = decode_persist_record(&bytes[..length]).expect("thermal plant decodes");
+        let PersistDomainData::ThermalPlant(decoded_thermal_plant) = decoded.data else {
+            panic!("expected thermal plant record");
+        };
+        let mut restored = MemoryConfig::default();
+        decoded_thermal_plant.apply_to_config(&mut restored);
+
+        assert_eq!(
+            restored.thermal_plant_transient_active,
+            config.thermal_plant_transient_active
+        );
+    }
+
+    #[test]
+    fn fpr2_thermal_plant_domain_roundtrip_preserves_maximum_trace_within_slot() {
+        let mut config = sample_config();
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.sample_count = THERMAL_PLANT_TRANSIENT_MAX_SAMPLES as u8;
+        for (index, sample) in transaction.samples.iter_mut().enumerate().skip(24) {
+            *sample = ThermalPlantTransientSample {
+                elapsed_ticks: (index as u16 + 1) * 10,
+                raw_rtd_adc_mv: 346u16.saturating_sub((index - 23) as u16),
+                heater_voltage_100mv: 0,
+                duty_percent: 0,
+            };
+        }
+        config.thermal_plant_transient_active = Some(transaction);
+        let data = PersistDomainData::ThermalPlant(ThermalPlantPersistence::from_config(&config));
+        let mut bytes = [0xffu8; FPR2_MAX_RECORD_SIZE];
+        let length =
+            encode_persist_record(62, &data, &mut bytes).expect("maximum thermal plant trace fits");
+
+        assert!(length <= FPR2_THERMAL_SLOT_SIZE);
+        let decoded = decode_persist_record(&bytes[..length]).expect("maximum trace decodes");
+        assert_eq!(decoded.data, data);
+    }
+
+    #[test]
+    fn fpr2_thermal_plant_domain_roundtrip_can_clear_active_transaction() {
+        let data = PersistDomainData::ThermalPlant(ThermalPlantPersistence { active: None });
+        let mut bytes = [0xffu8; FPR2_MAX_RECORD_SIZE];
+        let length = encode_persist_record(63, &data, &mut bytes).expect("clear record fits");
+        let decoded = decode_persist_record(&bytes[..length]).expect("clear record decodes");
+        assert_eq!(decoded.data, data);
     }
 
     #[test]

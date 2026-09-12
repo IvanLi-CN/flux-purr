@@ -6,11 +6,13 @@ Accepted
 
 ## Decision
 
-The external M24C64 stores five FPR2 record classes instead of a whole
+The external M24C64 stores six FPR2 record classes instead of a whole
 `MemoryConfig` snapshot. `SafetyCalibration`, `ThermalPolicy`, and the
 `LayoutMarker` use explicit A/B slots. `UserPreferences` and
 `NetworkAndPairing` are single-slot CRC records because a torn value in either
-domain does not change the heater safety admission decision.
+domain does not change the heater safety admission decision. `ThermalPlant` is
+also a single-slot record, but its write failure is safety-critical because it
+contains the active thermal-model transaction used to admit production heat.
 
 The fixed layout is:
 
@@ -21,7 +23,7 @@ The fixed layout is:
 | UserPreferences | single | `0x0a00..0x0a7f` |
 | NetworkAndPairing | single | `0x0a80..0x0b7f` |
 | LayoutMarker | A/B | `0x0c00..0x0cff`, 128 B each |
-| Reserved | none | `0x0d00..0x0fff` |
+| ThermalPlant | single | `0x0d00..0x0fff`, 768 B |
 | Legacy FPM1 | read-only during migration | `0x1000..0x1fff` |
 
 Every FPR2 record has a 20-byte header, bounded payload, sequence, domain
@@ -33,7 +35,8 @@ sector, or `flux_cfg` fallback is involved.
 ## Migration And Recovery
 
 When a valid v1-v5 FPM1 record exists, the firmware stream-decodes it and
-writes all four configuration domains. It then writes a `PREPARED` marker,
+writes all five configuration domains, including a valid active transient
+thermal-model transaction when one is present. It then writes a `PREPARED` marker,
 invalidates both legacy FPM1 magic values, and writes two `ACTIVE` markers.
 Power loss before invalidation leaves the legacy source intact. A reboot that
 finds `PREPARED` revalidates the new domains and either completes activation or
@@ -47,17 +50,19 @@ Preferences and network write failures retain the live heater policy, mark the
 domain unsaved, and expose a `PersistenceFault` with `slot: single`. The
 EEPROM error page is the retry surface: a center long-press retries the failed
 domain or resumes migration, while other keys only clear the attention overlay
-and continue navigation. Safety calibration and thermal policy candidates
-never become active before readback verification. Their failure leaves the
-previous verified slot active and locks heater/PPS/calibration until retry or
-discard.
+and continue navigation. Safety calibration, thermal policy, and thermal-plant
+records never become active before readback verification. A thermal-plant
+failure leaves the previous verified transaction active when possible and locks
+heater/PPS/calibration until retry or discard.
 
 ## Consequences
 
 - A single corrupt ordinary-domain record falls back only to that domain's
   defaults on reboot.
-- Deprecated thermal-plant snapshot records are decode-only legacy data and
-  are not migrated or written.
+- Legacy steady-state thermal-plant snapshot records remain decode-only. A
+  structurally valid transient record may migrate into the FPR2 `ThermalPlant`
+  domain; new automatic calibration writes that domain only after the complete
+  transaction passes readback verification.
 - Front-panel fault acknowledgement clears the attention overlay without
   swallowing navigation. Heater, PPS, and calibration gates remain separate
   from menu and fan navigation.
