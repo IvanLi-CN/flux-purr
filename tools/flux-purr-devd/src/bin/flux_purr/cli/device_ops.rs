@@ -408,6 +408,9 @@ pub(crate) async fn update_from_local_bundle(
 pub(crate) async fn direct_flash(
     args: FlashArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    validate_serial_port(&args.port)?;
+    let _serial_lock = flux_purr_devd::acquire_serial_port_lock(&args.port, Duration::from_secs(30))
+        .map_err(io::Error::other)?;
     let program = resolve_espflash_program();
     direct_flash_with_program(args, &program, true)
 }
@@ -495,6 +498,8 @@ pub(crate) async fn direct_recover(
     args: RecoverArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_serial_port(&args.port)?;
+    let _serial_lock = flux_purr_devd::acquire_serial_port_lock(&args.port, Duration::from_secs(30))
+        .map_err(io::Error::other)?;
     if args.confirm != "ERASE" {
         return Err("recover requires --confirm ERASE".into());
     }
