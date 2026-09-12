@@ -9,3 +9,11 @@ cargo +esp build \
   --target xtensa-esp32s3-none-elf \
   --target-dir firmware/target \
   --release
+
+cargo +esp build \
+  -p flux-purr-ram-bringup \
+  --target xtensa-esp32s3-none-elf \
+  --target-dir firmware/target \
+  --release
+
+bash scripts/check-ram-bringup-elf.sh

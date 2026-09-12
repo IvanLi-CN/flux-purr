@@ -1,331 +1,36 @@
 # Flux Purr
 
-Flux Purr is a temperature-controlled heating device. This glossary defines the language shared by the firmware, Front Panel, Control Console, host tools, specifications, and hardware documents.
-
-## Product And Operation
-
-**Device**:
-A physical Flux Purr unit that measures temperature and controls heating and cooling.
-_Avoid_: Board, MCU, target, hardware when the complete product is meant
-
-**Operator**:
-The person who observes or controls a Device.
-_Avoid_: User, owner, customer when the operating role is meant
-
-**General User**:
-A person who updates Device firmware only from a verified Firmware Update Bundle.
-_Avoid_: Developer, automatic target selection
-
-**Developer**:
-A person who may flash a local development ELF through an Explicit Serial Port.
-_Avoid_: General User, bundle updater
-
-**Front Panel**:
-The local display and keys on the Device.
-_Avoid_: Dashboard, Web UI
-
-**Control Console**:
-The Web application that observes and controls a Device.
-_Avoid_: Dashboard when the complete application is meant
-
-**Dashboard**:
-The primary operating view in the Front Panel or Control Console. State which surface is meant when the distinction matters.
-_Avoid_: Control Plane
-
-**Control Plane**:
-The shared Device operations and state available through supported transports.
-_Avoid_: Dashboard, Web API
-
-**Device Status**:
-The Device-confirmed snapshot of its current operating state.
-_Avoid_: UI state, requested state
-
-**Target Temperature**:
-The temperature that the Operator requests the Device to reach.
-_Avoid_: Current Temperature, calibration temperature
-
-**Current Temperature**:
-The latest valid temperature derived from the RTD Measurement Path.
-_Avoid_: Board Temperature, ambient temperature, raw ADC value
-
-**Heater Request**:
-Permission for the Device to apply heat. A Heater Request does not prove that the Heater Output is active.
-_Avoid_: Heater Output
-
-**Heater Output**:
-The heat-control output that the Device reports as physically applied.
-_Avoid_: Heater Request
-
-**Active Cooling**:
-The Device policy that permits fan operation when cooling is required.
-_Avoid_: Fan Output
-
-**Fan Output**:
-The Device-reported physical fan state and intensity.
-_Avoid_: Active Cooling
-
-## Audible Feedback
-
-**Buzzer Cue**:
-A predefined audible pattern emitted through the Device's single buzzer output; it may contain intentional tone and rest steps.
-_Avoid_: Sound effect, note
-
-**Cue Request**:
-A request from a Device behavior to deliver a Buzzer Cue. It does not own the physical buzzer output.
-_Avoid_: Direct playback, buzzer command
-
-**Cue Arbitration**:
-The priority-based selection of the one active Buzzer Cue and any coalesced feedback waiting behind it.
-_Avoid_: Mixing, concurrent playback
-
-**Protection Cue**:
-The highest-priority Buzzer Cue that reports active thermal runaway at its defined cadence.
-_Avoid_: General alert, reminder
-
-**Attention Reminder**:
-A Buzzer Cue that reports a cleared but unacknowledged thermal-runaway event.
-_Avoid_: Protection Cue, measurement fault
-
-**Feedback Cue**:
-A lower-priority Buzzer Cue that confirms an accepted interaction or runtime action.
-_Avoid_: Alert, alarm
-
-**Pending Feedback**:
-The one coalesced Feedback Cue retained while another cue is active; it represents the latest meaningful feedback, not a history of every request.
-_Avoid_: Playback queue, event log
-
-**Audible Safety State**:
-The Device state for active thermal runaway or an unacknowledged cleared runaway, during which only its safety cue may be emitted.
-_Avoid_: Measurement fault, general error
-
-**Buzzer Test Session**:
-The default native-USB test surface that submits production Buzzer Cue requests or fixed arbitration scenarios through Cue Arbitration. It cannot choose PWM parameters or create an Audible Safety State; the optional `buzzer-observe` feature adds GPIO48 carrier readback only.
-_Avoid_: Product control, raw buzzer driver, diagnostic-only playback path
-
-## Measurement
-
-**RTD**:
-The PT1000 resistance temperature detector used to measure the heated surface.
-_Avoid_: NTC, ambient sensor, board sensor
-
-**RTD Measurement Path**:
-The complete path from the RTD and its analog network through ADC conversion and temperature projection.
-_Avoid_: RTD when the complete measurement system is meant
-
-**RTD Divider Excitation**:
-The nominal supply used by the RTD divider's physical model, derived from the populated regulator feedback network. It is neither an independently measured rail nor an ADC Calibration Reference.
-_Avoid_: ADC reference, calibrated 3V3, measured 3V3
-
-**VIN Measurement Path**:
-The complete path from the Device input-voltage divider through ADC conversion and voltage projection.
-_Avoid_: VBUS telemetry, PD Contract
-
-**ADC Raw Code**:
-The 12-bit conversion result produced after the MCU ADC applies its basic zero-bias setup and firmware removes upper SAR status bits, before curve conversion to millivolts or physical units.
-_Avoid_: Raw ADC millivolts, voltage, temperature
-
-**Curve-Calibrated ADC Millivolts**:
-Millivolts calculated from an ADC Raw Code with the MCU's eFuse calibration data.
-_Avoid_: ADC Raw Code, calibrated temperature
-
-**Temperature Reading**:
-The temperature derived from the RTD Measurement Path and its active calibration.
-_Avoid_: ADC Raw Code, Curve-Calibrated ADC Millivolts, ambient temperature
-
-**Temperature Unavailable**:
-The Front Panel state before the current boot has produced a valid Temperature Reading. It is not a temperature value and must not be rendered as a numeric placeholder or a sensor fault.
-_Avoid_: 0°C, default temperature, sensor fault
-
-**Initial RTD Fault**:
-An RTD fault detected before the current boot has produced a valid Temperature Reading. It keeps the heater locked and is distinct from Temperature Unavailable.
-_Avoid_: last valid temperature, unavailable temperature
-
-**VIN Reading**:
-The Device input voltage derived from the VIN Measurement Path and its active calibration.
-_Avoid_: PD Request, PD Contract, IsolaPurr VBUS
-
-**Board Temperature**:
-The temperature reported for the Device electronics, separate from the RTD Temperature Reading.
-_Avoid_: Current Temperature, ambient temperature
-
-**Measurement Drift**:
-A sustained change in a measurement while the quantity under investigation is expected to remain stable. The term does not identify the cause.
-_Avoid_: ADC drift unless ADC transfer change is proven
-
-**Common-Mode Movement**:
-A same-direction change observed in the RTD and VIN Measurement Paths. It identifies a shared boundary but does not identify a shared cause.
-_Avoid_: ADC fault, supply fault unless independently proven
-
-**Boot Trace**:
-The retained sequence of RTD and VIN ADC Raw Codes from the first Device runtime seconds.
-_Avoid_: Calibration curve, correction curve, reference
-
-## Calibration
-
-**Calibration Reference**:
-An independently qualified physical value used to determine measurement error.
-_Avoid_: Ambient estimate, VIN Reading, first reading, uptime curve
-
-**ADC Calibration**:
-The mapping from ADC observations to expected electrical values.
-_Avoid_: Temperature calibration, heater calibration
-
-**Temperature Calibration**:
-The mapping from RTD observations to a qualified reference temperature.
-_Avoid_: Board Temperature correction, ambient offset
-
-**Calibration Sample**:
-A saved pair of an observed value and its qualified expected value.
-_Avoid_: Boot Trace sample, diagnostic sample
-
-**Calibration Slot**:
-One persistent set of calibration parameters that can be selected as active.
-_Avoid_: Calibration Sample, draft calibration
-
-**Active Calibration Slot**:
-The Calibration Slot currently used by the Device measurement path.
-_Avoid_: fitted suggestion, preview
-
-**Fitted Calibration**:
-Calibration parameters calculated from Calibration Samples and presented as a suggestion.
-_Avoid_: Active Calibration Slot
-
-**Runtime Fallback**:
-A diagnostic state in which required eFuse calibration data is unavailable and temperature-accuracy validation must stop.
-_Avoid_: Default calibration, valid calibration
-
-**Automatic Thermal-Model Result**:
-The last Device-confirmed, persisted result of a successful automatic thermal-model calibration. It is available for later review and identifies the active heater-resistance curve together with its thermal-model summary.
-_Avoid_: Temporary progress, preview, candidate
-
-**Calibration Outcome**:
-The terminal state of the most recent automatic calibration attempt. A failed or canceled Calibration Outcome does not erase the Automatic Thermal-Model Result from an earlier successful attempt.
-_Avoid_: Active thermal-model result
-
-**Active Thermal Model**:
-An Automatic Thermal-Model Result whose heater-resistance curve and thermal-model summary are confirmed by the Device as mutually valid and currently applied.
-_Avoid_: Cached result, historical result, preview
-
-**Advanced Manual Curve Tool**:
-The optional operator workflow for importing, previewing, or saving a heater-resistance curve. It is separate from an Automatic Thermal-Model Result.
-_Avoid_: Automatic thermal-model calibration
-
-## Product Release
-
-**Product Release Version**:
-The exact SemVer identity declared solely by the root `VERSION` file, including a prerelease identifier when applicable; a matching immutable Flux Purr product Git tag records a published instance but does not establish the version.
-_Avoid_: Cargo package version, NPM package version, build ID, release label
-
-**Version File**:
-The root `VERSION` file that declares the Product Release Version. It remains unchanged during development and is updated only by a VERSION-only preparation commit on an already-open product PR.
-_Avoid_: Git tag, Cargo package version, NPM package version, PR label
-
-**Build Identity**:
-The non-release display identity deterministically generated from the Version File without modifying it, optionally qualified by Git source revision data.
-_Avoid_: Product Release Version, PR label, release channel
-
-**Version Preparation Commit**:
-The VERSION-only preparation commit appended to a verified product PR. Its normal protected merge carries the Product Release Version into `main`.
-_Avoid_: Feature commit, product tag, direct main write
-
-**Tag Reservation**:
-The ownership gate for the `v< Product Release Version >` name. It must pass before a preparation commit is written; an existing tag is reusable only when an explicit recovery proves that it points to the same merged `main` commit.
-_Avoid_: Tag-derived version, retagging, tag overwrite
-
-**Migration Reconciliation Release**:
-The first normal product release after an historical tag or release is preserved as audit history but cannot be associated with the current `main` chain. It establishes the next patch boundary without rewriting or reissuing the historical release.
-_Avoid_: Retroactive release, history rewrite, release compression
-
-**Release Repair PR**:
-A PR that restores the release pipeline without changing the already-approved product source or creating a new Product Release Version.
-_Avoid_: Product patch, feature release
-
-**Release Recovery**:
-An explicit product-release operation that republishes the Product Release Version recorded by an existing prepared main merge without changing that commit.
-_Avoid_: Re-release, workflow retry
-
-**Release Promotion**:
-A stable product PR with its own protected merge boundary and exact stable `VERSION`; it must not retag the prerelease commit.
-_Avoid_: Retagging, channel override, direct main write
-
-## Power And Communication
-
-**PD Request**:
-The input voltage that the Device asks a USB-C power source to provide.
-_Avoid_: PD Contract, VIN Reading
-
-**PD Contract**:
-The USB-C power agreement reported by the Device.
-_Avoid_: PD Request, VIN Reading
-
-**PD Controller Variant**:
-The uniquely read-only-identified USB-C PD controller on a Device board: `CH224Q`, `FUSB302B`, or `unknown` when it is unsafe to select either driver.
-_Avoid_: I2C address, PD Contract
-
-**Contractual Current Limit**:
-The maximum current granted by the active USB-C PD contract and used to bound heater power. It is not a measured VBUS load current.
-_Avoid_: Current Reading, hardware over-current protection
-
-**Performance-Guaranteed PD Contract**:
-A ready PD contract of at least `20V` and `3A`. Contracts below this threshold may operate in degraded mode but are not valid for calibration or performance claims.
-_Avoid_: PD Request, nominal source rating
-
-**IsolaPurr**:
-The external USB-C power source and link controller used during Device validation. It is not part of the Flux Purr Device.
-_Avoid_: Device, MCU, calibration reference
-
-**devd**:
-The local daemon that mediates supported host access to a Device.
-_Avoid_: Device firmware, Control Console
-
-**Local devd Control Socket**:
-The local IPC endpoint that identifies one running devd instance for host tooling. It is neither an HTTP endpoint nor a URL.
-_Avoid_: devd HTTP address, daemon URL
-
-**Explicit Serial Port**:
-The exact host serial-port identifier supplied for a Device operation. It is never inferred, auto-selected, or replaced after the Device re-enumerates.
-_Avoid_: detected port, default port, serial candidate
-
-**Firmware Update Bundle**:
-A local `.fluxpurr-fw` product-release artifact whose signature, integrity, and Hardware Profile compatibility have been verified before update.
-_Avoid_: development ELF, arbitrary firmware file, firmware URL
-
-**EEPROM-Only Persistence**:
-The rule that Device configuration with cross-reboot meaning is stored only in the external M24C64 EEPROM, never in MCU internal Flash or NVS.
-_Avoid_: Flash fallback, NVS fallback, mirrored configuration
-
-**Developer EEPROM Backup**:
-An encrypted local archive of the external EEPROM created and verified by default before a Developer firmware flash. It is not Device persistence and is never created by a General User firmware update.
-_Avoid_: Flash fallback, update backup, Device configuration copy
-
-**EEPROM_REQUIRED**:
-The safety state entered when the external EEPROM is absent, unreadable, unwritable, or fails verification. It does not claim configuration persistence or enable operations that require it.
-_Avoid_: default-persistence mode, recovered configuration
-
-**MCU Flash Recovery**:
-An explicitly confirmed operation that erases and replaces MCU internal Flash. It does not read, write, preserve, or erase the external EEPROM.
-_Avoid_: Device reset, EEPROM reset, configuration recovery
-
-**Transport**:
-A supported communication path that carries the shared Control Plane.
-_Avoid_: Control Plane
-
-**WiFi Provisioning Access**:
-The Device-specific authority to read or change stored WiFi credentials. It is read-write only through an active USB Configuration Transport and read-only through a WiFi/LAN Transport.
-_Avoid_: WiFi connection, WiFi permission
-
-**USB Configuration Transport**:
-An active Browser Web Serial connection or native `devd` USB bridge that can safely write Device WiFi credentials.
-_Avoid_: WiFi/LAN Transport, generic devd target
-
-**WiFi/LAN Transport**:
-A direct LAN connection or native `devd` bridge over the Device network. It exposes current network facts but is not a WiFi credential write path.
-_Avoid_: WiFi Provisioning Access
-
-**Lease**:
-Temporary exclusive authority to perform mutating Control Plane operations on one Device.
-_Avoid_: Connection, pairing, device ownership
-
-**Pairing**:
-The process that authorizes a Control Console to use the Device LAN Control Plane.
-_Avoid_: Lease, Wi-Fi provisioning
+Flux Purr is an ESP32-S3 hardware controller with a persistent product runtime and
+temporary, hardware-facing diagnostics.
+
+## Language
+
+**Product Firmware**:
+The persistent `flux-purr` application installed in MCU Flash that provides the
+device's normal control and safety behavior.
+_Avoid_: main image, normal firmware
+
+**RAM Bring-up Firmware**:
+A separately built test application intended for RAM-loaded board diagnostics
+and previews, with an explicit persistent-install path.
+_Avoid_: RAM feature, main firmware test mode
+
+**Device Preview**:
+A visual state rendered by RAM Bring-up Firmware on the physical front panel
+without replacing Product Firmware.
+_Avoid_: host preview, preview firmware
+
+**RAM Bring-up Session**:
+The temporary interval from loading RAM Bring-up Firmware until the MCU next
+resets into Product Firmware.
+_Avoid_: installed test firmware, test mode
+
+**Persistent Test Installation**:
+RAM Bring-up Firmware written into the sole bootable application slot, replacing
+Product Firmware until a Product Firmware image is explicitly flashed again.
+_Avoid_: RAM session, reversible test install
+
+**Firmware Kind**:
+The runtime identity classification `product` or `ram_bringup` returned through
+the USB JSONL identity protocol.
+_Avoid_: detected from ROM, inferred firmware type

@@ -64,6 +64,10 @@ jobs:
           toolchain: 1.91.0
           components: rustfmt, clippy
 
+      - name: Setup Linux serial build dependencies
+        if: needs.classify.outputs.kind == 'source'
+        uses: ./.github/actions/setup-linux-serial-deps
+
       - name: Firmware fmt
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/check-firmware-fmt.sh
@@ -72,9 +76,9 @@ jobs:
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/check-firmware-clippy.sh
 
-      - name: Host preview tests
+      - name: Firmware host tests
         if: needs.classify.outputs.kind == 'source'
-        run: cargo test --locked --manifest-path firmware/Cargo.toml --features host-preview --all-targets
+        run: cargo test --locked --workspace
 
       - name: Setup Xtensa toolchain
         if: needs.classify.outputs.kind == 'source'

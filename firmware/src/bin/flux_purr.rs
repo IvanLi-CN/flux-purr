@@ -12231,6 +12231,17 @@ fn usb_error_response_with_retryable(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+fn product_ram_bringup_rejection(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> UsbFrame {
+    usb_error_response(
+        request_id,
+        "unsupported_frame",
+        "RAM Bring-up commands are accepted only by the ram_bringup firmware.",
+    )
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
     match parse_usb_frame(line) {
         Ok(UsbFrame::Request { request_id, op }) => match op {
@@ -12322,6 +12333,7 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
             "Thermal-model run snapshots are not available until hardware initialization completes.",
             true,
         ),
+        Ok(UsbFrame::RamBringup { request_id, .. }) => product_ram_bringup_rejection(request_id),
         Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
             request_id,
             "unsupported_frame",
@@ -12547,6 +12559,7 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
             "Thermal-model run snapshots are unavailable because hardware bring-up did not complete.",
             true,
         ),
+        Ok(UsbFrame::RamBringup { request_id, .. }) => product_ram_bringup_rejection(request_id),
         Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
             request_id,
             "unsupported_frame",
@@ -13199,6 +13212,7 @@ async fn process_control_line(
                 last_heater_duty,
             )),
         ),
+        Ok(UsbFrame::RamBringup { request_id, .. }) => product_ram_bringup_rejection(request_id),
         Ok(UsbFrame::HeaterCurveConfig { request_id, config }) => {
             if ui_state.persistence_locked() {
                 usb_error_response(
@@ -17033,6 +17047,44 @@ mod tests {
                 assert_eq!(identity.hostname.as_str(), "flux-purr-a0f262f20d6c");
             }
             other => panic!("unexpected early identity response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn product_rejects_ram_bringup_frame() {
+        let response = usb_early_response(
+            r#"{"type":"ram_bringup","requestId":"ram-1","command":"test_adc"}"#,
+            &MemoryConfig::default(),
+        );
+        match response {
+            UsbFrame::Response {
+                request_id,
+                ok: false,
+                error: Some(error),
+                ..
+            } => {
+                assert_eq!(request_id.as_str(), "ram-1");
+                assert_eq!(error.code.as_str(), "unsupported_frame");
+            }
+            other => panic!("unexpected product response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn product_ram_bringup_rejection_preserves_request_id() {
+        let mut request_id = heapless::String::new();
+        request_id.push_str("ram-runtime").unwrap();
+        match product_ram_bringup_rejection(request_id) {
+            UsbFrame::Response {
+                request_id,
+                ok: false,
+                error: Some(error),
+                ..
+            } => {
+                assert_eq!(request_id.as_str(), "ram-runtime");
+                assert_eq!(error.code.as_str(), "unsupported_frame");
+            }
+            other => panic!("unexpected runtime product response: {other:?}"),
         }
     }
 

@@ -5,7 +5,7 @@ if [[ ! -d firmware ]]; then
   exit 0
 fi
 
-COMMON_FEATURES="esp32s3,host-preview,frontpanel-key-test"
+COMMON_FEATURES="esp32s3,frontpanel-key-test"
 
 cargo clippy --manifest-path firmware/Cargo.toml --all-targets -- -D warnings
 cargo clippy --manifest-path firmware/Cargo.toml --all-targets --no-default-features --features "${COMMON_FEATURES},pd-request-12v" -- -D warnings
