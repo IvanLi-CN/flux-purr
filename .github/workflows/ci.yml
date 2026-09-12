@@ -64,6 +64,10 @@ jobs:
           toolchain: 1.91.0
           components: rustfmt, clippy
 
+      - name: Setup Linux serial build dependencies
+        if: needs.classify.outputs.kind == 'source'
+        uses: ./.github/actions/setup-linux-serial-deps
+
       - name: Firmware fmt
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/check-firmware-fmt.sh
