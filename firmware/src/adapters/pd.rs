@@ -249,6 +249,25 @@ impl SourceCapabilities {
             })
     }
 
+    /// Return whether a previously negotiated contract is still represented by
+    /// the source capability object at the same position.
+    pub fn supports_contract(self, contract: Contract) -> bool {
+        match contract.kind {
+            ContractKind::Fixed => self.fixed.into_iter().flatten().any(|pdo| {
+                pdo.object_position == contract.object_position
+                    && pdo.voltage_mv == contract.voltage_mv
+                    && pdo.max_ma >= contract.current_ma
+            }),
+            ContractKind::Pps => self.pps.into_iter().flatten().any(|apdo| {
+                apdo.object_position == contract.object_position
+                    && apdo.min_mv <= contract.voltage_mv
+                    && apdo.max_mv >= contract.voltage_mv
+                    && apdo.max_ma >= contract.current_ma
+            }),
+            ContractKind::None => false,
+        }
+    }
+
     pub fn fusb302b_pps_capability(self) -> Option<PpsApdo> {
         let mut best = None;
         for apdo in self.pps.into_iter().flatten() {

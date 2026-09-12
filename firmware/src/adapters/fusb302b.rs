@@ -17,6 +17,11 @@ const PPS_KEEPALIVE_INTERVAL_MS: u64 = 5_000;
 pub const SOURCE_CAPS_INITIAL_WAIT_MS: u64 = 400;
 pub const SOURCE_CAPS_RETRY_INTERVAL_MS: u64 = 5_000;
 
+fn source_message_id_is_newer(last: u8, current: u8) -> bool {
+    let distance = current.wrapping_sub(last) & 0x07;
+    (1..=4).contains(&distance)
+}
+
 /// The only recovery actions available after a Source_Capabilities timeout.
 ///
 /// A sink powered by the same VBUS must not initiate a PD reset merely because
@@ -83,7 +88,6 @@ pub struct SinkPolicy {
     source_capabilities: SourceCapabilities,
     source_capabilities_received: bool,
     source_message_id: Option<u8>,
-    expected_source_message_id: Option<u8>,
 }
 
 impl SinkPolicy {
@@ -98,7 +102,6 @@ impl SinkPolicy {
             source_capabilities: SourceCapabilities::empty(),
             source_capabilities_received: false,
             source_message_id: None,
-            expected_source_message_id: None,
         }
     }
 
@@ -120,9 +123,10 @@ impl SinkPolicy {
         self.on_source_capabilities_with_message_id(pdos, None)
     }
 
-    /// Select a contract and associate it with the source message that
-    /// advertised the capabilities. The runtime uses this association to
-    /// ignore delayed Accept/PS_RDY frames from an abandoned exchange.
+    /// Select a contract and retain the latest Source message ID. The runtime
+    /// uses it to ignore duplicate responses from an abandoned exchange while
+    /// allowing legitimate intervening Source messages to advance the ID by
+    /// more than one.
     pub fn on_source_capabilities_with_message_id(
         &mut self,
         pdos: &[u32],
@@ -134,14 +138,39 @@ impl SinkPolicy {
         self.begin_request(self.source_capabilities)
     }
 
+    /// Refresh cached capabilities without needlessly renegotiating a still
+    /// valid explicit contract. If the source no longer advertises that
+    /// contract, clear it and begin a bounded replacement request instead.
+    pub fn refresh_source_capabilities_with_message_id(
+        &mut self,
+        pdos: &[u32],
+        source_message_id: Option<u8>,
+    ) -> Option<[u8; 4]> {
+        self.source_capabilities = SourceCapabilities::from_pdos(pdos);
+        self.source_capabilities_received = true;
+        self.source_message_id = source_message_id.map(|value| value & 0x07);
+
+        if self.phase == SinkPhase::Ready && self.active_contract != Contract::none() {
+            if self
+                .source_capabilities
+                .supports_contract(self.active_contract)
+            {
+                self.pending_contract = Contract::none();
+                return None;
+            }
+            self.active_contract = Contract::none();
+            self.pending_contract = Contract::none();
+            self.phase = SinkPhase::WaitingForSourceCapabilities;
+        }
+
+        self.begin_request(self.source_capabilities)
+    }
+
     fn begin_request(&mut self, capabilities: SourceCapabilities) -> Option<[u8; 4]> {
         let contract =
             capabilities.select_fusb302b_contract(self.requested_mv, self.preferred_ma)?;
         let rdo = request_data_object(contract)?;
         self.pending_contract = contract;
-        self.expected_source_message_id = self
-            .source_message_id
-            .map(|source_id| source_id.wrapping_add(1) & 0x07);
         self.phase = SinkPhase::WaitingForAccept;
         Some(rdo)
     }
@@ -172,9 +201,6 @@ impl SinkPolicy {
         self.requested_mv = requested_mv;
         let rdo = request_data_object(contract)?;
         self.pending_contract = contract;
-        self.expected_source_message_id = self
-            .source_message_id
-            .map(|source_id| source_id.wrapping_add(1) & 0x07);
         self.phase = SinkPhase::WaitingForAccept;
         Some(rdo)
     }
@@ -191,9 +217,6 @@ impl SinkPolicy {
             .select_fusb302b_fixed_contract(requested_mv, self.preferred_ma)?;
         let rdo = request_data_object(contract)?;
         self.pending_contract = contract;
-        self.expected_source_message_id = self
-            .source_message_id
-            .map(|source_id| source_id.wrapping_add(1) & 0x07);
         self.phase = SinkPhase::WaitingForAccept;
         Some(rdo)
     }
@@ -203,9 +226,6 @@ impl SinkPolicy {
             return None;
         }
         self.pending_contract = self.active_contract;
-        self.expected_source_message_id = self
-            .source_message_id
-            .map(|source_id| source_id.wrapping_add(1) & 0x07);
         self.phase = SinkPhase::WaitingForAccept;
         request_data_object(self.pending_contract)
     }
@@ -215,7 +235,6 @@ impl SinkPolicy {
     /// retry on a later PD service turn.
     pub fn cancel_pending_request(&mut self) {
         self.pending_contract = Contract::none();
-        self.expected_source_message_id = None;
         self.phase = if self.active_contract == Contract::none() {
             SinkPhase::WaitingForSourceCapabilities
         } else {
@@ -237,7 +256,6 @@ impl SinkPolicy {
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
         self.source_message_id = None;
-        self.expected_source_message_id = None;
         self.requested_mv = self.default_requested_mv;
         self.source_capabilities = SourceCapabilities::empty();
         self.source_capabilities_received = false;
@@ -249,8 +267,10 @@ impl SinkPolicy {
         self.on_control_message_with_message_id(message_type, None, now_ms);
     }
 
-    /// Process a control response and, when available, validate its source
-    /// message ID against the current negotiation exchange.
+    /// Process a control response and reject only a duplicate Source message.
+    /// Source message IDs are monotonic modulo eight, but a Source may emit
+    /// other valid messages between the capability advertisement and its
+    /// response, so requiring an exact +1 ID loses valid negotiations.
     pub fn on_control_message_with_message_id(
         &mut self,
         message_type: u8,
@@ -263,11 +283,12 @@ impl SinkPolicy {
         const WAIT: u8 = 12;
 
         let message_id = message_id.map(|value| value & 0x07);
-        let response_id_matches = self
-            .expected_source_message_id
-            .is_none_or(|expected| message_id == Some(expected));
+        let response_id_is_fresh = message_id.is_none_or(|current| {
+            self.source_message_id
+                .is_none_or(|last| source_message_id_is_newer(last, current))
+        });
 
-        if !response_id_matches {
+        if !response_id_is_fresh {
             return;
         }
 
@@ -275,9 +296,6 @@ impl SinkPolicy {
             (SinkPhase::WaitingForAccept, ACCEPT) => {
                 if let Some(message_id) = message_id {
                     self.source_message_id = Some(message_id);
-                    self.expected_source_message_id = Some(message_id.wrapping_add(1) & 0x07);
-                } else {
-                    self.expected_source_message_id = None;
                 }
                 self.phase = SinkPhase::WaitingForPsRdy;
             }
@@ -287,7 +305,6 @@ impl SinkPolicy {
                 if let Some(message_id) = message_id {
                     self.source_message_id = Some(message_id);
                 }
-                self.expected_source_message_id = None;
                 self.phase = SinkPhase::Ready;
                 let _ = now_ms;
             }
@@ -303,7 +320,6 @@ impl SinkPolicy {
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
         self.source_message_id = None;
-        self.expected_source_message_id = None;
         self.requested_mv = self.default_requested_mv;
         self.source_capabilities = SourceCapabilities::empty();
         self.source_capabilities_received = false;
@@ -323,7 +339,6 @@ impl SinkPolicy {
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
         self.source_message_id = None;
-        self.expected_source_message_id = None;
         self.phase = SinkPhase::Fault;
     }
 }
@@ -728,16 +743,65 @@ mod tests {
         policy.on_control_message_with_message_id(3, Some(2), 0);
         assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
 
+        // The Source may send another valid message before Accept; an exact
+        // +1 requirement would incorrectly discard this response.
         policy.on_control_message_with_message_id(3, Some(4), 1);
         assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
 
-        policy.on_control_message_with_message_id(6, Some(6), 2);
+        // A duplicate Accept ID is stale for the PS_RDY phase.
+        policy.on_control_message_with_message_id(6, Some(4), 2);
         assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
         assert_eq!(policy.active_contract(), Contract::none());
 
-        policy.on_control_message_with_message_id(6, Some(5), 3);
+        // PS_RDY may also skip an intervening Source message ID.
+        policy.on_control_message_with_message_id(6, Some(6), 3);
         assert_eq!(policy.phase(), SinkPhase::Ready);
         assert_eq!(policy.active_contract().kind, ContractKind::Pps);
+    }
+
+    #[test]
+    fn source_response_message_ids_accept_wraparound_and_reject_old_ids() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(7));
+
+        policy.on_control_message_with_message_id(3, Some(0), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+
+        policy.on_control_message_with_message_id(6, Some(7), 1);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        policy.on_control_message_with_message_id(6, Some(2), 2);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+    }
+
+    #[test]
+    fn capability_refresh_preserves_a_still_advertised_contract() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(1));
+        policy.on_control_message_with_message_id(3, Some(2), 0);
+        policy.on_control_message_with_message_id(6, Some(3), 1);
+        let active_contract = policy.active_contract();
+
+        assert_eq!(
+            policy.refresh_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(4)),
+            None
+        );
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract(), active_contract);
+    }
+
+    #[test]
+    fn capability_refresh_clears_an_invalid_contract_and_starts_discovery() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(1));
+        policy.on_control_message_with_message_id(3, Some(2), 0);
+        policy.on_control_message_with_message_id(6, Some(3), 1);
+
+        assert_eq!(
+            policy.refresh_source_capabilities_with_message_id(&[0x0000_0000], Some(4)),
+            None
+        );
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert_eq!(policy.active_contract(), Contract::none());
     }
 
     #[test]

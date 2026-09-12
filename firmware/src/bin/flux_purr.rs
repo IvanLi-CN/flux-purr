@@ -33,7 +33,7 @@ use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
 #[cfg(target_arch = "xtensa")]
-use embassy_time::{Duration, Instant, Timer as EmbassyTimer, with_timeout};
+use embassy_time::{Duration, Instant, Timer as EmbassyTimer};
 #[cfg(target_arch = "xtensa")]
 use embedded_graphics::prelude::RgbColor;
 #[cfg(target_arch = "xtensa")]
@@ -45,9 +45,10 @@ use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
     Blocking,
-    analog::adc::{Adc, AdcCalBasic, AdcCalCurve, AdcCalScheme, AdcConfig, Attenuation},
+    analog::adc::{
+        Adc, AdcCalBasic, AdcCalCurve, AdcCalScheme, AdcChannel, AdcConfig, Attenuation,
+    },
     clock::CpuClock,
-    delay::Delay,
     efuse::{AdcCalibUnit, Efuse},
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c, SoftwareTimeout},
@@ -711,6 +712,10 @@ const RTD_CHANNEL_SWITCH_SETTLE_US: u32 = 5_000;
 const RTD_SETTLE_DISCARD_SAMPLE_COUNT: usize = 96;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_MIN_VALID_SAMPLE_COUNT: usize = 60;
+#[cfg(target_arch = "xtensa")]
+// Service the shared FUSB302B bus at least once per eight ADC conversions.
+// The time check in the sampler also covers a conversion that stalls.
+const ADC_PD_SERVICE_MAX_SAMPLES: usize = 8;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_RETRY_AFTER_VIN_STEP_RAW_ADC_DELTA_MV: u16 = 48;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -862,10 +867,14 @@ fn eeprom_snapshot_storage_failure(response: &EepromSnapshotResponse) -> bool {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn eeprom_snapshot_digest(
+async fn eeprom_snapshot_digest<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-) -> Result<heapless::String<EEPROM_SNAPSHOT_HASH_LEN>, &'static str> {
+    service: &mut EepromPdServiceContext<'_, PWM>,
+) -> Result<heapless::String<EEPROM_SNAPSHOT_HASH_LEN>, &'static str>
+where
+    PWM: SetDutyCycle,
+{
     let Some(address) = probe_eeprom_address(i2c) else {
         return Err("eeprom_unavailable");
     };
@@ -874,9 +883,16 @@ async fn eeprom_snapshot_digest(
     let mut bytes = [0_u8; EEPROM_SNAPSHOT_CHUNK_MAX as usize];
     while offset < EEPROM_SNAPSHOT_SIZE {
         let length = usize::from((EEPROM_SNAPSHOT_SIZE - offset).min(EEPROM_SNAPSHOT_CHUNK_MAX));
-        read_eeprom_bytes_chunked_with_pd(i2c, pd_port, address, offset, &mut bytes[..length])
-            .await
-            .map_err(|_| "eeprom_read_failed")?;
+        read_eeprom_bytes_chunked_with_pd(
+            i2c,
+            pd_port,
+            service,
+            address,
+            offset,
+            &mut bytes[..length],
+        )
+        .await
+        .map_err(|_| "eeprom_read_failed")?;
         hasher.update(&bytes[..length]);
         offset = offset.saturating_add(length as u16);
     }
@@ -910,15 +926,18 @@ fn write_eeprom_snapshot_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_eeprom_snapshot_line(
+async fn process_eeprom_snapshot_line<PWM>(
     line: &str,
     session: &mut EepromSnapshotSession,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-    last_heater_duty: u8,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     memory_commit_due_ms: &mut Option<u64>,
     elapsed_ms: u64,
-) -> Option<EepromSnapshotResponse> {
+) -> Option<EepromSnapshotResponse>
+where
+    PWM: SetDutyCycle,
+{
     let parsed = serde_json_core::from_slice::<EepromSnapshotRequest>(line.as_bytes());
     let request = match parsed {
         Ok((request, _)) if request.op.as_str().starts_with("eeprom_snapshot_") => request,
@@ -947,7 +966,7 @@ async fn process_eeprom_snapshot_line(
         .clone();
     match request.op.as_str() {
         "eeprom_snapshot_open" => {
-            if last_heater_duty != 0 {
+            if *service.last_heater_duty != 0 {
                 return Some(eeprom_snapshot_error(request_id, "heater_active"));
             }
             let session_id = request.session_id.unwrap_or(request.request_id.clone());
@@ -978,7 +997,7 @@ async fn process_eeprom_snapshot_line(
                     "snapshot_session_invalid",
                 ));
             }
-            if last_heater_duty != 0 {
+            if *service.last_heater_duty != 0 {
                 session.active = false;
                 return Some(eeprom_snapshot_error(request_id, "heater_active"));
             }
@@ -1001,6 +1020,7 @@ async fn process_eeprom_snapshot_line(
             if read_eeprom_bytes_chunked_with_pd(
                 i2c,
                 pd_port,
+                service,
                 address,
                 offset,
                 bytes.as_mut_slice(),
@@ -1033,7 +1053,7 @@ async fn process_eeprom_snapshot_line(
                     "snapshot_session_invalid",
                 ));
             }
-            if last_heater_duty != 0 {
+            if *service.last_heater_duty != 0 {
                 session.active = false;
                 return Some(eeprom_snapshot_error(request_id, "heater_active"));
             }
@@ -1041,7 +1061,7 @@ async fn process_eeprom_snapshot_line(
                 session.active = false;
                 return Some(eeprom_snapshot_error(request_id, "snapshot_incomplete"));
             }
-            let digest = match eeprom_snapshot_digest(i2c, pd_port).await {
+            let digest = match eeprom_snapshot_digest(i2c, pd_port, service).await {
                 Ok(digest) => digest,
                 Err(code) => {
                     session.active = false;
@@ -2069,6 +2089,25 @@ fn next_pd_runtime_service_deadline_ms(deadline_ms: u64, service_started_ms: u64
         .saturating_div(PD_RUNTIME_SERVICE_INTERVAL_MS)
         .saturating_add(1);
     next_deadline_ms.saturating_add(missed_intervals.saturating_mul(PD_RUNTIME_SERVICE_INTERVAL_MS))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn fixed_contract_liveness_probe_due(
+    contract_kind: ContractKind,
+    contract_ready: bool,
+    refresh_pending: bool,
+    last_probe_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    contract_ready
+        && contract_kind == ContractKind::Fixed
+        && !refresh_pending
+        && match last_probe_at_ms {
+            Some(last_probe_at_ms) => {
+                fusb302b::source_capabilities_retry_due(last_probe_at_ms, now_ms)
+            }
+            None => false,
+        }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -5015,6 +5054,63 @@ fn disarm_stale_heater_arm_after_pd_transition(
     was_armed
 }
 
+#[cfg(target_arch = "xtensa")]
+fn apply_pd_contract_observation<PWM>(
+    observation: Option<PdStatusObservation>,
+    pd_contract_ready: &mut bool,
+    ui_state: &mut FrontPanelUiState,
+    calibration_runtime_state: &mut CalibrationRuntimeState,
+    manual_pps_state: &mut ManualPpsState,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
+) -> bool
+where
+    PWM: SetDutyCycle,
+{
+    let current_pd_contract_ready = startup_pd_contract_ready(observation);
+    let mut needs_redraw = false;
+    if *pd_contract_ready != current_pd_contract_ready {
+        let pd_was_ready = *pd_contract_ready;
+        *pd_contract_ready = current_pd_contract_ready;
+        needs_redraw = true;
+        if current_pd_contract_ready {
+            if disarm_stale_heater_arm_after_pd_transition(
+                pd_was_ready,
+                current_pd_contract_ready,
+                ui_state,
+                calibration_runtime_state,
+            ) {
+                info!(
+                    "PD contract became ready; discarded pre-ready heater arm and require a new explicit arm"
+                );
+            }
+            info!("PD contract became ready; released startup heater interlock");
+        } else {
+            info!("PD contract became unavailable; heater interlocked");
+        }
+    }
+
+    if !current_pd_contract_ready
+        && (ui_state.heater_enabled
+            || calibration_runtime_state.heater_enabled
+            || *last_heater_duty != 0
+            || ui_state.heater_output_percent != 0)
+    {
+        // A stale observation must never leave GPIO47 powered while the
+        // protocol state is unavailable. The next explicit arm is required
+        // after a later contract recovery.
+        ui_state.heater_enabled = false;
+        ui_state.heater_output_percent = 0;
+        calibration_runtime_state.heater_enabled = false;
+        manual_pps_state.fail(ManualPpsError::PdNotReady);
+        apply_heater_duty(heater_pwm, 0, last_heater_duty);
+        needs_redraw = true;
+        info!("PD contract interlock -> heater output zero");
+    }
+
+    needs_redraw
+}
+
 #[cfg(any(target_arch = "xtensa", test))]
 fn thermal_plant_calibration_snapshot(
     measured_temp_c: f32,
@@ -5970,87 +6066,182 @@ fn initialize_adc1(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_rtd_adc_mv<'a>(
-    adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
-    pin: &mut esp_hal::analog::adc::AdcPin<
-        esp_hal::peripherals::GPIO2<'a>,
-        esp_hal::peripherals::ADC1<'a>,
-        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
-    >,
-    curve: &AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
-) -> Option<RtdAdcBatch> {
-    let delay = Delay::new();
-    delay.delay_micros(RTD_CHANNEL_SWITCH_SETTLE_US);
-    let batch = phase_averaged_rtd_batch_with_discard(
-        RTD_SAMPLE_COUNT,
-        RTD_SAMPLE_PWM_PHASE_COUNT,
-        RTD_SETTLE_DISCARD_SAMPLE_COUNT,
-        || {
-            let raw_code = loop {
-                match adc.read_oneshot(pin) {
-                    Ok(value) => break value,
-                    Err(nb::Error::WouldBlock) => continue,
-                    Err(_) => return None,
-                }
-            };
-            let raw_code = mask_adc1_raw_code(raw_code);
-            Some(AdcConvertedSample {
-                raw_code,
-                calibrated_mv: curve.adc_val(raw_code),
-            })
-        },
-        || delay.delay_micros(RTD_SAMPLE_PWM_PHASE_SPACING_US),
-    )?;
-    Some(batch)
+async fn service_pd_for_adc<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
+) where
+    PWM: SetDutyCycle,
+{
+    let observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+    *last_pd_observation = observation;
+    if !startup_pd_contract_ready(observation) {
+        // ADC acquisition can outlive a normal control turn. Cut the physical
+        // output at the same service boundary instead of waiting for sampling
+        // to finish before the main loop applies its state reconciliation.
+        apply_heater_duty(heater_pwm, 0, last_heater_duty);
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_vin_adc_mv<'a>(
-    adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
+async fn read_adc_batch_with_pd<PIN, PWM>(
+    adc: &mut Adc1Driver,
     pin: &mut esp_hal::analog::adc::AdcPin<
-        esp_hal::peripherals::GPIO1<'a>,
-        esp_hal::peripherals::ADC1<'a>,
-        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
+        PIN,
+        esp_hal::peripherals::ADC1<'static>,
+        AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
     >,
-    curve: &AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
-) -> Option<RtdAdcBatch> {
-    let delay = Delay::new();
-    delay.delay_micros(RTD_CHANNEL_SWITCH_SETTLE_US);
-    phase_averaged_rtd_batch_with_discard(
-        RTD_SAMPLE_COUNT,
-        RTD_SAMPLE_PWM_PHASE_COUNT,
-        RTD_SETTLE_DISCARD_SAMPLE_COUNT,
-        || {
-            let raw_code = loop {
-                match adc.read_oneshot(pin) {
-                    Ok(value) => break value,
-                    Err(nb::Error::WouldBlock) => continue,
-                    Err(_) => return None,
+    curve: &Adc1Curve,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
+) -> Option<RtdAdcBatch>
+where
+    PIN: AdcChannel,
+    PWM: SetDutyCycle,
+{
+    let samples_per_phase = RTD_SAMPLE_COUNT / RTD_SAMPLE_PWM_PHASE_COUNT;
+    let total_samples = RTD_SAMPLE_COUNT.saturating_add(RTD_SETTLE_DISCARD_SAMPLE_COUNT);
+    let mut sum_mv = 0_u32;
+    let mut sum_raw_code = 0_u32;
+    let mut min_mv = u16::MAX;
+    let mut max_mv = 0_u16;
+    let mut min_raw_code = u16::MAX;
+    let mut max_raw_code = 0_u16;
+    let mut valid_samples = 0_usize;
+    let mut discarded_valid_samples = 0_usize;
+    let mut samples_since_pd = 0_usize;
+    let mut last_pd_service_ms = Instant::now().as_millis();
+
+    // Keep the calibrated acquisition plan intact while yielding between
+    // conversions. The previous synchronous implementation could monopolize
+    // the executor across the whole discard and phase-averaging batch.
+    let settle_deadline = Instant::now().checked_add(Duration::from_micros(u64::from(
+        RTD_CHANNEL_SWITCH_SETTLE_US,
+    )))?;
+    while Instant::now() < settle_deadline {
+        service_pd_for_adc(
+            i2c,
+            pd_port,
+            last_pd_observation,
+            heater_pwm,
+            last_heater_duty,
+        )
+        .await;
+        last_pd_service_ms = Instant::now().as_millis();
+        EmbassyTimer::after_millis(1).await;
+    }
+
+    for _ in 0..total_samples {
+        let sample = loop {
+            match adc.read_oneshot(pin) {
+                Ok(value) => {
+                    let raw_code = mask_adc1_raw_code(value);
+                    break Some(AdcConvertedSample {
+                        raw_code,
+                        calibrated_mv: curve.adc_val(raw_code),
+                    });
                 }
-            };
-            let raw_code = mask_adc1_raw_code(raw_code);
-            Some(AdcConvertedSample {
-                raw_code,
-                calibrated_mv: curve.adc_val(raw_code),
-            })
-        },
-        || delay.delay_micros(RTD_SAMPLE_PWM_PHASE_SPACING_US),
-    )
+                Err(nb::Error::WouldBlock) => {
+                    if Instant::now()
+                        .as_millis()
+                        .saturating_sub(last_pd_service_ms)
+                        >= PD_RUNTIME_SERVICE_INTERVAL_MS
+                    {
+                        service_pd_for_adc(
+                            i2c,
+                            pd_port,
+                            last_pd_observation,
+                            heater_pwm,
+                            last_heater_duty,
+                        )
+                        .await;
+                        last_pd_service_ms = Instant::now().as_millis();
+                    }
+                    EmbassyTimer::after_micros(50).await;
+                }
+                Err(_) => break None,
+            }
+        };
+
+        samples_since_pd = samples_since_pd.saturating_add(1);
+        if let Some(sample) = sample {
+            if discarded_valid_samples < RTD_SETTLE_DISCARD_SAMPLE_COUNT {
+                discarded_valid_samples = discarded_valid_samples.saturating_add(1);
+            } else {
+                sum_mv = sum_mv.saturating_add(u32::from(sample.calibrated_mv));
+                sum_raw_code = sum_raw_code.saturating_add(u32::from(sample.raw_code));
+                min_mv = min_mv.min(sample.calibrated_mv);
+                max_mv = max_mv.max(sample.calibrated_mv);
+                min_raw_code = min_raw_code.min(sample.raw_code);
+                max_raw_code = max_raw_code.max(sample.raw_code);
+                valid_samples = valid_samples.saturating_add(1);
+
+                if valid_samples.is_multiple_of(samples_per_phase)
+                    && valid_samples < RTD_SAMPLE_COUNT
+                {
+                    EmbassyTimer::after_micros(u64::from(RTD_SAMPLE_PWM_PHASE_SPACING_US)).await;
+                }
+            }
+        }
+
+        if samples_since_pd >= ADC_PD_SERVICE_MAX_SAMPLES
+            || Instant::now()
+                .as_millis()
+                .saturating_sub(last_pd_service_ms)
+                >= PD_RUNTIME_SERVICE_INTERVAL_MS
+        {
+            service_pd_for_adc(
+                i2c,
+                pd_port,
+                last_pd_observation,
+                heater_pwm,
+                last_heater_duty,
+            )
+            .await;
+            samples_since_pd = 0;
+            last_pd_service_ms = Instant::now().as_millis();
+        }
+    }
+
+    rtd_fractional_mean_mv(sum_mv, valid_samples).map(|mean_mv| RtdAdcBatch {
+        mean_mv,
+        min_mv,
+        max_mv,
+        mean_raw_code: (sum_raw_code / valid_samples as u32) as u16,
+        min_raw_code,
+        max_raw_code,
+    })
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_calibrated_vin_mv<'a>(
-    adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
-    pin: &mut esp_hal::analog::adc::AdcPin<
-        esp_hal::peripherals::GPIO1<'a>,
-        esp_hal::peripherals::ADC1<'a>,
-        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
-    >,
-    curve: Option<&AdcCalCurve<esp_hal::peripherals::ADC1<'a>>>,
+async fn read_calibrated_vin_mv_with_pd(
+    adc: &mut Adc1Driver,
+    pin: &mut VinAdcPin,
+    curve: Option<&Adc1Curve>,
     memory_config: &MemoryConfig,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut impl SetDutyCycle,
+    last_heater_duty: &mut u8,
 ) -> Option<(u16, u16, u16, u32)> {
     let curve = curve?;
-    let batch = read_vin_adc_mv(adc, pin, curve)?;
+    let batch = read_adc_batch_with_pd(
+        adc,
+        pin,
+        curve,
+        i2c,
+        pd_port,
+        last_pd_observation,
+        heater_pwm,
+        last_heater_duty,
+    )
+    .await?;
     let raw_code = batch.mean_raw_code;
     let raw_adc_mv = batch.mean_mv.round() as u16;
     #[cfg(feature = "web_serial")]
@@ -6069,15 +6260,16 @@ fn read_calibrated_vin_mv<'a>(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_rtd_sample<'a>(
-    adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
-    pin: &mut esp_hal::analog::adc::AdcPin<
-        esp_hal::peripherals::GPIO2<'a>,
-        esp_hal::peripherals::ADC1<'a>,
-        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
-    >,
-    curve: Option<&AdcCalCurve<esp_hal::peripherals::ADC1<'a>>>,
+async fn read_rtd_sample_with_pd(
+    adc: &mut Adc1Driver,
+    pin: &mut RtdAdcPin,
+    curve: Option<&Adc1Curve>,
     memory_config: &MemoryConfig,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut impl SetDutyCycle,
+    last_heater_duty: &mut u8,
 ) -> RtdSample {
     let Some(curve) = curve else {
         return RtdSample::Fault {
@@ -6085,7 +6277,18 @@ fn read_rtd_sample<'a>(
             reason: HeaterFaultReason::AdcReadFailed,
         };
     };
-    let Some(batch) = read_rtd_adc_mv(adc, pin, curve) else {
+    let Some(batch) = read_adc_batch_with_pd(
+        adc,
+        pin,
+        curve,
+        i2c,
+        pd_port,
+        last_pd_observation,
+        heater_pwm,
+        last_heater_duty,
+    )
+    .await
+    else {
         return RtdSample::Fault {
             adc_mv: None,
             reason: HeaterFaultReason::AdcReadFailed,
@@ -6309,6 +6512,7 @@ struct Fusb302bRuntime {
     last_source_capabilities_request_at_ms: Option<u64>,
     source_capabilities_refresh_pending: bool,
     source_capabilities_refresh_requested_at_ms: Option<u64>,
+    source_capabilities_refresh_kind: Option<SourceCapabilitiesRefreshKind>,
     last_request_at_ms: Option<u64>,
     source_capabilities_tx_confirmed: bool,
     source_capabilities_gcrc_seen: bool,
@@ -6325,6 +6529,13 @@ enum PdContractRequestState {
 }
 
 #[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceCapabilitiesRefreshKind {
+    PpsTransition,
+    FixedContractLiveness,
+}
+
+#[cfg(target_arch = "xtensa")]
 impl Fusb302bRuntime {
     const fn new() -> Self {
         Self {
@@ -6338,6 +6549,7 @@ impl Fusb302bRuntime {
             last_source_capabilities_request_at_ms: None,
             source_capabilities_refresh_pending: false,
             source_capabilities_refresh_requested_at_ms: None,
+            source_capabilities_refresh_kind: None,
             last_request_at_ms: None,
             source_capabilities_tx_confirmed: false,
             source_capabilities_gcrc_seen: false,
@@ -6385,6 +6597,7 @@ impl Fusb302bRuntime {
         self.last_source_capabilities_request_at_ms = None;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_requested_at_ms = None;
+        self.source_capabilities_refresh_kind = None;
         self.last_request_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
@@ -6432,6 +6645,7 @@ impl Fusb302bRuntime {
                 self.last_source_capabilities_request_at_ms = Some(now_ms);
                 self.source_capabilities_refresh_pending = false;
                 self.source_capabilities_refresh_requested_at_ms = None;
+                self.source_capabilities_refresh_kind = None;
                 self.source_capabilities_tx_confirmed = false;
                 self.source_capabilities_gcrc_seen = false;
                 self.partial_rx_started_at_ms = None;
@@ -6495,6 +6709,8 @@ impl Fusb302bRuntime {
             }
             self.source_capabilities_refresh_pending = true;
             self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
+            self.source_capabilities_refresh_kind =
+                Some(SourceCapabilitiesRefreshKind::PpsTransition);
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
             return PdContractRequestState::Pending;
         }
@@ -6597,11 +6813,49 @@ impl Fusb302bRuntime {
                     now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS
                 })
         {
-            // Preserve the active fixed contract and retry the Source Caps
-            // refresh on a later control turn.
+            let refresh_kind = self.source_capabilities_refresh_kind;
             self.source_capabilities_refresh_pending = false;
             self.source_capabilities_refresh_requested_at_ms = None;
+            self.source_capabilities_refresh_kind = None;
+            if refresh_kind == Some(SourceCapabilitiesRefreshKind::FixedContractLiveness) {
+                // A fixed contract has no PPS keepalive. A bounded unanswered
+                // Source_Capabilities probe is the protocol-level evidence
+                // available while the MCU remains powered; interlock heat and
+                // re-enter discovery without changing CC termination.
+                FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
+                return self
+                    .recover_transient_transport_fault(
+                        i2c,
+                        fusb302b::TransientTransportFault::PendingRequestTimeout,
+                        now,
+                    )
+                    .await;
+            }
+            // A failed PPS capability refresh does not invalidate the active
+            // fixed contract. Leave it usable and retry only on a later
+            // explicit PPS request.
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
+        }
+
+        if fixed_contract_liveness_probe_due(
+            self.active_contract().kind,
+            self.policy.phase() == SinkPhase::Ready,
+            self.source_capabilities_refresh_pending,
+            self.last_source_capabilities_request_at_ms,
+            now_ms,
+        ) {
+            let header = fusb302b::get_source_capabilities_header(self.next_message_id);
+            if let Err(fault) = self.transmit(i2c, header, &[]).await {
+                return self
+                    .recover_transient_transport_fault(i2c, fault, now)
+                    .await;
+            }
+            self.source_capabilities_refresh_pending = true;
+            self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
+            self.source_capabilities_refresh_kind =
+                Some(SourceCapabilitiesRefreshKind::FixedContractLiveness);
+            self.last_source_capabilities_request_at_ms = Some(now_ms);
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
         }
 
         if self.polarity.is_none() {
@@ -6763,16 +7017,27 @@ impl Fusb302bRuntime {
                         message.header(),
                         message.payload(),
                     ) {
-                        self.last_source_capabilities_request_at_ms = None;
+                        let refresh_kind = self.source_capabilities_refresh_kind;
+                        let preserve_ready_contract = self.policy.phase() == SinkPhase::Ready
+                            && refresh_kind != Some(SourceCapabilitiesRefreshKind::PpsTransition);
                         self.source_capabilities_refresh_pending = false;
                         self.source_capabilities_refresh_requested_at_ms = None;
+                        self.source_capabilities_refresh_kind = None;
                         self.source_capabilities_tx_confirmed = false;
                         self.source_capabilities_gcrc_seen = false;
                         self.retry_fail_recovery_pending = false;
-                        if let Some(rdo) = self.policy.on_source_capabilities_with_message_id(
-                            &pdos[..count],
-                            Some((message.header() >> 9) as u8 & 0x07),
-                        ) {
+                        let rdo = if preserve_ready_contract {
+                            self.policy.refresh_source_capabilities_with_message_id(
+                                &pdos[..count],
+                                Some((message.header() >> 9) as u8 & 0x07),
+                            )
+                        } else {
+                            self.policy.on_source_capabilities_with_message_id(
+                                &pdos[..count],
+                                Some((message.header() >> 9) as u8 & 0x07),
+                            )
+                        };
+                        if let Some(rdo) = rdo {
                             let header = fusb302b::request_header(self.next_message_id);
                             if let Err(fault) = self.transmit(i2c, header, &rdo).await {
                                 return self
@@ -6780,8 +7045,15 @@ impl Fusb302bRuntime {
                                     .await;
                             }
                             self.last_request_at_ms = Some(now_ms);
+                            self.last_source_capabilities_request_at_ms = None;
                             FUSB302B_DIAGNOSTIC
                                 .store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
+                        } else if self.policy.phase() == SinkPhase::Ready {
+                            // A liveness response refreshed the cache while
+                            // keeping the explicit contract intact. Schedule
+                            // the next probe from this confirmed response.
+                            self.last_source_capabilities_request_at_ms = Some(now_ms);
+                            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_IDLE, Ordering::Relaxed);
                         } else {
                             // The attachment is still valid, but this source
                             // cannot satisfy the heater contract. Keep the
@@ -6793,11 +7065,16 @@ impl Fusb302bRuntime {
                             return true;
                         }
                     } else if message.payload().is_empty() {
+                        let was_waiting_for_ps_rdy =
+                            self.policy.phase() == SinkPhase::WaitingForPsRdy;
                         self.policy.on_control_message_with_message_id(
                             (message.header() & 0x1f) as u8,
                             Some((message.header() >> 9) as u8 & 0x07),
                             now_ms,
                         );
+                        if was_waiting_for_ps_rdy && self.policy.phase() == SinkPhase::Ready {
+                            self.last_source_capabilities_request_at_ms = Some(now_ms);
+                        }
                         FUSB302B_DIAGNOSTIC.store(
                             if self.policy.phase() == SinkPhase::Ready {
                                 FUSB302B_DIAG_IDLE
@@ -6822,17 +7099,24 @@ impl Fusb302bRuntime {
                         )
                         .await;
                 }
-                Fusb302bReceiveEvent::Protection | Fusb302bReceiveEvent::UnsupportedSop => {
+                Fusb302bReceiveEvent::Protection => {
                     self.policy.mark_fault();
-                    FUSB302B_DIAGNOSTIC.store(
-                        match event {
-                            Fusb302bReceiveEvent::Protection => FUSB302B_DIAG_PROTECTION,
-                            Fusb302bReceiveEvent::UnsupportedSop => FUSB302B_DIAG_UNSUPPORTED_SOP,
-                            _ => unreachable!(),
-                        },
-                        Ordering::Relaxed,
-                    );
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_PROTECTION, Ordering::Relaxed);
                     return false;
+                }
+                Fusb302bReceiveEvent::UnsupportedSop => {
+                    // A malformed or non-SOP frame is a recoverable receive
+                    // condition. Flush the incomplete FIFO state and requery
+                    // capabilities without withdrawing Rd or latching the
+                    // whole sink policy in Fault.
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_UNSUPPORTED_SOP, Ordering::Relaxed);
+                    return self
+                        .recover_transient_transport_fault(
+                            i2c,
+                            fusb302b::TransientTransportFault::ReceiveIoError,
+                            now,
+                        )
+                        .await;
                 }
             }
         }
@@ -7049,13 +7333,17 @@ fn probe_eeprom_address(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<u8> {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn read_eeprom_bytes_chunked_with_pd(
+async fn read_eeprom_bytes_chunked_with_pd<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     address: u8,
     offset: u16,
     bytes: &mut [u8],
-) -> Result<(), ()> {
+) -> Result<(), ()>
+where
+    PWM: SetDutyCycle,
+{
     let mut read = 0usize;
     while read < bytes.len() {
         let chunk_len = (bytes.len() - read).min(EEPROM_READ_CHUNK_MAX_BYTES);
@@ -7066,7 +7354,7 @@ async fn read_eeprom_bytes_chunked_with_pd(
         };
         result.map_err(|_| ())?;
         read += chunk_len;
-        service_pd_during_eeprom_operation(i2c, pd_port, 0, Instant::now()).await;
+        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
         EmbassyTimer::after_millis(0).await;
     }
     Ok(())
@@ -7078,14 +7366,16 @@ fn eeprom_bytes_contain_data(bytes: &[u8]) -> bool {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn write_eeprom_bytes_verified(
+async fn write_eeprom_bytes_verified<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-    elapsed_ms: u64,
-    maintenance_started_at: Instant,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     offset: u16,
     bytes: &[u8],
-) -> Result<(), MemoryCommitError> {
+) -> Result<(), MemoryCommitError>
+where
+    PWM: SetDutyCycle,
+{
     let Some(address) = probe_eeprom_address(i2c) else {
         return Err(MemoryCommitError::WriteAddressNoAck);
     };
@@ -7104,8 +7394,7 @@ async fn write_eeprom_bytes_verified(
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
         written += chunk_len;
         if pd_service_schedule.after_page_write() {
-            service_pd_during_eeprom_operation(i2c, pd_port, elapsed_ms, maintenance_started_at)
-                .await;
+            service_pd_during_eeprom_operation(i2c, pd_port, service).await;
         }
     }
     let mut verify = [0u8; flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX];
@@ -7121,7 +7410,7 @@ async fn write_eeprom_bytes_verified(
         };
         read_result.map_err(|_| MemoryCommitError::VerifyUnreadable)?;
         read += chunk_len;
-        service_pd_during_eeprom_operation(i2c, pd_port, elapsed_ms, maintenance_started_at).await;
+        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
     }
     if verify[..bytes.len()] != *bytes {
         return Err(MemoryCommitError::VerifyMismatch);
@@ -7277,14 +7566,17 @@ fn discard_deferred_memory_commit_for_incompatible_eeprom(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn usb_eeprom_maintenance_response(
+async fn usb_eeprom_maintenance_response<PWM>(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: EepromMaintenanceCommand,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-    elapsed_ms: u64,
-) -> UsbFrame {
-    let maintenance_started_at = Instant::now();
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    _elapsed_ms: u64,
+) -> UsbFrame
+where
+    PWM: SetDutyCycle,
+{
     match command.op {
         EepromMaintenanceOp::Read => {
             let (Some(offset), Some(length)) = (command.offset, command.length) else {
@@ -7317,6 +7609,7 @@ async fn usb_eeprom_maintenance_response(
             if read_eeprom_bytes_chunked_with_pd(
                 i2c,
                 pd_port,
+                service,
                 address,
                 offset,
                 bytes.as_mut_slice(),
@@ -7345,15 +7638,7 @@ async fn usb_eeprom_maintenance_response(
                     "EEPROM write range is invalid.",
                 );
             }
-            match write_eeprom_bytes_verified(
-                i2c,
-                pd_port,
-                elapsed_ms,
-                maintenance_started_at,
-                offset,
-                bytes.as_slice(),
-            )
-            .await
+            match write_eeprom_bytes_verified(i2c, pd_port, service, offset, bytes.as_slice()).await
             {
                 Ok(()) => usb_response(request_id, UsbResponsePayload::Ack),
                 Err(error) => usb_error_response(request_id, error.code(), error.message()),
@@ -7363,15 +7648,8 @@ async fn usb_eeprom_maintenance_response(
             let erased = [0xff; flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX];
             let mut offset = 0u16;
             while offset < M24C64_CAPACITY_BYTES {
-                if let Err(error) = write_eeprom_bytes_verified(
-                    i2c,
-                    pd_port,
-                    elapsed_ms,
-                    maintenance_started_at,
-                    offset,
-                    &erased,
-                )
-                .await
+                if let Err(error) =
+                    write_eeprom_bytes_verified(i2c, pd_port, service, offset, &erased).await
                 {
                     return usb_error_response(request_id, error.code(), error.message());
                 }
@@ -7399,12 +7677,16 @@ fn memory_record_length_from_header(header: &[u8], slot_size: usize) -> Option<u
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-async fn load_eeprom_memory_record(
+async fn load_eeprom_memory_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> (Option<MemoryRecord>, bool, bool, bool) {
+) -> (Option<MemoryRecord>, bool, bool, bool)
+where
+    PWM: SetDutyCycle,
+{
     let Some(address) = probe_eeprom_address(i2c) else {
         info!("memory restore skipped: eeprom unavailable");
         return (None, false, true, false);
@@ -7458,7 +7740,7 @@ async fn load_eeprom_memory_record(
             staging.bytes.fill(0xff);
             let header = &mut staging.bytes[..FPR2_HEADER_LEN];
             let candidate = match read_eeprom_bytes_chunked_with_pd(
-                i2c, pd_port, address, offset, header,
+                i2c, pd_port, service, address, offset, header,
             )
             .await
             {
@@ -7473,6 +7755,7 @@ async fn load_eeprom_memory_record(
                         match read_eeprom_bytes_chunked_with_pd(
                             i2c,
                             pd_port,
+                            service,
                             address,
                             offset.saturating_add(FPR2_HEADER_LEN as u16),
                             &mut staging.bytes[FPR2_HEADER_LEN..record_len],
@@ -7547,6 +7830,7 @@ async fn load_eeprom_memory_record(
             match read_eeprom_bytes_chunked_with_pd(
                 i2c,
                 pd_port,
+                service,
                 address,
                 offset,
                 &mut scratch.bytes[..probe_len],
@@ -7610,12 +7894,16 @@ fn merge_persist_records(domains: &[Option<PersistRecord>; 6]) -> Option<MemoryR
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-async fn load_legacy_eeprom_memory_record(
+async fn load_legacy_eeprom_memory_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> (Option<MemoryRecord>, bool) {
+) -> (Option<MemoryRecord>, bool)
+where
+    PWM: SetDutyCycle,
+{
     let Some(address) = probe_eeprom_address(i2c) else {
         return (None, true);
     };
@@ -7632,6 +7920,7 @@ async fn load_legacy_eeprom_memory_record(
         let candidate = read_legacy_record_stream(
             i2c,
             pd_port,
+            service,
             address,
             offset,
             length,
@@ -7656,17 +7945,21 @@ async fn load_legacy_eeprom_memory_record(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn read_legacy_record_stream(
+async fn read_legacy_record_stream<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     address: u8,
     offset: u16,
     slot_size: usize,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<MemoryRecord, ()> {
+) -> Result<MemoryRecord, ()>
+where
+    PWM: SetDutyCycle,
+{
     let mut header = [0u8; MEMORY_RECORD_HEADER_LEN];
-    read_eeprom_bytes_chunked_with_pd(i2c, pd_port, address, offset, &mut header).await?;
+    read_eeprom_bytes_chunked_with_pd(i2c, pd_port, service, address, offset, &mut header).await?;
     if header[..4] != *b"FPM1"
         || !matches!(header[4], 1 | 2 | 3 | 4 | MEMORY_RECORD_FORMAT_VERSION)
         || usize::from(header[5]) != MEMORY_RECORD_HEADER_LEN
@@ -7700,6 +7993,7 @@ async fn read_legacy_record_stream(
         read_eeprom_bytes_chunked_with_pd(
             i2c,
             pd_port,
+            service,
             address,
             tlv_offset,
             &mut scratch.bytes[..header_len],
@@ -7731,6 +8025,7 @@ async fn read_legacy_record_stream(
             read_eeprom_bytes_chunked_with_pd(
                 i2c,
                 pd_port,
+                service,
                 address,
                 value_offset,
                 &mut scratch.bytes[..chunk_len],
@@ -8038,15 +8333,16 @@ fn log_memory_commit_failure(
     } else {
         "PERSISTENCE_COMMIT_ATTEMPT_FAILED"
     };
-    let mut line = heapless::String::<192>::new();
+    let mut line = heapless::String::<256>::new();
     let _ = writeln!(
         line,
-        "{prefix} code={} phase={} attempt={} sequence={} slot={}",
+        "{prefix} code={} phase={} attempt={} sequence={} slot={} message={}",
         failure.code(),
         failure.phase,
         failure.attempt,
         failure.sequence,
         failure.slot.as_str(),
+        failure.message(),
     );
     sink.write_line(line.as_bytes());
 }
@@ -8057,27 +8353,62 @@ fn memory_record_write_chunk_len(absolute_offset: usize, remaining: usize) -> us
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn service_pd_during_eeprom_operation(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    _elapsed_ms: u64,
-    _commit_started_at: Instant,
-) {
-    let _ = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+struct EepromPdServiceContext<'a, PWM> {
+    last_pd_observation: &'a mut Option<PdStatusObservation>,
+    heater_pwm: &'a mut PWM,
+    last_heater_duty: &'a mut u8,
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn write_eeprom_persist_record(
+impl<'a, PWM> EepromPdServiceContext<'a, PWM>
+where
+    PWM: SetDutyCycle,
+{
+    fn new(
+        last_pd_observation: &'a mut Option<PdStatusObservation>,
+        heater_pwm: &'a mut PWM,
+        last_heater_duty: &'a mut u8,
+    ) -> Self {
+        Self {
+            last_pd_observation,
+            heater_pwm,
+            last_heater_duty,
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn service_pd_during_eeprom_operation<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-    elapsed_ms: u64,
-    commit_started_at: Instant,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+) where
+    PWM: SetDutyCycle,
+{
+    let observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+    *service.last_pd_observation = observation;
+    if !startup_pd_contract_ready(observation) {
+        // EEPROM and PD share I2C. A failed or contract-less service result
+        // must remove physical heater power before the caller resumes normal
+        // control work; the next explicit arm is required after recovery.
+        apply_heater_duty(service.heater_pwm, 0, service.last_heater_duty);
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn write_eeprom_persist_record<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     sequence: u32,
     data: &PersistDomainData,
     slot: PersistSlot,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<(), MemoryCommitError> {
+) -> Result<(), MemoryCommitError>
+where
+    PWM: SetDutyCycle,
+{
     let staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
     staging.bytes.fill(0xff);
     let record_len = encode_persist_record(sequence, data, staging.bytes)
@@ -8101,7 +8432,7 @@ async fn write_eeprom_persist_record(
         write_result.map_err(memory_commit_error_from_eeprom)?;
         written += chunk_len;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
-        service_pd_during_eeprom_operation(i2c, pd_port, elapsed_ms, commit_started_at).await;
+        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
     }
 
     let mut read = 0usize;
@@ -8119,7 +8450,7 @@ async fn write_eeprom_persist_record(
             return Err(MemoryCommitError::VerifyMismatch);
         }
         read += chunk_len;
-        service_pd_during_eeprom_operation(i2c, pd_port, elapsed_ms, commit_started_at).await;
+        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
     }
     let verified = decode_persist_record(&staging.bytes[..record_len])
         .map_err(|_| MemoryCommitError::VerifyUnreadable)?;
@@ -8131,16 +8462,20 @@ async fn write_eeprom_persist_record(
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-async fn commit_memory_config_now(
+async fn commit_memory_config_now<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-    elapsed_ms: u64,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    _elapsed_ms: u64,
     memory_sequence: &mut u32,
     memory_config: &MemoryConfig,
     domains_to_write: PersistDomainMask,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<(), MemoryCommitFailure> {
+) -> Result<(), MemoryCommitFailure>
+where
+    PWM: SetDutyCycle,
+{
     if domains_to_write.is_empty() {
         return Ok(());
     }
@@ -8148,7 +8483,6 @@ async fn commit_memory_config_now(
     expected_config.sanitize();
     let mut scratch = new_memory_io_scratch();
     let next_sequence = memory_sequence.saturating_add(1);
-    let commit_started_at = Instant::now();
     let domains = [
         (
             PersistDomainData::SafetyCalibration(SafetyCalibration::from_config(&expected_config)),
@@ -8190,8 +8524,7 @@ async fn commit_memory_config_now(
         let result = write_eeprom_persist_record(
             i2c,
             pd_port,
-            elapsed_ms,
-            commit_started_at,
+            service,
             next_sequence,
             data,
             slot,
@@ -8222,16 +8555,21 @@ async fn commit_memory_config_now(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn initialize_fpr2_defaults(
+async fn initialize_fpr2_defaults<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Option<u32> {
+) -> Option<u32>
+where
+    PWM: SetDutyCycle,
+{
     let mut sequence = 0;
     if commit_memory_config_now(
         i2c,
         pd_port,
+        service,
         0,
         &mut sequence,
         &flux_purr_firmware::memory::MemoryConfig::default(),
@@ -8254,8 +8592,7 @@ async fn initialize_fpr2_defaults(
         if let Err(error) = write_eeprom_persist_record(
             i2c,
             pd_port,
-            0,
-            Instant::now(),
+            service,
             marker_sequence,
             &marker,
             slot,
@@ -8280,18 +8617,23 @@ async fn initialize_fpr2_defaults(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn migrate_legacy_memory_config(
+async fn migrate_legacy_memory_config<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     legacy_sequence: u32,
     config: &MemoryConfig,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<u32, MemoryCommitFailure> {
+) -> Result<u32, MemoryCommitFailure>
+where
+    PWM: SetDutyCycle,
+{
     let mut sequence = legacy_sequence;
     commit_memory_config_now(
         i2c,
         pd_port,
+        service,
         0,
         &mut sequence,
         config,
@@ -8310,8 +8652,7 @@ async fn migrate_legacy_memory_config(
         write_eeprom_persist_record(
             i2c,
             pd_port,
-            0,
-            Instant::now(),
+            service,
             marker_sequence,
             &prepared,
             slot,
@@ -8319,24 +8660,32 @@ async fn migrate_legacy_memory_config(
             record_staging,
         )
         .await
-        .map_err(|error| MemoryCommitFailure {
-            error,
-            phase: "prepared",
-            attempt: 1,
-            sequence: marker_sequence,
-            domain: PersistDomain::LayoutMarker,
-            slot,
+        .map_err(|error| {
+            let failure = MemoryCommitFailure {
+                error,
+                phase: "prepared",
+                attempt: 1,
+                sequence: marker_sequence,
+                domain: PersistDomain::LayoutMarker,
+                slot,
+            };
+            log_memory_commit_failure(persistence_log_sink, failure, true);
+            failure
         })?;
     }
-    invalidate_legacy_v5_magic(i2c, pd_port, 0, Instant::now(), &mut scratch)
+    invalidate_legacy_v5_magic(i2c, pd_port, service, &mut scratch)
         .await
-        .map_err(|error| MemoryCommitFailure {
-            error,
-            phase: "invalidate",
-            attempt: 1,
-            sequence: marker_sequence,
-            domain: PersistDomain::LayoutMarker,
-            slot: PersistSlot::Single,
+        .map_err(|error| {
+            let failure = MemoryCommitFailure {
+                error,
+                phase: "invalidate",
+                attempt: 1,
+                sequence: marker_sequence,
+                domain: PersistDomain::LayoutMarker,
+                slot: PersistSlot::Single,
+            };
+            log_memory_commit_failure(persistence_log_sink, failure, true);
+            failure
         })?;
     let active = PersistDomainData::LayoutMarker(LayoutMarker {
         generation: marker_sequence,
@@ -8346,8 +8695,7 @@ async fn migrate_legacy_memory_config(
         write_eeprom_persist_record(
             i2c,
             pd_port,
-            0,
-            Instant::now(),
+            service,
             marker_sequence,
             &active,
             slot,
@@ -8355,26 +8703,34 @@ async fn migrate_legacy_memory_config(
             record_staging,
         )
         .await
-        .map_err(|error| MemoryCommitFailure {
-            error,
-            phase: "active",
-            attempt: 1,
-            sequence: marker_sequence,
-            domain: PersistDomain::LayoutMarker,
-            slot,
+        .map_err(|error| {
+            let failure = MemoryCommitFailure {
+                error,
+                phase: "active",
+                attempt: 1,
+                sequence: marker_sequence,
+                domain: PersistDomain::LayoutMarker,
+                slot,
+            };
+            log_memory_commit_failure(persistence_log_sink, failure, true);
+            failure
         })?;
     }
     Ok(marker_sequence)
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn recover_prepared_fpr2_layout(
+async fn recover_prepared_fpr2_layout<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     sequence: u32,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<(), MemoryCommitFailure> {
+) -> Result<(), MemoryCommitFailure>
+where
+    PWM: SetDutyCycle,
+{
     let mut scratch = new_memory_io_scratch();
     let active = PersistDomainData::LayoutMarker(LayoutMarker {
         generation: sequence,
@@ -8384,8 +8740,7 @@ async fn recover_prepared_fpr2_layout(
         if let Err(error) = write_eeprom_persist_record(
             i2c,
             pd_port,
-            0,
-            Instant::now(),
+            service,
             sequence,
             &active,
             slot,
@@ -8410,13 +8765,15 @@ async fn recover_prepared_fpr2_layout(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn invalidate_legacy_v5_magic(
+async fn invalidate_legacy_v5_magic<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-    elapsed_ms: u64,
-    commit_started_at: Instant,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     scratch: &mut MemoryIoScratch,
-) -> Result<(), MemoryCommitError> {
+) -> Result<(), MemoryCommitError>
+where
+    PWM: SetDutyCycle,
+{
     let Some(address) = probe_eeprom_address(i2c) else {
         return Err(MemoryCommitError::WriteAddressNoAck);
     };
@@ -8429,7 +8786,7 @@ async fn invalidate_legacy_v5_magic(
         };
         result.map_err(memory_commit_error_from_eeprom)?;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
-        service_pd_during_eeprom_operation(i2c, pd_port, elapsed_ms, commit_started_at).await;
+        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
     }
     Ok(())
 }
@@ -13020,15 +13377,23 @@ fn poll_usb_early_control(
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     memory_config: &MemoryConfig,
 ) {
+    let mut bytes_processed = 0_u16;
     loop {
+        if bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET {
+            break;
+        }
         match usb.read_byte() {
             Ok(b'\n') => {
+                bytes_processed = bytes_processed.saturating_add(1);
                 let response = usb_early_response(rx_line.as_str(), memory_config);
                 usb_write_response_frame(usb, &response, tx_buf);
                 rx_line.clear();
             }
-            Ok(b'\r') => {}
+            Ok(b'\r') => {
+                bytes_processed = bytes_processed.saturating_add(1);
+            }
             Ok(byte) => {
+                bytes_processed = bytes_processed.saturating_add(1);
                 if rx_line.push(char::from(byte)).is_err() {
                     rx_line.clear();
                 }
@@ -13239,7 +13604,7 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_control_line(
+async fn process_control_line<PWM>(
     line: &str,
     controller: &mut FrontPanelInputController,
     ui_state: &mut FrontPanelUiState,
@@ -13253,6 +13618,7 @@ async fn process_control_line(
     pd_i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_controller: ControllerKind,
     pd_port: &mut PdPort,
+    eeprom_pd_service: &mut EepromPdServiceContext<'_, PWM>,
     calibration_runtime_state: &mut CalibrationRuntimeState,
     thermal_plant_workspace: &mut CalibrationThermalPlantWorkspace,
     elapsed_ms: u64,
@@ -13282,7 +13648,10 @@ async fn process_control_line(
     heater_control_timing: HeaterControlTiming,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> (bool, UsbFrame) {
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
     let mut needs_redraw = false;
     let active_thermal_control_profile =
         active_thermal_control_profile(memory_config, *thermal_control_profile_preview, manual_pps);
@@ -13770,6 +14139,7 @@ async fn process_control_line(
                     match commit_memory_config_now(
                         pd_i2c,
                         pd_port,
+                        eeprom_pd_service,
                         elapsed_ms,
                         memory_sequence,
                         memory_config,
@@ -13919,6 +14289,7 @@ async fn process_control_line(
                 if let Err(error) = commit_memory_config_now(
                     pd_i2c,
                     pd_port,
+                    eeprom_pd_service,
                     elapsed_ms,
                     memory_sequence,
                     memory_config,
@@ -14005,9 +14376,15 @@ async fn process_control_line(
                 calibration_job_canceled(calibration_runtime_state, manual_pps);
             }
             needs_redraw = true;
-            let response =
-                usb_eeprom_maintenance_response(request_id, command, pd_i2c, pd_port, elapsed_ms)
-                    .await;
+            let response = usb_eeprom_maintenance_response(
+                request_id,
+                command,
+                pd_i2c,
+                pd_port,
+                eeprom_pd_service,
+                elapsed_ms,
+            )
+            .await;
             if matches!(&response, UsbFrame::Response { ok: true, .. }) {
                 apply_successful_eeprom_maintenance_operation(
                     op,
@@ -14309,10 +14686,15 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn present_initial_frontpanel_ui<'a, BUS, DC, RST>(
+async fn present_initial_frontpanel_ui<'a, BUS, DC, RST, PWM>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     state: &FrontPanelUiState,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
 ) -> bool
 where
     BUS: embedded_hal_async::spi::SpiDevice,
@@ -14320,10 +14702,19 @@ where
     RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
     DC::Error: core::fmt::Debug,
+    PWM: SetDutyCycle,
 {
     if !matches!(
-        with_timeout(DISPLAY_IO_TIMEOUT, flush_ui(display, canvas, state)).await,
-        Ok(Ok(()))
+        run_display_operation_with_pd_and_heater(
+            flush_ui(display, canvas, state),
+            i2c,
+            pd_port,
+            last_pd_observation,
+            heater_pwm,
+            last_heater_duty,
+        )
+        .await,
+        Some(Ok(()))
     ) {
         warn!("frontpanel runtime presentation failed");
         return false;
@@ -14341,8 +14732,8 @@ async fn run_display_operation_with_pd<F>(
     operation: F,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-    mut last_pd_observation: Option<PdStatusObservation>,
-) -> (Option<F::Output>, Option<PdStatusObservation>)
+    last_pd_observation: &mut Option<PdStatusObservation>,
+) -> Option<F::Output>
 where
     F: Future,
 {
@@ -14355,13 +14746,51 @@ where
         )
         .await
         {
-            Either::First(output) => return (Some(output), last_pd_observation),
+            Either::First(output) => return Some(output),
             Either::Second(_) => {
-                if let Some(observation) = read_pd_status(i2c, pd_port, PdTimestamp::now()).await {
-                    last_pd_observation = Some(observation);
+                *last_pd_observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+                if Instant::now().saturating_duration_since(started_at) >= DISPLAY_IO_TIMEOUT {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn run_display_operation_with_pd_and_heater<F, PWM>(
+    operation: F,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
+) -> Option<F::Output>
+where
+    F: Future,
+    PWM: SetDutyCycle,
+{
+    let mut pinned_operation = core::pin::pin!(operation);
+    let started_at = Instant::now();
+    loop {
+        match select(
+            pinned_operation.as_mut(),
+            EmbassyTimer::after_millis(PD_RUNTIME_SERVICE_INTERVAL_MS),
+        )
+        .await
+        {
+            Either::First(output) => return Some(output),
+            Either::Second(_) => {
+                let observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+                *last_pd_observation = observation;
+                if !startup_pd_contract_ready(observation) {
+                    // A failed status read is not proof of a detach, but it is
+                    // never authorization to keep driving the heater while a
+                    // display transfer is still in flight.
+                    apply_heater_duty(heater_pwm, 0, last_heater_duty);
                 }
                 if Instant::now().saturating_duration_since(started_at) >= DISPLAY_IO_TIMEOUT {
-                    return (None, last_pd_observation);
+                    return None;
                 }
             }
         }
@@ -14459,6 +14888,9 @@ async fn run_key_test_runtime<'a, BUS, DC, RST>(
     canvas: &mut DisplayCanvas,
     inputs: FrontPanelInputs<'a>,
     status_light_started_ms: u64,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
 ) -> Result<(), ()>
 where
     BUS: embedded_hal_async::spi::SpiDevice,
@@ -14474,10 +14906,14 @@ where
     let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
-    if !matches!(
-        with_timeout(DISPLAY_IO_TIMEOUT, flush_ui(display, canvas, &ui_state)).await,
-        Ok(Ok(()))
-    ) {
+    let initial_flush_result = run_display_operation_with_pd(
+        flush_ui(display, canvas, &ui_state),
+        i2c,
+        pd_port,
+        last_pd_observation,
+    )
+    .await;
+    if !matches!(initial_flush_result, Some(Ok(()))) {
         warn!("initial key-test UI failed; entering recovery");
         return Err(());
     }
@@ -14496,7 +14932,10 @@ where
                 StatusLightState::Ready
             },
         );
-        EmbassyTimer::after_millis(20).await;
+        for _ in 0..(20 / PD_RUNTIME_SERVICE_INTERVAL_MS) {
+            EmbassyTimer::after_millis(PD_RUNTIME_SERVICE_INTERVAL_MS).await;
+            *last_pd_observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+        }
         elapsed_ms = elapsed_ms.saturating_add(20);
 
         let raw_state = inputs.sample();
@@ -14528,10 +14967,14 @@ where
         }
 
         if needs_redraw {
-            if !matches!(
-                with_timeout(DISPLAY_IO_TIMEOUT, flush_ui(display, canvas, &ui_state)).await,
-                Ok(Ok(()))
-            ) {
+            let flush_result = run_display_operation_with_pd(
+                flush_ui(display, canvas, &ui_state),
+                i2c,
+                pd_port,
+                last_pd_observation,
+            )
+            .await;
+            if !matches!(flush_result, Some(Ok(()))) {
                 warn!("key-test UI refresh failed; entering recovery");
                 return Err(());
             }
@@ -14661,13 +15104,6 @@ async fn main(_spawner: Spawner) {
         initial_pd_observation =
             read_pd_status(&mut pd_i2c, &mut pd_port, PdTimestamp::now()).await;
     }
-    #[cfg(feature = "web_serial")]
-    poll_usb_early_control(
-        &mut usb_serial,
-        &mut usb_rx_line,
-        usb_tx_buf,
-        &usb_boot_memory_config,
-    );
     let mut pd_contract_ready = startup_pd_contract_ready(initial_pd_observation);
     if !pd_contract_ready {
         #[cfg(feature = "web_serial")]
@@ -14736,16 +15172,13 @@ async fn main(_spawner: Spawner) {
     );
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_start\n");
-    let (display_init_result, display_init_observation) = run_display_operation_with_pd(
+    let display_init_result = run_display_operation_with_pd(
         display.init(),
         &mut pd_i2c,
         &mut pd_port,
-        initial_pd_observation,
+        &mut initial_pd_observation,
     )
     .await;
-    if display_init_observation.is_some() {
-        initial_pd_observation = display_init_observation;
-    }
     let display_ready = matches!(display_init_result, Some(Ok(())));
     if !display_ready {
         #[cfg(feature = "web_serial")]
@@ -14780,16 +15213,13 @@ async fn main(_spawner: Spawner) {
     );
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_start\n");
-    let (startup_flush_result, startup_flush_observation) = run_display_operation_with_pd(
+    let startup_flush_result = run_display_operation_with_pd(
         display.flush(),
         &mut pd_i2c,
         &mut pd_port,
-        initial_pd_observation,
+        &mut initial_pd_observation,
     )
     .await;
-    if startup_flush_observation.is_some() {
-        initial_pd_observation = startup_flush_observation;
-    }
     let startup_flush_ready = match startup_flush_result {
         Some(Ok(())) => true,
         Some(Err(gc9d01::Error::Bus(_))) => {
@@ -14823,7 +15253,7 @@ async fn main(_spawner: Spawner) {
     }
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_complete\n");
-    info!("backlight active-low: gpio13 low -> on before PD and display initialization");
+    info!("backlight active-low: gpio13 low -> on");
     let input_cfg = InputConfig::default().with_pull(Pull::Up);
     let inputs = FrontPanelInputs {
         center: Input::new(peripherals.GPIO0, input_cfg),
@@ -14847,6 +15277,7 @@ async fn main(_spawner: Spawner) {
     );
 
     if runtime_mode == FrontPanelRuntimeMode::KeyTest {
+        let mut key_test_last_pd_observation = initial_pd_observation;
         let mut _heater_safe = Output::new(peripherals.GPIO47, Level::Low, OutputConfig::default());
         _heater_safe.set_low();
         let mut _fan_enable_safe =
@@ -14856,7 +15287,17 @@ async fn main(_spawner: Spawner) {
             Output::new(peripherals.GPIO36, Level::Low, OutputConfig::default());
         _fan_pwm_safe.set_low();
         info!("key-test runtime ready: gpio47/gpio35/gpio36 held safe-off without PD/RTD bring-up");
-        match run_key_test_runtime(&mut display, canvas, inputs, status_light_started_ms).await {
+        match run_key_test_runtime(
+            &mut display,
+            canvas,
+            inputs,
+            status_light_started_ms,
+            &mut pd_i2c,
+            &mut pd_port,
+            &mut key_test_last_pd_observation,
+        )
+        .await
+        {
             Err(()) => {
                 #[cfg(feature = "web_serial")]
                 run_usb_recovery_control_loop(
@@ -14929,6 +15370,7 @@ async fn main(_spawner: Spawner) {
         .expect("failed to derive heater PWM timer clock");
     mcpwm.timer1.start(heater_timer_cfg);
     let _ = heater_pwm.set_duty_cycle_percent(0);
+    let mut last_heater_duty = 0_u8;
 
     mcpwm.operator2.set_timer(&mcpwm.timer2);
     #[cfg(feature = "buzzer-observe")]
@@ -14983,10 +15425,24 @@ async fn main(_spawner: Spawner) {
         mut eeprom_data_incompatible,
         mut eeprom_required,
         mut prepared_layout_recovery_pending,
-    ) = if let Some(scratch) = boot_memory_io_scratch.as_mut() {
-        load_eeprom_memory_record(&mut pd_i2c, &mut pd_port, scratch, eeprom_record_staging).await
-    } else {
-        (None, false, true, false)
+    ) = {
+        let mut eeprom_pd_service = EepromPdServiceContext::new(
+            &mut initial_pd_observation,
+            &mut heater_pwm,
+            &mut last_heater_duty,
+        );
+        if let Some(scratch) = boot_memory_io_scratch.as_mut() {
+            load_eeprom_memory_record(
+                &mut pd_i2c,
+                &mut pd_port,
+                &mut eeprom_pd_service,
+                scratch,
+                eeprom_record_staging,
+            )
+            .await
+        } else {
+            (None, false, true, false)
+        }
     };
     let mut eeprom_restore_pending = eeprom_data_incompatible || prepared_layout_recovery_pending;
     if !eeprom_required && !eeprom_data_incompatible && eeprom_memory_record.is_none() {
@@ -14995,9 +15451,15 @@ async fn main(_spawner: Spawner) {
             let init_log_sink = &mut usb_serial as &mut dyn PersistenceLogSink;
             #[cfg(not(feature = "web_serial"))]
             let init_log_sink = &mut persistence_log_sink as &mut dyn PersistenceLogSink;
+            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                &mut initial_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
             initialize_fpr2_defaults(
                 &mut pd_i2c,
                 &mut pd_port,
+                &mut eeprom_pd_service,
                 &mut *init_log_sink,
                 eeprom_record_staging,
             )
@@ -15045,9 +15507,15 @@ async fn main(_spawner: Spawner) {
             let recovery_log_sink = &mut usb_serial as &mut dyn PersistenceLogSink;
             #[cfg(not(feature = "web_serial"))]
             let recovery_log_sink = &mut persistence_log_sink as &mut dyn PersistenceLogSink;
+            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                &mut initial_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
             recover_prepared_fpr2_layout(
                 &mut pd_i2c,
                 &mut pd_port,
+                &mut eeprom_pd_service,
                 memory_sequence,
                 &mut *recovery_log_sink,
                 eeprom_record_staging,
@@ -15172,7 +15640,6 @@ async fn main(_spawner: Spawner) {
         ),
     };
     let mut hold_pps_governor = HoldPpsGovernor::new();
-    let mut last_heater_duty = 0_u8;
     match heater_power_backend {
         HeaterPowerBackend::PpsMos {
             pps_min_mv,
@@ -15241,12 +15708,18 @@ async fn main(_spawner: Spawner) {
 
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_rtd_start\n");
-    let initial_rtd_sample = read_rtd_sample(
+    let initial_rtd_sample = read_rtd_sample_with_pd(
         &mut adc1,
         &mut rtd_adc_pin,
         adc_curve.as_ref(),
         &memory_config,
-    );
+        &mut pd_i2c,
+        &mut pd_port,
+        &mut last_pd_observation,
+        &mut heater_pwm,
+        &mut last_heater_duty,
+    )
+    .await;
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_rtd_complete\n");
     let mut controller = FrontPanelInputController::new(
@@ -15336,12 +15809,19 @@ async fn main(_spawner: Spawner) {
     }
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_vin_start\n");
-    if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) = read_calibrated_vin_mv(
+    if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) = read_calibrated_vin_mv_with_pd(
         &mut adc1,
         &mut vin_adc_pin,
         adc_curve.as_ref(),
         &memory_config,
-    ) {
+        &mut pd_i2c,
+        &mut pd_port,
+        &mut last_pd_observation,
+        &mut heater_pwm,
+        &mut last_heater_duty,
+    )
+    .await
+    {
         latest_vin_raw_adc_mv = raw_adc_mv;
         latest_vin_mv = vin_mv;
         info!(
@@ -15461,8 +15941,17 @@ async fn main(_spawner: Spawner) {
         &mut usb_serial,
         b"boot_stage=display_runtime_presentation_start\n",
     );
-    let initial_frontpanel_ui_ready =
-        present_initial_frontpanel_ui(&mut display, canvas, &ui_state).await;
+    let initial_frontpanel_ui_ready = present_initial_frontpanel_ui(
+        &mut display,
+        canvas,
+        &ui_state,
+        &mut pd_i2c,
+        &mut pd_port,
+        &mut last_pd_observation,
+        &mut heater_pwm,
+        &mut last_heater_duty,
+    )
+    .await;
     #[cfg(feature = "web_serial")]
     if initial_frontpanel_ui_ready {
         let _ = usb_write_bytes_bounded(
@@ -15491,9 +15980,15 @@ async fn main(_spawner: Spawner) {
         // Yield between slots so USB early-control and the status-light task
         // remain serviceable while the explicit restore lock is visible.
         if let Some(scratch) = boot_memory_io_scratch.as_mut() {
+            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                &mut last_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
             let (legacy_record, read_failed) = load_legacy_eeprom_memory_record(
                 &mut pd_i2c,
                 &mut pd_port,
+                &mut eeprom_pd_service,
                 scratch,
                 eeprom_record_staging,
             )
@@ -15507,9 +16002,15 @@ async fn main(_spawner: Spawner) {
                     #[cfg(not(feature = "web_serial"))]
                     let migration_log_sink =
                         &mut persistence_log_sink as &mut dyn PersistenceLogSink;
+                    let mut eeprom_pd_service = EepromPdServiceContext::new(
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    );
                     migrate_legacy_memory_config(
                         &mut pd_i2c,
                         &mut pd_port,
+                        &mut eeprom_pd_service,
                         record.sequence,
                         &memory_config,
                         &mut *migration_log_sink,
@@ -15650,46 +16151,15 @@ async fn main(_spawner: Spawner) {
                 last_pd_status_log_key = pd_status_log_key(current_pd_observation);
             }
             last_pd_observation = current_pd_observation;
-            let current_pd_contract_ready = startup_pd_contract_ready(current_pd_observation);
-            if pd_contract_ready != current_pd_contract_ready {
-                let pd_was_ready = pd_contract_ready;
-                pd_contract_ready = current_pd_contract_ready;
-                needs_redraw = true;
-                if pd_contract_ready {
-                    if disarm_stale_heater_arm_after_pd_transition(
-                        pd_was_ready,
-                        pd_contract_ready,
-                        &mut ui_state,
-                        &mut calibration_runtime_state,
-                    ) {
-                        needs_redraw = true;
-                        info!(
-                            "PD contract became ready; discarded pre-ready heater arm and require a new explicit arm"
-                        );
-                    }
-                    info!("PD contract became ready; released startup heater interlock");
-                } else {
-                    info!("PD contract became unavailable; heater interlocked");
-                }
-            }
-            if !current_pd_contract_ready {
-                // A stale observation must never leave GPIO47 powered while
-                // the protocol state is unavailable. The next explicit arm is
-                // required after a later contract recovery.
-                if ui_state.heater_enabled
-                    || calibration_runtime_state.heater_enabled
-                    || last_heater_duty != 0
-                    || ui_state.heater_output_percent != 0
-                {
-                    ui_state.heater_enabled = false;
-                    ui_state.heater_output_percent = 0;
-                    calibration_runtime_state.heater_enabled = false;
-                    manual_pps_state.fail(ManualPpsError::PdNotReady);
-                    apply_heater_duty(&mut heater_pwm, 0, &mut last_heater_duty);
-                    needs_redraw = true;
-                    info!("PD contract interlock -> heater output zero");
-                }
-            }
+            needs_redraw |= apply_pd_contract_observation(
+                current_pd_observation,
+                &mut pd_contract_ready,
+                &mut ui_state,
+                &mut calibration_runtime_state,
+                &mut manual_pps_state,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
         }
 
         let raw_state = inputs.sample();
@@ -15699,6 +16169,8 @@ async fn main(_spawner: Spawner) {
             ui_state.gesture_capabilities(),
         );
         let route_before_usb_control = ui_state.route;
+        #[cfg(feature = "net_http")]
+        let mut control_command_processed = false;
         #[cfg(feature = "web_serial")]
         let mut usb_bytes_processed = 0_u16;
         #[cfg(feature = "web_serial")]
@@ -15708,12 +16180,17 @@ async fn main(_spawner: Spawner) {
             }
             match usb_serial.read_byte() {
                 Ok(b'\n') => {
+                    let mut eeprom_pd_service = EepromPdServiceContext::new(
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    );
                     if let Some(response) = process_eeprom_snapshot_line(
                         usb_rx_line.as_str(),
                         &mut eeprom_snapshot_session,
                         &mut pd_i2c,
                         &mut pd_port,
-                        last_heater_duty,
+                        &mut eeprom_pd_service,
                         &mut memory_commit_due_ms,
                         elapsed_ms,
                     )
@@ -15730,8 +16207,19 @@ async fn main(_spawner: Spawner) {
                         }
                         write_eeprom_snapshot_response(&mut usb_serial, &response, usb_tx_buf);
                         usb_rx_line.clear();
+                        #[cfg(feature = "net_http")]
+                        {
+                            control_command_processed = true;
+                        }
                         break;
                     }
+                    let pd_observation_for_control = last_pd_observation;
+                    let heater_duty_for_control = last_heater_duty;
+                    let mut eeprom_pd_service = EepromPdServiceContext::new(
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    );
                     let (control_needs_redraw, response) = process_control_line(
                         usb_rx_line.as_str(),
                         &mut controller,
@@ -15746,10 +16234,11 @@ async fn main(_spawner: Spawner) {
                         &mut pd_i2c,
                         pd_port.controller_kind(),
                         &mut pd_port,
+                        &mut eeprom_pd_service,
                         &mut calibration_runtime_state,
                         thermal_plant_workspace,
                         elapsed_ms,
-                        last_pd_observation,
+                        pd_observation_for_control,
                         &mut heater_power_backend,
                         &mut heater_controller,
                         last_pid_snapshot,
@@ -15771,7 +16260,7 @@ async fn main(_spawner: Spawner) {
                         latest_rtd_raw_adc_max_mv,
                         latest_vin_raw_adc_mv,
                         latest_vin_mv,
-                        last_heater_duty,
+                        heater_duty_for_control,
                         heater_control_timing,
                         &mut usb_serial,
                         eeprom_record_staging,
@@ -15793,6 +16282,10 @@ async fn main(_spawner: Spawner) {
                     .await;
                     usb_write_response_frame(&mut usb_serial, &response, usb_tx_buf);
                     usb_rx_line.clear();
+                    #[cfg(feature = "net_http")]
+                    {
+                        control_command_processed = true;
+                    }
                     break;
                 }
                 Ok(b'\r') => {
@@ -15815,153 +16308,178 @@ async fn main(_spawner: Spawner) {
         }
 
         #[cfg(feature = "net_http")]
-        if let Some(command) = flux_purr_firmware::net::try_receive_command() {
-            let request_id = command.request_id;
-            let response_slot = command.response_slot;
-            let is_mutation = matches!(
-                command.method,
-                HttpMethod::Post | HttpMethod::Put | HttpMethod::Delete
-            );
-            if is_mutation && !flux_purr_firmware::net::command_lease_is_active(&command).await {
-                flux_purr_firmware::net::respond_to_command(
-                    response_slot,
-                    request_id,
-                    409,
-                    lan_error_json(
-                        "lease_expired",
-                        "The LAN lease expired before this command reached the control loop.",
-                    ),
-                    false,
+        if !control_command_processed {
+            if let Some(command) = flux_purr_firmware::net::try_receive_command() {
+                let request_id = command.request_id;
+                let response_slot = command.response_slot;
+                let is_mutation = matches!(
+                    command.method,
+                    HttpMethod::Post | HttpMethod::Put | HttpMethod::Delete
                 );
-                continue;
-            }
-            if is_mutation
-                && flux_purr_firmware::net_http::validate_control_revision(
-                    command.expected_revision,
-                    flux_purr_firmware::net::current_control_revision(),
+                if is_mutation && !flux_purr_firmware::net::command_lease_is_active(&command).await
+                {
+                    flux_purr_firmware::net::respond_to_command(
+                        response_slot,
+                        request_id,
+                        409,
+                        lan_error_json(
+                            "lease_expired",
+                            "The LAN lease expired before this command reached the control loop.",
+                        ),
+                        false,
+                    );
+                    continue;
+                }
+                if is_mutation
+                    && flux_purr_firmware::net_http::validate_control_revision(
+                        command.expected_revision,
+                        flux_purr_firmware::net::current_control_revision(),
+                    )
+                    .is_err()
+                {
+                    flux_purr_firmware::net::respond_to_command(
+                        response_slot,
+                        request_id,
+                        409,
+                        lan_error_json(
+                            "stale_write",
+                            "The control state changed after this client last read it.",
+                        ),
+                        false,
+                    );
+                    continue;
+                }
+                let direct_response = match (command.endpoint, command.method) {
+                    (LanEndpoint::Identity, HttpMethod::Get) => Some(lan_json_response(
+                        &flux_purr_firmware::net::lan_identity().await,
+                    )),
+                    (LanEndpoint::Network, HttpMethod::Get) => Some(lan_json_response(
+                        &flux_purr_firmware::net::lan_network_summary().await,
+                    )),
+                    _ => None,
+                };
+                if let Some((status, body)) = direct_response {
+                    flux_purr_firmware::net::respond_to_command(
+                        response_slot,
+                        request_id,
+                        status,
+                        body,
+                        false,
+                    );
+                    continue;
+                }
+                let line = match lan_command_to_control_line(&command) {
+                    Ok(line) => line,
+                    Err(message) => {
+                        flux_purr_firmware::net::respond_to_command(
+                            response_slot,
+                            request_id,
+                            400,
+                            lan_error_json("unsupported_lan_command", message),
+                            false,
+                        );
+                        continue;
+                    }
+                };
+                let pd_observation_for_control = last_pd_observation;
+                let heater_duty_for_control = last_heater_duty;
+                let mut eeprom_pd_service = EepromPdServiceContext::new(
+                    &mut last_pd_observation,
+                    &mut heater_pwm,
+                    &mut last_heater_duty,
+                );
+                let (control_needs_redraw, response) = process_control_line(
+                    line.as_str(),
+                    &mut controller,
+                    &mut ui_state,
+                    &mut memory_config,
+                    &mut last_persisted_memory_config,
+                    &mut preview_heater_curve,
+                    &mut memory_commit_due_ms,
+                    &mut memory_sequence,
+                    persistence_source,
+                    persistence_record_state,
+                    &mut pd_i2c,
+                    pd_port.controller_kind(),
+                    &mut pd_port,
+                    &mut eeprom_pd_service,
+                    &mut calibration_runtime_state,
+                    thermal_plant_workspace,
+                    elapsed_ms,
+                    pd_observation_for_control,
+                    &mut heater_power_backend,
+                    &mut heater_controller,
+                    last_pid_snapshot,
+                    &mut manual_pps_state,
+                    fan_command,
+                    current_rtd_fault,
+                    &mut overtemp_attention_acknowledged,
+                    &mut attention_pending_after_fault_clear,
+                    &mut overtemp_forced_fan_active,
+                    &mut next_attention_reminder_ms,
+                    &mut buzzer,
+                    &mut thermal_control_profile_preview,
+                    last_raw_state,
+                    latest_display_temp_c,
+                    latest_temp_c,
+                    control_measurement_guarded,
+                    latest_rtd_raw_adc_mv,
+                    latest_rtd_raw_adc_min_mv,
+                    latest_rtd_raw_adc_max_mv,
+                    latest_vin_raw_adc_mv,
+                    latest_vin_mv,
+                    heater_duty_for_control,
+                    heater_control_timing,
+                    &mut usb_serial,
+                    eeprom_record_staging,
                 )
-                .is_err()
-            {
-                flux_purr_firmware::net::respond_to_command(
-                    response_slot,
-                    request_id,
-                    409,
-                    lan_error_json(
-                        "stale_write",
-                        "The control state changed after this client last read it.",
-                    ),
-                    false,
+                .await;
+                needs_redraw |= control_needs_redraw;
+                needs_redraw |= disarm_pending_thermal_plant_output(
+                    &mut calibration_runtime_state,
+                    &mut heater_power_backend,
+                    &mut manual_pps_state,
+                    &mut pd_i2c,
+                    &mut pd_port,
+                    &mut heater_pwm,
+                    &mut hold_pps_governor,
+                    &mut ui_state,
+                    &mut last_heater_duty,
+                    latest_vin_mv,
+                )
+                .await;
+                let (status, body) = lan_frame_response(
+                    &response,
+                    flux_purr_firmware::net::lan_network_summary().await,
                 );
-                continue;
-            }
-            let direct_response = match (command.endpoint, command.method) {
-                (LanEndpoint::Identity, HttpMethod::Get) => Some(lan_json_response(
-                    &flux_purr_firmware::net::lan_identity().await,
-                )),
-                (LanEndpoint::Network, HttpMethod::Get) => Some(lan_json_response(
-                    &flux_purr_firmware::net::lan_network_summary().await,
-                )),
-                _ => None,
-            };
-            if let Some((status, body)) = direct_response {
                 flux_purr_firmware::net::respond_to_command(
                     response_slot,
                     request_id,
                     status,
                     body,
-                    false,
+                    is_mutation,
                 );
-                continue;
             }
-            let line = match lan_command_to_control_line(&command) {
-                Ok(line) => line,
-                Err(message) => {
-                    flux_purr_firmware::net::respond_to_command(
-                        response_slot,
-                        request_id,
-                        400,
-                        lan_error_json("unsupported_lan_command", message),
-                        false,
-                    );
-                    continue;
-                }
-            };
-            let (control_needs_redraw, response) = process_control_line(
-                line.as_str(),
-                &mut controller,
-                &mut ui_state,
-                &mut memory_config,
-                &mut last_persisted_memory_config,
-                &mut preview_heater_curve,
-                &mut memory_commit_due_ms,
-                &mut memory_sequence,
-                persistence_source,
-                persistence_record_state,
-                &mut pd_i2c,
-                pd_port.controller_kind(),
-                &mut pd_port,
-                &mut calibration_runtime_state,
-                thermal_plant_workspace,
-                elapsed_ms,
-                last_pd_observation,
-                &mut heater_power_backend,
-                &mut heater_controller,
-                last_pid_snapshot,
-                &mut manual_pps_state,
-                fan_command,
-                current_rtd_fault,
-                &mut overtemp_attention_acknowledged,
-                &mut attention_pending_after_fault_clear,
-                &mut overtemp_forced_fan_active,
-                &mut next_attention_reminder_ms,
-                &mut buzzer,
-                &mut thermal_control_profile_preview,
-                last_raw_state,
-                latest_display_temp_c,
-                latest_temp_c,
-                control_measurement_guarded,
-                latest_rtd_raw_adc_mv,
-                latest_rtd_raw_adc_min_mv,
-                latest_rtd_raw_adc_max_mv,
-                latest_vin_raw_adc_mv,
-                latest_vin_mv,
-                last_heater_duty,
-                heater_control_timing,
-                &mut usb_serial,
-                eeprom_record_staging,
-            )
-            .await;
-            needs_redraw |= control_needs_redraw;
-            needs_redraw |= disarm_pending_thermal_plant_output(
-                &mut calibration_runtime_state,
-                &mut heater_power_backend,
-                &mut manual_pps_state,
-                &mut pd_i2c,
-                &mut pd_port,
-                &mut heater_pwm,
-                &mut hold_pps_governor,
-                &mut ui_state,
-                &mut last_heater_duty,
-                latest_vin_mv,
-            )
-            .await;
-            let (status, body) = lan_frame_response(
-                &response,
-                flux_purr_firmware::net::lan_network_summary().await,
-            );
-            flux_purr_firmware::net::respond_to_command(
-                response_slot,
-                request_id,
-                status,
-                body,
-                is_mutation,
-            );
         }
         #[cfg(feature = "net_http")]
         if let Some(token) = flux_purr_firmware::net::take_persisted_token_change().await {
             memory_config.lan_pairing_token = token;
             memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
         }
+
+        // EEPROM/display work may have serviced PD while the normal deadline
+        // gate was suspended. Reconcile that observation before any thermal,
+        // UI, or LAN state is consumed so a failed read cannot authorize stale
+        // heater intent.
+        needs_redraw |= apply_pd_contract_observation(
+            last_pd_observation,
+            &mut pd_contract_ready,
+            &mut ui_state,
+            &mut calibration_runtime_state,
+            &mut manual_pps_state,
+            &mut heater_pwm,
+            &mut last_heater_duty,
+        );
 
         needs_redraw |= disarm_pending_thermal_plant_output(
             &mut calibration_runtime_state,
@@ -16082,6 +16600,11 @@ async fn main(_spawner: Spawner) {
                 let retry_format_recovery = retry_blank_initialization
                     || prepared_layout_recovery_pending
                     || eeprom_data_incompatible;
+                let mut eeprom_pd_service = EepromPdServiceContext::new(
+                    &mut last_pd_observation,
+                    &mut heater_pwm,
+                    &mut last_heater_duty,
+                );
                 let retry_result = {
                     #[cfg(feature = "web_serial")]
                     let retry_log_sink = &mut usb_serial as &mut dyn PersistenceLogSink;
@@ -16091,6 +16614,7 @@ async fn main(_spawner: Spawner) {
                         recover_prepared_fpr2_layout(
                             &mut pd_i2c,
                             &mut pd_port,
+                            &mut eeprom_pd_service,
                             memory_sequence,
                             retry_log_sink,
                             eeprom_record_staging,
@@ -16101,6 +16625,7 @@ async fn main(_spawner: Spawner) {
                         let (legacy_record, read_failed) = load_legacy_eeprom_memory_record(
                             &mut pd_i2c,
                             &mut pd_port,
+                            &mut eeprom_pd_service,
                             &mut scratch,
                             eeprom_record_staging,
                         )
@@ -16111,6 +16636,7 @@ async fn main(_spawner: Spawner) {
                             migrate_legacy_memory_config(
                                 &mut pd_i2c,
                                 &mut pd_port,
+                                &mut eeprom_pd_service,
                                 memory_sequence,
                                 &memory_config,
                                 retry_log_sink,
@@ -16138,6 +16664,7 @@ async fn main(_spawner: Spawner) {
                         match initialize_fpr2_defaults(
                             &mut pd_i2c,
                             &mut pd_port,
+                            &mut eeprom_pd_service,
                             retry_log_sink,
                             eeprom_record_staging,
                         )
@@ -16160,6 +16687,7 @@ async fn main(_spawner: Spawner) {
                         commit_memory_config_now(
                             &mut pd_i2c,
                             &mut pd_port,
+                            &mut eeprom_pd_service,
                             elapsed_ms,
                             &mut memory_sequence,
                             &memory_config,
@@ -16391,12 +16919,18 @@ async fn main(_spawner: Spawner) {
 
             let previous_vin_raw_adc_mv = latest_vin_raw_adc_mv;
             let current_request_mv = heater_power_backend.pd_request_mv();
-            let mut rtd_sample = read_rtd_sample(
+            let mut rtd_sample = read_rtd_sample_with_pd(
                 &mut adc1,
                 &mut rtd_adc_pin,
                 adc_curve.as_ref(),
                 &memory_config,
-            );
+                &mut pd_i2c,
+                &mut pd_port,
+                &mut last_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            )
+            .await;
             let first_rtd_snapshot = match &rtd_sample {
                 RtdSample::Valid(measurement) => {
                     (measurement.raw_adc_mv, measurement.temp_c, "valid")
@@ -16404,12 +16938,20 @@ async fn main(_spawner: Spawner) {
                 RtdSample::Fault { adc_mv, reason } => (adc_mv.unwrap_or(0), 0.0, reason.label()),
             };
 
-            if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) = read_calibrated_vin_mv(
-                &mut adc1,
-                &mut vin_adc_pin,
-                adc_curve.as_ref(),
-                &memory_config,
-            ) {
+            if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) =
+                read_calibrated_vin_mv_with_pd(
+                    &mut adc1,
+                    &mut vin_adc_pin,
+                    adc_curve.as_ref(),
+                    &memory_config,
+                    &mut pd_i2c,
+                    &mut pd_port,
+                    &mut last_pd_observation,
+                    &mut heater_pwm,
+                    &mut last_heater_duty,
+                )
+                .await
+            {
                 let retry_rtd_after_power_step = should_retry_rtd_sample_after_power_step(
                     last_rtd_sample_request_mv,
                     current_request_mv,
@@ -16426,12 +16968,18 @@ async fn main(_spawner: Spawner) {
                     raw_code, raw_adc_mv, corrected_adc_mv, vin_mv,
                 );
                 if retry_rtd_after_power_step {
-                    rtd_sample = read_rtd_sample(
+                    rtd_sample = read_rtd_sample_with_pd(
                         &mut adc1,
                         &mut rtd_adc_pin,
                         adc_curve.as_ref(),
                         &memory_config,
-                    );
+                        &mut pd_i2c,
+                        &mut pd_port,
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    )
+                    .await;
                     let second_rtd_snapshot = match &rtd_sample {
                         RtdSample::Valid(measurement) => {
                             (measurement.raw_adc_mv, measurement.temp_c, "valid")
@@ -16606,9 +17154,15 @@ async fn main(_spawner: Spawner) {
                 && calibration_runtime_state.job.status == CalibrationJobStatus::Completed;
             if memory_config != memory_before_calibration_job {
                 if thermal_plant_completed {
+                    let mut eeprom_pd_service = EepromPdServiceContext::new(
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    );
                     if let Err(error) = commit_memory_config_now(
                         &mut pd_i2c,
                         &mut pd_port,
+                        &mut eeprom_pd_service,
                         elapsed_ms,
                         &mut memory_sequence,
                         &memory_config,
@@ -16862,9 +17416,15 @@ async fn main(_spawner: Spawner) {
             memory_commit_due_ms = None;
             let commit_domains =
                 persist_domain_mask_between(&memory_config, &last_persisted_memory_config);
+            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                &mut last_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
             if let Err(error) = commit_memory_config_now(
                 &mut pd_i2c,
                 &mut pd_port,
+                &mut eeprom_pd_service,
                 elapsed_ms,
                 &mut memory_sequence,
                 &memory_config,
@@ -17093,14 +17653,28 @@ async fn main(_spawner: Spawner) {
         set_status_light_state(status_light_state);
         ui_refresh_pending |= needs_redraw;
         if ui_refresh_pending && elapsed_ms >= next_ui_refresh_ms {
-            match with_timeout(
-                DISPLAY_IO_TIMEOUT,
+            let display_flush_result = run_display_operation_with_pd_and_heater(
                 flush_ui(&mut display, canvas, &ui_state),
+                &mut pd_i2c,
+                &mut pd_port,
+                &mut last_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
             )
-            .await
-            {
-                Ok(Ok(())) => log_ui_state(&ui_state),
-                Ok(Err(_)) | Err(_) => {
+            .await;
+            let pd_redraw_after_flush = apply_pd_contract_observation(
+                last_pd_observation,
+                &mut pd_contract_ready,
+                &mut ui_state,
+                &mut calibration_runtime_state,
+                &mut manual_pps_state,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
+            ui_refresh_pending = pd_redraw_after_flush;
+            match display_flush_result {
+                Some(Ok(())) => log_ui_state(&ui_state),
+                Some(Err(_)) | None => {
                     // A failed or timed-out async SPI transaction must not be
                     // reused: its chip-select and panel state can be incomplete
                     // after an interrupted transfer. Stop heat first, force the
@@ -17148,7 +17722,6 @@ async fn main(_spawner: Spawner) {
                     panic!("frontpanel UI refresh timed out");
                 }
             }
-            ui_refresh_pending = false;
             next_ui_refresh_ms = elapsed_ms.saturating_add(DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS);
         }
     }
@@ -26632,7 +27205,12 @@ mod tests {
             .expect("runtime loop marker must remain present");
 
         assert!(runtime_loop.contains("if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET"));
-        assert!(runtime_loop.contains("usb_rx_line.clear();\n                    break;"));
+        let control_frame = runtime_loop
+            .find("usb_write_response_frame(&mut usb_serial, &response, usb_tx_buf);")
+            .expect("USB control path must write a bounded response");
+        let control_frame_tail = &runtime_loop[control_frame..];
+        assert!(control_frame_tail.contains("usb_rx_line.clear();"));
+        assert!(control_frame_tail.contains("break;"));
         assert!(
             runtime_loop
                 .contains("if let Some(command) = flux_purr_firmware::net::try_receive_command()")
@@ -26655,6 +27233,38 @@ mod tests {
     }
 
     #[test]
+    fn fixed_contract_liveness_probe_waits_for_the_bounded_interval() {
+        assert!(!fixed_contract_liveness_probe_due(
+            ContractKind::Fixed,
+            true,
+            false,
+            Some(1_000),
+            5_999,
+        ));
+        assert!(fixed_contract_liveness_probe_due(
+            ContractKind::Fixed,
+            true,
+            false,
+            Some(1_000),
+            6_000,
+        ));
+        assert!(!fixed_contract_liveness_probe_due(
+            ContractKind::Fixed,
+            true,
+            true,
+            Some(6_000),
+            11_000,
+        ));
+        assert!(!fixed_contract_liveness_probe_due(
+            ContractKind::Pps,
+            true,
+            false,
+            Some(1_000),
+            6_000,
+        ));
+    }
+
+    #[test]
     fn runtime_pd_service_interlocks_stale_heater_output_in_the_high_priority_path() {
         let source = include_str!("flux_purr.rs");
         let runtime_loop = source
@@ -26665,14 +27275,15 @@ mod tests {
             .find("if pd_runtime_service_due")
             .expect("runtime loop must service PD independently");
         let interlock = runtime_loop
-            .find("PD contract interlock -> heater output zero")
-            .expect("PD service must interlock stale heater output");
+            .find("apply_pd_contract_observation(")
+            .expect("PD service must apply the contract interlock");
         let control_tick = runtime_loop
             .find("if elapsed_ms >= next_control_deadline_ms")
             .expect("runtime loop must retain thermal control scheduling");
 
         assert!(pd_service < interlock);
         assert!(interlock < control_tick);
+        assert!(source.contains("PD contract interlock -> heater output zero"));
     }
 
     #[test]
