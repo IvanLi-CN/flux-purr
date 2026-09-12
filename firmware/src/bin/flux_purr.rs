@@ -3377,9 +3377,13 @@ const STARTUP_PD_SERVICE_INTERVAL_MS: u64 = 1;
 const fn startup_pd_service_should_continue(
     fusb302b_present: bool,
     contract_ready: bool,
+    service_available: bool,
     elapsed_ms: u64,
 ) -> bool {
-    fusb302b_present && !contract_ready && elapsed_ms < STARTUP_PD_SERVICE_BUDGET_MS
+    fusb302b_present
+        && service_available
+        && !contract_ready
+        && elapsed_ms < STARTUP_PD_SERVICE_BUDGET_MS
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -6125,8 +6129,9 @@ fn read_rtd_sample<'a>(
 }
 
 #[cfg(target_arch = "xtensa")]
-#[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS0_CRC_CHECK: u8 = 1 << 4;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_STATUS0_VBUSOK: u8 = 1 << 7;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_STATUS0A_RETRY_FAIL: u8 = 1 << 4;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -6137,11 +6142,11 @@ const FUSB302B_STATUS1_OVERTEMP: u8 = 1 << 1;
 const FUSB302B_STATUS1_VCONN_OCP: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS1A_RXSOP: u8 = 1;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_TOGSS_MASK: u8 = 0b0011_1000;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_TOGSS_SNK_CC1: u8 = 0b0010_1000;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_TOGSS_SNK_CC2: u8 = 0b0011_0000;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_INTERRUPTA_TX_SENT: u8 = 1 << 2;
@@ -6162,12 +6167,28 @@ const FUSB302B_TOGGLE_INTERRUPT_MASKS: InterruptMasks = InterruptMasks::new(0x7f
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_RECEIVE_INTERRUPT_MASKS: InterruptMasks = InterruptMasks::new(0x7d, 0xe0, 0x00);
 
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_settled_sink_polarity(status1a: u8) -> Option<u8> {
+    match status1a & FUSB302B_TOGSS_MASK {
+        FUSB302B_TOGSS_SNK_CC1 => Some(1),
+        FUSB302B_TOGSS_SNK_CC2 => Some(2),
+        _ => None,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_runtime_vbus_loss_is_detach(status0: u8, cc_is_selected: bool) -> bool {
+    cc_is_selected && status0 & FUSB302B_STATUS0_VBUSOK == 0
+}
+
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fusb302bReceiveEvent {
     Empty { tx_sent: bool, gcrc_sent: bool },
     Partial { tx_sent: bool, gcrc_sent: bool },
     Message(PdPacket),
+    Detached,
+    OppositeSettledCc(CcPin),
     ReceivedReset(Fusb302bReceivedResetAction),
     RetryFailed,
     Protection,
@@ -6259,6 +6280,7 @@ struct Fusb302bRuntime {
     source_capabilities_gcrc_seen: bool,
     partial_rx_started_at_ms: Option<u64>,
     retry_fail_recovery_pending: bool,
+    opposite_cc_detach_candidate: Option<CcPin>,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6288,6 +6310,7 @@ impl Fusb302bRuntime {
             source_capabilities_gcrc_seen: false,
             partial_rx_started_at_ms: None,
             retry_fail_recovery_pending: false,
+            opposite_cc_detach_candidate: None,
         }
     }
 
@@ -6335,6 +6358,7 @@ impl Fusb302bRuntime {
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
         self.retry_fail_recovery_pending = false;
+        self.opposite_cc_detach_candidate = None;
         if !fusb302b_flush_receive_fifo(i2c) {
             self.policy.mark_fault();
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
@@ -6379,6 +6403,7 @@ impl Fusb302bRuntime {
                 self.partial_rx_started_at_ms = None;
                 self.retry_fail_recovery_pending =
                     matches!(fault, fusb302b::TransientTransportFault::RetryFailed);
+                self.opposite_cc_detach_candidate = None;
 
                 if !fusb302b_flush_receive_fifo(i2c) {
                     self.policy.mark_fault();
@@ -6494,6 +6519,48 @@ impl Fusb302bRuntime {
         true
     }
 
+    async fn recover_after_detach(
+        &mut self,
+        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        now: PdTimestamp,
+    ) -> bool {
+        self.policy.on_detach_or_reset();
+        self.polarity = None;
+        self.next_message_id = 0;
+        self.attached_at_ms = None;
+        self.last_source_capabilities_request_at_ms = None;
+        self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_requested_at_ms = None;
+        self.last_request_at_ms = None;
+        self.source_capabilities_tx_confirmed = false;
+        self.source_capabilities_gcrc_seen = false;
+        self.partial_rx_started_at_ms = None;
+        self.retry_fail_recovery_pending = false;
+        self.opposite_cc_detach_candidate = None;
+
+        let rearmed = {
+            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+            phy.flush_fifos().await.is_ok()
+                && phy.set_cc_pull(CcPin::Cc1, CcPull::Down).await.is_ok()
+                && phy.set_cc_pull(CcPin::Cc2, CcPull::Down).await.is_ok()
+                && phy.set_measure_cc(None).await.is_ok()
+                && phy
+                    .set_interrupt_masks(FUSB302B_TOGGLE_INTERRUPT_MASKS)
+                    .await
+                    .is_ok()
+                && phy.read_interrupts().await.is_ok()
+                && phy.start_toggle(ToggleMode::Sink).await.is_ok()
+        };
+        if !rearmed {
+            self.policy.mark_fault();
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
+            return false;
+        }
+        let _ = now;
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_CC_ATTACH, Ordering::Relaxed);
+        true
+    }
+
     /// Drain a bounded number of completed PD frames in one service turn. No
     /// call awaits while I2C is borrowed, so EEPROM traffic remains independent
     /// of the controller's PD timing.
@@ -6571,6 +6638,7 @@ impl Fusb302bRuntime {
                     return false;
                 }
                 self.polarity = Some(polarity);
+                self.policy.on_attachment_detected();
                 self.attached_at_ms = Some(now_ms);
                 self.partial_rx_started_at_ms = None;
                 FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
@@ -6581,14 +6649,17 @@ impl Fusb302bRuntime {
         }
 
         for _ in 0..FUSB302B_MAX_RX_MESSAGES_PER_POLL {
-            let event = match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending).await {
-                Ok(event) => event,
-                Err(()) => {
-                    self.policy.mark_fault();
-                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
-                    return false;
-                }
-            };
+            let event =
+                match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending, self.polarity)
+                    .await
+                {
+                    Ok(event) => event,
+                    Err(()) => {
+                        self.policy.mark_fault();
+                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
+                        return false;
+                    }
+                };
             match event {
                 Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent } => {
                     self.partial_rx_started_at_ms = None;
@@ -6644,6 +6715,7 @@ impl Fusb302bRuntime {
                     return true;
                 }
                 Fusb302bReceiveEvent::Partial { tx_sent, gcrc_sent } => {
+                    self.opposite_cc_detach_candidate = None;
                     if self.policy.phase() == SinkPhase::WaitingForSourceCapabilities {
                         self.source_capabilities_tx_confirmed |= tx_sent;
                         self.source_capabilities_gcrc_seen |= gcrc_sent;
@@ -6665,6 +6737,7 @@ impl Fusb302bRuntime {
                     return true;
                 }
                 Fusb302bReceiveEvent::Message(message) => {
+                    self.opposite_cc_detach_candidate = None;
                     self.partial_rx_started_at_ms = None;
                     if let Some((pdos, count)) = fusb302b::source_capabilities_from_message(
                         message.header(),
@@ -6676,7 +6749,10 @@ impl Fusb302bRuntime {
                         self.source_capabilities_tx_confirmed = false;
                         self.source_capabilities_gcrc_seen = false;
                         self.retry_fail_recovery_pending = false;
-                        if let Some(rdo) = self.policy.on_source_capabilities(&pdos[..count]) {
+                        if let Some(rdo) = self.policy.on_source_capabilities_with_message_id(
+                            &pdos[..count],
+                            Some((message.header() >> 9) as u8 & 0x07),
+                        ) {
                             let header = fusb302b::request_header(self.next_message_id);
                             if !self.transmit(i2c, header, &rdo).await {
                                 return false;
@@ -6691,8 +6767,11 @@ impl Fusb302bRuntime {
                             return false;
                         }
                     } else if message.payload().is_empty() {
-                        self.policy
-                            .on_control_message((message.header() & 0x1f) as u8, now_ms);
+                        self.policy.on_control_message_with_message_id(
+                            (message.header() & 0x1f) as u8,
+                            Some((message.header() >> 9) as u8 & 0x07),
+                            now_ms,
+                        );
                         FUSB302B_DIAGNOSTIC.store(
                             if self.policy.phase() == SinkPhase::Ready {
                                 FUSB302B_DIAG_IDLE
@@ -6703,11 +6782,25 @@ impl Fusb302bRuntime {
                         );
                     }
                 }
+                Fusb302bReceiveEvent::Detached => {
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+                    return self.recover_after_detach(i2c, now).await;
+                }
+                Fusb302bReceiveEvent::OppositeSettledCc(polarity) => {
+                    if self.opposite_cc_detach_candidate == Some(polarity) {
+                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+                        return self.recover_after_detach(i2c, now).await;
+                    }
+                    self.opposite_cc_detach_candidate = Some(polarity);
+                    return true;
+                }
                 Fusb302bReceiveEvent::ReceivedReset(action) => {
+                    self.opposite_cc_detach_candidate = None;
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
                     return self.recover_after_received_reset(i2c, action, now).await;
                 }
                 Fusb302bReceiveEvent::RetryFailed => {
+                    self.opposite_cc_detach_candidate = None;
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
                     return self
                         .recover_transient_transport_fault(
@@ -6718,6 +6811,7 @@ impl Fusb302bRuntime {
                         .await;
                 }
                 Fusb302bReceiveEvent::Protection | Fusb302bReceiveEvent::UnsupportedSop => {
+                    self.opposite_cc_detach_candidate = None;
                     self.policy.mark_fault();
                     FUSB302B_DIAGNOSTIC.store(
                         match event {
@@ -6740,6 +6834,7 @@ impl Fusb302bRuntime {
 async fn fusb302b_receive_event(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     retry_fail_recovery_pending: bool,
+    expected_polarity: Option<CcPin>,
 ) -> Result<Fusb302bReceiveEvent, ()> {
     let mut phy = Fusb302::new(BlockingAsync::new(i2c));
     // Preserve the receiver's CRC/SOP state before clearing its interrupt latches.
@@ -6750,6 +6845,25 @@ async fn fusb302b_receive_event(
 
     if let Some(action) = fusb302b_received_reset_action(interrupts.interrupt_a) {
         return Ok(Fusb302bReceiveEvent::ReceivedReset(action));
+    }
+    if fusb302b_runtime_vbus_loss_is_detach(status.status0, expected_polarity.is_some()) {
+        return Ok(Fusb302bReceiveEvent::Detached);
+    }
+    if let Some(expected_polarity) = expected_polarity {
+        if let Some(settled_polarity) = fusb302b_settled_sink_polarity(status.status1a) {
+            let expected_polarity_code = match expected_polarity {
+                CcPin::Cc1 => 1,
+                CcPin::Cc2 => 2,
+            };
+            if settled_polarity != expected_polarity_code {
+                let opposite_polarity = match settled_polarity {
+                    1 => CcPin::Cc1,
+                    2 => CcPin::Cc2,
+                    _ => unreachable!(),
+                };
+                return Ok(Fusb302bReceiveEvent::OppositeSettledCc(opposite_polarity));
+            }
+        }
     }
     if fusb302b_retry_failure_requires_recovery(
         status.status0a,
@@ -6838,6 +6952,13 @@ impl PdPort {
         match self {
             Self::Fusb302b(_) => ControllerKind::Fusb302b,
             Self::Unavailable => ControllerKind::Unknown,
+        }
+    }
+
+    const fn service_available(&self) -> bool {
+        match self {
+            Self::Fusb302b(runtime) => !matches!(runtime.policy.phase(), SinkPhase::Fault),
+            Self::Unavailable => false,
         }
     }
 }
@@ -7553,7 +7674,10 @@ async fn read_legacy_record_stream(
             return Err(());
         }
         let mut value_read = 0usize;
-        let collect = !matches!(tag, 0x36 | 0x37 | 0x3a);
+        // The transient active record is part of the legacy configuration
+        // and must survive FPM1 -> FPR2 migration. The older raw plant
+        // records remain inspection-only and are intentionally not staged.
+        let collect = !matches!(tag, 0x36 | 0x37);
         while value_read < value_len {
             let chunk_len = (value_len - value_read).min(EEPROM_WRITE_CHUNK_MAX_BYTES);
             let value_offset = offset
@@ -11365,13 +11489,7 @@ fn record_thermal_plant_transient_sample(
     job.samples[index] = ThermalPlantTransientSample {
         elapsed_ticks,
         raw_rtd_adc_mv,
-        // The compact FPR2 representation derives duty from this byte. An
-        // unpowered sample therefore must not retain the source voltage.
-        heater_voltage_100mv: if duty_percent == 0 {
-            0
-        } else {
-            (latest_vin_mv / 100).min(u32::from(u8::MAX)) as u8
-        },
+        heater_voltage_100mv: (latest_vin_mv / 100).min(u32::from(u8::MAX)) as u8,
         duty_percent,
     };
     job.sample_count = job.sample_count.saturating_add(1);
@@ -14754,6 +14872,7 @@ async fn main(_spawner: Spawner) {
     while startup_pd_service_should_continue(
         fusb302b_present,
         startup_pd_contract_ready(initial_pd_observation),
+        pd_port.service_available(),
         pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
     ) {
         EmbassyTimer::after_millis(STARTUP_PD_SERVICE_INTERVAL_MS).await;
@@ -17004,6 +17123,30 @@ mod tests {
     fn fusb302b_recovery_flushes_only_the_receive_fifo() {
         assert_eq!(fusb302b_receive_fifo_flush_value(0), 0b0000_0100);
         assert_eq!(fusb302b_receive_fifo_flush_value(0xff), 0b0111_0111);
+    }
+
+    #[test]
+    fn fusb302b_settled_sink_polarity_decodes_only_sink_states() {
+        assert_eq!(
+            fusb302b_settled_sink_polarity(FUSB302B_TOGSS_SNK_CC1),
+            Some(1)
+        );
+        assert_eq!(
+            fusb302b_settled_sink_polarity(FUSB302B_TOGSS_SNK_CC2),
+            Some(2)
+        );
+        assert_eq!(fusb302b_settled_sink_polarity(0), None);
+        assert_eq!(fusb302b_settled_sink_polarity(0b0001_1000), None);
+    }
+
+    #[test]
+    fn fusb302b_runtime_vbus_loss_is_only_checked_after_cc_selection() {
+        assert!(fusb302b_runtime_vbus_loss_is_detach(0, true));
+        assert!(!fusb302b_runtime_vbus_loss_is_detach(
+            FUSB302B_STATUS0_VBUSOK,
+            true
+        ));
+        assert!(!fusb302b_runtime_vbus_loss_is_detach(0, false));
     }
 
     #[test]
@@ -20220,7 +20363,7 @@ mod tests {
         assert!(record_thermal_plant_transient_sample(
             &mut job, 250, 25.0, 20_000, 0, true
         ));
-        assert_eq!(job.samples[0].heater_voltage_100mv, 0);
+        assert_eq!(job.samples[0].heater_voltage_100mv, 200);
         assert_eq!(job.samples[0].duty_percent, 0);
 
         job.elapsed_ticks = 2;
@@ -26357,11 +26500,12 @@ mod tests {
 
     #[test]
     fn startup_pd_service_prioritizes_negotiation_before_low_priority_startup_work() {
-        assert!(startup_pd_service_should_continue(true, false, 0));
-        assert!(startup_pd_service_should_continue(true, false, 749));
-        assert!(!startup_pd_service_should_continue(true, false, 750));
-        assert!(!startup_pd_service_should_continue(true, true, 0));
-        assert!(!startup_pd_service_should_continue(false, false, 0));
+        assert!(startup_pd_service_should_continue(true, false, true, 0));
+        assert!(startup_pd_service_should_continue(true, false, true, 749));
+        assert!(!startup_pd_service_should_continue(true, false, true, 750));
+        assert!(!startup_pd_service_should_continue(true, true, true, 0));
+        assert!(!startup_pd_service_should_continue(true, false, false, 0));
+        assert!(!startup_pd_service_should_continue(false, false, true, 0));
     }
 
     #[test]

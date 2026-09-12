@@ -119,7 +119,7 @@
   - `0x37`: legacy steady-state thermal-plant active record (decode-only)
   - `0x38`: LAN pairing token
   - `0x39`: static IPv4 configuration
-  - `0x3a`: `ThermalPlant` active transient transaction，legacy FPM1 中兼容解码并可在迁移时写入该 FPR2 域
+  - `0x3a`: `ThermalPlant` active transient transaction，legacy FPM1 中按完整 6-byte sample 解码；FPR2 持久化使用 5-byte sample（`elapsed_ticks` 低 15 位加 duty 标志、raw RTD、heater voltage），以保留 128 点上限并可恢复零 duty 冷却样本
   - `0x3b`: `heater_curve_transaction_id`
 - FPR2 只把 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode 写入 `ThermalPolicy`，把 `0x35`、`0x3b` 与 commissioning/ADC 字段写入 `SafetyCalibration`，把完整的 `0x3a` transient active transaction 写入 `ThermalPlant` 单槽域，把偏好和网络字段分别写入对应单槽域。`0x36`、`0x37` 仍只保留为历史稳态 thermal-plant 数据的 decode-only 标签，不得迁移、写入或解锁加热；`0x3a` 只有通过结构和物理完整性校验的结果才能成为 active，提交失败保持安全锁。
 - 读取旧记录时，缺失 `0x05` 由旧 `0x04` 映射为 `Off`/`Normal`；缺失 `0x06` 默认 `Medium`。新标签优先于旧布尔值，写回同时保留 `0x04` 兼容投影。

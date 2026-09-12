@@ -131,6 +131,9 @@ const THERMAL_CONTROL_PROFILE_PAYLOAD_LEN: usize = THERMAL_CONTROL_PROFILE_LAYOU
 const THERMAL_PLANT_TRANSIENT_HEADER_LEN: usize = 24;
 const THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN: usize = 6;
 const THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN: usize = 5;
+const THERMAL_PLANT_PERSISTED_FORMAT_DUTY_PACKED: u8 = 1;
+const THERMAL_PLANT_PERSISTED_ELAPSED_TICKS_MASK: u16 = 0x7fff;
+const THERMAL_PLANT_PERSISTED_DUTY_BIT: u16 = 1 << 15;
 
 const MEMORY_RECORD_MAGIC: [u8; 4] = *b"FPM1";
 const FPR2_MAGIC: [u8; 4] = *b"FPR2";
@@ -1925,6 +1928,9 @@ fn encode_persist_payload(
         }
         PersistDomainData::ThermalPlant(value) => {
             if let Some(transaction) = value.active {
+                if !thermal_plant_persisted_transaction_fits(&transaction) {
+                    return Err(Fpr2EncodeError::PayloadTooLarge);
+                }
                 let payload_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
                     + usize::from(transaction.sample_count)
                         * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
@@ -3009,10 +3015,19 @@ fn encode_thermal_plant_transient_transaction(
     }
 }
 
+fn thermal_plant_persisted_transaction_fits(value: &ThermalPlantTransientTransaction) -> bool {
+    let sample_count = usize::from(value.sample_count);
+    sample_count <= THERMAL_PLANT_TRANSIENT_MAX_SAMPLES
+        && value.samples[..sample_count]
+            .iter()
+            .all(|sample| sample.elapsed_ticks <= THERMAL_PLANT_PERSISTED_ELAPSED_TICKS_MASK)
+}
+
 fn encode_thermal_plant_persisted_transaction(
     value: &ThermalPlantTransientTransaction,
     out: &mut [u8],
 ) {
+    debug_assert!(thermal_plant_persisted_transaction_fits(value));
     debug_assert_eq!(
         out.len(),
         THERMAL_PLANT_TRANSIENT_HEADER_LEN
@@ -3021,7 +3036,7 @@ fn encode_thermal_plant_persisted_transaction(
     out[..4].copy_from_slice(&value.transaction_id.to_le_bytes());
     out[4..6].copy_from_slice(&value.ambient_raw_rtd_adc_mv.to_le_bytes());
     out[6] = value.sample_count;
-    out[7] = 0;
+    out[7] = THERMAL_PLANT_PERSISTED_FORMAT_DUTY_PACKED;
     let projection = value.projection;
     out[8..12].copy_from_slice(&projection.convection_mw_per_c_bits.to_le_bytes());
     out[12..16].copy_from_slice(&projection.radiation_mw_per_k4_bits.to_le_bytes());
@@ -3033,7 +3048,13 @@ fn encode_thermal_plant_persisted_transaction(
     {
         let offset =
             THERMAL_PLANT_TRANSIENT_HEADER_LEN + index * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
-        out[offset..offset + 2].copy_from_slice(&sample.elapsed_ticks.to_le_bytes());
+        let elapsed_ticks = (sample.elapsed_ticks & THERMAL_PLANT_PERSISTED_ELAPSED_TICKS_MASK)
+            | if sample.duty_percent != 0 {
+                THERMAL_PLANT_PERSISTED_DUTY_BIT
+            } else {
+                0
+            };
+        out[offset..offset + 2].copy_from_slice(&elapsed_ticks.to_le_bytes());
         out[offset + 2..offset + 4].copy_from_slice(&sample.raw_rtd_adc_mv.to_le_bytes());
         out[offset + 4] = sample.heater_voltage_100mv;
     }
@@ -3091,13 +3112,19 @@ fn decode_thermal_plant_persisted_transaction(
         return None;
     }
     let sample_count = bytes[6];
-    let expected_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
-        + usize::from(sample_count) * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
-    if bytes.len() != expected_len
-        || usize::from(sample_count) > THERMAL_PLANT_TRANSIENT_MAX_SAMPLES
-    {
+    if usize::from(sample_count) > THERMAL_PLANT_TRANSIENT_MAX_SAMPLES {
         return None;
     }
+    let expected_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
+        + usize::from(sample_count) * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
+    if bytes.len() != expected_len {
+        return None;
+    }
+    let duty_is_packed = match bytes[7] {
+        0 => false,
+        THERMAL_PLANT_PERSISTED_FORMAT_DUTY_PACKED => true,
+        _ => return None,
+    };
     let mut samples = [ThermalPlantTransientSample {
         elapsed_ticks: 0,
         raw_rtd_adc_mv: 0,
@@ -3107,11 +3134,20 @@ fn decode_thermal_plant_persisted_transaction(
     for (index, sample) in samples[..usize::from(sample_count)].iter_mut().enumerate() {
         let offset =
             THERMAL_PLANT_TRANSIENT_HEADER_LEN + index * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
+        let elapsed_ticks = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
         *sample = ThermalPlantTransientSample {
-            elapsed_ticks: u16::from_le_bytes([bytes[offset], bytes[offset + 1]]),
+            elapsed_ticks: if duty_is_packed {
+                elapsed_ticks & THERMAL_PLANT_PERSISTED_ELAPSED_TICKS_MASK
+            } else {
+                elapsed_ticks
+            },
             raw_rtd_adc_mv: u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]),
             heater_voltage_100mv: bytes[offset + 4],
-            duty_percent: u8::from(bytes[offset + 4] != 0).saturating_mul(100),
+            duty_percent: if duty_is_packed {
+                u8::from(elapsed_ticks & THERMAL_PLANT_PERSISTED_DUTY_BIT != 0).saturating_mul(100)
+            } else {
+                u8::from(bytes[offset + 4] != 0).saturating_mul(100)
+            },
         };
     }
     let value = ThermalPlantTransientTransaction {
@@ -5700,6 +5736,27 @@ mod tests {
     }
 
     #[test]
+    fn persisted_transient_samples_retain_zero_duty_during_cooling() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[13].heater_voltage_100mv = 200;
+        assert!(thermal_plant_transient_transaction_has_valid_structure(
+            &transaction
+        ));
+
+        let payload_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + usize::from(transaction.sample_count) * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
+        let mut encoded = [0u8; THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + THERMAL_PLANT_TRANSIENT_MAX_SAMPLES * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN];
+        encode_thermal_plant_persisted_transaction(&transaction, &mut encoded[..payload_len]);
+
+        let decoded = decode_thermal_plant_persisted_transaction(&encoded[..payload_len])
+            .expect("current persisted transient format must decode");
+        assert_eq!(decoded.samples[13].heater_voltage_100mv, 200);
+        assert_eq!(decoded.samples[13].duty_percent, 0);
+        assert_eq!(decoded, transaction);
+    }
+
+    #[test]
     fn maximum_transient_trace_roundtrips_within_one_memory_record() {
         let mut config = sample_config();
         config.wifi_ssid.clear();
@@ -6047,6 +6104,21 @@ mod tests {
         let length = encode_persist_record(63, &data, &mut bytes).expect("clear record fits");
         let decoded = decode_persist_record(&bytes[..length]).expect("clear record decodes");
         assert_eq!(decoded.data, data);
+    }
+
+    #[test]
+    fn fpr2_thermal_plant_domain_rejects_unencodable_elapsed_ticks() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[1].elapsed_ticks = THERMAL_PLANT_PERSISTED_ELAPSED_TICKS_MASK + 1;
+        let data = PersistDomainData::ThermalPlant(ThermalPlantPersistence {
+            active: Some(transaction),
+        });
+        let mut bytes = [0xffu8; FPR2_MAX_RECORD_SIZE];
+
+        assert_eq!(
+            encode_persist_record(64, &data, &mut bytes),
+            Err(Fpr2EncodeError::PayloadTooLarge)
+        );
     }
 
     #[test]
