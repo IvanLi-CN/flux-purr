@@ -28,7 +28,7 @@
 
 - `firmware/src/frontpanel/**`
 - `firmware/src/bin/flux_purr.rs`
-- `firmware/src/bin/frontpanel_preview.rs`
+- `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>`
 - `web/src/features/frontpanel-preview/**`
 - `web/src/stories/FrontPanelDisplay.stories.tsx`
 - `docs/specs/frontpanel-input-interaction/**`
@@ -69,13 +69,13 @@
 - 所有已接受的前面板用户操作都必须提交声音反馈请求；Dashboard 的 heater / 主动降温切换继续提交专用 cue，其余已接受交互（菜单导航、进入/退出子页、Preset Temp 编辑等）统一提交通用提示音。实际播放受 `buzzer-cue-arbitration` 的单输出优先级、合并和安全状态抑制合同约束。
 - 真实 heater / fan 执行链路、保护与运行态真相源以 `heater-pid-frontpanel-runtime` 为准；本 spec 只冻结输入与导航语义。
 - Storybook 必须提供 docs/gallery 与交互故事，作为 Web 侧视觉主证据源。
-- 视觉证据必须同时包含 Storybook render 与 firmware preview render，并绑定到本 spec 的 `assets/`。
+- 视觉证据必须同时包含 Storybook render 与 `ram-run` 物理验证记录，并绑定到本 spec 的 `assets/`。
 
 ### SHOULD
 
 - raw-pin -> logical-key 映射表与扫描逻辑解耦，便于硬件校准后单点更新。
 - 固件与 Web mock reducer 的路由与交互语义保持一致，避免“双实现”漂移。
-- `Key Test` 和 App mock 页面都提供稳定的 host preview / Storybook 入口，方便后续回归。
+- `Key Test` 和 App mock 页面都提供稳定的 `ram-run` 物理验证 / Storybook 入口，方便后续回归。
 
 ### COULD
 
@@ -146,6 +146,10 @@
 - 当 runtime 仍在播放 fault-clear attention reminder 时，第一次任意输入只确认/静音；EEPROM 持久化提示则只清除覆盖层并继续处理导航。
 - mock 页面不因无效手势崩溃或跳到未知路由。
 
+## Related ADRs
+
+None
+
 ## 接口契约（Interfaces & Contracts）
 
 ### 接口清单（Inventory）
@@ -156,7 +160,7 @@
 | `FrontPanelUiState / FrontPanelRoute / FrontPanelRuntimeMode` | Rust state model | internal | New | None | firmware | runtime / preview | 固件 reducer 与路由状态 |
 | `FrontPanelRuntimeState / FrontPanelScreen` | TypeScript type | internal | Updated | None | web | Storybook / preview harness | Web mock runtime 对齐固件语义 |
 | `FrontPanelRuntimeHarness` | React component | internal | New | None | web | Storybook play coverage | 稳定交互驱动器 |
-| `frontpanel_preview` | Host preview bin | internal | New | None | firmware | visual evidence | 导出 framebuffer 供 PNG 转换 |
+| `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` | CLI command | internal | New | `ram-bringup-firmware/SPEC.md` | devd | physical display validation | 在真实面板运行前面板场景 |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -177,13 +181,13 @@ None
 - Given `WiFi Info`，When 主人进入页面，Then 显示一组新的四位码；When 主人返回，Then 前一组码立即失效。Given EEPROM 错误页，When 主人长按中键，Then 只发起一次显式 retry；其他页面仍只处理各自导航。
 - Given runtime 刚从活动 fault 退出且仍在 attention reminder pending，When 主人第一次进行任意输入，Then 该输入只会确认/静音，不会执行原本对应的 heater/fan/menu 动作。
 - Given Storybook docs/gallery，When 打开故事集，Then 至少存在 `Key Test`、`Dashboard`、`Menu`、四个子页和两条交互流故事。
-- Given firmware preview 与 Storybook 截图，When 对比同一路由，Then 颜色、布局和文案口径保持一致。
+- Given `ram-run` 物理验证与 Storybook 截图，When 对比同一路由，Then 颜色、布局和文案口径保持一致。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
 - 前面板硬件基线已冻结为 `ESP32-S3 + GC9D01 + 五向开关`。
-- 当前阶段允许修改固件显示运行态与 Storybook 预览，但不接真实控制链路。
-- `Key Test` 与 App mock 的验收主证据源分别为固件 preview / Storybook docs，并最终统一回填本 spec。
+- 当前阶段允许修改固件显示运行态与 Storybook 预览，但不接真实控制链路；物理显示和按键验证通过独立 RAM Bring-up 固件执行。
+- `Key Test` 与 App mock 的验收主证据源分别为 `ram-run` / Storybook docs，并最终统一回填本 spec。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -200,7 +204,7 @@ None
 ### UI / Storybook / Firmware Preview
 
 - Web 侧必须先清 Storybook coverage，再截图。
-- 固件侧必须通过 host preview 产出 framebuffer 与 PNG。
+- 固件侧必须通过 `ram-run` 在真实面板产出可观察画面与命令响应。
 - owner-facing 图片与 spec 资产必须绑定到当前实现 head，且聊天回图前先做 immutable snapshot。
 
 ## 文档更新（Docs to Update）
@@ -213,7 +217,7 @@ None
 
 - 固件侧通过统一 reducer 把输入、路由和渲染绑定到同一状态树，避免“输入识别”和“显示切页”各自维护隐藏状态。
 - Web 侧复用同一套交互语义，使用 Storybook docs/gallery 与 harness button 作为稳定的 mock 证明源。
-- 视觉证据采用“双源绑定”：Storybook 提供主 UI 合同，firmware preview 证明嵌入式渲染与布局一致；真机只用来校准映射和验证手势/导航真实路径。
+- 视觉证据采用“双源绑定”：Storybook 提供主 UI 合同，`ram-run` 证明嵌入式渲染与布局一致；授权真机同时用于校准映射和验证手势/导航真实路径。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
@@ -225,7 +229,7 @@ None
 
 ## Visual Evidence
 
-- 证据来源：Storybook canvas stories + firmware host preview + 真机 flash/monitor 校准记录
+- 证据来源：Storybook canvas stories + `ram-run` 物理验证 + 真机受控复位/串口记录
 - 绑定说明：以下图片对应当前本地实现；聊天验收图与 spec 资产保持同源
 
 ### Storybook canvas

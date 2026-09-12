@@ -68,10 +68,11 @@
 | mini-hotplate-doc-baseline | archived | `mini-hotplate-doc-baseline/IMPLEMENTATION.md` | `mini-hotplate-doc-baseline/SPEC.md` | - | Source-collection and evidence baseline is complete |
 | pr-label-release-protection | active | `pr-label-release-protection/IMPLEMENTATION.md` | `pr-label-release-protection/SPEC.md` | - | Label-driven release intent and branch protection policy |
 | real-control-plane-runtime | active | `real-control-plane-runtime/IMPLEMENTATION.md` | `real-control-plane-runtime/SPEC.md` | - | Web, firmware, and native devd real transport contract |
+| ram-bringup-firmware | active | `ram-bringup-firmware/IMPLEMENTATION.md` | `ram-bringup-firmware/SPEC.md` | - | Separate all-RAM firmware and CLI-only physical preview/test path |
 | release-failure-telegram-alerts | active | `release-failure-telegram-alerts/IMPLEMENTATION.md` | `release-failure-telegram-alerts/SPEC.md` | - | Release failure notification workflow and recovery context |
 | s3-ch224q-frontpanel-baseline | active | `s3-ch224q-frontpanel-baseline/IMPLEMENTATION.md` | `s3-ch224q-frontpanel-baseline/SPEC.md` | - | ESP32-S3 direct-panel and CH224Q hardware baseline |
 | s3-fan-cycle-bringup | archived | `s3-fan-cycle-bringup/IMPLEMENTATION.md` | `s3-fan-cycle-bringup/SPEC.md` | - | Historical four-phase fan bring-up state machine |
-| s3-gc9d01-display-bringup | active | `s3-gc9d01-display-bringup/IMPLEMENTATION.md` | `s3-gc9d01-display-bringup/SPEC.md` | - | GC9D01 async display driver and host-preview baseline |
+| s3-gc9d01-display-bringup | active | `s3-gc9d01-display-bringup/IMPLEMENTATION.md` | `s3-gc9d01-display-bringup/SPEC.md` | - | GC9D01 async display driver and ram-bringup baseline |
 | version-source | active | `version-source/IMPLEMENTATION.md` | `version-source/SPEC.md` | - | Single product version source and release sequencing |
 | web-control-plane-demo | active | `web-control-plane-demo/IMPLEMENTATION.md` | `web-control-plane-demo/SPEC.md` | - | Mock-first thermal bench Web console |
 | web-firmware-install-recovery | active | `web-firmware-install-recovery/IMPLEMENTATION.md` | `web-firmware-install-recovery/SPEC.md` | - | Unified devd and Browser Web Serial firmware workbench |

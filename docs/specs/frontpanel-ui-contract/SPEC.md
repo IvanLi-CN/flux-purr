@@ -21,12 +21,12 @@
 - 冻结 `160×50` 前面板主界面与两级设置菜单的视觉和导航契约。
 - 为 `Dashboard`、`Key Test`、`Menu L1`、`Preset Temp`、`FAN CTRL`、`WiFi Info`、`Device Info` 提供确定性渲染源。
 - 约束屏幕网格、字体预算、颜色 token、状态文案和五向键导航映射。
-- 以固件 host preview 的 RGB565 framebuffer 作为设备渲染真相源；`web/` 预览实现作为可截图的伴随展示面。
+- 以 Bring-up 固件在真实 LCD 上的 RGB565 渲染作为设备显示真相源；`web/` 预览实现作为可截图的伴随展示面。
 - 输出一张界面设计规范图，明确配色、字体、温度分段与小屏布局规则。
 
 ### Non-goals
 
-- 不落地真实 LCD 驱动时序或硬件总线管线；固件 framebuffer 与 draw API 的 host preview 属于本主题范围。
+- 不冻结真实 LCD 驱动时序或硬件总线管线；物理 Bring-up 渲染与 draw API 属于本主题范围。
 - 不扩展 HTTP / WebSocket 契约，也不新增设备遥测字段。
 - 不在本轮定义 heater PID 或 Wi‑Fi 配置写回逻辑；FAN CTRL 的多档策略显示与编辑以运行时 spec 为准。
 - 不处理多语言字体资产；本轮 on-device 文案默认只用短英文与缩写。
@@ -80,7 +80,7 @@
 
 ### Front panel palette
 
-Dashboard 使用单一纯白仪表面，不以深浅色卡片切割温度区与状态栈。默认亮色主题用于设备运行；其余亮色页面将文字与图标放在纯白内容 panel 上，panel 外仅保留中性灰白边界。host-side preview 为所有已实现页面提供这套亮色仪表面与深色仪表面，供两种主题的可读性审阅。
+Dashboard 使用单一纯白仪表面，不以深浅色卡片切割温度区与状态栈。默认亮色主题用于设备运行；其余亮色页面将文字与图标放在纯白内容 panel 上，panel 外仅保留中性灰白边界。physical RAM preview 为所有已实现页面提供这套亮色仪表面与深色仪表面，供两种主题的可读性审阅。
 
 | Token | Dark | Light | Usage |
 | --- | --- | --- | --- |
@@ -197,33 +197,33 @@ None
 
 ## 方案概述（Approach, high-level）
 
-- 使用固件 host preview 作为最小稳定渲染器，把所有前面板画面统一约束到 `160×50` 逻辑像素并序列化为 RGB565；浏览器侧 `canvas` 只复现已冻结的视觉契约。
+- 使用 Bring-up 固件 renderer 作为最小稳定渲染器，把所有前面板画面统一约束到 `160×50` 逻辑像素并序列化为 RGB565；浏览器侧 `canvas` 只复现已冻结的视觉契约。
 - 主界面采用“左大温度 / 右侧状态栈”的强层级布局，确保小屏条件下先读主值、再读功率和系统状态。
 - 菜单页统一使用短词条和单任务二级页，减少主人后续把 Web 控制台思路误搬到前面板上的风险。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
-- 风险：浏览器预览和固件字体栅格并非同一实现，Web 伴随面仍需以固件 host preview 的像素证据为准。
+- 风险：浏览器预览和固件字体栅格并非同一实现，Web 伴随面仍需以 Bring-up 实机画面为准。
 - 风险：`WiFi Info` 与 `Device Info` 一旦字段变长，必须依赖缩写策略，否则会挤压布局。
 - 开放问题：后续是否需要加入中文字体或多语言切换，本轮暂不处理。
 - 假设（需主人确认）：当前样机的主要显示方向和 `160×50` 横屏布局一致。
 
 ## Context and Scope
 
-本主题定义 Flux Purr `160×50` RGB565 前面板的 Dashboard、诊断页、设置页与双配色渲染契约。范围覆盖固件 host preview、设备默认主题和与这些页面绑定的视觉证据；真实 LCD 驱动时序与热控算法不在本主题内。
+本主题定义 Flux Purr `160×50` RGB565 前面板的 Dashboard、诊断页、设置页与双配色渲染契约。范围覆盖 Bring-up 固件渲染、设备默认主题和与这些页面绑定的视觉证据；真实 LCD 驱动时序与热控算法不在本主题内。
 
 ## Requirements
 
 - `REQ-FP-001`: 前面板逻辑分辨率 MUST 固定为 `160×50`，并复用固件字体、位图与 RGB565 framebuffer 布局。
-- `REQ-FP-002`: 前面板 MUST 提供亮色和深色两套主题；亮色主题 MUST 是设备默认主题，深色主题 MUST 可通过显式主题参数渲染。
+- `REQ-FP-002`: 前面板 MUST 提供亮色和深色两套主题；亮色主题 MUST 是设备默认主题，深色主题 MUST 可由共享渲染器和 Storybook 显式渲染。
 - `REQ-FP-003`: Dashboard MUST 保持单一主温度值、`SET`/`PPS`/`FAN` 状态栈和 heater 输出语义层级。
 - `REQ-FP-004`: 所有已实现非 Dashboard 页面 MUST 在两套主题下保持相同布局、字体和状态文案，并维持白底文字可读性。
 
 ## Verification
 
-- `VER-FP-001`: 固件单元测试与 preview 工具测试通过，covers: REQ-FP-001, REQ-FP-003。
-- `VER-FP-002`: 默认 framebuffer 与显式 `--theme light` framebuffer 像素完全一致，显式 `--theme dark` 输出不同，covers: REQ-FP-002。
-- `VER-FP-003`: `frontpanel_preview` 的 host tests 为全部已实现页面验证两套逻辑/面板 RGB565 帧；owner-facing PNG 是由同一 renderer 生成并经视觉证据门禁人工复核的跟踪资产，covers: REQ-FP-004。
+- `VER-FP-001`: 固件单元测试与 `ram-run` 协议/能力测试通过，covers: REQ-FP-001, REQ-FP-003。
+- `VER-FP-002`: 共享渲染器默认亮色输出与显式亮色输出像素完全一致，显式深色输出不同；物理 LCD 由 `ram-run` 验证，covers: REQ-FP-002。
+- `VER-FP-003`: `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 在授权实机验证全部已实现页面；Storybook 覆盖逻辑/面板状态，covers: REQ-FP-004。
 
 ## Related ADRs
 
@@ -231,8 +231,8 @@ None
 
 ## Visual Evidence
 
-- 证据来源：固件 `frontpanel_preview` 的 `firmware_preview` renderer（`160×50` 逻辑像素，nearest-neighbor 放大展示）。
-- 绑定说明：以下图片由 host-side preview 直接复用固件字体、布局和状态 renderer；真机校准与最新 runtime 联动验证由 `frontpanel-input-interaction` 持续承接。
+- 证据来源：固件 `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 的 Bring-up renderer（`160×50` 逻辑像素）与授权实机画面。
+- 绑定说明：以下图片对应固件字体、布局和状态 renderer；真机校准与最新 runtime 联动验证由 `frontpanel-input-interaction` 持续承接。
 
 ### Screen renders
 
@@ -266,7 +266,7 @@ None
 
 #### EEPROM incompatible
 
-该画面由固件 `frontpanel_preview` 直接复用设备 renderer、字体与 `DisplayCanvas` 生成，默认使用亮色主题；同目录同时保存 `160×50 RGB565LE` logical framebuffer 与 GC9D01 Landscape panel framebuffer。
+该画面由 Bring-up 固件直接复用设备 renderer、字体与 `DisplayCanvas` 生成，默认使用亮色主题；验收以真实 GC9D01 Landscape 面板输出为准。
 
 ![EEPROM incompatible fault screen](./assets/eeprom-data-incompatible/eeprom-data-incompatible.png)
 
@@ -288,7 +288,7 @@ None
 
 #### WiFi Info
 
-该证据由 host-side `frontpanel_preview` 复用固件 framebuffer renderer 生成，展示 runtime SSID、IPv4、RSSI 与配对码。
+该证据由 `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 复用固件 renderer 生成，展示 runtime SSID、IPv4、RSSI 与配对码。
 
 ![Front panel WiFi info](./assets/frontpanel-wifi-info.png)
 

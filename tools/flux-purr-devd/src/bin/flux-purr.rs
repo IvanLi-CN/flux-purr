@@ -3,10 +3,16 @@ use std::{
     io::{self, BufRead, BufReader, BufWriter, IsTerminal, Read, Write},
     net::Ipv4Addr,
     path::{Path, PathBuf},
-    process::{Child, Command as ProcessCommand, Stdio},
+    process::{Child, Command as ProcessCommand, ExitStatus, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::OpenOptionsExt;
+
+#[cfg(target_os = "macos")]
+const MACOS_O_NONBLOCK: i32 = 0x0004;
 
 use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use crossterm::{
@@ -19,6 +25,7 @@ use crossterm::{
     style::{Attribute, Print, SetAttribute},
     terminal::{self, Clear, ClearType},
 };
+use flux_purr_devd::FirmwareKind;
 use flux_purr_devd::{
     DEFAULT_DEVD_ENDPOINT, WifiConfigOp, developer_backup,
     firmware_bundle::{self, INTEGRITY_CATALOG_FILE},
@@ -102,6 +109,10 @@ enum Command {
     Update(UpdateArgs),
     Flash(FlashArgs),
     Recover(RecoverArgs),
+    RamRun {
+        #[command(subcommand)]
+        command: RamRunCommand,
+    },
     Eeprom {
         #[command(subcommand)]
         command: EepromCommand,
@@ -115,6 +126,115 @@ enum Command {
         #[command(subcommand)]
         command: UsbPortCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum RamRunCommand {
+    Preview(RamRunPreviewArgs),
+    Test(RamRunTestArgs),
+    Exit(RamRunExitArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct RamRunPreviewArgs {
+    #[arg(value_enum)]
+    preview: RamPreview,
+    #[command(flatten)]
+    options: RamRunOptions,
+}
+
+#[derive(Debug, Args, Clone)]
+struct RamRunTestArgs {
+    #[arg(value_enum)]
+    test: RamTest,
+    #[command(flatten)]
+    options: RamRunOptions,
+}
+
+#[derive(Debug, Args, Clone)]
+struct RamRunExitArgs {
+    #[arg(long, value_name = "SERIAL_PORT")]
+    port: String,
+}
+
+#[derive(Debug, Args, Clone)]
+struct RamRunOptions {
+    #[arg(long, value_name = "SERIAL_PORT")]
+    port: String,
+    #[arg(long, conflicts_with = "install")]
+    reload: bool,
+    #[arg(long, conflicts_with = "reload")]
+    install: bool,
+    #[arg(
+        long,
+        requires = "install",
+        help = "Skip the Developer EEPROM backup; pair with --confirm NO_EEPROM_BACKUP"
+    )]
+    skip_backup: bool,
+    #[arg(
+        long,
+        requires = "skip_backup",
+        value_name = "TOKEN",
+        help = "Literal confirmation required by --skip-backup: NO_EEPROM_BACKUP"
+    )]
+    confirm: Option<String>,
+    #[arg(long, value_enum, help = "Preview theme: light (default) or dark")]
+    theme: Option<RamTheme>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RamPreview {
+    Display,
+    Frontpanel,
+    StatusLight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RamTest {
+    Buttons,
+    Adc,
+    I2c,
+    Rgb,
+    Buzzer,
+    Fan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RamTheme {
+    Light,
+    Dark,
+}
+
+impl RamTheme {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
+impl RamPreview {
+    const fn command(self) -> &'static str {
+        match self {
+            Self::Display => "preview_display",
+            Self::Frontpanel => "preview_frontpanel",
+            Self::StatusLight => "preview_status_light",
+        }
+    }
+}
+
+impl RamTest {
+    const fn command(self) -> &'static str {
+        match self {
+            Self::Buttons => "test_buttons",
+            Self::Adc => "test_adc",
+            Self::I2c => "test_i2c",
+            Self::Rgb => "test_rgb",
+            Self::Buzzer => "test_buzzer",
+            Self::Fan => "test_fan",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -1665,16 +1785,23 @@ fn is_unicast_static_ipv4(address: Ipv4Addr) -> bool {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cli = Cli::parse();
     let direct_flash_command = matches!(&cli.command, Command::Flash(_) | Command::Recover(_));
+    let direct_ram_run_command = matches!(&cli.command, Command::RamRun { .. });
     let explicit_devd_endpoint = devd_flag_was_supplied();
-    if direct_flash_command && explicit_devd_endpoint {
-        return Err("flash and recover are direct-serial commands and do not accept --devd".into());
+    if (direct_flash_command || direct_ram_run_command) && explicit_devd_endpoint {
+        return Err(
+            "flash, recover, and ram-run are direct-serial commands and do not accept --devd"
+                .into(),
+        );
     }
     let mut managed_devd = None;
-    if should_start_managed_devd(direct_flash_command, explicit_devd_endpoint) {
+    if should_start_managed_devd(
+        direct_flash_command || direct_ram_run_command,
+        explicit_devd_endpoint,
+    ) {
         let managed = ManagedDevd::start().await?;
         cli.devd = managed.endpoint.to_string_lossy().into_owned();
         managed_devd = Some(managed);
-    } else if !direct_flash_command {
+    } else if !(direct_flash_command || direct_ram_run_command) {
         validate_local_control_endpoint(&cli.devd)?;
     }
     let client = Client::new();
@@ -1908,6 +2035,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::Update(args) => update_from_local_bundle(&client, &cli.devd, args).await?,
         Command::Flash(args) => direct_flash(args).await?,
         Command::Recover(args) => direct_recover(args).await?,
+        Command::RamRun { command } => direct_ram_run(command)?,
         Command::Eeprom { command } => handle_eeprom_command(&client, &cli.devd, command).await?,
         Command::Monitor(args) => {
             monitor_once(
@@ -2008,10 +2136,511 @@ async fn direct_flash(args: FlashArgs) -> Result<Value, Box<dyn std::error::Erro
     direct_flash_with_program(args, &program, true)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RamIdentityObservation {
+    #[serde(default)]
+    firmware_kind: Option<FirmwareKind>,
+    device_id: String,
+    firmware_version: String,
+    build_id: String,
+    git_sha: String,
+    board: String,
+    api_version: String,
+    protocol_version: String,
+    hostname: String,
+    capabilities: Vec<String>,
+}
+
+#[derive(Debug)]
+struct RamRuntimeIdentity {
+    identity: RamIdentityObservation,
+}
+
+fn direct_ram_run(
+    command: RamRunCommand,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    match command {
+        RamRunCommand::Preview(args) => ram_run_action(
+            &args.options,
+            args.preview.command(),
+            args.preview.command().to_string(),
+        ),
+        RamRunCommand::Test(args) => ram_run_action(
+            &args.options,
+            args.test.command(),
+            args.test.command().to_string(),
+        ),
+        RamRunCommand::Exit(args) => ram_run_exit(&args.port),
+    }
+}
+
+fn ram_run_action(
+    options: &RamRunOptions,
+    command: &str,
+    operation: String,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    validate_serial_port(&options.port)?;
+    let _serial_lock =
+        flux_purr_devd::acquire_serial_port_lock(&options.port, Duration::from_secs(30))
+            .map_err(io::Error::other)?;
+    if options.theme.is_some() && !command.starts_with("preview_") {
+        return Err("--theme is only valid for ram-run preview commands".into());
+    }
+    let expected_build_id = expected_ram_build_id();
+    let existing = probe_ram_identity(&options.port)?;
+    let elf = default_ram_bringup_elf();
+    validate_ram_bringup_elf(&elf)?;
+
+    if options.install {
+        let flash = direct_flash_with_program_allow_missing_app_descriptor(
+            FlashArgs {
+                port: options.port.clone(),
+                elf: Some(elf),
+                skip_backup: options.skip_backup,
+                confirm: options.confirm.clone(),
+            },
+            &resolve_espflash_program(),
+            true,
+        )?;
+        let identity = wait_for_ram_identity(&options.port, &expected_build_id)?;
+        ensure_ram_capability(&identity, command)?;
+        let response = send_ram_command(&options.port, command, options.theme)?;
+        return Ok(json!({
+            "ok": true,
+            "operation": operation,
+            "port": options.port,
+            "mode": "installed",
+            "loaded": true,
+            "reused": false,
+            "identity": identity.identity,
+            "flash": flash,
+            "response": response,
+            "warning": "Bring-up now replaces the sole factory Product Firmware slot; flash Product Firmware explicitly to restore it.",
+        }));
+    }
+
+    let reusable = !options.reload
+        && existing
+            .as_ref()
+            .is_some_and(|runtime| ram_identity_matches(runtime, &expected_build_id, command));
+
+    if !reusable {
+        ram_download_preflight(&options.port)?;
+        let program = resolve_espflash_program();
+        let args = ram_load_args(&options.port, &elf);
+        run_espflash_command(&program, &args)?;
+    }
+
+    let identity = wait_for_ram_identity(&options.port, &expected_build_id)?;
+    ensure_ram_capability(&identity, command)?;
+    let response = send_ram_command(&options.port, command, options.theme)?;
+    Ok(json!({
+        "ok": true,
+        "operation": operation,
+        "port": options.port,
+        "mode": "ram",
+        "loaded": !reusable,
+        "reused": reusable,
+        "identity": identity.identity,
+        "response": response,
+    }))
+}
+
+fn ensure_ram_capability(
+    identity: &RamRuntimeIdentity,
+    command: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if identity
+        .identity
+        .capabilities
+        .iter()
+        .any(|capability| capability == command)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "RAM Bring-up build {} does not advertise command {command}",
+        identity.identity.build_id
+    )
+    .into())
+}
+
+fn ram_run_exit(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    validate_serial_port(port)?;
+    let _serial_lock = flux_purr_devd::acquire_serial_port_lock(port, Duration::from_secs(30))
+        .map_err(io::Error::other)?;
+    let program = resolve_espflash_program();
+    let output = run_external_with_timeout(
+        &program,
+        &[
+            "reset",
+            "--chip",
+            "esp32s3",
+            "--port",
+            port,
+            "--before",
+            "usb-reset",
+            "--after",
+            "hard-reset",
+            "--non-interactive",
+        ],
+        Duration::from_secs(30),
+    )?;
+    if !output.success {
+        return Err(format!(
+            "failed to reset {port} into the installed application{}: {}",
+            if output.timed_out {
+                " before the 30-second deadline"
+            } else {
+                ""
+            },
+            output.stderr.trim()
+        )
+        .into());
+    }
+    match wait_for_product_identity(port)? {
+        FirmwareKind::Product => Ok(json!({
+            "ok": true,
+            "operation": "exit",
+            "port": port,
+            "reset": true,
+            "firmwareKind": "product",
+        })),
+        FirmwareKind::RamBringup => Err(
+            "reset completed but Product Firmware is not installed; use the explicit product `flash` command to restore it"
+                .into(),
+        ),
+    }
+}
+
+fn default_ram_bringup_elf() -> PathBuf {
+    flux_purr_repo_root()
+        .join("firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup")
+}
+
+fn expected_ram_build_id() -> String {
+    if let Ok(build_id) = std::env::var("FLUX_PURR_BUILD_ID")
+        && (16..=64).contains(&build_id.len())
+    {
+        return build_id;
+    }
+    ProcessCommand::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(flux_purr_repo_root())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|sha| sha.trim().chars().take(16).collect())
+        .filter(|value: &String| value.len() == 16)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn ram_load_args(port: &str, elf: &Path) -> Vec<String> {
+    vec![
+        "flash".into(),
+        "--chip".into(),
+        "esp32s3".into(),
+        "--port".into(),
+        port.into(),
+        "--before".into(),
+        "usb-reset".into(),
+        "--after".into(),
+        "no-reset".into(),
+        "--no-stub".into(),
+        "--ram".into(),
+        "--non-interactive".into(),
+        elf.to_string_lossy().into_owned(),
+    ]
+}
+
+fn ram_download_preflight(port: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let program = resolve_espflash_program();
+    let args = ram_download_probe_args(port);
+    let output = run_external_with_timeout(&program, &args, Duration::from_secs(30))?;
+    classify_ram_preflight_output(
+        port,
+        output.success && !output.timed_out,
+        &output.stdout,
+        &output.stderr,
+    )
+}
+
+fn classify_ram_preflight_output(
+    port: &str,
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    if !success {
+        return Err(format!(
+            "RAM execution preflight failed for {port}; ROM Download Mode or the selected transport is unavailable: {}",
+            stderr.trim()
+        )
+        .into());
+    }
+    for blocked in [
+        "secure uart download",
+        "secure uart",
+        "secure download",
+        "download mode disabled",
+        "rom download disabled",
+        "uart download disabled",
+        "usb serial-jtag download disabled",
+        "usb download mode disabled",
+    ] {
+        if combined.contains(blocked) {
+            return Err(format!(
+                "RAM execution is unavailable: ROM reported {blocked}; no Flash fallback was attempted"
+            )
+            .into());
+        }
+    }
+    if let Some(flags) = parse_security_flags(&combined) {
+        if flags & (1 << 2) != 0 {
+            return Err(
+                "RAM execution is unavailable: ROM security flags enable secure download; no Flash fallback was attempted".into(),
+            );
+        }
+        if flags & (1 << 8) != 0 {
+            return Err(
+                "RAM execution is unavailable: ROM security flags disable USB access/download; no Flash fallback was attempted".into(),
+            );
+        }
+    } else {
+        return Err(
+            "RAM execution preflight could not verify ROM security flags; no Flash fallback was attempted".into(),
+        );
+    }
+    Ok(())
+}
+
+fn parse_security_flags(output: &str) -> Option<u32> {
+    output.lines().find_map(|line| {
+        let line = line.trim().to_ascii_lowercase();
+        let value = line.strip_prefix("flags:")?;
+        let token = value.split_whitespace().next()?;
+        u32::from_str_radix(token.trim_start_matches("0x"), 16).ok()
+    })
+}
+
+fn probe_ram_identity(
+    port: &str,
+) -> Result<Option<RamRuntimeIdentity>, Box<dyn std::error::Error + Send + Sync>> {
+    let request_id = format!("ram-preflight-{}", current_unix_millis());
+    let request = json!({
+        "type": "request",
+        "requestId": request_id,
+        "op": "get_identity",
+    });
+    let Some(response) = exchange_jsonl(port, &request, Duration::from_millis(900))? else {
+        return Ok(None);
+    };
+    Ok(decode_ram_identity_response(&response))
+}
+
+fn decode_ram_identity_response(response: &Value) -> Option<RamRuntimeIdentity> {
+    if response.get("type").and_then(Value::as_str) != Some("response")
+        || response.get("ok").and_then(Value::as_bool) != Some(true)
+    {
+        return None;
+    }
+    let identity = response
+        .get("result")
+        .and_then(|result| result.get("identity"))
+        .cloned()?;
+    let identity = serde_json::from_value(identity).ok()?;
+    Some(RamRuntimeIdentity { identity })
+}
+
+fn ram_identity_matches(
+    runtime: &RamRuntimeIdentity,
+    expected_build_id: &str,
+    command: &str,
+) -> bool {
+    runtime.identity.firmware_kind == Some(FirmwareKind::RamBringup)
+        && runtime.identity.build_id == expected_build_id
+        && runtime
+            .identity
+            .capabilities
+            .iter()
+            .any(|capability| capability == command)
+}
+
+fn wait_for_ram_identity(
+    port: &str,
+    expected_build_id: &str,
+) -> Result<RamRuntimeIdentity, Box<dyn std::error::Error + Send + Sync>> {
+    let deadline = StdInstant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(identity) = probe_ram_identity(port)? {
+            if identity.identity.firmware_kind == Some(FirmwareKind::RamBringup)
+                && identity.identity.build_id == expected_build_id
+            {
+                return Ok(identity);
+            }
+        }
+        if StdInstant::now() >= deadline {
+            return Err(format!(
+                "RAM load completed without a matching ram_bringup identity for build {expected_build_id}; application kind remains unknown"
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_product_identity(
+    port: &str,
+) -> Result<FirmwareKind, Box<dyn std::error::Error + Send + Sync>> {
+    let deadline = StdInstant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(identity) = probe_ram_identity(port)? {
+            if let Some(kind) = identity.identity.firmware_kind {
+                if kind == FirmwareKind::Product {
+                    return Ok(kind);
+                }
+                if kind == FirmwareKind::RamBringup && StdInstant::now() >= deadline {
+                    return Ok(kind);
+                }
+            }
+        }
+        if StdInstant::now() >= deadline {
+            return Err(
+                "reset completed but application identity is unknown; Product Firmware was not assumed"
+                    .into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn send_ram_command(
+    port: &str,
+    command: &str,
+    theme: Option<RamTheme>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let request_id = format!("ram-command-{}", current_unix_millis());
+    let request = json!({
+        "type": "ram_bringup",
+        "requestId": request_id,
+        "command": command,
+        "theme": theme.map(RamTheme::as_str),
+    });
+    let response = exchange_jsonl(port, &request, ram_command_timeout(command))?
+        .ok_or_else(|| format!("RAM Bring-up command {command} returned no JSONL response"))?;
+    if response.get("type").and_then(Value::as_str) != Some("response")
+        || response.get("ok").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(
+            format!("RAM Bring-up command {command} returned an unsuccessful response").into(),
+        );
+    }
+    Ok(response)
+}
+
+fn ram_command_timeout(command: &str) -> Duration {
+    match command {
+        "preview_display" | "preview_status_light" | "test_fan" => Duration::from_secs(30),
+        "preview_frontpanel" => Duration::from_secs(60),
+        _ => Duration::from_secs(5),
+    }
+}
+
+trait RamJsonlSerial: Read + Write {}
+
+impl<T: Read + Write + ?Sized> RamJsonlSerial for T {}
+
+fn open_ram_jsonl_serial(port: &str) -> io::Result<Box<dyn RamJsonlSerial>> {
+    #[cfg(target_os = "macos")]
+    if port.starts_with("/dev/cu.usbmodem") {
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .custom_flags(MACOS_O_NONBLOCK)
+            .open(port)?;
+        return Ok(Box::new(file));
+    }
+
+    serialport::new(port, 115_200)
+        .timeout(Duration::from_millis(100))
+        .open()
+        .map(|port| Box::new(port) as Box<dyn RamJsonlSerial>)
+        .map_err(io::Error::other)
+}
+
+fn exchange_jsonl(
+    port: &str,
+    request: &Value,
+    timeout: Duration,
+) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    let request_id = request
+        .get("requestId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut serial = open_ram_jsonl_serial(port)?;
+    serial.write_all(serde_json::to_string(request)?.as_bytes())?;
+    serial.write_all(b"\n")?;
+    serial.flush()?;
+    let deadline = StdInstant::now() + timeout;
+    let mut line = Vec::new();
+    loop {
+        if StdInstant::now() >= deadline {
+            return Ok(None);
+        }
+        let mut byte = [0_u8; 1];
+        match serial.read(&mut byte) {
+            Ok(1) if byte[0] == b'\n' => {
+                let value = serde_json::from_slice::<Value>(&line).ok();
+                line.clear();
+                if value
+                    .as_ref()
+                    .and_then(|value| value.get("requestId"))
+                    .and_then(Value::as_str)
+                    == Some(request_id)
+                {
+                    return Ok(value);
+                }
+            }
+            Ok(1) if line.len() < 8 * 1024 => line.push(byte[0]),
+            Ok(1) => line.clear(),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 fn direct_flash_with_program(
     args: FlashArgs,
     program: &Path,
     require_real_flash_enablement: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    direct_flash_with_program_options(args, program, require_real_flash_enablement, false)
+}
+
+fn direct_flash_with_program_allow_missing_app_descriptor(
+    args: FlashArgs,
+    program: &Path,
+    require_real_flash_enablement: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    direct_flash_with_program_options(args, program, require_real_flash_enablement, true)
+}
+
+fn direct_flash_with_program_options(
+    args: FlashArgs,
+    program: &Path,
+    require_real_flash_enablement: bool,
+    ignore_app_descriptor: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let backup_directory = if args.skip_backup {
         None
@@ -2022,6 +2651,7 @@ fn direct_flash_with_program(
         args,
         program,
         require_real_flash_enablement,
+        ignore_app_descriptor,
         read_eeprom_snapshot,
         detect_rom_download_mode,
         backup_directory.as_deref(),
@@ -2035,6 +2665,7 @@ fn direct_flash_with_program_inner(
     args: FlashArgs,
     program: &Path,
     require_real_flash_enablement: bool,
+    ignore_app_descriptor: bool,
     snapshot_reader: SnapshotReader,
     rom_probe: RomProbe,
     backup_directory: Option<&Path>,
@@ -2074,7 +2705,12 @@ fn direct_flash_with_program_inner(
         let directory = backup_directory.ok_or("developer backup directory is unavailable")?;
         Some(developer_backup::write_atomic(directory, &snapshot)?)
     };
-    let flash_args = direct_elf_flash_args(&args.port, partition_table.path(), &elf)?;
+    let flash_args = direct_elf_flash_args_with_options(
+        &args.port,
+        partition_table.path(),
+        &elf,
+        ignore_app_descriptor,
+    )?;
     let espflash = run_espflash_command(program, &flash_args)?;
     Ok(
         json!({"ok": true, "operation": "flash", "port": args.port, "elf": elf, "backup": backup_path, "espflash": espflash}),
@@ -2122,6 +2758,17 @@ fn validate_local_elf(path: &Path) -> Result<(), Box<dyn std::error::Error + Sen
     Ok(())
 }
 
+fn validate_ram_bringup_elf(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !path.is_file() {
+        return Err(format!(
+            "RAM Bring-up ELF does not exist: {}\nBuild it with: cargo +esp build -p flux-purr-ram-bringup --target xtensa-esp32s3-none-elf --target-dir firmware/target --release",
+            path.display()
+        )
+        .into());
+    }
+    validate_local_elf(path)
+}
+
 fn embedded_partition_table()
 -> Result<tempfile::NamedTempFile, Box<dyn std::error::Error + Send + Sync>> {
     let mut file = tempfile::Builder::new()
@@ -2141,7 +2788,16 @@ fn direct_elf_flash_args(
     partition_table: &Path,
     elf: &Path,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(vec![
+    direct_elf_flash_args_with_options(port, partition_table, elf, false)
+}
+
+fn direct_elf_flash_args_with_options(
+    port: &str,
+    partition_table: &Path,
+    elf: &Path,
+    ignore_app_descriptor: bool,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut args = vec![
         "flash".into(),
         "--chip".into(),
         "esp32s3".into(),
@@ -2150,13 +2806,19 @@ fn direct_elf_flash_args(
         "--non-interactive".into(),
         "--after".into(),
         "hard-reset".into(),
+    ];
+    if ignore_app_descriptor {
+        args.push("--ignore-app-descriptor".into());
+    }
+    args.extend([
         "--partition-table".into(),
         partition_table
             .to_str()
             .ok_or("invalid partition table path")?
             .into(),
         elf.to_str().ok_or("invalid ELF path")?.into(),
-    ])
+    ]);
+    Ok(args)
 }
 
 fn direct_erase_flash_args(port: &str) -> Vec<String> {
@@ -2211,19 +2873,75 @@ fn run_espflash_command(
     program: &Path,
     args: &[String],
 ) -> Result<EspflashDiagnostics, Box<dyn std::error::Error + Send + Sync>> {
-    let output = ProcessCommand::new(program).args(args).output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let output = run_external_with_timeout(program, args, Duration::from_secs(180))?;
+    let stdout = output.stdout.trim().to_string();
+    let mut stderr = output.stderr.trim().to_string();
+    if output.timed_out {
+        stderr.push_str("\nespflash process timed out after 180 seconds");
+    }
     let diagnostics = classify_espflash_diagnostics(
         args.first().map(String::as_str).unwrap_or("unknown"),
-        output.status.code(),
+        output.exit_code,
         &stdout,
         &stderr,
     );
-    if !output.status.success() {
+    if !output.success || output.timed_out {
         return Err(format_espflash_failure(&diagnostics).into());
     }
     Ok(diagnostics)
+}
+
+#[derive(Debug)]
+struct ExternalProcessOutput {
+    success: bool,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+}
+
+fn run_external_with_timeout(
+    program: &Path,
+    args: &[impl AsRef<std::ffi::OsStr>],
+    timeout: Duration,
+) -> Result<ExternalProcessOutput, io::Error> {
+    let mut child = ProcessCommand::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = StdInstant::now() + timeout;
+    let mut timed_out = false;
+    let status: ExitStatus;
+    loop {
+        if let Some(observed) = child.try_wait()? {
+            status = observed;
+            break;
+        }
+        if StdInstant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            status = child.wait()?;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut stdout = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        pipe.read_to_string(&mut stdout)?;
+    }
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_string(&mut stderr)?;
+    }
+    Ok(ExternalProcessOutput {
+        success: status.success(),
+        exit_code: status.code(),
+        stdout,
+        stderr,
+        timed_out,
+    })
 }
 
 fn classify_espflash_diagnostics(
@@ -2586,6 +3304,17 @@ fn rom_download_probe_args(port: &str) -> Vec<String> {
         "--no-stub".into(),
         "--non-interactive".into(),
     ]
+}
+
+fn ram_download_probe_args(port: &str) -> Vec<String> {
+    let mut args = rom_download_probe_args(port);
+    let before = args
+        .iter()
+        .position(|arg| arg == "--before")
+        .expect("ROM probe has --before")
+        + 1;
+    args[before] = "usb-reset".into();
+    args
 }
 
 fn read_snapshot_response<R: Read + ?Sized>(
@@ -18358,6 +19087,7 @@ mod tests {
             },
             &fake_espflash,
             false,
+            false,
             fixture_snapshot,
             fixture_rom_probe,
             Some(&backup_directory),
@@ -18411,6 +19141,7 @@ mod tests {
                 confirm: None,
             },
             &fake_espflash,
+            false,
             false,
             fixture_snapshot,
             fixture_rom_probe,
@@ -18523,6 +19254,19 @@ mod tests {
     }
 
     #[test]
+    fn ram_download_preflight_resets_only_after_identity_probe() {
+        let args = ram_download_probe_args("/dev/cu.test");
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--before" && pair[1] == "usb-reset" })
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--after" && pair[1] == "no-reset" })
+        );
+    }
+
+    #[test]
     fn direct_elf_flash_rebuilds_the_checked_in_partition_layout() {
         let args = direct_elf_flash_args(
             "/dev/cu.test",
@@ -18542,6 +19286,251 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--no-stub"));
         assert_eq!(args.last().map(String::as_str), Some("firmware.elf"));
         assert_eq!(direct_erase_flash_args("/dev/cu.test")[0], "erase-flash");
+    }
+
+    #[test]
+    fn ram_install_flash_args_ignore_missing_app_descriptor_only_when_requested() {
+        let normal = direct_elf_flash_args(
+            "/dev/cu.test",
+            Path::new("firmware/partitions.csv"),
+            Path::new("firmware.elf"),
+        )
+        .unwrap();
+        assert!(!normal.iter().any(|arg| arg == "--ignore-app-descriptor"));
+
+        let ram = direct_elf_flash_args_with_options(
+            "/dev/cu.test",
+            Path::new("firmware/partitions.csv"),
+            Path::new("bringup.elf"),
+            true,
+        )
+        .unwrap();
+        assert!(ram.iter().any(|arg| arg == "--ignore-app-descriptor"));
+    }
+
+    #[test]
+    fn ram_run_cli_defaults_to_ram_execution_and_supports_explicit_install() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "ram-run",
+            "preview",
+            "display",
+            "--port",
+            "/dev/cu.test",
+        ])
+        .unwrap();
+        let Command::RamRun {
+            command: RamRunCommand::Preview(args),
+        } = cli.command
+        else {
+            panic!("ram preview parses");
+        };
+        assert!(!args.options.reload);
+        assert!(!args.options.install);
+        assert!(!args.options.skip_backup);
+        assert!(args.options.confirm.is_none());
+        assert!(args.options.theme.is_none());
+
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "ram-run",
+            "preview",
+            "frontpanel",
+            "--port",
+            "/dev/cu.test",
+            "--theme",
+            "dark",
+        ])
+        .unwrap();
+        let Command::RamRun {
+            command: RamRunCommand::Preview(args),
+        } = cli.command
+        else {
+            panic!("ram themed preview parses");
+        };
+        assert_eq!(args.options.theme, Some(RamTheme::Dark));
+
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "ram-run",
+            "test",
+            "fan",
+            "--port",
+            "/dev/cu.test",
+            "--install",
+        ])
+        .unwrap();
+        let Command::RamRun {
+            command: RamRunCommand::Test(args),
+        } = cli.command
+        else {
+            panic!("ram test parses");
+        };
+        assert!(args.options.install);
+
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "ram-run",
+            "test",
+            "adc",
+            "--port",
+            "/dev/cu.test",
+            "--install",
+            "--skip-backup",
+            "--confirm",
+            "NO_EEPROM_BACKUP",
+        ])
+        .unwrap();
+        let Command::RamRun {
+            command: RamRunCommand::Test(args),
+        } = cli.command
+        else {
+            panic!("ram install bypass parses");
+        };
+        assert!(args.options.skip_backup);
+        assert_eq!(args.options.confirm.as_deref(), Some("NO_EEPROM_BACKUP"));
+    }
+
+    #[test]
+    fn ram_load_is_explicitly_non_persistent() {
+        let args = ram_load_args("/dev/cu.test", Path::new("bringup.elf"));
+        assert!(args.iter().any(|arg| arg == "--ram"));
+        assert!(args.iter().any(|arg| arg == "--no-stub"));
+        assert!(!args.iter().any(|arg| arg == "--partition-table"));
+        assert!(!args.iter().any(|arg| arg == "hard-reset"));
+    }
+
+    #[test]
+    fn unknown_or_product_identity_can_never_reuse_ram_session() {
+        let product = RamRuntimeIdentity {
+            identity: RamIdentityObservation {
+                firmware_kind: Some(FirmwareKind::Product),
+                device_id: "device-1".to_string(),
+                firmware_version: "0.1.0".to_string(),
+                build_id: "build-1".to_string(),
+                git_sha: "git-1".to_string(),
+                board: "esp32-s3".to_string(),
+                api_version: "api-1".to_string(),
+                protocol_version: "flux-purr.usb.v1".to_string(),
+                hostname: "flux-purr".to_string(),
+                capabilities: vec!["test_adc".to_string()],
+            },
+        };
+        assert!(!ram_identity_matches(&product, "build-1", "test_adc"));
+
+        let legacy = RamRuntimeIdentity {
+            identity: RamIdentityObservation {
+                firmware_kind: None,
+                device_id: "device-1".to_string(),
+                firmware_version: "0.1.0".to_string(),
+                build_id: "build-1".to_string(),
+                git_sha: "git-1".to_string(),
+                board: "esp32-s3".to_string(),
+                api_version: "api-1".to_string(),
+                protocol_version: "flux-purr.usb.v1".to_string(),
+                hostname: "flux-purr".to_string(),
+                capabilities: vec!["test_adc".to_string()],
+            },
+        };
+        assert!(!ram_identity_matches(&legacy, "build-1", "test_adc"));
+    }
+
+    #[test]
+    fn malformed_or_legacy_identity_is_unknown_to_ram_probe() {
+        assert!(
+            decode_ram_identity_response(&json!({
+                "type": "response",
+                "ok": true,
+                "result": {"identity": {
+                    "deviceId": "device-1",
+                    "firmwareVersion": "0.1.0",
+                    "buildId": "build-1",
+                    "gitSha": "git-1",
+                    "board": "esp32-s3",
+                    "apiVersion": "api-1",
+                    "protocolVersion": "flux-purr.usb.v1",
+                    "hostname": "flux-purr",
+                    "capabilities": []
+                }}
+            }))
+            .is_some_and(|runtime| runtime.identity.firmware_kind.is_none())
+        );
+        assert!(
+            decode_ram_identity_response(&json!({
+                "result": {"identity": {"firmwareKind": "not-a-kind"}}
+            }))
+            .is_none()
+        );
+        assert!(decode_ram_identity_response(&json!({"type": "rom-log"})).is_none());
+        assert!(
+            decode_ram_identity_response(&json!({
+                "type": "response",
+                "ok": false,
+                "result": {"identity": {"firmwareKind": "ram_bringup"}}
+            }))
+            .is_none()
+        );
+        assert!(
+            decode_ram_identity_response(&json!({
+                "type": "event",
+                "ok": true,
+                "result": {"identity": {"firmwareKind": "ram_bringup"}}
+            }))
+            .is_none()
+        );
+        assert!(
+            decode_ram_identity_response(&json!({
+                "result": {"identity": {"firmwareKind": "ram_bringup"}}
+            }))
+            .is_none()
+        );
+        for envelope in [
+            json!({"type": null, "ok": true, "result": {"identity": {"firmwareKind": "ram_bringup"}}}),
+            json!({"type": "response", "ok": 1, "result": {"identity": {"firmwareKind": "ram_bringup"}}}),
+        ] {
+            assert!(decode_ram_identity_response(&envelope).is_none());
+        }
+    }
+
+    #[test]
+    fn long_ram_commands_have_time_to_finish_before_identity_is_classified_unknown() {
+        assert_eq!(ram_command_timeout("test_fan"), Duration::from_secs(30));
+        assert_eq!(
+            ram_command_timeout("preview_frontpanel"),
+            Duration::from_secs(60)
+        );
+        assert_eq!(ram_command_timeout("test_adc"), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn ram_preflight_rejects_secure_or_disabled_download_without_fallback() {
+        let error = classify_ram_preflight_output(
+            "/dev/cu.test",
+            true,
+            "ROM: secure UART download enabled",
+            "",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no Flash fallback"));
+        assert!(classify_ram_preflight_output("/dev/cu.test", false, "", "timeout").is_err());
+    }
+
+    #[test]
+    fn ram_preflight_parses_rom_security_flags() {
+        assert_eq!(parse_security_flags("Flags: 0x00000004"), Some(0x00000004));
+        assert_eq!(
+            parse_security_flags("  flags: 0x00000100 other"),
+            Some(0x100)
+        );
+        let error = classify_ram_preflight_output("/dev/cu.test", true, "Flags: 0x00000004", "")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("secure download"));
+        let error = classify_ram_preflight_output("/dev/cu.test", true, "Flags: 0x00000100", "")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("USB access/download"));
     }
 
     #[test]

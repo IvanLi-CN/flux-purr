@@ -21,6 +21,7 @@ use crate::{
         ThermalControlProfileSettingsConfig, ThermalProfileBank, ThermalProfileMode,
         WifiStaticIpv4Config, adc_calibration_fit,
     },
+    ram_bringup::{RamBringupCommand, RamBringupTheme},
 };
 
 pub const CONTROL_PLANE_API_VERSION: &str = "2026-05-29";
@@ -39,6 +40,13 @@ pub const REQUEST_ID_MAX_LEN: usize = 48;
 pub const ERROR_CODE_MAX_LEN: usize = 48;
 pub const ERROR_MESSAGE_MAX_LEN: usize = 160;
 pub const EEPROM_MAINTENANCE_CHUNK_MAX: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareKind {
+    Product,
+    RamBringup,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -115,6 +123,7 @@ impl Default for NetworkSummary {
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
     pub device_id: String<DEVICE_ID_MAX_LEN>,
+    pub firmware_kind: FirmwareKind,
     pub firmware_version: String<32>,
     pub build_id: String<BUILD_ID_MAX_LEN>,
     pub git_sha: String<GIT_SHA_MAX_LEN>,
@@ -150,6 +159,7 @@ impl Identity {
         push_str(&mut capabilities, "buzzer_test");
         Self {
             device_id: string("flux-purr-s3-001"),
+            firmware_kind: FirmwareKind::Product,
             firmware_version: string(env!("FLUX_PURR_FW_VERSION")),
             build_id: string(env!("FLUX_PURR_BUILD_ID")),
             git_sha: string(env!("FLUX_PURR_SOURCE_SHA")),
@@ -1708,6 +1718,11 @@ pub enum UsbFrame {
         request_id: String<REQUEST_ID_MAX_LEN>,
         config: RuntimeConfigCommand,
     },
+    RamBringup {
+        request_id: String<REQUEST_ID_MAX_LEN>,
+        command: RamBringupCommand,
+        theme: Option<RamBringupTheme>,
+    },
     #[cfg(feature = "buzzer-test")]
     BuzzerTestResponse {
         request_id: String<REQUEST_ID_MAX_LEN>,
@@ -1777,6 +1792,10 @@ struct UsbFrameWire {
     request_id: Option<String<REQUEST_ID_MAX_LEN>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     op: Option<String<24>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<RamBringupCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    theme: Option<RamBringupTheme>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1975,6 +1994,14 @@ struct UsbRuntimeConfigInboundWire {
     thermal_control_profile: Option<ThermalControlProfileCommand>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbRamBringupInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    command: Option<RamBringupCommand>,
+    theme: Option<RamBringupTheme>,
+}
+
 #[cfg(feature = "buzzer-test")]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2130,6 +2157,11 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     thermal_control_profile: value.thermal_control_profile.map(|profile| *profile),
                 },
             }),
+            "ram_bringup" => Ok(UsbFrame::RamBringup {
+                request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                command: value.command.ok_or(UsbFrameError::MalformedJson)?,
+                theme: value.theme,
+            }),
             #[cfg(feature = "buzzer-test")]
             "buzzer_test" => Ok(UsbFrame::BuzzerTest {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
@@ -2209,6 +2241,8 @@ impl From<&UsbFrame> for UsbFrameWire {
             capabilities: None,
             request_id: None,
             op: None,
+            command: None,
+            theme: None,
             ssid: None,
             password: None,
             static_ipv4: None,
@@ -2300,6 +2334,16 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.calibration = config.calibration.map(Box::new);
                 wire.thermal_profile_mode = config.thermal_profile_mode;
                 wire.thermal_control_profile = config.thermal_control_profile.map(Box::new);
+            }
+            UsbFrame::RamBringup {
+                request_id,
+                command,
+                theme,
+            } => {
+                wire.frame_type = string("ram_bringup");
+                wire.request_id = Some(request_id.clone());
+                wire.command = Some(*command);
+                wire.theme = *theme;
             }
             #[cfg(feature = "buzzer-test")]
             UsbFrame::BuzzerTest {
@@ -2686,6 +2730,14 @@ pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
                 },
             })
         }
+        "ram_bringup" => {
+            let frame = parse_usb_wire::<UsbRamBringupInboundWire>(trimmed)?;
+            Ok(UsbFrame::RamBringup {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                command: frame.command.ok_or(UsbFrameError::MalformedJson)?,
+                theme: frame.theme,
+            })
+        }
         #[cfg(feature = "buzzer-test")]
         "buzzer_test" => {
             let frame = parse_usb_wire::<UsbBuzzerTestInboundWire>(trimmed)?;
@@ -3012,6 +3064,7 @@ mod tests {
     #[test]
     fn identity_lists_feature_capabilities() {
         let identity = Identity::firmware_default();
+        assert_eq!(identity.firmware_kind, FirmwareKind::Product);
         assert!(
             identity
                 .capabilities
@@ -3063,6 +3116,37 @@ mod tests {
                     .any(|value| value == "lan_pairing")
             );
         }
+    }
+
+    #[test]
+    fn new_identity_emits_firmware_kind() {
+        let identity = Identity::firmware_default();
+        let frame = hello_frame(identity);
+        let mut out = [0_u8; USB_LINE_MAX_LEN];
+        let line = write_usb_frame(&frame, &mut out).expect("identity frame serializes");
+        assert!(line.contains(r#""firmwareKind":"product""#));
+    }
+
+    #[test]
+    fn ram_bringup_frame_is_typed_and_closed() {
+        let frame = parse_usb_frame(
+            r#"{"type":"ram_bringup","requestId":"ram-1","command":"test_adc","theme":"dark"}"#,
+        )
+        .expect("ram frame parses");
+        assert_eq!(
+            frame,
+            UsbFrame::RamBringup {
+                request_id: string("ram-1"),
+                command: RamBringupCommand::TestAdc,
+                theme: Some(RamBringupTheme::Dark),
+            }
+        );
+        assert!(
+            parse_usb_frame(
+                r#"{"type":"ram_bringup","requestId":"ram-2","command":"write_eeprom"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

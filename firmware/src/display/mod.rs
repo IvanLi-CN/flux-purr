@@ -267,6 +267,21 @@ pub const DEMO_SEQUENCE: [SceneId; 10] = [
     SceneId::DemoGrid,
 ];
 
+pub const DISPLAY_PREVIEW_SEQUENCE: [SceneId; 12] = [
+    SceneId::StartupSplash,
+    SceneId::StartupCalibration,
+    SceneId::DemoSolidRed,
+    SceneId::DemoSolidGreen,
+    SceneId::DemoSolidBlue,
+    SceneId::DemoCheckerWide,
+    SceneId::DemoCheckerFine,
+    SceneId::DemoShapes,
+    SceneId::DemoLines,
+    SceneId::DemoText,
+    SceneId::DemoTriangles,
+    SceneId::DemoGrid,
+];
+
 pub const FRONTPANEL_CAROUSEL_SEQUENCE: [SceneId; 10] = [
     SceneId::FrontPanelHome,
     SceneId::FrontPanelPreferencesPresetTemp,

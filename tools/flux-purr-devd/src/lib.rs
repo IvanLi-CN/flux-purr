@@ -566,6 +566,7 @@ impl DeviceRecord {
     fn mock(id: &str, transport: DeviceTransport) -> Self {
         let identity = Identity {
             device_id: id.to_string(),
+            firmware_kind: Some(FirmwareKind::Product),
             firmware_version: "fw/v0.4.0-dev".to_string(),
             build_id: "devd-mock".to_string(),
             git_sha: "unknown".to_string(),
@@ -804,6 +805,7 @@ impl DeviceRecord {
             connection: ConnectionState::Disconnected,
             identity: Identity {
                 device_id: String::new(),
+                firmware_kind: None,
                 firmware_version: "unknown".to_string(),
                 build_id: "native-serial-placeholder".to_string(),
                 git_sha: "unknown".to_string(),
@@ -884,6 +886,8 @@ pub enum ConnectionState {
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
     pub device_id: String,
+    #[serde(default)]
+    pub firmware_kind: Option<FirmwareKind>,
     pub firmware_version: String,
     pub build_id: String,
     pub git_sha: String,
@@ -892,6 +896,13 @@ pub struct Identity {
     pub protocol_version: String,
     pub hostname: String,
     pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareKind {
+    Product,
+    RamBringup,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8389,6 +8400,21 @@ fn open_serial_session(port_path: &str, deadline: Instant) -> Result<SerialSessi
         _serial_lock: serial_lock,
         port,
     })
+}
+
+/// Hold the process-wide lock for a direct serial workflow that owns a port
+/// across multiple opens and external commands.
+pub fn acquire_serial_port_lock(
+    port_path: &str,
+    timeout: Duration,
+) -> Result<impl Send + 'static, String> {
+    SerialPortProcessLock::acquire(port_path, Instant::now() + timeout)
+        .map(|lock| SerialPortLockGuard { _lock: lock })
+        .map_err(|error| error.error.message)
+}
+
+struct SerialPortLockGuard {
+    _lock: SerialPortProcessLock,
 }
 
 fn reopen_serial_session(port_path: &str, deadline: Instant) -> Result<SerialSession, HttpError> {

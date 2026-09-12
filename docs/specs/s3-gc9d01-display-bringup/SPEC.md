@@ -6,14 +6,14 @@
 
 - 当前仓库的 `ESP32-S3` 固件入口为 `flux-purr`，LCD 相关引脚已冻结，并由显示 bring-up 与前面板 runtime 共用。
 - 主人已经明确要求使用 `gc9d01-rs` 作为显示驱动，并且硬约束必须走 **异步 SPI**，不能用 blocking SPI 兜底。
-- 若没有统一的显示测试界面、host 侧可控预览图，以及上板后用于拍照校验方向/颜色的流程，就无法可靠完成面板方向、偏移和颜色口径的闭环。
+- 若没有统一的显示测试界面，以及上板后用于拍照校验方向/颜色的流程，就无法可靠完成面板方向、偏移和颜色口径的闭环。
 - 本 spec 完成时曾以“启动校准后进入界面轮播”作为 bring-up 验收；当前分支的运行态行为已迁移到 `frontpanel-input-interaction`。
 
 ### 目标 / 非目标
 
 #### 继承 / supersession 说明
 
-- 本 spec 继续保留 `GC9D01 + panel_160x50 + host preview` 的显示 bring-up 基线。当前 `esp-rtos` 运行态使用异步 SPI；GC9D01 规定的面板延时必须在异步操作完成前真实等待。
+- 本 spec 继续保留 `GC9D01 + panel_160x50` 的显示 bring-up 基线；物理预览由独立 `flux-purr-ram-bringup` 固件提供。当前 `esp-rtos` 运行态使用异步 SPI；GC9D01 规定的面板延时必须在异步操作完成前真实等待。
 - 启动后轮播、五向输入、Key Test 与 mock-only safe-off runtime 行为，现已由 `frontpanel-input-interaction` 接管。
 - 若本 spec 与 `frontpanel-input-interaction` 在运行态行为上冲突，以 `frontpanel-input-interaction` 为准。
 
@@ -21,9 +21,9 @@
 
 - 以 `flux-purr` binary 作为 `ESP32-S3` 的 GC9D01 显示 bring-up 与前面板 runtime 入口。
 - 接入 `gc9d01-rs` driver，使用 `Embassy + esp-rtos + SPI2` 完成面板初始化与刷屏。
-- 新增一套共享显示场景与 host/device 共用渲染基线，支撑后续前面板 runtime 的 host preview 与硬件验证。
-- 新增 host-side preview harness，复用同一套渲染代码导出 `framebuffer.bin`；使用仓库 converter 将逻辑 framebuffer 转换为 `preview.png`。
-- 保持 host 侧质量门和 Xtensa 构建口径可运行，并通过 `mcu-agentd` 完成烧录/监看流程。
+- 新增一套共享显示场景与设备端渲染基线，支撑前面板物理验证。
+- 通过 `flux-purr ram-run preview display --port <SERIAL_PORT>` 在真实面板上运行场景；不保留独立 physical RAM preview binary。
+- 保持主机质量门和 Xtensa 构建口径可运行，并通过仓库 CLI 完成受控 RAM 载入。
 
 #### Non-goals
 
@@ -40,7 +40,7 @@
 - `firmware/Cargo.toml` 的显示/异步运行时依赖
 - `firmware/src/lib.rs` 与新增的显示模块
 - `firmware/src/bin/flux_purr.rs`
-- `firmware/src/bin/display_preview.rs` 与 framebuffer 导出逻辑
+- `flux-purr ram-run preview display --port <SERIAL_PORT>` 的物理面板预览入口
 - `firmware/README.md`、必要的根 README 口径同步
 - `docs/specs/s3-gc9d01-display-bringup/assets/` 下的视觉证据
 
@@ -71,15 +71,15 @@ None
 - REQ-DISPLAY-011: splash 必须提供亮色与深色两套 RGB565 主题，亮色为默认主题。设计输入色为：深色背景 `#08111F`、机身/项目名 `#F7FBFF`、热区 `#FF5542`、版本文字 `#8999AD`；亮色背景 `#FFFFFF`、深色机身/项目名 `#08111F`、热区 `#FF5542`、版本文字 `#465467`。量化到 RGB565 后，深色背景/版本文字分别为 `#081019`/`#8C9AAD`，亮色版本文字为 `#425563`；验收以 RGB565 输出值为准。Logo 与项目名字标的边缘必须使用前景/背景 alpha 混合后的 RGB565 中间色，不得以单一深灰色替代抗锯齿。版本文本必须使用 `4×7` 像素位图，以项目名视觉中心 `x=99` 对齐并叠加到 `y=30`；checked-in preview 使用 `FLUX_PURR_BUILD_MODE=release` 固定为源树 `VERSION`，避免把动态开发 hash 固定进视觉证据，正式发布包再由 release workflow 写入最终版本。该启动屏字形独立于运行态界面；普通运行态标签保持既有字形，FAN CTRL 策略编辑页单独使用 `6×10` 标签与 `8×13` 标题以保证可读性。
 - REQ-DISPLAY-012: splash 仅覆盖 App 的启动早期；后续首次 runtime Dashboard 刷新自然替换它。不得为 splash 增加阻塞安全初始化的固定等待。Key Test 启动继续显示静态校准屏。
 - REQ-DISPLAY-013: bring-up 阶段必须支持：`静态校准屏 -> 前面板显示基线`。
-- REQ-DISPLAY-014: 当前 display baseline 只负责证明驱动、方向、偏移、host preview 与 on-device 渲染一致；后续运行态是否轮播、是否 safe-off，由 `frontpanel-input-interaction` 冻结。
-- REQ-DISPLAY-015: host preview 必须复用同一套场景渲染代码并产出 `framebuffer.bin`；`fb_to_png.py` 将逻辑 framebuffer 可复现地转换为 `preview.png`，8x nearest-neighbor PNG 作为 owner-facing 证据。
+- REQ-DISPLAY-014: 当前 display baseline 只负责证明驱动、方向、偏移、physical RAM preview 与 on-device 渲染一致；后续运行态是否轮播、是否 safe-off，由 `frontpanel-input-interaction` 冻结。
+- REQ-DISPLAY-015: CLI physical RAM preview 必须复用同一套场景渲染代码并直接驱动真实 GC9D01；主机 framebuffer/PNG 只能作为静态参考，不能替代实机验收。
 - REQ-DISPLAY-016: 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
 - REQ-DISPLAY-020: 背光 `GPIO13` 必须在显示控制器初始化和首个启动帧成功刷入前保持关闭；启动屏整帧提交成功后应立即点亮。显示初始化或首帧刷屏失败时必须保持关闭，避免把未定义帧暴露给用户。
 
 ### SHOULD
 
 - REQ-DISPLAY-017: demo 序列尽量复用上游 `gc9d01-rs` embedded-graphics 示例里的典型图案（纯色、棋盘格、形状、文字、网格等）。
-- REQ-DISPLAY-018: host preview 输出应默认落到 spec 资产目录，便于在 `SPEC.md` 中作为视觉证据引用。
+- REQ-DISPLAY-018: CLI physical RAM preview 的完成响应与授权实拍应作为验收证据；静态参考图继续落在 spec 资产目录。
 - REQ-DISPLAY-019: 设备端日志应输出当前场景、方向配置与 profile 口径，便于 monitor 时定位问题。
 
 ## 功能与行为规格（Functional / Behavior Spec）
@@ -89,14 +89,14 @@ None
 - 设备上电后初始化 Embassy 运行时、异步 SPI、GC9D01 driver 与背光控制；背光先保持关闭。
 - 正常 App 路径在显示初始化完成后先绘制静态 splash，启动屏整帧成功刷入后立即点亮背光，并在其后的安全输出、PD、EEPROM 与 ADC 启动工作期间保持显示；首个 Dashboard 刷新覆盖 splash。
 - Key Test 路径继续绘制静态校准屏，用于确认驱动、方向与颜色口径。
-- host preview binary 使用与设备端相同的场景渲染入口生成 framebuffer dump，再转换成 PNG 供主人预审。
+- CLI physical RAM preview 使用与设备端相同的场景渲染入口直接驱动真实面板；主机侧图片仅作为静态参考，不是验收入口。
 - 硬件调试阶段，主人拍摄静态校准屏和前面板运行画面；Agent 根据实拍判断是否需要微调 orientation / dx / dy / 颜色设置。
 
 ### Edge cases / errors
 
 - 若 SPI / Embassy 初始化失败，固件应在日志中暴露初始化阶段与具体环节，而不是静默卡死。
 - 显示初始化、首次整屏写入和运行期刷新失败或超时后必须进入可诊断 recovery 状态；超时取消的 SPI 事务不得被复用。SPI 调用返回成功之前必须已经满足面板规定的时序延时。
-- 若 host preview 生成的 PNG 与设备实拍不一致，优先检查驱动 orientation / address window / offset，而不是在 PNG 转换阶段做掩盖式旋转。
+- 若 CLI physical RAM preview 与设备实拍不一致，优先检查驱动 orientation / address window / offset，而不是在主机参考图阶段做掩盖式旋转。
 - 若 `mcu-agentd` 无 selector、无设备、资源忙或 artifact 缺失，必须按 `mcu-agentd` 机器人模式错误口径中止并回报证据。
 
 ## 接口契约（Interfaces & Contracts）
@@ -106,8 +106,8 @@ None
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `flux-purr` firmware binary | CLI/binary | internal | Modify | None | firmware | mcu-agentd / bring-up operator | 正常 App 与显示 bring-up 入口 |
-| Display scene render helpers | Rust module | internal | New | None | firmware | device binary / host preview | 复用同源渲染逻辑 |
-| Host display preview binary | CLI/binary | internal | New | None | firmware | developer | 导出 framebuffer 与预览图 |
+| Display scene render helpers | Rust module | internal | New | None | firmware | product / RAM Bring-up firmware | 复用同源渲染逻辑 |
+| RAM display preview command | CLI command | internal | Modify | `ram-bringup-firmware/SPEC.md` | firmware/devd | developer | 通过 Bring-up ELF 驱动真实面板 |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -115,11 +115,11 @@ None
 
 ## Verification
 
-- VER-DISPLAY-001 (covers: REQ-DISPLAY-005, REQ-DISPLAY-006, REQ-DISPLAY-007, REQ-DISPLAY-008, REQ-DISPLAY-009, REQ-DISPLAY-010, REQ-DISPLAY-011, REQ-DISPLAY-015, REQ-DISPLAY-017, REQ-DISPLAY-018): Given `display_preview` 与 `fb_to_png.py`，When 生成启动屏、校准屏与 demo 场景的 framebuffer 并转换为 PNG，Then 预览图能显示方向标识、RGB 色块、灰阶块和文字标签。
+- VER-DISPLAY-001 (covers: REQ-DISPLAY-005, REQ-DISPLAY-006, REQ-DISPLAY-007, REQ-DISPLAY-008, REQ-DISPLAY-009, REQ-DISPLAY-010, REQ-DISPLAY-011, REQ-DISPLAY-015, REQ-DISPLAY-017, REQ-DISPLAY-018): Given `flux-purr ram-run preview display --port <SERIAL_PORT>`，When CLI 在真实面板上运行显示场景，Then 面板能显示方向标识、RGB 色块、灰阶块和文字标签，并返回完成响应。
 - VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004, REQ-DISPLAY-020): Given `flux-purr` device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release` 成功，并通过启动顺序测试确认背光在首帧成功刷入后才开启。
 - VER-DISPLAY-003 (covers: REQ-DISPLAY-014): Given host 质量门，When 运行 `cargo test`、`cargo clippy --all-targets --all-features -D warnings`、`cargo build --release`，Then 全部通过。
 - VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 正常 App 路径先显示 branded splash，首帧成功后点亮背光并进入 Dashboard；Key Test 路径显示静态校准屏，并报告当前场景、方向配置与 profile。
-- VER-DISPLAY-005 (covers: REQ-DISPLAY-016): Given 主人提供实拍照片，When 对比 host preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
+- VER-DISPLAY-005 (covers: REQ-DISPLAY-016): Given 主人提供实拍照片，When 对比 physical RAM preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
 - VER-DISPLAY-006: Given 后续运行态规格需要交互或 safe-off 约束，When 查询本仓库 spec，Then 以 `frontpanel-input-interaction` 为真相源，而不是回退到本 spec 的历史轮播描述。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
@@ -140,7 +140,7 @@ None
 
 ### Quality checks
 
-- host preview 与设备预览使用同一渲染源
+- CLI physical RAM preview 与 product firmware 使用同一渲染源
 - 视觉证据在本 spec 的 `## Visual Evidence` 中留档
 - 若进入 PR 路径，必须完成 spec sync 与 review proof
 
@@ -152,22 +152,22 @@ None
 
 ## 方案概述（Approach, high-level）
 
-- 场景渲染采用独立的逻辑 framebuffer/canvas，让 host preview 与 device binary 共享同一套绘制代码。
+- 场景渲染采用独立的逻辑 framebuffer/canvas，让 RAM Bring-up 与 product firmware 共享同一套绘制代码。
 - 设备端只负责初始化 `gc9d01-rs` driver，并把共享 canvas 内容拷入驱动 framebuffer 再 flush 到屏幕。
-- host preview 默认导出 owner-facing 的逻辑 framebuffer（`RGB565 LE`，`160x50`）用于 PNG 预览，同时额外导出与 GC9D01 设备端一致的 panel-order companion framebuffer（已应用 orientation 变换，`RGB565 BE`，`50x160`），避免另写一套 UI 逻辑。
+- CLI physical RAM preview 不导出主机 framebuffer；它直接把同源 canvas 刷到 GC9D01。仓库中的 PNG/framebuffer 文件仅作为静态显示参考，避免把主机渲染路径误当成验收入口。
 - 通过单一常量控制“仅校准屏”、“demo 测试轮播”和“前面板界面轮播”三种启动模式的切换。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
 - 风险：上游 `gc9d01-rs` 的 `Orientation::Landscape` 与当前板子的实际装配方向可能不一致，仍需实拍确认。
 - 风险：`panel_160x50` 的 `dx=15` 与实际模组可视区若存在偏差，需要在同一轮实现里微调。
-- 风险：host preview 反映的是逻辑场景与 panel-order companion 的组合证据，不等于实机面板玻璃、背光、色温与拍照白平衡的真实观感。
+- 风险：physical RAM preview 反映的是同源逻辑场景，不等于实机面板玻璃、背光、色温与拍照白平衡的真实观感。
 - 风险：若 `mcu-agentd` selector 未设置或串口被占用，会阻断上板验证。
 - 假设：当前前面板模组确实与 `gc9d01-rs` 的 `panel_160x50` 配置兼容。
 
 ## Visual Evidence
 
-- Host startup preview（逻辑预览，`RGB565 LE`，`160x50`，`Orientation::Landscape`，`dx=15`，`dy=0`；默认亮色主题，背景为 RGB565 纯白）
+- Checked-in startup reference（逻辑参考，`RGB565 LE`，`160x50`，`Orientation::Landscape`，`dx=15`，`dy=0`；默认亮色主题，背景为 RGB565 纯白）
 - Raw framebuffer: `./assets/startup.framebuffer.bin`
 - Panel-order framebuffer: `./assets/startup.panel.framebuffer.bin`
 - PNG preview source: `./assets/startup.preview.png`
@@ -175,26 +175,13 @@ None
 - Dark-theme counterparts: `./assets/startup-dark.framebuffer.bin`、`./assets/startup-dark.panel.framebuffer.bin`、`./assets/startup-dark.preview.png`
 - Dark-theme owner-facing render (`8x`, `1280x400`): `./assets/startup-dark.zoom.png`
 
-![Host startup preview](./assets/startup.zoom.png)
+![Display reference](./assets/startup.zoom.png)
 
-- Host boot-splash preview（逻辑预览，`RGB565 LE`，`160x50`，含 brand mark、项目名与编译版本；默认亮色主题，背景为 RGB565 纯白）
-- Bitmap template: `./assets/startup-splash-template.png`（由 `firmware/scripts/generate_startup_splash_asset.py` 从官方 Logo 生成）
-- Light-theme bitmap template: `./assets/startup-splash-light-template.png`
-- Raw framebuffer: `./assets/startup-splash.framebuffer.bin`
-- Panel-order framebuffer: `./assets/startup-splash.panel.framebuffer.bin`
-- PNG preview source: `./assets/startup-splash.preview.png`
-- Owner-facing render (`8x`, `1280x400`): `./assets/startup-splash.zoom.png`
-- Dark-theme raw framebuffer: `./assets/startup-splash-dark.framebuffer.bin`
-- Dark-theme panel-order framebuffer: `./assets/startup-splash-dark.panel.framebuffer.bin`
-- Dark-theme PNG preview source: `./assets/startup-splash-dark.preview.png`
-- Dark-theme owner-facing render (`8x`, `1280x400`): `./assets/startup-splash-dark.zoom.png`
-- Preview theme selection: `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin display_preview -- startup-splash <output> --theme dark|light`
-- PNG conversion: `FLUX_PURR_BUILD_MODE=release cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin display_preview -- startup-splash <output> --theme light|dark`, then `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in <output>.framebuffer.bin --out <output>.preview.png` and `magick <output>.preview.png -filter point -resize 800% <output>.zoom.png`.
-- Checked-in splash previews use the source-tree `VERSION` with release-mode identity; release preparation regenerates the final release bundle after the GitHub-signed VERSION-only preparation commit.
-
-![Host boot-splash preview](./assets/startup-splash.zoom.png)
-
-![Host boot-splash dark-theme preview](./assets/startup-splash-dark.zoom.png)
+- Physical display validation: `flux-purr ram-run preview display --port <SERIAL_PORT>`.
+- The CLI loads the separate Bring-up ELF into RAM by default and does not write
+  Flash. `--install` is explicit and uses the existing developer flash gate.
+- The checked-in images are visual reference assets only; acceptance is the
+  authorized board's actual LCD output and serial command response.
 
 ## 参考（References）
 

@@ -2,7 +2,7 @@
 name = "flux-purr-firmware"
 version = "0.1.0"
 edition = "2024"
-description = "Flux Purr firmware domain crate (ESP32-S3 display bring-up + host preview)"
+description = "Flux Purr product firmware domain crate for the ESP32-S3 front panel"
 license = "MIT OR Apache-2.0"
 build = "build.rs"
 
@@ -13,26 +13,10 @@ path = "src/lib.rs"
 name = "flux-purr"
 path = "src/bin/flux_purr.rs"
 
-[[bin]]
-name = "display_preview"
-path = "src/bin/display_preview.rs"
-required-features = ["host-preview"]
-
-[[bin]]
-name = "frontpanel_preview"
-path = "src/bin/frontpanel_preview.rs"
-required-features = ["host-preview"]
-
-[[bin]]
-name = "status_light_preview"
-path = "src/bin/status_light_preview.rs"
-required-features = ["host-preview"]
-
 [features]
 default = ["esp32s3", "web_serial", "net_http", "pd-request-20v", "buzzer-test"]
 esp32s3 = []
 esp32c3 = []
-host-preview = []
 frontpanel-key-test = []
 web_serial = []
 buzzer-test = ["web_serial"]

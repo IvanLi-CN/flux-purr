@@ -36,7 +36,7 @@
 
 - `firmware/src/bin/flux_purr.rs`
 - `firmware/src/frontpanel/**`
-- `firmware/src/bin/frontpanel_preview.rs`
+- `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>`
 - `web/src/features/frontpanel-preview/**`
 - `web/src/stories/FrontPanelDisplay.stories.tsx`
 - `firmware/README.md`
@@ -137,7 +137,7 @@
 
 - cooling-disabled lock 的标签与恢复路径保持稳定，便于 monitor 与后续 review 收敛。
 - 初始 UI 应在第一次有效 RTD 样本后就显示实际温度，而不是长时间保留 bring-up 默认值。
-- firmware preview 与 Storybook 的 Dashboard/Active Cooling 文案和颜色层级保持一致。
+- `ram-run` 物理验证与 Storybook 的 Dashboard/Active Cooling 文案和颜色层级保持一致。
 
 ### COULD
 
@@ -256,23 +256,16 @@ None
 - `bun run check:devd`
 - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- --json thermal self-test --device mock-fp-lab-01 --source-kind isolapurr --source-id iso-mock --source-url http://127.0.0.1:1 --dry-run`
 - `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --features esp32s3 --bin flux-purr --release`
-- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-pps-12v.framebuffer.bin --pd-mv 12000`
-- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-pps-28v.framebuffer.bin --pd-mv 28000`
+- `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` (physical Dashboard preview)
 - `bun run --cwd web check`
 - `bun run --cwd web typecheck`
 - `bun run --cwd web test:unit`
 - `bun run --cwd web build-storybook`
-- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-fan-off docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-fan-off.framebuffer.bin`
-- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-fan-auto docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-fan-auto.framebuffer.bin`
-- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-fan-run docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-fan-run.framebuffer.bin`
-- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-overtemp-a docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-overtemp-a.framebuffer.bin`
-- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-overtemp-b docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-overtemp-b.framebuffer.bin`
-- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-power-wait docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-power-wait.framebuffer.bin`
-- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-eeprom-restore docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-eeprom-restore.framebuffer.bin`
+- `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` covers the physical Dashboard and menu states.
 
 ### UI / Firmware Preview
 
-- owner-facing 预览必须来自 `frontpanel_preview` 或 Storybook 的确定性输出。
+- owner-facing 预览必须来自 `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 或 Storybook 的确定性输出。
 - 视觉证据必须落在本 spec 的 `./assets/` 下，并和聊天回图保持同源。
 
 ## 文档更新（Docs to Update）
