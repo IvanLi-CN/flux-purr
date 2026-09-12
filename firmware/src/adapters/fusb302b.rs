@@ -225,10 +225,10 @@ impl SinkPolicy {
                 self.phase = SinkPhase::Ready;
                 let _ = now_ms;
             }
-            (_, REJECT | WAIT) if self.active_contract != Contract::none() => {
-                self.cancel_pending_request()
-            }
-            (_, REJECT | WAIT) => self.mark_fault(),
+            // A source may reject or defer the first request while it is
+            // still advertising a usable contract. Keep the attachment alive
+            // and let the normal Source_Capabilities retry schedule recover.
+            (_, REJECT | WAIT) => self.cancel_pending_request(),
             _ => {}
         }
     }
@@ -559,8 +559,63 @@ mod tests {
         let mut policy = SinkPolicy::new(20_000, 5_000);
         let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
         policy.on_control_message(4, 0);
-        assert_eq!(policy.phase(), SinkPhase::Fault);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
         assert_eq!(policy.active_contract(), Contract::none());
+    }
+
+    #[test]
+    fn rejected_startup_request_can_requery_and_install_a_contract() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+
+        policy.on_control_message(4, 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+        policy.on_control_message(3, 1);
+        policy.on_control_message(6, 2);
+
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract().kind, ContractKind::Pps);
+    }
+
+    #[test]
+    fn wait_startup_request_can_requery_and_install_a_contract() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+
+        policy.on_control_message(12, 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+        policy.on_control_message(3, 1);
+        policy.on_control_message(6, 2);
+
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract().kind, ContractKind::Pps);
+    }
+
+    #[test]
+    fn rejected_renegotiation_preserves_the_active_contract() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        let active_contract = policy.active_contract();
+
+        assert!(policy.request_pps_voltage(12_000).is_some());
+        policy.on_control_message(4, 1);
+
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract(), active_contract);
     }
 
     #[test]

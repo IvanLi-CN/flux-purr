@@ -544,9 +544,39 @@ const HEATER_PROFILE_TICK_MS: u64 = 1_000;
 const HEATER_CONTROL_INTERVAL_MS: u64 = 50;
 
 #[cfg(any(target_arch = "xtensa", test))]
+const PD_RUNTIME_SERVICE_INTERVAL_MS: u64 = 5;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const PD_RUNTIME_USB_BYTE_BUDGET: u16 = 256;
+
+#[cfg(any(target_arch = "xtensa", test))]
 const fn pd_runtime_elapsed_ms(started_at_ms: u64, now_ms: u64) -> u64 {
     now_ms.saturating_sub(started_at_ms)
 }
+
+/// Keep PD protocol deadlines in the monotonic clock domain. Thermal and UI
+/// code intentionally uses a relative runtime clock, so the type boundary
+/// prevents those values from reaching FUSB302B request timestamps.
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PdTimestamp(u64);
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl PdTimestamp {
+    #[cfg(target_arch = "xtensa")]
+    fn now() -> Self {
+        Self(Instant::now().as_millis())
+    }
+
+    #[cfg(test)]
+    const fn from_millis(millis: u64) -> Self {
+        Self(millis)
+    }
+
+    const fn as_millis(self) -> u64 {
+        self.0
+    }
+}
+
 // The plant delay is calibrated in seconds, so its predictor must not amplify
 // sub-second RTD quantisation into a multi-degree correction.
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2007,6 +2037,25 @@ fn next_heater_control_deadline_ms(deadline_ms: u64, control_started_ms: u64) ->
         .saturating_div(HEATER_CONTROL_INTERVAL_MS)
         .saturating_add(1);
     next_deadline_ms.saturating_add(missed_intervals.saturating_mul(HEATER_CONTROL_INTERVAL_MS))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn pd_runtime_service_due(now_ms: u64, deadline_ms: u64) -> bool {
+    now_ms >= deadline_ms
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn next_pd_runtime_service_deadline_ms(deadline_ms: u64, service_started_ms: u64) -> u64 {
+    let next_deadline_ms = deadline_ms.saturating_add(PD_RUNTIME_SERVICE_INTERVAL_MS);
+    if next_deadline_ms > service_started_ms {
+        return next_deadline_ms;
+    }
+
+    let missed_intervals = service_started_ms
+        .saturating_sub(next_deadline_ms)
+        .saturating_div(PD_RUNTIME_SERVICE_INTERVAL_MS)
+        .saturating_add(1);
+    next_deadline_ms.saturating_add(missed_intervals.saturating_mul(PD_RUNTIME_SERVICE_INTERVAL_MS))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -6271,8 +6320,9 @@ impl Fusb302bRuntime {
         &mut self,
         i2c: &mut I2c<'_, esp_hal::Blocking>,
         action: Fusb302bReceivedResetAction,
-        now_ms: u64,
+        now: PdTimestamp,
     ) -> bool {
+        let now_ms = now.as_millis();
         self.policy.on_received_protocol_reset();
         self.next_message_id = 0;
         self.attached_at_ms = Some(now_ms);
@@ -6309,8 +6359,9 @@ impl Fusb302bRuntime {
         &mut self,
         i2c: &mut I2c<'_, esp_hal::Blocking>,
         fault: fusb302b::TransientTransportFault,
-        now_ms: u64,
+        now: PdTimestamp,
     ) -> bool {
+        let now_ms = now.as_millis();
         match fusb302b::transient_transport_fault_recovery(fault) {
             fusb302b::TransientTransportRecovery::FlushReceiveAndRequery => {
                 self.policy.interlock_after_transient_transport_fault();
@@ -6351,8 +6402,9 @@ impl Fusb302bRuntime {
         &mut self,
         i2c: &mut I2c<'_, esp_hal::Blocking>,
         requested_mv: u16,
-        now_ms: u64,
+        now: PdTimestamp,
     ) -> PdContractRequestState {
+        let now_ms = now.as_millis();
         let active = self.policy.active_contract();
         if active.kind == ContractKind::Pps && active.voltage_mv == requested_mv {
             return PdContractRequestState::Confirmed;
@@ -6395,8 +6447,9 @@ impl Fusb302bRuntime {
         &mut self,
         i2c: &mut I2c<'_, esp_hal::Blocking>,
         requested_mv: u16,
-        now_ms: u64,
+        now: PdTimestamp,
     ) -> bool {
+        let now_ms = now.as_millis();
         let active = self.policy.active_contract();
         if active.kind == ContractKind::Fixed && active.voltage_mv == requested_mv {
             return true;
@@ -6443,7 +6496,8 @@ impl Fusb302bRuntime {
     /// Drain a bounded number of completed PD frames in one service turn. No
     /// call awaits while I2C is borrowed, so EEPROM traffic remains independent
     /// of the controller's PD timing.
-    async fn poll(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, now_ms: u64) -> bool {
+    async fn poll(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, now: PdTimestamp) -> bool {
+        let now_ms = now.as_millis();
         if self.policy.phase() == SinkPhase::Fault {
             return false;
         }
@@ -6460,7 +6514,7 @@ impl Fusb302bRuntime {
                 .recover_transient_transport_fault(
                     i2c,
                     fusb302b::TransientTransportFault::PendingRequestTimeout,
-                    now_ms,
+                    now,
                 )
                 .await;
         }
@@ -6602,7 +6656,7 @@ impl Fusb302bRuntime {
                             .recover_transient_transport_fault(
                                 i2c,
                                 fusb302b::TransientTransportFault::PartialReceiveTimeout,
-                                now_ms,
+                                now,
                             )
                             .await;
                     }
@@ -6650,7 +6704,7 @@ impl Fusb302bRuntime {
                 }
                 Fusb302bReceiveEvent::ReceivedReset(action) => {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                    return self.recover_after_received_reset(i2c, action, now_ms).await;
+                    return self.recover_after_received_reset(i2c, action, now).await;
                 }
                 Fusb302bReceiveEvent::RetryFailed => {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
@@ -6658,7 +6712,7 @@ impl Fusb302bRuntime {
                         .recover_transient_transport_fault(
                             i2c,
                             fusb302b::TransientTransportFault::RetryFailed,
-                            now_ms,
+                            now,
                         )
                         .await;
                 }
@@ -7809,15 +7863,10 @@ fn memory_record_write_chunk_len(absolute_offset: usize, remaining: usize) -> us
 async fn service_pd_during_eeprom_operation(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-    elapsed_ms: u64,
-    commit_started_at: Instant,
+    _elapsed_ms: u64,
+    _commit_started_at: Instant,
 ) {
-    let now_ms = elapsed_ms.saturating_add(
-        Instant::now()
-            .as_millis()
-            .saturating_sub(commit_started_at.as_millis()),
-    );
-    let _ = read_pd_status(i2c, pd_port, now_ms).await;
+    let _ = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -14098,7 +14147,7 @@ async fn request_pd_fixed_voltage(
     match port {
         PdPort::Fusb302b(runtime) => {
             runtime
-                .request_fixed_voltage(i2c, request.millivolts(), Instant::now().as_millis())
+                .request_fixed_voltage(i2c, request.millivolts(), PdTimestamp::now())
                 .await
         }
         PdPort::Unavailable => false,
@@ -14118,7 +14167,7 @@ async fn request_pd_adjustable_voltage(
             let _ = mode_changed;
             if mode == ch224q::AdjustableVoltageMode::Pps {
                 runtime
-                    .request_pps_voltage(i2c, request_mv, Instant::now().as_millis())
+                    .request_pps_voltage(i2c, request_mv, PdTimestamp::now())
                     .await
             } else {
                 PdContractRequestState::Failed
@@ -14132,11 +14181,11 @@ async fn request_pd_adjustable_voltage(
 async fn read_pd_status(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     port: &mut PdPort,
-    now_ms: u64,
+    now: PdTimestamp,
 ) -> Option<PdStatusObservation> {
     match port {
         PdPort::Fusb302b(runtime) => {
-            if !runtime.poll(i2c, now_ms).await {
+            if !runtime.poll(i2c, now).await {
                 return None;
             }
             let contract = runtime.active_contract();
@@ -14666,24 +14715,16 @@ async fn main(_spawner: Spawner) {
     // This window is bounded and preserves the contract-less Dashboard path.
     let pd_runtime_started_ms = Instant::now().as_millis();
     let fusb302b_present = matches!(&pd_port, PdPort::Fusb302b(_));
-    let mut initial_pd_observation = read_pd_status(
-        &mut pd_i2c,
-        &mut pd_port,
-        pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
-    )
-    .await;
+    let mut initial_pd_observation =
+        read_pd_status(&mut pd_i2c, &mut pd_port, PdTimestamp::now()).await;
     while startup_pd_service_should_continue(
         fusb302b_present,
         startup_pd_contract_ready(initial_pd_observation),
         pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
     ) {
         EmbassyTimer::after_millis(STARTUP_PD_SERVICE_INTERVAL_MS).await;
-        initial_pd_observation = read_pd_status(
-            &mut pd_i2c,
-            &mut pd_port,
-            pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
-        )
-        .await;
+        initial_pd_observation =
+            read_pd_status(&mut pd_i2c, &mut pd_port, PdTimestamp::now()).await;
     }
     #[cfg(feature = "web_serial")]
     poll_usb_early_control(
@@ -15329,6 +15370,9 @@ async fn main(_spawner: Spawner) {
     let runtime_started_ms = pd_runtime_started_ms;
     let mut last_control_ms: u64 = 0;
     let mut next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
+    // PD protocol work has a tighter deadline than thermal control. Keep it
+    // ahead of USB/LAN commands and reuse its latest observation below.
+    let mut next_pd_service_deadline_ms = 0;
     let mut heater_control_timing = HeaterControlTiming::default();
     let mut ui_refresh_pending = restore_frame_was_shown;
     let mut next_ui_refresh_ms = DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS;
@@ -15344,6 +15388,72 @@ async fn main(_spawner: Spawner) {
         let elapsed_ms = Instant::now()
             .as_millis()
             .saturating_sub(runtime_started_ms);
+        let pd_now = PdTimestamp::now();
+        let mut needs_redraw = false;
+
+        if pd_runtime_service_due(pd_now.as_millis(), next_pd_service_deadline_ms) {
+            next_pd_service_deadline_ms = next_pd_runtime_service_deadline_ms(
+                next_pd_service_deadline_ms,
+                pd_now.as_millis(),
+            );
+            let current_pd_observation = read_pd_status(&mut pd_i2c, &mut pd_port, pd_now).await;
+            if pd_status_log_key(current_pd_observation) != last_pd_status_log_key {
+                match current_pd_observation {
+                    Some(observation) => info!(
+                        "pd status update status=0x{=u8:02x} pd={=bool} epr={=bool} epr_exist={=bool} current_raw=0x{=u8:02x} current_ma={=u16}",
+                        observation.status_raw,
+                        observation.status.pd_active,
+                        observation.status.epr_active,
+                        observation.status.epr_exist,
+                        observation.current_raw,
+                        observation.current_ma,
+                    ),
+                    None => info!("pd status update read=failed"),
+                }
+                last_pd_status_log_key = pd_status_log_key(current_pd_observation);
+            }
+            last_pd_observation = current_pd_observation;
+            let current_pd_contract_ready = startup_pd_contract_ready(current_pd_observation);
+            if pd_contract_ready != current_pd_contract_ready {
+                let pd_was_ready = pd_contract_ready;
+                pd_contract_ready = current_pd_contract_ready;
+                needs_redraw = true;
+                if pd_contract_ready {
+                    if disarm_stale_heater_arm_after_pd_transition(
+                        pd_was_ready,
+                        pd_contract_ready,
+                        &mut ui_state,
+                        &mut calibration_runtime_state,
+                    ) {
+                        needs_redraw = true;
+                        info!(
+                            "PD contract became ready; discarded pre-ready heater arm and require a new explicit arm"
+                        );
+                    }
+                    info!("PD contract became ready; released startup heater interlock");
+                } else {
+                    info!("PD contract became unavailable; heater interlocked");
+                }
+            }
+            if !current_pd_contract_ready {
+                // A stale observation must never leave GPIO47 powered while
+                // the protocol state is unavailable. The next explicit arm is
+                // required after a later contract recovery.
+                if ui_state.heater_enabled
+                    || calibration_runtime_state.heater_enabled
+                    || last_heater_duty != 0
+                    || ui_state.heater_output_percent != 0
+                {
+                    ui_state.heater_enabled = false;
+                    ui_state.heater_output_percent = 0;
+                    calibration_runtime_state.heater_enabled = false;
+                    manual_pps_state.fail(ManualPpsError::PdNotReady);
+                    apply_heater_duty(&mut heater_pwm, 0, &mut last_heater_duty);
+                    needs_redraw = true;
+                    info!("PD contract interlock -> heater output zero");
+                }
+            }
+        }
 
         let raw_state = inputs.sample();
         let sample = controller.sample_with_capabilities(
@@ -15351,10 +15461,14 @@ async fn main(_spawner: Spawner) {
             raw_state,
             ui_state.gesture_capabilities(),
         );
-        let mut needs_redraw = false;
         let route_before_usb_control = ui_state.route;
         #[cfg(feature = "web_serial")]
+        let mut usb_bytes_processed = 0_u16;
+        #[cfg(feature = "web_serial")]
         loop {
+            if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET {
+                break;
+            }
             match usb_serial.read_byte() {
                 Ok(b'\n') => {
                     if let Some(response) = process_eeprom_snapshot_line(
@@ -15376,7 +15490,7 @@ async fn main(_spawner: Spawner) {
                         }
                         write_eeprom_snapshot_response(&mut usb_serial, &response, usb_tx_buf);
                         usb_rx_line.clear();
-                        continue;
+                        break;
                     }
                     let (control_needs_redraw, response) = process_control_line(
                         usb_rx_line.as_str(),
@@ -15439,9 +15553,13 @@ async fn main(_spawner: Spawner) {
                     .await;
                     usb_write_response_frame(&mut usb_serial, &response, usb_tx_buf);
                     usb_rx_line.clear();
+                    break;
                 }
-                Ok(b'\r') => {}
+                Ok(b'\r') => {
+                    usb_bytes_processed = usb_bytes_processed.saturating_add(1);
+                }
                 Ok(byte) => {
+                    usb_bytes_processed = usb_bytes_processed.saturating_add(1);
                     if usb_rx_line.push(char::from(byte)).is_err() {
                         usb_rx_line.clear();
                     }
@@ -15457,7 +15575,7 @@ async fn main(_spawner: Spawner) {
         }
 
         #[cfg(feature = "net_http")]
-        while let Some(command) = flux_purr_firmware::net::try_receive_command() {
+        if let Some(command) = flux_purr_firmware::net::try_receive_command() {
             let request_id = command.request_id;
             let response_slot = command.response_slot;
             let is_mutation = matches!(
@@ -16179,46 +16297,7 @@ async fn main(_spawner: Spawner) {
                 );
             }
 
-            let current_pd_observation =
-                read_pd_status(&mut pd_i2c, &mut pd_port, elapsed_ms).await;
-            if pd_status_log_key(current_pd_observation) != last_pd_status_log_key {
-                match current_pd_observation {
-                    Some(observation) => info!(
-                        "pd status update status=0x{=u8:02x} pd={=bool} epr={=bool} epr_exist={=bool} current_raw=0x{=u8:02x} current_ma={=u16}",
-                        observation.status_raw,
-                        observation.status.pd_active,
-                        observation.status.epr_active,
-                        observation.status.epr_exist,
-                        observation.current_raw,
-                        observation.current_ma,
-                    ),
-                    None => info!("pd status update read=failed"),
-                }
-                last_pd_status_log_key = pd_status_log_key(current_pd_observation);
-            }
-            last_pd_observation = current_pd_observation;
-            let current_pd_contract_ready = startup_pd_contract_ready(current_pd_observation);
-            if pd_contract_ready != current_pd_contract_ready {
-                let pd_was_ready = pd_contract_ready;
-                pd_contract_ready = current_pd_contract_ready;
-                needs_redraw = true;
-                if pd_contract_ready {
-                    if disarm_stale_heater_arm_after_pd_transition(
-                        pd_was_ready,
-                        pd_contract_ready,
-                        &mut ui_state,
-                        &mut calibration_runtime_state,
-                    ) {
-                        needs_redraw = true;
-                        info!(
-                            "PD contract became ready; discarded pre-ready heater arm and require a new explicit arm"
-                        );
-                    }
-                    info!("PD contract became ready; released startup heater interlock");
-                } else {
-                    info!("PD contract became unavailable; heater interlocked");
-                }
-            }
+            let current_pd_observation = last_pd_observation;
             let mut fusb302b_capabilities_changed = false;
             if pd_port.controller_kind() == ControllerKind::Fusb302b {
                 let capabilities = read_pd_power_capabilities(&mut pd_i2c, &mut pd_port);
@@ -16854,6 +16933,24 @@ mod tests {
             400
         );
         assert_eq!(pd_runtime_elapsed_ms(started_at_ms, started_at_ms - 1), 0);
+
+        let protocol_now = PdTimestamp::from_millis(42_400);
+        assert_eq!(protocol_now.as_millis(), 42_400);
+        assert!(pd_runtime_service_due(protocol_now.as_millis(), 42_395));
+    }
+
+    #[test]
+    fn pd_service_does_not_feed_control_elapsed_time_into_protocol_deadlines() {
+        let source = include_str!("flux_purr.rs");
+        let implementation = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("implementation must precede tests");
+
+        assert!(
+            !implementation.contains("read_pd_status(&mut pd_i2c, &mut pd_port, elapsed_ms)"),
+            "PD protocol deadlines must not receive the relative control-loop clock"
+        );
     }
 
     #[test]
@@ -26194,6 +26291,75 @@ mod tests {
         assert!(!startup_pd_service_should_continue(true, false, 750));
         assert!(!startup_pd_service_should_continue(true, true, 0));
         assert!(!startup_pd_service_should_continue(false, false, 0));
+    }
+
+    #[test]
+    fn runtime_loop_services_pd_before_control_plane_work() {
+        let source = include_str!("flux_purr.rs");
+        let runtime_loop = source
+            .split("let mut suppress_pairing_input_until_released = false;")
+            .nth(1)
+            .expect("runtime loop marker must remain present");
+        let pd_service = runtime_loop
+            .find("pd_runtime_service_due")
+            .expect("runtime loop must have an independent PD service gate");
+        let control_plane = runtime_loop
+            .find("process_control_line")
+            .expect("runtime loop must retain control-plane handling");
+
+        assert!(pd_service < control_plane);
+    }
+
+    #[test]
+    fn runtime_control_work_is_bounded_before_the_next_pd_service() {
+        let source = include_str!("flux_purr.rs");
+        let runtime_loop = source
+            .split("let mut suppress_pairing_input_until_released = false;")
+            .nth(1)
+            .expect("runtime loop marker must remain present");
+
+        assert!(runtime_loop.contains("if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET"));
+        assert!(runtime_loop.contains("usb_rx_line.clear();\n                    break;"));
+        assert!(
+            runtime_loop
+                .contains("if let Some(command) = flux_purr_firmware::net::try_receive_command()")
+        );
+        assert!(
+            !runtime_loop.contains(
+                "while let Some(command) = flux_purr_firmware::net::try_receive_command()"
+            )
+        );
+    }
+
+    #[test]
+    fn pd_runtime_service_deadline_preserves_cadence_after_a_long_control_turn() {
+        assert!(pd_runtime_service_due(0, 0));
+        assert!(!pd_runtime_service_due(4, 5));
+        assert!(pd_runtime_service_due(5, 5));
+        assert_eq!(next_pd_runtime_service_deadline_ms(0, 0), 5);
+        assert_eq!(next_pd_runtime_service_deadline_ms(5, 5), 10);
+        assert_eq!(next_pd_runtime_service_deadline_ms(5, 27), 30);
+    }
+
+    #[test]
+    fn runtime_pd_service_interlocks_stale_heater_output_in_the_high_priority_path() {
+        let source = include_str!("flux_purr.rs");
+        let runtime_loop = source
+            .split("let mut suppress_pairing_input_until_released = false;")
+            .nth(1)
+            .expect("runtime loop marker must remain present");
+        let pd_service = runtime_loop
+            .find("if pd_runtime_service_due")
+            .expect("runtime loop must service PD independently");
+        let interlock = runtime_loop
+            .find("PD contract interlock -> heater output zero")
+            .expect("PD service must interlock stale heater output");
+        let control_tick = runtime_loop
+            .find("if elapsed_ms >= next_control_deadline_ms")
+            .expect("runtime loop must retain thermal control scheduling");
+
+        assert!(pd_service < interlock);
+        assert!(interlock < control_tick);
     }
 
     #[test]
