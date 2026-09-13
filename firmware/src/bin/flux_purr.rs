@@ -6906,6 +6906,33 @@ impl Fusb302bRuntime {
         true
     }
 
+    /// Re-synchronize only the PD protocol engine after VBUS returns. The
+    /// FUSB302B driver documents `pd_reset` as a protocol reset; keep the
+    /// selected CC pin, Rd termination, and Type-C attachment intact.
+    async fn resynchronize_after_vbus_restore(
+        &mut self,
+        i2c: &mut I2c<'_, esp_hal::Blocking>,
+    ) -> bool {
+        let configured = {
+            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+            phy.pd_reset().await.is_ok()
+                && phy.flush_fifos().await.is_ok()
+                && phy.configure_phy(fusb302b_phy_config(true)).await.is_ok()
+                && phy
+                    .set_interrupt_masks(FUSB302B_RECEIVE_INTERRUPT_MASKS)
+                    .await
+                    .is_ok()
+        };
+        if !configured {
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+            return false;
+        }
+
+        self.next_message_id = 0;
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
+        true
+    }
+
     /// Recover a local receive/transmit failure without toggling CC. A PHY
     /// reinitialization withdraws Rd briefly and disrupts the active source
     /// attachment.
@@ -7101,10 +7128,13 @@ impl Fusb302bRuntime {
                 return true;
             }
 
-            // VBUS is present again. Reuse the existing CC/RX PHY session and
-            // let the bounded Source_Capabilities retry path recover the PD
-            // contract. Reinitializing here would withdraw Rd and can make
+            // VBUS is present again. Reset only the PD protocol engine so the
+            // source and sink restart message-ID state in sync. Reinitializing
+            // the whole PHY or restarting CC would withdraw Rd and can make
             // the source remove VBUS again.
+            if !self.resynchronize_after_vbus_restore(i2c).await {
+                return true;
+            }
             self.awaiting_vbus_restore = false;
             self.vbus_restore_candidate_since_ms = None;
             self.vbus_low_candidate_since_ms = None;
@@ -19149,7 +19179,7 @@ mod tests {
             .nth(1)
             .and_then(|value| {
                 value
-                    .split("    /// Recover a local receive/transmit failure")
+                    .split("    /// Re-synchronize only the PD protocol engine")
                     .next()
             })
             .expect("detach recovery implementation must remain present");
@@ -19166,7 +19196,34 @@ mod tests {
             .and_then(|value| value.split("if matches!(").next())
             .expect("VBUS restore path must remain present");
         assert!(!restore_path.contains("initialize(i2c)"));
+        assert!(restore_path.contains("resynchronize_after_vbus_restore(i2c)"));
+        assert!(restore_path.contains("self.awaiting_vbus_restore = false"));
         assert!(restore_path.contains("self.vbus_low_interlocked = false"));
+
+        let resynchronization = implementation
+            .split("async fn resynchronize_after_vbus_restore")
+            .nth(1)
+            .and_then(|value| {
+                value
+                    .split("    /// Recover a local receive/transmit failure")
+                    .next()
+            })
+            .expect("VBUS restore resynchronization must remain present");
+        let pd_reset = resynchronization
+            .find("phy.pd_reset()")
+            .expect("VBUS restore must reset the PD engine");
+        let fifo_flush = resynchronization
+            .find("phy.flush_fifos()")
+            .expect("VBUS restore must flush both FIFOs");
+        let phy_config = resynchronization
+            .find("phy.configure_phy(fusb302b_phy_config(true))")
+            .expect("VBUS restore must reapply the receiver PHY configuration");
+        let masks = resynchronization
+            .find("set_interrupt_masks(FUSB302B_RECEIVE_INTERRUPT_MASKS)")
+            .expect("VBUS restore must reapply receiver interrupt masks");
+        assert!(pd_reset < fifo_flush && fifo_flush < phy_config && phy_config < masks);
+        assert!(!resynchronization.contains("set_cc_pull"));
+        assert!(!resynchronization.contains("start_toggle"));
     }
 
     #[test]

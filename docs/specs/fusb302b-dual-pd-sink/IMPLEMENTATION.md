@@ -15,6 +15,7 @@
 - A source `Reject` or `Wait` before `PS_RDY` cancels the pending request and returns to `WaitingForSourceCapabilities`, allowing the existing bounded re-query path to retry without withdrawing CC. If a later renegotiation is rejected while an active contract exists, the policy returns to `Ready` and preserves that contract.
 - Source-capability discovery and recovery use only the FUSB302B sink policy. They do not depend on thermal-tuning state or candidate data.
 - When a pending contract becomes ready, the runtime clears any UI or calibration heater arm intent captured before readiness; heating can resume only after a new explicit arm operation.
+- After the bounded VBUS-restore confirmation, `resynchronize_after_vbus_restore` resets only the PD protocol engine, flushes both FIFOs, reapplies the receiver PHY configuration and interrupt masks, and resets the local transmit message ID. It preserves CC pulls and does not restart Type-C toggling before bounded `Source_Capabilities` discovery.
 - `firmware/src/board/s3_frontpanel.rs` reserves `GPIO7` as `PIN_PD_INTERRUPT` and includes it in the active GPIO map.
 - Firmware status emits contract metadata separately from the legacy `currentMa` telemetry field. `pdContractCurrentMa` and `pdContractPowerMw` are contractual upper bounds, never a physical-current claim.
 
