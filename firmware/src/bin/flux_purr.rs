@@ -5164,6 +5164,96 @@ where
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_STALE_CONTRACT_VIN_CONFIRM_MS: u64 = 100;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_STALE_CONTRACT_VIN_DEFICIT_MV: u32 = 2_000;
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+const FUSB302B_STALE_CONTRACT_VIN_SETTLE_GRACE_MS: u64 = 500;
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PdContractVinGuard {
+    mismatch_since_ms: Option<u64>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl PdContractVinGuard {
+    fn observe(
+        &mut self,
+        observation: Option<PdStatusObservation>,
+        measured_vin_mv: Option<u32>,
+        now_ms: u64,
+        suspended: bool,
+    ) -> bool {
+        if suspended {
+            self.mismatch_since_ms = None;
+            return false;
+        }
+        let mismatch = match (observation, measured_vin_mv) {
+            (Some(observation), Some(measured_vin_mv))
+                if observation.contract != Contract::none() =>
+            {
+                u32::from(observation.contract.voltage_mv).saturating_sub(measured_vin_mv)
+                    >= FUSB302B_STALE_CONTRACT_VIN_DEFICIT_MV
+            }
+            _ => false,
+        };
+        if !mismatch {
+            self.mismatch_since_ms = None;
+            return false;
+        }
+
+        let started = *self.mismatch_since_ms.get_or_insert(now_ms);
+        now_ms.saturating_sub(started) >= FUSB302B_STALE_CONTRACT_VIN_CONFIRM_MS
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn reconcile_pd_contract_with_vin<PWM>(
+    guard: &mut PdContractVinGuard,
+    observation: Option<PdStatusObservation>,
+    measured_vin_mv: Option<u32>,
+    now_ms: u64,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    pd_contract_ready: &mut bool,
+    ui_state: &mut FrontPanelUiState,
+    calibration_runtime_state: &mut CalibrationRuntimeState,
+    manual_pps_state: &mut ManualPpsState,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
+) -> bool
+where
+    PWM: SetDutyCycle,
+{
+    if !guard.observe(
+        observation,
+        measured_vin_mv,
+        now_ms,
+        pd_port.stale_contract_vin_guard_suspended(now_ms),
+    ) {
+        return false;
+    }
+
+    // A measured VIN deficit invalidates only the cached contract. The
+    // controller remains attached and will rediscover capabilities through the
+    // existing bounded policy path; no VBUS state is inferred across power
+    // loss, and no CC toggle is started here.
+    pd_port.interlock_after_stale_contract(now_ms);
+    *last_pd_observation = None;
+    apply_pd_contract_observation(
+        None,
+        pd_contract_ready,
+        ui_state,
+        calibration_runtime_state,
+        manual_pps_state,
+        heater_pwm,
+        last_heater_duty,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn thermal_plant_calibration_snapshot(
     measured_temp_c: f32,
     heater_enabled: bool,
@@ -6691,14 +6781,7 @@ impl Fusb302bRuntime {
         self.vbus_low_interlocked = false;
     }
 
-    fn interlock_after_vbus_low(&mut self, now_ms: u64) {
-        if self.vbus_low_interlocked {
-            return;
-        }
-
-        // VBUS low is sufficient to withdraw contract authorization and heat,
-        // but a static level is not sufficient evidence to withdraw Rd. Keep
-        // the physical CC session intact until a transition is confirmed.
+    fn clear_contract_authorization(&mut self, now_ms: u64) {
         self.policy.on_received_protocol_reset();
         self.attached_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = None;
@@ -6710,8 +6793,35 @@ impl Fusb302bRuntime {
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
         self.retry_fail_recovery_pending = false;
+    }
+
+    fn interlock_after_vbus_low(&mut self, now_ms: u64) {
+        if self.vbus_low_interlocked {
+            return;
+        }
+
+        // VBUS low is sufficient to withdraw contract authorization and heat,
+        // but a static level is not sufficient evidence to withdraw Rd. Keep
+        // the physical CC session intact until a transition is confirmed.
+        self.clear_contract_authorization(now_ms);
         self.vbus_low_candidate_since_ms = None;
         self.vbus_low_interlocked = true;
+    }
+
+    fn interlock_after_stale_contract(&mut self, now_ms: u64) {
+        self.clear_contract_authorization(now_ms);
+        self.clear_vbus_low_interlock();
+        self.awaiting_vbus_restore = false;
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+    }
+
+    fn stale_contract_vin_guard_suspended(&self, now_ms: u64) -> bool {
+        matches!(
+            self.policy.phase(),
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        ) || self.last_request_at_ms.is_some_and(|last| {
+            now_ms.saturating_sub(last) < FUSB302B_STALE_CONTRACT_VIN_SETTLE_GRACE_MS
+        })
     }
 
     async fn initialize(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
@@ -7505,6 +7615,19 @@ impl PdPort {
     const fn service_available(&self) -> bool {
         match self {
             Self::Fusb302b(runtime) => !matches!(runtime.policy.phase(), SinkPhase::Fault),
+            Self::Unavailable => false,
+        }
+    }
+
+    fn interlock_after_stale_contract(&mut self, now_ms: u64) {
+        if let Self::Fusb302b(runtime) = self {
+            runtime.interlock_after_stale_contract(now_ms);
+        }
+    }
+
+    fn stale_contract_vin_guard_suspended(&self, now_ms: u64) -> bool {
+        match self {
+            Self::Fusb302b(runtime) => runtime.stale_contract_vin_guard_suspended(now_ms),
             Self::Unavailable => false,
         }
     }
@@ -16449,6 +16572,7 @@ async fn main(_spawner: Spawner) {
         );
     }
     let mut last_pd_status_log_key = pd_status_log_key(last_pd_observation);
+    let mut pd_contract_vin_guard = PdContractVinGuard::default();
     let mut active_thermal_settings =
         ThermalControlProfileSettings::from(memory_config.active_thermal_control_profile.settings);
     info!(
@@ -16680,6 +16804,20 @@ async fn main(_spawner: Spawner) {
         info!(
             "vin initial raw_code={=u16} raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
             raw_code, raw_adc_mv, corrected_adc_mv, vin_mv,
+        );
+        let _ = reconcile_pd_contract_with_vin(
+            &mut pd_contract_vin_guard,
+            last_pd_observation,
+            Some(vin_mv),
+            PdTimestamp::now().as_millis(),
+            &mut pd_port,
+            &mut last_pd_observation,
+            &mut pd_contract_ready,
+            &mut ui_state,
+            &mut calibration_runtime_state,
+            &mut manual_pps_state,
+            &mut heater_pwm,
+            &mut last_heater_duty,
         );
     }
     #[cfg(feature = "web_serial")]
@@ -18000,6 +18138,20 @@ async fn main(_spawner: Spawner) {
                     latest_vin_mv = vin_mv;
                     needs_redraw = true;
                 }
+                needs_redraw |= reconcile_pd_contract_with_vin(
+                    &mut pd_contract_vin_guard,
+                    last_pd_observation,
+                    Some(vin_mv),
+                    PdTimestamp::now().as_millis(),
+                    &mut pd_port,
+                    &mut last_pd_observation,
+                    &mut pd_contract_ready,
+                    &mut ui_state,
+                    &mut calibration_runtime_state,
+                    &mut manual_pps_state,
+                    &mut heater_pwm,
+                    &mut last_heater_duty,
+                );
                 info!(
                     "vin sample raw_code={=u16} raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
                     raw_code, raw_adc_mv, corrected_adc_mv, vin_mv,
@@ -18897,6 +19049,79 @@ mod tests {
             Some(1_000),
             1_050,
         ));
+    }
+
+    #[test]
+    fn stale_pd_contract_requires_continuous_measured_vin_deficit() {
+        let contract = Contract {
+            kind: ContractKind::Pps,
+            object_position: 1,
+            voltage_mv: 12_000,
+            current_ma: 5_000,
+        };
+        let observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: contract.current_ma,
+            contract_voltage_mv: Some(contract.voltage_mv),
+            contract,
+        };
+        let mut guard = PdContractVinGuard::default();
+
+        assert!(!guard.observe(Some(observation), Some(5_000), 1_000, false));
+        assert!(!guard.observe(Some(observation), Some(5_000), 1_099, false));
+        assert!(guard.observe(Some(observation), Some(5_000), 1_100, false));
+        assert!(!guard.observe(Some(observation), Some(11_000), 1_101, false));
+        assert!(!guard.observe(Some(observation), Some(5_000), 1_200, false));
+        assert!(guard.observe(Some(observation), Some(5_000), 1_300, false));
+    }
+
+    #[test]
+    fn stale_pd_contract_does_not_infer_loss_without_a_vin_sample() {
+        let contract = Contract {
+            kind: ContractKind::Fixed,
+            object_position: 1,
+            voltage_mv: 20_000,
+            current_ma: 3_000,
+        };
+        let observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: contract.current_ma,
+            contract_voltage_mv: Some(contract.voltage_mv),
+            contract,
+        };
+        let mut guard = PdContractVinGuard::default();
+
+        assert!(!guard.observe(Some(observation), None, 2_000, false));
+        assert!(!guard.observe(Some(observation), None, 2_500, false));
+        assert!(!guard.observe(None, Some(5_000), 3_000, false));
+    }
+
+    #[test]
+    fn stale_pd_contract_guard_waits_out_pd_request_settling() {
+        let contract = Contract {
+            kind: ContractKind::Pps,
+            object_position: 1,
+            voltage_mv: 20_000,
+            current_ma: 3_000,
+        };
+        let observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: contract.current_ma,
+            contract_voltage_mv: Some(contract.voltage_mv),
+            contract,
+        };
+        let mut guard = PdContractVinGuard::default();
+
+        assert!(!guard.observe(Some(observation), Some(5_000), 4_000, true));
+        assert!(!guard.observe(Some(observation), Some(5_000), 4_500, true));
+        assert!(!guard.observe(Some(observation), Some(5_000), 4_599, false));
+        assert!(guard.observe(Some(observation), Some(5_000), 4_699, false));
     }
 
     #[test]
