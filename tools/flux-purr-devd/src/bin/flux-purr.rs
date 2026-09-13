@@ -17643,6 +17643,10 @@ mod tests {
         }))
     }
 
+    async fn thermal_status_retry_ready() -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
+
     async fn spawn_flaky_thermal_status_server(
         delayed_attempts: usize,
         delay_ms: u64,
@@ -17657,14 +17661,15 @@ mod tests {
             delayed_attempts,
             delay_ms,
         };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let app = Router::new()
+            .route("/ready", get(thermal_status_retry_ready))
             .route(
                 "/api/v1/devices/{device_id}/status",
                 get(flaky_thermal_status_readback),
             )
             .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -17682,9 +17687,15 @@ mod tests {
     #[tokio::test]
     async fn thermal_status_retry_recovers_after_single_timeout() {
         let (resolved, attempts, server) = spawn_flaky_thermal_status_server(1, 150).await;
+        let client = Client::new();
+        client
+            .get(format!("{}/ready", resolved.devd))
+            .send()
+            .await
+            .unwrap();
 
         let status = request_thermal_status_with_retry_config(
-            &Client::new(),
+            &client,
             &resolved,
             "lease-test",
             Duration::from_millis(50),
@@ -17702,9 +17713,15 @@ mod tests {
     #[tokio::test]
     async fn thermal_status_retry_recovers_after_transient_usb_burst() {
         let (resolved, attempts, server) = spawn_flaky_thermal_status_server(4, 150).await;
+        let client = Client::new();
+        client
+            .get(format!("{}/ready", resolved.devd))
+            .send()
+            .await
+            .unwrap();
 
         let status = request_thermal_status_with_retry_config(
-            &Client::new(),
+            &client,
             &resolved,
             "lease-test",
             Duration::from_millis(50),
