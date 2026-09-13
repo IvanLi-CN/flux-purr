@@ -198,7 +198,10 @@ impl SourceCapabilities {
 
         let mut best_fixed = None;
         for pdo in self.fixed.into_iter().flatten() {
-            if pdo.voltage_mv > FUSB302B_FIXED_MAX_MV || pdo.max_ma < MIN_HEATER_CONTRACT_MA {
+            if pdo.voltage_mv < FUSB302B_PD_ABSOLUTE_MIN_MV
+                || pdo.voltage_mv > FUSB302B_FIXED_MAX_MV
+                || pdo.max_ma < MIN_HEATER_CONTRACT_MA
+            {
                 continue;
             }
             let candidate = Contract {
@@ -226,7 +229,7 @@ impl SourceCapabilities {
         requested_mv: u16,
         preferred_ma: u16,
     ) -> Option<Contract> {
-        if requested_mv > FUSB302B_FIXED_MAX_MV {
+        if !(FUSB302B_PD_ABSOLUTE_MIN_MV..=FUSB302B_FIXED_MAX_MV).contains(&requested_mv) {
             return None;
         }
         let requested_ma = preferred_ma.clamp(MIN_HEATER_CONTRACT_MA, MAX_HEATER_CONTRACT_MA);
@@ -438,6 +441,26 @@ mod tests {
         assert_eq!(contract.current_ma, 5_000);
         assert_eq!(
             capabilities.select_fusb302b_fixed_contract(15_000, 5_000),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_fixed_pdos_below_the_absolute_five_volt_floor() {
+        let capabilities =
+            SourceCapabilities::from_pdos(&[fixed_pdo(3_300, 5_000), fixed_pdo(5_000, 3_000)]);
+
+        let normal = capabilities
+            .select_fusb302b_contract(20_000, 5_000)
+            .expect("the valid 5V fixed PDO should remain selectable");
+        assert_eq!(normal.voltage_mv, 5_000);
+        assert_eq!(
+            SourceCapabilities::from_pdos(&[fixed_pdo(3_300, 5_000)])
+                .select_fusb302b_contract(20_000, 5_000),
+            None
+        );
+        assert_eq!(
+            capabilities.select_fusb302b_fixed_contract(3_300, 5_000),
             None
         );
     }

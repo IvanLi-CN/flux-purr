@@ -6348,6 +6348,8 @@ const FUSB302B_STATUS0_CRC_CHECK: u8 = 1 << 4;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_STATUS0A_RETRY_FAIL: u8 = 1 << 4;
 #[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_STATUS0_VBUSOK: u8 = 1 << 7;
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_STATUS1_RX_EMPTY: u8 = 1 << 5;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS1_OVERTEMP: u8 = 1 << 1;
@@ -6363,6 +6365,8 @@ const FUSB302B_TOGSS_SNK_CC1: u8 = 0b0010_1000;
 const FUSB302B_TOGSS_SNK_CC2: u8 = 0b0011_0000;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_INTERRUPTA_TX_SENT: u8 = 1 << 2;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_INTERRUPT_VBUSOK: u8 = 1 << 7;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_INTERRUPTA_SOFT_RESET: u8 = 1 << 1;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -6395,12 +6399,21 @@ const fn fusb302b_settled_sink_polarity(status1a: u8) -> Option<u8> {
     }
 }
 
+/// A powered FUSB302B reports a Type-C Sink detach through the VBUSOK
+/// transition interrupt. The level is only the second half of that evidence;
+/// a static low status read must not restart the CC session.
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_vbus_detach_was_reported(interrupt: u8, status0: u8) -> bool {
+    interrupt & FUSB302B_INTERRUPT_VBUSOK != 0 && status0 & FUSB302B_STATUS0_VBUSOK == 0
+}
+
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fusb302bReceiveEvent {
     Empty { tx_sent: bool, gcrc_sent: bool },
     Partial { tx_sent: bool, gcrc_sent: bool },
     Message(PdPacket),
+    Detached,
     ReceivedReset(Fusb302bReceivedResetAction),
     RetryFailed,
     Protection,
@@ -6622,6 +6635,32 @@ impl Fusb302bRuntime {
         }
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
         true
+    }
+
+    async fn recover_after_detach(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+        self.policy.on_detach_or_reset();
+        self.polarity = None;
+        self.next_message_id = 0;
+        self.attached_at_ms = None;
+        self.last_source_capabilities_request_at_ms = None;
+        self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_requested_at_ms = None;
+        self.source_capabilities_refresh_kind = None;
+        self.last_request_at_ms = None;
+        self.source_capabilities_tx_confirmed = false;
+        self.source_capabilities_gcrc_seen = false;
+        self.partial_rx_started_at_ms = None;
+        self.retry_fail_recovery_pending = false;
+
+        // VBUSOK has provided the physical detach evidence, so it is safe to
+        // re-enter the FUSB302B's controlled sink-toggle discovery path.
+        if self.initialize(i2c).await {
+            true
+        } else {
+            self.policy.mark_fault();
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
+            false
+        }
     }
 
     /// Recover a local receive/transmit failure without toggling CC. A PHY
@@ -7085,6 +7124,10 @@ impl Fusb302bRuntime {
                         );
                     }
                 }
+                Fusb302bReceiveEvent::Detached => {
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+                    return self.recover_after_detach(i2c).await;
+                }
                 Fusb302bReceiveEvent::ReceivedReset(action) => {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
                     return self.recover_after_received_reset(i2c, action, now).await;
@@ -7131,18 +7174,23 @@ async fn fusb302b_receive_event(
     retry_fail_recovery_pending: bool,
 ) -> Result<Fusb302bReceiveEvent, fusb302b::TransientTransportFault> {
     let mut phy = Fusb302::new(BlockingAsync::new(i2c));
-    // Preserve the receiver's CRC/SOP state before clearing its interrupt latches.
-    let status = phy
-        .read_status()
-        .await
-        .map_err(|_| fusb302b::TransientTransportFault::ReceiveIoError)?;
+    // Clear transition latches first, then sample the non-destructive status
+    // bank. This pairs a VBUSOK detach transition with its current low level
+    // instead of leaving a status/interrupt race between the two I2C reads.
     let interrupts = phy
         .read_interrupts()
+        .await
+        .map_err(|_| fusb302b::TransientTransportFault::ReceiveIoError)?;
+    let status = phy
+        .read_status()
         .await
         .map_err(|_| fusb302b::TransientTransportFault::ReceiveIoError)?;
     let tx_sent = interrupts.interrupt_a & FUSB302B_INTERRUPTA_TX_SENT != 0;
     let gcrc_sent = interrupts.interrupt_b & FUSB302B_INTERRUPTB_GCRC_SENT != 0;
 
+    if fusb302b_vbus_detach_was_reported(interrupts.interrupt, status.status0) {
+        return Ok(Fusb302bReceiveEvent::Detached);
+    }
     if let Some(action) = fusb302b_received_reset_action(interrupts.interrupt_a) {
         return Ok(Fusb302bReceiveEvent::ReceivedReset(action));
     }
@@ -17803,6 +17851,23 @@ mod tests {
     }
 
     #[test]
+    fn fusb302b_detach_requires_the_vbusok_transition_interrupt() {
+        assert!(fusb302b_vbus_detach_was_reported(
+            FUSB302B_INTERRUPT_VBUSOK,
+            0,
+        ));
+        assert!(!fusb302b_vbus_detach_was_reported(0, 0));
+        assert!(!fusb302b_vbus_detach_was_reported(
+            FUSB302B_INTERRUPT_VBUSOK,
+            FUSB302B_STATUS0_VBUSOK,
+        ));
+        assert!(!fusb302b_vbus_detach_was_reported(
+            FUSB302B_INTERRUPTA_HARD_RESET,
+            0,
+        ));
+    }
+
+    #[test]
     fn fusb302b_status_only_signals_cannot_restart_the_physical_sink_session() {
         let source = include_str!("flux_purr.rs");
         let implementation = source
@@ -17813,8 +17878,10 @@ mod tests {
         assert!(implementation.contains("Fusb302bReceivedResetAction"));
         assert!(implementation.contains("recover_after_received_reset"));
         assert!(implementation.contains("recover_transient_transport_fault"));
+        assert!(implementation.contains("fusb302b_vbus_detach_was_reported"));
+        assert!(implementation.contains("Fusb302bReceiveEvent::Detached"));
+        assert!(implementation.contains("recover_after_detach"));
         assert!(!implementation.contains("fusb302b_runtime_vbus_loss_is_detach"));
-        assert!(!implementation.contains("recover_after_detach"));
         assert!(!implementation.contains("Fusb302bReceiveEvent::OppositeSettledCc"));
     }
 
