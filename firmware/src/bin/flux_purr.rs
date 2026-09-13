@@ -6892,26 +6892,16 @@ impl Fusb302bRuntime {
     }
 
     async fn recover_after_detach(&mut self, _i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
-        self.policy.on_detach_or_reset();
-        self.polarity = None;
-        self.next_message_id = 0;
-        self.attached_at_ms = None;
-        self.last_source_capabilities_request_at_ms = None;
-        self.source_capabilities_refresh_pending = false;
-        self.source_capabilities_refresh_requested_at_ms = None;
-        self.source_capabilities_refresh_kind = None;
-        self.last_request_at_ms = None;
-        self.source_capabilities_tx_confirmed = false;
-        self.source_capabilities_gcrc_seen = false;
-        self.partial_rx_started_at_ms = None;
-        self.retry_fail_recovery_pending = false;
-        self.clear_vbus_low_interlock();
+        // `interlock_after_vbus_low` already discarded the contract and kept
+        // the policy in bounded discovery. The VBUS transition does not prove
+        // that CC detached, so preserve the selected CC/RX PHY session while
+        // the source restores power.
         self.vbus_restore_candidate_since_ms = None;
         self.awaiting_vbus_restore = true;
 
-        // Keep the existing CC session intact while VBUS is absent. Starting
-        // Sink toggle here withdraws Rd during the source's power recovery
-        // window and can turn a recoverable VBUS drop into a detach loop.
+        // Starting Sink toggle here would withdraw Rd during the source's
+        // power recovery window and can turn a recoverable VBUS drop into a
+        // detach loop.
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_CC_ATTACH, Ordering::Relaxed);
         true
     }
@@ -7111,18 +7101,15 @@ impl Fusb302bRuntime {
                 return true;
             }
 
-            // VBUS is present again, so the controller can safely perform one
-            // controlled sink-toggle discovery pass. This is deliberately the
-            // only reinitialization after the low-VBUS recovery path.
+            // VBUS is present again. Reuse the existing CC/RX PHY session and
+            // let the bounded Source_Capabilities retry path recover the PD
+            // contract. Reinitializing here would withdraw Rd and can make
+            // the source remove VBUS again.
             self.awaiting_vbus_restore = false;
             self.vbus_restore_candidate_since_ms = None;
+            self.vbus_low_candidate_since_ms = None;
+            self.vbus_low_interlocked = false;
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-            if !self.initialize(i2c).await {
-                self.policy.mark_fault();
-                FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
-                return false;
-            }
-            self.clear_vbus_low_interlock();
             return true;
         }
 
@@ -19151,7 +19138,7 @@ mod tests {
     }
 
     #[test]
-    fn fusb302b_persistent_low_vbus_does_not_reinitialize_until_restore() {
+    fn fusb302b_persistent_low_vbus_reuses_cc_session_after_restore() {
         let source = include_str!("flux_purr.rs");
         let implementation = source
             .split("#[cfg(test)]\nmod tests")
@@ -19167,10 +19154,19 @@ mod tests {
             })
             .expect("detach recovery implementation must remain present");
 
-        assert!(!detach_recovery.contains("initialize(i2c)"));
+        assert!(!detach_recovery.contains("on_detach_or_reset"));
+        assert!(!detach_recovery.contains("self.polarity = None"));
+        assert!(!detach_recovery.contains("self.next_message_id = 0"));
         assert!(detach_recovery.contains("awaiting_vbus_restore = true"));
-        assert!(implementation.contains("if !self.initialize(i2c).await"));
         assert!(implementation.contains("fusb302b_vbus_restore_confirmation_expired"));
+
+        let restore_path = implementation
+            .split("if self.awaiting_vbus_restore")
+            .nth(1)
+            .and_then(|value| value.split("if matches!(").next())
+            .expect("VBUS restore path must remain present");
+        assert!(!restore_path.contains("initialize(i2c)"));
+        assert!(restore_path.contains("self.vbus_low_interlocked = false"));
     }
 
     #[test]
