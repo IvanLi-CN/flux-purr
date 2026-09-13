@@ -20,7 +20,7 @@ related_specs:
 
 Thermal control validation is a measured control workflow, not a fixed duty tweak.
 
-Production heating uses one physical thermal plant model on any PPS source that covers `20V` at `>=3A`. EEPROM retains a bounded raw transient trace of RTD ADC, heater voltage, duty, and `50ms` time points. A single protected run takes an ambient baseline, requests the selected APDO's maximum voltage with `100%` PWM to `220C`, immediately turns heat off, and records passive cooling to `80C`. Heater-curve data and production-profile current reserve settings do not reduce or vary the calibration request. The device fits and writes the physically valid model directly as `active`; the same rising trace supplies the heater-curve samples.
+Production heating uses one physical thermal plant model on any PPS source that covers `20V` at `>=3A`. EEPROM retains a bounded raw transient trace of RTD ADC, heater voltage quantized to `125mV`, duty, and `50ms` time points; this compact encoding covers the complete `5V..28V` PD guard. A single protected run takes an ambient baseline, requests the selected APDO's maximum voltage with `100%` PWM to `220C`, immediately turns heat off, and records passive cooling to `80C`. Heater-curve data and production-profile current reserve settings do not reduce or vary the calibration request. The device fits and writes the physically valid model directly as `active`; the same rising trace supplies the heater-curve samples. A framed transaction with an incomplete trace or invalid physical projection is never promoted to the active heater model after decode or reboot.
 
 The production controller is:
 
@@ -67,7 +67,7 @@ When the bundle is a review-only checkpoint rather than a committed accepted bas
 
 This legacy renderer vocabulary is a report-format contract. For a thermal-plant run, the authoritative activation state is `thermalPlantModel.state=active` with `projectionValid=true` after reboot.
 
-The owner-facing compliant preliminary review bundle is now regenerated through the Rust CLI:
+The owner-facing compliant preliminary review bundle is generated through the Rust CLI:
 
 - `flux-purr thermal report rerender-legacy --legacy-bundle-dir <dir> [--output-dir <dir>]`
 
@@ -192,7 +192,7 @@ The current bank-aware defaults are:
 
 - `pps3a`: seed from the committed 65W accepted bundle
 - `pps5a`: seed from the committed 100W accepted bundle when it exists
-- `pps5a` fallback before accepted 100W baseline exists: `thermal-self-test-runs/variants_100c_v6_hold220_cutoff90.json`
+- `pps5a` fallback before an accepted 100W baseline exists: an explicit repository-maintained 100W seed bundle
 
 Until a committed `pps5a` accepted baseline exists, do not treat a stale saved `pps5a` EEPROM profile as current truth. Focused 100W retuning should start from an explicit preview seed, not from an arbitrary previously saved bank.
 
@@ -383,7 +383,4 @@ If the local daemon stops serving the active hardware path:
 
 - `docs/specs/heater-pid-frontpanel-runtime/SPEC.md`
 - `docs/specs/real-control-plane-runtime/SPEC.md`
-- `thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd63w-pps3a/accepted-full-range-20hz/`
-- `thermal-self-test-runs/approach-characterization-pd100w-pps5a-20260717-final/`
-- `thermal-self-test-runs/preliminary-pd100w-pps5a-60-140-220-20260717/`
-- `thermal-self-test-runs/variants_100c_v6_hold220_cutoff90.json`
+- repository-maintained accepted and preliminary thermal bundles

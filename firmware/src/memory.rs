@@ -46,7 +46,10 @@ pub const HEATER_CURVE_MAX_POINTS: usize = 8;
 pub const THERMAL_PLANT_ANCHOR_COUNT: usize = 2;
 pub const THERMAL_PLANT_TRANSIENT_MAX_SAMPLES: usize = 128;
 pub const THERMAL_PLANT_TRANSIENT_MIN_POWERED_SAMPLES: u8 = 12;
-pub const THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV: u8 = 50;
+pub const THERMAL_PLANT_TRANSIENT_HEATER_VOLTAGE_QUANTUM_MV: u16 = 125;
+pub const THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_MV: u16 = 28_000;
+pub const THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_125MV: u8 = 224;
+pub const THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_125MV: u8 = 40;
 pub const THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C: f32 = 2_000.0;
 pub const THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4: f32 = 0.000_01;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
@@ -132,6 +135,8 @@ const THERMAL_PLANT_TRANSIENT_HEADER_LEN: usize = 24;
 const THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN: usize = 6;
 const THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN: usize = 5;
 const THERMAL_PLANT_PERSISTED_FORMAT_DUTY_PACKED: u8 = 1;
+const THERMAL_PLANT_PERSISTED_FORMAT_DUTY_PACKED_125MV: u8 = 2;
+const THERMAL_PLANT_TRANSIENT_FORMAT_125MV: u8 = 1;
 const THERMAL_PLANT_PERSISTED_ELAPSED_TICKS_MASK: u16 = 0x7fff;
 const THERMAL_PLANT_PERSISTED_DUTY_BIT: u16 = 1 << 15;
 
@@ -359,9 +364,9 @@ pub struct ThermalPlantTransientSample {
     /// 50 ms ticks from the start of the automatic job.
     pub elapsed_ticks: u16,
     pub raw_rtd_adc_mv: u16,
-    /// Measured heater voltage, quantized to 100 mV. The PPS request is capped
-    /// at 21 V, so this fits in a byte without losing useful precision.
-    pub heater_voltage_100mv: u8,
+    /// Measured heater voltage, quantized to 125 mV. This covers the complete
+    /// 28 V PD guard in one byte without changing the persisted sample size.
+    pub heater_voltage_125mv: u8,
     pub duty_percent: u8,
 }
 
@@ -400,6 +405,20 @@ pub struct ThermalPlantTransientTransaction {
     pub sample_count: u8,
     pub projection: ThermalPlantProjectionRecord,
     pub samples: [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+}
+
+pub const fn quantize_thermal_plant_heater_voltage_mv(voltage_mv: u32) -> u8 {
+    let clamped_mv = if voltage_mv > THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_MV as u32 {
+        THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_MV as u32
+    } else {
+        voltage_mv
+    };
+    ((clamped_mv + (THERMAL_PLANT_TRANSIENT_HEATER_VOLTAGE_QUANTUM_MV / 2) as u32)
+        / THERMAL_PLANT_TRANSIENT_HEATER_VOLTAGE_QUANTUM_MV as u32) as u8
+}
+
+pub const fn thermal_plant_heater_voltage_mv(code: u8) -> u16 {
+    code as u16 * THERMAL_PLANT_TRANSIENT_HEATER_VOLTAGE_QUANTUM_MV
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -787,7 +806,10 @@ pub fn thermal_plant_transient_transaction_has_valid_structure(
     let mut cooling_started = false;
     let mut peak_raw_rtd_adc_mv = 0u16;
     for (index, sample) in samples.iter().enumerate() {
-        if sample.raw_rtd_adc_mv == 0 || sample.duty_percent > 100 {
+        if sample.raw_rtd_adc_mv == 0
+            || sample.duty_percent > 100
+            || sample.heater_voltage_125mv > THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_125MV
+        {
             return false;
         }
         if index > 0 && sample.elapsed_ticks <= samples[index - 1].elapsed_ticks {
@@ -799,7 +821,7 @@ pub fn thermal_plant_transient_transaction_has_valid_structure(
                 has_cooling_sample |= sample.raw_rtd_adc_mv < peak_raw_rtd_adc_mv;
             }
         } else if sample.duty_percent == 100
-            && sample.heater_voltage_100mv >= THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV
+            && sample.heater_voltage_125mv >= THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_125MV
             && !cooling_started
         {
             powered_sample_count = powered_sample_count.saturating_add(1);
@@ -1452,9 +1474,16 @@ pub enum LayoutMarkerStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutMarkerKind {
+    Commit,
+    LegacyMigration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayoutMarker {
     pub generation: u32,
     pub status: LayoutMarkerStatus,
+    pub kind: LayoutMarkerKind,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1477,6 +1506,85 @@ pub struct PersistRecord {
     pub data: PersistDomainData,
 }
 
+const FPR2_SNAPSHOT_DOMAINS: [PersistDomain; 5] = [
+    PersistDomain::SafetyCalibration,
+    PersistDomain::ThermalPolicy,
+    PersistDomain::UserPreferences,
+    PersistDomain::NetworkAndPairing,
+    PersistDomain::ThermalPlant,
+];
+
+fn fpr2_snapshot_config(
+    domains: &[Option<PersistRecord>; 6],
+    generation: u32,
+    require_exact_generation: bool,
+) -> Option<MemoryConfig> {
+    for domain in FPR2_SNAPSHOT_DOMAINS {
+        let record = domains[domain as usize - 1].as_ref()?;
+        if record.data.domain() != domain
+            || record.sequence > generation
+            || (require_exact_generation && record.sequence != generation)
+        {
+            return None;
+        }
+    }
+
+    let mut config = MemoryConfig::default();
+    for record in domains.iter().flatten() {
+        match &record.data {
+            PersistDomainData::SafetyCalibration(value) => value.apply_to_config(&mut config),
+            PersistDomainData::ThermalPolicy(value) => value.apply_to_config(&mut config),
+            PersistDomainData::UserPreferences(value) => value.apply_to_config(&mut config),
+            PersistDomainData::NetworkAndPairing(value) => value.apply_to_config(&mut config),
+            PersistDomainData::LayoutMarker(_) => {}
+            PersistDomainData::ThermalPlant(value) => value.apply_to_config(&mut config),
+        }
+    }
+    config.sanitize();
+
+    // A structurally valid transient record remains useful diagnostic data even
+    // when its fitted projection is invalid. Runtime heater authorization still
+    // requires `thermal_plant_transient_transaction_is_complete`; persistence
+    // must not discard the raw trace merely because the model is unusable.
+    if config
+        .thermal_plant_transient_active
+        .is_some_and(|value| !thermal_plant_transient_transaction_has_valid_structure(&value))
+    {
+        return None;
+    }
+    match (
+        config.heater_curve_transaction_id,
+        config.thermal_plant_transient_active,
+    ) {
+        (None, None) => Some(config),
+        (Some(heater_curve_id), Some(transaction))
+            if heater_curve_id == transaction.transaction_id =>
+        {
+            Some(config)
+        }
+        _ => None,
+    }
+}
+
+/// Return whether an ACTIVE marker can safely publish this FPR2 snapshot.
+///
+/// Ordinary commits may update only a subset of domains, so unchanged records
+/// from an older generation are valid as long as every required domain is
+/// present and no record is newer than the marker.
+pub fn fpr2_snapshot_is_complete(domains: &[Option<PersistRecord>; 6], generation: u32) -> bool {
+    fpr2_snapshot_config(domains, generation, false).is_some()
+}
+
+/// Return whether a PREPARED legacy-migration generation is complete enough to
+/// promote. Migration writes every domain at the new generation, so mixed
+/// generations are not recoverable and must remain locked.
+pub fn fpr2_prepared_generation_is_complete(
+    domains: &[Option<PersistRecord>; 6],
+    generation: u32,
+) -> bool {
+    fpr2_snapshot_config(domains, generation, true).is_some()
+}
+
 pub fn select_latest_persist_record(
     left: Result<PersistRecord, Fpr2DecodeError>,
     right: Result<PersistRecord, Fpr2DecodeError>,
@@ -1487,6 +1595,23 @@ pub fn select_latest_persist_record(
         (Ok(left), Err(_)) => Some(left),
         (Err(_), Ok(right)) => Some(right),
         (Err(_), Err(_)) => None,
+    }
+}
+
+pub fn select_latest_persist_record_at_or_before(
+    left: Result<PersistRecord, Fpr2DecodeError>,
+    right: Result<PersistRecord, Fpr2DecodeError>,
+    max_sequence: u32,
+) -> Option<PersistRecord> {
+    match (
+        left.ok().filter(|record| record.sequence <= max_sequence),
+        right.ok().filter(|record| record.sequence <= max_sequence),
+    ) {
+        (Some(left), Some(right)) if right.sequence > left.sequence => Some(right),
+        (Some(left), Some(_)) => Some(left),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
     }
 }
 
@@ -1558,7 +1683,9 @@ impl SafetyCalibration {
 impl ThermalPlantPersistence {
     pub fn from_config(config: &MemoryConfig) -> Self {
         Self {
-            active: config.thermal_plant_transient_active,
+            active: config
+                .thermal_plant_transient_active
+                .filter(thermal_plant_transient_transaction_has_valid_structure),
         }
     }
 
@@ -1660,6 +1787,7 @@ impl PersistDomainData {
 
 const FPR2_TLV_STATUS: u8 = 0x01;
 const FPR2_TLV_GENERATION: u8 = 0x02;
+const FPR2_TLV_KIND: u8 = 0x03;
 const FPR2_TLV_THERMAL_PLANT_STATE: u8 = 0x01;
 const THERMAL_PLANT_STATE_EMPTY: u8 = 0;
 
@@ -1925,6 +2053,15 @@ fn encode_persist_payload(
                 out,
                 &mut cursor,
             )?;
+            push_fpr2_tlv(
+                FPR2_TLV_KIND,
+                &[match value.kind {
+                    LayoutMarkerKind::Commit => 1,
+                    LayoutMarkerKind::LegacyMigration => 2,
+                }],
+                out,
+                &mut cursor,
+            )?;
         }
         PersistDomainData::ThermalPlant(value) => {
             if let Some(transaction) = value.active {
@@ -2020,6 +2157,9 @@ fn decode_persist_payload(
     let mut marker = LayoutMarker {
         generation: 0,
         status: LayoutMarkerStatus::Prepared,
+        // Before the kind TLV existed, PREPARED was only used by legacy
+        // migration. Keep that interpretation for records already in EEPROM.
+        kind: LayoutMarkerKind::LegacyMigration,
     };
     let mut thermal_plant = ThermalPlantPersistence { active: None };
     let mut saw_field = false;
@@ -2188,6 +2328,14 @@ fn decode_persist_payload(
                 marker.generation = u32::from_le_bytes(value.try_into().unwrap());
                 saw_field = true;
             }
+            FPR2_TLV_KIND if value.len() == 1 => {
+                marker.kind = if value[0] == 2 {
+                    LayoutMarkerKind::LegacyMigration
+                } else {
+                    LayoutMarkerKind::Commit
+                };
+                saw_field = true;
+            }
             _ => {}
         },
         PersistDomain::ThermalPlant => match tag {
@@ -2205,7 +2353,9 @@ fn decode_persist_payload(
                     .contains(&value.len()) =>
             {
                 thermal_plant.active = decode_thermal_plant_persisted_transaction(value);
-                saw_field = thermal_plant.active.is_some();
+                // An invalid projection is a validly framed domain value, but
+                // it must never become an active heater model.
+                saw_field = true;
             }
             _ => {}
         },
@@ -2996,7 +3146,7 @@ fn encode_thermal_plant_transient_transaction(
     out[..4].copy_from_slice(&value.transaction_id.to_le_bytes());
     out[4..6].copy_from_slice(&value.ambient_raw_rtd_adc_mv.to_le_bytes());
     out[6] = value.sample_count;
-    out[7] = 0;
+    out[7] = THERMAL_PLANT_TRANSIENT_FORMAT_125MV;
     let projection = value.projection;
     out[8..12].copy_from_slice(&projection.convection_mw_per_c_bits.to_le_bytes());
     out[12..16].copy_from_slice(&projection.radiation_mw_per_k4_bits.to_le_bytes());
@@ -3010,7 +3160,7 @@ fn encode_thermal_plant_transient_transaction(
             THERMAL_PLANT_TRANSIENT_HEADER_LEN + index * THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN;
         out[offset..offset + 2].copy_from_slice(&sample.elapsed_ticks.to_le_bytes());
         out[offset + 2..offset + 4].copy_from_slice(&sample.raw_rtd_adc_mv.to_le_bytes());
-        out[offset + 4] = sample.heater_voltage_100mv;
+        out[offset + 4] = sample.heater_voltage_125mv;
         out[offset + 5] = sample.duty_percent;
     }
 }
@@ -3036,7 +3186,7 @@ fn encode_thermal_plant_persisted_transaction(
     out[..4].copy_from_slice(&value.transaction_id.to_le_bytes());
     out[4..6].copy_from_slice(&value.ambient_raw_rtd_adc_mv.to_le_bytes());
     out[6] = value.sample_count;
-    out[7] = THERMAL_PLANT_PERSISTED_FORMAT_DUTY_PACKED;
+    out[7] = THERMAL_PLANT_PERSISTED_FORMAT_DUTY_PACKED_125MV;
     let projection = value.projection;
     out[8..12].copy_from_slice(&projection.convection_mw_per_c_bits.to_le_bytes());
     out[12..16].copy_from_slice(&projection.radiation_mw_per_k4_bits.to_le_bytes());
@@ -3056,7 +3206,7 @@ fn encode_thermal_plant_persisted_transaction(
             };
         out[offset..offset + 2].copy_from_slice(&elapsed_ticks.to_le_bytes());
         out[offset + 2..offset + 4].copy_from_slice(&sample.raw_rtd_adc_mv.to_le_bytes());
-        out[offset + 4] = sample.heater_voltage_100mv;
+        out[offset + 4] = sample.heater_voltage_125mv;
     }
 }
 
@@ -3077,7 +3227,7 @@ fn decode_thermal_plant_transient_transaction(
     let mut samples = [ThermalPlantTransientSample {
         elapsed_ticks: 0,
         raw_rtd_adc_mv: 0,
-        heater_voltage_100mv: 0,
+        heater_voltage_125mv: 0,
         duty_percent: 0,
     }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     for (index, sample) in samples[..usize::from(sample_count)].iter_mut().enumerate() {
@@ -3086,7 +3236,11 @@ fn decode_thermal_plant_transient_transaction(
         *sample = ThermalPlantTransientSample {
             elapsed_ticks: u16::from_le_bytes([bytes[offset], bytes[offset + 1]]),
             raw_rtd_adc_mv: u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]),
-            heater_voltage_100mv: bytes[offset + 4],
+            heater_voltage_125mv: match bytes[7] {
+                0 => quantize_thermal_plant_heater_voltage_mv(u32::from(bytes[offset + 4]) * 100),
+                THERMAL_PLANT_TRANSIENT_FORMAT_125MV => bytes[offset + 4],
+                _ => return None,
+            },
             duty_percent: bytes[offset + 5],
         };
     }
@@ -3120,15 +3274,16 @@ fn decode_thermal_plant_persisted_transaction(
     if bytes.len() != expected_len {
         return None;
     }
-    let duty_is_packed = match bytes[7] {
-        0 => false,
-        THERMAL_PLANT_PERSISTED_FORMAT_DUTY_PACKED => true,
+    let (duty_is_packed, voltage_is_125mv) = match bytes[7] {
+        0 => (false, false),
+        THERMAL_PLANT_PERSISTED_FORMAT_DUTY_PACKED => (true, false),
+        THERMAL_PLANT_PERSISTED_FORMAT_DUTY_PACKED_125MV => (true, true),
         _ => return None,
     };
     let mut samples = [ThermalPlantTransientSample {
         elapsed_ticks: 0,
         raw_rtd_adc_mv: 0,
-        heater_voltage_100mv: 0,
+        heater_voltage_125mv: 0,
         duty_percent: 0,
     }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     for (index, sample) in samples[..usize::from(sample_count)].iter_mut().enumerate() {
@@ -3142,7 +3297,11 @@ fn decode_thermal_plant_persisted_transaction(
                 elapsed_ticks
             },
             raw_rtd_adc_mv: u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]),
-            heater_voltage_100mv: bytes[offset + 4],
+            heater_voltage_125mv: if voltage_is_125mv {
+                bytes[offset + 4]
+            } else {
+                quantize_thermal_plant_heater_voltage_mv(u32::from(bytes[offset + 4]) * 100)
+            },
             duty_percent: if duty_is_packed {
                 u8::from(elapsed_ticks & THERMAL_PLANT_PERSISTED_DUTY_BIT != 0).saturating_mul(100)
             } else {
@@ -5655,7 +5814,7 @@ mod tests {
         let mut samples = [ThermalPlantTransientSample {
             elapsed_ticks: 0,
             raw_rtd_adc_mv: 0,
-            heater_voltage_100mv: 0,
+            heater_voltage_125mv: 0,
             duty_percent: 0,
         }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
         for (index, sample) in samples.iter_mut().take(24).enumerate() {
@@ -5668,7 +5827,7 @@ mod tests {
                 } else {
                     346 - (index as u16 - 12) * 8
                 },
-                heater_voltage_100mv: if (1..=12).contains(&index) { 200 } else { 0 },
+                heater_voltage_125mv: if (1..=12).contains(&index) { 160 } else { 0 },
                 duty_percent: if (1..=12).contains(&index) { 100 } else { 0 },
             };
         }
@@ -5738,7 +5897,7 @@ mod tests {
     #[test]
     fn persisted_transient_samples_retain_zero_duty_during_cooling() {
         let mut transaction = sample_transient_thermal_plant_transaction();
-        transaction.samples[13].heater_voltage_100mv = 200;
+        transaction.samples[13].heater_voltage_125mv = 160;
         assert!(thermal_plant_transient_transaction_has_valid_structure(
             &transaction
         ));
@@ -5751,7 +5910,7 @@ mod tests {
 
         let decoded = decode_thermal_plant_persisted_transaction(&encoded[..payload_len])
             .expect("current persisted transient format must decode");
-        assert_eq!(decoded.samples[13].heater_voltage_100mv, 200);
+        assert_eq!(decoded.samples[13].heater_voltage_125mv, 160);
         assert_eq!(decoded.samples[13].duty_percent, 0);
         assert_eq!(decoded, transaction);
     }
@@ -5801,7 +5960,7 @@ mod tests {
                 } else {
                     502 - (index as u16 - 64) * 2
                 },
-                heater_voltage_100mv: if (1..64).contains(&index) { 200 } else { 0 },
+                heater_voltage_125mv: if (1..64).contains(&index) { 160 } else { 0 },
                 duty_percent: if (1..64).contains(&index) { 100 } else { 0 },
             };
         }
@@ -5839,7 +5998,7 @@ mod tests {
     }
 
     #[test]
-    fn structurally_valid_transient_with_invalid_projection_retains_raw_trace() {
+    fn invalid_projection_retains_raw_trace_without_active_thermal_model() {
         let mut transaction = sample_transient_thermal_plant_transaction();
         transaction.projection = ThermalPlantProjectionRecord {
             convection_mw_per_c_bits: 0,
@@ -5876,7 +6035,7 @@ mod tests {
     fn transient_record_requires_cooling_after_heating() {
         let mut transaction = sample_transient_thermal_plant_transaction();
         transaction.samples[14].duty_percent = 100;
-        transaction.samples[14].heater_voltage_100mv = 200;
+        transaction.samples[14].heater_voltage_125mv = 160;
 
         assert!(!thermal_plant_transient_transaction_is_complete(
             &transaction
@@ -5898,14 +6057,14 @@ mod tests {
 
         transaction = sample_transient_thermal_plant_transaction();
         transaction.samples[0].duty_percent = 100;
-        transaction.samples[0].heater_voltage_100mv = 200;
+        transaction.samples[0].heater_voltage_125mv = 160;
         assert!(!thermal_plant_transient_transaction_is_complete(
             &transaction
         ));
 
         transaction = sample_transient_thermal_plant_transaction();
-        transaction.samples[1].heater_voltage_100mv =
-            THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV - 1;
+        transaction.samples[1].heater_voltage_125mv =
+            THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_125MV - 1;
         assert!(!thermal_plant_transient_transaction_is_complete(
             &transaction
         ));
@@ -5926,11 +6085,60 @@ mod tests {
     #[test]
     fn transient_record_accepts_measured_voltage_above_nominal_apdo_request() {
         let mut transaction = sample_transient_thermal_plant_transaction();
-        transaction.samples[1].heater_voltage_100mv = 217;
+        transaction.samples[1].heater_voltage_125mv = 174;
 
         assert!(thermal_plant_transient_transaction_is_complete(
             &transaction
         ));
+    }
+
+    #[test]
+    fn transient_voltage_code_covers_the_absolute_pd_guard() {
+        assert_eq!(quantize_thermal_plant_heater_voltage_mv(28_000), 224);
+        assert_eq!(thermal_plant_heater_voltage_mv(224), 28_000);
+
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[1].heater_voltage_125mv = 224;
+        assert!(thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        let payload_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + usize::from(transaction.sample_count) * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
+        let mut encoded = [0u8; THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + THERMAL_PLANT_TRANSIENT_MAX_SAMPLES * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN];
+        encode_thermal_plant_persisted_transaction(&transaction, &mut encoded[..payload_len]);
+        let decoded = decode_thermal_plant_persisted_transaction(&encoded[..payload_len])
+            .expect("28 V transient record must decode");
+        assert_eq!(decoded.samples[1].heater_voltage_125mv, 224);
+    }
+
+    #[test]
+    fn transient_voltage_code_rejects_values_above_the_pd_guard() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[1].heater_voltage_125mv = 225;
+
+        assert!(!thermal_plant_transient_transaction_has_valid_structure(
+            &transaction
+        ));
+    }
+
+    #[test]
+    fn legacy_persisted_voltage_encoding_remains_readable() {
+        let transaction = sample_transient_thermal_plant_transaction();
+        let payload_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + usize::from(transaction.sample_count) * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
+        let mut encoded = [0u8; THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + THERMAL_PLANT_TRANSIENT_MAX_SAMPLES * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN];
+        encode_thermal_plant_persisted_transaction(&transaction, &mut encoded[..payload_len]);
+        encoded[7] = THERMAL_PLANT_PERSISTED_FORMAT_DUTY_PACKED;
+        encoded
+            [THERMAL_PLANT_TRANSIENT_HEADER_LEN + THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN + 4] =
+            217;
+
+        let decoded = decode_thermal_plant_persisted_transaction(&encoded[..payload_len])
+            .expect("legacy persisted transient record must decode");
+        assert_eq!(decoded.samples[1].heater_voltage_125mv, 174);
     }
 
     #[test]
@@ -6037,6 +6245,7 @@ mod tests {
             PersistDomainData::LayoutMarker(LayoutMarker {
                 generation: 7,
                 status: LayoutMarkerStatus::Active,
+                kind: LayoutMarkerKind::Commit,
             }),
             PersistDomainData::ThermalPlant(ThermalPlantPersistence::from_config(&config)),
         ];
@@ -6082,7 +6291,7 @@ mod tests {
             *sample = ThermalPlantTransientSample {
                 elapsed_ticks: (index as u16 + 1) * 10,
                 raw_rtd_adc_mv: 346u16.saturating_sub((index - 23) as u16),
-                heater_voltage_100mv: 0,
+                heater_voltage_125mv: 0,
                 duty_percent: 0,
             };
         }
@@ -6147,6 +6356,7 @@ mod tests {
         let data = PersistDomainData::LayoutMarker(LayoutMarker {
             generation: 3,
             status: LayoutMarkerStatus::Active,
+            kind: LayoutMarkerKind::Commit,
         });
         let mut bytes = [0u8; FPR2_MAX_RECORD_SIZE];
         let length = encode_persist_record(3, &data, &mut bytes).unwrap();
@@ -6166,12 +6376,34 @@ mod tests {
     }
 
     #[test]
+    fn fpr2_selection_can_ignore_newer_prepared_generation() {
+        let data = PersistDomainData::LayoutMarker(LayoutMarker {
+            generation: 4,
+            status: LayoutMarkerStatus::Active,
+            kind: LayoutMarkerKind::Commit,
+        });
+        let mut old = [0u8; FPR2_MAX_RECORD_SIZE];
+        let old_len = encode_persist_record(4, &data, &mut old).unwrap();
+        let mut prepared = [0u8; FPR2_MAX_RECORD_SIZE];
+        let prepared_len = encode_persist_record(5, &data, &mut prepared).unwrap();
+
+        let selected = select_latest_persist_record_at_or_before(
+            decode_persist_record(&old[..old_len]),
+            decode_persist_record(&prepared[..prepared_len]),
+            4,
+        );
+
+        assert_eq!(selected.unwrap().sequence, 4);
+    }
+
+    #[test]
     fn layout_recovery_never_treats_prepared_as_active() {
         assert_eq!(
             layout_recovery_state(
                 Some(LayoutMarker {
                     generation: 4,
                     status: LayoutMarkerStatus::Prepared,
+                    kind: LayoutMarkerKind::LegacyMigration,
                 }),
                 false,
             ),
@@ -6182,6 +6414,7 @@ mod tests {
                 Some(LayoutMarker {
                     generation: 4,
                     status: LayoutMarkerStatus::Active,
+                    kind: LayoutMarkerKind::Commit,
                 }),
                 true,
             ),
@@ -6191,5 +6424,101 @@ mod tests {
             layout_recovery_state(None, true),
             LayoutRecoveryState::Legacy
         );
+    }
+
+    fn fpr2_domains_for_config(config: &MemoryConfig, sequence: u32) -> [Option<PersistRecord>; 6] {
+        let mut domains = [None, None, None, None, None, None];
+        domains[PersistDomain::SafetyCalibration as usize - 1] = Some(PersistRecord {
+            sequence,
+            data: PersistDomainData::SafetyCalibration(SafetyCalibration::from_config(config)),
+        });
+        domains[PersistDomain::ThermalPolicy as usize - 1] = Some(PersistRecord {
+            sequence,
+            data: PersistDomainData::ThermalPolicy(ThermalPolicy::from_config(config)),
+        });
+        domains[PersistDomain::UserPreferences as usize - 1] = Some(PersistRecord {
+            sequence,
+            data: PersistDomainData::UserPreferences(UserPreferences::from_config(config)),
+        });
+        domains[PersistDomain::NetworkAndPairing as usize - 1] = Some(PersistRecord {
+            sequence,
+            data: PersistDomainData::NetworkAndPairing(NetworkAndPairing::from_config(config)),
+        });
+        domains[PersistDomain::ThermalPlant as usize - 1] = Some(PersistRecord {
+            sequence,
+            data: PersistDomainData::ThermalPlant(ThermalPlantPersistence::from_config(config)),
+        });
+        domains
+    }
+
+    #[test]
+    fn fpr2_active_snapshot_requires_all_domains_and_matching_thermal_identity() {
+        let transaction = sample_transient_thermal_plant_transaction();
+        let mut config = sample_config();
+        config.heater_curve_transaction_id = Some(transaction.transaction_id);
+        config.thermal_plant_transient_active = Some(transaction);
+        let mut domains = fpr2_domains_for_config(&config, 9);
+
+        assert!(fpr2_snapshot_is_complete(&domains, 9));
+
+        domains[PersistDomain::NetworkAndPairing as usize - 1] = None;
+        assert!(!fpr2_snapshot_is_complete(&domains, 9));
+
+        let mut domains = fpr2_domains_for_config(&config, 9);
+        let safety = domains[PersistDomain::SafetyCalibration as usize - 1]
+            .as_mut()
+            .expect("safety record");
+        let PersistDomainData::SafetyCalibration(value) = &mut safety.data else {
+            panic!("safety record has the wrong domain");
+        };
+        value.heater_curve_transaction_id = Some(transaction.transaction_id.wrapping_add(1));
+        assert!(!fpr2_snapshot_is_complete(&domains, 9));
+    }
+
+    #[test]
+    fn fpr2_active_snapshot_retains_structural_trace_with_invalid_projection() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.projection = ThermalPlantProjectionRecord {
+            convection_mw_per_c_bits: 0,
+            radiation_mw_per_k4_bits: 0,
+            thermal_capacity_mj_per_c_bits: 0,
+            transport_delay_ms: 0,
+        };
+        let mut config = sample_config();
+        config.heater_curve_transaction_id = Some(transaction.transaction_id);
+        config.thermal_plant_transient_active = Some(transaction);
+        let domains = fpr2_domains_for_config(&config, 14);
+
+        assert!(thermal_plant_transient_transaction_has_valid_structure(
+            &transaction
+        ));
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+        assert!(fpr2_snapshot_is_complete(&domains, 14));
+
+        let thermal = domains[PersistDomain::ThermalPlant as usize - 1]
+            .as_ref()
+            .expect("thermal plant record");
+        let PersistDomainData::ThermalPlant(thermal) = &thermal.data else {
+            panic!("thermal plant record has the wrong domain");
+        };
+        assert_eq!(thermal.active, Some(transaction));
+    }
+
+    #[test]
+    fn fpr2_prepared_recovery_rejects_missing_and_mixed_generations() {
+        let mut domains = fpr2_domains_for_config(&MemoryConfig::default(), 12);
+        assert!(fpr2_prepared_generation_is_complete(&domains, 12));
+
+        domains[PersistDomain::ThermalPolicy as usize - 1] = None;
+        assert!(!fpr2_prepared_generation_is_complete(&domains, 12));
+
+        let mut domains = fpr2_domains_for_config(&MemoryConfig::default(), 12);
+        domains[PersistDomain::NetworkAndPairing as usize - 1]
+            .as_mut()
+            .expect("network record")
+            .sequence = 11;
+        assert!(!fpr2_prepared_generation_is_complete(&domains, 12));
     }
 }

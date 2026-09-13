@@ -47,8 +47,8 @@
 ### MUST
 
 - EEPROM 设备为 `M24C64`，7-bit I2C 地址固定为硬件基线 `0x50`；启动和高级维护不得扫描其它 I2C 地址。容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。启动读取使用固定大小的域缓冲和不超过 `16 bytes` 的有界分块访问，不得把完整 `2 KiB` v5 快照放入启动栈或堆。
-- FPR2 header 固定为 `20 bytes`：`FPR2 magic`、format version、domain、flags、header length、`sequence`、payload length、reserved 和 CRC32。分区固定为：`SafetyCalibration` A/B=`0x0000/0x0200`（512 B）；`ThermalPolicy` A/B=`0x0400/0x0700`（768 B）；`UserPreferences` single=`0x0a00`（128 B）；`NetworkAndPairing` single=`0x0a80`（256 B）；`LayoutMarker` A/B=`0x0c00/0x0c80`（128 B）；`ThermalPlant` single=`0x0d00`（768 B）；旧 v1-v5 FPM1 只在迁移时流式读取，位于 `0x1000..0x1fff`，迁移后两个 magic 均失效。每个域选择 CRC 合法且 `sequence` 最大的槽；单槽损坏只回退该域默认值，安全域或热模型域不可恢复时保持 heater/PPS/calibration 锁定。
-- 外置 EEPROM 是唯一的持久化后端。`MemoryRecord`、等价配置与其任何镜像不得写入 ESP flash、NVS、raw sector 或 `flux_cfg`。启动只从 EEPROM 槽位选择 CRC 合法且 `sequence` 最大的 record；旧内部 Flash record 必须忽略且不得迁移。EEPROM 全空时可按批准的硬件配置初始化并写后验证；EEPROM 不可达或安全域记录无法恢复时进入 `EEPROM_REQUIRED`，普通偏好/网络域失败只标记该域未保存。
+- FPR2 header 固定为 `20 bytes`：`FPR2 magic`、format version、domain、flags、header length、`sequence`、payload length、reserved 和 CRC32。分区固定为：`SafetyCalibration` A/B=`0x0000/0x0200`（512 B）；`ThermalPolicy` A/B=`0x0400/0x0700`（768 B）；`UserPreferences` single=`0x0a00`（128 B）；`NetworkAndPairing` single=`0x0a80`（256 B）；`LayoutMarker` A/B=`0x0c00/0x0c80`（128 B）；`ThermalPlant` single=`0x0d00`（768 B）；旧 v1-v5 FPM1 只在迁移时流式读取，位于 `0x1000..0x1fff`，迁移后两个 magic 均失效。Layout marker payload carries `status` (`PREPARED|ACTIVE`), `generation`, and `kind` (`COMMIT|LEGACY_MIGRATION`). 启动先选择 CRC 合法的最新 `ACTIVE` marker，再为每个域选择不晚于其 `generation` 的最新 CRC 合法 record；`PREPARED` 代永远不会覆盖较旧的 active snapshot。单槽损坏只回退该域默认值，安全域或热模型域不可恢复或 transaction identity 不一致时保持 heater/PPS/calibration 锁定。
+- 外置 EEPROM 是唯一的持久化后端。`MemoryRecord`、等价配置与其任何镜像不得写入 ESP flash、NVS、raw sector 或 `flux_cfg`。普通提交先写目标代的 `PREPARED` marker，再写并验证双槽安全域，发布同代 `ACTIVE` marker，最后写单槽域；任何中断只能恢复旧 active snapshot 或进入安全锁。旧内部 Flash record 必须忽略且不得迁移。EEPROM 全空时可按批准的硬件配置初始化并写后验证；EEPROM 不可达或安全域记录无法恢复时进入 `EEPROM_REQUIRED`，普通偏好/网络域失败只标记该域未保存。
 - 固件更新、恢复与 devd 不得读取、保存、迁移、恢复或验证 MCU 内部配置分区。分区表、镜像布局和 bundle 不得声明 `flux_cfg` 或等价配置区域。
 - record payload 必须使用 TLV，未知 TLV 必须跳过，缺失 TLV 必须使用默认值；v1/v2 的 TLV header 使用 `tag:u8 + len:u8`，v3-v5 使用 `tag:u8 + len:u16le`。
 - 温度字段恢复后必须 clamp 到 `0..400°C`。
@@ -76,7 +76,7 @@
 - 写回流程：
   - 前面板已接受交互完成后，从 UI 状态生成下一份 `MemoryConfig`。
   - 若配置相对上一份有变化，设置约 `2s` 写回 deadline。
-- deadline 到期后按变更域写入下一 record sequence 对应的槽；每页 EEPROM 写和验证 chunk 后先服务共享总线上的 PD，再进入下一段。EEPROM 不可用、写入失败或验证失败不得重新路由到 MCU 存储。
+- deadline 到期后按变更域创建下一 transaction generation；每页 EEPROM 写和验证 chunk 后先服务共享总线上的 PD，再进入下一段。只有同代域记录全部完成并读回验证后才发布 `ACTIVE` marker；EEPROM 不可用、写入失败或验证失败不得重新路由到 MCU 存储。
 - 提交失败时状态接口公开 `persistenceFault` 与 `persistenceFaultAttentionPending`，安装状态公开 `lastPersistenceFault`；`recordState` 使用 `valid|blank|corrupt|incompatible|unavailable`，不可使用 `eeprom_required` 作为记录状态。
 - Wi-Fi 字段：
   - `ssid`、`password`、`telemetryIntervalMs` 进入持久化模型；自动重连是固件固定策略，不属于用户配置。
@@ -129,10 +129,10 @@
 
 - Given EEPROM 为空且可写，When 固件启动，Then 固件从批准的硬件配置初始化 EEPROM、验证写入，并在 UI 使用该配置。
 - Given EEPROM 缺失，或安全校准/温控策略记录不可读、不可写或验证失败，When 固件启动或提交配置，Then 固件进入 `EEPROM_REQUIRED`，不使用内部 Flash/NVS/raw sector 且 heater/PPS/calibration 保持锁定；Given 偏好/网络域失败，Then 只标记该域未保存并允许 heater/fan 保护继续运行。
-- Given EEPROM 槽都有合法 record，When 固件启动，Then 选择 `sequence` 最大的一槽。
+- Given EEPROM has a valid `ACTIVE` marker and multiple valid domain records, When firmware starts, Then it selects the newest valid record for each domain whose `sequence` is no newer than the active marker generation; a newer `PREPARED` record is ignored.
 - Given 最新槽 CRC 损坏且旧槽合法，When 固件启动，Then 回退到旧槽。
 - Given `flux_cfg` 或旧 raw fallback 双槽含 CRC 合法 record，When 固件启动，Then 固件忽略它们，绝不读取、恢复或复制。
-- Given EEPROM previous/legacy 槽存在 CRC 合法的 v1-v5 record，When 固件启动，Then 按版本流式完成 RAM 内字段迁移、逐域写入并读回验证，依次提交 `PREPARED`、使旧 magic 无效、提交两份 `ACTIVE`；任一中断阶段重启都不得把半成品当作已激活配置。
+- Given EEPROM previous/legacy 槽存在 CRC 合法的 v1-v5 record，When 固件启动，Then 按版本流式完成 RAM 内字段迁移、写入 `LEGACY_MIGRATION/PREPARED`、逐域写入并读回验证、使旧 magic 无效、提交两份 `LEGACY_MIGRATION/ACTIVE`；任一中断阶段重启都不得把半成品当作已激活配置，且旧 FPM1 仍存在时必须回退到 legacy migration path。
 - Given firmware update、Developer flash 或 MCU Flash recovery 发生，When MCU 写入或擦除完成，Then 操作不得读取、写入、迁移或验证内部配置分区，且外置 EEPROM 不受该 MCU 操作影响。
 - Given record payload 包含未知 TLV，When 解码，Then 忽略未知字段并保留已知字段。
 - Given 目标温度或 preset 超出范围，When 解码完成，Then 温度被 clamp 到 `0..400°C`。
