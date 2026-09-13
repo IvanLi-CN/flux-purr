@@ -2,42 +2,60 @@
 
 ## Related ADRs
 
-- None
+None
 
-## Goal
+## Context and Scope
 
 Flux Purr production firmware targets the FUSB302BMPX PD-message PHY. The archived CH224Q
 controller board remains documentation-only and is not selected, probed, or packaged by the
-product build. FUSB302BMPX uses a repository-owned sink policy that selects compatible PPS APDOs
-within `5V..21V` and fixed PDOs as a fallback.
+product build. FUSB302BMPX uses a repository-owned sink policy that applies the absolute
+`5V..28V` PD guard, then selects within the live PPS APDO and falls back to fixed PDOs.
 
-## Hardware Identity
+- In scope: FUSB302B identification, CC attachment, source-capability discovery, contract recovery, heater interlock, and PD status semantics.
+- Out of scope: heater PID and tuning-candidate parameters, thermal-tuning state, physical VBUS-current measurement, USB-IF certification, and a CH224Q product path.
+
+## Requirements
+
+### REQ-FUSB-IDENTITY
 
 - Both controllers can answer at I2C address `0x22`; an ACK alone is never a valid identity signal.
 - Startup performs only the FUSB302BMPX identity transaction. A valid signature requires two stable `Device ID` reads matching the documented `0x9x` format plus a readable FUSB status bank. There is no CH224Q fallback probe because the product board is FUSB-only.
 - An unstable, invalid, incomplete, or read-failed signature reports `unknown`, performs zero PD writes, and keeps heater output interlocked. The Front Panel and USB runtime still reach their normal ready state for diagnostics, but `GPIO47` remains off until a valid controller and ready contract are observed. A physical shared-address collision cannot be made safe by ACK probing and requires board correction before heating use.
-- FUSB302B's `GPIO7` interrupt net is reserved for a later event-driven path and shares `GPIO8`/`GPIO9` with the M24C64 EEPROM. Sink initialization retains Rd pull-downs on both CC pins, and the current policy safely polls the PHY. EEPROM record writes and their verification must release the shared bus after every bounded chunk and service the FUSB302B before the next chunk; no EEPROM write-cycle delay or success-path flash mirror may starve receive or contract recovery.
+- FUSB302B's `GPIO7` interrupt net is reserved for a later event-driven path and shares `GPIO8`/`GPIO9` with the M24C64 EEPROM. Sink initialization retains Rd pull-downs on both CC pins, and the current policy safely polls the PHY's clear-on-read interrupt snapshot. Any observed `STATUS0.VBUSOK=0` immediately interlocks the heater and clears contract authorization; a reported `I_VBUSOK` transition starts only a bounded `50ms` low-VBUS confirmation for physical detach. A transient or static low level without that transition must not withdraw Rd or restart CC. Only persistent low VBUS after the transition may enter physical-detach recovery, and after that recovery the PHY waits for VBUS to return before accepting another low-VBUS confirmation. EEPROM record reads/writes, raw maintenance reads/writes, snapshot reads/digest, and verification must release the shared bus after every bounded chunk and service the FUSB302B before the next chunk; no EEPROM write-cycle delay or success-path flash mirror may starve receive or contract recovery.
+- The runtime main loop gives FUSB302B an independent compensating `5ms` service deadline before control-plane work. Startup display initialization and flush use the same service cadence while their one-second display deadline remains active. Each pass consumes at most `256` USB bytes and one complete USB or LAN control command before returning to the deadline gate; thermal control continues at its `50ms` cadence using the latest PD observation and does not own PD protocol liveness. When that service observes an unavailable contract, it immediately clears the heater arm and physical output before lower-priority UI, LAN, or thermal work continues.
+- A `Reject` or `Wait` received before `PS_RDY` cancels only the pending request and returns the Sink to bounded Source_Capabilities discovery. It must not permanently enter `Fault` while the Type-C attachment remains present; an active contract is still preserved only when the response belongs to a later renegotiation.
 
-## Contract Policy
+### REQ-FUSB-CONTRACT
 
-- FUSB302BMPX selects the best usable PPS APDO covering the requested voltage within `5V..21V`; it selects the highest usable fixed PDO at or below `20V` only when no suitable APDO is present.
+- FUSB302BMPX clamps programmable PPS requests to the operational `5.5V` floor and the absolute `28V` PD ceiling before intersecting the selected live APDO. It selects the best usable APDO at that resulting voltage, or the highest usable fixed PDO at or below `20V` when no suitable APDO is present. The current `5V..21V` APDO is source capability data, not a global product limit.
+- The FUSB302B capability bridge preserves every usable live PPS APDO. Manual PPS validation and automatic heater selection must evaluate the APDO that covers the requested voltage and current; neither may collapse a mixed source to a single highest-voltage APDO or apply the archived CH224Q `21V` ceiling.
+- VIN ADC calibration must select the maximum current from the APDO covering each sweep voltage; it must not reuse an aggregate capability current after crossing an APDO boundary.
+- When automatic heater control uses one current ceiling for a continuous PPS voltage interval, that ceiling must be valid at every requestable voltage in the interval. It must not use a higher current advertised only by the APDO covering the interval's upper endpoint.
 - Automatic idle operation requests `12V` from a usable PPS APDO. The APDO must still cover `20V @ 3A` before it qualifies for the performance tier; heater control raises the request only when its power policy requires it.
-- Source capabilities, PPS RDOs, fixed RDOs, `Accept`, `PS_RDY`, detach, reset, reject, wait, and I2C faults are explicit policy states.
+- Source capabilities, PPS RDOs, fixed RDOs, `Accept`, `PS_RDY`, CC detach, reset, reject, wait, and I2C faults are explicit policy states.
 - Heating is authorized only after `Accept` then `PS_RDY`. Contract loss clears the authorization and heater output.
+- While the MCU remains powered and has a valid calibrated VIN Reading, an active contract whose voltage exceeds that reading by at least `2V` for a continuous `100ms` is treated as stale contract metadata. The runtime immediately clears contract authorization and heater output, retains the existing CC session, and returns to bounded Source_Capabilities discovery. This guard is suspended while a request is awaiting `Accept`/`PS_RDY` and for `500ms` after a request, so a normal PPS voltage transition is allowed to settle. It never infers VBUS state across an unobservable MCU power loss.
 - A contract transition from pending to ready does not revive a heater arm requested while power was unavailable; that stale intent is discarded and a new explicit arm is required after readiness.
-- A missing startup contract, detached source, failed controller initialization, or later contract loss is a heater-only interlock: it must not block the Dashboard or runtime-ready signal. The device may continue to expose diagnostics while heater output remains zero, and it releases the lock only after a ready contract is observed again.
-- Contract selection rejects source capabilities below `3A`. FUSB302BMPX clamps contractual current to `3A..5A`, PPS voltage to `5V..21V`, and fixed-PDO voltage to `5V..20V`.
-- An active PPS request is renewed every five seconds without holding the shared I2C bus while waiting for a response.
+- After the bounded VBUS-restore confirmation, the runtime resets only the PD protocol engine, flushes both FIFOs, reapplies the receiver PHY configuration and interrupt masks, and resets the local transmit message ID. It preserves CC pulls and does not restart Type-C toggling before bounded Source_Capabilities discovery.
+- A missing startup contract, detached source, failed controller initialization, or later contract loss is a heater-only interlock: it must not block the Dashboard or runtime-ready signal. The device may continue to expose diagnostics while heater output remains zero, and it releases the lock only after a ready contract is observed again. When a valid FUSB302B is present at startup, firmware reserves at most `750ms` before low-priority shared-I2C, display, or network initialization to service the sink policy at least once per millisecond; during the bounded display initialization and startup-frame flush it continues service at the independent `5ms` cadence. It exits the initial window immediately after a ready contract. An unknown or failed controller does not consume that window.
+
+### REQ-FUSB-RECOVERY
+- While waiting for `Source_Capabilities`, the Sink may retry `Get_Source_Capabilities` after the bounded retry interval, but it must not initiate a PD Soft Reset or Hard Reset solely because that response is absent or late. A Sink-initiated reset can disturb the current source attachment and turn a recoverable contract delay into a reset loop. A received reset, detach, reject, wait, or controller fault remains an explicit local recovery and heater-interlock event.
+- A local FUSB302B `RETRY_FAIL`, an expired `Accept`/`PS_RDY` wait, or an incomplete receive FIFO timeout does not prove a detach. Each must clear contract authorization and heater output, invalidate cached Source Capabilities, flush only the receive FIFO, retain the existing CC attachment, and re-query `Source_Capabilities`; it must not reinitialize the PHY, restart CC toggling, or reset the PD session. A fixed-contract liveness probe that receives no response uses the same CC-preserving recovery after its bounded response wait. `RETRY_FAIL` has precedence over every queued receive frame because the failed exchange invalidates that frame before it can change policy state. `RETRY_FAIL` remains latched until a subsequent transmit start, so recovery must consume the already-handled latch until the ordinary bounded discovery interval sends the next query. A received PD reset is a protocol event and must retain Rd, the selected CC pin, and the configured PHY; it must clear contract authorization and wait for new Source Capabilities without restarting CC toggling or software/PHY initialization. Any observed low VBUS first interlocks the heater and clears contract authorization; only a reported low-VBUS transition followed by the bounded confirmation above may enter a VBUS-restore wait. During that wait, the runtime retains the selected CC/RX session and waits for VBUS to return; it then resumes bounded Source Capabilities discovery without reinitializing the PHY or restarting CC toggling. A Source Capabilities refresh that still covers the active contract updates the cache without issuing a duplicate Request. `STATUS0.BC_LVL` reports current-level/termination evidence, not a reliable Sink detach: `BC_LVL=00`, active BMC, and any unknown status retain Rd and the current PD session. The VIN stale-contract guard uses the same CC-preserving recovery and must not start a detach path.
+- Every FUSB302B policy deadline, including the initial CC-attachment observation, uses one elapsed-millisecond runtime epoch. Startup must not seed the policy with an absolute monotonic timestamp and then service it with a relative timestamp; otherwise `Source_Capabilities`, `Accept`, `PS_RDY`, and PPS renewal deadlines can cease to advance after boot.
+- Contract selection rejects source capabilities below `3A`. FUSB302BMPX clamps contractual current to `3A..5A`, programmable PPS voltage to the intersection of the absolute `5V..28V` guard and the selected APDO, and fixed-PDO voltage to `5V..20V`. The currently observed `5V..21V` APDO is capability data, not a global PPS limit.
+- An active PPS request is renewed every five seconds without holding the shared I2C bus while waiting for a response. An active fixed contract uses the same five-second interval for a bounded `Get_Source_Capabilities` liveness probe; an unanswered probe expires the contract authorization and returns to CC-preserving discovery.
 - `20V @ 3A` provides at most `60W`; `20V @ 5A` provides at most `100W`. Firmware uses the negotiated limit to cap PWM-derived heater power.
 - These limits are contractual. This revision has no VBUS current shunt, physical VBUS-current reading, or hardware VBUS over-current cutoff.
 
-## Performance Tiers
+### REQ-FUSB-PERFORMANCE
 
 - A ready contract at or above `20V` and `3A` is performance-guaranteed.
 - A lower-voltage PPS or fixed contract may run the heater in degraded mode, with `pdPerformanceGuaranteed=false` and a visible degraded reason.
 - A ready PPS `>=20V @ >=3A` contract is the FUSB302BMPX performance tier and authorizes calibration. Its fixed-PDO fallback remains heat-only.
+- A terminal thermal-calibration disarm remains effective across source-capability refresh, temporary fixed-PDO fallback, and PPS rediscovery. Only an explicit manual PPS re-arm may clear that disarm.
 
-## Control-Plane Contract
+### REQ-FUSB-STATUS
 
 Status retains `currentMa`, `ppsCapability*`, and `manualPps*` compatibility fields and adds:
 
@@ -50,15 +68,15 @@ Status retains `currentMa`, `ppsCapability*`, and `manualPps*` compatibility fie
 
 `currentMa` is not renamed and is not redefined as a measured VBUS load current.
 
-## Hardware Evidence Gate
+### REQ-FUSB-HARDWARE
 
 `docs/hardware/netlists/main-controller-board.enet` remains the archived CH224Q baseline. `docs/hardware/netlists/main-controller-board-fusb302b-rev-5-2.enet` is the imported FUSB302B source netlist.
 
 C20 is directly `VBUS`-to-`GND`, marked `Add into BOM=yes`, and is explicitly recorded as `100uF ±20% 50V` with `Voltage Rating: 50V` and `DeviceName: C1210_100UF_50V_20%`. The imported source markings are preserved without substitution. A physical component marking is authoritative, followed by traceable assembly BOM/AOI or rework evidence for the actual board. C42 and C43 remain separately specified `100uF`, `35V` VBUS bulk capacitors.
 
-## Driver Boundary
+### REQ-FUSB-DRIVER
 
-- The firmware uses the public `fusb302` crate for FUSB302B physical-layer configuration, status, FIFO handling, packet transport, and read-only device identification. Flux Purr adapts its existing blocking ESP32-S3 I2C transport to the crate's async API at the transaction boundary.
+- The firmware uses the public `fusb302` crate for FUSB302B physical-layer configuration, status, packet transport, and read-only device identification. Flux Purr adapts its existing blocking ESP32-S3 I2C transport to the crate's async API at the transaction boundary. Local receive recovery writes only `CONTROL1.RX_FLUSH` through that same bounded transport and preserves the receive-mask bits; a failed transmit path additionally writes the FUSB302B `CONTROL0.TX_FLUSH` bit to discard the incomplete TX frame before bounded rediscovery.
 - Before sink toggle, the runtime applies the PHY's default host-current setting, disables CC measurement, and selects the toggle interrupt mask. After CC attachment, it selects the attached CC pin for measurement and applies the receiver interrupt mask before packet transmission.
 - Flux Purr owns controller selection, PPS/fixed contract policy, RDO selection, `Accept`/`PS_RDY` contract commit, recovery timing, and heater interlock. The FUSB302BMPX PD 3.0 GoodCRC encoding is an explicit target-hardware opt-in. Source-only validation proves framing and policy, not real-source interoperability.
 
@@ -68,3 +86,35 @@ C20 is directly `VBUS`-to-`GND`, marked `Add into BOM=yes`, and is explicitly re
 - Claiming physical VBUS-current measurement or over-current protection.
 - Building or selecting a CH224Q product path.
 - Any real flash, reset, serial read/write, or target-port switching without separate owner authorization.
+
+## Verification
+
+### VER-FUSB-IDENTITY
+
+- Method: controller identity and fail-closed firmware unit tests.
+- covers: `REQ-FUSB-IDENTITY`
+- Pass condition: only a stable FUSB302B signature permits PD traffic; failed identification preserves diagnostics and interlocks heat.
+
+### VER-FUSB-CONTRACT
+
+- Method: FUSB302B adapter RDO, APDO, `Accept`, `PS_RDY`, detach/reset, and PPS-renewal unit tests.
+- covers: `REQ-FUSB-CONTRACT`, `REQ-FUSB-PERFORMANCE`
+- Pass condition: PPS/fixed selection, performance qualification, contract commit, and power caps match the bounded policy.
+
+### VER-FUSB-RECOVERY
+
+- Method: source-capability retry and transient-transport recovery unit tests, plus firmware binary tests.
+- covers: `REQ-FUSB-RECOVERY`, `REQ-FUSB-DRIVER`
+- Pass condition: absent source capabilities and local receive faults retain CC, interlock heat, and retry discovery without initiating a Sink reset; a continuous `2V` VIN deficit against an active contract is interlocked after `100ms` without a VIN-less VBUS inference; any low-VBUS observation interlocks immediately, while only a transition followed by the bounded confirmation enters detach recovery, and persistent low VBUS re-enters controlled CC discovery only once until VBUS is restored.
+
+### VER-FUSB-STATUS
+
+- Method: control-plane status serialization tests.
+- covers: `REQ-FUSB-STATUS`
+- Pass condition: contract fields remain distinct from compatibility and physical-current telemetry.
+
+### VER-FUSB-HARDWARE
+
+- Method: release build, netlist inspection, and separately authorized HIL.
+- covers: `REQ-FUSB-HARDWARE`
+- Pass condition: the release artifact builds against the public PHY boundary, hardware evidence preserves the FUSB302B topology, and any physical-source interoperability claim is backed by an authorized HIL receipt.

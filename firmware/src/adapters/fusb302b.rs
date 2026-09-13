@@ -7,6 +7,7 @@
 use super::pd::{Contract, ContractKind, SourceCapabilities};
 
 const PD_HEADER_REQUEST: u16 = 2;
+const PD_HEADER_ACCEPT: u16 = 3;
 const PD_HEADER_GET_SOURCE_CAP: u16 = 7;
 const PD_HEADER_SPEC_REV_30: u16 = 0b10 << 6;
 const PPS_RDO_VOLTAGE_STEP_MV: u16 = 20;
@@ -15,7 +16,51 @@ const PPS_KEEPALIVE_INTERVAL_MS: u64 = 5_000;
 
 pub const SOURCE_CAPS_INITIAL_WAIT_MS: u64 = 400;
 pub const SOURCE_CAPS_RETRY_INTERVAL_MS: u64 = 5_000;
-pub const SOURCE_CAPS_HARD_RESET_DELAY_MS: u64 = 1_000;
+
+fn source_message_id_is_newer(last: u8, current: u8) -> bool {
+    let distance = current.wrapping_sub(last) & 0x07;
+    (1..=4).contains(&distance)
+}
+
+/// The only recovery actions available after a Source_Capabilities timeout.
+///
+/// A sink powered by the same VBUS must not initiate a PD reset merely because
+/// a source-capability response is late: either reset can disturb the source
+/// session that powers the sink itself. Keep the heater interlocked and retry
+/// `Get_Source_Capabilities` instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceCapabilitiesRecovery {
+    Wait,
+    RetryGetSourceCapabilities,
+}
+
+/// A local transport failure that does not prove a CC detach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransientTransportFault {
+    RetryFailed,
+    PendingRequestTimeout,
+    PartialReceiveTimeout,
+    ReceiveIoError,
+    TransmitIoError,
+    ConfigurationIoError,
+}
+
+/// The recovery action for a local transport failure.
+///
+/// Reinitializing the PHY can withdraw Rd long enough for the source that
+/// powers this sink to remove VBUS. These faults must instead preserve CC,
+/// interlock heating, flush the incomplete transaction, and re-query source
+/// capabilities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransientTransportRecovery {
+    FlushReceiveAndRequery,
+}
+
+pub const fn transient_transport_fault_recovery(
+    _fault: TransientTransportFault,
+) -> TransientTransportRecovery {
+    TransientTransportRecovery::FlushReceiveAndRequery
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SinkPhase {
@@ -35,24 +80,28 @@ pub enum SinkPhase {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SinkPolicy {
     phase: SinkPhase,
+    default_requested_mv: u16,
     requested_mv: u16,
     preferred_ma: u16,
     pending_contract: Contract,
     active_contract: Contract,
     source_capabilities: SourceCapabilities,
     source_capabilities_received: bool,
+    source_message_id: Option<u8>,
 }
 
 impl SinkPolicy {
     pub const fn new(requested_mv: u16, preferred_ma: u16) -> Self {
         Self {
             phase: SinkPhase::WaitingForSourceCapabilities,
+            default_requested_mv: requested_mv,
             requested_mv,
             preferred_ma,
             pending_contract: Contract::none(),
             active_contract: Contract::none(),
             source_capabilities: SourceCapabilities::empty(),
             source_capabilities_received: false,
+            source_message_id: None,
         }
     }
 
@@ -71,8 +120,49 @@ impl SinkPolicy {
 
     /// Select a PPS contract, with fixed PDO fallback, from source capabilities.
     pub fn on_source_capabilities(&mut self, pdos: &[u32]) -> Option<[u8; 4]> {
+        self.on_source_capabilities_with_message_id(pdos, None)
+    }
+
+    /// Select a contract and retain the latest Source message ID. The runtime
+    /// uses it to ignore duplicate responses from an abandoned exchange while
+    /// allowing legitimate intervening Source messages to advance the ID by
+    /// more than one.
+    pub fn on_source_capabilities_with_message_id(
+        &mut self,
+        pdos: &[u32],
+        source_message_id: Option<u8>,
+    ) -> Option<[u8; 4]> {
         self.source_capabilities = SourceCapabilities::from_pdos(pdos);
         self.source_capabilities_received = true;
+        self.source_message_id = source_message_id.map(|value| value & 0x07);
+        self.begin_request(self.source_capabilities)
+    }
+
+    /// Refresh cached capabilities without needlessly renegotiating a still
+    /// valid explicit contract. If the source no longer advertises that
+    /// contract, clear it and begin a bounded replacement request instead.
+    pub fn refresh_source_capabilities_with_message_id(
+        &mut self,
+        pdos: &[u32],
+        source_message_id: Option<u8>,
+    ) -> Option<[u8; 4]> {
+        self.source_capabilities = SourceCapabilities::from_pdos(pdos);
+        self.source_capabilities_received = true;
+        self.source_message_id = source_message_id.map(|value| value & 0x07);
+
+        if self.phase == SinkPhase::Ready && self.active_contract != Contract::none() {
+            if self
+                .source_capabilities
+                .supports_contract(self.active_contract)
+            {
+                self.pending_contract = Contract::none();
+                return None;
+            }
+            self.active_contract = Contract::none();
+            self.pending_contract = Contract::none();
+            self.phase = SinkPhase::WaitingForSourceCapabilities;
+        }
+
         self.begin_request(self.source_capabilities)
     }
 
@@ -152,37 +242,76 @@ impl SinkPolicy {
         };
     }
 
-    /// Disarm after a request timeout. The runtime resets the PHY before it
-    /// resumes negotiation, so delayed frames cannot install a contract after
-    /// the timeout.
-    pub fn timeout_pending_request(&mut self) {
-        if matches!(
-            self.phase,
-            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-        ) {
-            self.mark_fault();
-        }
+    /// Make a local transport failure a heater-only interlock without
+    /// withdrawing CC. The caller flushes the PHY receive FIFO and later
+    /// re-queries the source before a new contract can authorize heat.
+    pub fn interlock_after_transient_transport_fault(&mut self) {
+        self.on_received_protocol_reset();
+    }
+
+    /// A received PD reset clears contract authorization but preserves the
+    /// Type-C attachment. The physical CC relationship belongs to the PHY and
+    /// must not be reconstructed by the policy engine.
+    pub fn on_received_protocol_reset(&mut self) {
+        self.pending_contract = Contract::none();
+        self.active_contract = Contract::none();
+        self.source_message_id = None;
+        self.requested_mv = self.default_requested_mv;
+        self.source_capabilities = SourceCapabilities::empty();
+        self.source_capabilities_received = false;
+        self.phase = SinkPhase::WaitingForSourceCapabilities;
     }
 
     /// `Accept` alone never arms heating; only `PS_RDY` installs a contract.
     pub fn on_control_message(&mut self, message_type: u8, now_ms: u64) {
+        self.on_control_message_with_message_id(message_type, None, now_ms);
+    }
+
+    /// Process a control response and reject only a duplicate Source message.
+    /// Source message IDs are monotonic modulo eight, but a Source may emit
+    /// other valid messages between the capability advertisement and its
+    /// response, so requiring an exact +1 ID loses valid negotiations.
+    pub fn on_control_message_with_message_id(
+        &mut self,
+        message_type: u8,
+        message_id: Option<u8>,
+        now_ms: u64,
+    ) {
         const ACCEPT: u8 = 3;
         const PS_RDY: u8 = 6;
         const REJECT: u8 = 4;
         const WAIT: u8 = 12;
 
+        let message_id = message_id.map(|value| value & 0x07);
+        let response_id_is_fresh = message_id.is_none_or(|current| {
+            self.source_message_id
+                .is_none_or(|last| source_message_id_is_newer(last, current))
+        });
+
+        if !response_id_is_fresh {
+            return;
+        }
+
         match (self.phase, message_type) {
-            (SinkPhase::WaitingForAccept, ACCEPT) => self.phase = SinkPhase::WaitingForPsRdy,
+            (SinkPhase::WaitingForAccept, ACCEPT) => {
+                if let Some(message_id) = message_id {
+                    self.source_message_id = Some(message_id);
+                }
+                self.phase = SinkPhase::WaitingForPsRdy;
+            }
             (SinkPhase::WaitingForPsRdy, PS_RDY) => {
                 self.active_contract = self.pending_contract;
                 self.pending_contract = Contract::none();
+                if let Some(message_id) = message_id {
+                    self.source_message_id = Some(message_id);
+                }
                 self.phase = SinkPhase::Ready;
                 let _ = now_ms;
             }
-            (_, REJECT | WAIT) if self.active_contract != Contract::none() => {
-                self.cancel_pending_request()
-            }
-            (_, REJECT | WAIT) => self.mark_fault(),
+            // A source may reject or defer the first request while it is
+            // still advertising a usable contract. Keep the attachment alive
+            // and let the normal Source_Capabilities retry schedule recover.
+            (_, REJECT | WAIT) => self.cancel_pending_request(),
             _ => {}
         }
     }
@@ -190,19 +319,36 @@ impl SinkPolicy {
     pub fn on_detach_or_reset(&mut self) {
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
+        self.source_message_id = None;
+        self.requested_mv = self.default_requested_mv;
+        self.source_capabilities = SourceCapabilities::empty();
         self.source_capabilities_received = false;
         self.phase = SinkPhase::Detached;
+    }
+
+    /// Re-enter bounded Source_Capabilities discovery after the PHY reports a
+    /// fresh Type-C attachment. The PHY owns CC detection; this transition
+    /// only re-arms the policy's protocol-side discovery state.
+    pub fn on_attachment_detected(&mut self) {
+        if self.phase == SinkPhase::Detached {
+            self.phase = SinkPhase::WaitingForSourceCapabilities;
+        }
     }
 
     pub fn mark_fault(&mut self) {
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
+        self.source_message_id = None;
         self.phase = SinkPhase::Fault;
     }
 }
 
 pub const fn request_header(message_id: u8) -> u16 {
     PD_HEADER_REQUEST | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9) | (1 << 12)
+}
+
+pub const fn accept_header(message_id: u8) -> u16 {
+    PD_HEADER_ACCEPT | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9)
 }
 
 pub const fn get_source_capabilities_header(message_id: u8) -> u16 {
@@ -242,8 +388,31 @@ pub const fn source_capabilities_retry_due(last_request_at_ms: u64, now_ms: u64)
     now_ms.saturating_sub(last_request_at_ms) >= SOURCE_CAPS_RETRY_INTERVAL_MS
 }
 
-pub const fn source_capabilities_hard_reset_due(last_request_at_ms: u64, now_ms: u64) -> bool {
-    now_ms.saturating_sub(last_request_at_ms) >= SOURCE_CAPS_HARD_RESET_DELAY_MS
+/// Returns whether the sink should request Source_Capabilities now.
+///
+/// A newly attached source gets its normal advertisement window first. Once a
+/// request has been sent, recovery remains a bounded re-query and never
+/// escalates to a sink-initiated reset.
+pub const fn source_capabilities_request_due(
+    attached_at_ms: u64,
+    last_request_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    match last_request_at_ms {
+        Some(last_request_at_ms) => source_capabilities_retry_due(last_request_at_ms, now_ms),
+        None => now_ms.saturating_sub(attached_at_ms) >= SOURCE_CAPS_INITIAL_WAIT_MS,
+    }
+}
+
+pub const fn source_capabilities_recovery(
+    last_request_at_ms: u64,
+    now_ms: u64,
+) -> SourceCapabilitiesRecovery {
+    if source_capabilities_retry_due(last_request_at_ms, now_ms) {
+        SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+    } else {
+        SourceCapabilitiesRecovery::Wait
+    }
 }
 
 /// Decode a complete Source_Capabilities data message from the public PHY packet view.
@@ -341,17 +510,94 @@ mod tests {
     }
 
     #[test]
+    fn fresh_attachment_reenters_source_capability_discovery() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        policy.on_detach_or_reset();
+        assert_eq!(policy.phase(), SinkPhase::Detached);
+
+        policy.on_attachment_detected();
+
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+    }
+
+    #[test]
+    fn received_protocol_reset_interlocks_without_detaching_cc() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+
+        policy.on_received_protocol_reset();
+
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert_eq!(policy.active_contract(), Contract::none());
+        assert_eq!(policy.source_capabilities(), None);
+    }
+
+    #[test]
+    fn unusable_source_capabilities_keep_discovery_alive() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        assert_eq!(policy.on_source_capabilities(&[0x0000_0000]), None);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert_eq!(policy.active_contract(), Contract::none());
+        assert!(policy.source_capabilities().is_some());
+    }
+
+    #[test]
     fn pps_keepalive_interval_is_five_seconds() {
         assert!(!pps_keepalive_due(1_000, 5_999));
         assert!(pps_keepalive_due(1_000, 6_000));
     }
 
     #[test]
-    fn source_capability_recovery_deadlines_are_preserved() {
-        assert!(!source_capabilities_retry_due(1_000, 5_999));
-        assert!(source_capabilities_retry_due(1_000, 6_000));
-        assert!(!source_capabilities_hard_reset_due(1_000, 1_999));
-        assert!(source_capabilities_hard_reset_due(1_000, 2_000));
+    fn missing_source_capabilities_only_retry_without_resetting_the_source() {
+        assert_eq!(
+            source_capabilities_recovery(1_000, 1_999),
+            SourceCapabilitiesRecovery::Wait
+        );
+        assert_eq!(
+            source_capabilities_recovery(1_000, 6_000),
+            SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+        );
+    }
+
+    #[test]
+    fn source_capabilities_request_schedule_waits_then_retries() {
+        assert!(!source_capabilities_request_due(1_000, None, 1_399));
+        assert!(source_capabilities_request_due(1_000, None, 1_400));
+        assert!(!source_capabilities_request_due(1_000, Some(1_400), 6_399));
+        assert!(source_capabilities_request_due(1_000, Some(1_400), 6_400));
+    }
+
+    #[test]
+    fn unanswered_startup_source_caps_never_resets_the_powering_source() {
+        assert_eq!(
+            source_capabilities_recovery(1_400, 2_399),
+            SourceCapabilitiesRecovery::Wait
+        );
+        assert_eq!(
+            source_capabilities_recovery(1_400, 2_400),
+            SourceCapabilitiesRecovery::Wait
+        );
+        assert_eq!(
+            source_capabilities_recovery(1_400, 6_400),
+            SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+        );
+    }
+
+    #[test]
+    fn missing_source_capabilities_only_waits_or_requeries_without_resetting_source() {
+        assert!(
+            matches!(
+                source_capabilities_recovery(1_000, 2_000),
+                SourceCapabilitiesRecovery::Wait
+            ),
+            "a missing Source_Capabilities response must not make the sink reset the source session"
+        );
+        assert!(matches!(
+            source_capabilities_recovery(1_000, 6_000),
+            SourceCapabilitiesRecovery::RetryGetSourceCapabilities
+        ));
     }
 
     #[test]
@@ -369,11 +615,192 @@ mod tests {
     }
 
     #[test]
+    fn transient_transport_faults_interlock_without_requesting_a_phy_reset() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+
+        for fault in [
+            TransientTransportFault::RetryFailed,
+            TransientTransportFault::PendingRequestTimeout,
+            TransientTransportFault::PartialReceiveTimeout,
+            TransientTransportFault::ReceiveIoError,
+            TransientTransportFault::TransmitIoError,
+            TransientTransportFault::ConfigurationIoError,
+        ] {
+            assert_eq!(
+                transient_transport_fault_recovery(fault),
+                TransientTransportRecovery::FlushReceiveAndRequery
+            );
+        }
+
+        policy.interlock_after_transient_transport_fault();
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert_eq!(policy.active_contract(), Contract::none());
+        assert_eq!(policy.source_capabilities(), None);
+        assert!(!policy.prepare_pps_request(12_000));
+        assert_eq!(policy.request_pps_voltage(12_000), None);
+        assert_eq!(policy.request_fixed_voltage(20_000), None);
+
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn transient_transport_fault_discards_manual_pps_target_before_rediscovery() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert!(policy.request_pps_voltage(12_000).is_some());
+        assert_eq!(policy.requested_mv, 12_000);
+
+        policy.interlock_after_transient_transport_fault();
+
+        assert_eq!(policy.requested_mv, 20_000);
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+        assert_eq!(policy.requested_mv, 20_000);
+    }
+
+    #[test]
     fn rejected_request_cannot_install_a_contract() {
         let mut policy = SinkPolicy::new(20_000, 5_000);
         let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
         policy.on_control_message(4, 0);
-        assert_eq!(policy.phase(), SinkPhase::Fault);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert_eq!(policy.active_contract(), Contract::none());
+    }
+
+    #[test]
+    fn rejected_startup_request_can_requery_and_install_a_contract() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+
+        policy.on_control_message(4, 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+        policy.on_control_message(3, 1);
+        policy.on_control_message(6, 2);
+
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract().kind, ContractKind::Pps);
+    }
+
+    #[test]
+    fn wait_startup_request_can_requery_and_install_a_contract() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+
+        policy.on_control_message(12, 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+        policy.on_control_message(3, 1);
+        policy.on_control_message(6, 2);
+
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract().kind, ContractKind::Pps);
+    }
+
+    #[test]
+    fn rejected_renegotiation_preserves_the_active_contract() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        let active_contract = policy.active_contract();
+
+        assert!(policy.request_pps_voltage(12_000).is_some());
+        policy.on_control_message(4, 1);
+
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract(), active_contract);
+    }
+
+    #[test]
+    fn stale_control_responses_cannot_complete_a_new_source_capabilities_exchange() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(3));
+
+        policy.on_control_message_with_message_id(3, Some(2), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+
+        // The Source may send another valid message before Accept; an exact
+        // +1 requirement would incorrectly discard this response.
+        policy.on_control_message_with_message_id(3, Some(4), 1);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+
+        // A duplicate Accept ID is stale for the PS_RDY phase.
+        policy.on_control_message_with_message_id(6, Some(4), 2);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        assert_eq!(policy.active_contract(), Contract::none());
+
+        // PS_RDY may also skip an intervening Source message ID.
+        policy.on_control_message_with_message_id(6, Some(6), 3);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract().kind, ContractKind::Pps);
+    }
+
+    #[test]
+    fn source_response_message_ids_accept_wraparound_and_reject_old_ids() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(7));
+
+        policy.on_control_message_with_message_id(3, Some(0), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+
+        policy.on_control_message_with_message_id(6, Some(7), 1);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        policy.on_control_message_with_message_id(6, Some(2), 2);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+    }
+
+    #[test]
+    fn capability_refresh_preserves_a_still_advertised_contract() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(1));
+        policy.on_control_message_with_message_id(3, Some(2), 0);
+        policy.on_control_message_with_message_id(6, Some(3), 1);
+        let active_contract = policy.active_contract();
+
+        assert_eq!(
+            policy.refresh_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(4)),
+            None
+        );
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract(), active_contract);
+    }
+
+    #[test]
+    fn capability_refresh_clears_an_invalid_contract_and_starts_discovery() {
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+        let _ = policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(1));
+        policy.on_control_message_with_message_id(3, Some(2), 0);
+        policy.on_control_message_with_message_id(6, Some(3), 1);
+
+        assert_eq!(
+            policy.refresh_source_capabilities_with_message_id(&[0x0000_0000], Some(4)),
+            None
+        );
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
         assert_eq!(policy.active_contract(), Contract::none());
     }
 
@@ -381,5 +808,6 @@ mod tests {
     fn pd30_headers_keep_message_id_and_object_count() {
         assert_eq!(request_header(5), 0x1a82);
         assert_eq!(get_source_capabilities_header(5), 0x0a87);
+        assert_eq!(accept_header(0), 0x0083);
     }
 }

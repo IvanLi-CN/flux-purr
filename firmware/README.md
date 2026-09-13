@@ -31,11 +31,11 @@
   - `BLK` is active-low on the panel board
   - `Q5` (`BSS84AKW`) switches `3V3 -> LEDA` on the high side
   - `R55 100 kOhm` pulls `BLK` up to `3V3`, so firmware must drive low or use inverted PWM for visible light
-  - Firmware holds `BLK` high (backlight off) through display initialization and the first startup frame, then drives it low immediately after that frame flush succeeds
+  - Firmware configures `BLK` as active-low and drives it low before PD detection, so backlight control is established before any potentially blocking startup work
 - Current startup behavior:
   - normal App boot -> branded startup splash (light theme by default)
-  - flush the complete splash frame, then turn the backlight on immediately
-  - first Dashboard refresh naturally replaces the splash while runtime initialization continues
+  - establish the backlight, complete the bounded FUSB302B Sink startup service window, then initialize the panel and flush the splash frame
+  - first Dashboard refresh naturally replaces the splash after the remaining runtime initialization completes
   - Key Test boot -> static calibration screen
   - default build (`esp32s3`) enters the app runtime with real RTD/PID/fan state rendering
 
@@ -76,9 +76,9 @@
   - `heater_output_percent` is the live PID duty rendered in the Dashboard bottom bar
   - `fan_enabled` is the actual fan runtime state, not a mock toggle
 - EEPROM memory:
-  - `M24C64` on shared `GPIO8/9` I2C stores FPR2 record classes: safety calibration A/B (`0x0000/0x0200`, 512 B), thermal policy A/B (`0x0400/0x0700`, 768 B), single-slot preferences/network records, and A/B layout markers. Legacy v1-v5 EEPROM records are stream-migrated once; historical internal-Flash records are ignored and never migrated.
+  - `M24C64` on shared `GPIO8/9` I2C stores FPR2 record classes: safety calibration A/B (`0x0000/0x0200`, 512 B), thermal policy A/B (`0x0400/0x0700`, 768 B), single-slot preferences/network records, a single-slot `ThermalPlant` active transaction (`0x0d00`, 768 B), and A/B layout markers. Legacy v1-v5 EEPROM records are stream-migrated once; historical internal-Flash records are ignored and never migrated.
   - EEPROM is the only persistence backend. EEPROM absence or safety-domain read/write/verification failure enters `EEPROM_REQUIRED`; preference and network failures remain scoped to their domain. MCU Flash, NVS, and raw sectors are never configuration fallbacks.
-  - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, the two fan policy modes, the legacy `active_cooling_enabled` projection, and Wi-Fi config fields
+  - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, the two fan policy modes, the legacy `active_cooling_enabled` projection, Wi-Fi config fields, and the validated active thermal-model transaction with its bounded raw trace
   - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended, and newly persisted thermal-profile TLVs use an explicit `TCP2` layout marker while unmarked historical layouts remain readable
   - accepted front-panel edits debounce for about `2s` before writing the next slot
   - on FUSB302B boards, each bounded EEPROM page write releases the shared I2C bus and services PD before the next page; a successful EEPROM save does not synchronously mirror to flash

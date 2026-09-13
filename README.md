@@ -107,11 +107,12 @@ Current hardware baseline assumes `ESP32-S3FH4R2`; keep API contracts stable if 
 Current firmware runtime baseline also assumes:
 
 - the archived CH224Q board defaults to a `20 V` PD request and retains its existing high-voltage behavior
-- the FUSB302BMPX board uses read-only `0x9x` identity selection at its colliding `0x22` address, has `GPIO7` PD interrupt wiring, and selects PPS APDOs from `5V` through `21V`, with fixed PDO fallback
+- the FUSB302BMPX board uses read-only `0x9x` identity selection at its colliding `0x22` address, has `GPIO7` PD interrupt wiring, preserves each usable live PPS APDO (a currently observed source advertises `5V..21V`), and retains fixed PDO fallback
 - `>=20 V @ >=3 A` is the performance-guaranteed PD tier; lower accepted contracts are degraded operation and cannot run calibration
 - contractual `3 A`/`5 A` limits bound software heater power (`60 W`/`100 W` at `20 V`) but are not measured VBUS current or physical OCP
 - optional firmware variants can switch the boot PD request to `12 V` or `28 V` via Cargo features
-- heater control uses the selected controller's supported path: CH224Q can use PPS/AVS, while FUSB302BMPX uses `5V..21V` PPS with fixed-PDO fallback and the `GPIO47` PWM backend
+- heater control uses the selected controller's supported path: CH224Q can use PPS/AVS, while FUSB302BMPX applies the absolute `5V..28V` PD guard before selecting its live PPS APDO, with fixed-PDO fallback and the `GPIO47` PWM backend
+- startup establishes the active-low backlight, runs the bounded FUSB302B Sink service window, initializes the display and flushes the startup frame, then initializes other outputs and control-plane hardware; an unavailable contract keeps the heater fail-closed while Dashboard startup continues
 - Dashboard center double toggles the active-cooling policy
 - Dashboard fan line renders `OFF / AUTO / RUN`, while the real output contract remains `fanEnabled + fanPwmPermille`
 

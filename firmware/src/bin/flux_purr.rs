@@ -12,6 +12,8 @@ extern crate alloc;
 use alloc::boxed::Box;
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
 use core::cell::RefCell;
+#[cfg(target_arch = "xtensa")]
+use core::future::Future;
 #[cfg(any(target_arch = "xtensa", test))]
 use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 #[cfg(target_arch = "xtensa")]
@@ -31,7 +33,7 @@ use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
 #[cfg(target_arch = "xtensa")]
-use embassy_time::{Duration, Instant, Timer as EmbassyTimer, with_timeout};
+use embassy_time::{Duration, Instant, Timer as EmbassyTimer};
 #[cfg(target_arch = "xtensa")]
 use embedded_graphics::prelude::RgbColor;
 #[cfg(target_arch = "xtensa")]
@@ -43,9 +45,10 @@ use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
     Blocking,
-    analog::adc::{Adc, AdcCalBasic, AdcCalCurve, AdcCalScheme, AdcConfig, Attenuation},
+    analog::adc::{
+        Adc, AdcCalBasic, AdcCalCurve, AdcCalScheme, AdcChannel, AdcConfig, Attenuation,
+    },
     clock::CpuClock,
-    delay::Delay,
     efuse::{AdcCalibUnit, Efuse},
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c, SoftwareTimeout},
@@ -76,13 +79,15 @@ use flux_purr_firmware::DEFAULT_PD_VOLTAGE_REQUEST;
 use flux_purr_firmware::adapters::ch224q;
 #[cfg(test)]
 use flux_purr_firmware::adapters::ch224q::Status;
-#[cfg(target_arch = "xtensa")]
+#[cfg(test)]
+use flux_purr_firmware::adapters::fusb302b;
+#[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::adapters::pd::SourceCapabilities;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::adapters::pd::{
     Contract, ContractKind, ControllerKind, FUSB302B_PPS_MAX_MV,
 };
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::adapters::pd::{
     FUSB302B_PPS_MIN_MV, GUARANTEED_HEATER_MIN_MV, MAX_HEATER_CONTRACT_MA, MIN_HEATER_CONTRACT_MA,
 };
@@ -172,16 +177,17 @@ use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 use flux_purr_firmware::memory::{
     EepromError, FPR2_HEADER_LEN, FPR2_LAYOUT_A_OFFSET, FPR2_LAYOUT_B_OFFSET,
     FPR2_LAYOUT_SLOT_SIZE, FPR2_MAX_RECORD_SIZE, FPR2_NETWORK_OFFSET, FPR2_PREFERENCES_OFFSET,
-    FPR2_RESERVED_OFFSET, FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET, FPR2_SAFETY_SLOT_SIZE,
-    FPR2_THERMAL_A_OFFSET, FPR2_THERMAL_B_OFFSET, FPR2_THERMAL_SLOT_SIZE,
+    FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET, FPR2_SAFETY_SLOT_SIZE, FPR2_THERMAL_A_OFFSET,
+    FPR2_THERMAL_B_OFFSET, FPR2_THERMAL_PLANT_OFFSET, FPR2_THERMAL_SLOT_SIZE,
     LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
-    LayoutMarker, LayoutMarkerStatus, M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS, M24c64,
-    MEMORY_RECORD_FORMAT_VERSION, MEMORY_RECORD_HEADER_LEN, MEMORY_SLOT_A_OFFSET,
+    LayoutMarker, LayoutMarkerKind, LayoutMarkerStatus, M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS,
+    M24c64, MEMORY_RECORD_FORMAT_VERSION, MEMORY_RECORD_HEADER_LEN, MEMORY_SLOT_A_OFFSET,
     MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE, MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord,
     NetworkAndPairing, PREVIOUS_MEMORY_SLOT_A_OFFSET, PREVIOUS_MEMORY_SLOT_B_OFFSET,
     PREVIOUS_MEMORY_SLOT_SIZE, PersistDomain, PersistDomainData, PersistRecord, PersistSlot,
-    SafetyCalibration, ThermalPolicy, UserPreferences, apply_legacy_config_tlv,
-    decode_persist_record, encode_persist_record, persistence_crc32_update,
+    SafetyCalibration, ThermalPlantPersistence, ThermalPolicy, UserPreferences,
+    apply_legacy_config_tlv, decode_persist_record, encode_persist_record,
+    fpr2_prepared_generation_is_complete, fpr2_snapshot_is_complete, persistence_crc32_update,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::{
@@ -197,7 +203,9 @@ use flux_purr_firmware::memory::{
     ThermalControlProfileConfig, ThermalControlProfilePointConfig,
     ThermalControlProfileSettingsConfig, ThermalPlantProjection, ThermalPlantProjectionRecord,
     ThermalPlantTransientSample, ThermalPlantTransientTransaction, ThermalProfileBank,
-    ThermalProfileMode, heater_resistance_ohms_from_curve, thermal_plant_projection_from_transient,
+    ThermalProfileMode, heater_resistance_ohms_from_curve,
+    quantize_thermal_plant_heater_voltage_mv, thermal_plant_heater_voltage_mv,
+    thermal_plant_projection_from_transient,
 };
 #[cfg(test)]
 use flux_purr_firmware::memory::{
@@ -540,6 +548,41 @@ const HEATER_PROFILE_TICK_MS: u64 = 1_000;
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 // Keep the per-cycle RTD aggregate unchanged while doubling control and RTD update cadence.
 const HEATER_CONTROL_INTERVAL_MS: u64 = 50;
+
+#[cfg(any(target_arch = "xtensa", test))]
+const PD_RUNTIME_SERVICE_INTERVAL_MS: u64 = 5;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const PD_RUNTIME_USB_BYTE_BUDGET: u16 = 256;
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn pd_runtime_elapsed_ms(started_at_ms: u64, now_ms: u64) -> u64 {
+    now_ms.saturating_sub(started_at_ms)
+}
+
+/// Keep PD protocol deadlines in the monotonic clock domain. Thermal and UI
+/// code intentionally uses a relative runtime clock, so the type boundary
+/// prevents those values from reaching FUSB302B request timestamps.
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PdTimestamp(u64);
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl PdTimestamp {
+    #[cfg(target_arch = "xtensa")]
+    fn now() -> Self {
+        Self(Instant::now().as_millis())
+    }
+
+    #[cfg(test)]
+    const fn from_millis(millis: u64) -> Self {
+        Self(millis)
+    }
+
+    const fn as_millis(self) -> u64 {
+        self.0
+    }
+}
+
 // The plant delay is calibrated in seconds, so its predictor must not amplify
 // sub-second RTD quantisation into a multi-degree correction.
 #[cfg(any(target_arch = "xtensa", test))]
@@ -671,6 +714,10 @@ const RTD_CHANNEL_SWITCH_SETTLE_US: u32 = 5_000;
 const RTD_SETTLE_DISCARD_SAMPLE_COUNT: usize = 96;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_MIN_VALID_SAMPLE_COUNT: usize = 60;
+#[cfg(target_arch = "xtensa")]
+// Service the shared FUSB302B bus at least once per eight ADC conversions.
+// The time check in the sampler also covers a conversion that stalls.
+const ADC_PD_SERVICE_MAX_SAMPLES: usize = 8;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_RETRY_AFTER_VIN_STEP_RAW_ADC_DELTA_MV: u16 = 48;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -713,16 +760,18 @@ const RTD_TEMP_MIN_C: f32 = -50.0;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_TEMP_MAX_C: f32 = 500.0;
 #[cfg(target_arch = "xtensa")]
-const FUSB302B_I2C_FREQUENCY_HZ: u32 = 100_000;
+const FUSB302B_I2C_FREQUENCY_HZ: u32 = 400_000;
 #[cfg(target_arch = "xtensa")]
-// Keep identity probing fail-closed without turning an absent optional
-// controller into a multi-second startup stall. EEPROM reads are chunked
-// below this budget so the shared bus retains the same bounded transaction.
-const I2C_TRANSACTION_TIMEOUT_MS: u64 = 25;
+// FUSB302B and M24C64 both support fast-mode I2C. Keep each shared-bus
+// transaction at the PD service interval so a stalled peripheral cannot
+// monopolize the protocol service for the old 25ms timeout.
+const I2C_TRANSACTION_TIMEOUT_MS: u64 = 5;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
 const EEPROM_WRITE_CHUNK_MAX_BYTES: usize = 16;
+#[cfg(any(target_arch = "xtensa", test))]
+const EEPROM_MAINTENANCE_PD_MAX_PAGE_WRITES_WITHOUT_SERVICE: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_READ_CHUNK_MAX_BYTES: usize = 16;
 #[cfg(target_arch = "xtensa")]
@@ -820,20 +869,32 @@ fn eeprom_snapshot_storage_failure(response: &EepromSnapshotResponse) -> bool {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn eeprom_snapshot_digest(
+async fn eeprom_snapshot_digest<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
-) -> Result<heapless::String<EEPROM_SNAPSHOT_HASH_LEN>, &'static str> {
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+) -> Result<heapless::String<EEPROM_SNAPSHOT_HASH_LEN>, &'static str>
+where
+    PWM: SetDutyCycle,
+{
     let Some(address) = probe_eeprom_address(i2c) else {
         return Err("eeprom_unavailable");
     };
-    let mut eeprom = M24c64::with_address(i2c, address);
     let mut hasher = Sha256::new();
     let mut offset = 0_u16;
     let mut bytes = [0_u8; EEPROM_SNAPSHOT_CHUNK_MAX as usize];
     while offset < EEPROM_SNAPSHOT_SIZE {
         let length = usize::from((EEPROM_SNAPSHOT_SIZE - offset).min(EEPROM_SNAPSHOT_CHUNK_MAX));
-        read_eeprom_bytes_chunked(&mut eeprom, offset, &mut bytes[..length])
-            .map_err(|_| "eeprom_read_failed")?;
+        read_eeprom_bytes_chunked_with_pd(
+            i2c,
+            pd_port,
+            service,
+            address,
+            offset,
+            &mut bytes[..length],
+        )
+        .await
+        .map_err(|_| "eeprom_read_failed")?;
         hasher.update(&bytes[..length]);
         offset = offset.saturating_add(length as u16);
     }
@@ -867,14 +928,18 @@ fn write_eeprom_snapshot_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn process_eeprom_snapshot_line(
+async fn process_eeprom_snapshot_line<PWM>(
     line: &str,
     session: &mut EepromSnapshotSession,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
-    last_heater_duty: u8,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     memory_commit_due_ms: &mut Option<u64>,
     elapsed_ms: u64,
-) -> Option<EepromSnapshotResponse> {
+) -> Option<EepromSnapshotResponse>
+where
+    PWM: SetDutyCycle,
+{
     let parsed = serde_json_core::from_slice::<EepromSnapshotRequest>(line.as_bytes());
     let request = match parsed {
         Ok((request, _)) if request.op.as_str().starts_with("eeprom_snapshot_") => request,
@@ -903,7 +968,7 @@ fn process_eeprom_snapshot_line(
         .clone();
     match request.op.as_str() {
         "eeprom_snapshot_open" => {
-            if last_heater_duty != 0 {
+            if *service.last_heater_duty != 0 {
                 return Some(eeprom_snapshot_error(request_id, "heater_active"));
             }
             let session_id = request.session_id.unwrap_or(request.request_id.clone());
@@ -934,7 +999,7 @@ fn process_eeprom_snapshot_line(
                     "snapshot_session_invalid",
                 ));
             }
-            if last_heater_duty != 0 {
+            if *service.last_heater_duty != 0 {
                 session.active = false;
                 return Some(eeprom_snapshot_error(request_id, "heater_active"));
             }
@@ -952,10 +1017,19 @@ fn process_eeprom_snapshot_line(
                 session.active = false;
                 return Some(eeprom_snapshot_error(request_id, "eeprom_unavailable"));
             };
-            let mut eeprom = M24c64::with_address(i2c, address);
             let mut bytes = heapless::Vec::<u8, 32>::new();
             let _ = bytes.resize_default(usize::from(length));
-            if read_eeprom_bytes_chunked(&mut eeprom, offset, bytes.as_mut_slice()).is_err() {
+            if read_eeprom_bytes_chunked_with_pd(
+                i2c,
+                pd_port,
+                service,
+                address,
+                offset,
+                bytes.as_mut_slice(),
+            )
+            .await
+            .is_err()
+            {
                 session.active = false;
                 return Some(eeprom_snapshot_error(request_id, "eeprom_read_failed"));
             }
@@ -981,7 +1055,7 @@ fn process_eeprom_snapshot_line(
                     "snapshot_session_invalid",
                 ));
             }
-            if last_heater_duty != 0 {
+            if *service.last_heater_duty != 0 {
                 session.active = false;
                 return Some(eeprom_snapshot_error(request_id, "heater_active"));
             }
@@ -989,7 +1063,7 @@ fn process_eeprom_snapshot_line(
                 session.active = false;
                 return Some(eeprom_snapshot_error(request_id, "snapshot_incomplete"));
             }
-            let digest = match eeprom_snapshot_digest(i2c) {
+            let digest = match eeprom_snapshot_digest(i2c, pd_port, service).await {
                 Ok(digest) => digest,
                 Err(code) => {
                     session.active = false;
@@ -1998,6 +2072,44 @@ fn next_heater_control_deadline_ms(deadline_ms: u64, control_started_ms: u64) ->
         .saturating_div(HEATER_CONTROL_INTERVAL_MS)
         .saturating_add(1);
     next_deadline_ms.saturating_add(missed_intervals.saturating_mul(HEATER_CONTROL_INTERVAL_MS))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn pd_runtime_service_due(now_ms: u64, deadline_ms: u64) -> bool {
+    now_ms >= deadline_ms
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn next_pd_runtime_service_deadline_ms(deadline_ms: u64, service_started_ms: u64) -> u64 {
+    let next_deadline_ms = deadline_ms.saturating_add(PD_RUNTIME_SERVICE_INTERVAL_MS);
+    if next_deadline_ms > service_started_ms {
+        return next_deadline_ms;
+    }
+
+    let missed_intervals = service_started_ms
+        .saturating_sub(next_deadline_ms)
+        .saturating_div(PD_RUNTIME_SERVICE_INTERVAL_MS)
+        .saturating_add(1);
+    next_deadline_ms.saturating_add(missed_intervals.saturating_mul(PD_RUNTIME_SERVICE_INTERVAL_MS))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn fixed_contract_liveness_probe_due(
+    contract_kind: ContractKind,
+    contract_ready: bool,
+    refresh_pending: bool,
+    last_probe_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    contract_ready
+        && contract_kind == ContractKind::Fixed
+        && !refresh_pending
+        && match last_probe_at_ms {
+            Some(last_probe_at_ms) => {
+                fusb302b::source_capabilities_retry_due(last_probe_at_ms, now_ms)
+            }
+            None => false,
+        }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3307,8 +3419,75 @@ fn startup_pd_contract_ready(observation: Option<PdStatusObservation>) -> bool {
     observation.is_some_and(|observation| observation.status.pd_active)
 }
 
-#[cfg(test)]
-const STARTUP_PD_WAIT_BUDGET_MS: u64 = 0;
+// Source_Capabilities may arrive immediately after CC attachment. Reserve one
+// bounded startup window for the policy before shared-I2C initialization work.
+#[cfg(any(target_arch = "xtensa", test))]
+const STARTUP_PD_SERVICE_BUDGET_MS: u64 = 750;
+#[cfg(target_arch = "xtensa")]
+const STARTUP_PD_SERVICE_INTERVAL_MS: u64 = 1;
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn startup_pd_service_should_continue(
+    fusb302b_present: bool,
+    contract_ready: bool,
+    service_available: bool,
+    elapsed_ms: u64,
+) -> bool {
+    fusb302b_present
+        && service_available
+        && !contract_ready
+        && elapsed_ms < STARTUP_PD_SERVICE_BUDGET_MS
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupSequenceStage {
+    BacklightReady,
+    PdServiceComplete,
+    DisplayReady,
+    StartupFrameReady,
+    OtherInitialization,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StartupSequence {
+    completed: Option<StartupSequenceStage>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl StartupSequence {
+    const fn new() -> Self {
+        Self { completed: None }
+    }
+
+    const fn advance(&mut self, next: StartupSequenceStage) -> bool {
+        let expected = match self.completed {
+            None => StartupSequenceStage::BacklightReady,
+            Some(StartupSequenceStage::BacklightReady) => StartupSequenceStage::PdServiceComplete,
+            Some(StartupSequenceStage::PdServiceComplete) => StartupSequenceStage::DisplayReady,
+            Some(StartupSequenceStage::DisplayReady) => StartupSequenceStage::StartupFrameReady,
+            Some(StartupSequenceStage::StartupFrameReady) => {
+                StartupSequenceStage::OtherInitialization
+            }
+            Some(StartupSequenceStage::OtherInitialization) => return false,
+        };
+        match (expected, next) {
+            (StartupSequenceStage::BacklightReady, StartupSequenceStage::BacklightReady)
+            | (StartupSequenceStage::PdServiceComplete, StartupSequenceStage::PdServiceComplete)
+            | (StartupSequenceStage::DisplayReady, StartupSequenceStage::DisplayReady)
+            | (StartupSequenceStage::StartupFrameReady, StartupSequenceStage::StartupFrameReady)
+            | (
+                StartupSequenceStage::OtherInitialization,
+                StartupSequenceStage::OtherInitialization,
+            ) => {
+                self.completed = Some(next);
+                true
+            }
+            _ => false,
+        }
+    }
+}
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4102,11 +4281,9 @@ const FUSB302B_DIAG_NO_USABLE_CONTRACT: u8 = 16;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_RX_PARTIAL: u8 = 17;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT: u8 = 18;
-#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_REQUEST_TIMEOUT: u8 = 19;
-#[cfg(target_arch = "xtensa")]
-const FUSB302B_MAX_RX_MESSAGES_PER_POLL: u8 = 4;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_MAX_RX_MESSAGES_PER_POLL: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_PARTIAL_RX_TIMEOUT_MS: u64 = 250;
 #[cfg(target_arch = "xtensa")]
@@ -4134,7 +4311,6 @@ fn fusb302b_degraded_reason() -> &'static str {
         FUSB302B_DIAG_TX_I2C_ERROR => "pd_fusb_tx_i2c_error",
         FUSB302B_DIAG_NO_USABLE_CONTRACT => "pd_fusb_no_usable_contract",
         FUSB302B_DIAG_RX_PARTIAL => "pd_fusb_rx_partial",
-        FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT => "pd_fusb_source_caps_hard_reset_sent",
         FUSB302B_DIAG_REQUEST_TIMEOUT => "pd_fusb_contract_request_timeout",
         _ => "pd_contract_unavailable",
     }
@@ -4266,6 +4442,7 @@ enum HeaterPowerBackend {
         reason: HeaterPowerBackendReason,
         fixed_request_confirmed: bool,
         fixed_request: ch224q::VoltageRequest,
+        terminal_fixed_pd_disarmed: bool,
     },
 }
 
@@ -4444,6 +4621,8 @@ impl ManualPpsError {
 struct ManualPpsState {
     enabled: bool,
     owner: ManualPpsOwner,
+    request_min_mv: u16,
+    request_max_mv: u16,
     target_mv: Option<u16>,
     target_ma: Option<u16>,
     applied_mv: Option<u16>,
@@ -4461,6 +4640,8 @@ impl Default for ManualPpsState {
         Self {
             enabled: false,
             owner: ManualPpsOwner::Debug,
+            request_min_mv: CH224Q_ADJUSTABLE_REQUEST_MIN_MV,
+            request_max_mv: ch224q::CH224Q_PPS_MAX_MV,
             target_mv: None,
             target_ma: None,
             applied_mv: None,
@@ -4925,6 +5106,153 @@ fn disarm_stale_heater_arm_after_pd_transition(
     was_armed
 }
 
+#[cfg(target_arch = "xtensa")]
+fn apply_pd_contract_observation<PWM>(
+    observation: Option<PdStatusObservation>,
+    pd_contract_ready: &mut bool,
+    ui_state: &mut FrontPanelUiState,
+    calibration_runtime_state: &mut CalibrationRuntimeState,
+    manual_pps_state: &mut ManualPpsState,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
+) -> bool
+where
+    PWM: SetDutyCycle,
+{
+    let current_pd_contract_ready = startup_pd_contract_ready(observation);
+    let mut needs_redraw = false;
+    if *pd_contract_ready != current_pd_contract_ready {
+        let pd_was_ready = *pd_contract_ready;
+        *pd_contract_ready = current_pd_contract_ready;
+        needs_redraw = true;
+        if current_pd_contract_ready {
+            if disarm_stale_heater_arm_after_pd_transition(
+                pd_was_ready,
+                current_pd_contract_ready,
+                ui_state,
+                calibration_runtime_state,
+            ) {
+                info!(
+                    "PD contract became ready; discarded pre-ready heater arm and require a new explicit arm"
+                );
+            }
+            info!("PD contract became ready; released startup heater interlock");
+        } else {
+            info!("PD contract became unavailable; heater interlocked");
+        }
+    }
+
+    if !current_pd_contract_ready
+        && (ui_state.heater_enabled
+            || calibration_runtime_state.heater_enabled
+            || *last_heater_duty != 0
+            || ui_state.heater_output_percent != 0)
+    {
+        // A stale observation must never leave GPIO47 powered while the
+        // protocol state is unavailable. The next explicit arm is required
+        // after a later contract recovery.
+        ui_state.heater_enabled = false;
+        ui_state.heater_output_percent = 0;
+        calibration_runtime_state.heater_enabled = false;
+        manual_pps_state.fail(ManualPpsError::PdNotReady);
+        apply_heater_duty(heater_pwm, 0, last_heater_duty);
+        needs_redraw = true;
+        info!("PD contract interlock -> heater output zero");
+    }
+
+    needs_redraw
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_STALE_CONTRACT_VIN_CONFIRM_MS: u64 = 100;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_STALE_CONTRACT_VIN_DEFICIT_MV: u32 = 2_000;
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+const FUSB302B_STALE_CONTRACT_VIN_SETTLE_GRACE_MS: u64 = 500;
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PdContractVinGuard {
+    mismatch_since_ms: Option<u64>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl PdContractVinGuard {
+    fn observe(
+        &mut self,
+        observation: Option<PdStatusObservation>,
+        measured_vin_mv: Option<u32>,
+        now_ms: u64,
+        suspended: bool,
+    ) -> bool {
+        if suspended {
+            self.mismatch_since_ms = None;
+            return false;
+        }
+        let mismatch = match (observation, measured_vin_mv) {
+            (Some(observation), Some(measured_vin_mv))
+                if observation.contract != Contract::none() =>
+            {
+                u32::from(observation.contract.voltage_mv).saturating_sub(measured_vin_mv)
+                    >= FUSB302B_STALE_CONTRACT_VIN_DEFICIT_MV
+            }
+            _ => false,
+        };
+        if !mismatch {
+            self.mismatch_since_ms = None;
+            return false;
+        }
+
+        let started = *self.mismatch_since_ms.get_or_insert(now_ms);
+        now_ms.saturating_sub(started) >= FUSB302B_STALE_CONTRACT_VIN_CONFIRM_MS
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn reconcile_pd_contract_with_vin<PWM>(
+    guard: &mut PdContractVinGuard,
+    observation: Option<PdStatusObservation>,
+    measured_vin_mv: Option<u32>,
+    now_ms: u64,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    pd_contract_ready: &mut bool,
+    ui_state: &mut FrontPanelUiState,
+    calibration_runtime_state: &mut CalibrationRuntimeState,
+    manual_pps_state: &mut ManualPpsState,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
+) -> bool
+where
+    PWM: SetDutyCycle,
+{
+    if !guard.observe(
+        observation,
+        measured_vin_mv,
+        now_ms,
+        pd_port.stale_contract_vin_guard_suspended(now_ms),
+    ) {
+        return false;
+    }
+
+    // A measured VIN deficit invalidates only the cached contract. The
+    // controller remains attached and will rediscover capabilities through the
+    // existing bounded policy path; no VBUS state is inferred across power
+    // loss, and no CC toggle is started here.
+    pd_port.interlock_after_stale_contract(now_ms);
+    *last_pd_observation = None;
+    apply_pd_contract_observation(
+        None,
+        pd_contract_ready,
+        ui_state,
+        calibration_runtime_state,
+        manual_pps_state,
+        heater_pwm,
+        last_heater_duty,
+    )
+}
+
 #[cfg(any(target_arch = "xtensa", test))]
 fn thermal_plant_calibration_snapshot(
     measured_temp_c: f32,
@@ -5088,7 +5416,33 @@ fn thermal_plant_transient_trace_reaches_targets(
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 impl ManualPpsState {
     fn from_capabilities(capabilities: Option<ch224q::AdjustablePowerCapabilities>) -> Self {
-        let mut state = Self::default();
+        Self::from_capabilities_with_request_bounds(
+            capabilities,
+            CH224Q_ADJUSTABLE_REQUEST_MIN_MV,
+            ch224q::CH224Q_PPS_MAX_MV,
+        )
+    }
+
+    fn from_fusb302b_capabilities(
+        capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+    ) -> Self {
+        Self::from_capabilities_with_request_bounds(
+            capabilities,
+            FUSB302B_PPS_MIN_MV,
+            FUSB302B_PPS_MAX_MV,
+        )
+    }
+
+    fn from_capabilities_with_request_bounds(
+        capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+        request_min_mv: u16,
+        request_max_mv: u16,
+    ) -> Self {
+        let mut state = Self {
+            request_min_mv,
+            request_max_mv,
+            ..Self::default()
+        };
         if let Some(capabilities) = capabilities
             && let (Some(min_mv), Some(max_mv), Some(max_ma)) = (
                 capabilities.pps_min_mv,
@@ -5096,8 +5450,8 @@ impl ManualPpsState {
                 capabilities.pps_max_ma,
             )
         {
-            let bounded_min_mv = min_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV);
-            let bounded_max_mv = max_mv.min(ch224q::CH224Q_PPS_MAX_MV);
+            let bounded_min_mv = min_mv.max(request_min_mv);
+            let bounded_max_mv = max_mv.min(request_max_mv);
             if bounded_min_mv <= bounded_max_mv && max_ma > 0 {
                 state.capability_min_mv = Some(bounded_min_mv);
                 state.capability_max_mv = Some(bounded_max_mv);
@@ -5125,7 +5479,6 @@ impl ManualPpsState {
         };
         if target_mv < min_mv
             || target_mv > max_mv
-            || target_mv > ch224q::CH224Q_PPS_MAX_MV
             || !target_mv.is_multiple_of(100)
             || target_ma == 0
             || !target_ma.is_multiple_of(50)
@@ -5138,31 +5491,128 @@ impl ManualPpsState {
 
     fn has_matching_pps_apdo(&self, target_mv: u16, target_ma: u16) -> bool {
         self.capability_apdos.iter().flatten().any(|apdo| {
-            let min_mv = apdo.min_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV);
-            let max_mv = apdo.max_mv.min(ch224q::CH224Q_PPS_MAX_MV);
+            let min_mv = apdo.min_mv.max(self.request_min_mv);
+            let max_mv = apdo.max_mv.min(self.request_max_mv);
             target_mv >= min_mv && target_mv <= max_mv && target_ma <= apdo.max_ma
         })
     }
 
+    fn maximum_pps_current_for_target(&self, target_mv: u16) -> Option<u16> {
+        self.capability_apdos
+            .iter()
+            .flatten()
+            .filter_map(|apdo| {
+                let min_mv = apdo.min_mv.max(self.request_min_mv);
+                let max_mv = apdo.max_mv.min(self.request_max_mv);
+                (target_mv >= min_mv && target_mv <= max_mv).then_some(apdo.max_ma)
+            })
+            .max()
+    }
+
     fn thermal_plant_source_limits(&self) -> Option<(u16, u16, u16)> {
-        let mut selected = None;
+        self.single_pps_source_limits(20_000)
+    }
+
+    fn heater_source_limits(&self) -> Option<(u16, u16, u16)> {
+        self.contiguous_pps_source_limits(HEATER_ADJUSTABLE_MIN_MV)
+    }
+
+    fn single_pps_source_limits(&self, anchor_mv: u16) -> Option<(u16, u16, u16)> {
+        let mut best = None;
         for apdo in self.capability_apdos.iter().flatten() {
-            let min_mv = apdo.min_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV);
-            let max_mv = apdo.max_mv.min(HEATER_ADJUSTABLE_MAX_MV);
-            if min_mv > 20_000 || max_mv < 20_000 || apdo.max_ma < 3_000 {
+            let min_mv = apdo.min_mv.max(self.request_min_mv);
+            let max_mv = apdo.max_mv.min(self.request_max_mv);
+            if min_mv > anchor_mv || max_mv < anchor_mv || apdo.max_ma < MIN_HEATER_CONTRACT_MA {
                 continue;
             }
-            let candidate = (min_mv, max_mv, apdo.max_ma);
-            if selected.is_none_or(|(selected_min_mv, selected_max_mv, selected_ma)| {
-                candidate.2 > selected_ma
-                    || (candidate.2 == selected_ma
-                        && (candidate.1 > selected_max_mv
-                            || (candidate.1 == selected_max_mv && candidate.0 < selected_min_mv)))
+            let candidate = (min_mv, max_mv, apdo.max_ma.min(MAX_HEATER_CONTRACT_MA));
+            if best.is_none_or(|current: (u16, u16, u16)| {
+                candidate.2 > current.2
+                    || (candidate.2 == current.2
+                        && (candidate.1 > current.1
+                            || (candidate.1 == current.1 && candidate.0 < current.0)))
             }) {
-                selected = Some(candidate);
+                best = Some(candidate);
             }
         }
-        selected
+        best
+    }
+
+    fn contiguous_pps_source_limits(&self, anchor_mv: u16) -> Option<(u16, u16, u16)> {
+        let mut minimum_mv = u16::MAX;
+        let mut reachable_max_mv = 0;
+        for apdo in self.capability_apdos.iter().flatten() {
+            let min_mv = apdo.min_mv.max(self.request_min_mv);
+            let max_mv = apdo.max_mv.min(self.request_max_mv);
+            if min_mv > anchor_mv || max_mv < anchor_mv || apdo.max_ma < 3_000 {
+                continue;
+            }
+            minimum_mv = minimum_mv.min(min_mv);
+            reachable_max_mv = reachable_max_mv.max(max_mv);
+        }
+        if reachable_max_mv == 0 {
+            return None;
+        }
+
+        // APDOs may offer a higher voltage at a lower current. Extend the
+        // automatic request range only through overlapping APDOs, leaving the
+        // negotiated PPS contract as the current-limit authority per request.
+        let mut extended = true;
+        while extended {
+            extended = false;
+            for apdo in self.capability_apdos.iter().flatten() {
+                let min_mv = apdo.min_mv.max(self.request_min_mv);
+                let max_mv = apdo.max_mv.min(self.request_max_mv);
+                if apdo.max_ma < 3_000 || min_mv > reachable_max_mv || max_mv <= reachable_max_mv {
+                    continue;
+                }
+                reachable_max_mv = max_mv;
+                extended = true;
+            }
+        }
+
+        extended = true;
+        while extended {
+            extended = false;
+            for apdo in self.capability_apdos.iter().flatten() {
+                let min_mv = apdo.min_mv.max(self.request_min_mv);
+                let max_mv = apdo.max_mv.min(self.request_max_mv);
+                if apdo.max_ma < 3_000 || max_mv < minimum_mv || min_mv >= minimum_mv {
+                    continue;
+                }
+                minimum_mv = min_mv;
+                extended = true;
+            }
+        }
+
+        // The runtime heater budget accepts a single current ceiling for the
+        // whole automatic voltage range. Derive a ceiling that is valid at
+        // every boundary of the continuous APDO component, rather than taking
+        // the (potentially higher) current offered only at its top voltage.
+        let mut conservative_current_ma = u16::MAX;
+        let mut current_observed = false;
+        for apdo in self.capability_apdos.iter().flatten() {
+            let apdo_min_mv = apdo.min_mv.max(self.request_min_mv);
+            let apdo_max_mv = apdo.max_mv.min(self.request_max_mv);
+            if apdo.max_ma < 3_000 || apdo_max_mv < minimum_mv || apdo_min_mv > reachable_max_mv {
+                continue;
+            }
+
+            for checkpoint_mv in [
+                apdo_min_mv.max(minimum_mv),
+                apdo_max_mv.min(reachable_max_mv),
+                apdo_max_mv.saturating_add(1),
+            ] {
+                if checkpoint_mv < minimum_mv || checkpoint_mv > reachable_max_mv {
+                    continue;
+                }
+                let current_ma = self.maximum_pps_current_for_target(checkpoint_mv)?;
+                conservative_current_ma = conservative_current_ma.min(current_ma);
+                current_observed = true;
+            }
+        }
+
+        current_observed.then_some((minimum_mv, reachable_max_mv, conservative_current_ma))
     }
 
     fn enable(
@@ -5172,7 +5622,7 @@ impl ManualPpsState {
         target_ma: Option<u16>,
     ) -> Result<(), ManualPpsError> {
         let target_ma = target_ma
-            .or(self.capability_max_ma)
+            .or_else(|| self.maximum_pps_current_for_target(target_mv))
             .ok_or(ManualPpsError::NoPpsCapability)?;
         self.validate_target(target_mv, target_ma)?;
         self.enabled = true;
@@ -5252,6 +5702,32 @@ impl HeaterPowerBackend {
 
     const fn pd_contract_mv(self) -> u16 {
         self.pd_request_mv()
+    }
+
+    const fn terminal_fixed_pd_disarmed(self) -> bool {
+        match self {
+            Self::PpsMos {
+                terminal_fixed_pd_disarmed,
+                ..
+            }
+            | Self::FixedPdPwmFallback {
+                terminal_fixed_pd_disarmed,
+                ..
+            } => terminal_fixed_pd_disarmed,
+        }
+    }
+
+    fn set_terminal_fixed_pd_disarmed(&mut self, disarmed: bool) {
+        match self {
+            Self::PpsMos {
+                terminal_fixed_pd_disarmed,
+                ..
+            }
+            | Self::FixedPdPwmFallback {
+                terminal_fixed_pd_disarmed,
+                ..
+            } => *terminal_fixed_pd_disarmed = disarmed,
+        }
     }
 }
 
@@ -5465,7 +5941,7 @@ fn thermal_plant_run_snapshot_wire(
             elapsed_ms: u32::from(sample.elapsed_ticks)
                 .saturating_mul(HEATER_CONTROL_INTERVAL_MS as u32),
             temperature_centi_c,
-            heater_voltage_mv: u16::from(sample.heater_voltage_100mv).saturating_mul(100),
+            heater_voltage_mv: thermal_plant_heater_voltage_mv(sample.heater_voltage_125mv),
             duty_percent: sample.duty_percent.min(100),
             phase,
         });
@@ -5753,87 +6229,182 @@ fn initialize_adc1(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_rtd_adc_mv<'a>(
-    adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
-    pin: &mut esp_hal::analog::adc::AdcPin<
-        esp_hal::peripherals::GPIO2<'a>,
-        esp_hal::peripherals::ADC1<'a>,
-        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
-    >,
-    curve: &AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
-) -> Option<RtdAdcBatch> {
-    let delay = Delay::new();
-    delay.delay_micros(RTD_CHANNEL_SWITCH_SETTLE_US);
-    let batch = phase_averaged_rtd_batch_with_discard(
-        RTD_SAMPLE_COUNT,
-        RTD_SAMPLE_PWM_PHASE_COUNT,
-        RTD_SETTLE_DISCARD_SAMPLE_COUNT,
-        || {
-            let raw_code = loop {
-                match adc.read_oneshot(pin) {
-                    Ok(value) => break value,
-                    Err(nb::Error::WouldBlock) => continue,
-                    Err(_) => return None,
-                }
-            };
-            let raw_code = mask_adc1_raw_code(raw_code);
-            Some(AdcConvertedSample {
-                raw_code,
-                calibrated_mv: curve.adc_val(raw_code),
-            })
-        },
-        || delay.delay_micros(RTD_SAMPLE_PWM_PHASE_SPACING_US),
-    )?;
-    Some(batch)
+async fn service_pd_for_adc<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
+) where
+    PWM: SetDutyCycle,
+{
+    let observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+    *last_pd_observation = observation;
+    if !startup_pd_contract_ready(observation) {
+        // ADC acquisition can outlive a normal control turn. Cut the physical
+        // output at the same service boundary instead of waiting for sampling
+        // to finish before the main loop applies its state reconciliation.
+        apply_heater_duty(heater_pwm, 0, last_heater_duty);
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_vin_adc_mv<'a>(
-    adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
+async fn read_adc_batch_with_pd<PIN, PWM>(
+    adc: &mut Adc1Driver,
     pin: &mut esp_hal::analog::adc::AdcPin<
-        esp_hal::peripherals::GPIO1<'a>,
-        esp_hal::peripherals::ADC1<'a>,
-        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
+        PIN,
+        esp_hal::peripherals::ADC1<'static>,
+        AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
     >,
-    curve: &AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
-) -> Option<RtdAdcBatch> {
-    let delay = Delay::new();
-    delay.delay_micros(RTD_CHANNEL_SWITCH_SETTLE_US);
-    phase_averaged_rtd_batch_with_discard(
-        RTD_SAMPLE_COUNT,
-        RTD_SAMPLE_PWM_PHASE_COUNT,
-        RTD_SETTLE_DISCARD_SAMPLE_COUNT,
-        || {
-            let raw_code = loop {
-                match adc.read_oneshot(pin) {
-                    Ok(value) => break value,
-                    Err(nb::Error::WouldBlock) => continue,
-                    Err(_) => return None,
+    curve: &Adc1Curve,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
+) -> Option<RtdAdcBatch>
+where
+    PIN: AdcChannel,
+    PWM: SetDutyCycle,
+{
+    let samples_per_phase = RTD_SAMPLE_COUNT / RTD_SAMPLE_PWM_PHASE_COUNT;
+    let total_samples = RTD_SAMPLE_COUNT.saturating_add(RTD_SETTLE_DISCARD_SAMPLE_COUNT);
+    let mut sum_mv = 0_u32;
+    let mut sum_raw_code = 0_u32;
+    let mut min_mv = u16::MAX;
+    let mut max_mv = 0_u16;
+    let mut min_raw_code = u16::MAX;
+    let mut max_raw_code = 0_u16;
+    let mut valid_samples = 0_usize;
+    let mut discarded_valid_samples = 0_usize;
+    let mut samples_since_pd = 0_usize;
+    let mut last_pd_service_ms = Instant::now().as_millis();
+
+    // Keep the calibrated acquisition plan intact while yielding between
+    // conversions. The previous synchronous implementation could monopolize
+    // the executor across the whole discard and phase-averaging batch.
+    let settle_deadline = Instant::now().checked_add(Duration::from_micros(u64::from(
+        RTD_CHANNEL_SWITCH_SETTLE_US,
+    )))?;
+    while Instant::now() < settle_deadline {
+        service_pd_for_adc(
+            i2c,
+            pd_port,
+            last_pd_observation,
+            heater_pwm,
+            last_heater_duty,
+        )
+        .await;
+        last_pd_service_ms = Instant::now().as_millis();
+        EmbassyTimer::after_millis(1).await;
+    }
+
+    for _ in 0..total_samples {
+        let sample = loop {
+            match adc.read_oneshot(pin) {
+                Ok(value) => {
+                    let raw_code = mask_adc1_raw_code(value);
+                    break Some(AdcConvertedSample {
+                        raw_code,
+                        calibrated_mv: curve.adc_val(raw_code),
+                    });
                 }
-            };
-            let raw_code = mask_adc1_raw_code(raw_code);
-            Some(AdcConvertedSample {
-                raw_code,
-                calibrated_mv: curve.adc_val(raw_code),
-            })
-        },
-        || delay.delay_micros(RTD_SAMPLE_PWM_PHASE_SPACING_US),
-    )
+                Err(nb::Error::WouldBlock) => {
+                    if Instant::now()
+                        .as_millis()
+                        .saturating_sub(last_pd_service_ms)
+                        >= PD_RUNTIME_SERVICE_INTERVAL_MS
+                    {
+                        service_pd_for_adc(
+                            i2c,
+                            pd_port,
+                            last_pd_observation,
+                            heater_pwm,
+                            last_heater_duty,
+                        )
+                        .await;
+                        last_pd_service_ms = Instant::now().as_millis();
+                    }
+                    EmbassyTimer::after_micros(50).await;
+                }
+                Err(_) => break None,
+            }
+        };
+
+        samples_since_pd = samples_since_pd.saturating_add(1);
+        if let Some(sample) = sample {
+            if discarded_valid_samples < RTD_SETTLE_DISCARD_SAMPLE_COUNT {
+                discarded_valid_samples = discarded_valid_samples.saturating_add(1);
+            } else {
+                sum_mv = sum_mv.saturating_add(u32::from(sample.calibrated_mv));
+                sum_raw_code = sum_raw_code.saturating_add(u32::from(sample.raw_code));
+                min_mv = min_mv.min(sample.calibrated_mv);
+                max_mv = max_mv.max(sample.calibrated_mv);
+                min_raw_code = min_raw_code.min(sample.raw_code);
+                max_raw_code = max_raw_code.max(sample.raw_code);
+                valid_samples = valid_samples.saturating_add(1);
+
+                if valid_samples.is_multiple_of(samples_per_phase)
+                    && valid_samples < RTD_SAMPLE_COUNT
+                {
+                    EmbassyTimer::after_micros(u64::from(RTD_SAMPLE_PWM_PHASE_SPACING_US)).await;
+                }
+            }
+        }
+
+        if samples_since_pd >= ADC_PD_SERVICE_MAX_SAMPLES
+            || Instant::now()
+                .as_millis()
+                .saturating_sub(last_pd_service_ms)
+                >= PD_RUNTIME_SERVICE_INTERVAL_MS
+        {
+            service_pd_for_adc(
+                i2c,
+                pd_port,
+                last_pd_observation,
+                heater_pwm,
+                last_heater_duty,
+            )
+            .await;
+            samples_since_pd = 0;
+            last_pd_service_ms = Instant::now().as_millis();
+        }
+    }
+
+    rtd_fractional_mean_mv(sum_mv, valid_samples).map(|mean_mv| RtdAdcBatch {
+        mean_mv,
+        min_mv,
+        max_mv,
+        mean_raw_code: (sum_raw_code / valid_samples as u32) as u16,
+        min_raw_code,
+        max_raw_code,
+    })
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_calibrated_vin_mv<'a>(
-    adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
-    pin: &mut esp_hal::analog::adc::AdcPin<
-        esp_hal::peripherals::GPIO1<'a>,
-        esp_hal::peripherals::ADC1<'a>,
-        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
-    >,
-    curve: Option<&AdcCalCurve<esp_hal::peripherals::ADC1<'a>>>,
+async fn read_calibrated_vin_mv_with_pd(
+    adc: &mut Adc1Driver,
+    pin: &mut VinAdcPin,
+    curve: Option<&Adc1Curve>,
     memory_config: &MemoryConfig,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut impl SetDutyCycle,
+    last_heater_duty: &mut u8,
 ) -> Option<(u16, u16, u16, u32)> {
     let curve = curve?;
-    let batch = read_vin_adc_mv(adc, pin, curve)?;
+    let batch = read_adc_batch_with_pd(
+        adc,
+        pin,
+        curve,
+        i2c,
+        pd_port,
+        last_pd_observation,
+        heater_pwm,
+        last_heater_duty,
+    )
+    .await?;
     let raw_code = batch.mean_raw_code;
     let raw_adc_mv = batch.mean_mv.round() as u16;
     #[cfg(feature = "web_serial")]
@@ -5852,15 +6423,16 @@ fn read_calibrated_vin_mv<'a>(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_rtd_sample<'a>(
-    adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
-    pin: &mut esp_hal::analog::adc::AdcPin<
-        esp_hal::peripherals::GPIO2<'a>,
-        esp_hal::peripherals::ADC1<'a>,
-        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
-    >,
-    curve: Option<&AdcCalCurve<esp_hal::peripherals::ADC1<'a>>>,
+async fn read_rtd_sample_with_pd(
+    adc: &mut Adc1Driver,
+    pin: &mut RtdAdcPin,
+    curve: Option<&Adc1Curve>,
     memory_config: &MemoryConfig,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut impl SetDutyCycle,
+    last_heater_duty: &mut u8,
 ) -> RtdSample {
     let Some(curve) = curve else {
         return RtdSample::Fault {
@@ -5868,7 +6440,18 @@ fn read_rtd_sample<'a>(
             reason: HeaterFaultReason::AdcReadFailed,
         };
     };
-    let Some(batch) = read_rtd_adc_mv(adc, pin, curve) else {
+    let Some(batch) = read_adc_batch_with_pd(
+        adc,
+        pin,
+        curve,
+        i2c,
+        pd_port,
+        last_pd_observation,
+        heater_pwm,
+        last_heater_duty,
+    )
+    .await
+    else {
         return RtdSample::Fault {
             adc_mv: None,
             reason: HeaterFaultReason::AdcReadFailed,
@@ -5924,12 +6507,12 @@ fn read_rtd_sample<'a>(
 }
 
 #[cfg(target_arch = "xtensa")]
-const FUSB302B_STATUS0_VBUS_OK: u8 = 1 << 7;
-#[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS0_CRC_CHECK: u8 = 1 << 4;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_STATUS0A_RETRY_FAIL: u8 = 1 << 4;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_STATUS0_VBUSOK: u8 = 1 << 7;
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_STATUS1_RX_EMPTY: u8 = 1 << 5;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS1_OVERTEMP: u8 = 1 << 1;
@@ -5937,24 +6520,81 @@ const FUSB302B_STATUS1_OVERTEMP: u8 = 1 << 1;
 const FUSB302B_STATUS1_VCONN_OCP: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_STATUS1A_RXSOP: u8 = 1;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_TOGSS_MASK: u8 = 0b0011_1000;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_TOGSS_SNK_CC1: u8 = 0b0010_1000;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_TOGSS_SNK_CC2: u8 = 0b0011_0000;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_INTERRUPTA_TX_SENT: u8 = 1 << 2;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_INTERRUPT_VBUSOK: u8 = 1 << 7;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_VBUS_LOW_CONFIRM_MS: u64 = 50;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_VBUS_RESTORE_CONFIRM_MS: u64 = 50;
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_INTERRUPTA_SOFT_RESET: u8 = 1 << 1;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_INTERRUPTA_HARD_RESET: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_INTERRUPTB_GCRC_SENT: u8 = 1;
 #[cfg(target_arch = "xtensa")]
+const FUSB302B_CONTROL1_REGISTER: u8 = 0x07;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_CONTROL1_RW_MASK: u8 = 0b0111_0011;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_CONTROL1_RX_FLUSH: u8 = 1 << 2;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_CONTROL0_REGISTER: u8 = 0x06;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_CONTROL0_RW_MASK: u8 = 0b0010_1110;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_CONTROL0_TX_FLUSH: u8 = 1 << 6;
+#[cfg(target_arch = "xtensa")]
 const FUSB302B_TOGGLE_INTERRUPT_MASKS: InterruptMasks = InterruptMasks::new(0x7f, 0xbf, 0xff);
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_RECEIVE_INTERRUPT_MASKS: InterruptMasks = InterruptMasks::new(0x7d, 0xe0, 0x00);
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_settled_sink_polarity(status1a: u8) -> Option<u8> {
+    match status1a & FUSB302B_TOGSS_MASK {
+        FUSB302B_TOGSS_SNK_CC1 => Some(1),
+        FUSB302B_TOGSS_SNK_CC2 => Some(2),
+        _ => None,
+    }
+}
+
+/// A powered FUSB302B starts a possible Sink detach with the VBUSOK transition
+/// interrupt. The low level is then sampled on later service turns; a single
+/// transient must not restart the CC session.
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_vbus_detach_was_reported(interrupt: u8, status0: u8) -> bool {
+    interrupt & FUSB302B_INTERRUPT_VBUSOK != 0 && status0 & FUSB302B_STATUS0_VBUSOK == 0
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_vbus_low_confirmation_expired(
+    candidate_since_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    match candidate_since_ms {
+        Some(started) => now_ms.saturating_sub(started) >= FUSB302B_VBUS_LOW_CONFIRM_MS,
+        None => false,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_vbus_restore_confirmation_expired(
+    candidate_since_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    match candidate_since_ms {
+        Some(started) => now_ms.saturating_sub(started) >= FUSB302B_VBUS_RESTORE_CONFIRM_MS,
+        None => false,
+    }
+}
 
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5962,10 +6602,20 @@ enum Fusb302bReceiveEvent {
     Empty { tx_sent: bool, gcrc_sent: bool },
     Partial { tx_sent: bool, gcrc_sent: bool },
     Message(PdPacket),
-    Reset,
+    VbusLow { transition: bool },
+    ReceivedReset(Fusb302bReceivedResetAction),
     RetryFailed,
     Protection,
     UnsupportedSop,
+}
+
+/// The FUSB302B reports received PD resets independently of Type-C CC state.
+/// Neither event is evidence that the attached source has detached.
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fusb302bReceivedResetAction {
+    AcceptAndWaitForSourceCapabilities,
+    WaitForSourceCapabilities,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -5982,6 +6632,87 @@ const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_received_reset_action(interrupt_a: u8) -> Option<Fusb302bReceivedResetAction> {
+    if interrupt_a & FUSB302B_INTERRUPTA_HARD_RESET != 0 {
+        Some(Fusb302bReceivedResetAction::WaitForSourceCapabilities)
+    } else if interrupt_a & FUSB302B_INTERRUPTA_SOFT_RESET != 0 {
+        Some(Fusb302bReceivedResetAction::AcceptAndWaitForSourceCapabilities)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_receive_fifo_flush_value(control1: u8) -> u8 {
+    (control1 & FUSB302B_CONTROL1_RW_MASK) | FUSB302B_CONTROL1_RX_FLUSH
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_transmit_fifo_flush_value(control0: u8) -> u8 {
+    (control0 & FUSB302B_CONTROL0_RW_MASK) | FUSB302B_CONTROL0_TX_FLUSH
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_retry_failure_requires_recovery(
+    status0a: u8,
+    _status1: u8,
+    retry_fail_recovery_pending: bool,
+) -> bool {
+    !retry_fail_recovery_pending && status0a & FUSB302B_STATUS0A_RETRY_FAIL != 0
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn fusb302b_retry_recovery_should_discard_frame(
+    status1: u8,
+    retry_fail_recovery_pending: bool,
+) -> bool {
+    retry_fail_recovery_pending && status1 & FUSB302B_STATUS1_RX_EMPTY == 0
+}
+
+/// The upstream PHY API exposes only a combined FIFO flush. Receive recovery
+/// therefore updates only CONTROL1.RX_FLUSH and preserves the driver's
+/// receive-mask bits; transmit recovery uses the separate TX flush below.
+#[cfg(target_arch = "xtensa")]
+fn fusb302b_flush_receive_fifo(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+    let mut control1 = [0_u8];
+    i2c.write_read(
+        fusb302::DEFAULT_ADDRESS,
+        &[FUSB302B_CONTROL1_REGISTER],
+        &mut control1,
+    )
+    .is_ok()
+        && i2c
+            .write(
+                fusb302::DEFAULT_ADDRESS,
+                &[
+                    FUSB302B_CONTROL1_REGISTER,
+                    fusb302b_receive_fifo_flush_value(control1[0]),
+                ],
+            )
+            .is_ok()
+}
+
+#[cfg(target_arch = "xtensa")]
+fn fusb302b_flush_transmit_fifo(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+    let mut control0 = [0_u8];
+    i2c.write_read(
+        fusb302::DEFAULT_ADDRESS,
+        &[FUSB302B_CONTROL0_REGISTER],
+        &mut control0,
+    )
+    .is_ok()
+        && i2c
+            .write(
+                fusb302::DEFAULT_ADDRESS,
+                &[
+                    FUSB302B_CONTROL0_REGISTER,
+                    fusb302b_transmit_fifo_flush_value(control0[0]),
+                ],
+            )
+            .is_ok()
+}
+
 #[cfg(target_arch = "xtensa")]
 struct Fusb302bRuntime {
     policy: fusb302b::SinkPolicy,
@@ -5991,11 +6722,16 @@ struct Fusb302bRuntime {
     last_source_capabilities_request_at_ms: Option<u64>,
     source_capabilities_refresh_pending: bool,
     source_capabilities_refresh_requested_at_ms: Option<u64>,
+    source_capabilities_refresh_kind: Option<SourceCapabilitiesRefreshKind>,
     last_request_at_ms: Option<u64>,
     source_capabilities_tx_confirmed: bool,
     source_capabilities_gcrc_seen: bool,
     partial_rx_started_at_ms: Option<u64>,
-    source_caps_hard_reset_sent: bool,
+    retry_fail_recovery_pending: bool,
+    vbus_low_candidate_since_ms: Option<u64>,
+    vbus_low_interlocked: bool,
+    vbus_restore_candidate_since_ms: Option<u64>,
+    awaiting_vbus_restore: bool,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6004,6 +6740,13 @@ enum PdContractRequestState {
     Confirmed,
     Pending,
     Failed,
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceCapabilitiesRefreshKind {
+    PpsTransition,
+    FixedContractLiveness,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6020,12 +6763,65 @@ impl Fusb302bRuntime {
             last_source_capabilities_request_at_ms: None,
             source_capabilities_refresh_pending: false,
             source_capabilities_refresh_requested_at_ms: None,
+            source_capabilities_refresh_kind: None,
             last_request_at_ms: None,
             source_capabilities_tx_confirmed: false,
             source_capabilities_gcrc_seen: false,
             partial_rx_started_at_ms: None,
-            source_caps_hard_reset_sent: false,
+            retry_fail_recovery_pending: false,
+            vbus_low_candidate_since_ms: None,
+            vbus_low_interlocked: false,
+            vbus_restore_candidate_since_ms: None,
+            awaiting_vbus_restore: false,
         }
+    }
+
+    fn clear_vbus_low_interlock(&mut self) {
+        self.vbus_low_candidate_since_ms = None;
+        self.vbus_low_interlocked = false;
+    }
+
+    fn clear_contract_authorization(&mut self, now_ms: u64) {
+        self.policy.on_received_protocol_reset();
+        self.attached_at_ms = Some(now_ms);
+        self.last_source_capabilities_request_at_ms = None;
+        self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_requested_at_ms = None;
+        self.source_capabilities_refresh_kind = None;
+        self.last_request_at_ms = None;
+        self.source_capabilities_tx_confirmed = false;
+        self.source_capabilities_gcrc_seen = false;
+        self.partial_rx_started_at_ms = None;
+        self.retry_fail_recovery_pending = false;
+    }
+
+    fn interlock_after_vbus_low(&mut self, now_ms: u64) {
+        if self.vbus_low_interlocked {
+            return;
+        }
+
+        // VBUS low is sufficient to withdraw contract authorization and heat,
+        // but a static level is not sufficient evidence to withdraw Rd. Keep
+        // the physical CC session intact until a transition is confirmed.
+        self.clear_contract_authorization(now_ms);
+        self.vbus_low_candidate_since_ms = None;
+        self.vbus_low_interlocked = true;
+    }
+
+    fn interlock_after_stale_contract(&mut self, now_ms: u64) {
+        self.clear_contract_authorization(now_ms);
+        self.clear_vbus_low_interlock();
+        self.awaiting_vbus_restore = false;
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+    }
+
+    fn stale_contract_vin_guard_suspended(&self, now_ms: u64) -> bool {
+        matches!(
+            self.policy.phase(),
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        ) || self.last_request_at_ms.is_some_and(|last| {
+            now_ms.saturating_sub(last) < FUSB302B_STALE_CONTRACT_VIN_SETTLE_GRACE_MS
+        })
     }
 
     async fn initialize(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
@@ -6054,26 +6850,131 @@ impl Fusb302bRuntime {
         initialized
     }
 
-    async fn restart_after_reset(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
-        self.policy.on_detach_or_reset();
-        self.polarity = None;
+    async fn recover_after_received_reset(
+        &mut self,
+        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        action: Fusb302bReceivedResetAction,
+        now: PdTimestamp,
+    ) -> bool {
+        let now_ms = now.as_millis();
+        self.policy.on_received_protocol_reset();
         self.next_message_id = 0;
-        self.attached_at_ms = None;
+        self.attached_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = None;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_requested_at_ms = None;
+        self.source_capabilities_refresh_kind = None;
         self.last_request_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
-        self.source_caps_hard_reset_sent = false;
-        if self.initialize(i2c).await {
-            self.policy =
-                fusb302b::SinkPolicy::new(FUSB302B_INITIAL_PPS_REQUEST_MV, MAX_HEATER_CONTRACT_MA);
-            true
-        } else {
-            self.policy.mark_fault();
-            false
+        self.retry_fail_recovery_pending = false;
+        self.clear_vbus_low_interlock();
+        if !fusb302b_flush_receive_fifo(i2c) {
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+            return true;
+        }
+        if matches!(
+            action,
+            Fusb302bReceivedResetAction::AcceptAndWaitForSourceCapabilities
+        ) {
+            if let Err(fault) = self
+                .transmit(i2c, fusb302b::accept_header(self.next_message_id), &[])
+                .await
+            {
+                return self
+                    .recover_transient_transport_fault(i2c, fault, now)
+                    .await;
+            }
+        }
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
+        true
+    }
+
+    async fn recover_after_detach(&mut self, _i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+        // `interlock_after_vbus_low` already discarded the contract and kept
+        // the policy in bounded discovery. The VBUS transition does not prove
+        // that CC detached, so preserve the selected CC/RX PHY session while
+        // the source restores power.
+        self.vbus_restore_candidate_since_ms = None;
+        self.awaiting_vbus_restore = true;
+
+        // Starting Sink toggle here would withdraw Rd during the source's
+        // power recovery window and can turn a recoverable VBUS drop into a
+        // detach loop.
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_CC_ATTACH, Ordering::Relaxed);
+        true
+    }
+
+    /// Re-synchronize only the PD protocol engine after VBUS returns. The
+    /// FUSB302B driver documents `pd_reset` as a protocol reset; keep the
+    /// selected CC pin, Rd termination, and Type-C attachment intact.
+    async fn resynchronize_after_vbus_restore(
+        &mut self,
+        i2c: &mut I2c<'_, esp_hal::Blocking>,
+    ) -> bool {
+        let configured = {
+            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+            phy.pd_reset().await.is_ok()
+                && phy.flush_fifos().await.is_ok()
+                && phy.configure_phy(fusb302b_phy_config(true)).await.is_ok()
+                && phy
+                    .set_interrupt_masks(FUSB302B_RECEIVE_INTERRUPT_MASKS)
+                    .await
+                    .is_ok()
+        };
+        if !configured {
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+            return false;
+        }
+
+        self.next_message_id = 0;
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
+        true
+    }
+
+    /// Recover a local receive/transmit failure without toggling CC. A PHY
+    /// reinitialization withdraws Rd briefly and disrupts the active source
+    /// attachment.
+    async fn recover_transient_transport_fault(
+        &mut self,
+        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        fault: fusb302b::TransientTransportFault,
+        now: PdTimestamp,
+    ) -> bool {
+        let now_ms = now.as_millis();
+        match fusb302b::transient_transport_fault_recovery(fault) {
+            fusb302b::TransientTransportRecovery::FlushReceiveAndRequery => {
+                self.policy.interlock_after_transient_transport_fault();
+                self.last_request_at_ms = None;
+                // Preserve the normal discovery retry interval after a local
+                // fault. RetryFail remains asserted until the next START_TX,
+                // so the polling path consumes that already-handled status
+                // until this bounded re-query is sent.
+                self.last_source_capabilities_request_at_ms = Some(now_ms);
+                self.source_capabilities_refresh_pending = false;
+                self.source_capabilities_refresh_requested_at_ms = None;
+                self.source_capabilities_refresh_kind = None;
+                self.source_capabilities_tx_confirmed = false;
+                self.source_capabilities_gcrc_seen = false;
+                self.partial_rx_started_at_ms = None;
+                self.retry_fail_recovery_pending =
+                    matches!(fault, fusb302b::TransientTransportFault::RetryFailed);
+                self.clear_vbus_low_interlock();
+
+                let receive_flushed = fusb302b_flush_receive_fifo(i2c);
+                let transmit_flushed =
+                    !matches!(fault, fusb302b::TransientTransportFault::TransmitIoError)
+                        || fusb302b_flush_transmit_fifo(i2c);
+                if !receive_flushed {
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                }
+                if !transmit_flushed {
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
+                }
+                FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
+                true
+            }
         }
     }
 
@@ -6089,8 +6990,9 @@ impl Fusb302bRuntime {
         &mut self,
         i2c: &mut I2c<'_, esp_hal::Blocking>,
         requested_mv: u16,
-        now_ms: u64,
+        now: PdTimestamp,
     ) -> PdContractRequestState {
+        let now_ms = now.as_millis();
         let active = self.policy.active_contract();
         if active.kind == ContractKind::Pps && active.voltage_mv == requested_mv {
             return PdContractRequestState::Confirmed;
@@ -6109,11 +7011,16 @@ impl Fusb302bRuntime {
                 return PdContractRequestState::Failed;
             }
             let header = fusb302b::get_source_capabilities_header(self.next_message_id);
-            if !self.transmit(i2c, header, &[]).await {
+            if let Err(fault) = self.transmit(i2c, header, &[]).await {
+                let _ = self
+                    .recover_transient_transport_fault(i2c, fault, now)
+                    .await;
                 return PdContractRequestState::Failed;
             }
             self.source_capabilities_refresh_pending = true;
             self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
+            self.source_capabilities_refresh_kind =
+                Some(SourceCapabilitiesRefreshKind::PpsTransition);
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
             return PdContractRequestState::Pending;
         }
@@ -6121,7 +7028,10 @@ impl Fusb302bRuntime {
             return PdContractRequestState::Failed;
         };
         let header = fusb302b::request_header(self.next_message_id);
-        if !self.transmit(i2c, header, &rdo).await {
+        if let Err(fault) = self.transmit(i2c, header, &rdo).await {
+            let _ = self
+                .recover_transient_transport_fault(i2c, fault, now)
+                .await;
             return PdContractRequestState::Failed;
         }
         self.last_request_at_ms = Some(now_ms);
@@ -6133,28 +7043,32 @@ impl Fusb302bRuntime {
         &mut self,
         i2c: &mut I2c<'_, esp_hal::Blocking>,
         requested_mv: u16,
-        now_ms: u64,
-    ) -> bool {
+        now: PdTimestamp,
+    ) -> PdContractRequestState {
+        let now_ms = now.as_millis();
         let active = self.policy.active_contract();
         if active.kind == ContractKind::Fixed && active.voltage_mv == requested_mv {
-            return true;
+            return PdContractRequestState::Confirmed;
         }
         if matches!(
             self.policy.phase(),
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
         ) {
-            return true;
+            return PdContractRequestState::Pending;
         }
         let Some(rdo) = self.policy.request_fixed_voltage(requested_mv) else {
-            return false;
+            return PdContractRequestState::Failed;
         };
         let header = fusb302b::request_header(self.next_message_id);
-        if !self.transmit(i2c, header, &rdo).await {
-            return false;
+        if let Err(fault) = self.transmit(i2c, header, &rdo).await {
+            let _ = self
+                .recover_transient_transport_fault(i2c, fault, now)
+                .await;
+            return PdContractRequestState::Failed;
         }
         self.last_request_at_ms = Some(now_ms);
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
-        true
+        PdContractRequestState::Pending
     }
 
     async fn transmit(
@@ -6162,49 +7076,71 @@ impl Fusb302bRuntime {
         i2c: &mut I2c<'_, esp_hal::Blocking>,
         header: u16,
         data: &[u8],
-    ) -> bool {
+    ) -> Result<(), fusb302b::TransientTransportFault> {
         let Ok(packet) = PdPacket::new(SopType::Sop, header, data) else {
-            self.policy.mark_fault();
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
-            return false;
+            return Err(fusb302b::TransientTransportFault::TransmitIoError);
         };
         let mut phy = Fusb302::new(BlockingAsync::new(i2c));
         if phy.transmit(&packet).await.is_err() {
-            self.policy.mark_fault();
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
-            return false;
+            return Err(fusb302b::TransientTransportFault::TransmitIoError);
         }
         self.next_message_id = (self.next_message_id + 1) & 0x07;
-        true
+        Ok(())
     }
 
     /// Drain a bounded number of completed PD frames in one service turn. No
     /// call awaits while I2C is borrowed, so EEPROM traffic remains independent
     /// of the controller's PD timing.
-    async fn poll(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, now_ms: u64) -> bool {
+    async fn poll(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, now: PdTimestamp) -> bool {
+        let now_ms = now.as_millis();
         if self.policy.phase() == SinkPhase::Fault {
             return false;
         }
 
-        if matches!(
-            self.policy.phase(),
-            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy | SinkPhase::Ready
-        ) {
-            let vbus_present = {
+        if self.awaiting_vbus_restore {
+            let vbus_restored = {
                 let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
-                phy.read_status()
-                    .await
-                    .map(|status| status.status0 & FUSB302B_STATUS0_VBUS_OK != 0)
-            };
-            match vbus_present {
-                Ok(true) => {}
-                Ok(false) => return self.restart_after_reset(i2c).await,
-                Err(_) => {
-                    self.policy.mark_fault();
-                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
-                    return false;
+                match phy.read_status().await {
+                    Ok(status) => status.status0 & FUSB302B_STATUS0_VBUSOK != 0,
+                    Err(_) => {
+                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                        return self
+                            .recover_transient_transport_fault(
+                                i2c,
+                                fusb302b::TransientTransportFault::ReceiveIoError,
+                                now,
+                            )
+                            .await;
+                    }
                 }
+            };
+            if !vbus_restored {
+                self.vbus_restore_candidate_since_ms = None;
+                FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_CC_ATTACH, Ordering::Relaxed);
+                return true;
             }
+
+            let restore_started = *self.vbus_restore_candidate_since_ms.get_or_insert(now_ms);
+            if !fusb302b_vbus_restore_confirmation_expired(Some(restore_started), now_ms) {
+                FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+                return true;
+            }
+
+            // VBUS is present again. Reset only the PD protocol engine so the
+            // source and sink restart message-ID state in sync. Reinitializing
+            // the whole PHY or restarting CC would withdraw Rd and can make
+            // the source remove VBUS again.
+            if !self.resynchronize_after_vbus_restore(i2c).await {
+                return true;
+            }
+            self.awaiting_vbus_restore = false;
+            self.vbus_restore_candidate_since_ms = None;
+            self.vbus_low_candidate_since_ms = None;
+            self.vbus_low_interlocked = false;
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+            return true;
         }
 
         if matches!(
@@ -6214,13 +7150,14 @@ impl Fusb302bRuntime {
             .last_request_at_ms
             .is_some_and(|last| now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS)
         {
-            // Reset the PHY and discard every contract before retrying. This
-            // flushes delayed Accept/PS_RDY frames so an expired transaction
-            // can never install a newer pending contract.
-            self.policy.timeout_pending_request();
-            self.last_request_at_ms = None;
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
-            return self.restart_after_reset(i2c).await;
+            return self
+                .recover_transient_transport_fault(
+                    i2c,
+                    fusb302b::TransientTransportFault::PendingRequestTimeout,
+                    now,
+                )
+                .await;
         }
 
         if self.source_capabilities_refresh_pending
@@ -6230,26 +7167,71 @@ impl Fusb302bRuntime {
                     now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS
                 })
         {
-            // Preserve the active fixed contract and retry the Source Caps
-            // refresh on a later control turn.
+            let refresh_kind = self.source_capabilities_refresh_kind;
             self.source_capabilities_refresh_pending = false;
             self.source_capabilities_refresh_requested_at_ms = None;
+            self.source_capabilities_refresh_kind = None;
+            if refresh_kind == Some(SourceCapabilitiesRefreshKind::FixedContractLiveness) {
+                // A fixed contract has no PPS keepalive. A bounded unanswered
+                // Source_Capabilities probe is the protocol-level evidence
+                // available while the MCU remains powered; interlock heat and
+                // re-enter discovery without changing CC termination.
+                FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
+                return self
+                    .recover_transient_transport_fault(
+                        i2c,
+                        fusb302b::TransientTransportFault::PendingRequestTimeout,
+                        now,
+                    )
+                    .await;
+            }
+            // A failed PPS capability refresh does not invalidate the active
+            // fixed contract. Leave it usable and retry only on a later
+            // explicit PPS request.
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
+        }
+
+        if fixed_contract_liveness_probe_due(
+            self.active_contract().kind,
+            self.policy.phase() == SinkPhase::Ready,
+            self.source_capabilities_refresh_pending,
+            self.last_source_capabilities_request_at_ms,
+            now_ms,
+        ) {
+            let header = fusb302b::get_source_capabilities_header(self.next_message_id);
+            if let Err(fault) = self.transmit(i2c, header, &[]).await {
+                return self
+                    .recover_transient_transport_fault(i2c, fault, now)
+                    .await;
+            }
+            self.source_capabilities_refresh_pending = true;
+            self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
+            self.source_capabilities_refresh_kind =
+                Some(SourceCapabilitiesRefreshKind::FixedContractLiveness);
+            self.last_source_capabilities_request_at_ms = Some(now_ms);
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
         }
 
         if self.polarity.is_none() {
             let polarity = {
                 let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
                 match phy.read_status().await {
-                    Ok(status) => match status.status1a & FUSB302B_TOGSS_MASK {
-                        FUSB302B_TOGSS_SNK_CC1 => Some(CcPin::Cc1),
-                        FUSB302B_TOGSS_SNK_CC2 => Some(CcPin::Cc2),
-                        _ => None,
-                    },
+                    Ok(status) => {
+                        fusb302b_settled_sink_polarity(status.status1a).map(|pin| match pin {
+                            1 => CcPin::Cc1,
+                            2 => CcPin::Cc2,
+                            _ => unreachable!(),
+                        })
+                    }
                     Err(_) => {
-                        self.policy.mark_fault();
-                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
-                        return false;
+                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                        return self
+                            .recover_transient_transport_fault(
+                                i2c,
+                                fusb302b::TransientTransportFault::ReceiveIoError,
+                                now,
+                            )
+                            .await;
                     }
                 }
             };
@@ -6269,11 +7251,17 @@ impl Fusb302bRuntime {
                             .is_ok()
                 };
                 if !selected {
-                    self.policy.mark_fault();
-                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
-                    return false;
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                    return self
+                        .recover_transient_transport_fault(
+                            i2c,
+                            fusb302b::TransientTransportFault::ConfigurationIoError,
+                            now,
+                        )
+                        .await;
                 }
                 self.polarity = Some(polarity);
+                self.policy.on_attachment_detected();
                 self.attached_at_ms = Some(now_ms);
                 self.partial_rx_started_at_ms = None;
                 FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
@@ -6284,48 +7272,44 @@ impl Fusb302bRuntime {
         }
 
         for _ in 0..FUSB302B_MAX_RX_MESSAGES_PER_POLL {
-            let event = match fusb302b_receive_event(i2c).await {
+            let event = match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending).await {
                 Ok(event) => event,
-                Err(()) => {
-                    self.policy.mark_fault();
-                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
-                    return false;
+                Err(fault) => {
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                    return self
+                        .recover_transient_transport_fault(i2c, fault, now)
+                        .await;
                 }
             };
             match event {
+                Fusb302bReceiveEvent::VbusLow { transition } => {
+                    self.interlock_after_vbus_low(now_ms);
+                    if transition && self.vbus_low_candidate_since_ms.is_none() {
+                        self.vbus_low_candidate_since_ms = Some(now_ms);
+                    }
+                    if fusb302b_vbus_low_confirmation_expired(
+                        self.vbus_low_candidate_since_ms,
+                        now_ms,
+                    ) {
+                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+                        return self.recover_after_detach(i2c).await;
+                    }
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+                    return true;
+                }
                 Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent } => {
+                    self.clear_vbus_low_interlock();
                     self.partial_rx_started_at_ms = None;
                     if self.policy.phase() == SinkPhase::WaitingForSourceCapabilities {
                         self.source_capabilities_tx_confirmed |= tx_sent;
                         self.source_capabilities_gcrc_seen |= gcrc_sent;
-                        let query_due = match self.last_source_capabilities_request_at_ms {
-                            Some(last) => fusb302b::source_capabilities_retry_due(last, now_ms),
-                            None => self.attached_at_ms.is_some_and(|attached_at_ms| {
-                                now_ms.saturating_sub(attached_at_ms)
-                                    >= fusb302b::SOURCE_CAPS_INITIAL_WAIT_MS
-                            }),
-                        };
-                        let hard_reset_due = !self.source_caps_hard_reset_sent
-                            && self
-                                .last_source_capabilities_request_at_ms
-                                .is_some_and(|last| {
-                                    fusb302b::source_capabilities_hard_reset_due(last, now_ms)
-                                });
-                        if hard_reset_due {
-                            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
-                            if phy.transmit_hard_reset().await.is_err() {
-                                self.policy.mark_fault();
-                                FUSB302B_DIAGNOSTIC
-                                    .store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
-                                return false;
-                            }
-                            self.source_caps_hard_reset_sent = true;
-                            FUSB302B_DIAGNOSTIC.store(
-                                FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT,
-                                Ordering::Relaxed,
-                            );
-                            return true;
-                        }
+                        let query_due = self.attached_at_ms.is_some_and(|attached_at_ms| {
+                            fusb302b::source_capabilities_request_due(
+                                attached_at_ms,
+                                self.last_source_capabilities_request_at_ms,
+                                now_ms,
+                            )
+                        });
                         if !query_due {
                             let diagnostic = if self.source_capabilities_gcrc_seen {
                                 FUSB302B_DIAG_SOURCE_CAPS_GCRC_SEEN
@@ -6340,9 +7324,12 @@ impl Fusb302bRuntime {
                             return true;
                         }
                         let header = fusb302b::get_source_capabilities_header(self.next_message_id);
-                        if !self.transmit(i2c, header, &[]).await {
-                            return false;
+                        if let Err(fault) = self.transmit(i2c, header, &[]).await {
+                            return self
+                                .recover_transient_transport_fault(i2c, fault, now)
+                                .await;
                         }
+                        self.retry_fail_recovery_pending = false;
                         self.source_capabilities_tx_confirmed = false;
                         self.source_capabilities_gcrc_seen = false;
                         self.last_source_capabilities_request_at_ms = Some(now_ms);
@@ -6355,18 +7342,26 @@ impl Fusb302bRuntime {
                             .is_some_and(|last| fusb302b::pps_keepalive_due(last, now_ms))
                     {
                         let Some(rdo) = self.policy.refresh_active_pps() else {
-                            self.policy.mark_fault();
-                            return false;
+                            return self
+                                .recover_transient_transport_fault(
+                                    i2c,
+                                    fusb302b::TransientTransportFault::ConfigurationIoError,
+                                    now,
+                                )
+                                .await;
                         };
                         let header = fusb302b::request_header(self.next_message_id);
-                        if !self.transmit(i2c, header, &rdo).await {
-                            return false;
+                        if let Err(fault) = self.transmit(i2c, header, &rdo).await {
+                            return self
+                                .recover_transient_transport_fault(i2c, fault, now)
+                                .await;
                         }
                         self.last_request_at_ms = Some(now_ms);
                     }
                     return true;
                 }
                 Fusb302bReceiveEvent::Partial { tx_sent, gcrc_sent } => {
+                    self.clear_vbus_low_interlock();
                     if self.policy.phase() == SinkPhase::WaitingForSourceCapabilities {
                         self.source_capabilities_tx_confirmed |= tx_sent;
                         self.source_capabilities_gcrc_seen |= gcrc_sent;
@@ -6376,39 +7371,82 @@ impl Fusb302bRuntime {
                         >= FUSB302B_PARTIAL_RX_TIMEOUT_MS
                     {
                         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                        return self.restart_after_reset(i2c).await;
+                        return self
+                            .recover_transient_transport_fault(
+                                i2c,
+                                fusb302b::TransientTransportFault::PartialReceiveTimeout,
+                                now,
+                            )
+                            .await;
                     }
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_PARTIAL, Ordering::Relaxed);
                     return true;
                 }
                 Fusb302bReceiveEvent::Message(message) => {
+                    self.clear_vbus_low_interlock();
                     self.partial_rx_started_at_ms = None;
                     if let Some((pdos, count)) = fusb302b::source_capabilities_from_message(
                         message.header(),
                         message.payload(),
                     ) {
-                        self.last_source_capabilities_request_at_ms = None;
+                        let refresh_kind = self.source_capabilities_refresh_kind;
+                        let preserve_ready_contract = self.policy.phase() == SinkPhase::Ready
+                            && refresh_kind != Some(SourceCapabilitiesRefreshKind::PpsTransition);
                         self.source_capabilities_refresh_pending = false;
                         self.source_capabilities_refresh_requested_at_ms = None;
+                        self.source_capabilities_refresh_kind = None;
                         self.source_capabilities_tx_confirmed = false;
                         self.source_capabilities_gcrc_seen = false;
-                        if let Some(rdo) = self.policy.on_source_capabilities(&pdos[..count]) {
+                        self.retry_fail_recovery_pending = false;
+                        let rdo = if preserve_ready_contract {
+                            self.policy.refresh_source_capabilities_with_message_id(
+                                &pdos[..count],
+                                Some((message.header() >> 9) as u8 & 0x07),
+                            )
+                        } else {
+                            self.policy.on_source_capabilities_with_message_id(
+                                &pdos[..count],
+                                Some((message.header() >> 9) as u8 & 0x07),
+                            )
+                        };
+                        if let Some(rdo) = rdo {
                             let header = fusb302b::request_header(self.next_message_id);
-                            if !self.transmit(i2c, header, &rdo).await {
-                                return false;
+                            if let Err(fault) = self.transmit(i2c, header, &rdo).await {
+                                return self
+                                    .recover_transient_transport_fault(i2c, fault, now)
+                                    .await;
                             }
                             self.last_request_at_ms = Some(now_ms);
+                            self.last_source_capabilities_request_at_ms = None;
                             FUSB302B_DIAGNOSTIC
                                 .store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
+                        } else if self.policy.phase() == SinkPhase::Ready {
+                            // A liveness response refreshed the cache while
+                            // keeping the explicit contract intact. Schedule
+                            // the next probe from this confirmed response.
+                            self.last_source_capabilities_request_at_ms = Some(now_ms);
+                            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_IDLE, Ordering::Relaxed);
                         } else {
-                            self.policy.mark_fault();
+                            // The attachment is still valid, but this source
+                            // cannot satisfy the heater contract. Keep the
+                            // policy in discovery so a later capability update
+                            // can recover without a CC reset.
+                            self.last_source_capabilities_request_at_ms = Some(now_ms);
                             FUSB302B_DIAGNOSTIC
                                 .store(FUSB302B_DIAG_NO_USABLE_CONTRACT, Ordering::Relaxed);
-                            return false;
+                            return true;
                         }
                     } else if message.payload().is_empty() {
-                        self.policy
-                            .on_control_message((message.header() & 0x1f) as u8, now_ms);
+                        let was_waiting_for_ps_rdy =
+                            self.policy.phase() == SinkPhase::WaitingForPsRdy;
+                        self.policy.on_control_message_with_message_id(
+                            (message.header() & 0x1f) as u8,
+                            Some((message.header() >> 9) as u8 & 0x07),
+                            now_ms,
+                        );
+                        if was_waiting_for_ps_rdy && self.policy.phase() == SinkPhase::Ready {
+                            self.last_source_capabilities_request_at_ms = Some(now_ms);
+                        }
                         FUSB302B_DIAGNOSTIC.store(
                             if self.policy.phase() == SinkPhase::Ready {
                                 FUSB302B_DIAG_IDLE
@@ -6419,25 +7457,42 @@ impl Fusb302bRuntime {
                         );
                     }
                 }
-                Fusb302bReceiveEvent::Reset => {
+                Fusb302bReceiveEvent::ReceivedReset(action) => {
+                    self.clear_vbus_low_interlock();
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                    return self.restart_after_reset(i2c).await;
+                    return self.recover_after_received_reset(i2c, action, now).await;
                 }
                 Fusb302bReceiveEvent::RetryFailed => {
+                    self.clear_vbus_low_interlock();
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                    return self.restart_after_reset(i2c).await;
+                    return self
+                        .recover_transient_transport_fault(
+                            i2c,
+                            fusb302b::TransientTransportFault::RetryFailed,
+                            now,
+                        )
+                        .await;
                 }
-                Fusb302bReceiveEvent::Protection | Fusb302bReceiveEvent::UnsupportedSop => {
+                Fusb302bReceiveEvent::Protection => {
+                    self.clear_vbus_low_interlock();
                     self.policy.mark_fault();
-                    FUSB302B_DIAGNOSTIC.store(
-                        match event {
-                            Fusb302bReceiveEvent::Protection => FUSB302B_DIAG_PROTECTION,
-                            Fusb302bReceiveEvent::UnsupportedSop => FUSB302B_DIAG_UNSUPPORTED_SOP,
-                            _ => unreachable!(),
-                        },
-                        Ordering::Relaxed,
-                    );
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_PROTECTION, Ordering::Relaxed);
                     return false;
+                }
+                Fusb302bReceiveEvent::UnsupportedSop => {
+                    self.clear_vbus_low_interlock();
+                    // A malformed or non-SOP frame is a recoverable receive
+                    // condition. Flush the incomplete FIFO state and requery
+                    // capabilities without withdrawing Rd or latching the
+                    // whole sink policy in Fault.
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_UNSUPPORTED_SOP, Ordering::Relaxed);
+                    return self
+                        .recover_transient_transport_fault(
+                            i2c,
+                            fusb302b::TransientTransportFault::ReceiveIoError,
+                            now,
+                        )
+                        .await;
                 }
             }
         }
@@ -6449,26 +7504,46 @@ impl Fusb302bRuntime {
 #[cfg(target_arch = "xtensa")]
 async fn fusb302b_receive_event(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
-) -> Result<Fusb302bReceiveEvent, ()> {
-    let mut phy = Fusb302::new(BlockingAsync::new(i2c));
-    // Preserve the receiver's CRC/SOP state before clearing its interrupt latches.
-    let status = phy.read_status().await.map_err(|_| ())?;
-    let interrupts = phy.read_interrupts().await.map_err(|_| ())?;
+    retry_fail_recovery_pending: bool,
+) -> Result<Fusb302bReceiveEvent, fusb302b::TransientTransportFault> {
+    let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+    // Clear transition latches first, then sample the non-destructive status
+    // bank. This pairs a VBUSOK detach transition with its current low level
+    // instead of leaving a status/interrupt race between the two I2C reads.
+    let interrupts = phy
+        .read_interrupts()
+        .await
+        .map_err(|_| fusb302b::TransientTransportFault::ReceiveIoError)?;
+    let status = phy
+        .read_status()
+        .await
+        .map_err(|_| fusb302b::TransientTransportFault::ReceiveIoError)?;
     let tx_sent = interrupts.interrupt_a & FUSB302B_INTERRUPTA_TX_SENT != 0;
     let gcrc_sent = interrupts.interrupt_b & FUSB302B_INTERRUPTB_GCRC_SENT != 0;
 
-    if interrupts.interrupt_a & (FUSB302B_INTERRUPTA_SOFT_RESET | FUSB302B_INTERRUPTA_HARD_RESET)
-        != 0
-    {
-        return Ok(Fusb302bReceiveEvent::Reset);
+    if status.status0 & FUSB302B_STATUS0_VBUSOK == 0 {
+        return Ok(Fusb302bReceiveEvent::VbusLow {
+            transition: fusb302b_vbus_detach_was_reported(interrupts.interrupt, status.status0),
+        });
     }
-    if status.status0a & FUSB302B_STATUS0A_RETRY_FAIL != 0
-        && status.status1 & FUSB302B_STATUS1_RX_EMPTY != 0
-    {
+    if let Some(action) = fusb302b_received_reset_action(interrupts.interrupt_a) {
+        return Ok(Fusb302bReceiveEvent::ReceivedReset(action));
+    }
+    if fusb302b_retry_failure_requires_recovery(
+        status.status0a,
+        status.status1,
+        retry_fail_recovery_pending,
+    ) {
         return Ok(Fusb302bReceiveEvent::RetryFailed);
     }
     if status.status1 & (FUSB302B_STATUS1_OVERTEMP | FUSB302B_STATUS1_VCONN_OCP) != 0 {
         return Ok(Fusb302bReceiveEvent::Protection);
+    }
+    if fusb302b_retry_recovery_should_discard_frame(status.status1, retry_fail_recovery_pending) {
+        if !fusb302b_flush_receive_fifo(i2c) {
+            return Err(fusb302b::TransientTransportFault::ReceiveIoError);
+        }
+        return Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent });
     }
     if status.status1 & FUSB302B_STATUS1_RX_EMPTY != 0 {
         return Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent });
@@ -6479,41 +7554,64 @@ async fn fusb302b_receive_event(
         return Ok(Fusb302bReceiveEvent::Partial { tx_sent, gcrc_sent });
     }
 
-    match phy.receive().await.map_err(|_| ())? {
-        None => Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent }),
-        Some(packet) if packet.sop() == SopType::Sop => Ok(Fusb302bReceiveEvent::Message(packet)),
-        Some(_) => Ok(Fusb302bReceiveEvent::UnsupportedSop),
+    match phy.receive().await {
+        Ok(None) => Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent }),
+        Ok(Some(packet)) if packet.sop() == SopType::Sop => {
+            Ok(Fusb302bReceiveEvent::Message(packet))
+        }
+        Ok(Some(_)) => Ok(Fusb302bReceiveEvent::UnsupportedSop),
+        Err(fusb302::Error::Receive(_)) => Ok(Fusb302bReceiveEvent::UnsupportedSop),
+        Err(_) => Err(fusb302b::TransientTransportFault::ReceiveIoError),
     }
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 fn fusb302b_adjustable_power_capabilities(
     source_capabilities: SourceCapabilities,
 ) -> Option<ch224q::AdjustablePowerCapabilities> {
-    let apdo = source_capabilities.fusb302b_pps_capability()?;
-    let pps_min_mv = apdo.min_mv.max(FUSB302B_PPS_MIN_MV);
-    let pps_max_mv = apdo.max_mv.min(FUSB302B_PPS_MAX_MV);
-    let pps_max_ma = apdo.max_ma.min(MAX_HEATER_CONTRACT_MA);
-    if pps_min_mv > GUARANTEED_HEATER_MIN_MV
-        || pps_max_mv < GUARANTEED_HEATER_MIN_MV
-        || pps_max_ma < MIN_HEATER_CONTRACT_MA
-    {
-        return None;
+    let mut capabilities = ch224q::AdjustablePowerCapabilities::default();
+    let mut has_usable_pps_apdo = false;
+
+    for apdo in source_capabilities.pps.into_iter().flatten() {
+        let min_mv = apdo.min_mv.max(FUSB302B_PPS_MIN_MV);
+        let max_mv = apdo.max_mv.min(FUSB302B_PPS_MAX_MV);
+        let max_ma = apdo.max_ma.min(MAX_HEATER_CONTRACT_MA);
+        if min_mv > max_mv || max_ma < MIN_HEATER_CONTRACT_MA {
+            continue;
+        }
+        has_usable_pps_apdo = true;
+
+        capabilities.pps_min_mv = Some(
+            capabilities
+                .pps_min_mv
+                .map_or(min_mv, |value| value.min(min_mv)),
+        );
+        capabilities.pps_max_mv = Some(
+            capabilities
+                .pps_max_mv
+                .map_or(max_mv, |value| value.max(max_mv)),
+        );
+        capabilities.pps_max_ma = Some(
+            capabilities
+                .pps_max_ma
+                .map_or(max_ma, |value| value.max(max_ma)),
+        );
+        capabilities.pps_covers_20v |=
+            min_mv <= GUARANTEED_HEATER_MIN_MV && max_mv >= GUARANTEED_HEATER_MIN_MV;
+        if let Some(slot) = capabilities
+            .pps_apdos
+            .iter_mut()
+            .find(|slot| slot.is_none())
+        {
+            *slot = Some(ch224q::PpsApdo {
+                min_mv,
+                max_mv,
+                max_ma,
+            });
+        }
     }
 
-    let mut capabilities = ch224q::AdjustablePowerCapabilities {
-        pps_covers_20v: true,
-        pps_min_mv: Some(pps_min_mv),
-        pps_max_mv: Some(pps_max_mv),
-        pps_max_ma: Some(pps_max_ma),
-        ..ch224q::AdjustablePowerCapabilities::default()
-    };
-    capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
-        min_mv: pps_min_mv,
-        max_mv: pps_max_mv,
-        max_ma: pps_max_ma,
-    });
-    Some(capabilities)
+    has_usable_pps_apdo.then_some(capabilities)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6528,6 +7626,26 @@ impl PdPort {
         match self {
             Self::Fusb302b(_) => ControllerKind::Fusb302b,
             Self::Unavailable => ControllerKind::Unknown,
+        }
+    }
+
+    const fn service_available(&self) -> bool {
+        match self {
+            Self::Fusb302b(runtime) => !matches!(runtime.policy.phase(), SinkPhase::Fault),
+            Self::Unavailable => false,
+        }
+    }
+
+    fn interlock_after_stale_contract(&mut self, now_ms: u64) {
+        if let Self::Fusb302b(runtime) = self {
+            runtime.interlock_after_stale_contract(now_ms);
+        }
+    }
+
+    fn stale_contract_vin_guard_suspended(&self, now_ms: u64) -> bool {
+        match self {
+            Self::Fusb302b(runtime) => runtime.stale_contract_vin_guard_suspended(now_ms),
+            Self::Unavailable => false,
         }
     }
 }
@@ -6617,22 +7735,29 @@ fn probe_eeprom_address(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<u8> {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_eeprom_bytes_chunked<I2C>(
-    eeprom: &mut M24c64<I2C>,
+async fn read_eeprom_bytes_chunked_with_pd<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    address: u8,
     offset: u16,
     bytes: &mut [u8],
-) -> Result<(), EepromError<I2C::Error>>
+) -> Result<(), ()>
 where
-    I2C: embedded_hal::i2c::I2c,
+    PWM: SetDutyCycle,
 {
     let mut read = 0usize;
     while read < bytes.len() {
         let chunk_len = (bytes.len() - read).min(EEPROM_READ_CHUNK_MAX_BYTES);
-        let chunk_offset = offset
-            .checked_add(read as u16)
-            .ok_or(EepromError::OutOfRange)?;
-        eeprom.read_bytes(chunk_offset, &mut bytes[read..read + chunk_len])?;
+        let chunk_offset = offset.checked_add(read as u16).ok_or(())?;
+        let result = {
+            let mut eeprom = M24c64::with_address(&mut *i2c, address);
+            eeprom.read_bytes(chunk_offset, &mut bytes[read..read + chunk_len])
+        };
+        result.map_err(|_| ())?;
         read += chunk_len;
+        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
+        EmbassyTimer::after_millis(0).await;
     }
     Ok(())
 }
@@ -6643,30 +7768,52 @@ fn eeprom_bytes_contain_data(bytes: &[u8]) -> bool {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn write_eeprom_bytes_verified(
+async fn write_eeprom_bytes_verified<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     offset: u16,
     bytes: &[u8],
-) -> Result<(), MemoryCommitError> {
+) -> Result<(), MemoryCommitError>
+where
+    PWM: SetDutyCycle,
+{
     let Some(address) = probe_eeprom_address(i2c) else {
         return Err(MemoryCommitError::WriteAddressNoAck);
     };
-    let mut eeprom = M24c64::with_address(&mut *i2c, address);
+    let mut pd_service_schedule = EepromMaintenancePdServiceSchedule::new();
     let mut written = 0usize;
     while written < bytes.len() {
         let absolute_offset = usize::from(offset) + written;
         let chunk_len = eeprom_maintenance_write_chunk_len(absolute_offset, bytes.len() - written);
         let chunk_offset =
             u16::try_from(absolute_offset).map_err(|_| MemoryCommitError::WriteFailed)?;
-        eeprom
-            .write_page(chunk_offset, &bytes[written..written + chunk_len])
-            .map_err(memory_commit_error_from_eeprom)?;
+        let write_result = {
+            let mut eeprom = M24c64::with_address(&mut *i2c, address);
+            eeprom.write_page(chunk_offset, &bytes[written..written + chunk_len])
+        };
+        write_result.map_err(memory_commit_error_from_eeprom)?;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
         written += chunk_len;
+        if pd_service_schedule.after_page_write() {
+            service_pd_during_eeprom_operation(i2c, pd_port, service).await;
+        }
     }
     let mut verify = [0u8; flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX];
-    read_eeprom_bytes_chunked(&mut eeprom, offset, &mut verify[..bytes.len()])
-        .map_err(|_| MemoryCommitError::VerifyUnreadable)?;
+    let mut read = 0usize;
+    while read < bytes.len() {
+        let chunk_len = (bytes.len() - read).min(EEPROM_READ_CHUNK_MAX_BYTES);
+        let chunk_offset = offset
+            .checked_add(read as u16)
+            .ok_or(MemoryCommitError::VerifyUnreadable)?;
+        let read_result = {
+            let mut eeprom = M24c64::with_address(&mut *i2c, address);
+            eeprom.read_bytes(chunk_offset, &mut verify[read..read + chunk_len])
+        };
+        read_result.map_err(|_| MemoryCommitError::VerifyUnreadable)?;
+        read += chunk_len;
+        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
+    }
     if verify[..bytes.len()] != *bytes {
         return Err(MemoryCommitError::VerifyMismatch);
     }
@@ -6678,6 +7825,33 @@ fn eeprom_maintenance_write_chunk_len(absolute_offset: usize, remaining: usize) 
     let page_size = flux_purr_firmware::memory::M24C64_PAGE_SIZE;
     let page_room = page_size - (absolute_offset % page_size);
     remaining.min(page_room).min(EEPROM_WRITE_CHUNK_MAX_BYTES)
+}
+
+/// Raw EEPROM maintenance shares the PD I2C bus. A page write's five-millisecond
+/// program cycle is the longest maintenance interval, so service PD after every
+/// completed page instead of waiting for a command-sized batch to finish.
+#[cfg(any(target_arch = "xtensa", test))]
+struct EepromMaintenancePdServiceSchedule {
+    page_writes_since_service: u8,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl EepromMaintenancePdServiceSchedule {
+    const fn new() -> Self {
+        Self {
+            page_writes_since_service: 0,
+        }
+    }
+
+    fn after_page_write(&mut self) -> bool {
+        self.page_writes_since_service = self.page_writes_since_service.saturating_add(1);
+        if self.page_writes_since_service >= EEPROM_MAINTENANCE_PD_MAX_PAGE_WRITES_WITHOUT_SERVICE {
+            self.page_writes_since_service = 0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -6765,6 +7939,7 @@ fn eeprom_storage_failure_response(response: &UsbFrame) -> bool {
             | "user_preferences_persistence_failed"
             | "network_pairing_persistence_failed"
             | "layout_marker_persistence_failed"
+            | "thermal_plant_persistence_failed"
     )
 }
 
@@ -6793,11 +7968,17 @@ fn discard_deferred_memory_commit_for_incompatible_eeprom(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn usb_eeprom_maintenance_response(
+async fn usb_eeprom_maintenance_response<PWM>(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: EepromMaintenanceCommand,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
-) -> UsbFrame {
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    _elapsed_ms: u64,
+) -> UsbFrame
+where
+    PWM: SetDutyCycle,
+{
     match command.op {
         EepromMaintenanceOp::Read => {
             let (Some(offset), Some(length)) = (command.offset, command.length) else {
@@ -6827,8 +8008,17 @@ async fn usb_eeprom_maintenance_response(
             };
             let mut bytes = heapless::Vec::new();
             let _ = bytes.resize_default(length);
-            let mut eeprom = M24c64::with_address(i2c, address);
-            if read_eeprom_bytes_chunked(&mut eeprom, offset, bytes.as_mut_slice()).is_err() {
+            if read_eeprom_bytes_chunked_with_pd(
+                i2c,
+                pd_port,
+                service,
+                address,
+                offset,
+                bytes.as_mut_slice(),
+            )
+            .await
+            .is_err()
+            {
                 return usb_error_response(request_id, "eeprom_read_failed", "EEPROM read failed.");
             }
             usb_response(request_id, UsbResponsePayload::EepromBytes(bytes))
@@ -6850,7 +8040,8 @@ async fn usb_eeprom_maintenance_response(
                     "EEPROM write range is invalid.",
                 );
             }
-            match write_eeprom_bytes_verified(i2c, offset, bytes.as_slice()).await {
+            match write_eeprom_bytes_verified(i2c, pd_port, service, offset, bytes.as_slice()).await
+            {
                 Ok(()) => usb_response(request_id, UsbResponsePayload::Ack),
                 Err(error) => usb_error_response(request_id, error.code(), error.message()),
             }
@@ -6859,7 +8050,9 @@ async fn usb_eeprom_maintenance_response(
             let erased = [0xff; flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX];
             let mut offset = 0u16;
             while offset < M24C64_CAPACITY_BYTES {
-                if let Err(error) = write_eeprom_bytes_verified(i2c, offset, &erased).await {
+                if let Err(error) =
+                    write_eeprom_bytes_verified(i2c, pd_port, service, offset, &erased).await
+                {
                     return usb_error_response(request_id, error.code(), error.message());
                 }
                 offset = offset.saturating_add(erased.len() as u16);
@@ -6886,25 +8079,172 @@ fn memory_record_length_from_header(header: &[u8], slot_size: usize) -> Option<u
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-fn load_eeprom_memory_record(
+async fn read_eeprom_persist_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    address: u8,
+    offset: u16,
+    slot_size: usize,
+    staging: &mut [u8],
+) -> Result<Option<PersistRecord>, ()>
+where
+    PWM: SetDutyCycle,
+{
+    if slot_size < FPR2_HEADER_LEN || staging.len() < FPR2_HEADER_LEN {
+        return Ok(None);
+    }
+    read_eeprom_bytes_chunked_with_pd(
+        i2c,
+        pd_port,
+        service,
+        address,
+        offset,
+        &mut staging[..FPR2_HEADER_LEN],
+    )
+    .await?;
+    if staging[..4] != *b"FPR2" {
+        return Ok(None);
+    }
+    let payload_len = usize::from(u16::from_le_bytes([staging[12], staging[13]]));
+    let Some(record_len) = FPR2_HEADER_LEN.checked_add(payload_len) else {
+        return Ok(None);
+    };
+    if record_len > slot_size || record_len > staging.len() {
+        return Ok(None);
+    }
+    read_eeprom_bytes_chunked_with_pd(
+        i2c,
+        pd_port,
+        service,
+        address,
+        offset.saturating_add(FPR2_HEADER_LEN as u16),
+        &mut staging[FPR2_HEADER_LEN..record_len],
+    )
+    .await?;
+    Ok(decode_persist_record(&staging[..record_len]).ok())
+}
+
+#[cfg(target_arch = "xtensa")]
+#[inline(never)]
+async fn load_eeprom_memory_record<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> (Option<MemoryRecord>, bool, bool, bool) {
+) -> (Option<MemoryRecord>, bool, bool, bool)
+where
+    PWM: SetDutyCycle,
+{
     let Some(address) = probe_eeprom_address(i2c) else {
         info!("memory restore skipped: eeprom unavailable");
         return (None, false, true, false);
     };
 
-    let mut eeprom = M24c64::with_address(i2c, address);
     let mut contains_data = false;
     let mut legacy_format_present = false;
     let mut read_failed = false;
-    let mut layout_valid_slots = 0u8;
-    let mut layout_active_slots = 0u8;
-    let mut domains: [Option<PersistRecord>; 5] = [None, None, None, None, None];
+    let mut latest_active_marker: Option<LayoutMarker> = None;
+    let mut latest_prepared_marker: Option<LayoutMarker> = None;
+    let mut domains: [Option<PersistRecord>; 6] = [None, None, None, None, None, None];
     let staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
-    let domain_slots = [
+    for offset in [FPR2_LAYOUT_A_OFFSET, FPR2_LAYOUT_B_OFFSET] {
+        staging.bytes.fill(0xff);
+        let candidate = read_eeprom_persist_record(
+            i2c,
+            pd_port,
+            service,
+            address,
+            offset,
+            FPR2_LAYOUT_SLOT_SIZE,
+            staging.bytes,
+        )
+        .await;
+        contains_data |= eeprom_bytes_contain_data(&staging.bytes[..FPR2_HEADER_LEN]);
+        let Some(candidate) = (match candidate {
+            Ok(candidate) => candidate,
+            Err(()) => {
+                read_failed = true;
+                None
+            }
+        }) else {
+            continue;
+        };
+        let PersistDomainData::LayoutMarker(marker) = candidate.data else {
+            continue;
+        };
+        if marker.generation != candidate.sequence {
+            continue;
+        }
+        match marker.status {
+            LayoutMarkerStatus::Active
+                if latest_active_marker
+                    .is_none_or(|current| candidate.sequence > current.generation) =>
+            {
+                latest_active_marker = Some(marker);
+            }
+            LayoutMarkerStatus::Prepared
+                if latest_prepared_marker
+                    .is_none_or(|current| candidate.sequence > current.generation) =>
+            {
+                latest_prepared_marker = Some(marker);
+            }
+            _ => {}
+        }
+    }
+
+    // A valid ACTIVE marker makes the new format authoritative. Without one,
+    // keep reading legacy data so an interrupted migration can fall back
+    // safely instead of treating PREPARED records as production state.
+    if latest_active_marker.is_none() {
+        for offset in [
+            PREVIOUS_MEMORY_SLOT_A_OFFSET,
+            PREVIOUS_MEMORY_SLOT_B_OFFSET,
+            LEGACY_MEMORY_SLOT_A_OFFSET,
+            LEGACY_MEMORY_SLOT_B_OFFSET,
+            MEMORY_SLOT_A_OFFSET,
+            MEMORY_SLOT_B_OFFSET,
+        ] {
+            let probe_len = if matches!(
+                offset,
+                PREVIOUS_MEMORY_SLOT_A_OFFSET
+                    | PREVIOUS_MEMORY_SLOT_B_OFFSET
+                    | LEGACY_MEMORY_SLOT_A_OFFSET
+                    | LEGACY_MEMORY_SLOT_B_OFFSET
+                    | MEMORY_SLOT_A_OFFSET
+                    | MEMORY_SLOT_B_OFFSET
+            ) {
+                4
+            } else {
+                1
+            };
+            match read_eeprom_bytes_chunked_with_pd(
+                i2c,
+                pd_port,
+                service,
+                address,
+                offset,
+                &mut scratch.bytes[..probe_len],
+            )
+            .await
+            {
+                Ok(()) => {
+                    contains_data |= eeprom_bytes_contain_data(&scratch.bytes[..probe_len]);
+                    legacy_format_present |= probe_len == 4 && scratch.bytes[..4] == *b"FPM1";
+                }
+                Err(_) => read_failed = true,
+            }
+        }
+    }
+
+    let active_generation = latest_active_marker.map(|marker| marker.generation);
+    let read_generation = active_generation.or_else(|| {
+        latest_prepared_marker
+            .filter(|marker| marker.kind == LayoutMarkerKind::LegacyMigration)
+            .map(|marker| marker.generation)
+    });
+    for (domain, offsets, slot_size) in [
         (
             PersistDomain::SafetyCalibration,
             [FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET],
@@ -6926,111 +8266,70 @@ fn load_eeprom_memory_record(
             256,
         ),
         (
-            PersistDomain::LayoutMarker,
-            [FPR2_LAYOUT_A_OFFSET, FPR2_LAYOUT_B_OFFSET],
-            FPR2_LAYOUT_SLOT_SIZE,
+            PersistDomain::ThermalPlant,
+            [FPR2_THERMAL_PLANT_OFFSET, 0],
+            FPR2_THERMAL_SLOT_SIZE,
         ),
-    ];
-    for (domain, offsets, slot_size) in domain_slots {
+    ] {
+        let Some(read_generation) = read_generation else {
+            break;
+        };
+        let mut selected: Option<PersistRecord> = None;
         for offset in offsets
             .iter()
             .copied()
             .take(usize::from(domain.slot_count()))
         {
             staging.bytes.fill(0xff);
-            let header = &mut staging.bytes[..FPR2_HEADER_LEN];
-            let candidate = match read_eeprom_bytes_chunked(&mut eeprom, offset, header) {
-                Ok(()) => {
-                    contains_data |= eeprom_bytes_contain_data(header);
-                    let payload_len = usize::from(u16::from_le_bytes([header[12], header[13]]));
-                    let record_len = FPR2_HEADER_LEN.saturating_add(payload_len);
-                    if header[..4] == *b"FPR2"
-                        && record_len <= slot_size
-                        && record_len <= staging.bytes.len()
-                    {
-                        match read_eeprom_bytes_chunked(
-                            &mut eeprom,
-                            offset.saturating_add(FPR2_HEADER_LEN as u16),
-                            &mut staging.bytes[FPR2_HEADER_LEN..record_len],
-                        ) {
-                            Ok(()) => decode_persist_record(&staging.bytes[..record_len]).ok(),
-                            Err(_) => {
-                                read_failed = true;
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                }
-                Err(_) => {
+            let candidate = read_eeprom_persist_record(
+                i2c,
+                pd_port,
+                service,
+                address,
+                offset,
+                slot_size,
+                staging.bytes,
+            )
+            .await;
+            contains_data |= eeprom_bytes_contain_data(&staging.bytes[..FPR2_HEADER_LEN]);
+            let candidate = match candidate {
+                Ok(candidate) => candidate,
+                Err(()) => {
                     read_failed = true;
                     None
                 }
             };
             if let Some(candidate) = candidate {
-                let position = domain as usize - 1;
-                if candidate.data.domain() == domain {
-                    if domain == PersistDomain::LayoutMarker {
-                        layout_valid_slots = layout_valid_slots.saturating_add(1);
-                        if matches!(
-                            &candidate.data,
-                            PersistDomainData::LayoutMarker(LayoutMarker {
-                                status: LayoutMarkerStatus::Active,
-                                ..
-                            })
-                        ) {
-                            layout_active_slots = layout_active_slots.saturating_add(1);
-                        }
-                    }
-                    if domains[position]
+                if candidate.data.domain() == domain
+                    && candidate.sequence <= read_generation
+                    && selected
                         .as_ref()
                         .is_none_or(|current| candidate.sequence > current.sequence)
-                    {
-                        domains[position] = Some(candidate);
-                    }
+                {
+                    selected = Some(candidate);
                 }
             }
         }
+        domains[domain as usize - 1] = selected;
     }
-    // Once a layout marker exists, the legacy FPM1 region is no longer part
-    // of the boot read set. This makes ACTIVE a one-way format boundary and
-    // lets PREPARED recovery operate solely on the new domains.
-    if domains[4].is_none() {
-        for offset in [
-            PREVIOUS_MEMORY_SLOT_A_OFFSET,
-            PREVIOUS_MEMORY_SLOT_B_OFFSET,
-            LEGACY_MEMORY_SLOT_A_OFFSET,
-            LEGACY_MEMORY_SLOT_B_OFFSET,
-            MEMORY_SLOT_A_OFFSET,
-            MEMORY_SLOT_B_OFFSET,
-            FPR2_RESERVED_OFFSET,
-        ] {
-            let probe_len = if matches!(
-                offset,
-                PREVIOUS_MEMORY_SLOT_A_OFFSET
-                    | PREVIOUS_MEMORY_SLOT_B_OFFSET
-                    | LEGACY_MEMORY_SLOT_A_OFFSET
-                    | LEGACY_MEMORY_SLOT_B_OFFSET
-                    | MEMORY_SLOT_A_OFFSET
-                    | MEMORY_SLOT_B_OFFSET
-            ) {
-                4
-            } else {
-                1
-            };
-            match read_eeprom_bytes_chunked(&mut eeprom, offset, &mut scratch.bytes[..probe_len]) {
-                Ok(()) => {
-                    contains_data |= eeprom_bytes_contain_data(&scratch.bytes[..probe_len]);
-                    legacy_format_present |= probe_len == 4 && scratch.bytes[..4] == *b"FPM1";
-                }
-                Err(_) => read_failed = true,
-            }
-        }
-    }
-    let selected = merge_persist_records(&domains);
+
+    let prepared_recovery = latest_active_marker.is_none()
+        && latest_prepared_marker.is_some_and(|marker| {
+            marker.kind == LayoutMarkerKind::LegacyMigration
+                && !legacy_format_present
+                && fpr2_prepared_generation_is_complete(&domains, marker.generation)
+        });
+    let selected = if let Some(generation) = active_generation {
+        merge_persist_records(&domains, generation)
+    } else if prepared_recovery {
+        merge_persist_records(
+            &domains,
+            latest_prepared_marker.map_or(0, |marker| marker.generation),
+        )
+    } else {
+        None
+    };
     let current_format_valid = selected.is_some();
-    let layout_recovery_pending = layout_valid_slots > 0 && layout_active_slots < 2;
 
     if let Some(record) = &selected {
         info!(
@@ -7050,18 +8349,21 @@ fn load_eeprom_memory_record(
         legacy_format_present || eeprom_data_is_incompatible(current_format_valid, contains_data);
     let required = (read_failed && selected.is_none())
         || (contains_data && (domains[0].is_none() || domains[1].is_none()))
-        || layout_recovery_pending;
-    let prepared_recovery = layout_recovery_pending && domains[0].is_some() && domains[1].is_some();
+        || (contains_data && latest_active_marker.is_none() && !prepared_recovery);
     (selected, incompatible, required, prepared_recovery)
 }
 
 #[cfg(target_arch = "xtensa")]
-fn merge_persist_records(domains: &[Option<PersistRecord>; 5]) -> Option<MemoryRecord> {
+fn merge_persist_records(
+    domains: &[Option<PersistRecord>; 6],
+    sequence: u32,
+) -> Option<MemoryRecord> {
+    if !fpr2_snapshot_is_complete(domains, sequence) {
+        return None;
+    }
     let mut config = flux_purr_firmware::memory::MemoryConfig::default();
-    let mut sequence = 0;
     let mut present = false;
     for record in domains.iter().flatten() {
-        sequence = sequence.max(record.sequence);
         present = true;
         match &record.data {
             PersistDomainData::SafetyCalibration(value) => value.apply_to_config(&mut config),
@@ -7069,22 +8371,28 @@ fn merge_persist_records(domains: &[Option<PersistRecord>; 5]) -> Option<MemoryR
             PersistDomainData::UserPreferences(value) => value.apply_to_config(&mut config),
             PersistDomainData::NetworkAndPairing(value) => value.apply_to_config(&mut config),
             PersistDomainData::LayoutMarker(_) => {}
+            PersistDomainData::ThermalPlant(value) => value.apply_to_config(&mut config),
         }
     }
+    config.sanitize();
     present.then_some(MemoryRecord { sequence, config })
 }
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-async fn load_legacy_eeprom_memory_record(
+async fn load_legacy_eeprom_memory_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> (Option<MemoryRecord>, bool) {
+) -> (Option<MemoryRecord>, bool)
+where
+    PWM: SetDutyCycle,
+{
     let Some(address) = probe_eeprom_address(i2c) else {
         return (None, true);
     };
-    let mut eeprom = M24c64::with_address(i2c, address);
     let mut selected: Option<MemoryRecord> = None;
     let mut read_failed = false;
     for (offset, length) in [
@@ -7095,10 +8403,18 @@ async fn load_legacy_eeprom_memory_record(
         (LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
         (LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
     ] {
-        let candidate =
-            read_legacy_record_stream(&mut eeprom, offset, length, scratch, record_staging)
-                .await
-                .ok();
+        let candidate = read_legacy_record_stream(
+            i2c,
+            pd_port,
+            service,
+            address,
+            offset,
+            length,
+            scratch,
+            record_staging,
+        )
+        .await
+        .ok();
         if candidate.is_none() {
             read_failed = true;
         }
@@ -7115,15 +8431,21 @@ async fn load_legacy_eeprom_memory_record(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn read_legacy_record_stream(
-    eeprom: &mut M24c64<&mut I2c<'_, esp_hal::Blocking>>,
+async fn read_legacy_record_stream<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    address: u8,
     offset: u16,
     slot_size: usize,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<MemoryRecord, ()> {
+) -> Result<MemoryRecord, ()>
+where
+    PWM: SetDutyCycle,
+{
     let mut header = [0u8; MEMORY_RECORD_HEADER_LEN];
-    read_eeprom_bytes_chunked(eeprom, offset, &mut header).map_err(|_| ())?;
+    read_eeprom_bytes_chunked_with_pd(i2c, pd_port, service, address, offset, &mut header).await?;
     if header[..4] != *b"FPM1"
         || !matches!(header[4], 1 | 2 | 3 | 4 | MEMORY_RECORD_FORMAT_VERSION)
         || usize::from(header[5]) != MEMORY_RECORD_HEADER_LEN
@@ -7154,8 +8476,15 @@ async fn read_legacy_record_stream(
             .checked_add(MEMORY_RECORD_HEADER_LEN as u16)
             .and_then(|base| base.checked_add(payload_cursor as u16))
             .ok_or(())?;
-        read_eeprom_bytes_chunked(eeprom, tlv_offset, &mut scratch.bytes[..header_len])
-            .map_err(|_| ())?;
+        read_eeprom_bytes_chunked_with_pd(
+            i2c,
+            pd_port,
+            service,
+            address,
+            tlv_offset,
+            &mut scratch.bytes[..header_len],
+        )
+        .await?;
         crc = persistence_crc32_update(crc, &scratch.bytes[..header_len]);
         let tag = scratch.bytes[0];
         let value_len = if wide_tlv_lengths {
@@ -7168,7 +8497,10 @@ async fn read_legacy_record_stream(
             return Err(());
         }
         let mut value_read = 0usize;
-        let collect = !matches!(tag, 0x36 | 0x37 | 0x3a);
+        // The transient active record is part of the legacy configuration
+        // and must survive FPM1 -> FPR2 migration. The older raw plant
+        // records remain inspection-only and are intentionally not staged.
+        let collect = !matches!(tag, 0x36 | 0x37);
         while value_read < value_len {
             let chunk_len = (value_len - value_read).min(EEPROM_WRITE_CHUNK_MAX_BYTES);
             let value_offset = offset
@@ -7176,8 +8508,15 @@ async fn read_legacy_record_stream(
                 .and_then(|base| base.checked_add(payload_cursor as u16))
                 .and_then(|base| base.checked_add(value_read as u16))
                 .ok_or(())?;
-            read_eeprom_bytes_chunked(eeprom, value_offset, &mut scratch.bytes[..chunk_len])
-                .map_err(|_| ())?;
+            read_eeprom_bytes_chunked_with_pd(
+                i2c,
+                pd_port,
+                service,
+                address,
+                value_offset,
+                &mut scratch.bytes[..chunk_len],
+            )
+            .await?;
             crc = persistence_crc32_update(crc, &scratch.bytes[..chunk_len]);
             if collect && value_read + chunk_len <= staging.bytes.len() {
                 staging.bytes[value_read..value_read + chunk_len]
@@ -7282,8 +8621,14 @@ impl PersistDomainMask {
     const THERMAL: Self = Self(1 << 1);
     const PREFERENCES: Self = Self(1 << 2);
     const NETWORK: Self = Self(1 << 3);
-    const ALL: Self =
-        Self(Self::SAFETY.0 | Self::THERMAL.0 | Self::PREFERENCES.0 | Self::NETWORK.0);
+    const THERMAL_PLANT: Self = Self(1 << 4);
+    const ALL: Self = Self(
+        Self::SAFETY.0
+            | Self::THERMAL.0
+            | Self::PREFERENCES.0
+            | Self::NETWORK.0
+            | Self::THERMAL_PLANT.0,
+    );
 
     const fn single(domain: PersistDomain) -> Self {
         match domain {
@@ -7292,6 +8637,7 @@ impl PersistDomainMask {
             PersistDomain::UserPreferences => Self::PREFERENCES,
             PersistDomain::NetworkAndPairing => Self::NETWORK,
             PersistDomain::LayoutMarker => Self::ALL,
+            PersistDomain::ThermalPlant => Self::THERMAL_PLANT,
         }
     }
 
@@ -7302,6 +8648,7 @@ impl PersistDomainMask {
             PersistDomain::UserPreferences => self.0 & Self::PREFERENCES.0 != 0,
             PersistDomain::NetworkAndPairing => self.0 & Self::NETWORK.0 != 0,
             PersistDomain::LayoutMarker => false,
+            PersistDomain::ThermalPlant => self.0 & Self::THERMAL_PLANT.0 != 0,
         }
     }
 
@@ -7323,6 +8670,7 @@ impl PersistDomainMask {
             "user_preferences_persistence_failed" => Self::PREFERENCES,
             "network_pairing_persistence_failed" => Self::NETWORK,
             "layout_marker_persistence_failed" => Self::ALL,
+            "thermal_plant_persistence_failed" => Self::THERMAL_PLANT,
             _ => Self(0),
         }
     }
@@ -7341,6 +8689,9 @@ fn persist_domain_mask_between(
         || current.heater_curve_transaction_id != persisted.heater_curve_transaction_id
     {
         mask.0 |= PersistDomainMask::SAFETY.0;
+    }
+    if current.thermal_plant_transient_active != persisted.thermal_plant_transient_active {
+        mask.0 |= PersistDomainMask::THERMAL_PLANT.0;
     }
     if current.active_thermal_control_profile != persisted.active_thermal_control_profile
         || current.thermal_control_profile_pps5a != persisted.thermal_control_profile_pps5a
@@ -7382,6 +8733,9 @@ fn copy_persisted_domains(
         persisted.heater_curve_raw_observations = current.heater_curve_raw_observations;
         persisted.heater_curve_transaction_id = current.heater_curve_transaction_id;
     }
+    if domains.includes(PersistDomain::ThermalPlant) {
+        persisted.thermal_plant_transient_active = current.thermal_plant_transient_active;
+    }
     if domains.includes(PersistDomain::ThermalPolicy) {
         persisted.active_thermal_control_profile = current.active_thermal_control_profile;
         persisted.thermal_control_profile_pps5a = current.thermal_control_profile_pps5a;
@@ -7414,6 +8768,7 @@ impl MemoryCommitFailure {
             PersistDomain::UserPreferences => "user_preferences_persistence_failed",
             PersistDomain::NetworkAndPairing => "network_pairing_persistence_failed",
             PersistDomain::LayoutMarker => "layout_marker_persistence_failed",
+            PersistDomain::ThermalPlant => "thermal_plant_persistence_failed",
         }
     }
 
@@ -7428,6 +8783,7 @@ const fn memory_failure_requires_heater_lock(failure: MemoryCommitFailure) -> bo
         failure.domain,
         PersistDomain::SafetyCalibration
             | PersistDomain::ThermalPolicy
+            | PersistDomain::ThermalPlant
             | PersistDomain::LayoutMarker
     )
 }
@@ -7463,15 +8819,16 @@ fn log_memory_commit_failure(
     } else {
         "PERSISTENCE_COMMIT_ATTEMPT_FAILED"
     };
-    let mut line = heapless::String::<192>::new();
+    let mut line = heapless::String::<256>::new();
     let _ = writeln!(
         line,
-        "{prefix} code={} phase={} attempt={} sequence={} slot={}",
+        "{prefix} code={} phase={} attempt={} sequence={} slot={} message={}",
         failure.code(),
         failure.phase,
         failure.attempt,
         failure.sequence,
         failure.slot.as_str(),
+        failure.message(),
     );
     sink.write_line(line.as_bytes());
 }
@@ -7482,32 +8839,119 @@ fn memory_record_write_chunk_len(absolute_offset: usize, remaining: usize) -> us
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn service_pd_during_memory_commit(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    elapsed_ms: u64,
-    commit_started_at: Instant,
-) {
-    let now_ms = elapsed_ms.saturating_add(
-        Instant::now()
-            .as_millis()
-            .saturating_sub(commit_started_at.as_millis()),
-    );
-    let _ = read_pd_status(i2c, pd_port, now_ms).await;
+struct EepromPdServiceContext<'a, PWM> {
+    last_pd_observation: &'a mut Option<PdStatusObservation>,
+    heater_pwm: &'a mut PWM,
+    last_heater_duty: &'a mut u8,
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn write_eeprom_persist_record(
+impl<'a, PWM> EepromPdServiceContext<'a, PWM>
+where
+    PWM: SetDutyCycle,
+{
+    fn new(
+        last_pd_observation: &'a mut Option<PdStatusObservation>,
+        heater_pwm: &'a mut PWM,
+        last_heater_duty: &'a mut u8,
+    ) -> Self {
+        Self {
+            last_pd_observation,
+            heater_pwm,
+            last_heater_duty,
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+struct PdNetworkServiceContext<'a, 'b, PWM> {
+    eeprom: &'a mut EepromPdServiceContext<'b, PWM>,
+    pd_contract_ready: &'a mut bool,
+    ui_state: &'a mut FrontPanelUiState,
+    calibration_runtime_state: &'a mut CalibrationRuntimeState,
+    manual_pps: &'a mut ManualPpsState,
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn service_pd_during_network_operation<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-    elapsed_ms: u64,
-    commit_started_at: Instant,
+    context: &mut PdNetworkServiceContext<'_, '_, PWM>,
+) where
+    PWM: SetDutyCycle,
+{
+    let observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+    *context.eeprom.last_pd_observation = observation;
+    apply_pd_contract_observation(
+        observation,
+        context.pd_contract_ready,
+        context.ui_state,
+        context.calibration_runtime_state,
+        context.manual_pps,
+        context.eeprom.heater_pwm,
+        context.eeprom.last_heater_duty,
+    );
+}
+
+/// Network control can wait on a background task for seconds. Keep that wait
+/// from starving the FUSB302B policy or leaving stale heater intent armed.
+#[cfg(target_arch = "xtensa")]
+async fn run_network_operation_with_pd<F, PWM>(
+    operation: F,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    context: &mut PdNetworkServiceContext<'_, '_, PWM>,
+) -> F::Output
+where
+    F: Future,
+    PWM: SetDutyCycle,
+{
+    let mut pinned_operation = core::pin::pin!(operation);
+    loop {
+        match select(
+            pinned_operation.as_mut(),
+            EmbassyTimer::after_millis(PD_RUNTIME_SERVICE_INTERVAL_MS),
+        )
+        .await
+        {
+            Either::First(output) => return output,
+            Either::Second(_) => service_pd_during_network_operation(i2c, pd_port, context).await,
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn service_pd_during_eeprom_operation<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+) where
+    PWM: SetDutyCycle,
+{
+    let observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+    *service.last_pd_observation = observation;
+    if !startup_pd_contract_ready(observation) {
+        // EEPROM and PD share I2C. A failed or contract-less service result
+        // must remove physical heater power before the caller resumes normal
+        // control work; the next explicit arm is required after recovery.
+        apply_heater_duty(service.heater_pwm, 0, service.last_heater_duty);
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn write_eeprom_persist_record<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     sequence: u32,
     data: &PersistDomainData,
     slot: PersistSlot,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<(), MemoryCommitError> {
+) -> Result<(), MemoryCommitError>
+where
+    PWM: SetDutyCycle,
+{
     let staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
     staging.bytes.fill(0xff);
     let record_len = encode_persist_record(sequence, data, staging.bytes)
@@ -7531,7 +8975,7 @@ async fn write_eeprom_persist_record(
         write_result.map_err(memory_commit_error_from_eeprom)?;
         written += chunk_len;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
-        service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
     }
 
     let mut read = 0usize;
@@ -7549,7 +8993,7 @@ async fn write_eeprom_persist_record(
             return Err(MemoryCommitError::VerifyMismatch);
         }
         read += chunk_len;
-        service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
     }
     let verified = decode_persist_record(&staging.bytes[..record_len])
         .map_err(|_| MemoryCommitError::VerifyUnreadable)?;
@@ -7560,49 +9004,108 @@ async fn write_eeprom_persist_record(
 }
 
 #[cfg(target_arch = "xtensa")]
-#[inline(never)]
-async fn commit_memory_config_now(
+async fn write_layout_marker_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-    elapsed_ms: u64,
-    memory_sequence: &mut u32,
-    memory_config: &MemoryConfig,
-    domains_to_write: PersistDomainMask,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    generation: u32,
+    status: LayoutMarkerStatus,
+    kind: LayoutMarkerKind,
+    slot: PersistSlot,
+    phase: &'static str,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<(), MemoryCommitFailure> {
-    if domains_to_write.is_empty() {
-        return Ok(());
-    }
-    let mut expected_config = memory_config.clone();
-    expected_config.sanitize();
+) -> Result<(), MemoryCommitFailure>
+where
+    PWM: SetDutyCycle,
+{
+    let data = PersistDomainData::LayoutMarker(LayoutMarker {
+        generation,
+        status,
+        kind,
+    });
     let mut scratch = new_memory_io_scratch();
-    let next_sequence = memory_sequence.saturating_add(1);
-    let commit_started_at = Instant::now();
+    let result = {
+        #[cfg(feature = "hil-eeprom-commit-fault")]
+        {
+            Err(MemoryCommitError::Injected)
+        }
+        #[cfg(not(feature = "hil-eeprom-commit-fault"))]
+        {
+            write_eeprom_persist_record(
+                i2c,
+                pd_port,
+                service,
+                generation,
+                &data,
+                slot,
+                &mut scratch,
+                record_staging,
+            )
+            .await
+        }
+    };
+    if let Err(error) = result {
+        let failure = MemoryCommitFailure {
+            error,
+            phase,
+            attempt: 1,
+            sequence: generation,
+            domain: PersistDomain::LayoutMarker,
+            slot,
+        };
+        log_memory_commit_failure(persistence_log_sink, failure, true);
+        return Err(failure);
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn persist_memory_domains<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    sequence: u32,
+    expected_config: &MemoryConfig,
+    domains_to_write: PersistDomainMask,
+    double_slot_domains: bool,
+    phase: &'static str,
+    persistence_log_sink: &mut dyn PersistenceLogSink,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
+) -> Result<(), MemoryCommitFailure>
+where
+    PWM: SetDutyCycle,
+{
     let domains = [
         (
-            PersistDomainData::SafetyCalibration(SafetyCalibration::from_config(&expected_config)),
+            PersistDomainData::SafetyCalibration(SafetyCalibration::from_config(expected_config)),
             PersistSlot::A,
         ),
         (
-            PersistDomainData::ThermalPolicy(ThermalPolicy::from_config(&expected_config)),
+            PersistDomainData::ThermalPolicy(ThermalPolicy::from_config(expected_config)),
             PersistSlot::A,
         ),
         (
-            PersistDomainData::UserPreferences(UserPreferences::from_config(&expected_config)),
+            PersistDomainData::UserPreferences(UserPreferences::from_config(expected_config)),
             PersistSlot::Single,
         ),
         (
-            PersistDomainData::NetworkAndPairing(NetworkAndPairing::from_config(&expected_config)),
+            PersistDomainData::NetworkAndPairing(NetworkAndPairing::from_config(expected_config)),
+            PersistSlot::Single,
+        ),
+        (
+            PersistDomainData::ThermalPlant(ThermalPlantPersistence::from_config(expected_config)),
             PersistSlot::Single,
         ),
     ];
-    for (index, (data, single_slot)) in domains.iter().enumerate() {
-        if !domains_to_write.includes(data.domain()) {
+    let mut scratch = new_memory_io_scratch();
+    for (data, single_slot) in domains.iter() {
+        let domain = data.domain();
+        if !domains_to_write.includes(domain) || (domain.slot_count() == 2) != double_slot_domains {
             continue;
         }
-        let slot = if data.domain().slot_count() == 2 {
-            if next_sequence % 2 == 1 {
+        let slot = if domain.slot_count() == 2 {
+            if sequence % 2 == 1 {
                 PersistSlot::A
             } else {
                 PersistSlot::B
@@ -7616,9 +9119,8 @@ async fn commit_memory_config_now(
         let result = write_eeprom_persist_record(
             i2c,
             pd_port,
-            elapsed_ms,
-            commit_started_at,
-            next_sequence,
+            service,
+            sequence,
             data,
             slot,
             &mut scratch,
@@ -7628,36 +9130,166 @@ async fn commit_memory_config_now(
         if let Err(error) = result {
             let failure = MemoryCommitFailure {
                 error,
-                phase: if error == MemoryCommitError::EncodeFailed {
-                    "encode"
-                } else {
-                    "write"
-                },
+                phase,
                 attempt: 1,
-                sequence: next_sequence,
-                domain: data.domain(),
+                sequence,
+                domain,
                 slot,
             };
             log_memory_commit_failure(persistence_log_sink, failure, true);
-            let _ = index;
             return Err(failure);
         }
     }
+    Ok(())
+}
+
+#[cfg(target_arch = "xtensa")]
+#[inline(never)]
+async fn commit_memory_config_now<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    _elapsed_ms: u64,
+    memory_sequence: &mut u32,
+    memory_config: &MemoryConfig,
+    domains_to_write: PersistDomainMask,
+    persistence_log_sink: &mut dyn PersistenceLogSink,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
+) -> Result<(), MemoryCommitFailure>
+where
+    PWM: SetDutyCycle,
+{
+    if domains_to_write.is_empty() {
+        return Ok(());
+    }
+    let mut expected_config = memory_config.clone();
+    expected_config.sanitize();
+    let next_sequence = memory_sequence.saturating_add(1);
+    let marker_slot = if next_sequence % 2 == 1 {
+        PersistSlot::A
+    } else {
+        PersistSlot::B
+    };
+    write_layout_marker_record(
+        i2c,
+        pd_port,
+        service,
+        next_sequence,
+        LayoutMarkerStatus::Prepared,
+        LayoutMarkerKind::Commit,
+        marker_slot,
+        "prepared",
+        persistence_log_sink,
+        record_staging,
+    )
+    .await?;
+    persist_memory_domains(
+        i2c,
+        pd_port,
+        service,
+        next_sequence,
+        &expected_config,
+        domains_to_write,
+        true,
+        "write",
+        persistence_log_sink,
+        record_staging,
+    )
+    .await?;
+    persist_memory_domains(
+        i2c,
+        pd_port,
+        service,
+        next_sequence,
+        &expected_config,
+        domains_to_write,
+        false,
+        "write-single",
+        persistence_log_sink,
+        record_staging,
+    )
+    .await?;
+    // ACTIVE is the publication point for the whole snapshot. Do not expose
+    // this generation until both double-slot and single-slot domains have
+    // completed their write/readback verification.
+    write_layout_marker_record(
+        i2c,
+        pd_port,
+        service,
+        next_sequence,
+        LayoutMarkerStatus::Active,
+        LayoutMarkerKind::Commit,
+        marker_slot,
+        "active",
+        persistence_log_sink,
+        record_staging,
+    )
+    .await?;
     *memory_sequence = next_sequence;
     Ok(())
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn initialize_fpr2_defaults(
+async fn commit_memory_config_domains_without_marker<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    sequence: u32,
+    memory_config: &MemoryConfig,
+    domains_to_write: PersistDomainMask,
+    phase: &'static str,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Option<u32> {
+) -> Result<(), MemoryCommitFailure>
+where
+    PWM: SetDutyCycle,
+{
+    let mut expected_config = memory_config.clone();
+    expected_config.sanitize();
+    persist_memory_domains(
+        i2c,
+        pd_port,
+        service,
+        sequence,
+        &expected_config,
+        domains_to_write,
+        true,
+        phase,
+        persistence_log_sink,
+        record_staging,
+    )
+    .await?;
+    persist_memory_domains(
+        i2c,
+        pd_port,
+        service,
+        sequence,
+        &expected_config,
+        domains_to_write,
+        false,
+        phase,
+        persistence_log_sink,
+        record_staging,
+    )
+    .await
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn initialize_fpr2_defaults<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    persistence_log_sink: &mut dyn PersistenceLogSink,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
+) -> Option<u32>
+where
+    PWM: SetDutyCycle,
+{
     let mut sequence = 0;
     if commit_memory_config_now(
         i2c,
         pd_port,
+        service,
         0,
         &mut sequence,
         &flux_purr_firmware::memory::MemoryConfig::default(),
@@ -7670,148 +9302,203 @@ async fn initialize_fpr2_defaults(
     {
         return None;
     }
-    let mut scratch = new_memory_io_scratch();
-    let marker_sequence = sequence.saturating_add(1);
-    let marker = PersistDomainData::LayoutMarker(LayoutMarker {
-        generation: marker_sequence,
-        status: LayoutMarkerStatus::Active,
-    });
-    for slot in [PersistSlot::A, PersistSlot::B] {
-        if let Err(error) = write_eeprom_persist_record(
-            i2c,
-            pd_port,
-            0,
-            Instant::now(),
-            marker_sequence,
-            &marker,
-            slot,
-            &mut scratch,
-            record_staging,
-        )
-        .await
-        {
-            let failure = MemoryCommitFailure {
-                error,
-                phase: "active-init",
-                attempt: 1,
-                sequence: marker_sequence,
-                domain: PersistDomain::LayoutMarker,
-                slot,
-            };
-            log_memory_commit_failure(persistence_log_sink, failure, true);
-            return None;
-        }
-    }
-    Some(marker_sequence)
+    Some(sequence)
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn migrate_legacy_memory_config(
+async fn migrate_legacy_memory_config<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     legacy_sequence: u32,
     config: &MemoryConfig,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<u32, MemoryCommitFailure> {
-    let mut sequence = legacy_sequence;
-    commit_memory_config_now(
+) -> Result<u32, MemoryCommitFailure>
+where
+    PWM: SetDutyCycle,
+{
+    let sequence = legacy_sequence.saturating_add(1);
+    for slot in [PersistSlot::A, PersistSlot::B] {
+        write_layout_marker_record(
+            i2c,
+            pd_port,
+            service,
+            sequence,
+            LayoutMarkerStatus::Prepared,
+            LayoutMarkerKind::LegacyMigration,
+            slot,
+            "prepared",
+            persistence_log_sink,
+            record_staging,
+        )
+        .await?;
+    }
+    commit_memory_config_domains_without_marker(
         i2c,
         pd_port,
-        0,
-        &mut sequence,
+        service,
+        sequence,
         config,
         PersistDomainMask::ALL,
+        "write-migration",
         persistence_log_sink,
         record_staging,
     )
     .await?;
     let mut scratch = new_memory_io_scratch();
-    let marker_sequence = sequence.saturating_add(1);
-    let prepared = PersistDomainData::LayoutMarker(LayoutMarker {
-        generation: marker_sequence,
-        status: LayoutMarkerStatus::Prepared,
-    });
+    invalidate_legacy_v5_magic(i2c, pd_port, service, &mut scratch)
+        .await
+        .map_err(|error| {
+            let failure = MemoryCommitFailure {
+                error,
+                phase: "invalidate",
+                attempt: 1,
+                sequence,
+                domain: PersistDomain::LayoutMarker,
+                slot: PersistSlot::Single,
+            };
+            log_memory_commit_failure(persistence_log_sink, failure, true);
+            failure
+        })?;
     for slot in [PersistSlot::A, PersistSlot::B] {
-        write_eeprom_persist_record(
+        write_layout_marker_record(
             i2c,
             pd_port,
-            0,
-            Instant::now(),
-            marker_sequence,
-            &prepared,
+            service,
+            sequence,
+            LayoutMarkerStatus::Active,
+            LayoutMarkerKind::LegacyMigration,
             slot,
-            &mut scratch,
+            "active",
+            persistence_log_sink,
             record_staging,
         )
-        .await
-        .map_err(|error| MemoryCommitFailure {
-            error,
-            phase: "prepared",
-            attempt: 1,
-            sequence: marker_sequence,
-            domain: PersistDomain::LayoutMarker,
-            slot,
-        })?;
+        .await?;
     }
-    invalidate_legacy_v5_magic(i2c, pd_port, 0, Instant::now(), &mut scratch)
-        .await
-        .map_err(|error| MemoryCommitFailure {
-            error,
-            phase: "invalidate",
-            attempt: 1,
-            sequence: marker_sequence,
-            domain: PersistDomain::LayoutMarker,
-            slot: PersistSlot::Single,
-        })?;
-    let active = PersistDomainData::LayoutMarker(LayoutMarker {
-        generation: marker_sequence,
-        status: LayoutMarkerStatus::Active,
-    });
-    for slot in [PersistSlot::A, PersistSlot::B] {
-        write_eeprom_persist_record(
-            i2c,
-            pd_port,
-            0,
-            Instant::now(),
-            marker_sequence,
-            &active,
-            slot,
-            &mut scratch,
-            record_staging,
-        )
-        .await
-        .map_err(|error| MemoryCommitFailure {
-            error,
-            phase: "active",
-            attempt: 1,
-            sequence: marker_sequence,
-            domain: PersistDomain::LayoutMarker,
-            slot,
-        })?;
-    }
-    Ok(marker_sequence)
+    Ok(sequence)
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn recover_prepared_fpr2_layout(
+async fn recover_prepared_fpr2_layout<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     sequence: u32,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<(), MemoryCommitFailure> {
+) -> Result<(), MemoryCommitFailure>
+where
+    PWM: SetDutyCycle,
+{
+    let Some(address) = probe_eeprom_address(i2c) else {
+        let failure = MemoryCommitFailure {
+            error: MemoryCommitError::VerifyUnreadable,
+            phase: "active-recovery",
+            attempt: 1,
+            sequence,
+            domain: PersistDomain::LayoutMarker,
+            slot: PersistSlot::A,
+        };
+        log_memory_commit_failure(persistence_log_sink, failure, true);
+        return Err(failure);
+    };
+    let mut domains: [Option<PersistRecord>; 6] = [None, None, None, None, None, None];
+    let mut read_failed = false;
+    let staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
+    for (domain, offsets, slot_size) in [
+        (
+            PersistDomain::SafetyCalibration,
+            [FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET],
+            FPR2_SAFETY_SLOT_SIZE,
+        ),
+        (
+            PersistDomain::ThermalPolicy,
+            [FPR2_THERMAL_A_OFFSET, FPR2_THERMAL_B_OFFSET],
+            FPR2_THERMAL_SLOT_SIZE,
+        ),
+        (
+            PersistDomain::UserPreferences,
+            [FPR2_PREFERENCES_OFFSET, 0],
+            128,
+        ),
+        (
+            PersistDomain::NetworkAndPairing,
+            [FPR2_NETWORK_OFFSET, 0],
+            256,
+        ),
+        (
+            PersistDomain::ThermalPlant,
+            [FPR2_THERMAL_PLANT_OFFSET, 0],
+            FPR2_THERMAL_SLOT_SIZE,
+        ),
+    ] {
+        let mut selected: Option<PersistRecord> = None;
+        for offset in offsets
+            .iter()
+            .copied()
+            .take(usize::from(domain.slot_count()))
+        {
+            staging.bytes.fill(0xff);
+            let candidate = read_eeprom_persist_record(
+                i2c,
+                pd_port,
+                service,
+                address,
+                offset,
+                slot_size,
+                staging.bytes,
+            )
+            .await;
+            let candidate = match candidate {
+                Ok(candidate) => candidate,
+                Err(()) => {
+                    read_failed = true;
+                    None
+                }
+            };
+            if let Some(candidate) = candidate {
+                if candidate.data.domain() == domain
+                    && candidate.sequence == sequence
+                    && selected
+                        .as_ref()
+                        .is_none_or(|current| candidate.sequence > current.sequence)
+                {
+                    selected = Some(candidate);
+                }
+            }
+        }
+        domains[domain as usize - 1] = selected;
+    }
+    if read_failed || !fpr2_prepared_generation_is_complete(&domains, sequence) {
+        let failure = MemoryCommitFailure {
+            error: if read_failed {
+                MemoryCommitError::VerifyUnreadable
+            } else {
+                MemoryCommitError::VerifyMismatch
+            },
+            phase: "active-recovery",
+            attempt: 1,
+            sequence,
+            domain: PersistDomain::LayoutMarker,
+            slot: PersistSlot::A,
+        };
+        log_memory_commit_failure(persistence_log_sink, failure, true);
+        return Err(failure);
+    }
+
+    drop(staging);
     let mut scratch = new_memory_io_scratch();
     let active = PersistDomainData::LayoutMarker(LayoutMarker {
         generation: sequence,
         status: LayoutMarkerStatus::Active,
+        kind: LayoutMarkerKind::LegacyMigration,
     });
     for slot in [PersistSlot::A, PersistSlot::B] {
         if let Err(error) = write_eeprom_persist_record(
             i2c,
             pd_port,
-            0,
-            Instant::now(),
+            service,
             sequence,
             &active,
             slot,
@@ -7836,13 +9523,15 @@ async fn recover_prepared_fpr2_layout(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn invalidate_legacy_v5_magic(
+async fn invalidate_legacy_v5_magic<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
-    elapsed_ms: u64,
-    commit_started_at: Instant,
+    service: &mut EepromPdServiceContext<'_, PWM>,
     scratch: &mut MemoryIoScratch,
-) -> Result<(), MemoryCommitError> {
+) -> Result<(), MemoryCommitError>
+where
+    PWM: SetDutyCycle,
+{
     let Some(address) = probe_eeprom_address(i2c) else {
         return Err(MemoryCommitError::WriteAddressNoAck);
     };
@@ -7855,7 +9544,7 @@ async fn invalidate_legacy_v5_magic(
         };
         result.map_err(memory_commit_error_from_eeprom)?;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
-        service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
     }
     Ok(())
 }
@@ -7986,15 +9675,21 @@ fn estimated_heater_resistance_ohms(
 #[cfg(any(target_arch = "xtensa", test))]
 fn effective_pps_current_limit_ma(
     capability_max_ma: u16,
-    _pd_observation: Option<PdStatusObservation>,
+    pd_observation: Option<PdStatusObservation>,
 ) -> u16 {
-    // CURRENT_DATA_REGISTER is the instantaneous draw. It is useful telemetry,
-    // but it is not the APDO contract limit: treating a partially loaded 5 A
-    // source as, for example, a 2.5 A contract feeds the draw back into the
-    // voltage ceiling and prevents a high-temperature plate from ever using
-    // its negotiated PPS headroom. The resistance-derived ceiling below keeps
-    // actual heater current within this contractual budget.
-    capability_max_ma
+    // `current_ma` on the FUSB302B observation is the committed PPS contract,
+    // not instantaneous VBUS draw. It is authoritative after a source
+    // capability refresh, whereas the capability bridge remains the safe
+    // provisional ceiling before a PPS contract is ready.
+    pd_observation
+        .filter(|observation| {
+            observation.status.pd_active
+                && observation.contract.kind == ContractKind::Pps
+                && observation.current_ma >= MIN_HEATER_CONTRACT_MA
+        })
+        .map_or(capability_max_ma, |observation| {
+            capability_max_ma.min(observation.current_ma)
+        })
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -8270,7 +9965,7 @@ fn integer_sqrt_floor(value: u64) -> u32 {
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 fn adjustable_mode_for_request(request_mv: u16, pps_max_mv: u16) -> ch224q::AdjustableVoltageMode {
-    if request_mv <= pps_max_mv.min(ch224q::CH224Q_PPS_MAX_MV) {
+    if request_mv <= pps_max_mv {
         ch224q::AdjustableVoltageMode::Pps
     } else {
         ch224q::AdjustableVoltageMode::Avs
@@ -8349,17 +10044,42 @@ fn select_heater_power_backend(
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: true,
             fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+            terminal_fixed_pd_disarmed: false,
         };
     };
 
-    let capability_state = ManualPpsState::from_capabilities(Some(capabilities));
-    let Some((pps_min_mv, pps_max_mv, capability_max_ma)) =
-        capability_state.thermal_plant_source_limits()
-    else {
+    select_heater_power_backend_with_capability_state(
+        capabilities,
+        status,
+        ManualPpsState::from_capabilities(Some(capabilities)),
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn select_heater_power_backend_with_capability_state(
+    capabilities: ch224q::AdjustablePowerCapabilities,
+    status: Option<Status>,
+    capability_state: ManualPpsState,
+) -> HeaterPowerBackend {
+    select_heater_power_backend_with_source_limits(
+        capabilities,
+        status,
+        capability_state.thermal_plant_source_limits(),
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn select_heater_power_backend_with_source_limits(
+    capabilities: ch224q::AdjustablePowerCapabilities,
+    status: Option<Status>,
+    source_limits: Option<(u16, u16, u16)>,
+) -> HeaterPowerBackend {
+    let Some((pps_min_mv, pps_max_mv, capability_max_ma)) = source_limits else {
         return HeaterPowerBackend::FixedPdPwmFallback {
             reason: HeaterPowerBackendReason::NoPps20vCapability,
             fixed_request_confirmed: true,
             fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+            terminal_fixed_pd_disarmed: false,
         };
     };
     let idle_request_mv = HEATER_ADJUSTABLE_MIN_MV.clamp(pps_min_mv, pps_max_mv);
@@ -8436,33 +10156,66 @@ fn constrain_heater_backend_to_controller(
                 terminal_fixed_pd_disarmed,
             }
         }
-        (ControllerKind::Fusb302b, HeaterPowerBackend::PpsMos { .. }) => {
-            HeaterPowerBackend::FixedPdPwmFallback {
-                reason: HeaterPowerBackendReason::NoPps20vCapability,
-                fixed_request_confirmed: false,
-                fixed_request: ch224q::VoltageRequest::V20,
-            }
-        }
-        (ControllerKind::Fusb302b, HeaterPowerBackend::FixedPdPwmFallback { reason, .. }) => {
+        (
+            ControllerKind::Fusb302b,
+            HeaterPowerBackend::PpsMos {
+                terminal_fixed_pd_disarmed,
+                ..
+            },
+        ) => HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::NoPps20vCapability,
+            fixed_request_confirmed: false,
+            fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed,
+        },
+        (
+            ControllerKind::Fusb302b,
             HeaterPowerBackend::FixedPdPwmFallback {
                 reason,
-                fixed_request_confirmed: false,
-                fixed_request: ch224q::VoltageRequest::V20,
-            }
-        }
+                terminal_fixed_pd_disarmed,
+                ..
+            },
+        ) => HeaterPowerBackend::FixedPdPwmFallback {
+            reason,
+            fixed_request_confirmed: false,
+            fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed,
+        },
         (_, backend) => backend,
     }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fusb302b_pps_backend_from_capabilities(
-    capabilities: ch224q::AdjustablePowerCapabilities,
-) -> Option<HeaterPowerBackend> {
-    let backend = constrain_heater_backend_to_controller(
+fn select_fusb302b_heater_power_backend(
+    capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+) -> HeaterPowerBackend {
+    let Some(capabilities) = capabilities else {
+        return HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::CapabilityReadFailed,
+            fixed_request_confirmed: false,
+            fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed: false,
+        };
+    };
+
+    constrain_heater_backend_to_controller(
         ControllerKind::Fusb302b,
-        select_heater_power_backend(Some(capabilities), None),
-    );
-    matches!(backend, HeaterPowerBackend::PpsMos { .. }).then_some(backend)
+        select_heater_power_backend_with_source_limits(
+            capabilities,
+            None,
+            ManualPpsState::from_fusb302b_capabilities(Some(capabilities)).heater_source_limits(),
+        ),
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn refresh_fusb302b_heater_power_backend(
+    previous: HeaterPowerBackend,
+    capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+) -> HeaterPowerBackend {
+    let mut refreshed = select_fusb302b_heater_power_backend(capabilities);
+    refreshed.set_terminal_fixed_pd_disarmed(previous.terminal_fixed_pd_disarmed());
+    refreshed
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -8507,7 +10260,10 @@ where
     ui_state.heater_enabled = false;
     ui_state.heater_output_percent = 0;
 
-    if !request_pd_fixed_voltage(i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST).await {
+    if !matches!(
+        request_pd_fixed_voltage(i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST).await,
+        PdContractRequestState::Confirmed
+    ) {
         // Keep both the disarm latch and the PPS backend lock so the next
         // control period retries fixed PD without re-applying a PPS request.
         return true;
@@ -8530,6 +10286,18 @@ fn terminal_fixed_pd_voltage_confirmed(measured_vin_mv: u32) -> bool {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn pd_observation_confirms_fixed_contract(
+    observation: Option<PdStatusObservation>,
+    requested_mv: u16,
+) -> bool {
+    observation.is_some_and(|observation| {
+        observation.status.pd_active
+            && observation.contract.kind == ContractKind::Fixed
+            && observation.contract.voltage_mv == requested_mv
+    })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn latch_terminal_fixed_pd_disarm(
     calibration_runtime_state: &CalibrationRuntimeState,
     backend: &mut HeaterPowerBackend,
@@ -8537,13 +10305,7 @@ fn latch_terminal_fixed_pd_disarm(
     if !calibration_runtime_state.immediate_heater_disarm_pending {
         return false;
     }
-    if let HeaterPowerBackend::PpsMos {
-        terminal_fixed_pd_disarmed,
-        ..
-    } = backend
-    {
-        *terminal_fixed_pd_disarmed = true;
-    }
+    backend.set_terminal_fixed_pd_disarmed(true);
     true
 }
 
@@ -8552,34 +10314,46 @@ fn release_terminal_fixed_pd_disarm_for_manual_pps(
     backend: &mut HeaterPowerBackend,
     manual_pps_active: bool,
 ) -> bool {
-    let HeaterPowerBackend::PpsMos {
-        terminal_fixed_pd_disarmed,
-        current_mode,
-        current_request_mv,
-        settle_until_ms,
-        next_request_at_ms,
-        current_limit_fixed_pwm_active,
-        current_limit_fixed_request_confirmed,
-        idle_request_mv,
-        ..
-    } = backend
-    else {
-        return false;
-    };
-    if !manual_pps_active || !*terminal_fixed_pd_disarmed {
+    if !manual_pps_active {
         return false;
     }
 
-    // A new manual PPS request is an explicit, non-heating re-arm. It may
-    // renegotiate the source while the heater output remains at zero.
-    *terminal_fixed_pd_disarmed = false;
-    *current_mode = None;
-    *current_request_mv = *idle_request_mv;
-    *settle_until_ms = None;
-    *next_request_at_ms = 0;
-    *current_limit_fixed_pwm_active = false;
-    *current_limit_fixed_request_confirmed = false;
-    true
+    match backend {
+        HeaterPowerBackend::PpsMos {
+            terminal_fixed_pd_disarmed,
+            current_mode,
+            current_request_mv,
+            settle_until_ms,
+            next_request_at_ms,
+            current_limit_fixed_pwm_active,
+            current_limit_fixed_request_confirmed,
+            idle_request_mv,
+            ..
+        } if *terminal_fixed_pd_disarmed => {
+            // A new manual PPS request is an explicit, non-heating re-arm. It
+            // may renegotiate the source while the heater output remains at zero.
+            *terminal_fixed_pd_disarmed = false;
+            *current_mode = None;
+            *current_request_mv = *idle_request_mv;
+            *settle_until_ms = None;
+            *next_request_at_ms = 0;
+            *current_limit_fixed_pwm_active = false;
+            *current_limit_fixed_request_confirmed = false;
+            true
+        }
+        HeaterPowerBackend::FixedPdPwmFallback {
+            terminal_fixed_pd_disarmed,
+            fixed_request_confirmed,
+            ..
+        } if *terminal_fixed_pd_disarmed => {
+            // Leave fallback ready to request fixed PD again if the manual PPS
+            // override is later cleared.
+            *terminal_fixed_pd_disarmed = false;
+            *fixed_request_confirmed = false;
+            true
+        }
+        _ => false,
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -8633,14 +10407,7 @@ where
 {
     let manual_pps_active = manual_pps.enabled;
     let _ = release_terminal_fixed_pd_disarm_for_manual_pps(backend, manual_pps_active);
-    let terminal_fixed_pd_disarmed = match backend {
-        HeaterPowerBackend::PpsMos {
-            terminal_fixed_pd_disarmed,
-            ..
-        } => *terminal_fixed_pd_disarmed,
-        HeaterPowerBackend::FixedPdPwmFallback { .. } => false,
-    };
-    if terminal_fixed_pd_disarmed {
+    if backend.terminal_fixed_pd_disarmed() {
         apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
         return false;
     }
@@ -8724,12 +10491,14 @@ where
             HeaterPowerBackend::FixedPdPwmFallback {
                 reason,
                 fixed_request,
+                terminal_fixed_pd_disarmed,
                 ..
             } => {
                 *backend = HeaterPowerBackend::FixedPdPwmFallback {
                     reason,
                     fixed_request_confirmed: false,
                     fixed_request,
+                    terminal_fixed_pd_disarmed,
                 };
             }
             HeaterPowerBackend::PpsMos {
@@ -8763,22 +10532,35 @@ where
             reason,
             fixed_request_confirmed,
             fixed_request,
+            terminal_fixed_pd_disarmed,
         } => {
             if !fixed_request_confirmed && !manual_pps_active {
-                if request_pd_fixed_voltage(i2c, pd_port, fixed_request).await {
-                    *backend = HeaterPowerBackend::FixedPdPwmFallback {
-                        reason,
-                        fixed_request_confirmed: true,
-                        fixed_request,
-                    };
-                    info!("heater backend fallback fixed-pd request confirmed");
-                } else {
-                    apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
-                    info!(
-                        "heater backend fallback waiting for fixed-pd request reason={=str}",
-                        reason.label(),
-                    );
-                    return false;
+                match request_pd_fixed_voltage(i2c, pd_port, fixed_request).await {
+                    PdContractRequestState::Confirmed => {
+                        *backend = HeaterPowerBackend::FixedPdPwmFallback {
+                            reason,
+                            fixed_request_confirmed: true,
+                            fixed_request,
+                            terminal_fixed_pd_disarmed,
+                        };
+                        info!("heater backend fallback fixed-pd contract confirmed");
+                    }
+                    PdContractRequestState::Pending => {
+                        apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+                        info!(
+                            "heater backend fallback waiting for fixed-pd contract reason={=str}",
+                            reason.label(),
+                        );
+                        return false;
+                    }
+                    PdContractRequestState::Failed => {
+                        apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+                        info!(
+                            "heater backend fallback fixed-pd request failed reason={=str}",
+                            reason.label(),
+                        );
+                        return false;
+                    }
                 }
             }
             let negotiated_current_ma = pd_observation
@@ -8855,54 +10637,146 @@ where
                         if now_ms < settle_until_ms {
                             return false;
                         }
-                        *backend = HeaterPowerBackend::PpsMos {
-                            pps_min_mv,
-                            idle_request_mv,
-                            pps_max_mv,
-                            adjustable_max_mv,
-                            capability_max_ma,
-                            current_mode: None,
-                            current_request_mv: HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
-                            settle_until_ms: None,
-                            next_request_at_ms: 0,
-                            current_limit_fixed_pwm_active: true,
-                            current_limit_fixed_request_confirmed: true,
-                            terminal_fixed_pd_disarmed: false,
-                        };
+                        if pd_observation_confirms_fixed_contract(
+                            pd_observation,
+                            HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
+                        ) {
+                            *backend = HeaterPowerBackend::PpsMos {
+                                pps_min_mv,
+                                idle_request_mv,
+                                pps_max_mv,
+                                adjustable_max_mv,
+                                capability_max_ma,
+                                current_mode: None,
+                                current_request_mv: HEATER_CURRENT_LIMIT_FALLBACK_REQUEST
+                                    .millivolts(),
+                                settle_until_ms: None,
+                                next_request_at_ms: 0,
+                                current_limit_fixed_pwm_active: true,
+                                current_limit_fixed_request_confirmed: true,
+                                terminal_fixed_pd_disarmed: false,
+                            };
+                        } else {
+                            match request_pd_fixed_voltage(
+                                i2c,
+                                pd_port,
+                                HEATER_CURRENT_LIMIT_FALLBACK_REQUEST,
+                            )
+                            .await
+                            {
+                                PdContractRequestState::Confirmed => {
+                                    *backend = HeaterPowerBackend::PpsMos {
+                                        pps_min_mv,
+                                        idle_request_mv,
+                                        pps_max_mv,
+                                        adjustable_max_mv,
+                                        capability_max_ma,
+                                        current_mode: None,
+                                        current_request_mv: HEATER_CURRENT_LIMIT_FALLBACK_REQUEST
+                                            .millivolts(),
+                                        settle_until_ms: None,
+                                        next_request_at_ms: 0,
+                                        current_limit_fixed_pwm_active: true,
+                                        current_limit_fixed_request_confirmed: true,
+                                        terminal_fixed_pd_disarmed: false,
+                                    };
+                                }
+                                PdContractRequestState::Pending => {
+                                    *backend = HeaterPowerBackend::PpsMos {
+                                        pps_min_mv,
+                                        idle_request_mv,
+                                        pps_max_mv,
+                                        adjustable_max_mv,
+                                        capability_max_ma,
+                                        current_mode: None,
+                                        current_request_mv: HEATER_CURRENT_LIMIT_FALLBACK_REQUEST
+                                            .millivolts(),
+                                        settle_until_ms: Some(
+                                            now_ms.saturating_add(HEATER_PPS_LARGE_TRANSITION_MS),
+                                        ),
+                                        next_request_at_ms: 0,
+                                        current_limit_fixed_pwm_active: true,
+                                        current_limit_fixed_request_confirmed: false,
+                                        terminal_fixed_pd_disarmed: false,
+                                    };
+                                    return false;
+                                }
+                                PdContractRequestState::Failed => {
+                                    *backend = HeaterPowerBackend::PpsMos {
+                                        pps_min_mv,
+                                        idle_request_mv,
+                                        pps_max_mv,
+                                        adjustable_max_mv,
+                                        capability_max_ma,
+                                        current_mode: None,
+                                        current_request_mv: HEATER_CURRENT_LIMIT_FALLBACK_REQUEST
+                                            .millivolts(),
+                                        settle_until_ms: None,
+                                        next_request_at_ms: 0,
+                                        current_limit_fixed_pwm_active: true,
+                                        current_limit_fixed_request_confirmed: false,
+                                        terminal_fixed_pd_disarmed: false,
+                                    };
+                                    return false;
+                                }
+                            }
+                        }
                     } else {
-                        if !request_pd_fixed_voltage(
+                        match request_pd_fixed_voltage(
                             i2c,
                             pd_port,
                             HEATER_CURRENT_LIMIT_FALLBACK_REQUEST,
                         )
                         .await
                         {
-                            info!(
-                                "heater current-limit fallback waiting fixed_mv={=u16} safe_max_mv={=u16} control_floor_mv={=u16} current_limit_ma={=u16}",
-                                HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
-                                safe_max_mv,
-                                control_floor_mv,
-                                effective_current_limit_ma,
-                            );
-                            return false;
+                            PdContractRequestState::Confirmed => {
+                                *backend = HeaterPowerBackend::PpsMos {
+                                    pps_min_mv,
+                                    idle_request_mv,
+                                    pps_max_mv,
+                                    adjustable_max_mv,
+                                    capability_max_ma,
+                                    current_mode: None,
+                                    current_request_mv: HEATER_CURRENT_LIMIT_FALLBACK_REQUEST
+                                        .millivolts(),
+                                    settle_until_ms: None,
+                                    next_request_at_ms: 0,
+                                    current_limit_fixed_pwm_active: true,
+                                    current_limit_fixed_request_confirmed: true,
+                                    terminal_fixed_pd_disarmed: false,
+                                };
+                            }
+                            PdContractRequestState::Pending => {
+                                *backend = HeaterPowerBackend::PpsMos {
+                                    pps_min_mv,
+                                    idle_request_mv,
+                                    pps_max_mv,
+                                    adjustable_max_mv,
+                                    capability_max_ma,
+                                    current_mode: None,
+                                    current_request_mv: HEATER_CURRENT_LIMIT_FALLBACK_REQUEST
+                                        .millivolts(),
+                                    settle_until_ms: Some(
+                                        now_ms.saturating_add(HEATER_PPS_LARGE_TRANSITION_MS),
+                                    ),
+                                    next_request_at_ms: 0,
+                                    current_limit_fixed_pwm_active: true,
+                                    current_limit_fixed_request_confirmed: false,
+                                    terminal_fixed_pd_disarmed: false,
+                                };
+                                return false;
+                            }
+                            PdContractRequestState::Failed => {
+                                info!(
+                                    "heater current-limit fallback waiting fixed_mv={=u16} safe_max_mv={=u16} control_floor_mv={=u16} current_limit_ma={=u16}",
+                                    HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
+                                    safe_max_mv,
+                                    control_floor_mv,
+                                    effective_current_limit_ma,
+                                );
+                                return false;
+                            }
                         }
-                        *backend = HeaterPowerBackend::PpsMos {
-                            pps_min_mv,
-                            idle_request_mv,
-                            pps_max_mv,
-                            adjustable_max_mv,
-                            capability_max_ma,
-                            current_mode: None,
-                            current_request_mv: HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
-                            settle_until_ms: Some(
-                                now_ms.saturating_add(HEATER_PPS_LARGE_TRANSITION_MS),
-                            ),
-                            next_request_at_ms: 0,
-                            current_limit_fixed_pwm_active: true,
-                            current_limit_fixed_request_confirmed: false,
-                            terminal_fixed_pd_disarmed: false,
-                        };
-                        return true;
                     }
                 }
                 let fallback_duty_percent = apply_warmup_soft_start(
@@ -9030,13 +10904,16 @@ where
                     }
                     PdContractRequestState::Failed => {
                         apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
-                        let fixed_request_confirmed =
+                        let fixed_request_confirmed = matches!(
                             request_pd_fixed_voltage(i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST)
-                                .await;
+                                .await,
+                            PdContractRequestState::Confirmed
+                        );
                         *backend = HeaterPowerBackend::FixedPdPwmFallback {
                             reason: HeaterPowerBackendReason::AdjustableRequestFailed,
                             fixed_request_confirmed,
                             fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                            terminal_fixed_pd_disarmed: false,
                         };
                         if fixed_request_confirmed {
                             let negotiated_current_ma = pd_observation
@@ -10358,10 +12235,7 @@ fn apply_calibration_control_config(
             .pps_mv
             .or(calibration.pps_mv)
             .ok_or(ManualPpsError::InvalidVoltage)?;
-        let target_ma = calibration
-            .pps_ma
-            .or(manual_pps.target_ma)
-            .or(manual_pps.capability_max_ma);
+        let target_ma = calibration.pps_ma.or(manual_pps.target_ma);
         manual_pps.enable(ManualPpsOwner::Calibration, target_mv, target_ma)?;
         calibration.pps_enabled = true;
         calibration.pps_mv = manual_pps.target_mv;
@@ -10491,6 +12365,19 @@ fn disarm_calibration_after_transient_input_change(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn disarm_calibration_after_capability_refresh(
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+) {
+    if calibration.heater_enabled
+        || calibration.pps_enabled
+        || manual_pps.owner == ManualPpsOwner::Calibration
+    {
+        disarm_calibration_after_transient_input_change(calibration, manual_pps);
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn calibration_job_start_with_workspace(
     calibration: &mut CalibrationRuntimeState,
     kind: CalibrationJobKind,
@@ -10516,11 +12403,10 @@ fn calibration_job_start_with_workspace(
                 .capability_max_mv
                 .ok_or(ManualPpsError::NoPpsCapability)?
                 .min(28_000);
-            let target_ma = calibration
-                .pps_ma
-                .or(manual_pps.capability_max_ma)
-                .ok_or(ManualPpsError::NoPpsCapability)?;
             let next_request_mv = min_mv.div_ceil(100) * 100;
+            let target_ma = manual_pps
+                .maximum_pps_current_for_target(next_request_mv)
+                .ok_or(ManualPpsError::NoPpsCapability)?;
             manual_pps.enable(
                 ManualPpsOwner::Calibration,
                 next_request_mv,
@@ -10595,7 +12481,7 @@ fn calibration_job_start_with_workspace(
                 samples: [ThermalPlantTransientSample {
                     elapsed_ticks: 0,
                     raw_rtd_adc_mv: 0,
-                    heater_voltage_100mv: 0,
+                    heater_voltage_125mv: 0,
                     duty_percent: 0,
                 }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
             });
@@ -10887,7 +12773,7 @@ fn record_thermal_plant_transient_sample(
     job.samples[index] = ThermalPlantTransientSample {
         elapsed_ticks,
         raw_rtd_adc_mv,
-        heater_voltage_100mv: (latest_vin_mv / 100).min(u32::from(u8::MAX)) as u8,
+        heater_voltage_125mv: quantize_thermal_plant_heater_voltage_mv(latest_vin_mv),
         duty_percent,
     };
     job.sample_count = job.sample_count.saturating_add(1);
@@ -10906,7 +12792,8 @@ fn transient_sample_power_mw(
     if sample.duty_percent == 0 {
         return Some(0.0);
     }
-    let voltage_v = f32::from(sample.heater_voltage_100mv) / 10.0;
+    let voltage_v =
+        f32::from(thermal_plant_heater_voltage_mv(sample.heater_voltage_125mv)) / 1_000.0;
     let resistance_ohms =
         estimated_heater_resistance_ohms(temp_c, preview_heater_curve, memory_config);
     (voltage_v > 0.0 && resistance_ohms.is_finite() && resistance_ohms > 0.1).then_some(
@@ -11188,7 +13075,7 @@ fn fit_thermal_plant_transient(
             let mut copied = [ThermalPlantTransientSample {
                 elapsed_ticks: 0,
                 raw_rtd_adc_mv: 0,
-                heater_voltage_100mv: 0,
+                heater_voltage_125mv: 0,
                 duty_percent: 0,
             }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
             copied[..count].copy_from_slice(samples);
@@ -11280,16 +13167,31 @@ fn update_calibration_job_state_with_workspace(
                 return;
             }
 
-            if calibration.pps_mv != Some(job.next_request_mv) {
+            let target_ma = match manual_pps.maximum_pps_current_for_target(job.next_request_mv) {
+                Some(target_ma) => target_ma,
+                None => {
+                    calibration_job_fail(
+                        calibration,
+                        ManualPpsError::NoPpsCapability,
+                        false,
+                        manual_pps,
+                    );
+                    return;
+                }
+            };
+            if calibration.pps_mv != Some(job.next_request_mv)
+                || calibration.pps_ma != Some(target_ma)
+            {
                 match manual_pps.enable(
                     ManualPpsOwner::Calibration,
                     job.next_request_mv,
-                    Some(job.target_ma),
+                    Some(target_ma),
                 ) {
                     Ok(()) => {
                         calibration.pps_enabled = true;
                         calibration.pps_mv = Some(job.next_request_mv);
-                        calibration.pps_ma = Some(job.target_ma);
+                        calibration.pps_ma = Some(target_ma);
+                        job.target_ma = target_ma;
                         job.settle_ticks = 0;
                         job.stable_ticks = 0;
                         job.last_observed_mv = None;
@@ -11300,6 +13202,7 @@ fn update_calibration_job_state_with_workspace(
                     }
                 }
             }
+            job.target_ma = target_ma;
 
             let requested_mv = manual_pps.target_mv.unwrap_or(job.next_request_mv);
             let request_locked =
@@ -12353,15 +14256,23 @@ fn poll_usb_early_control(
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     memory_config: &MemoryConfig,
 ) {
+    let mut bytes_processed = 0_u16;
     loop {
+        if bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET {
+            break;
+        }
         match usb.read_byte() {
             Ok(b'\n') => {
+                bytes_processed = bytes_processed.saturating_add(1);
                 let response = usb_early_response(rx_line.as_str(), memory_config);
                 usb_write_response_frame(usb, &response, tx_buf);
                 rx_line.clear();
             }
-            Ok(b'\r') => {}
+            Ok(b'\r') => {
+                bytes_processed = bytes_processed.saturating_add(1);
+            }
             Ok(byte) => {
+                bytes_processed = bytes_processed.saturating_add(1);
                 if rx_line.push(char::from(byte)).is_err() {
                     rx_line.clear();
                 }
@@ -12572,7 +14483,7 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_control_line(
+async fn process_control_line<PWM>(
     line: &str,
     controller: &mut FrontPanelInputController,
     ui_state: &mut FrontPanelUiState,
@@ -12586,10 +14497,12 @@ async fn process_control_line(
     pd_i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_controller: ControllerKind,
     pd_port: &mut PdPort,
+    eeprom_pd_service: &mut EepromPdServiceContext<'_, PWM>,
     calibration_runtime_state: &mut CalibrationRuntimeState,
     thermal_plant_workspace: &mut CalibrationThermalPlantWorkspace,
     elapsed_ms: u64,
     last_pd_observation: Option<PdStatusObservation>,
+    pd_contract_ready: &mut bool,
     heater_power_backend: &mut HeaterPowerBackend,
     heater_controller: &mut HeaterController,
     pid_snapshot: HeaterPidSnapshot,
@@ -12615,12 +14528,16 @@ async fn process_control_line(
     heater_control_timing: HeaterControlTiming,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> (bool, UsbFrame) {
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
     let mut needs_redraw = false;
     let active_thermal_control_profile =
         active_thermal_control_profile(memory_config, *thermal_control_profile_preview, manual_pps);
     let runtime_context =
-        |heater_fault_latched: Option<HeaterFaultReason>,
+        |manual_pps_value: ManualPpsState,
+         heater_fault_latched: Option<HeaterFaultReason>,
          attention_pending_after_fault_clear_value: bool| UsbRuntimeStatusContext {
             elapsed_ms,
             pd_controller,
@@ -12629,7 +14546,7 @@ async fn process_control_line(
             pid_snapshot,
             heater_control_timing,
             heater_physical_output_percent: last_heater_duty,
-            manual_pps: *manual_pps,
+            manual_pps: manual_pps_value,
             fan_command,
             current_rtd_fault,
             heater_fault_latched,
@@ -12647,7 +14564,24 @@ async fn process_control_line(
             vin_mv: latest_vin_mv,
         };
     #[cfg(feature = "net_http")]
-    if ui_state.apply_network_summary(flux_purr_firmware::net::lan_network_summary().await) {
+    let initial_network_summary = {
+        let mut pd_network_service = PdNetworkServiceContext {
+            eeprom: &mut *eeprom_pd_service,
+            pd_contract_ready,
+            ui_state,
+            calibration_runtime_state,
+            manual_pps,
+        };
+        run_network_operation_with_pd(
+            flux_purr_firmware::net::lan_network_summary(),
+            pd_i2c,
+            pd_port,
+            &mut pd_network_service,
+        )
+        .await
+    };
+    #[cfg(feature = "net_http")]
+    if ui_state.apply_network_summary(initial_network_summary) {
         // Status and network requests must observe the same device-owned
         // snapshot even during the first control-loop ticks after boot.
         needs_redraw = true;
@@ -12742,7 +14676,22 @@ async fn process_control_line(
             }
             UsbRequestOp::GetNetwork => {
                 #[cfg(feature = "net_http")]
-                let network = flux_purr_firmware::net::lan_network_summary().await;
+                let network = {
+                    let mut pd_network_service = PdNetworkServiceContext {
+                        eeprom: &mut *eeprom_pd_service,
+                        pd_contract_ready,
+                        ui_state,
+                        calibration_runtime_state,
+                        manual_pps,
+                    };
+                    run_network_operation_with_pd(
+                        flux_purr_firmware::net::lan_network_summary(),
+                        pd_i2c,
+                        pd_port,
+                        &mut pd_network_service,
+                    )
+                    .await
+                };
                 #[cfg(not(feature = "net_http"))]
                 let network = network_from_memory(memory_config);
                 usb_response(request_id, UsbResponsePayload::Network(network))
@@ -12754,6 +14703,7 @@ async fn process_control_line(
                     memory_config,
                     calibration_runtime_state,
                     runtime_context(
+                        *manual_pps,
                         heater_controller.fault_latched(),
                         *attention_pending_after_fault_clear,
                     ),
@@ -12800,7 +14750,22 @@ async fn process_control_line(
             UsbRequestOp::OpenLanPairingWindow => {
                 #[cfg(feature = "net_http")]
                 {
-                    let code = flux_purr_firmware::net::enter_pairing().await;
+                    let code = {
+                        let mut pd_network_service = PdNetworkServiceContext {
+                            eeprom: &mut *eeprom_pd_service,
+                            pd_contract_ready,
+                            ui_state,
+                            calibration_runtime_state,
+                            manual_pps,
+                        };
+                        run_network_operation_with_pd(
+                            flux_purr_firmware::net::enter_pairing(),
+                            pd_i2c,
+                            pd_port,
+                            &mut pd_network_service,
+                        )
+                        .await
+                    };
                     ui_state.enter_wifi_pairing(code);
                     needs_redraw = true;
                     usb_response(
@@ -12820,7 +14785,20 @@ async fn process_control_line(
             UsbRequestOp::CloseLanPairingWindow => {
                 #[cfg(feature = "net_http")]
                 {
-                    flux_purr_firmware::net::leave_pairing().await;
+                    let mut pd_network_service = PdNetworkServiceContext {
+                        eeprom: &mut *eeprom_pd_service,
+                        pd_contract_ready,
+                        ui_state,
+                        calibration_runtime_state,
+                        manual_pps,
+                    };
+                    run_network_operation_with_pd(
+                        flux_purr_firmware::net::leave_pairing(),
+                        pd_i2c,
+                        pd_port,
+                        &mut pd_network_service,
+                    )
+                    .await;
                     ui_state.leave_wifi_pairing();
                     ui_state.route = FrontPanelRoute::Dashboard;
                     needs_redraw = true;
@@ -12845,7 +14823,20 @@ async fn process_control_line(
                             "EEPROM_REQUIRED: persistent configuration is unavailable; LAN pairing token cannot be cleared.",
                         )
                     } else {
-                        flux_purr_firmware::net::clear_token_from_usb().await;
+                        let mut pd_network_service = PdNetworkServiceContext {
+                            eeprom: &mut *eeprom_pd_service,
+                            pd_contract_ready,
+                            ui_state,
+                            calibration_runtime_state,
+                            manual_pps,
+                        };
+                        run_network_operation_with_pd(
+                            flux_purr_firmware::net::clear_token_from_usb(),
+                            pd_i2c,
+                            pd_port,
+                            &mut pd_network_service,
+                        )
+                        .await;
                         memory_config.lan_pairing_token = None;
                         *memory_commit_due_ms =
                             Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
@@ -12877,7 +14868,23 @@ async fn process_control_line(
             #[cfg(feature = "net_http")]
             let network = match config.op {
                 WifiConfigOp::Cancel => {
-                    match flux_purr_firmware::net::cancel_wifi_connection().await {
+                    let result = {
+                        let mut pd_network_service = PdNetworkServiceContext {
+                            eeprom: &mut *eeprom_pd_service,
+                            pd_contract_ready,
+                            ui_state,
+                            calibration_runtime_state,
+                            manual_pps,
+                        };
+                        run_network_operation_with_pd(
+                            flux_purr_firmware::net::cancel_wifi_connection(),
+                            pd_i2c,
+                            pd_port,
+                            &mut pd_network_service,
+                        )
+                        .await
+                    };
+                    match result {
                         Ok(network) => network,
                         Err(error) => {
                             return (
@@ -12889,7 +14896,20 @@ async fn process_control_line(
                 }
                 WifiConfigOp::Set | WifiConfigOp::Clear => {
                     config.apply_to(memory_config);
-                    flux_purr_firmware::net::apply_wifi_config(memory_config).await
+                    let mut pd_network_service = PdNetworkServiceContext {
+                        eeprom: &mut *eeprom_pd_service,
+                        pd_contract_ready,
+                        ui_state,
+                        calibration_runtime_state,
+                        manual_pps,
+                    };
+                    run_network_operation_with_pd(
+                        flux_purr_firmware::net::apply_wifi_config(memory_config),
+                        pd_i2c,
+                        pd_port,
+                        &mut pd_network_service,
+                    )
+                    .await
                 }
             };
             #[cfg(not(feature = "net_http"))]
@@ -12982,6 +15002,7 @@ async fn process_control_line(
                 thermal_control_profile_preview,
                 calibration_runtime_state,
                 runtime_context(
+                    *manual_pps,
                     heater_controller.fault_latched(),
                     *attention_pending_after_fault_clear,
                 ),
@@ -13103,6 +15124,7 @@ async fn process_control_line(
                     match commit_memory_config_now(
                         pd_i2c,
                         pd_port,
+                        eeprom_pd_service,
                         elapsed_ms,
                         memory_sequence,
                         memory_config,
@@ -13121,12 +15143,11 @@ async fn process_control_line(
                             *memory_commit_due_ms = None;
                         }
                         Err(error) => {
-                            let failed_domain = PersistDomainMask::single(error.domain);
                             restore_persisted_memory_domains(
                                 memory_config,
                                 ui_state,
                                 last_persisted_memory_config,
-                                failed_domain,
+                                changed_domains,
                             );
                             let fault = persistence_fault_from_commit(error);
                             if memory_failure_requires_heater_lock(error) {
@@ -13252,10 +15273,11 @@ async fn process_control_line(
                 if let Err(error) = commit_memory_config_now(
                     pd_i2c,
                     pd_port,
+                    eeprom_pd_service,
                     elapsed_ms,
                     memory_sequence,
                     memory_config,
-                    PersistDomainMask::SAFETY,
+                    PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                     persistence_log_sink,
                     record_staging,
                 )
@@ -13267,7 +15289,7 @@ async fn process_control_line(
                         memory_config,
                         ui_state,
                         last_persisted_memory_config,
-                        PersistDomainMask::SAFETY,
+                        PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                     );
                     mark_eeprom_required(
                         ui_state,
@@ -13281,7 +15303,7 @@ async fn process_control_line(
                 copy_persisted_domains(
                     last_persisted_memory_config,
                     memory_config,
-                    PersistDomainMask::SAFETY,
+                    PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                 );
                 *memory_commit_due_ms = None;
                 usb_response(
@@ -13323,7 +15345,10 @@ async fn process_control_line(
                     manual_pps,
                     memory_commit_due_ms,
                 );
-                if !request_pd_fixed_voltage(pd_i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST).await {
+                if !matches!(
+                    request_pd_fixed_voltage(pd_i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST).await,
+                    PdContractRequestState::Confirmed
+                ) {
                     return (
                         needs_redraw,
                         usb_error_response(
@@ -13338,7 +15363,15 @@ async fn process_control_line(
                 calibration_job_canceled(calibration_runtime_state, manual_pps);
             }
             needs_redraw = true;
-            let response = usb_eeprom_maintenance_response(request_id, command, pd_i2c).await;
+            let response = usb_eeprom_maintenance_response(
+                request_id,
+                command,
+                pd_i2c,
+                pd_port,
+                eeprom_pd_service,
+                elapsed_ms,
+            )
+            .await;
             if matches!(&response, UsbFrame::Response { ok: true, .. }) {
                 apply_successful_eeprom_maintenance_operation(
                     op,
@@ -13640,10 +15673,15 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn present_initial_frontpanel_ui<'a, BUS, DC, RST>(
+async fn present_initial_frontpanel_ui<'a, BUS, DC, RST, PWM>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     state: &FrontPanelUiState,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
 ) -> bool
 where
     BUS: embedded_hal_async::spi::SpiDevice,
@@ -13651,10 +15689,19 @@ where
     RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
     DC::Error: core::fmt::Debug,
+    PWM: SetDutyCycle,
 {
     if !matches!(
-        with_timeout(DISPLAY_IO_TIMEOUT, flush_ui(display, canvas, state)).await,
-        Ok(Ok(()))
+        run_display_operation_with_pd_and_heater(
+            flush_ui(display, canvas, state),
+            i2c,
+            pd_port,
+            last_pd_observation,
+            heater_pwm,
+            last_heater_duty,
+        )
+        .await,
+        Some(Ok(()))
     ) {
         warn!("frontpanel runtime presentation failed");
         return false;
@@ -13668,6 +15715,76 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
+async fn run_display_operation_with_pd<F>(
+    operation: F,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+) -> Option<F::Output>
+where
+    F: Future,
+{
+    let mut pinned_operation = core::pin::pin!(operation);
+    let started_at = Instant::now();
+    loop {
+        match select(
+            pinned_operation.as_mut(),
+            EmbassyTimer::after_millis(PD_RUNTIME_SERVICE_INTERVAL_MS),
+        )
+        .await
+        {
+            Either::First(output) => return Some(output),
+            Either::Second(_) => {
+                *last_pd_observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+                if Instant::now().saturating_duration_since(started_at) >= DISPLAY_IO_TIMEOUT {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn run_display_operation_with_pd_and_heater<F, PWM>(
+    operation: F,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
+    heater_pwm: &mut PWM,
+    last_heater_duty: &mut u8,
+) -> Option<F::Output>
+where
+    F: Future,
+    PWM: SetDutyCycle,
+{
+    let mut pinned_operation = core::pin::pin!(operation);
+    let started_at = Instant::now();
+    loop {
+        match select(
+            pinned_operation.as_mut(),
+            EmbassyTimer::after_millis(PD_RUNTIME_SERVICE_INTERVAL_MS),
+        )
+        .await
+        {
+            Either::First(output) => return Some(output),
+            Either::Second(_) => {
+                let observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+                *last_pd_observation = observation;
+                if !startup_pd_contract_ready(observation) {
+                    // A failed status read is not proof of a detach, but it is
+                    // never authorization to keep driving the heater while a
+                    // display transfer is still in flight.
+                    apply_heater_duty(heater_pwm, 0, last_heater_duty);
+                }
+                if Instant::now().saturating_duration_since(started_at) >= DISPLAY_IO_TIMEOUT {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 const DISPLAY_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(target_arch = "xtensa")]
@@ -13675,14 +15792,14 @@ async fn request_pd_fixed_voltage(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     port: &mut PdPort,
     request: ch224q::VoltageRequest,
-) -> bool {
+) -> PdContractRequestState {
     match port {
         PdPort::Fusb302b(runtime) => {
             runtime
-                .request_fixed_voltage(i2c, request.millivolts(), Instant::now().as_millis())
+                .request_fixed_voltage(i2c, request.millivolts(), PdTimestamp::now())
                 .await
         }
-        PdPort::Unavailable => false,
+        PdPort::Unavailable => PdContractRequestState::Failed,
     }
 }
 
@@ -13699,7 +15816,7 @@ async fn request_pd_adjustable_voltage(
             let _ = mode_changed;
             if mode == ch224q::AdjustableVoltageMode::Pps {
                 runtime
-                    .request_pps_voltage(i2c, request_mv, Instant::now().as_millis())
+                    .request_pps_voltage(i2c, request_mv, PdTimestamp::now())
                     .await
             } else {
                 PdContractRequestState::Failed
@@ -13713,11 +15830,11 @@ async fn request_pd_adjustable_voltage(
 async fn read_pd_status(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     port: &mut PdPort,
-    now_ms: u64,
+    now: PdTimestamp,
 ) -> Option<PdStatusObservation> {
     match port {
         PdPort::Fusb302b(runtime) => {
-            if !runtime.poll(i2c, now_ms).await {
+            if !runtime.poll(i2c, now).await {
                 return None;
             }
             let contract = runtime.active_contract();
@@ -13758,6 +15875,9 @@ async fn run_key_test_runtime<'a, BUS, DC, RST>(
     canvas: &mut DisplayCanvas,
     inputs: FrontPanelInputs<'a>,
     status_light_started_ms: u64,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    last_pd_observation: &mut Option<PdStatusObservation>,
 ) -> Result<(), ()>
 where
     BUS: embedded_hal_async::spi::SpiDevice,
@@ -13773,10 +15893,14 @@ where
     let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
-    if !matches!(
-        with_timeout(DISPLAY_IO_TIMEOUT, flush_ui(display, canvas, &ui_state)).await,
-        Ok(Ok(()))
-    ) {
+    let initial_flush_result = run_display_operation_with_pd(
+        flush_ui(display, canvas, &ui_state),
+        i2c,
+        pd_port,
+        last_pd_observation,
+    )
+    .await;
+    if !matches!(initial_flush_result, Some(Ok(()))) {
         warn!("initial key-test UI failed; entering recovery");
         return Err(());
     }
@@ -13795,7 +15919,10 @@ where
                 StatusLightState::Ready
             },
         );
-        EmbassyTimer::after_millis(20).await;
+        for _ in 0..(20 / PD_RUNTIME_SERVICE_INTERVAL_MS) {
+            EmbassyTimer::after_millis(PD_RUNTIME_SERVICE_INTERVAL_MS).await;
+            *last_pd_observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+        }
         elapsed_ms = elapsed_ms.saturating_add(20);
 
         let raw_state = inputs.sample();
@@ -13827,10 +15954,14 @@ where
         }
 
         if needs_redraw {
-            if !matches!(
-                with_timeout(DISPLAY_IO_TIMEOUT, flush_ui(display, canvas, &ui_state)).await,
-                Ok(Ok(()))
-            ) {
+            let flush_result = run_display_operation_with_pd(
+                flush_ui(display, canvas, &ui_state),
+                i2c,
+                pd_port,
+                last_pd_observation,
+            )
+            .await;
+            if !matches!(flush_result, Some(Ok(()))) {
                 warn!("key-test UI refresh failed; entering recovery");
                 return Err(());
             }
@@ -13845,6 +15976,13 @@ async fn main(_spawner: Spawner) {
     let reset_reason = reset_reason_log_line(esp_hal::system::reset_reason());
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    let mut startup_sequence = StartupSequence::new();
+    // GPIO13 drives the panel's active-low backlight gate. Configure it
+    // before any potentially blocking startup work so a visible panel does
+    // not depend on later display or PD initialization completing.
+    let mut backlight = Output::new(peripherals.GPIO13, Level::Low, OutputConfig::default());
+    backlight.set_low();
+    assert!(startup_sequence.advance(StartupSequenceStage::BacklightReady));
     init_runtime_heap();
     let eeprom_record_staging = initialize_eeprom_record_staging();
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -13879,6 +16017,8 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "web_serial")]
     let usb_boot_memory_config = MemoryConfig::default();
     #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=backlight_on\n");
+    #[cfg(feature = "web_serial")]
     usb_write_frame(
         &mut usb_serial,
         &hello_frame(hardware_identity()),
@@ -13887,12 +16027,85 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, reset_reason.as_bytes());
     #[cfg(feature = "web_serial")]
-    poll_usb_early_control(
-        &mut usb_serial,
-        &mut usb_rx_line,
-        usb_tx_buf,
-        &usb_boot_memory_config,
-    );
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_detect_start\n");
+    let mut pd_i2c = I2c::new(
+        peripherals.I2C0,
+        I2cConfig::default()
+            .with_frequency(Rate::from_hz(FUSB302B_I2C_FREQUENCY_HZ))
+            .with_software_timeout(SoftwareTimeout::Transaction(HalDuration::from_millis(
+                I2C_TRANSACTION_TIMEOUT_MS,
+            ))),
+    )
+    .expect("failed to create I2C0")
+    .with_sda(peripherals.GPIO8)
+    .with_scl(peripherals.GPIO9);
+    let detected_pd_controller = detect_pd_controller(&mut pd_i2c).await;
+    let mut pd_port = match detected_pd_controller {
+        DetectedPdController::Fusb302b(device_id) => {
+            #[cfg(feature = "web_serial")]
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_fusb302b_detected\n");
+            let mut runtime = Fusb302bRuntime::new();
+            if !runtime.initialize(&mut pd_i2c).await {
+                #[cfg(feature = "web_serial")]
+                let _ =
+                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_failed\n");
+                warn!(
+                    "fusb302b identified device_id=0x{=u8:02x} but PHY initialization failed; holding heater interlocked",
+                    device_id,
+                );
+                PdPort::Unavailable
+            } else {
+                #[cfg(feature = "web_serial")]
+                let _ =
+                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_complete\n");
+                info!(
+                    "fusb302b selected device_id=0x{=u8:02x} policy=pps target_mv={=u16} max_current_ma={=u16}",
+                    device_id,
+                    DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+                    MAX_HEATER_CONTRACT_MA,
+                );
+                PdPort::Fusb302b(runtime)
+            }
+        }
+        DetectedPdController::Unknown => {
+            #[cfg(feature = "web_serial")]
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_identity_unknown\n");
+            warn!("PD controller identity is ambiguous or unreadable; holding heater interlocked");
+            PdPort::Unavailable
+        }
+    };
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_pending\n");
+    // Complete one bounded startup service window before touching the display.
+    // A missing contract remains a fail-closed heater interlock rather than an
+    // unbounded boot delay.
+    let pd_runtime_started_ms = Instant::now().as_millis();
+    let fusb302b_present = matches!(&pd_port, PdPort::Fusb302b(_));
+    let mut initial_pd_observation =
+        read_pd_status(&mut pd_i2c, &mut pd_port, PdTimestamp::now()).await;
+    while startup_pd_service_should_continue(
+        fusb302b_present,
+        startup_pd_contract_ready(initial_pd_observation),
+        pd_port.service_available(),
+        pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
+    ) {
+        EmbassyTimer::after_millis(STARTUP_PD_SERVICE_INTERVAL_MS).await;
+        initial_pd_observation =
+            read_pd_status(&mut pd_i2c, &mut pd_port, PdTimestamp::now()).await;
+    }
+    let mut pd_contract_ready = startup_pd_contract_ready(initial_pd_observation);
+    if !pd_contract_ready {
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_not_ready\n");
+        warn!(
+            "PD contract was not ready before display initialization; continuing with heater interlocked"
+        );
+    } else {
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_ready\n");
+    }
+    assert!(startup_sequence.advance(StartupSequenceStage::PdServiceComplete));
+
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_setup_start\n");
     info!(
@@ -13912,26 +16125,6 @@ async fn main(_spawner: Spawner) {
         s3_frontpanel::PIN_KEY_LEFT,
         s3_frontpanel::PIN_KEY_UP,
     );
-
-    #[cfg(feature = "web_serial")]
-    poll_usb_early_control(
-        &mut usb_serial,
-        &mut usb_rx_line,
-        usb_tx_buf,
-        &usb_boot_memory_config,
-    );
-
-    let input_cfg = InputConfig::default().with_pull(Pull::Up);
-    let inputs = FrontPanelInputs {
-        center: Input::new(peripherals.GPIO0, input_cfg),
-        right: Input::new(peripherals.GPIO16, input_cfg),
-        // The calibrated logical key map swaps raw DOWN/LEFT, so keep the raw
-        // input binding on the verified GPIO order instead of the board labels.
-        down: Input::new(peripherals.GPIO17, input_cfg),
-        left: Input::new(peripherals.GPIO18, input_cfg),
-        up: Input::new(peripherals.GPIO21, input_cfg),
-    };
-
     let spi = Spi::new(
         peripherals.SPI2,
         SpiConfig::default()
@@ -13941,25 +16134,18 @@ async fn main(_spawner: Spawner) {
     .expect("failed to create SPI2")
     .with_sck(peripherals.GPIO12)
     .with_mosi(peripherals.GPIO11);
-
     let cs = Output::new(peripherals.GPIO15, Level::High, OutputConfig::default());
     let dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
     let rst = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
-    let mut backlight = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
-    info!("backlight active-low: gpio13 high -> off during display bring-up");
-
     let spi_device = ExclusiveDevice::new_no_delay(spi.into_async(), cs)
         .expect("failed to wrap async SPI bus as ExclusiveDevice");
-
     static DRIVER_FB: StaticCell<
         [embedded_graphics::pixelcolor::Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS],
     > = StaticCell::new();
-
     let driver_framebuffer = DRIVER_FB.init_with(|| {
         [embedded_graphics::pixelcolor::Rgb565::BLACK; flux_purr_firmware::display::DISPLAY_PIXELS]
     });
     let canvas = initialize_display_canvas();
-
     let mut display: GC9D01<_, _, _, DisplayTimer> = GC9D01::new(
         DISPLAY_PANEL_CONFIG,
         spi_device,
@@ -13967,7 +16153,6 @@ async fn main(_spawner: Spawner) {
         rst,
         driver_framebuffer,
     );
-
     info!(
         "init panel width={=u16} height={=u16} dx={=u16} dy={=u16}",
         DISPLAY_PANEL_CONFIG.width,
@@ -13977,10 +16162,14 @@ async fn main(_spawner: Spawner) {
     );
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_start\n");
-    let display_ready = matches!(
-        with_timeout(DISPLAY_IO_TIMEOUT, display.init()).await,
-        Ok(Ok(()))
-    );
+    let display_init_result = run_display_operation_with_pd(
+        display.init(),
+        &mut pd_i2c,
+        &mut pd_port,
+        &mut initial_pd_observation,
+    )
+    .await;
+    let display_ready = matches!(display_init_result, Some(Ok(())));
     if !display_ready {
         #[cfg(feature = "web_serial")]
         let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_failed\n");
@@ -13994,10 +16183,10 @@ async fn main(_spawner: Spawner) {
             UsbRecoveryPhase::BeforePersistentState,
         )
         .await;
-
         #[cfg(not(feature = "web_serial"))]
         panic!("failed to initialize GC9D01 display");
     }
+    assert!(startup_sequence.advance(StartupSequenceStage::DisplayReady));
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_complete\n");
     match startup_frontpanel_presentation(runtime_mode) {
@@ -14015,17 +16204,24 @@ async fn main(_spawner: Spawner) {
     );
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_start\n");
-    let startup_flush_ready = match with_timeout(DISPLAY_IO_TIMEOUT, display.flush()).await {
-        Ok(Ok(())) => true,
-        Ok(Err(gc9d01::Error::Bus(_))) => {
+    let startup_flush_result = run_display_operation_with_pd(
+        display.flush(),
+        &mut pd_i2c,
+        &mut pd_port,
+        &mut initial_pd_observation,
+    )
+    .await;
+    let startup_flush_ready = match startup_flush_result {
+        Some(Ok(())) => true,
+        Some(Err(gc9d01::Error::Bus(_))) => {
             warn!("startup display flush failed: spi bus");
             false
         }
-        Ok(Err(gc9d01::Error::Pin(_))) => {
+        Some(Err(gc9d01::Error::Pin(_))) => {
             warn!("startup display flush failed: display pin");
             false
         }
-        Err(_) => {
+        None => {
             warn!("startup display flush timed out");
             false
         }
@@ -14043,14 +16239,23 @@ async fn main(_spawner: Spawner) {
             UsbRecoveryPhase::BeforePersistentState,
         )
         .await;
-
         #[cfg(not(feature = "web_serial"))]
         panic!("failed to draw startup calibration screen");
     }
+    assert!(startup_sequence.advance(StartupSequenceStage::StartupFrameReady));
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_complete\n");
-    backlight.set_low();
-    info!("backlight active-low: gpio13 low -> on after startup frame");
+    info!("backlight active-low: gpio13 low -> on");
+    let input_cfg = InputConfig::default().with_pull(Pull::Up);
+    let inputs = FrontPanelInputs {
+        center: Input::new(peripherals.GPIO0, input_cfg),
+        right: Input::new(peripherals.GPIO16, input_cfg),
+        // The calibrated logical key map swaps raw DOWN/LEFT, so keep the raw
+        // input binding on the verified GPIO order instead of the board labels.
+        down: Input::new(peripherals.GPIO17, input_cfg),
+        left: Input::new(peripherals.GPIO18, input_cfg),
+        up: Input::new(peripherals.GPIO21, input_cfg),
+    };
     #[cfg(feature = "web_serial")]
     poll_usb_early_control(
         &mut usb_serial,
@@ -14064,6 +16269,7 @@ async fn main(_spawner: Spawner) {
     );
 
     if runtime_mode == FrontPanelRuntimeMode::KeyTest {
+        let mut key_test_last_pd_observation = initial_pd_observation;
         let mut _heater_safe = Output::new(peripherals.GPIO47, Level::Low, OutputConfig::default());
         _heater_safe.set_low();
         let mut _fan_enable_safe =
@@ -14073,7 +16279,17 @@ async fn main(_spawner: Spawner) {
             Output::new(peripherals.GPIO36, Level::Low, OutputConfig::default());
         _fan_pwm_safe.set_low();
         info!("key-test runtime ready: gpio47/gpio35/gpio36 held safe-off without PD/RTD bring-up");
-        match run_key_test_runtime(&mut display, canvas, inputs, status_light_started_ms).await {
+        match run_key_test_runtime(
+            &mut display,
+            canvas,
+            inputs,
+            status_light_started_ms,
+            &mut pd_i2c,
+            &mut pd_port,
+            &mut key_test_last_pd_observation,
+        )
+        .await
+        {
             Err(()) => {
                 #[cfg(feature = "web_serial")]
                 run_usb_recovery_control_loop(
@@ -14094,6 +16310,7 @@ async fn main(_spawner: Spawner) {
     }
     // Put every power-related output into a known safe state before any I2C
     // probe or EEPROM access can take the boot path through a timeout.
+    assert!(startup_sequence.advance(StartupSequenceStage::OtherInitialization));
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=outputs_init_start\n");
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
@@ -14146,6 +16363,7 @@ async fn main(_spawner: Spawner) {
         .expect("failed to derive heater PWM timer clock");
     mcpwm.timer1.start(heater_timer_cfg);
     let _ = heater_pwm.set_duty_cycle_percent(0);
+    let mut last_heater_duty = 0_u8;
 
     mcpwm.operator2.set_timer(&mcpwm.timer2);
     #[cfg(feature = "buzzer-observe")]
@@ -14193,79 +16411,6 @@ async fn main(_spawner: Spawner) {
         .spawn(run_buzzer_task(mcpwm.timer2, buzzer_pwm, pwm_clock_cfg))
         .expect("failed to spawn realtime buzzer task");
 
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_detect_start\n");
-    let mut pd_i2c = I2c::new(
-        peripherals.I2C0,
-        I2cConfig::default()
-            .with_frequency(Rate::from_hz(FUSB302B_I2C_FREQUENCY_HZ))
-            .with_software_timeout(SoftwareTimeout::Transaction(HalDuration::from_millis(
-                I2C_TRANSACTION_TIMEOUT_MS,
-            ))),
-    )
-    .expect("failed to create I2C0")
-    .with_sda(peripherals.GPIO8)
-    .with_scl(peripherals.GPIO9);
-    let detected_pd_controller = detect_pd_controller(&mut pd_i2c).await;
-    let mut pd_port = match detected_pd_controller {
-        DetectedPdController::Fusb302b(device_id) => {
-            #[cfg(feature = "web_serial")]
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_fusb302b_detected\n");
-            let mut runtime = Fusb302bRuntime::new();
-            if !runtime.initialize(&mut pd_i2c).await {
-                #[cfg(feature = "web_serial")]
-                let _ =
-                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_failed\n");
-                warn!(
-                    "fusb302b identified device_id=0x{=u8:02x} but PHY initialization failed; holding heater interlocked",
-                    device_id,
-                );
-                PdPort::Unavailable
-            } else {
-                #[cfg(feature = "web_serial")]
-                let _ =
-                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_complete\n");
-                info!(
-                    "fusb302b selected device_id=0x{=u8:02x} policy=pps target_mv={=u16} max_current_ma={=u16}",
-                    device_id,
-                    DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
-                    MAX_HEATER_CONTRACT_MA,
-                );
-                PdPort::Fusb302b(runtime)
-            }
-        }
-        DetectedPdController::Unknown => {
-            #[cfg(feature = "web_serial")]
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_identity_unknown\n");
-            warn!("PD controller identity is ambiguous or unreadable; holding heater interlocked");
-            PdPort::Unavailable
-        }
-    };
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_pending\n");
-    // PD negotiation is serviced by the runtime loop. Do one bounded service
-    // turn for already-attached sources, but never hold the Dashboard behind
-    // a contract wait.
-    let initial_pd_observation =
-        read_pd_status(&mut pd_i2c, &mut pd_port, Instant::now().as_millis()).await;
-    #[cfg(feature = "web_serial")]
-    poll_usb_early_control(
-        &mut usb_serial,
-        &mut usb_rx_line,
-        usb_tx_buf,
-        &usb_boot_memory_config,
-    );
-    let mut pd_contract_ready = startup_pd_contract_ready(initial_pd_observation);
-    if !pd_contract_ready {
-        #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_not_ready\n");
-        warn!(
-            "PD contract was not ready before outputs initialize; continuing with heater interlocked"
-        );
-    } else {
-        #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_ready\n");
-    }
     // Keep the fixed scratch alive through startup migration and network bring-up.
     let mut boot_memory_io_scratch = try_allocate_memory_io_scratch();
     let (
@@ -14273,10 +16418,24 @@ async fn main(_spawner: Spawner) {
         mut eeprom_data_incompatible,
         mut eeprom_required,
         mut prepared_layout_recovery_pending,
-    ) = if let Some(scratch) = boot_memory_io_scratch.as_mut() {
-        load_eeprom_memory_record(&mut pd_i2c, scratch, eeprom_record_staging)
-    } else {
-        (None, false, true, false)
+    ) = {
+        let mut eeprom_pd_service = EepromPdServiceContext::new(
+            &mut initial_pd_observation,
+            &mut heater_pwm,
+            &mut last_heater_duty,
+        );
+        if let Some(scratch) = boot_memory_io_scratch.as_mut() {
+            load_eeprom_memory_record(
+                &mut pd_i2c,
+                &mut pd_port,
+                &mut eeprom_pd_service,
+                scratch,
+                eeprom_record_staging,
+            )
+            .await
+        } else {
+            (None, false, true, false)
+        }
     };
     let mut eeprom_restore_pending = eeprom_data_incompatible || prepared_layout_recovery_pending;
     if !eeprom_required && !eeprom_data_incompatible && eeprom_memory_record.is_none() {
@@ -14285,9 +16444,15 @@ async fn main(_spawner: Spawner) {
             let init_log_sink = &mut usb_serial as &mut dyn PersistenceLogSink;
             #[cfg(not(feature = "web_serial"))]
             let init_log_sink = &mut persistence_log_sink as &mut dyn PersistenceLogSink;
+            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                &mut initial_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
             initialize_fpr2_defaults(
                 &mut pd_i2c,
                 &mut pd_port,
+                &mut eeprom_pd_service,
                 &mut *init_log_sink,
                 eeprom_record_staging,
             )
@@ -14335,9 +16500,15 @@ async fn main(_spawner: Spawner) {
             let recovery_log_sink = &mut usb_serial as &mut dyn PersistenceLogSink;
             #[cfg(not(feature = "web_serial"))]
             let recovery_log_sink = &mut persistence_log_sink as &mut dyn PersistenceLogSink;
+            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                &mut initial_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
             recover_prepared_fpr2_layout(
                 &mut pd_i2c,
                 &mut pd_port,
+                &mut eeprom_pd_service,
                 memory_sequence,
                 &mut *recovery_log_sink,
                 eeprom_record_staging,
@@ -14418,6 +16589,7 @@ async fn main(_spawner: Spawner) {
         );
     }
     let mut last_pd_status_log_key = pd_status_log_key(last_pd_observation);
+    let mut pd_contract_vin_guard = PdContractVinGuard::default();
     let mut active_thermal_settings =
         ThermalControlProfileSettings::from(memory_config.active_thermal_control_profile.settings);
     info!(
@@ -14443,22 +16615,25 @@ async fn main(_spawner: Spawner) {
         ),
         None => info!("pd power data read failed"),
     }
-    let mut manual_pps_state = ManualPpsState::from_capabilities(power_data_capabilities);
+    let mut manual_pps_state = ManualPpsState::from_fusb302b_capabilities(power_data_capabilities);
+    let mut last_fusb302b_power_capabilities = power_data_capabilities;
     let mut calibration_runtime_state = CalibrationRuntimeState::default();
     static THERMAL_PLANT_WORKSPACE: StaticCell<CalibrationThermalPlantWorkspace> =
         StaticCell::new();
     let thermal_plant_workspace =
         THERMAL_PLANT_WORKSPACE.init_with(CalibrationThermalPlantWorkspace::default);
     let mut thermal_control_profile_preview: Option<ThermalControlProfile> = None;
-    let mut heater_power_backend = constrain_heater_backend_to_controller(
-        pd_port.controller_kind(),
-        select_heater_power_backend(
-            power_data_capabilities,
-            last_pd_observation.map(|status| status.status),
+    let mut heater_power_backend = match pd_port.controller_kind() {
+        ControllerKind::Fusb302b => select_fusb302b_heater_power_backend(power_data_capabilities),
+        controller => constrain_heater_backend_to_controller(
+            controller,
+            select_heater_power_backend(
+                power_data_capabilities,
+                last_pd_observation.map(|status| status.status),
+            ),
         ),
-    );
+    };
     let mut hold_pps_governor = HoldPpsGovernor::new();
-    let mut last_heater_duty = 0_u8;
     match heater_power_backend {
         HeaterPowerBackend::PpsMos {
             pps_min_mv,
@@ -14527,12 +16702,18 @@ async fn main(_spawner: Spawner) {
 
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_rtd_start\n");
-    let initial_rtd_sample = read_rtd_sample(
+    let initial_rtd_sample = read_rtd_sample_with_pd(
         &mut adc1,
         &mut rtd_adc_pin,
         adc_curve.as_ref(),
         &memory_config,
-    );
+        &mut pd_i2c,
+        &mut pd_port,
+        &mut last_pd_observation,
+        &mut heater_pwm,
+        &mut last_heater_duty,
+    )
+    .await;
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_rtd_complete\n");
     let mut controller = FrontPanelInputController::new(
@@ -14622,17 +16803,38 @@ async fn main(_spawner: Spawner) {
     }
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_vin_start\n");
-    if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) = read_calibrated_vin_mv(
+    if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) = read_calibrated_vin_mv_with_pd(
         &mut adc1,
         &mut vin_adc_pin,
         adc_curve.as_ref(),
         &memory_config,
-    ) {
+        &mut pd_i2c,
+        &mut pd_port,
+        &mut last_pd_observation,
+        &mut heater_pwm,
+        &mut last_heater_duty,
+    )
+    .await
+    {
         latest_vin_raw_adc_mv = raw_adc_mv;
         latest_vin_mv = vin_mv;
         info!(
             "vin initial raw_code={=u16} raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
             raw_code, raw_adc_mv, corrected_adc_mv, vin_mv,
+        );
+        let _ = reconcile_pd_contract_with_vin(
+            &mut pd_contract_vin_guard,
+            last_pd_observation,
+            Some(vin_mv),
+            PdTimestamp::now().as_millis(),
+            &mut pd_port,
+            &mut last_pd_observation,
+            &mut pd_contract_ready,
+            &mut ui_state,
+            &mut calibration_runtime_state,
+            &mut manual_pps_state,
+            &mut heater_pwm,
+            &mut last_heater_duty,
         );
     }
     #[cfg(feature = "web_serial")]
@@ -14747,8 +16949,17 @@ async fn main(_spawner: Spawner) {
         &mut usb_serial,
         b"boot_stage=display_runtime_presentation_start\n",
     );
-    let initial_frontpanel_ui_ready =
-        present_initial_frontpanel_ui(&mut display, canvas, &ui_state).await;
+    let initial_frontpanel_ui_ready = present_initial_frontpanel_ui(
+        &mut display,
+        canvas,
+        &ui_state,
+        &mut pd_i2c,
+        &mut pd_port,
+        &mut last_pd_observation,
+        &mut heater_pwm,
+        &mut last_heater_duty,
+    )
+    .await;
     #[cfg(feature = "web_serial")]
     if initial_frontpanel_ui_ready {
         let _ = usb_write_bytes_bounded(
@@ -14777,8 +16988,19 @@ async fn main(_spawner: Spawner) {
         // Yield between slots so USB early-control and the status-light task
         // remain serviceable while the explicit restore lock is visible.
         if let Some(scratch) = boot_memory_io_scratch.as_mut() {
-            let (legacy_record, read_failed) =
-                load_legacy_eeprom_memory_record(&mut pd_i2c, scratch, eeprom_record_staging).await;
+            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                &mut last_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
+            let (legacy_record, read_failed) = load_legacy_eeprom_memory_record(
+                &mut pd_i2c,
+                &mut pd_port,
+                &mut eeprom_pd_service,
+                scratch,
+                eeprom_record_staging,
+            )
+            .await;
             if let Some(record) = legacy_record {
                 memory_sequence = record.sequence;
                 memory_config = record.config;
@@ -14788,9 +17010,15 @@ async fn main(_spawner: Spawner) {
                     #[cfg(not(feature = "web_serial"))]
                     let migration_log_sink =
                         &mut persistence_log_sink as &mut dyn PersistenceLogSink;
+                    let mut eeprom_pd_service = EepromPdServiceContext::new(
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    );
                     migrate_legacy_memory_config(
                         &mut pd_i2c,
                         &mut pd_port,
+                        &mut eeprom_pd_service,
                         record.sequence,
                         &memory_config,
                         &mut *migration_log_sink,
@@ -14856,20 +17084,62 @@ async fn main(_spawner: Spawner) {
     // network control plane only after the trusted RTD presentation is on the
     // panel so radio retries cannot delay the owner-facing startup state.
     #[cfg(feature = "net_http")]
-    flux_purr_firmware::net::initialize_control_state(memory_config.lan_pairing_token).await;
+    {
+        let mut eeprom_pd_service = EepromPdServiceContext::new(
+            &mut last_pd_observation,
+            &mut heater_pwm,
+            &mut last_heater_duty,
+        );
+        let mut pd_network_service = PdNetworkServiceContext {
+            eeprom: &mut eeprom_pd_service,
+            pd_contract_ready: &mut pd_contract_ready,
+            ui_state: &mut ui_state,
+            calibration_runtime_state: &mut calibration_runtime_state,
+            manual_pps: &mut manual_pps_state,
+        };
+        run_network_operation_with_pd(
+            flux_purr_firmware::net::initialize_control_state(memory_config.lan_pairing_token),
+            &mut pd_i2c,
+            &mut pd_port,
+            &mut pd_network_service,
+        )
+        .await;
+    }
     #[cfg(all(feature = "net_http", feature = "web_serial"))]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_control_state_ready\n");
     #[cfg(feature = "net_http")]
     {
-        if let Err(error) =
+        let mut eeprom_pd_service = EepromPdServiceContext::new(
+            &mut last_pd_observation,
+            &mut heater_pwm,
+            &mut last_heater_duty,
+        );
+        let mut pd_network_service = PdNetworkServiceContext {
+            eeprom: &mut eeprom_pd_service,
+            pd_contract_ready: &mut pd_contract_ready,
+            ui_state: &mut ui_state,
+            calibration_runtime_state: &mut calibration_runtime_state,
+            manual_pps: &mut manual_pps_state,
+        };
+        let spawn_result = run_network_operation_with_pd(
             flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config, |stage| {
                 #[cfg(feature = "web_serial")]
                 let _ = usb_write_bytes_bounded(&mut usb_serial, stage);
-            })
-            .await
-        {
+            }),
+            &mut pd_i2c,
+            &mut pd_port,
+            &mut pd_network_service,
+        )
+        .await;
+        if let Err(error) = spawn_result {
             warn!("LAN control plane startup failed: {=str}", error.message());
-            flux_purr_firmware::net::report_startup_failure(error).await;
+            run_network_operation_with_pd(
+                flux_purr_firmware::net::report_startup_failure(error),
+                &mut pd_i2c,
+                &mut pd_port,
+                &mut pd_network_service,
+            )
+            .await;
         }
     }
     drop(boot_memory_io_scratch);
@@ -14885,9 +17155,12 @@ async fn main(_spawner: Spawner) {
         let _ = usb_write_bytes_bounded(&mut usb_serial, reset_reason.as_bytes());
     }
 
-    let runtime_started_ms = Instant::now().as_millis();
+    let runtime_started_ms = pd_runtime_started_ms;
     let mut last_control_ms: u64 = 0;
     let mut next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
+    // PD protocol work has a tighter deadline than thermal control. Keep it
+    // ahead of USB/LAN commands and reuse its latest observation below.
+    let mut next_pd_service_deadline_ms = 0;
     let mut heater_control_timing = HeaterControlTiming::default();
     let mut ui_refresh_pending = restore_frame_was_shown;
     let mut next_ui_refresh_ms = DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS;
@@ -14903,6 +17176,41 @@ async fn main(_spawner: Spawner) {
         let elapsed_ms = Instant::now()
             .as_millis()
             .saturating_sub(runtime_started_ms);
+        let pd_now = PdTimestamp::now();
+        let mut needs_redraw = false;
+
+        if pd_runtime_service_due(pd_now.as_millis(), next_pd_service_deadline_ms) {
+            next_pd_service_deadline_ms = next_pd_runtime_service_deadline_ms(
+                next_pd_service_deadline_ms,
+                pd_now.as_millis(),
+            );
+            let current_pd_observation = read_pd_status(&mut pd_i2c, &mut pd_port, pd_now).await;
+            if pd_status_log_key(current_pd_observation) != last_pd_status_log_key {
+                match current_pd_observation {
+                    Some(observation) => info!(
+                        "pd status update status=0x{=u8:02x} pd={=bool} epr={=bool} epr_exist={=bool} current_raw=0x{=u8:02x} current_ma={=u16}",
+                        observation.status_raw,
+                        observation.status.pd_active,
+                        observation.status.epr_active,
+                        observation.status.epr_exist,
+                        observation.current_raw,
+                        observation.current_ma,
+                    ),
+                    None => info!("pd status update read=failed"),
+                }
+                last_pd_status_log_key = pd_status_log_key(current_pd_observation);
+            }
+            last_pd_observation = current_pd_observation;
+            needs_redraw |= apply_pd_contract_observation(
+                current_pd_observation,
+                &mut pd_contract_ready,
+                &mut ui_state,
+                &mut calibration_runtime_state,
+                &mut manual_pps_state,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
+        }
 
         let raw_state = inputs.sample();
         let sample = controller.sample_with_capabilities(
@@ -14910,20 +17218,34 @@ async fn main(_spawner: Spawner) {
             raw_state,
             ui_state.gesture_capabilities(),
         );
-        let mut needs_redraw = false;
         let route_before_usb_control = ui_state.route;
+        #[cfg(feature = "net_http")]
+        let mut control_command_processed = false;
+        #[cfg(feature = "web_serial")]
+        let mut usb_bytes_processed = 0_u16;
         #[cfg(feature = "web_serial")]
         loop {
+            if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET {
+                break;
+            }
             match usb_serial.read_byte() {
                 Ok(b'\n') => {
+                    let mut eeprom_pd_service = EepromPdServiceContext::new(
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    );
                     if let Some(response) = process_eeprom_snapshot_line(
                         usb_rx_line.as_str(),
                         &mut eeprom_snapshot_session,
                         &mut pd_i2c,
-                        last_heater_duty,
+                        &mut pd_port,
+                        &mut eeprom_pd_service,
                         &mut memory_commit_due_ms,
                         elapsed_ms,
-                    ) {
+                    )
+                    .await
+                    {
                         if eeprom_snapshot_storage_failure(&response) {
                             mark_eeprom_required(
                                 &mut ui_state,
@@ -14935,8 +17257,19 @@ async fn main(_spawner: Spawner) {
                         }
                         write_eeprom_snapshot_response(&mut usb_serial, &response, usb_tx_buf);
                         usb_rx_line.clear();
-                        continue;
+                        #[cfg(feature = "net_http")]
+                        {
+                            control_command_processed = true;
+                        }
+                        break;
                     }
+                    let pd_observation_for_control = last_pd_observation;
+                    let heater_duty_for_control = last_heater_duty;
+                    let mut eeprom_pd_service = EepromPdServiceContext::new(
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    );
                     let (control_needs_redraw, response) = process_control_line(
                         usb_rx_line.as_str(),
                         &mut controller,
@@ -14951,10 +17284,12 @@ async fn main(_spawner: Spawner) {
                         &mut pd_i2c,
                         pd_port.controller_kind(),
                         &mut pd_port,
+                        &mut eeprom_pd_service,
                         &mut calibration_runtime_state,
                         thermal_plant_workspace,
                         elapsed_ms,
-                        last_pd_observation,
+                        pd_observation_for_control,
+                        &mut pd_contract_ready,
                         &mut heater_power_backend,
                         &mut heater_controller,
                         last_pid_snapshot,
@@ -14976,7 +17311,7 @@ async fn main(_spawner: Spawner) {
                         latest_rtd_raw_adc_max_mv,
                         latest_vin_raw_adc_mv,
                         latest_vin_mv,
-                        last_heater_duty,
+                        heater_duty_for_control,
                         heater_control_timing,
                         &mut usb_serial,
                         eeprom_record_staging,
@@ -14998,9 +17333,17 @@ async fn main(_spawner: Spawner) {
                     .await;
                     usb_write_response_frame(&mut usb_serial, &response, usb_tx_buf);
                     usb_rx_line.clear();
+                    #[cfg(feature = "net_http")]
+                    {
+                        control_command_processed = true;
+                    }
+                    break;
                 }
-                Ok(b'\r') => {}
+                Ok(b'\r') => {
+                    usb_bytes_processed = usb_bytes_processed.saturating_add(1);
+                }
                 Ok(byte) => {
+                    usb_bytes_processed = usb_bytes_processed.saturating_add(1);
                     if usb_rx_line.push(char::from(byte)).is_err() {
                         usb_rx_line.clear();
                     }
@@ -15016,153 +17359,281 @@ async fn main(_spawner: Spawner) {
         }
 
         #[cfg(feature = "net_http")]
-        while let Some(command) = flux_purr_firmware::net::try_receive_command() {
-            let request_id = command.request_id;
-            let response_slot = command.response_slot;
-            let is_mutation = matches!(
-                command.method,
-                HttpMethod::Post | HttpMethod::Put | HttpMethod::Delete
-            );
-            if is_mutation && !flux_purr_firmware::net::command_lease_is_active(&command).await {
-                flux_purr_firmware::net::respond_to_command(
-                    response_slot,
-                    request_id,
-                    409,
-                    lan_error_json(
-                        "lease_expired",
-                        "The LAN lease expired before this command reached the control loop.",
-                    ),
-                    false,
+        if !control_command_processed {
+            if let Some(command) = flux_purr_firmware::net::try_receive_command() {
+                let request_id = command.request_id;
+                let response_slot = command.response_slot;
+                let is_mutation = matches!(
+                    command.method,
+                    HttpMethod::Post | HttpMethod::Put | HttpMethod::Delete
                 );
-                continue;
-            }
-            if is_mutation
-                && flux_purr_firmware::net_http::validate_control_revision(
-                    command.expected_revision,
-                    flux_purr_firmware::net::current_control_revision(),
+                let lease_active = {
+                    let mut eeprom_pd_service = EepromPdServiceContext::new(
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    );
+                    let mut pd_network_service = PdNetworkServiceContext {
+                        eeprom: &mut eeprom_pd_service,
+                        pd_contract_ready: &mut pd_contract_ready,
+                        ui_state: &mut ui_state,
+                        calibration_runtime_state: &mut calibration_runtime_state,
+                        manual_pps: &mut manual_pps_state,
+                    };
+                    run_network_operation_with_pd(
+                        flux_purr_firmware::net::command_lease_is_active(&command),
+                        &mut pd_i2c,
+                        &mut pd_port,
+                        &mut pd_network_service,
+                    )
+                    .await
+                };
+                if is_mutation && !lease_active {
+                    flux_purr_firmware::net::respond_to_command(
+                        response_slot,
+                        request_id,
+                        409,
+                        lan_error_json(
+                            "lease_expired",
+                            "The LAN lease expired before this command reached the control loop.",
+                        ),
+                        false,
+                    );
+                    continue;
+                }
+                if is_mutation
+                    && flux_purr_firmware::net_http::validate_control_revision(
+                        command.expected_revision,
+                        flux_purr_firmware::net::current_control_revision(),
+                    )
+                    .is_err()
+                {
+                    flux_purr_firmware::net::respond_to_command(
+                        response_slot,
+                        request_id,
+                        409,
+                        lan_error_json(
+                            "stale_write",
+                            "The control state changed after this client last read it.",
+                        ),
+                        false,
+                    );
+                    continue;
+                }
+                let direct_response = match (command.endpoint, command.method) {
+                    (LanEndpoint::Identity, HttpMethod::Get) => {
+                        let identity = {
+                            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                                &mut last_pd_observation,
+                                &mut heater_pwm,
+                                &mut last_heater_duty,
+                            );
+                            let mut pd_network_service = PdNetworkServiceContext {
+                                eeprom: &mut eeprom_pd_service,
+                                pd_contract_ready: &mut pd_contract_ready,
+                                ui_state: &mut ui_state,
+                                calibration_runtime_state: &mut calibration_runtime_state,
+                                manual_pps: &mut manual_pps_state,
+                            };
+                            run_network_operation_with_pd(
+                                flux_purr_firmware::net::lan_identity(),
+                                &mut pd_i2c,
+                                &mut pd_port,
+                                &mut pd_network_service,
+                            )
+                            .await
+                        };
+                        Some(lan_json_response(&identity))
+                    }
+                    (LanEndpoint::Network, HttpMethod::Get) => {
+                        let network = {
+                            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                                &mut last_pd_observation,
+                                &mut heater_pwm,
+                                &mut last_heater_duty,
+                            );
+                            let mut pd_network_service = PdNetworkServiceContext {
+                                eeprom: &mut eeprom_pd_service,
+                                pd_contract_ready: &mut pd_contract_ready,
+                                ui_state: &mut ui_state,
+                                calibration_runtime_state: &mut calibration_runtime_state,
+                                manual_pps: &mut manual_pps_state,
+                            };
+                            run_network_operation_with_pd(
+                                flux_purr_firmware::net::lan_network_summary(),
+                                &mut pd_i2c,
+                                &mut pd_port,
+                                &mut pd_network_service,
+                            )
+                            .await
+                        };
+                        Some(lan_json_response(&network))
+                    }
+                    _ => None,
+                };
+                if let Some((status, body)) = direct_response {
+                    flux_purr_firmware::net::respond_to_command(
+                        response_slot,
+                        request_id,
+                        status,
+                        body,
+                        false,
+                    );
+                    continue;
+                }
+                let line = match lan_command_to_control_line(&command) {
+                    Ok(line) => line,
+                    Err(message) => {
+                        flux_purr_firmware::net::respond_to_command(
+                            response_slot,
+                            request_id,
+                            400,
+                            lan_error_json("unsupported_lan_command", message),
+                            false,
+                        );
+                        continue;
+                    }
+                };
+                let pd_observation_for_control = last_pd_observation;
+                let heater_duty_for_control = last_heater_duty;
+                let mut eeprom_pd_service = EepromPdServiceContext::new(
+                    &mut last_pd_observation,
+                    &mut heater_pwm,
+                    &mut last_heater_duty,
+                );
+                let (control_needs_redraw, response) = process_control_line(
+                    line.as_str(),
+                    &mut controller,
+                    &mut ui_state,
+                    &mut memory_config,
+                    &mut last_persisted_memory_config,
+                    &mut preview_heater_curve,
+                    &mut memory_commit_due_ms,
+                    &mut memory_sequence,
+                    persistence_source,
+                    persistence_record_state,
+                    &mut pd_i2c,
+                    pd_port.controller_kind(),
+                    &mut pd_port,
+                    &mut eeprom_pd_service,
+                    &mut calibration_runtime_state,
+                    thermal_plant_workspace,
+                    elapsed_ms,
+                    pd_observation_for_control,
+                    &mut pd_contract_ready,
+                    &mut heater_power_backend,
+                    &mut heater_controller,
+                    last_pid_snapshot,
+                    &mut manual_pps_state,
+                    fan_command,
+                    current_rtd_fault,
+                    &mut overtemp_attention_acknowledged,
+                    &mut attention_pending_after_fault_clear,
+                    &mut overtemp_forced_fan_active,
+                    &mut next_attention_reminder_ms,
+                    &mut buzzer,
+                    &mut thermal_control_profile_preview,
+                    last_raw_state,
+                    latest_display_temp_c,
+                    latest_temp_c,
+                    control_measurement_guarded,
+                    latest_rtd_raw_adc_mv,
+                    latest_rtd_raw_adc_min_mv,
+                    latest_rtd_raw_adc_max_mv,
+                    latest_vin_raw_adc_mv,
+                    latest_vin_mv,
+                    heater_duty_for_control,
+                    heater_control_timing,
+                    &mut usb_serial,
+                    eeprom_record_staging,
                 )
-                .is_err()
-            {
-                flux_purr_firmware::net::respond_to_command(
-                    response_slot,
-                    request_id,
-                    409,
-                    lan_error_json(
-                        "stale_write",
-                        "The control state changed after this client last read it.",
-                    ),
-                    false,
-                );
-                continue;
-            }
-            let direct_response = match (command.endpoint, command.method) {
-                (LanEndpoint::Identity, HttpMethod::Get) => Some(lan_json_response(
-                    &flux_purr_firmware::net::lan_identity().await,
-                )),
-                (LanEndpoint::Network, HttpMethod::Get) => Some(lan_json_response(
-                    &flux_purr_firmware::net::lan_network_summary().await,
-                )),
-                _ => None,
-            };
-            if let Some((status, body)) = direct_response {
+                .await;
+                needs_redraw |= control_needs_redraw;
+                needs_redraw |= disarm_pending_thermal_plant_output(
+                    &mut calibration_runtime_state,
+                    &mut heater_power_backend,
+                    &mut manual_pps_state,
+                    &mut pd_i2c,
+                    &mut pd_port,
+                    &mut heater_pwm,
+                    &mut hold_pps_governor,
+                    &mut ui_state,
+                    &mut last_heater_duty,
+                    latest_vin_mv,
+                )
+                .await;
+                let network_summary = {
+                    let mut eeprom_pd_service = EepromPdServiceContext::new(
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    );
+                    let mut pd_network_service = PdNetworkServiceContext {
+                        eeprom: &mut eeprom_pd_service,
+                        pd_contract_ready: &mut pd_contract_ready,
+                        ui_state: &mut ui_state,
+                        calibration_runtime_state: &mut calibration_runtime_state,
+                        manual_pps: &mut manual_pps_state,
+                    };
+                    run_network_operation_with_pd(
+                        flux_purr_firmware::net::lan_network_summary(),
+                        &mut pd_i2c,
+                        &mut pd_port,
+                        &mut pd_network_service,
+                    )
+                    .await
+                };
+                let (status, body) = lan_frame_response(&response, network_summary);
                 flux_purr_firmware::net::respond_to_command(
                     response_slot,
                     request_id,
                     status,
                     body,
-                    false,
+                    is_mutation,
                 );
-                continue;
             }
-            let line = match lan_command_to_control_line(&command) {
-                Ok(line) => line,
-                Err(message) => {
-                    flux_purr_firmware::net::respond_to_command(
-                        response_slot,
-                        request_id,
-                        400,
-                        lan_error_json("unsupported_lan_command", message),
-                        false,
-                    );
-                    continue;
-                }
-            };
-            let (control_needs_redraw, response) = process_control_line(
-                line.as_str(),
-                &mut controller,
-                &mut ui_state,
-                &mut memory_config,
-                &mut last_persisted_memory_config,
-                &mut preview_heater_curve,
-                &mut memory_commit_due_ms,
-                &mut memory_sequence,
-                persistence_source,
-                persistence_record_state,
-                &mut pd_i2c,
-                pd_port.controller_kind(),
-                &mut pd_port,
-                &mut calibration_runtime_state,
-                thermal_plant_workspace,
-                elapsed_ms,
-                last_pd_observation,
-                &mut heater_power_backend,
-                &mut heater_controller,
-                last_pid_snapshot,
-                &mut manual_pps_state,
-                fan_command,
-                current_rtd_fault,
-                &mut overtemp_attention_acknowledged,
-                &mut attention_pending_after_fault_clear,
-                &mut overtemp_forced_fan_active,
-                &mut next_attention_reminder_ms,
-                &mut buzzer,
-                &mut thermal_control_profile_preview,
-                last_raw_state,
-                latest_display_temp_c,
-                latest_temp_c,
-                control_measurement_guarded,
-                latest_rtd_raw_adc_mv,
-                latest_rtd_raw_adc_min_mv,
-                latest_rtd_raw_adc_max_mv,
-                latest_vin_raw_adc_mv,
-                latest_vin_mv,
-                last_heater_duty,
-                heater_control_timing,
-                &mut usb_serial,
-                eeprom_record_staging,
-            )
-            .await;
-            needs_redraw |= control_needs_redraw;
-            needs_redraw |= disarm_pending_thermal_plant_output(
-                &mut calibration_runtime_state,
-                &mut heater_power_backend,
-                &mut manual_pps_state,
-                &mut pd_i2c,
-                &mut pd_port,
-                &mut heater_pwm,
-                &mut hold_pps_governor,
-                &mut ui_state,
-                &mut last_heater_duty,
-                latest_vin_mv,
-            )
-            .await;
-            let (status, body) = lan_frame_response(
-                &response,
-                flux_purr_firmware::net::lan_network_summary().await,
-            );
-            flux_purr_firmware::net::respond_to_command(
-                response_slot,
-                request_id,
-                status,
-                body,
-                is_mutation,
-            );
         }
         #[cfg(feature = "net_http")]
-        if let Some(token) = flux_purr_firmware::net::take_persisted_token_change().await {
+        let persisted_token_change = {
+            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                &mut last_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
+            let mut pd_network_service = PdNetworkServiceContext {
+                eeprom: &mut eeprom_pd_service,
+                pd_contract_ready: &mut pd_contract_ready,
+                ui_state: &mut ui_state,
+                calibration_runtime_state: &mut calibration_runtime_state,
+                manual_pps: &mut manual_pps_state,
+            };
+            run_network_operation_with_pd(
+                flux_purr_firmware::net::take_persisted_token_change(),
+                &mut pd_i2c,
+                &mut pd_port,
+                &mut pd_network_service,
+            )
+            .await
+        };
+        #[cfg(feature = "net_http")]
+        if let Some(token) = persisted_token_change {
             memory_config.lan_pairing_token = token;
             memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
         }
+
+        // EEPROM/display work may have serviced PD while the normal deadline
+        // gate was suspended. Reconcile that observation before any thermal,
+        // UI, or LAN state is consumed so a failed read cannot authorize stale
+        // heater intent.
+        needs_redraw |= apply_pd_contract_observation(
+            last_pd_observation,
+            &mut pd_contract_ready,
+            &mut ui_state,
+            &mut calibration_runtime_state,
+            &mut manual_pps_state,
+            &mut heater_pwm,
+            &mut last_heater_duty,
+        );
 
         needs_redraw |= disarm_pending_thermal_plant_output(
             &mut calibration_runtime_state,
@@ -15283,6 +17754,11 @@ async fn main(_spawner: Spawner) {
                 let retry_format_recovery = retry_blank_initialization
                     || prepared_layout_recovery_pending
                     || eeprom_data_incompatible;
+                let mut eeprom_pd_service = EepromPdServiceContext::new(
+                    &mut last_pd_observation,
+                    &mut heater_pwm,
+                    &mut last_heater_duty,
+                );
                 let retry_result = {
                     #[cfg(feature = "web_serial")]
                     let retry_log_sink = &mut usb_serial as &mut dyn PersistenceLogSink;
@@ -15292,6 +17768,7 @@ async fn main(_spawner: Spawner) {
                         recover_prepared_fpr2_layout(
                             &mut pd_i2c,
                             &mut pd_port,
+                            &mut eeprom_pd_service,
                             memory_sequence,
                             retry_log_sink,
                             eeprom_record_staging,
@@ -15301,6 +17778,8 @@ async fn main(_spawner: Spawner) {
                         let mut scratch = new_memory_io_scratch();
                         let (legacy_record, read_failed) = load_legacy_eeprom_memory_record(
                             &mut pd_i2c,
+                            &mut pd_port,
+                            &mut eeprom_pd_service,
                             &mut scratch,
                             eeprom_record_staging,
                         )
@@ -15311,6 +17790,7 @@ async fn main(_spawner: Spawner) {
                             migrate_legacy_memory_config(
                                 &mut pd_i2c,
                                 &mut pd_port,
+                                &mut eeprom_pd_service,
                                 memory_sequence,
                                 &memory_config,
                                 retry_log_sink,
@@ -15338,6 +17818,7 @@ async fn main(_spawner: Spawner) {
                         match initialize_fpr2_defaults(
                             &mut pd_i2c,
                             &mut pd_port,
+                            &mut eeprom_pd_service,
                             retry_log_sink,
                             eeprom_record_staging,
                         )
@@ -15360,6 +17841,7 @@ async fn main(_spawner: Spawner) {
                         commit_memory_config_now(
                             &mut pd_i2c,
                             &mut pd_port,
+                            &mut eeprom_pd_service,
                             elapsed_ms,
                             &mut memory_sequence,
                             &memory_config,
@@ -15420,7 +17902,27 @@ async fn main(_spawner: Spawner) {
             {
                 #[cfg(feature = "net_http")]
                 {
-                    let code = flux_purr_firmware::net::enter_pairing().await;
+                    let code = {
+                        let mut eeprom_pd_service = EepromPdServiceContext::new(
+                            &mut last_pd_observation,
+                            &mut heater_pwm,
+                            &mut last_heater_duty,
+                        );
+                        let mut pd_network_service = PdNetworkServiceContext {
+                            eeprom: &mut eeprom_pd_service,
+                            pd_contract_ready: &mut pd_contract_ready,
+                            ui_state: &mut ui_state,
+                            calibration_runtime_state: &mut calibration_runtime_state,
+                            manual_pps: &mut manual_pps_state,
+                        };
+                        run_network_operation_with_pd(
+                            flux_purr_firmware::net::enter_pairing(),
+                            &mut pd_i2c,
+                            &mut pd_port,
+                            &mut pd_network_service,
+                        )
+                        .await
+                    };
                     ui_state.enter_wifi_pairing(code);
                     info!("LAN pairing window opened from WiFi Info page");
                 }
@@ -15431,7 +17933,25 @@ async fn main(_spawner: Spawner) {
             {
                 #[cfg(feature = "net_http")]
                 {
-                    flux_purr_firmware::net::leave_pairing().await;
+                    let mut eeprom_pd_service = EepromPdServiceContext::new(
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    );
+                    let mut pd_network_service = PdNetworkServiceContext {
+                        eeprom: &mut eeprom_pd_service,
+                        pd_contract_ready: &mut pd_contract_ready,
+                        ui_state: &mut ui_state,
+                        calibration_runtime_state: &mut calibration_runtime_state,
+                        manual_pps: &mut manual_pps_state,
+                    };
+                    run_network_operation_with_pd(
+                        flux_purr_firmware::net::leave_pairing(),
+                        &mut pd_i2c,
+                        &mut pd_port,
+                        &mut pd_network_service,
+                    )
+                    .await;
                     ui_state.leave_wifi_pairing();
                     info!("LAN pairing window closed after leaving WiFi Info page");
                 }
@@ -15591,12 +18111,18 @@ async fn main(_spawner: Spawner) {
 
             let previous_vin_raw_adc_mv = latest_vin_raw_adc_mv;
             let current_request_mv = heater_power_backend.pd_request_mv();
-            let mut rtd_sample = read_rtd_sample(
+            let mut rtd_sample = read_rtd_sample_with_pd(
                 &mut adc1,
                 &mut rtd_adc_pin,
                 adc_curve.as_ref(),
                 &memory_config,
-            );
+                &mut pd_i2c,
+                &mut pd_port,
+                &mut last_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            )
+            .await;
             let first_rtd_snapshot = match &rtd_sample {
                 RtdSample::Valid(measurement) => {
                     (measurement.raw_adc_mv, measurement.temp_c, "valid")
@@ -15604,12 +18130,20 @@ async fn main(_spawner: Spawner) {
                 RtdSample::Fault { adc_mv, reason } => (adc_mv.unwrap_or(0), 0.0, reason.label()),
             };
 
-            if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) = read_calibrated_vin_mv(
-                &mut adc1,
-                &mut vin_adc_pin,
-                adc_curve.as_ref(),
-                &memory_config,
-            ) {
+            if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) =
+                read_calibrated_vin_mv_with_pd(
+                    &mut adc1,
+                    &mut vin_adc_pin,
+                    adc_curve.as_ref(),
+                    &memory_config,
+                    &mut pd_i2c,
+                    &mut pd_port,
+                    &mut last_pd_observation,
+                    &mut heater_pwm,
+                    &mut last_heater_duty,
+                )
+                .await
+            {
                 let retry_rtd_after_power_step = should_retry_rtd_sample_after_power_step(
                     last_rtd_sample_request_mv,
                     current_request_mv,
@@ -15621,17 +18155,37 @@ async fn main(_spawner: Spawner) {
                     latest_vin_mv = vin_mv;
                     needs_redraw = true;
                 }
+                needs_redraw |= reconcile_pd_contract_with_vin(
+                    &mut pd_contract_vin_guard,
+                    last_pd_observation,
+                    Some(vin_mv),
+                    PdTimestamp::now().as_millis(),
+                    &mut pd_port,
+                    &mut last_pd_observation,
+                    &mut pd_contract_ready,
+                    &mut ui_state,
+                    &mut calibration_runtime_state,
+                    &mut manual_pps_state,
+                    &mut heater_pwm,
+                    &mut last_heater_duty,
+                );
                 info!(
                     "vin sample raw_code={=u16} raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
                     raw_code, raw_adc_mv, corrected_adc_mv, vin_mv,
                 );
                 if retry_rtd_after_power_step {
-                    rtd_sample = read_rtd_sample(
+                    rtd_sample = read_rtd_sample_with_pd(
                         &mut adc1,
                         &mut rtd_adc_pin,
                         adc_curve.as_ref(),
                         &memory_config,
-                    );
+                        &mut pd_i2c,
+                        &mut pd_port,
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    )
+                    .await;
                     let second_rtd_snapshot = match &rtd_sample {
                         RtdSample::Valid(measurement) => {
                             (measurement.raw_adc_mv, measurement.temp_c, "valid")
@@ -15738,61 +18292,20 @@ async fn main(_spawner: Spawner) {
                 );
             }
 
-            let current_pd_observation =
-                read_pd_status(&mut pd_i2c, &mut pd_port, elapsed_ms).await;
-            if pd_status_log_key(current_pd_observation) != last_pd_status_log_key {
-                match current_pd_observation {
-                    Some(observation) => info!(
-                        "pd status update status=0x{=u8:02x} pd={=bool} epr={=bool} epr_exist={=bool} current_raw=0x{=u8:02x} current_ma={=u16}",
-                        observation.status_raw,
-                        observation.status.pd_active,
-                        observation.status.epr_active,
-                        observation.status.epr_exist,
-                        observation.current_raw,
-                        observation.current_ma,
-                    ),
-                    None => info!("pd status update read=failed"),
+            let current_pd_observation = last_pd_observation;
+            let mut fusb302b_capabilities_changed = false;
+            if pd_port.controller_kind() == ControllerKind::Fusb302b {
+                let capabilities = read_pd_power_capabilities(&mut pd_i2c, &mut pd_port);
+                if capabilities != last_fusb302b_power_capabilities {
+                    fusb302b_capabilities_changed = true;
+                    last_fusb302b_power_capabilities = capabilities;
+                    heater_power_backend =
+                        refresh_fusb302b_heater_power_backend(heater_power_backend, capabilities);
+                    manual_pps_state = ManualPpsState::from_fusb302b_capabilities(capabilities);
+                    hold_pps_governor = HoldPpsGovernor::new();
+                    needs_redraw = true;
+                    info!("fusb302b source capabilities changed; refreshed heater power bounds");
                 }
-                last_pd_status_log_key = pd_status_log_key(current_pd_observation);
-            }
-            last_pd_observation = current_pd_observation;
-            let current_pd_contract_ready = startup_pd_contract_ready(current_pd_observation);
-            if pd_contract_ready != current_pd_contract_ready {
-                let pd_was_ready = pd_contract_ready;
-                pd_contract_ready = current_pd_contract_ready;
-                needs_redraw = true;
-                if pd_contract_ready {
-                    if disarm_stale_heater_arm_after_pd_transition(
-                        pd_was_ready,
-                        pd_contract_ready,
-                        &mut ui_state,
-                        &mut calibration_runtime_state,
-                    ) {
-                        needs_redraw = true;
-                        info!(
-                            "PD contract became ready; discarded pre-ready heater arm and require a new explicit arm"
-                        );
-                    }
-                    info!("PD contract became ready; released startup heater interlock");
-                } else {
-                    info!("PD contract became unavailable; heater interlocked");
-                }
-            }
-            if pd_port.controller_kind() == ControllerKind::Fusb302b
-                && matches!(
-                    heater_power_backend,
-                    HeaterPowerBackend::FixedPdPwmFallback { .. }
-                )
-                && let Some(capabilities) = read_pd_power_capabilities(&mut pd_i2c, &mut pd_port)
-                && let Some(next_backend) = fusb302b_pps_backend_from_capabilities(capabilities)
-            {
-                heater_power_backend = next_backend;
-                manual_pps_state = ManualPpsState::from_capabilities(Some(capabilities));
-                hold_pps_governor = HoldPpsGovernor::new();
-                needs_redraw = true;
-                info!(
-                    "fusb302b source capabilities became available; promoted heater backend to pps-mos"
-                );
             }
             update_calibration_runtime_state(
                 &mut calibration_runtime_state,
@@ -15836,18 +18349,30 @@ async fn main(_spawner: Spawner) {
                     last_heater_duty,
                 );
             }
+            if fusb302b_capabilities_changed {
+                disarm_calibration_after_capability_refresh(
+                    &mut calibration_runtime_state,
+                    &mut manual_pps_state,
+                );
+            }
             let thermal_plant_completed = calibration_runtime_state.mode == CalibrationMode::Off
                 && calibration_runtime_state.job.kind == Some(CalibrationJobKind::ThermalPlant)
                 && calibration_runtime_state.job.status == CalibrationJobStatus::Completed;
             if memory_config != memory_before_calibration_job {
                 if thermal_plant_completed {
+                    let mut eeprom_pd_service = EepromPdServiceContext::new(
+                        &mut last_pd_observation,
+                        &mut heater_pwm,
+                        &mut last_heater_duty,
+                    );
                     if let Err(error) = commit_memory_config_now(
                         &mut pd_i2c,
                         &mut pd_port,
+                        &mut eeprom_pd_service,
                         elapsed_ms,
                         &mut memory_sequence,
                         &memory_config,
-                        PersistDomainMask::SAFETY,
+                        PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                         #[cfg(feature = "web_serial")]
                         &mut usb_serial,
                         #[cfg(not(feature = "web_serial"))]
@@ -15861,7 +18386,7 @@ async fn main(_spawner: Spawner) {
                             &mut memory_config,
                             &mut ui_state,
                             &last_persisted_memory_config,
-                            PersistDomainMask::SAFETY,
+                            PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                         );
                         mark_eeprom_required(
                             &mut ui_state,
@@ -15881,7 +18406,7 @@ async fn main(_spawner: Spawner) {
                         copy_persisted_domains(
                             &mut last_persisted_memory_config,
                             &memory_config,
-                            PersistDomainMask::SAFETY,
+                            PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
                         );
                         memory_commit_due_ms = None;
                     }
@@ -15954,7 +18479,7 @@ async fn main(_spawner: Spawner) {
             // watts. Bound achievable plate power by both V^2/R(T) and the
             // selected APDO's V*I contract without turning R(T) into a voltage
             // ceiling. The source contract owns its current boundary.
-            let runtime_source_limits = manual_pps_state.thermal_plant_source_limits();
+            let runtime_source_limits = manual_pps_state.heater_source_limits();
             let max_power_mw = heater_available_power_mw_for_temp(
                 latest_temp_c,
                 runtime_source_limits.map(|(_, max_mv, _)| max_mv),
@@ -16097,9 +18622,15 @@ async fn main(_spawner: Spawner) {
             memory_commit_due_ms = None;
             let commit_domains =
                 persist_domain_mask_between(&memory_config, &last_persisted_memory_config);
+            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                &mut last_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
             if let Err(error) = commit_memory_config_now(
                 &mut pd_i2c,
                 &mut pd_port,
+                &mut eeprom_pd_service,
                 elapsed_ms,
                 &mut memory_sequence,
                 &memory_config,
@@ -16119,7 +18650,7 @@ async fn main(_spawner: Spawner) {
                         &mut memory_config,
                         &mut ui_state,
                         &last_persisted_memory_config,
-                        PersistDomainMask::single(error.domain),
+                        commit_domains,
                     );
                     mark_eeprom_required(
                         &mut ui_state,
@@ -16283,7 +18814,29 @@ async fn main(_spawner: Spawner) {
         }
 
         #[cfg(feature = "net_http")]
-        if ui_state.apply_network_summary(flux_purr_firmware::net::lan_network_summary().await) {
+        let runtime_network_summary = {
+            let mut eeprom_pd_service = EepromPdServiceContext::new(
+                &mut last_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
+            let mut pd_network_service = PdNetworkServiceContext {
+                eeprom: &mut eeprom_pd_service,
+                pd_contract_ready: &mut pd_contract_ready,
+                ui_state: &mut ui_state,
+                calibration_runtime_state: &mut calibration_runtime_state,
+                manual_pps: &mut manual_pps_state,
+            };
+            run_network_operation_with_pd(
+                flux_purr_firmware::net::lan_network_summary(),
+                &mut pd_i2c,
+                &mut pd_port,
+                &mut pd_network_service,
+            )
+            .await
+        };
+        #[cfg(feature = "net_http")]
+        if ui_state.apply_network_summary(runtime_network_summary) {
             needs_redraw = true;
         }
         if maybe_play_protection_alarm(
@@ -16328,14 +18881,28 @@ async fn main(_spawner: Spawner) {
         set_status_light_state(status_light_state);
         ui_refresh_pending |= needs_redraw;
         if ui_refresh_pending && elapsed_ms >= next_ui_refresh_ms {
-            match with_timeout(
-                DISPLAY_IO_TIMEOUT,
+            let display_flush_result = run_display_operation_with_pd_and_heater(
                 flush_ui(&mut display, canvas, &ui_state),
+                &mut pd_i2c,
+                &mut pd_port,
+                &mut last_pd_observation,
+                &mut heater_pwm,
+                &mut last_heater_duty,
             )
-            .await
-            {
-                Ok(Ok(())) => log_ui_state(&ui_state),
-                Ok(Err(_)) | Err(_) => {
+            .await;
+            let pd_redraw_after_flush = apply_pd_contract_observation(
+                last_pd_observation,
+                &mut pd_contract_ready,
+                &mut ui_state,
+                &mut calibration_runtime_state,
+                &mut manual_pps_state,
+                &mut heater_pwm,
+                &mut last_heater_duty,
+            );
+            ui_refresh_pending = pd_redraw_after_flush;
+            match display_flush_result {
+                Some(Ok(())) => log_ui_state(&ui_state),
+                Some(Err(_)) | None => {
                     // A failed or timed-out async SPI transaction must not be
                     // reused: its chip-select and panel state can be incomplete
                     // after an interrupted transfer. Stop heat first, force the
@@ -16383,7 +18950,6 @@ async fn main(_spawner: Spawner) {
                     panic!("frontpanel UI refresh timed out");
                 }
             }
-            ui_refresh_pending = false;
             next_ui_refresh_ms = elapsed_ms.saturating_add(DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS);
         }
     }
@@ -16399,6 +18965,458 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pd_startup_and_runtime_share_one_timestamp_epoch() {
+        let started_at_ms = 42_000;
+        assert_eq!(pd_runtime_elapsed_ms(started_at_ms, started_at_ms), 0);
+        assert_eq!(
+            pd_runtime_elapsed_ms(started_at_ms, started_at_ms + 400),
+            400
+        );
+        assert_eq!(pd_runtime_elapsed_ms(started_at_ms, started_at_ms - 1), 0);
+
+        let protocol_now = PdTimestamp::from_millis(42_400);
+        assert_eq!(protocol_now.as_millis(), 42_400);
+        assert!(pd_runtime_service_due(protocol_now.as_millis(), 42_395));
+    }
+
+    #[test]
+    fn pd_service_does_not_feed_control_elapsed_time_into_protocol_deadlines() {
+        let source = include_str!("flux_purr.rs");
+        let implementation = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("implementation must precede tests");
+
+        assert!(
+            !implementation.contains("read_pd_status(&mut pd_i2c, &mut pd_port, elapsed_ms)"),
+            "PD protocol deadlines must not receive the relative control-loop clock"
+        );
+    }
+
+    #[test]
+    fn fusb302b_received_resets_do_not_request_cc_reinitialization() {
+        assert_eq!(
+            fusb302b_received_reset_action(FUSB302B_INTERRUPTA_SOFT_RESET),
+            Some(Fusb302bReceivedResetAction::AcceptAndWaitForSourceCapabilities)
+        );
+        assert_eq!(
+            fusb302b_received_reset_action(FUSB302B_INTERRUPTA_HARD_RESET),
+            Some(Fusb302bReceivedResetAction::WaitForSourceCapabilities)
+        );
+        assert_eq!(fusb302b_received_reset_action(0), None);
+    }
+
+    #[test]
+    fn fusb302b_recovery_flushes_only_the_receive_fifo() {
+        assert_eq!(fusb302b_receive_fifo_flush_value(0), 0b0000_0100);
+        assert_eq!(fusb302b_receive_fifo_flush_value(0xff), 0b0111_0111);
+        assert_eq!(fusb302b_transmit_fifo_flush_value(0), 0b0100_0000);
+        assert_eq!(fusb302b_transmit_fifo_flush_value(0xff), 0b0110_1110);
+    }
+
+    #[test]
+    fn fusb302b_settled_sink_polarity_decodes_only_sink_states() {
+        assert_eq!(
+            fusb302b_settled_sink_polarity(FUSB302B_TOGSS_SNK_CC1),
+            Some(1)
+        );
+        assert_eq!(
+            fusb302b_settled_sink_polarity(FUSB302B_TOGSS_SNK_CC2),
+            Some(2)
+        );
+        assert_eq!(fusb302b_settled_sink_polarity(0), None);
+        assert_eq!(fusb302b_settled_sink_polarity(0b0001_1000), None);
+    }
+
+    #[test]
+    fn fusb302b_detach_requires_the_vbusok_transition_interrupt() {
+        assert!(fusb302b_vbus_detach_was_reported(
+            FUSB302B_INTERRUPT_VBUSOK,
+            0,
+        ));
+        assert!(!fusb302b_vbus_detach_was_reported(0, 0));
+        assert!(!fusb302b_vbus_detach_was_reported(
+            FUSB302B_INTERRUPT_VBUSOK,
+            FUSB302B_STATUS0_VBUSOK,
+        ));
+        assert!(!fusb302b_vbus_detach_was_reported(
+            FUSB302B_INTERRUPTA_HARD_RESET,
+            0,
+        ));
+    }
+
+    #[test]
+    fn fusb302b_vbus_low_requires_a_bounded_confirmation_window() {
+        assert!(!fusb302b_vbus_low_confirmation_expired(None, 1_000));
+        assert!(!fusb302b_vbus_low_confirmation_expired(Some(1_000), 1_049,));
+        assert!(fusb302b_vbus_low_confirmation_expired(Some(1_000), 1_050,));
+        assert!(fusb302b_vbus_low_confirmation_expired(Some(1_000), 2_000,));
+    }
+
+    #[test]
+    fn fusb302b_vbus_restore_requires_a_bounded_confirmation_window() {
+        assert!(!fusb302b_vbus_restore_confirmation_expired(None, 1_000));
+        assert!(!fusb302b_vbus_restore_confirmation_expired(
+            Some(1_000),
+            1_049,
+        ));
+        assert!(fusb302b_vbus_restore_confirmation_expired(
+            Some(1_000),
+            1_050,
+        ));
+    }
+
+    #[test]
+    fn stale_pd_contract_requires_continuous_measured_vin_deficit() {
+        let contract = Contract {
+            kind: ContractKind::Pps,
+            object_position: 1,
+            voltage_mv: 12_000,
+            current_ma: 5_000,
+        };
+        let observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: contract.current_ma,
+            contract_voltage_mv: Some(contract.voltage_mv),
+            contract,
+        };
+        let mut guard = PdContractVinGuard::default();
+
+        assert!(!guard.observe(Some(observation), Some(5_000), 1_000, false));
+        assert!(!guard.observe(Some(observation), Some(5_000), 1_099, false));
+        assert!(guard.observe(Some(observation), Some(5_000), 1_100, false));
+        assert!(!guard.observe(Some(observation), Some(11_000), 1_101, false));
+        assert!(!guard.observe(Some(observation), Some(5_000), 1_200, false));
+        assert!(guard.observe(Some(observation), Some(5_000), 1_300, false));
+    }
+
+    #[test]
+    fn stale_pd_contract_does_not_infer_loss_without_a_vin_sample() {
+        let contract = Contract {
+            kind: ContractKind::Fixed,
+            object_position: 1,
+            voltage_mv: 20_000,
+            current_ma: 3_000,
+        };
+        let observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: contract.current_ma,
+            contract_voltage_mv: Some(contract.voltage_mv),
+            contract,
+        };
+        let mut guard = PdContractVinGuard::default();
+
+        assert!(!guard.observe(Some(observation), None, 2_000, false));
+        assert!(!guard.observe(Some(observation), None, 2_500, false));
+        assert!(!guard.observe(None, Some(5_000), 3_000, false));
+    }
+
+    #[test]
+    fn stale_pd_contract_guard_waits_out_pd_request_settling() {
+        let contract = Contract {
+            kind: ContractKind::Pps,
+            object_position: 1,
+            voltage_mv: 20_000,
+            current_ma: 3_000,
+        };
+        let observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: contract.current_ma,
+            contract_voltage_mv: Some(contract.voltage_mv),
+            contract,
+        };
+        let mut guard = PdContractVinGuard::default();
+
+        assert!(!guard.observe(Some(observation), Some(5_000), 4_000, true));
+        assert!(!guard.observe(Some(observation), Some(5_000), 4_500, true));
+        assert!(!guard.observe(Some(observation), Some(5_000), 4_599, false));
+        assert!(guard.observe(Some(observation), Some(5_000), 4_699, false));
+    }
+
+    #[test]
+    fn fusb302b_any_low_vbus_observation_interlocks_before_detach_confirmation() {
+        let source = include_str!("flux_purr.rs");
+        let implementation = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("implementation must precede tests");
+        let low_vbus_branch = implementation
+            .split("Fusb302bReceiveEvent::VbusLow { transition }")
+            .nth(1)
+            .expect("VBUS-low handling must remain present");
+        let transition_gate = low_vbus_branch
+            .find("if transition && self.vbus_low_candidate_since_ms.is_none()")
+            .expect("detach confirmation must remain transition-gated");
+        let interlock = low_vbus_branch
+            .find("self.interlock_after_vbus_low(now_ms)")
+            .expect("every low-VBUS observation must interlock immediately");
+
+        assert!(interlock < transition_gate);
+        assert!(implementation.contains(
+            "self.policy.on_received_protocol_reset();\n        self.attached_at_ms = Some(now_ms);"
+        ));
+        assert!(implementation.contains("vbus_low_interlocked: bool"));
+        assert!(implementation.contains("self.clear_vbus_low_interlock();"));
+    }
+
+    #[test]
+    fn fusb302b_persistent_low_vbus_reuses_cc_session_after_restore() {
+        let source = include_str!("flux_purr.rs");
+        let implementation = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("implementation must precede tests");
+        let detach_recovery = implementation
+            .split("async fn recover_after_detach")
+            .nth(1)
+            .and_then(|value| {
+                value
+                    .split("    /// Re-synchronize only the PD protocol engine")
+                    .next()
+            })
+            .expect("detach recovery implementation must remain present");
+
+        assert!(!detach_recovery.contains("on_detach_or_reset"));
+        assert!(!detach_recovery.contains("self.polarity = None"));
+        assert!(!detach_recovery.contains("self.next_message_id = 0"));
+        assert!(detach_recovery.contains("awaiting_vbus_restore = true"));
+        assert!(implementation.contains("fusb302b_vbus_restore_confirmation_expired"));
+
+        let restore_path = implementation
+            .split("if self.awaiting_vbus_restore")
+            .nth(1)
+            .and_then(|value| value.split("if matches!(").next())
+            .expect("VBUS restore path must remain present");
+        assert!(!restore_path.contains("initialize(i2c)"));
+        assert!(restore_path.contains("resynchronize_after_vbus_restore(i2c)"));
+        assert!(restore_path.contains("self.awaiting_vbus_restore = false"));
+        assert!(restore_path.contains("self.vbus_low_interlocked = false"));
+
+        let resynchronization = implementation
+            .split("async fn resynchronize_after_vbus_restore")
+            .nth(1)
+            .and_then(|value| {
+                value
+                    .split("    /// Recover a local receive/transmit failure")
+                    .next()
+            })
+            .expect("VBUS restore resynchronization must remain present");
+        let pd_reset = resynchronization
+            .find("phy.pd_reset()")
+            .expect("VBUS restore must reset the PD engine");
+        let fifo_flush = resynchronization
+            .find("phy.flush_fifos()")
+            .expect("VBUS restore must flush both FIFOs");
+        let phy_config = resynchronization
+            .find("phy.configure_phy(fusb302b_phy_config(true))")
+            .expect("VBUS restore must reapply the receiver PHY configuration");
+        let masks = resynchronization
+            .find("set_interrupt_masks(FUSB302B_RECEIVE_INTERRUPT_MASKS)")
+            .expect("VBUS restore must reapply receiver interrupt masks");
+        assert!(pd_reset < fifo_flush && fifo_flush < phy_config && phy_config < masks);
+        assert!(!resynchronization.contains("set_cc_pull"));
+        assert!(!resynchronization.contains("start_toggle"));
+    }
+
+    #[test]
+    fn fusb302b_status_only_signals_cannot_restart_the_physical_sink_session() {
+        let source = include_str!("flux_purr.rs");
+        let implementation = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("implementation must precede tests");
+
+        assert!(implementation.contains("Fusb302bReceivedResetAction"));
+        assert!(implementation.contains("recover_after_received_reset"));
+        assert!(implementation.contains("recover_transient_transport_fault"));
+        assert!(implementation.contains("fusb302b_vbus_detach_was_reported"));
+        assert!(implementation.contains("Fusb302bReceiveEvent::VbusLow"));
+        assert!(implementation.contains("recover_after_detach"));
+        assert!(!implementation.contains("fusb302b_runtime_vbus_loss_is_detach"));
+        assert!(!implementation.contains("Fusb302bReceiveEvent::OppositeSettledCc"));
+    }
+
+    #[test]
+    fn fusb302b_retry_failure_is_consumed_until_the_bounded_requery() {
+        assert!(fusb302b_retry_failure_requires_recovery(
+            FUSB302B_STATUS0A_RETRY_FAIL,
+            FUSB302B_STATUS1_RX_EMPTY,
+            false,
+        ));
+        // RETRY_FAIL invalidates the exchange even when a stale frame remains
+        // in the receive FIFO. Recovery must take precedence over that frame.
+        assert!(fusb302b_retry_failure_requires_recovery(
+            FUSB302B_STATUS0A_RETRY_FAIL,
+            0,
+            false,
+        ));
+        assert!(!fusb302b_retry_failure_requires_recovery(
+            FUSB302B_STATUS0A_RETRY_FAIL,
+            FUSB302B_STATUS1_RX_EMPTY,
+            true,
+        ));
+        assert!(!fusb302b_retry_recovery_should_discard_frame(
+            FUSB302B_STATUS1_RX_EMPTY,
+            true,
+        ));
+        assert!(fusb302b_retry_recovery_should_discard_frame(0, true));
+        assert!(!fusb302b_retry_recovery_should_discard_frame(0, false));
+        assert!(!fusb302b::source_capabilities_request_due(
+            1_000,
+            Some(2_000),
+            6_999,
+        ));
+        assert!(fusb302b::source_capabilities_request_due(
+            1_000,
+            Some(2_000),
+            7_000,
+        ));
+    }
+
+    #[test]
+    fn fusb302b_capability_bridge_preserves_each_usable_apdo() {
+        let mut source = SourceCapabilities::empty();
+        source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 21_000,
+            max_ma: 5_000,
+        });
+        source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 2,
+            min_mv: 5_000,
+            max_mv: 28_000,
+            max_ma: 3_000,
+        });
+
+        let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+        let mut manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        assert!(manual.validate_target(20_000, 5_000).is_ok());
+        assert!(manual.validate_target(24_000, 3_000).is_ok());
+        assert!(manual.validate_target(5_000, 3_000).is_err());
+        manual
+            .enable(ManualPpsOwner::Debug, 24_000, None)
+            .expect("an omitted current must use the APDO covering the requested voltage");
+        assert_eq!(manual.target_ma, Some(3_000));
+        assert_eq!(
+            manual.thermal_plant_source_limits(),
+            Some((5_500, 21_000, 5_000))
+        );
+        assert_eq!(
+            adjustable_mode_for_request(24_000, 28_000),
+            ch224q::AdjustableVoltageMode::Pps
+        );
+    }
+
+    #[test]
+    fn automatic_heating_uses_a_current_ceiling_valid_across_the_pps_range() {
+        let mut source = SourceCapabilities::empty();
+        source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 24_000,
+            max_ma: 3_000,
+        });
+        source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 2,
+            min_mv: 24_000,
+            max_mv: 28_000,
+            max_ma: 5_000,
+        });
+
+        let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+        let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        assert_eq!(manual.heater_source_limits(), Some((5_500, 28_000, 3_000)));
+    }
+
+    #[test]
+    fn thermal_plant_uses_one_apdo_covering_the_twenty_volt_anchor() {
+        let mut source = SourceCapabilities::empty();
+        source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 24_000,
+            max_ma: 3_000,
+        });
+        source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 2,
+            min_mv: 20_000,
+            max_mv: 28_000,
+            max_ma: 5_000,
+        });
+
+        let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+        let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        assert_eq!(
+            manual.thermal_plant_source_limits(),
+            Some((20_000, 28_000, 5_000))
+        );
+        assert_eq!(manual.heater_source_limits(), Some((5_500, 28_000, 3_000)));
+    }
+
+    #[test]
+    fn fusb302b_capability_bridge_retains_degraded_pps_apdo() {
+        let mut source = SourceCapabilities::empty();
+        source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 19_000,
+            max_ma: 3_000,
+        });
+
+        let capabilities = fusb302b_adjustable_power_capabilities(source)
+            .expect("a usable lower-voltage APDO remains visible to the PPS bridge");
+        let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        assert!(!capabilities.pps_covers_20v);
+        assert!(manual.validate_target(12_000, 3_000).is_ok());
+        assert_eq!(manual.thermal_plant_source_limits(), None);
+        let HeaterPowerBackend::PpsMos {
+            pps_min_mv,
+            pps_max_mv,
+            capability_max_ma,
+            ..
+        } = select_fusb302b_heater_power_backend(Some(capabilities))
+        else {
+            panic!("a usable degraded PPS APDO must remain available to automatic heating");
+        };
+        assert_eq!(pps_min_mv, 5_500);
+        assert_eq!(pps_max_mv, 19_000);
+        assert_eq!(capability_max_ma, 3_000);
+    }
+
+    #[test]
+    fn automatic_heating_does_not_join_disjoint_pps_apdos() {
+        let mut source = SourceCapabilities::empty();
+        source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 1,
+            min_mv: 5_000,
+            max_mv: 11_000,
+            max_ma: 3_000,
+        });
+        source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
+            object_position: 2,
+            min_mv: 12_000,
+            max_mv: 19_000,
+            max_ma: 3_000,
+        });
+
+        let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+        let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        assert_eq!(manual.heater_source_limits(), Some((12_000, 19_000, 3_000)));
+    }
 
     #[test]
     fn fusb302b_identity_requires_stable_family_id_and_readable_status() {
@@ -16464,38 +19482,51 @@ mod tests {
     }
 
     #[test]
-    fn startup_safe_outputs_precede_pd_and_legacy_eeprom_work() {
-        let source = include_str!("flux_purr.rs");
-        let outputs = source
-            .find("boot_stage=outputs_init_start")
-            .expect("safe output stage marker");
-        let pd = source
-            .find("boot_stage=pd_detect_start")
-            .expect("PD stage marker");
-        let legacy = source
-            .find("load_legacy_eeprom_memory_record(&mut pd_i2c, scratch, eeprom_record_staging)")
-            .expect("legacy restore call");
-        let first_frame = source
-            .find("present_initial_frontpanel_ui(&mut display, canvas, &ui_state)")
-            .expect("initial Dashboard frame");
-        assert!(outputs < pd);
-        assert!(first_frame < legacy);
+    fn startup_sequence_requires_backlight_pd_display_frame_before_other_work() {
+        let mut sequence = StartupSequence::new();
+        assert!(!sequence.advance(StartupSequenceStage::PdServiceComplete));
+        assert!(sequence.advance(StartupSequenceStage::BacklightReady));
+        assert!(!sequence.advance(StartupSequenceStage::StartupFrameReady));
+        assert!(sequence.advance(StartupSequenceStage::PdServiceComplete));
+        assert!(sequence.advance(StartupSequenceStage::DisplayReady));
+        assert!(sequence.advance(StartupSequenceStage::StartupFrameReady));
+        assert!(sequence.advance(StartupSequenceStage::OtherInitialization));
+        assert!(!sequence.advance(StartupSequenceStage::OtherInitialization));
     }
 
     #[test]
-    fn backlight_waits_for_display_init_and_startup_frame() {
+    fn memory_commit_publishes_active_marker_after_every_domain_write() {
         let source = include_str!("flux_purr.rs");
-        let display_init = source
-            .find("with_timeout(DISPLAY_IO_TIMEOUT, display.init()).await")
-            .expect("display init call");
-        let startup_flush = source
-            .find("let startup_flush_ready = match with_timeout(DISPLAY_IO_TIMEOUT, display.flush()).await")
-            .expect("startup flush call");
-        let backlight_on = source
-            .find("backlight.set_low();")
-            .expect("backlight enable");
-        assert!(display_init < startup_flush);
-        assert!(startup_flush < backlight_on);
+        let commit = source
+            .split("async fn commit_memory_config_now")
+            .nth(1)
+            .and_then(|value| {
+                value
+                    .split("async fn commit_memory_config_domains_without_marker")
+                    .next()
+            })
+            .expect("memory commit implementation must remain present");
+        let prepared = commit
+            .find("LayoutMarkerStatus::Prepared")
+            .expect("commit must prepare a marker");
+        let double_slot_domains = commit
+            .find("true,\n        \"write\"")
+            .expect("commit must write double-slot domains");
+        let single_slot_domains = commit
+            .find("false,\n        \"write-single\"")
+            .expect("commit must write single-slot domains");
+        let active = commit
+            .find("LayoutMarkerStatus::Active")
+            .expect("commit must publish an active marker");
+
+        assert!(prepared < double_slot_domains);
+        assert!(double_slot_domains < single_slot_domains);
+        assert!(single_slot_domains < active);
+    }
+
+    #[test]
+    fn pd_service_turn_is_bounded_to_one_received_frame() {
+        assert_eq!(FUSB302B_MAX_RX_MESSAGES_PER_POLL, 1);
     }
 
     #[test]
@@ -16503,7 +19534,6 @@ mod tests {
         assert_eq!(FUSB302B_INITIAL_PPS_REQUEST_MV, HEATER_ADJUSTABLE_MIN_MV);
         assert_eq!(FUSB302B_INITIAL_PPS_REQUEST_MV, 12_000);
     }
-
     #[test]
     fn zeroize_bytes_scrubs_reusable_heap_workspace() {
         let mut bytes = [0xFA, 0x00, 0xF4, 0x01, 0xA5, 0x5A];
@@ -16791,6 +19821,7 @@ mod tests {
                 reason: HeaterPowerBackendReason::NoPps20vCapability,
                 fixed_request_confirmed: true,
                 fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                terminal_fixed_pd_disarmed: false,
             },
             pid_snapshot: HeaterPidSnapshot {
                 duty_percent: 0,
@@ -18075,6 +21106,45 @@ mod tests {
     }
 
     #[test]
+    fn calibration_control_uses_the_target_apdo_current_when_unspecified() {
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_500),
+            pps_max_mv: Some(28_000),
+            pps_max_ma: Some(5_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 21_000,
+            max_ma: 5_000,
+        });
+        capabilities.pps_apdos[1] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 28_000,
+            max_ma: 3_000,
+        });
+        let mut calibration = CalibrationRuntimeState::default();
+        let mut manual_pps = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
+        apply_calibration_control_config(
+            &CalibrationControlCommand {
+                mode: Some(CalibrationModeWire::HeaterCurve),
+                pps_enabled: Some(true),
+                pps_mv: Some(24_000),
+                heater_enabled: None,
+                target_adc_mv: None,
+            },
+            &mut calibration,
+            &mut manual_pps,
+        )
+        .expect("calibration PPS selects the APDO that covers 24V");
+
+        assert_eq!(calibration.pps_mv, Some(24_000));
+        assert_eq!(calibration.pps_ma, Some(3_000));
+    }
+
+    #[test]
     fn leaving_calibration_mode_disarms_its_pps_override() {
         let mut calibration = CalibrationRuntimeState {
             mode: CalibrationMode::HeaterCurve,
@@ -18143,6 +21213,47 @@ mod tests {
         assert!(!manual_pps.enabled);
         assert_eq!(manual_pps.target_mv, None);
         assert_eq!(manual_pps.applied_mv, None);
+    }
+
+    #[test]
+    fn capability_refresh_disarms_active_calibration_before_output() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::HeaterCurve,
+            pps_enabled: true,
+            pps_mv: Some(20_000),
+            pps_ma: Some(3_000),
+            heater_enabled: true,
+            ..CalibrationRuntimeState::default()
+        };
+        let mut manual_pps = ManualPpsState::from_fusb302b_capabilities(Some(
+            ch224q::AdjustablePowerCapabilities::default(),
+        ));
+        disarm_calibration_after_capability_refresh(&mut calibration, &mut manual_pps);
+
+        assert!(!calibration.heater_enabled);
+        assert!(!calibration.pps_enabled);
+        assert_eq!(calibration.pps_mv, None);
+        assert_eq!(calibration.pps_ma, None);
+        assert!(calibration.immediate_heater_disarm_pending);
+        assert!(!manual_pps.enabled);
+    }
+
+    #[test]
+    fn capability_refresh_keeps_passive_adc_calibration_available() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::RtdAdc,
+            ..CalibrationRuntimeState::default()
+        };
+        let mut manual_pps = ManualPpsState::from_fusb302b_capabilities(Some(
+            ch224q::AdjustablePowerCapabilities::default(),
+        ));
+
+        disarm_calibration_after_capability_refresh(&mut calibration, &mut manual_pps);
+
+        assert!(!calibration.heater_enabled);
+        assert!(!calibration.pps_enabled);
+        assert!(!calibration.immediate_heater_disarm_pending);
+        assert!(!manual_pps.enabled);
     }
 
     #[test]
@@ -18377,6 +21488,79 @@ mod tests {
             memory_config.adc_calibration.vin.samples[7].map(|sample| sample.expected_mv),
             Some(vin_adc_mv_for_input_mv(21_000))
         );
+    }
+
+    #[test]
+    fn vin_auto_job_reselects_current_when_sweep_crosses_apdo_boundary() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::VinAdc,
+            pps_ma: Some(3_000),
+            ..CalibrationRuntimeState::default()
+        };
+        let mut memory_config = MemoryConfig::default();
+        let mut manual_pps =
+            ManualPpsState::from_fusb302b_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(28_000),
+                pps_max_ma: Some(5_000),
+                pps_apdos: [
+                    Some(ch224q::PpsApdo {
+                        min_mv: 5_000,
+                        max_mv: 21_000,
+                        max_ma: 5_000,
+                    }),
+                    Some(ch224q::PpsApdo {
+                        min_mv: 21_000,
+                        max_mv: 28_000,
+                        max_ma: 3_000,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }));
+
+        calibration_job_start(
+            &mut calibration,
+            CalibrationJobKind::VinAdc,
+            &mut memory_config,
+            &mut manual_pps,
+        )
+        .unwrap();
+
+        let mut crossed_apdo_boundary = false;
+        for _ in 0..200 {
+            let request_mv = manual_pps.target_mv.expect("VIN sweep keeps a PPS request");
+            let expected_ma = if request_mv <= 21_000 { 5_000 } else { 3_000 };
+            let step = (request_mv - 5_000) / 1_000;
+            let vin_raw_mv = 280 + (step * 45);
+            assert_eq!(manual_pps.target_ma, Some(expected_ma));
+            crossed_apdo_boundary |= request_mv > 21_000;
+
+            update_calibration_job_state(
+                &mut calibration,
+                &mut memory_config,
+                &mut manual_pps,
+                0,
+                vin_raw_mv,
+                25.0,
+                3_000,
+                u32::from(request_mv),
+                0,
+            );
+            if calibration.job.status == CalibrationJobStatus::Completed {
+                break;
+            }
+        }
+
+        assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
+        assert_eq!(calibration.job.samples_collected, 23);
+        assert!(crossed_apdo_boundary);
     }
 
     #[test]
@@ -18769,13 +21953,13 @@ mod tests {
         let mut samples = [ThermalPlantTransientSample {
             elapsed_ticks: 0,
             raw_rtd_adc_mv: 0,
-            heater_voltage_100mv: 0,
+            heater_voltage_125mv: 0,
             duty_percent: 0,
         }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
         samples[0] = ThermalPlantTransientSample {
             elapsed_ticks: 1,
             raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(ambient_temp_c),
-            heater_voltage_100mv: 0,
+            heater_voltage_125mv: 0,
             duty_percent: 0,
         };
         let mut sample_count = 1usize;
@@ -18799,7 +21983,7 @@ mod tests {
                 samples[sample_count] = ThermalPlantTransientSample {
                     elapsed_ticks: tick,
                     raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(temperature_c),
-                    heater_voltage_100mv: if heating { 200 } else { 0 },
+                    heater_voltage_125mv: if heating { 160 } else { 0 },
                     duty_percent,
                 };
                 sample_count += 1;
@@ -19005,7 +22189,7 @@ mod tests {
         nonterminal_cooldown.samples[append_index] = ThermalPlantTransientSample {
             elapsed_ticks: previous.elapsed_ticks.saturating_add(1),
             raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(100.0),
-            heater_voltage_100mv: 0,
+            heater_voltage_125mv: 0,
             duty_percent: 0,
         };
         nonterminal_cooldown.sample_count = nonterminal_cooldown.sample_count.saturating_add(1);
@@ -19235,14 +22419,14 @@ mod tests {
         let mut samples = [ThermalPlantTransientSample {
             elapsed_ticks: 0,
             raw_rtd_adc_mv: 0,
-            heater_voltage_100mv: 0,
+            heater_voltage_125mv: 0,
             duty_percent: 0,
         }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
         for (index, (elapsed_ticks, temp_c, duty_percent)) in trace.into_iter().enumerate() {
             samples[index] = ThermalPlantTransientSample {
                 elapsed_ticks,
                 raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(temp_c),
-                heater_voltage_100mv: 200,
+                heater_voltage_125mv: 160,
                 duty_percent,
             };
         }
@@ -19291,6 +22475,43 @@ mod tests {
     #[test]
     fn runtime_ready_boot_stage_matches_post_flash_contract() {
         assert_eq!(RUNTIME_READY_BOOT_STAGE_LINE, b"boot_stage=runtime_ready\n");
+    }
+
+    #[test]
+    fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
+        let mut job = CalibrationThermalPlantAutoJob {
+            run_id: 1,
+            phase: ThermalPlantAutoPhase::Ambient,
+            source_max_mv: 20_000,
+            source_current_ma: 3_000,
+            ambient_raw_rtd_adc_mv: 250,
+            idle_samples: 1,
+            heater_curve: ThermalPlantCurveSampler::default(),
+            elapsed_ticks: 1,
+            phase_started_tick: 0,
+            sample_count: 0,
+            last_saved_temp_c: f32::MIN,
+            last_saved_tick: 0,
+            samples: [ThermalPlantTransientSample {
+                elapsed_ticks: 0,
+                raw_rtd_adc_mv: 0,
+                heater_voltage_125mv: 0,
+                duty_percent: 0,
+            }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+        };
+
+        assert!(record_thermal_plant_transient_sample(
+            &mut job, 250, 25.0, 20_000, 0, true
+        ));
+        assert_eq!(job.samples[0].heater_voltage_125mv, 160);
+        assert_eq!(job.samples[0].duty_percent, 0);
+
+        job.elapsed_ticks = 2;
+        assert!(record_thermal_plant_transient_sample(
+            &mut job, 260, 26.0, 20_000, 100, true
+        ));
+        assert_eq!(job.samples[1].heater_voltage_125mv, 160);
+        assert_eq!(job.samples[1].duty_percent, 100);
     }
 
     #[test]
@@ -19428,7 +22649,7 @@ mod tests {
             samples: [ThermalPlantTransientSample {
                 elapsed_ticks: 100,
                 raw_rtd_adc_mv: 250,
-                heater_voltage_100mv: 200,
+                heater_voltage_125mv: 160,
                 duty_percent: 100,
             }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
         });
@@ -19717,6 +22938,15 @@ mod tests {
         assert_eq!(eeprom_maintenance_write_chunk_len(0x001f, 2), 1);
         assert_eq!(eeprom_maintenance_write_chunk_len(0x0020, 17), 16);
         assert_eq!(eeprom_maintenance_write_chunk_len(0x003f, 16), 1);
+    }
+
+    #[test]
+    fn raw_eeprom_maintenance_services_pd_after_every_page_write() {
+        let mut schedule = EepromMaintenancePdServiceSchedule::new();
+
+        assert_eq!(EEPROM_MAINTENANCE_PD_MAX_PAGE_WRITES_WITHOUT_SERVICE, 1);
+        assert!(schedule.after_page_write());
+        assert!(schedule.after_page_write());
     }
 
     #[test]
@@ -22954,6 +26184,27 @@ mod tests {
         );
         assert_eq!(zero_draw_keeps_contract, 5_000);
 
+        let refreshed_pps_contract_limits_the_budget = effective_pps_current_limit_ma(
+            5_000,
+            Some(PdStatusObservation {
+                status_raw: 0,
+                status: Status {
+                    pd_active: true,
+                    ..Status::default()
+                },
+                current_raw: 0,
+                current_ma: 3_000,
+                contract_voltage_mv: Some(24_000),
+                contract: Contract {
+                    kind: ContractKind::Pps,
+                    voltage_mv: 24_000,
+                    current_ma: 3_000,
+                    object_position: 2,
+                },
+            }),
+        );
+        assert_eq!(refreshed_pps_contract_limits_the_budget, 3_000);
+
         assert_eq!(effective_pps_current_limit_ma(5_000, None), 5_000);
     }
 
@@ -23125,6 +26376,7 @@ mod tests {
                 reason: HeaterPowerBackendReason::NoPps20vCapability,
                 fixed_request_confirmed: true,
                 fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                terminal_fixed_pd_disarmed: false,
             }
         );
     }
@@ -24556,6 +27808,7 @@ mod tests {
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: true,
             fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed: false,
         };
         assert_eq!(
             effective_pd_contract_mv(&ManualPpsState::default(), Some(low_voltage), fallback),
@@ -24564,7 +27817,7 @@ mod tests {
     }
 
     #[test]
-    fn fusb302b_pps_contract_enables_calibration_and_caps_backend_to_21v() {
+    fn fusb302b_pps_contract_enables_calibration_and_keeps_the_absolute_guard() {
         let contract = Contract {
             kind: ContractKind::Pps,
             object_position: 2,
@@ -24624,10 +27877,10 @@ mod tests {
         else {
             panic!("FUSB302B must retain a PPS backend when a PPS APDO is present");
         };
-        assert_eq!(pps_max_mv, 21_000);
-        assert_eq!(adjustable_max_mv, 21_000);
+        assert_eq!(pps_max_mv, 28_000);
+        assert_eq!(adjustable_max_mv, 28_000);
         assert_eq!(current_mode, Some(ch224q::AdjustableVoltageMode::Pps));
-        assert_eq!(current_request_mv, 21_000);
+        assert_eq!(current_request_mv, 24_000);
     }
 
     #[test]
@@ -24645,8 +27898,7 @@ mod tests {
             max_ma: 3_000,
         });
 
-        let backend = fusb302b_pps_backend_from_capabilities(capabilities)
-            .expect("FUSB302B PPS source capabilities must enable the PPS backend");
+        let backend = select_fusb302b_heater_power_backend(Some(capabilities));
         let HeaterPowerBackend::PpsMos {
             pps_min_mv,
             pps_max_mv,
@@ -24657,10 +27909,123 @@ mod tests {
         else {
             panic!("FUSB302B must promote from fixed fallback to PPS");
         };
-        assert_eq!(pps_min_mv, 5_000);
+        assert_eq!(pps_min_mv, FUSB302B_PPS_MIN_MV);
         assert_eq!(pps_max_mv, 21_000);
         assert_eq!(capability_max_ma, 3_000);
         assert_eq!(current_mode, Some(ch224q::AdjustableVoltageMode::Pps));
+    }
+
+    #[test]
+    fn fusb302b_capability_refresh_preserves_terminal_fixed_pd_disarm() {
+        let previous = HeaterPowerBackend::PpsMos {
+            pps_min_mv: 5_500,
+            idle_request_mv: 12_000,
+            pps_max_mv: 21_000,
+            adjustable_max_mv: 21_000,
+            capability_max_ma: 3_000,
+            current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+            current_request_mv: 20_000,
+            settle_until_ms: None,
+            next_request_at_ms: 0,
+            current_limit_fixed_pwm_active: false,
+            current_limit_fixed_request_confirmed: false,
+            terminal_fixed_pd_disarmed: true,
+        };
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_500),
+            pps_max_mv: Some(21_000),
+            pps_max_ma: Some(3_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 21_000,
+            max_ma: 3_000,
+        });
+
+        assert!(matches!(
+            refresh_fusb302b_heater_power_backend(previous, Some(capabilities)),
+            HeaterPowerBackend::PpsMos {
+                terminal_fixed_pd_disarmed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fusb302b_rediscovery_preserves_terminal_fixed_pd_disarm() {
+        let previous = HeaterPowerBackend::PpsMos {
+            pps_min_mv: 5_500,
+            idle_request_mv: 12_000,
+            pps_max_mv: 21_000,
+            adjustable_max_mv: 21_000,
+            capability_max_ma: 3_000,
+            current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+            current_request_mv: 20_000,
+            settle_until_ms: None,
+            next_request_at_ms: 0,
+            current_limit_fixed_pwm_active: false,
+            current_limit_fixed_request_confirmed: false,
+            terminal_fixed_pd_disarmed: true,
+        };
+        let fallback = refresh_fusb302b_heater_power_backend(previous, None);
+        assert!(matches!(
+            fallback,
+            HeaterPowerBackend::FixedPdPwmFallback {
+                terminal_fixed_pd_disarmed: true,
+                ..
+            }
+        ));
+
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_500),
+            pps_max_mv: Some(21_000),
+            pps_max_ma: Some(3_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 21_000,
+            max_ma: 3_000,
+        });
+
+        assert!(matches!(
+            refresh_fusb302b_heater_power_backend(fallback, Some(capabilities)),
+            HeaterPowerBackend::PpsMos {
+                terminal_fixed_pd_disarmed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fusb302b_initial_backend_uses_fusb302b_request_bounds() {
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_500),
+            pps_max_mv: Some(28_000),
+            pps_max_ma: Some(3_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 28_000,
+            max_ma: 3_000,
+        });
+
+        let HeaterPowerBackend::PpsMos {
+            pps_min_mv,
+            pps_max_mv,
+            ..
+        } = select_fusb302b_heater_power_backend(Some(capabilities))
+        else {
+            panic!("FUSB302B should retain a usable PPS backend");
+        };
+
+        assert_eq!(pps_min_mv, FUSB302B_PPS_MIN_MV);
+        assert_eq!(pps_max_mv, FUSB302B_PPS_MAX_MV);
     }
 
     #[test]
@@ -24675,6 +28040,7 @@ mod tests {
                     reason: HeaterPowerBackendReason::NoPps20vCapability,
                     fixed_request_confirmed: false,
                     fixed_request: ch224q::VoltageRequest::V20,
+                    terminal_fixed_pd_disarmed: false,
                 },
                 vin_mv: 20_000,
                 ..test_usb_runtime_status_context()
@@ -24692,11 +28058,45 @@ mod tests {
     }
 
     #[test]
+    fn fixed_pd_settle_requires_an_observed_fixed_contract() {
+        let fixed_observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: 3_000,
+            contract_voltage_mv: Some(20_000),
+            contract: Contract {
+                kind: ContractKind::Fixed,
+                object_position: 1,
+                voltage_mv: 20_000,
+                current_ma: 3_000,
+            },
+        };
+
+        assert!(pd_observation_confirms_fixed_contract(
+            Some(fixed_observation),
+            20_000
+        ));
+        assert!(!pd_observation_confirms_fixed_contract(
+            Some(PdStatusObservation {
+                contract: Contract {
+                    kind: ContractKind::Pps,
+                    ..fixed_observation.contract
+                },
+                ..fixed_observation
+            }),
+            20_000
+        ));
+        assert!(!pd_observation_confirms_fixed_contract(None, 20_000));
+    }
+
+    #[test]
     fn fusb302b_backend_never_inherits_a_ch224q_28v_default() {
         let legacy = HeaterPowerBackend::FixedPdPwmFallback {
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: true,
             fixed_request: ch224q::VoltageRequest::V28,
+            terminal_fixed_pd_disarmed: false,
         };
 
         let fusb = constrain_heater_backend_to_controller(ControllerKind::Fusb302b, legacy);
@@ -25272,8 +28672,179 @@ mod tests {
     }
 
     #[test]
-    fn pd_runtime_service_does_not_block_startup() {
-        assert_eq!(STARTUP_PD_WAIT_BUDGET_MS, 0);
+    fn startup_pd_service_prioritizes_negotiation_before_low_priority_startup_work() {
+        assert!(startup_pd_service_should_continue(true, false, true, 0));
+        assert!(startup_pd_service_should_continue(true, false, true, 749));
+        assert!(!startup_pd_service_should_continue(true, false, true, 750));
+        assert!(!startup_pd_service_should_continue(true, true, true, 0));
+        assert!(!startup_pd_service_should_continue(true, false, false, 0));
+        assert!(!startup_pd_service_should_continue(false, false, true, 0));
+    }
+
+    #[test]
+    fn runtime_loop_services_pd_before_control_plane_work() {
+        let source = include_str!("flux_purr.rs");
+        let runtime_loop = source
+            .split("let mut suppress_pairing_input_until_released = false;")
+            .nth(1)
+            .expect("runtime loop marker must remain present");
+        let pd_service = runtime_loop
+            .find("pd_runtime_service_due")
+            .expect("runtime loop must have an independent PD service gate");
+        let control_plane = runtime_loop
+            .find("process_control_line")
+            .expect("runtime loop must retain control-plane handling");
+
+        assert!(pd_service < control_plane);
+    }
+
+    #[test]
+    fn runtime_control_work_is_bounded_before_the_next_pd_service() {
+        let source = include_str!("flux_purr.rs");
+        let runtime_loop = source
+            .split("let mut suppress_pairing_input_until_released = false;")
+            .nth(1)
+            .expect("runtime loop marker must remain present");
+
+        assert!(runtime_loop.contains("if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET"));
+        let control_frame = runtime_loop
+            .find("usb_write_response_frame(&mut usb_serial, &response, usb_tx_buf);")
+            .expect("USB control path must write a bounded response");
+        let control_frame_tail = &runtime_loop[control_frame..];
+        assert!(control_frame_tail.contains("usb_rx_line.clear();"));
+        assert!(control_frame_tail.contains("break;"));
+        assert!(
+            runtime_loop
+                .contains("if let Some(command) = flux_purr_firmware::net::try_receive_command()")
+        );
+        assert!(
+            !runtime_loop.contains(
+                "while let Some(command) = flux_purr_firmware::net::try_receive_command()"
+            )
+        );
+    }
+
+    #[test]
+    fn every_network_await_is_wrapped_by_the_pd_service_window() {
+        let source = include_str!("flux_purr.rs");
+        let process_control = source
+            .split("async fn process_control_line")
+            .nth(1)
+            .and_then(|value| value.split("async fn flush_ui").next())
+            .expect("control-line implementation must remain present");
+        for call in [
+            "flux_purr_firmware::net::lan_network_summary()",
+            "flux_purr_firmware::net::enter_pairing()",
+            "flux_purr_firmware::net::leave_pairing()",
+            "flux_purr_firmware::net::clear_token_from_usb()",
+            "flux_purr_firmware::net::cancel_wifi_connection()",
+            "flux_purr_firmware::net::apply_wifi_config(memory_config)",
+        ] {
+            let call_start = process_control
+                .find(call)
+                .expect("expected network operation in control-line implementation");
+            let wrapper_start = process_control[..call_start]
+                .rfind("run_network_operation_with_pd(")
+                .expect("network await must use the PD service window");
+            assert!(
+                !process_control[wrapper_start..call_start].contains(';'),
+                "network await must be inside the PD service window: {call}"
+            );
+        }
+
+        let runtime_loop = source
+            .split("let mut suppress_pairing_input_until_released = false;")
+            .nth(1)
+            .expect("runtime loop marker must remain present");
+        for call in [
+            "flux_purr_firmware::net::command_lease_is_active(&command)",
+            "flux_purr_firmware::net::lan_identity()",
+            "flux_purr_firmware::net::lan_network_summary()",
+            "flux_purr_firmware::net::take_persisted_token_change()",
+        ] {
+            let call_start = runtime_loop
+                .find(call)
+                .expect("expected network operation in runtime loop");
+            let wrapper_start = runtime_loop[..call_start]
+                .rfind("run_network_operation_with_pd(")
+                .expect("runtime network await must use the PD service window");
+            assert!(
+                !runtime_loop[wrapper_start..call_start].contains(';'),
+                "runtime network await must be inside the PD service window: {call}"
+            );
+        }
+
+        let startup = source
+            .split("let mut last_persisted_memory_config = memory_config.clone();")
+            .nth(1)
+            .and_then(|value| value.split("drop(boot_memory_io_scratch);").next())
+            .expect("post-display startup implementation must remain present");
+        assert!(startup.contains("run_network_operation_with_pd("));
+        assert!(startup.contains("flux_purr_firmware::net::spawn("));
+    }
+
+    #[test]
+    fn pd_runtime_service_deadline_preserves_cadence_after_a_long_control_turn() {
+        assert!(pd_runtime_service_due(0, 0));
+        assert!(!pd_runtime_service_due(4, 5));
+        assert!(pd_runtime_service_due(5, 5));
+        assert_eq!(next_pd_runtime_service_deadline_ms(0, 0), 5);
+        assert_eq!(next_pd_runtime_service_deadline_ms(5, 5), 10);
+        assert_eq!(next_pd_runtime_service_deadline_ms(5, 27), 30);
+    }
+
+    #[test]
+    fn fixed_contract_liveness_probe_waits_for_the_bounded_interval() {
+        assert!(!fixed_contract_liveness_probe_due(
+            ContractKind::Fixed,
+            true,
+            false,
+            Some(1_000),
+            5_999,
+        ));
+        assert!(fixed_contract_liveness_probe_due(
+            ContractKind::Fixed,
+            true,
+            false,
+            Some(1_000),
+            6_000,
+        ));
+        assert!(!fixed_contract_liveness_probe_due(
+            ContractKind::Fixed,
+            true,
+            true,
+            Some(6_000),
+            11_000,
+        ));
+        assert!(!fixed_contract_liveness_probe_due(
+            ContractKind::Pps,
+            true,
+            false,
+            Some(1_000),
+            6_000,
+        ));
+    }
+
+    #[test]
+    fn runtime_pd_service_interlocks_stale_heater_output_in_the_high_priority_path() {
+        let source = include_str!("flux_purr.rs");
+        let runtime_loop = source
+            .split("let mut suppress_pairing_input_until_released = false;")
+            .nth(1)
+            .expect("runtime loop marker must remain present");
+        let pd_service = runtime_loop
+            .find("if pd_runtime_service_due")
+            .expect("runtime loop must service PD independently");
+        let interlock = runtime_loop
+            .find("apply_pd_contract_observation(")
+            .expect("PD service must apply the contract interlock");
+        let control_tick = runtime_loop
+            .find("if elapsed_ms >= next_control_deadline_ms")
+            .expect("runtime loop must retain thermal control scheduling");
+
+        assert!(pd_service < interlock);
+        assert!(interlock < control_tick);
+        assert!(source.contains("PD contract interlock -> heater output zero"));
     }
 
     #[test]
@@ -25544,6 +29115,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn manual_pps_releases_terminal_disarm_after_fixed_pd_fallback() {
+        let mut backend = HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::NoPps20vCapability,
+            fixed_request_confirmed: true,
+            fixed_request: ch224q::VoltageRequest::V20,
+            terminal_fixed_pd_disarmed: true,
+        };
+
+        assert!(release_terminal_fixed_pd_disarm_for_manual_pps(
+            &mut backend,
+            true
+        ));
+        assert_eq!(
+            backend,
+            HeaterPowerBackend::FixedPdPwmFallback {
+                reason: HeaterPowerBackendReason::NoPps20vCapability,
+                fixed_request_confirmed: false,
+                fixed_request: ch224q::VoltageRequest::V20,
+                terminal_fixed_pd_disarmed: false,
+            }
+        );
     }
 
     #[test]
