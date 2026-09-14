@@ -314,10 +314,6 @@ async fn create_lease(
     .into())
 }
 
-#[expect(
-    clippy::excessive_nesting,
-    reason = "thermal readiness handshake keeps lease cleanup and heater safety ordered"
-)]
 async fn create_ready_thermal_lease(
     client: &Client,
     resolved: &ResolvedUsbTarget,
@@ -325,34 +321,12 @@ async fn create_ready_thermal_lease(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut last_error = "device did not become ready".to_string();
     while tokio::time::Instant::now() < deadline {
-        match create_lease(client, resolved).await {
-            Ok(lease) => {
-                match request_thermal_status_with_retry(client, resolved, &lease.lease_id).await {
-                    Ok(mut status) => {
-                        if status.get("heaterEnabled").and_then(Value::as_bool) == Some(true) {
-                            force_thermal_self_test_shutdown(client, resolved, &lease.lease_id)
-                                .await?;
-                            status = request_thermal_status_with_retry(
-                                client,
-                                resolved,
-                                &lease.lease_id,
-                            )
-                            .await?;
-                        }
-                        if status.get("heaterEnabled").and_then(Value::as_bool) == Some(false) {
-                            return Ok((lease, status));
-                        }
-                        last_error = "thermal readiness status did not confirm heater off".into();
-                    }
-                    Err(error) => {
-                        last_error = error.to_string();
-                    }
-                }
-                let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+        match try_create_ready_thermal_lease(client, resolved).await {
+            Ok(Some(ready)) => return Ok(ready),
+            Ok(None) => {
+                last_error = "thermal readiness status did not confirm heater off".into();
             }
-            Err(error) => {
-                last_error = error.to_string();
-            }
+            Err(error) => last_error = error.to_string(),
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -361,6 +335,30 @@ async fn create_ready_thermal_lease(
         resolved.device
     )
     .into())
+}
+
+async fn try_create_ready_thermal_lease(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+) -> Result<Option<(Lease, Value)>, Box<dyn std::error::Error + Send + Sync>> {
+    let lease = create_lease(client, resolved).await?;
+    let mut status = match request_thermal_status_with_retry(client, resolved, &lease.lease_id).await
+    {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+            return Err(error);
+        }
+    };
+    if status.get("heaterEnabled").and_then(Value::as_bool) == Some(true) {
+        force_thermal_self_test_shutdown(client, resolved, &lease.lease_id).await?;
+        status = request_thermal_status_with_retry(client, resolved, &lease.lease_id).await?;
+    }
+    if status.get("heaterEnabled").and_then(Value::as_bool) == Some(false) {
+        return Ok(Some((lease, status)));
+    }
+    let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+    Ok(None)
 }
 
 async fn release_lease(

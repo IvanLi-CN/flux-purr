@@ -1571,7 +1571,7 @@ fn runtime_config_rejects_clear_preview_with_profile_payload() {
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "profile persistence fixture covers the complete save/readback contract"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn runtime_config_saves_thermal_profile_to_memory() {
     let mut request_id = heapless::String::new();
@@ -1936,7 +1936,7 @@ fn runtime_status_reports_backend_request_when_manual_pps_is_disabled() {
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "manual PPS fixture covers capability, status, and rejection paths"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn manual_pps_config_validates_capability_and_updates_status_payload() {
     let mut request_id = heapless::String::new();
@@ -2982,7 +2982,7 @@ fn thermal_plant_auto_job_starts_one_transient_run_for_3a_and_5a_pps() {
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "synthetic thermal fit fixture preserves the full heat/cool trace"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn transient_thermal_fit_recovers_a_physical_model_from_heat_and_cool_trace() {
     const SYNTHETIC_TARGET_MARGIN_C: f32 = 2.0;
@@ -3344,7 +3344,7 @@ fn transient_thermal_fit_recovers_a_physical_model_from_heat_and_cool_trace() {
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "live-shaped thermal fit fixture preserves trace quantization cases"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {

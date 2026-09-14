@@ -427,7 +427,7 @@ where
 #[inline(never)]
 #[expect(
     clippy::too_many_lines,
-    reason = "EEPROM recovery keeps slot selection and PD servicing atomic"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 async fn load_eeprom_memory_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
@@ -745,7 +745,7 @@ struct LegacyRecordReadInput<'a> {
 #[cfg(target_arch = "xtensa")]
 #[expect(
     clippy::too_many_lines,
-    reason = "legacy record decoding preserves streaming CRC and migration ordering"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 async fn read_legacy_record_stream<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
@@ -1777,7 +1777,7 @@ where
 #[cfg(target_arch = "xtensa")]
 #[expect(
     clippy::too_many_lines,
-    reason = "prepared layout recovery keeps marker publication atomic"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 async fn recover_prepared_fpr2_layout<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,

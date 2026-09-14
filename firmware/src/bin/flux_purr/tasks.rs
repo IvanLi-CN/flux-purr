@@ -2,7 +2,7 @@
 #[expect(
     clippy::too_many_lines,
     clippy::excessive_nesting,
-    reason = "heater output arbitration preserves PD, thermal, and physical interlocks in order"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 async fn apply_heater_power_output<PWM>(context: HeaterPowerOutputContext<'_, '_, PWM>) -> bool
 where

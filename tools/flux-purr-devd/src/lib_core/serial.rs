@@ -816,10 +816,6 @@ struct SerialExchangeContext<'a> {
     retry_policy: SerialRetryPolicy,
 }
 
-#[expect(
-    clippy::excessive_nesting,
-    reason = "serial exchange preserves line framing and retry ordering"
-)]
 fn serial_exchange_blocking(context: SerialExchangeContext<'_>) -> Result<Value, HttpError> {
     let SerialExchangeContext {
         state,
@@ -850,48 +846,32 @@ fn serial_exchange_blocking(context: SerialExchangeContext<'_>) -> Result<Value,
         match session.port.read(&mut read_buf) {
             Ok(0) => std::thread::sleep(SERIAL_READ_TIMEOUT),
             Ok(read) => {
-                for byte in &read_buf[..read] {
-                    if serial_line_finished(&mut line, &mut discarding_overlong_line, *byte) {
-                        emit_serial_log_line(state, events, device_id, &line);
-                        if serial_line_is_usb_reset_marker(&line) {
-                            // Opening an ESP32-S3 USB Serial/JTAG port can itself
-                            // trigger this reset. Keep the fd open so the firmware
-                            // can complete its startup and answer the request; an
-                            // actual I/O failure below remains the reopen signal.
-                            retry_after_runtime_ready = true;
-                        } else if should_retry_request_after_runtime_ready(
-                            retry_after_runtime_ready,
-                            &line,
-                            Instant::now(),
-                            deadline,
-                        ) {
-                            session = write_serial_request_with_reopen(
-                                session, port_path, request, deadline,
-                            )?;
-                            retry_after_runtime_ready = false;
-                        } else {
-                            match decode_usb_response_line(&line, request_id) {
-                                Ok(Some(payload)) => {
-                                    store_serial_session(&mut serial_sessions, port_path, session);
-                                    return Ok(payload);
-                                }
-                                Ok(None) => {}
-                                Err(error)
-                                    if is_retryable_startup_busy(&error)
-                                        && Instant::now() < deadline =>
-                                {
-                                    // The request is known not to have run. Wait for the
-                                    // runtime-ready marker before sending its one safe retry.
-                                    retry_after_runtime_ready = true;
-                                }
-                                Err(error) => {
-                                    store_serial_session(&mut serial_sessions, port_path, session);
-                                    return Err(error);
-                                }
-                            }
-                        }
-                        line.clear();
+                let result = process_serial_read_chunk(
+                    SerialResponseLineContext {
+                        state,
+                        events,
+                        device_id,
+                        port_path,
+                        request_id,
+                        request,
+                        deadline,
+                    },
+                    &read_buf[..read],
+                    &mut line,
+                    &mut discarding_overlong_line,
+                    session,
+                    &mut serial_sessions,
+                    retry_after_runtime_ready,
+                )?;
+                match result {
+                    SerialChunkResult::Continue {
+                        next_session,
+                        retry_after_runtime_ready: next_retry,
+                    } => {
+                        session = next_session;
+                        retry_after_runtime_ready = next_retry;
                     }
+                    SerialChunkResult::Response(payload) => return Ok(payload),
                 }
             }
             Err(error)
@@ -928,10 +908,6 @@ fn serial_exchange_blocking(context: SerialExchangeContext<'_>) -> Result<Value,
     ))
 }
 
-#[expect(
-    clippy::excessive_nesting,
-    reason = "boot observation preserves serial framing and readiness ordering"
-)]
 fn observe_post_flash_boot_blocking(
     state: &Arc<Mutex<DevdState>>,
     events: &broadcast::Sender<DevdEvent>,
@@ -951,18 +927,17 @@ fn observe_post_flash_boot_blocking(
         match session.port.read(&mut read_buf) {
             Ok(0) => {}
             Ok(read) => {
-                for byte in &read_buf[..read] {
-                    if !serial_line_finished(&mut line, &mut discarding_overlong_line, *byte) {
-                        continue;
-                    }
-                    emit_serial_log_line(state, events, device_id, &line);
-                    if let Ok(text) = std::str::from_utf8(&line)
-                        && observation.observe_line(text)?
-                    {
-                        store_serial_session(&mut serial_sessions, port_path, session);
-                        return Ok(observation);
-                    }
-                    line.clear();
+                if process_boot_read_chunk(
+                    state,
+                    events,
+                    device_id,
+                    &read_buf[..read],
+                    &mut line,
+                    &mut discarding_overlong_line,
+                    &mut observation,
+                )? {
+                    store_serial_session(&mut serial_sessions, port_path, session);
+                    return Ok(observation);
                 }
             }
             Err(error)
@@ -1144,6 +1119,144 @@ fn serial_line_finished(line: &mut Vec<u8>, discarding_overlong_line: &mut bool,
     false
 }
 
+enum SerialLineAction {
+    Continue(bool),
+    Response(Value),
+    Failure(HttpError),
+}
+
+#[derive(Clone, Copy)]
+struct SerialResponseLineContext<'a> {
+    state: &'a Arc<Mutex<DevdState>>,
+    events: &'a broadcast::Sender<DevdEvent>,
+    device_id: &'a str,
+    port_path: &'a str,
+    request_id: &'a str,
+    request: &'a str,
+    deadline: Instant,
+}
+
+enum SerialChunkResult {
+    Continue {
+        next_session: SerialSession,
+        retry_after_runtime_ready: bool,
+    },
+    Response(Value),
+}
+
+fn process_serial_read_chunk(
+    context: SerialResponseLineContext<'_>,
+    bytes: &[u8],
+    line: &mut Vec<u8>,
+    discarding_overlong_line: &mut bool,
+    mut session: SerialSession,
+    serial_sessions: &mut SerialSessionMap,
+    mut retry_after_runtime_ready: bool,
+) -> Result<SerialChunkResult, HttpError> {
+    for byte in bytes {
+        if !serial_line_finished(line, discarding_overlong_line, *byte) {
+            continue;
+        }
+        let (next_session, action) = process_serial_response_line(
+            context,
+            session,
+            retry_after_runtime_ready,
+            line,
+        )?;
+        session = next_session;
+        match action {
+            SerialLineAction::Continue(next_retry) => retry_after_runtime_ready = next_retry,
+            SerialLineAction::Response(payload) => {
+                store_serial_session(serial_sessions, context.port_path, session);
+                return Ok(SerialChunkResult::Response(payload));
+            }
+            SerialLineAction::Failure(error) => {
+                store_serial_session(serial_sessions, context.port_path, session);
+                return Err(error);
+            }
+        }
+        line.clear();
+    }
+    Ok(SerialChunkResult::Continue {
+        next_session: session,
+        retry_after_runtime_ready,
+    })
+}
+
+fn process_serial_response_line(
+    context: SerialResponseLineContext<'_>,
+    session: SerialSession,
+    retry_after_runtime_ready: bool,
+    line: &[u8],
+) -> Result<(SerialSession, SerialLineAction), HttpError> {
+    emit_serial_log_line(context.state, context.events, context.device_id, line);
+    if serial_line_is_usb_reset_marker(line) {
+        // Opening an ESP32-S3 USB Serial/JTAG port can itself trigger this
+        // reset. Keep the fd open until the runtime-ready marker arrives.
+        return Ok((session, SerialLineAction::Continue(true)));
+    }
+    if should_retry_request_after_runtime_ready(
+        retry_after_runtime_ready,
+        line,
+        Instant::now(),
+        context.deadline,
+    ) {
+        let session = write_serial_request_with_reopen(
+            session,
+            context.port_path,
+            context.request,
+            context.deadline,
+        )?;
+        return Ok((session, SerialLineAction::Continue(false)));
+    }
+    let action = match decode_usb_response_line(line, context.request_id) {
+        Ok(Some(payload)) => SerialLineAction::Response(payload),
+        Ok(None) => SerialLineAction::Continue(retry_after_runtime_ready),
+        Err(error)
+            if is_retryable_startup_busy(&error) && Instant::now() < context.deadline =>
+        {
+            SerialLineAction::Continue(true)
+        }
+        Err(error) => SerialLineAction::Failure(error),
+    };
+    Ok((session, action))
+}
+
+fn process_boot_observation_line(
+    state: &Arc<Mutex<DevdState>>,
+    events: &broadcast::Sender<DevdEvent>,
+    device_id: &str,
+    line: &[u8],
+    observation: &mut BootObservation,
+) -> Result<bool, HttpError> {
+    emit_serial_log_line(state, events, device_id, line);
+    let Ok(text) = std::str::from_utf8(line) else {
+        return Ok(false);
+    };
+    observation.observe_line(text)
+}
+
+fn process_boot_read_chunk(
+    state: &Arc<Mutex<DevdState>>,
+    events: &broadcast::Sender<DevdEvent>,
+    device_id: &str,
+    bytes: &[u8],
+    line: &mut Vec<u8>,
+    discarding_overlong_line: &mut bool,
+    observation: &mut BootObservation,
+) -> Result<bool, HttpError> {
+    for byte in bytes {
+        if !serial_line_finished(line, discarding_overlong_line, *byte) {
+            continue;
+        }
+        if process_boot_observation_line(state, events, device_id, line, observation)? {
+            return Ok(true);
+        }
+        line.clear();
+    }
+    Ok(false)
+}
+
 type SerialSessionMap = HashMap<String, SerialSession>;
 
 struct SerialSession {
@@ -1235,51 +1348,10 @@ struct SerialPortProcessLock {
 }
 
 impl SerialPortProcessLock {
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "platform lock acquisition keeps retry and timeout semantics together"
-    )]
     fn acquire(port_path: &str, deadline: Instant) -> Result<Self, HttpError> {
         #[cfg(unix)]
         {
-            let lock_path = serial_lock_path(port_path);
-            let file = File::options()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&lock_path)
-                .map_err(|error| {
-                    HttpError::new(
-                        StatusCode::BAD_GATEWAY,
-                        "serial_lock_failed",
-                        &format!(
-                            "Failed to open serial lock {}: {error}",
-                            lock_path.display()
-                        ),
-                        true,
-                    )
-                })?;
-
-            while Instant::now() < deadline {
-                // SAFETY: flock is called with a valid file descriptor owned by `file`.
-                let lock_result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-                if lock_result == 0 {
-                    return Ok(Self { file });
-                }
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::WouldBlock {
-                    return Err(serial_io_http_error(error));
-                }
-                std::thread::sleep(SERIAL_READ_TIMEOUT);
-            }
-
-            Err(HttpError::new(
-                StatusCode::GATEWAY_TIMEOUT,
-                "serial_lock_timeout",
-                "Timed out waiting for exclusive USB serial access.",
-                true,
-            ))
+            Self::acquire_unix(port_path, deadline).map(|file| Self { file })
         }
 
         #[cfg(not(unix))]
@@ -1287,6 +1359,42 @@ impl SerialPortProcessLock {
             let _ = (port_path, deadline);
             Ok(Self {})
         }
+    }
+
+    #[cfg(unix)]
+    fn acquire_unix(port_path: &str, deadline: Instant) -> Result<File, HttpError> {
+        let lock_path = serial_lock_path(port_path);
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "serial_lock_failed",
+                    &format!("Failed to open serial lock {}: {error}", lock_path.display()),
+                    true,
+                )
+            })?;
+        while Instant::now() < deadline {
+            // SAFETY: flock is called with a valid file descriptor owned by `file`.
+            if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
+                return Ok(file);
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::WouldBlock {
+                return Err(serial_io_http_error(error));
+            }
+            std::thread::sleep(SERIAL_READ_TIMEOUT);
+        }
+        Err(HttpError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "serial_lock_timeout",
+            "Timed out waiting for exclusive USB serial access.",
+            true,
+        ))
     }
 }
 

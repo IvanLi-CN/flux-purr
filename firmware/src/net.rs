@@ -651,6 +651,55 @@ async fn progress_wifi_failure(
     }
 }
 
+async fn finish_wifi_disable(controller: &mut WifiController<'static>, config: &WifiRuntimeConfig) {
+    let _ = with_timeout(
+        Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
+        controller.disconnect_async(),
+    )
+    .await;
+    if !stop_wifi_station(controller).await {
+        let _ = progress_wifi_failure(
+            config,
+            ProvisioningEvent::DisconnectTimedOut,
+            "WiFi station did not stop in time.",
+        )
+        .await;
+        return;
+    }
+
+    if !matches!(wifi_state().await, NetworkState::Idle) {
+        let _ = publish_wifi_event(config, ProvisioningEvent::CancelProvisioning, None).await;
+    }
+    let request_id = WIFI_CANCEL_REQUEST_ID.swap(0, Ordering::AcqRel);
+    if request_id != 0 {
+        WIFI_CANCEL_ACK.signal(request_id);
+    }
+}
+
+async fn finish_wifi_disconnect(controller: &mut WifiController<'static>) {
+    let disconnected = with_timeout(
+        Duration::from_millis(SAVING_TIMEOUT_MS as u64),
+        controller.disconnect_async(),
+    )
+    .await;
+    let latest_config = WIFI_CONFIG.lock().await.clone();
+    if disconnected.is_ok() {
+        let _ =
+            publish_wifi_event(&latest_config, ProvisioningEvent::DisconnectCompleted, None).await;
+        return;
+    }
+
+    let follow_up = progress_wifi_failure(
+        &latest_config,
+        ProvisioningEvent::DisconnectTimedOut,
+        "Timed out while stopping WiFi.",
+    )
+    .await;
+    if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
+        WIFI_APPLY_SIGNAL.wait().await;
+    }
+}
+
 #[embassy_executor::task]
 async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stack<'static>) {
     wifi_task_inner(controller, stack).await;
@@ -658,8 +707,7 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
 
 #[expect(
     clippy::too_many_lines,
-    clippy::excessive_nesting,
-    reason = "WiFi task preserves startup, association, and recovery sequencing"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 async fn wifi_task_inner(controller: &'static mut WifiController<'static>, stack: Stack<'static>) {
     let mut retry_pending = false;
@@ -675,30 +723,7 @@ async fn wifi_task_inner(controller: &'static mut WifiController<'static>, stack
         }
 
         if !config.connection_enabled {
-            let _ = with_timeout(
-                Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
-                controller.disconnect_async(),
-            )
-            .await;
-            let stopped = stop_wifi_station(controller).await;
-            if stopped {
-                if !matches!(wifi_state().await, NetworkState::Idle) {
-                    let _ =
-                        publish_wifi_event(&config, ProvisioningEvent::CancelProvisioning, None)
-                            .await;
-                }
-                let request_id = WIFI_CANCEL_REQUEST_ID.swap(0, Ordering::AcqRel);
-                if request_id != 0 {
-                    WIFI_CANCEL_ACK.signal(request_id);
-                }
-            } else {
-                let _ = progress_wifi_failure(
-                    &config,
-                    ProvisioningEvent::DisconnectTimedOut,
-                    "WiFi station did not stop in time.",
-                )
-                .await;
-            }
+            finish_wifi_disable(controller, &config).await;
             WIFI_APPLY_SIGNAL.wait().await;
             continue;
         }
@@ -857,30 +882,7 @@ async fn wifi_task_inner(controller: &'static mut WifiController<'static>, stack
                 WIFI_APPLY_SIGNAL.wait().await
             }
             Either::Second(()) => {
-                let disconnected = with_timeout(
-                    Duration::from_millis(SAVING_TIMEOUT_MS as u64),
-                    controller.disconnect_async(),
-                )
-                .await;
-                let latest_config = WIFI_CONFIG.lock().await.clone();
-                if disconnected.is_ok() {
-                    let _ = publish_wifi_event(
-                        &latest_config,
-                        ProvisioningEvent::DisconnectCompleted,
-                        None,
-                    )
-                    .await;
-                } else {
-                    let follow_up = progress_wifi_failure(
-                        &latest_config,
-                        ProvisioningEvent::DisconnectTimedOut,
-                        "Timed out while stopping WiFi.",
-                    )
-                    .await;
-                    if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
-                        WIFI_APPLY_SIGNAL.wait().await;
-                    }
-                }
+                finish_wifi_disconnect(controller).await;
             }
         }
     }

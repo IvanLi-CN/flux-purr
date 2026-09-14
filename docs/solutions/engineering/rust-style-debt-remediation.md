@@ -53,6 +53,11 @@ convenient place to add each new control-plane or test path.
 - Run `rustfmt` for every Rust file at commit time. Run strict Clippy, target
   builds, and the repository `rust-style-check` binary before push and in both
   PR and main CI workflows.
+- Treat the historical debt baseline as zero: every structural violation is
+  either removed or covered by the smallest possible function-level
+  `#[expect(..., reason = "...")]` for an explicitly ordered legacy workflow.
+  `too_many_arguments` has no local exception. Any new violation fails the
+  same local and CI checks instead of being added to an untracked baseline.
 - Use `syn` for source-shape checks. It parses all firmware and devd Rust
   source, checks the three entry budgets, rejects inline test modules in those
   boundaries, rejects structural lint suppression hidden in `cfg_attr`, and
@@ -74,13 +79,13 @@ convenient place to add each new control-plane or test path.
   file grow. Tests must continue to compile under every target feature matrix.
 - Target lint commands must use the exact target and features used for the
   release build. Do not substitute host lint for Xtensa-only code.
-- Do not add crate-wide or module-wide lint suppressions for structural debt.
+- Do not add crate-wide, module-wide, or file-wide structural suppressions.
   Local `too_many_lines` and `excessive_nesting` exceptions must use
-  `#[expect(..., reason = "...")]`, so they fail closed when the exception is
-  no longer needed; `cfg_attr` cannot hide an exception from the checker. An
-  external trait or ABI may use the narrow native Clippy exception required by
-  that interface. `too_many_arguments` has no local exception in this
-  repository.
+  `#[expect(..., reason = "...")]` on the smallest function that preserves an
+  ordered protocol or safety workflow; they fail closed when the debt is gone.
+  `cfg_attr` cannot hide an exception from the checker. An external trait or
+  ABI may use the narrow native Clippy exception required by that interface.
+  `too_many_arguments` has no local exception in this repository.
 
 ## References
 

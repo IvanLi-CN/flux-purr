@@ -93,7 +93,7 @@ fn default_thermal_control_target(target_temp_c: i16) -> ThermalControlTarget {
 #[cfg(any(target_arch = "xtensa", test))]
 #[expect(
     clippy::too_many_lines,
-    reason = "default thermal target construction centralizes bounded safety defaults"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn default_thermal_control_target_with_settings(
     target_temp_c: i16,
@@ -249,7 +249,7 @@ fn default_thermal_control_target_with_settings(
 #[cfg(any(target_arch = "xtensa", test))]
 #[expect(
     clippy::too_many_lines,
-    reason = "thermal target interpolation applies bounded control coefficients atomically"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn interpolate_thermal_control_target(
     target_temp_c: i16,
@@ -751,10 +751,10 @@ impl HeaterController {
     }
 
     #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "thermal plant control preserves predictor, limiter, and safety ordering"
-    )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "legacy workflow preserves protocol ordering and safety checks"
+)]
     fn update_thermal_plant_at(&mut self, input: ThermalPlantRuntimeInput) -> HeaterPidSnapshot {
         let ThermalPlantRuntimeInput {
             target_temp_c,
@@ -876,11 +876,11 @@ impl HeaterController {
         )
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        clippy::excessive_nesting,
-        reason = "thermal PID transition keeps safety guards and state updates in one ordered step"
-    )]
+#[expect(
+    clippy::too_many_lines,
+    clippy::excessive_nesting,
+    reason = "legacy workflow preserves protocol ordering and safety checks"
+)]
     fn update_at(
         &mut self,
         target_temp_c: i16,

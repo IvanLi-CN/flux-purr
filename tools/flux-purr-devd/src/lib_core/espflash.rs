@@ -49,10 +49,6 @@ async fn run_espflash_with_program(
     .await
 }
 
-#[expect(
-    clippy::excessive_nesting,
-    reason = "reset fallback preserves ordered retry and recovery semantics"
-)]
 async fn run_espflash_with_reset_fallback_with_program<F>(
     program: &Path,
     artifact: &FirmwareArtifact,
@@ -71,45 +67,21 @@ where
             let output =
                 run_espflash_command_with_timeout(program, &args, ESPFLASH_COMMAND_TIMEOUT).await?;
 
-            if !output.status.success() {
-                if espflash_flash_end_requires_reset(&args, &output) {
-                    let reset_args = build_espflash_reset_args(artifact, port_path, before_reset)?;
-                    let reset_output = run_espflash_command_with_timeout(
-                        program,
-                        &reset_args,
-                        ESPFLASH_COMMAND_TIMEOUT,
-                    )
-                    .await?;
-
-                    if reset_output.status.success() {
-                        // The ROM accepted the image data but rejected the final
-                        // run-user-code transition. Reset once, then let the caller
-                        // require the normal runtime-ready verification.
-                        return Ok(());
-                    }
-
-                    return Err(HttpError::internal_with_details(
-                        "flash_recovery_reset_failed",
-                        "espflash reached FlashEnd but the recovery reset failed.",
-                        json!({
-                            "flashAttempt": espflash_failure_details(program, &args, &output),
-                            "resetAttempt": espflash_failure_details(program, &reset_args, &reset_output),
-                        }),
-                    ));
-                }
-                retry_with_next_reset =
-                    mode_index + 1 < reset_modes.len() && espflash_connection_failed(&output);
-                if retry_with_next_reset {
-                    if is_esp_usb_serial_jtag_port(port_path) {
-                        tokio::time::sleep(ESPFLASH_USB_RESET_RETRY_DELAY).await;
-                    }
-                    break;
-                }
-                return Err(HttpError::internal_with_details(
-                    "flash_tool_failed",
-                    "espflash returned a non-zero status.",
-                    espflash_failure_details(program, &args, &output),
-                ));
+            if output.status.success() {
+                continue;
+            }
+            retry_with_next_reset = handle_failed_espflash_attempt(
+                program,
+                artifact,
+                port_path,
+                before_reset,
+                &args,
+                &output,
+                mode_index + 1 < reset_modes.len(),
+            )
+            .await?;
+            if retry_with_next_reset {
+                break;
             }
         }
 
@@ -121,6 +93,47 @@ where
     Err(HttpError::internal(
         "espflash did not complete a reset attempt.",
     ))
+}
+
+async fn handle_failed_espflash_attempt(
+    program: &Path,
+    artifact: &FirmwareArtifact,
+    port_path: &str,
+    before_reset: &str,
+    args: &[String],
+    output: &Output,
+    can_retry: bool,
+) -> Result<bool, HttpError> {
+    if espflash_flash_end_requires_reset(args, output) {
+        let reset_args = build_espflash_reset_args(artifact, port_path, before_reset)?;
+        let reset_output =
+            run_espflash_command_with_timeout(program, &reset_args, ESPFLASH_COMMAND_TIMEOUT)
+                .await?;
+        if reset_output.status.success() {
+            // The ROM accepted the image data but rejected the final
+            // run-user-code transition. Reset once, then verify runtime_ready.
+            return Ok(false);
+        }
+        return Err(HttpError::internal_with_details(
+            "flash_recovery_reset_failed",
+            "espflash reached FlashEnd but the recovery reset failed.",
+            json!({
+                "flashAttempt": espflash_failure_details(program, args, output),
+                "resetAttempt": espflash_failure_details(program, &reset_args, &reset_output),
+            }),
+        ));
+    }
+    if !can_retry || !espflash_connection_failed(output) {
+        return Err(HttpError::internal_with_details(
+            "flash_tool_failed",
+            "espflash returned a non-zero status.",
+            espflash_failure_details(program, args, output),
+        ));
+    }
+    if is_esp_usb_serial_jtag_port(port_path) {
+        tokio::time::sleep(ESPFLASH_USB_RESET_RETRY_DELAY).await;
+    }
+    Ok(true)
 }
 
 async fn run_espflash_command_with_timeout(

@@ -293,10 +293,6 @@ impl AppState {
         }
     }
 
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "lease cleanup keeps state/session invariants together"
-    )]
     async fn reap_expired_leases(&self) -> Result<usize, HttpError> {
         let _serial_rpc =
             acquire_serial_rpc_with_timeout(self.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
@@ -309,18 +305,7 @@ impl AppState {
                 .map(|lease| lease.device_id.as_str())
                 .collect::<HashSet<_>>();
             let mut sessions = lock_serial_sessions(&self.serial_sessions)?;
-            for lease in &expired {
-                if active_device_ids.contains(lease.device_id.as_str()) {
-                    continue;
-                }
-                if let Some(port_path) = state
-                    .devices
-                    .get(&lease.device_id)
-                    .and_then(|device| device.port_path.as_deref())
-                {
-                    sessions.remove(port_path);
-                }
-            }
+            remove_expired_serial_sessions(&state, &active_device_ids, &expired, &mut sessions);
             expired
         };
         for lease in &expired {
@@ -332,6 +317,27 @@ impl AppState {
             ));
         }
         Ok(expired.len())
+    }
+}
+
+fn remove_expired_serial_sessions(
+    state: &DevdState,
+    active_device_ids: &HashSet<&str>,
+    expired: &[WebLease],
+    sessions: &mut SerialSessionMap,
+) {
+    for lease in expired {
+        if active_device_ids.contains(lease.device_id.as_str()) {
+            continue;
+        }
+        let Some(port_path) = state
+            .devices
+            .get(&lease.device_id)
+            .and_then(|device| device.port_path.as_deref())
+        else {
+            continue;
+        };
+        sessions.remove(port_path);
     }
 }
 

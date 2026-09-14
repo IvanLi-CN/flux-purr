@@ -646,10 +646,6 @@ impl BitmapTextStyle {
     }
 }
 
-#[expect(
-    clippy::excessive_nesting,
-    reason = "bitmap text rasterization preserves glyph layout"
-)]
 fn draw_bitmap_text(
     canvas: &mut DisplayCanvas,
     text: &str,
@@ -675,21 +671,7 @@ fn draw_bitmap_text(
         BitmapFont::Small | BitmapFont::Mid => {
             for ch in text.chars() {
                 let glyph = bitmap_glyph(ch);
-                for (row_index, row) in glyph.iter().enumerate() {
-                    for (column_index, pixel) in row.chars().enumerate() {
-                        if pixel != '1' {
-                            continue;
-                        }
-                        fill_rect(
-                            canvas,
-                            cursor_x + column_index as i32 * scale,
-                            y + row_index as i32 * scale,
-                            scale as u32,
-                            scale as u32,
-                            color,
-                        );
-                    }
-                }
+                draw_bitmap_glyph(canvas, glyph, cursor_x, y, scale, color);
                 cursor_x += (font.width() + spacing) * scale;
             }
         }
@@ -711,6 +693,30 @@ fn draw_bitmap_text(
                 .draw(canvas)
                 .ok();
                 cursor_x += font.width() + spacing;
+            }
+        }
+    }
+}
+
+fn draw_bitmap_glyph(
+    canvas: &mut DisplayCanvas,
+    glyph: &[&str; 5],
+    x: i32,
+    y: i32,
+    scale: i32,
+    color: Rgb565,
+) {
+    for (row_index, row) in glyph.iter().enumerate() {
+        for (column_index, pixel) in row.chars().enumerate() {
+            if pixel == '1' {
+                fill_rect(
+                    canvas,
+                    x + column_index as i32 * scale,
+                    y + row_index as i32 * scale,
+                    scale as u32,
+                    scale as u32,
+                    color,
+                );
             }
         }
     }
@@ -1167,10 +1173,6 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState, theme: &
     );
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "dashboard rendering keeps the fixed panel layout together"
-)]
 fn draw_dashboard(
     canvas: &mut DisplayCanvas,
     state: &FrontPanelUiState,
@@ -1183,6 +1185,46 @@ fn draw_dashboard(
         DashboardPresentationState::Initializing | DashboardPresentationState::InitialRtdFault
     );
     let eeprom_restore = state.dashboard_presentation == DashboardPresentationState::EepromRestore;
+    draw_dashboard_temperature(
+        canvas,
+        state,
+        palette,
+        theme,
+        initializing_presentation,
+        with_temperature_shadow,
+    );
+    draw_dashboard_status(
+        canvas,
+        state,
+        theme,
+        initializing_presentation,
+        eeprom_restore,
+    );
+    draw_dashboard_pps(
+        canvas,
+        state,
+        theme,
+        initializing_presentation,
+        eeprom_restore,
+    );
+    draw_dashboard_fan(
+        canvas,
+        state,
+        theme,
+        initializing_presentation,
+        eeprom_restore,
+    );
+    draw_dashboard_heat(canvas, state, theme);
+}
+
+fn draw_dashboard_temperature(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    palette: &TemperaturePalette,
+    theme: &DashboardTheme,
+    initializing_presentation: bool,
+    with_temperature_shadow: bool,
+) {
     let (display_text, fractional_digit, value_color) = if initializing_presentation {
         ("---".try_into().unwrap(), '-', theme.muted)
     } else {
@@ -1192,11 +1234,6 @@ fn draw_dashboard(
             fractional_digit,
             temperature_color_with_palette(state.current_temp_c, palette),
         )
-    };
-    let set_text = if initializing_presentation || eeprom_restore {
-        "---".try_into().unwrap()
-    } else {
-        i16_to_text(state.target_temp_c)
     };
     let digits_width = measure_seven_segment_text(&display_text);
     let digits_right_edge = 55;
@@ -1223,7 +1260,20 @@ fn draw_dashboard(
     fill_rect(canvas, 58, 19, 2, 2, theme.text);
     draw_bitmap_rows(canvas, &CELSIUS_UNIT_BITMAP, 58, 27, theme.text);
     fill_rect(canvas, 78, 4, 1, 36, theme.divider);
+}
 
+fn draw_dashboard_status(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    theme: &DashboardTheme,
+    initializing_presentation: bool,
+    eeprom_restore: bool,
+) {
+    let set_text = if initializing_presentation || eeprom_restore {
+        "---".try_into().unwrap()
+    } else {
+        i16_to_text(state.target_temp_c)
+    };
     if state.dashboard_presentation == DashboardPresentationState::InitialRtdFault {
         draw_dashboard_status_line(canvas, 4, "WARN", "SENSOR", theme.warning, theme.warning);
     } else if eeprom_restore {
@@ -1239,6 +1289,15 @@ fn draw_dashboard(
     } else {
         draw_dashboard_status_line(canvas, 4, "SET", &set_text, theme.muted, theme.setpoint);
     }
+}
+
+fn draw_dashboard_pps(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    theme: &DashboardTheme,
+    initializing_presentation: bool,
+    eeprom_restore: bool,
+) {
     let mut pps_value = heapless::String::<8>::new();
     if initializing_presentation || eeprom_restore {
         let _ = pps_value.push_str("---");
@@ -1257,6 +1316,15 @@ fn draw_dashboard(
             theme.info,
         );
     }
+}
+
+fn draw_dashboard_fan(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    theme: &DashboardTheme,
+    initializing_presentation: bool,
+    eeprom_restore: bool,
+) {
     draw_dashboard_status_line(
         canvas,
         30,
@@ -1278,7 +1346,13 @@ fn draw_dashboard(
             }
         },
     );
+}
 
+fn draw_dashboard_heat(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    theme: &DashboardTheme,
+) {
     fill_rect(canvas, 4, 41, 152, 1, theme.divider);
     draw_text_small(canvas, "HEAT", 4, 43, theme.muted);
     let output_text = percent_to_text(state.heater_output_percent);

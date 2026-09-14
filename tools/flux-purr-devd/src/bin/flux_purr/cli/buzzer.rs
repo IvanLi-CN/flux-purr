@@ -276,10 +276,6 @@ impl Drop for BuzzerTerminalGuard {
     }
 }
 
-#[expect(
-    clippy::excessive_nesting,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
 async fn buzzer_play_terminal_interactive(
     client: &Client,
     resolved: ResolvedUsbTarget,
@@ -301,78 +297,119 @@ async fn buzzer_play_terminal_interactive(
             terminal_guard.pointer_capture,
         )?;
         let session_running = buzzer_session_state(&status) == "running";
-        let mut action = None;
+        let (next_selection, next_notice, action) = read_buzzer_terminal_input(
+            &mut output,
+            &mut terminal_guard,
+            selection,
+            session_running,
+        )?;
+        selection = next_selection;
+        if next_notice.is_some() {
+            notice = next_notice;
+        }
 
-        loop {
-            match event::read()? {
-                Event::Key(key) => {
-                    if matches!(key.kind, KeyEventKind::Press)
-                        && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M'))
-                    {
-                        let enabled = !terminal_guard.pointer_capture;
-                        terminal_guard.set_pointer_capture(&mut output, enabled)?;
-                        notice = Some(if enabled {
-                            "Pointer capture enabled. Press M again to release it for terminal copy."
-                        } else {
-                            "Pointer capture disabled. Terminal text selection and copy are enabled."
-                        }
-                        .to_string());
-                        break;
+        if let Some(action) = action
+            && apply_buzzer_interactive_action(
+                client,
+                resolved.clone(),
+                action,
+                &mut status,
+                &mut notice,
+            )
+            .await?
+        {
+            return Ok(());
+        }
+    }
+}
+
+async fn apply_buzzer_interactive_action(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+    action: BuzzerInteractiveAction,
+    status: &mut Value,
+    notice: &mut Option<String>,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    match execute_buzzer_interactive_action(client, resolved, action).await? {
+        BuzzerInteractiveExecution::Exit => Ok(true),
+        BuzzerInteractiveExecution::Updated {
+            message,
+            status: next_status,
+        } => {
+            *notice = Some(message);
+            if let Some(next_status) = next_status {
+                *status = next_status;
+            }
+            Ok(false)
+        }
+    }
+}
+
+fn read_buzzer_terminal_input(
+    output: &mut impl Write,
+    terminal_guard: &mut BuzzerTerminalGuard,
+    mut selection: BuzzerTerminalSelection,
+    session_running: bool,
+) -> io::Result<(
+    BuzzerTerminalSelection,
+    Option<String>,
+    Option<BuzzerInteractiveAction>,
+)> {
+    loop {
+        match event::read()? {
+            Event::Key(key) => {
+                if matches!(key.kind, KeyEventKind::Press)
+                    && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M'))
+                {
+                    let enabled = !terminal_guard.pointer_capture;
+                    terminal_guard.set_pointer_capture(output, enabled)?;
+                    let notice = Some(pointer_capture_notice(enabled));
+                    return Ok((selection, notice, None));
+                }
+                if buzzer_terminal_move_selection(&mut selection, key.code, key.kind) {
+                    return Ok((selection, None, None));
+                }
+                if let Some(action) =
+                    buzzer_terminal_key_action(key.code, key.kind, selection, session_running)
+                {
+                    return Ok((selection, None, Some(action)));
+                }
+            }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if selection.select_row(mouse.row) {
+                        return Ok((selection, None, None));
                     }
-                    if buzzer_terminal_move_selection(&mut selection, key.code, key.kind) {
-                        break;
-                    }
-                    if let Some(next_action) =
-                        buzzer_terminal_key_action(key.code, key.kind, selection, session_running)
-                    {
-                        action = Some(next_action);
-                        break;
+                    if let Some(action) = buzzer_terminal_pointer_action(
+                        mouse.row,
+                        mouse.column,
+                        selection,
+                        session_running,
+                    ) {
+                        return Ok((selection, None, Some(action)));
                     }
                 }
-                Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        if selection.select_row(mouse.row) {
-                            break;
-                        }
-                        if let Some(next_action) = buzzer_terminal_pointer_action(
-                            mouse.row,
-                            mouse.column,
-                            selection,
-                            session_running,
-                        ) {
-                            action = Some(next_action);
-                            break;
-                        }
-                    }
-                    MouseEventKind::ScrollUp => {
-                        selection.move_previous();
-                        break;
-                    }
-                    MouseEventKind::ScrollDown => {
-                        selection.move_next();
-                        break;
-                    }
-                    _ => {}
-                },
-                Event::Resize(_, _) => break,
+                MouseEventKind::ScrollUp => {
+                    selection.move_previous();
+                    return Ok((selection, None, None));
+                }
+                MouseEventKind::ScrollDown => {
+                    selection.move_next();
+                    return Ok((selection, None, None));
+                }
                 _ => {}
-            }
+            },
+            Event::Resize(_, _) => return Ok((selection, None, None)),
+            _ => {}
         }
+    }
+}
 
-        if let Some(action) = action {
-            match execute_buzzer_interactive_action(client, resolved.clone(), action).await? {
-                BuzzerInteractiveExecution::Exit => return Ok(()),
-                BuzzerInteractiveExecution::Updated {
-                    message,
-                    status: next_status,
-                } => {
-                    notice = Some(message);
-                    if let Some(next_status) = next_status {
-                        status = next_status;
-                    }
-                }
-            }
-        }
+fn pointer_capture_notice(enabled: bool) -> String {
+    if enabled {
+        "Pointer capture enabled. Press M again to release it for terminal copy.".to_string()
+    } else {
+        "Pointer capture disabled. Terminal text selection and copy are enabled.".to_string()
     }
 }
 

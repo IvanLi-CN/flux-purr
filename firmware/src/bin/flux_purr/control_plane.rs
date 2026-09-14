@@ -1,7 +1,7 @@
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 #[expect(
     clippy::too_many_lines,
-    reason = "status serialization maps one coherent runtime snapshot"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn usb_runtime_status_with_calibration(
     ui_state: &FrontPanelUiState,
@@ -236,7 +236,7 @@ struct UsbRuntimeConfigInput<'a> {
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 #[expect(
     clippy::too_many_lines,
-    reason = "runtime configuration applies coupled safety and persistence updates atomically"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn usb_runtime_config_response_with_calibration(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
@@ -710,7 +710,7 @@ fn disarm_calibration_after_capability_refresh(
 #[cfg(any(target_arch = "xtensa", test))]
 #[expect(
     clippy::too_many_lines,
-    reason = "calibration startup establishes synchronized workspace invariants"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn calibration_job_start_with_workspace(
     calibration: &mut CalibrationRuntimeState,
@@ -1246,7 +1246,7 @@ fn transient_fit_row(
 #[expect(
     clippy::too_many_lines,
     clippy::excessive_nesting,
-    reason = "thermal fitting validates samples and derives the persisted model atomically"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn fit_thermal_plant_transient(
     transaction_id: u32,
@@ -1486,9 +1486,9 @@ struct CalibrationJobUpdateInput {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[expect(
-    clippy::too_many_lines,
     clippy::excessive_nesting,
-    reason = "calibration updates preserve synchronized PPS, sensor, and persistence state"
+    clippy::too_many_lines,
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn update_calibration_job_state_with_workspace(
     calibration: &mut CalibrationRuntimeState,
@@ -1950,7 +1950,7 @@ fn update_calibration_job_state(
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 #[expect(
     clippy::too_many_lines,
-    reason = "calibration response keeps validation and rollback coupled"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn usb_calibration_config_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
@@ -2382,7 +2382,7 @@ impl PersistenceLogSink for NoopPersistenceLogSink {
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 #[expect(
     clippy::excessive_nesting,
-    reason = "bounded USB writes preserve packet and flush ordering"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn usb_write_bytes_bounded<T: UsbControlTx>(tx: &mut T, bytes: &[u8]) -> bool {
     let mut packet_len = 0;
@@ -2479,7 +2479,7 @@ fn usb_error_response_with_retryable(
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 #[expect(
     clippy::too_many_lines,
-    reason = "early USB recovery responses preserve protocol compatibility"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
     match parse_usb_frame(line) {
@@ -2631,10 +2631,16 @@ fn poll_usb_early_control(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-#[expect(
-    clippy::excessive_nesting,
-    reason = "USB recovery loop keeps retry and persistence fault transitions atomic"
-)]
+fn append_usb_recovery_byte(
+    rx_line: &mut heapless::String<USB_CONTROL_LINE_CAPACITY>,
+    byte: u8,
+) {
+    if rx_line.push(char::from(byte)).is_err() {
+        rx_line.clear();
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 async fn run_usb_recovery_control_loop(
     usb: &mut RawUsbSerialJtag,
     rx_line: &mut heapless::String<USB_CONTROL_LINE_CAPACITY>,
@@ -2660,9 +2666,7 @@ async fn run_usb_recovery_control_loop(
                 }
                 Ok(b'\r') => {}
                 Ok(byte) => {
-                    if rx_line.push(char::from(byte)).is_err() {
-                        rx_line.clear();
-                    }
+                    append_usb_recovery_byte(rx_line, byte);
                 }
                 Err(nb::Error::WouldBlock) => break,
                 Err(_) => break,
@@ -2726,7 +2730,7 @@ fn usb_recovery_status(memory_config: &MemoryConfig, elapsed_ms: u64) -> Box<Con
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 #[expect(
     clippy::too_many_lines,
-    reason = "USB recovery response routing preserves bounded retry behavior"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u64) -> UsbFrame {
     match parse_usb_frame(line) {

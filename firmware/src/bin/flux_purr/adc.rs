@@ -211,10 +211,53 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-#[expect(
-    clippy::excessive_nesting,
-    reason = "ADC sampling keeps conversion and PD servicing phases ordered"
-)]
+async fn read_adc_sample_with_pd<PIN, PWM>(
+    adc: &mut Adc1Driver,
+    pin: &mut esp_hal::analog::adc::AdcPin<
+        PIN,
+        esp_hal::peripherals::ADC1<'static>,
+        AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
+    >,
+    curve: &Adc1Curve,
+    service: &mut PdAdcService<'_, '_, PWM>,
+    last_pd_service_ms: &mut u64,
+) -> Option<AdcConvertedSample>
+where
+    PIN: AdcChannel,
+    PWM: SetDutyCycle,
+{
+    loop {
+        match adc.read_oneshot(pin) {
+            Ok(value) => {
+                let raw_code = mask_adc1_raw_code(value);
+                return Some(AdcConvertedSample {
+                    raw_code,
+                    calibrated_mv: curve.adc_val(raw_code),
+                });
+            }
+            Err(nb::Error::WouldBlock) => {
+                let elapsed_ms = Instant::now()
+                    .as_millis()
+                    .saturating_sub(*last_pd_service_ms);
+                if elapsed_ms >= PD_RUNTIME_SERVICE_INTERVAL_MS {
+                    service_pd_for_adc(service).await;
+                    *last_pd_service_ms = Instant::now().as_millis();
+                }
+                EmbassyTimer::after_micros(50).await;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn wait_for_adc_phase_if_needed(should_wait: bool) {
+    if should_wait {
+        EmbassyTimer::after_micros(u64::from(RTD_SAMPLE_PWM_PHASE_SPACING_US)).await;
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 async fn read_adc_batch_with_pd<PIN, PWM>(
     adc: &mut Adc1Driver,
     pin: &mut esp_hal::analog::adc::AdcPin<
@@ -255,29 +298,14 @@ where
     }
 
     for _ in 0..total_samples {
-        let sample = loop {
-            match adc.read_oneshot(pin) {
-                Ok(value) => {
-                    let raw_code = mask_adc1_raw_code(value);
-                    break Some(AdcConvertedSample {
-                        raw_code,
-                        calibrated_mv: curve.adc_val(raw_code),
-                    });
-                }
-                Err(nb::Error::WouldBlock) => {
-                    if Instant::now()
-                        .as_millis()
-                        .saturating_sub(last_pd_service_ms)
-                        >= PD_RUNTIME_SERVICE_INTERVAL_MS
-                    {
-                        service_pd_for_adc(service).await;
-                        last_pd_service_ms = Instant::now().as_millis();
-                    }
-                    EmbassyTimer::after_micros(50).await;
-                }
-                Err(_) => break None,
-            }
-        };
+        let sample = read_adc_sample_with_pd(
+            adc,
+            pin,
+            curve,
+            service,
+            &mut last_pd_service_ms,
+        )
+        .await;
 
         samples_since_pd = samples_since_pd.saturating_add(1);
         if let Some(sample) = sample {
@@ -291,12 +319,11 @@ where
                 min_raw_code = min_raw_code.min(sample.raw_code);
                 max_raw_code = max_raw_code.max(sample.raw_code);
                 valid_samples = valid_samples.saturating_add(1);
-
-                if valid_samples.is_multiple_of(samples_per_phase)
-                    && valid_samples < RTD_SAMPLE_COUNT
-                {
-                    EmbassyTimer::after_micros(u64::from(RTD_SAMPLE_PWM_PHASE_SPACING_US)).await;
-                }
+                wait_for_adc_phase_if_needed(
+                    valid_samples.is_multiple_of(samples_per_phase)
+                        && valid_samples < RTD_SAMPLE_COUNT,
+                )
+                .await;
             }
         }
 
@@ -1007,7 +1034,7 @@ impl Fusb302bRuntime {
     #[expect(
         clippy::too_many_lines,
         clippy::excessive_nesting,
-        reason = "PD polling is a single bounded protocol state transition"
+        reason = "legacy workflow preserves protocol ordering and safety checks"
     )]
     async fn poll(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, now: PdTimestamp) -> bool {
         let now_ms = now.as_millis();

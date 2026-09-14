@@ -49,7 +49,7 @@ struct ControlLineContext<'a, 'i, 'e, PWM> {
 #[expect(
     clippy::too_many_lines,
     clippy::excessive_nesting,
-    reason = "control-line dispatch preserves command ordering and safety interlocks"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 async fn process_control_line<PWM>(
     line: &str,

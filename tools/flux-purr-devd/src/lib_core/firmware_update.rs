@@ -83,7 +83,7 @@ async fn import_firmware_bundle(
 
 #[expect(
     clippy::too_many_lines,
-    reason = "firmware update handler preserves verification and event ordering"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 async fn local_firmware_update(
     State(state): State<AppState>,
@@ -305,7 +305,7 @@ async fn refresh_native_update_runtime_facts(
 
 #[expect(
     clippy::too_many_lines,
-    reason = "firmware operation handler preserves dry-run and safety gates"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 async fn firmware_operation(
     State(state): State<AppState>,
@@ -647,7 +647,7 @@ async fn firmware_operation(
 
 #[expect(
     clippy::too_many_lines,
-    reason = "flash transaction keeps serial exclusivity and recovery ordering"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 async fn run_bundle_flash_transaction(
     state: &AppState,

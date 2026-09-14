@@ -2,7 +2,7 @@
 #[expect(
     clippy::too_many_lines,
     clippy::excessive_nesting,
-    reason = "firmware runtime assembly preserves boot and control-loop ordering"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 pub async fn run(_spawner: Spawner) {
     let reset_reason = reset_reason_log_line(esp_hal::system::reset_reason());

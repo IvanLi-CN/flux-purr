@@ -162,7 +162,7 @@ impl Canvas {
 
     #[expect(
         clippy::excessive_nesting,
-        reason = "preview rasterization preserves circle pixels"
+        reason = "preview rasterization keeps pixel loops together"
     )]
     fn circle(&mut self, center_x: i32, center_y: i32, radius: i32, color: [u8; 3]) {
         let radius_squared = radius * radius;
@@ -179,7 +179,7 @@ impl Canvas {
 
     #[expect(
         clippy::excessive_nesting,
-        reason = "preview rasterization preserves ring pixels"
+        reason = "preview rasterization keeps pixel loops together"
     )]
     fn circle_outline(&mut self, center_x: i32, center_y: i32, radius: i32, color: [u8; 3]) {
         let outer = radius * radius;
@@ -198,7 +198,7 @@ impl Canvas {
 
     #[expect(
         clippy::excessive_nesting,
-        reason = "preview glyph rasterization preserves text pixels"
+        reason = "preview rasterization keeps pixel loops together"
     )]
     fn draw_text(&mut self, text: &str, x: i32, y: i32, scale: i32, color: [u8; 3]) {
         let mut cursor_x = x;

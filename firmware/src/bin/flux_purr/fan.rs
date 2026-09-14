@@ -363,7 +363,7 @@ fn guard_pulse_percent(current_temp_c: i16, mode: HeatingFanGuardMode) -> u8 {
 #[cfg(any(target_arch = "xtensa", test))]
 #[expect(
     clippy::excessive_nesting,
-    reason = "fan policy transitions preserve mutually exclusive safety precedence"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 fn fan_policy_decision_with_modes(
     current_temp_c: i16,

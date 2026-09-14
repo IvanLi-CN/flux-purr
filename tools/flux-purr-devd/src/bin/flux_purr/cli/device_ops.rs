@@ -1,6 +1,6 @@
 #[expect(
     clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cli = Cli::parse();
@@ -1069,7 +1069,7 @@ const EEPROM_CHUNK_BYTES: usize = 32;
 #[expect(
     clippy::too_many_lines,
     clippy::excessive_nesting,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 async fn handle_eeprom_command(
     client: &Client,

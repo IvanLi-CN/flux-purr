@@ -1169,7 +1169,7 @@ impl ManualPpsState {
 
     #[expect(
         clippy::excessive_nesting,
-        reason = "capability normalization keeps source bounds atomic"
+        reason = "legacy workflow preserves protocol ordering and safety checks"
     )]
     fn from_capabilities_with_request_bounds(
         capabilities: Option<ch224q::AdjustablePowerCapabilities>,
@@ -1278,7 +1278,7 @@ impl ManualPpsState {
 
     #[expect(
         clippy::excessive_nesting,
-        reason = "PPS capability selection preserves ordered fallback checks"
+        reason = "legacy workflow preserves protocol ordering and safety checks"
     )]
     fn contiguous_pps_source_limits(&self, anchor_mv: u16) -> Option<(u16, u16, u16)> {
         let mut minimum_mv = u16::MAX;

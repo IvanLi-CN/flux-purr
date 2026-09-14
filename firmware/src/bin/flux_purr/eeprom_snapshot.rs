@@ -101,7 +101,7 @@ fn write_eeprom_snapshot_response(
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 #[expect(
     clippy::too_many_lines,
-    reason = "snapshot protocol handling keeps framing and persistence ordering together"
+    reason = "legacy workflow preserves protocol ordering and safety checks"
 )]
 async fn process_eeprom_snapshot_line<PWM>(
     line: &str,

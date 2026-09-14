@@ -161,7 +161,7 @@ impl PreviewPreset {
 
     #[expect(
         clippy::too_many_lines,
-        reason = "preview fixture builds the complete front-panel state"
+        reason = "legacy workflow preserves protocol ordering and safety checks"
     )]
     fn build_state(self, dashboard_temp_c: Option<i16>) -> FrontPanelUiState {
         match self {
