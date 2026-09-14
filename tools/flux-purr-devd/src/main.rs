@@ -17,7 +17,7 @@ enum Command {
     Serve(ServeArgs),
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Default)]
 struct ServeArgs {
     #[arg(long)]
     bind: Option<SocketAddr>,
@@ -33,20 +33,6 @@ struct ServeArgs {
     allow_real_flash: bool,
     #[arg(long = "control-socket")]
     control_socket: Option<PathBuf>,
-}
-
-impl Default for ServeArgs {
-    fn default() -> Self {
-        Self {
-            bind: None,
-            artifact_root: None,
-            serial_port: None,
-            allow_dev_cors: false,
-            no_dev_cors: false,
-            allow_real_flash: false,
-            control_socket: None,
-        }
-    }
 }
 
 #[tokio::main]

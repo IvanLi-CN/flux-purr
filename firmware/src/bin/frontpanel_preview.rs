@@ -159,6 +159,10 @@ impl PreviewPreset {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "preview fixture builds the complete front-panel state"
+    )]
     fn build_state(self, dashboard_temp_c: Option<i16>) -> FrontPanelUiState {
         match self {
             Self::KeyTestIdle => FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest),

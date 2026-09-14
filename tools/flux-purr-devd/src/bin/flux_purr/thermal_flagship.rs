@@ -92,6 +92,10 @@ impl Ord for CandidateScore {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "flagship tuning keeps ordered retry and safety evidence together"
+)]
 pub(super) async fn run_flagship_tuning(
     client: &Client,
     default_devd: &str,
@@ -146,16 +150,16 @@ pub(super) async fn run_flagship_tuning(
 
         for target_temp_c in endpoint_targets {
             let workspace_dir = output_root.join(format!("target-{target_temp_c}"));
-            let (updated_profile, entry) = tune_flagship_target(
+            let (updated_profile, entry) = tune_flagship_target(FlagshipTargetRequest {
                 client,
                 default_devd,
-                &args,
-                &target_selector,
+                args: &args,
+                target_selector: &target_selector,
                 current_profile,
                 target_temp_c,
-                &tune_targets_c,
-                &workspace_dir,
-            )
+                anchors_c: &tune_targets_c,
+                workspace_dir: &workspace_dir,
+            })
             .await?;
             current_profile = updated_profile;
             if entry_candidate_ready(&entry) {
@@ -211,16 +215,16 @@ pub(super) async fn run_flagship_tuning(
             &tune_targets_c,
         )?;
         let workspace_dir = output_root.join(format!("target-{target_temp_c}"));
-        let (updated_profile, entry) = tune_flagship_target(
+        let (updated_profile, entry) = tune_flagship_target(FlagshipTargetRequest {
             client,
             default_devd,
-            &args,
-            &target_selector,
+            args: &args,
+            target_selector: &target_selector,
             current_profile,
             target_temp_c,
-            &tune_targets_c,
-            &workspace_dir,
-        )
+            anchors_c: &tune_targets_c,
+            workspace_dir: &workspace_dir,
+        })
         .await?;
         current_profile = updated_profile;
         let candidate_ready = entry_candidate_ready(&entry);
@@ -248,21 +252,24 @@ pub(super) async fn run_flagship_tuning(
     }
 
     let bundle = super::thermal_report::write_preliminary_review_bundle(
-        &bundle_dir,
-        &current_profile,
-        review_entries.clone(),
-        &args.source_id,
-        &device_id,
-        &port_path,
-        i64::try_from(args.per_target_budget_seconds).unwrap_or(i64::MAX),
-        json!(current_unix_millis()),
-        args.profile_mode.as_str(),
-        flagship_resolved_bank(args.profile_mode),
-        flagship_detected_source_class(args.profile_mode),
-        &tune_targets_c,
-        &tuning_execution_order_c,
-        source_preset(args.profile_mode),
-        PROVIDER_ISOLAPURR,
+        super::thermal_report::PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &current_profile,
+            entries: review_entries.clone(),
+            source_id: &args.source_id,
+            device_id: &device_id,
+            port_path: &port_path,
+            tuning_budget_seconds: i64::try_from(args.per_target_budget_seconds)
+                .unwrap_or(i64::MAX),
+            generated_at: json!(current_unix_millis()),
+            selected_mode: args.profile_mode.as_str(),
+            resolved_bank: flagship_resolved_bank(args.profile_mode),
+            detected_source_class: flagship_detected_source_class(args.profile_mode),
+            tuning_targets_c: &tune_targets_c,
+            tuning_execution_order_c: &tuning_execution_order_c,
+            source_preset: source_preset(args.profile_mode),
+            provider: PROVIDER_ISOLAPURR,
+        },
     )?;
 
     let review_outcomes = tune_targets_c
@@ -527,17 +534,35 @@ fn supplemental_anchor_targets(anchors_c: &[i16], target_temp_c: i16) -> Vec<i16
     targets
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn tune_flagship_target(
-    client: &Client,
-    default_devd: &str,
-    args: &ThermalFlagshipTuneArgs,
-    target_selector: &TargetSelector,
-    mut current_profile: Value,
+struct FlagshipTargetRequest<'a> {
+    client: &'a Client,
+    default_devd: &'a str,
+    args: &'a ThermalFlagshipTuneArgs,
+    target_selector: &'a TargetSelector,
+    current_profile: Value,
     target_temp_c: i16,
-    anchors_c: &[i16],
-    workspace_dir: &Path,
+    anchors_c: &'a [i16],
+    workspace_dir: &'a Path,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    clippy::excessive_nesting,
+    reason = "flagship tuning keeps ordered retry and safety evidence together"
+)]
+async fn tune_flagship_target(
+    request: FlagshipTargetRequest<'_>,
 ) -> Result<(Value, Value), Box<dyn std::error::Error + Send + Sync>> {
+    let FlagshipTargetRequest {
+        client,
+        default_devd,
+        args,
+        target_selector,
+        mut current_profile,
+        target_temp_c,
+        anchors_c,
+        workspace_dir,
+    } = request;
     fs::create_dir_all(workspace_dir)?;
     let budget_started_at = Instant::now();
     let cooldown_temp_c = cooldown_threshold(target_temp_c);
@@ -608,19 +633,19 @@ async fn tune_flagship_target(
             };
             ensure_expected_source(&scout.summary, args.profile_mode)?;
             last_summary = scout.summary.clone();
-            rounds.push(round_record_from_summary(
-                &scout.summary,
+            rounds.push(round_record_from_summary(RoundRecordInput {
+                summary: &scout.summary,
                 target_temp_c,
-                rounds.len() + 1,
-                &format!("tuning {round_index} / scout"),
-                explicit_point_value(&current_profile, target_temp_c),
-                "scout",
-                Some(round_index),
-                None,
-                false,
-                None,
-                budget_elapsed_seconds(budget_started_at),
-            ));
+                round_number: rounds.len() + 1,
+                label: &format!("tuning {round_index} / scout"),
+                point: explicit_point_value(&current_profile, target_temp_c),
+                attempt_type: "scout",
+                tuning_round: Some(round_index),
+                candidate_name: None,
+                selected: false,
+                score: None,
+                budget_elapsed_seconds_value: budget_elapsed_seconds(budget_started_at),
+            }));
             if run_is_disqualified(&scout.summary, target_temp_c) {
                 if scout_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
                     && flagship_retryable_environment_summary(&scout.summary, target_temp_c)
@@ -643,18 +668,18 @@ async fn tune_flagship_target(
         if scout_current_is_promotable(&scout.summary, target_temp_c) {
             let mut confirm_retry_count = 0u8;
             let confirm = loop {
-                let confirm = match run_hold_confirm_for_profile(
+                let confirm = match run_hold_confirm_for_profile(HoldConfirmRequest {
                     client,
                     default_devd,
                     args,
                     target_selector,
-                    &current_profile,
+                    current_profile: &current_profile,
                     target_temp_c,
                     workspace_dir,
                     round_index,
                     cooldown_temp_c,
                     budget_started_at,
-                )
+                })
                 .await
                 {
                     Ok(run) => run,
@@ -682,19 +707,19 @@ async fn tune_flagship_target(
                 };
                 ensure_expected_source(&confirm.summary, args.profile_mode)?;
                 last_summary = confirm.summary.clone();
-                rounds.push(round_record_from_summary(
-                    &confirm.summary,
+                rounds.push(round_record_from_summary(RoundRecordInput {
+                    summary: &confirm.summary,
                     target_temp_c,
-                    rounds.len() + 1,
-                    "hold confirm",
-                    explicit_point_value(&current_profile, target_temp_c),
-                    "hold_confirm",
-                    Some(round_index),
-                    None,
-                    true,
-                    None,
-                    budget_elapsed_seconds(budget_started_at),
-                ));
+                    round_number: rounds.len() + 1,
+                    label: "hold confirm",
+                    point: explicit_point_value(&current_profile, target_temp_c),
+                    attempt_type: "hold_confirm",
+                    tuning_round: Some(round_index),
+                    candidate_name: None,
+                    selected: true,
+                    score: None,
+                    budget_elapsed_seconds_value: budget_elapsed_seconds(budget_started_at),
+                }));
                 if run_is_disqualified(&confirm.summary, target_temp_c) {
                     if confirm_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
                         && flagship_retryable_environment_summary(&confirm.summary, target_temp_c)
@@ -873,18 +898,18 @@ async fn tune_flagship_target(
         }
         let mut confirm_retry_count = 0u8;
         let confirm = loop {
-            let confirm = match run_hold_confirm_for_profile(
+            let confirm = match run_hold_confirm_for_profile(HoldConfirmRequest {
                 client,
                 default_devd,
                 args,
                 target_selector,
-                &current_profile,
+                current_profile: &current_profile,
                 target_temp_c,
                 workspace_dir,
                 round_index,
                 cooldown_temp_c,
                 budget_started_at,
-            )
+            })
             .await
             {
                 Ok(run) => run,
@@ -912,19 +937,19 @@ async fn tune_flagship_target(
             };
             ensure_expected_source(&confirm.summary, args.profile_mode)?;
             last_summary = confirm.summary.clone();
-            rounds.push(round_record_from_summary(
-                &confirm.summary,
+            rounds.push(round_record_from_summary(RoundRecordInput {
+                summary: &confirm.summary,
                 target_temp_c,
-                rounds.len() + 1,
-                "hold confirm",
-                explicit_point_value(&current_profile, target_temp_c),
-                "hold_confirm",
-                Some(round_index),
-                None,
-                true,
-                None,
-                budget_elapsed_seconds(budget_started_at),
-            ));
+                round_number: rounds.len() + 1,
+                label: "hold confirm",
+                point: explicit_point_value(&current_profile, target_temp_c),
+                attempt_type: "hold_confirm",
+                tuning_round: Some(round_index),
+                candidate_name: None,
+                selected: true,
+                score: None,
+                budget_elapsed_seconds_value: budget_elapsed_seconds(budget_started_at),
+            }));
             if run_is_disqualified(&confirm.summary, target_temp_c) {
                 if confirm_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
                     && flagship_retryable_environment_summary(&confirm.summary, target_temp_c)
@@ -1108,19 +1133,34 @@ async fn run_budgeted_self_test(
     Ok(SelfTestRun { summary, run_dir })
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_hold_confirm_for_profile(
-    client: &Client,
-    default_devd: &str,
-    args: &ThermalFlagshipTuneArgs,
-    target_selector: &TargetSelector,
-    current_profile: &Value,
+struct HoldConfirmRequest<'a> {
+    client: &'a Client,
+    default_devd: &'a str,
+    args: &'a ThermalFlagshipTuneArgs,
+    target_selector: &'a TargetSelector,
+    current_profile: &'a Value,
     target_temp_c: i16,
-    workspace_dir: &Path,
+    workspace_dir: &'a Path,
     round_index: u32,
     cooldown_temp_c: f64,
     budget_started_at: Instant,
+}
+
+async fn run_hold_confirm_for_profile(
+    request: HoldConfirmRequest<'_>,
 ) -> Result<SelfTestRun, Box<dyn std::error::Error + Send + Sync>> {
+    let HoldConfirmRequest {
+        client,
+        default_devd,
+        args,
+        target_selector,
+        current_profile,
+        target_temp_c,
+        workspace_dir,
+        round_index,
+        cooldown_temp_c,
+        budget_started_at,
+    } = request;
     let hold_seed = workspace_dir.join(format!("hold-confirm-{round_index}-seed.json"));
     write_json_pretty(
         &hold_seed,
@@ -1367,6 +1407,10 @@ fn conservative_high_side_candidate(
     (point != current).then_some(point)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "flagship tuning keeps ordered retry and safety evidence together"
+)]
 fn apply_flagship_gate_nudge(
     current_point: &ThermalCandidatePoint,
     mut point: ThermalCandidatePoint,
@@ -1846,40 +1890,54 @@ fn batch_attempt_records(
                 .map(|stem| stem.to_string_lossy().into_owned())
         });
         let run_id = run.get("runId").and_then(Value::as_str).unwrap_or_default();
-        records.push(round_record_from_summary(
-            run,
+        records.push(round_record_from_summary(RoundRecordInput {
+            summary: run,
             target_temp_c,
-            first_round_number + records.len(),
-            &format!(
+            round_number: first_round_number + records.len(),
+            label: &format!(
                 "tuning {tuning_round} / {}",
                 candidate_name.as_deref().unwrap_or("candidate")
             ),
-            explicit_point_value(&candidate_profile, target_temp_c),
-            "batch_candidate",
-            Some(tuning_round),
-            candidate_name.as_deref(),
-            run_id == selected_run_id,
-            Some(candidate_score(run, target_temp_c).to_value()),
+            point: explicit_point_value(&candidate_profile, target_temp_c),
+            attempt_type: "batch_candidate",
+            tuning_round: Some(tuning_round),
+            candidate_name: candidate_name.as_deref(),
+            selected: run_id == selected_run_id,
+            score: Some(candidate_score(run, target_temp_c).to_value()),
             budget_elapsed_seconds_value,
-        ));
+        }));
     }
     records
 }
 
-#[allow(clippy::too_many_arguments)]
-fn round_record_from_summary(
-    summary: &Value,
+struct RoundRecordInput<'a> {
+    summary: &'a Value,
     target_temp_c: i16,
     round_number: usize,
-    label: &str,
+    label: &'a str,
     point: Option<Value>,
-    attempt_type: &str,
+    attempt_type: &'a str,
     tuning_round: Option<u32>,
-    candidate_name: Option<&str>,
+    candidate_name: Option<&'a str>,
     selected: bool,
     score: Option<Value>,
     budget_elapsed_seconds_value: u64,
-) -> Value {
+}
+
+fn round_record_from_summary(input: RoundRecordInput<'_>) -> Value {
+    let RoundRecordInput {
+        summary,
+        target_temp_c,
+        round_number,
+        label,
+        point,
+        attempt_type,
+        tuning_round,
+        candidate_name,
+        selected,
+        score,
+        budget_elapsed_seconds_value,
+    } = input;
     let stage = stage_for_target(summary, target_temp_c).unwrap_or(Value::Null);
     let analysis = stage.get("analysis").cloned().unwrap_or(Value::Null);
     let stable = stage
@@ -2253,6 +2311,10 @@ fn reseed_after_failed_hold_confirm(
     Ok(Some(thermal_candidate_profile_to_value(&candidate)))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "flagship tuning keeps ordered retry and safety evidence together"
+)]
 fn apply_hold_confirm_reseed_nudge(
     mut point: ThermalCandidatePoint,
     stage: &Value,
@@ -2323,8 +2385,7 @@ fn apply_hold_confirm_reseed_nudge(
         point.hold_power_permille = point
             .hold_power_permille
             .saturating_add(80)
-            .min(1_000)
-            .max(700);
+            .clamp(700, 1_000);
         point.hold_reheat_power_permille = point
             .hold_reheat_power_permille
             .saturating_add(60)
@@ -2347,8 +2408,7 @@ fn apply_hold_confirm_reseed_nudge(
         point.brake_distance_centi_c = point
             .brake_distance_centi_c
             .saturating_add(brake_step)
-            .max(450)
-            .min(5_000);
+            .clamp(450, 5_000);
         point.approach_lead_ticks = point
             .approach_lead_ticks
             .saturating_add(if severity_c >= 2.0 {
@@ -3164,12 +3224,16 @@ fn source_preset(profile_mode: ThermalProfileMode) -> &'static str {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "shared report helpers are kept below isolated test fixtures"
+)]
 mod tests {
-    use super::*;
-    use crate::{
+    use super::super::{
         ThermalApproachGuardAnalysis, ThermalFullSpeedStableAnalysis, ThermalStageAnalysis,
         thermal_default_target_point,
     };
+    use super::*;
     use std::{
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
@@ -3820,22 +3884,22 @@ mod tests {
         let mut valid_summary_for_round = valid_summary.clone();
         valid_summary_for_round["files"]["summaryPath"] =
             json!(summary_path.to_string_lossy().into_owned());
-        let round = round_record_from_summary(
-            &valid_summary_for_round,
-            220,
-            1,
-            "tuning 1 / scout",
-            Some(json!({
+        let round = round_record_from_summary(RoundRecordInput {
+            summary: &valid_summary_for_round,
+            target_temp_c: 220,
+            round_number: 1,
+            label: "tuning 1 / scout",
+            point: Some(json!({
                 "targetTempC": 220,
                 "holdPowerPermille": 780,
             })),
-            "scout",
-            Some(1),
-            None,
-            true,
-            None,
-            42,
-        );
+            attempt_type: "scout",
+            tuning_round: Some(1),
+            candidate_name: None,
+            selected: true,
+            score: None,
+            budget_elapsed_seconds_value: 42,
+        });
         let terminal_summary = json!({
             "runId": "terminal-run",
             "error": "isolapurr USB-C telemetry did not advance for 2181ms",
@@ -3922,22 +3986,22 @@ mod tests {
                 },
             }],
         });
-        let round = round_record_from_summary(
-            &summary,
-            100,
-            1,
-            "tuning 1 / batch",
-            Some(json!({
+        let round = round_record_from_summary(RoundRecordInput {
+            summary: &summary,
+            target_temp_c: 100,
+            round_number: 1,
+            label: "tuning 1 / batch",
+            point: Some(json!({
                 "targetTempC": 100,
                 "holdPowerPermille": 500,
             })),
-            "batch_candidate",
-            Some(1),
-            Some("bad-candidate"),
-            true,
-            None,
-            1200,
-        );
+            attempt_type: "batch_candidate",
+            tuning_round: Some(1),
+            candidate_name: Some("bad-candidate"),
+            selected: true,
+            score: None,
+            budget_elapsed_seconds_value: 1200,
+        });
         let accepted_profile = json!({
             "settings": {},
             "points": [{
@@ -4005,24 +4069,24 @@ mod tests {
                 },
             }],
         });
-        let round = round_record_from_summary(
-            &summary,
-            60,
-            1,
-            "tuning 2 / batch candidate 1",
-            Some(json!({
+        let round = round_record_from_summary(RoundRecordInput {
+            summary: &summary,
+            target_temp_c: 60,
+            round_number: 1,
+            label: "tuning 2 / batch candidate 1",
+            point: Some(json!({
                 "targetTempC": 60,
                 "approachPowerPermille": 870,
                 "approachFloorPowerPermille": 580,
                 "brakeDistanceCentiC": 580,
             })),
-            "batch_candidate",
-            Some(2),
-            Some("candidate-1"),
-            true,
-            None,
-            1155,
-        );
+            attempt_type: "batch_candidate",
+            tuning_round: Some(2),
+            candidate_name: Some("candidate-1"),
+            selected: true,
+            score: None,
+            budget_elapsed_seconds_value: 1155,
+        });
         let accepted_profile = json!({
             "settings": {},
             "points": [{
@@ -4094,22 +4158,22 @@ mod tests {
                 },
             }],
         });
-        let round = round_record_from_summary(
-            &summary,
-            220,
-            1,
-            "validation / final profile",
-            Some(json!({
+        let round = round_record_from_summary(RoundRecordInput {
+            summary: &summary,
+            target_temp_c: 220,
+            round_number: 1,
+            label: "validation / final profile",
+            point: Some(json!({
                 "targetTempC": 220,
                 "holdPowerPermille": 780,
             })),
-            "validation",
-            None,
-            Some("final-profile"),
-            true,
-            None,
-            64,
-        );
+            attempt_type: "validation",
+            tuning_round: None,
+            candidate_name: Some("final-profile"),
+            selected: true,
+            score: None,
+            budget_elapsed_seconds_value: 64,
+        });
         let accepted_profile = json!({
             "settings": {},
             "points": [{
@@ -4296,6 +4360,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "flagship tuning keeps ordered retry and safety evidence together"
+    )]
     fn failed_hold_confirm_boosts_underpowered_high_temp_hold_response() {
         let sample = |elapsed_ms: i64, phase: &str, temp_c: f64, output_percent: i64| {
             json!({

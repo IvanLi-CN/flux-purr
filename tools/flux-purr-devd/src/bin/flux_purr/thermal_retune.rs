@@ -66,6 +66,10 @@ impl ThermalRetuneOutput {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "retune workflow preserves validation and artifact ordering"
+)]
 pub(super) fn retune_thermal_self_test_run(
     input: ThermalRetuneInput,
 ) -> Result<ThermalRetuneOutput, Box<dyn std::error::Error + Send + Sync>> {
@@ -183,6 +187,10 @@ pub(super) fn retune_thermal_self_test_run(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "retune workflow preserves validation and artifact ordering"
+)]
 pub(super) async fn run_thermal_retune(
     client: &Client,
     default_devd: &str,

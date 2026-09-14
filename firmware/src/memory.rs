@@ -1031,6 +1031,10 @@ fn sanitize_heater_curve(config: &mut HeaterCurveConfig) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "thermal profile sanitization applies all persisted bounds"
+)]
 fn sanitize_thermal_control_profile(config: &mut ThermalControlProfileConfig) {
     config.settings.temp_filter_alpha_permille =
         config.settings.temp_filter_alpha_permille.clamp(1, 1_000);
@@ -1878,6 +1882,10 @@ fn push_fpr2_tlv(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "persist payload encoder preserves all versioned domains"
+)]
 fn encode_persist_payload(
     data: &PersistDomainData,
     out: &mut [u8],
@@ -2121,6 +2129,10 @@ fn for_each_fpr2_tlv(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "persist payload decoder preserves all versioned domains"
+)]
 fn decode_persist_payload(
     domain: PersistDomain,
     payload: &[u8],
@@ -2575,6 +2587,10 @@ pub fn select_latest_optional_memory_record(
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "config payload encoder preserves every TLV field"
+)]
 fn encode_config_payload(
     config: &MemoryConfig,
     out: &mut [u8],
@@ -2789,6 +2805,14 @@ struct ConfigDecodeState {
 }
 
 impl ConfigDecodeState {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "TLV decoder handles every persisted configuration tag"
+    )]
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "TLV decoder keeps tag-specific validation together"
+    )]
     fn apply_tlv(&mut self, config: &mut MemoryConfig, tag: u8, value: &[u8]) {
         let len = value.len();
         match tag {
@@ -3739,6 +3763,10 @@ fn encode_thermal_control_profile_tcp2(
 }
 
 #[allow(clippy::manual_is_multiple_of)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "thermal profile decoder supports all historical layouts"
+)]
 fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
     let mut config = ThermalControlProfileConfig::default();
     if bytes.starts_with(&THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER)
@@ -4256,6 +4284,10 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
 }
 
 #[allow(clippy::manual_is_multiple_of)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "profile support detection enumerates historical layouts"
+)]
 fn is_supported_thermal_control_profile(bytes: &[u8]) -> bool {
     let len = bytes.len();
     let marked_packed = bytes.starts_with(&THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER)
@@ -4441,6 +4473,10 @@ fn encode_thermal_control_profile_settings(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "settings decoder preserves historical field layouts"
+)]
 fn decode_thermal_control_profile_settings(bytes: &[u8]) -> ThermalControlProfileSettingsConfig {
     let mut values = [0u16; 18];
     for (index, value) in values.iter_mut().enumerate() {
@@ -4628,6 +4664,10 @@ pub fn persistence_crc32_update(crc: u32, bytes: &[u8]) -> u32 {
 mod tests {
     use super::*;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "fixture populates the complete persisted configuration"
+    )]
     fn sample_config() -> MemoryConfig {
         let mut config = MemoryConfig {
             target_temp_c: 222,
@@ -5038,6 +5078,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "legacy record fixture walks the encoded TLV stream"
+    )]
     fn v1_header_decodes_the_legacy_profile_as_the_65w_bank() {
         let record = MemoryRecord {
             sequence: 7,

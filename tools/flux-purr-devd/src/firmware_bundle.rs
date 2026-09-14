@@ -288,39 +288,62 @@ fn validate_manifest(
     manifest: &FirmwareBundleManifest,
     entries: &HashMap<String, Vec<u8>>,
 ) -> Result<(), BundleError> {
-    if manifest.schema_version != 2 || manifest.media_type != BUNDLE_MEDIA_TYPE {
-        return Err(BundleError::Contract(
+    validate_manifest_header(manifest)?;
+    validate_manifest_identity(manifest)?;
+    validate_manifest_target(manifest)?;
+    validate_manifest_layout(manifest)?;
+    validate_manifest_segments(manifest, entries)?;
+    Ok(())
+}
+
+fn validate_manifest_header(manifest: &FirmwareBundleManifest) -> Result<(), BundleError> {
+    if manifest.schema_version == 2 && manifest.media_type == BUNDLE_MEDIA_TYPE {
+        Ok(())
+    } else {
+        Err(BundleError::Contract(
             "unsupported schema or media type".into(),
-        ));
+        ))
     }
-    if semver::Version::parse(&manifest.identity.version).is_err()
-        || manifest.identity.source_sha.len() != 40
-        || !manifest
-            .identity
+}
+
+fn validate_manifest_identity(manifest: &FirmwareBundleManifest) -> Result<(), BundleError> {
+    let identity = &manifest.identity;
+    let valid = semver::Version::parse(&identity.version).is_ok()
+        && identity.source_sha.len() == 40
+        && identity
             .source_sha
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        || manifest.identity.build_id.len() < 16
-        || manifest.identity.build_id.len() > 64
-        || !manifest
-            .identity
+        && (16..=64).contains(&identity.build_id.len())
+        && identity
             .build_id
             .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        return Err(BundleError::Contract("invalid build identity".into()));
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+    if valid {
+        Ok(())
+    } else {
+        Err(BundleError::Contract("invalid build identity".into()))
     }
-    if manifest.target.chip != "esp32s3"
-        || manifest.target.package != "ESP32-S3FH4R2"
-        || manifest.target.flash_size != 4 * 1024 * 1024
-        || manifest.target.psram_size != 2 * 1024 * 1024
-        || manifest.target.flash_mode != "dio"
-        || manifest.target.flash_frequency != "40m"
-    {
-        return Err(BundleError::Contract(
+}
+
+fn validate_manifest_target(manifest: &FirmwareBundleManifest) -> Result<(), BundleError> {
+    let target = &manifest.target;
+    let valid = target.chip == "esp32s3"
+        && target.package == "ESP32-S3FH4R2"
+        && target.flash_size == 4 * 1024 * 1024
+        && target.psram_size == 2 * 1024 * 1024
+        && target.flash_mode == "dio"
+        && target.flash_frequency == "40m";
+    if valid {
+        Ok(())
+    } else {
+        Err(BundleError::Contract(
             "target does not match ESP32-S3FH4R2".into(),
-        ));
+        ))
     }
+}
+
+fn validate_manifest_layout(manifest: &FirmwareBundleManifest) -> Result<(), BundleError> {
     if manifest.layout.id != LAYOUT_ID
         || manifest.layout.version != LAYOUT_VERSION
         || manifest.layout.partition_table_sha256 != CURRENT_PARTITION_TABLE_SHA256
@@ -329,7 +352,11 @@ fn validate_manifest(
             "layout identity does not match".into(),
         ));
     }
-    let expected = [
+    Ok(())
+}
+
+fn expected_manifest_segments() -> [(SegmentKind, &'static str, u64, u64, u64); 3] {
+    [
         (
             SegmentKind::Bootloader,
             "images/bootloader.bin",
@@ -351,7 +378,14 @@ fn validate_manifest(
             1,
             0x200000,
         ),
-    ];
+    ]
+}
+
+fn validate_manifest_segments(
+    manifest: &FirmwareBundleManifest,
+    entries: &HashMap<String, Vec<u8>>,
+) -> Result<(), BundleError> {
+    let expected = expected_manifest_segments();
     if manifest.segments.len() != expected.len() {
         return Err(BundleError::Contract(
             "exactly three ordered segments are required".into(),
@@ -359,27 +393,7 @@ fn validate_manifest(
     }
     for (segment, (kind, path, address, min_len, max_len)) in manifest.segments.iter().zip(expected)
     {
-        if segment.kind != kind
-            || segment.path != path
-            || segment.address != address
-            || segment.length < min_len
-            || segment.length > max_len
-        {
-            return Err(BundleError::Contract(format!(
-                "invalid segment layout for {path}"
-            )));
-        }
-        let bytes = entries
-            .get(path)
-            .ok_or(BundleError::Contract(format!("missing bytes for {path}")))?;
-        if bytes.len() as u64 != segment.length
-            || segment.sha256 != format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
-            || segment.md5 != hex::encode(Md5::digest(bytes))
-        {
-            return Err(BundleError::Contract(format!(
-                "hash or length mismatch for {path}"
-            )));
-        }
+        validate_manifest_segment(segment, entries, kind, path, address, min_len, max_len)?;
     }
     let partition_table = manifest
         .segments
@@ -395,6 +409,39 @@ fn validate_manifest(
         return Err(BundleError::Contract(
             "partition table must be exactly 4 KiB".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_manifest_segment(
+    segment: &BundleSegment,
+    entries: &HashMap<String, Vec<u8>>,
+    kind: SegmentKind,
+    path: &str,
+    address: u64,
+    min_len: u64,
+    max_len: u64,
+) -> Result<(), BundleError> {
+    if segment.kind != kind
+        || segment.path != path
+        || segment.address != address
+        || segment.length < min_len
+        || segment.length > max_len
+    {
+        return Err(BundleError::Contract(format!(
+            "invalid segment layout for {path}"
+        )));
+    }
+    let bytes = entries
+        .get(path)
+        .ok_or(BundleError::Contract(format!("missing bytes for {path}")))?;
+    if bytes.len() as u64 != segment.length
+        || segment.sha256 != format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+        || segment.md5 != hex::encode(Md5::digest(bytes))
+    {
+        return Err(BundleError::Contract(format!(
+            "hash or length mismatch for {path}"
+        )));
     }
     Ok(())
 }

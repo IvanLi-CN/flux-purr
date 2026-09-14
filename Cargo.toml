@@ -3,4 +3,5 @@ resolver = "3"
 members = [
   "firmware",
   "tools/flux-purr-devd",
+  "tools/rust-style-check",
 ]

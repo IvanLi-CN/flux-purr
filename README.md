@@ -72,7 +72,10 @@ bun run worktree:setup
 ```bash
 bun run check:firmware:fmt
 bun run check:firmware:clippy
+bun run check:firmware:clippy:xtensa
 bun run check:firmware:build
+bun run check:rust:style
+bun run check:devd
 bun run build:firmware:web
 bun run check:web
 bun run check:web:build

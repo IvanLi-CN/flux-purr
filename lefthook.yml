@@ -1,12 +1,9 @@
 pre-commit:
-  parallel: true
+  parallel: false
   commands:
-    firmware_fmt:
-      glob: "firmware/**/*.rs"
-      run: bash scripts/check-firmware-fmt.sh
-    web_check:
-      glob: "web/**/*.{ts,tsx,js,jsx,json,css,mdx}"
-      run: bash scripts/check-web-check.sh
+    rust_fmt:
+      glob: "{firmware,tools}/**/*.rs"
+      run: cargo fmt --all -- --check
 
 commit-msg:
   commands:
@@ -31,8 +28,12 @@ commit-msg:
 pre-push:
   parallel: false
   commands:
+    rust_style:
+      run: bash scripts/check-rust-style.sh
     firmware_clippy:
       run: bash scripts/check-firmware-clippy.sh
+    firmware_clippy_xtensa:
+      run: bash scripts/check-firmware-clippy-xtensa.sh
     firmware_build:
       run: bash scripts/check-firmware-build.sh
     web_build:

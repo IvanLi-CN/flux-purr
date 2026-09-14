@@ -629,17 +629,40 @@ fn temperature_color_with_palette(value_c: i16, palette: &TemperaturePalette) ->
     palette.colors[palette.colors.len() - 1]
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+struct BitmapTextStyle {
+    font: BitmapFont,
+    letter_spacing: u32,
+    align: BitmapAlign,
+}
+
+impl BitmapTextStyle {
+    const fn new(font: BitmapFont, letter_spacing: u32, align: BitmapAlign) -> Self {
+        Self {
+            font,
+            letter_spacing,
+            align,
+        }
+    }
+}
+
+#[expect(
+    clippy::excessive_nesting,
+    reason = "bitmap text rasterization preserves glyph layout"
+)]
 fn draw_bitmap_text(
     canvas: &mut DisplayCanvas,
     text: &str,
     x: i32,
     y: i32,
     color: Rgb565,
-    font: BitmapFont,
-    letter_spacing: u32,
-    align: BitmapAlign,
+    style: BitmapTextStyle,
 ) {
+    let BitmapTextStyle {
+        font,
+        letter_spacing,
+        align,
+    } = style;
     let width = measure_bitmap_text(text, font, letter_spacing);
     let mut cursor_x = match align {
         BitmapAlign::Left => x,
@@ -700,9 +723,7 @@ fn draw_text_small(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, color
         x,
         y,
         color,
-        BitmapFont::Small,
-        1,
-        BitmapAlign::Left,
+        BitmapTextStyle::new(BitmapFont::Small, 1, BitmapAlign::Left),
     );
 }
 
@@ -713,9 +734,7 @@ fn draw_text_mid(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, color: 
         x,
         y,
         color,
-        BitmapFont::Mid,
-        1,
-        BitmapAlign::Left,
+        BitmapTextStyle::new(BitmapFont::Mid, 1, BitmapAlign::Left),
     );
 }
 
@@ -726,9 +745,7 @@ fn draw_text_mid_center(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, 
         x,
         y,
         color,
-        BitmapFont::Mid,
-        1,
-        BitmapAlign::Center,
+        BitmapTextStyle::new(BitmapFont::Mid, 1, BitmapAlign::Center),
     );
 }
 
@@ -824,9 +841,7 @@ fn draw_dashboard_status_line(
         value_x,
         y,
         value_color,
-        BitmapFont::Mid,
-        1,
-        BitmapAlign::Right,
+        BitmapTextStyle::new(BitmapFont::Mid, 1, BitmapAlign::Right),
     );
 }
 
@@ -1152,6 +1167,10 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState, theme: &
     );
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "dashboard rendering keeps the fixed panel layout together"
+)]
 fn draw_dashboard(
     canvas: &mut DisplayCanvas,
     state: &FrontPanelUiState,
@@ -1386,9 +1405,7 @@ fn draw_active_cooling(
         6,
         1,
         theme.text,
-        BitmapFont::ControlTitle,
-        1,
-        BitmapAlign::Left,
+        BitmapTextStyle::new(BitmapFont::ControlTitle, 1, BitmapAlign::Left),
     );
     fill_rect(canvas, 4, 15, 152, 1, theme.border);
 
@@ -1413,9 +1430,7 @@ fn draw_active_cooling(
         } else {
             theme.muted
         },
-        BitmapFont::ControlLabel,
-        1,
-        BitmapAlign::Left,
+        BitmapTextStyle::new(BitmapFont::ControlLabel, 1, BitmapAlign::Left),
     );
     draw_bitmap_text(
         canvas,
@@ -1427,9 +1442,7 @@ fn draw_active_cooling(
         } else {
             theme.text
         },
-        BitmapFont::ControlLabel,
-        1,
-        BitmapAlign::Right,
+        BitmapTextStyle::new(BitmapFont::ControlLabel, 1, BitmapAlign::Right),
     );
     draw_bitmap_text(
         canvas,
@@ -1441,9 +1454,7 @@ fn draw_active_cooling(
         } else {
             theme.muted
         },
-        BitmapFont::ControlLabel,
-        1,
-        BitmapAlign::Left,
+        BitmapTextStyle::new(BitmapFont::ControlLabel, 1, BitmapAlign::Left),
     );
     draw_bitmap_text(
         canvas,
@@ -1455,9 +1466,7 @@ fn draw_active_cooling(
         } else {
             theme.text
         },
-        BitmapFont::ControlLabel,
-        1,
-        BitmapAlign::Right,
+        BitmapTextStyle::new(BitmapFont::ControlLabel, 1, BitmapAlign::Right),
     );
     let mut runtime = heapless::String::<32>::new();
     let _ = runtime.push_str(state.fan_display_state.label());
@@ -1475,9 +1484,7 @@ fn draw_active_cooling(
         } else {
             theme.info
         },
-        BitmapFont::ControlLabel,
-        1,
-        BitmapAlign::Left,
+        BitmapTextStyle::new(BitmapFont::ControlLabel, 1, BitmapAlign::Left),
     );
 }
 

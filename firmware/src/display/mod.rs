@@ -552,6 +552,10 @@ fn startup_version_glyph(character: u8) -> [u8; 7] {
     }
 }
 
+#[expect(
+    clippy::excessive_nesting,
+    reason = "bitmap glyph rasterization preserves pixel order"
+)]
 fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str, color: Rgb565) {
     const GLYPH_WIDTH: i32 = 4;
     const LETTER_SPACING: i32 = 1;
@@ -575,6 +579,10 @@ fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str, color:
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "startup calibration renders the complete display contract"
+)]
 fn render_startup_calibration(canvas: &mut DisplayCanvas, theme: DisplayThemeId) {
     let foreground = match theme {
         DisplayThemeId::Dark => Rgb565::WHITE,
@@ -881,6 +889,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "pixel-level splash fixture covers the complete transformed render"
+    )]
     fn startup_splash_renders_brand_mark_wordmark_and_build_version() {
         let mut canvas = DisplayCanvas::new();
         render_scene_with_theme(SceneId::StartupSplash, &mut canvas, DisplayThemeId::Dark);
@@ -1059,6 +1071,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "panel contract fixture walks every transformed pixel"
+    )]
     fn panel_transform_coordinates_fit_the_driver_framebuffer_indexing_contract() {
         let orientations = [
             Orientation::Portrait,

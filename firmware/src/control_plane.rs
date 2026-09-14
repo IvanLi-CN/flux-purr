@@ -1006,6 +1006,10 @@ impl RuntimeConfigCommand {
         }
     }
 
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "runtime config application preserves field precedence"
+    )]
     pub fn apply_to(&self, config: &mut MemoryConfig) {
         if let Some(target_temp_c) = self.target_temp_c {
             config.target_temp_c = target_temp_c;
@@ -2089,6 +2093,10 @@ struct UsbErrorInboundWire {
 impl TryFrom<UsbFrameWire> for UsbFrame {
     type Error = UsbFrameError;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "USB wire decoder maps every protocol frame variant"
+    )]
     fn try_from(value: UsbFrameWire) -> Result<Self, <UsbFrame as TryFrom<UsbFrameWire>>::Error> {
         match value.frame_type.as_str() {
             "hello" => Ok(UsbFrame::Hello {
@@ -2200,6 +2208,10 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
 }
 
 impl From<&UsbFrame> for UsbFrameWire {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "USB wire encoder maps every protocol frame variant"
+    )]
     fn from(value: &UsbFrame) -> Self {
         let mut wire = UsbFrameWire {
             frame_type: String::new(),
@@ -2524,19 +2536,31 @@ pub struct InstallStatus {
     pub persistence_fault_attention_pending: bool,
 }
 
+pub struct InstallRuntimeSnapshot<'a> {
+    pub config: &'a crate::memory::MemoryConfig,
+    pub persistence_source: &'a str,
+    pub record_state: &'a str,
+    pub record_sequence: u32,
+    pub sensor_ready: bool,
+    pub heater_fault_latched: bool,
+    pub persistence_locked: bool,
+    pub last_persistence_fault: Option<PersistenceFault>,
+    pub persistence_fault_attention_pending: bool,
+}
+
 impl InstallStatus {
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_runtime(
-        config: &crate::memory::MemoryConfig,
-        persistence_source: &str,
-        record_state: &str,
-        record_sequence: u32,
-        sensor_ready: bool,
-        heater_fault_latched: bool,
-        persistence_locked: bool,
-        last_persistence_fault: Option<PersistenceFault>,
-        persistence_fault_attention_pending: bool,
-    ) -> Self {
+    pub fn from_runtime(snapshot: InstallRuntimeSnapshot<'_>) -> Self {
+        let InstallRuntimeSnapshot {
+            config,
+            persistence_source,
+            record_state,
+            record_sequence,
+            sensor_ready,
+            heater_fault_latched,
+            persistence_locked,
+            last_persistence_fault,
+            persistence_fault_attention_pending,
+        } = snapshot;
         Self {
             layout_id: string("flux-purr.esp32s3fh4r2.factory"),
             layout_version: 1,
@@ -2616,6 +2640,10 @@ pub fn log_frame(level: &str, message: &str) -> UsbFrame {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "USB JSONL parser validates the complete inbound frame contract"
+)]
 pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
     let frame_type = parse_usb_wire::<UsbFrameTypeWire>(trimmed)?.frame_type;
@@ -3620,6 +3648,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "protocol regression fixture covers save and clear transitions"
+    )]
     fn runtime_command_saves_and_clears_thermal_profile() {
         let mut points = [None; FRONTPANEL_PRESET_COUNT];
         points[0] = Some(ThermalControlProfilePointWire {

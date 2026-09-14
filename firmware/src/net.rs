@@ -653,6 +653,15 @@ async fn progress_wifi_failure(
 
 #[embassy_executor::task]
 async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stack<'static>) {
+    wifi_task_inner(controller, stack).await;
+}
+
+#[expect(
+    clippy::too_many_lines,
+    clippy::excessive_nesting,
+    reason = "WiFi task preserves startup, association, and recovery sequencing"
+)]
+async fn wifi_task_inner(controller: &'static mut WifiController<'static>, stack: Stack<'static>) {
     let mut retry_pending = false;
     loop {
         let config = WIFI_CONFIG.lock().await.clone();
@@ -808,7 +817,7 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
             // and must never publish state or panic the WiFi task.
             continue;
         };
-        let mut summary = network_connected(&config, &stack, &controller);
+        let mut summary = network_connected(&config, &stack, controller);
         summary.state = connected.state;
         summary.failure_code = connected.failure_code;
         summary.configuration_generation = connected.configuration_generation;
@@ -918,10 +927,11 @@ fn network_summary_for_config(config: &WifiRuntimeConfig, state: NetworkState) -
     NetworkSummary {
         state: public_state,
         ssid: config.is_configured().then(|| config.ssid.clone()),
-        wifi_password_length: config
-            .is_configured()
-            .then_some(config.password.len() as u8)
-            .unwrap_or(0),
+        wifi_password_length: if config.is_configured() {
+            config.password.len() as u8
+        } else {
+            0
+        },
         ..NetworkSummary::default()
     }
 }

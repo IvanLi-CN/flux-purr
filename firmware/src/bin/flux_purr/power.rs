@@ -1,0 +1,23 @@
+#[cfg(target_arch = "xtensa")]
+struct HeaterPowerOutputContext<'a, 'i, PWM> {
+    i2c: &'a mut I2c<'i, esp_hal::Blocking>,
+    pd_port: &'a mut PdPort,
+    heater_pwm: &'a mut PWM,
+    backend: &'a mut HeaterPowerBackend,
+    hold_pps_governor: &'a mut HoldPpsGovernor,
+    manual_pps: &'a mut ManualPpsState,
+    pd_observation: Option<PdStatusObservation>,
+    measured_heater_mv: u32,
+    current_temp_c: f32,
+    duty_percent: u8,
+    heater_enabled: bool,
+    control_phase: HeaterControlPhase,
+    control_error_c: f32,
+    filtered_slope_c_per_s: f32,
+    warmup_soft_start_percent: u8,
+    last_physical_duty_percent: &'a mut u8,
+    preview_heater_curve: Option<&'a HeaterCurveConfig>,
+    memory_config: &'a MemoryConfig,
+    active_thermal_settings: ThermalControlProfileSettings,
+    now_ms: u64,
+}

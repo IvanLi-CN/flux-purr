@@ -337,6 +337,11 @@ impl FrontPanelInputController {
         self.sample_with_capabilities(now_ms, raw_state, FrontPanelGestureCapabilities::ALL)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        clippy::excessive_nesting,
+        reason = "gesture sampling preserves debounce and gesture ordering"
+    )]
     pub fn sample_with_capabilities(
         &mut self,
         now_ms: u64,

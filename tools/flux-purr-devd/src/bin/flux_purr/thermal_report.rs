@@ -46,6 +46,10 @@ pub(super) struct ThermalSelfTestReportInput {
     pub(super) output_dir: Option<PathBuf>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "report transformation preserves complete evidence normalization"
+)]
 pub(super) fn rerender_legacy_preliminary_review_bundle(
     input: ThermalLegacyReportInput,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -160,23 +164,23 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
         i16_array_field(&legacy_bundle, "tuningTargetsC").unwrap_or(fallback_targets_c);
     let tuning_execution_order_c = unique_i16_preserve_order(entry_targets_c.clone());
 
-    let bundle = write_preliminary_review_bundle(
-        &output_dir,
-        &accepted_profile,
+    let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+        bundle_dir: &output_dir,
+        accepted_profile: &accepted_profile,
         entries,
-        &source_device_id,
-        &device_id,
-        &port_path,
-        0,
+        source_id: &source_device_id,
+        device_id: &device_id,
+        port_path: &port_path,
+        tuning_budget_seconds: 0,
         generated_at,
-        &selected_mode,
-        &resolved_bank,
-        &detected_source_class,
-        &tuning_targets_c,
-        &tuning_execution_order_c,
-        &source_preset,
-        &provider,
-    )?;
+        selected_mode: &selected_mode,
+        resolved_bank: &resolved_bank,
+        detected_source_class: &detected_source_class,
+        tuning_targets_c: &tuning_targets_c,
+        tuning_execution_order_c: &tuning_execution_order_c,
+        source_preset: &source_preset,
+        provider: &provider,
+    })?;
 
     Ok(json!({
         "ok": true,
@@ -199,6 +203,10 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
 /// This intentionally snapshots the active thermal-plant model instead of a
 /// point-local thermal profile. The legacy accepted-profile filename is kept
 /// only because the report renderer's four-file bundle is a stable contract.
+#[expect(
+    clippy::too_many_lines,
+    reason = "report transformation preserves complete evidence normalization"
+)]
 pub(super) fn render_self_test_evidence_bundle(
     input: ThermalSelfTestReportInput,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -371,15 +379,15 @@ pub(super) fn render_self_test_evidence_bundle(
         "model": active_model,
     });
 
-    let bundle = write_preliminary_review_bundle(
-        &output_dir,
-        &accepted_profile,
+    let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+        bundle_dir: &output_dir,
+        accepted_profile: &accepted_profile,
         entries,
         source_id,
         device_id,
         port_path,
-        0,
-        summary
+        tuning_budget_seconds: 0,
+        generated_at: summary
             .get("generatedAt")
             .or_else(|| summary.get("capturedAtUnixMs"))
             .cloned()
@@ -387,11 +395,11 @@ pub(super) fn render_self_test_evidence_bundle(
         selected_mode,
         resolved_bank,
         detected_source_class,
-        &target_temps_c,
-        &target_temps_c,
-        &source_preset,
+        tuning_targets_c: &target_temps_c,
+        tuning_execution_order_c: &target_temps_c,
+        source_preset: &source_preset,
         provider,
-    )?;
+    })?;
 
     Ok(json!({
         "ok": true,
@@ -446,6 +454,10 @@ fn self_test_targets(
     Ok(unique_i16_preserve_order(targets))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "report transformation preserves complete evidence normalization"
+)]
 fn self_test_report_entry(
     summary: &Value,
     run_id: &str,
@@ -952,6 +964,10 @@ fn validation_failures_for_target(summary: &Value, target_temp_c: i16) -> Vec<Va
         .collect()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "report transformation preserves complete evidence normalization"
+)]
 fn legacy_preliminary_review_entries(
     legacy_bundle: &Value,
     grouped_target_samples: &BTreeMap<i16, Vec<Value>>,
@@ -1104,6 +1120,10 @@ fn legacy_preliminary_review_entries(
     Ok(entries)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "report transformation preserves complete evidence normalization"
+)]
 fn legacy_live_report_entries(
     legacy_bundle: &Value,
     accepted_profile: &Value,
@@ -1514,24 +1534,49 @@ fn build_report_runs(entries: &[Value], tuning_targets_c: &[i16]) -> Vec<Value> 
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct PreliminaryReviewBundleInput<'a> {
+    pub(super) bundle_dir: &'a Path,
+    pub(super) accepted_profile: &'a Value,
+    pub(super) entries: Vec<Value>,
+    pub(super) source_id: &'a str,
+    pub(super) device_id: &'a str,
+    pub(super) port_path: &'a str,
+    pub(super) tuning_budget_seconds: i64,
+    pub(super) generated_at: Value,
+    pub(super) selected_mode: &'a str,
+    pub(super) resolved_bank: &'a str,
+    pub(super) detected_source_class: &'a str,
+    pub(super) tuning_targets_c: &'a [i16],
+    pub(super) tuning_execution_order_c: &'a [i16],
+    pub(super) source_preset: &'a str,
+    pub(super) provider: &'a str,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    clippy::excessive_nesting,
+    reason = "report transformation preserves complete evidence normalization"
+)]
 pub(super) fn write_preliminary_review_bundle(
-    bundle_dir: &Path,
-    accepted_profile: &Value,
-    entries: Vec<Value>,
-    source_id: &str,
-    device_id: &str,
-    port_path: &str,
-    tuning_budget_seconds: i64,
-    generated_at: Value,
-    selected_mode: &str,
-    resolved_bank: &str,
-    detected_source_class: &str,
-    tuning_targets_c: &[i16],
-    tuning_execution_order_c: &[i16],
-    source_preset: &str,
-    provider: &str,
+    input: PreliminaryReviewBundleInput<'_>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let PreliminaryReviewBundleInput {
+        bundle_dir,
+        accepted_profile,
+        entries,
+        source_id,
+        device_id,
+        port_path,
+        tuning_budget_seconds,
+        generated_at,
+        selected_mode,
+        resolved_bank,
+        detected_source_class,
+        tuning_targets_c,
+        tuning_execution_order_c,
+        source_preset,
+        provider,
+    } = input;
     let entries: Vec<Value> = entries
         .iter()
         .map(sort_entry_samples)
@@ -1860,8 +1905,8 @@ fn escape_report_html_value(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        ThermalLegacyReportInput, ThermalSelfTestReportInput, render_baseline_html,
-        render_self_test_evidence_bundle, report_identity,
+        PreliminaryReviewBundleInput, ThermalLegacyReportInput, ThermalSelfTestReportInput,
+        render_baseline_html, render_self_test_evidence_bundle, report_identity,
         rerender_legacy_preliminary_review_bundle, sanitize_non_finite_json_numbers,
         sanitize_point, tuning_workflow, write_preliminary_review_bundle,
     };
@@ -1961,6 +2006,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "report transformation preserves complete evidence normalization"
+    )]
     fn self_test_renderer_preserves_completed_pps3a_thermal_plant_evidence() {
         let dir = tempfile::tempdir().expect("temp dir");
         let run_dir = dir.path().join("raw-self-test");
@@ -2167,22 +2216,26 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "report transformation preserves complete evidence normalization"
+    )]
     fn preliminary_review_bundle_keeps_single_target_when_raw_entry_uses_legacy_validation_role() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
         let bundle_dir = env::temp_dir().join(format!("thermal-report-validation-test-{unique}"));
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
                 "settings": {},
                 "points": [
                     {"targetTempC": 60, "holdPowerPermille": 400},
                     {"targetTempC": 100, "holdPowerPermille": 500}
                 ],
             }),
-            vec![json!({
+            entries: vec![json!({
                 "target": 80,
                 "targetTempC": 80,
                 "targetRole": "validation",
@@ -2237,19 +2290,19 @@ mod tests {
                     }]
                 }]
             })],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[80],
-            &[80],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[80],
+            tuning_execution_order_c: &[80],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
         .expect("bundle");
 
         assert_eq!(bundle["tuningTargetsC"], json!([80]));
@@ -2284,6 +2337,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "report transformation preserves complete evidence normalization"
+    )]
     fn preliminary_review_bundle_maps_supplemental_candidate_ready_to_passed() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2304,15 +2361,15 @@ mod tests {
                 "controlTempC": 119.7
             }
         });
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
                 "settings": {},
                 "points": [
                     {"targetTempC": 120, "holdPowerPermille": 500}
                 ],
             }),
-            vec![
+            entries: vec![
                 json!({
                     "target": 120,
                     "targetTempC": 120,
@@ -2348,19 +2405,19 @@ mod tests {
                     }
                 }),
             ],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[120],
-            &[120],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[120],
+            tuning_execution_order_c: &[120],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
         .expect("bundle");
 
         assert_eq!(bundle["tuningTargetsC"], json!([120]));
@@ -2456,6 +2513,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "report transformation preserves complete evidence normalization"
+    )]
     fn preliminary_review_bundle_sorts_report_targets_by_temperature() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2471,9 +2532,9 @@ mod tests {
                 "output": 50
             })
         };
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
                 "settings": {},
                 "points": [
                     {"targetTempC": 60, "holdPowerPermille": 400},
@@ -2481,7 +2542,7 @@ mod tests {
                     {"targetTempC": 100, "holdPowerPermille": 500}
                 ],
             }),
-            vec![
+            entries: vec![
                 json!({
                     "target": 60,
                     "targetTempC": 60,
@@ -2516,19 +2577,19 @@ mod tests {
                     "rounds": []
                 }),
             ],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[60, 80, 100],
-            &[60, 100, 80],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[60, 80, 100],
+            tuning_execution_order_c: &[60, 100, 80],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
         .expect("bundle");
 
         assert_eq!(bundle["tuningTargetsC"], json!([60, 80, 100]));
@@ -2582,16 +2643,16 @@ mod tests {
             .expect("system time")
             .as_nanos();
         let bundle_dir = env::temp_dir().join(format!("thermal-report-placeholder-test-{unique}"));
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
                 "settings": {},
                 "points": [
                     {"targetTempC": 60, "holdPowerPermille": 400},
                     {"targetTempC": 140, "holdPowerPermille": 600}
                 ],
             }),
-            vec![
+            entries: vec![
                 json!({
                     "target": 60,
                     "targetTempC": 60,
@@ -2623,19 +2684,19 @@ mod tests {
                     "rounds": []
                 }),
             ],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[60, 100, 140],
-            &[60, 140],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[60, 100, 140],
+            tuning_execution_order_c: &[60, 140],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
         .expect("bundle");
 
         assert_eq!(bundle["tuningTargetsC"], json!([60, 100, 140]));
@@ -2681,13 +2742,13 @@ mod tests {
             "output": 80,
             "requestV": 18.0
         });
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
                 "settings": {},
                 "points": [{"targetTempC": 100, "holdPowerPermille": 500}],
             }),
-            vec![json!({
+            entries: vec![json!({
                 "target": 100,
                 "targetTempC": 100,
                 "targetRole": "tuning",
@@ -2713,19 +2774,19 @@ mod tests {
                     }
                 }
             })],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[100],
-            &[100],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[100],
+            tuning_execution_order_c: &[100],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
         .expect("bundle");
 
         assert_eq!(bundle["runs"][0]["candidateReady"], json!(false));
@@ -2769,13 +2830,13 @@ mod tests {
             "output": 20,
             "requestV": 6.5
         });
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
                 "settings": {},
                 "points": [{"targetTempC": 60, "holdPowerPermille": 135}],
             }),
-            vec![json!({
+            entries: vec![json!({
                 "target": 60,
                 "targetTempC": 60,
                 "targetRole": "tuning",
@@ -2801,19 +2862,19 @@ mod tests {
                     }
                 }
             })],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[60],
-            &[60],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[60],
+            tuning_execution_order_c: &[60],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
         .expect("bundle");
 
         assert_eq!(bundle["runs"][0]["candidateReady"], json!(true));
