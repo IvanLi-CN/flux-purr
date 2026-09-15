@@ -107,186 +107,288 @@ pub(super) async fn run_flagship_tuning(
         .bundle_dir
         .clone()
         .unwrap_or_else(|| output_root.join("preliminary-review-bundle"));
-
-    let resolved = if args.dry_run {
-        None
-    } else {
-        Some(resolve_target(target_selector.clone(), default_devd)?)
-    };
-    let device_id = resolved
-        .as_ref()
-        .map(|target| target.device.clone())
-        .unwrap_or_else(|| "mock-fp-lab-01".to_string());
-    let port_path = if let Some(resolved) = resolved.as_ref() {
-        resolve_device_port_path(client, &resolved.devd, &resolved.device)
-            .await
-            .unwrap_or_else(|| "unknown-port".to_string())
-    } else {
-        "dry-run".to_string()
-    };
-
-    let mut current_profile = initial_sparse_profile(&args, &tune_targets_c)?;
+    let (device_id, port_path) =
+        flagship_device_metadata(client, default_devd, &target_selector, args.dry_run).await?;
+    let current_profile = initial_sparse_profile(&args, &tune_targets_c)?;
     let initial_profile_path = output_root.join("seed").join("initial-sparse-profile.json");
     write_json_pretty(&initial_profile_path, &current_profile)?;
-
-    let mut review_entries = Vec::<Value>::new();
-    let mut accepted_targets_c = BTreeSet::<i16>::new();
-    let mut candidate_ready_targets_c = BTreeSet::<i16>::new();
-
-    if let Some((&first_target_c, remaining_targets)) = tune_targets_c.split_first() {
-        let endpoint_targets = if let Some(&last_target_c) = remaining_targets.last() {
-            if first_target_c == last_target_c {
-                vec![first_target_c]
-            } else {
-                vec![first_target_c, last_target_c]
-            }
-        } else {
-            vec![first_target_c]
-        };
-
-        for target_temp_c in endpoint_targets {
-            let workspace_dir = output_root.join(format!("target-{target_temp_c}"));
-            let (updated_profile, entry) = tune_flagship_target(
-                client,
-                default_devd,
-                &args,
-                &target_selector,
-                current_profile,
-                target_temp_c,
-                &tune_targets_c,
-                &workspace_dir,
-            )
-            .await?;
-            current_profile = updated_profile;
-            if entry_candidate_ready(&entry) {
-                candidate_ready_targets_c.insert(target_temp_c);
-            }
-            if entry_acceptance_passed(&entry) {
-                accepted_targets_c.insert(target_temp_c);
-            }
-            review_entries.push(entry);
-            let persisted_entry = review_entries
-                .last()
-                .ok_or("missing flagship review entry after endpoint tuning")?;
-            persist_target_review(
-                &output_root,
-                target_temp_c,
-                &current_profile,
-                persisted_entry,
-                &review_entries,
-            )?;
-        }
-    }
-
-    let mut interval_stack = if tune_targets_c.len() >= 2
-        && accepted_targets_c.contains(&tune_targets_c[0])
-        && accepted_targets_c.contains(
-            tune_targets_c
-                .last()
-                .ok_or("missing final tuning target for flagship DFS")?,
-        ) {
-        vec![(0usize, tune_targets_c.len() - 1)]
-    } else {
-        Vec::new()
+    let context = FlagshipRunContext {
+        client,
+        default_devd,
+        args: &args,
+        target_selector: &target_selector,
+        tune_targets_c: &tune_targets_c,
+        tuning_execution_order_c: &tuning_execution_order_c,
+        output_root: &output_root,
+        bundle_dir: &bundle_dir,
+        device_id: &device_id,
+        port_path: &port_path,
     };
+    let mut state = FlagshipRunState {
+        current_profile,
+        ..FlagshipRunState::default()
+    };
+    tune_flagship_endpoints(&context, &mut state).await?;
+    tune_flagship_intervals(&context, &mut state).await?;
+    let bundle = write_flagship_bundle(&context, &state)?;
+    Ok(flagship_summary(&context, &state, &bundle))
+}
 
+struct FlagshipRunContext<'a> {
+    client: &'a Client,
+    default_devd: &'a str,
+    args: &'a ThermalFlagshipTuneArgs,
+    target_selector: &'a TargetSelector,
+    tune_targets_c: &'a [i16],
+    tuning_execution_order_c: &'a [i16],
+    output_root: &'a Path,
+    bundle_dir: &'a Path,
+    device_id: &'a str,
+    port_path: &'a str,
+}
+
+#[derive(Default)]
+struct FlagshipRunState {
+    current_profile: Value,
+    review_entries: Vec<Value>,
+    accepted_targets_c: BTreeSet<i16>,
+    candidate_ready_targets_c: BTreeSet<i16>,
+}
+
+async fn flagship_device_metadata(
+    client: &Client,
+    default_devd: &str,
+    target_selector: &TargetSelector,
+    dry_run: bool,
+) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+    if dry_run {
+        return Ok(("mock-fp-lab-01".to_string(), "dry-run".to_string()));
+    }
+    let resolved = resolve_target(target_selector.clone(), default_devd)?;
+    let port_path = resolve_device_port_path(client, &resolved.devd, &resolved.device)
+        .await
+        .unwrap_or_else(|| "unknown-port".to_string());
+    Ok((resolved.device, port_path))
+}
+
+async fn tune_flagship_endpoints(
+    context: &FlagshipRunContext<'_>,
+    state: &mut FlagshipRunState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some((&first_target_c, remaining_targets)) = context.tune_targets_c.split_first() else {
+        return Ok(());
+    };
+    let endpoint_targets = flagship_endpoint_targets(first_target_c, remaining_targets);
+    for target_temp_c in endpoint_targets {
+        tune_flagship_target_at(context, state, target_temp_c).await?;
+    }
+    Ok(())
+}
+
+fn flagship_endpoint_targets(first_target_c: i16, remaining_targets: &[i16]) -> Vec<i16> {
+    match remaining_targets.last().copied() {
+        Some(last_target_c) if last_target_c != first_target_c => {
+            vec![first_target_c, last_target_c]
+        }
+        _ => vec![first_target_c],
+    }
+}
+
+async fn tune_flagship_target_at(
+    context: &FlagshipRunContext<'_>,
+    state: &mut FlagshipRunState,
+    target_temp_c: i16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let workspace_dir = context.output_root.join(format!("target-{target_temp_c}"));
+    let (updated_profile, entry) = tune_flagship_target(FlagshipTargetRequest {
+        client: context.client,
+        default_devd: context.default_devd,
+        args: context.args,
+        target_selector: context.target_selector,
+        current_profile: std::mem::take(&mut state.current_profile),
+        target_temp_c,
+        anchors_c: context.tune_targets_c,
+        workspace_dir: &workspace_dir,
+    })
+    .await?;
+    state.current_profile = updated_profile;
+    record_flagship_target(context, state, target_temp_c, entry)
+}
+
+fn record_flagship_target(
+    context: &FlagshipRunContext<'_>,
+    state: &mut FlagshipRunState,
+    target_temp_c: i16,
+    entry: Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if entry_candidate_ready(&entry) {
+        state.candidate_ready_targets_c.insert(target_temp_c);
+    }
+    if entry_acceptance_passed(&entry) {
+        state.accepted_targets_c.insert(target_temp_c);
+    }
+    state.review_entries.push(entry);
+    let persisted_entry = state
+        .review_entries
+        .last()
+        .ok_or("missing flagship review entry")?;
+    persist_target_review(
+        context.output_root,
+        target_temp_c,
+        &state.current_profile,
+        persisted_entry,
+        &state.review_entries,
+    )
+}
+
+async fn tune_flagship_intervals(
+    context: &FlagshipRunContext<'_>,
+    state: &mut FlagshipRunState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut interval_stack = initial_flagship_intervals(context, state)?;
     while let Some((lower_index, upper_index)) = interval_stack.pop() {
         if upper_index <= lower_index + 1 {
             continue;
         }
-        let lower_target_c = tune_targets_c[lower_index];
-        let upper_target_c = tune_targets_c[upper_index];
-        if !accepted_targets_c.contains(&lower_target_c)
-            || !accepted_targets_c.contains(&upper_target_c)
+        let lower_target_c = context.tune_targets_c[lower_index];
+        let upper_target_c = context.tune_targets_c[upper_index];
+        if !state.accepted_targets_c.contains(&lower_target_c)
+            || !state.accepted_targets_c.contains(&upper_target_c)
         {
             continue;
         }
         let midpoint_index = interval_midpoint_index(lower_index, upper_index);
-        let target_temp_c = tune_targets_c[midpoint_index];
-        current_profile = reseed_target_from_accepted_bounds(
-            &current_profile,
+        let target_temp_c = context.tune_targets_c[midpoint_index];
+        state.current_profile = reseed_target_from_accepted_bounds(
+            &state.current_profile,
             target_temp_c,
             lower_target_c,
             upper_target_c,
-            &tune_targets_c,
+            context.tune_targets_c,
         )?;
-        let workspace_dir = output_root.join(format!("target-{target_temp_c}"));
-        let (updated_profile, entry) = tune_flagship_target(
-            client,
-            default_devd,
-            &args,
-            &target_selector,
-            current_profile,
-            target_temp_c,
-            &tune_targets_c,
-            &workspace_dir,
-        )
-        .await?;
-        current_profile = updated_profile;
-        let candidate_ready = entry_candidate_ready(&entry);
-        if candidate_ready {
-            candidate_ready_targets_c.insert(target_temp_c);
-        }
-        if entry_acceptance_passed(&entry) {
-            accepted_targets_c.insert(target_temp_c);
-        }
-        review_entries.push(entry);
-        let persisted_entry = review_entries
+        tune_flagship_target_at(context, state, target_temp_c).await?;
+        if state
+            .review_entries
             .last()
-            .ok_or("missing flagship review entry after midpoint tuning")?;
-        persist_target_review(
-            &output_root,
-            target_temp_c,
-            &current_profile,
-            persisted_entry,
-            &review_entries,
-        )?;
-        if entry_acceptance_passed(persisted_entry) {
+            .is_some_and(entry_acceptance_passed)
+        {
             interval_stack.push((midpoint_index, upper_index));
             interval_stack.push((lower_index, midpoint_index));
         }
     }
+    Ok(())
+}
 
-    let bundle = super::thermal_report::write_preliminary_review_bundle(
-        &bundle_dir,
-        &current_profile,
-        review_entries.clone(),
-        &args.source_id,
-        &device_id,
-        &port_path,
-        i64::try_from(args.per_target_budget_seconds).unwrap_or(i64::MAX),
-        json!(current_unix_millis()),
-        args.profile_mode.as_str(),
-        flagship_resolved_bank(args.profile_mode),
-        flagship_detected_source_class(args.profile_mode),
-        &tune_targets_c,
-        &tuning_execution_order_c,
-        source_preset(args.profile_mode),
-        PROVIDER_ISOLAPURR,
-    )?;
+fn initial_flagship_intervals(
+    context: &FlagshipRunContext<'_>,
+    state: &FlagshipRunState,
+) -> Result<Vec<(usize, usize)>, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(&last_target_c) = context.tune_targets_c.last() else {
+        return Ok(Vec::new());
+    };
+    if context.tune_targets_c.len() >= 2
+        && state
+            .accepted_targets_c
+            .contains(&context.tune_targets_c[0])
+        && state.accepted_targets_c.contains(&last_target_c)
+    {
+        Ok(vec![(0, context.tune_targets_c.len() - 1)])
+    } else {
+        Ok(Vec::new())
+    }
+}
 
-    let review_outcomes = tune_targets_c
+fn write_flagship_bundle(
+    context: &FlagshipRunContext<'_>,
+    state: &FlagshipRunState,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    super::thermal_report::write_preliminary_review_bundle(
+        super::thermal_report::PreliminaryReviewBundleInput {
+            bundle_dir: context.bundle_dir,
+            accepted_profile: &state.current_profile,
+            entries: state.review_entries.clone(),
+            source_id: &context.args.source_id,
+            device_id: context.device_id,
+            port_path: context.port_path,
+            tuning_budget_seconds: i64::try_from(context.args.per_target_budget_seconds)
+                .unwrap_or(i64::MAX),
+            generated_at: json!(current_unix_millis()),
+            selected_mode: context.args.profile_mode.as_str(),
+            resolved_bank: flagship_resolved_bank(context.args.profile_mode),
+            detected_source_class: flagship_detected_source_class(context.args.profile_mode),
+            tuning_targets_c: context.tune_targets_c,
+            tuning_execution_order_c: context.tuning_execution_order_c,
+            source_preset: source_preset(context.args.profile_mode),
+            provider: PROVIDER_ISOLAPURR,
+        },
+    )
+}
+
+fn flagship_summary(
+    context: &FlagshipRunContext<'_>,
+    state: &FlagshipRunState,
+    bundle: &Value,
+) -> Value {
+    let summary_ok = context
+        .tune_targets_c
+        .iter()
+        .all(|target_temp_c| state.accepted_targets_c.contains(target_temp_c));
+    json!({
+        "ok": summary_ok,
+        "kind": "thermal_flagship_tuning",
+        "mode": if context.args.dry_run { "dry_run" } else { "real_hil" },
+        "profileMode": context.args.profile_mode.as_str(),
+        "resolvedBank": flagship_resolved_bank(context.args.profile_mode),
+        "detectedSourceClass": flagship_detected_source_class(context.args.profile_mode),
+        "tuneTargetsC": context.tune_targets_c,
+        "tuningExecutionOrderC": context.tuning_execution_order_c,
+        "perTargetBudgetSeconds": context.args.per_target_budget_seconds,
+        "maxTuningRounds": effective_round_limit(context.args),
+        "scoutHoldSeconds": context.args.scout_hold_seconds,
+        "confirmHoldSeconds": context.args.confirm_hold_seconds,
+        "outputRoot": display_path(context.output_root),
+        "acceptedProfilePath": display_path(&context.output_root.join("review-candidate-profile.json")),
+        "bundleDir": display_path(context.bundle_dir),
+        "bundleJson": bundle.pointer("/files/bundleJson").cloned().unwrap_or(Value::Null),
+        "bundleIndexHtml": bundle.pointer("/files/indexHtml").cloned().unwrap_or(Value::Null),
+        "reviewOutcomes": flagship_review_outcomes(context.tune_targets_c, &state.review_entries),
+        "candidateDispositions": flagship_candidate_dispositions(context.tune_targets_c, &state.review_entries),
+        "candidateReadyTargetsC": state.candidate_ready_targets_c.iter().copied().map(i64::from).collect::<Vec<_>>(),
+    })
+}
+
+fn flagship_review_outcomes(
+    targets_c: &[i16],
+    entries: &[Value],
+) -> serde_json::Map<String, Value> {
+    targets_c
         .iter()
         .copied()
         .map(|target_temp_c| {
-            let passed = review_entries.iter().find(|entry| {
+            let entry = entries.iter().find(|entry| {
                 entry.get("target").and_then(Value::as_i64) == Some(i64::from(target_temp_c))
             });
             (
                 target_temp_c.to_string(),
-                json!(if passed.is_some_and(entry_acceptance_passed) {
+                json!(if entry.is_some_and(entry_acceptance_passed) {
                     "passed"
                 } else {
                     "failed"
                 }),
             )
         })
-        .collect::<serde_json::Map<String, Value>>();
-    let candidate_dispositions = tune_targets_c
+        .collect()
+}
+
+fn flagship_candidate_dispositions(
+    targets_c: &[i16],
+    entries: &[Value],
+) -> serde_json::Map<String, Value> {
+    targets_c
         .iter()
         .copied()
         .map(|target_temp_c| {
-            let disposition = review_entries
+            let disposition = entries
                 .iter()
                 .find(|entry| {
                     entry.get("target").and_then(Value::as_i64) == Some(i64::from(target_temp_c))
@@ -295,33 +397,7 @@ pub(super) async fn run_flagship_tuning(
                 .unwrap_or_else(|| json!("not_executed_without_accepted_bounds"));
             (target_temp_c.to_string(), disposition)
         })
-        .collect::<serde_json::Map<String, Value>>();
-    let summary_ok = tune_targets_c
-        .iter()
-        .all(|target_temp_c| accepted_targets_c.contains(target_temp_c));
-
-    Ok(json!({
-        "ok": summary_ok,
-        "kind": "thermal_flagship_tuning",
-        "mode": if args.dry_run { "dry_run" } else { "real_hil" },
-        "profileMode": args.profile_mode.as_str(),
-        "resolvedBank": flagship_resolved_bank(args.profile_mode),
-        "detectedSourceClass": flagship_detected_source_class(args.profile_mode),
-        "tuneTargetsC": tune_targets_c,
-        "tuningExecutionOrderC": tuning_execution_order_c,
-        "perTargetBudgetSeconds": args.per_target_budget_seconds,
-        "maxTuningRounds": effective_round_limit(&args),
-        "scoutHoldSeconds": args.scout_hold_seconds,
-        "confirmHoldSeconds": args.confirm_hold_seconds,
-        "outputRoot": display_path(&output_root),
-        "acceptedProfilePath": display_path(&output_root.join("review-candidate-profile.json")),
-        "bundleDir": display_path(&bundle_dir),
-        "bundleJson": bundle.pointer("/files/bundleJson").cloned().unwrap_or(Value::Null),
-        "bundleIndexHtml": bundle.pointer("/files/indexHtml").cloned().unwrap_or(Value::Null),
-        "reviewOutcomes": review_outcomes,
-        "candidateDispositions": candidate_dispositions,
-        "candidateReadyTargetsC": candidate_ready_targets_c.iter().copied().map(i64::from).collect::<Vec<_>>(),
-    }))
+        .collect()
 }
 
 fn interval_midpoint_index(lower_index: usize, upper_index: usize) -> usize {
@@ -527,31 +603,58 @@ fn supplemental_anchor_targets(anchors_c: &[i16], target_temp_c: i16) -> Vec<i16
     targets
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn tune_flagship_target(
-    client: &Client,
-    default_devd: &str,
-    args: &ThermalFlagshipTuneArgs,
-    target_selector: &TargetSelector,
-    mut current_profile: Value,
+struct FlagshipTargetRequest<'a> {
+    client: &'a Client,
+    default_devd: &'a str,
+    args: &'a ThermalFlagshipTuneArgs,
+    target_selector: &'a TargetSelector,
+    current_profile: Value,
     target_temp_c: i16,
-    anchors_c: &[i16],
-    workspace_dir: &Path,
+    anchors_c: &'a [i16],
+    workspace_dir: &'a Path,
+}
+
+async fn tune_flagship_target(
+    request: FlagshipTargetRequest<'_>,
 ) -> Result<(Value, Value), Box<dyn std::error::Error + Send + Sync>> {
+    let FlagshipTargetRequest {
+        client,
+        default_devd,
+        args,
+        target_selector,
+        current_profile,
+        target_temp_c,
+        anchors_c,
+        workspace_dir,
+    } = request;
     fs::create_dir_all(workspace_dir)?;
-    let budget_started_at = Instant::now();
-    let cooldown_temp_c = cooldown_threshold(target_temp_c);
-    let mut rounds = Vec::<Value>::new();
-    let mut last_summary = synthetic_failure_summary(target_temp_c, "no_round_completed");
-    let mut budget_outcome = "not_converged".to_string();
+    let context = TargetTuningContext {
+        client,
+        default_devd,
+        args,
+        target_selector,
+        target_temp_c,
+        anchors_c,
+        workspace_dir,
+        cooldown_temp_c: cooldown_threshold(target_temp_c),
+        budget_started_at: Instant::now(),
+    };
+    let mut state = TargetTuningState {
+        current_profile,
+        last_summary: synthetic_failure_summary(target_temp_c, "no_round_completed"),
+        ..TargetTuningState::default()
+    };
     let mut round_index = 0u32;
 
     loop {
-        if budget_exhausted(budget_started_at, args.per_target_budget_seconds) {
-            budget_outcome = "budget_exhausted".to_string();
+        if budget_exhausted(
+            context.budget_started_at,
+            context.args.per_target_budget_seconds,
+        ) {
+            state.budget_outcome = "budget_exhausted".to_string();
             break;
         }
-        if effective_round_limit(args).is_some_and(|limit| round_index >= limit) {
+        if effective_round_limit(context.args).is_some_and(|limit| round_index >= limit) {
             break;
         }
         round_index += 1;
@@ -560,419 +663,472 @@ async fn tune_flagship_target(
         let round_seed = round_dir.join("current-sparse.json");
         write_json_pretty(
             &round_seed,
-            &target_local_profile_window(&current_profile, target_temp_c)?,
+            &target_local_profile_window(&state.current_profile, target_temp_c)?,
         )?;
-
-        let mut scout_retry_count = 0u8;
-        let scout = loop {
-            let scout = match run_budgeted_self_test(
-                client,
-                default_devd,
-                args,
-                target_selector,
-                SelfTestRequest {
-                    seed_profile_file: Some(round_seed.clone()),
-                    candidate_profile_files: Vec::new(),
-                    target_temp_c,
-                    hold_seconds: args.scout_hold_seconds,
-                    output_dir: round_dir.join("scout"),
-                    evaluation_mode: ThermalSelfTestEvaluationMode::TuningScout,
-                    cooldown_temp_c,
-                    budget_started_at,
-                },
-            )
-            .await
-            {
-                Ok(run) => run,
-                Err(error) if error.to_string().contains("target_budget_exhausted") => {
-                    budget_outcome = "budget_exhausted".to_string();
-                    last_summary =
-                        synthetic_failure_summary(target_temp_c, "target_budget_exhausted");
-                    break None;
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    if scout_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
-                        && flagship_retryable_environment_error_message(&message)
-                    {
-                        scout_retry_count += 1;
-                        continue;
-                    }
-                    budget_outcome = "environment_blocked".to_string();
-                    last_summary = synthetic_failure_summary(
-                        target_temp_c,
-                        &format!("round_execution_failed: {message}"),
-                    );
-                    break None;
-                }
-            };
-            ensure_expected_source(&scout.summary, args.profile_mode)?;
-            last_summary = scout.summary.clone();
-            rounds.push(round_record_from_summary(
-                &scout.summary,
-                target_temp_c,
-                rounds.len() + 1,
-                &format!("tuning {round_index} / scout"),
-                explicit_point_value(&current_profile, target_temp_c),
-                "scout",
-                Some(round_index),
-                None,
-                false,
-                None,
-                budget_elapsed_seconds(budget_started_at),
-            ));
-            if run_is_disqualified(&scout.summary, target_temp_c) {
-                if scout_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
-                    && flagship_retryable_environment_summary(&scout.summary, target_temp_c)
-                {
-                    scout_retry_count += 1;
-                    continue;
-                }
-                budget_outcome = "environment_blocked".to_string();
-                break None;
-            }
-            break Some(scout);
-        };
-        let Some(scout) = scout else {
-            break;
-        };
-        if !warmup_output_is_full(&scout.summary, target_temp_c) {
-            budget_outcome = "not_converged".to_string();
-            break;
-        }
-        if scout_current_is_promotable(&scout.summary, target_temp_c) {
-            let mut confirm_retry_count = 0u8;
-            let confirm = loop {
-                let confirm = match run_hold_confirm_for_profile(
-                    client,
-                    default_devd,
-                    args,
-                    target_selector,
-                    &current_profile,
-                    target_temp_c,
-                    workspace_dir,
-                    round_index,
-                    cooldown_temp_c,
-                    budget_started_at,
-                )
-                .await
-                {
-                    Ok(run) => run,
-                    Err(error) if error.to_string().contains("target_budget_exhausted") => {
-                        budget_outcome = "budget_exhausted".to_string();
-                        last_summary =
-                            synthetic_failure_summary(target_temp_c, "target_budget_exhausted");
-                        break None;
-                    }
-                    Err(error) => {
-                        let message = error.to_string();
-                        if confirm_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
-                            && flagship_retryable_environment_error_message(&message)
-                        {
-                            confirm_retry_count += 1;
-                            continue;
-                        }
-                        budget_outcome = "environment_blocked".to_string();
-                        last_summary = synthetic_failure_summary(
-                            target_temp_c,
-                            &format!("hold_confirm_failed: {message}"),
-                        );
-                        break None;
-                    }
-                };
-                ensure_expected_source(&confirm.summary, args.profile_mode)?;
-                last_summary = confirm.summary.clone();
-                rounds.push(round_record_from_summary(
-                    &confirm.summary,
-                    target_temp_c,
-                    rounds.len() + 1,
-                    "hold confirm",
-                    explicit_point_value(&current_profile, target_temp_c),
-                    "hold_confirm",
-                    Some(round_index),
-                    None,
-                    true,
-                    None,
-                    budget_elapsed_seconds(budget_started_at),
-                ));
-                if run_is_disqualified(&confirm.summary, target_temp_c) {
-                    if confirm_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
-                        && flagship_retryable_environment_summary(&confirm.summary, target_temp_c)
-                    {
-                        confirm_retry_count += 1;
-                        continue;
-                    }
-                    budget_outcome = "environment_blocked".to_string();
-                    break None;
-                }
-                break Some(confirm);
-            };
-            let Some(confirm) = confirm else {
-                break;
-            };
-            if confirm
-                .summary
-                .pointer("/validation/passed")
-                .and_then(Value::as_bool)
-                == Some(true)
-            {
-                budget_outcome = "completed".to_string();
-                break;
-            }
-            if let Some(reseeded) =
-                reseed_after_failed_hold_confirm(&current_profile, target_temp_c, &confirm.summary)?
-            {
-                current_profile = normalize_sparse_profile_value(&reseeded, anchors_c)?;
-                write_json_pretty(
-                    &workspace_dir.join(format!("hold-confirm-{round_index}-reseed.json")),
-                    &current_profile,
-                )?;
-            }
-            budget_outcome = "not_converged".to_string();
-            continue;
-        }
-
-        let retuned =
-            thermal_retune::retune_thermal_self_test_run(thermal_retune::ThermalRetuneInput {
-                run_dir: scout.run_dir.clone(),
-                optimize_targets_c: Some(target_temp_c.to_string()),
-            })?;
-        let retuned_profile =
-            normalize_sparse_profile_value(&retuned.candidate_profile, anchors_c)?;
-        write_json_pretty(
-            &round_dir.join("thermal-profile.replayed.sparse.json"),
-            &retuned_profile,
-        )?;
-        let variants = candidate_variants(
-            &current_profile,
-            &retuned_profile,
-            &scout.summary,
-            target_temp_c,
-            anchors_c,
-        )?;
-        let candidate_paths =
-            write_candidate_variants(&round_dir.join("candidates"), &variants, target_temp_c)?;
-
-        let mut batch_retry_count = 0u8;
-        let batch_outcome = loop {
-            let batch = match run_budgeted_self_test(
-                client,
-                default_devd,
-                args,
-                target_selector,
-                SelfTestRequest {
-                    seed_profile_file: None,
-                    candidate_profile_files: candidate_paths.clone(),
-                    target_temp_c,
-                    hold_seconds: args.scout_hold_seconds,
-                    output_dir: round_dir.join("batch"),
-                    evaluation_mode: ThermalSelfTestEvaluationMode::TuningScout,
-                    cooldown_temp_c,
-                    budget_started_at,
-                },
-            )
-            .await
-            {
-                Ok(run) => run,
-                Err(error) if error.to_string().contains("target_budget_exhausted") => {
-                    budget_outcome = "budget_exhausted".to_string();
-                    last_summary =
-                        synthetic_failure_summary(target_temp_c, "target_budget_exhausted");
-                    break None;
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    if batch_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
-                        && flagship_retryable_environment_error_message(&message)
-                    {
-                        batch_retry_count += 1;
-                        continue;
-                    }
-                    budget_outcome = "environment_blocked".to_string();
-                    last_summary = synthetic_failure_summary(
-                        target_temp_c,
-                        &format!("batch_execution_failed: {message}"),
-                    );
-                    break None;
-                }
-            };
-            ensure_batch_source(&batch.summary, args.profile_mode)?;
-            let diagnostic_best = match choose_best_batch_run(&batch.summary, target_temp_c) {
-                Ok(best) => best,
-                Err(error) => {
-                    rounds.extend(batch_attempt_records(
-                        &batch.summary,
-                        target_temp_c,
-                        rounds.len() + 1,
-                        round_index,
-                        "",
-                        budget_elapsed_seconds(budget_started_at),
-                    ));
-                    last_summary = first_batch_run_summary(&batch.summary).unwrap_or_else(|| {
-                        synthetic_failure_summary(target_temp_c, "batch_no_selected_candidate")
-                    });
-                    if batch_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
-                        && flagship_retryable_environment_batch_summary(
-                            &batch.summary,
-                            target_temp_c,
-                        )
-                    {
-                        batch_retry_count += 1;
-                        continue;
-                    }
-                    budget_outcome = "environment_blocked".to_string();
-                    last_summary = synthetic_failure_summary(
-                        target_temp_c,
-                        &format!("batch_execution_failed: {error}"),
-                    );
-                    break None;
-                }
-            };
-            let promoted_best = choose_confirmable_batch_run(&batch.summary, target_temp_c)?;
-            let selected_best = promoted_best
-                .clone()
-                .unwrap_or_else(|| diagnostic_best.clone());
-            let selected_run_id = selected_best
-                .summary
-                .get("runId")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            rounds.extend(batch_attempt_records(
-                &batch.summary,
-                target_temp_c,
-                rounds.len() + 1,
-                round_index,
-                &selected_run_id,
-                budget_elapsed_seconds(budget_started_at),
-            ));
-            break Some((promoted_best, selected_best));
-        };
-        let Some((promoted_best, selected_best)) = batch_outcome else {
-            break;
-        };
-        let chosen_profile = read_json(&selected_best.candidate_profile_file)?;
-        current_profile = merge_target_candidate_into_profile(
-            &current_profile,
-            &chosen_profile,
-            target_temp_c,
-            anchors_c,
-        )?;
-        write_json_pretty(
-            &round_dir.join("accepted-sparse-profile.json"),
-            &current_profile,
-        )?;
-        last_summary = selected_best.summary.clone();
-
-        if promoted_best.is_none() {
-            continue;
-        }
-        if budget_exhausted(budget_started_at, args.per_target_budget_seconds) {
-            budget_outcome = "budget_exhausted".to_string();
-            break;
-        }
-        let mut confirm_retry_count = 0u8;
-        let confirm = loop {
-            let confirm = match run_hold_confirm_for_profile(
-                client,
-                default_devd,
-                args,
-                target_selector,
-                &current_profile,
-                target_temp_c,
-                workspace_dir,
-                round_index,
-                cooldown_temp_c,
-                budget_started_at,
-            )
-            .await
-            {
-                Ok(run) => run,
-                Err(error) if error.to_string().contains("target_budget_exhausted") => {
-                    budget_outcome = "budget_exhausted".to_string();
-                    last_summary =
-                        synthetic_failure_summary(target_temp_c, "target_budget_exhausted");
-                    break None;
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    if confirm_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
-                        && flagship_retryable_environment_error_message(&message)
-                    {
-                        confirm_retry_count += 1;
-                        continue;
-                    }
-                    budget_outcome = "environment_blocked".to_string();
-                    last_summary = synthetic_failure_summary(
-                        target_temp_c,
-                        &format!("hold_confirm_failed: {message}"),
-                    );
-                    break None;
-                }
-            };
-            ensure_expected_source(&confirm.summary, args.profile_mode)?;
-            last_summary = confirm.summary.clone();
-            rounds.push(round_record_from_summary(
-                &confirm.summary,
-                target_temp_c,
-                rounds.len() + 1,
-                "hold confirm",
-                explicit_point_value(&current_profile, target_temp_c),
-                "hold_confirm",
-                Some(round_index),
-                None,
-                true,
-                None,
-                budget_elapsed_seconds(budget_started_at),
-            ));
-            if run_is_disqualified(&confirm.summary, target_temp_c) {
-                if confirm_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
-                    && flagship_retryable_environment_summary(&confirm.summary, target_temp_c)
-                {
-                    confirm_retry_count += 1;
-                    continue;
-                }
-                budget_outcome = "environment_blocked".to_string();
-                break None;
-            }
-            break Some(confirm);
-        };
-        let Some(confirm) = confirm else {
-            break;
-        };
-        if confirm
-            .summary
-            .pointer("/validation/passed")
-            .and_then(Value::as_bool)
-            == Some(true)
+        match run_flagship_round(&context, &mut state, round_index, &round_dir, &round_seed).await?
         {
-            budget_outcome = "completed".to_string();
-            break;
+            TargetRoundControl::Continue => {}
+            TargetRoundControl::Stop => break,
         }
-        if let Some(reseeded) =
-            reseed_after_failed_hold_confirm(&current_profile, target_temp_c, &confirm.summary)?
-        {
-            current_profile = normalize_sparse_profile_value(&reseeded, anchors_c)?;
-            write_json_pretty(
-                &workspace_dir.join(format!("hold-confirm-{round_index}-reseed.json")),
-                &current_profile,
-            )?;
-        }
-        budget_outcome = "not_converged".to_string();
     }
 
     let entry = review_target_entry(
         target_temp_c,
-        &budget_outcome,
-        budget_elapsed_seconds(budget_started_at),
-        rounds,
-        &last_summary,
-        &current_profile,
+        &state.budget_outcome,
+        budget_elapsed_seconds(context.budget_started_at),
+        state.rounds,
+        &state.last_summary,
+        &state.current_profile,
         args.confirm_hold_seconds,
     );
-    Ok((current_profile, entry))
+    Ok((state.current_profile, entry))
 }
 
+struct TargetTuningContext<'a> {
+    client: &'a Client,
+    default_devd: &'a str,
+    args: &'a ThermalFlagshipTuneArgs,
+    target_selector: &'a TargetSelector,
+    target_temp_c: i16,
+    anchors_c: &'a [i16],
+    workspace_dir: &'a Path,
+    cooldown_temp_c: f64,
+    budget_started_at: Instant,
+}
+
+#[derive(Default)]
+struct TargetTuningState {
+    current_profile: Value,
+    rounds: Vec<Value>,
+    last_summary: Value,
+    budget_outcome: String,
+}
+
+enum TargetRoundControl {
+    Continue,
+    Stop,
+}
+
+async fn run_flagship_round(
+    context: &TargetTuningContext<'_>,
+    state: &mut TargetTuningState,
+    round_index: u32,
+    round_dir: &Path,
+    round_seed: &Path,
+) -> Result<TargetRoundControl, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(scout) = run_scout_phase(context, state, round_index, round_dir, round_seed).await?
+    else {
+        return Ok(TargetRoundControl::Stop);
+    };
+    if !warmup_output_is_full(&scout.summary, context.target_temp_c) {
+        state.budget_outcome = "not_converged".to_string();
+        return Ok(TargetRoundControl::Stop);
+    }
+    if scout_current_is_promotable(&scout.summary, context.target_temp_c) {
+        return handle_scout_confirmation(context, state, round_index).await;
+    }
+    let candidate_paths = prepare_candidate_batch(context, state, &scout, round_dir)?;
+    let Some((promoted_best, selected_best)) =
+        run_candidate_batch_phase(context, state, round_index, round_dir, &candidate_paths).await?
+    else {
+        return Ok(TargetRoundControl::Stop);
+    };
+    state.current_profile = merge_selected_candidate(
+        &state.current_profile,
+        &selected_best,
+        context.target_temp_c,
+        context.anchors_c,
+        round_dir,
+    )?;
+    state.last_summary = selected_best.summary.clone();
+    if promoted_best.is_none() {
+        return Ok(TargetRoundControl::Continue);
+    }
+    if budget_exhausted(
+        context.budget_started_at,
+        context.args.per_target_budget_seconds,
+    ) {
+        state.budget_outcome = "budget_exhausted".to_string();
+        return Ok(TargetRoundControl::Stop);
+    }
+    handle_scout_confirmation(context, state, round_index).await
+}
+
+async fn run_scout_phase(
+    context: &TargetTuningContext<'_>,
+    state: &mut TargetTuningState,
+    round_index: u32,
+    round_dir: &Path,
+    round_seed: &Path,
+) -> Result<Option<SelfTestRun>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut retry_count = 0u8;
+    loop {
+        let scout = match run_scout_attempt(context, round_dir, round_seed).await {
+            Ok(run) => run,
+            Err(error) if error.to_string().contains("target_budget_exhausted") => {
+                state.budget_outcome = "budget_exhausted".to_string();
+                state.last_summary =
+                    synthetic_failure_summary(context.target_temp_c, "target_budget_exhausted");
+                return Ok(None);
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
+                    && flagship_retryable_environment_error_message(&message)
+                {
+                    retry_count += 1;
+                    continue;
+                }
+                state.budget_outcome = "environment_blocked".to_string();
+                state.last_summary = synthetic_failure_summary(
+                    context.target_temp_c,
+                    &format!("round_execution_failed: {message}"),
+                );
+                return Ok(None);
+            }
+        };
+        ensure_expected_source(&scout.summary, context.args.profile_mode)?;
+        state.last_summary = scout.summary.clone();
+        state
+            .rounds
+            .push(round_record_from_summary(RoundRecordInput {
+                summary: &scout.summary,
+                target_temp_c: context.target_temp_c,
+                round_number: state.rounds.len() + 1,
+                label: &format!("tuning {round_index} / scout"),
+                point: explicit_point_value(&state.current_profile, context.target_temp_c),
+                attempt_type: "scout",
+                tuning_round: Some(round_index),
+                candidate_name: None,
+                selected: false,
+                score: None,
+                budget_elapsed_seconds_value: budget_elapsed_seconds(context.budget_started_at),
+            }));
+        if run_is_disqualified(&scout.summary, context.target_temp_c) {
+            if retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
+                && flagship_retryable_environment_summary(&scout.summary, context.target_temp_c)
+            {
+                retry_count += 1;
+                continue;
+            }
+            state.budget_outcome = "environment_blocked".to_string();
+            return Ok(None);
+        }
+        return Ok(Some(scout));
+    }
+}
+
+async fn run_scout_attempt(
+    context: &TargetTuningContext<'_>,
+    round_dir: &Path,
+    round_seed: &Path,
+) -> Result<SelfTestRun, Box<dyn std::error::Error + Send + Sync>> {
+    run_budgeted_self_test(
+        context.client,
+        context.default_devd,
+        context.args,
+        context.target_selector,
+        SelfTestRequest {
+            seed_profile_file: Some(round_seed.to_path_buf()),
+            candidate_profile_files: Vec::new(),
+            target_temp_c: context.target_temp_c,
+            hold_seconds: context.args.scout_hold_seconds,
+            output_dir: round_dir.join("scout"),
+            evaluation_mode: ThermalSelfTestEvaluationMode::TuningScout,
+            cooldown_temp_c: context.cooldown_temp_c,
+            budget_started_at: context.budget_started_at,
+        },
+    )
+    .await
+}
+
+async fn handle_scout_confirmation(
+    context: &TargetTuningContext<'_>,
+    state: &mut TargetTuningState,
+    round_index: u32,
+) -> Result<TargetRoundControl, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(confirm) = run_hold_confirm_phase(context, state, round_index).await? else {
+        return Ok(TargetRoundControl::Stop);
+    };
+    finish_hold_confirmation(context, state, round_index, &confirm)
+}
+
+async fn run_hold_confirm_phase(
+    context: &TargetTuningContext<'_>,
+    state: &mut TargetTuningState,
+    round_index: u32,
+) -> Result<Option<SelfTestRun>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut retry_count = 0u8;
+    loop {
+        let confirm = match run_hold_confirm_attempt(context, state, round_index).await {
+            Ok(run) => run,
+            Err(error) if error.to_string().contains("target_budget_exhausted") => {
+                state.budget_outcome = "budget_exhausted".to_string();
+                state.last_summary =
+                    synthetic_failure_summary(context.target_temp_c, "target_budget_exhausted");
+                return Ok(None);
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
+                    && flagship_retryable_environment_error_message(&message)
+                {
+                    retry_count += 1;
+                    continue;
+                }
+                state.budget_outcome = "environment_blocked".to_string();
+                state.last_summary = synthetic_failure_summary(
+                    context.target_temp_c,
+                    &format!("hold_confirm_failed: {message}"),
+                );
+                return Ok(None);
+            }
+        };
+        ensure_expected_source(&confirm.summary, context.args.profile_mode)?;
+        state.last_summary = confirm.summary.clone();
+        state
+            .rounds
+            .push(round_record_from_summary(RoundRecordInput {
+                summary: &confirm.summary,
+                target_temp_c: context.target_temp_c,
+                round_number: state.rounds.len() + 1,
+                label: "hold confirm",
+                point: explicit_point_value(&state.current_profile, context.target_temp_c),
+                attempt_type: "hold_confirm",
+                tuning_round: Some(round_index),
+                candidate_name: None,
+                selected: true,
+                score: None,
+                budget_elapsed_seconds_value: budget_elapsed_seconds(context.budget_started_at),
+            }));
+        if run_is_disqualified(&confirm.summary, context.target_temp_c) {
+            if retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
+                && flagship_retryable_environment_summary(&confirm.summary, context.target_temp_c)
+            {
+                retry_count += 1;
+                continue;
+            }
+            state.budget_outcome = "environment_blocked".to_string();
+            return Ok(None);
+        }
+        return Ok(Some(confirm));
+    }
+}
+
+async fn run_hold_confirm_attempt(
+    context: &TargetTuningContext<'_>,
+    state: &TargetTuningState,
+    round_index: u32,
+) -> Result<SelfTestRun, Box<dyn std::error::Error + Send + Sync>> {
+    run_hold_confirm_for_profile(HoldConfirmRequest {
+        client: context.client,
+        default_devd: context.default_devd,
+        args: context.args,
+        target_selector: context.target_selector,
+        current_profile: &state.current_profile,
+        target_temp_c: context.target_temp_c,
+        workspace_dir: context.workspace_dir,
+        round_index,
+        cooldown_temp_c: context.cooldown_temp_c,
+        budget_started_at: context.budget_started_at,
+    })
+    .await
+}
+
+fn finish_hold_confirmation(
+    context: &TargetTuningContext<'_>,
+    state: &mut TargetTuningState,
+    round_index: u32,
+    confirm: &SelfTestRun,
+) -> Result<TargetRoundControl, Box<dyn std::error::Error + Send + Sync>> {
+    if confirm
+        .summary
+        .pointer("/validation/passed")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        state.budget_outcome = "completed".to_string();
+        return Ok(TargetRoundControl::Stop);
+    }
+    if let Some(reseeded) = reseed_after_failed_hold_confirm(
+        &state.current_profile,
+        context.target_temp_c,
+        &confirm.summary,
+    )? {
+        state.current_profile = normalize_sparse_profile_value(&reseeded, context.anchors_c)?;
+        write_json_pretty(
+            &context
+                .workspace_dir
+                .join(format!("hold-confirm-{round_index}-reseed.json")),
+            &state.current_profile,
+        )?;
+    }
+    state.budget_outcome = "not_converged".to_string();
+    Ok(TargetRoundControl::Continue)
+}
+
+fn prepare_candidate_batch(
+    context: &TargetTuningContext<'_>,
+    state: &TargetTuningState,
+    scout: &SelfTestRun,
+    round_dir: &Path,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error + Send + Sync>> {
+    let retuned =
+        thermal_retune::retune_thermal_self_test_run(thermal_retune::ThermalRetuneInput {
+            run_dir: scout.run_dir.clone(),
+            optimize_targets_c: Some(context.target_temp_c.to_string()),
+        })?;
+    let retuned_profile =
+        normalize_sparse_profile_value(&retuned.candidate_profile, context.anchors_c)?;
+    write_json_pretty(
+        &round_dir.join("thermal-profile.replayed.sparse.json"),
+        &retuned_profile,
+    )?;
+    let variants = candidate_variants(
+        &state.current_profile,
+        &retuned_profile,
+        &scout.summary,
+        context.target_temp_c,
+        context.anchors_c,
+    )?;
+    write_candidate_variants(
+        &round_dir.join("candidates"),
+        &variants,
+        context.target_temp_c,
+    )
+}
+
+async fn run_candidate_batch_phase(
+    context: &TargetTuningContext<'_>,
+    state: &mut TargetTuningState,
+    round_index: u32,
+    round_dir: &Path,
+    candidate_paths: &[PathBuf],
+) -> Result<
+    Option<(Option<SelectedBatchRun>, SelectedBatchRun)>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let mut retry_count = 0u8;
+    loop {
+        let batch = match run_candidate_batch_attempt(context, round_dir, candidate_paths).await {
+            Ok(run) => run,
+            Err(error) if error.to_string().contains("target_budget_exhausted") => {
+                state.budget_outcome = "budget_exhausted".to_string();
+                state.last_summary =
+                    synthetic_failure_summary(context.target_temp_c, "target_budget_exhausted");
+                return Ok(None);
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
+                    && flagship_retryable_environment_error_message(&message)
+                {
+                    retry_count += 1;
+                    continue;
+                }
+                state.budget_outcome = "environment_blocked".to_string();
+                state.last_summary = synthetic_failure_summary(
+                    context.target_temp_c,
+                    &format!("batch_execution_failed: {message}"),
+                );
+                return Ok(None);
+            }
+        };
+        ensure_batch_source(&batch.summary, context.args.profile_mode)?;
+        let diagnostic_best = match choose_best_batch_run(&batch.summary, context.target_temp_c) {
+            Ok(best) => best,
+            Err(error) => {
+                state.rounds.extend(batch_attempt_records(
+                    &batch.summary,
+                    context.target_temp_c,
+                    state.rounds.len() + 1,
+                    round_index,
+                    "",
+                    budget_elapsed_seconds(context.budget_started_at),
+                ));
+                state.last_summary = first_batch_run_summary(&batch.summary).unwrap_or_else(|| {
+                    synthetic_failure_summary(context.target_temp_c, "batch_no_selected_candidate")
+                });
+                if retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
+                    && flagship_retryable_environment_batch_summary(
+                        &batch.summary,
+                        context.target_temp_c,
+                    )
+                {
+                    retry_count += 1;
+                    continue;
+                }
+                state.budget_outcome = "environment_blocked".to_string();
+                state.last_summary = synthetic_failure_summary(
+                    context.target_temp_c,
+                    &format!("batch_execution_failed: {error}"),
+                );
+                return Ok(None);
+            }
+        };
+        let promoted_best = choose_confirmable_batch_run(&batch.summary, context.target_temp_c)?;
+        let selected_best = promoted_best
+            .clone()
+            .unwrap_or_else(|| diagnostic_best.clone());
+        let selected_run_id = selected_best
+            .summary
+            .get("runId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        state.rounds.extend(batch_attempt_records(
+            &batch.summary,
+            context.target_temp_c,
+            state.rounds.len() + 1,
+            round_index,
+            &selected_run_id,
+            budget_elapsed_seconds(context.budget_started_at),
+        ));
+        return Ok(Some((promoted_best, selected_best)));
+    }
+}
+
+async fn run_candidate_batch_attempt(
+    context: &TargetTuningContext<'_>,
+    round_dir: &Path,
+    candidate_paths: &[PathBuf],
+) -> Result<SelfTestRun, Box<dyn std::error::Error + Send + Sync>> {
+    run_budgeted_self_test(
+        context.client,
+        context.default_devd,
+        context.args,
+        context.target_selector,
+        SelfTestRequest {
+            seed_profile_file: None,
+            candidate_profile_files: candidate_paths.to_vec(),
+            target_temp_c: context.target_temp_c,
+            hold_seconds: context.args.scout_hold_seconds,
+            output_dir: round_dir.join("batch"),
+            evaluation_mode: ThermalSelfTestEvaluationMode::TuningScout,
+            cooldown_temp_c: context.cooldown_temp_c,
+            budget_started_at: context.budget_started_at,
+        },
+    )
+    .await
+}
+
+fn merge_selected_candidate(
+    current_profile: &Value,
+    selected_best: &SelectedBatchRun,
+    target_temp_c: i16,
+    anchors_c: &[i16],
+    round_dir: &Path,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let chosen_profile = read_json(&selected_best.candidate_profile_file)?;
+    let merged = merge_target_candidate_into_profile(
+        current_profile,
+        &chosen_profile,
+        target_temp_c,
+        anchors_c,
+    )?;
+    write_json_pretty(&round_dir.join("accepted-sparse-profile.json"), &merged)?;
+    Ok(merged)
+}
 #[cfg(test)]
 fn validation_preview_profile_for_target(
     profile_value: &Value,
@@ -1108,19 +1264,34 @@ async fn run_budgeted_self_test(
     Ok(SelfTestRun { summary, run_dir })
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_hold_confirm_for_profile(
-    client: &Client,
-    default_devd: &str,
-    args: &ThermalFlagshipTuneArgs,
-    target_selector: &TargetSelector,
-    current_profile: &Value,
+struct HoldConfirmRequest<'a> {
+    client: &'a Client,
+    default_devd: &'a str,
+    args: &'a ThermalFlagshipTuneArgs,
+    target_selector: &'a TargetSelector,
+    current_profile: &'a Value,
     target_temp_c: i16,
-    workspace_dir: &Path,
+    workspace_dir: &'a Path,
     round_index: u32,
     cooldown_temp_c: f64,
     budget_started_at: Instant,
+}
+
+async fn run_hold_confirm_for_profile(
+    request: HoldConfirmRequest<'_>,
 ) -> Result<SelfTestRun, Box<dyn std::error::Error + Send + Sync>> {
+    let HoldConfirmRequest {
+        client,
+        default_devd,
+        args,
+        target_selector,
+        current_profile,
+        target_temp_c,
+        workspace_dir,
+        round_index,
+        cooldown_temp_c,
+        budget_started_at,
+    } = request;
     let hold_seed = workspace_dir.join(format!("hold-confirm-{round_index}-seed.json"));
     write_json_pretty(
         &hold_seed,
@@ -1369,7 +1540,7 @@ fn conservative_high_side_candidate(
 
 fn apply_flagship_gate_nudge(
     current_point: &ThermalCandidatePoint,
-    mut point: ThermalCandidatePoint,
+    point: ThermalCandidatePoint,
     evidence: &Value,
     target_temp_c: i16,
 ) -> ThermalCandidatePoint {
@@ -1382,175 +1553,220 @@ fn apply_flagship_gate_nudge(
         .and_then(Value::as_f64)
         .unwrap_or(0.0)
         .max(0.0);
-    if matches!(
+    let point = apply_low_side_gate_nudge(
+        current_point,
+        point,
+        failure_class,
+        temperature_gap_c,
+        target_temp_c,
+    );
+    apply_high_side_gate_nudge(
+        current_point,
+        point,
+        failure_class,
+        temperature_gap_c,
+        target_temp_c,
+    )
+}
+
+fn apply_low_side_gate_nudge(
+    current_point: &ThermalCandidatePoint,
+    mut point: ThermalCandidatePoint,
+    failure_class: &str,
+    temperature_gap_c: f64,
+    target_temp_c: i16,
+) -> ThermalCandidatePoint {
+    if !matches!(
         failure_class,
         "missed_lower_band_before_limit" | "stable_window_broke_low" | "within_gate_low_margin"
     ) {
-        let stable_band_centi_c = (ThermalFullSpeedStableTracker::STABLE_BAND_C * 100.0) as u16;
-        let low_temp = target_temp_c <= 150;
-        let brake_step = if low_temp {
-            match failure_class {
-                "within_gate_low_margin" => 100,
-                "missed_lower_band_before_limit" if temperature_gap_c <= 1.5 => 160,
-                "missed_lower_band_before_limit" => 300,
-                _ if temperature_gap_c <= 0.5 => 120,
-                _ if temperature_gap_c <= 1.5 => 180,
-                _ => 260,
-            }
-        } else {
-            match failure_class {
-                "within_gate_low_margin" => 120,
-                _ if temperature_gap_c <= 0.5 => 180,
-                _ if temperature_gap_c <= 1.5 => 260,
-                _ => 360,
-            }
-        };
-        let low_temp_brake_floor = if low_temp {
-            stable_band_centi_c.saturating_add(300)
-        } else {
-            stable_band_centi_c
-        };
-        let brake_floor = low_temp_brake_floor.min(current_point.brake_distance_centi_c);
-        point.brake_distance_centi_c = current_point
-            .brake_distance_centi_c
-            .saturating_sub(brake_step)
-            .max(brake_floor);
-
-        let power_step = if low_temp {
-            match failure_class {
-                "within_gate_low_margin" => 80,
-                _ if temperature_gap_c <= 1.5 => 120,
-                _ => 240,
-            }
-        } else if temperature_gap_c <= 1.0 {
-            180
-        } else {
-            260
-        };
-        point.approach_floor_power_permille = current_point
-            .approach_floor_power_permille
-            .saturating_add(power_step)
-            .max(current_point.hold_power_permille)
-            .min(1_000);
-        point.approach_power_permille = current_point
-            .approach_power_permille
-            .saturating_add(power_step)
-            .max(point.approach_floor_power_permille.saturating_add(80))
-            .min(1_000);
-        point.approach_damping_exponent_permille = point
-            .approach_damping_exponent_permille
-            .saturating_sub(if low_temp { 180 } else { 260 })
-            .max(100);
-        if low_temp {
-            point.approach_lead_ticks = current_point.approach_lead_ticks.saturating_sub(1).min(12);
-        }
+        return point;
     }
-    if matches!(
-        failure_class,
-        "stable_window_broke_high" | "missed_upper_band_before_limit"
-    ) {
-        let severe_mid_temperature_high_side = target_temp_c <= 150 && temperature_gap_c >= 1.5;
-        let min_brake_delta = if severe_mid_temperature_high_side {
-            140
-        } else if target_temp_c <= 150 {
-            80
-        } else {
-            120
-        };
-        let max_brake_delta = if severe_mid_temperature_high_side {
-            240
-        } else if target_temp_c <= 150 {
-            140
-        } else {
-            180
-        };
-        let min_brake = current_point
-            .brake_distance_centi_c
-            .saturating_add(min_brake_delta);
-        let max_brake = current_point
-            .brake_distance_centi_c
-            .saturating_add(max_brake_delta);
-        point.brake_distance_centi_c = point.brake_distance_centi_c.clamp(min_brake, max_brake);
-        if target_temp_c <= 150 {
-            point.brake_distance_centi_c = point.brake_distance_centi_c.max(450);
+    let stable_band_centi_c = (ThermalFullSpeedStableTracker::STABLE_BAND_C * 100.0) as u16;
+    let low_temp = target_temp_c <= 150;
+    let brake_step = if low_temp {
+        match failure_class {
+            "within_gate_low_margin" => 100,
+            "missed_lower_band_before_limit" if temperature_gap_c <= 1.5 => 160,
+            "missed_lower_band_before_limit" => 300,
+            _ if temperature_gap_c <= 0.5 => 120,
+            _ if temperature_gap_c <= 1.5 => 180,
+            _ => 260,
         }
-        let lead_step = if severe_mid_temperature_high_side {
-            2
-        } else {
-            1
-        };
-        point.approach_lead_ticks = point
-            .approach_lead_ticks
-            .max(current_point.approach_lead_ticks.saturating_add(lead_step))
-            .min(12);
-        point.approach_damping_exponent_permille = point
-            .approach_damping_exponent_permille
-            .max(
-                current_point
-                    .approach_damping_exponent_permille
-                    .saturating_add(50),
-            )
-            .min(
-                current_point
-                    .approach_damping_exponent_permille
-                    .saturating_add(180),
-            )
-            .max(180);
-        if target_temp_c <= 150 {
-            let trim = if severe_mid_temperature_high_side {
-                180
-            } else {
-                80
-            };
-            point.approach_floor_power_permille = current_point
-                .approach_floor_power_permille
-                .saturating_sub(trim)
-                .max(current_point.hold_power_permille)
-                .max(100);
-            point.approach_power_permille = current_point
-                .approach_power_permille
-                .saturating_sub(trim)
-                .max(point.approach_floor_power_permille.saturating_add(80))
-                .min(1_000);
-            point.hold_reheat_power_permille = current_point
-                .hold_reheat_power_permille
-                .saturating_sub(if severe_mid_temperature_high_side {
-                    100
-                } else {
-                    trim / 2
-                })
-                .max(current_point.hold_power_permille);
-            point.hold_kp_permille_per_c = current_point
-                .hold_kp_permille_per_c
-                .saturating_sub(4)
-                .max(8);
-            if severe_mid_temperature_high_side {
-                point.hold_ki_permille_per_c_tick =
-                    current_point.hold_ki_permille_per_c_tick.saturating_sub(1);
-                point.hold_blend_ticks = current_point.hold_blend_ticks.saturating_add(1).min(8);
-            }
-            point.overshoot_cutoff_centi_c = current_point
-                .overshoot_cutoff_centi_c
-                .saturating_sub(40)
-                .max(80);
-            point.hold_off_centi_c = current_point
-                .hold_off_centi_c
-                .min(point.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
-        } else if point.hold_power_permille >= 900 {
-            point.hold_power_permille = point.hold_power_permille.saturating_sub(180).max(780);
-            point.hold_reheat_power_permille = point
-                .hold_reheat_power_permille
-                .saturating_sub(200)
-                .max(point.hold_power_permille)
-                .max(800);
-            point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(2).max(10);
-            point.overshoot_cutoff_centi_c =
-                point.overshoot_cutoff_centi_c.saturating_sub(20).max(140);
+    } else {
+        match failure_class {
+            "within_gate_low_margin" => 120,
+            _ if temperature_gap_c <= 0.5 => 180,
+            _ if temperature_gap_c <= 1.5 => 260,
+            _ => 360,
         }
+    };
+    let low_temp_brake_floor = if low_temp {
+        stable_band_centi_c.saturating_add(300)
+    } else {
+        stable_band_centi_c
+    };
+    let brake_floor = low_temp_brake_floor.min(current_point.brake_distance_centi_c);
+    point.brake_distance_centi_c = current_point
+        .brake_distance_centi_c
+        .saturating_sub(brake_step)
+        .max(brake_floor);
+
+    let power_step = if low_temp {
+        match failure_class {
+            "within_gate_low_margin" => 80,
+            _ if temperature_gap_c <= 1.5 => 120,
+            _ => 240,
+        }
+    } else if temperature_gap_c <= 1.0 {
+        180
+    } else {
+        260
+    };
+    point.approach_floor_power_permille = current_point
+        .approach_floor_power_permille
+        .saturating_add(power_step)
+        .max(current_point.hold_power_permille)
+        .min(1_000);
+    point.approach_power_permille = current_point
+        .approach_power_permille
+        .saturating_add(power_step)
+        .max(point.approach_floor_power_permille.saturating_add(80))
+        .min(1_000);
+    point.approach_damping_exponent_permille = point
+        .approach_damping_exponent_permille
+        .saturating_sub(if low_temp { 180 } else { 260 })
+        .max(100);
+    if low_temp {
+        point.approach_lead_ticks = current_point.approach_lead_ticks.saturating_sub(1).min(12);
     }
     point
 }
 
+fn apply_high_side_gate_nudge(
+    current_point: &ThermalCandidatePoint,
+    mut point: ThermalCandidatePoint,
+    failure_class: &str,
+    temperature_gap_c: f64,
+    target_temp_c: i16,
+) -> ThermalCandidatePoint {
+    if !matches!(
+        failure_class,
+        "stable_window_broke_high" | "missed_upper_band_before_limit"
+    ) {
+        return point;
+    }
+    let severe_mid_temperature_high_side = target_temp_c <= 150 && temperature_gap_c >= 1.5;
+    let min_brake_delta = if severe_mid_temperature_high_side {
+        140
+    } else if target_temp_c <= 150 {
+        80
+    } else {
+        120
+    };
+    let max_brake_delta = if severe_mid_temperature_high_side {
+        240
+    } else if target_temp_c <= 150 {
+        140
+    } else {
+        180
+    };
+    let min_brake = current_point
+        .brake_distance_centi_c
+        .saturating_add(min_brake_delta);
+    let max_brake = current_point
+        .brake_distance_centi_c
+        .saturating_add(max_brake_delta);
+    point.brake_distance_centi_c = point.brake_distance_centi_c.clamp(min_brake, max_brake);
+    if target_temp_c <= 150 {
+        point.brake_distance_centi_c = point.brake_distance_centi_c.max(450);
+    }
+    let lead_step = if severe_mid_temperature_high_side {
+        2
+    } else {
+        1
+    };
+    point.approach_lead_ticks = point
+        .approach_lead_ticks
+        .max(current_point.approach_lead_ticks.saturating_add(lead_step))
+        .min(12);
+    point.approach_damping_exponent_permille = point
+        .approach_damping_exponent_permille
+        .max(
+            current_point
+                .approach_damping_exponent_permille
+                .saturating_add(50),
+        )
+        .min(
+            current_point
+                .approach_damping_exponent_permille
+                .saturating_add(180),
+        )
+        .max(180);
+    if target_temp_c <= 150 {
+        apply_low_temp_high_side_gate_nudge(
+            &mut point,
+            current_point,
+            severe_mid_temperature_high_side,
+        );
+    } else if point.hold_power_permille >= 900 {
+        point.hold_power_permille = point.hold_power_permille.saturating_sub(180).max(780);
+        point.hold_reheat_power_permille = point
+            .hold_reheat_power_permille
+            .saturating_sub(200)
+            .max(point.hold_power_permille)
+            .max(800);
+        point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(2).max(10);
+        point.overshoot_cutoff_centi_c = point.overshoot_cutoff_centi_c.saturating_sub(20).max(140);
+    }
+    point
+}
+
+fn apply_low_temp_high_side_gate_nudge(
+    point: &mut ThermalCandidatePoint,
+    current_point: &ThermalCandidatePoint,
+    severe_mid_temperature_high_side: bool,
+) {
+    let trim = if severe_mid_temperature_high_side {
+        180
+    } else {
+        80
+    };
+    point.approach_floor_power_permille = current_point
+        .approach_floor_power_permille
+        .saturating_sub(trim)
+        .max(current_point.hold_power_permille)
+        .max(100);
+    point.approach_power_permille = current_point
+        .approach_power_permille
+        .saturating_sub(trim)
+        .max(point.approach_floor_power_permille.saturating_add(80))
+        .min(1_000);
+    point.hold_reheat_power_permille = current_point
+        .hold_reheat_power_permille
+        .saturating_sub(if severe_mid_temperature_high_side {
+            100
+        } else {
+            trim / 2
+        })
+        .max(current_point.hold_power_permille);
+    point.hold_kp_permille_per_c = current_point
+        .hold_kp_permille_per_c
+        .saturating_sub(4)
+        .max(8);
+    if severe_mid_temperature_high_side {
+        point.hold_ki_permille_per_c_tick =
+            current_point.hold_ki_permille_per_c_tick.saturating_sub(1);
+        point.hold_blend_ticks = current_point.hold_blend_ticks.saturating_add(1).min(8);
+    }
+    point.overshoot_cutoff_centi_c = current_point
+        .overshoot_cutoff_centi_c
+        .saturating_sub(40)
+        .max(80);
+    point.hold_off_centi_c = current_point
+        .hold_off_centi_c
+        .min(point.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
+}
 fn bound_low_temperature_candidate_step(
     current_point: &ThermalCandidatePoint,
     mut point: ThermalCandidatePoint,
@@ -1846,40 +2062,54 @@ fn batch_attempt_records(
                 .map(|stem| stem.to_string_lossy().into_owned())
         });
         let run_id = run.get("runId").and_then(Value::as_str).unwrap_or_default();
-        records.push(round_record_from_summary(
-            run,
+        records.push(round_record_from_summary(RoundRecordInput {
+            summary: run,
             target_temp_c,
-            first_round_number + records.len(),
-            &format!(
+            round_number: first_round_number + records.len(),
+            label: &format!(
                 "tuning {tuning_round} / {}",
                 candidate_name.as_deref().unwrap_or("candidate")
             ),
-            explicit_point_value(&candidate_profile, target_temp_c),
-            "batch_candidate",
-            Some(tuning_round),
-            candidate_name.as_deref(),
-            run_id == selected_run_id,
-            Some(candidate_score(run, target_temp_c).to_value()),
+            point: explicit_point_value(&candidate_profile, target_temp_c),
+            attempt_type: "batch_candidate",
+            tuning_round: Some(tuning_round),
+            candidate_name: candidate_name.as_deref(),
+            selected: run_id == selected_run_id,
+            score: Some(candidate_score(run, target_temp_c).to_value()),
             budget_elapsed_seconds_value,
-        ));
+        }));
     }
     records
 }
 
-#[allow(clippy::too_many_arguments)]
-fn round_record_from_summary(
-    summary: &Value,
+struct RoundRecordInput<'a> {
+    summary: &'a Value,
     target_temp_c: i16,
     round_number: usize,
-    label: &str,
+    label: &'a str,
     point: Option<Value>,
-    attempt_type: &str,
+    attempt_type: &'a str,
     tuning_round: Option<u32>,
-    candidate_name: Option<&str>,
+    candidate_name: Option<&'a str>,
     selected: bool,
     score: Option<Value>,
     budget_elapsed_seconds_value: u64,
-) -> Value {
+}
+
+fn round_record_from_summary(input: RoundRecordInput<'_>) -> Value {
+    let RoundRecordInput {
+        summary,
+        target_temp_c,
+        round_number,
+        label,
+        point,
+        attempt_type,
+        tuning_round,
+        candidate_name,
+        selected,
+        score,
+        budget_elapsed_seconds_value,
+    } = input;
     let stage = stage_for_target(summary, target_temp_c).unwrap_or(Value::Null);
     let analysis = stage.get("analysis").cloned().unwrap_or(Value::Null);
     let stable = stage
@@ -2283,15 +2513,30 @@ fn apply_hold_confirm_reseed_nudge(
         .and_then(Value::as_f64)
         .unwrap_or(0.0)
         .max(0.0);
-    let high_side_or_ripple = matches!(
+    apply_high_temp_hold_reseed(
+        &mut point,
         failure_class,
-        "stable_window_broke_high" | "missed_upper_band_before_limit" | "within_gate"
-    ) && (overshoot_c > 3.0 || hold_p2p_c > 3.0);
-    let stable_band_high_side = matches!(
+        target_temp_c,
+        hold_median,
+        hold_p90,
+    );
+    apply_low_temp_hold_reseed(
+        &mut point,
         failure_class,
-        "stable_window_broke_high" | "missed_upper_band_before_limit"
-    ) && (overshoot_c > ThermalFullSpeedStableTracker::STABLE_BAND_C
-        || hold_p2p_c > ThermalFullSpeedStableTracker::STABLE_BAND_C);
+        target_temp_c,
+        overshoot_c,
+        hold_p2p_c,
+    );
+    point
+}
+
+fn apply_high_temp_hold_reseed(
+    point: &mut ThermalCandidatePoint,
+    failure_class: &str,
+    target_temp_c: i16,
+    hold_median: u16,
+    hold_p90: u16,
+) {
     if target_temp_c > 150
         && matches!(
             failure_class,
@@ -2323,8 +2568,7 @@ fn apply_hold_confirm_reseed_nudge(
         point.hold_power_permille = point
             .hold_power_permille
             .saturating_add(80)
-            .min(1_000)
-            .max(700);
+            .clamp(700, 1_000);
         point.hold_reheat_power_permille = point
             .hold_reheat_power_permille
             .saturating_add(60)
@@ -2333,63 +2577,79 @@ fn apply_hold_confirm_reseed_nudge(
         point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_add(4).min(24);
         point.hold_on_centi_c = point.hold_on_centi_c.saturating_add(4).min(60);
     }
-    if target_temp_c <= 150 && (high_side_or_ripple || stable_band_high_side) {
-        let severity_floor_c = if high_side_or_ripple { 3.0 } else { 1.5 };
-        let severity_c = (overshoot_c - severity_floor_c)
-            .max(hold_p2p_c - severity_floor_c)
-            .max(0.0);
-        let mild_high_side = high_side_or_ripple && severity_c < 1.0;
-        let brake_step = if mild_high_side {
-            40
-        } else {
-            ((severity_c * 75.0) + 80.0).round().clamp(80.0, 350.0) as u16
-        };
-        point.brake_distance_centi_c = point
-            .brake_distance_centi_c
-            .saturating_add(brake_step)
-            .max(450)
-            .min(5_000);
-        point.approach_lead_ticks = point
-            .approach_lead_ticks
-            .saturating_add(if severity_c >= 2.0 {
-                2
-            } else if mild_high_side {
-                0
-            } else {
-                1
-            })
-            .min(12);
-        let trim = if severity_c >= 2.0 {
-            120
-        } else if mild_high_side {
-            40
-        } else {
-            80
-        };
-        point.approach_floor_power_permille = point
-            .approach_floor_power_permille
-            .saturating_sub(trim)
-            .max(point.hold_power_permille)
-            .max(100);
-        point.approach_power_permille = point
-            .approach_power_permille
-            .saturating_sub(trim)
-            .max(point.approach_floor_power_permille.saturating_add(80))
-            .min(1_000);
-        point.hold_reheat_power_permille = point
-            .hold_reheat_power_permille
-            .saturating_sub(trim / 2)
-            .max(point.hold_power_permille);
-        point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
-        point.hold_blend_ticks = point.hold_blend_ticks.saturating_sub(1).max(1);
-        point.overshoot_cutoff_centi_c = point.overshoot_cutoff_centi_c.saturating_sub(40).max(80);
-        point.hold_off_centi_c = point
-            .hold_off_centi_c
-            .min(point.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
-    }
-    point
 }
 
+fn apply_low_temp_hold_reseed(
+    point: &mut ThermalCandidatePoint,
+    failure_class: &str,
+    target_temp_c: i16,
+    overshoot_c: f64,
+    hold_p2p_c: f64,
+) {
+    let high_side_or_ripple = matches!(
+        failure_class,
+        "stable_window_broke_high" | "missed_upper_band_before_limit" | "within_gate"
+    ) && (overshoot_c > 3.0 || hold_p2p_c > 3.0);
+    let stable_band_high_side = matches!(
+        failure_class,
+        "stable_window_broke_high" | "missed_upper_band_before_limit"
+    ) && (overshoot_c > ThermalFullSpeedStableTracker::STABLE_BAND_C
+        || hold_p2p_c > ThermalFullSpeedStableTracker::STABLE_BAND_C);
+    if target_temp_c > 150 || (!high_side_or_ripple && !stable_band_high_side) {
+        return;
+    }
+    let severity_floor_c = if high_side_or_ripple { 3.0 } else { 1.5 };
+    let severity_c = (overshoot_c - severity_floor_c)
+        .max(hold_p2p_c - severity_floor_c)
+        .max(0.0);
+    let mild_high_side = high_side_or_ripple && severity_c < 1.0;
+    let brake_step = if mild_high_side {
+        40
+    } else {
+        ((severity_c * 75.0) + 80.0).round().clamp(80.0, 350.0) as u16
+    };
+    point.brake_distance_centi_c = point
+        .brake_distance_centi_c
+        .saturating_add(brake_step)
+        .clamp(450, 5_000);
+    point.approach_lead_ticks = point
+        .approach_lead_ticks
+        .saturating_add(if severity_c >= 2.0 {
+            2
+        } else if mild_high_side {
+            0
+        } else {
+            1
+        })
+        .min(12);
+    let trim = if severity_c >= 2.0 {
+        120
+    } else if mild_high_side {
+        40
+    } else {
+        80
+    };
+    point.approach_floor_power_permille = point
+        .approach_floor_power_permille
+        .saturating_sub(trim)
+        .max(point.hold_power_permille)
+        .max(100);
+    point.approach_power_permille = point
+        .approach_power_permille
+        .saturating_sub(trim)
+        .max(point.approach_floor_power_permille.saturating_add(80))
+        .min(1_000);
+    point.hold_reheat_power_permille = point
+        .hold_reheat_power_permille
+        .saturating_sub(trim / 2)
+        .max(point.hold_power_permille);
+    point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+    point.hold_blend_ticks = point.hold_blend_ticks.saturating_sub(1).max(1);
+    point.overshoot_cutoff_centi_c = point.overshoot_cutoff_centi_c.saturating_sub(40).max(80);
+    point.hold_off_centi_c = point
+        .hold_off_centi_c
+        .min(point.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
+}
 fn stage_for_target(
     summary: &Value,
     target_temp_c: i16,
@@ -3163,13 +3423,62 @@ fn source_preset(profile_mode: ThermalProfileMode) -> &'static str {
     }
 }
 
+fn read_json(path: &Path) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+fn write_json_pretty(
+    path: &Path,
+    value: &Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(value)?)?;
+    Ok(())
+}
+
+fn display_path(path: &Path) -> String {
+    match env::current_dir() {
+        Ok(cwd) => path
+            .strip_prefix(&cwd)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| path.display().to_string()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+fn display_path_string(path: &str) -> String {
+    display_path(Path::new(path))
+}
+
+fn slug(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn round_decimal(value: f64, places: i32) -> f64 {
+    let factor = 10_f64.powi(places);
+    (value * factor).round() / factor
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
+    use super::super::{
         ThermalApproachGuardAnalysis, ThermalFullSpeedStableAnalysis, ThermalStageAnalysis,
         thermal_default_target_point,
     };
+    use super::*;
     use std::{
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
@@ -3820,22 +4129,22 @@ mod tests {
         let mut valid_summary_for_round = valid_summary.clone();
         valid_summary_for_round["files"]["summaryPath"] =
             json!(summary_path.to_string_lossy().into_owned());
-        let round = round_record_from_summary(
-            &valid_summary_for_round,
-            220,
-            1,
-            "tuning 1 / scout",
-            Some(json!({
+        let round = round_record_from_summary(RoundRecordInput {
+            summary: &valid_summary_for_round,
+            target_temp_c: 220,
+            round_number: 1,
+            label: "tuning 1 / scout",
+            point: Some(json!({
                 "targetTempC": 220,
                 "holdPowerPermille": 780,
             })),
-            "scout",
-            Some(1),
-            None,
-            true,
-            None,
-            42,
-        );
+            attempt_type: "scout",
+            tuning_round: Some(1),
+            candidate_name: None,
+            selected: true,
+            score: None,
+            budget_elapsed_seconds_value: 42,
+        });
         let terminal_summary = json!({
             "runId": "terminal-run",
             "error": "isolapurr USB-C telemetry did not advance for 2181ms",
@@ -3922,22 +4231,22 @@ mod tests {
                 },
             }],
         });
-        let round = round_record_from_summary(
-            &summary,
-            100,
-            1,
-            "tuning 1 / batch",
-            Some(json!({
+        let round = round_record_from_summary(RoundRecordInput {
+            summary: &summary,
+            target_temp_c: 100,
+            round_number: 1,
+            label: "tuning 1 / batch",
+            point: Some(json!({
                 "targetTempC": 100,
                 "holdPowerPermille": 500,
             })),
-            "batch_candidate",
-            Some(1),
-            Some("bad-candidate"),
-            true,
-            None,
-            1200,
-        );
+            attempt_type: "batch_candidate",
+            tuning_round: Some(1),
+            candidate_name: Some("bad-candidate"),
+            selected: true,
+            score: None,
+            budget_elapsed_seconds_value: 1200,
+        });
         let accepted_profile = json!({
             "settings": {},
             "points": [{
@@ -4005,24 +4314,24 @@ mod tests {
                 },
             }],
         });
-        let round = round_record_from_summary(
-            &summary,
-            60,
-            1,
-            "tuning 2 / batch candidate 1",
-            Some(json!({
+        let round = round_record_from_summary(RoundRecordInput {
+            summary: &summary,
+            target_temp_c: 60,
+            round_number: 1,
+            label: "tuning 2 / batch candidate 1",
+            point: Some(json!({
                 "targetTempC": 60,
                 "approachPowerPermille": 870,
                 "approachFloorPowerPermille": 580,
                 "brakeDistanceCentiC": 580,
             })),
-            "batch_candidate",
-            Some(2),
-            Some("candidate-1"),
-            true,
-            None,
-            1155,
-        );
+            attempt_type: "batch_candidate",
+            tuning_round: Some(2),
+            candidate_name: Some("candidate-1"),
+            selected: true,
+            score: None,
+            budget_elapsed_seconds_value: 1155,
+        });
         let accepted_profile = json!({
             "settings": {},
             "points": [{
@@ -4094,22 +4403,22 @@ mod tests {
                 },
             }],
         });
-        let round = round_record_from_summary(
-            &summary,
-            220,
-            1,
-            "validation / final profile",
-            Some(json!({
+        let round = round_record_from_summary(RoundRecordInput {
+            summary: &summary,
+            target_temp_c: 220,
+            round_number: 1,
+            label: "validation / final profile",
+            point: Some(json!({
                 "targetTempC": 220,
                 "holdPowerPermille": 780,
             })),
-            "validation",
-            None,
-            Some("final-profile"),
-            true,
-            None,
-            64,
-        );
+            attempt_type: "validation",
+            tuning_round: None,
+            candidate_name: Some("final-profile"),
+            selected: true,
+            score: None,
+            budget_elapsed_seconds_value: 64,
+        });
         let accepted_profile = json!({
             "settings": {},
             "points": [{
@@ -4297,6 +4606,37 @@ mod tests {
 
     #[test]
     fn failed_hold_confirm_boosts_underpowered_high_temp_hold_response() {
+        let (samples_path, profile, summary) =
+            failed_hold_confirm_boosts_underpowered_high_temp_hold_response_fixture();
+        let reseeded =
+            reseed_after_failed_hold_confirm(&profile, 240, &summary).expect("reseed result");
+        let point = reseeded
+            .and_then(|value| explicit_point_value(&value, 240))
+            .expect("240C point");
+
+        assert_eq!(
+            point.get("brakeDistanceCentiC").and_then(Value::as_i64),
+            Some(120)
+        );
+        assert_eq!(
+            point.get("holdPowerPermille").and_then(Value::as_i64),
+            Some(1000)
+        );
+        assert_eq!(
+            point.get("holdReheatPowerPermille").and_then(Value::as_i64),
+            Some(1000)
+        );
+        assert_eq!(
+            point.get("holdKpPermillePerC").and_then(Value::as_i64),
+            Some(20)
+        );
+        assert_eq!(point.get("holdOnCentiC").and_then(Value::as_i64), Some(18));
+
+        let _ = fs::remove_file(samples_path);
+    }
+
+    fn failed_hold_confirm_boosts_underpowered_high_temp_hold_response_fixture()
+    -> (std::path::PathBuf, Value, Value) {
         let sample = |elapsed_ms: i64, phase: &str, temp_c: f64, output_percent: i64| {
             json!({
                 "targetTempC": 240,
@@ -4384,32 +4724,7 @@ mod tests {
                 },
             }],
         });
-
-        let reseeded =
-            reseed_after_failed_hold_confirm(&profile, 240, &summary).expect("reseed result");
-        let point = reseeded
-            .and_then(|value| explicit_point_value(&value, 240))
-            .expect("240C point");
-
-        assert_eq!(
-            point.get("brakeDistanceCentiC").and_then(Value::as_i64),
-            Some(120)
-        );
-        assert_eq!(
-            point.get("holdPowerPermille").and_then(Value::as_i64),
-            Some(1000)
-        );
-        assert_eq!(
-            point.get("holdReheatPowerPermille").and_then(Value::as_i64),
-            Some(1000)
-        );
-        assert_eq!(
-            point.get("holdKpPermillePerC").and_then(Value::as_i64),
-            Some(20)
-        );
-        assert_eq!(point.get("holdOnCentiC").and_then(Value::as_i64), Some(18));
-
-        let _ = fs::remove_file(samples_path);
+        (samples_path, profile, summary)
     }
 
     #[test]
@@ -4985,53 +5300,4 @@ mod tests {
         assert!(nudged.approach_power_permille < point.approach_power_permille);
         assert!(nudged.approach_floor_power_permille < point.approach_floor_power_permille);
     }
-}
-
-fn read_json(path: &Path) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
-}
-
-fn write_json_pretty(
-    path: &Path,
-    value: &Value,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, serde_json::to_vec_pretty(value)?)?;
-    Ok(())
-}
-
-fn display_path(path: &Path) -> String {
-    match env::current_dir() {
-        Ok(cwd) => path
-            .strip_prefix(&cwd)
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| path.display().to_string()),
-        Err(_) => path.display().to_string(),
-    }
-}
-
-fn display_path_string(path: &str) -> String {
-    display_path(Path::new(path))
-}
-
-fn slug(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-        } else if !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    out.trim_matches('-').to_string()
-}
-
-fn round_decimal(value: f64, places: i32) -> f64 {
-    let factor = 10_f64.powi(places);
-    (value * factor).round() / factor
 }

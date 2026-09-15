@@ -1,0 +1,13 @@
+[package]
+name = "rust-style-check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "rust-style-check"
+path = "src/main.rs"
+
+[dependencies]
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
+syn = { version = "2.0", features = ["full", "visit"] }

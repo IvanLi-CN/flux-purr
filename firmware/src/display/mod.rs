@@ -562,14 +562,19 @@ fn draw_startup_splash_version(canvas: &mut DisplayCanvas, version: &str, color:
     let start_x = STARTUP_SPLASH_WORDMARK_CENTER_X - width / 2;
 
     for (character_index, character) in version.iter().copied().enumerate() {
-        for (row, bits) in startup_version_glyph(character).into_iter().enumerate() {
-            for column in 0..GLYPH_WIDTH {
-                if bits & (1 << (GLYPH_WIDTH - 1 - column)) == 0 {
-                    continue;
-                }
-                let x = start_x + character_index as i32 * (GLYPH_WIDTH + LETTER_SPACING) + column;
-                let y = STARTUP_SPLASH_VERSION_BASELINE_Y + row as i32;
-                canvas.pixels_mut()[y as usize * DISPLAY_WIDTH_USIZE + x as usize] = color;
+        let x = start_x + character_index as i32 * (GLYPH_WIDTH + LETTER_SPACING);
+        draw_startup_glyph(canvas, startup_version_glyph(character), x, color);
+    }
+}
+
+fn draw_startup_glyph(canvas: &mut DisplayCanvas, glyph: [u8; 7], x: i32, color: Rgb565) {
+    for (row, bits) in glyph.into_iter().enumerate() {
+        for column in 0..4 {
+            if bits & (1 << (3 - column)) != 0 {
+                let pixel_x = x + column;
+                let pixel_y = STARTUP_SPLASH_VERSION_BASELINE_Y + row as i32;
+                canvas.pixels_mut()[pixel_y as usize * DISPLAY_WIDTH_USIZE + pixel_x as usize] =
+                    color;
             }
         }
     }
@@ -586,7 +591,20 @@ fn render_startup_calibration(canvas: &mut DisplayCanvas, theme: DisplayThemeId)
     let text_mid = MonoTextStyle::new(&FONT_5X8, foreground);
 
     canvas.clear(startup_palette(theme).background).ok();
+    draw_calibration_frame(canvas, border);
+    draw_calibration_markers(canvas, text_small, text_small_black);
+    draw_calibration_palette(canvas, foreground);
+    Text::with_alignment(
+        "GC9D01 160x50 DX15",
+        Point::new(80, 49),
+        text_mid,
+        Alignment::Center,
+    )
+    .draw(canvas)
+    .ok();
+}
 
+fn draw_calibration_frame(canvas: &mut DisplayCanvas, border: PrimitiveStyle<Rgb565>) {
     Rectangle::new(
         Point::new(0, 0),
         Size::new(DISPLAY_WIDTH as u32, DISPLAY_HEIGHT as u32),
@@ -594,61 +612,44 @@ fn render_startup_calibration(canvas: &mut DisplayCanvas, theme: DisplayThemeId)
     .into_styled(border)
     .draw(canvas)
     .ok();
+    for (point, color) in [
+        (Point::new(2, 2), Rgb565::RED),
+        (Point::new(144, 2), Rgb565::GREEN),
+        (Point::new(2, 40), Rgb565::BLUE),
+        (Point::new(144, 40), Rgb565::YELLOW),
+    ] {
+        Rectangle::new(point, Size::new(14, 8))
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(canvas)
+            .ok();
+    }
+}
 
-    Rectangle::new(Point::new(2, 2), Size::new(14, 8))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::RED))
-        .draw(canvas)
-        .ok();
-    Rectangle::new(Point::new(144, 2), Size::new(14, 8))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::GREEN))
-        .draw(canvas)
-        .ok();
-    Rectangle::new(Point::new(2, 40), Size::new(14, 8))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::BLUE))
-        .draw(canvas)
-        .ok();
-    Rectangle::new(Point::new(144, 40), Size::new(14, 8))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::YELLOW))
-        .draw(canvas)
-        .ok();
-
-    Text::with_alignment("TL", Point::new(9, 8), text_small_black, Alignment::Center)
-        .draw(canvas)
-        .ok();
-    Text::with_alignment(
-        "TR",
-        Point::new(151, 8),
-        text_small_black,
-        Alignment::Center,
-    )
-    .draw(canvas)
-    .ok();
-    Text::with_alignment("BL", Point::new(9, 46), text_small, Alignment::Center)
-        .draw(canvas)
-        .ok();
-    Text::with_alignment(
-        "BR",
-        Point::new(151, 46),
-        text_small_black,
-        Alignment::Center,
-    )
-    .draw(canvas)
-    .ok();
-
+fn draw_calibration_markers(
+    canvas: &mut DisplayCanvas,
+    text_small: MonoTextStyle<'_, Rgb565>,
+    text_small_black: MonoTextStyle<'_, Rgb565>,
+) {
+    for (label, point, style) in [
+        ("TL", Point::new(9, 8), text_small_black),
+        ("TR", Point::new(151, 8), text_small_black),
+        ("BL", Point::new(9, 46), text_small),
+        ("BR", Point::new(151, 46), text_small_black),
+        ("UP", Point::new(80, 18), text_small),
+        ("L", Point::new(22, 18), text_small),
+        ("R", Point::new(138, 18), text_small),
+    ] {
+        Text::with_alignment(label, point, style, Alignment::Center)
+            .draw(canvas)
+            .ok();
+    }
     Triangle::new(Point::new(80, 2), Point::new(72, 11), Point::new(88, 11))
         .into_styled(PrimitiveStyle::with_fill(Rgb565::MAGENTA))
         .draw(canvas)
         .ok();
-    Text::with_alignment("UP", Point::new(80, 18), text_small, Alignment::Center)
-        .draw(canvas)
-        .ok();
-    Text::with_alignment("L", Point::new(22, 18), text_small, Alignment::Center)
-        .draw(canvas)
-        .ok();
-    Text::with_alignment("R", Point::new(138, 18), text_small, Alignment::Center)
-        .draw(canvas)
-        .ok();
+}
 
+fn draw_calibration_palette(canvas: &mut DisplayCanvas, foreground: Rgb565) {
     draw_palette_row(
         canvas,
         0,
@@ -683,15 +684,6 @@ fn render_startup_calibration(canvas: &mut DisplayCanvas, theme: DisplayThemeId)
             Rgb565::WHITE,
         ],
     );
-
-    Text::with_alignment(
-        "GC9D01 160x50 DX15",
-        Point::new(80, 49),
-        text_mid,
-        Alignment::Center,
-    )
-    .draw(canvas)
-    .ok();
 }
 
 fn draw_palette_row(
@@ -885,6 +877,11 @@ mod tests {
         let mut canvas = DisplayCanvas::new();
         render_scene_with_theme(SceneId::StartupSplash, &mut canvas, DisplayThemeId::Dark);
 
+        assert_splash_brand_geometry(&canvas);
+        assert_splash_version_geometry(&canvas);
+    }
+
+    fn assert_splash_brand_geometry(canvas: &DisplayCanvas) {
         assert_eq!(canvas.pixels()[0], STARTUP_SPLASH_PALETTE[0]);
         let logo_pixels =
             &canvas.pixels()[11 * DISPLAY_WIDTH_USIZE + 8..39 * DISPLAY_WIDTH_USIZE + 38];
@@ -965,6 +962,9 @@ mod tests {
             canvas.pixels()[24 * DISPLAY_WIDTH_USIZE + 58],
             STARTUP_SPLASH_PALETTE[1]
         );
+    }
+
+    fn assert_splash_version_geometry(canvas: &DisplayCanvas) {
         assert_eq!(STARTUP_SPLASH_VERSION, env!("FLUX_PURR_FW_VERSION"));
         let version_width = STARTUP_SPLASH_VERSION.len().min(18) as i32 * 5 - 1;
         let version_start_x = STARTUP_SPLASH_WORDMARK_CENTER_X - version_width / 2;
@@ -1068,19 +1068,21 @@ mod tests {
         ];
 
         for orientation in orientations {
-            for y in 0..DISPLAY_HEIGHT {
-                for x in 0..DISPLAY_WIDTH {
-                    let (px, py) = panel_transform_coordinates(orientation, x, y);
-                    let physical_index = py as usize * DISPLAY_PHYSICAL_WIDTH_USIZE + px as usize;
-                    assert!(
-                        physical_index < DISPLAY_PIXELS,
-                        "framebuffer index out of range for orientation={} x={} y={}",
-                        orientation as u8,
-                        x,
-                        y
-                    );
-                }
-            }
+            assert_panel_orientation_coordinates(orientation);
+        }
+    }
+
+    fn assert_panel_orientation_coordinates(orientation: Orientation) {
+        for (x, y) in (0..DISPLAY_HEIGHT).flat_map(|y| (0..DISPLAY_WIDTH).map(move |x| (x, y))) {
+            let (px, py) = panel_transform_coordinates(orientation, x, y);
+            let physical_index = py as usize * DISPLAY_PHYSICAL_WIDTH_USIZE + px as usize;
+            assert!(
+                physical_index < DISPLAY_PIXELS,
+                "framebuffer index out of range for orientation={} x={} y={}",
+                orientation as u8,
+                x,
+                y
+            );
         }
     }
 

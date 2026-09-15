@@ -344,138 +344,61 @@ impl FrontPanelInputController {
         capabilities: FrontPanelGestureCapabilities,
     ) -> FrontPanelSampleResult {
         let mut result = FrontPanelSampleResult::new(raw_state);
-
         for raw_key in RawFrontPanelKey::ALL {
-            let logical_key = self.key_map.logical_from_raw(raw_key);
-            let key_gestures = capabilities.gestures_for(logical_key);
-            let pressed = raw_state.is_pressed(raw_key);
-            let tracker = &mut self.trackers[raw_key.index()];
-
-            if pressed != tracker.raw_pressed {
-                tracker.raw_pressed = pressed;
-                tracker.last_raw_change_ms = now_ms;
-
-                if pressed {
-                    tracker.press_started_ms = Some(now_ms);
-                    tracker.long_fired = false;
-                    tracker.next_repeat_ms = None;
-                } else {
-                    tracker.next_repeat_ms = None;
-                    if !tracker.stable_pressed {
-                        tracker.press_started_ms = None;
-                        tracker.long_fired = false;
-                    }
-                }
-            }
-
-            if let Some(released) = tracker.pending_short_release_ms
-                && (!key_gestures.supports(KeyGesture::DoublePress)
-                    || now_ms.saturating_sub(released) > self.timings.double_click_ms)
-            {
-                tracker.pending_short_release_ms = None;
-                if key_gestures.supports(KeyGesture::ShortPress) {
-                    let _ = result.events.push(KeyEvent {
-                        raw_key,
-                        key: logical_key,
-                        gesture: KeyGesture::ShortPress,
-                        at_ms: now_ms,
-                    });
-                }
-            }
-
-            if tracker.raw_pressed != tracker.stable_pressed
-                && now_ms.saturating_sub(tracker.last_raw_change_ms) >= self.timings.debounce_ms
-            {
-                tracker.stable_pressed = tracker.raw_pressed;
-                if tracker.stable_pressed {
-                    tracker.long_fired = false;
-                    tracker.next_repeat_ms = None;
-                } else {
-                    tracker.next_repeat_ms = None;
-                    if tracker.press_started_ms.take().is_some() && !tracker.long_fired {
-                        if key_gestures.supports(KeyGesture::DoublePress) {
-                            if let Some(previous_release_ms) = tracker.pending_short_release_ms {
-                                if now_ms.saturating_sub(previous_release_ms)
-                                    <= self.timings.double_click_ms
-                                {
-                                    tracker.pending_short_release_ms = None;
-                                    let _ = result.events.push(KeyEvent {
-                                        raw_key,
-                                        key: logical_key,
-                                        gesture: KeyGesture::DoublePress,
-                                        at_ms: now_ms,
-                                    });
-                                } else {
-                                    tracker.pending_short_release_ms = Some(now_ms);
-                                }
-                            } else {
-                                tracker.pending_short_release_ms = Some(now_ms);
-                            }
-                        } else if key_gestures.supports(KeyGesture::ShortPress) {
-                            let _ = result.events.push(KeyEvent {
-                                raw_key,
-                                key: logical_key,
-                                gesture: KeyGesture::ShortPress,
-                                at_ms: now_ms,
-                            });
-                        }
-                    }
-                }
-            }
-
-            if tracker.stable_pressed
-                && !tracker.long_fired
-                && key_gestures.supports(KeyGesture::LongPress)
-                && tracker.press_started_ms.is_some_and(|started| {
-                    now_ms.saturating_sub(started) >= self.timings.long_press_ms
-                })
-            {
-                tracker.long_fired = true;
-                tracker.pending_short_release_ms = None;
-                tracker.next_repeat_ms =
-                    Some(now_ms.saturating_add(FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS));
-                let _ = result.events.push(KeyEvent {
-                    raw_key,
-                    key: logical_key,
-                    gesture: KeyGesture::LongPress,
-                    at_ms: now_ms,
-                });
-            }
-
-            if tracker.stable_pressed
-                && tracker.raw_pressed
-                && tracker.long_fired
-                && matches!(logical_key, FrontPanelKey::Up | FrontPanelKey::Down)
-                && tracker
-                    .next_repeat_ms
-                    .is_some_and(|repeat_ms| now_ms >= repeat_ms)
-            {
-                let interval_ms = tracker
-                    .press_started_ms
-                    .map(|started| {
-                        if now_ms.saturating_sub(started)
-                            >= self
-                                .timings
-                                .long_press_ms
-                                .saturating_add(FRONTPANEL_REPEAT_FAST_AFTER_MS)
-                        {
-                            FRONTPANEL_REPEAT_FAST_INTERVAL_MS
-                        } else {
-                            FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS
-                        }
-                    })
-                    .unwrap_or(FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS);
-                tracker.next_repeat_ms = Some(now_ms.saturating_add(interval_ms));
-                let _ = result.events.push(KeyEvent {
-                    raw_key,
-                    key: logical_key,
-                    gesture: KeyGesture::RepeatPress,
-                    at_ms: now_ms,
-                });
-            }
+            self.sample_key(now_ms, raw_state, capabilities, raw_key, &mut result);
         }
-
         result
+    }
+
+    fn sample_key(
+        &mut self,
+        now_ms: u64,
+        raw_state: FrontPanelRawState,
+        capabilities: FrontPanelGestureCapabilities,
+        raw_key: RawFrontPanelKey,
+        result: &mut FrontPanelSampleResult,
+    ) {
+        let logical_key = self.key_map.logical_from_raw(raw_key);
+        let gestures = capabilities.gestures_for(logical_key);
+        let timings = self.timings;
+        let tracker = &mut self.trackers[raw_key.index()];
+        update_raw_tracker(tracker, raw_state.is_pressed(raw_key), now_ms);
+        emit_pending_short_press(
+            tracker,
+            now_ms,
+            timings,
+            raw_key,
+            logical_key,
+            gestures,
+            result,
+        );
+        update_stable_tracker(
+            tracker,
+            now_ms,
+            timings,
+            raw_key,
+            logical_key,
+            gestures,
+            result,
+        );
+        emit_long_press(
+            tracker,
+            now_ms,
+            timings,
+            raw_key,
+            logical_key,
+            gestures,
+            result,
+        );
+        emit_repeat_press(
+            tracker,
+            now_ms,
+            timings,
+            raw_key,
+            logical_key,
+            gestures,
+            result,
+        );
     }
 
     pub fn clear_pending_short_press(&mut self, raw_key: RawFrontPanelKey) {
@@ -486,6 +409,215 @@ impl FrontPanelInputController {
         tracker.long_fired = false;
         tracker.next_repeat_ms = None;
         tracker.pending_short_release_ms = None;
+    }
+}
+
+fn update_raw_tracker(tracker: &mut KeyTracker, pressed: bool, now_ms: u64) {
+    if pressed == tracker.raw_pressed {
+        return;
+    }
+    tracker.raw_pressed = pressed;
+    tracker.last_raw_change_ms = now_ms;
+    tracker.next_repeat_ms = None;
+    if pressed {
+        tracker.press_started_ms = Some(now_ms);
+        tracker.long_fired = false;
+    } else if !tracker.stable_pressed {
+        tracker.press_started_ms = None;
+        tracker.long_fired = false;
+    }
+}
+
+fn emit_pending_short_press(
+    tracker: &mut KeyTracker,
+    now_ms: u64,
+    timings: FrontPanelInputTimings,
+    raw_key: RawFrontPanelKey,
+    logical_key: FrontPanelKey,
+    gestures: KeyGestureSet,
+    result: &mut FrontPanelSampleResult,
+) {
+    let Some(released) = tracker.pending_short_release_ms else {
+        return;
+    };
+    if gestures.supports(KeyGesture::DoublePress)
+        && now_ms.saturating_sub(released) <= timings.double_click_ms
+    {
+        return;
+    }
+    tracker.pending_short_release_ms = None;
+    push_key_event(
+        result,
+        raw_key,
+        logical_key,
+        KeyGesture::ShortPress,
+        now_ms,
+        gestures,
+    );
+}
+
+fn update_stable_tracker(
+    tracker: &mut KeyTracker,
+    now_ms: u64,
+    timings: FrontPanelInputTimings,
+    raw_key: RawFrontPanelKey,
+    logical_key: FrontPanelKey,
+    gestures: KeyGestureSet,
+    result: &mut FrontPanelSampleResult,
+) {
+    if tracker.raw_pressed == tracker.stable_pressed
+        || now_ms.saturating_sub(tracker.last_raw_change_ms) < timings.debounce_ms
+    {
+        return;
+    }
+    tracker.stable_pressed = tracker.raw_pressed;
+    tracker.next_repeat_ms = None;
+    if tracker.stable_pressed {
+        tracker.long_fired = false;
+        return;
+    }
+    if tracker.press_started_ms.take().is_some() && !tracker.long_fired {
+        emit_release_gesture(
+            tracker,
+            now_ms,
+            timings,
+            raw_key,
+            logical_key,
+            gestures,
+            result,
+        );
+    }
+}
+
+fn emit_release_gesture(
+    tracker: &mut KeyTracker,
+    now_ms: u64,
+    timings: FrontPanelInputTimings,
+    raw_key: RawFrontPanelKey,
+    logical_key: FrontPanelKey,
+    gestures: KeyGestureSet,
+    result: &mut FrontPanelSampleResult,
+) {
+    if !gestures.supports(KeyGesture::DoublePress) {
+        push_key_event(
+            result,
+            raw_key,
+            logical_key,
+            KeyGesture::ShortPress,
+            now_ms,
+            gestures,
+        );
+        return;
+    }
+    let Some(previous_release_ms) = tracker.pending_short_release_ms else {
+        tracker.pending_short_release_ms = Some(now_ms);
+        return;
+    };
+    if now_ms.saturating_sub(previous_release_ms) <= timings.double_click_ms {
+        tracker.pending_short_release_ms = None;
+        push_key_event(
+            result,
+            raw_key,
+            logical_key,
+            KeyGesture::DoublePress,
+            now_ms,
+            gestures,
+        );
+    } else {
+        tracker.pending_short_release_ms = Some(now_ms);
+    }
+}
+
+fn emit_long_press(
+    tracker: &mut KeyTracker,
+    now_ms: u64,
+    timings: FrontPanelInputTimings,
+    raw_key: RawFrontPanelKey,
+    logical_key: FrontPanelKey,
+    gestures: KeyGestureSet,
+    result: &mut FrontPanelSampleResult,
+) {
+    let due = tracker.stable_pressed
+        && !tracker.long_fired
+        && gestures.supports(KeyGesture::LongPress)
+        && tracker
+            .press_started_ms
+            .is_some_and(|started| now_ms.saturating_sub(started) >= timings.long_press_ms);
+    if !due {
+        return;
+    }
+    tracker.long_fired = true;
+    tracker.pending_short_release_ms = None;
+    tracker.next_repeat_ms = Some(now_ms.saturating_add(FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS));
+    push_key_event(
+        result,
+        raw_key,
+        logical_key,
+        KeyGesture::LongPress,
+        now_ms,
+        gestures,
+    );
+}
+
+fn emit_repeat_press(
+    tracker: &mut KeyTracker,
+    now_ms: u64,
+    timings: FrontPanelInputTimings,
+    raw_key: RawFrontPanelKey,
+    logical_key: FrontPanelKey,
+    gestures: KeyGestureSet,
+    result: &mut FrontPanelSampleResult,
+) {
+    let repeat_due = tracker.stable_pressed
+        && tracker.raw_pressed
+        && tracker.long_fired
+        && matches!(logical_key, FrontPanelKey::Up | FrontPanelKey::Down)
+        && tracker
+            .next_repeat_ms
+            .is_some_and(|repeat_ms| now_ms >= repeat_ms);
+    if !repeat_due {
+        return;
+    }
+    let interval_ms = tracker
+        .press_started_ms
+        .map(|started| {
+            if now_ms.saturating_sub(started)
+                >= timings
+                    .long_press_ms
+                    .saturating_add(FRONTPANEL_REPEAT_FAST_AFTER_MS)
+            {
+                FRONTPANEL_REPEAT_FAST_INTERVAL_MS
+            } else {
+                FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS
+            }
+        })
+        .unwrap_or(FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS);
+    tracker.next_repeat_ms = Some(now_ms.saturating_add(interval_ms));
+    push_key_event(
+        result,
+        raw_key,
+        logical_key,
+        KeyGesture::RepeatPress,
+        now_ms,
+        gestures,
+    );
+}
+
+fn push_key_event(
+    result: &mut FrontPanelSampleResult,
+    raw_key: RawFrontPanelKey,
+    logical_key: FrontPanelKey,
+    gesture: KeyGesture,
+    now_ms: u64,
+    gestures: KeyGestureSet,
+) {
+    if gestures.supports(gesture) {
+        let _ = result.events.push(KeyEvent {
+            raw_key,
+            key: logical_key,
+            gesture,
+            at_ms: now_ms,
+        });
     }
 }
 

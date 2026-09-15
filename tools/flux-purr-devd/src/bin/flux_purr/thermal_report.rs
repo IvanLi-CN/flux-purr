@@ -78,77 +78,7 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
         _ => legacy_preliminary_review_entries(&legacy_bundle, &target_samples)?,
     };
 
-    let source = legacy_bundle.get("source").and_then(Value::as_object);
-    let target = legacy_bundle.get("target").and_then(Value::as_object);
-    let source_device_id = source
-        .and_then(|payload| {
-            payload
-                .get("sourceDeviceId")
-                .or_else(|| payload.get("deviceId"))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| legacy_bundle.get("sourceDeviceId").and_then(Value::as_str))
-        .unwrap_or("unknown-source")
-        .to_string();
-    let device_id = target
-        .and_then(|payload| payload.get("deviceId").and_then(Value::as_str))
-        .or_else(|| legacy_bundle.get("deviceId").and_then(Value::as_str))
-        .or_else(|| source.and_then(|payload| payload.get("deviceId").and_then(Value::as_str)))
-        .unwrap_or("unknown-device")
-        .to_string();
-    let port_path = target
-        .and_then(|payload| {
-            payload
-                .get("port")
-                .or_else(|| payload.get("portPath"))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            source.and_then(|payload| {
-                payload
-                    .get("port")
-                    .or_else(|| payload.get("portPath"))
-                    .and_then(Value::as_str)
-            })
-        })
-        .or_else(|| {
-            legacy_bundle
-                .get("port")
-                .or_else(|| legacy_bundle.get("portPath"))
-                .and_then(Value::as_str)
-        })
-        .unwrap_or(UNKNOWN_LEGACY_METADATA)
-        .to_string();
-
-    let selected_mode = legacy_bundle
-        .get("selectedMode")
-        .and_then(Value::as_str)
-        .unwrap_or(UNKNOWN_LEGACY_METADATA)
-        .to_string();
-    let resolved_bank = legacy_bundle
-        .get("resolvedBank")
-        .and_then(Value::as_str)
-        .unwrap_or(UNKNOWN_LEGACY_METADATA)
-        .to_string();
-    let detected_source_class = legacy_bundle
-        .get("detectedSourceClass")
-        .and_then(Value::as_str)
-        .unwrap_or(UNKNOWN_LEGACY_METADATA)
-        .to_string();
-    let source_preset = legacy_bundle
-        .get("sourcePreset")
-        .and_then(Value::as_str)
-        .unwrap_or(UNKNOWN_LEGACY_METADATA)
-        .to_string();
-    let provider = legacy_bundle
-        .get("provider")
-        .and_then(Value::as_str)
-        .unwrap_or(UNKNOWN_LEGACY_METADATA)
-        .to_string();
-    let generated_at = legacy_bundle
-        .get("generatedAt")
-        .cloned()
-        .unwrap_or_else(|| json!(current_unix_millis()));
+    let metadata = legacy_report_metadata(&legacy_bundle);
     let entry_targets_c = entries
         .iter()
         .filter_map(|entry| entry.get("target").and_then(Value::as_i64))
@@ -160,23 +90,23 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
         i16_array_field(&legacy_bundle, "tuningTargetsC").unwrap_or(fallback_targets_c);
     let tuning_execution_order_c = unique_i16_preserve_order(entry_targets_c.clone());
 
-    let bundle = write_preliminary_review_bundle(
-        &output_dir,
-        &accepted_profile,
+    let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+        bundle_dir: &output_dir,
+        accepted_profile: &accepted_profile,
         entries,
-        &source_device_id,
-        &device_id,
-        &port_path,
-        0,
-        generated_at,
-        &selected_mode,
-        &resolved_bank,
-        &detected_source_class,
-        &tuning_targets_c,
-        &tuning_execution_order_c,
-        &source_preset,
-        &provider,
-    )?;
+        source_id: &metadata.source_device_id,
+        device_id: &metadata.device_id,
+        port_path: &metadata.port_path,
+        tuning_budget_seconds: 0,
+        generated_at: metadata.generated_at,
+        selected_mode: &metadata.selected_mode,
+        resolved_bank: &metadata.resolved_bank,
+        detected_source_class: &metadata.detected_source_class,
+        tuning_targets_c: &tuning_targets_c,
+        tuning_execution_order_c: &tuning_execution_order_c,
+        source_preset: &metadata.source_preset,
+        provider: &metadata.provider,
+    })?;
 
     Ok(json!({
         "ok": true,
@@ -192,6 +122,69 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
         "acceptedProfileRole": bundle.get("acceptedProfileRole").cloned().unwrap_or(Value::Null),
         "tuningTargetsC": bundle.get("tuningTargetsC").cloned().unwrap_or(Value::Null),
     }))
+}
+
+struct LegacyReportMetadata {
+    source_device_id: String,
+    device_id: String,
+    port_path: String,
+    selected_mode: String,
+    resolved_bank: String,
+    detected_source_class: String,
+    source_preset: String,
+    provider: String,
+    generated_at: Value,
+}
+
+fn legacy_report_metadata(bundle: &Value) -> LegacyReportMetadata {
+    let source = bundle.get("source").and_then(Value::as_object);
+    let target = bundle.get("target").and_then(Value::as_object);
+    let source_device_id = source
+        .and_then(|value| {
+            value
+                .get("sourceDeviceId")
+                .or_else(|| value.get("deviceId"))
+        })
+        .and_then(Value::as_str)
+        .or_else(|| bundle.get("sourceDeviceId").and_then(Value::as_str))
+        .unwrap_or("unknown-source")
+        .to_string();
+    let device_id = target
+        .and_then(|value| value.get("deviceId"))
+        .or_else(|| bundle.get("deviceId"))
+        .or_else(|| source.and_then(|value| value.get("deviceId")))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown-device")
+        .to_string();
+    let port_path = target
+        .and_then(|value| value.get("port").or_else(|| value.get("portPath")))
+        .or_else(|| source.and_then(|value| value.get("port").or_else(|| value.get("portPath"))))
+        .or_else(|| bundle.get("port").or_else(|| bundle.get("portPath")))
+        .and_then(Value::as_str)
+        .unwrap_or(UNKNOWN_LEGACY_METADATA)
+        .to_string();
+    LegacyReportMetadata {
+        source_device_id,
+        device_id,
+        port_path,
+        selected_mode: legacy_string_field(bundle, "selectedMode"),
+        resolved_bank: legacy_string_field(bundle, "resolvedBank"),
+        detected_source_class: legacy_string_field(bundle, "detectedSourceClass"),
+        source_preset: legacy_string_field(bundle, "sourcePreset"),
+        provider: legacy_string_field(bundle, "provider"),
+        generated_at: bundle
+            .get("generatedAt")
+            .cloned()
+            .unwrap_or_else(|| json!(current_unix_millis())),
+    }
+}
+
+fn legacy_string_field(bundle: &Value, key: &str) -> String {
+    bundle
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or(UNKNOWN_LEGACY_METADATA)
+        .to_string()
 }
 
 /// Adapt a completed raw self-test into the canonical HTML evidence bundle.
@@ -238,10 +231,80 @@ pub(super) fn render_self_test_evidence_bundle(
         )
         .into());
     }
+    let evidence = collect_self_test_evidence(&run_dirs, &summaries)?;
+    let hold_seconds = summary
+        .pointer("/parameters/holdSeconds")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let entries = build_self_test_report_entries(
+        &evidence.target_temps_c,
+        &evidence.stage_sources,
+        hold_seconds,
+    )?;
+
+    let metadata = self_test_report_metadata(summary);
+    let active_model = thermal_plant_model_snapshot(&evidence.all_samples);
+    let accepted_profile = json!({
+        "kind": "thermal_plant_model_evidence",
+        "role": "runtime_model_snapshot",
+        "profileCompatibility": "not_a_point_local_profile",
+        "runIds": run_dirs.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
+        "model": active_model,
+    });
+
+    let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+        bundle_dir: &output_dir,
+        accepted_profile: &accepted_profile,
+        entries,
+        source_id: &metadata.source_id,
+        device_id: &metadata.device_id,
+        port_path: &metadata.port_path,
+        tuning_budget_seconds: 0,
+        generated_at: summary
+            .get("generatedAt")
+            .or_else(|| summary.get("capturedAtUnixMs"))
+            .cloned()
+            .unwrap_or_else(|| json!(current_unix_millis())),
+        selected_mode: &metadata.selected_mode,
+        resolved_bank: &metadata.resolved_bank,
+        detected_source_class: &metadata.detected_source_class,
+        tuning_targets_c: &evidence.target_temps_c,
+        tuning_execution_order_c: &evidence.target_temps_c,
+        source_preset: &metadata.source_preset,
+        provider: &metadata.provider,
+    })?;
+
+    Ok(json!({
+        "ok": true,
+        "operation": "thermal_report.render_self_test_evidence_bundle",
+        "runDirs": run_dirs.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
+        "outputDir": display_path(&output_dir),
+        "bundleJson": bundle.pointer("/files/bundleJson").cloned().unwrap_or(Value::Null),
+        "bundleIndexHtml": bundle.pointer("/files/indexHtml").cloned().unwrap_or(Value::Null),
+        "samplesPath": bundle.pointer("/files/samplesPath").cloned().unwrap_or(Value::Null),
+        "acceptedProfilePath": bundle.pointer("/files/acceptedProfilePath").cloned().unwrap_or(Value::Null),
+        "kind": bundle.get("kind").cloned().unwrap_or(Value::Null),
+        "bundleDisposition": bundle.get("bundleDisposition").cloned().unwrap_or(Value::Null),
+        "targetsC": evidence.target_temps_c,
+    }))
+}
+
+type SelfTestStageSource = (Value, String, Value, Vec<Value>);
+
+struct SelfTestEvidenceCollection {
+    target_temps_c: Vec<i16>,
+    stage_sources: BTreeMap<i16, SelfTestStageSource>,
+    all_samples: BTreeMap<i16, Vec<Value>>,
+}
+
+fn collect_self_test_evidence(
+    run_dirs: &[PathBuf],
+    summaries: &[Value],
+) -> Result<SelfTestEvidenceCollection, Box<dyn std::error::Error + Send + Sync>> {
     let mut target_temps_c = Vec::new();
     let mut stage_sources = BTreeMap::new();
     let mut all_samples = BTreeMap::<i16, Vec<Value>>::new();
-    for (run_dir, summary) in run_dirs.iter().zip(summaries.iter()) {
+    for (run_dir, summary) in run_dirs.iter().zip(summaries) {
         if summary.get("kind").and_then(Value::as_str) != Some("thermal_self_test") {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -263,10 +326,12 @@ pub(super) fn render_self_test_evidence_bundle(
             .to_string();
         for target in self_test_targets(summary)? {
             target_temps_c.push(target);
-            if let Some(stage) = applied.iter().find(|stage| {
+            let Some(stage) = applied.iter().find(|stage| {
                 stage.get("targetTempC").and_then(Value::as_i64) == Some(i64::from(target))
-            }) && stage.get("stopReason").and_then(Value::as_str) == Some("completed")
-            {
+            }) else {
+                continue;
+            };
+            if stage.get("stopReason").and_then(Value::as_str) == Some("completed") {
                 stage_sources.insert(
                     target,
                     (
@@ -282,12 +347,19 @@ pub(super) fn render_self_test_evidence_bundle(
             all_samples.entry(target).or_default().extend(samples);
         }
     }
-    let target_temps_c = unique_i16_preserve_order(target_temps_c);
-    let hold_seconds = summary
-        .pointer("/parameters/holdSeconds")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let entries = target_temps_c
+    Ok(SelfTestEvidenceCollection {
+        target_temps_c: unique_i16_preserve_order(target_temps_c),
+        stage_sources,
+        all_samples,
+    })
+}
+
+fn build_self_test_report_entries(
+    targets: &[i16],
+    stage_sources: &BTreeMap<i16, SelfTestStageSource>,
+    hold_seconds: u64,
+) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    targets
         .iter()
         .map(|target_temp_c| {
             let (stage_summary, run_id, stage, raw_samples) =
@@ -328,84 +400,62 @@ pub(super) fn render_self_test_evidence_bundle(
                 full_speed_to_stable,
             ))
         })
-        .collect::<Result<Vec<_>, Box<dyn std::error::Error + Send + Sync>>>()?;
+        .collect()
+}
 
+struct SelfTestReportMetadata {
+    source_id: String,
+    device_id: String,
+    port_path: String,
+    selected_mode: String,
+    resolved_bank: String,
+    detected_source_class: String,
+    source_preset: String,
+    provider: String,
+}
+
+fn self_test_report_metadata(summary: &Value) -> SelfTestReportMetadata {
     let source = summary.get("source").and_then(Value::as_object);
-    let source_id = source
-        .and_then(|value| {
-            value
-                .get("deviceId")
-                .or_else(|| value.get("id"))
-                .and_then(Value::as_str)
-        })
-        .unwrap_or(UNKNOWN_LEGACY_METADATA);
-    let device_id = summary
-        .pointer("/target/deviceId")
-        .and_then(Value::as_str)
-        .unwrap_or(UNKNOWN_LEGACY_METADATA);
-    let selected_mode = source
-        .and_then(|value| value.get("selectedMode").and_then(Value::as_str))
-        .unwrap_or(UNKNOWN_LEGACY_METADATA);
-    let resolved_bank = source
-        .and_then(|value| value.get("resolvedBank").and_then(Value::as_str))
-        .unwrap_or(UNKNOWN_LEGACY_METADATA);
-    let detected_source_class = source
-        .and_then(|value| value.get("detectedSourceClass").and_then(Value::as_str))
-        .unwrap_or(UNKNOWN_LEGACY_METADATA);
-    let source_preset = self_test_source_preset(source);
-    let provider = source
-        .and_then(|value| value.get("kind").and_then(Value::as_str))
-        .map(provider_name)
-        .unwrap_or(UNKNOWN_LEGACY_METADATA);
-    let port_path = summary
-        .pointer("/target/port")
-        .or_else(|| summary.pointer("/target/portPath"))
-        .and_then(Value::as_str)
-        .unwrap_or(UNKNOWN_LEGACY_METADATA);
-    let active_model = thermal_plant_model_snapshot(&all_samples);
-    let accepted_profile = json!({
-        "kind": "thermal_plant_model_evidence",
-        "role": "runtime_model_snapshot",
-        "profileCompatibility": "not_a_point_local_profile",
-        "runIds": run_dirs.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
-        "model": active_model,
-    });
-
-    let bundle = write_preliminary_review_bundle(
-        &output_dir,
-        &accepted_profile,
-        entries,
-        source_id,
-        device_id,
-        port_path,
-        0,
-        summary
-            .get("generatedAt")
-            .or_else(|| summary.get("capturedAtUnixMs"))
-            .cloned()
-            .unwrap_or_else(|| json!(current_unix_millis())),
-        selected_mode,
-        resolved_bank,
-        detected_source_class,
-        &target_temps_c,
-        &target_temps_c,
-        &source_preset,
-        provider,
-    )?;
-
-    Ok(json!({
-        "ok": true,
-        "operation": "thermal_report.render_self_test_evidence_bundle",
-        "runDirs": run_dirs.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
-        "outputDir": display_path(&output_dir),
-        "bundleJson": bundle.pointer("/files/bundleJson").cloned().unwrap_or(Value::Null),
-        "bundleIndexHtml": bundle.pointer("/files/indexHtml").cloned().unwrap_or(Value::Null),
-        "samplesPath": bundle.pointer("/files/samplesPath").cloned().unwrap_or(Value::Null),
-        "acceptedProfilePath": bundle.pointer("/files/acceptedProfilePath").cloned().unwrap_or(Value::Null),
-        "kind": bundle.get("kind").cloned().unwrap_or(Value::Null),
-        "bundleDisposition": bundle.get("bundleDisposition").cloned().unwrap_or(Value::Null),
-        "targetsC": target_temps_c,
-    }))
+    SelfTestReportMetadata {
+        source_id: source
+            .and_then(|value| value.get("deviceId").or_else(|| value.get("id")))
+            .and_then(Value::as_str)
+            .unwrap_or(UNKNOWN_LEGACY_METADATA)
+            .to_string(),
+        device_id: summary
+            .pointer("/target/deviceId")
+            .and_then(Value::as_str)
+            .unwrap_or(UNKNOWN_LEGACY_METADATA)
+            .to_string(),
+        port_path: summary
+            .pointer("/target/port")
+            .or_else(|| summary.pointer("/target/portPath"))
+            .and_then(Value::as_str)
+            .unwrap_or(UNKNOWN_LEGACY_METADATA)
+            .to_string(),
+        selected_mode: source
+            .and_then(|value| value.get("selectedMode"))
+            .and_then(Value::as_str)
+            .unwrap_or(UNKNOWN_LEGACY_METADATA)
+            .to_string(),
+        resolved_bank: source
+            .and_then(|value| value.get("resolvedBank"))
+            .and_then(Value::as_str)
+            .unwrap_or(UNKNOWN_LEGACY_METADATA)
+            .to_string(),
+        detected_source_class: source
+            .and_then(|value| value.get("detectedSourceClass"))
+            .and_then(Value::as_str)
+            .unwrap_or(UNKNOWN_LEGACY_METADATA)
+            .to_string(),
+        source_preset: self_test_source_preset(source),
+        provider: source
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            .map(provider_name)
+            .unwrap_or(UNKNOWN_LEGACY_METADATA)
+            .to_string(),
+    }
 }
 
 fn infer_self_test_output_dir(run_dir: &Path) -> PathBuf {
@@ -473,25 +523,14 @@ fn self_test_report_entry(
                 None => Some("full_speed_to_stable_missing"),
             }
         });
-    if stage_completed
-        && !failures.iter().any(|failure| {
-            matches!(
-                failure.get("reason").and_then(Value::as_str),
-                Some("full_speed_to_stable" | "full_speed_to_stable_missing")
-            )
-        })
-        && let Some(reason) = replay_gate_failure_reason
-    {
-        failures.push(json!({
-            "targetTempC": target_temp_c,
-            "reason": reason,
-            "limit": full_speed_limit_ms,
-            "settleTimeMs": full_speed_to_stable.get("settleTimeMs").cloned().unwrap_or(Value::Null),
-            "warmupExitedAtMs": full_speed_to_stable.get("warmupExitedAtMs").cloned().unwrap_or(Value::Null),
-            "stableWindowStartedAtMs": full_speed_to_stable.get("stableWindowStartedAtMs").cloned().unwrap_or(Value::Null),
-            "failureReason": full_speed_to_stable.get("failureReason").cloned().unwrap_or(Value::Null),
-        }));
-    }
+    append_replay_gate_failure(
+        &mut failures,
+        stage_completed,
+        replay_gate_failure_reason,
+        target_temp_c,
+        full_speed_limit_ms,
+        &full_speed_to_stable,
+    );
     let passed = stage_completed && failures.is_empty();
     let failure_reason = failures
         .first()
@@ -564,6 +603,36 @@ fn self_test_report_entry(
         "samples": samples,
         "holdCheck": hold_check,
     })
+}
+
+fn append_replay_gate_failure(
+    failures: &mut Vec<Value>,
+    stage_completed: bool,
+    reason: Option<&str>,
+    target_temp_c: i16,
+    limit_ms: u64,
+    full_speed_to_stable: &Value,
+) {
+    if !stage_completed
+        || failures.iter().any(|failure| {
+            matches!(
+                failure.get("reason").and_then(Value::as_str),
+                Some("full_speed_to_stable" | "full_speed_to_stable_missing")
+            )
+        })
+    {
+        return;
+    }
+    let Some(reason) = reason else { return };
+    failures.push(json!({
+        "targetTempC": target_temp_c,
+        "reason": reason,
+        "limit": limit_ms,
+        "settleTimeMs": full_speed_to_stable.get("settleTimeMs").cloned().unwrap_or(Value::Null),
+        "warmupExitedAtMs": full_speed_to_stable.get("warmupExitedAtMs").cloned().unwrap_or(Value::Null),
+        "stableWindowStartedAtMs": full_speed_to_stable.get("stableWindowStartedAtMs").cloned().unwrap_or(Value::Null),
+        "failureReason": full_speed_to_stable.get("failureReason").cloned().unwrap_or(Value::Null),
+    }));
 }
 
 fn self_test_source_preset(source: Option<&Map<String, Value>>) -> String {
@@ -956,78 +1025,117 @@ fn legacy_preliminary_review_entries(
     legacy_bundle: &Value,
     grouped_target_samples: &BTreeMap<i16, Vec<Value>>,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut entries = Vec::new();
     let Some(targets) = legacy_bundle.get("targets").and_then(Value::as_array) else {
-        return Ok(entries);
+        return Ok(Vec::new());
     };
-    for target_payload in targets {
-        let target_temp_c = value_as_i16(target_payload.get("targetTempC").ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "legacy preliminary target missing targetTempC",
-            )
-        })?)?;
-        let hold_check = target_payload
-            .get("holdCheck")
-            .cloned()
-            .filter(|value| value.is_object())
-            .unwrap_or_else(|| json!({}));
-        let variants = target_payload
-            .get("variants")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let effective_point =
-            sanitize_point(target_payload.get("effectivePoint"), Some(target_temp_c));
-        let raw_target_samples = grouped_target_samples
-            .get(&target_temp_c)
-            .cloned()
-            .unwrap_or_default();
-        let target_segments = split_samples_on_time_reset(&raw_target_samples);
-        let top_level_samples = target_segments
-            .last()
-            .map(|segment| normalized_sorted_samples(segment))
-            .unwrap_or_default();
+    targets
+        .iter()
+        .map(|target| {
+            legacy_preliminary_review_entry(legacy_bundle, grouped_target_samples, target)
+        })
+        .collect()
+}
 
-        let mut rounds = Vec::new();
-        let selected_round = variants.len().max(1);
-        for (index, variant) in variants.iter().enumerate() {
-            let Some(variant_object) = variant.as_object() else {
-                continue;
-            };
-            let variant_point =
-                sanitize_point(variant_object.get("tunedPoint"), Some(target_temp_c));
-            let metrics = variant_object
-                .get("metrics")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            let variant_samples = sort_samples_by_time(
-                variant_object
-                    .get("samples")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .map(|sample| {
-                        let source = sample.get("sourceTelemetry").and_then(Value::as_object);
-                        json!({
-                            "t": round_decimal(sample.get("elapsedMs").and_then(Value::as_f64).unwrap_or(0.0) / 1000.0, 3),
-                            "temp": sample.get("currentTempC").cloned().unwrap_or(Value::Null),
-                            "filtered": sample.get("heaterFilteredTempC").cloned().unwrap_or(Value::Null),
-                            "control": sample.get("heaterControlTempC").cloned().unwrap_or(Value::Null),
-                            "controlGuarded": sample.get("heaterControlMeasurementGuarded").cloned().unwrap_or(Value::Null),
-                            "command": sample.get("heaterOutputPercent").cloned().unwrap_or(Value::Null),
-                            "output": sample.get("heaterPhysicalOutputPercent").cloned().unwrap_or(Value::Null),
-                            "requestV": Value::Null,
-                            "phase": sample.get("heaterControlPhase").cloned().unwrap_or(Value::Null),
-                            "sourceVoltageV": number_to_json(source.and_then(|payload| payload.get("voltageMv").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
-                            "sourceCurrentA": number_to_json(source.and_then(|payload| payload.get("currentMa").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
-                            "sourcePowerW": number_to_json(source.and_then(|payload| payload.get("powerMw").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
-                        })
-                    })
-                    .collect(),
-            );
-            rounds.push(json!({
+fn legacy_preliminary_review_entry(
+    legacy_bundle: &Value,
+    grouped_target_samples: &BTreeMap<i16, Vec<Value>>,
+    target_payload: &Value,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let target_temp_c = value_as_i16(target_payload.get("targetTempC").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "legacy preliminary target missing targetTempC",
+        )
+    })?)?;
+    let hold_check = target_payload
+        .get("holdCheck")
+        .cloned()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| json!({}));
+    let variants = target_payload
+        .get("variants")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let effective_point = sanitize_point(target_payload.get("effectivePoint"), Some(target_temp_c));
+    let raw_samples = grouped_target_samples
+        .get(&target_temp_c)
+        .cloned()
+        .unwrap_or_default();
+    let top_level_samples = split_samples_on_time_reset(&raw_samples)
+        .last()
+        .map(|segment| normalized_sorted_samples(segment))
+        .unwrap_or_default();
+    let rounds = legacy_preliminary_variant_rounds(&variants, target_temp_c);
+    let full_speed_limit_ms = if target_temp_c <= 150 { 10_000 } else { 5_000 };
+    let passed = hold_check
+        .get("passed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let failure_reason = hold_check
+        .get("failureReason")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let failures = preliminary_hold_failures(target_temp_c, passed, &hold_check, &failure_reason);
+    Ok(json!({
+        "runId": hold_check.get("confirmRunId").cloned().unwrap_or_else(|| legacy_bundle.get("runId").cloned().unwrap_or_else(|| json!(format!("legacy-{target_temp_c}")))),
+        "target": target_temp_c,
+        "targetTempC": target_temp_c,
+        "ok": passed,
+        "saved": false,
+        "evidence": "preliminary_review",
+        "budgetOutcome": if passed { "completed" } else { "not_converged" },
+        "timeSpentSeconds": int_round_json(top_level_samples.last().and_then(|sample| sample.get("t")).and_then(Value::as_f64)),
+        "roundCount": rounds.len(),
+        "validTestCount": rounds.iter().filter(|round| round.get("evidenceValid").and_then(Value::as_bool) != Some(false)).count(),
+        "invalidTestCount": rounds.iter().filter(|round| round.get("evidenceValid").and_then(Value::as_bool) == Some(false)).count(),
+        "approachReference": { "limitMs": full_speed_limit_ms },
+        "point": effective_point.clone().unwrap_or(Value::Null),
+        "truthPoint": effective_point.unwrap_or(Value::Null),
+        "pointSource": "review_candidate_snapshot",
+        "rounds": rounds,
+        "result": {
+            "stopReason": hold_check.get("stopReason").cloned().unwrap_or_else(|| if passed { json!("completed") } else { failure_reason.clone() }),
+            "maxOvershootC": hold_check.get("maxOvershootC").cloned().unwrap_or(Value::Null),
+            "holdPeakToPeakC": hold_check.get("holdPeakToPeakC").cloned().unwrap_or(Value::Null),
+            "fullSpeedToStable": { "limitMs": full_speed_limit_ms, "settleTimeMs": Value::Null, "failureReason": failure_reason.clone() },
+            "analysis": {
+                "holdMedianOutputPermille": hold_check.get("holdMedianOutputPermille").cloned().unwrap_or(Value::Null),
+                "holdP90OutputPermille": hold_check.get("holdP90OutputPermille").cloned().unwrap_or(Value::Null),
+                "approachSource": hold_check.get("approachSource").cloned().unwrap_or(Value::Null),
+                "holdSource": hold_check.get("holdSource").cloned().unwrap_or(Value::Null),
+            },
+        },
+        "failures": failures,
+        "samples": top_level_samples,
+        "holdCheck": hold_check,
+    }))
+}
+
+fn preliminary_hold_failures(
+    target_temp_c: i16,
+    passed: bool,
+    hold_check: &Value,
+    failure_reason: &Value,
+) -> Vec<Value> {
+    if passed || hold_check.is_null() {
+        Vec::new()
+    } else {
+        vec![json!({ "targetTempC": target_temp_c, "reason": failure_reason })]
+    }
+}
+
+fn legacy_preliminary_variant_rounds(variants: &[Value], target_temp_c: i16) -> Vec<Value> {
+    let selected_round = variants.len().max(1);
+    variants
+        .iter()
+        .enumerate()
+        .filter_map(|(index, variant)| {
+            let variant_object = variant.as_object()?;
+            let variant_point = sanitize_point(variant_object.get("tunedPoint"), Some(target_temp_c));
+            let metrics = variant_object.get("metrics").and_then(Value::as_object);
+            let variant_samples = legacy_variant_samples(variant_object);
+            Some(json!({
                 "round": index + 1,
                 "label": variant_object.get("variantLabel").cloned().unwrap_or_else(|| json!(format!("variant {}", index + 1))),
                 "attemptType": "characterization",
@@ -1039,69 +1147,50 @@ fn legacy_preliminary_review_entries(
                 "failures": [],
                 "result": {
                     "stopReason": "completed",
-                    "maxOvershootC": metrics.get("peak").cloned().unwrap_or(Value::Null),
-                    "holdPeakToPeakC": metrics.get("rollback").cloned().unwrap_or(Value::Null),
-                    "settleTimeMs": metrics.get("approachDurationMs").cloned().unwrap_or(Value::Null),
+                    "maxOvershootC": metrics.and_then(|value| value.get("peak")).cloned().unwrap_or(Value::Null),
+                    "holdPeakToPeakC": metrics.and_then(|value| value.get("rollback")).cloned().unwrap_or(Value::Null),
+                    "settleTimeMs": metrics.and_then(|value| value.get("approachDurationMs")).cloned().unwrap_or(Value::Null),
                 },
-            }));
-        }
+            }))
+        })
+        .collect()
+}
 
-        let full_speed_limit_ms = if target_temp_c <= 150 { 10_000 } else { 5_000 };
-        let passed = hold_check
-            .get("passed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let failure_reason = hold_check
-            .get("failureReason")
-            .cloned()
-            .unwrap_or(Value::Null);
-        let failures = if !passed && !hold_check.is_null() {
-            vec![json!({
-                "targetTempC": target_temp_c,
-                "reason": failure_reason.clone(),
-            })]
-        } else {
-            Vec::new()
-        };
-        entries.push(json!({
-            "runId": hold_check.get("confirmRunId").cloned().unwrap_or_else(|| legacy_bundle.get("runId").cloned().unwrap_or_else(|| json!(format!("legacy-{target_temp_c}")))),
-            "target": target_temp_c,
-            "targetTempC": target_temp_c,
-            "ok": passed,
-            "saved": false,
-            "evidence": "preliminary_review",
-            "budgetOutcome": if passed { "completed" } else { "not_converged" },
-            "timeSpentSeconds": int_round_json(top_level_samples.last().and_then(|sample| sample.get("t")).and_then(Value::as_f64)),
-            "roundCount": rounds.len(),
-            "validTestCount": rounds.iter().filter(|round| round.get("evidenceValid").and_then(Value::as_bool) != Some(false)).count(),
-            "invalidTestCount": rounds.iter().filter(|round| round.get("evidenceValid").and_then(Value::as_bool) == Some(false)).count(),
-            "approachReference": { "limitMs": full_speed_limit_ms },
-            "point": effective_point.clone().unwrap_or(Value::Null),
-            "truthPoint": effective_point.unwrap_or(Value::Null),
-            "pointSource": "review_candidate_snapshot",
-            "rounds": rounds,
-            "result": {
-                "stopReason": hold_check.get("stopReason").cloned().unwrap_or_else(|| if passed { json!("completed") } else { failure_reason.clone() }),
-                "maxOvershootC": hold_check.get("maxOvershootC").cloned().unwrap_or(Value::Null),
-                "holdPeakToPeakC": hold_check.get("holdPeakToPeakC").cloned().unwrap_or(Value::Null),
-                "fullSpeedToStable": {
-                    "limitMs": full_speed_limit_ms,
-                    "settleTimeMs": Value::Null,
-                    "failureReason": failure_reason.clone(),
-                },
-                "analysis": {
-                    "holdMedianOutputPermille": hold_check.get("holdMedianOutputPermille").cloned().unwrap_or(Value::Null),
-                    "holdP90OutputPermille": hold_check.get("holdP90OutputPermille").cloned().unwrap_or(Value::Null),
-                    "approachSource": hold_check.get("approachSource").cloned().unwrap_or(Value::Null),
-                    "holdSource": hold_check.get("holdSource").cloned().unwrap_or(Value::Null),
-                },
-            },
-            "failures": failures,
-            "samples": top_level_samples,
-            "holdCheck": hold_check,
-        }));
-    }
-    Ok(entries)
+fn legacy_variant_samples(variant: &Map<String, Value>) -> Vec<Value> {
+    sort_samples_by_time(
+        variant
+            .get("samples")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|sample| {
+                let source = sample.get("sourceTelemetry").and_then(Value::as_object);
+                json!({
+                    "t": round_decimal(sample.get("elapsedMs").and_then(Value::as_f64).unwrap_or(0.0) / 1000.0, 3),
+                    "temp": sample.get("currentTempC").cloned().unwrap_or(Value::Null),
+                    "filtered": sample.get("heaterFilteredTempC").cloned().unwrap_or(Value::Null),
+                    "control": sample.get("heaterControlTempC").cloned().unwrap_or(Value::Null),
+                    "controlGuarded": sample.get("heaterControlMeasurementGuarded").cloned().unwrap_or(Value::Null),
+                    "command": sample.get("heaterOutputPercent").cloned().unwrap_or(Value::Null),
+                    "output": sample.get("heaterPhysicalOutputPercent").cloned().unwrap_or(Value::Null),
+                    "requestV": Value::Null,
+                    "phase": sample.get("heaterControlPhase").cloned().unwrap_or(Value::Null),
+                    "sourceVoltageV": number_to_json(source.and_then(|value| value.get("voltageMv").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
+                    "sourceCurrentA": number_to_json(source.and_then(|value| value.get("currentMa").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
+                    "sourcePowerW": number_to_json(source.and_then(|value| value.get("powerMw").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
+                })
+            })
+            .collect(),
+    )
+}
+
+struct LegacyLiveEntryContext<'a> {
+    legacy_bundle: &'a Value,
+    accepted_points: &'a BTreeMap<i16, Value>,
+    candidate_points: &'a BTreeMap<i16, Value>,
+    hold_seconds: Option<Value>,
+    source_runs: &'a Map<String, Value>,
+    grouped_target_samples: &'a BTreeMap<i16, Vec<Value>>,
 }
 
 fn legacy_live_report_entries(
@@ -1114,155 +1203,224 @@ fn legacy_live_report_entries(
         .get("candidateProfile")
         .map(point_map)
         .unwrap_or_default();
-    let hold_seconds = legacy_bundle.pointer("/parameters/holdSeconds").cloned();
     let source_runs = legacy_bundle
         .get("sourceRuns")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let mut entries = Vec::new();
-    let Some(applied) = legacy_bundle.get("applied").and_then(Value::as_array) else {
-        return Ok(entries);
+    let context = LegacyLiveEntryContext {
+        legacy_bundle,
+        accepted_points: &accepted_points,
+        candidate_points: &candidate_points,
+        hold_seconds: legacy_bundle.pointer("/parameters/holdSeconds").cloned(),
+        source_runs: &source_runs,
+        grouped_target_samples,
     };
-    for stage in applied {
-        let target_temp_c = value_as_i16(stage.get("targetTempC").ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "legacy live report stage missing targetTempC",
-            )
-        })?)?;
-        let raw_target_samples = grouped_target_samples
-            .get(&target_temp_c)
-            .cloned()
-            .unwrap_or_default();
-        let target_segments = split_samples_on_time_reset(&raw_target_samples);
-        let mut segment_rounds = Vec::new();
-        for (segment_index, raw_segment) in target_segments.iter().enumerate() {
-            let segment_samples = normalized_sorted_samples(raw_segment);
-            segment_rounds.push(json!({
+    let Some(applied) = legacy_bundle.get("applied").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    applied
+        .iter()
+        .map(|stage| legacy_live_entry_from_stage(&context, stage))
+        .collect()
+}
+
+fn legacy_live_entry_from_stage(
+    context: &LegacyLiveEntryContext<'_>,
+    stage: &Value,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let target_temp_c = value_as_i16(stage.get("targetTempC").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "legacy live report stage missing targetTempC",
+        )
+    })?)?;
+    let raw_target_samples = context
+        .grouped_target_samples
+        .get(&target_temp_c)
+        .cloned()
+        .unwrap_or_default();
+    let segment_rounds = legacy_live_segment_rounds(&raw_target_samples, target_temp_c);
+    let selected_round = segment_rounds.last().cloned();
+    let top_level_samples = selected_round
+        .as_ref()
+        .and_then(|round| round.get("samples").and_then(Value::as_array))
+        .cloned()
+        .unwrap_or_default();
+    let point = legacy_live_point(context, &selected_round, &raw_target_samples, target_temp_c);
+    let analysis = object_or_empty(stage.get("analysis"));
+    let full_speed = object_or_empty(stage.get("fullSpeedToStable"));
+    let failures = validation_failures_for_target(context.legacy_bundle, target_temp_c);
+    let failure_reason = legacy_live_failure_reason(stage, &full_speed, &failures);
+    let passed =
+        failures.is_empty() && stage.get("stopReason").and_then(Value::as_str) == Some("completed");
+    let confirm_run_id = format!(
+        "{}-{}",
+        context
+            .legacy_bundle
+            .get("runId")
+            .and_then(Value::as_str)
+            .unwrap_or("legacy"),
+        target_temp_c
+    );
+    let hold_check = legacy_live_hold_check(
+        &confirm_run_id,
+        passed,
+        failure_reason,
+        context.hold_seconds.clone(),
+        stage,
+        &analysis,
+        context.source_runs.get(&target_temp_c.to_string()),
+    );
+    let rounds = legacy_live_round_results(segment_rounds, &point, &failures, stage, &full_speed);
+    Ok(json!({
+        "runId": confirm_run_id,
+        "target": target_temp_c,
+        "targetTempC": target_temp_c,
+        "ok": passed,
+        "saved": false,
+        "evidence": "preliminary_review",
+        "budgetOutcome": if passed { "completed" } else { "not_converged" },
+        "timeSpentSeconds": int_round_json(top_level_samples.last().and_then(|sample| sample.get("t")).and_then(Value::as_f64)),
+        "roundCount": rounds.len(),
+        "validTestCount": rounds.iter().filter(|round| round.get("evidenceValid").and_then(Value::as_bool) != Some(false)).count(),
+        "invalidTestCount": 0,
+        "approachReference": { "limitMs": full_speed.get("limitMs").cloned().unwrap_or(Value::Null) },
+        "point": point.clone(),
+        "truthPoint": point,
+        "pointSource": "review_candidate_snapshot",
+        "rounds": rounds,
+        "result": {
+            "stopReason": stage.get("stopReason").cloned().unwrap_or(Value::Null),
+            "maxOvershootC": stage.get("maxOvershootC").cloned().unwrap_or(Value::Null),
+            "holdPeakToPeakC": stage.get("holdPeakToPeakC").cloned().unwrap_or(Value::Null),
+            "fullSpeedToStable": full_speed,
+            "analysis": analysis,
+        },
+        "failures": failures,
+        "samples": top_level_samples,
+        "holdCheck": hold_check,
+    }))
+}
+
+fn object_or_empty(value: Option<&Value>) -> Value {
+    value
+        .cloned()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}))
+}
+
+fn legacy_live_segment_rounds(raw_samples: &[Value], target_temp_c: i16) -> Vec<Value> {
+    let segments = split_samples_on_time_reset(raw_samples);
+    segments
+        .iter()
+        .enumerate()
+        .map(|(segment_index, raw_segment)| {
+            json!({
                 "round": segment_index + 1,
                 "label": format!("legacy live review {}", segment_index + 1),
                 "attemptType": "legacy_live_report",
                 "candidateName": format!("legacy_live_report_{}", segment_index + 1),
-                "selected": segment_index + 1 == target_segments.len(),
+                "selected": segment_index + 1 == segments.len(),
                 "evidenceValid": true,
                 "point": effective_point_from_samples(raw_segment, target_temp_c).unwrap_or(Value::Null),
-                "samples": segment_samples,
-            }));
-        }
-        let selected_round = segment_rounds.last().cloned();
-        let top_level_samples = selected_round
-            .as_ref()
-            .and_then(|round| round.get("samples").and_then(Value::as_array))
-            .cloned()
-            .unwrap_or_default();
-        let point = sanitize_point(accepted_points.get(&target_temp_c), Some(target_temp_c))
-            .or_else(|| sanitize_point(candidate_points.get(&target_temp_c), Some(target_temp_c)))
-            .or_else(|| {
-                selected_round
-                    .as_ref()
-                    .and_then(|round| sanitize_point(round.get("point"), Some(target_temp_c)))
+                "samples": normalized_sorted_samples(raw_segment),
             })
-            .or_else(|| effective_point_from_samples(&raw_target_samples, target_temp_c))
-            .unwrap_or(Value::Null);
-        let analysis = stage
-            .get("analysis")
-            .cloned()
-            .filter(|value| value.is_object())
-            .unwrap_or_else(|| json!({}));
-        let full_speed = stage
-            .get("fullSpeedToStable")
-            .cloned()
-            .filter(|value| value.is_object())
-            .unwrap_or_else(|| json!({}));
-        let failures = validation_failures_for_target(legacy_bundle, target_temp_c);
-        let failure_reason = failures
-            .first()
-            .and_then(|failure| failure.get("reason"))
-            .cloned()
-            .or_else(|| full_speed.get("failureReason").cloned())
-            .or_else(|| match stage.get("stopReason").and_then(Value::as_str) {
-                Some("completed") | None => None,
-                Some(reason) => Some(json!(reason)),
-            })
-            .unwrap_or(Value::Null);
-        let passed = failures.is_empty()
-            && stage.get("stopReason").and_then(Value::as_str) == Some("completed");
-        let confirm_run_id = format!(
-            "{}-{}",
-            legacy_bundle
-                .get("runId")
-                .and_then(Value::as_str)
-                .unwrap_or("legacy"),
-            target_temp_c
-        );
-        let hold_check = json!({
-            "confirmRunId": confirm_run_id,
-            "passed": passed,
-            "failureReason": failure_reason.clone(),
-            "holdSeconds": hold_seconds.clone().unwrap_or(Value::Null),
-            "maxOvershootC": stage.get("maxOvershootC").cloned().unwrap_or(Value::Null),
-            "holdPeakToPeakC": stage.get("holdPeakToPeakC").cloned().unwrap_or(Value::Null),
-            "firstHoldAtMs": stage.pointer("/guard/firstHoldAtMs").cloned().unwrap_or(Value::Null),
-            "holdMedianOutputPermille": analysis.get("holdMedianOutputPermille").cloned().unwrap_or(Value::Null),
-            "holdP90OutputPermille": analysis.get("holdP90OutputPermille").cloned().unwrap_or(Value::Null),
-            "approachSource": analysis.get("approachSource").cloned().unwrap_or(Value::Null),
-            "holdSource": analysis.get("holdSource").cloned().unwrap_or(Value::Null),
-            "sourceRunPath": source_runs.get(&target_temp_c.to_string()).cloned().unwrap_or(Value::Null),
-            "stopReason": stage.get("stopReason").cloned().unwrap_or(Value::Null),
-        });
-        let round_result = json!({
-            "stopReason": stage.get("stopReason").cloned().unwrap_or(Value::Null),
-            "maxOvershootC": stage.get("maxOvershootC").cloned().unwrap_or(Value::Null),
-            "holdPeakToPeakC": stage.get("holdPeakToPeakC").cloned().unwrap_or(Value::Null),
-            "settleTimeMs": full_speed.get("settleTimeMs").cloned().unwrap_or(Value::Null),
-            "fullSpeedLimitMs": full_speed.get("limitMs").cloned().unwrap_or(Value::Null),
-            "failureReason": full_speed.get("failureReason").cloned().unwrap_or(Value::Null),
-        });
-        let rounds: Vec<Value> = segment_rounds
-            .into_iter()
-            .map(|segment_round| {
-                let mut round = segment_round;
-                if round.get("point").is_none() || round.get("point") == Some(&Value::Null) {
-                    round["point"] = point.clone();
-                }
-                round["failures"] = Value::Array(failures.clone());
-                round["result"] = round_result.clone();
-                round
-            })
-            .collect();
-        entries.push(json!({
-            "runId": hold_check.get("confirmRunId").cloned().unwrap_or(Value::Null),
-            "target": target_temp_c,
-            "targetTempC": target_temp_c,
-            "ok": passed,
-            "saved": false,
-            "evidence": "preliminary_review",
-            "budgetOutcome": if passed { "completed" } else { "not_converged" },
-            "timeSpentSeconds": int_round_json(top_level_samples.last().and_then(|sample| sample.get("t")).and_then(Value::as_f64)),
-            "roundCount": rounds.len(),
-            "validTestCount": rounds.iter().filter(|round| round.get("evidenceValid").and_then(Value::as_bool) != Some(false)).count(),
-            "invalidTestCount": 0,
-            "approachReference": { "limitMs": full_speed.get("limitMs").cloned().unwrap_or(Value::Null) },
-            "point": point.clone(),
-            "truthPoint": point.clone(),
-            "pointSource": "review_candidate_snapshot",
-            "rounds": rounds,
-            "result": {
-                "stopReason": stage.get("stopReason").cloned().unwrap_or(Value::Null),
-                "maxOvershootC": stage.get("maxOvershootC").cloned().unwrap_or(Value::Null),
-                "holdPeakToPeakC": stage.get("holdPeakToPeakC").cloned().unwrap_or(Value::Null),
-                "fullSpeedToStable": full_speed,
-                "analysis": analysis,
-            },
-            "failures": failures,
-            "samples": top_level_samples,
-            "holdCheck": hold_check,
-        }));
-    }
-    Ok(entries)
+        })
+        .collect()
 }
 
+fn legacy_live_point(
+    context: &LegacyLiveEntryContext<'_>,
+    selected_round: &Option<Value>,
+    raw_samples: &[Value],
+    target_temp_c: i16,
+) -> Value {
+    sanitize_point(
+        context.accepted_points.get(&target_temp_c),
+        Some(target_temp_c),
+    )
+    .or_else(|| {
+        sanitize_point(
+            context.candidate_points.get(&target_temp_c),
+            Some(target_temp_c),
+        )
+    })
+    .or_else(|| {
+        selected_round
+            .as_ref()
+            .and_then(|round| sanitize_point(round.get("point"), Some(target_temp_c)))
+    })
+    .or_else(|| effective_point_from_samples(raw_samples, target_temp_c))
+    .unwrap_or(Value::Null)
+}
+
+fn legacy_live_failure_reason(stage: &Value, full_speed: &Value, failures: &[Value]) -> Value {
+    failures
+        .first()
+        .and_then(|failure| failure.get("reason"))
+        .cloned()
+        .or_else(|| full_speed.get("failureReason").cloned())
+        .or_else(|| match stage.get("stopReason").and_then(Value::as_str) {
+            Some("completed") | None => None,
+            Some(reason) => Some(json!(reason)),
+        })
+        .unwrap_or(Value::Null)
+}
+
+fn legacy_live_hold_check(
+    confirm_run_id: &str,
+    passed: bool,
+    failure_reason: Value,
+    hold_seconds: Option<Value>,
+    stage: &Value,
+    analysis: &Value,
+    source_run_path: Option<&Value>,
+) -> Value {
+    json!({
+        "confirmRunId": confirm_run_id,
+        "passed": passed,
+        "failureReason": failure_reason,
+        "holdSeconds": hold_seconds.unwrap_or(Value::Null),
+        "maxOvershootC": stage.get("maxOvershootC").cloned().unwrap_or(Value::Null),
+        "holdPeakToPeakC": stage.get("holdPeakToPeakC").cloned().unwrap_or(Value::Null),
+        "firstHoldAtMs": stage.pointer("/guard/firstHoldAtMs").cloned().unwrap_or(Value::Null),
+        "holdMedianOutputPermille": analysis.get("holdMedianOutputPermille").cloned().unwrap_or(Value::Null),
+        "holdP90OutputPermille": analysis.get("holdP90OutputPermille").cloned().unwrap_or(Value::Null),
+        "approachSource": analysis.get("approachSource").cloned().unwrap_or(Value::Null),
+        "holdSource": analysis.get("holdSource").cloned().unwrap_or(Value::Null),
+        "sourceRunPath": source_run_path.cloned().unwrap_or(Value::Null),
+        "stopReason": stage.get("stopReason").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn legacy_live_round_results(
+    segment_rounds: Vec<Value>,
+    point: &Value,
+    failures: &[Value],
+    stage: &Value,
+    full_speed: &Value,
+) -> Vec<Value> {
+    let round_result = json!({
+        "stopReason": stage.get("stopReason").cloned().unwrap_or(Value::Null),
+        "maxOvershootC": stage.get("maxOvershootC").cloned().unwrap_or(Value::Null),
+        "holdPeakToPeakC": stage.get("holdPeakToPeakC").cloned().unwrap_or(Value::Null),
+        "settleTimeMs": full_speed.get("settleTimeMs").cloned().unwrap_or(Value::Null),
+        "fullSpeedLimitMs": full_speed.get("limitMs").cloned().unwrap_or(Value::Null),
+        "failureReason": full_speed.get("failureReason").cloned().unwrap_or(Value::Null),
+    });
+    segment_rounds
+        .into_iter()
+        .map(|mut round| {
+            if round.get("point").is_none() || round.get("point") == Some(&Value::Null) {
+                round["point"] = point.clone();
+            }
+            round["failures"] = Value::Array(failures.to_vec());
+            round["result"] = round_result.clone();
+            round
+        })
+        .collect()
+}
 fn sort_entry_samples(entry: &Value) -> Value {
     let mut sorted = entry.clone();
     if let Some(samples) = entry.get("samples").and_then(Value::as_array) {
@@ -1514,70 +1672,90 @@ fn build_report_runs(entries: &[Value], tuning_targets_c: &[i16]) -> Vec<Value> 
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct PreliminaryReviewBundleInput<'a> {
+    pub(super) bundle_dir: &'a Path,
+    pub(super) accepted_profile: &'a Value,
+    pub(super) entries: Vec<Value>,
+    pub(super) source_id: &'a str,
+    pub(super) device_id: &'a str,
+    pub(super) port_path: &'a str,
+    pub(super) tuning_budget_seconds: i64,
+    pub(super) generated_at: Value,
+    pub(super) selected_mode: &'a str,
+    pub(super) resolved_bank: &'a str,
+    pub(super) detected_source_class: &'a str,
+    pub(super) tuning_targets_c: &'a [i16],
+    pub(super) tuning_execution_order_c: &'a [i16],
+    pub(super) source_preset: &'a str,
+    pub(super) provider: &'a str,
+}
+
+struct PreliminaryBundlePaths {
+    samples_path: PathBuf,
+    accepted_profile_path: PathBuf,
+    run_bundle_path: PathBuf,
+    index_html_path: PathBuf,
+}
+
+impl PreliminaryBundlePaths {
+    fn new(bundle_dir: &Path) -> Self {
+        Self {
+            samples_path: bundle_dir.join("samples.ndjson"),
+            accepted_profile_path: bundle_dir.join("thermal-profile.accepted.json"),
+            run_bundle_path: bundle_dir.join("run.bundle.json"),
+            index_html_path: bundle_dir.join("index.html"),
+        }
+    }
+}
+
 pub(super) fn write_preliminary_review_bundle(
-    bundle_dir: &Path,
-    accepted_profile: &Value,
-    entries: Vec<Value>,
-    source_id: &str,
-    device_id: &str,
-    port_path: &str,
-    tuning_budget_seconds: i64,
-    generated_at: Value,
-    selected_mode: &str,
-    resolved_bank: &str,
-    detected_source_class: &str,
-    tuning_targets_c: &[i16],
-    tuning_execution_order_c: &[i16],
-    source_preset: &str,
-    provider: &str,
+    input: PreliminaryReviewBundleInput<'_>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let entries: Vec<Value> = entries
+    let entries = normalize_preliminary_entries(&input.entries);
+    fs::create_dir_all(input.bundle_dir)?;
+    let paths = PreliminaryBundlePaths::new(input.bundle_dir);
+    write_preliminary_samples(&entries, &paths.samples_path)?;
+    write_json_pretty(&paths.accepted_profile_path, input.accepted_profile)?;
+    let report_runs = build_report_runs(&entries, input.tuning_targets_c);
+    let bundle = build_preliminary_bundle(&input, &entries, &report_runs, &paths);
+    write_json_pretty(&paths.run_bundle_path, &bundle)?;
+    write_preliminary_index(&input, &bundle, &paths)?;
+    Ok(bundle)
+}
+
+fn normalize_preliminary_entries(entries: &[Value]) -> Vec<Value> {
+    entries
         .iter()
         .map(sort_entry_samples)
         .map(ensure_candidate_receipt_fields)
-        .collect();
-    fs::create_dir_all(bundle_dir)?;
-    let samples_path = bundle_dir.join("samples.ndjson");
+        .collect()
+}
+
+fn write_preliminary_samples(
+    entries: &[Value],
+    samples_path: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut sample_lines = String::new();
-    for entry in &entries {
+    for entry in entries {
         if let Some(rounds) = entry.get("rounds").and_then(Value::as_array)
             && !rounds.is_empty()
         {
-            for attempt in rounds {
-                for sample in attempt
-                    .get("samples")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    let mut enriched = sample.clone();
-                    enriched["targetTempC"] = entry.get("target").cloned().unwrap_or(Value::Null);
-                    enriched["attemptNumber"] =
-                        attempt.get("round").cloned().unwrap_or(Value::Null);
-                    enriched["attemptType"] =
-                        attempt.get("attemptType").cloned().unwrap_or(Value::Null);
-                    enriched["candidateName"] =
-                        attempt.get("candidateName").cloned().unwrap_or(Value::Null);
-                    enriched["selected"] = attempt
-                        .get("selected")
-                        .cloned()
-                        .unwrap_or(Value::Bool(false));
-                    enriched["evidenceValid"] = attempt
-                        .get("evidenceValid")
-                        .cloned()
-                        .unwrap_or(Value::Bool(true));
-                    enriched["evidenceInvalidReason"] = attempt
-                        .get("evidenceInvalidReason")
-                        .cloned()
-                        .unwrap_or(Value::Null);
-                    sample_lines.push_str(&serde_json::to_string(&enriched)?);
-                    sample_lines.push('\n');
-                }
-            }
+            append_attempt_samples(&mut sample_lines, entry, rounds)?;
             continue;
         }
-        for sample in entry
+        append_entry_samples(&mut sample_lines, entry)?;
+    }
+    fs::write(samples_path, sample_lines)?;
+    Ok(())
+}
+
+fn append_attempt_samples(
+    sample_lines: &mut String,
+    entry: &Value,
+    rounds: &[Value],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for attempt in rounds {
+        for sample in attempt
             .get("samples")
             .and_then(Value::as_array)
             .into_iter()
@@ -1585,19 +1763,53 @@ pub(super) fn write_preliminary_review_bundle(
         {
             let mut enriched = sample.clone();
             enriched["targetTempC"] = entry.get("target").cloned().unwrap_or(Value::Null);
+            enriched["attemptNumber"] = attempt.get("round").cloned().unwrap_or(Value::Null);
+            enriched["attemptType"] = attempt.get("attemptType").cloned().unwrap_or(Value::Null);
+            enriched["candidateName"] =
+                attempt.get("candidateName").cloned().unwrap_or(Value::Null);
+            enriched["selected"] = attempt
+                .get("selected")
+                .cloned()
+                .unwrap_or(Value::Bool(false));
+            enriched["evidenceValid"] = attempt
+                .get("evidenceValid")
+                .cloned()
+                .unwrap_or(Value::Bool(true));
+            enriched["evidenceInvalidReason"] = attempt
+                .get("evidenceInvalidReason")
+                .cloned()
+                .unwrap_or(Value::Null);
             sample_lines.push_str(&serde_json::to_string(&enriched)?);
             sample_lines.push('\n');
         }
     }
-    fs::write(&samples_path, sample_lines)?;
+    Ok(())
+}
 
-    let accepted_profile_path = bundle_dir.join("thermal-profile.accepted.json");
-    let run_bundle_path = bundle_dir.join("run.bundle.json");
-    let index_html_path = bundle_dir.join("index.html");
-    write_json_pretty(&accepted_profile_path, accepted_profile)?;
-    let entries_array = Value::Array(entries.clone());
-    let report_runs = build_report_runs(&entries, tuning_targets_c);
-    let report_runs_array = Value::Array(report_runs.clone());
+fn append_entry_samples(
+    sample_lines: &mut String,
+    entry: &Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for sample in entry
+        .get("samples")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let mut enriched = sample.clone();
+        enriched["targetTempC"] = entry.get("target").cloned().unwrap_or(Value::Null);
+        sample_lines.push_str(&serde_json::to_string(&enriched)?);
+        sample_lines.push('\n');
+    }
+    Ok(())
+}
+
+fn build_preliminary_bundle(
+    input: &PreliminaryReviewBundleInput<'_>,
+    entries: &[Value],
+    report_runs: &[Value],
+    paths: &PreliminaryBundlePaths,
+) -> Value {
     let candidate_dispositions = report_runs
         .iter()
         .map(|entry| {
@@ -1617,11 +1829,9 @@ pub(super) fn write_preliminary_review_bundle(
     let candidate_ready_targets_c = report_runs
         .iter()
         .filter_map(|entry| {
-            if entry.get("candidateReady").and_then(Value::as_bool) == Some(true) {
-                entry.get("target").and_then(Value::as_i64)
-            } else {
-                None
-            }
+            (entry.get("candidateReady").and_then(Value::as_bool) == Some(true))
+                .then(|| entry.get("target").and_then(Value::as_i64))
+                .flatten()
         })
         .collect::<BTreeSet<_>>();
     let temperature_semantics = json!({
@@ -1631,41 +1841,46 @@ pub(super) fn write_preliminary_review_bundle(
         "filteredTempC": "Firmware-filtered temperature when exposed by telemetry.",
         "controlTempC": "Control-loop temperature used by thermal gates and scoring.",
     });
-
-    let bundle = json!({
+    let entries_array = Value::Array(entries.to_vec());
+    json!({
         "kind": "thermal_self_test_preliminary_bundle",
         "canonicalReportFormat": "html_bundle",
         "bundleDisposition": "preliminary_review",
         "acceptedProfileRole": "review_candidate_snapshot",
-        "generatedAt": generated_at,
-        "selectedMode": selected_mode,
-        "resolvedBank": resolved_bank,
-        "detectedSourceClass": detected_source_class,
-        "tuningBudgetSeconds": tuning_budget_seconds,
-        "tuningWorkflow": tuning_workflow(resolved_bank),
-        "tuningTargetsC": tuning_targets_c,
-        "tuningExecutionOrderC": tuning_execution_order_c,
+        "generatedAt": input.generated_at,
+        "selectedMode": input.selected_mode,
+        "resolvedBank": input.resolved_bank,
+        "detectedSourceClass": input.detected_source_class,
+        "tuningBudgetSeconds": input.tuning_budget_seconds,
+        "tuningWorkflow": tuning_workflow(input.resolved_bank),
+        "tuningTargetsC": input.tuning_targets_c,
+        "tuningExecutionOrderC": input.tuning_execution_order_c,
         "temperatureSemantics": temperature_semantics,
         "candidateDispositions": candidate_dispositions,
         "candidateReadyTargetsC": set_to_vec(candidate_ready_targets_c),
-        "sourcePreset": source_preset,
-        "provider": provider,
-        "sourceDeviceId": source_id,
-        "deviceId": device_id,
-        "port": port_path,
-        "reportRuns": report_runs_array,
+        "sourcePreset": input.source_preset,
+        "provider": input.provider,
+        "sourceDeviceId": input.source_id,
+        "deviceId": input.device_id,
+        "port": input.port_path,
+        "reportRuns": Value::Array(report_runs.to_vec()),
         "targets": entries_array.clone(),
         "runs": entries_array,
         "files": {
-            "bundleDir": display_path(bundle_dir),
-            "indexHtml": display_path(&index_html_path),
-            "bundleJson": display_path(&run_bundle_path),
-            "samplesPath": display_path(&samples_path),
-            "acceptedProfilePath": display_path(&accepted_profile_path),
+            "bundleDir": display_path(input.bundle_dir),
+            "indexHtml": display_path(&paths.index_html_path),
+            "bundleJson": display_path(&paths.run_bundle_path),
+            "samplesPath": display_path(&paths.samples_path),
+            "acceptedProfilePath": display_path(&paths.accepted_profile_path),
         },
-    });
-    write_json_pretty(&run_bundle_path, &bundle)?;
+    })
+}
 
+fn write_preliminary_index(
+    input: &PreliminaryReviewBundleInput<'_>,
+    bundle: &Value,
+    paths: &PreliminaryBundlePaths,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let target_label = bundle
         .get("reportRuns")
         .and_then(Value::as_array)
@@ -1675,11 +1890,11 @@ pub(super) fn write_preliminary_review_bundle(
         .map(|target| format!("{target}°C"))
         .collect::<Vec<_>>()
         .join(" / ");
-    let report_identity = report_identity(selected_mode, resolved_bank);
+    let identity = report_identity(input.selected_mode, input.resolved_bank);
     let html_data = json!({
         "generatedAt": bundle.get("generatedAt").cloned().unwrap_or(Value::Null),
-        "title": format!("Flux Purr {report_identity} {target_label} preliminary review"),
-        "subtitle": format!("展示本次 {report_identity} full-batch 调优目标：{target_label}。主卡显示稳定窗口建立用时，稳定窗口门槛作为判定依据；轮次详情展示全部有效调优尝试、预算结果与 hold confirm。"),
+        "title": format!("Flux Purr {identity} {target_label} preliminary review"),
+        "subtitle": format!("展示本次 {identity} full-batch 调优目标：{target_label}。主卡显示稳定窗口建立用时，稳定窗口门槛作为判定依据；轮次详情展示全部有效调优尝试、预算结果与 hold confirm。"),
         "bundleDisposition": bundle.get("bundleDisposition").cloned().unwrap_or(Value::Null),
         "acceptedProfileRole": bundle.get("acceptedProfileRole").cloned().unwrap_or(Value::Null),
         "selectedMode": bundle.get("selectedMode").cloned().unwrap_or(Value::Null),
@@ -1705,10 +1920,9 @@ pub(super) fn write_preliminary_review_bundle(
                 .unwrap_or(&[]),
         ),
     });
-    fs::write(&index_html_path, render_baseline_html(&html_data)?)?;
-    Ok(bundle)
+    fs::write(&paths.index_html_path, render_baseline_html(&html_data)?)?;
+    Ok(())
 }
-
 fn tuning_workflow(resolved_bank: &str) -> &'static str {
     match resolved_bank {
         "pps5a" => "five_amp_batch",
@@ -1860,8 +2074,8 @@ fn escape_report_html_value(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        ThermalLegacyReportInput, ThermalSelfTestReportInput, render_baseline_html,
-        render_self_test_evidence_bundle, report_identity,
+        PreliminaryReviewBundleInput, ThermalLegacyReportInput, ThermalSelfTestReportInput,
+        render_baseline_html, render_self_test_evidence_bundle, report_identity,
         rerender_legacy_preliminary_review_bundle, sanitize_non_finite_json_numbers,
         sanitize_point, tuning_workflow, write_preliminary_review_bundle,
     };
@@ -1962,6 +2176,58 @@ mod tests {
 
     #[test]
     fn self_test_renderer_preserves_completed_pps3a_thermal_plant_evidence() {
+        let (_dir, run_dir, output_dir) =
+            self_test_renderer_preserves_completed_pps3a_thermal_plant_evidence_fixture();
+        let result = render_self_test_evidence_bundle(ThermalSelfTestReportInput {
+            run_dirs: vec![run_dir],
+            output_dir: Some(output_dir.clone()),
+        })
+        .expect("render self-test evidence");
+        let bundle: Value = serde_json::from_slice(
+            &fs::read(output_dir.join("run.bundle.json")).expect("read bundle"),
+        )
+        .expect("parse bundle");
+        let model: Value = serde_json::from_slice(
+            &fs::read(output_dir.join("thermal-profile.accepted.json")).expect("read model"),
+        )
+        .expect("parse model");
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(bundle["detectedSourceClass"], "pps3a");
+        assert_eq!(bundle["sourceDeviceId"], "f293cc9c139e");
+        assert_eq!(bundle["sourcePreset"], "20V / 3.25A PPS auto-follow");
+        assert_eq!(bundle["reportRuns"][0]["target"], 240);
+        assert_eq!(bundle["reportRuns"][0]["targetRole"], "validation");
+        assert_eq!(bundle["reportRuns"][0]["reviewPassed"], true);
+        assert_eq!(
+            bundle["reportRuns"][0]["result"]["fullSpeedToStable"]["warmupExitedAtMs"],
+            1_000
+        );
+        assert_eq!(
+            bundle["reportRuns"][0]["result"]["fullSpeedToStable"]["settleTimeMs"],
+            1_000
+        );
+        assert_eq!(bundle["reportRuns"][0]["holdCheck"]["holdSeconds"], 60);
+        assert_eq!(model["profileCompatibility"], "not_a_point_local_profile");
+        assert_eq!(model["model"]["state"], "active");
+        assert!(output_dir.join("index.html").is_file());
+        let html = fs::read_to_string(output_dir.join("index.html")).expect("report html");
+        assert!(html.contains("稳定窗口建立用时"));
+        assert!(!html.contains("逼近用时"));
+        assert!(!html.contains("稳定用时"));
+        assert!(!html.contains("full-speed 实测"));
+        assert!(!html.contains("逼近阶段"));
+        assert_eq!(
+            fs::read_to_string(output_dir.join("samples.ndjson"))
+                .expect("report samples")
+                .lines()
+                .count(),
+            4
+        );
+    }
+
+    fn self_test_renderer_preserves_completed_pps3a_thermal_plant_evidence_fixture()
+    -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("temp dir");
         let run_dir = dir.path().join("raw-self-test");
         let output_dir = dir.path().join("html-bundle");
@@ -2049,55 +2315,8 @@ mod tests {
                 + "\n",
         )
         .expect("sample file");
-
-        let result = render_self_test_evidence_bundle(ThermalSelfTestReportInput {
-            run_dirs: vec![run_dir],
-            output_dir: Some(output_dir.clone()),
-        })
-        .expect("render self-test evidence");
-        let bundle: Value = serde_json::from_slice(
-            &fs::read(output_dir.join("run.bundle.json")).expect("read bundle"),
-        )
-        .expect("parse bundle");
-        let model: Value = serde_json::from_slice(
-            &fs::read(output_dir.join("thermal-profile.accepted.json")).expect("read model"),
-        )
-        .expect("parse model");
-
-        assert_eq!(result["ok"], true);
-        assert_eq!(bundle["detectedSourceClass"], "pps3a");
-        assert_eq!(bundle["sourceDeviceId"], "f293cc9c139e");
-        assert_eq!(bundle["sourcePreset"], "20V / 3.25A PPS auto-follow");
-        assert_eq!(bundle["reportRuns"][0]["target"], 240);
-        assert_eq!(bundle["reportRuns"][0]["targetRole"], "validation");
-        assert_eq!(bundle["reportRuns"][0]["reviewPassed"], true);
-        assert_eq!(
-            bundle["reportRuns"][0]["result"]["fullSpeedToStable"]["warmupExitedAtMs"],
-            1_000
-        );
-        assert_eq!(
-            bundle["reportRuns"][0]["result"]["fullSpeedToStable"]["settleTimeMs"],
-            1_000
-        );
-        assert_eq!(bundle["reportRuns"][0]["holdCheck"]["holdSeconds"], 60);
-        assert_eq!(model["profileCompatibility"], "not_a_point_local_profile");
-        assert_eq!(model["model"]["state"], "active");
-        assert!(output_dir.join("index.html").is_file());
-        let html = fs::read_to_string(output_dir.join("index.html")).expect("report html");
-        assert!(html.contains("稳定窗口建立用时"));
-        assert!(!html.contains("逼近用时"));
-        assert!(!html.contains("稳定用时"));
-        assert!(!html.contains("full-speed 实测"));
-        assert!(!html.contains("逼近阶段"));
-        assert_eq!(
-            fs::read_to_string(output_dir.join("samples.ndjson"))
-                .expect("report samples")
-                .lines()
-                .count(),
-            4
-        );
+        (dir, run_dir, output_dir)
     }
-
     #[test]
     fn report_workflow_follows_the_resolved_profile_bank() {
         assert_eq!(tuning_workflow("pps5a"), "five_amp_batch");
@@ -2168,21 +2387,56 @@ mod tests {
 
     #[test]
     fn preliminary_review_bundle_keeps_single_target_when_raw_entry_uses_legacy_validation_role() {
+        let (bundle_dir, bundle) = preliminary_review_bundle_keeps_single_target_when_raw_entry_uses_legacy_validation_role_fixture();
+
+        assert_eq!(bundle["tuningTargetsC"], json!([80]));
+        assert_eq!(bundle["tuningExecutionOrderC"], json!([80]));
+        assert_eq!(bundle["runs"][0]["targetRole"], "validation");
+        assert_eq!(bundle["reportRuns"][0]["targetRole"], "validation");
+        assert_eq!(bundle["reportRuns"][0]["reviewOutcome"], "passed");
+        assert_eq!(bundle["reportRuns"][0]["reviewPassed"], true);
+
+        let samples = fs::read_to_string(bundle_dir.join("samples.ndjson")).expect("samples");
+        assert!(samples.contains(r#""targetTempC":80"#));
+        let sample_lines = samples
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("sample json"))
+            .collect::<Vec<_>>();
+        assert_eq!(sample_lines.len(), 2);
+        assert_eq!(sample_lines[0]["evidenceValid"], true);
+        assert_eq!(sample_lines[1]["evidenceValid"], false);
+        assert_eq!(
+            sample_lines[1]["evidenceInvalidReason"],
+            "source_telemetry_stale"
+        );
+
+        let embedded_data = embedded_report_data(&bundle_dir);
+        assert_eq!(embedded_data["runs"][0]["reviewOutcome"], "passed");
+        assert_eq!(
+            embedded_data["runs"][0]["samples"][0]["temperature"]["humanTempC"],
+            json!(78.0)
+        );
+
+        let _ = fs::remove_dir_all(bundle_dir);
+    }
+
+    fn preliminary_review_bundle_keeps_single_target_when_raw_entry_uses_legacy_validation_role_fixture()
+    -> (std::path::PathBuf, Value) {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
         let bundle_dir = env::temp_dir().join(format!("thermal-report-validation-test-{unique}"));
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
                 "settings": {},
                 "points": [
                     {"targetTempC": 60, "holdPowerPermille": 400},
                     {"targetTempC": 100, "holdPowerPermille": 500}
                 ],
             }),
-            vec![json!({
+            entries: vec![json!({
                 "target": 80,
                 "targetTempC": 80,
                 "targetRole": "validation",
@@ -2237,131 +2491,26 @@ mod tests {
                     }]
                 }]
             })],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[80],
-            &[80],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[80],
+            tuning_execution_order_c: &[80],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
         .expect("bundle");
-
-        assert_eq!(bundle["tuningTargetsC"], json!([80]));
-        assert_eq!(bundle["tuningExecutionOrderC"], json!([80]));
-        assert_eq!(bundle["runs"][0]["targetRole"], "validation");
-        assert_eq!(bundle["reportRuns"][0]["targetRole"], "validation");
-        assert_eq!(bundle["reportRuns"][0]["reviewOutcome"], "passed");
-        assert_eq!(bundle["reportRuns"][0]["reviewPassed"], true);
-
-        let samples = fs::read_to_string(bundle_dir.join("samples.ndjson")).expect("samples");
-        assert!(samples.contains(r#""targetTempC":80"#));
-        let sample_lines = samples
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).expect("sample json"))
-            .collect::<Vec<_>>();
-        assert_eq!(sample_lines.len(), 2);
-        assert_eq!(sample_lines[0]["evidenceValid"], true);
-        assert_eq!(sample_lines[1]["evidenceValid"], false);
-        assert_eq!(
-            sample_lines[1]["evidenceInvalidReason"],
-            "source_telemetry_stale"
-        );
-
-        let embedded_data = embedded_report_data(&bundle_dir);
-        assert_eq!(embedded_data["runs"][0]["reviewOutcome"], "passed");
-        assert_eq!(
-            embedded_data["runs"][0]["samples"][0]["temperature"]["humanTempC"],
-            json!(78.0)
-        );
-
-        let _ = fs::remove_dir_all(bundle_dir);
+        (bundle_dir, bundle)
     }
-
     #[test]
     fn preliminary_review_bundle_maps_supplemental_candidate_ready_to_passed() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        let bundle_dir = env::temp_dir().join(format!("thermal-report-supplemental-test-{unique}"));
-        let sample = json!({
-            "t": 0.0,
-            "temp": 120.0,
-            "phase": "hold",
-            "command": 60,
-            "output": 60,
-            "requestV": 12.0,
-            "sourcePowerW": 20.0,
-            "temperature": {
-                "humanTempC": 120.0,
-                "filteredTempC": 119.8,
-                "controlTempC": 119.7
-            }
-        });
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
-                "settings": {},
-                "points": [
-                    {"targetTempC": 120, "holdPowerPermille": 500}
-                ],
-            }),
-            vec![
-                json!({
-                    "target": 120,
-                    "targetTempC": 120,
-                    "targetRole": "validation",
-                    "ok": false,
-                    "candidateReady": false,
-                    "candidateDisposition": "validation_failed",
-                    "budgetOutcome": "validation_failed",
-                    "validTestCount": 1,
-                    "samples": [sample.clone()],
-                    "rounds": []
-                }),
-                json!({
-                    "target": 120,
-                    "targetTempC": 120,
-                    "targetRole": "supplemental_tuning",
-                    "ok": false,
-                    "candidateReady": true,
-                    "candidateDisposition": "candidate_ready",
-                    "budgetOutcome": "budget_exhausted",
-                    "validTestCount": 2,
-                    "samples": [sample],
-                    "rounds": [],
-                    "result": {
-                        "stopReason": "completed",
-                        "maxOvershootC": 1.2,
-                        "holdPeakToPeakC": 1.8,
-                        "fullSpeedToStable": {
-                            "limitMs": 10000,
-                            "settleTimeMs": 6500,
-                            "failureReason": null
-                        }
-                    }
-                }),
-            ],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[120],
-            &[120],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
-        .expect("bundle");
+        let (bundle_dir, bundle) =
+            preliminary_review_bundle_maps_supplemental_candidate_ready_to_passed_fixture();
 
         assert_eq!(bundle["tuningTargetsC"], json!([120]));
         assert_eq!(bundle["tuningExecutionOrderC"], json!([120]));
@@ -2455,81 +2604,91 @@ mod tests {
         let _ = fs::remove_dir_all(bundle_dir);
     }
 
-    #[test]
-    fn preliminary_review_bundle_sorts_report_targets_by_temperature() {
+    fn preliminary_review_bundle_maps_supplemental_candidate_ready_to_passed_fixture()
+    -> (std::path::PathBuf, Value) {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        let bundle_dir = env::temp_dir().join(format!("thermal-report-sorted-test-{unique}"));
-        let sample_for = |target: i64| {
-            json!({
-                "t": 0.0,
-                "temp": target,
-                "phase": "hold",
-                "command": 50,
-                "output": 50
-            })
-        };
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
+        let bundle_dir = env::temp_dir().join(format!("thermal-report-supplemental-test-{unique}"));
+        let sample = json!({
+            "t": 0.0,
+            "temp": 120.0,
+            "phase": "hold",
+            "command": 60,
+            "output": 60,
+            "requestV": 12.0,
+            "sourcePowerW": 20.0,
+            "temperature": {
+                "humanTempC": 120.0,
+                "filteredTempC": 119.8,
+                "controlTempC": 119.7
+            }
+        });
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
                 "settings": {},
                 "points": [
-                    {"targetTempC": 60, "holdPowerPermille": 400},
-                    {"targetTempC": 80, "holdPowerPermille": 450},
-                    {"targetTempC": 100, "holdPowerPermille": 500}
+                    {"targetTempC": 120, "holdPowerPermille": 500}
                 ],
             }),
-            vec![
+            entries: vec![
                 json!({
-                    "target": 60,
-                    "targetTempC": 60,
-                    "targetRole": "tuning",
-                    "budgetOutcome": "completed",
-                    "samples": [sample_for(60)],
-                    "rounds": []
-                }),
-                json!({
-                    "target": 100,
-                    "targetTempC": 100,
-                    "targetRole": "tuning",
-                    "budgetOutcome": "completed",
-                    "samples": [sample_for(100)],
-                    "rounds": []
-                }),
-                json!({
-                    "target": 80,
-                    "targetTempC": 80,
+                    "target": 120,
+                    "targetTempC": 120,
                     "targetRole": "validation",
-                    "budgetOutcome": "validation_failed",
+                    "ok": false,
+                    "candidateReady": false,
                     "candidateDisposition": "validation_failed",
-                    "samples": [sample_for(80)],
+                    "budgetOutcome": "validation_failed",
+                    "validTestCount": 1,
+                    "samples": [sample.clone()],
                     "rounds": []
                 }),
                 json!({
-                    "target": 80,
-                    "targetTempC": 80,
+                    "target": 120,
+                    "targetTempC": 120,
                     "targetRole": "supplemental_tuning",
-                    "budgetOutcome": "completed",
-                    "samples": [sample_for(80)],
-                    "rounds": []
+                    "ok": false,
+                    "candidateReady": true,
+                    "candidateDisposition": "candidate_ready",
+                    "budgetOutcome": "budget_exhausted",
+                    "validTestCount": 2,
+                    "samples": [sample],
+                    "rounds": [],
+                    "result": {
+                        "stopReason": "completed",
+                        "maxOvershootC": 1.2,
+                        "holdPeakToPeakC": 1.8,
+                        "fullSpeedToStable": {
+                            "limitMs": 10000,
+                            "settleTimeMs": 6500,
+                            "failureReason": null
+                        }
+                    }
                 }),
             ],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[60, 80, 100],
-            &[60, 100, 80],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[120],
+            tuning_execution_order_c: &[120],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
         .expect("bundle");
+        (bundle_dir, bundle)
+    }
+    #[test]
+    fn preliminary_review_bundle_sorts_report_targets_by_temperature() {
+        let (bundle_dir, bundle) =
+            preliminary_review_bundle_sorts_report_targets_by_temperature_fixture();
 
         assert_eq!(bundle["tuningTargetsC"], json!([60, 80, 100]));
         assert_eq!(bundle["tuningExecutionOrderC"], json!([60, 100, 80]));
@@ -2575,6 +2734,83 @@ mod tests {
         let _ = fs::remove_dir_all(bundle_dir);
     }
 
+    fn preliminary_review_bundle_sorts_report_targets_by_temperature_fixture()
+    -> (std::path::PathBuf, Value) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let bundle_dir = env::temp_dir().join(format!("thermal-report-sorted-test-{unique}"));
+        let sample_for = |target: i64| {
+            json!({
+                "t": 0.0,
+                "temp": target,
+                "phase": "hold",
+                "command": 50,
+                "output": 50
+            })
+        };
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
+                "settings": {},
+                "points": [
+                    {"targetTempC": 60, "holdPowerPermille": 400},
+                    {"targetTempC": 80, "holdPowerPermille": 450},
+                    {"targetTempC": 100, "holdPowerPermille": 500}
+                ],
+            }),
+            entries: vec![
+                json!({
+                    "target": 60,
+                    "targetTempC": 60,
+                    "targetRole": "tuning",
+                    "budgetOutcome": "completed",
+                    "samples": [sample_for(60)],
+                    "rounds": []
+                }),
+                json!({
+                    "target": 100,
+                    "targetTempC": 100,
+                    "targetRole": "tuning",
+                    "budgetOutcome": "completed",
+                    "samples": [sample_for(100)],
+                    "rounds": []
+                }),
+                json!({
+                    "target": 80,
+                    "targetTempC": 80,
+                    "targetRole": "validation",
+                    "budgetOutcome": "validation_failed",
+                    "candidateDisposition": "validation_failed",
+                    "samples": [sample_for(80)],
+                    "rounds": []
+                }),
+                json!({
+                    "target": 80,
+                    "targetTempC": 80,
+                    "targetRole": "supplemental_tuning",
+                    "budgetOutcome": "completed",
+                    "samples": [sample_for(80)],
+                    "rounds": []
+                }),
+            ],
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[60, 80, 100],
+            tuning_execution_order_c: &[60, 100, 80],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
+        .expect("bundle");
+        (bundle_dir, bundle)
+    }
     #[test]
     fn preliminary_review_bundle_materializes_placeholders_and_omits_tier_fields() {
         let unique = SystemTime::now()
@@ -2582,16 +2818,16 @@ mod tests {
             .expect("system time")
             .as_nanos();
         let bundle_dir = env::temp_dir().join(format!("thermal-report-placeholder-test-{unique}"));
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
                 "settings": {},
                 "points": [
                     {"targetTempC": 60, "holdPowerPermille": 400},
                     {"targetTempC": 140, "holdPowerPermille": 600}
                 ],
             }),
-            vec![
+            entries: vec![
                 json!({
                     "target": 60,
                     "targetTempC": 60,
@@ -2623,19 +2859,19 @@ mod tests {
                     "rounds": []
                 }),
             ],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[60, 100, 140],
-            &[60, 140],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[60, 100, 140],
+            tuning_execution_order_c: &[60, 140],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
         .expect("bundle");
 
         assert_eq!(bundle["tuningTargetsC"], json!([60, 100, 140]));
@@ -2681,13 +2917,13 @@ mod tests {
             "output": 80,
             "requestV": 18.0
         });
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
                 "settings": {},
                 "points": [{"targetTempC": 100, "holdPowerPermille": 500}],
             }),
-            vec![json!({
+            entries: vec![json!({
                 "target": 100,
                 "targetTempC": 100,
                 "targetRole": "tuning",
@@ -2713,19 +2949,19 @@ mod tests {
                     }
                 }
             })],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[100],
-            &[100],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[100],
+            tuning_execution_order_c: &[100],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
         .expect("bundle");
 
         assert_eq!(bundle["runs"][0]["candidateReady"], json!(false));
@@ -2769,13 +3005,13 @@ mod tests {
             "output": 20,
             "requestV": 6.5
         });
-        let bundle = write_preliminary_review_bundle(
-            &bundle_dir,
-            &json!({
+        let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+            bundle_dir: &bundle_dir,
+            accepted_profile: &json!({
                 "settings": {},
                 "points": [{"targetTempC": 60, "holdPowerPermille": 135}],
             }),
-            vec![json!({
+            entries: vec![json!({
                 "target": 60,
                 "targetTempC": 60,
                 "targetRole": "tuning",
@@ -2801,19 +3037,19 @@ mod tests {
                     }
                 }
             })],
-            "f293cc9c139e",
-            "mock-fp-lab-01",
-            "/dev/cu.usbmodem2111401",
-            1200,
-            json!(1234567890),
-            "100w",
-            "pps5a",
-            "pps5a",
-            &[60],
-            &[60],
-            "21V / 5.0A",
-            "IsolaPurr",
-        )
+            source_id: "f293cc9c139e",
+            device_id: "mock-fp-lab-01",
+            port_path: "/dev/cu.usbmodem2111401",
+            tuning_budget_seconds: 1200,
+            generated_at: json!(1234567890),
+            selected_mode: "100w",
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            tuning_targets_c: &[60],
+            tuning_execution_order_c: &[60],
+            source_preset: "21V / 5.0A",
+            provider: "IsolaPurr",
+        })
         .expect("bundle");
 
         assert_eq!(bundle["runs"][0]["candidateReady"], json!(true));

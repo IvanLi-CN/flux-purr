@@ -3274,6 +3274,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-style-check"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

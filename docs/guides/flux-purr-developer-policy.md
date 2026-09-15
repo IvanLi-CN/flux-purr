@@ -44,8 +44,10 @@
   - `bun run bootstrap:dev`
   - `bun run check:firmware:fmt`
   - `bun run check:firmware:clippy`
+  - `bun run check:firmware:clippy:xtensa`
   - `bun run check:firmware:build`
   - `bun run check:devd`
+  - `bun run check:rust:style`
   - `bun run check:web`
   - `bun run check:web:build`
   - `bun run check:storybook`
@@ -58,6 +60,11 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 ```
 
 - 非硬件验证先于任何真机/HIL 操作完成。
+- Rust 风格合同由 `cargo fmt --all -- --check`、`bun run check:rust:style`、
+  firmware/devd 的严格 Clippy 以及 12V/20V/28V 的 `cargo +esp clippy`
+  共同执行。入口文件只负责装配，测试和领域实现必须位于命名模块中。
+  `check:rust:style` 会运行 checker fixtures，并拒绝三项 structural lint
+  的任何本地 `allow`/`expect`（包括嵌套 `cfg_attr`）。
 - `bun`、`rustup`、`cargo +esp`、`jq` 与 Playwright browsers 属于系统前置；bootstrap 只检测并提示，不自动安装。
 - `devd` 启动、CLI 调用和 Web live development 要显式使用当前 repo checkout、显式 bind/port 和显式环境变量，不依赖默认端口或全局二进制。
 - `scripts/devd-hardware-smoke.py --device-id mock-fp-lab-01 --allow-mock-device` 只证明 localhost HTTP contract；不得把 mock smoke 报告成硬件验证。

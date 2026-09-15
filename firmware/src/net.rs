@@ -651,228 +651,273 @@ async fn progress_wifi_failure(
     }
 }
 
+async fn finish_wifi_disable(controller: &mut WifiController<'static>, config: &WifiRuntimeConfig) {
+    let _ = with_timeout(
+        Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
+        controller.disconnect_async(),
+    )
+    .await;
+    if !stop_wifi_station(controller).await {
+        let _ = progress_wifi_failure(
+            config,
+            ProvisioningEvent::DisconnectTimedOut,
+            "WiFi station did not stop in time.",
+        )
+        .await;
+        return;
+    }
+
+    if !matches!(wifi_state().await, NetworkState::Idle) {
+        let _ = publish_wifi_event(config, ProvisioningEvent::CancelProvisioning, None).await;
+    }
+    let request_id = WIFI_CANCEL_REQUEST_ID.swap(0, Ordering::AcqRel);
+    if request_id != 0 {
+        WIFI_CANCEL_ACK.signal(request_id);
+    }
+}
+
+async fn finish_wifi_disconnect(controller: &mut WifiController<'static>) {
+    let disconnected = with_timeout(
+        Duration::from_millis(SAVING_TIMEOUT_MS as u64),
+        controller.disconnect_async(),
+    )
+    .await;
+    let latest_config = WIFI_CONFIG.lock().await.clone();
+    if disconnected.is_ok() {
+        let _ =
+            publish_wifi_event(&latest_config, ProvisioningEvent::DisconnectCompleted, None).await;
+        return;
+    }
+
+    let follow_up = progress_wifi_failure(
+        &latest_config,
+        ProvisioningEvent::DisconnectTimedOut,
+        "Timed out while stopping WiFi.",
+    )
+    .await;
+    if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
+        WIFI_APPLY_SIGNAL.wait().await;
+    }
+}
+
 #[embassy_executor::task]
 async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stack<'static>) {
+    wifi_task_inner(controller, stack).await;
+}
+
+async fn wifi_task_inner(controller: &'static mut WifiController<'static>, stack: Stack<'static>) {
     let mut retry_pending = false;
     loop {
         let config = WIFI_CONFIG.lock().await.clone();
-        if !config.is_configured() {
-            let _ = stop_wifi_station(controller).await;
-            if !matches!(wifi_state().await, NetworkState::Disabled) {
-                let _ = publish_wifi_event(&config, ProvisioningEvent::ClearConfig, None).await;
-            }
-            WIFI_APPLY_SIGNAL.wait().await;
+        if !prepare_wifi_connection(controller, &config, &mut retry_pending).await {
             continue;
         }
-
-        if !config.connection_enabled {
-            let _ = with_timeout(
-                Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
-                controller.disconnect_async(),
-            )
-            .await;
-            let stopped = stop_wifi_station(controller).await;
-            if stopped {
-                if !matches!(wifi_state().await, NetworkState::Idle) {
-                    let _ =
-                        publish_wifi_event(&config, ProvisioningEvent::CancelProvisioning, None)
-                            .await;
-                }
-                let request_id = WIFI_CANCEL_REQUEST_ID.swap(0, Ordering::AcqRel);
-                if request_id != 0 {
-                    WIFI_CANCEL_ACK.signal(request_id);
-                }
-            } else {
-                let _ = progress_wifi_failure(
-                    &config,
-                    ProvisioningEvent::DisconnectTimedOut,
-                    "WiFi station did not stop in time.",
-                )
-                .await;
-            }
-            WIFI_APPLY_SIGNAL.wait().await;
-            continue;
-        }
-
-        if matches!(wifi_state().await, NetworkState::Disabled) {
-            let _ = publish_wifi_event(&config, ProvisioningEvent::ApplyConfig, None).await;
-        }
-        if retry_pending {
-            let _ = publish_wifi_event(&config, ProvisioningEvent::RetryDelayElapsed, None).await;
-            retry_pending = false;
-        }
-        if matches!(wifi_state().await, NetworkState::Saving) {
-            let _ = publish_wifi_event(&config, ProvisioningEvent::DisconnectCompleted, None).await;
-        }
-        if !matches!(wifi_state().await, NetworkState::Connecting) {
-            WIFI_APPLY_SIGNAL.wait().await;
-            continue;
-        }
-
-        let client = ModeConfig::Client(
-            ClientConfig::default()
-                .with_ssid(alloc::string::String::from(config.ssid.as_str()))
-                .with_password(alloc::string::String::from(config.password.as_str())),
-        );
-        stack.set_config_v4(net_config(&config).ipv4);
-        let driver_configured = controller.set_config(&client).is_ok();
-        let driver_started = driver_configured
-            && (matches!(controller.is_started(), Ok(true))
-                || matches!(
-                    with_timeout(
-                        Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
-                        controller.start_async(),
-                    )
-                    .await,
-                    Ok(Ok(()))
-                ));
-        if !driver_started {
-            let follow_up = progress_wifi_failure(
-                &config,
-                ProvisioningEvent::DriverConfigurationFailed,
-                "WiFi configuration could not be applied.",
-            )
-            .await;
-            if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
-                WIFI_APPLY_SIGNAL.wait().await;
-            }
+        if !start_wifi_driver(controller, stack, &config).await {
             continue;
         }
         let _ = publish_wifi_event(&config, ProvisioningEvent::DriverConfigured, None).await;
-        // `connect_async` clears pending STA events before it waits. The radio
-        // can associate between `start_async` and that clear, leaving the TCP
-        // stack online while this task waits forever for an event it discarded.
-        // Start association once, then observe the stack's current link state;
-        // `wait_link_up` completes immediately when that event already arrived.
-        let association_started =
-            matches!(controller.is_connected(), Ok(true)) || controller.connect().is_ok();
-        let association_timed_out = if association_started {
-            match select(
-                with_timeout(
-                    Duration::from_secs(WIFI_ASSOCIATION_TIMEOUT_SECS),
-                    stack.wait_link_up(),
-                ),
-                WIFI_APPLY_SIGNAL.wait(),
-            )
-            .await
-            {
-                Either::First(result) => result.is_err(),
-                Either::Second(()) => continue,
-            }
-        } else {
-            false
-        };
-        if !association_started || association_timed_out {
-            let event = if association_timed_out {
-                ProvisioningEvent::AssociationTimedOut
-            } else {
-                ProvisioningEvent::AssociationFailed
-            };
-            let follow_up = progress_wifi_failure(&config, event, "WiFi association failed.").await;
-            if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
-                WIFI_APPLY_SIGNAL.wait().await;
-            }
+        if !await_wifi_association(controller, stack, &config).await {
             continue;
         }
         let _ = publish_wifi_event(&config, ProvisioningEvent::AssociationSucceeded, None).await;
-        let ipv4_timed_out = match select(
-            with_timeout(Duration::from_secs(15), stack.wait_config_up()),
+        if !await_wifi_ipv4(controller, stack, &config).await {
+            continue;
+        }
+        retry_pending = wait_wifi_disconnect(controller, stack, &config).await;
+    }
+}
+
+async fn prepare_wifi_connection(
+    controller: &mut WifiController<'static>,
+    config: &WifiRuntimeConfig,
+    retry_pending: &mut bool,
+) -> bool {
+    if !config.is_configured() {
+        let _ = stop_wifi_station(controller).await;
+        if !matches!(wifi_state().await, NetworkState::Disabled) {
+            let _ = publish_wifi_event(config, ProvisioningEvent::ClearConfig, None).await;
+        }
+        WIFI_APPLY_SIGNAL.wait().await;
+        return false;
+    }
+    if !config.connection_enabled {
+        finish_wifi_disable(controller, config).await;
+        WIFI_APPLY_SIGNAL.wait().await;
+        return false;
+    }
+    if matches!(wifi_state().await, NetworkState::Disabled) {
+        let _ = publish_wifi_event(config, ProvisioningEvent::ApplyConfig, None).await;
+    }
+    if *retry_pending {
+        let _ = publish_wifi_event(config, ProvisioningEvent::RetryDelayElapsed, None).await;
+        *retry_pending = false;
+    }
+    if matches!(wifi_state().await, NetworkState::Saving) {
+        let _ = publish_wifi_event(config, ProvisioningEvent::DisconnectCompleted, None).await;
+    }
+    if !matches!(wifi_state().await, NetworkState::Connecting) {
+        WIFI_APPLY_SIGNAL.wait().await;
+        return false;
+    }
+    true
+}
+
+async fn start_wifi_driver(
+    controller: &mut WifiController<'static>,
+    stack: Stack<'static>,
+    config: &WifiRuntimeConfig,
+) -> bool {
+    let client = ModeConfig::Client(
+        ClientConfig::default()
+            .with_ssid(alloc::string::String::from(config.ssid.as_str()))
+            .with_password(alloc::string::String::from(config.password.as_str())),
+    );
+    stack.set_config_v4(net_config(config).ipv4);
+    let driver_configured = controller.set_config(&client).is_ok();
+    let driver_started = driver_configured
+        && (matches!(controller.is_started(), Ok(true))
+            || matches!(
+                with_timeout(
+                    Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
+                    controller.start_async(),
+                )
+                .await,
+                Ok(Ok(()))
+            ));
+    if driver_started {
+        return true;
+    }
+    let follow_up = progress_wifi_failure(
+        config,
+        ProvisioningEvent::DriverConfigurationFailed,
+        "WiFi configuration could not be applied.",
+    )
+    .await;
+    if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
+        WIFI_APPLY_SIGNAL.wait().await;
+    }
+    false
+}
+
+async fn await_wifi_association(
+    controller: &mut WifiController<'static>,
+    stack: Stack<'static>,
+    config: &WifiRuntimeConfig,
+) -> bool {
+    let association_started =
+        matches!(controller.is_connected(), Ok(true)) || controller.connect().is_ok();
+    let association_timed_out = if association_started {
+        match select(
+            with_timeout(
+                Duration::from_secs(WIFI_ASSOCIATION_TIMEOUT_SECS),
+                stack.wait_link_up(),
+            ),
             WIFI_APPLY_SIGNAL.wait(),
         )
         .await
         {
             Either::First(result) => result.is_err(),
-            Either::Second(()) => continue,
-        };
-        if ipv4_timed_out {
-            let _ = with_timeout(
-                Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
-                controller.disconnect_async(),
-            )
-            .await;
-            let follow_up = progress_wifi_failure(
-                &config,
-                ProvisioningEvent::Ipv4TimedOut,
-                "Timed out waiting for IPv4 configuration.",
-            )
-            .await;
-            if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
-                WIFI_APPLY_SIGNAL.wait().await;
-            }
-            continue;
+            Either::Second(()) => return false,
         }
+    } else {
+        false
+    };
+    if association_started && !association_timed_out {
+        return true;
+    }
+    let event = if association_timed_out {
+        ProvisioningEvent::AssociationTimedOut
+    } else {
+        ProvisioningEvent::AssociationFailed
+    };
+    let follow_up = progress_wifi_failure(config, event, "WiFi association failed.").await;
+    if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
+        WIFI_APPLY_SIGNAL.wait().await;
+    }
+    false
+}
 
-        let Some(connected) = apply_wifi_transition(ProvisioningEvent::Ipv4Configured).await else {
-            // A newer configuration may have replaced this association while
-            // DHCP was pending. Its completion belongs to the old transaction
-            // and must never publish state or panic the WiFi task.
-            continue;
-        };
-        let mut summary = network_connected(&config, &stack, &controller);
-        summary.state = connected.state;
-        summary.failure_code = connected.failure_code;
-        summary.configuration_generation = connected.configuration_generation;
-        summary.transition_sequence = connected.transition_sequence;
-        set_network_summary(summary).await;
+async fn await_wifi_ipv4(
+    controller: &mut WifiController<'static>,
+    stack: Stack<'static>,
+    config: &WifiRuntimeConfig,
+) -> bool {
+    let ipv4_timed_out = match select(
+        with_timeout(Duration::from_secs(15), stack.wait_config_up()),
+        WIFI_APPLY_SIGNAL.wait(),
+    )
+    .await
+    {
+        Either::First(result) => result.is_err(),
+        Either::Second(()) => return false,
+    };
+    if !ipv4_timed_out {
+        return true;
+    }
+    let _ = with_timeout(
+        Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
+        controller.disconnect_async(),
+    )
+    .await;
+    let follow_up = progress_wifi_failure(
+        config,
+        ProvisioningEvent::Ipv4TimedOut,
+        "Timed out waiting for IPv4 configuration.",
+    )
+    .await;
+    if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
+        WIFI_APPLY_SIGNAL.wait().await;
+    }
+    false
+}
 
-        match select(
-            // Do not use `wait_for_event` here: esp-wifi clears the requested
-            // event before waiting, which loses a disconnect that races with
-            // DHCP completion and leaves the device reporting a stale link.
-            controller.wait_for_events(WifiEvent::StaDisconnected.into(), false),
-            WIFI_APPLY_SIGNAL.wait(),
-        )
-        .await
-        {
-            Either::First(_) if config.auto_reconnect => {
-                let _ = publish_wifi_event(
-                    &config,
-                    ProvisioningEvent::StationDisconnected {
-                        auto_reconnect: true,
-                    },
-                    None,
-                )
-                .await;
-                Timer::after(Duration::from_secs(2)).await;
-                retry_pending = true;
-            }
-            Either::First(_) => {
-                let _ = publish_wifi_event(
-                    &config,
-                    ProvisioningEvent::StationDisconnected {
-                        auto_reconnect: false,
-                    },
-                    Some("WiFi station disconnected."),
-                )
-                .await;
-                WIFI_APPLY_SIGNAL.wait().await
-            }
-            Either::Second(()) => {
-                let disconnected = with_timeout(
-                    Duration::from_millis(SAVING_TIMEOUT_MS as u64),
-                    controller.disconnect_async(),
-                )
-                .await;
-                let latest_config = WIFI_CONFIG.lock().await.clone();
-                if disconnected.is_ok() {
-                    let _ = publish_wifi_event(
-                        &latest_config,
-                        ProvisioningEvent::DisconnectCompleted,
-                        None,
-                    )
-                    .await;
-                } else {
-                    let follow_up = progress_wifi_failure(
-                        &latest_config,
-                        ProvisioningEvent::DisconnectTimedOut,
-                        "Timed out while stopping WiFi.",
-                    )
-                    .await;
-                    if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
-                        WIFI_APPLY_SIGNAL.wait().await;
-                    }
-                }
-            }
+async fn wait_wifi_disconnect(
+    controller: &mut WifiController<'static>,
+    stack: Stack<'static>,
+    config: &WifiRuntimeConfig,
+) -> bool {
+    let Some(connected) = apply_wifi_transition(ProvisioningEvent::Ipv4Configured).await else {
+        return false;
+    };
+    let mut summary = network_connected(config, &stack, controller);
+    summary.state = connected.state;
+    summary.failure_code = connected.failure_code;
+    summary.configuration_generation = connected.configuration_generation;
+    summary.transition_sequence = connected.transition_sequence;
+    set_network_summary(summary).await;
+    match select(
+        controller.wait_for_events(WifiEvent::StaDisconnected.into(), false),
+        WIFI_APPLY_SIGNAL.wait(),
+    )
+    .await
+    {
+        Either::First(_) if config.auto_reconnect => {
+            let _ = publish_wifi_event(
+                config,
+                ProvisioningEvent::StationDisconnected {
+                    auto_reconnect: true,
+                },
+                None,
+            )
+            .await;
+            Timer::after(Duration::from_secs(2)).await;
+            true
+        }
+        Either::First(_) => {
+            let _ = publish_wifi_event(
+                config,
+                ProvisioningEvent::StationDisconnected {
+                    auto_reconnect: false,
+                },
+                Some("WiFi station disconnected."),
+            )
+            .await;
+            WIFI_APPLY_SIGNAL.wait().await;
+            false
+        }
+        Either::Second(()) => {
+            finish_wifi_disconnect(controller).await;
+            false
         }
     }
 }
@@ -918,10 +963,11 @@ fn network_summary_for_config(config: &WifiRuntimeConfig, state: NetworkState) -
     NetworkSummary {
         state: public_state,
         ssid: config.is_configured().then(|| config.ssid.clone()),
-        wifi_password_length: config
-            .is_configured()
-            .then_some(config.password.len() as u8)
-            .unwrap_or(0),
+        wifi_password_length: if config.is_configured() {
+            config.password.len() as u8
+        } else {
+            0
+        },
         ..NetworkSummary::default()
     }
 }

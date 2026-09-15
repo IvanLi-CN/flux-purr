@@ -298,20 +298,20 @@ impl BuzzerTestSession {
                     let _ = decisions.push(decision);
                 }
             }
-            BuzzerCueId::AttentionReminder => {
+            BuzzerCueId::AttentionReminder
                 if playback
                     .attention_due_ms
-                    .is_some_and(|due_ms| now_ms >= due_ms)
-                {
-                    let decision = arbiter
-                        .request_attention_reminder(BuzzerCueSource::ThermalAttention, now_ms);
-                    self.record(now_ms, decision);
-                    let _ = decisions.push(decision);
-                    playback.attention_started = true;
-                    playback.attention_due_ms =
-                        Some(now_ms.saturating_add(ATTENTION_REMINDER_INTERVAL_MS));
-                }
+                    .is_some_and(|due_ms| now_ms >= due_ms) =>
+            {
+                let decision =
+                    arbiter.request_attention_reminder(BuzzerCueSource::ThermalAttention, now_ms);
+                self.record(now_ms, decision);
+                let _ = decisions.push(decision);
+                playback.attention_started = true;
+                playback.attention_due_ms =
+                    Some(now_ms.saturating_add(ATTENTION_REMINDER_INTERVAL_MS));
             }
+            BuzzerCueId::AttentionReminder => {}
             _ if !arbiter.is_active() && playback.repeat => {
                 let decision =
                     arbiter.request_feedback(BuzzerCueSource::BuzzerTest, playback.cue, now_ms);

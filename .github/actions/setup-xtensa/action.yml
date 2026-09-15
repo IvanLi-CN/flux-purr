@@ -47,3 +47,7 @@ runs:
         if [[ -n "${CLANG_PATH:-}" ]]; then
           echo "CLANG_PATH=${CLANG_PATH}" >> "$GITHUB_ENV"
         fi
+
+        # Fail setup when the Espressif toolchain cannot provide Clippy. The
+        # target lint is a required check for Xtensa-only firmware sources.
+        cargo +esp clippy --version

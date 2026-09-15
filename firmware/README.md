@@ -138,6 +138,10 @@ or supported by the production `flux-purr` firmware artifact.
   - `cargo test --manifest-path firmware/Cargo.toml`
 - Host lint:
   - `bash scripts/check-firmware-clippy.sh`
+- Cross-target style boundary check:
+  - `bash scripts/check-rust-style.sh`
+- Xtensa lint for every supported PD request:
+  - `bash scripts/check-firmware-clippy-xtensa.sh`
 - Host release build:
   - `cargo build --manifest-path firmware/Cargo.toml --release`
 - Xtensa app runtime build:
