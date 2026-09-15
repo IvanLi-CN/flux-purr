@@ -79,6 +79,14 @@ fn fusb302b_received_resets_do_not_request_cc_reinitialization() {
 }
 
 #[test]
+fn fusb302b_phy_uses_pd20_for_automatic_goodcrc() {
+    assert!(RUNTIME_IMPLEMENTATION.contains(
+        "pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {\n    PhyConfig {\n        pd_revision: PdRevision::Rev20,"
+    ));
+    assert!(!RUNTIME_IMPLEMENTATION.contains("pd_revision: PdRevision::Rev30"));
+}
+
+#[test]
 fn fusb302b_recovery_flushes_only_the_receive_fifo() {
     assert_eq!(fusb302b_receive_fifo_flush_value(0), 0b0000_0100);
     assert_eq!(fusb302b_receive_fifo_flush_value(0xff), 0b0111_0111);
