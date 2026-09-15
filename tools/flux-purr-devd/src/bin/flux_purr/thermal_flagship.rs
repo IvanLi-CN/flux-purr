@@ -3423,11 +3423,56 @@ fn source_preset(profile_mode: ThermalProfileMode) -> &'static str {
     }
 }
 
+fn read_json(path: &Path) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+fn write_json_pretty(
+    path: &Path,
+    value: &Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(value)?)?;
+    Ok(())
+}
+
+fn display_path(path: &Path) -> String {
+    match env::current_dir() {
+        Ok(cwd) => path
+            .strip_prefix(&cwd)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| path.display().to_string()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+fn display_path_string(path: &str) -> String {
+    display_path(Path::new(path))
+}
+
+fn slug(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn round_decimal(value: f64, places: i32) -> f64 {
+    let factor = 10_f64.powi(places);
+    (value * factor).round() / factor
+}
+
 #[cfg(test)]
-#[expect(
-    clippy::items_after_test_module,
-    reason = "shared report helpers are kept below isolated test fixtures"
-)]
 mod tests {
     use super::super::{
         ThermalApproachGuardAnalysis, ThermalFullSpeedStableAnalysis, ThermalStageAnalysis,
@@ -5255,53 +5300,4 @@ mod tests {
         assert!(nudged.approach_power_permille < point.approach_power_permille);
         assert!(nudged.approach_floor_power_permille < point.approach_floor_power_permille);
     }
-}
-
-fn read_json(path: &Path) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
-}
-
-fn write_json_pretty(
-    path: &Path,
-    value: &Value,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, serde_json::to_vec_pretty(value)?)?;
-    Ok(())
-}
-
-fn display_path(path: &Path) -> String {
-    match env::current_dir() {
-        Ok(cwd) => path
-            .strip_prefix(&cwd)
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| path.display().to_string()),
-        Err(_) => path.display().to_string(),
-    }
-}
-
-fn display_path_string(path: &str) -> String {
-    display_path(Path::new(path))
-}
-
-fn slug(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-        } else if !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    out.trim_matches('-').to_string()
-}
-
-fn round_decimal(value: f64, places: i32) -> f64 {
-    let factor = 10_f64.powi(places);
-    (value * factor).round() / factor
 }

@@ -91,6 +91,10 @@ convenient place to add each new control-plane or test path.
   of waived. An external trait or ABI may use the narrow native Clippy
   exception required by that interface only when it is not one of the three
   structural lints.
+- Do not use module-level `allow(dead_code)` to mask reachability after a
+  module split. Keep implementation modules private where possible and expose
+  their intentional crate API through explicit re-exports; the checker rejects
+  file- and module-level `allow`/`expect` attributes.
 - Do not use `macro_rules!`, `include!`, or generated wrappers as a substitute
   for a responsibility boundary. A macro may remove repetitive syntax, but the
   control-flow and safety phases it expands must live in named, lint-visible

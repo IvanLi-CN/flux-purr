@@ -1756,9 +1756,9 @@ pub(crate) async fn runtime_commit_deferred_memory(state: &mut RuntimeLoopState,
     #[cfg(not(feature = "web_serial"))]
     let eeprom_snapshot_active = false;
     if eeprom_snapshot_active
-        || !state
+        || state
             .memory_commit_due_ms
-            .is_some_and(|due_ms| elapsed_ms >= due_ms)
+            .is_none_or(|due_ms| elapsed_ms < due_ms)
     {
         return;
     }

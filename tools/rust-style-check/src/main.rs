@@ -179,6 +179,27 @@ impl<'a> SourceVisitor<'a> {
     }
 }
 
+fn suppression_attribute(attr: &Attribute) -> bool {
+    if attr.path().is_ident("allow") || attr.path().is_ident("expect") {
+        return true;
+    }
+    if !attr.path().is_ident("cfg_attr") {
+        return false;
+    }
+    let Ok(list) = attr.meta.require_list() else {
+        return false;
+    };
+    let Ok(metas) = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(list.tokens.clone())
+    else {
+        return false;
+    };
+    metas.into_iter().skip(1).any(|meta| match meta {
+        Meta::Path(path) => path.is_ident("allow") || path.is_ident("expect"),
+        Meta::List(list) if list.path.is_ident("allow") || list.path.is_ident("expect") => true,
+        _ => false,
+    })
+}
+
 fn clippy_line_count(source: &str, body: &syn::Block) -> usize {
     let start = body.brace_token.span.open().byte_range().start;
     let end = body.brace_token.span.close().byte_range().end;
@@ -313,6 +334,34 @@ fn string_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 impl<'ast> Visit<'ast> for SourceVisitor<'_> {
+    fn visit_file(&mut self, node: &'ast File) {
+        for attr in &node.attrs {
+            if suppression_attribute(attr)
+                && attribute_details(attr).is_some_and(|details| details.lints.is_empty())
+            {
+                self.push(
+                    attr.path().span().start().line,
+                    "file-level allow/expect exceptions are not permitted".to_string(),
+                );
+            }
+        }
+        syn::visit::visit_file(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast ItemMod) {
+        for attr in &node.attrs {
+            if suppression_attribute(attr)
+                && attribute_details(attr).is_some_and(|details| details.lints.is_empty())
+            {
+                self.push(
+                    attr.path().span().start().line,
+                    "module-level allow/expect exceptions are not permitted".to_string(),
+                );
+            }
+        }
+        syn::visit::visit_item_mod(self, node);
+    }
+
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         self.check_function(&node.attrs, &node.sig, &node.block);
         syn::visit::visit_item_fn(self, node);
@@ -650,6 +699,27 @@ mod tests {
                 .violations
                 .iter()
                 .any(|violation| violation.message.contains("structural allow"))
+        );
+    }
+
+    #[test]
+    fn module_level_blanket_attributes_are_rejected() {
+        let file = syn::parse_file("#[allow(dead_code)] mod nested { fn sample() {} }")
+            .expect("fixture parses");
+        let Item::Mod(module) = &file.items[0] else {
+            panic!("fixture starts with a module");
+        };
+        let mut visitor = SourceVisitor {
+            path: Path::new("fixture.rs"),
+            source: "#[allow(dead_code)] mod nested { fn sample() {} }",
+            violations: Vec::new(),
+        };
+        visitor.visit_item_mod(module);
+        assert!(
+            visitor
+                .violations
+                .iter()
+                .any(|violation| violation.message.contains("module-level allow/expect"))
         );
     }
 

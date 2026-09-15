@@ -8,37 +8,26 @@ pub mod firmware_bundle;
 pub mod lan;
 
 #[path = "lib_core/contracts.rs"]
-#[allow(dead_code)]
 pub mod contracts;
 #[path = "lib_core/control_plane.rs"]
-#[allow(dead_code)]
 pub mod control_plane;
 #[path = "lib_core/discovery.rs"]
-#[allow(dead_code)]
 pub mod discovery;
 #[path = "lib_core/espflash.rs"]
-#[allow(dead_code)]
 pub mod espflash;
 #[path = "lib_core/events.rs"]
-#[allow(dead_code)]
 pub mod events;
 #[path = "lib_core/firmware_update.rs"]
-#[allow(dead_code)]
 pub mod firmware_update;
 #[path = "lib_core/flash.rs"]
-#[allow(dead_code)]
 pub mod flash;
 #[path = "lib_core/foundation.rs"]
-#[allow(dead_code)]
 pub mod foundation;
 #[path = "lib_core/http.rs"]
-#[allow(dead_code)]
 pub mod http;
 #[path = "lib_core/serial.rs"]
-#[allow(dead_code)]
 pub mod serial;
 #[path = "lib_core/wifi_thermal.rs"]
-#[allow(dead_code)]
 pub mod wifi_thermal;
 
 pub use contracts::*;
