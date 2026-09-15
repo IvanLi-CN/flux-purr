@@ -288,7 +288,8 @@ pub(crate) fn classify_ram_preflight_output(
 
 fn parse_security_flags(output: &str) -> Option<u32> {
     output.lines().find_map(|line| {
-        let value = line.trim().strip_prefix("flags:")?;
+        let line = line.trim().to_ascii_lowercase();
+        let value = line.strip_prefix("flags:")?;
         let token = value.split_whitespace().next()?;
         u32::from_str_radix(token.trim_start_matches("0x"), 16).ok()
     })
@@ -535,4 +536,137 @@ fn run_external_with_timeout(
         stderr,
         timed_out,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ram_run_cli_defaults_to_non_persistent_execution() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "ram-run",
+            "preview",
+            "display",
+            "--port",
+            "/dev/cu.test",
+        ])
+        .unwrap();
+        let Command::RamRun {
+            command: RamRunCommand::Preview(args),
+        } = cli.command
+        else {
+            panic!("ram preview parses");
+        };
+        assert!(!args.options.reload);
+        assert!(!args.options.install);
+        assert!(!args.options.skip_backup);
+        assert!(args.options.confirm.is_none());
+        assert!(args.options.theme.is_none());
+    }
+
+    #[test]
+    fn ram_load_is_explicitly_non_persistent() {
+        let args = ram_load_args("/dev/cu.test", Path::new("bringup.elf"));
+        assert!(args.iter().any(|arg| arg == "--ram"));
+        assert!(args.iter().any(|arg| arg == "--no-stub"));
+        assert!(!args.iter().any(|arg| arg == "--partition-table"));
+        assert!(!args.iter().any(|arg| arg == "hard-reset"));
+    }
+
+    #[test]
+    fn unknown_or_product_identity_can_never_reuse_ram_session() {
+        let product = RamRuntimeIdentity {
+            identity: RamIdentityObservation {
+                firmware_kind: Some(flux_purr_devd::FirmwareKind::Product),
+                build_id: "build-1".to_string(),
+                capabilities: vec!["test_adc".to_string()],
+            },
+        };
+        assert!(!ram_identity_matches(&product, "build-1", "test_adc"));
+
+        let legacy = RamRuntimeIdentity {
+            identity: RamIdentityObservation {
+                firmware_kind: None,
+                build_id: "build-1".to_string(),
+                capabilities: vec!["test_adc".to_string()],
+            },
+        };
+        assert!(!ram_identity_matches(&legacy, "build-1", "test_adc"));
+    }
+
+    #[test]
+    fn malformed_or_legacy_identity_is_unknown_to_ram_probe() {
+        assert!(
+            decode_ram_identity_response(&json!({
+                "type": "response",
+                "ok": true,
+                "result": {"identity": {
+                    "firmwareVersion": "0.1.0",
+                    "buildId": "build-1",
+                    "capabilities": []
+                }}
+            }))
+            .is_some_and(|runtime| runtime.identity.firmware_kind.is_none())
+        );
+        assert!(
+            decode_ram_identity_response(&json!({
+                "type": "response",
+                "ok": true,
+                "result": {"identity": {"firmwareKind": "not-a-kind"}}
+            }))
+            .is_none()
+        );
+        assert!(decode_ram_identity_response(&json!({"type": "rom-log"})).is_none());
+        assert!(
+            decode_ram_identity_response(&json!({
+                "type": "response",
+                "ok": false,
+                "result": {"identity": {"firmwareKind": "ram_bringup"}}
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn ram_preflight_rejects_secure_or_disabled_download_without_fallback() {
+        let error = classify_ram_preflight_output(
+            "/dev/cu.test",
+            true,
+            "ROM: secure UART download enabled",
+            "",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no Flash fallback"));
+        assert!(classify_ram_preflight_output("/dev/cu.test", false, "", "timeout").is_err());
+    }
+
+    #[test]
+    fn ram_preflight_parses_rom_security_flags() {
+        assert_eq!(parse_security_flags("Flags: 0x00000004"), Some(0x00000004));
+        assert_eq!(
+            parse_security_flags("  flags: 0x00000100 other"),
+            Some(0x100)
+        );
+        let error = classify_ram_preflight_output("/dev/cu.test", true, "Flags: 0x00000004", "")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("secure download"));
+        let error = classify_ram_preflight_output("/dev/cu.test", true, "Flags: 0x00000100", "")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("USB access/download"));
+    }
+
+    #[test]
+    fn long_ram_commands_have_time_to_finish_before_timeout() {
+        assert_eq!(ram_command_timeout("test_fan"), Duration::from_secs(30));
+        assert_eq!(
+            ram_command_timeout("preview_frontpanel"),
+            Duration::from_secs(60)
+        );
+        assert_eq!(ram_command_timeout("test_adc"), Duration::from_secs(5));
+    }
 }
