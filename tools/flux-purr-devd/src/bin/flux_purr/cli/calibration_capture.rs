@@ -1,289 +1,368 @@
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
+struct CalibrationRunContext<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease: &'a Lease,
+    args: &'a CalibrationCollectArgs,
+    run_id: &'a str,
+    source_current_ma: u16,
+    run_started_unix_ms: u64,
+    sample_interval: Duration,
+    max_runtime: Duration,
+}
+
+#[derive(Default)]
+struct CalibrationCollectionState {
+    stop_reason: Option<&'static str>,
+    threshold_sample_index: Option<usize>,
+    stopped_sample_index: Option<usize>,
+    sample_index: usize,
+    samples_count: usize,
+    current_temp_stats: Option<CalibrationSeriesStats>,
+    voltage_stats: Option<CalibrationSeriesStats>,
+    current_ma_stats: Option<CalibrationSeriesStats>,
+    heater_output_stats: Option<CalibrationSeriesStats>,
+    board_temp_stats: Option<CalibrationSeriesStats>,
+    rtd_raw_stats: Option<CalibrationSeriesStats>,
+    vin_raw_stats: Option<CalibrationSeriesStats>,
+    first_status_snapshot: Option<Value>,
+    last_status_snapshot: Option<Value>,
+    heater_started: bool,
+    heater_stopped: bool,
+    final_status_snapshot: Option<Value>,
+}
+
 async fn collect_calibration_run(
     client: &Client,
     default_devd: &str,
     args: CalibrationCollectArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let resolved = resolve_target(args.target, default_devd)?;
+    let resolved = resolve_target(args.target.clone(), default_devd)?;
     let source_current_ma = parse_pps_amps(&args.source_current_a)?;
     let run_started_unix_ms = current_unix_millis();
-    let run_id = format!(
-        "cal-{}-{}-{}mA",
-        run_started_unix_ms,
-        slugify_path_component(&resolved.device),
-        source_current_ma
-    );
+    let run_id = calibration_run_id(run_started_unix_ms, &resolved, source_current_ma);
     let run_dir = args.output_dir.join(&run_id);
     fs::create_dir_all(&run_dir)?;
     let samples_path = run_dir.join("samples.ndjson");
     let summary_path = run_dir.join("run.json");
     let mut samples_writer = BufWriter::new(File::create(&samples_path)?);
-
     let lease = create_lease(client, &resolved).await?;
     let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-
-    let mut stop_reason = None::<&'static str>;
-    let mut threshold_sample_index = None::<usize>;
-    let mut stopped_sample_index = None::<usize>;
-    let mut sample_index = 0usize;
-    let mut samples_count = 0usize;
-    let mut current_temp_stats: Option<CalibrationSeriesStats> = None;
-    let mut voltage_stats: Option<CalibrationSeriesStats> = None;
-    let mut current_ma_stats: Option<CalibrationSeriesStats> = None;
-    let mut heater_output_stats: Option<CalibrationSeriesStats> = None;
-    let mut board_temp_stats: Option<CalibrationSeriesStats> = None;
-    let mut rtd_raw_stats: Option<CalibrationSeriesStats> = None;
-    let mut vin_raw_stats: Option<CalibrationSeriesStats> = None;
-    let mut first_status_snapshot: Option<Value> = None;
-    let mut last_status_snapshot: Option<Value> = None;
-    let mut heater_started = false;
-    let mut heater_stopped = false;
-    let mut final_status_snapshot = None::<Value>;
-    let mut loop_started = tokio::time::Instant::now();
-    let sample_interval = Duration::from_millis(args.sample_interval_ms.max(1));
-    let max_runtime = Duration::from_secs(args.max_runtime_seconds.max(1));
-
-    let collect_result = async {
-        if !args.dry_run {
-            let initial_status = request_leased(
-                client,
-                &resolved,
-                &lease.lease_id,
-                Method::GET,
-                "/status",
-                None,
-            )
-            .await?;
-            let initial_current_temp = require_status_f64(&initial_status, "currentTempC")?;
-            if initial_current_temp > 40.0 {
-                return Err(format!(
-                    "calibration collect requires room-temperature start (<= 40C), got {initial_current_temp:.1}C"
-                )
-                .into());
-            }
-            let body = json!({
-                "heaterEnabled": true,
-                "targetTempC": args.target_temp_c,
-            });
-            request_leased(
-                client,
-                &resolved,
-                &lease.lease_id,
-                Method::PUT,
-                "/runtime",
-                Some(body),
-            )
-            .await?;
-            heater_started = true;
-            let readback = request_leased(
-                client,
-                &resolved,
-                &lease.lease_id,
-                Method::GET,
-                "/status",
-                None,
-            )
-            .await?;
-            let readback_target = require_status_i32(&readback, "targetTempC")?;
-            if !readback
-                .get("heaterEnabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                || readback_target != args.target_temp_c as i32
-            {
-                return Err("heater start readback did not match requested runtime state".into());
-            }
-        }
-
-        loop_started = tokio::time::Instant::now();
-        let deadline = loop_started + max_runtime;
-        let mut next_tick = loop_started;
-
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                stop_reason = Some("max_runtime");
-                break;
-            }
-
-            let status = request_leased(
-                client,
-                &resolved,
-                &lease.lease_id,
-                Method::GET,
-                "/status",
-                None,
-            )
-            .await?;
-            let current_temp_c = require_status_f64(&status, "currentTempC")?;
-            let voltage_mv = require_status_u64(&status, "voltageMv")? as f64;
-            let current_ma = require_status_u64(&status, "currentMa")? as f64;
-            let heater_output_percent = require_status_u64(&status, "heaterOutputPercent")? as f64;
-            let board_temp_centi = require_status_i32(&status, "boardTempCenti")? as f64;
-            let rtd_raw_adc_mv = require_status_u16(&status, "rtdRawAdcMv")? as f64;
-            let vin_raw_adc_mv = require_status_u16(&status, "vinRawAdcMv")? as f64;
-
-            observe_series(&mut current_temp_stats, current_temp_c);
-            observe_series(&mut voltage_stats, voltage_mv);
-            observe_series(&mut current_ma_stats, current_ma);
-            observe_series(&mut heater_output_stats, heater_output_percent);
-            observe_series(&mut board_temp_stats, board_temp_centi);
-            observe_series(&mut rtd_raw_stats, rtd_raw_adc_mv);
-            observe_series(&mut vin_raw_stats, vin_raw_adc_mv);
-
-            let phase = if args.dry_run {
-                "dry_run"
-            } else {
-                "warmup"
-            };
-            let status_snapshot = status_snapshot(&status)?;
-            if first_status_snapshot.is_none() {
-                first_status_snapshot = Some(status_snapshot.clone());
-            }
-            last_status_snapshot = Some(status_snapshot.clone());
-            let captured_at_unix_ms = current_unix_millis();
-            let elapsed_ms = captured_at_unix_ms.saturating_sub(run_started_unix_ms);
-            let sample = json!({
-                "runId": run_id.clone(),
-                "sampleIndex": sample_index,
-                "capturedAtUnixMs": captured_at_unix_ms,
-                "elapsedMs": elapsed_ms,
-                "phase": phase,
-                "sourceCurrentMa": source_current_ma,
-                "status": status,
-            });
-            writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
-            samples_writer.flush()?;
-            samples_count += 1;
-
-            if !args.dry_run && current_temp_c >= f64::from(args.stop_temp_c) {
-                stop_reason = Some("temperature_threshold");
-                threshold_sample_index = Some(sample_index);
-                break;
-            }
-
-            sample_index = sample_index.saturating_add(1);
-            let target_tick = next_tick + sample_interval;
-            next_tick = target_tick;
-            tokio::time::sleep_until(target_tick).await;
-        }
-
-        if !args.dry_run {
-            let _ = request_leased(
-                client,
-                &resolved,
-                &lease.lease_id,
-                Method::PUT,
-                "/runtime",
-                Some(thermal_self_test_runtime_body(false, args.target_temp_c)),
-            )
-            .await?;
-            heater_stopped = true;
-            let stop_status = request_leased(
-                client,
-                &resolved,
-                &lease.lease_id,
-                Method::GET,
-                "/status",
-                None,
-            )
-            .await?;
-            let stop_snapshot = status_snapshot(&stop_status)?;
-            let captured_at_unix_ms = current_unix_millis();
-            let elapsed_ms = captured_at_unix_ms.saturating_sub(run_started_unix_ms);
-            let sample = json!({
-                "runId": run_id.clone(),
-                "sampleIndex": sample_index.saturating_add(1),
-                "capturedAtUnixMs": captured_at_unix_ms,
-                "elapsedMs": elapsed_ms,
-                "phase": "stopped",
-                "sourceCurrentMa": source_current_ma,
-                "status": stop_status,
-            });
-            writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
-            samples_writer.flush()?;
-            samples_count += 1;
-            stopped_sample_index = Some(sample_index.saturating_add(1));
-            final_status_snapshot = Some(stop_snapshot.clone());
-            last_status_snapshot = Some(stop_snapshot);
-        } else {
-            final_status_snapshot = last_status_snapshot.clone();
-            stop_reason = Some("max_runtime");
-        }
-
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-    }
-    .await;
-
-    if heater_started && !heater_stopped {
-        let _ = request_leased(
-            client,
-            &resolved,
-            &lease.lease_id,
-            Method::PUT,
-            "/runtime",
-            Some(thermal_self_test_runtime_body(false, args.target_temp_c)),
-        )
-        .await;
-    }
-
+    let context = CalibrationRunContext {
+        client,
+        resolved: &resolved,
+        lease: &lease,
+        args: &args,
+        run_id: &run_id,
+        source_current_ma,
+        run_started_unix_ms,
+        sample_interval: Duration::from_millis(args.sample_interval_ms.max(1)),
+        max_runtime: Duration::from_secs(args.max_runtime_seconds.max(1)),
+    };
+    let mut state = CalibrationCollectionState::default();
+    let collect_result = run_calibration_collection(&context, &mut state, &mut samples_writer).await;
+    cleanup_calibration_heater(&context, &state).await;
     let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
     heartbeat.abort();
-
     collect_result?;
-
-    let duration_ms = current_unix_millis().saturating_sub(run_started_unix_ms);
-    let summary = json!({
-        "ok": true,
-        "runId": run_id.clone(),
-        "dryRun": args.dry_run,
-        "target": {
-            "deviceId": resolved.device.clone(),
-            "hardwareId": resolved.hardware_id.clone(),
-            "devd": resolved.devd.clone(),
-        },
-        "source": {
-            "deviceId": args.source_device_id,
-            "mode": "manual_cc",
-            "currentMa": source_current_ma,
-        },
-        "parameters": {
-            "targetTempC": args.target_temp_c,
-            "stopTempC": args.stop_temp_c,
-            "sampleIntervalMs": args.sample_interval_ms.max(1),
-            "maxRuntimeSeconds": args.max_runtime_seconds.max(1),
-        },
-        "files": {
-            "runDir": run_dir,
-            "summaryPath": summary_path,
-            "samplesPath": samples_path,
-        },
-        "sampleCount": samples_count,
-        "durationMs": duration_ms,
-        "stopReason": stop_reason.unwrap_or("max_runtime"),
-        "complete": args.dry_run || stop_reason == Some("temperature_threshold"),
-        "thresholdSampleIndex": threshold_sample_index,
-        "stoppedSampleIndex": stopped_sample_index,
-        "startStatus": first_status_snapshot,
-        "finalStatus": final_status_snapshot,
-        "stats": {
-            "currentTempC": current_temp_stats.map(|stats| stats.to_value()),
-            "voltageMv": voltage_stats.map(|stats| stats.to_value()),
-            "currentMa": current_ma_stats.map(|stats| stats.to_value()),
-            "heaterOutputPercent": heater_output_stats.map(|stats| stats.to_value()),
-            "boardTempCenti": board_temp_stats.map(|stats| stats.to_value()),
-            "rtdRawAdcMv": rtd_raw_stats.map(|stats| stats.to_value()),
-            "vinRawAdcMv": vin_raw_stats.map(|stats| stats.to_value()),
-        }
-    });
-
+    let summary = calibration_summary(&context, &state, &run_dir, &summary_path, &samples_path);
     fs::write(&summary_path, serde_json::to_vec_pretty(&summary)?)?;
     if let Some(id) = resolved.hardware_id.as_deref() {
         let _ = remember_usb(id, &resolved.device, &resolved.devd);
     }
     Ok(summary)
+}
+
+fn calibration_run_id(started_unix_ms: u64, resolved: &ResolvedUsbTarget, current_ma: u16) -> String {
+    format!(
+        "cal-{}-{}-{}mA",
+        started_unix_ms,
+        slugify_path_component(&resolved.device),
+        current_ma
+    )
+}
+
+async fn run_calibration_collection(
+    context: &CalibrationRunContext<'_>,
+    state: &mut CalibrationCollectionState,
+    samples_writer: &mut BufWriter<File>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    start_calibration_heater(context, state).await?;
+    collect_calibration_samples(context, state, samples_writer).await?;
+    stop_calibration_heater(context, state, samples_writer).await
+}
+
+async fn start_calibration_heater(
+    context: &CalibrationRunContext<'_>,
+    state: &mut CalibrationCollectionState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if context.args.dry_run {
+        return Ok(());
+    }
+    let initial_status = request_leased(
+        context.client,
+        context.resolved,
+        &context.lease.lease_id,
+        Method::GET,
+        "/status",
+        None,
+    )
+    .await?;
+    let initial_current_temp = require_status_f64(&initial_status, "currentTempC")?;
+    if initial_current_temp > 40.0 {
+        return Err(format!(
+            "calibration collect requires room-temperature start (<= 40C), got {initial_current_temp:.1}C"
+        )
+        .into());
+    }
+    request_leased(
+        context.client,
+        context.resolved,
+        &context.lease.lease_id,
+        Method::PUT,
+        "/runtime",
+        Some(json!({
+            "heaterEnabled": true,
+            "targetTempC": context.args.target_temp_c,
+        })),
+    )
+    .await?;
+    state.heater_started = true;
+    verify_calibration_heater_start(context).await
+}
+
+async fn verify_calibration_heater_start(
+    context: &CalibrationRunContext<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let readback = request_leased(
+        context.client,
+        context.resolved,
+        &context.lease.lease_id,
+        Method::GET,
+        "/status",
+        None,
+    )
+    .await?;
+    let readback_target = require_status_i32(&readback, "targetTempC")?;
+    if !readback
+        .get("heaterEnabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || readback_target != i32::from(context.args.target_temp_c)
+    {
+        return Err("heater start readback did not match requested runtime state".into());
+    }
+    Ok(())
+}
+
+async fn collect_calibration_samples(
+    context: &CalibrationRunContext<'_>,
+    state: &mut CalibrationCollectionState,
+    samples_writer: &mut BufWriter<File>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let loop_started = tokio::time::Instant::now();
+    let deadline = loop_started + context.max_runtime;
+    let mut next_tick = loop_started;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            state.stop_reason = Some("max_runtime");
+            break;
+        }
+        let status = request_leased(
+            context.client,
+            context.resolved,
+            &context.lease.lease_id,
+            Method::GET,
+            "/status",
+            None,
+        )
+        .await?;
+        let current_temp_c = record_calibration_sample(context, state, samples_writer, &status, "warmup")?;
+        if !context.args.dry_run && current_temp_c >= f64::from(context.args.stop_temp_c) {
+            state.stop_reason = Some("temperature_threshold");
+            state.threshold_sample_index = Some(state.sample_index);
+            break;
+        }
+        state.sample_index = state.sample_index.saturating_add(1);
+        next_tick += context.sample_interval;
+        tokio::time::sleep_until(next_tick).await;
+    }
+    Ok(())
+}
+
+fn record_calibration_sample(
+    context: &CalibrationRunContext<'_>,
+    state: &mut CalibrationCollectionState,
+    samples_writer: &mut BufWriter<File>,
+    status: &Value,
+    phase: &str,
+) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+    let current_temp_c = require_status_f64(status, "currentTempC")?;
+    observe_calibration_status(state, status)?;
+    let status_snapshot = status_snapshot(status)?;
+    if state.first_status_snapshot.is_none() {
+        state.first_status_snapshot = Some(status_snapshot.clone());
+    }
+    state.last_status_snapshot = Some(status_snapshot);
+    let captured_at_unix_ms = current_unix_millis();
+    let sample = json!({
+        "runId": context.run_id,
+        "sampleIndex": state.sample_index,
+        "capturedAtUnixMs": captured_at_unix_ms,
+        "elapsedMs": captured_at_unix_ms.saturating_sub(context.run_started_unix_ms),
+        "phase": phase,
+        "sourceCurrentMa": context.source_current_ma,
+        "status": status,
+    });
+    writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+    samples_writer.flush()?;
+    state.samples_count += 1;
+    Ok(current_temp_c)
+}
+
+fn observe_calibration_status(
+    state: &mut CalibrationCollectionState,
+    status: &Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    observe_series(&mut state.current_temp_stats, require_status_f64(status, "currentTempC")?);
+    observe_series(&mut state.voltage_stats, require_status_u64(status, "voltageMv")? as f64);
+    observe_series(&mut state.current_ma_stats, require_status_u64(status, "currentMa")? as f64);
+    observe_series(
+        &mut state.heater_output_stats,
+        require_status_u64(status, "heaterOutputPercent")? as f64,
+    );
+    observe_series(
+        &mut state.board_temp_stats,
+        require_status_i32(status, "boardTempCenti")? as f64,
+    );
+    observe_series(&mut state.rtd_raw_stats, require_status_u16(status, "rtdRawAdcMv")? as f64);
+    observe_series(&mut state.vin_raw_stats, require_status_u16(status, "vinRawAdcMv")? as f64);
+    Ok(())
+}
+
+async fn stop_calibration_heater(
+    context: &CalibrationRunContext<'_>,
+    state: &mut CalibrationCollectionState,
+    samples_writer: &mut BufWriter<File>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if context.args.dry_run {
+        state.final_status_snapshot = state.last_status_snapshot.clone();
+        state.stop_reason = Some("max_runtime");
+        return Ok(());
+    }
+    request_leased(
+        context.client,
+        context.resolved,
+        &context.lease.lease_id,
+        Method::PUT,
+        "/runtime",
+        Some(thermal_self_test_runtime_body(false, context.args.target_temp_c)),
+    )
+    .await?;
+    state.heater_stopped = true;
+    let stop_status = request_leased(
+        context.client,
+        context.resolved,
+        &context.lease.lease_id,
+        Method::GET,
+        "/status",
+        None,
+    )
+    .await?;
+    state.sample_index = state.sample_index.saturating_add(1);
+    write_stopped_calibration_sample(context, state, samples_writer, &stop_status)?;
+    state.stopped_sample_index = Some(state.sample_index);
+    state.final_status_snapshot = state.last_status_snapshot.clone();
+    Ok(())
+}
+
+fn write_stopped_calibration_sample(
+    context: &CalibrationRunContext<'_>,
+    state: &mut CalibrationCollectionState,
+    samples_writer: &mut BufWriter<File>,
+    status: &Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let stop_snapshot = status_snapshot(status)?;
+    let captured_at_unix_ms = current_unix_millis();
+    let sample = json!({
+        "runId": context.run_id,
+        "sampleIndex": state.sample_index,
+        "capturedAtUnixMs": captured_at_unix_ms,
+        "elapsedMs": captured_at_unix_ms.saturating_sub(context.run_started_unix_ms),
+        "phase": "stopped",
+        "sourceCurrentMa": context.source_current_ma,
+        "status": status,
+    });
+    writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+    samples_writer.flush()?;
+    state.samples_count += 1;
+    state.last_status_snapshot = Some(stop_snapshot.clone());
+    state.final_status_snapshot = Some(stop_snapshot);
+    Ok(())
+}
+
+async fn cleanup_calibration_heater(
+    context: &CalibrationRunContext<'_>,
+    state: &CalibrationCollectionState,
+) {
+    if state.heater_started && !state.heater_stopped {
+        let _ = request_leased(
+            context.client,
+            context.resolved,
+            &context.lease.lease_id,
+            Method::PUT,
+            "/runtime",
+            Some(thermal_self_test_runtime_body(false, context.args.target_temp_c)),
+        )
+        .await;
+    }
+}
+
+fn calibration_summary(
+    context: &CalibrationRunContext<'_>,
+    state: &CalibrationCollectionState,
+    run_dir: &Path,
+    summary_path: &Path,
+    samples_path: &Path,
+) -> Value {
+    json!({
+        "ok": true,
+        "runId": context.run_id,
+        "dryRun": context.args.dry_run,
+        "target": {
+            "deviceId": context.resolved.device,
+            "hardwareId": context.resolved.hardware_id,
+            "devd": context.resolved.devd,
+        },
+        "source": {"deviceId": context.args.source_device_id, "mode": "manual_cc", "currentMa": context.source_current_ma},
+        "parameters": {
+            "targetTempC": context.args.target_temp_c,
+            "stopTempC": context.args.stop_temp_c,
+            "sampleIntervalMs": context.args.sample_interval_ms.max(1),
+            "maxRuntimeSeconds": context.args.max_runtime_seconds.max(1),
+        },
+        "files": {"runDir": run_dir, "summaryPath": summary_path, "samplesPath": samples_path},
+        "sampleCount": state.samples_count,
+        "durationMs": current_unix_millis().saturating_sub(context.run_started_unix_ms),
+        "stopReason": state.stop_reason.unwrap_or("max_runtime"),
+        "complete": context.args.dry_run || state.stop_reason == Some("temperature_threshold"),
+        "thresholdSampleIndex": state.threshold_sample_index,
+        "stoppedSampleIndex": state.stopped_sample_index,
+        "startStatus": state.first_status_snapshot,
+        "finalStatus": state.final_status_snapshot,
+        "stats": calibration_stats_value(state),
+    })
+}
+
+fn calibration_stats_value(state: &CalibrationCollectionState) -> Value {
+    json!({
+        "currentTempC": state.current_temp_stats.as_ref().map(CalibrationSeriesStats::to_value),
+        "voltageMv": state.voltage_stats.as_ref().map(CalibrationSeriesStats::to_value),
+        "currentMa": state.current_ma_stats.as_ref().map(CalibrationSeriesStats::to_value),
+        "heaterOutputPercent": state.heater_output_stats.as_ref().map(CalibrationSeriesStats::to_value),
+        "boardTempCenti": state.board_temp_stats.as_ref().map(CalibrationSeriesStats::to_value),
+        "rtdRawAdcMv": state.rtd_raw_stats.as_ref().map(CalibrationSeriesStats::to_value),
+        "vinRawAdcMv": state.vin_raw_stats.as_ref().map(CalibrationSeriesStats::to_value),
+    })
 }
 
 async fn create_lease(

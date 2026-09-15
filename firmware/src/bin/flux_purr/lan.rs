@@ -46,953 +46,1253 @@ struct ControlLineContext<'a, 'i, 'e, PWM> {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-#[expect(
-    clippy::too_many_lines,
-    clippy::excessive_nesting,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 async fn process_control_line<PWM>(
     line: &str,
-    context: ControlLineContext<'_, '_, '_, PWM>,
+    mut context: ControlLineContext<'_, '_, '_, PWM>,
 ) -> (bool, UsbFrame)
 where
     PWM: SetDutyCycle,
 {
-    let ControlLineContext {
-        controller,
-        ui_state,
-        memory_config,
-        last_persisted_memory_config,
-        preview_heater_curve,
-        memory_commit_due_ms,
-        memory_sequence,
-        persistence_source,
-        persistence_record_state,
-        pd_i2c,
-        pd_controller,
-        pd_port,
-        eeprom_pd_service,
-        calibration_runtime_state,
-        thermal_plant_workspace,
-        elapsed_ms,
-        last_pd_observation,
-        pd_contract_ready,
-        heater_power_backend,
-        heater_controller,
-        pid_snapshot,
-        manual_pps,
-        fan_command,
-        current_rtd_fault,
-        overtemp_attention_acknowledged,
-        attention_pending_after_fault_clear,
-        overtemp_forced_fan_active,
-        next_attention_reminder_ms,
-        buzzer,
-        thermal_control_profile_preview,
-        last_raw_state,
-        latest_status_temp_c,
-        latest_control_temp_c,
-        control_measurement_guarded,
-        latest_rtd_raw_adc_mv,
-        latest_rtd_raw_adc_min_mv,
-        latest_rtd_raw_adc_max_mv,
-        latest_vin_raw_adc_mv,
-        latest_vin_mv,
-        last_heater_duty,
-        heater_control_timing,
-        persistence_log_sink,
-        record_staging,
-    } = context;
-    let mut needs_redraw = false;
-    let active_thermal_control_profile =
-        active_thermal_control_profile(memory_config, *thermal_control_profile_preview, manual_pps);
-    let runtime_context =
-        |manual_pps_value: ManualPpsState,
-         heater_fault_latched: Option<HeaterFaultReason>,
-         attention_pending_after_fault_clear_value: bool| UsbRuntimeStatusContext {
-            elapsed_ms,
-            pd_controller,
-            last_pd_observation,
-            heater_power_backend: *heater_power_backend,
-            pid_snapshot,
-            heater_control_timing,
-            heater_physical_output_percent: last_heater_duty,
-            manual_pps: manual_pps_value,
-            fan_command,
-            current_rtd_fault,
-            heater_fault_latched,
-            attention_pending_after_fault_clear: attention_pending_after_fault_clear_value,
-            thermal_control_profile_preview: thermal_control_profile_preview.is_some(),
-            active_thermal_control_profile,
-            last_raw_state,
-            latest_status_temp_c,
-            latest_control_temp_c,
-            control_measurement_guarded,
-            latest_rtd_raw_adc_mv,
-            latest_rtd_raw_adc_min_mv,
-            latest_rtd_raw_adc_max_mv,
-            latest_vin_raw_adc_mv,
-            vin_mv: latest_vin_mv,
-        };
+    let mut needs_redraw = refresh_control_network(&mut context).await;
+    let active_profile = active_thermal_control_profile(
+        context.memory_config,
+        *context.thermal_control_profile_preview,
+        context.manual_pps,
+    );
+    let (handler_redraw, response) = dispatch_control_frame(&mut context, line, active_profile).await;
+    needs_redraw |= handler_redraw;
+    (needs_redraw, response)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn refresh_control_network<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+) -> bool
+where
+    PWM: SetDutyCycle,
+{
     #[cfg(feature = "net_http")]
-    let initial_network_summary = {
-        let mut pd_network_service = PdNetworkServiceContext {
-            eeprom: &mut *eeprom_pd_service,
-            pd_contract_ready,
-            ui_state,
-            calibration_runtime_state,
-            manual_pps,
-        };
-        run_network_operation_with_pd(
-            flux_purr_firmware::net::lan_network_summary(),
-            pd_i2c,
-            pd_port,
-            &mut pd_network_service,
-        )
-        .await
-    };
-    #[cfg(feature = "net_http")]
-    if ui_state.apply_network_summary(initial_network_summary) {
-        // Status and network requests must observe the same device-owned
-        // snapshot even during the first control-loop ticks after boot.
-        needs_redraw = true;
-    }
-    let response = match parse_usb_frame(line) {
-        Ok(UsbFrame::Request { request_id, op }) => match op {
-            UsbRequestOp::GetIdentity => usb_response(
-                request_id,
-                UsbResponsePayload::Identity(Box::new(hardware_identity())),
-            ),
-            UsbRequestOp::GetInstallStatus => usb_response(
-                request_id,
-                UsbResponsePayload::InstallStatus(InstallStatus::from_runtime(
-                    InstallRuntimeSnapshot {
-                        config: memory_config,
-                        persistence_source,
-                        record_state: persistence_record_state,
-                        record_sequence: *memory_sequence,
-                        sensor_ready: current_rtd_fault.is_none()
-                            && latest_status_temp_c.is_finite(),
-                        heater_fault_latched: heater_controller.fault_latched().is_some(),
-                        persistence_locked: ui_state.persistence_locked(),
-                        last_persistence_fault: ui_state.persistence_fault.clone(),
-                        persistence_fault_attention_pending: ui_state
-                            .persistence_fault_attention_pending,
-                    },
-                )),
-            ),
-            UsbRequestOp::CompleteSetup => {
-                if ui_state.persistence_locked() {
-                    usb_error_response(
-                        request_id,
-                        "eeprom_required",
-                        "EEPROM_REQUIRED: persistent configuration is unavailable; setup cannot be completed.",
-                    )
-                } else {
-                    let sensor_ready =
-                        current_rtd_fault.is_none() && latest_status_temp_c.is_finite();
-                    let calibration_ready = flux_purr_firmware::memory::adc_calibration_fit(
-                        &memory_config.adc_calibration,
-                        flux_purr_firmware::memory::AdcCalibrationChannel::Rtd,
-                    )
-                    .sample_count
-                        >= 2
-                        && flux_purr_firmware::memory::adc_calibration_fit(
-                            &memory_config.adc_calibration,
-                            flux_purr_firmware::memory::AdcCalibrationChannel::Vin,
-                        )
-                        .sample_count
-                            >= 2
-                        && memory_config
-                            .active_heater_curve
-                            .points
-                            .iter()
-                            .flatten()
-                            .count()
-                            >= 2;
-                    match memory_config.complete_setup(sensor_ready, calibration_ready) {
-                        Ok(()) => {
-                            *memory_commit_due_ms =
-                                Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-                            usb_response(request_id, UsbResponsePayload::Ack)
-                        }
-                        Err(flux_purr_firmware::memory::SetupCompletionError::SensorNotReady) => {
-                            usb_error_response(
-                                request_id,
-                                "sensor_unready",
-                                "Sensor readiness is required before setup completion.",
-                            )
-                        }
-                        Err(
-                            flux_purr_firmware::memory::SetupCompletionError::CalibrationRequired,
-                        ) => usb_error_response(
-                            request_id,
-                            "calibration_required",
-                            "Calibration is required before setup completion.",
-                        ),
-                    }
-                }
-            }
-            UsbRequestOp::ResetPersistence => {
-                if ui_state.persistence_locked() {
-                    usb_error_response(
-                        request_id,
-                        "eeprom_required",
-                        "EEPROM_REQUIRED: persistent configuration is unavailable; persistence cannot be reset.",
-                    )
-                } else {
-                    memory_config.reset_for_commissioning();
-                    apply_memory_config_to_ui(ui_state, memory_config);
-                    *memory_commit_due_ms =
-                        Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-                    needs_redraw = true;
-                    usb_response(request_id, UsbResponsePayload::Ack)
-                }
-            }
-            UsbRequestOp::GetNetwork => {
-                #[cfg(feature = "net_http")]
-                let network = {
-                    let mut pd_network_service = PdNetworkServiceContext {
-                        eeprom: &mut *eeprom_pd_service,
-                        pd_contract_ready,
-                        ui_state,
-                        calibration_runtime_state,
-                        manual_pps,
-                    };
-                    run_network_operation_with_pd(
-                        flux_purr_firmware::net::lan_network_summary(),
-                        pd_i2c,
-                        pd_port,
-                        &mut pd_network_service,
-                    )
-                    .await
-                };
-                #[cfg(not(feature = "net_http"))]
-                let network = network_from_memory(memory_config);
-                usb_response(request_id, UsbResponsePayload::Network(network))
-            }
-            UsbRequestOp::GetStatus => usb_response(
-                request_id,
-                UsbResponsePayload::Status(usb_runtime_status(
-                    ui_state,
-                    memory_config,
-                    calibration_runtime_state,
-                    runtime_context(
-                        *manual_pps,
-                        heater_controller.fault_latched(),
-                        *attention_pending_after_fault_clear,
-                    ),
-                )),
-            ),
-            UsbRequestOp::GetCalibration => usb_response(
-                request_id,
-                UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
-            ),
-            UsbRequestOp::GetCalibrationJob => usb_response(
-                request_id,
-                UsbResponsePayload::CalibrationJob(
-                    calibration_runtime_state_to_wire(calibration_runtime_state).job,
-                ),
-            ),
-            UsbRequestOp::GetHeaterCurve => usb_response(
-                request_id,
-                UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
-                    memory_config,
-                    preview_heater_curve
-                        .as_ref()
-                        .map(|preview| (&preview.curve, preview.raw_observations.as_ref())),
-                )),
-            ),
-            UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
-            UsbRequestOp::GetLanPairingCode => {
-                #[cfg(feature = "net_http")]
-                {
-                    let code = flux_purr_firmware::net::pairing_code();
-                    usb_response(
-                        request_id,
-                        UsbResponsePayload::LanPairingCode(lan_pairing_code_payload(code)),
-                    )
-                }
-                #[cfg(not(feature = "net_http"))]
-                {
-                    usb_error_response(
-                        request_id,
-                        "lan_unavailable",
-                        "LAN pairing is disabled in this firmware build.",
-                    )
-                }
-            }
-            UsbRequestOp::OpenLanPairingWindow => {
-                #[cfg(feature = "net_http")]
-                {
-                    let code = {
-                        let mut pd_network_service = PdNetworkServiceContext {
-                            eeprom: &mut *eeprom_pd_service,
-                            pd_contract_ready,
-                            ui_state,
-                            calibration_runtime_state,
-                            manual_pps,
-                        };
-                        run_network_operation_with_pd(
-                            flux_purr_firmware::net::enter_pairing(),
-                            pd_i2c,
-                            pd_port,
-                            &mut pd_network_service,
-                        )
-                        .await
-                    };
-                    ui_state.enter_wifi_pairing(code);
-                    needs_redraw = true;
-                    usb_response(
-                        request_id,
-                        UsbResponsePayload::LanPairingCode(lan_pairing_code_payload(code)),
-                    )
-                }
-                #[cfg(not(feature = "net_http"))]
-                {
-                    usb_error_response(
-                        request_id,
-                        "lan_unavailable",
-                        "LAN pairing is disabled in this firmware build.",
-                    )
-                }
-            }
-            UsbRequestOp::CloseLanPairingWindow => {
-                #[cfg(feature = "net_http")]
-                {
-                    let mut pd_network_service = PdNetworkServiceContext {
-                        eeprom: &mut *eeprom_pd_service,
-                        pd_contract_ready,
-                        ui_state,
-                        calibration_runtime_state,
-                        manual_pps,
-                    };
-                    run_network_operation_with_pd(
-                        flux_purr_firmware::net::leave_pairing(),
-                        pd_i2c,
-                        pd_port,
-                        &mut pd_network_service,
-                    )
-                    .await;
-                    ui_state.leave_wifi_pairing();
-                    ui_state.route = FrontPanelRoute::Dashboard;
-                    needs_redraw = true;
-                    usb_response(request_id, UsbResponsePayload::Ack)
-                }
-                #[cfg(not(feature = "net_http"))]
-                {
-                    usb_error_response(
-                        request_id,
-                        "lan_unavailable",
-                        "LAN pairing is disabled in this firmware build.",
-                    )
-                }
-            }
-            UsbRequestOp::ClearLanPairingToken => {
-                #[cfg(feature = "net_http")]
-                {
-                    if ui_state.persistence_locked() {
-                        usb_error_response(
-                            request_id,
-                            "eeprom_required",
-                            "EEPROM_REQUIRED: persistent configuration is unavailable; LAN pairing token cannot be cleared.",
-                        )
-                    } else {
-                        let mut pd_network_service = PdNetworkServiceContext {
-                            eeprom: &mut *eeprom_pd_service,
-                            pd_contract_ready,
-                            ui_state,
-                            calibration_runtime_state,
-                            manual_pps,
-                        };
-                        run_network_operation_with_pd(
-                            flux_purr_firmware::net::clear_token_from_usb(),
-                            pd_i2c,
-                            pd_port,
-                            &mut pd_network_service,
-                        )
-                        .await;
-                        memory_config.lan_pairing_token = None;
-                        *memory_commit_due_ms =
-                            Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-                        info!("LAN pairing token cleared by USB control request");
-                        usb_response(request_id, UsbResponsePayload::Ack)
-                    }
-                }
-                #[cfg(not(feature = "net_http"))]
-                {
-                    usb_error_response(
-                        request_id,
-                        "lan_unavailable",
-                        "LAN pairing is disabled in this firmware build.",
-                    )
-                }
-            }
-        },
-        Ok(UsbFrame::WifiConfig { request_id, config }) => {
-            if ui_state.persistence_locked() && !matches!(config.op, WifiConfigOp::Cancel) {
-                return (
-                    needs_redraw,
-                    usb_error_response(
-                        request_id,
-                        "eeprom_required",
-                        "EEPROM_REQUIRED: persistent configuration is unavailable; Wi-Fi persistence is locked.",
-                    ),
-                );
-            }
-            #[cfg(feature = "net_http")]
-            let network = match config.op {
-                WifiConfigOp::Cancel => {
-                    let result = {
-                        let mut pd_network_service = PdNetworkServiceContext {
-                            eeprom: &mut *eeprom_pd_service,
-                            pd_contract_ready,
-                            ui_state,
-                            calibration_runtime_state,
-                            manual_pps,
-                        };
-                        run_network_operation_with_pd(
-                            flux_purr_firmware::net::cancel_wifi_connection(),
-                            pd_i2c,
-                            pd_port,
-                            &mut pd_network_service,
-                        )
-                        .await
-                    };
-                    match result {
-                        Ok(network) => network,
-                        Err(error) => {
-                            return (
-                                needs_redraw,
-                                usb_error_response(request_id, error.code(), error.message()),
-                            );
-                        }
-                    }
-                }
-                WifiConfigOp::Set | WifiConfigOp::Clear => {
-                    config.apply_to(memory_config);
-                    let mut pd_network_service = PdNetworkServiceContext {
-                        eeprom: &mut *eeprom_pd_service,
-                        pd_contract_ready,
-                        ui_state,
-                        calibration_runtime_state,
-                        manual_pps,
-                    };
-                    run_network_operation_with_pd(
-                        flux_purr_firmware::net::apply_wifi_config(memory_config),
-                        pd_i2c,
-                        pd_port,
-                        &mut pd_network_service,
-                    )
-                    .await
-                }
+    {
+        let summary = {
+            let mut service = PdNetworkServiceContext {
+                eeprom: &mut *context.eeprom_pd_service,
+                pd_contract_ready: context.pd_contract_ready,
+                ui_state: context.ui_state,
+                calibration_runtime_state: context.calibration_runtime_state,
+                manual_pps: context.manual_pps,
             };
-            #[cfg(not(feature = "net_http"))]
-            let network = match config.op {
-                WifiConfigOp::Cancel => {
-                    return (
-                        needs_redraw,
-                        usb_error_response(
-                            request_id,
-                            "wifi_cancel_unavailable",
-                            "WiFi cancellation is unavailable in this firmware build.",
-                        ),
-                    );
-                }
-                WifiConfigOp::Set | WifiConfigOp::Clear => {
-                    config.apply_to(memory_config);
-                    network_from_memory(memory_config)
-                }
-            };
-            if !matches!(config.op, WifiConfigOp::Cancel) {
-                apply_memory_config_to_ui(ui_state, memory_config);
-                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-                needs_redraw = true;
-            }
-            usb_response(
-                request_id,
-                UsbResponsePayload::Wifi(WifiConfigReceipt {
-                    wifi: config.redacted_summary(),
-                    network,
-                }),
+            run_network_operation_with_pd(
+                flux_purr_firmware::net::lan_network_summary(),
+                context.pd_i2c,
+                context.pd_port,
+                &mut service,
             )
+            .await
+        };
+        context.ui_state.apply_network_summary(summary)
+    }
+    #[cfg(not(feature = "net_http"))]
+    {
+        let _ = context;
+        false
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn control_runtime_status_context<PWM>(
+    context: &ControlLineContext<'_, '_, '_, PWM>,
+    active_profile: Option<ThermalControlProfile>,
+    manual_pps: ManualPpsState,
+    heater_fault_latched: Option<HeaterFaultReason>,
+    attention_pending: bool,
+) -> UsbRuntimeStatusContext
+where
+    PWM: SetDutyCycle,
+{
+    UsbRuntimeStatusContext {
+        elapsed_ms: context.elapsed_ms,
+        pd_controller: context.pd_controller,
+        last_pd_observation: context.last_pd_observation,
+        heater_power_backend: *context.heater_power_backend,
+        pid_snapshot: context.pid_snapshot,
+        heater_control_timing: context.heater_control_timing,
+        heater_physical_output_percent: context.last_heater_duty,
+        manual_pps,
+        fan_command: context.fan_command,
+        current_rtd_fault: context.current_rtd_fault,
+        heater_fault_latched,
+        attention_pending_after_fault_clear: attention_pending,
+        thermal_control_profile_preview: context.thermal_control_profile_preview.is_some(),
+        active_thermal_control_profile: active_profile,
+        last_raw_state: context.last_raw_state,
+        latest_status_temp_c: context.latest_status_temp_c,
+        latest_control_temp_c: context.latest_control_temp_c,
+        control_measurement_guarded: context.control_measurement_guarded,
+        latest_rtd_raw_adc_mv: context.latest_rtd_raw_adc_mv,
+        latest_rtd_raw_adc_min_mv: context.latest_rtd_raw_adc_min_mv,
+        latest_rtd_raw_adc_max_mv: context.latest_rtd_raw_adc_max_mv,
+        latest_vin_raw_adc_mv: context.latest_vin_raw_adc_mv,
+        vin_mv: context.latest_vin_mv,
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn dispatch_control_frame<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    line: &str,
+    active_profile: Option<ThermalControlProfile>,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    match parse_usb_frame(line) {
+        Ok(UsbFrame::Request { request_id, op }) => {
+            process_request_frame(context, request_id, op, active_profile).await
+        }
+        Ok(UsbFrame::WifiConfig { request_id, config }) => {
+            process_wifi_config_frame(context, request_id, config).await
         }
         Ok(UsbFrame::RuntimeConfig {
             request_id,
-            mut config,
-        }) => {
-            if ui_state.persistence_locked()
-                && (config.heater_enabled == Some(true)
-                    || config.manual_pps_enabled == Some(true)
-                    || config.calibration.is_some())
-            {
-                return (
-                    needs_redraw,
-                    usb_error_response(
-                        request_id,
-                        "eeprom_required",
-                        "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
-                    ),
-                );
-            }
-            let previous_memory_config = memory_config.clone();
-            let heater_toggle_requested = config.heater_enabled.is_some();
-            let heater_rearm_requested = config.heater_enabled == Some(true);
-            let overtemp_active = is_overtemp_fault(current_rtd_fault);
-            if config.fault_attention_acknowledged == Some(true)
-                && acknowledge_overtemp_attention(
-                    overtemp_active,
-                    overtemp_attention_acknowledged,
-                    attention_pending_after_fault_clear,
-                    overtemp_forced_fan_active,
-                    next_attention_reminder_ms,
-                    buzzer,
-                )
-            {
-                info!("overtemp attention acknowledged");
-            }
-            if heater_rearm_requested && (overtemp_active || *attention_pending_after_fault_clear) {
-                config.heater_enabled = Some(false);
-                buzzer.request_feedback(
-                    BuzzerCueSource::RuntimeControl,
-                    BuzzerCueId::HeaterReject,
-                    elapsed_ms,
-                );
-                info!("heater runtime arm rejected by overtemp attention state");
-            }
-            if should_clear_runtime_fault_latch(
-                heater_rearm_requested,
-                current_rtd_fault,
-                heater_controller.fault_latched(),
-            ) {
-                heater_controller.clear_fault_latch();
-                info!("heater runtime re-arm -> cleared latched fault");
-            }
-            let status_context = runtime_context(
-                *manual_pps,
-                heater_controller.fault_latched(),
-                *attention_pending_after_fault_clear,
-            );
-            let response = usb_runtime_config_response(
-                request_id,
-                config,
-                UsbRuntimeConfigInput {
-                    ui_state,
-                    memory_config,
-                    manual_pps,
-                    thermal_control_profile_preview,
-                    calibration: calibration_runtime_state,
-                    context: status_context,
-                },
-            );
-            if heater_toggle_requested {
-                controller.clear_pending_short_press(RawFrontPanelKey::CenterBoot);
-            }
-            if *memory_config != previous_memory_config {
-                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-            }
-            needs_redraw = true;
-            response
-        }
+            config,
+        }) => process_runtime_config_frame(context, request_id, config, active_profile),
         #[cfg(feature = "buzzer-test")]
         Ok(UsbFrame::BuzzerTest {
             request_id,
             command,
-        }) => {
-            if !command.is_valid() {
-                usb_error_response(
-                    request_id,
-                    "invalid_buzzer_test_command",
-                    "buzzer_test requires exactly the fields for its operation.",
-                )
-            } else if command.op != BuzzerTestOp::Status
-                && (ui_state.heater_enabled
-                    || current_rtd_fault.is_some()
-                    || heater_controller.fault_latched().is_some()
-                    || *attention_pending_after_fault_clear)
-            {
-                usb_error_response(
-                    request_id,
-                    "buzzer_test_interlocked",
-                    "Buzzer test requires heater-off with no active or pending thermal fault.",
-                )
-            } else {
-                match command.op {
-                    BuzzerTestOp::Status => UsbFrame::BuzzerTestResponse {
-                        request_id,
-                        status: Box::new(buzzer_test_status()),
-                    },
-                    BuzzerTestOp::Trigger => {
-                        let status = buzzer_test_status();
-                        if status.state == BuzzerTestSessionState::Running {
-                            usb_error_response(
-                                request_id,
-                                "buzzer_test_busy",
-                                "A buzzer test scenario is already running.",
-                            )
-                        } else {
-                            BuzzerRuntime::submit_test(command);
-                            UsbFrame::BuzzerTestResponse {
-                                request_id,
-                                status: Box::new(status),
-                            }
-                        }
-                    }
-                    BuzzerTestOp::Run => {
-                        let status = buzzer_test_status();
-                        if status.state != BuzzerTestSessionState::Running {
-                            BuzzerRuntime::submit_test(command);
-                            UsbFrame::BuzzerTestResponse {
-                                request_id,
-                                status: Box::new(status),
-                            }
-                        } else {
-                            usb_error_response(
-                                request_id,
-                                "buzzer_test_busy",
-                                "A buzzer test scenario is already running.",
-                            )
-                        }
-                    }
-                    BuzzerTestOp::Stop => {
-                        BuzzerRuntime::submit_test(command);
-                        UsbFrame::BuzzerTestResponse {
-                            request_id,
-                            status: Box::new(buzzer_test_status()),
-                        }
-                    }
-                }
-            }
-        }
+        }) => process_buzzer_test_frame(context, request_id, command),
         Ok(UsbFrame::CalibrationConfig { request_id, config }) => {
-            if ui_state.persistence_locked() {
-                usb_error_response(
-                    request_id,
-                    "eeprom_required",
-                    "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
-                )
-            } else if thermal_plant_calibration_job_running(*calibration_runtime_state) {
-                usb_error_response(
-                    request_id,
-                    ManualPpsError::CalibrationInProgress.code(),
-                    "Automatic thermal-model calibration is running; calibration inputs are locked.",
-                )
-            } else {
-                let previous_memory_config = memory_config.clone();
-                let response = usb_calibration_config_response(
-                    request_id.clone(),
-                    config,
-                    memory_config,
-                    latest_rtd_raw_adc_mv,
-                    latest_vin_raw_adc_mv,
-                );
-                if previous_memory_config
-                    .thermal_plant_transient_active
-                    .is_some()
-                    && previous_memory_config.adc_calibration != memory_config.adc_calibration
-                {
-                    disarm_calibration_after_transient_input_change(
-                        calibration_runtime_state,
-                        manual_pps,
-                    );
-                }
-                if *memory_config != previous_memory_config {
-                    let changed_domains =
-                        persist_domain_mask_between(memory_config, &previous_memory_config);
-                    match commit_memory_config_now(
-                        pd_i2c,
-                        pd_port,
-                        eeprom_pd_service,
-                        CommitMemoryConfigInput {
-                            memory_sequence,
-                            memory_config,
-                            domains_to_write: changed_domains,
-                            persistence_log_sink,
-                            record_staging,
-                        },
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            copy_persisted_domains(
-                                last_persisted_memory_config,
-                                memory_config,
-                                changed_domains,
-                            );
-                            *memory_commit_due_ms = None;
-                        }
-                        Err(error) => {
-                            restore_persisted_memory_domains(
-                                memory_config,
-                                ui_state,
-                                last_persisted_memory_config,
-                                changed_domains,
-                            );
-                            let fault = persistence_fault_from_commit(error);
-                            if memory_failure_requires_heater_lock(error) {
-                                mark_eeprom_required(
-                                    ui_state,
-                                    calibration_runtime_state,
-                                    manual_pps,
-                                    memory_commit_due_ms,
-                                    Some(fault),
-                                );
-                            } else {
-                                ui_state.persistence_fault = Some(fault);
-                                ui_state.persistence_fault_attention_pending = true;
-                            }
-                            return (
-                                needs_redraw,
-                                usb_error_response(
-                                    request_id,
-                                    "memory_commit_failed",
-                                    "Calibration draft could not be persisted.",
-                                ),
-                            );
-                        }
-                    }
-                }
-                response
-            }
+            process_calibration_config_frame(context, request_id, config).await
         }
         Ok(UsbFrame::CalibrationJob {
             request_id,
             command,
-        }) => {
-            if ui_state.persistence_locked() {
-                usb_error_response(
-                    request_id,
-                    "eeprom_required",
-                    "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
-                )
-            } else if matches!(command.op, CalibrationJobOpWire::Start)
-                && !pd_contract_allows_calibration(pd_controller, last_pd_observation)
-            {
-                let (code, message) = (
-                    "pd_performance_not_guaranteed",
-                    "Calibration requires a performance-guaranteed PPS contract.",
-                );
-                usb_error_response(request_id, code, message)
-            } else {
-                usb_calibration_job_response(
-                    request_id,
-                    command,
-                    calibration_runtime_state,
-                    memory_config,
-                    manual_pps,
-                    thermal_plant_workspace,
-                )
-            }
-        }
+        }) => process_calibration_job_frame(context, request_id, command),
         Ok(UsbFrame::ThermalPlantRun {
             request_id,
             after_sample,
-        }) => usb_response(
-            request_id,
-            UsbResponsePayload::ThermalPlantRun(thermal_plant_run_snapshot_wire(
-                calibration_runtime_state,
-                memory_config,
-                thermal_plant_workspace,
-                after_sample,
-                latest_status_temp_c,
-                latest_vin_mv,
-                last_heater_duty,
-            )),
-        ),
+        }) => process_thermal_plant_run_frame(context, request_id, after_sample),
         Ok(UsbFrame::HeaterCurveConfig { request_id, config }) => {
-            if ui_state.persistence_locked() {
-                usb_error_response(
-                    request_id,
-                    "eeprom_required",
-                    "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
-                )
-            } else {
-                usb_heater_curve_config_response(
-                    request_id,
-                    config,
-                    memory_config,
-                    preview_heater_curve,
-                )
-            }
+            process_heater_curve_config_frame(context, request_id, config)
         }
         Ok(UsbFrame::HeaterCurveSave { request_id }) => {
-            if ui_state.persistence_locked() {
-                usb_error_response(
-                    request_id,
-                    "eeprom_required",
-                    "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
-                )
-            } else if thermal_plant_calibration_job_running(*calibration_runtime_state) {
-                usb_error_response(
-                    request_id,
-                    ManualPpsError::CalibrationInProgress.code(),
-                    "Automatic thermal-model calibration is running; calibration inputs are locked.",
-                )
-            } else if let Some(preview) = *preview_heater_curve {
-                let previous_memory_config = memory_config.clone();
-                memory_config.active_heater_curve = preview.curve;
-                if let Some(raw_observations) = preview.raw_observations {
-                    memory_config.heater_curve_raw_observations = raw_observations;
-                }
-                memory_config.sanitize();
-                let raw_observations_changed = previous_memory_config.heater_curve_raw_observations
-                    != memory_config.heater_curve_raw_observations;
-                if raw_observations_changed
-                    && previous_memory_config
-                        .thermal_plant_transient_active
-                        .is_some()
-                {
-                    memory_config.heater_curve_transaction_id = None;
-                    invalidate_transient_thermal_plant(memory_config);
-                    disarm_calibration_after_transient_input_change(
-                        calibration_runtime_state,
-                        manual_pps,
-                    );
-                }
-                if let Err(error) = commit_memory_config_now(
-                    pd_i2c,
-                    pd_port,
-                    eeprom_pd_service,
-                    CommitMemoryConfigInput {
-                        memory_sequence,
-                        memory_config,
-                        domains_to_write: PersistDomainMask::SAFETY
-                            .union(PersistDomainMask::THERMAL_PLANT),
-                        persistence_log_sink,
-                        record_staging,
-                    },
-                )
-                .await
-                {
-                    let code = error.code();
-                    let message = error.message();
-                    restore_persisted_memory_domains(
-                        memory_config,
-                        ui_state,
-                        last_persisted_memory_config,
-                        PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
-                    );
-                    mark_eeprom_required(
-                        ui_state,
-                        calibration_runtime_state,
-                        manual_pps,
-                        memory_commit_due_ms,
-                        Some(persistence_fault_from_commit(error)),
-                    );
-                    return (needs_redraw, usb_error_response(request_id, code, message));
-                }
-                copy_persisted_domains(
-                    last_persisted_memory_config,
-                    memory_config,
-                    PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
-                );
-                *memory_commit_due_ms = None;
-                usb_response(
-                    request_id,
-                    UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
-                        memory_config,
-                        preview_heater_curve
-                            .as_ref()
-                            .map(|preview| (&preview.curve, preview.raw_observations.as_ref())),
-                    )),
-                )
-            } else {
-                usb_error_response(
-                    request_id,
-                    "heater_curve_preview_required",
-                    "Heater curve save requires an active preview package.",
-                )
-            }
+            process_heater_curve_save_frame(context, request_id).await
         }
         Ok(UsbFrame::EepromMaintenance {
             request_id,
             command,
-        }) => {
-            if last_heater_duty != 0 {
-                return (
+        }) => process_eeprom_maintenance_frame(context, request_id, command).await,
+        Ok(UsbFrame::Response { request_id, .. }) => (
+            false,
+            usb_error_response(
+                request_id,
+                "unsupported_frame",
+                "Host response frames are ignored.",
+            ),
+        ),
+        Ok(_) => (
+            false,
+            UsbFrame::Error {
+                request_id: None,
+                error: ApiError::new("unsupported_frame", "Unsupported USB frame type.", false),
+            },
+        ),
+        Err(UsbFrameError::MalformedJson) => (
+            false,
+            UsbFrame::Error {
+                request_id: None,
+                error: ApiError::new("malformed_json", "Malformed USB JSONL frame.", false),
+            },
+        ),
+        Err(UsbFrameError::OutputTooSmall) => (
+            false,
+            UsbFrame::Error {
+                request_id: None,
+                error: ApiError::new(
+                    "output_too_small",
+                    "USB JSONL frame exceeded buffer.",
                     false,
-                    usb_error_response(
-                        request_id,
-                        "heater_output_active",
-                        "EEPROM maintenance requires physical heater output to be off.",
+                ),
+            },
+        ),
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn process_request_frame<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    op: UsbRequestOp,
+    active_profile: Option<ThermalControlProfile>,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    match op {
+        UsbRequestOp::GetIdentity => (
+            false,
+            usb_response(
+                request_id,
+                UsbResponsePayload::Identity(Box::new(hardware_identity())),
+            ),
+        ),
+        UsbRequestOp::GetInstallStatus => (
+            false,
+            usb_response(
+                request_id,
+                UsbResponsePayload::InstallStatus(InstallStatus::from_runtime(
+                    InstallRuntimeSnapshot {
+                        config: context.memory_config,
+                        persistence_source: context.persistence_source,
+                        record_state: context.persistence_record_state,
+                        record_sequence: *context.memory_sequence,
+                        sensor_ready: context.current_rtd_fault.is_none()
+                            && context.latest_status_temp_c.is_finite(),
+                        heater_fault_latched: context.heater_controller.fault_latched().is_some(),
+                        persistence_locked: context.ui_state.persistence_locked(),
+                        last_persistence_fault: context.ui_state.persistence_fault.clone(),
+                        persistence_fault_attention_pending: context
+                            .ui_state
+                            .persistence_fault_attention_pending,
+                    },
+                )),
+            ),
+        ),
+        UsbRequestOp::CompleteSetup => process_complete_setup(context, request_id),
+        UsbRequestOp::ResetPersistence => process_reset_persistence(context, request_id),
+        UsbRequestOp::GetNetwork
+        | UsbRequestOp::GetLanPairingCode
+        | UsbRequestOp::OpenLanPairingWindow
+        | UsbRequestOp::CloseLanPairingWindow
+        | UsbRequestOp::ClearLanPairingToken => {
+            process_network_request(context, request_id, op).await
+        }
+        UsbRequestOp::GetStatus => (
+            false,
+            usb_response(
+                request_id,
+                UsbResponsePayload::Status(usb_runtime_status(
+                    context.ui_state,
+                    context.memory_config,
+                    context.calibration_runtime_state,
+                    control_runtime_status_context(
+                        context,
+                        active_profile,
+                        *context.manual_pps,
+                        context.heater_controller.fault_latched(),
+                        *context.attention_pending_after_fault_clear,
                     ),
-                );
-            }
-            let op = command.op;
-            if raw_eeprom_operation_mutates(op) {
-                begin_mutating_eeprom_maintenance(
-                    ui_state,
-                    calibration_runtime_state,
-                    manual_pps,
-                    memory_commit_due_ms,
-                );
-                if !matches!(
-                    request_pd_fixed_voltage(pd_i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST).await,
-                    PdContractRequestState::Confirmed
-                ) {
+                )),
+            ),
+        ),
+        UsbRequestOp::GetCalibration => (
+            false,
+            usb_response(
+                request_id,
+                UsbResponsePayload::Calibration(calibration_state_from_memory(context.memory_config)),
+            ),
+        ),
+        UsbRequestOp::GetCalibrationJob => (
+            false,
+            usb_response(
+                request_id,
+                UsbResponsePayload::CalibrationJob(
+                    calibration_runtime_state_to_wire(context.calibration_runtime_state).job,
+                ),
+            ),
+        ),
+        UsbRequestOp::GetHeaterCurve => (
+            false,
+            usb_response(
+                request_id,
+                UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
+                    context.memory_config,
+                    context
+                        .preview_heater_curve
+                        .as_ref()
+                        .map(|preview| (&preview.curve, preview.raw_observations.as_ref())),
+                )),
+            ),
+        ),
+        UsbRequestOp::SetLogLevel => (false, usb_response(request_id, UsbResponsePayload::Ack)),
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn process_complete_setup<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    if context.ui_state.persistence_locked() {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "eeprom_required",
+                "EEPROM_REQUIRED: persistent configuration is unavailable; setup cannot be completed.",
+            ),
+        );
+    }
+    let sensor_ready = context.current_rtd_fault.is_none()
+        && context.latest_status_temp_c.is_finite();
+    let calibration_ready = flux_purr_firmware::memory::adc_calibration_fit(
+        &context.memory_config.adc_calibration,
+        flux_purr_firmware::memory::AdcCalibrationChannel::Rtd,
+    )
+    .sample_count
+        >= 2
+        && flux_purr_firmware::memory::adc_calibration_fit(
+            &context.memory_config.adc_calibration,
+            flux_purr_firmware::memory::AdcCalibrationChannel::Vin,
+        )
+        .sample_count
+            >= 2
+        && context
+            .memory_config
+            .active_heater_curve
+            .points
+            .iter()
+            .flatten()
+            .count()
+            >= 2;
+    let result = context
+        .memory_config
+        .complete_setup(sensor_ready, calibration_ready);
+    let response = match result {
+        Ok(()) => {
+            *context.memory_commit_due_ms =
+                Some(context.elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+            usb_response(request_id, UsbResponsePayload::Ack)
+        }
+        Err(flux_purr_firmware::memory::SetupCompletionError::SensorNotReady) => {
+            usb_error_response(
+                request_id,
+                "sensor_unready",
+                "Sensor readiness is required before setup completion.",
+            )
+        }
+        Err(flux_purr_firmware::memory::SetupCompletionError::CalibrationRequired) => {
+            usb_error_response(
+                request_id,
+                "calibration_required",
+                "Calibration is required before setup completion.",
+            )
+        }
+    };
+    (false, response)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn process_reset_persistence<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    if context.ui_state.persistence_locked() {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "eeprom_required",
+                "EEPROM_REQUIRED: persistent configuration is unavailable; persistence cannot be reset.",
+            ),
+        );
+    }
+    context.memory_config.reset_for_commissioning();
+    apply_memory_config_to_ui(context.ui_state, context.memory_config);
+    *context.memory_commit_due_ms =
+        Some(context.elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+    (true, usb_response(request_id, UsbResponsePayload::Ack))
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn process_network_request<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    op: UsbRequestOp,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    match op {
+        UsbRequestOp::GetNetwork => process_get_network(context, request_id).await,
+        UsbRequestOp::GetLanPairingCode => process_get_lan_pairing_code(request_id),
+        UsbRequestOp::OpenLanPairingWindow => process_open_lan_pairing(context, request_id).await,
+        UsbRequestOp::CloseLanPairingWindow => process_close_lan_pairing(context, request_id).await,
+        UsbRequestOp::ClearLanPairingToken => process_clear_lan_pairing_token(context, request_id).await,
+        _ => unreachable!("non-network request routed to process_network_request"),
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn process_get_network<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    #[cfg(feature = "net_http")]
+    let network = {
+        let mut service = PdNetworkServiceContext {
+            eeprom: &mut *context.eeprom_pd_service,
+            pd_contract_ready: context.pd_contract_ready,
+            ui_state: context.ui_state,
+            calibration_runtime_state: context.calibration_runtime_state,
+            manual_pps: context.manual_pps,
+        };
+        run_network_operation_with_pd(
+            flux_purr_firmware::net::lan_network_summary(),
+            context.pd_i2c,
+            context.pd_port,
+            &mut service,
+        )
+        .await
+    };
+    #[cfg(not(feature = "net_http"))]
+    let network = network_from_memory(context.memory_config);
+    (false, usb_response(request_id, UsbResponsePayload::Network(network)))
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn process_get_lan_pairing_code(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> (bool, UsbFrame) {
+    #[cfg(feature = "net_http")]
+    {
+        let code = flux_purr_firmware::net::pairing_code();
+        (
+            false,
+            usb_response(
+                request_id,
+                UsbResponsePayload::LanPairingCode(lan_pairing_code_payload(code)),
+            ),
+        )
+    }
+    #[cfg(not(feature = "net_http"))]
+    (
+        false,
+        usb_error_response(
+            request_id,
+            "lan_unavailable",
+            "LAN pairing is disabled in this firmware build.",
+        ),
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn process_open_lan_pairing<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    #[cfg(feature = "net_http")]
+    {
+        let code = {
+            let mut service = PdNetworkServiceContext {
+                eeprom: &mut *context.eeprom_pd_service,
+                pd_contract_ready: context.pd_contract_ready,
+                ui_state: context.ui_state,
+                calibration_runtime_state: context.calibration_runtime_state,
+                manual_pps: context.manual_pps,
+            };
+            run_network_operation_with_pd(
+                flux_purr_firmware::net::enter_pairing(),
+                context.pd_i2c,
+                context.pd_port,
+                &mut service,
+            )
+            .await
+        };
+        context.ui_state.enter_wifi_pairing(code);
+        (
+            true,
+            usb_response(
+                request_id,
+                UsbResponsePayload::LanPairingCode(lan_pairing_code_payload(code)),
+            ),
+        )
+    }
+    #[cfg(not(feature = "net_http"))]
+    lan_unavailable_response(request_id)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn process_close_lan_pairing<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    #[cfg(feature = "net_http")]
+    {
+        let mut service = PdNetworkServiceContext {
+            eeprom: &mut *context.eeprom_pd_service,
+            pd_contract_ready: context.pd_contract_ready,
+            ui_state: context.ui_state,
+            calibration_runtime_state: context.calibration_runtime_state,
+            manual_pps: context.manual_pps,
+        };
+        run_network_operation_with_pd(
+            flux_purr_firmware::net::leave_pairing(),
+            context.pd_i2c,
+            context.pd_port,
+            &mut service,
+        )
+        .await;
+        context.ui_state.leave_wifi_pairing();
+        context.ui_state.route = FrontPanelRoute::Dashboard;
+        (true, usb_response(request_id, UsbResponsePayload::Ack))
+    }
+    #[cfg(not(feature = "net_http"))]
+    lan_unavailable_response(request_id)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn process_clear_lan_pairing_token<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    #[cfg(feature = "net_http")]
+    {
+        if context.ui_state.persistence_locked() {
+            return (
+                false,
+                usb_error_response(
+                    request_id,
+                    "eeprom_required",
+                    "EEPROM_REQUIRED: persistent configuration is unavailable; LAN pairing token cannot be cleared.",
+                ),
+            );
+        }
+        let mut service = PdNetworkServiceContext {
+            eeprom: &mut *context.eeprom_pd_service,
+            pd_contract_ready: context.pd_contract_ready,
+            ui_state: context.ui_state,
+            calibration_runtime_state: context.calibration_runtime_state,
+            manual_pps: context.manual_pps,
+        };
+        run_network_operation_with_pd(
+            flux_purr_firmware::net::clear_token_from_usb(),
+            context.pd_i2c,
+            context.pd_port,
+            &mut service,
+        )
+        .await;
+        context.memory_config.lan_pairing_token = None;
+        *context.memory_commit_due_ms =
+            Some(context.elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+        info!("LAN pairing token cleared by USB control request");
+        (false, usb_response(request_id, UsbResponsePayload::Ack))
+    }
+    #[cfg(not(feature = "net_http"))]
+    lan_unavailable_response(request_id)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial", not(feature = "net_http")))]
+fn lan_unavailable_response(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> (bool, UsbFrame) {
+    (
+        false,
+        usb_error_response(
+            request_id,
+            "lan_unavailable",
+            "LAN pairing is disabled in this firmware build.",
+        ),
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn process_wifi_config_frame<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    config: WifiConfigCommand,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    if context.ui_state.persistence_locked() && !matches!(config.op, WifiConfigOp::Cancel) {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "eeprom_required",
+                "EEPROM_REQUIRED: persistent configuration is unavailable; Wi-Fi persistence is locked.",
+            ),
+        );
+    }
+    #[cfg(feature = "net_http")]
+    let network = match config.op {
+        WifiConfigOp::Cancel => {
+            let result = {
+                let mut service = PdNetworkServiceContext {
+                    eeprom: &mut *context.eeprom_pd_service,
+                    pd_contract_ready: context.pd_contract_ready,
+                    ui_state: context.ui_state,
+                    calibration_runtime_state: context.calibration_runtime_state,
+                    manual_pps: context.manual_pps,
+                };
+                run_network_operation_with_pd(
+                    flux_purr_firmware::net::cancel_wifi_connection(),
+                    context.pd_i2c,
+                    context.pd_port,
+                    &mut service,
+                )
+                .await
+            };
+            match result {
+                Ok(network) => network,
+                Err(error) => {
                     return (
-                        needs_redraw,
-                        usb_error_response(
-                            request_id,
-                            "eeprom_power_disarm_failed",
-                            "EEPROM maintenance could not restore fixed PD.",
-                        ),
+                        false,
+                        usb_error_response(request_id, error.code(), error.message()),
                     );
                 }
-            } else {
-                ui_state.heater_enabled = false;
-                calibration_job_canceled(calibration_runtime_state, manual_pps);
             }
-            needs_redraw = true;
-            let response = usb_eeprom_maintenance_response(
-                request_id,
-                command,
-                pd_i2c,
-                pd_port,
-                eeprom_pd_service,
-                elapsed_ms,
-            )
-            .await;
-            if matches!(&response, UsbFrame::Response { ok: true, .. }) {
-                apply_successful_eeprom_maintenance_operation(
-                    op,
-                    ui_state,
-                    memory_config,
-                    memory_commit_due_ms,
-                );
-                if matches!(op, EepromMaintenanceOp::Erase) {
-                    *preview_heater_curve = None;
-                    *thermal_control_profile_preview = None;
-                }
-            } else if eeprom_storage_failure_response(&response) {
-                ui_state.eeprom_required = true;
-            }
-            response
         }
-        Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
-            request_id,
-            "unsupported_frame",
-            "Host response frames are ignored.",
-        ),
-        Ok(_) => UsbFrame::Error {
-            request_id: None,
-            error: ApiError::new("unsupported_frame", "Unsupported USB frame type.", false),
-        },
-        Err(UsbFrameError::MalformedJson) => UsbFrame::Error {
-            request_id: None,
-            error: ApiError::new("malformed_json", "Malformed USB JSONL frame.", false),
-        },
-        Err(UsbFrameError::OutputTooSmall) => UsbFrame::Error {
-            request_id: None,
-            error: ApiError::new(
-                "output_too_small",
-                "USB JSONL frame exceeded buffer.",
-                false,
-            ),
-        },
+        WifiConfigOp::Set | WifiConfigOp::Clear => {
+            config.apply_to(context.memory_config);
+            let mut service = PdNetworkServiceContext {
+                eeprom: &mut *context.eeprom_pd_service,
+                pd_contract_ready: context.pd_contract_ready,
+                ui_state: context.ui_state,
+                calibration_runtime_state: context.calibration_runtime_state,
+                manual_pps: context.manual_pps,
+            };
+            run_network_operation_with_pd(
+                flux_purr_firmware::net::apply_wifi_config(context.memory_config),
+                context.pd_i2c,
+                context.pd_port,
+                &mut service,
+            )
+            .await
+        }
     };
+    #[cfg(not(feature = "net_http"))]
+    let network = match config.op {
+        WifiConfigOp::Cancel => {
+            return (
+                false,
+                usb_error_response(
+                    request_id,
+                    "wifi_cancel_unavailable",
+                    "WiFi cancellation is unavailable in this firmware build.",
+                ),
+            );
+        }
+        WifiConfigOp::Set | WifiConfigOp::Clear => {
+            config.apply_to(context.memory_config);
+            network_from_memory(context.memory_config)
+        }
+    };
+    if !matches!(config.op, WifiConfigOp::Cancel) {
+        apply_memory_config_to_ui(context.ui_state, context.memory_config);
+        *context.memory_commit_due_ms =
+            Some(context.elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+    }
+    (
+        !matches!(config.op, WifiConfigOp::Cancel),
+        usb_response(
+            request_id,
+            UsbResponsePayload::Wifi(WifiConfigReceipt {
+                wifi: config.redacted_summary(),
+                network,
+            }),
+        ),
+    )
+}
 
-    (needs_redraw, response)
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn process_runtime_config_frame<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    mut config: RuntimeConfigCommand,
+    active_profile: Option<ThermalControlProfile>,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    if context.ui_state.persistence_locked()
+        && (config.heater_enabled == Some(true)
+            || config.manual_pps_enabled == Some(true)
+            || config.calibration.is_some())
+    {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "eeprom_required",
+                "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
+            ),
+        );
+    }
+    let previous_memory_config = context.memory_config.clone();
+    let heater_toggle_requested = config.heater_enabled.is_some();
+    let heater_rearm_requested = config.heater_enabled == Some(true);
+    let overtemp_active = is_overtemp_fault(context.current_rtd_fault);
+    acknowledge_runtime_attention(context, &config, overtemp_active);
+    reject_runtime_rearm_if_attention_pending(context, &mut config, heater_rearm_requested, overtemp_active);
+    if should_clear_runtime_fault_latch(
+        heater_rearm_requested,
+        context.current_rtd_fault,
+        context.heater_controller.fault_latched(),
+    ) {
+        context.heater_controller.clear_fault_latch();
+        info!("heater runtime re-arm -> cleared latched fault");
+    }
+    let status_context = control_runtime_status_context(
+        context,
+        active_profile,
+        *context.manual_pps,
+        context.heater_controller.fault_latched(),
+        *context.attention_pending_after_fault_clear,
+    );
+    let response = usb_runtime_config_response(
+        request_id,
+        config,
+        UsbRuntimeConfigInput {
+            ui_state: context.ui_state,
+            memory_config: context.memory_config,
+            manual_pps: context.manual_pps,
+            thermal_control_profile_preview: context.thermal_control_profile_preview,
+            calibration: context.calibration_runtime_state,
+            context: status_context,
+        },
+    );
+    if heater_toggle_requested {
+        context
+            .controller
+            .clear_pending_short_press(RawFrontPanelKey::CenterBoot);
+    }
+    if *context.memory_config != previous_memory_config {
+        *context.memory_commit_due_ms = Some(
+            context
+                .elapsed_ms
+                .saturating_add(MEMORY_WRITE_DEBOUNCE_MS),
+        );
+    }
+    (true, response)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn acknowledge_runtime_attention<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    config: &RuntimeConfigCommand,
+    overtemp_active: bool,
+) where
+    PWM: SetDutyCycle,
+{
+    if config.fault_attention_acknowledged == Some(true)
+        && acknowledge_overtemp_attention(
+            overtemp_active,
+            context.overtemp_attention_acknowledged,
+            context.attention_pending_after_fault_clear,
+            context.overtemp_forced_fan_active,
+            context.next_attention_reminder_ms,
+            context.buzzer,
+        )
+    {
+        info!("overtemp attention acknowledged");
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn reject_runtime_rearm_if_attention_pending<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    config: &mut RuntimeConfigCommand,
+    heater_rearm_requested: bool,
+    overtemp_active: bool,
+) where
+    PWM: SetDutyCycle,
+{
+    if heater_rearm_requested
+        && (overtemp_active || *context.attention_pending_after_fault_clear)
+    {
+        config.heater_enabled = Some(false);
+        context.buzzer.request_feedback(
+            BuzzerCueSource::RuntimeControl,
+            BuzzerCueId::HeaterReject,
+            context.elapsed_ms,
+        );
+        info!("heater runtime arm rejected by overtemp attention state");
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial", feature = "buzzer-test"))]
+fn process_buzzer_test_frame<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    command: BuzzerTestCommand,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    if !command.is_valid() {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "invalid_buzzer_test_command",
+                "buzzer_test requires exactly the fields for its operation.",
+            ),
+        );
+    }
+    if command.op != BuzzerTestOp::Status
+        && (context.ui_state.heater_enabled
+            || context.current_rtd_fault.is_some()
+            || context.heater_controller.fault_latched().is_some()
+            || *context.attention_pending_after_fault_clear)
+    {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "buzzer_test_interlocked",
+                "Buzzer test requires heater-off with no active or pending thermal fault.",
+            ),
+        );
+    }
+    let response = match command.op {
+        BuzzerTestOp::Status => UsbFrame::BuzzerTestResponse {
+            request_id,
+            status: Box::new(buzzer_test_status()),
+        },
+        BuzzerTestOp::Trigger => submit_buzzer_test_if_idle(request_id, command, true),
+        BuzzerTestOp::Run => submit_buzzer_test_if_idle(request_id, command, false),
+        BuzzerTestOp::Stop => {
+            BuzzerRuntime::submit_test(command);
+            UsbFrame::BuzzerTestResponse {
+                request_id,
+                status: Box::new(buzzer_test_status()),
+            }
+        }
+    };
+    (false, response)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial", feature = "buzzer-test"))]
+fn submit_buzzer_test_if_idle(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    command: BuzzerTestCommand,
+    reject_when_running: bool,
+) -> UsbFrame {
+    let status = buzzer_test_status();
+    let busy = status.state == BuzzerTestSessionState::Running;
+    if busy == reject_when_running {
+        return usb_error_response(
+            request_id,
+            "buzzer_test_busy",
+            "A buzzer test scenario is already running.",
+        );
+    }
+    BuzzerRuntime::submit_test(command);
+    UsbFrame::BuzzerTestResponse {
+        request_id,
+        status: Box::new(status),
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn process_calibration_config_frame<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    config: CalibrationConfigCommand,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    if context.ui_state.persistence_locked() {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "eeprom_required",
+                "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
+            ),
+        );
+    }
+    if thermal_plant_calibration_job_running(*context.calibration_runtime_state) {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                ManualPpsError::CalibrationInProgress.code(),
+                "Automatic thermal-model calibration is running; calibration inputs are locked.",
+            ),
+        );
+    }
+    let previous_memory_config = context.memory_config.clone();
+    let response = usb_calibration_config_response(
+        request_id.clone(),
+        config,
+        context.memory_config,
+        context.latest_rtd_raw_adc_mv,
+        context.latest_vin_raw_adc_mv,
+    );
+    if previous_memory_config.thermal_plant_transient_active.is_some()
+        && previous_memory_config.adc_calibration != context.memory_config.adc_calibration
+    {
+        disarm_calibration_after_transient_input_change(
+            context.calibration_runtime_state,
+            context.manual_pps,
+        );
+    }
+    if *context.memory_config != previous_memory_config {
+        let changed_domains =
+            persist_domain_mask_between(context.memory_config, &previous_memory_config);
+        if let Err(error) = commit_memory_config_now(
+            context.pd_i2c,
+            context.pd_port,
+            context.eeprom_pd_service,
+            CommitMemoryConfigInput {
+                memory_sequence: context.memory_sequence,
+                memory_config: context.memory_config,
+                domains_to_write: changed_domains,
+                persistence_log_sink: context.persistence_log_sink,
+                record_staging: context.record_staging,
+            },
+        )
+        .await
+        {
+            restore_persisted_memory_domains(
+                context.memory_config,
+                context.ui_state,
+                context.last_persisted_memory_config,
+                changed_domains,
+            );
+            let fault = persistence_fault_from_commit(error);
+            if memory_failure_requires_heater_lock(error) {
+                mark_eeprom_required(
+                    context.ui_state,
+                    context.calibration_runtime_state,
+                    context.manual_pps,
+                    context.memory_commit_due_ms,
+                    Some(fault),
+                );
+            } else {
+                context.ui_state.persistence_fault = Some(fault);
+                context.ui_state.persistence_fault_attention_pending = true;
+            }
+            return (
+                false,
+                usb_error_response(
+                    request_id,
+                    "memory_commit_failed",
+                    "Calibration draft could not be persisted.",
+                ),
+            );
+        }
+        copy_persisted_domains(
+            context.last_persisted_memory_config,
+            context.memory_config,
+            changed_domains,
+        );
+        *context.memory_commit_due_ms = None;
+    }
+    (false, response)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn process_calibration_job_frame<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    command: CalibrationJobCommandWire,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    if context.ui_state.persistence_locked() {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "eeprom_required",
+                "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
+            ),
+        );
+    }
+    if matches!(command.op, CalibrationJobOpWire::Start)
+        && !pd_contract_allows_calibration(context.pd_controller, context.last_pd_observation)
+    {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "pd_performance_not_guaranteed",
+                "Calibration requires a performance-guaranteed PPS contract.",
+            ),
+        );
+    }
+    (
+        false,
+        usb_calibration_job_response(
+            request_id,
+            command,
+            context.calibration_runtime_state,
+            context.memory_config,
+            context.manual_pps,
+            context.thermal_plant_workspace,
+        ),
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn process_thermal_plant_run_frame<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    after_sample: u8,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    (
+        false,
+        usb_response(
+            request_id,
+            UsbResponsePayload::ThermalPlantRun(thermal_plant_run_snapshot_wire(
+                context.calibration_runtime_state,
+                context.memory_config,
+                context.thermal_plant_workspace,
+                after_sample,
+                context.latest_status_temp_c,
+                context.latest_vin_mv,
+                context.last_heater_duty,
+            )),
+        ),
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn process_heater_curve_config_frame<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    config: HeaterCurveConfigCommand,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    if context.ui_state.persistence_locked() {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "eeprom_required",
+                "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
+            ),
+        );
+    }
+    (
+        false,
+        usb_heater_curve_config_response(
+            request_id,
+            config,
+            context.memory_config,
+            context.preview_heater_curve,
+        ),
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn process_heater_curve_save_frame<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    if context.ui_state.persistence_locked() {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "eeprom_required",
+                "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
+            ),
+        );
+    }
+    if thermal_plant_calibration_job_running(*context.calibration_runtime_state) {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                ManualPpsError::CalibrationInProgress.code(),
+                "Automatic thermal-model calibration is running; calibration inputs are locked.",
+            ),
+        );
+    }
+    let Some(preview) = *context.preview_heater_curve else {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "heater_curve_preview_required",
+                "Heater curve save requires an active preview package.",
+            ),
+        );
+    };
+    let previous_memory_config = context.memory_config.clone();
+    context.memory_config.active_heater_curve = preview.curve;
+    if let Some(raw_observations) = preview.raw_observations {
+        context.memory_config.heater_curve_raw_observations = raw_observations;
+    }
+    context.memory_config.sanitize();
+    if context.memory_config.heater_curve_raw_observations
+        != previous_memory_config.heater_curve_raw_observations
+        && previous_memory_config.thermal_plant_transient_active.is_some()
+    {
+        context.memory_config.heater_curve_transaction_id = None;
+        invalidate_transient_thermal_plant(context.memory_config);
+        disarm_calibration_after_transient_input_change(
+            context.calibration_runtime_state,
+            context.manual_pps,
+        );
+    }
+    if let Err(error) = persist_heater_curve(context).await {
+        let code = error.code();
+        let message = error.message();
+        restore_persisted_memory_domains(
+            context.memory_config,
+            context.ui_state,
+            context.last_persisted_memory_config,
+            PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
+        );
+        mark_eeprom_required(
+            context.ui_state,
+            context.calibration_runtime_state,
+            context.manual_pps,
+            context.memory_commit_due_ms,
+            Some(persistence_fault_from_commit(error)),
+        );
+        return (false, usb_error_response(request_id, code, message));
+    }
+    copy_persisted_domains(
+        context.last_persisted_memory_config,
+        context.memory_config,
+        PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
+    );
+    *context.memory_commit_due_ms = None;
+    (
+        false,
+        usb_response(
+            request_id,
+            UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
+                context.memory_config,
+                context
+                    .preview_heater_curve
+                    .as_ref()
+                    .map(|preview| (&preview.curve, preview.raw_observations.as_ref())),
+            )),
+        ),
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn persist_heater_curve<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+) -> Result<(), MemoryCommitFailure>
+where
+    PWM: SetDutyCycle,
+{
+    commit_memory_config_now(
+        context.pd_i2c,
+        context.pd_port,
+        context.eeprom_pd_service,
+        CommitMemoryConfigInput {
+            memory_sequence: context.memory_sequence,
+            memory_config: context.memory_config,
+            domains_to_write: PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
+            persistence_log_sink: context.persistence_log_sink,
+            record_staging: context.record_staging,
+        },
+    )
+    .await
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn process_eeprom_maintenance_frame<PWM>(
+    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    command: EepromMaintenanceCommand,
+) -> (bool, UsbFrame)
+where
+    PWM: SetDutyCycle,
+{
+    if context.last_heater_duty != 0 {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "heater_output_active",
+                "EEPROM maintenance requires physical heater output to be off.",
+            ),
+        );
+    }
+    let op = command.op;
+    if raw_eeprom_operation_mutates(op) {
+        begin_mutating_eeprom_maintenance(
+            context.ui_state,
+            context.calibration_runtime_state,
+            context.manual_pps,
+            context.memory_commit_due_ms,
+        );
+        if !matches!(
+            request_pd_fixed_voltage(
+                context.pd_i2c,
+                context.pd_port,
+                DEFAULT_PD_VOLTAGE_REQUEST,
+            )
+            .await,
+            PdContractRequestState::Confirmed
+        ) {
+            return (
+                false,
+                usb_error_response(
+                    request_id,
+                    "eeprom_power_disarm_failed",
+                    "EEPROM maintenance could not restore fixed PD.",
+                ),
+            );
+        }
+    } else {
+        context.ui_state.heater_enabled = false;
+        calibration_job_canceled(context.calibration_runtime_state, context.manual_pps);
+    }
+    let response = usb_eeprom_maintenance_response(
+        request_id,
+        command,
+        context.pd_i2c,
+        context.pd_port,
+        context.eeprom_pd_service,
+        context.elapsed_ms,
+    )
+    .await;
+    if matches!(&response, UsbFrame::Response { ok: true, .. }) {
+        apply_successful_eeprom_maintenance_operation(
+            op,
+            context.ui_state,
+            context.memory_config,
+            context.memory_commit_due_ms,
+        );
+        if matches!(op, EepromMaintenanceOp::Erase) {
+            *context.preview_heater_curve = None;
+            *context.thermal_control_profile_preview = None;
+        }
+    } else if eeprom_storage_failure_response(&response) {
+        context.ui_state.eeprom_required = true;
+    }
+    (true, response)
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]

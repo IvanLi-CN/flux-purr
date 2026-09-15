@@ -361,10 +361,6 @@ fn guard_pulse_percent(current_temp_c: i16, mode: HeatingFanGuardMode) -> u8 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-#[expect(
-    clippy::excessive_nesting,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 fn fan_policy_decision_with_modes(
     current_temp_c: i16,
     elapsed_ms: u64,
@@ -384,25 +380,7 @@ fn fan_policy_decision_with_modes(
                 FanPolicySource::HeatingGuard,
             ),
             HeatingFanGuardMode::Low | HeatingFanGuardMode::Medium => {
-                let duty_percent = guard_pulse_percent(current_temp_c, guard_mode);
-                if duty_percent == 0 {
-                    (FanPolicyState::Disabled, FanPolicySource::HeatingGuard)
-                } else {
-                    let pwm_permille = if matches!(guard_mode, HeatingFanGuardMode::Medium)
-                        && current_temp_c > 150
-                    {
-                        interpolate_limited_fan_pwm(current_temp_c)
-                    } else {
-                        FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE
-                    };
-                    (
-                        FanPolicyState::HeatingGuardPulse {
-                            duty_percent,
-                            pwm_permille,
-                        },
-                        FanPolicySource::HeatingGuard,
-                    )
-                }
+                heating_guard_pulse_state(current_temp_c, guard_mode)
             }
             HeatingFanGuardMode::Off | HeatingFanGuardMode::High => {
                 (FanPolicyState::Disabled, FanPolicySource::HeatingGuard)
@@ -463,6 +441,29 @@ fn fan_policy_decision_with_modes(
         source,
         output_level: fan_output_level_for_command(command),
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn heating_guard_pulse_state(
+    current_temp_c: i16,
+    guard_mode: HeatingFanGuardMode,
+) -> (FanPolicyState, FanPolicySource) {
+    let duty_percent = guard_pulse_percent(current_temp_c, guard_mode);
+    if duty_percent == 0 {
+        return (FanPolicyState::Disabled, FanPolicySource::HeatingGuard);
+    }
+    let pwm_permille = matches!(guard_mode, HeatingFanGuardMode::Medium)
+        .then_some(current_temp_c)
+        .filter(|temp_c| *temp_c > 150)
+        .map(interpolate_limited_fan_pwm)
+        .unwrap_or(FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE);
+    (
+        FanPolicyState::HeatingGuardPulse {
+            duty_percent,
+            pwm_permille,
+        },
+        FanPolicySource::HeatingGuard,
+    )
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1349,7 +1350,6 @@ const FUSB302B_DIAG_RX_PARTIAL: u8 = 17;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_DIAG_REQUEST_TIMEOUT: u8 = 19;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_MAX_RX_MESSAGES_PER_POLL: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_PARTIAL_RX_TIMEOUT_MS: u64 = 250;
 #[cfg(target_arch = "xtensa")]

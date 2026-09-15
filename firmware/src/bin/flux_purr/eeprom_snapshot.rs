@@ -99,10 +99,6 @@ fn write_eeprom_snapshot_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 async fn process_eeprom_snapshot_line<PWM>(
     line: &str,
     session: &mut EepromSnapshotSession,
@@ -135,138 +131,210 @@ where
         session.next_offset = 0;
         *memory_commit_due_ms = None;
     }
-    let request_id = request.request_id.clone();
+    process_eeprom_snapshot_request(
+        request,
+        session,
+        i2c,
+        pd_port,
+        service,
+        memory_commit_due_ms,
+        elapsed_ms,
+    )
+    .await
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn process_eeprom_snapshot_request<PWM>(
+    request: EepromSnapshotRequest,
+    session: &mut EepromSnapshotSession,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    memory_commit_due_ms: &mut Option<u64>,
+    elapsed_ms: u64,
+) -> Option<EepromSnapshotResponse>
+where
+    PWM: SetDutyCycle,
+{
+    match request.op.as_str() {
+        "eeprom_snapshot_open" => {
+            open_eeprom_snapshot(request, session, memory_commit_due_ms, elapsed_ms, service)
+        }
+        "eeprom_snapshot_read" => {
+            read_eeprom_snapshot(request, session, i2c, pd_port, service, memory_commit_due_ms, elapsed_ms).await
+        }
+        "eeprom_snapshot_close" => {
+            close_eeprom_snapshot(request, session, i2c, pd_port, service, memory_commit_due_ms, elapsed_ms).await
+        }
+        _ => Some(eeprom_snapshot_error(request.request_id, "snapshot_op_unsupported")),
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn open_eeprom_snapshot<PWM>(
+    request: EepromSnapshotRequest,
+    session: &mut EepromSnapshotSession,
+    memory_commit_due_ms: &mut Option<u64>,
+    elapsed_ms: u64,
+    service: &EepromPdServiceContext<'_, PWM>,
+) -> Option<EepromSnapshotResponse>
+where
+    PWM: SetDutyCycle,
+{
+    if *service.last_heater_duty != 0 {
+        return Some(eeprom_snapshot_error(request.request_id, "heater_active"));
+    }
+    let request_id = request.request_id;
+    let session_id = request.session_id.unwrap_or(request_id.clone());
+    if session_id.is_empty() {
+        return Some(eeprom_snapshot_error(request_id, "session_required"));
+    }
+    session.active = true;
+    session.session_id = session_id.clone();
+    session.next_offset = 0;
+    session.last_activity_ms = elapsed_ms;
+    *memory_commit_due_ms = None;
+    Some(EepromSnapshotResponse {
+        ok: true,
+        request_id,
+        session_id: Some(session_id),
+        capacity: Some(EEPROM_SNAPSHOT_SIZE),
+        chunk_max: Some(EEPROM_SNAPSHOT_CHUNK_MAX),
+        offset: None,
+        bytes: None,
+        sha256: None,
+        error: None,
+    })
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn read_eeprom_snapshot<PWM>(
+    request: EepromSnapshotRequest,
+    session: &mut EepromSnapshotSession,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    memory_commit_due_ms: &mut Option<u64>,
+    elapsed_ms: u64,
+) -> Option<EepromSnapshotResponse>
+where
+    PWM: SetDutyCycle,
+{
+    let request_id = request.request_id;
     let requested_session = request
         .session_id
         .as_ref()
-        .unwrap_or(&request.request_id)
+        .unwrap_or(&request_id)
         .clone();
-    match request.op.as_str() {
-        "eeprom_snapshot_open" => {
-            if *service.last_heater_duty != 0 {
-                return Some(eeprom_snapshot_error(request_id, "heater_active"));
-            }
-            let session_id = request.session_id.unwrap_or(request.request_id.clone());
-            if session_id.is_empty() {
-                return Some(eeprom_snapshot_error(request_id, "session_required"));
-            }
-            session.active = true;
-            session.session_id = session_id.clone();
-            session.next_offset = 0;
-            session.last_activity_ms = elapsed_ms;
-            *memory_commit_due_ms = None;
-            Some(EepromSnapshotResponse {
-                ok: true,
-                request_id,
-                session_id: Some(session_id),
-                capacity: Some(EEPROM_SNAPSHOT_SIZE),
-                chunk_max: Some(EEPROM_SNAPSHOT_CHUNK_MAX),
-                offset: None,
-                bytes: None,
-                sha256: None,
-                error: None,
-            })
-        }
-        "eeprom_snapshot_read" => {
-            if !session.active || requested_session != session.session_id {
-                return Some(eeprom_snapshot_error(
-                    request_id,
-                    "snapshot_session_invalid",
-                ));
-            }
-            if *service.last_heater_duty != 0 {
-                session.active = false;
-                return Some(eeprom_snapshot_error(request_id, "heater_active"));
-            }
-            let (Some(offset), Some(length)) = (request.offset, request.length) else {
-                return Some(eeprom_snapshot_error(request_id, "snapshot_range_required"));
-            };
-            if length == 0
-                || length > EEPROM_SNAPSHOT_CHUNK_MAX
-                || offset != session.next_offset
-                || offset.saturating_add(length) > EEPROM_SNAPSHOT_SIZE
-            {
-                return Some(eeprom_snapshot_error(request_id, "snapshot_range_invalid"));
-            }
-            let Some(address) = probe_eeprom_address(i2c) else {
-                session.active = false;
-                return Some(eeprom_snapshot_error(request_id, "eeprom_unavailable"));
-            };
-            let mut bytes = heapless::Vec::<u8, 32>::new();
-            let _ = bytes.resize_default(usize::from(length));
-            if read_eeprom_bytes_chunked_with_pd(
-                i2c,
-                pd_port,
-                service,
-                address,
-                offset,
-                bytes.as_mut_slice(),
-            )
-            .await
-            .is_err()
-            {
-                session.active = false;
-                return Some(eeprom_snapshot_error(request_id, "eeprom_read_failed"));
-            }
-            session.next_offset = session.next_offset.saturating_add(length);
-            session.last_activity_ms = elapsed_ms;
-            *memory_commit_due_ms = None;
-            Some(EepromSnapshotResponse {
-                ok: true,
-                request_id,
-                session_id: Some(session.session_id.clone()),
-                capacity: None,
-                chunk_max: None,
-                offset: Some(offset),
-                bytes: Some(bytes),
-                sha256: None,
-                error: None,
-            })
-        }
-        "eeprom_snapshot_close" => {
-            if !session.active || requested_session != session.session_id {
-                return Some(eeprom_snapshot_error(
-                    request_id,
-                    "snapshot_session_invalid",
-                ));
-            }
-            if *service.last_heater_duty != 0 {
-                session.active = false;
-                return Some(eeprom_snapshot_error(request_id, "heater_active"));
-            }
-            if session.next_offset != EEPROM_SNAPSHOT_SIZE {
-                session.active = false;
-                return Some(eeprom_snapshot_error(request_id, "snapshot_incomplete"));
-            }
-            let digest = match eeprom_snapshot_digest(i2c, pd_port, service).await {
-                Ok(digest) => digest,
-                Err(code) => {
-                    session.active = false;
-                    return Some(eeprom_snapshot_error(request_id, code));
-                }
-            };
-            if request.sha256.as_ref() != Some(&digest) {
-                session.active = false;
-                return Some(eeprom_snapshot_error(request_id, "snapshot_hash_mismatch"));
-            }
-            let session_id = session.session_id.clone();
-            session.active = false;
-            session.session_id.clear();
-            session.next_offset = 0;
-            session.last_activity_ms = elapsed_ms;
-            *memory_commit_due_ms = None;
-            Some(EepromSnapshotResponse {
-                ok: true,
-                request_id,
-                session_id: Some(session_id),
-                capacity: None,
-                chunk_max: None,
-                offset: None,
-                bytes: None,
-                sha256: Some(digest),
-                error: None,
-            })
-        }
-        _ => Some(eeprom_snapshot_error(request_id, "snapshot_op_unsupported")),
+    if !session.active || requested_session != session.session_id {
+        return Some(eeprom_snapshot_error(request_id, "snapshot_session_invalid"));
     }
+    if *service.last_heater_duty != 0 {
+        session.active = false;
+        return Some(eeprom_snapshot_error(request_id, "heater_active"));
+    }
+    let (Some(offset), Some(length)) = (request.offset, request.length) else {
+        return Some(eeprom_snapshot_error(request_id, "snapshot_range_required"));
+    };
+    if length == 0
+        || length > EEPROM_SNAPSHOT_CHUNK_MAX
+        || offset != session.next_offset
+        || offset.saturating_add(length) > EEPROM_SNAPSHOT_SIZE
+    {
+        return Some(eeprom_snapshot_error(request_id, "snapshot_range_invalid"));
+    }
+    let Some(address) = probe_eeprom_address(i2c) else {
+        session.active = false;
+        return Some(eeprom_snapshot_error(request_id, "eeprom_unavailable"));
+    };
+    let mut bytes = heapless::Vec::<u8, 32>::new();
+    let _ = bytes.resize_default(usize::from(length));
+    if read_eeprom_bytes_chunked_with_pd(
+        i2c,
+        pd_port,
+        service,
+        address,
+        offset,
+        bytes.as_mut_slice(),
+    )
+    .await
+    .is_err()
+    {
+        session.active = false;
+        return Some(eeprom_snapshot_error(request_id, "eeprom_read_failed"));
+    }
+    session.next_offset = session.next_offset.saturating_add(length);
+    session.last_activity_ms = elapsed_ms;
+    *memory_commit_due_ms = None;
+    Some(EepromSnapshotResponse {
+        ok: true,
+        request_id,
+        session_id: Some(session.session_id.clone()),
+        capacity: None,
+        chunk_max: None,
+        offset: Some(offset),
+        bytes: Some(bytes),
+        sha256: None,
+        error: None,
+    })
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn close_eeprom_snapshot<PWM>(
+    request: EepromSnapshotRequest,
+    session: &mut EepromSnapshotSession,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    memory_commit_due_ms: &mut Option<u64>,
+    elapsed_ms: u64,
+) -> Option<EepromSnapshotResponse>
+where
+    PWM: SetDutyCycle,
+{
+    let request_id = request.request_id;
+    let requested_session = request
+        .session_id
+        .as_ref()
+        .unwrap_or(&request_id)
+        .clone();
+    if !session.active || requested_session != session.session_id {
+        return Some(eeprom_snapshot_error(request_id, "snapshot_session_invalid"));
+    }
+    if *service.last_heater_duty != 0 {
+        session.active = false;
+        return Some(eeprom_snapshot_error(request_id, "heater_active"));
+    }
+    if session.next_offset != EEPROM_SNAPSHOT_SIZE {
+        session.active = false;
+        return Some(eeprom_snapshot_error(request_id, "snapshot_incomplete"));
+    }
+    let digest = match eeprom_snapshot_digest(i2c, pd_port, service).await {
+        Ok(digest) => digest,
+        Err(code) => {
+            session.active = false;
+            return Some(eeprom_snapshot_error(request_id, code));
+        }
+    };
+    if request.sha256.as_ref() != Some(&digest) {
+        session.active = false;
+        return Some(eeprom_snapshot_error(request_id, "snapshot_hash_mismatch"));
+    }
+    let session_id = session.session_id.clone();
+    session.active = false;
+    session.session_id.clear();
+    session.next_offset = 0;
+    session.last_activity_ms = elapsed_ms;
+    *memory_commit_due_ms = None;
+    Some(EepromSnapshotResponse {
+        ok: true,
+        request_id,
+        session_id: Some(session_id),
+        capacity: None,
+        chunk_max: None,
+        offset: None,
+        bytes: None,
+        sha256: Some(digest),
+        error: None,
+    })
 }

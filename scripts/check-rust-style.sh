@@ -11,4 +11,5 @@ cargo clippy --locked --manifest-path tools/rust-style-check/Cargo.toml --all-ta
   -D clippy::too_many_lines \
   -D clippy::too_many_arguments \
   -D clippy::excessive_nesting
+cargo test --locked --manifest-path tools/rust-style-check/Cargo.toml
 cargo run --locked --manifest-path tools/rust-style-check/Cargo.toml --bin rust-style-check

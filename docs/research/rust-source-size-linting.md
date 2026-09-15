@@ -69,8 +69,9 @@ cognitive-complexity-threshold = 25
 2. 使用各 crate 的 `clippy.toml`，由检查脚本统一执行 `cargo fmt --check` 和严格的
    `cargo clippy --all-targets`；`too_many_arguments` 随 `-D warnings` 变为 error，
    另外两项由命令行显式提升。
-3. 结构性例外只能落在最小函数范围，并使用带原因的 `#[expect]`；仓库 checker
-   拒绝 crate/file/module 级例外与任何本地 `too_many_arguments` 例外。新函数不得
-   获得 blanket allow。
+3. 本仓库的历史结构债务基线为零，结构性 lint 不允许任何本地
+   `#[allow]`/`#[expect]`，包括函数、模块、文件和 `cfg_attr` 中的嵌套形式。
+   外部 trait/ABI 只有在 Clippy 原生要求且不属于这三项结构性 lint 时，才可使用
+   最小范围的原生例外。新函数不得获得 blanket allow。
 4. 另建不依赖 Clippy 的入口边界检查：只对三个装配入口统计 500 行预算并拒绝
    内联测试；领域模块不设置统一文件行数上限，按职责边界拆分。

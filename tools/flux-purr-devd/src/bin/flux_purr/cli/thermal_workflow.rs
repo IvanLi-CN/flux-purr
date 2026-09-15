@@ -117,10 +117,6 @@ fn thermal_effective_source_power_watts(
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
 async fn collect_batch_thermal_self_test(
     client: &Client,
     default_devd: &str,
@@ -141,239 +137,38 @@ async fn collect_batch_thermal_self_test(
     );
     let batch_dir = args.output_dir.join(&batch_id);
     fs::create_dir_all(&batch_dir)?;
-    let mut runs = Vec::<Value>::new();
-    let mut batch_error = None::<String>;
-
-    if args.dry_run {
-        for (candidate_index, candidate_file) in args.candidate_profile_files.iter().enumerate() {
-            let imported = serde_json::from_slice::<Value>(&fs::read(candidate_file)?)?;
-            let profile =
-                thermal_candidate_profile_to_value(&thermal_candidate_profile_from_value(imported));
-            let run_id = format!("{batch_id}-candidate-{candidate_index}");
-            let run_dir = batch_dir.join(format!("candidate-{candidate_index}"));
-            fs::create_dir_all(&run_dir)?;
-            let samples_path = run_dir.join("samples.ndjson");
-            let mut samples_writer = BufWriter::new(File::create(&samples_path)?);
-            let mut sample_index = 0usize;
-            let results = write_dry_thermal_ladder(DryThermalLadderInput {
-                samples_writer: &mut samples_writer,
-                run_id: &run_id,
-                test_phase: "applied",
-                source_voltage_mv,
-                source_current_ma,
-                thermal_profile: Some(&profile),
-                heater_parameter_mode: "preview",
-                target_temps_c: &[target_temp_c],
-                sample_index: &mut sample_index,
-            })?;
-            samples_writer.flush()?;
-            let validation =
-                validate_thermal_applied_results(&results, &[target_temp_c], args.evaluation_mode);
-            let mut summary = thermal_batch_candidate_summary(ThermalBatchCandidateSummaryInput {
-                run_id: &run_id,
-                resolved: &resolved,
-                args: &args,
-                source_selection: &source_selection,
-                source_power_watts,
-                candidate_file,
-                candidate_index,
-                target_temp_c,
-                restart_temp_c,
-                source_voltage_mv,
-                source_current_ma,
-                run_dir: &run_dir,
-                samples_path: &samples_path,
-                profile: &profile,
-                results: &results,
-                validation,
-                sample_count: sample_index,
-            });
-            thermal_summary_attach_source_analysis_from_ndjson(&mut summary, &samples_path)?;
-            write_thermal_batch_candidate_files(&summary, &run_dir)?;
-            runs.push(summary);
-        }
+    let (runs, batch_error) = if args.dry_run {
+        let runs = collect_batch_dry_runs(ThermalBatchDryInput {
+            resolved: &resolved,
+            args: &args,
+            source_selection: &source_selection,
+            source_power_watts,
+            target_temp_c,
+            restart_temp_c,
+            source_voltage_mv,
+            source_current_ma,
+            batch_id: &batch_id,
+            batch_dir: &batch_dir,
+        })?;
+        (runs, None)
     } else {
-        validate_thermal_bench_source_tools(args.source_kind)?;
-        let (initial_source_telemetry, lease) =
-            prepare_thermal_source_and_lease(ThermalSourceLeaseInput {
-                resolved: &resolved,
-                source_kind: args.source_kind,
-                config: ThermalSourceConfig {
-                    client,
-                    source_url: &args.source_url,
-                    source_id: &args.source_id,
-                    source_mode: &args.source_mode,
-                    profile_mode: args.profile_mode,
-                    source_power_watts,
-                    voltage_mv: source_voltage_mv,
-                    current_limit_ma: source_current_ma,
-                },
-            })
-            .await?;
-        let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-        let test_future = async {
-            let mut source_sampler = BenchSourceTelemetrySampler::new(
-                args.source_kind,
-                &args.source_url,
-                initial_source_telemetry,
-            );
-            for (candidate_index, candidate_file) in args.candidate_profile_files.iter().enumerate()
-            {
-                let imported = serde_json::from_slice::<Value>(&fs::read(candidate_file)?)?;
-                let profile = thermal_candidate_profile_to_value(
-                    &thermal_candidate_profile_from_value(imported),
-                );
-                request_thermal_runtime_with_retry(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
-                    thermal_self_test_cooldown_runtime_body(),
-                )
-                .await?;
-                wait_for_cooldown(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
-                    restart_temp_c,
-                    Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
-                )
-                .await?;
-                let run_id = format!("{batch_id}-candidate-{candidate_index}");
-                let run_dir = batch_dir.join(format!("candidate-{candidate_index}"));
-                fs::create_dir_all(&run_dir)?;
-                let samples_path = run_dir.join("samples.ndjson");
-                let mut samples_writer = BufWriter::new(File::create(&samples_path)?);
-                let mut sample_index = 0usize;
-                let heater_parameters =
-                    thermal_heater_parameters_value(target_temp_c, Some(&profile), "preview");
-                refresh_thermal_source_sampler_before_stage(
-                    &args,
-                    source_power_watts,
-                    &mut source_sampler,
-                )
-                .await?;
-                // Recheck immediately before arm: a prior candidate can leave residual heat
-                // after its batch-level cooldown was observed.
-                wait_for_cooldown(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
-                    restart_temp_c,
-                    Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
-                )
-                .await?;
-                let arm_status =
-                    preview_prepare_and_arm_thermal_self_test_target(ThermalPreviewTargetInput {
-                        client,
-                        resolved: &resolved,
-                        lease_id: &lease.lease_id,
-                        profile_mode: args.profile_mode,
-                        profile: &profile,
-                        target_temp_c,
-                        heater_parameters: &heater_parameters,
-                        use_legacy_profile: use_point_local_profile,
-                    })
-                    .await?;
-                let result = run_thermal_stage(ThermalStageInput {
-                    client,
-                    resolved: &resolved,
-                    lease_id: &lease.lease_id,
-                    samples_writer: &mut samples_writer,
-                    run_id: &run_id,
-                    test_phase: "applied",
-                    target_temp_c,
-                    source_voltage_mv,
-                    source_current_ma,
-                    heater_parameters: &heater_parameters,
-                    runtime_profile: &profile,
-                    args: &args,
-                    source_sampler: &mut source_sampler,
-                    sample_index: &mut sample_index,
-                    initial_status: Some(arm_status),
-                })
-                .await?;
-                let _ = arm_thermal_self_test_heater(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
-                    false,
-                    target_temp_c,
-                )
-                .await?;
-                samples_writer.flush()?;
-                let results = vec![result];
-                let validation = validate_thermal_applied_results(
-                    &results,
-                    &[target_temp_c],
-                    args.evaluation_mode,
-                );
-                let mut summary =
-                    thermal_batch_candidate_summary(ThermalBatchCandidateSummaryInput {
-                        run_id: &run_id,
-                        resolved: &resolved,
-                        args: &args,
-                        source_selection: &source_selection,
-                        source_power_watts,
-                        candidate_file,
-                        candidate_index,
-                        target_temp_c,
-                        restart_temp_c,
-                        source_voltage_mv,
-                        source_current_ma,
-                        run_dir: &run_dir,
-                        samples_path: &samples_path,
-                        profile: &profile,
-                        results: &results,
-                        validation,
-                        sample_count: sample_index,
-                    });
-                thermal_summary_attach_source_analysis_from_ndjson(&mut summary, &samples_path)?;
-                write_thermal_batch_candidate_files(&summary, &run_dir)?;
-                runs.push(summary);
-            }
-            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-        };
-        let deadline = async {
-            if let Some(deadline) = args.execution_deadline {
-                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        };
-        let test_result = tokio::select! {
-            result = test_future => result,
-            _ = deadline => Err("target_budget_exhausted: thermal batch self-test deadline reached; heater cleanup requested".into()),
-            signal = tokio::signal::ctrl_c() => {
-                signal?;
-                Err("thermal batch self-test interrupted; heater cleanup requested".into())
-            }
-        };
-        heartbeat.abort();
-        if let Err(error) = test_result {
-            batch_error = Some(error.to_string());
-        }
-        if let Err(error) =
-            force_thermal_self_test_shutdown(client, &resolved, &lease.lease_id).await
-            && batch_error.is_none()
-        {
-            batch_error = Some(format!("thermal batch cleanup failed: {error}"));
-        }
-        let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-        if let Err(error) = restore_thermal_bench_source_default(
+        let live = collect_batch_live_runs(ThermalBatchLiveInput {
             client,
-            args.source_kind,
-            &args.source_url,
-            &args.source_id,
-        )
-        .await
-            && batch_error.is_none()
-        {
-            batch_error = Some(format!(
-                "{} cleanup failed: {error}",
-                args.source_kind.as_str()
-            ));
-        }
-    }
+            resolved: &resolved,
+            args: &args,
+            source_selection: &source_selection,
+            source_power_watts,
+            use_point_local_profile,
+            target_temp_c,
+            restart_temp_c,
+            source_voltage_mv,
+            source_current_ma,
+            batch_id: &batch_id,
+            batch_dir: &batch_dir,
+        })
+        .await?;
+        (live.runs, live.error)
+    };
 
     let passed_candidates = runs
         .iter()
@@ -399,6 +194,362 @@ async fn collect_batch_thermal_self_test(
         serde_json::to_vec_pretty(&summary)?,
     )?;
     Ok(summary)
+}
+
+struct ThermalBatchDryInput<'a> {
+    resolved: &'a ResolvedUsbTarget,
+    args: &'a ThermalSelfTestArgs,
+    source_selection: &'a ThermalSourceSelection,
+    source_power_watts: u16,
+    target_temp_c: i16,
+    restart_temp_c: f64,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    batch_id: &'a str,
+    batch_dir: &'a Path,
+}
+
+fn collect_batch_dry_runs(
+    input: ThermalBatchDryInput<'_>,
+) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalBatchDryInput {
+        resolved,
+        args,
+        source_selection,
+        source_power_watts,
+        target_temp_c,
+        restart_temp_c,
+        source_voltage_mv,
+        source_current_ma,
+        batch_id,
+        batch_dir,
+    } = input;
+    args.candidate_profile_files
+        .iter()
+        .enumerate()
+        .map(|(candidate_index, candidate_file)| {
+            let imported = serde_json::from_slice::<Value>(&fs::read(candidate_file)?)?;
+            let profile = thermal_candidate_profile_to_value(
+                &thermal_candidate_profile_from_value(imported),
+            );
+            let run_id = format!("{batch_id}-candidate-{candidate_index}");
+            let run_dir = batch_dir.join(format!("candidate-{candidate_index}"));
+            fs::create_dir_all(&run_dir)?;
+            let samples_path = run_dir.join("samples.ndjson");
+            let mut samples_writer = BufWriter::new(File::create(&samples_path)?);
+            let mut sample_index = 0usize;
+            let results = write_dry_thermal_ladder(DryThermalLadderInput {
+                samples_writer: &mut samples_writer,
+                run_id: &run_id,
+                test_phase: "applied",
+                source_voltage_mv,
+                source_current_ma,
+                thermal_profile: Some(&profile),
+                heater_parameter_mode: "preview",
+                target_temps_c: &[target_temp_c],
+                sample_index: &mut sample_index,
+            })?;
+            samples_writer.flush()?;
+            let validation =
+                validate_thermal_applied_results(&results, &[target_temp_c], args.evaluation_mode);
+            let mut summary = thermal_batch_candidate_summary(ThermalBatchCandidateSummaryInput {
+                run_id: &run_id,
+                resolved,
+                args,
+                source_selection,
+                source_power_watts,
+                candidate_file,
+                candidate_index,
+                target_temp_c,
+                restart_temp_c,
+                source_voltage_mv,
+                source_current_ma,
+                run_dir: &run_dir,
+                samples_path: &samples_path,
+                profile: &profile,
+                results: &results,
+                validation,
+                sample_count: sample_index,
+            });
+            thermal_summary_attach_source_analysis_from_ndjson(&mut summary, &samples_path)?;
+            write_thermal_batch_candidate_files(&summary, &run_dir)?;
+            Ok(summary)
+        })
+        .collect()
+}
+
+struct ThermalBatchLiveInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    args: &'a ThermalSelfTestArgs,
+    source_selection: &'a ThermalSourceSelection,
+    source_power_watts: u16,
+    use_point_local_profile: bool,
+    target_temp_c: i16,
+    restart_temp_c: f64,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    batch_id: &'a str,
+    batch_dir: &'a Path,
+}
+
+struct ThermalBatchLiveOutcome {
+    runs: Vec<Value>,
+    error: Option<String>,
+}
+
+async fn collect_batch_live_runs(
+    input: ThermalBatchLiveInput<'_>,
+) -> Result<ThermalBatchLiveOutcome, Box<dyn std::error::Error + Send + Sync>> {
+    validate_thermal_bench_source_tools(input.args.source_kind)?;
+    let (initial_source_telemetry, lease) = prepare_thermal_source_and_lease(
+        ThermalSourceLeaseInput {
+            resolved: input.resolved,
+            source_kind: input.args.source_kind,
+            config: ThermalSourceConfig {
+                client: input.client,
+                source_url: &input.args.source_url,
+                source_id: &input.args.source_id,
+                source_mode: &input.args.source_mode,
+                profile_mode: input.args.profile_mode,
+                source_power_watts: input.source_power_watts,
+                voltage_mv: input.source_voltage_mv,
+                current_limit_ma: input.source_current_ma,
+            },
+        },
+    )
+    .await?;
+    let heartbeat = spawn_heartbeat(
+        input.client.clone(),
+        input.resolved.devd.clone(),
+        lease.clone(),
+    );
+    let mut runs = Vec::new();
+    let test_result = tokio::select! {
+        result = collect_batch_live_candidates(&input, &lease, initial_source_telemetry, &mut runs) => result,
+        _ = thermal_execution_deadline(input.args.execution_deadline) => Err("target_budget_exhausted: thermal batch self-test deadline reached; heater cleanup requested".into()),
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            Err("thermal batch self-test interrupted; heater cleanup requested".into())
+        }
+    };
+    heartbeat.abort();
+    let mut error = test_result.err().map(|value| value.to_string());
+    if let Err(cleanup) =
+        force_thermal_self_test_shutdown(input.client, input.resolved, &lease.lease_id).await
+        && error.is_none()
+    {
+        error = Some(format!("thermal batch cleanup failed: {cleanup}"));
+    }
+    let _ = release_lease(input.client, &input.resolved.devd, &lease.lease_id).await;
+    if let Err(cleanup) = restore_thermal_bench_source_default(
+        input.client,
+        input.args.source_kind,
+        &input.args.source_url,
+        &input.args.source_id,
+    )
+    .await
+        && error.is_none()
+    {
+        error = Some(format!(
+            "{} cleanup failed: {cleanup}",
+            input.args.source_kind.as_str()
+        ));
+    }
+    Ok(ThermalBatchLiveOutcome { runs, error })
+}
+
+async fn thermal_execution_deadline(deadline: Option<std::time::Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn collect_batch_live_candidates(
+    input: &ThermalBatchLiveInput<'_>,
+    lease: &Lease,
+    initial_source_telemetry: BenchSourceLiveTelemetry,
+    runs: &mut Vec<Value>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut source_sampler = BenchSourceTelemetrySampler::new(
+        input.args.source_kind,
+        &input.args.source_url,
+        initial_source_telemetry,
+    );
+    for (candidate_index, candidate_file) in input
+        .args
+        .candidate_profile_files
+        .iter()
+        .enumerate()
+    {
+        let summary = collect_batch_live_candidate(ThermalBatchLiveCandidateInput {
+            input,
+            lease,
+            candidate_file,
+            candidate_index,
+            source_sampler: &mut source_sampler,
+        })
+        .await?;
+        runs.push(summary);
+    }
+    Ok(())
+}
+
+struct ThermalBatchLiveCandidateInput<'a> {
+    input: &'a ThermalBatchLiveInput<'a>,
+    lease: &'a Lease,
+    candidate_file: &'a Path,
+    candidate_index: usize,
+    source_sampler: &'a mut BenchSourceTelemetrySampler,
+}
+
+async fn collect_batch_live_candidate(
+    candidate: ThermalBatchLiveCandidateInput<'_>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let input = candidate.input;
+    let profile = load_batch_candidate_profile(candidate.candidate_file)?;
+    request_thermal_runtime_with_retry(
+        input.client,
+        input.resolved,
+        &candidate.lease.lease_id,
+        thermal_self_test_cooldown_runtime_body(),
+    )
+    .await?;
+    wait_for_cooldown(
+        input.client,
+        input.resolved,
+        &candidate.lease.lease_id,
+        input.restart_temp_c,
+        Duration::from_secs(input.args.cooldown_timeout_seconds.max(1)),
+    )
+    .await?;
+    let run_id = format!("{}-candidate-{}", input.batch_id, candidate.candidate_index);
+    let run_dir = input
+        .batch_dir
+        .join(format!("candidate-{}", candidate.candidate_index));
+    fs::create_dir_all(&run_dir)?;
+    let samples_path = run_dir.join("samples.ndjson");
+    let mut samples_writer = BufWriter::new(File::create(&samples_path)?);
+    let mut sample_index = 0usize;
+    let heater_parameters = thermal_batch_candidate_heater_parameters(input.target_temp_c, &profile);
+    refresh_batch_candidate_source(input.args, input.source_power_watts, candidate.source_sampler)
+        .await?;
+    wait_for_cooldown(
+        input.client,
+        input.resolved,
+        &candidate.lease.lease_id,
+        input.restart_temp_c,
+        Duration::from_secs(input.args.cooldown_timeout_seconds.max(1)),
+    )
+    .await?;
+    let arm_status = preview_prepare_and_arm_thermal_self_test_target(ThermalPreviewTargetInput {
+        client: input.client,
+        resolved: input.resolved,
+        lease_id: &candidate.lease.lease_id,
+        profile_mode: input.args.profile_mode,
+        profile: &profile,
+        target_temp_c: input.target_temp_c,
+        heater_parameters: &heater_parameters,
+        use_legacy_profile: input.use_point_local_profile,
+    })
+    .await?;
+    let result = run_thermal_stage(ThermalStageInput {
+        client: input.client,
+        resolved: input.resolved,
+        lease_id: &candidate.lease.lease_id,
+        samples_writer: &mut samples_writer,
+        run_id: &run_id,
+        test_phase: "applied",
+        target_temp_c: input.target_temp_c,
+        source_voltage_mv: input.source_voltage_mv,
+        source_current_ma: input.source_current_ma,
+        heater_parameters: &heater_parameters,
+        runtime_profile: &profile,
+        args: input.args,
+        source_sampler: candidate.source_sampler,
+        sample_index: &mut sample_index,
+        initial_status: Some(arm_status),
+    })
+    .await?;
+    let _ = arm_thermal_self_test_heater(
+        input.client,
+        input.resolved,
+        &candidate.lease.lease_id,
+        false,
+        input.target_temp_c,
+    )
+    .await?;
+    samples_writer.flush()?;
+    complete_batch_live_candidate(ThermalBatchCandidateCompletionInput {
+        candidate: &candidate,
+        input,
+        run_id: &run_id,
+        run_dir: &run_dir,
+        samples_path: &samples_path,
+        profile: &profile,
+        result,
+        sample_count: sample_index,
+    })
+}
+
+struct ThermalBatchCandidateCompletionInput<'a> {
+    candidate: &'a ThermalBatchLiveCandidateInput<'a>,
+    input: &'a ThermalBatchLiveInput<'a>,
+    run_id: &'a str,
+    run_dir: &'a Path,
+    samples_path: &'a Path,
+    profile: &'a Value,
+    result: ThermalStageResult,
+    sample_count: usize,
+}
+
+fn complete_batch_live_candidate(
+    completion: ThermalBatchCandidateCompletionInput<'_>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let results = vec![completion.result];
+    let validation = validate_thermal_applied_results(
+        &results,
+        &[completion.input.target_temp_c],
+        completion.input.args.evaluation_mode,
+    );
+    finalize_thermal_batch_candidate(ThermalBatchCandidateSummaryInput {
+        run_id: completion.run_id,
+        resolved: completion.input.resolved,
+        args: completion.input.args,
+        source_selection: completion.input.source_selection,
+        source_power_watts: completion.input.source_power_watts,
+        candidate_file: completion.candidate.candidate_file,
+        candidate_index: completion.candidate.candidate_index,
+        target_temp_c: completion.input.target_temp_c,
+        restart_temp_c: completion.input.restart_temp_c,
+        source_voltage_mv: completion.input.source_voltage_mv,
+        source_current_ma: completion.input.source_current_ma,
+        run_dir: completion.run_dir,
+        samples_path: completion.samples_path,
+        profile: completion.profile,
+        results: &results,
+        validation,
+        sample_count: completion.sample_count,
+    })
+}
+
+fn thermal_batch_candidate_heater_parameters(target_temp_c: i16, profile: &Value) -> Value {
+    thermal_heater_parameters_value(target_temp_c, Some(profile), "preview")
+}
+
+async fn refresh_batch_candidate_source(
+    args: &ThermalSelfTestArgs,
+    source_power_watts: u16,
+    source_sampler: &mut BenchSourceTelemetrySampler,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    refresh_thermal_source_sampler_before_stage(args, source_power_watts, source_sampler).await
+}
+
+fn load_batch_candidate_profile(path: &Path) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let imported = serde_json::from_slice::<Value>(&fs::read(path)?)?;
+    Ok(thermal_candidate_profile_to_value(&thermal_candidate_profile_from_value(imported)))
 }
 
 struct ThermalBatchCandidateSummaryInput<'a> {
@@ -507,6 +658,17 @@ fn thermal_batch_candidate_summary(input: ThermalBatchCandidateSummaryInput<'_>)
     })
 }
 
+fn finalize_thermal_batch_candidate(
+    input: ThermalBatchCandidateSummaryInput<'_>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let samples_path = input.samples_path.to_path_buf();
+    let run_dir = input.run_dir.to_path_buf();
+    let mut summary = thermal_batch_candidate_summary(input);
+    thermal_summary_attach_source_analysis_from_ndjson(&mut summary, &samples_path)?;
+    write_thermal_batch_candidate_files(&summary, &run_dir)?;
+    Ok(summary)
+}
+
 fn write_thermal_batch_candidate_files(
     summary: &Value,
     run_dir: &Path,
@@ -522,41 +684,41 @@ fn write_thermal_batch_candidate_files(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    clippy::excessive_nesting,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
-async fn collect_single_thermal_self_test(
-    client: &Client,
+struct ThermalSelfTestRunSetup {
+    resolved: ResolvedUsbTarget,
+    source_selection: ThermalSourceSelection,
+    source_power_watts: u16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    target_temps_c: Vec<i16>,
+    optimize_targets_c: Vec<i16>,
+    effective_seed_profile_file: Option<PathBuf>,
+    run_id: String,
+    run_dir: PathBuf,
+    samples_path: PathBuf,
+    summary_path: PathBuf,
+    candidate_path: PathBuf,
+    candidate_profile: ThermalCandidateProfile,
+    candidate_profile_value: Value,
+}
+
+fn prepare_thermal_self_test_run(
     default_devd: &str,
-    args: ThermalSelfTestArgs,
-    save_profile_on_pass: bool,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    args: &ThermalSelfTestArgs,
+) -> Result<ThermalSelfTestRunSetup, Box<dyn std::error::Error + Send + Sync>> {
     let resolved = resolve_target(args.target.clone(), default_devd)?;
-    let source_selection = resolve_thermal_source_selection(&args)?;
-    let use_point_local_profile =
-        thermal_self_test_uses_point_local_profile(&source_selection, args.calibration_run);
-    let source_power_watts = thermal_effective_source_power_watts(&args, &source_selection);
-    let (source_voltage_mv, source_current_ma) = thermal_source_request(&args, &source_selection)?;
+    let source_selection = resolve_thermal_source_selection(args)?;
+    let source_power_watts = thermal_effective_source_power_watts(args, &source_selection);
+    let (source_voltage_mv, source_current_ma) = thermal_source_request(args, &source_selection)?;
     let target_temps_c = parse_thermal_targets(args.targets_c.as_deref())?;
     let optimize_targets_c = if args.skip_optimize {
         Vec::new()
     } else {
         resolve_optimization_targets(&target_temps_c, args.optimize_targets_c.as_deref())?
     };
-    let (mut candidate_profile, effective_seed_profile_file) =
-        if let Some(seed_profile_file) = args.seed_profile_file.as_ref() {
-            (
-                thermal_candidate_profile_from_value(serde_json::from_slice(&fs::read(
-                    seed_profile_file,
-                )?)?),
-                Some(seed_profile_file.clone()),
-            )
-        } else {
-            load_thermal_default_seed_candidate_profile(source_selection.resolved_bank)?
-        };
-    let mut candidate_profile_value = thermal_candidate_profile_to_value(&candidate_profile);
+    let (candidate_profile, effective_seed_profile_file) =
+        load_self_test_seed_profile(args, &source_selection)?;
+    let candidate_profile_value = thermal_candidate_profile_to_value(&candidate_profile);
     let run_started_unix_ms = current_unix_millis();
     let run_id = format!(
         "thermal-{}-{}",
@@ -564,10 +726,69 @@ async fn collect_single_thermal_self_test(
         slugify_path_component(&resolved.device)
     );
     let run_dir = args.output_dir.join(&run_id);
-    fs::create_dir_all(&run_dir)?;
     let samples_path = run_dir.join("samples.ndjson");
     let summary_path = run_dir.join("run.json");
     let candidate_path = run_dir.join("thermal-profile.candidate.json");
+    Ok(ThermalSelfTestRunSetup {
+        resolved,
+        source_selection,
+        source_power_watts,
+        source_voltage_mv,
+        source_current_ma,
+        target_temps_c,
+        optimize_targets_c,
+        effective_seed_profile_file,
+        run_id,
+        run_dir,
+        samples_path,
+        summary_path,
+        candidate_path,
+        candidate_profile,
+        candidate_profile_value,
+    })
+}
+
+fn load_self_test_seed_profile(
+    args: &ThermalSelfTestArgs,
+    source_selection: &ThermalSourceSelection,
+) -> Result<
+    (ThermalCandidateProfile, Option<PathBuf>),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    if let Some(seed_profile_file) = args.seed_profile_file.as_ref() {
+        let profile = thermal_candidate_profile_from_value(serde_json::from_slice(&fs::read(
+            seed_profile_file,
+        )?)?);
+        return Ok((profile, Some(seed_profile_file.clone())));
+    }
+    load_thermal_default_seed_candidate_profile(source_selection.resolved_bank)
+}
+
+async fn collect_single_thermal_self_test(
+    client: &Client,
+    default_devd: &str,
+    args: ThermalSelfTestArgs,
+    save_profile_on_pass: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let setup = prepare_thermal_self_test_run(default_devd, &args)?;
+    let ThermalSelfTestRunSetup {
+        resolved,
+        source_selection,
+        source_power_watts,
+        source_voltage_mv,
+        source_current_ma,
+        target_temps_c,
+        optimize_targets_c,
+        effective_seed_profile_file,
+        run_id,
+        run_dir,
+        samples_path,
+        summary_path,
+        candidate_path,
+        mut candidate_profile,
+        mut candidate_profile_value,
+    } = setup;
+    fs::create_dir_all(&run_dir)?;
     fs::write(
         &candidate_path,
         serde_json::to_vec_pretty(&candidate_profile_value)?,
@@ -594,404 +815,97 @@ async fn collect_single_thermal_self_test(
             sample_index: &mut sample_index,
         })?;
     } else {
-        validate_thermal_bench_source_tools(args.source_kind)?;
-        let (initial_source_telemetry, lease) =
-            prepare_thermal_source_and_lease(ThermalSourceLeaseInput {
-                resolved: &resolved,
-                source_kind: args.source_kind,
-                config: ThermalSourceConfig {
-                    client,
-                    source_url: &args.source_url,
-                    source_id: &args.source_id,
-                    source_mode: &args.source_mode,
-                    profile_mode: args.profile_mode,
-                    source_power_watts,
-                    voltage_mv: source_voltage_mv,
-                    current_limit_ma: source_current_ma,
-                },
-            })
-            .await?;
-        let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-
-        let test_future = async {
-            let mut source_sampler = BenchSourceTelemetrySampler::new(
-                args.source_kind,
-                &args.source_url,
-                initial_source_telemetry,
-            );
-            request_thermal_runtime_with_retry(
-                client,
-                &resolved,
-                &lease.lease_id,
-                thermal_self_test_cooldown_runtime_body(),
-            )
-            .await?;
-            wait_for_cooldown(
-                client,
-                &resolved,
-                &lease.lease_id,
-                args.cooldown_temp_c,
-                Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
-            )
-            .await?;
-            let mut optimization_completed = true;
-            for (stage_index, target_temp_c) in optimize_targets_c.iter().copied().enumerate() {
-                let heater_parameters = thermal_heater_parameters_value(
-                    target_temp_c,
-                    Some(&candidate_profile_value),
-                    "preview",
-                );
-                wait_for_cooldown(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
-                    args.cooldown_temp_c,
-                    Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
-                )
-                .await?;
-                refresh_thermal_source_sampler_before_stage(
-                    &args,
-                    source_power_watts,
-                    &mut source_sampler,
-                )
-                .await?;
-                let arm_status =
-                    preview_prepare_and_arm_thermal_self_test_target(ThermalPreviewTargetInput {
-                        client,
-                        resolved: &resolved,
-                        lease_id: &lease.lease_id,
-                        profile_mode: args.profile_mode,
-                        profile: &candidate_profile_value,
-                        target_temp_c,
-                        heater_parameters: &heater_parameters,
-                        use_legacy_profile: use_point_local_profile,
-                    })
-                    .await?;
-                let result = run_thermal_stage(ThermalStageInput {
-                    client,
-                    resolved: &resolved,
-                    lease_id: &lease.lease_id,
-                    samples_writer: &mut samples_writer,
-                    run_id: &run_id,
-                    test_phase: "optimize",
-                    target_temp_c,
-                    source_voltage_mv,
-                    source_current_ma,
-                    heater_parameters: &heater_parameters,
-                    runtime_profile: &candidate_profile_value,
-                    args: &args,
-                    source_sampler: &mut source_sampler,
-                    sample_index: &mut sample_index,
-                    initial_status: Some(arm_status),
-                })
-                .await?;
-                if let Some(point) =
-                    thermal_candidate_point_mut(&mut candidate_profile, target_temp_c)
-                {
-                    *point = tune_thermal_candidate_point(*point, &result);
-                }
-                thermal_rebuild_profile_from_anchor_targets(
-                    &mut candidate_profile,
-                    &optimize_targets_c,
-                );
-                candidate_profile_value = thermal_candidate_profile_to_value(&candidate_profile);
-                fs::write(
-                    &candidate_path,
-                    serde_json::to_vec_pretty(&candidate_profile_value)?,
-                )?;
-                tuning_steps.push(json!({
-                    "phase": "optimize",
-                    "stageIndex": stage_index,
-                    "targetTempC": target_temp_c,
-                    "result": result.to_value(),
-                    "candidateProfile": candidate_profile_value.clone(),
-                }));
-                let _ = arm_thermal_self_test_heater(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
-                    false,
-                    target_temp_c,
-                )
-                .await?;
-                if !thermal_stage_can_continue_tuning(&result) {
-                    optimization_completed = false;
-                    break;
-                }
-            }
-            if optimization_completed {
-                if !optimize_targets_c.is_empty() {
-                    request_thermal_runtime_with_retry(
-                        client,
-                        &resolved,
-                        &lease.lease_id,
-                        thermal_self_test_cooldown_runtime_body(),
-                    )
-                    .await?;
-                    wait_for_cooldown(
-                        client,
-                        &resolved,
-                        &lease.lease_id,
-                        args.cooldown_temp_c,
-                        Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
-                    )
-                    .await?;
-                }
-                for (stage_index, target_temp_c) in target_temps_c.iter().copied().enumerate() {
-                    let heater_parameters = thermal_heater_parameters_value(
-                        target_temp_c,
-                        Some(&candidate_profile_value),
-                        "preview",
-                    );
-                    let mut retries_remaining = args.runtime_rearm_attempts;
-                    let mut attempt_index = 0u8;
-                    let result = loop {
-                        wait_for_cooldown(
-                            client,
-                            &resolved,
-                            &lease.lease_id,
-                            args.cooldown_temp_c,
-                            Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
-                        )
-                        .await?;
-                        refresh_thermal_source_sampler_before_stage(
-                            &args,
-                            source_power_watts,
-                            &mut source_sampler,
-                        )
-                        .await?;
-                        let arm_status = preview_prepare_and_arm_thermal_self_test_target(
-                            ThermalPreviewTargetInput {
-                                client,
-                                resolved: &resolved,
-                                lease_id: &lease.lease_id,
-                                profile_mode: args.profile_mode,
-                                profile: &candidate_profile_value,
-                                target_temp_c,
-                                heater_parameters: &heater_parameters,
-                                use_legacy_profile: use_point_local_profile,
-                            },
-                        )
-                        .await?;
-                        let test_phase = if attempt_index == 0 {
-                            "applied"
-                        } else {
-                            "applied_environment_retry"
-                        };
-                        let attempt = run_thermal_stage(ThermalStageInput {
-                            client,
-                            resolved: &resolved,
-                            lease_id: &lease.lease_id,
-                            samples_writer: &mut samples_writer,
-                            run_id: &run_id,
-                            test_phase,
-                            target_temp_c,
-                            source_voltage_mv,
-                            source_current_ma,
-                            heater_parameters: &heater_parameters,
-                            runtime_profile: &candidate_profile_value,
-                            args: &args,
-                            source_sampler: &mut source_sampler,
-                            sample_index: &mut sample_index,
-                            initial_status: Some(arm_status),
-                        })
-                        .await?;
-                        let _ = arm_thermal_self_test_heater(
-                            client,
-                            &resolved,
-                            &lease.lease_id,
-                            false,
-                            target_temp_c,
-                        )
-                        .await?;
-                        if retries_remaining > 0
-                            && thermal_stage_should_retry_after_environment_fault(&attempt)
-                        {
-                            discarded_environment_attempts.push(json!({
-                                "stageIndex": stage_index,
-                                "targetTempC": target_temp_c,
-                                "attemptIndex": attempt_index,
-                                "result": attempt.to_value(),
-                                "restartTempC": args.cooldown_temp_c,
-                                "retriesRemaining": retries_remaining.saturating_sub(1),
-                            }));
-                            retries_remaining = retries_remaining.saturating_sub(1);
-                            attempt_index = attempt_index.saturating_add(1);
-                            continue;
-                        }
-                        break attempt;
-                    };
-                    applied_results.push(result.clone());
-                    tuning_steps.push(json!({
-                        "phase": "applied",
-                        "stageIndex": stage_index,
-                        "targetTempC": target_temp_c,
-                        "result": result.to_value(),
-                        "candidateProfile": candidate_profile_value.clone(),
-                    }));
-                    if result.stop_reason != "completed" {
-                        break;
-                    }
-                }
-            }
-            let validation_passed = validate_thermal_applied_results(
-                &applied_results,
-                &target_temps_c,
-                args.evaluation_mode,
-            )["passed"]
-                .as_bool()
-                == Some(true);
-            if validation_passed && save_profile_on_pass && !args.calibration_run {
-                let persisted_profile_value = thermal_candidate_profile_to_value(
-                    &thermal_profile_for_persistence(&candidate_profile)?,
-                );
-                let save_status = request_leased(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
-                    Method::PUT,
-                    "/runtime",
-                    Some(json!({
-                        "thermalControlProfile": {
-                            "op": "save",
-                            "bank": source_selection.resolved_bank,
-                            "profile": persisted_profile_value,
-                        },
-                        "thermalProfileMode": args.profile_mode.as_str(),
-                    })),
-                )
-                .await?;
-                if require_status_bool(&save_status, "thermalControlProfilePreview")? {
-                    return Err(
-                        "thermal profile save unexpectedly left preview mode enabled".into(),
-                    );
-                }
-                saved_profile_retained = true;
-            }
-            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-        };
-
-        let deadline = async {
-            if let Some(deadline) = args.execution_deadline {
-                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        };
-        let test_result = tokio::select! {
-            result = test_future => result,
-            _ = deadline => Err("target_budget_exhausted: thermal self-test deadline reached; heater cleanup requested".into()),
-            signal = tokio::signal::ctrl_c() => {
-                signal?;
-                Err("thermal self-test interrupted; heater cleanup requested".into())
-            }
-        };
-
-        heartbeat.abort();
-        if let Err(error) = test_result {
-            run_error = Some(error.to_string());
-        }
-        if let Err(error) =
-            force_thermal_self_test_shutdown(client, &resolved, &lease.lease_id).await
-            && run_error.is_none()
-        {
-            run_error = Some(format!("thermal self-test cleanup failed: {error}"));
-        }
-        let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-        if let Err(error) = restore_thermal_bench_source_default(
+        run_live_thermal_self_test(ThermalLiveSelfTestInput {
             client,
-            args.source_kind,
-            &args.source_url,
-            &args.source_id,
-        )
-        .await
-            && run_error.is_none()
-        {
-            run_error = Some(format!(
-                "{} cleanup failed: {error}",
-                args.source_kind.as_str()
-            ));
-        }
+            resolved: &resolved,
+            args: &args,
+            source_selection: &source_selection,
+            source_power_watts,
+            source_voltage_mv,
+            source_current_ma,
+            target_temps_c: &target_temps_c,
+            optimize_targets_c: &optimize_targets_c,
+            run_id: &run_id,
+            candidate_path: &candidate_path,
+            candidate_profile: &mut candidate_profile,
+            candidate_profile_value: &mut candidate_profile_value,
+            samples_writer: &mut samples_writer,
+            sample_index: &mut sample_index,
+            applied_results: &mut applied_results,
+            run_error: &mut run_error,
+            saved_profile_retained: &mut saved_profile_retained,
+            tuning_steps: &mut tuning_steps,
+            discarded_environment_attempts: &mut discarded_environment_attempts,
+            save_profile_on_pass,
+        })
+        .await?;
     }
 
     samples_writer.flush()?;
     let validation =
         validate_thermal_applied_results(&applied_results, &target_temps_c, args.evaluation_mode);
     let complete = run_error.is_none() && validation["passed"].as_bool() == Some(true);
-    let mut summary = json!({
-        "kind": "thermal_self_test",
-        "ok": complete,
-        "runId": run_id,
-        "dryRun": args.dry_run,
-        "target": {
-            "deviceId": resolved.device,
-            "hardwareId": resolved.hardware_id,
-            "devd": resolved.devd,
-        },
-        "source": thermal_source_summary_value(
-            &args,
-            &source_selection,
-            source_power_watts,
-            source_voltage_mv,
-            source_current_ma,
-        ),
-        "parameters": {
-            "targetsC": target_temps_c,
-            "optimizeTargetsC": optimize_targets_c,
-            "seedProfileFile": effective_seed_profile_file
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned()),
-            "batchCandidate": !save_profile_on_pass,
-            "evaluationMode": args.evaluation_mode.as_str(),
-            "sampleIntervalMs": args.sample_interval_ms.max(1),
-            "effectiveSampleIntervalMs": effective_thermal_sample_interval_ms(args.sample_interval_ms),
-            "holdSeconds": args.hold_seconds.max(1),
-            "stageTimeoutSeconds": args.stage_timeout_seconds.max(1),
-            "warmupTimeoutSeconds": args.warmup_timeout_seconds.max(1),
-            "runtimeRearmAttempts": args.runtime_rearm_attempts,
-            "cooldownTempC": args.cooldown_temp_c,
-            "cooldownTimeoutSeconds": args.cooldown_timeout_seconds.max(1),
-            "limits": {
-                "overshootC": 3.0,
-                "holdPeakToPeakC": 3.0,
-                "minimumSampleRateHz": THERMAL_MIN_SAMPLE_RATE_HZ,
-                "sampleRateWindowMs": THERMAL_SAMPLE_RATE_WINDOW_MS,
-                "fullSpeedToStableMsByTarget": {
-                    "lte150C": ThermalFullSpeedStableTracker::LOW_TEMP_SETTLE_LIMIT_MS,
-                    "gt150C": ThermalFullSpeedStableTracker::HIGH_TEMP_SETTLE_LIMIT_MS,
-                },
-                "fullSpeedStableBandC": ThermalFullSpeedStableTracker::STABLE_BAND_C,
-                "fullSpeedStableWindowMs": ThermalFullSpeedStableTracker::STABLE_WINDOW_MS,
-                "fullSpeedToStableHardGate": args.evaluation_mode.enforces_stage_limits(),
-                "approachThresholdTimeoutMs": 10_000,
-                "approachHoldTimeoutMs": 30_000,
-                "approachWarmupReentry": "fail"
-            }
-        },
-        "files": {
-            "runDir": run_dir,
-            "summaryPath": summary_path,
-            "samplesPath": samples_path,
-            "candidateProfilePath": candidate_path,
-        },
-        "candidateProfile": candidate_profile_value.clone(),
-        "profilePersistence": if args.dry_run {
-            "dry_run"
-        } else if saved_profile_retained {
-            "saved_tuned_candidate"
-        } else {
-            "not_saved"
-        },
-        "tuningSteps": tuning_steps,
-        "discardedEnvironmentAttempts": discarded_environment_attempts,
-        "applied": applied_results.iter().map(ThermalStageResult::to_value).collect::<Vec<_>>(),
-        "validation": validation,
-        "sampleCount": sample_index,
-        "complete": complete,
-        "error": run_error,
-    });
-    thermal_summary_attach_source_analysis_from_ndjson(&mut summary, &samples_path)?;
-    fs::write(&summary_path, serde_json::to_vec_pretty(&summary)?)?;
+    write_thermal_self_test_summary(ThermalSelfTestSummaryInput {
+        run_id: &run_id,
+        args: &args,
+        resolved: &resolved,
+        source_selection: &source_selection,
+        source_power_watts,
+        source_voltage_mv,
+        source_current_ma,
+        target_temps_c: &target_temps_c,
+        optimize_targets_c: &optimize_targets_c,
+        effective_seed_profile_file: effective_seed_profile_file.as_ref(),
+        run_dir: &run_dir,
+        summary_path: &summary_path,
+        samples_path: &samples_path,
+        candidate_path: &candidate_path,
+        candidate_profile_value: &candidate_profile_value,
+        saved_profile_retained,
+        tuning_steps: &tuning_steps,
+        discarded_environment_attempts: &discarded_environment_attempts,
+        applied_results: &applied_results,
+        validation: &validation,
+        sample_index,
+        complete,
+        run_error: &run_error,
+    })
+}
+
+struct ThermalSelfTestSummaryInput<'a> {
+    run_id: &'a str,
+    args: &'a ThermalSelfTestArgs,
+    resolved: &'a ResolvedUsbTarget,
+    source_selection: &'a ThermalSourceSelection,
+    source_power_watts: u16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    target_temps_c: &'a [i16],
+    optimize_targets_c: &'a [i16],
+    effective_seed_profile_file: Option<&'a PathBuf>,
+    run_dir: &'a Path,
+    summary_path: &'a Path,
+    samples_path: &'a Path,
+    candidate_path: &'a Path,
+    candidate_profile_value: &'a Value,
+    saved_profile_retained: bool,
+    tuning_steps: &'a [Value],
+    discarded_environment_attempts: &'a [Value],
+    applied_results: &'a [ThermalStageResult],
+    validation: &'a Value,
+    sample_index: usize,
+    complete: bool,
+    run_error: &'a Option<String>,
+}
+
+fn write_thermal_self_test_summary(
+    input: ThermalSelfTestSummaryInput<'_>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let summary_path = input.summary_path;
+    let samples_path = input.samples_path;
+    let mut summary = thermal_self_test_summary(input);
+    thermal_summary_attach_source_analysis_from_ndjson(&mut summary, samples_path)?;
+    fs::write(summary_path, serde_json::to_vec_pretty(&summary)?)?;
     if let Some(id) = summary
         .get("target")
         .and_then(|target| target.get("hardwareId"))
@@ -1006,6 +920,831 @@ async fn collect_single_thermal_self_test(
         );
     }
     Ok(summary)
+}
+
+fn thermal_self_test_summary(input: ThermalSelfTestSummaryInput<'_>) -> Value {
+    let ThermalSelfTestSummaryInput {
+        run_id,
+        args,
+        resolved,
+        source_selection,
+        source_power_watts,
+        source_voltage_mv,
+        source_current_ma,
+        target_temps_c,
+        optimize_targets_c,
+        effective_seed_profile_file,
+        run_dir,
+        summary_path,
+        samples_path,
+        candidate_path,
+        candidate_profile_value,
+        saved_profile_retained,
+        tuning_steps,
+        discarded_environment_attempts,
+        applied_results,
+        validation,
+        sample_index,
+        complete,
+        run_error,
+    } = input;
+    json!({
+        "kind": "thermal_self_test",
+        "ok": complete,
+        "runId": run_id,
+        "dryRun": args.dry_run,
+        "target": {
+            "deviceId": resolved.device,
+            "hardwareId": resolved.hardware_id,
+            "devd": resolved.devd,
+        },
+        "source": thermal_source_summary_value(
+            args,
+            source_selection,
+            source_power_watts,
+            source_voltage_mv,
+            source_current_ma,
+        ),
+        "parameters": thermal_self_test_parameters(
+            args,
+            target_temps_c,
+            optimize_targets_c,
+            effective_seed_profile_file,
+            !saved_profile_retained,
+        ),
+        "files": {
+            "runDir": run_dir,
+            "summaryPath": summary_path,
+            "samplesPath": samples_path,
+            "candidateProfilePath": candidate_path,
+        },
+        "candidateProfile": candidate_profile_value,
+        "profilePersistence": if args.dry_run {
+            "dry_run"
+        } else if saved_profile_retained {
+            "saved_tuned_candidate"
+        } else {
+            "not_saved"
+        },
+        "tuningSteps": tuning_steps,
+        "discardedEnvironmentAttempts": discarded_environment_attempts,
+        "applied": applied_results.iter().map(ThermalStageResult::to_value).collect::<Vec<_>>(),
+        "validation": validation,
+        "sampleCount": sample_index,
+        "complete": complete,
+        "error": run_error,
+    })
+}
+
+fn thermal_self_test_parameters(
+    args: &ThermalSelfTestArgs,
+    target_temps_c: &[i16],
+    optimize_targets_c: &[i16],
+    effective_seed_profile_file: Option<&PathBuf>,
+    batch_candidate: bool,
+) -> Value {
+    json!({
+        "targetsC": target_temps_c,
+        "optimizeTargetsC": optimize_targets_c,
+        "seedProfileFile": effective_seed_profile_file.map(|path| path.to_string_lossy().into_owned()),
+        "batchCandidate": batch_candidate,
+        "evaluationMode": args.evaluation_mode.as_str(),
+        "sampleIntervalMs": args.sample_interval_ms.max(1),
+        "effectiveSampleIntervalMs": effective_thermal_sample_interval_ms(args.sample_interval_ms),
+        "holdSeconds": args.hold_seconds.max(1),
+        "stageTimeoutSeconds": args.stage_timeout_seconds.max(1),
+        "warmupTimeoutSeconds": args.warmup_timeout_seconds.max(1),
+        "runtimeRearmAttempts": args.runtime_rearm_attempts,
+        "cooldownTempC": args.cooldown_temp_c,
+        "cooldownTimeoutSeconds": args.cooldown_timeout_seconds.max(1),
+        "limits": {
+            "overshootC": 3.0,
+            "holdPeakToPeakC": 3.0,
+            "minimumSampleRateHz": THERMAL_MIN_SAMPLE_RATE_HZ,
+            "sampleRateWindowMs": THERMAL_SAMPLE_RATE_WINDOW_MS,
+            "fullSpeedToStableMsByTarget": {
+                "lte150C": ThermalFullSpeedStableTracker::LOW_TEMP_SETTLE_LIMIT_MS,
+                "gt150C": ThermalFullSpeedStableTracker::HIGH_TEMP_SETTLE_LIMIT_MS,
+            },
+            "fullSpeedStableBandC": ThermalFullSpeedStableTracker::STABLE_BAND_C,
+            "fullSpeedStableWindowMs": ThermalFullSpeedStableTracker::STABLE_WINDOW_MS,
+            "fullSpeedToStableHardGate": args.evaluation_mode.enforces_stage_limits(),
+            "approachThresholdTimeoutMs": 10_000,
+            "approachHoldTimeoutMs": 30_000,
+            "approachWarmupReentry": "fail"
+        }
+    })
+}
+
+struct ThermalLiveSelfTestInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    args: &'a ThermalSelfTestArgs,
+    source_selection: &'a ThermalSourceSelection,
+    source_power_watts: u16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    target_temps_c: &'a [i16],
+    optimize_targets_c: &'a [i16],
+    run_id: &'a str,
+    candidate_path: &'a Path,
+    candidate_profile: &'a mut ThermalCandidateProfile,
+    candidate_profile_value: &'a mut Value,
+    samples_writer: &'a mut BufWriter<File>,
+    sample_index: &'a mut usize,
+    applied_results: &'a mut Vec<ThermalStageResult>,
+    run_error: &'a mut Option<String>,
+    saved_profile_retained: &'a mut bool,
+    tuning_steps: &'a mut Vec<Value>,
+    discarded_environment_attempts: &'a mut Vec<Value>,
+    save_profile_on_pass: bool,
+}
+
+async fn run_live_thermal_self_test(
+    input: ThermalLiveSelfTestInput<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalLiveSelfTestInput {
+        client,
+        resolved,
+        args,
+        source_selection,
+        source_power_watts,
+        source_voltage_mv,
+        source_current_ma,
+        target_temps_c,
+        optimize_targets_c,
+        run_id,
+        candidate_path,
+        candidate_profile,
+        candidate_profile_value,
+        samples_writer,
+        sample_index,
+        applied_results,
+        run_error,
+        saved_profile_retained,
+        tuning_steps,
+        discarded_environment_attempts,
+        save_profile_on_pass,
+    } = input;
+    validate_thermal_bench_source_tools(args.source_kind)?;
+    let (initial_source_telemetry, lease) =
+        prepare_thermal_source_and_lease(ThermalSourceLeaseInput {
+            resolved,
+            source_kind: args.source_kind,
+            config: ThermalSourceConfig {
+                client,
+                source_url: &args.source_url,
+                source_id: &args.source_id,
+                source_mode: &args.source_mode,
+                profile_mode: args.profile_mode,
+                source_power_watts,
+                voltage_mv: source_voltage_mv,
+                current_limit_ma: source_current_ma,
+            },
+        })
+        .await?;
+    let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let test_result = tokio::select! {
+        result = run_live_thermal_test_future(ThermalLiveTestFutureInput {
+            client,
+            resolved,
+            lease: &lease,
+            args,
+            source_selection,
+            source_power_watts,
+            source_voltage_mv,
+            source_current_ma,
+            target_temps_c,
+            optimize_targets_c,
+            run_id,
+            candidate_path,
+            candidate_profile,
+            candidate_profile_value,
+            samples_writer,
+            sample_index,
+            applied_results,
+            saved_profile_retained,
+            tuning_steps,
+            discarded_environment_attempts,
+            save_profile_on_pass,
+        }, initial_source_telemetry) => result,
+        _ = thermal_execution_deadline(args.execution_deadline) => Err("target_budget_exhausted: thermal self-test deadline reached; heater cleanup requested".into()),
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            Err("thermal self-test interrupted; heater cleanup requested".into())
+        }
+    };
+    heartbeat.abort();
+    if let Err(error) = test_result {
+        *run_error = Some(error.to_string());
+    }
+    if let Err(error) =
+        force_thermal_self_test_shutdown(client, resolved, &lease.lease_id).await
+        && run_error.is_none()
+    {
+        *run_error = Some(format!("thermal self-test cleanup failed: {error}"));
+    }
+    let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+    if let Err(error) = restore_thermal_bench_source_default(
+        client,
+        args.source_kind,
+        &args.source_url,
+        &args.source_id,
+    )
+    .await
+        && run_error.is_none()
+    {
+        *run_error = Some(format!("{} cleanup failed: {error}", args.source_kind.as_str()));
+    }
+    Ok(())
+}
+
+struct ThermalLiveTestFutureInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease: &'a Lease,
+    args: &'a ThermalSelfTestArgs,
+    source_selection: &'a ThermalSourceSelection,
+    source_power_watts: u16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    target_temps_c: &'a [i16],
+    optimize_targets_c: &'a [i16],
+    run_id: &'a str,
+    candidate_path: &'a Path,
+    candidate_profile: &'a mut ThermalCandidateProfile,
+    candidate_profile_value: &'a mut Value,
+    samples_writer: &'a mut BufWriter<File>,
+    sample_index: &'a mut usize,
+    applied_results: &'a mut Vec<ThermalStageResult>,
+    saved_profile_retained: &'a mut bool,
+    tuning_steps: &'a mut Vec<Value>,
+    discarded_environment_attempts: &'a mut Vec<Value>,
+    save_profile_on_pass: bool,
+}
+
+async fn run_live_thermal_test_future(
+    input: ThermalLiveTestFutureInput<'_>,
+    initial_source_telemetry: BenchSourceLiveTelemetry,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalLiveTestFutureInput {
+        client,
+        resolved,
+        lease,
+        args,
+        source_selection,
+        source_power_watts,
+        source_voltage_mv,
+        source_current_ma,
+        target_temps_c,
+        optimize_targets_c,
+        run_id,
+        candidate_path,
+        candidate_profile,
+        candidate_profile_value,
+        samples_writer,
+        sample_index,
+        applied_results,
+        saved_profile_retained,
+        tuning_steps,
+        discarded_environment_attempts,
+        save_profile_on_pass,
+    } = input;
+    let mut source_sampler = prepare_live_thermal_test(
+        client,
+        resolved,
+        lease,
+        args,
+        initial_source_telemetry,
+    )
+    .await?;
+    let optimization_completed = run_thermal_optimization_stages(ThermalOptimizationInput {
+        client,
+        resolved,
+        lease,
+        args,
+        source_power_watts,
+        source_voltage_mv,
+        source_current_ma,
+        optimize_targets_c,
+        run_id,
+        candidate_path,
+        candidate_profile,
+        candidate_profile_value,
+        samples_writer,
+        sample_index,
+        tuning_steps,
+        source_sampler: &mut source_sampler,
+        use_point_local_profile: thermal_self_test_uses_point_local_profile(
+            source_selection,
+            args.calibration_run,
+        ),
+    })
+    .await?;
+    if optimization_completed {
+        cool_down_after_optimization(client, resolved, lease, args, optimize_targets_c).await?;
+        run_thermal_applied_stages(ThermalAppliedStagesInput {
+            client,
+            resolved,
+            lease,
+            args,
+            source_power_watts,
+            source_voltage_mv,
+            source_current_ma,
+            target_temps_c,
+            run_id,
+            candidate_profile_value,
+            samples_writer,
+            sample_index,
+            applied_results,
+            tuning_steps,
+            discarded_environment_attempts,
+            source_sampler: &mut source_sampler,
+            use_point_local_profile: thermal_self_test_uses_point_local_profile(
+                source_selection,
+                args.calibration_run,
+            ),
+        })
+        .await?;
+    }
+    let validation =
+        validate_thermal_applied_results(applied_results, target_temps_c, args.evaluation_mode);
+    if validation["passed"].as_bool() == Some(true) && save_profile_on_pass && !args.calibration_run
+    {
+        save_thermal_profile_on_pass(ThermalProfileSaveInput {
+            client,
+            resolved,
+            lease,
+            args,
+            source_selection,
+            candidate_profile,
+            saved_profile_retained,
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+async fn prepare_live_thermal_test(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease: &Lease,
+    args: &ThermalSelfTestArgs,
+    initial_source_telemetry: BenchSourceLiveTelemetry,
+) -> Result<BenchSourceTelemetrySampler, Box<dyn std::error::Error + Send + Sync>> {
+    let source_sampler = BenchSourceTelemetrySampler::new(
+        args.source_kind,
+        &args.source_url,
+        initial_source_telemetry,
+    );
+    request_thermal_runtime_with_retry(
+        client,
+        resolved,
+        &lease.lease_id,
+        thermal_self_test_cooldown_runtime_body(),
+    )
+    .await?;
+    wait_for_cooldown(
+        client,
+        resolved,
+        &lease.lease_id,
+        args.cooldown_temp_c,
+        Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
+    )
+    .await?;
+    Ok(source_sampler)
+}
+
+async fn cool_down_after_optimization(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease: &Lease,
+    args: &ThermalSelfTestArgs,
+    optimize_targets_c: &[i16],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if optimize_targets_c.is_empty() {
+        return Ok(());
+    }
+    request_thermal_runtime_with_retry(
+        client,
+        resolved,
+        &lease.lease_id,
+        thermal_self_test_cooldown_runtime_body(),
+    )
+    .await?;
+    wait_for_cooldown(
+        client,
+        resolved,
+        &lease.lease_id,
+        args.cooldown_temp_c,
+        Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
+    )
+    .await
+}
+
+struct ThermalAppliedStagesInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease: &'a Lease,
+    args: &'a ThermalSelfTestArgs,
+    source_power_watts: u16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    target_temps_c: &'a [i16],
+    run_id: &'a str,
+    candidate_profile_value: &'a Value,
+    samples_writer: &'a mut BufWriter<File>,
+    sample_index: &'a mut usize,
+    applied_results: &'a mut Vec<ThermalStageResult>,
+    tuning_steps: &'a mut Vec<Value>,
+    discarded_environment_attempts: &'a mut Vec<Value>,
+    source_sampler: &'a mut BenchSourceTelemetrySampler,
+    use_point_local_profile: bool,
+}
+
+async fn run_thermal_applied_stages(
+    input: ThermalAppliedStagesInput<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalAppliedStagesInput {
+        client,
+        resolved,
+        lease,
+        args,
+        source_power_watts,
+        source_voltage_mv,
+        source_current_ma,
+        target_temps_c,
+        run_id,
+        candidate_profile_value,
+        samples_writer,
+        sample_index,
+        applied_results,
+        tuning_steps,
+        discarded_environment_attempts,
+        source_sampler,
+        use_point_local_profile,
+    } = input;
+    for (stage_index, target_temp_c) in target_temps_c.iter().copied().enumerate() {
+        let result = run_thermal_applied_stage(ThermalAppliedStageInput {
+            client,
+            resolved,
+            lease,
+            args,
+            source_power_watts,
+            source_voltage_mv,
+            source_current_ma,
+            target_temp_c,
+            run_id,
+            candidate_profile_value,
+            samples_writer,
+            sample_index,
+            discarded_environment_attempts,
+            source_sampler,
+            use_point_local_profile,
+        })
+        .await?;
+        tuning_steps.push(json!({
+            "phase": "applied",
+            "stageIndex": stage_index,
+            "targetTempC": target_temp_c,
+            "result": result.to_value(),
+            "candidateProfile": candidate_profile_value.clone(),
+        }));
+        let complete = result.stop_reason == "completed";
+        applied_results.push(result);
+        if !complete {
+            break;
+        }
+    }
+    Ok(())
+}
+
+struct ThermalAppliedStageInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease: &'a Lease,
+    args: &'a ThermalSelfTestArgs,
+    source_power_watts: u16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    target_temp_c: i16,
+    run_id: &'a str,
+    candidate_profile_value: &'a Value,
+    samples_writer: &'a mut BufWriter<File>,
+    sample_index: &'a mut usize,
+    discarded_environment_attempts: &'a mut Vec<Value>,
+    source_sampler: &'a mut BenchSourceTelemetrySampler,
+    use_point_local_profile: bool,
+}
+
+async fn run_thermal_applied_stage(
+    input: ThermalAppliedStageInput<'_>,
+) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalAppliedStageInput {
+        client,
+        resolved,
+        lease,
+        args,
+        source_power_watts,
+        source_voltage_mv,
+        source_current_ma,
+        target_temp_c,
+        run_id,
+        candidate_profile_value,
+        samples_writer,
+        sample_index,
+        discarded_environment_attempts,
+        source_sampler,
+        use_point_local_profile,
+    } = input;
+    let heater_parameters =
+        thermal_heater_parameters_value(target_temp_c, Some(candidate_profile_value), "preview");
+    let mut retries_remaining = args.runtime_rearm_attempts;
+    let mut attempt_index = 0u8;
+    loop {
+        wait_for_cooldown(
+            client,
+            resolved,
+            &lease.lease_id,
+            args.cooldown_temp_c,
+            Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
+        )
+        .await?;
+        refresh_thermal_source_sampler_before_stage(args, source_power_watts, source_sampler).await?;
+        let arm_status = preview_prepare_and_arm_thermal_self_test_target(ThermalPreviewTargetInput {
+            client,
+            resolved,
+            lease_id: &lease.lease_id,
+            profile_mode: args.profile_mode,
+            profile: candidate_profile_value,
+            target_temp_c,
+            heater_parameters: &heater_parameters,
+            use_legacy_profile: use_point_local_profile,
+        })
+        .await?;
+        let test_phase = if attempt_index == 0 {
+            "applied"
+        } else {
+            "applied_environment_retry"
+        };
+        let attempt = run_thermal_stage(ThermalStageInput {
+            client,
+            resolved,
+            lease_id: &lease.lease_id,
+            samples_writer,
+            run_id,
+            test_phase,
+            target_temp_c,
+            source_voltage_mv,
+            source_current_ma,
+            heater_parameters: &heater_parameters,
+            runtime_profile: candidate_profile_value,
+            args,
+            source_sampler,
+            sample_index,
+            initial_status: Some(arm_status),
+        })
+        .await?;
+        let _ =
+            arm_thermal_self_test_heater(client, resolved, &lease.lease_id, false, target_temp_c)
+                .await?;
+        if retries_remaining > 0 && thermal_stage_should_retry_after_environment_fault(&attempt) {
+            discarded_environment_attempts.push(json!({
+                "targetTempC": target_temp_c,
+                "attemptIndex": attempt_index,
+                "result": attempt.to_value(),
+                "restartTempC": args.cooldown_temp_c,
+                "retriesRemaining": retries_remaining.saturating_sub(1),
+            }));
+            retries_remaining = retries_remaining.saturating_sub(1);
+            attempt_index = attempt_index.saturating_add(1);
+            continue;
+        }
+        return Ok(attempt);
+    }
+}
+
+struct ThermalProfileSaveInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease: &'a Lease,
+    args: &'a ThermalSelfTestArgs,
+    source_selection: &'a ThermalSourceSelection,
+    candidate_profile: &'a ThermalCandidateProfile,
+    saved_profile_retained: &'a mut bool,
+}
+
+async fn save_thermal_profile_on_pass(
+    input: ThermalProfileSaveInput<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalProfileSaveInput {
+        client,
+        resolved,
+        lease,
+        args,
+        source_selection,
+        candidate_profile,
+        saved_profile_retained,
+    } = input;
+    let persisted_profile_value =
+        thermal_candidate_profile_to_value(&thermal_profile_for_persistence(candidate_profile)?);
+    let save_status = request_leased(
+        client,
+        resolved,
+        &lease.lease_id,
+        Method::PUT,
+        "/runtime",
+        Some(json!({
+            "thermalControlProfile": {
+                "op": "save",
+                "bank": source_selection.resolved_bank,
+                "profile": persisted_profile_value,
+            },
+            "thermalProfileMode": args.profile_mode.as_str(),
+        })),
+    )
+    .await?;
+    if require_status_bool(&save_status, "thermalControlProfilePreview")? {
+        return Err("thermal profile save unexpectedly left preview mode enabled".into());
+    }
+    *saved_profile_retained = true;
+    Ok(())
+}
+
+struct ThermalOptimizationInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease: &'a Lease,
+    args: &'a ThermalSelfTestArgs,
+    source_power_watts: u16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    optimize_targets_c: &'a [i16],
+    run_id: &'a str,
+    candidate_path: &'a Path,
+    candidate_profile: &'a mut ThermalCandidateProfile,
+    candidate_profile_value: &'a mut Value,
+    samples_writer: &'a mut BufWriter<File>,
+    sample_index: &'a mut usize,
+    tuning_steps: &'a mut Vec<Value>,
+    source_sampler: &'a mut BenchSourceTelemetrySampler,
+    use_point_local_profile: bool,
+}
+
+async fn run_thermal_optimization_stages(
+    input: ThermalOptimizationInput<'_>,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalOptimizationInput {
+        client,
+        resolved,
+        lease,
+        args,
+        source_power_watts,
+        source_voltage_mv,
+        source_current_ma,
+        optimize_targets_c,
+        run_id,
+        candidate_path,
+        candidate_profile,
+        candidate_profile_value,
+        samples_writer,
+        sample_index,
+        tuning_steps,
+        source_sampler,
+        use_point_local_profile,
+    } = input;
+    for (stage_index, target_temp_c) in optimize_targets_c.iter().copied().enumerate() {
+        let result = run_thermal_optimization_stage(ThermalOptimizationStageInput {
+            client,
+            resolved,
+            lease,
+            args,
+            source_power_watts,
+            source_voltage_mv,
+            source_current_ma,
+            target_temp_c,
+            run_id,
+            candidate_path,
+            candidate_profile,
+            candidate_profile_value,
+            samples_writer,
+            sample_index,
+            anchor_targets_c: optimize_targets_c,
+            source_sampler,
+            use_point_local_profile,
+        })
+        .await?;
+        tuning_steps.push(json!({
+            "phase": "optimize",
+            "stageIndex": stage_index,
+            "targetTempC": target_temp_c,
+            "result": result.to_value(),
+            "candidateProfile": candidate_profile_value.clone(),
+        }));
+        if !thermal_stage_can_continue_tuning(&result) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+struct ThermalOptimizationStageInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease: &'a Lease,
+    args: &'a ThermalSelfTestArgs,
+    source_power_watts: u16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    target_temp_c: i16,
+    run_id: &'a str,
+    candidate_path: &'a Path,
+    candidate_profile: &'a mut ThermalCandidateProfile,
+    candidate_profile_value: &'a mut Value,
+    samples_writer: &'a mut BufWriter<File>,
+    sample_index: &'a mut usize,
+    anchor_targets_c: &'a [i16],
+    source_sampler: &'a mut BenchSourceTelemetrySampler,
+    use_point_local_profile: bool,
+}
+
+async fn run_thermal_optimization_stage(
+    input: ThermalOptimizationStageInput<'_>,
+) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalOptimizationStageInput {
+        client,
+        resolved,
+        lease,
+        args,
+        source_power_watts,
+        source_voltage_mv,
+        source_current_ma,
+        target_temp_c,
+        run_id,
+        candidate_path,
+        candidate_profile,
+        candidate_profile_value,
+        samples_writer,
+        sample_index,
+        anchor_targets_c,
+        source_sampler,
+        use_point_local_profile,
+    } = input;
+    let heater_parameters =
+        thermal_heater_parameters_value(target_temp_c, Some(candidate_profile_value), "preview");
+    wait_for_cooldown(
+        client,
+        resolved,
+        &lease.lease_id,
+        args.cooldown_temp_c,
+        Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
+    )
+    .await?;
+    refresh_thermal_source_sampler_before_stage(args, source_power_watts, source_sampler).await?;
+    let arm_status = preview_prepare_and_arm_thermal_self_test_target(ThermalPreviewTargetInput {
+        client,
+        resolved,
+        lease_id: &lease.lease_id,
+        profile_mode: args.profile_mode,
+        profile: candidate_profile_value,
+        target_temp_c,
+        heater_parameters: &heater_parameters,
+        use_legacy_profile: use_point_local_profile,
+    })
+    .await?;
+    let result = run_thermal_stage(ThermalStageInput {
+        client,
+        resolved,
+        lease_id: &lease.lease_id,
+        samples_writer,
+        run_id,
+        test_phase: "optimize",
+        target_temp_c,
+        source_voltage_mv,
+        source_current_ma,
+        heater_parameters: &heater_parameters,
+        runtime_profile: candidate_profile_value,
+        args,
+        source_sampler,
+        sample_index,
+        initial_status: Some(arm_status),
+    })
+    .await?;
+    if let Some(point) = thermal_candidate_point_mut(candidate_profile, target_temp_c) {
+        *point = tune_thermal_candidate_point(*point, &result);
+    }
+    thermal_rebuild_profile_from_anchor_targets(candidate_profile, anchor_targets_c);
+    *candidate_profile_value = thermal_candidate_profile_to_value(candidate_profile);
+    fs::write(candidate_path, serde_json::to_vec_pretty(candidate_profile_value)?)?;
+    let _ = arm_thermal_self_test_heater(
+        client,
+        resolved,
+        &lease.lease_id,
+        false,
+        target_temp_c,
+    )
+    .await?;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1170,199 +1909,109 @@ fn thermal_candidate_profile_to_value(profile: &ThermalCandidateProfile) -> Valu
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
 fn thermal_candidate_profile_from_value(imported: Value) -> ThermalCandidateProfile {
     let profile = thermal_profile_package_from_value(imported);
     let settings_value = profile.get("settings").cloned().unwrap_or(Value::Null);
-    let default_settings = thermal_default_settings();
-    let settings = ThermalCandidateSettings {
-        temp_filter_alpha_permille: settings_value
-            .get("tempFilterAlphaPermille")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.temp_filter_alpha_permille),
-        approach_max_ticks: settings_value
-            .get("approachMaxTicks")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.approach_max_ticks),
-        approach_min_power_ratio_permille: settings_value
-            .get("approachMinPowerRatioPermille")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.approach_min_power_ratio_permille),
-        auto_adjustable_working_floor_mv: settings_value
-            .get("autoAdjustableWorkingFloorMv")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.auto_adjustable_working_floor_mv),
-        heater_current_reserve_ma: settings_value
-            .get("heaterCurrentReserveMa")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.heater_current_reserve_ma),
-    };
     let points_value = profile
         .get("points")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let point_targets = if points_value.is_empty() {
+    ThermalCandidateProfile {
+        settings: thermal_candidate_settings_from_value(&settings_value),
+        points: thermal_candidate_points_from_values(&points_value, &settings_value),
+    }
+}
+
+fn thermal_candidate_settings_from_value(value: &Value) -> ThermalCandidateSettings {
+    let defaults = thermal_default_settings();
+    ThermalCandidateSettings {
+        temp_filter_alpha_permille: value_u16(value, "tempFilterAlphaPermille")
+            .unwrap_or(defaults.temp_filter_alpha_permille),
+        approach_max_ticks: value_u16(value, "approachMaxTicks")
+            .unwrap_or(defaults.approach_max_ticks),
+        approach_min_power_ratio_permille: value_u16(value, "approachMinPowerRatioPermille")
+            .unwrap_or(defaults.approach_min_power_ratio_permille),
+        auto_adjustable_working_floor_mv: value_u16(value, "autoAdjustableWorkingFloorMv")
+            .unwrap_or(defaults.auto_adjustable_working_floor_mv),
+        heater_current_reserve_ma: value_u16(value, "heaterCurrentReserveMa")
+            .unwrap_or(defaults.heater_current_reserve_ma),
+    }
+}
+
+fn thermal_candidate_points_from_values(
+    values: &[Value],
+    settings: &Value,
+) -> Vec<ThermalCandidatePoint> {
+    let targets = if values.is_empty() {
         THERMAL_PROFILE_ANCHOR_TARGETS_C.to_vec()
     } else {
-        points_value
+        values
             .iter()
-            .filter_map(|point| {
-                point
-                    .get("targetTempC")
-                    .and_then(Value::as_i64)
-                    .and_then(|value| i16::try_from(value).ok())
-            })
-            .collect::<Vec<_>>()
+            .filter_map(|point| value_i16(point, "targetTempC"))
+            .collect()
     };
-    let points = point_targets
+    targets
         .into_iter()
-        .map(|target_temp_c| {
-            let default_point = thermal_default_target_point(target_temp_c);
-            let point_value = points_value.iter().find(|point| {
-                point
-                    .get("targetTempC")
-                    .and_then(Value::as_i64)
-                    .is_some_and(|value| value == i64::from(target_temp_c))
-            });
-            let point_value = point_value.cloned().unwrap_or(Value::Null);
-            let mut point = ThermalCandidatePoint {
-                target_temp_c,
-                brake_distance_centi_c: point_value
-                    .get("brakeDistanceCentiC")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.brake_distance_centi_c),
-                warmup_power_permille: 1_000,
-                approach_power_permille: point_value
-                    .get("approachPowerPermille")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.approach_power_permille),
-                approach_floor_power_permille: point_value
-                    .get("approachFloorPowerPermille")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.approach_floor_power_permille),
-                approach_damping_exponent_permille: point_value
-                    .get("approachDampingExponentPermille")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.approach_damping_exponent_permille),
-                approach_tail_window_centi_c: point_value
-                    .get("approachTailWindowCentiC")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.approach_tail_window_centi_c),
-                hold_power_permille: point_value
-                    .get("holdPowerPermille")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.hold_power_permille),
-                hold_reheat_power_permille: point_value
-                    .get("holdReheatPowerPermille")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or_else(|| {
-                        inherited_point_u16(
-                            &point_value,
-                            "holdReheatPowerPermille",
-                            &settings_value,
-                            "holdReheatPowerPermille",
-                            default_point.hold_reheat_power_permille,
-                        )
-                    }),
-                warmup_reenter_centi_c: inherited_point_u16(
-                    &point_value,
-                    "warmupReenterCentiC",
-                    &settings_value,
-                    "warmupReenterCentiC",
-                    default_point.warmup_reenter_centi_c,
-                ),
-                hold_entry_centi_c: inherited_point_u16(
-                    &point_value,
-                    "holdEntryCentiC",
-                    &settings_value,
-                    "holdEntryCentiC",
-                    default_point.hold_entry_centi_c,
-                ),
-                hold_exit_centi_c: inherited_point_u16(
-                    &point_value,
-                    "holdExitCentiC",
-                    &settings_value,
-                    "holdExitCentiC",
-                    default_point.hold_exit_centi_c,
-                ),
-                hold_on_centi_c: inherited_point_u16(
-                    &point_value,
-                    "holdOnCentiC",
-                    &settings_value,
-                    "holdOnCentiC",
-                    default_point.hold_on_centi_c,
-                ),
-                hold_off_centi_c: inherited_point_u16(
-                    &point_value,
-                    "holdOffCentiC",
-                    &settings_value,
-                    "holdOffCentiC",
-                    default_point.hold_off_centi_c,
-                ),
-                overshoot_cutoff_centi_c: inherited_point_u16(
-                    &point_value,
-                    "overshootCutoffCentiC",
-                    &settings_value,
-                    "overshootCutoffCentiC",
-                    default_point.overshoot_cutoff_centi_c,
-                ),
-                hold_kp_permille_per_c: inherited_point_u16(
-                    &point_value,
-                    "holdKpPermillePerC",
-                    &settings_value,
-                    "holdKpPermillePerC",
-                    default_point.hold_kp_permille_per_c,
-                ),
-                hold_ki_permille_per_c_tick: inherited_point_u16(
-                    &point_value,
-                    "holdKiPermillePerCTick",
-                    &settings_value,
-                    "holdKiPermillePerCTick",
-                    default_point.hold_ki_permille_per_c_tick,
-                ),
-                hold_blend_ticks: inherited_point_u16(
-                    &point_value,
-                    "holdBlendTicks",
-                    &settings_value,
-                    "holdBlendTicks",
-                    default_point.hold_blend_ticks,
-                ),
-                approach_lead_ticks: inherited_point_u16(
-                    &point_value,
-                    "approachLeadTicks",
-                    &settings_value,
-                    "approachLeadTicks",
-                    default_point.approach_lead_ticks,
-                ),
-                hold_lead_ticks: inherited_point_u16(
-                    &point_value,
-                    "holdLeadTicks",
-                    &settings_value,
-                    "holdLeadTicks",
-                    default_point.hold_lead_ticks,
-                ),
-            };
-            point.warmup_power_permille = 1_000;
-            point
+        .map(|target| {
+            let point = values
+                .iter()
+                .find(|value| value_i16(value, "targetTempC") == Some(target))
+                .cloned()
+                .unwrap_or(Value::Null);
+            thermal_candidate_point_from_value(target, &point, settings)
         })
-        .collect();
-    ThermalCandidateProfile { settings, points }
+        .collect()
+}
+
+fn thermal_candidate_point_from_value(
+    target_temp_c: i16,
+    value: &Value,
+    settings: &Value,
+) -> ThermalCandidatePoint {
+    let defaults = thermal_default_target_point(target_temp_c);
+    ThermalCandidatePoint {
+        target_temp_c,
+        brake_distance_centi_c: value_u16(value, "brakeDistanceCentiC")
+            .unwrap_or(defaults.brake_distance_centi_c),
+        warmup_power_permille: 1_000,
+        approach_power_permille: value_u16(value, "approachPowerPermille")
+            .unwrap_or(defaults.approach_power_permille),
+        approach_floor_power_permille: value_u16(value, "approachFloorPowerPermille")
+            .unwrap_or(defaults.approach_floor_power_permille),
+        approach_damping_exponent_permille: value_u16(value, "approachDampingExponentPermille")
+            .unwrap_or(defaults.approach_damping_exponent_permille),
+        approach_tail_window_centi_c: value_u16(value, "approachTailWindowCentiC")
+            .unwrap_or(defaults.approach_tail_window_centi_c),
+        hold_power_permille: value_u16(value, "holdPowerPermille")
+            .unwrap_or(defaults.hold_power_permille),
+        hold_reheat_power_permille: inherited_point_u16(
+            value,
+            "holdReheatPowerPermille",
+            settings,
+            "holdReheatPowerPermille",
+            defaults.hold_reheat_power_permille,
+        ),
+        warmup_reenter_centi_c: inherited_point_u16(value, "warmupReenterCentiC", settings, "warmupReenterCentiC", defaults.warmup_reenter_centi_c),
+        hold_entry_centi_c: inherited_point_u16(value, "holdEntryCentiC", settings, "holdEntryCentiC", defaults.hold_entry_centi_c),
+        hold_exit_centi_c: inherited_point_u16(value, "holdExitCentiC", settings, "holdExitCentiC", defaults.hold_exit_centi_c),
+        hold_on_centi_c: inherited_point_u16(value, "holdOnCentiC", settings, "holdOnCentiC", defaults.hold_on_centi_c),
+        hold_off_centi_c: inherited_point_u16(value, "holdOffCentiC", settings, "holdOffCentiC", defaults.hold_off_centi_c),
+        overshoot_cutoff_centi_c: inherited_point_u16(value, "overshootCutoffCentiC", settings, "overshootCutoffCentiC", defaults.overshoot_cutoff_centi_c),
+        hold_kp_permille_per_c: inherited_point_u16(value, "holdKpPermillePerC", settings, "holdKpPermillePerC", defaults.hold_kp_permille_per_c),
+        hold_ki_permille_per_c_tick: inherited_point_u16(value, "holdKiPermillePerCTick", settings, "holdKiPermillePerCTick", defaults.hold_ki_permille_per_c_tick),
+        hold_blend_ticks: inherited_point_u16(value, "holdBlendTicks", settings, "holdBlendTicks", defaults.hold_blend_ticks),
+        approach_lead_ticks: inherited_point_u16(value, "approachLeadTicks", settings, "approachLeadTicks", defaults.approach_lead_ticks),
+        hold_lead_ticks: inherited_point_u16(value, "holdLeadTicks", settings, "holdLeadTicks", defaults.hold_lead_ticks),
+    }
+}
+
+fn value_u16(value: &Value, key: &str) -> Option<u16> {
+    value.get(key).and_then(Value::as_u64).and_then(|value| u16::try_from(value).ok())
+}
+
+fn value_i16(value: &Value, key: &str) -> Option<i16> {
+    value.get(key).and_then(Value::as_i64).and_then(|value| i16::try_from(value).ok())
 }
 
 fn inherited_point_u16(
@@ -1559,10 +2208,6 @@ fn thermal_candidate_point(
         .find(|point| point.target_temp_c == target_temp_c)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
 fn thermal_interpolated_candidate_point(
     profile: &ThermalCandidateProfile,
     target_temp_c: i16,
@@ -1581,6 +2226,14 @@ fn thermal_interpolated_candidate_point(
         .iter()
         .copied()
         .find(|point| point.target_temp_c > target_temp_c)?;
+    Some(thermal_interpolate_candidate_point(target_temp_c, lower, upper))
+}
+
+fn thermal_interpolate_candidate_point(
+    target_temp_c: i16,
+    lower: ThermalCandidatePoint,
+    upper: ThermalCandidatePoint,
+) -> ThermalCandidatePoint {
     let ratio = f32::from(target_temp_c - lower.target_temp_c)
         / f32::from(upper.target_temp_c - lower.target_temp_c);
     let lerp = |left: u16, right: u16, upper_bound: u16| {
@@ -1592,35 +2245,12 @@ fn thermal_interpolated_candidate_point(
         upper.brake_distance_centi_c,
         5_000,
     );
-    let midpoint_weight = 4.0 * ratio * (1.0 - ratio);
-    let intermediate_brake_adjustment = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
-        -0.20
-    } else if lower.target_temp_c >= 100 && upper.target_temp_c <= 180 {
-        if upper.target_temp_c <= 140 {
-            0.55
-        } else {
-            0.20
-        }
-    } else {
-        0.0
-    };
-    let interpolated_brake_distance = (f32::from(linear_brake_distance)
-        * (1.0 - intermediate_brake_adjustment * midpoint_weight)
-        + 0.5) as u16;
-    let low_temp_hold_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
-        1.0 - (0.20 * midpoint_weight)
-    } else {
-        1.0
-    };
-    let low_temp_reheat_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
-        1.0 - (0.10 * midpoint_weight)
-    } else {
-        1.0
-    };
+    let (interpolated_brake_distance, low_temp_hold_scale, low_temp_reheat_scale) =
+        thermal_interpolation_adjustments(lower, upper, ratio, linear_brake_distance);
     let scale_low_temp_hold =
         |value: u16| (f32::from(value) * low_temp_hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
     let default_point = thermal_default_target_point(target_temp_c);
-    Some(ThermalCandidatePoint {
+    ThermalCandidatePoint {
         target_temp_c,
         brake_distance_centi_c: interpolated_brake_distance,
         warmup_power_permille: 1_000,
@@ -1703,7 +2333,38 @@ fn thermal_interpolated_candidate_point(
             upper.hold_lead_ticks,
             u16::from(u8::MAX),
         ),
-    })
+    }
+}
+
+fn thermal_interpolation_adjustments(
+    lower: ThermalCandidatePoint,
+    upper: ThermalCandidatePoint,
+    ratio: f32,
+    linear_brake_distance: u16,
+) -> (u16, f32, f32) {
+    let midpoint_weight = 4.0 * ratio * (1.0 - ratio);
+    let intermediate_brake_adjustment = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        -0.20
+    } else if lower.target_temp_c >= 100 && upper.target_temp_c <= 180 {
+        if upper.target_temp_c <= 140 { 0.55 } else { 0.20 }
+    } else {
+        0.0
+    };
+    let brake_distance = (f32::from(linear_brake_distance)
+        * (1.0 - intermediate_brake_adjustment * midpoint_weight)
+        + 0.5) as u16;
+    let low_temp_band = lower.target_temp_c >= 60 && upper.target_temp_c <= 100;
+    let hold_scale = if low_temp_band {
+        1.0 - (0.20 * midpoint_weight)
+    } else {
+        1.0
+    };
+    let reheat_scale = if low_temp_band {
+        1.0 - (0.10 * midpoint_weight)
+    } else {
+        1.0
+    };
+    (brake_distance, hold_scale, reheat_scale)
 }
 
 fn thermal_candidate_point_mut(
@@ -1760,10 +2421,6 @@ fn thermal_rebuild_profile_from_anchor_targets(
     profile.points.sort_by_key(|point| point.target_temp_c);
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
 fn rebuild_thermal_candidate_point_from_anchor_relations(
     target_temp_c: i16,
     lower: ThermalCandidatePoint,
@@ -1775,213 +2432,221 @@ fn rebuild_thermal_candidate_point_from_anchor_relations(
             ..lower
         };
     }
+    thermal_rebuild_interpolated_point(target_temp_c, lower, upper)
+}
+
+#[derive(Clone, Copy)]
+struct ThermalRebuildPowerValues {
+    warmup: u16,
+    approach: u16,
+    approach_floor: u16,
+    hold: u16,
+    hold_reheat: u16,
+}
+
+#[derive(Clone, Copy)]
+struct ThermalRebuildControlValues {
+    brake_distance: u16,
+    approach_damping: u16,
+    approach_tail_window: u16,
+    warmup_reenter: u16,
+    hold_entry: u16,
+    hold_exit: u16,
+    hold_on: u16,
+    hold_off: u16,
+    overshoot_cutoff: u16,
+    hold_kp: u16,
+    hold_ki: u16,
+    hold_blend: u16,
+    approach_lead: u16,
+    hold_lead: u16,
+}
+
+fn thermal_rebuild_interpolated_point(
+    target_temp_c: i16,
+    lower: ThermalCandidatePoint,
+    upper: ThermalCandidatePoint,
+) -> ThermalCandidatePoint {
     let ratio = (f32::from(target_temp_c - lower.target_temp_c)
         / f32::from(upper.target_temp_c - lower.target_temp_c))
     .clamp(0.0, 1.0);
-    let default_point = thermal_default_target_point(target_temp_c);
-    let lower_default = thermal_default_target_point(lower.target_temp_c);
-    let upper_default = thermal_default_target_point(upper.target_temp_c);
-
-    let scale_power = |target_default: u16,
-                       lower_value: u16,
-                       lower_default_value: u16,
-                       upper_value: u16,
-                       upper_default_value: u16| {
-        let lower_scale = if lower_default_value == 0 {
-            1.0
-        } else {
-            lower_value as f32 / lower_default_value as f32
-        };
-        let upper_scale = if upper_default_value == 0 {
-            1.0
-        } else {
-            upper_value as f32 / upper_default_value as f32
-        };
-        ((target_default as f32) * (lower_scale + ((upper_scale - lower_scale) * ratio)) + 0.5)
-            .clamp(0.0, 1_000.0) as u16
-    };
-    let shift_from_default = |target_default: u16,
-                              lower_value: u16,
-                              lower_default_value: u16,
-                              upper_value: u16,
-                              upper_default_value: u16,
-                              max: u16| {
-        let lower_delta = i32::from(lower_value) - i32::from(lower_default_value);
-        let upper_delta = i32::from(upper_value) - i32::from(upper_default_value);
-        ((target_default as f32)
-            + (lower_delta as f32 + ((upper_delta - lower_delta) as f32 * ratio))
-            + 0.5)
-            .clamp(0.0, f32::from(max)) as u16
-    };
-
-    let hold_power_permille = scale_power(
-        default_point.hold_power_permille,
-        lower.hold_power_permille,
-        lower_default.hold_power_permille,
-        upper.hold_power_permille,
-        upper_default.hold_power_permille,
-    );
-    let mut approach_floor_power_permille = scale_power(
-        default_point.approach_floor_power_permille,
-        lower.approach_floor_power_permille,
-        lower_default.approach_floor_power_permille,
-        upper.approach_floor_power_permille,
-        upper_default.approach_floor_power_permille,
-    )
-    .max(hold_power_permille);
-    let mut approach_power_permille = scale_power(
-        default_point.approach_power_permille,
-        lower.approach_power_permille,
-        lower_default.approach_power_permille,
-        upper.approach_power_permille,
-        upper_default.approach_power_permille,
-    )
-    .max(approach_floor_power_permille);
-    let warmup_power_permille = 1_000;
-    let hold_reheat_power_permille = scale_power(
-        default_point.hold_reheat_power_permille,
-        lower.hold_reheat_power_permille,
-        lower_default.hold_reheat_power_permille,
-        upper.hold_reheat_power_permille,
-        upper_default.hold_reheat_power_permille,
-    )
-    .max(hold_power_permille)
-    .max(approach_floor_power_permille);
-
-    let default_approach_gap = default_point
-        .approach_power_permille
-        .saturating_sub(default_point.approach_floor_power_permille);
-    approach_power_permille = approach_power_permille
-        .max(approach_floor_power_permille.saturating_add((default_approach_gap / 3).max(10)));
-    approach_floor_power_permille = approach_floor_power_permille.min(1_000);
-    approach_power_permille = approach_power_permille.min(1_000);
-
+    let defaults = thermal_default_target_point(target_temp_c);
+    let lower_defaults = thermal_default_target_point(lower.target_temp_c);
+    let upper_defaults = thermal_default_target_point(upper.target_temp_c);
+    let power = thermal_rebuild_power_values(lower, upper, lower_defaults, upper_defaults, defaults, ratio);
+    let control = thermal_rebuild_control_values(lower, upper, lower_defaults, upper_defaults, defaults, ratio);
     ThermalCandidatePoint {
         target_temp_c,
-        brake_distance_centi_c: shift_from_default(
-            default_point.brake_distance_centi_c,
-            lower.brake_distance_centi_c,
-            lower_default.brake_distance_centi_c,
-            upper.brake_distance_centi_c,
-            upper_default.brake_distance_centi_c,
-            5_000,
-        ),
-        warmup_power_permille,
-        approach_power_permille,
-        approach_floor_power_permille,
-        approach_damping_exponent_permille: shift_from_default(
-            default_point.approach_damping_exponent_permille,
-            lower.approach_damping_exponent_permille,
-            lower_default.approach_damping_exponent_permille,
-            upper.approach_damping_exponent_permille,
-            upper_default.approach_damping_exponent_permille,
-            4_000,
-        ),
-        approach_tail_window_centi_c: shift_from_default(
-            default_point.approach_tail_window_centi_c,
-            lower.approach_tail_window_centi_c,
-            lower_default.approach_tail_window_centi_c,
-            upper.approach_tail_window_centi_c,
-            upper_default.approach_tail_window_centi_c,
-            5_000,
-        ),
-        hold_power_permille,
-        hold_reheat_power_permille,
-        warmup_reenter_centi_c: shift_from_default(
-            default_point.warmup_reenter_centi_c,
-            lower.warmup_reenter_centi_c,
-            lower_default.warmup_reenter_centi_c,
-            upper.warmup_reenter_centi_c,
-            upper_default.warmup_reenter_centi_c,
-            5_000,
-        ),
-        hold_entry_centi_c: shift_from_default(
-            default_point.hold_entry_centi_c,
-            lower.hold_entry_centi_c,
-            lower_default.hold_entry_centi_c,
-            upper.hold_entry_centi_c,
-            upper_default.hold_entry_centi_c,
-            5_000,
-        ),
-        hold_exit_centi_c: shift_from_default(
-            default_point.hold_exit_centi_c,
-            lower.hold_exit_centi_c,
-            lower_default.hold_exit_centi_c,
-            upper.hold_exit_centi_c,
-            upper_default.hold_exit_centi_c,
-            5_000,
-        ),
-        hold_on_centi_c: shift_from_default(
-            default_point.hold_on_centi_c,
-            lower.hold_on_centi_c,
-            lower_default.hold_on_centi_c,
-            upper.hold_on_centi_c,
-            upper_default.hold_on_centi_c,
-            5_000,
-        ),
-        hold_off_centi_c: shift_from_default(
-            default_point.hold_off_centi_c,
-            lower.hold_off_centi_c,
-            lower_default.hold_off_centi_c,
-            upper.hold_off_centi_c,
-            upper_default.hold_off_centi_c,
-            5_000,
-        ),
-        overshoot_cutoff_centi_c: shift_from_default(
-            default_point.overshoot_cutoff_centi_c,
-            lower.overshoot_cutoff_centi_c,
-            lower_default.overshoot_cutoff_centi_c,
-            upper.overshoot_cutoff_centi_c,
-            upper_default.overshoot_cutoff_centi_c,
-            5_000,
-        ),
-        hold_kp_permille_per_c: shift_from_default(
-            default_point.hold_kp_permille_per_c,
-            lower.hold_kp_permille_per_c,
-            lower_default.hold_kp_permille_per_c,
-            upper.hold_kp_permille_per_c,
-            upper_default.hold_kp_permille_per_c,
-            10_000,
-        ),
-        hold_ki_permille_per_c_tick: shift_from_default(
-            default_point.hold_ki_permille_per_c_tick,
-            lower.hold_ki_permille_per_c_tick,
-            lower_default.hold_ki_permille_per_c_tick,
-            upper.hold_ki_permille_per_c_tick,
-            upper_default.hold_ki_permille_per_c_tick,
-            10_000,
-        ),
-        hold_blend_ticks: shift_from_default(
-            default_point.hold_blend_ticks,
-            lower.hold_blend_ticks,
-            lower_default.hold_blend_ticks,
-            upper.hold_blend_ticks,
-            upper_default.hold_blend_ticks,
-            u16::from(u8::MAX),
-        ),
-        approach_lead_ticks: shift_from_default(
-            default_point.approach_lead_ticks,
-            lower.approach_lead_ticks,
-            lower_default.approach_lead_ticks,
-            upper.approach_lead_ticks,
-            upper_default.approach_lead_ticks,
-            u16::from(u8::MAX),
-        ),
-        hold_lead_ticks: shift_from_default(
-            default_point.hold_lead_ticks,
-            lower.hold_lead_ticks,
-            lower_default.hold_lead_ticks,
-            upper.hold_lead_ticks,
-            upper_default.hold_lead_ticks,
-            u16::from(u8::MAX),
-        ),
+        brake_distance_centi_c: control.brake_distance,
+        warmup_power_permille: power.warmup,
+        approach_power_permille: power.approach,
+        approach_floor_power_permille: power.approach_floor,
+        approach_damping_exponent_permille: control.approach_damping,
+        approach_tail_window_centi_c: control.approach_tail_window,
+        hold_power_permille: power.hold,
+        hold_reheat_power_permille: power.hold_reheat,
+        warmup_reenter_centi_c: control.warmup_reenter,
+        hold_entry_centi_c: control.hold_entry,
+        hold_exit_centi_c: control.hold_exit,
+        hold_on_centi_c: control.hold_on,
+        hold_off_centi_c: control.hold_off,
+        overshoot_cutoff_centi_c: control.overshoot_cutoff,
+        hold_kp_permille_per_c: control.hold_kp,
+        hold_ki_permille_per_c_tick: control.hold_ki,
+        hold_blend_ticks: control.hold_blend,
+        approach_lead_ticks: control.approach_lead,
+        hold_lead_ticks: control.hold_lead,
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
+fn thermal_rebuild_power_values(
+    lower: ThermalCandidatePoint,
+    upper: ThermalCandidatePoint,
+    lower_defaults: ThermalCandidatePoint,
+    upper_defaults: ThermalCandidatePoint,
+    defaults: ThermalCandidatePoint,
+    ratio: f32,
+) -> ThermalRebuildPowerValues {
+    let hold = scale_power_from_defaults(defaults.hold_power_permille, lower.hold_power_permille, lower_defaults.hold_power_permille, upper.hold_power_permille, upper_defaults.hold_power_permille, ratio);
+    let approach_floor = scale_power_from_defaults(defaults.approach_floor_power_permille, lower.approach_floor_power_permille, lower_defaults.approach_floor_power_permille, upper.approach_floor_power_permille, upper_defaults.approach_floor_power_permille, ratio).max(hold).min(1_000);
+    let default_gap = defaults.approach_power_permille.saturating_sub(defaults.approach_floor_power_permille);
+    let approach = scale_power_from_defaults(defaults.approach_power_permille, lower.approach_power_permille, lower_defaults.approach_power_permille, upper.approach_power_permille, upper_defaults.approach_power_permille, ratio).max(approach_floor.saturating_add((default_gap / 3).max(10))).min(1_000);
+    let hold_reheat = scale_power_from_defaults(defaults.hold_reheat_power_permille, lower.hold_reheat_power_permille, lower_defaults.hold_reheat_power_permille, upper.hold_reheat_power_permille, upper_defaults.hold_reheat_power_permille, ratio).max(hold).max(approach_floor);
+    ThermalRebuildPowerValues { warmup: 1_000, approach, approach_floor, hold, hold_reheat }
+}
+
+fn thermal_rebuild_control_values(
+    lower: ThermalCandidatePoint,
+    upper: ThermalCandidatePoint,
+    lower_defaults: ThermalCandidatePoint,
+    upper_defaults: ThermalCandidatePoint,
+    defaults: ThermalCandidatePoint,
+    ratio: f32,
+) -> ThermalRebuildControlValues {
+    let shift = |target, lower_value, lower_default, upper_value, upper_default, max| shift_from_defaults(target, lower_value, lower_default, upper_value, upper_default, max, ratio);
+    ThermalRebuildControlValues {
+        brake_distance: shift(defaults.brake_distance_centi_c, lower.brake_distance_centi_c, lower_defaults.brake_distance_centi_c, upper.brake_distance_centi_c, upper_defaults.brake_distance_centi_c, 5_000),
+        approach_damping: shift(defaults.approach_damping_exponent_permille, lower.approach_damping_exponent_permille, lower_defaults.approach_damping_exponent_permille, upper.approach_damping_exponent_permille, upper_defaults.approach_damping_exponent_permille, 4_000),
+        approach_tail_window: shift(defaults.approach_tail_window_centi_c, lower.approach_tail_window_centi_c, lower_defaults.approach_tail_window_centi_c, upper.approach_tail_window_centi_c, upper_defaults.approach_tail_window_centi_c, 5_000),
+        warmup_reenter: shift(defaults.warmup_reenter_centi_c, lower.warmup_reenter_centi_c, lower_defaults.warmup_reenter_centi_c, upper.warmup_reenter_centi_c, upper_defaults.warmup_reenter_centi_c, 5_000),
+        hold_entry: shift(defaults.hold_entry_centi_c, lower.hold_entry_centi_c, lower_defaults.hold_entry_centi_c, upper.hold_entry_centi_c, upper_defaults.hold_entry_centi_c, 5_000),
+        hold_exit: shift(defaults.hold_exit_centi_c, lower.hold_exit_centi_c, lower_defaults.hold_exit_centi_c, upper.hold_exit_centi_c, upper_defaults.hold_exit_centi_c, 5_000),
+        hold_on: shift(defaults.hold_on_centi_c, lower.hold_on_centi_c, lower_defaults.hold_on_centi_c, upper.hold_on_centi_c, upper_defaults.hold_on_centi_c, 5_000),
+        hold_off: shift(defaults.hold_off_centi_c, lower.hold_off_centi_c, lower_defaults.hold_off_centi_c, upper.hold_off_centi_c, upper_defaults.hold_off_centi_c, 5_000),
+        overshoot_cutoff: shift(defaults.overshoot_cutoff_centi_c, lower.overshoot_cutoff_centi_c, lower_defaults.overshoot_cutoff_centi_c, upper.overshoot_cutoff_centi_c, upper_defaults.overshoot_cutoff_centi_c, 5_000),
+        hold_kp: shift(defaults.hold_kp_permille_per_c, lower.hold_kp_permille_per_c, lower_defaults.hold_kp_permille_per_c, upper.hold_kp_permille_per_c, upper_defaults.hold_kp_permille_per_c, 10_000),
+        hold_ki: shift(defaults.hold_ki_permille_per_c_tick, lower.hold_ki_permille_per_c_tick, lower_defaults.hold_ki_permille_per_c_tick, upper.hold_ki_permille_per_c_tick, upper_defaults.hold_ki_permille_per_c_tick, 10_000),
+        hold_blend: shift(defaults.hold_blend_ticks, lower.hold_blend_ticks, lower_defaults.hold_blend_ticks, upper.hold_blend_ticks, upper_defaults.hold_blend_ticks, u16::from(u8::MAX)),
+        approach_lead: shift(defaults.approach_lead_ticks, lower.approach_lead_ticks, lower_defaults.approach_lead_ticks, upper.approach_lead_ticks, upper_defaults.approach_lead_ticks, u16::from(u8::MAX)),
+        hold_lead: shift(defaults.hold_lead_ticks, lower.hold_lead_ticks, lower_defaults.hold_lead_ticks, upper.hold_lead_ticks, upper_defaults.hold_lead_ticks, u16::from(u8::MAX)),
+    }
+}
+
+fn scale_power_from_defaults(
+    target_default: u16,
+    lower_value: u16,
+    lower_default: u16,
+    upper_value: u16,
+    upper_default: u16,
+    ratio: f32,
+) -> u16 {
+    let lower_scale = if lower_default == 0 { 1.0 } else { lower_value as f32 / lower_default as f32 };
+    let upper_scale = if upper_default == 0 { 1.0 } else { upper_value as f32 / upper_default as f32 };
+    ((target_default as f32) * (lower_scale + ((upper_scale - lower_scale) * ratio)) + 0.5).clamp(0.0, 1_000.0) as u16
+}
+
+fn shift_from_defaults(
+    target_default: u16,
+    lower_value: u16,
+    lower_default: u16,
+    upper_value: u16,
+    upper_default: u16,
+    max: u16,
+    ratio: f32,
+) -> u16 {
+    let lower_delta = i32::from(lower_value) - i32::from(lower_default);
+    let upper_delta = i32::from(upper_value) - i32::from(upper_default);
+    ((target_default as f32) + (lower_delta as f32 + ((upper_delta - lower_delta) as f32 * ratio)) + 0.5).clamp(0.0, f32::from(max)) as u16
+}
+
+#[derive(Clone)]
+struct ThermalTuneMetrics {
+    settle_limit_ms: u64,
+    full_speed_failed: bool,
+    overshoot_c: f64,
+    residual_c: f64,
+    under_c: f64,
+    over_c: f64,
+    hold_p2p_c: f64,
+    equilibrium: u16,
+    hold_p90: u16,
+    near_target_power: u16,
+    curve_needs_tuning: bool,
+    entering_below_target: f64,
+    entering_above_target: f64,
+    hold_gate_lag: bool,
+    approach_only_underpowered: bool,
+    high_temp_power_limited: bool,
+    stability_overshoot: bool,
+    entry_residual_dominant: bool,
+    overshoot_dominant: bool,
+    timely_hold_but_late_stability: bool,
+    low_temp_hold_entry_carry: bool,
+    hold_ripple: bool,
+    bursty_low_temp_hold: bool,
+}
+
+impl ThermalTuneMetrics {
+    fn from_result(previous: ThermalCandidatePoint, result: &ThermalStageResult) -> Self {
+        let analysis = &result.analysis;
+        let settle_limit_ms = ThermalFullSpeedStableTracker::settle_limit_ms_for_target(result.target_temp_c);
+        let full_speed_failed = result.stop_reason != "completed"
+            || result.full_speed_to_stable.settle_time_ms.is_some_and(|value| value > settle_limit_ms)
+            || result.full_speed_to_stable.failure_reason.is_some();
+        let overshoot_c = result.max_overshoot_c.max(0.0);
+        let residual_c = analysis.residual_heat_after_hold_entry_c.unwrap_or(overshoot_c).max(0.0);
+        let under_c = analysis.hold_max_below_target_c.unwrap_or(0.0).max(0.0);
+        let over_c = analysis.hold_max_above_target_c.unwrap_or(0.0).max(0.0);
+        let hold_p2p_c = result.hold_peak_to_peak_c.max(0.0);
+        let equilibrium = analysis.hold_median_output_permille.unwrap_or(previous.hold_power_permille);
+        let hold_p90 = analysis.hold_p90_output_permille.unwrap_or(previous.hold_reheat_power_permille.max(equilibrium));
+        let near_target_power = analysis.approach_median_output_permille.unwrap_or(previous.approach_floor_power_permille.max(equilibrium));
+        let curve_class = analysis.approach_curve_deviation_class;
+        let curve_needs_tuning = matches!(curve_class, Some("brake_late_or_residual" | "underpowered_or_early_coast" | "oscillatory_near_target"));
+        let curve_overshoot = curve_class == Some("brake_late_or_residual");
+        let curve_underpowered = curve_class == Some("underpowered_or_early_coast");
+        let curve_oscillation = curve_class == Some("oscillatory_near_target");
+        let entering_below_target = analysis.first_hold_error_c.unwrap_or(0.0).max(0.0);
+        let entering_above_target = (-analysis.first_hold_error_c.unwrap_or(0.0)).max(0.0);
+        let hold_gate_lag = full_speed_failed && analysis.hold_sample_count == 0 && result.guard.hold_threshold_crossed_at_ms.is_some() && !curve_underpowered;
+        let approach_only_underpowered = (full_speed_failed && analysis.hold_sample_count == 0 && !hold_gate_lag) || curve_underpowered;
+        let high_temp_power_limited = approach_only_underpowered && result.target_temp_c >= 180 && near_target_power >= 900 && analysis.approach_median_slope_c_per_s.is_some_and(|slope| slope <= 1.0);
+        let starved_low_temp_hold = full_speed_failed && result.target_temp_c <= 120 && analysis.hold_sample_count > 0 && hold_p90 == 0 && analysis.hold_mean_error_c.is_some_and(|error| error > 0.2) && under_c > over_c + 0.4;
+        let stability_overshoot = full_speed_failed && analysis.hold_sample_count > 0 && over_c > ThermalFullSpeedStableTracker::STABLE_BAND_C && (result.target_temp_c <= 120 || over_c >= under_c) && !starved_low_temp_hold;
+        let entry_residual_dominant = analysis.first_hold_error_c.is_some() && residual_c >= 1.5 && over_c >= ThermalFullSpeedStableTracker::STABLE_BAND_C && over_c >= under_c + 0.4;
+        let overshoot_dominant = curve_overshoot || overshoot_c > 3.0 || stability_overshoot || entry_residual_dominant || (residual_c > 2.5 && entering_above_target > 0.5 && over_c > under_c);
+        let timely_hold_but_late_stability = thermal_timely_hold_late_stability(result, settle_limit_ms, under_c, over_c, full_speed_failed);
+        let low_temp_hold_entry_carry = full_speed_failed && result.target_temp_c <= 120 && analysis.hold_sample_count > 0 && analysis.hold_p90_output_permille.is_some_and(|output| output > previous.hold_power_permille) && hold_p2p_c > ThermalFullSpeedStableTracker::STABLE_BAND_C + 0.5 && entering_below_target >= 0.4 && residual_c >= ThermalFullSpeedStableTracker::STABLE_BAND_C && over_c > ThermalFullSpeedStableTracker::STABLE_BAND_C;
+        let hold_ripple = curve_oscillation || (analysis.hold_sample_count > 0 && hold_p2p_c > 3.0);
+        let bursty_low_temp_hold = result.target_temp_c <= 120 && analysis.hold_median_output_permille == Some(0) && hold_p90 >= previous.hold_power_permille.saturating_add(20) && under_c > over_c + 0.4 && analysis.hold_mean_error_c.is_some_and(|error| error > 0.2);
+        Self { settle_limit_ms, full_speed_failed, overshoot_c, residual_c, under_c, over_c, hold_p2p_c, equilibrium, hold_p90, near_target_power, curve_needs_tuning, entering_below_target, entering_above_target, hold_gate_lag, approach_only_underpowered, high_temp_power_limited, stability_overshoot, entry_residual_dominant, overshoot_dominant, timely_hold_but_late_stability, low_temp_hold_entry_carry, hold_ripple, bursty_low_temp_hold }
+    }
+}
+
+fn thermal_timely_hold_late_stability(
+    result: &ThermalStageResult,
+    settle_limit_ms: u64,
+    under_c: f64,
+    over_c: f64,
+    full_speed_failed: bool,
+) -> bool {
+    full_speed_failed
+        && result.guard.first_hold_at_ms.zip(result.full_speed_to_stable.warmup_exited_at_ms).is_some_and(|(first, warmup)| first.saturating_sub(warmup) <= settle_limit_ms)
+        && result.full_speed_to_stable.stable_window_started_at_ms.zip(result.full_speed_to_stable.warmup_exited_at_ms).is_some_and(|(started, warmup)| started.saturating_sub(warmup) > settle_limit_ms)
+        && under_c <= ThermalFullSpeedStableTracker::STABLE_BAND_C
+        && over_c <= ThermalFullSpeedStableTracker::STABLE_BAND_C
+}
+
 fn tune_thermal_candidate_point(
     previous: ThermalCandidatePoint,
     result: &ThermalStageResult,
@@ -1990,117 +2655,24 @@ fn tune_thermal_candidate_point(
         return previous;
     }
     let analysis = &result.analysis;
-    let settle_limit_ms =
-        ThermalFullSpeedStableTracker::settle_limit_ms_for_target(result.target_temp_c);
-    let full_speed_failed = result.stop_reason != "completed"
-        || result
-            .full_speed_to_stable
-            .settle_time_ms
-            .is_some_and(|value| value > settle_limit_ms)
-        || result.full_speed_to_stable.failure_reason.is_some();
-    let overshoot_c = result.max_overshoot_c.max(0.0);
-    let residual_c = analysis
-        .residual_heat_after_hold_entry_c
-        .unwrap_or(overshoot_c)
-        .max(0.0);
-    let under_c = analysis.hold_max_below_target_c.unwrap_or(0.0).max(0.0);
-    let over_c = analysis.hold_max_above_target_c.unwrap_or(0.0).max(0.0);
-    let hold_p2p_c = result.hold_peak_to_peak_c.max(0.0);
-    let equilibrium = analysis
-        .hold_median_output_permille
-        .unwrap_or(previous.hold_power_permille);
-    let hold_p90 = analysis
-        .hold_p90_output_permille
-        .unwrap_or(previous.hold_reheat_power_permille.max(equilibrium));
-    let near_target_power = analysis
-        .approach_median_output_permille
-        .unwrap_or(previous.approach_floor_power_permille.max(equilibrium));
-    let curve_class = analysis.approach_curve_deviation_class;
-    let curve_needs_tuning = matches!(
-        curve_class,
-        Some("brake_late_or_residual" | "underpowered_or_early_coast" | "oscillatory_near_target")
-    );
-    let curve_overshoot = curve_class == Some("brake_late_or_residual");
-    let curve_underpowered = curve_class == Some("underpowered_or_early_coast");
-    let curve_oscillation = curve_class == Some("oscillatory_near_target");
-    let entering_below_target = analysis.first_hold_error_c.unwrap_or(0.0).max(0.0);
-    let entering_above_target = (-analysis.first_hold_error_c.unwrap_or(0.0)).max(0.0);
-    let hold_gate_lag = full_speed_failed
-        && analysis.hold_sample_count == 0
-        && result.guard.hold_threshold_crossed_at_ms.is_some()
-        && !curve_underpowered;
-    let approach_only_underpowered =
-        (full_speed_failed && analysis.hold_sample_count == 0 && !hold_gate_lag)
-            || curve_underpowered;
-    let high_temp_power_limited = approach_only_underpowered
-        && result.target_temp_c >= 180
-        && near_target_power >= 900
-        && analysis
-            .approach_median_slope_c_per_s
-            .is_some_and(|slope_c_per_s| slope_c_per_s <= 1.0);
-    let starved_low_temp_hold = full_speed_failed
-        && result.target_temp_c <= 120
-        && analysis.hold_sample_count > 0
-        && hold_p90 == 0
-        && analysis
-            .hold_mean_error_c
-            .is_some_and(|mean_error_c| mean_error_c > 0.2)
-        && under_c > over_c + 0.4;
-    let stability_overshoot = full_speed_failed
-        && analysis.hold_sample_count > 0
-        && over_c > ThermalFullSpeedStableTracker::STABLE_BAND_C
-        && (result.target_temp_c <= 120 || over_c >= under_c)
-        && !starved_low_temp_hold;
-    let entry_residual_dominant = analysis.first_hold_error_c.is_some()
-        && residual_c >= 1.5
-        && over_c >= ThermalFullSpeedStableTracker::STABLE_BAND_C
-        && over_c >= under_c + 0.4;
-    let overshoot_dominant = curve_overshoot
-        || overshoot_c > 3.0
-        || stability_overshoot
-        || entry_residual_dominant
-        || (residual_c > 2.5 && entering_above_target > 0.5 && over_c > under_c);
-    let timely_hold_but_late_stability = full_speed_failed
-        && result
-            .guard
-            .first_hold_at_ms
-            .zip(result.full_speed_to_stable.warmup_exited_at_ms)
-            .is_some_and(|(first_hold_at_ms, warmup_exited_at_ms)| {
-                first_hold_at_ms.saturating_sub(warmup_exited_at_ms) <= settle_limit_ms
-            })
-        && result
-            .full_speed_to_stable
-            .stable_window_started_at_ms
-            .zip(result.full_speed_to_stable.warmup_exited_at_ms)
-            .is_some_and(|(stable_started_at_ms, warmup_exited_at_ms)| {
-                stable_started_at_ms.saturating_sub(warmup_exited_at_ms) > settle_limit_ms
-            })
-        && under_c <= ThermalFullSpeedStableTracker::STABLE_BAND_C
-        && over_c <= ThermalFullSpeedStableTracker::STABLE_BAND_C;
-    let low_temp_hold_entry_carry = full_speed_failed
-        && result.target_temp_c <= 120
-        && analysis.hold_sample_count > 0
-        && analysis
-            .hold_p90_output_permille
-            .is_some_and(|output| output > previous.hold_power_permille)
-        && hold_p2p_c > ThermalFullSpeedStableTracker::STABLE_BAND_C + 0.5
-        && entering_below_target >= 0.4
-        && residual_c >= ThermalFullSpeedStableTracker::STABLE_BAND_C
-        && over_c > ThermalFullSpeedStableTracker::STABLE_BAND_C;
-    let hold_ripple = curve_oscillation || (analysis.hold_sample_count > 0 && hold_p2p_c > 3.0);
-    let underpowered = curve_underpowered
-        || starved_low_temp_hold
-        || (full_speed_failed && !overshoot_dominant && !hold_ripple)
-        || (!hold_ripple
-            && !overshoot_dominant
-            && (under_c > over_c + 0.4 || entering_below_target > 0.4));
-    let bursty_low_temp_hold = result.target_temp_c <= 120
-        && analysis.hold_median_output_permille == Some(0)
-        && hold_p90 >= previous.hold_power_permille.saturating_add(20)
-        && under_c > over_c + 0.4
-        && analysis
-            .hold_mean_error_c
-            .is_some_and(|mean_error_c| mean_error_c > 0.2);
+    let metrics = ThermalTuneMetrics::from_result(previous, result);
+    let ThermalTuneMetrics {
+        full_speed_failed,
+        overshoot_c,
+        residual_c,
+        under_c,
+        hold_p2p_c,
+        near_target_power,
+        curve_needs_tuning,
+        hold_gate_lag,
+        approach_only_underpowered,
+        high_temp_power_limited,
+        overshoot_dominant,
+        timely_hold_but_late_stability,
+        low_temp_hold_entry_carry,
+        hold_ripple,
+        ..
+    } = metrics.clone();
     let mut tuned = previous;
 
     if !full_speed_failed && overshoot_c <= 3.0 && hold_p2p_c <= 3.0 && !curve_needs_tuning {
@@ -2108,200 +2680,83 @@ fn tune_thermal_candidate_point(
     }
 
     if high_temp_power_limited {
-        let stable_entry_centi_c =
-            (ThermalFullSpeedStableTracker::STABLE_BAND_C * 100.0).round() as u16;
-        tuned.hold_entry_centi_c = stable_entry_centi_c;
-        tuned.hold_exit_centi_c = tuned
-            .hold_exit_centi_c
-            .max(stable_entry_centi_c.saturating_add(10));
-        tuned.brake_distance_centi_c = tuned
-            .hold_entry_centi_c
-            .saturating_add(10)
-            .clamp(100, 5_000);
-        tuned.warmup_power_permille = 1_000;
-        tuned.approach_power_permille = 1_000;
-        tuned.approach_floor_power_permille = 1_000;
-        tuned.approach_damping_exponent_permille = 100;
-        tuned.approach_lead_ticks = 0;
-        tuned.hold_power_permille = near_target_power.saturating_add(50).clamp(950, 1_000);
-        tuned.hold_reheat_power_permille = 1_000;
-        tuned.hold_off_centi_c = tuned.hold_off_centi_c.min(80);
-        tuned.overshoot_cutoff_centi_c = tuned
-            .overshoot_cutoff_centi_c
-            .min(180)
-            .max(tuned.hold_off_centi_c.saturating_add(40));
+        apply_high_temp_power_limit(&mut tuned, near_target_power);
     } else if timely_hold_but_late_stability {
-        let hold_exit_target = ((under_c + 0.2) * 100.0).round().clamp(80.0, 300.0) as u16;
-        tuned.hold_exit_centi_c = tuned.hold_exit_centi_c.max(hold_exit_target);
+        apply_timely_hold_late_stability(&mut tuned, under_c);
     } else if low_temp_hold_entry_carry {
-        let previous_hold_lead_ticks = tuned.hold_lead_ticks;
-        tuned.hold_lead_ticks = tuned
-            .hold_lead_ticks
-            .saturating_add(if residual_c >= 2.0 { 2 } else { 1 })
-            .min(8);
-        if tuned.hold_lead_ticks == previous_hold_lead_ticks {
-            tuned.hold_power_permille = tuned.hold_power_permille.saturating_sub(20).max(40);
-            tuned.hold_off_centi_c = tuned.hold_off_centi_c.saturating_add(20).min(400);
-        }
-        tuned.hold_reheat_power_permille = tuned
-            .hold_reheat_power_permille
-            .saturating_sub(30)
-            .max(tuned.hold_power_permille);
+        apply_low_temp_hold_entry(&mut tuned, residual_c);
     } else if hold_gate_lag {
-        let lead_step = if result.target_temp_c >= 120 { 1 } else { 2 };
-        tuned.approach_lead_ticks = tuned.approach_lead_ticks.saturating_add(lead_step).min(12);
+        apply_hold_gate_lag(&mut tuned, result.target_temp_c);
     } else if approach_only_underpowered {
-        let power_step = if result.target_temp_c >= 180 { 120 } else { 80 };
-        let lead_step = (tuned.approach_lead_ticks / 2).max(2);
-        tuned.approach_floor_power_permille = step_toward_u16(
-            tuned.approach_floor_power_permille,
-            near_target_power
-                .saturating_add(power_step)
-                .max(tuned.approach_floor_power_permille),
-            power_step,
-            tuned.hold_power_permille,
-            1_000,
-        );
-        tuned.approach_power_permille = tuned
-            .approach_power_permille
-            .max(tuned.approach_floor_power_permille.saturating_add(80))
-            .min(1_000);
-        tuned.approach_damping_exponent_permille = tuned
-            .approach_damping_exponent_permille
-            .saturating_sub(90)
-            .clamp(100, 4_000);
-        tuned.approach_lead_ticks = tuned.approach_lead_ticks.saturating_sub(lead_step);
-        tuned.brake_distance_centi_c = tuned
-            .brake_distance_centi_c
-            .saturating_sub(if result.target_temp_c <= 120 { 120 } else { 60 })
-            .max(100);
-    } else if underpowered {
-        let power_step = if result.target_temp_c >= 180 {
-            160
-        } else {
-            120
-        };
-        let sustain_target = near_target_power
-            .max(equilibrium.saturating_add(power_step))
-            .max(
-                previous
-                    .hold_reheat_power_permille
-                    .saturating_add(power_step / 2),
-            );
-        tuned.hold_power_permille = step_toward_u16(
-            tuned.hold_power_permille,
-            equilibrium
-                .max(previous.hold_power_permille)
-                .saturating_add(40),
-            100,
-            0,
-            1_000,
-        );
-        tuned.approach_floor_power_permille = step_toward_u16(
-            tuned.approach_floor_power_permille,
-            sustain_target,
-            power_step,
-            tuned.hold_power_permille,
-            1_000,
-        );
-        tuned.hold_reheat_power_permille = step_toward_u16(
-            tuned.hold_reheat_power_permille,
-            sustain_target.saturating_add(40),
-            power_step,
-            tuned.approach_floor_power_permille,
-            1_000,
-        );
-        tuned.approach_power_permille = tuned
-            .approach_power_permille
-            .max(tuned.hold_reheat_power_permille.saturating_add(80))
-            .min(1_000);
-        tuned.warmup_power_permille = tuned
-            .warmup_power_permille
-            .max(tuned.approach_power_permille.saturating_add(100))
-            .min(1_000);
-        tuned.approach_damping_exponent_permille = tuned
-            .approach_damping_exponent_permille
-            .saturating_sub(180)
-            .clamp(100, 4_000);
-        tuned.brake_distance_centi_c = tuned.brake_distance_centi_c.saturating_sub(120).max(100);
-        tuned.hold_kp_permille_per_c = tuned
-            .hold_kp_permille_per_c
-            .saturating_add(4)
-            .clamp(8, 10_000);
+        apply_approach_underpowered(&mut tuned, result.target_temp_c, near_target_power);
     } else if overshoot_dominant {
-        let bounded_low_temp_entry_residual = result.target_temp_c <= 120
-            && stability_overshoot
-            && residual_c <= 3.5
-            && analysis.hold_sample_count > 0
-            && result
-                .guard
-                .first_hold_at_ms
-                .zip(result.full_speed_to_stable.warmup_exited_at_ms)
-                .is_some_and(|(first_hold_at_ms, warmup_exited_at_ms)| {
-                    first_hold_at_ms.saturating_sub(warmup_exited_at_ms) <= settle_limit_ms
-                });
-        let coast_gate_limited = stability_overshoot
-            && result.target_temp_c <= 120
-            && residual_c <= 3.5
-            && analysis.hold_sample_count > 0;
-        let brake_step = if bounded_low_temp_entry_residual {
-            80
-        } else if coast_gate_limited {
-            0
-        } else {
-            ((residual_c * 100.0) + (overshoot_c * 70.0))
-                .round()
-                .clamp(if stability_overshoot { 100.0 } else { 80.0 }, 350.0) as u16
-        };
-        tuned.brake_distance_centi_c = tuned
-            .brake_distance_centi_c
-            .saturating_add(brake_step)
-            .clamp(100, 5_000);
-        tuned.approach_damping_exponent_permille = tuned
-            .approach_damping_exponent_permille
-            .saturating_add(if bounded_low_temp_entry_residual {
-                50
-            } else if residual_c > 3.0 {
-                200
-            } else {
-                100
-            })
-            .clamp(100, 4_000);
-        if bounded_low_temp_entry_residual {
-            let hold_delay_ms = result
-                .guard
-                .first_hold_at_ms
-                .zip(result.full_speed_to_stable.warmup_exited_at_ms)
-                .map(|(first_hold_at_ms, warmup_exited_at_ms)| {
-                    first_hold_at_ms.saturating_sub(warmup_exited_at_ms)
-                })
-                .unwrap_or_default();
-            if hold_delay_ms >= 9_000 {
-                tuned.hold_entry_centi_c = tuned.hold_entry_centi_c.saturating_add(40).min(250);
-            } else {
-                let cutoff_step = ((over_c - ThermalFullSpeedStableTracker::STABLE_BAND_C) * 100.0)
-                    .round()
-                    .clamp(20.0, 60.0) as u16;
-                tuned.overshoot_cutoff_centi_c = tuned
-                    .overshoot_cutoff_centi_c
-                    .saturating_sub(cutoff_step)
-                    .max(50);
-                tuned.hold_off_centi_c = tuned
-                    .hold_off_centi_c
-                    .min(tuned.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
-            }
-        } else if tuned.approach_lead_ticks < 12 {
-            tuned.approach_lead_ticks = tuned
-                .approach_lead_ticks
-                .saturating_add(if result.target_temp_c <= 120 && residual_c > 3.0 {
-                    2
-                } else {
-                    1
-                })
-                .min(12);
-        }
-        if coast_gate_limited && !entry_residual_dominant && !bounded_low_temp_entry_residual {
-            let coast_step = ((residual_c - 0.8).max(overshoot_c - 1.5) * 100.0)
+        apply_overshoot_tuning(&mut tuned, previous, result, analysis, &metrics);
+    } else if hold_ripple {
+        apply_hold_ripple_tuning(&mut tuned, previous, result, analysis, &metrics);
+    } else {
+        return previous;
+    }
+
+    tuned.hold_reheat_power_permille = tuned
+        .hold_reheat_power_permille
+        .max(tuned.hold_power_permille);
+    tuned.approach_power_permille = tuned
+        .approach_power_permille
+        .max(tuned.approach_floor_power_permille)
+        .min(1_000);
+    tuned.warmup_power_permille = tuned
+        .warmup_power_permille
+        .max(tuned.approach_power_permille)
+        .min(1_000);
+    tuned
+}
+
+fn apply_overshoot_brake(
+    tuned: &mut ThermalCandidatePoint,
+    result: &ThermalStageResult,
+    analysis: &ThermalStageAnalysis,
+    metrics: &ThermalTuneMetrics,
+) -> (bool, bool) {
+    let bounded_low_temp_entry_residual = result.target_temp_c <= 120
+        && metrics.stability_overshoot
+        && metrics.residual_c <= 3.5
+        && analysis.hold_sample_count > 0
+        && result
+            .guard
+            .first_hold_at_ms
+            .zip(result.full_speed_to_stable.warmup_exited_at_ms)
+            .is_some_and(|(first, warmup)| first.saturating_sub(warmup) <= metrics.settle_limit_ms);
+    let coast_gate_limited = metrics.stability_overshoot
+        && result.target_temp_c <= 120
+        && metrics.residual_c <= 3.5
+        && analysis.hold_sample_count > 0;
+    let brake_step = if bounded_low_temp_entry_residual {
+        80
+    } else if coast_gate_limited {
+        0
+    } else {
+        ((metrics.residual_c * 100.0) + (metrics.overshoot_c * 70.0))
+            .round()
+            .clamp(if metrics.stability_overshoot { 100.0 } else { 80.0 }, 350.0) as u16
+    };
+    tuned.brake_distance_centi_c = tuned.brake_distance_centi_c.saturating_add(brake_step).clamp(100, 5_000);
+    let damping_step = if bounded_low_temp_entry_residual { 50 } else if metrics.residual_c > 3.0 { 200 } else { 100 };
+    tuned.approach_damping_exponent_permille = tuned.approach_damping_exponent_permille.saturating_add(damping_step).clamp(100, 4_000);
+    (bounded_low_temp_entry_residual, coast_gate_limited)
+}
+
+fn apply_overshoot_tuning(
+    tuned: &mut ThermalCandidatePoint,
+    previous: ThermalCandidatePoint,
+    result: &ThermalStageResult,
+    analysis: &ThermalStageAnalysis,
+    metrics: &ThermalTuneMetrics,
+) {
+        let (bounded_low_temp_entry_residual, coast_gate_limited) =
+            apply_overshoot_brake(tuned, result, analysis, metrics);
+        apply_overshoot_entry_adjustment(tuned, result, metrics, bounded_low_temp_entry_residual);
+        if coast_gate_limited && !metrics.entry_residual_dominant && !bounded_low_temp_entry_residual {
+            let coast_step = ((metrics.residual_c - 0.8).max(metrics.overshoot_c - 1.5) * 100.0)
                 .round()
                 .clamp(50.0, 250.0) as u16;
             tuned.hold_exit_centi_c = tuned
@@ -2312,8 +2767,8 @@ fn tune_thermal_candidate_point(
         }
         tuned.approach_floor_power_permille = tuned
             .approach_floor_power_permille
-            .max(equilibrium.saturating_sub(30));
-        let equilibrium_observation_ready = !full_speed_failed || analysis.hold_sample_count >= 120;
+            .max(metrics.equilibrium.saturating_sub(30));
+        let equilibrium_observation_ready = !metrics.full_speed_failed || analysis.hold_sample_count >= 120;
         let equilibrium_was_observed = equilibrium_observation_ready
             && (analysis
                 .hold_max_below_target_c
@@ -2332,7 +2787,7 @@ fn tune_thermal_candidate_point(
                 .hold_median_output_permille
                 .is_some_and(|output| output <= previous.hold_power_permille);
         if coasted_through_hold {
-            let floor_step = if residual_c > 5.0 { 100 } else { 60 };
+            let floor_step = if metrics.residual_c > 5.0 { 100 } else { 60 };
             tuned.approach_floor_power_permille = tuned
                 .approach_floor_power_permille
                 .saturating_sub(floor_step)
@@ -2349,14 +2804,14 @@ fn tune_thermal_candidate_point(
                 .max(tuned.hold_power_permille);
             tuned.hold_power_permille = step_toward_u16(
                 tuned.hold_power_permille,
-                equilibrium.saturating_sub(30),
+                metrics.equilibrium.saturating_sub(30),
                 80,
                 0,
                 1_000,
             );
         }
         if result.target_temp_c <= 120
-            && residual_c > 5.0
+            && metrics.residual_c > 5.0
             && analysis
                 .approach_median_slope_c_per_s
                 .is_some_and(|slope_c_per_s| slope_c_per_s > 2.0)
@@ -2368,111 +2823,125 @@ fn tune_thermal_candidate_point(
         }
         tuned.hold_blend_ticks = tuned.hold_blend_ticks.saturating_sub(3).max(1);
         tuned.hold_kp_permille_per_c = tuned.hold_kp_permille_per_c.saturating_sub(4).max(8);
-    } else if hold_ripple {
-        let hold_ripple_equilibrium = if bursty_low_temp_hold {
-            previous
-                .hold_power_permille
-                .saturating_add(30)
-                .max(hold_p90.saturating_sub(100))
-        } else {
-            equilibrium
-        };
-        let high_temp_entry_carry = result.target_temp_c >= 180
-            && entering_below_target >= 0.2
-            && residual_c >= 1.6
-            && over_c >= 1.0;
-        let saturated_high_temp_hold = result.target_temp_c >= 180
-            && equilibrium >= 950
-            && hold_p90 >= 990
-            && over_c >= 1.0
-            && under_c >= 1.0;
-        let reheat_gap = hold_p90.saturating_sub(if bursty_low_temp_hold {
-            hold_ripple_equilibrium
-        } else {
-            equilibrium
-        });
-        let bounded_reheat_gap = if over_c >= under_c {
-            (reheat_gap / 2).clamp(40, 100)
-        } else {
-            reheat_gap.clamp(80, 160)
-        };
-        tuned.hold_power_permille = step_toward_u16(
-            tuned.hold_power_permille,
-            hold_ripple_equilibrium,
-            80,
-            0,
-            1_000,
-        );
-        let approach_floor_target = if under_c > over_c {
-            previous
-                .approach_floor_power_permille
-                .max(tuned.hold_power_permille.saturating_add(20))
-        } else {
-            tuned.hold_power_permille.saturating_add(20)
-        };
-        tuned.approach_floor_power_permille = tuned
-            .approach_floor_power_permille
-            .max(approach_floor_target)
-            .min(1_000);
-        tuned.hold_reheat_power_permille = tuned
-            .hold_power_permille
-            .saturating_add(bounded_reheat_gap)
-            .max(tuned.approach_floor_power_permille.saturating_add(40))
-            .min(1_000);
-        if under_c > 3.0 {
-            let hold_exit_target = (under_c * 100.0 * 0.67).round().clamp(100.0, 300.0) as u16;
-            tuned.hold_exit_centi_c = tuned.hold_exit_centi_c.max(hold_exit_target);
-            if result.target_temp_c >= 180 {
-                tuned.hold_lead_ticks = tuned.hold_lead_ticks.saturating_add(1).min(8);
-            }
-        }
-        if saturated_high_temp_hold {
-            let hold_off_c = f64::from(tuned.hold_off_centi_c) / 100.0;
-            let cutoff_target_c = ((over_c - (0.7 * hold_off_c)) / 0.3)
-                .max(hold_off_c + 0.4)
-                .clamp(1.2, 6.0);
-            tuned.overshoot_cutoff_centi_c = tuned
-                .overshoot_cutoff_centi_c
-                .max((cutoff_target_c * 100.0).round() as u16);
-            tuned.hold_blend_ticks = tuned.hold_blend_ticks.clamp(1, 4);
-        } else if high_temp_entry_carry {
-            tuned.hold_on_centi_c = step_toward_u16(tuned.hold_on_centi_c, 140, 60, 20, 250);
-            tuned.hold_off_centi_c = tuned.hold_off_centi_c.saturating_sub(30).max(40);
-            tuned.hold_blend_ticks = tuned.hold_blend_ticks.saturating_sub(4).max(1);
-            tuned.hold_kp_permille_per_c = tuned
-                .hold_kp_permille_per_c
-                .saturating_add(6)
-                .clamp(8, 10_000);
-        } else if entering_above_target > 0.2 || over_c > under_c {
-            tuned.hold_on_centi_c = tuned.hold_on_centi_c.saturating_add(30).clamp(20, 250);
-            tuned.hold_exit_centi_c = tuned
-                .hold_exit_centi_c
-                .max(tuned.hold_on_centi_c)
-                .clamp(20, 500);
-            tuned.hold_blend_ticks = tuned.hold_blend_ticks.saturating_sub(3).max(1);
-            tuned.hold_kp_permille_per_c = tuned.hold_kp_permille_per_c.saturating_sub(3).max(8);
-        } else {
-            tuned.hold_kp_permille_per_c = tuned
-                .hold_kp_permille_per_c
-                .saturating_add(3)
-                .clamp(8, 10_000);
-        }
-    } else {
-        return previous;
-    }
+}
 
-    tuned.hold_reheat_power_permille = tuned
-        .hold_reheat_power_permille
-        .max(tuned.hold_power_permille);
-    tuned.approach_power_permille = tuned
-        .approach_power_permille
-        .max(tuned.approach_floor_power_permille)
-        .min(1_000);
-    tuned.warmup_power_permille = tuned
-        .warmup_power_permille
-        .max(tuned.approach_power_permille)
-        .min(1_000);
-    tuned
+fn apply_overshoot_entry_adjustment(
+    tuned: &mut ThermalCandidatePoint,
+    result: &ThermalStageResult,
+    metrics: &ThermalTuneMetrics,
+    bounded_low_temp_entry_residual: bool,
+) {
+    if bounded_low_temp_entry_residual {
+        let hold_delay_ms = result.guard.first_hold_at_ms.zip(result.full_speed_to_stable.warmup_exited_at_ms).map(|(first, warmup)| first.saturating_sub(warmup)).unwrap_or_default();
+        if hold_delay_ms >= 9_000 {
+            tuned.hold_entry_centi_c = tuned.hold_entry_centi_c.saturating_add(40).min(250);
+        } else {
+            let cutoff_step = ((metrics.over_c - ThermalFullSpeedStableTracker::STABLE_BAND_C) * 100.0).round().clamp(20.0, 60.0) as u16;
+            tuned.overshoot_cutoff_centi_c = tuned.overshoot_cutoff_centi_c.saturating_sub(cutoff_step).max(50);
+            tuned.hold_off_centi_c = tuned.hold_off_centi_c.min(tuned.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
+        }
+    } else if tuned.approach_lead_ticks < 12 {
+        let lead_step = if result.target_temp_c <= 120 && metrics.residual_c > 3.0 { 2 } else { 1 };
+        tuned.approach_lead_ticks = tuned.approach_lead_ticks.saturating_add(lead_step).min(12);
+    }
+}
+
+fn apply_hold_ripple_tuning(
+    tuned: &mut ThermalCandidatePoint,
+    previous: ThermalCandidatePoint,
+    result: &ThermalStageResult,
+    analysis: &ThermalStageAnalysis,
+    metrics: &ThermalTuneMetrics,
+) {
+    let hold_ripple_equilibrium = if metrics.bursty_low_temp_hold {
+        previous.hold_power_permille.saturating_add(30).max(metrics.hold_p90.saturating_sub(100))
+    } else {
+        metrics.equilibrium
+    };
+    let high_temp_entry_carry = result.target_temp_c >= 180 && metrics.entering_below_target >= 0.2 && metrics.residual_c >= 1.6 && metrics.over_c >= 1.0;
+    let saturated_high_temp_hold = result.target_temp_c >= 180 && metrics.equilibrium >= 950 && metrics.hold_p90 >= 990 && metrics.over_c >= 1.0 && metrics.under_c >= 1.0;
+    let reheat_gap = metrics.hold_p90.saturating_sub(if metrics.bursty_low_temp_hold { hold_ripple_equilibrium } else { metrics.equilibrium });
+    let bounded_reheat_gap = if metrics.over_c >= metrics.under_c { (reheat_gap / 2).clamp(40, 100) } else { reheat_gap.clamp(80, 160) };
+    tuned.hold_power_permille = step_toward_u16(tuned.hold_power_permille, hold_ripple_equilibrium, 80, 0, 1_000);
+    let approach_floor_target = if metrics.under_c > metrics.over_c { previous.approach_floor_power_permille.max(tuned.hold_power_permille.saturating_add(20)) } else { tuned.hold_power_permille.saturating_add(20) };
+    tuned.approach_floor_power_permille = tuned.approach_floor_power_permille.max(approach_floor_target).min(1_000);
+    tuned.hold_reheat_power_permille = tuned.hold_power_permille.saturating_add(bounded_reheat_gap).max(tuned.approach_floor_power_permille.saturating_add(40)).min(1_000);
+    apply_ripple_hold_window(tuned, result.target_temp_c, metrics.under_c);
+    if saturated_high_temp_hold {
+        let hold_off_c = f64::from(tuned.hold_off_centi_c) / 100.0;
+        let cutoff_target_c = ((metrics.over_c - (0.7 * hold_off_c)) / 0.3).max(hold_off_c + 0.4).clamp(1.2, 6.0);
+        tuned.overshoot_cutoff_centi_c = tuned.overshoot_cutoff_centi_c.max((cutoff_target_c * 100.0).round() as u16);
+        tuned.hold_blend_ticks = tuned.hold_blend_ticks.clamp(1, 4);
+    } else if high_temp_entry_carry {
+        tuned.hold_on_centi_c = step_toward_u16(tuned.hold_on_centi_c, 140, 60, 20, 250);
+        tuned.hold_off_centi_c = tuned.hold_off_centi_c.saturating_sub(30).max(40);
+        tuned.hold_blend_ticks = tuned.hold_blend_ticks.saturating_sub(4).max(1);
+        tuned.hold_kp_permille_per_c = tuned.hold_kp_permille_per_c.saturating_add(6).clamp(8, 10_000);
+    } else if metrics.entering_above_target > 0.2 || metrics.over_c > metrics.under_c {
+        tuned.hold_on_centi_c = tuned.hold_on_centi_c.saturating_add(30).clamp(20, 250);
+        tuned.hold_exit_centi_c = tuned.hold_exit_centi_c.max(tuned.hold_on_centi_c).clamp(20, 500);
+        tuned.hold_blend_ticks = tuned.hold_blend_ticks.saturating_sub(3).max(1);
+        tuned.hold_kp_permille_per_c = tuned.hold_kp_permille_per_c.saturating_sub(3).max(8);
+    } else {
+        tuned.hold_kp_permille_per_c = tuned.hold_kp_permille_per_c.saturating_add(3).clamp(8, 10_000);
+    }
+    let _ = analysis;
+}
+
+fn apply_ripple_hold_window(tuned: &mut ThermalCandidatePoint, target_temp_c: i16, under_c: f64) {
+    if under_c <= 3.0 {
+        return;
+    }
+    tuned.hold_exit_centi_c = tuned.hold_exit_centi_c.max((under_c * 100.0 * 0.67).round().clamp(100.0, 300.0) as u16);
+    if target_temp_c >= 180 {
+        tuned.hold_lead_ticks = tuned.hold_lead_ticks.saturating_add(1).min(8);
+    }
+}
+
+fn apply_high_temp_power_limit(tuned: &mut ThermalCandidatePoint, near_target_power: u16) {
+    let stable_entry_centi_c = (ThermalFullSpeedStableTracker::STABLE_BAND_C * 100.0).round() as u16;
+    tuned.hold_entry_centi_c = stable_entry_centi_c;
+    tuned.hold_exit_centi_c = tuned.hold_exit_centi_c.max(stable_entry_centi_c.saturating_add(10));
+    tuned.brake_distance_centi_c = tuned.hold_entry_centi_c.saturating_add(10).clamp(100, 5_000);
+    tuned.warmup_power_permille = 1_000;
+    tuned.approach_power_permille = 1_000;
+    tuned.approach_floor_power_permille = 1_000;
+    tuned.approach_damping_exponent_permille = 100;
+    tuned.approach_lead_ticks = 0;
+    tuned.hold_power_permille = near_target_power.saturating_add(50).clamp(950, 1_000);
+    tuned.hold_reheat_power_permille = 1_000;
+    tuned.hold_off_centi_c = tuned.hold_off_centi_c.min(80);
+    tuned.overshoot_cutoff_centi_c = tuned.overshoot_cutoff_centi_c.min(180).max(tuned.hold_off_centi_c.saturating_add(40));
+}
+
+fn apply_timely_hold_late_stability(tuned: &mut ThermalCandidatePoint, under_c: f64) {
+    let hold_exit_target = ((under_c + 0.2) * 100.0).round().clamp(80.0, 300.0) as u16;
+    tuned.hold_exit_centi_c = tuned.hold_exit_centi_c.max(hold_exit_target);
+}
+
+fn apply_low_temp_hold_entry(tuned: &mut ThermalCandidatePoint, residual_c: f64) {
+    let previous_hold_lead_ticks = tuned.hold_lead_ticks;
+    tuned.hold_lead_ticks = tuned.hold_lead_ticks.saturating_add(if residual_c >= 2.0 { 2 } else { 1 }).min(8);
+    if tuned.hold_lead_ticks == previous_hold_lead_ticks {
+        tuned.hold_power_permille = tuned.hold_power_permille.saturating_sub(20).max(40);
+        tuned.hold_off_centi_c = tuned.hold_off_centi_c.saturating_add(20).min(400);
+    }
+    tuned.hold_reheat_power_permille = tuned.hold_reheat_power_permille.saturating_sub(30).max(tuned.hold_power_permille);
+}
+
+fn apply_hold_gate_lag(tuned: &mut ThermalCandidatePoint, target_temp_c: i16) {
+    let lead_step = if target_temp_c >= 120 { 1 } else { 2 };
+    tuned.approach_lead_ticks = tuned.approach_lead_ticks.saturating_add(lead_step).min(12);
+}
+
+fn apply_approach_underpowered(tuned: &mut ThermalCandidatePoint, target_temp_c: i16, near_target_power: u16) {
+    let power_step = if target_temp_c >= 180 { 120 } else { 80 };
+    let lead_step = (tuned.approach_lead_ticks / 2).max(2);
+    tuned.approach_floor_power_permille = step_toward_u16(tuned.approach_floor_power_permille, near_target_power.saturating_add(power_step).max(tuned.approach_floor_power_permille), power_step, tuned.hold_power_permille, 1_000);
+    tuned.approach_power_permille = tuned.approach_power_permille.max(tuned.approach_floor_power_permille.saturating_add(80)).min(1_000);
+    tuned.approach_damping_exponent_permille = tuned.approach_damping_exponent_permille.saturating_sub(90).clamp(100, 4_000);
+    tuned.approach_lead_ticks = tuned.approach_lead_ticks.saturating_sub(lead_step);
+    tuned.brake_distance_centi_c = tuned.brake_distance_centi_c.saturating_sub(if target_temp_c <= 120 { 120 } else { 60 }).max(100);
 }
 
 fn step_toward_u16(current: u16, target: u16, max_step: u16, min: u16, max: u16) -> u16 {
@@ -2509,10 +2978,6 @@ fn percentile_f64(values: &[f64], percentile: f64) -> Option<f64> {
     sorted.get(index.min(sorted.len() - 1)).copied()
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
 fn thermal_heater_parameters_value(
     target_temp_c: i16,
     thermal_profile: Option<&Value>,
@@ -2536,105 +3001,7 @@ fn thermal_heater_parameters_value(
         })["points"][0]
             .clone()
     });
-    let point = point_value.as_ref();
-    let approach_tail_window_centi_c = point
-        .and_then(|point| point.get("approachTailWindowCentiC"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as u16;
-    let (
-        brake_distance_centi_c,
-        warmup_power_permille,
-        approach_power_permille,
-        approach_floor_power_permille,
-        approach_damping_exponent_permille,
-        hold_power_permille,
-        hold_reheat_power_permille,
-        warmup_reenter_centi_c,
-        hold_entry_centi_c,
-        hold_exit_centi_c,
-        hold_on_centi_c,
-        hold_off_centi_c,
-        overshoot_cutoff_centi_c,
-        hold_kp_permille_per_c,
-        hold_ki_permille_per_c_tick,
-        hold_blend_ticks,
-        approach_lead_ticks,
-        hold_lead_ticks,
-    ) = if let Some(point) = point {
-        (
-            point
-                .get("brakeDistanceCentiC")
-                .and_then(Value::as_u64)
-                .unwrap_or(750) as u16,
-            1_000,
-            point
-                .get("approachPowerPermille")
-                .and_then(Value::as_u64)
-                .unwrap_or(320) as u16,
-            point
-                .get("approachFloorPowerPermille")
-                .and_then(Value::as_u64)
-                .unwrap_or(220) as u16,
-            point
-                .get("approachDampingExponentPermille")
-                .and_then(Value::as_u64)
-                .unwrap_or(1_000) as u16,
-            point
-                .get("holdPowerPermille")
-                .and_then(Value::as_u64)
-                .unwrap_or(220) as u16,
-            point
-                .get("holdReheatPowerPermille")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-            point
-                .get("warmupReenterCentiC")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-            point
-                .get("holdEntryCentiC")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-            point
-                .get("holdExitCentiC")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-            point
-                .get("holdOnCentiC")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-            point
-                .get("holdOffCentiC")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-            point
-                .get("overshootCutoffCentiC")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-            point
-                .get("holdKpPermillePerC")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-            point
-                .get("holdKiPermillePerCTick")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-            point
-                .get("holdBlendTicks")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-            point
-                .get("approachLeadTicks")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-            point
-                .get("holdLeadTicks")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as u16,
-        )
-    } else {
-        thermal_default_target_values(target_temp_c)
-    };
+    let values = thermal_heater_parameter_values(target_temp_c, point_value.as_ref());
     let settings = thermal_profile
         .and_then(|profile| profile.get("settings"))
         .cloned()
@@ -2642,27 +3009,78 @@ fn thermal_heater_parameters_value(
     json!({
         "mode": mode,
         "targetTempC": target_temp_c,
-        "warmupPowerPermille": warmup_power_permille,
-        "brakeDistanceCentiC": brake_distance_centi_c,
-        "approachPowerPermille": approach_power_permille,
-        "approachFloorPowerPermille": approach_floor_power_permille,
-        "approachDampingExponentPermille": approach_damping_exponent_permille,
-        "approachTailWindowCentiC": approach_tail_window_centi_c,
-        "holdPowerPermille": hold_power_permille,
-        "holdReheatPowerPermille": hold_reheat_power_permille,
-        "warmupReenterCentiC": warmup_reenter_centi_c,
-        "holdEntryCentiC": hold_entry_centi_c,
-        "holdExitCentiC": hold_exit_centi_c,
-        "holdOnCentiC": hold_on_centi_c,
-        "holdOffCentiC": hold_off_centi_c,
-        "overshootCutoffCentiC": overshoot_cutoff_centi_c,
-        "holdKpPermillePerC": hold_kp_permille_per_c,
-        "holdKiPermillePerCTick": hold_ki_permille_per_c_tick,
-        "holdBlendTicks": hold_blend_ticks,
-        "approachLeadTicks": approach_lead_ticks,
-        "holdLeadTicks": hold_lead_ticks,
+        "warmupPowerPermille": values.warmup_power_permille,
+        "brakeDistanceCentiC": values.brake_distance_centi_c,
+        "approachPowerPermille": values.approach_power_permille,
+        "approachFloorPowerPermille": values.approach_floor_power_permille,
+        "approachDampingExponentPermille": values.approach_damping_exponent_permille,
+        "approachTailWindowCentiC": values.approach_tail_window_centi_c,
+        "holdPowerPermille": values.hold_power_permille,
+        "holdReheatPowerPermille": values.hold_reheat_power_permille,
+        "warmupReenterCentiC": values.warmup_reenter_centi_c,
+        "holdEntryCentiC": values.hold_entry_centi_c,
+        "holdExitCentiC": values.hold_exit_centi_c,
+        "holdOnCentiC": values.hold_on_centi_c,
+        "holdOffCentiC": values.hold_off_centi_c,
+        "overshootCutoffCentiC": values.overshoot_cutoff_centi_c,
+        "holdKpPermillePerC": values.hold_kp_permille_per_c,
+        "holdKiPermillePerCTick": values.hold_ki_permille_per_c_tick,
+        "holdBlendTicks": values.hold_blend_ticks,
+        "approachLeadTicks": values.approach_lead_ticks,
+        "holdLeadTicks": values.hold_lead_ticks,
         "settings": settings,
     })
+}
+
+struct ThermalHeaterParameterValues {
+    warmup_power_permille: u16,
+    brake_distance_centi_c: u16,
+    approach_power_permille: u16,
+    approach_floor_power_permille: u16,
+    approach_damping_exponent_permille: u16,
+    approach_tail_window_centi_c: u16,
+    hold_power_permille: u16,
+    hold_reheat_power_permille: u16,
+    warmup_reenter_centi_c: u16,
+    hold_entry_centi_c: u16,
+    hold_exit_centi_c: u16,
+    hold_on_centi_c: u16,
+    hold_off_centi_c: u16,
+    overshoot_cutoff_centi_c: u16,
+    hold_kp_permille_per_c: u16,
+    hold_ki_permille_per_c_tick: u16,
+    hold_blend_ticks: u16,
+    approach_lead_ticks: u16,
+    hold_lead_ticks: u16,
+}
+
+fn thermal_heater_parameter_values(
+    target_temp_c: i16,
+    point: Option<&Value>,
+) -> ThermalHeaterParameterValues {
+    let defaults = thermal_default_target_values(target_temp_c);
+    let get = |key: &str, default: u16| point.and_then(|value| value_u16(value, key)).unwrap_or(default);
+    ThermalHeaterParameterValues {
+        brake_distance_centi_c: get("brakeDistanceCentiC", defaults.0),
+        warmup_power_permille: 1_000,
+        approach_power_permille: get("approachPowerPermille", defaults.2),
+        approach_floor_power_permille: get("approachFloorPowerPermille", defaults.3),
+        approach_damping_exponent_permille: get("approachDampingExponentPermille", defaults.4),
+        approach_tail_window_centi_c: get("approachTailWindowCentiC", 0),
+        hold_power_permille: get("holdPowerPermille", defaults.5),
+        hold_reheat_power_permille: get("holdReheatPowerPermille", defaults.6),
+        warmup_reenter_centi_c: get("warmupReenterCentiC", defaults.7),
+        hold_entry_centi_c: get("holdEntryCentiC", defaults.8),
+        hold_exit_centi_c: get("holdExitCentiC", defaults.9),
+        hold_on_centi_c: get("holdOnCentiC", defaults.10),
+        hold_off_centi_c: get("holdOffCentiC", defaults.11),
+        overshoot_cutoff_centi_c: get("overshootCutoffCentiC", defaults.12),
+        hold_kp_permille_per_c: get("holdKpPermillePerC", defaults.13),
+        hold_ki_permille_per_c_tick: get("holdKiPermillePerCTick", defaults.14),
+        hold_blend_ticks: get("holdBlendTicks", defaults.15),
+        approach_lead_ticks: get("approachLeadTicks", defaults.16),
+        hold_lead_ticks: get("holdLeadTicks", defaults.17),
+    }
 }
 
 fn thermal_target_scoped_preview_profile_value(profile: &Value, target_temp_c: i16) -> Value {
@@ -2761,11 +3179,6 @@ struct DryThermalLadderInput<'a> {
     sample_index: &'a mut usize,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    clippy::excessive_nesting,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
 fn write_dry_thermal_ladder(
     input: DryThermalLadderInput<'_>,
 ) -> Result<Vec<ThermalStageResult>, Box<dyn std::error::Error + Send + Sync>> {
@@ -2780,151 +3193,246 @@ fn write_dry_thermal_ladder(
         target_temps_c,
         sample_index,
     } = input;
-    let mut results = Vec::new();
-    for &target_temp_c in target_temps_c {
-        let rise_time_ms = u64::from(target_temp_c as u16) * 980;
-        let max_overshoot_c = 1.8;
-        let hold_peak_to_peak_c = 1.6;
-        let heater_parameters =
-            thermal_heater_parameters_value(target_temp_c, thermal_profile, heater_parameter_mode);
-        let mut synthetic_stage_samples = Vec::new();
-        for phase in ["warmup", "hold"] {
-            let heater_output_percent = if phase == "warmup" { 100 } else { 26 };
-            let temp_c = if phase == "warmup" {
-                f64::from(target_temp_c) - 0.5
-            } else {
-                f64::from(target_temp_c) + max_overshoot_c / 2.0
-            };
-            let elapsed_ms = if phase == "warmup" {
-                rise_time_ms.saturating_sub(1_000)
-            } else {
-                rise_time_ms
-            };
-            let sample = json!({
-                "runId": run_id,
-                "sampleIndex": *sample_index,
-                "capturedAtUnixMs": current_unix_millis(),
-                "elapsedMs": elapsed_ms,
-                "testPhase": test_phase,
-                "phase": phase,
-                "targetTempC": target_temp_c,
-                "source": {
-                    "mode": "dry_run",
-                    "requestedVoltageMv": source_voltage_mv,
-                    "requestedCurrentLimitMa": source_current_ma,
-                },
-                "sourceTelemetry": {
-                    "voltageMv": source_voltage_mv,
-                    "currentMa": 0,
-                    "powerMw": 0,
-                    "sampleUptimeMs": 0,
-                    "status": "dry_run",
-                },
-                "heaterTelemetry": {
-                    "currentTempC": temp_c,
-                    "hotplateVoltageMv": source_voltage_mv,
-                    "ppsRequestMv": source_voltage_mv,
-                    "ppsContractMv": source_voltage_mv,
-                    "heaterEnabled": true,
-                    "heaterOutputPercent": heater_output_percent,
-                    "heaterPhysicalOutputPercent": heater_output_percent,
-                },
-                "heaterParameters": heater_parameters,
-                "status": synthetic_thermal_status(
-                    target_temp_c,
-                    temp_c,
-                    source_voltage_mv,
-                    source_current_ma,
-                    heater_output_percent,
-                ),
-            });
-            writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
-            synthetic_stage_samples.push(ThermalReplayStageSample {
-                elapsed_ms,
-                current_temp_c: temp_c,
-                heater_output_percent,
-                control_phase: Some(if phase == "warmup" {
-                    "approach".to_string()
-                } else {
-                    "hold".to_string()
-                }),
-                control_phase_in_hold: phase == "hold",
-                source_voltage_mv: Some(u64::from(source_voltage_mv)),
-                source_current_ma: Some(0),
-                source_power_mw: Some(0),
-            });
-            *sample_index = sample_index.saturating_add(1);
-        }
-        let mut analysis = thermal_replay_stage_analysis(&synthetic_stage_samples, target_temp_c);
-        let guard = ThermalApproachGuardAnalysis {
-            hold_threshold_temp_c: f64::from(target_temp_c) - 0.5,
-            approach_started_at_ms: Some(rise_time_ms.saturating_sub(1_000)),
-            hold_threshold_crossed_at_ms: Some(rise_time_ms),
-            first_hold_at_ms: Some(rise_time_ms),
-            warmup_reentered_at_ms: None,
-        };
-        let full_speed_to_stable = ThermalFullSpeedStableAnalysis {
-            warmup_exited_at_ms: Some(rise_time_ms.saturating_sub(7_500)),
-            stable_window_started_at_ms: Some(rise_time_ms),
-            stable_window_verified_at_ms: Some(rise_time_ms),
-            settle_time_ms: Some(7_500),
-            failure_reason: None,
-        };
-        let curve_samples = thermal_stage_approach_curve_sample_series(
-            &synthetic_stage_samples,
+    target_temps_c
+        .iter()
+        .copied()
+        .map(|target_temp_c| {
+            write_dry_thermal_stage(DryThermalStageInput {
+                samples_writer,
+                run_id,
+                test_phase,
+                source_voltage_mv,
+                source_current_ma,
+                thermal_profile,
+                heater_parameter_mode,
+                target_temp_c,
+                sample_index,
+            })
+        })
+        .collect()
+}
+
+struct DryThermalStageInput<'a> {
+    samples_writer: &'a mut BufWriter<File>,
+    run_id: &'a str,
+    test_phase: &'a str,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    thermal_profile: Option<&'a Value>,
+    heater_parameter_mode: &'static str,
+    target_temp_c: i16,
+    sample_index: &'a mut usize,
+}
+
+fn write_dry_thermal_stage(
+    input: DryThermalStageInput<'_>,
+) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
+    let DryThermalStageInput {
+        samples_writer,
+        run_id,
+        test_phase,
+        source_voltage_mv,
+        source_current_ma,
+        thermal_profile,
+        heater_parameter_mode,
+        target_temp_c,
+        sample_index,
+    } = input;
+    let rise_time_ms = u64::from(target_temp_c as u16) * 980;
+    let max_overshoot_c = 1.8;
+    let hold_peak_to_peak_c = 1.6;
+    let heater_parameters =
+        thermal_heater_parameters_value(target_temp_c, thermal_profile, heater_parameter_mode);
+    let mut synthetic_stage_samples = Vec::new();
+    for phase in ["warmup", "hold"] {
+        let sample = dry_thermal_stage_sample(DryThermalStageSampleInput {
+            run_id,
+            test_phase,
             target_temp_c,
-            &guard,
-            &analysis,
-        );
-        if analysis.approach_curve_max_above_c.is_none()
-            || analysis.approach_curve_max_below_c.is_none()
-        {
-            let mut max_above_c = 0.0f64;
-            let mut max_below_c = 0.0f64;
-            for (sample, reference_temp_c) in
-                synthetic_stage_samples.iter().zip(curve_samples.iter())
-            {
-                if let Some(reference_temp_c) = reference_temp_c {
-                    let deviation_c = sample.current_temp_c - reference_temp_c;
-                    max_above_c = max_above_c.max(deviation_c.max(0.0));
-                    max_below_c = max_below_c.max((-deviation_c).max(0.0));
-                }
-            }
-            analysis.approach_curve_max_above_c = Some(max_above_c);
-            analysis.approach_curve_max_below_c = Some(max_below_c);
-        }
-        results.push(ThermalStageResult {
-            target_temp_c,
+            source_voltage_mv,
+            source_current_ma,
+            heater_parameters: &heater_parameters,
+            sample_index: *sample_index,
+            phase,
             rise_time_ms,
             max_overshoot_c,
-            hold_peak_to_peak_c,
-            sample_count: 2,
-            stop_reason: "completed",
-            terminal_runtime_drop_reason: None,
-            analysis: {
-                analysis.approach_median_output_permille = heater_parameters
-                    .get("approachFloorPowerPermille")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16);
-                analysis.approach_median_slope_c_per_s = Some(0.35);
-                analysis.hold_median_output_permille = heater_parameters
-                    .get("holdPowerPermille")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16);
-                analysis.hold_p90_output_permille = heater_parameters
-                    .get("holdReheatPowerPermille")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16);
-                analysis.hold_mean_error_c = Some(0.0);
-                analysis.hold_max_above_target_c = Some(max_overshoot_c / 2.0);
-                analysis.hold_max_below_target_c = Some(hold_peak_to_peak_c / 2.0);
-                analysis
-            },
-            guard,
-            full_speed_to_stable,
         });
+        writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+        synthetic_stage_samples.push(dry_thermal_replay_sample(
+            phase,
+            target_temp_c,
+            source_voltage_mv,
+            rise_time_ms,
+            max_overshoot_c,
+        ));
+        *sample_index = sample_index.saturating_add(1);
     }
-    Ok(results)
+    let guard = dry_thermal_guard(target_temp_c, rise_time_ms);
+    let full_speed_to_stable = dry_thermal_full_speed_analysis(rise_time_ms);
+    let mut analysis = thermal_replay_stage_analysis(&synthetic_stage_samples, target_temp_c);
+    thermal_stage_populate_approach_curve_analysis(
+        &mut analysis,
+        &synthetic_stage_samples,
+        target_temp_c,
+    );
+    analysis.approach_median_output_permille = heater_parameters
+        .get("approachFloorPowerPermille")
+        .and_then(Value::as_u64)
+        .map(|value| value as u16);
+    analysis.approach_median_slope_c_per_s = Some(0.35);
+    analysis.hold_median_output_permille = heater_parameters
+        .get("holdPowerPermille")
+        .and_then(Value::as_u64)
+        .map(|value| value as u16);
+    analysis.hold_p90_output_permille = heater_parameters
+        .get("holdReheatPowerPermille")
+        .and_then(Value::as_u64)
+        .map(|value| value as u16);
+    analysis.hold_mean_error_c = Some(0.0);
+    analysis.hold_max_above_target_c = Some(max_overshoot_c / 2.0);
+    analysis.hold_max_below_target_c = Some(hold_peak_to_peak_c / 2.0);
+    Ok(ThermalStageResult {
+        target_temp_c,
+        rise_time_ms,
+        max_overshoot_c,
+        hold_peak_to_peak_c,
+        sample_count: 2,
+        stop_reason: "completed",
+        terminal_runtime_drop_reason: None,
+        analysis,
+        guard,
+        full_speed_to_stable,
+    })
+}
+
+struct DryThermalStageSampleInput<'a> {
+    run_id: &'a str,
+    test_phase: &'a str,
+    target_temp_c: i16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    heater_parameters: &'a Value,
+    sample_index: usize,
+    phase: &'a str,
+    rise_time_ms: u64,
+    max_overshoot_c: f64,
+}
+
+fn dry_thermal_stage_sample(input: DryThermalStageSampleInput<'_>) -> Value {
+    let DryThermalStageSampleInput {
+        run_id,
+        test_phase,
+        target_temp_c,
+        source_voltage_mv,
+        source_current_ma,
+        heater_parameters,
+        sample_index,
+        phase,
+        rise_time_ms,
+        max_overshoot_c,
+    } = input;
+    let heater_output_percent = if phase == "warmup" { 100 } else { 26 };
+    let temp_c = if phase == "warmup" {
+        f64::from(target_temp_c) - 0.5
+    } else {
+        f64::from(target_temp_c) + max_overshoot_c / 2.0
+    };
+    let elapsed_ms = if phase == "warmup" {
+        rise_time_ms.saturating_sub(1_000)
+    } else {
+        rise_time_ms
+    };
+    json!({
+        "runId": run_id,
+        "sampleIndex": sample_index,
+        "capturedAtUnixMs": current_unix_millis(),
+        "elapsedMs": elapsed_ms,
+        "testPhase": test_phase,
+        "phase": phase,
+        "targetTempC": target_temp_c,
+        "source": {
+            "mode": "dry_run",
+            "requestedVoltageMv": source_voltage_mv,
+            "requestedCurrentLimitMa": source_current_ma,
+        },
+        "sourceTelemetry": {
+            "voltageMv": source_voltage_mv,
+            "currentMa": 0,
+            "powerMw": 0,
+            "sampleUptimeMs": 0,
+            "status": "dry_run",
+        },
+        "heaterTelemetry": {
+            "currentTempC": temp_c,
+            "hotplateVoltageMv": source_voltage_mv,
+            "ppsRequestMv": source_voltage_mv,
+            "ppsContractMv": source_voltage_mv,
+            "heaterEnabled": true,
+            "heaterOutputPercent": heater_output_percent,
+            "heaterPhysicalOutputPercent": heater_output_percent,
+        },
+        "heaterParameters": heater_parameters,
+        "status": synthetic_thermal_status(
+            target_temp_c,
+            temp_c,
+            source_voltage_mv,
+            source_current_ma,
+            heater_output_percent,
+        ),
+    })
+}
+
+fn dry_thermal_replay_sample(
+    phase: &str,
+    target_temp_c: i16,
+    source_voltage_mv: u16,
+    rise_time_ms: u64,
+    max_overshoot_c: f64,
+) -> ThermalReplayStageSample {
+    let heater_output_percent = if phase == "warmup" { 100 } else { 26 };
+    let current_temp_c = if phase == "warmup" {
+        f64::from(target_temp_c) - 0.5
+    } else {
+        f64::from(target_temp_c) + max_overshoot_c / 2.0
+    };
+    ThermalReplayStageSample {
+        elapsed_ms: if phase == "warmup" {
+            rise_time_ms.saturating_sub(1_000)
+        } else {
+            rise_time_ms
+        },
+        current_temp_c,
+        heater_output_percent,
+        control_phase: Some(if phase == "warmup" {
+            "approach".to_string()
+        } else {
+            "hold".to_string()
+        }),
+        control_phase_in_hold: phase == "hold",
+        source_voltage_mv: Some(u64::from(source_voltage_mv)),
+        source_current_ma: Some(0),
+        source_power_mw: Some(0),
+    }
+}
+
+fn dry_thermal_guard(target_temp_c: i16, rise_time_ms: u64) -> ThermalApproachGuardAnalysis {
+    ThermalApproachGuardAnalysis {
+        hold_threshold_temp_c: f64::from(target_temp_c) - 0.5,
+        approach_started_at_ms: Some(rise_time_ms.saturating_sub(1_000)),
+        hold_threshold_crossed_at_ms: Some(rise_time_ms),
+        first_hold_at_ms: Some(rise_time_ms),
+        warmup_reentered_at_ms: None,
+    }
+}
+
+fn dry_thermal_full_speed_analysis(rise_time_ms: u64) -> ThermalFullSpeedStableAnalysis {
+    ThermalFullSpeedStableAnalysis {
+        warmup_exited_at_ms: Some(rise_time_ms.saturating_sub(7_500)),
+        stable_window_started_at_ms: Some(rise_time_ms),
+        stable_window_verified_at_ms: Some(rise_time_ms),
+        settle_time_ms: Some(7_500),
+        failure_reason: None,
+    }
 }
 
 fn synthetic_thermal_status(
@@ -3465,10 +3973,85 @@ struct ThermalStageInput<'a> {
     initial_status: Option<Value>,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
+struct ThermalStageState {
+    target_temp_c: i16,
+    stage_timeout: Duration,
+    warmup_timeout: Duration,
+    hold_duration: Duration,
+    sample_interval: Duration,
+    control_target: ThermalCandidatePoint,
+    source_power_watts: u16,
+    use_point_local_profile: bool,
+    started: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+    next_tick: tokio::time::Instant,
+    hold_tracker: ThermalHoldTracker,
+    analyzer: ThermalStageAnalyzer,
+    approach_guard: ThermalApproachGuardTracker,
+    full_speed_tracker: ThermalFullSpeedStableTracker,
+    max_temp_c: f64,
+    stage_sample_count: usize,
+    recorded_samples: Vec<ThermalReplayStageSample>,
+    stop_reason: &'static str,
+    terminal_runtime_drop_reason: Option<&'static str>,
+    last_uptime_seconds: Option<u64>,
+    sample_rate_tracker: ThermalSampleRateTracker,
+    measurement_guard_tracker: ThermalMeasurementGuardTracker,
+    heater_output_seen: bool,
+    runtime_rearm_attempts_remaining: u8,
+    next_status: Option<Value>,
+}
+
+impl ThermalStageState {
+    fn new(
+        args: &ThermalSelfTestArgs,
+        target_temp_c: i16,
+        control_target: ThermalCandidatePoint,
+        source_power_watts: u16,
+        use_point_local_profile: bool,
+        initial_status: Option<Value>,
+    ) -> Self {
+        let started = tokio::time::Instant::now();
+        let stage_timeout = Duration::from_secs(args.stage_timeout_seconds.max(1));
+        Self {
+            target_temp_c,
+            stage_timeout,
+            warmup_timeout: Duration::from_secs(args.warmup_timeout_seconds.max(1)),
+            hold_duration: Duration::from_secs(args.hold_seconds.max(1)),
+            sample_interval: Duration::from_millis(effective_thermal_sample_interval_ms(
+                args.sample_interval_ms,
+            )),
+            control_target,
+            source_power_watts,
+            use_point_local_profile,
+            started,
+            deadline: started + stage_timeout,
+            next_tick: started,
+            hold_tracker: ThermalHoldTracker::new(
+                target_temp_c,
+                Duration::from_secs(args.hold_seconds.max(1)),
+            ),
+            analyzer: ThermalStageAnalyzer::new(target_temp_c),
+            approach_guard: ThermalApproachGuardTracker::new(
+                target_temp_c,
+                control_target.hold_entry_centi_c,
+            ),
+            full_speed_tracker: ThermalFullSpeedStableTracker::new(target_temp_c),
+            max_temp_c: f64::NEG_INFINITY,
+            stage_sample_count: 0,
+            recorded_samples: Vec::new(),
+            stop_reason: "timeout",
+            terminal_runtime_drop_reason: None,
+            last_uptime_seconds: None,
+            sample_rate_tracker: ThermalSampleRateTracker::new(),
+            measurement_guard_tracker: ThermalMeasurementGuardTracker::default(),
+            heater_output_seen: false,
+            runtime_rearm_attempts_remaining: args.runtime_rearm_attempts,
+            next_status: initial_status,
+        }
+    }
+}
+
 async fn run_thermal_stage(
     input: ThermalStageInput<'_>,
 ) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
@@ -3489,333 +4072,96 @@ async fn run_thermal_stage(
         sample_index,
         initial_status,
     } = input;
-    let mut started = tokio::time::Instant::now();
-    let stage_timeout = Duration::from_secs(args.stage_timeout_seconds.max(1));
-    let warmup_timeout = Duration::from_secs(args.warmup_timeout_seconds.max(1));
-    let mut deadline = started + stage_timeout;
-    let hold_duration = Duration::from_secs(args.hold_seconds.max(1));
-    let sample_interval = Duration::from_millis(effective_thermal_sample_interval_ms(
-        args.sample_interval_ms,
-    ));
     let control_target = thermal_candidate_point_from_heater_parameters(heater_parameters)?;
-    let mut next_tick = started;
-    let mut hold_tracker = ThermalHoldTracker::new(target_temp_c, hold_duration);
-    let mut analyzer = ThermalStageAnalyzer::new(target_temp_c);
-    let mut approach_guard =
-        ThermalApproachGuardTracker::new(target_temp_c, control_target.hold_entry_centi_c);
-    let mut full_speed_tracker = ThermalFullSpeedStableTracker::new(target_temp_c);
-    let mut max_temp_c = f64::NEG_INFINITY;
-    let mut stage_sample_count = 0usize;
-    let mut recorded_samples = Vec::<ThermalReplayStageSample>::new();
-    let mut stop_reason = "timeout";
-    let mut terminal_runtime_drop_reason = None::<&'static str>;
-    let mut last_uptime_seconds = None::<u64>;
-    let mut sample_rate_tracker = ThermalSampleRateTracker::new();
-    let mut measurement_guard_tracker = ThermalMeasurementGuardTracker::default();
-    let mut heater_output_seen = false;
-    let mut runtime_rearm_attempts_remaining = args.runtime_rearm_attempts;
-    let mut next_status = initial_status;
     let source_selection = resolve_thermal_source_selection(args)?;
     let use_point_local_profile =
         thermal_self_test_uses_point_local_profile(&source_selection, args.calibration_run);
     let source_power_watts = thermal_effective_source_power_watts(args, &source_selection);
+    let mut state = ThermalStageState::new(
+        args,
+        target_temp_c,
+        control_target,
+        source_power_watts,
+        use_point_local_profile,
+        initial_status,
+    );
 
-    loop {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            break;
-        }
-        let (source_telemetry, source_telemetry_stale_ms) = match source_sampler.snapshot() {
-            Ok(snapshot) => snapshot,
-            Err(error)
-                if runtime_rearm_attempts_remaining > 0
-                    && thermal_source_telemetry_stale_error(error.as_ref()) =>
-            {
-                runtime_rearm_attempts_remaining =
-                    runtime_rearm_attempts_remaining.saturating_sub(1);
-                let stale_ms = source_sampler.latest_stale_ms();
-                let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-                let status =
-                    arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c)
-                        .await?;
-                let sample = json!({
-                    "runId": run_id,
-                    "sampleIndex": *sample_index,
-                    "capturedAtUnixMs": current_unix_millis(),
-                    "elapsedMs": elapsed_ms,
-                    "testPhase": test_phase,
-                    "phase": "source_recovery",
-                    "targetTempC": target_temp_c,
-                    "source": {
-                        "mode": args.source_mode,
-                        "capabilityPowerWatts": source_power_watts,
-                        "requestedVoltageMv": (args.source_mode == "manual-forced").then_some(source_voltage_mv),
-                        "requestedCurrentLimitMa": (args.source_mode == "manual-forced").then_some(source_current_ma),
-                    },
-                    "sourceTelemetry": source_sampler.latest().to_value(),
-                    "sourceTelemetryStaleMs": stale_ms,
-                    "sourceRecovery": {
-                        "reason": "source_telemetry_stale",
-                        "error": error.to_string(),
-                        "runtimeRearmAttemptsRemaining": runtime_rearm_attempts_remaining,
-                    },
-                    "heaterTelemetry": heater_telemetry_value(&status)?,
-                    "heaterParameters": heater_parameters,
-                    "status": status,
-                });
-                writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
-                samples_writer.flush()?;
-                *sample_index = sample_index.saturating_add(1);
-                stage_sample_count = stage_sample_count.saturating_add(1);
+    run_thermal_stage_loop(ThermalStageLoopInput {
+        client,
+        resolved,
+        lease_id,
+        samples_writer,
+        run_id,
+        test_phase,
+        target_temp_c,
+        source_voltage_mv,
+        source_current_ma,
+        heater_parameters,
+        runtime_profile,
+        args,
+        source_sampler,
+        sample_index,
+        state: &mut state,
+    })
+    .await?;
+    complete_thermal_stage(ThermalStageCompletionInput {
+        client,
+        resolved,
+        lease_id,
+        target_temp_c,
+        started: state.started,
+        hold_tracker: &state.hold_tracker,
+        full_speed_tracker: &mut state.full_speed_tracker,
+        max_temp_c: state.max_temp_c,
+        recorded_samples: &state.recorded_samples,
+        stage_sample_count: state.stage_sample_count,
+        stop_reason: state.stop_reason,
+        terminal_runtime_drop_reason: state.terminal_runtime_drop_reason,
+        analyzer: &state.analyzer,
+        approach_guard: &mut state.approach_guard,
+    })
+    .await
+}
 
-                let recovered = recover_thermal_bench_source_after_stale(
-                    args.source_kind,
-                    &args.source_url,
-                    &args.source_id,
-                    args.profile_mode,
-                    source_power_watts,
-                )
-                .await?;
-                *source_sampler =
-                    BenchSourceTelemetrySampler::new(args.source_kind, &args.source_url, recovered);
-                let next_arm_status =
-                    preview_prepare_and_arm_thermal_self_test_target(ThermalPreviewTargetInput {
-                        client,
-                        resolved,
-                        lease_id,
-                        profile_mode: args.profile_mode,
-                        profile: runtime_profile,
-                        target_temp_c,
-                        heater_parameters,
-                        use_legacy_profile: use_point_local_profile,
-                    })
-                    .await?;
-                next_status = Some(next_arm_status);
-                started = tokio::time::Instant::now();
-                deadline = started + stage_timeout;
-                next_tick = started;
-                hold_tracker = ThermalHoldTracker::new(target_temp_c, hold_duration);
-                analyzer = ThermalStageAnalyzer::new(target_temp_c);
-                approach_guard = ThermalApproachGuardTracker::new(
-                    target_temp_c,
-                    control_target.hold_entry_centi_c,
-                );
-                full_speed_tracker = ThermalFullSpeedStableTracker::new(target_temp_c);
-                max_temp_c = f64::NEG_INFINITY;
-                recorded_samples.clear();
-                last_uptime_seconds = None;
-                sample_rate_tracker = ThermalSampleRateTracker::new();
-                measurement_guard_tracker = ThermalMeasurementGuardTracker::default();
-                heater_output_seen = false;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let status = if let Some(status) = next_status.take() {
-            status
-        } else {
-            match request_thermal_status_with_retry(client, resolved, lease_id).await {
-                Ok(status) => status,
-                Err(_) => {
-                    stop_reason = "status_request_failed";
-                    break;
-                }
-            }
-        };
-        let runtime_drop_reason =
-            thermal_runtime_drop_reason(&status, target_temp_c, last_uptime_seconds);
-        if let Some(reason) = runtime_drop_reason {
-            let recoverable_sensor_fault =
-                runtime_rearm_attempts_remaining > 0 && thermal_recoverable_sensor_fault(&status);
-            let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-            let sample = json!({
-                "runId": run_id,
-                "sampleIndex": *sample_index,
-                "capturedAtUnixMs": current_unix_millis(),
-                "elapsedMs": elapsed_ms,
-                "testPhase": test_phase,
-                "phase": "runtime_rearm",
-                "targetTempC": target_temp_c,
-                "source": {
-                    "mode": args.source_mode,
-                    "capabilityPowerWatts": source_power_watts,
-                    "requestedVoltageMv": (args.source_mode == "manual-forced").then_some(source_voltage_mv),
-                    "requestedCurrentLimitMa": (args.source_mode == "manual-forced").then_some(source_current_ma),
-                },
-                "sourceTelemetry": source_telemetry.to_value(),
-                "sourceTelemetryStaleMs": source_telemetry_stale_ms,
-                "heaterTelemetry": heater_telemetry_value(&status)?,
-                "heaterParameters": heater_parameters,
-                "runtimeDropReason": reason.as_str(),
-                "runtimeRearmAttemptsRemaining": runtime_rearm_attempts_remaining,
-                "status": status,
-            });
-            writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
-            samples_writer.flush()?;
-            *sample_index = sample_index.saturating_add(1);
-            stage_sample_count = stage_sample_count.saturating_add(1);
-            if recoverable_sensor_fault {
-                runtime_rearm_attempts_remaining =
-                    runtime_rearm_attempts_remaining.saturating_sub(1);
-                next_status = Some(
-                    arm_thermal_self_test_heater(client, resolved, lease_id, true, target_temp_c)
-                        .await?,
-                );
-                started = tokio::time::Instant::now();
-                deadline = started + stage_timeout;
-                next_tick = started;
-                hold_tracker = ThermalHoldTracker::new(target_temp_c, hold_duration);
-                analyzer = ThermalStageAnalyzer::new(target_temp_c);
-                approach_guard = ThermalApproachGuardTracker::new(
-                    target_temp_c,
-                    control_target.hold_entry_centi_c,
-                );
-                full_speed_tracker = ThermalFullSpeedStableTracker::new(target_temp_c);
-                max_temp_c = f64::NEG_INFINITY;
-                recorded_samples.clear();
-                last_uptime_seconds = None;
-                sample_rate_tracker = ThermalSampleRateTracker::new();
-                measurement_guard_tracker = ThermalMeasurementGuardTracker::default();
-                heater_output_seen = false;
-                continue;
-            }
-            stop_reason = reason.as_str();
-            terminal_runtime_drop_reason = Some(reason.as_str());
-            break;
-        }
-        last_uptime_seconds = status.get("uptimeSeconds").and_then(Value::as_u64);
-        // Use the firmware's guarded control temperature for live gates and
-        // metrics. The raw human-facing temperature remains in `status` and
-        // is preserved in the recorded sample/report for diagnosis.
-        let current_temp_c = thermal_control_temperature_c(&status, None)?;
-        let heater_output_percent =
-            require_status_u64(&status, "heaterOutputPercent")?.min(u64::from(u8::MAX)) as u8;
-        heater_output_seen |= heater_output_percent > 0;
-        max_temp_c = max_temp_c.max(current_temp_c);
-        let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let sample_rate = sample_rate_tracker.observe(elapsed_ms);
-        let control_measurement_guarded = status
-            .get("heaterControlMeasurementGuarded")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let measurement_guard_violation =
-            measurement_guard_tracker.observe(control_measurement_guarded, elapsed_ms);
-        let control_phase = status.get("heaterControlPhase").and_then(Value::as_str);
-        let control_phase_in_hold = control_phase.is_some_and(|phase| phase == "hold");
-        analyzer.observe(
-            current_temp_c,
-            heater_output_percent,
-            elapsed_ms,
-            control_phase_in_hold,
-        );
-        let observation =
-            hold_tracker.observe(current_temp_c, elapsed_ms, now, control_phase_in_hold);
-        let mut phase = match observation {
-            ThermalHoldObservation::Warmup => "warmup",
-            ThermalHoldObservation::Hold | ThermalHoldObservation::Completed => {
-                if observation == ThermalHoldObservation::Completed {
-                    stop_reason = "completed";
-                }
-                "hold"
-            }
-        };
-        if let Some(control_phase) = control_phase {
-            phase = control_phase;
-        }
-        if stop_reason == "timeout" && sample_rate.violation {
-            stop_reason = "sample_rate_below_3hz";
-        }
-        if stop_reason == "timeout" && measurement_guard_violation {
-            stop_reason = "temperature_sample_glitch";
-        }
-        if stop_reason == "timeout"
-            && !heater_output_seen
-            && elapsed_ms >= THERMAL_HEATER_OUTPUT_START_TIMEOUT_MS
-            && current_temp_c < f64::from(target_temp_c) - 1.0
-        {
-            stop_reason = "heater_no_output";
-        }
-        let _guard_stop_reason = if stop_reason == "timeout" {
-            approach_guard.observe(current_temp_c, elapsed_ms, control_phase)
-        } else {
-            None
-        };
-        let full_speed_stop_reason = if stop_reason == "timeout" {
-            match full_speed_tracker.observe(current_temp_c, elapsed_ms, control_phase) {
-                ThermalFullSpeedStableObservation::Failed(reason) => Some(reason),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        if stop_reason == "timeout"
-            && full_speed_tracker.warmup_exited_at_ms.is_none()
-            && started.elapsed() >= warmup_timeout
-        {
-            stop_reason = "warmup_timeout";
-        }
-        if stop_reason == "timeout"
-            && args.evaluation_mode.enforces_stage_limits()
-            && let Some(reason) = full_speed_stop_reason
-        {
-            stop_reason = reason;
-        }
-        let sample = json!({
-            "runId": run_id,
-            "sampleIndex": *sample_index,
-            "capturedAtUnixMs": current_unix_millis(),
-            "elapsedMs": elapsed_ms,
-            "testPhase": test_phase,
-            "phase": phase,
-            "targetTempC": target_temp_c,
-            "source": {
-                "mode": args.source_mode,
-                "requestedVoltageMv": (args.source_mode == "manual-forced").then_some(source_voltage_mv),
-                "requestedCurrentLimitMa": (args.source_mode == "manual-forced").then_some(source_current_ma),
-            },
-            "sourceTelemetry": source_telemetry.to_value(),
-            "sourceTelemetryStaleMs": source_telemetry_stale_ms,
-            "heaterTelemetry": heater_telemetry_value(&status)?,
-            "heaterParameters": heater_parameters,
-            "sampling": {
-                "intervalMs": sample_rate.interval_ms,
-                "rollingRateHz": sample_rate.rolling_rate_hz,
-                "minimumRateHz": THERMAL_MIN_SAMPLE_RATE_HZ,
-                "windowMs": THERMAL_SAMPLE_RATE_WINDOW_MS,
-                "rateViolation": sample_rate.violation,
-                "controlMeasurementGuarded": control_measurement_guarded,
-                "measurementGuardGraceMs": THERMAL_MEASUREMENT_GUARD_FAILURE_GRACE_MS,
-                "measurementGuardViolation": measurement_guard_violation,
-            },
-            "status": status,
-        });
-        writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
-        samples_writer.flush()?;
-        recorded_samples.push(ThermalReplayStageSample {
-            elapsed_ms,
-            current_temp_c,
-            heater_output_percent,
-            control_phase: control_phase.map(ToOwned::to_owned),
-            control_phase_in_hold,
-            source_voltage_mv: Some(source_telemetry.voltage_mv),
-            source_current_ma: Some(source_telemetry.current_ma),
-            source_power_mw: Some(source_telemetry.power_mw),
-        });
-        *sample_index = sample_index.saturating_add(1);
-        stage_sample_count = stage_sample_count.saturating_add(1);
-        // Every non-timeout reason is terminal. fullSpeedToStable uses the current
-        // 5A target-temperature budget: <=150C has 10s, >150C has 5s.
-        if stop_reason != "timeout" {
-            break;
-        }
-        next_tick += sample_interval;
-        tokio::time::sleep_until(next_tick).await;
-    }
+struct ThermalStageCompletionInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease_id: &'a str,
+    target_temp_c: i16,
+    started: tokio::time::Instant,
+    hold_tracker: &'a ThermalHoldTracker,
+    full_speed_tracker: &'a mut ThermalFullSpeedStableTracker,
+    max_temp_c: f64,
+    recorded_samples: &'a [ThermalReplayStageSample],
+    stage_sample_count: usize,
+    stop_reason: &'static str,
+    terminal_runtime_drop_reason: Option<&'static str>,
+    analyzer: &'a ThermalStageAnalyzer,
+    approach_guard: &'a mut ThermalApproachGuardTracker,
+}
+
+async fn complete_thermal_stage(
+    input: ThermalStageCompletionInput<'_>,
+) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalStageCompletionInput {
+        client,
+        resolved,
+        lease_id,
+        target_temp_c,
+        started,
+        hold_tracker,
+        full_speed_tracker,
+        max_temp_c,
+        recorded_samples,
+        stage_sample_count,
+        stop_reason,
+        terminal_runtime_drop_reason,
+        analyzer,
+        approach_guard,
+    } = input;
     if stop_reason != "completed" {
-        let _ =
-            arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c).await?;
+        arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c).await?;
     }
-
     let guard = approach_guard.finalize();
     let full_speed_to_stable = full_speed_tracker.finalize();
     let mut analysis = if max_temp_c.is_finite() {
@@ -3823,8 +4169,7 @@ async fn run_thermal_stage(
     } else {
         ThermalStageAnalysis::default()
     };
-    thermal_stage_populate_approach_curve_analysis(&mut analysis, &recorded_samples, target_temp_c);
-
+    thermal_stage_populate_approach_curve_analysis(&mut analysis, recorded_samples, target_temp_c);
     Ok(ThermalStageResult {
         target_temp_c,
         rise_time_ms: hold_tracker
@@ -3839,6 +4184,772 @@ async fn run_thermal_stage(
         guard,
         full_speed_to_stable,
     })
+}
+
+struct ThermalStageLoopInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease_id: &'a str,
+    samples_writer: &'a mut BufWriter<File>,
+    run_id: &'a str,
+    test_phase: &'a str,
+    target_temp_c: i16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    heater_parameters: &'a Value,
+    runtime_profile: &'a Value,
+    args: &'a ThermalSelfTestArgs,
+    source_sampler: &'a mut BenchSourceTelemetrySampler,
+    sample_index: &'a mut usize,
+    state: &'a mut ThermalStageState,
+}
+
+async fn run_thermal_stage_loop(
+    input: ThermalStageLoopInput<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut input = input;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= input.state.deadline {
+            break;
+        }
+        if !thermal_stage_iteration(&mut input, now).await? {
+            break;
+        }
+        input.state.next_tick += input.state.sample_interval;
+        tokio::time::sleep_until(input.state.next_tick).await;
+    }
+    Ok(())
+}
+
+async fn thermal_stage_iteration(
+    input: &mut ThermalStageLoopInput<'_>,
+    now: tokio::time::Instant,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let state = &mut *input.state;
+    let (source_telemetry, source_telemetry_stale_ms) = match input.source_sampler.snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error)
+            if state.runtime_rearm_attempts_remaining > 0
+                && thermal_source_telemetry_stale_error(error.as_ref()) =>
+        {
+            recover_thermal_stage_iteration_source(input, error).await?;
+            return Ok(true);
+        }
+        Err(error) => return Err(error),
+    };
+    let status = match state.next_status.take() {
+        Some(status) => status,
+        None => match request_thermal_status_with_retry(input.client, input.resolved, input.lease_id).await {
+            Ok(status) => status,
+            Err(_) => {
+                state.stop_reason = "status_request_failed";
+                return Ok(false);
+            }
+        },
+    };
+    if let Some(reason) =
+        thermal_runtime_drop_reason(&status, input.target_temp_c, state.last_uptime_seconds)
+    {
+        if let Some(rearmed_status) = handle_thermal_runtime_drop(ThermalRuntimeDropInput {
+            client: input.client,
+            resolved: input.resolved,
+            lease_id: input.lease_id,
+            run_id: input.run_id,
+            test_phase: input.test_phase,
+            target_temp_c: input.target_temp_c,
+            source_voltage_mv: input.source_voltage_mv,
+            source_current_ma: input.source_current_ma,
+            heater_parameters: input.heater_parameters,
+            args: input.args,
+            source_telemetry: &source_telemetry,
+            source_telemetry_stale_ms,
+            source_power_watts: state.source_power_watts,
+            samples_writer: input.samples_writer,
+            sample_index: input.sample_index,
+            stage_sample_count: &mut state.stage_sample_count,
+            runtime_rearm_attempts_remaining: &mut state.runtime_rearm_attempts_remaining,
+            reason,
+            status: &status,
+            started: state.started,
+        })
+        .await?
+        {
+            state.next_status = Some(rearmed_status);
+            reset_thermal_stage_after_rearm(state);
+            return Ok(true);
+        }
+        state.stop_reason = reason.as_str();
+        state.terminal_runtime_drop_reason = Some(reason.as_str());
+        return Ok(false);
+    }
+    state.last_uptime_seconds = status.get("uptimeSeconds").and_then(Value::as_u64);
+    record_thermal_stage_observation(ThermalStageObservationInput {
+        status: &status,
+        source_telemetry: &source_telemetry,
+        source_telemetry_stale_ms,
+        run_id: input.run_id,
+        test_phase: input.test_phase,
+        target_temp_c: input.target_temp_c,
+        source_voltage_mv: input.source_voltage_mv,
+        source_current_ma: input.source_current_ma,
+        heater_parameters: input.heater_parameters,
+        args: input.args,
+        started: state.started,
+        now,
+        warmup_timeout: state.warmup_timeout,
+        sample_index: input.sample_index,
+        stage_sample_count: &mut state.stage_sample_count,
+        recorded_samples: &mut state.recorded_samples,
+        stop_reason: &mut state.stop_reason,
+        max_temp_c: &mut state.max_temp_c,
+        heater_output_seen: &mut state.heater_output_seen,
+        sample_rate_tracker: &mut state.sample_rate_tracker,
+        measurement_guard_tracker: &mut state.measurement_guard_tracker,
+        analyzer: &mut state.analyzer,
+        hold_tracker: &mut state.hold_tracker,
+        approach_guard: &mut state.approach_guard,
+        full_speed_tracker: &mut state.full_speed_tracker,
+        samples_writer: input.samples_writer,
+    })?;
+    Ok(state.stop_reason == "timeout")
+}
+
+async fn recover_thermal_stage_iteration_source(
+    input: &mut ThermalStageLoopInput<'_>,
+    error: Box<dyn std::error::Error + Send + Sync>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let state = &mut *input.state;
+    let next_status = recover_thermal_stage_source(ThermalStageSourceRecoveryInput {
+        client: input.client,
+        resolved: input.resolved,
+        lease_id: input.lease_id,
+        run_id: input.run_id,
+        test_phase: input.test_phase,
+        target_temp_c: input.target_temp_c,
+        source_voltage_mv: input.source_voltage_mv,
+        source_current_ma: input.source_current_ma,
+        heater_parameters: input.heater_parameters,
+        runtime_profile: input.runtime_profile,
+        args: input.args,
+        source_sampler: input.source_sampler,
+        samples_writer: input.samples_writer,
+        sample_index: input.sample_index,
+        stage_sample_count: &mut state.stage_sample_count,
+        runtime_rearm_attempts_remaining: &mut state.runtime_rearm_attempts_remaining,
+        source_power_watts: state.source_power_watts,
+        use_point_local_profile: state.use_point_local_profile,
+        error,
+        started: state.started,
+    })
+    .await?;
+    state.next_status = Some(next_status);
+    reset_thermal_stage_after_rearm(state);
+    Ok(())
+}
+
+fn reset_thermal_stage_after_rearm(state: &mut ThermalStageState) {
+    state.started = tokio::time::Instant::now();
+    state.deadline = state.started + state.stage_timeout;
+    state.next_tick = state.started;
+    state.hold_tracker = ThermalHoldTracker::new(state.target_temp_c, state.hold_duration);
+    state.analyzer = ThermalStageAnalyzer::new(state.target_temp_c);
+    state.approach_guard = ThermalApproachGuardTracker::new(
+        state.target_temp_c,
+        state.control_target.hold_entry_centi_c,
+    );
+    state.full_speed_tracker = ThermalFullSpeedStableTracker::new(state.target_temp_c);
+    state.max_temp_c = f64::NEG_INFINITY;
+    state.recorded_samples.clear();
+    state.last_uptime_seconds = None;
+    state.sample_rate_tracker = ThermalSampleRateTracker::new();
+    state.measurement_guard_tracker = ThermalMeasurementGuardTracker::default();
+    state.heater_output_seen = false;
+}
+
+struct ThermalStageSourceRecoveryInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease_id: &'a str,
+    run_id: &'a str,
+    test_phase: &'a str,
+    target_temp_c: i16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    heater_parameters: &'a Value,
+    runtime_profile: &'a Value,
+    args: &'a ThermalSelfTestArgs,
+    source_sampler: &'a mut BenchSourceTelemetrySampler,
+    samples_writer: &'a mut BufWriter<File>,
+    sample_index: &'a mut usize,
+    stage_sample_count: &'a mut usize,
+    runtime_rearm_attempts_remaining: &'a mut u8,
+    source_power_watts: u16,
+    use_point_local_profile: bool,
+    error: Box<dyn std::error::Error + Send + Sync>,
+    started: tokio::time::Instant,
+}
+
+async fn recover_thermal_stage_source(
+    input: ThermalStageSourceRecoveryInput<'_>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalStageSourceRecoveryInput {
+        client,
+        resolved,
+        lease_id,
+        run_id,
+        test_phase,
+        target_temp_c,
+        source_voltage_mv,
+        source_current_ma,
+        heater_parameters,
+        runtime_profile,
+        args,
+        source_sampler,
+        samples_writer,
+        sample_index,
+        stage_sample_count,
+        runtime_rearm_attempts_remaining,
+        source_power_watts,
+        use_point_local_profile,
+        error,
+        started,
+    } = input;
+    *runtime_rearm_attempts_remaining = runtime_rearm_attempts_remaining.saturating_sub(1);
+    let stale_ms = source_sampler.latest_stale_ms();
+    let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let status =
+        arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c).await?;
+    let sample = json!({
+        "runId": run_id,
+        "sampleIndex": *sample_index,
+        "capturedAtUnixMs": current_unix_millis(),
+        "elapsedMs": elapsed_ms,
+        "testPhase": test_phase,
+        "phase": "source_recovery",
+        "targetTempC": target_temp_c,
+        "source": {
+            "mode": args.source_mode,
+            "capabilityPowerWatts": source_power_watts,
+            "requestedVoltageMv": (args.source_mode == "manual-forced").then_some(source_voltage_mv),
+            "requestedCurrentLimitMa": (args.source_mode == "manual-forced").then_some(source_current_ma),
+        },
+        "sourceTelemetry": source_sampler.latest().to_value(),
+        "sourceTelemetryStaleMs": stale_ms,
+        "sourceRecovery": {
+            "reason": "source_telemetry_stale",
+            "error": error.to_string(),
+            "runtimeRearmAttemptsRemaining": *runtime_rearm_attempts_remaining,
+        },
+        "heaterTelemetry": heater_telemetry_value(&status)?,
+        "heaterParameters": heater_parameters,
+        "status": status,
+    });
+    writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+    samples_writer.flush()?;
+    *sample_index = sample_index.saturating_add(1);
+    *stage_sample_count = stage_sample_count.saturating_add(1);
+    let recovered = recover_thermal_bench_source_after_stale(
+        args.source_kind,
+        &args.source_url,
+        &args.source_id,
+        args.profile_mode,
+        source_power_watts,
+    )
+    .await?;
+    *source_sampler =
+        BenchSourceTelemetrySampler::new(args.source_kind, &args.source_url, recovered);
+    preview_prepare_and_arm_thermal_self_test_target(ThermalPreviewTargetInput {
+        client,
+        resolved,
+        lease_id,
+        profile_mode: args.profile_mode,
+        profile: runtime_profile,
+        target_temp_c,
+        heater_parameters,
+        use_legacy_profile: use_point_local_profile,
+    })
+    .await
+}
+
+struct ThermalRuntimeDropInput<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease_id: &'a str,
+    run_id: &'a str,
+    test_phase: &'a str,
+    target_temp_c: i16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    heater_parameters: &'a Value,
+    args: &'a ThermalSelfTestArgs,
+    source_telemetry: &'a BenchSourceLiveTelemetry,
+    source_telemetry_stale_ms: u64,
+    source_power_watts: u16,
+    samples_writer: &'a mut BufWriter<File>,
+    sample_index: &'a mut usize,
+    stage_sample_count: &'a mut usize,
+    runtime_rearm_attempts_remaining: &'a mut u8,
+    reason: ThermalRuntimeDropReason,
+    status: &'a Value,
+    started: tokio::time::Instant,
+}
+
+async fn handle_thermal_runtime_drop(
+    input: ThermalRuntimeDropInput<'_>,
+) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalRuntimeDropInput {
+        client,
+        resolved,
+        lease_id,
+        run_id,
+        test_phase,
+        target_temp_c,
+        source_voltage_mv,
+        source_current_ma,
+        heater_parameters,
+        args,
+        source_telemetry,
+        source_telemetry_stale_ms,
+        source_power_watts,
+        samples_writer,
+        sample_index,
+        stage_sample_count,
+        runtime_rearm_attempts_remaining,
+        reason,
+        status,
+        started,
+    } = input;
+    let recoverable =
+        *runtime_rearm_attempts_remaining > 0 && thermal_recoverable_sensor_fault(status);
+    let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let sample = json!({
+        "runId": run_id,
+        "sampleIndex": *sample_index,
+        "capturedAtUnixMs": current_unix_millis(),
+        "elapsedMs": elapsed_ms,
+        "testPhase": test_phase,
+        "phase": "runtime_rearm",
+        "targetTempC": target_temp_c,
+        "source": {
+            "mode": args.source_mode,
+            "capabilityPowerWatts": source_power_watts,
+            "requestedVoltageMv": (args.source_mode == "manual-forced").then_some(source_voltage_mv),
+            "requestedCurrentLimitMa": (args.source_mode == "manual-forced").then_some(source_current_ma),
+        },
+        "sourceTelemetry": source_telemetry.to_value(),
+        "sourceTelemetryStaleMs": source_telemetry_stale_ms,
+        "heaterTelemetry": heater_telemetry_value(status)?,
+        "heaterParameters": heater_parameters,
+        "runtimeDropReason": reason.as_str(),
+        "runtimeRearmAttemptsRemaining": *runtime_rearm_attempts_remaining,
+        "status": status,
+    });
+    writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+    samples_writer.flush()?;
+    *sample_index = sample_index.saturating_add(1);
+    *stage_sample_count = stage_sample_count.saturating_add(1);
+    if !recoverable {
+        return Ok(None);
+    }
+    *runtime_rearm_attempts_remaining = runtime_rearm_attempts_remaining.saturating_sub(1);
+    Ok(Some(
+        arm_thermal_self_test_heater(client, resolved, lease_id, true, target_temp_c).await?,
+    ))
+}
+
+struct ThermalStageObservationInput<'a> {
+    status: &'a Value,
+    source_telemetry: &'a BenchSourceLiveTelemetry,
+    source_telemetry_stale_ms: u64,
+    run_id: &'a str,
+    test_phase: &'a str,
+    target_temp_c: i16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    heater_parameters: &'a Value,
+    args: &'a ThermalSelfTestArgs,
+    started: tokio::time::Instant,
+    now: tokio::time::Instant,
+    warmup_timeout: Duration,
+    sample_index: &'a mut usize,
+    stage_sample_count: &'a mut usize,
+    recorded_samples: &'a mut Vec<ThermalReplayStageSample>,
+    stop_reason: &'a mut &'static str,
+    max_temp_c: &'a mut f64,
+    heater_output_seen: &'a mut bool,
+    sample_rate_tracker: &'a mut ThermalSampleRateTracker,
+    measurement_guard_tracker: &'a mut ThermalMeasurementGuardTracker,
+    analyzer: &'a mut ThermalStageAnalyzer,
+    hold_tracker: &'a mut ThermalHoldTracker,
+    approach_guard: &'a mut ThermalApproachGuardTracker,
+    full_speed_tracker: &'a mut ThermalFullSpeedStableTracker,
+    samples_writer: &'a mut BufWriter<File>,
+}
+
+struct ThermalStageMeasurement<'a> {
+    current_temp_c: f64,
+    heater_output_percent: u8,
+    elapsed_ms: u64,
+    sample_rate: ThermalSampleRateObservation,
+    control_measurement_guarded: bool,
+    measurement_guard_violation: bool,
+    control_phase: Option<&'a str>,
+    control_phase_in_hold: bool,
+    phase: &'a str,
+}
+
+struct ThermalStageMeasurementInput<'a> {
+    status: &'a Value,
+    target_temp_c: i16,
+    started: tokio::time::Instant,
+    now: tokio::time::Instant,
+    warmup_timeout: Duration,
+    heater_output_seen: &'a mut bool,
+    max_temp_c: &'a mut f64,
+    sample_rate_tracker: &'a mut ThermalSampleRateTracker,
+    measurement_guard_tracker: &'a mut ThermalMeasurementGuardTracker,
+    analyzer: &'a mut ThermalStageAnalyzer,
+    hold_tracker: &'a mut ThermalHoldTracker,
+    stop_reason: &'a mut &'static str,
+    approach_guard: &'a mut ThermalApproachGuardTracker,
+    full_speed_tracker: &'a mut ThermalFullSpeedStableTracker,
+    enforce_stage_limits: bool,
+}
+
+fn measure_thermal_stage(input: ThermalStageMeasurementInput<'_>) -> Result<ThermalStageMeasurement<'_>, Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalStageMeasurementInput {
+        status,
+        target_temp_c,
+        started,
+        now,
+        warmup_timeout,
+        heater_output_seen,
+        max_temp_c,
+        sample_rate_tracker,
+        measurement_guard_tracker,
+        analyzer,
+        hold_tracker,
+        stop_reason,
+        approach_guard,
+        full_speed_tracker,
+        enforce_stage_limits,
+    } = input;
+    let current_temp_c = thermal_control_temperature_c(status, None)?;
+    let heater_output_percent =
+        require_status_u64(status, "heaterOutputPercent")?.min(u64::from(u8::MAX)) as u8;
+    *heater_output_seen |= heater_output_percent > 0;
+    *max_temp_c = max_temp_c.max(current_temp_c);
+    let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let sample_rate = sample_rate_tracker.observe(elapsed_ms);
+    let control_measurement_guarded = status
+        .get("heaterControlMeasurementGuarded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let measurement_guard_violation =
+        measurement_guard_tracker.observe(control_measurement_guarded, elapsed_ms);
+    let control_phase = status.get("heaterControlPhase").and_then(Value::as_str);
+    let control_phase_in_hold = control_phase.is_some_and(|phase| phase == "hold");
+    analyzer.observe(
+        current_temp_c,
+        heater_output_percent,
+        elapsed_ms,
+        control_phase_in_hold,
+    );
+    let observation = hold_tracker.observe(current_temp_c, elapsed_ms, now, control_phase_in_hold);
+    let mut phase = match observation {
+        ThermalHoldObservation::Warmup => "warmup",
+        ThermalHoldObservation::Hold | ThermalHoldObservation::Completed => {
+            if observation == ThermalHoldObservation::Completed {
+                *stop_reason = "completed";
+            }
+            "hold"
+        }
+    };
+    if let Some(control_phase) = control_phase {
+        phase = control_phase;
+    }
+    update_thermal_stage_stop_reason(ThermalStageStopInput {
+        stop_reason,
+        sample_rate_violation: sample_rate.violation,
+        measurement_guard_violation,
+        heater_output_seen: *heater_output_seen,
+        elapsed_ms,
+        current_temp_c,
+        target_temp_c,
+        approach_guard,
+        full_speed_tracker,
+        control_phase,
+        started,
+        warmup_timeout,
+        enforce_stage_limits,
+    });
+    Ok(ThermalStageMeasurement {
+        current_temp_c,
+        heater_output_percent,
+        elapsed_ms,
+        sample_rate,
+        control_measurement_guarded,
+        measurement_guard_violation,
+        control_phase,
+        control_phase_in_hold,
+        phase,
+    })
+}
+
+fn record_thermal_stage_observation(
+    input: ThermalStageObservationInput<'_>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ThermalStageObservationInput {
+        status,
+        source_telemetry,
+        source_telemetry_stale_ms,
+        run_id,
+        test_phase,
+        target_temp_c,
+        source_voltage_mv,
+        source_current_ma,
+        heater_parameters,
+        args,
+        started,
+        now,
+        warmup_timeout,
+        sample_index,
+        stage_sample_count,
+        recorded_samples,
+        stop_reason,
+        max_temp_c,
+        heater_output_seen,
+        sample_rate_tracker,
+        measurement_guard_tracker,
+        analyzer,
+        hold_tracker,
+        approach_guard,
+        full_speed_tracker,
+        samples_writer,
+    } = input;
+    let measurement = measure_thermal_stage(ThermalStageMeasurementInput {
+        status,
+        target_temp_c,
+        started,
+        now,
+        warmup_timeout,
+        heater_output_seen,
+        max_temp_c,
+        sample_rate_tracker,
+        measurement_guard_tracker,
+        analyzer,
+        hold_tracker,
+        stop_reason,
+        approach_guard,
+        full_speed_tracker,
+        enforce_stage_limits: args.evaluation_mode.enforces_stage_limits(),
+    })?;
+    let ThermalStageMeasurement {
+        current_temp_c,
+        heater_output_percent,
+        elapsed_ms,
+        sample_rate,
+        control_measurement_guarded,
+        measurement_guard_violation,
+        control_phase,
+        control_phase_in_hold,
+        phase,
+    } = measurement;
+    let sample = live_thermal_stage_sample(LiveThermalStageSampleInput {
+        run_id,
+        test_phase,
+        target_temp_c,
+        source_voltage_mv,
+        source_current_ma,
+        heater_parameters,
+        args,
+        source_telemetry,
+        source_telemetry_stale_ms,
+        status,
+        sample_index: *sample_index,
+        phase,
+        elapsed_ms,
+        sample_rate,
+        control_measurement_guarded,
+        measurement_guard_violation,
+    })?;
+    let replay_sample = ThermalReplayStageSample {
+        elapsed_ms,
+        current_temp_c,
+        heater_output_percent,
+        control_phase: control_phase.map(ToOwned::to_owned),
+        control_phase_in_hold,
+        source_voltage_mv: Some(source_telemetry.voltage_mv),
+        source_current_ma: Some(source_telemetry.current_ma),
+        source_power_mw: Some(source_telemetry.power_mw),
+    };
+    append_thermal_stage_sample(
+        samples_writer,
+        sample,
+        recorded_samples,
+        replay_sample,
+        sample_index,
+        stage_sample_count,
+    )?;
+    Ok(())
+}
+
+fn append_thermal_stage_sample(
+    samples_writer: &mut BufWriter<File>,
+    sample: Value,
+    recorded_samples: &mut Vec<ThermalReplayStageSample>,
+    replay_sample: ThermalReplayStageSample,
+    sample_index: &mut usize,
+    stage_sample_count: &mut usize,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+    samples_writer.flush()?;
+    recorded_samples.push(replay_sample);
+    *sample_index = sample_index.saturating_add(1);
+    *stage_sample_count = stage_sample_count.saturating_add(1);
+    Ok(())
+}
+
+struct ThermalStageStopInput<'a> {
+    stop_reason: &'a mut &'static str,
+    sample_rate_violation: bool,
+    measurement_guard_violation: bool,
+    heater_output_seen: bool,
+    elapsed_ms: u64,
+    current_temp_c: f64,
+    target_temp_c: i16,
+    approach_guard: &'a mut ThermalApproachGuardTracker,
+    full_speed_tracker: &'a mut ThermalFullSpeedStableTracker,
+    control_phase: Option<&'a str>,
+    started: tokio::time::Instant,
+    warmup_timeout: Duration,
+    enforce_stage_limits: bool,
+}
+
+fn update_thermal_stage_stop_reason(input: ThermalStageStopInput<'_>) {
+    let ThermalStageStopInput {
+        stop_reason,
+        sample_rate_violation,
+        measurement_guard_violation,
+        heater_output_seen,
+        elapsed_ms,
+        current_temp_c,
+        target_temp_c,
+        approach_guard,
+        full_speed_tracker,
+        control_phase,
+        started,
+        warmup_timeout,
+        enforce_stage_limits,
+    } = input;
+    if *stop_reason == "timeout" && sample_rate_violation {
+        *stop_reason = "sample_rate_below_3hz";
+    }
+    if *stop_reason == "timeout" && measurement_guard_violation {
+        *stop_reason = "temperature_sample_glitch";
+    }
+    if *stop_reason == "timeout"
+        && !heater_output_seen
+        && elapsed_ms >= THERMAL_HEATER_OUTPUT_START_TIMEOUT_MS
+        && current_temp_c < f64::from(target_temp_c) - 1.0
+    {
+        *stop_reason = "heater_no_output";
+    }
+    if *stop_reason == "timeout" {
+        approach_guard.observe(current_temp_c, elapsed_ms, control_phase);
+    }
+    let full_speed_stop_reason = if *stop_reason == "timeout" {
+        match full_speed_tracker.observe(current_temp_c, elapsed_ms, control_phase) {
+            ThermalFullSpeedStableObservation::Failed(reason) => Some(reason),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if *stop_reason == "timeout"
+        && full_speed_tracker.warmup_exited_at_ms.is_none()
+        && started.elapsed() >= warmup_timeout
+    {
+        *stop_reason = "warmup_timeout";
+    }
+    if *stop_reason == "timeout"
+        && enforce_stage_limits
+        && let Some(reason) = full_speed_stop_reason
+    {
+        *stop_reason = reason;
+    }
+}
+
+struct LiveThermalStageSampleInput<'a> {
+    run_id: &'a str,
+    test_phase: &'a str,
+    target_temp_c: i16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    heater_parameters: &'a Value,
+    args: &'a ThermalSelfTestArgs,
+    source_telemetry: &'a BenchSourceLiveTelemetry,
+    source_telemetry_stale_ms: u64,
+    status: &'a Value,
+    sample_index: usize,
+    phase: &'a str,
+    elapsed_ms: u64,
+    sample_rate: ThermalSampleRateObservation,
+    control_measurement_guarded: bool,
+    measurement_guard_violation: bool,
+}
+
+fn live_thermal_stage_sample(
+    input: LiveThermalStageSampleInput<'_>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let LiveThermalStageSampleInput {
+        run_id,
+        test_phase,
+        target_temp_c,
+        source_voltage_mv,
+        source_current_ma,
+        heater_parameters,
+        args,
+        source_telemetry,
+        source_telemetry_stale_ms,
+        status,
+        sample_index,
+        phase,
+        elapsed_ms,
+        sample_rate,
+        control_measurement_guarded,
+        measurement_guard_violation,
+    } = input;
+    Ok(json!({
+        "runId": run_id,
+        "sampleIndex": sample_index,
+        "capturedAtUnixMs": current_unix_millis(),
+        "elapsedMs": elapsed_ms,
+        "testPhase": test_phase,
+        "phase": phase,
+        "targetTempC": target_temp_c,
+        "source": {
+            "mode": args.source_mode,
+            "requestedVoltageMv": (args.source_mode == "manual-forced").then_some(source_voltage_mv),
+            "requestedCurrentLimitMa": (args.source_mode == "manual-forced").then_some(source_current_ma),
+        },
+        "sourceTelemetry": source_telemetry.to_value(),
+        "sourceTelemetryStaleMs": source_telemetry_stale_ms,
+        "heaterTelemetry": heater_telemetry_value(status)?,
+        "heaterParameters": heater_parameters,
+        "sampling": {
+            "intervalMs": sample_rate.interval_ms,
+            "rollingRateHz": sample_rate.rolling_rate_hz,
+            "minimumRateHz": THERMAL_MIN_SAMPLE_RATE_HZ,
+            "windowMs": THERMAL_SAMPLE_RATE_WINDOW_MS,
+            "rateViolation": sample_rate.violation,
+            "controlMeasurementGuarded": control_measurement_guarded,
+            "measurementGuardGraceMs": THERMAL_MEASUREMENT_GUARD_FAILURE_GRACE_MS,
+            "measurementGuardViolation": measurement_guard_violation,
+        },
+        "status": status,
+    }))
 }
 
 async fn wait_for_cooldown(

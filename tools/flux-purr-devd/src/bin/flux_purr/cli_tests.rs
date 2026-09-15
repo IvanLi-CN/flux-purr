@@ -4424,16 +4424,93 @@ fn thermal_report_test_point(target_temp_c: i16) -> Value {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
 fn thermal_report_rerender_preliminary_bundle_writes_compliant_artifacts() {
+    let (_dir, legacy_dir, output_dir) =
+        thermal_report_rerender_preliminary_bundle_writes_compliant_artifacts_fixture();
+    let result = thermal_report::rerender_legacy_preliminary_review_bundle(
+        thermal_report::ThermalLegacyReportInput {
+            legacy_bundle_dir: legacy_dir.clone(),
+            output_dir: Some(output_dir.clone()),
+        },
+    )
+    .unwrap();
+    let bundle: Value =
+        serde_json::from_slice(&fs::read(output_dir.join("run.bundle.json")).unwrap()).unwrap();
+    let html = fs::read_to_string(output_dir.join("index.html")).unwrap();
+
+    assert_eq!(result["ok"], true);
+    assert_eq!(
+        result["operation"],
+        "thermal_report.rerender_legacy_preliminary_review_bundle"
+    );
+    assert_eq!(bundle["kind"], "thermal_self_test_preliminary_bundle");
+    assert_eq!(bundle["bundleDisposition"], "preliminary_review");
+    assert_eq!(bundle["acceptedProfileRole"], "review_candidate_snapshot");
+    assert_eq!(bundle["tuningTargetsC"], json!([60]));
+    assert_eq!(bundle["runs"][0]["target"], 60);
+    assert_eq!(
+        bundle["runs"][0]["pointSource"],
+        "review_candidate_snapshot"
+    );
+    assert_eq!(
+        bundle["runs"][0]["rounds"][0]["attemptType"],
+        "characterization"
+    );
+    assert!(html.contains("60°C"));
+    assert!(html.contains("preliminary review"));
+}
+
+fn thermal_report_rerender_preliminary_bundle_writes_compliant_artifacts_fixture()
+-> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let legacy_dir = dir.path().join("legacy");
     let output_dir = dir.path().join("rerendered");
     fs::create_dir_all(&legacy_dir).unwrap();
 
+    let legacy_bundle = thermal_report_preliminary_legacy_bundle();
+    fs::write(
+        legacy_dir.join("run.bundle.json"),
+        serde_json::to_vec_pretty(&legacy_bundle).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        legacy_dir.join("thermal-profile.accepted.json"),
+        serde_json::to_vec_pretty(&json!({
+            "points": [thermal_report_test_point(60)],
+            "settings": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        legacy_dir.join("samples.ndjson"),
+        format!(
+            "{}\n",
+            serde_json::to_string(&json!({
+                "targetTempC": 60,
+                "elapsedMs": 1000,
+                "status": {
+                    "currentTempC": 60.2,
+                    "heaterFilteredTempC": 60.1,
+                    "heaterOutputPercent": 18,
+                    "heaterPhysicalOutputPercent": 18,
+                    "pdRequestMv": 21000
+                },
+                "phase": "hold",
+                "sourceTelemetry": {
+                    "voltageMv": 21000,
+                    "currentMa": 300,
+                    "powerMw": 6300
+                }
+            }))
+            .unwrap()
+        ),
+    )
+    .unwrap();
+    (dir, legacy_dir, output_dir)
+}
+
+fn thermal_report_preliminary_legacy_bundle() -> Value {
     let legacy_bundle = json!({
         "kind": "thermal_approach_characterization",
         "runId": "legacy-run",
@@ -4494,85 +4571,54 @@ fn thermal_report_rerender_preliminary_bundle_writes_compliant_artifacts() {
             }
         ]
     });
-    fs::write(
-        legacy_dir.join("run.bundle.json"),
-        serde_json::to_vec_pretty(&legacy_bundle).unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        legacy_dir.join("thermal-profile.accepted.json"),
-        serde_json::to_vec_pretty(&json!({
-            "points": [thermal_report_test_point(60)],
-            "settings": {}
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        legacy_dir.join("samples.ndjson"),
-        format!(
-            "{}\n",
-            serde_json::to_string(&json!({
-                "targetTempC": 60,
-                "elapsedMs": 1000,
-                "status": {
-                    "currentTempC": 60.2,
-                    "heaterFilteredTempC": 60.1,
-                    "heaterOutputPercent": 18,
-                    "heaterPhysicalOutputPercent": 18,
-                    "pdRequestMv": 21000
-                },
-                "phase": "hold",
-                "sourceTelemetry": {
-                    "voltageMv": 21000,
-                    "currentMa": 300,
-                    "powerMw": 6300
-                }
-            }))
-            .unwrap()
-        ),
-    )
-    .unwrap();
+    legacy_bundle
+}
 
-    let result = thermal_report::rerender_legacy_preliminary_review_bundle(
+#[test]
+fn thermal_report_rerender_preserves_nine_point_pps5a_plant_evidence() {
+    let (_dir, legacy_dir, output_dir, targets) =
+        thermal_report_rerender_preserves_nine_point_pps5a_plant_evidence_fixture();
+    thermal_report::rerender_legacy_preliminary_review_bundle(
         thermal_report::ThermalLegacyReportInput {
-            legacy_bundle_dir: legacy_dir.clone(),
+            legacy_bundle_dir: legacy_dir,
             output_dir: Some(output_dir.clone()),
         },
     )
     .unwrap();
+
     let bundle: Value =
         serde_json::from_slice(&fs::read(output_dir.join("run.bundle.json")).unwrap()).unwrap();
+    let written_samples = fs::read_to_string(output_dir.join("samples.ndjson")).unwrap();
     let html = fs::read_to_string(output_dir.join("index.html")).unwrap();
 
-    assert_eq!(result["ok"], true);
+    assert_eq!(bundle["selectedMode"], "100w");
+    assert_eq!(bundle["resolvedBank"], "pps5a");
+    assert_eq!(bundle["detectedSourceClass"], "pps5a");
+    assert_eq!(bundle["sourceDeviceId"], "f293cc9c139e");
+    assert_eq!(bundle["tuningTargetsC"], json!(targets));
     assert_eq!(
-        result["operation"],
-        "thermal_report.rerender_legacy_preliminary_review_bundle"
+        bundle["reportRuns"].as_array().unwrap().len(),
+        targets.len()
     );
-    assert_eq!(bundle["kind"], "thermal_self_test_preliminary_bundle");
-    assert_eq!(bundle["bundleDisposition"], "preliminary_review");
-    assert_eq!(bundle["acceptedProfileRole"], "review_candidate_snapshot");
-    assert_eq!(bundle["tuningTargetsC"], json!([60]));
-    assert_eq!(bundle["runs"][0]["target"], 60);
-    assert_eq!(
-        bundle["runs"][0]["pointSource"],
-        "review_candidate_snapshot"
+    assert!(
+        bundle["reportRuns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["reviewPassed"] == Value::Bool(true))
     );
-    assert_eq!(
-        bundle["runs"][0]["rounds"][0]["attemptType"],
-        "characterization"
-    );
-    assert!(html.contains("60°C"));
-    assert!(html.contains("preliminary review"));
+    assert_eq!(written_samples.lines().count(), targets.len());
+    for target_temp_c in targets {
+        assert!(html.contains(&format!("{target_temp_c}°C")));
+    }
 }
 
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
-fn thermal_report_rerender_preserves_nine_point_pps5a_plant_evidence() {
+fn thermal_report_rerender_preserves_nine_point_pps5a_plant_evidence_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    [i16; 9],
+) {
     let dir = tempfile::tempdir().unwrap();
     let legacy_dir = dir.path().join("plant-hil");
     let output_dir = dir.path().join("plant-hil-rerendered");
@@ -4669,168 +4715,13 @@ fn thermal_report_rerender_preserves_nine_point_pps5a_plant_evidence() {
             + "\n",
     )
     .unwrap();
-
-    thermal_report::rerender_legacy_preliminary_review_bundle(
-        thermal_report::ThermalLegacyReportInput {
-            legacy_bundle_dir: legacy_dir,
-            output_dir: Some(output_dir.clone()),
-        },
-    )
-    .unwrap();
-
-    let bundle: Value =
-        serde_json::from_slice(&fs::read(output_dir.join("run.bundle.json")).unwrap()).unwrap();
-    let written_samples = fs::read_to_string(output_dir.join("samples.ndjson")).unwrap();
-    let html = fs::read_to_string(output_dir.join("index.html")).unwrap();
-
-    assert_eq!(bundle["selectedMode"], "100w");
-    assert_eq!(bundle["resolvedBank"], "pps5a");
-    assert_eq!(bundle["detectedSourceClass"], "pps5a");
-    assert_eq!(bundle["sourceDeviceId"], "f293cc9c139e");
-    assert_eq!(bundle["tuningTargetsC"], json!(targets));
-    assert_eq!(
-        bundle["reportRuns"].as_array().unwrap().len(),
-        targets.len()
-    );
-    assert!(
-        bundle["reportRuns"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|entry| entry["reviewPassed"] == Value::Bool(true))
-    );
-    assert_eq!(written_samples.lines().count(), targets.len());
-    for target_temp_c in targets {
-        assert!(html.contains(&format!("{target_temp_c}°C")));
-    }
+    (dir, legacy_dir, output_dir, targets)
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
 fn thermal_report_rerender_live_bundle_splits_time_reset_attempts() {
-    let dir = tempfile::tempdir().unwrap();
-    let legacy_dir = dir.path().join("legacy-live");
-    fs::create_dir_all(&legacy_dir).unwrap();
-
-    let legacy_bundle = json!({
-        "kind": "thermal_self_test_report_bundle",
-        "runId": "legacy-live-run",
-        "generatedAt": "2026-07-20T10:36:44.251Z",
-        "selectedMode": "100w",
-        "resolvedBank": "pps5a",
-        "detectedSourceClass": "pps5a",
-        "bundleDisposition": "latest_live_report",
-        "acceptedProfileRole": "review_candidate_snapshot",
-        "source": {
-            "deviceId": "f293cc9c139e"
-        },
-        "target": {
-            "deviceId": "serial-303a-1001-A0:F2:62:F2:0D:6C"
-        },
-        "parameters": {
-            "holdSeconds": 60
-        },
-        "sourceRuns": {
-            "60": "thermal-self-test-runs/source-run-summaries/60.run.json"
-        },
-        "candidateProfile": {
-            "settings": {},
-            "points": [thermal_report_test_point(60)]
-        },
-        "applied": [
-            {
-                "targetTempC": 60,
-                "stopReason": "completed",
-                "maxOvershootC": 0.75,
-                "holdPeakToPeakC": 1.71,
-                "analysis": {
-                    "holdMedianOutputPermille": 0,
-                    "holdP90OutputPermille": 100,
-                    "approachSource": {"powerMw": {"avg": 22425.0}},
-                    "holdSource": {"powerMw": {"avg": 3935.0}}
-                },
-                "fullSpeedToStable": {
-                    "limitMs": 10000,
-                    "settleTimeMs": 8200,
-                    "failureReason": Value::Null
-                },
-                "guard": {
-                    "firstHoldAtMs": 9100
-                }
-            }
-        ],
-        "validation": {
-            "passed": true,
-            "expectedTargetsC": [60],
-            "failures": []
-        }
-    });
-    fs::write(
-        legacy_dir.join("run.bundle.json"),
-        serde_json::to_vec_pretty(&legacy_bundle).unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        legacy_dir.join("thermal-profile.accepted.json"),
-        serde_json::to_vec_pretty(&json!({
-            "points": [thermal_report_test_point(60)],
-            "settings": {}
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let live_samples = [
-        json!({
-            "targetTempC": 60,
-            "elapsedMs": 5000,
-            "status": {
-                "currentTempC": 60.8,
-                "heaterFilteredTempC": 60.7,
-                "heaterOutputPercent": 16,
-                "heaterPhysicalOutputPercent": 16,
-                "pdRequestMv": 21000
-            },
-            "phase": "hold",
-            "heaterParameters": thermal_report_test_point(60),
-            "sourceTelemetry": {
-                "voltageMv": 21000,
-                "currentMa": 280,
-                "powerMw": 5880
-            }
-        }),
-        json!({
-            "targetTempC": 60,
-            "elapsedMs": 1000,
-            "status": {
-                "currentTempC": 60.2,
-                "heaterFilteredTempC": 60.1,
-                "heaterOutputPercent": 18,
-                "heaterPhysicalOutputPercent": 18,
-                "pdRequestMv": 21000
-            },
-            "phase": "hold",
-            "heaterParameters": thermal_report_test_point(60),
-            "sourceTelemetry": {
-                "voltageMv": 21000,
-                "currentMa": 300,
-                "powerMw": 6300
-            }
-        }),
-    ];
-    fs::write(
-        legacy_dir.join("samples.ndjson"),
-        live_samples
-            .iter()
-            .map(|sample| serde_json::to_string(sample).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n",
-    )
-    .unwrap();
-
+    let (dir, legacy_dir) =
+        thermal_report_rerender_live_bundle_splits_time_reset_attempts_fixture();
     let result = thermal_report::rerender_legacy_preliminary_review_bundle(
         thermal_report::ThermalLegacyReportInput {
             legacy_bundle_dir: legacy_dir.clone(),
@@ -5466,6 +5357,139 @@ async fn thermal_retune_apply_preview_requires_profile_to_cover_active_target() 
     );
 
     server.abort();
+}
+
+fn thermal_report_rerender_live_bundle_splits_time_reset_attempts_fixture()
+-> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy_dir = dir.path().join("legacy-live");
+    fs::create_dir_all(&legacy_dir).unwrap();
+
+    let legacy_bundle = thermal_report_live_legacy_bundle();
+    fs::write(
+        legacy_dir.join("run.bundle.json"),
+        serde_json::to_vec_pretty(&legacy_bundle).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        legacy_dir.join("thermal-profile.accepted.json"),
+        serde_json::to_vec_pretty(&json!({
+            "points": [thermal_report_test_point(60)],
+            "settings": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let live_samples = thermal_report_live_samples();
+    fs::write(
+        legacy_dir.join("samples.ndjson"),
+        live_samples
+            .iter()
+            .map(|sample| serde_json::to_string(sample).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    (dir, legacy_dir)
+}
+fn thermal_report_live_legacy_bundle() -> Value {
+    let legacy_bundle = json!({
+        "kind": "thermal_self_test_report_bundle",
+        "runId": "legacy-live-run",
+        "generatedAt": "2026-07-20T10:36:44.251Z",
+        "selectedMode": "100w",
+        "resolvedBank": "pps5a",
+        "detectedSourceClass": "pps5a",
+        "bundleDisposition": "latest_live_report",
+        "acceptedProfileRole": "review_candidate_snapshot",
+        "source": {
+            "deviceId": "f293cc9c139e"
+        },
+        "target": {
+            "deviceId": "serial-303a-1001-A0:F2:62:F2:0D:6C"
+        },
+        "parameters": {
+            "holdSeconds": 60
+        },
+        "sourceRuns": {
+            "60": "thermal-self-test-runs/source-run-summaries/60.run.json"
+        },
+        "candidateProfile": {
+            "settings": {},
+            "points": [thermal_report_test_point(60)]
+        },
+        "applied": [
+            {
+                "targetTempC": 60,
+                "stopReason": "completed",
+                "maxOvershootC": 0.75,
+                "holdPeakToPeakC": 1.71,
+                "analysis": {
+                    "holdMedianOutputPermille": 0,
+                    "holdP90OutputPermille": 100,
+                    "approachSource": {"powerMw": {"avg": 22425.0}},
+                    "holdSource": {"powerMw": {"avg": 3935.0}}
+                },
+                "fullSpeedToStable": {
+                    "limitMs": 10000,
+                    "settleTimeMs": 8200,
+                    "failureReason": Value::Null
+                },
+                "guard": {
+                    "firstHoldAtMs": 9100
+                }
+            }
+        ],
+        "validation": {
+            "passed": true,
+            "expectedTargetsC": [60],
+            "failures": []
+        }
+    });
+    legacy_bundle
+}
+
+fn thermal_report_live_samples() -> Vec<Value> {
+    let live_samples = [
+        json!({
+            "targetTempC": 60,
+            "elapsedMs": 5000,
+            "status": {
+                "currentTempC": 60.8,
+                "heaterFilteredTempC": 60.7,
+                "heaterOutputPercent": 16,
+                "heaterPhysicalOutputPercent": 16,
+                "pdRequestMv": 21000
+            },
+            "phase": "hold",
+            "heaterParameters": thermal_report_test_point(60),
+            "sourceTelemetry": {
+                "voltageMv": 21000,
+                "currentMa": 280,
+                "powerMw": 5880
+            }
+        }),
+        json!({
+            "targetTempC": 60,
+            "elapsedMs": 1000,
+            "status": {
+                "currentTempC": 60.2,
+                "heaterFilteredTempC": 60.1,
+                "heaterOutputPercent": 18,
+                "heaterPhysicalOutputPercent": 18,
+                "pdRequestMv": 21000
+            },
+            "phase": "hold",
+            "heaterParameters": thermal_report_test_point(60),
+            "sourceTelemetry": {
+                "voltageMv": 21000,
+                "currentMa": 300,
+                "powerMw": 6300
+            }
+        }),
+    ];
+    live_samples.to_vec()
 }
 #[test]
 fn cooldown_target_reached_allows_quantized_edge_without_hiding_real_overshoot() {

@@ -1,144 +1,109 @@
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
 async fn handle_calibration_command(
     client: &Client,
     default_devd: &str,
     command: CalibrationCommand,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     match command {
-        CalibrationCommand::Get(selector) => {
-            request_with_lease(
-                client,
-                resolve_target(selector, default_devd)?,
-                Method::GET,
-                "/calibration",
-                None,
-            )
-            .await
-        }
-        CalibrationCommand::Capture(args) => {
-            let mut body = serde_json::Map::new();
-            body.insert("op".to_string(), json!("capture"));
-            body.insert(
-                "channel".to_string(),
-                json!(parse_calibration_channel(&args.channel)?),
-            );
-            insert_if_some(&mut body, "referenceTempC", args.reference_temp_c);
-            insert_if_some(
-                &mut body,
-                "referenceVinMv",
-                parse_reference_vin_mv(args.reference_vin_mv, args.reference_vin_volts.as_deref())?,
-            );
-            insert_if_some(&mut body, "observedMv", args.observed_mv);
-            insert_if_some(&mut body, "expectedMv", args.expected_mv);
-            request_with_lease(
-                client,
-                resolve_target(args.target, default_devd)?,
-                Method::PUT,
-                "/calibration",
-                Some(Value::Object(body)),
-            )
-            .await
-        }
-        CalibrationCommand::Delete(args) => {
-            let body = json!({
-                "op": "delete",
-                "channel": parse_calibration_channel(&args.channel)?,
-                "sampleIndex": args.sample_index,
-            });
-            request_with_lease(
-                client,
-                resolve_target(args.target, default_devd)?,
-                Method::PUT,
-                "/calibration",
-                Some(body),
-            )
-            .await
-        }
-        CalibrationCommand::Clear(args) => {
-            let body = json!({
-                "op": "clear",
-                "channel": parse_calibration_channel(&args.channel)?,
-            });
-            request_with_lease(
-                client,
-                resolve_target(args.target, default_devd)?,
-                Method::PUT,
-                "/calibration",
-                Some(body),
-            )
-            .await
-        }
-        CalibrationCommand::SetSlotFit(args) => {
-            let body = calibration_set_slot_fit_body(
-                &args.channel,
-                &args.slot,
-                args.gain,
-                args.offset_mv,
-            )?;
-            request_with_lease(
-                client,
-                resolve_target(args.target, default_devd)?,
-                Method::PUT,
-                "/calibration",
-                Some(body),
-            )
-            .await
-        }
-        CalibrationCommand::SetActiveSlot(args) => {
-            let body = calibration_set_active_slot_body(&args.channel, &args.slot)?;
-            request_with_lease(
-                client,
-                resolve_target(args.target, default_devd)?,
-                Method::PUT,
-                "/calibration",
-                Some(body),
-            )
-            .await
-        }
-        CalibrationCommand::Import(args) => {
-            let imported: Value = serde_json::from_slice(&fs::read(&args.file)?)?;
-            let body = json!({
-                "op": "import",
-                "state": imported,
-            });
-            request_with_lease(
-                client,
-                resolve_target(args.target, default_devd)?,
-                Method::PUT,
-                "/calibration",
-                Some(body),
-            )
-            .await
-        }
-        CalibrationCommand::Export(args) => {
-            let payload = request_with_lease(
-                client,
-                resolve_target(args.target, default_devd)?,
-                Method::GET,
-                "/calibration",
-                None,
-            )
-            .await?;
-            if let Some(parent) = args
-                .file
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-            {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(&args.file, serde_json::to_vec_pretty(&payload)?)?;
-            Ok(json!({
-                "ok": true,
-                "path": args.file,
-            }))
-        }
-        CalibrationCommand::Collect(args) => {
-            collect_calibration_run(client, default_devd, args).await
-        }
+        CalibrationCommand::Get(selector) => get_calibration(client, default_devd, selector).await,
+        CalibrationCommand::Capture(args) => capture_calibration(client, default_devd, args).await,
+        CalibrationCommand::Delete(args) => delete_calibration(client, default_devd, args).await,
+        CalibrationCommand::Clear(args) => clear_calibration(client, default_devd, args).await,
+        CalibrationCommand::SetSlotFit(args) => set_calibration_slot_fit(client, default_devd, args).await,
+        CalibrationCommand::SetActiveSlot(args) => set_active_calibration_slot(client, default_devd, args).await,
+        CalibrationCommand::Import(args) => import_calibration(client, default_devd, args).await,
+        CalibrationCommand::Export(args) => export_calibration(client, default_devd, args).await,
+        CalibrationCommand::Collect(args) => collect_calibration_run(client, default_devd, args).await,
     }
+}
+
+async fn get_calibration(
+    client: &Client,
+    default_devd: &str,
+    selector: TargetSelector,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    request_with_lease(client, resolve_target(selector, default_devd)?, Method::GET, "/calibration", None).await
+}
+
+async fn capture_calibration(
+    client: &Client,
+    default_devd: &str,
+    args: CalibrationCaptureArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut body = serde_json::Map::new();
+    body.insert("op".to_string(), json!("capture"));
+    body.insert("channel".to_string(), json!(parse_calibration_channel(&args.channel)?));
+    insert_if_some(&mut body, "referenceTempC", args.reference_temp_c);
+    insert_if_some(&mut body, "referenceVinMv", parse_reference_vin_mv(args.reference_vin_mv, args.reference_vin_volts.as_deref())?);
+    insert_if_some(&mut body, "observedMv", args.observed_mv);
+    insert_if_some(&mut body, "expectedMv", args.expected_mv);
+    put_calibration(client, default_devd, args.target, Value::Object(body)).await
+}
+
+async fn delete_calibration(
+    client: &Client,
+    default_devd: &str,
+    args: CalibrationDeleteArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let body = json!({"op": "delete", "channel": parse_calibration_channel(&args.channel)?, "sampleIndex": args.sample_index});
+    put_calibration(client, default_devd, args.target, body).await
+}
+
+async fn clear_calibration(
+    client: &Client,
+    default_devd: &str,
+    args: CalibrationChannelArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let body = json!({"op": "clear", "channel": parse_calibration_channel(&args.channel)?});
+    put_calibration(client, default_devd, args.target, body).await
+}
+
+async fn set_calibration_slot_fit(
+    client: &Client,
+    default_devd: &str,
+    args: CalibrationSetSlotFitArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let body = calibration_set_slot_fit_body(&args.channel, &args.slot, args.gain, args.offset_mv)?;
+    put_calibration(client, default_devd, args.target, body).await
+}
+
+async fn set_active_calibration_slot(
+    client: &Client,
+    default_devd: &str,
+    args: CalibrationSetActiveSlotArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let body = calibration_set_active_slot_body(&args.channel, &args.slot)?;
+    put_calibration(client, default_devd, args.target, body).await
+}
+
+async fn import_calibration(
+    client: &Client,
+    default_devd: &str,
+    args: CalibrationImportArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let imported: Value = serde_json::from_slice(&fs::read(&args.file)?)?;
+    put_calibration(client, default_devd, args.target, json!({"op": "import", "state": imported})).await
+}
+
+async fn export_calibration(
+    client: &Client,
+    default_devd: &str,
+    args: CalibrationExportArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let payload = get_calibration(client, default_devd, args.target).await?;
+    if let Some(parent) = args.file.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&args.file, serde_json::to_vec_pretty(&payload)?)?;
+    Ok(json!({"ok": true, "path": args.file}))
+}
+
+async fn put_calibration(
+    client: &Client,
+    default_devd: &str,
+    selector: TargetSelector,
+    body: Value,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    request_with_lease(client, resolve_target(selector, default_devd)?, Method::PUT, "/calibration", Some(body)).await
 }
 
 async fn handle_calibration_mode_command(

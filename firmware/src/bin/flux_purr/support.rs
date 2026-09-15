@@ -52,8 +52,8 @@ use esp_hal::{
     interrupt::{Priority, software::SoftwareInterruptControl},
     mcpwm::{
         McPwm, PeripheralClockConfig,
-        operator::{PwmActions, PwmPin, PwmPinConfig, PwmUpdateMethod},
-        timer::{CounterDirection, PwmWorkingMode},
+        operator::{Operator, PwmActions, PwmPin, PwmPinConfig, PwmUpdateMethod},
+        timer::{CounterDirection, PwmWorkingMode, Timer},
     },
     spi::{
         Mode as SpiMode,
@@ -112,10 +112,12 @@ use flux_purr_firmware::buzzer_test::{
 use flux_purr_firmware::control_plane::EepromMaintenanceOp;
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 use flux_purr_firmware::control_plane::LanPairingCode;
-#[cfg(test)]
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::ThermalControlProfileCommand;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::WifiConfigOp;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::control_plane::WifiConfigCommand;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::WifiConfigReceipt;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -688,7 +690,7 @@ const BUZZER_IDLE_FREQUENCY_HZ: u32 = 2_000;
 const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
 #[cfg(target_arch = "xtensa")]
 const STATUS_LIGHT_BOOT_DURATION_MS: u64 = 1_000;
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 const RUNTIME_READY_BOOT_STAGE_LINE: &[u8] = b"boot_stage=runtime_ready\n";
 #[cfg(target_arch = "xtensa")]
 const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;

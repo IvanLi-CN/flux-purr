@@ -1167,10 +1167,6 @@ impl ManualPpsState {
         )
     }
 
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "legacy workflow preserves protocol ordering and safety checks"
-    )]
     fn from_capabilities_with_request_bounds(
         capabilities: Option<ch224q::AdjustablePowerCapabilities>,
         request_min_mv: u16,
@@ -1181,28 +1177,32 @@ impl ManualPpsState {
             request_max_mv,
             ..Self::default()
         };
-        if let Some(capabilities) = capabilities
-            && let (Some(min_mv), Some(max_mv), Some(max_ma)) = (
-                capabilities.pps_min_mv,
-                capabilities.pps_max_mv,
-                capabilities.pps_max_ma,
-            )
-        {
-            let bounded_min_mv = min_mv.max(request_min_mv);
-            let bounded_max_mv = max_mv.min(request_max_mv);
-            if bounded_min_mv <= bounded_max_mv && max_ma > 0 {
-                state.capability_min_mv = Some(bounded_min_mv);
-                state.capability_max_mv = Some(bounded_max_mv);
-                state.capability_max_ma = Some(max_ma);
-                state.capability_apdos = capabilities.pps_apdos;
-                if state.capability_apdos.iter().all(Option::is_none) {
-                    state.capability_apdos[0] = Some(ch224q::PpsApdo {
-                        min_mv: bounded_min_mv,
-                        max_mv,
-                        max_ma,
-                    });
-                }
-            }
+        let Some(capabilities) = capabilities else {
+            return state;
+        };
+        let Some((min_mv, max_mv, max_ma)) = capabilities
+            .pps_min_mv
+            .zip(capabilities.pps_max_mv)
+            .zip(capabilities.pps_max_ma)
+            .map(|((min_mv, max_mv), max_ma)| (min_mv, max_mv, max_ma))
+        else {
+            return state;
+        };
+        let bounded_min_mv = min_mv.max(request_min_mv);
+        let bounded_max_mv = max_mv.min(request_max_mv);
+        if bounded_min_mv > bounded_max_mv || max_ma == 0 {
+            return state;
+        }
+        state.capability_min_mv = Some(bounded_min_mv);
+        state.capability_max_mv = Some(bounded_max_mv);
+        state.capability_max_ma = Some(max_ma);
+        state.capability_apdos = capabilities.pps_apdos;
+        if state.capability_apdos.iter().all(Option::is_none) {
+            state.capability_apdos[0] = Some(ch224q::PpsApdo {
+                min_mv: bounded_min_mv,
+                max_mv,
+                max_ma,
+            });
         }
         state
     }
@@ -1276,10 +1276,6 @@ impl ManualPpsState {
         best
     }
 
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "legacy workflow preserves protocol ordering and safety checks"
-    )]
     fn contiguous_pps_source_limits(&self, anchor_mv: u16) -> Option<(u16, u16, u16)> {
         let mut minimum_mv = u16::MAX;
         let mut reachable_max_mv = 0;
@@ -1299,38 +1295,46 @@ impl ManualPpsState {
         // APDOs may offer a higher voltage at a lower current. Extend the
         // automatic request range only through overlapping APDOs, leaving the
         // negotiated PPS contract as the current-limit authority per request.
-        let mut extended = true;
-        while extended {
-            extended = false;
-            for apdo in self.capability_apdos.iter().flatten() {
-                let min_mv = apdo.min_mv.max(self.request_min_mv);
-                let max_mv = apdo.max_mv.min(self.request_max_mv);
-                if apdo.max_ma < 3_000 || min_mv > reachable_max_mv || max_mv <= reachable_max_mv {
-                    continue;
-                }
-                reachable_max_mv = max_mv;
-                extended = true;
-            }
-        }
-
-        extended = true;
-        while extended {
-            extended = false;
-            for apdo in self.capability_apdos.iter().flatten() {
-                let min_mv = apdo.min_mv.max(self.request_min_mv);
-                let max_mv = apdo.max_mv.min(self.request_max_mv);
-                if apdo.max_ma < 3_000 || max_mv < minimum_mv || min_mv >= minimum_mv {
-                    continue;
-                }
-                minimum_mv = min_mv;
-                extended = true;
-            }
-        }
+        while self.extend_reachable_max(&mut reachable_max_mv) {}
+        while self.extend_minimum(&mut minimum_mv) {}
 
         // The runtime heater budget accepts a single current ceiling for the
         // whole automatic voltage range. Derive a ceiling that is valid at
         // every boundary of the continuous APDO component, rather than taking
         // the (potentially higher) current offered only at its top voltage.
+        let conservative_current_ma = self.conservative_current_for_range(minimum_mv, reachable_max_mv)?;
+        Some((minimum_mv, reachable_max_mv, conservative_current_ma))
+    }
+
+    fn extend_reachable_max(&self, reachable_max_mv: &mut u16) -> bool {
+        let previous = *reachable_max_mv;
+        for apdo in self.capability_apdos.iter().flatten() {
+            let min_mv = apdo.min_mv.max(self.request_min_mv);
+            let max_mv = apdo.max_mv.min(self.request_max_mv);
+            if apdo.max_ma >= 3_000 && min_mv <= *reachable_max_mv && max_mv > *reachable_max_mv {
+                *reachable_max_mv = max_mv;
+            }
+        }
+        *reachable_max_mv != previous
+    }
+
+    fn extend_minimum(&self, minimum_mv: &mut u16) -> bool {
+        let previous = *minimum_mv;
+        for apdo in self.capability_apdos.iter().flatten() {
+            let min_mv = apdo.min_mv.max(self.request_min_mv);
+            let max_mv = apdo.max_mv.min(self.request_max_mv);
+            if apdo.max_ma >= 3_000 && max_mv >= *minimum_mv && min_mv < *minimum_mv {
+                *minimum_mv = min_mv;
+            }
+        }
+        *minimum_mv != previous
+    }
+
+    fn conservative_current_for_range(
+        &self,
+        minimum_mv: u16,
+        reachable_max_mv: u16,
+    ) -> Option<u16> {
         let mut conservative_current_ma = u16::MAX;
         let mut current_observed = false;
         for apdo in self.capability_apdos.iter().flatten() {
@@ -1339,22 +1343,22 @@ impl ManualPpsState {
             if apdo.max_ma < 3_000 || apdo_max_mv < minimum_mv || apdo_min_mv > reachable_max_mv {
                 continue;
             }
-
             for checkpoint_mv in [
                 apdo_min_mv.max(minimum_mv),
                 apdo_max_mv.min(reachable_max_mv),
                 apdo_max_mv.saturating_add(1),
-            ] {
-                if checkpoint_mv < minimum_mv || checkpoint_mv > reachable_max_mv {
-                    continue;
-                }
+            ]
+            .into_iter()
+            .filter(|checkpoint_mv| {
+                *checkpoint_mv >= minimum_mv && *checkpoint_mv <= reachable_max_mv
+            })
+            {
                 let current_ma = self.maximum_pps_current_for_target(checkpoint_mv)?;
                 conservative_current_ma = conservative_current_ma.min(current_ma);
                 current_observed = true;
             }
         }
-
-        current_observed.then_some((minimum_mv, reachable_max_mv, conservative_current_ma))
+        current_observed.then_some(conservative_current_ma)
     }
 
     fn enable(

@@ -145,6 +145,12 @@ impl Canvas {
         self.pixels[offset..offset + 3].copy_from_slice(&color);
     }
 
+    fn set_pixel_when(&mut self, condition: bool, x: i32, y: i32, color: [u8; 3]) {
+        if condition {
+            self.set_pixel(x, y, color);
+        }
+    }
+
     fn fill_rect(&mut self, x: i32, y: i32, width: i32, height: i32, color: [u8; 3]) {
         for row in y..y + height {
             for column in x..x + width {
@@ -160,27 +166,17 @@ impl Canvas {
         self.fill_rect(x + width - 1, y, 1, height, color);
     }
 
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "preview rasterization keeps pixel loops together"
-    )]
     fn circle(&mut self, center_x: i32, center_y: i32, radius: i32, color: [u8; 3]) {
         let radius_squared = radius * radius;
         for y in center_y - radius..=center_y + radius {
             for x in center_x - radius..=center_x + radius {
                 let dx = x - center_x;
                 let dy = y - center_y;
-                if dx * dx + dy * dy <= radius_squared {
-                    self.set_pixel(x, y, color);
-                }
+                self.set_pixel_when(dx * dx + dy * dy <= radius_squared, x, y, color);
             }
         }
     }
 
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "preview rasterization keeps pixel loops together"
-    )]
     fn circle_outline(&mut self, center_x: i32, center_y: i32, radius: i32, color: [u8; 3]) {
         let outer = radius * radius;
         let inner = (radius - 2) * (radius - 2);
@@ -189,35 +185,35 @@ impl Canvas {
                 let dx = x - center_x;
                 let dy = y - center_y;
                 let distance_squared = dx * dx + dy * dy;
-                if distance_squared <= outer && distance_squared >= inner {
-                    self.set_pixel(x, y, color);
-                }
+                self.set_pixel_when(
+                    distance_squared <= outer && distance_squared >= inner,
+                    x,
+                    y,
+                    color,
+                );
             }
         }
     }
 
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "preview rasterization keeps pixel loops together"
-    )]
     fn draw_text(&mut self, text: &str, x: i32, y: i32, scale: i32, color: [u8; 3]) {
         let mut cursor_x = x;
         for byte in text.bytes() {
-            let glyph = glyph(byte);
-            for (row, bits) in glyph.iter().enumerate() {
-                for column in 0..5 {
-                    if bits & (1 << (4 - column)) != 0 {
-                        self.fill_rect(
-                            cursor_x + (column * scale),
-                            y + (row as i32 * scale),
-                            scale,
-                            scale,
-                            color,
-                        );
-                    }
-                }
-            }
+            self.draw_glyph(glyph(byte), cursor_x, y, scale, color);
             cursor_x += 6 * scale;
+        }
+    }
+
+    fn draw_glyph(&mut self, glyph: [u8; 7], x: i32, y: i32, scale: i32, color: [u8; 3]) {
+        for (row, bits) in glyph.iter().enumerate() {
+            for column in (0..5).filter(|column| bits & (1 << (4 - column)) != 0) {
+                self.fill_rect(
+                    x + (column * scale),
+                    y + (row as i32 * scale),
+                    scale,
+                    scale,
+                    color,
+                );
+            }
         }
     }
 }

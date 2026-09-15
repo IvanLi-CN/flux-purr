@@ -151,10 +151,6 @@ fn is_unicast_static_ipv4(address: [u8; 4]) -> bool {
     first != 0 && first != 127 && first < 224
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 async fn configure_runtime(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -170,46 +166,71 @@ async fn configure_runtime(
             .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
             .clone()
     };
-    if target.transport == DeviceTransport::NativeSerial {
-        let status = match serial_runtime_config(&state, &target, &payload).await {
-            Ok(status) => status,
-            Err(error) => {
-                record_serial_bridge_error(&state, &device_id, "runtime_config", &error);
-                return Err(error);
-            }
-        };
-        let mut state_lock = state.lock()?;
-        if let Some(device) = state_lock.devices.get_mut(&device_id) {
-            device.status = status.clone();
-            device.network = status.network.clone();
-            device.connection = ConnectionState::Connected;
+    match target.transport {
+        DeviceTransport::NativeSerial => {
+            configure_native_runtime(&state, &device_id, &target, &payload).await
         }
-        drop(state_lock);
-        emit_runtime_config_event(&state, &device_id, &payload, &status);
-        return Ok(Json(status));
+        DeviceTransport::Lan => configure_lan_runtime(&state, &device_id, &target, &payload).await,
+        DeviceTransport::Mock => configure_mock_runtime(&state, &device_id, &target, &payload),
     }
+}
 
-    if target.transport == DeviceTransport::Lan {
-        let configured = lan_bridge_config(&target)?;
-        let status = lan_bridge_write::<ControlPlaneStatus>(
-            &configured,
-            "runtime",
-            Method::PUT,
-            Some(lan_bridge_payload(&payload)?),
-        )
-        .await?;
-        let mut state_lock = state.lock()?;
-        if let Some(device) = state_lock.devices.get_mut(&device_id) {
-            device.status = status.clone();
-            device.network = status.network.clone();
-            device.connection = ConnectionState::Connected;
+async fn configure_native_runtime(
+    state: &AppState,
+    device_id: &str,
+    target: &DeviceRecord,
+    payload: &RuntimeConfigRequest,
+) -> Result<Json<ControlPlaneStatus>, HttpError> {
+    let status = match serial_runtime_config(state, target, payload).await {
+        Ok(status) => status,
+        Err(error) => {
+            record_serial_bridge_error(state, device_id, "runtime_config", &error);
+            return Err(error);
         }
-        drop(state_lock);
-        emit_runtime_config_event(&state, &device_id, &payload, &status);
-        return Ok(Json(status));
+    };
+    let mut state_lock = state.lock()?;
+    if let Some(device) = state_lock.devices.get_mut(device_id) {
+        device.status = status.clone();
+        device.network = status.network.clone();
+        device.connection = ConnectionState::Connected;
     }
+    drop(state_lock);
+    emit_runtime_config_event(state, device_id, payload, &status);
+    Ok(Json(status))
+}
 
-    validate_manual_pps_request_against_status(&payload, &target.status)?;
+async fn configure_lan_runtime(
+    state: &AppState,
+    device_id: &str,
+    target: &DeviceRecord,
+    payload: &RuntimeConfigRequest,
+) -> Result<Json<ControlPlaneStatus>, HttpError> {
+    let configured = lan_bridge_config(target)?;
+    let status = lan_bridge_write::<ControlPlaneStatus>(
+        &configured,
+        "runtime",
+        Method::PUT,
+        Some(lan_bridge_payload(payload)?),
+    )
+    .await?;
+    let mut state_lock = state.lock()?;
+    if let Some(device) = state_lock.devices.get_mut(device_id) {
+        device.status = status.clone();
+        device.network = status.network.clone();
+        device.connection = ConnectionState::Connected;
+    }
+    drop(state_lock);
+    emit_runtime_config_event(state, device_id, payload, &status);
+    Ok(Json(status))
+}
+
+fn configure_mock_runtime(
+    state: &AppState,
+    device_id: &str,
+    target: &DeviceRecord,
+    payload: &RuntimeConfigRequest,
+) -> Result<Json<ControlPlaneStatus>, HttpError> {
+    validate_manual_pps_request_against_status(payload, &target.status)?;
     if let Some(calibration) = payload.calibration.as_ref() {
         validate_calibration_request_against_status(
             calibration,
@@ -221,22 +242,36 @@ async fn configure_runtime(
     let mut state_lock = state.lock()?;
     let device = state_lock
         .devices
-        .get_mut(&device_id)
+        .get_mut(device_id)
         .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
-    if mock_thermal_plant_job_running(&device.status) {
-        let manual_pps_requested = payload.manual_pps_enabled.is_some()
-            || payload.manual_pps_mv.is_some()
-            || payload.manual_pps_ma.is_some();
-        if manual_pps_requested
-            || payload.calibration.is_some()
-            || payload.heater_enabled == Some(true)
-        {
-            return Err(HttpError::bad_request(
-                "manual_pps_calibration_busy",
-                "Manual PPS and heater controls cannot override a running thermal-model calibration.",
-            ));
-        }
+    reject_mock_runtime_override_while_busy(device, payload)?;
+    apply_mock_runtime_fields(device, payload);
+    let status = device.status.clone();
+    drop(state_lock);
+    emit_runtime_config_event(state, device_id, payload, &status);
+    Ok(Json(status))
+}
+
+fn reject_mock_runtime_override_while_busy(
+    device: &DeviceRecord,
+    payload: &RuntimeConfigRequest,
+) -> Result<(), HttpError> {
+    if !mock_thermal_plant_job_running(&device.status) {
+        return Ok(());
     }
+    let manual_pps_requested = payload.manual_pps_enabled.is_some()
+        || payload.manual_pps_mv.is_some()
+        || payload.manual_pps_ma.is_some();
+    if manual_pps_requested || payload.calibration.is_some() || payload.heater_enabled == Some(true) {
+        return Err(HttpError::bad_request(
+            "manual_pps_calibration_busy",
+            "Manual PPS and heater controls cannot override a running thermal-model calibration.",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_mock_runtime_fields(device: &mut DeviceRecord, payload: &RuntimeConfigRequest) {
     if let Some(target_temp_c) = payload.target_temp_c {
         device.status.target_temp_c = target_temp_c;
     }
@@ -316,37 +351,7 @@ async fn configure_runtime(
             "pps3a".to_string()
         };
     }
-    if let Some(thermal_control_profile) = payload.thermal_control_profile.as_ref() {
-        let bank = thermal_control_profile
-            .bank
-            .as_deref()
-            .unwrap_or(&device.status.thermal_profile_resolved_bank)
-            .to_string();
-        match thermal_control_profile.op {
-            ThermalControlProfileOp::Preview => {
-                device.preview_thermal_control_profile = thermal_control_profile.profile.clone();
-            }
-            ThermalControlProfileOp::ClearPreview => {
-                device.preview_thermal_control_profile = None;
-            }
-            ThermalControlProfileOp::Save => {
-                if bank == "pps5a" {
-                    device.saved_thermal_control_profile_pps5a =
-                        thermal_control_profile.profile.clone();
-                } else {
-                    device.saved_thermal_control_profile = thermal_control_profile.profile.clone();
-                }
-                device.preview_thermal_control_profile = None;
-            }
-            ThermalControlProfileOp::ClearSaved => {
-                if bank == "pps5a" {
-                    device.saved_thermal_control_profile_pps5a = None;
-                } else {
-                    device.saved_thermal_control_profile = None;
-                }
-            }
-        }
-    }
+    apply_mock_thermal_profile(device, payload.thermal_control_profile.as_ref());
     let active_profile = device.preview_thermal_control_profile.as_ref().or({
         match device.status.thermal_profile_resolved_bank.as_str() {
             "pps5a" => device.saved_thermal_control_profile_pps5a.as_ref(),
@@ -357,10 +362,43 @@ async fn configure_runtime(
     device.status.thermal_control_profile_preview = preview_active;
     device.status.thermal_control =
         mock_thermal_runtime(device.status.target_temp_c, active_profile, preview_active);
-    let status = device.status.clone();
-    drop(state_lock);
-    emit_runtime_config_event(&state, &device_id, &payload, &status);
-    Ok(Json(status))
+}
+
+fn apply_mock_thermal_profile(
+    device: &mut DeviceRecord,
+    thermal_control_profile: Option<&ThermalControlProfileRequest>,
+) {
+    let Some(profile) = thermal_control_profile else {
+        return;
+    };
+    let bank = profile
+        .bank
+        .as_deref()
+        .unwrap_or(&device.status.thermal_profile_resolved_bank)
+        .to_string();
+    match profile.op {
+        ThermalControlProfileOp::Preview => {
+            device.preview_thermal_control_profile = profile.profile.clone();
+        }
+        ThermalControlProfileOp::ClearPreview => {
+            device.preview_thermal_control_profile = None;
+        }
+        ThermalControlProfileOp::Save => {
+            if bank == "pps5a" {
+                device.saved_thermal_control_profile_pps5a = profile.profile.clone();
+            } else {
+                device.saved_thermal_control_profile = profile.profile.clone();
+            }
+            device.preview_thermal_control_profile = None;
+        }
+        ThermalControlProfileOp::ClearSaved => {
+            if bank == "pps5a" {
+                device.saved_thermal_control_profile_pps5a = None;
+            } else {
+                device.saved_thermal_control_profile = None;
+            }
+        }
+    }
 }
 
 async fn configure_buzzer_test(
@@ -801,16 +839,21 @@ fn mock_thermal_default_target_point(target_temp_c: i16) -> MockThermalCandidate
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 fn mock_thermal_profile_from_package(
     package: &ThermalControlProfilePackage,
 ) -> MockThermalCandidateProfile {
-    let default_settings = mock_thermal_default_settings();
-    let settings = package
-        .settings
+    let settings = mock_thermal_settings_from_package(package.settings);
+    let points = thermal_profile_targets(package)
+        .into_iter()
+        .map(|target_temp_c| mock_thermal_point_from_package(package, target_temp_c))
+        .collect();
+    MockThermalCandidateProfile { settings, points }
+}
+
+fn mock_thermal_settings_from_package(
+    settings: Option<ThermalControlProfileSettings>,
+) -> MockThermalCandidateSettings {
+    settings
         .map(|settings| MockThermalCandidateSettings {
             temp_filter_alpha_permille: settings.temp_filter_alpha_permille,
             warmup_reenter_centi_c: settings.warmup_reenter_centi_c,
@@ -830,92 +873,93 @@ fn mock_thermal_profile_from_package(
             auto_adjustable_working_floor_mv: settings.auto_adjustable_working_floor_mv,
             heater_current_reserve_ma: settings.heater_current_reserve_ma,
         })
-        .unwrap_or(default_settings);
-    let point_targets = {
-        let explicit = package
-            .points
-            .iter()
-            .flatten()
-            .map(|point| point.target_temp_c)
-            .collect::<Vec<_>>();
-        if explicit.is_empty() {
-            THERMAL_PROFILE_ANCHOR_TARGETS_C.to_vec()
-        } else {
-            explicit
-        }
-    };
-    let points = point_targets
-        .into_iter()
-        .map(|target_temp_c| {
-            let default_point = mock_thermal_default_target_point(target_temp_c);
-            let point = package
-                .points
-                .iter()
-                .flatten()
-                .find(|point| point.target_temp_c == target_temp_c);
-            MockThermalCandidatePoint {
-                target_temp_c,
-                brake_distance_centi_c: point
-                    .map(|point| point.brake_distance_centi_c)
-                    .unwrap_or(default_point.brake_distance_centi_c),
-                warmup_power_permille: point
-                    .map(|point| point.warmup_power_permille)
-                    .unwrap_or(default_point.warmup_power_permille),
-                approach_power_permille: point
-                    .map(|point| point.approach_power_permille)
-                    .unwrap_or(default_point.approach_power_permille),
-                approach_floor_power_permille: point
-                    .map(|point| point.approach_floor_power_permille)
-                    .unwrap_or(default_point.approach_floor_power_permille),
-                approach_damping_exponent_permille: point
-                    .map(|point| point.approach_damping_exponent_permille)
-                    .unwrap_or(default_point.approach_damping_exponent_permille),
-                approach_tail_window_centi_c: point
-                    .map(|point| point.approach_tail_window_centi_c)
-                    .unwrap_or(default_point.approach_tail_window_centi_c),
-                hold_power_permille: point
-                    .map(|point| point.hold_power_permille)
-                    .unwrap_or(default_point.hold_power_permille),
-                hold_reheat_power_permille: point
-                    .map(|point| point.hold_reheat_power_permille)
-                    .unwrap_or(default_point.hold_reheat_power_permille),
-                warmup_reenter_centi_c: point
-                    .map(|point| point.warmup_reenter_centi_c)
-                    .unwrap_or(default_point.warmup_reenter_centi_c),
-                hold_entry_centi_c: point
-                    .map(|point| point.hold_entry_centi_c)
-                    .unwrap_or(default_point.hold_entry_centi_c),
-                hold_exit_centi_c: point
-                    .map(|point| point.hold_exit_centi_c)
-                    .unwrap_or(default_point.hold_exit_centi_c),
-                hold_on_centi_c: point
-                    .map(|point| point.hold_on_centi_c)
-                    .unwrap_or(default_point.hold_on_centi_c),
-                hold_off_centi_c: point
-                    .map(|point| point.hold_off_centi_c)
-                    .unwrap_or(default_point.hold_off_centi_c),
-                overshoot_cutoff_centi_c: point
-                    .map(|point| point.overshoot_cutoff_centi_c)
-                    .unwrap_or(default_point.overshoot_cutoff_centi_c),
-                hold_kp_permille_per_c: point
-                    .map(|point| point.hold_kp_permille_per_c)
-                    .unwrap_or(default_point.hold_kp_permille_per_c),
-                hold_ki_permille_per_c_tick: point
-                    .map(|point| point.hold_ki_permille_per_c_tick)
-                    .unwrap_or(default_point.hold_ki_permille_per_c_tick),
-                hold_blend_ticks: point
-                    .map(|point| point.hold_blend_ticks)
-                    .unwrap_or(default_point.hold_blend_ticks),
-                approach_lead_ticks: point
-                    .map(|point| point.approach_lead_ticks)
-                    .unwrap_or(default_point.approach_lead_ticks),
-                hold_lead_ticks: point
-                    .map(|point| point.hold_lead_ticks)
-                    .unwrap_or(default_point.hold_lead_ticks),
-            }
-        })
-        .collect();
-    MockThermalCandidateProfile { settings, points }
+        .unwrap_or_else(mock_thermal_default_settings)
+}
+
+fn thermal_profile_targets(package: &ThermalControlProfilePackage) -> Vec<i16> {
+    let explicit = package
+        .points
+        .iter()
+        .flatten()
+        .map(|point| point.target_temp_c)
+        .collect::<Vec<_>>();
+    if explicit.is_empty() {
+        THERMAL_PROFILE_ANCHOR_TARGETS_C.to_vec()
+    } else {
+        explicit
+    }
+}
+
+fn mock_thermal_point_from_package(
+    package: &ThermalControlProfilePackage,
+    target_temp_c: i16,
+) -> MockThermalCandidatePoint {
+    let default_point = mock_thermal_default_target_point(target_temp_c);
+    let point = package
+        .points
+        .iter()
+        .flatten()
+        .find(|point| point.target_temp_c == target_temp_c);
+    MockThermalCandidatePoint {
+        target_temp_c,
+        brake_distance_centi_c: point
+            .map(|point| point.brake_distance_centi_c)
+            .unwrap_or(default_point.brake_distance_centi_c),
+        warmup_power_permille: point
+            .map(|point| point.warmup_power_permille)
+            .unwrap_or(default_point.warmup_power_permille),
+        approach_power_permille: point
+            .map(|point| point.approach_power_permille)
+            .unwrap_or(default_point.approach_power_permille),
+        approach_floor_power_permille: point
+            .map(|point| point.approach_floor_power_permille)
+            .unwrap_or(default_point.approach_floor_power_permille),
+        approach_damping_exponent_permille: point
+            .map(|point| point.approach_damping_exponent_permille)
+            .unwrap_or(default_point.approach_damping_exponent_permille),
+        approach_tail_window_centi_c: point
+            .map(|point| point.approach_tail_window_centi_c)
+            .unwrap_or(default_point.approach_tail_window_centi_c),
+        hold_power_permille: point
+            .map(|point| point.hold_power_permille)
+            .unwrap_or(default_point.hold_power_permille),
+        hold_reheat_power_permille: point
+            .map(|point| point.hold_reheat_power_permille)
+            .unwrap_or(default_point.hold_reheat_power_permille),
+        warmup_reenter_centi_c: point
+            .map(|point| point.warmup_reenter_centi_c)
+            .unwrap_or(default_point.warmup_reenter_centi_c),
+        hold_entry_centi_c: point
+            .map(|point| point.hold_entry_centi_c)
+            .unwrap_or(default_point.hold_entry_centi_c),
+        hold_exit_centi_c: point
+            .map(|point| point.hold_exit_centi_c)
+            .unwrap_or(default_point.hold_exit_centi_c),
+        hold_on_centi_c: point
+            .map(|point| point.hold_on_centi_c)
+            .unwrap_or(default_point.hold_on_centi_c),
+        hold_off_centi_c: point
+            .map(|point| point.hold_off_centi_c)
+            .unwrap_or(default_point.hold_off_centi_c),
+        overshoot_cutoff_centi_c: point
+            .map(|point| point.overshoot_cutoff_centi_c)
+            .unwrap_or(default_point.overshoot_cutoff_centi_c),
+        hold_kp_permille_per_c: point
+            .map(|point| point.hold_kp_permille_per_c)
+            .unwrap_or(default_point.hold_kp_permille_per_c),
+        hold_ki_permille_per_c_tick: point
+            .map(|point| point.hold_ki_permille_per_c_tick)
+            .unwrap_or(default_point.hold_ki_permille_per_c_tick),
+        hold_blend_ticks: point
+            .map(|point| point.hold_blend_ticks)
+            .unwrap_or(default_point.hold_blend_ticks),
+        approach_lead_ticks: point
+            .map(|point| point.approach_lead_ticks)
+            .unwrap_or(default_point.approach_lead_ticks),
+        hold_lead_ticks: point
+            .map(|point| point.hold_lead_ticks)
+            .unwrap_or(default_point.hold_lead_ticks),
+    }
 }
 
 fn mock_thermal_candidate_point(
@@ -929,10 +973,6 @@ fn mock_thermal_candidate_point(
         .find(|point| point.target_temp_c == target_temp_c)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 fn mock_thermal_interpolated_candidate_point(
     profile: &MockThermalCandidateProfile,
     target_temp_c: i16,
@@ -940,6 +980,16 @@ fn mock_thermal_interpolated_candidate_point(
     if let Some(point) = mock_thermal_candidate_point(profile, target_temp_c) {
         return Some(point);
     }
+    let (lower, upper) = interpolation_bounds(profile, target_temp_c)?;
+    let ratio = f32::from(target_temp_c - lower.target_temp_c)
+        / f32::from(upper.target_temp_c - lower.target_temp_c);
+    Some(interpolate_thermal_candidate_point(lower, upper, target_temp_c, ratio))
+}
+
+fn interpolation_bounds(
+    profile: &MockThermalCandidateProfile,
+    target_temp_c: i16,
+) -> Option<(MockThermalCandidatePoint, MockThermalCandidatePoint)> {
     let mut points = profile.points.clone();
     points.sort_by_key(|point| point.target_temp_c);
     let lower = points
@@ -951,8 +1001,45 @@ fn mock_thermal_interpolated_candidate_point(
         .iter()
         .copied()
         .find(|point| point.target_temp_c > target_temp_c)?;
-    let ratio = f32::from(target_temp_c - lower.target_temp_c)
-        / f32::from(upper.target_temp_c - lower.target_temp_c);
+    Some((lower, upper))
+}
+
+fn interpolate_thermal_candidate_point(
+    lower: MockThermalCandidatePoint,
+    upper: MockThermalCandidatePoint,
+    target_temp_c: i16,
+    ratio: f32,
+) -> MockThermalCandidatePoint {
+    let values = interpolated_thermal_point_values(lower, upper, ratio);
+    MockThermalCandidatePoint {
+        target_temp_c,
+        brake_distance_centi_c: values.brake_distance_centi_c,
+        warmup_power_permille: values.warmup_power_permille,
+        approach_power_permille: values.approach_power_permille,
+        approach_floor_power_permille: values.approach_floor_power_permille,
+        approach_damping_exponent_permille: values.approach_damping_exponent_permille,
+        approach_tail_window_centi_c: values.approach_tail_window_centi_c,
+        hold_power_permille: values.hold_power_permille,
+        hold_reheat_power_permille: values.hold_reheat_power_permille,
+        warmup_reenter_centi_c: values.warmup_reenter_centi_c,
+        hold_entry_centi_c: values.hold_entry_centi_c,
+        hold_exit_centi_c: values.hold_exit_centi_c,
+        hold_on_centi_c: values.hold_on_centi_c,
+        hold_off_centi_c: values.hold_off_centi_c,
+        overshoot_cutoff_centi_c: values.overshoot_cutoff_centi_c,
+        hold_kp_permille_per_c: values.hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick: values.hold_ki_permille_per_c_tick,
+        hold_blend_ticks: values.hold_blend_ticks,
+        approach_lead_ticks: values.approach_lead_ticks,
+        hold_lead_ticks: values.hold_lead_ticks,
+    }
+}
+
+fn interpolated_thermal_point_values(
+    lower: MockThermalCandidatePoint,
+    upper: MockThermalCandidatePoint,
+    ratio: f32,
+) -> MockThermalRuntimePointValues {
     let lerp = |left: u16, right: u16, upper_bound: u16| {
         (f32::from(left) + ((f32::from(right) - f32::from(left)) * ratio) + 0.5)
             .clamp(0.0, f32::from(upper_bound)) as u16
@@ -963,121 +1050,74 @@ fn mock_thermal_interpolated_candidate_point(
         5_000,
     );
     let midpoint_weight = 4.0 * ratio * (1.0 - ratio);
-    let intermediate_brake_adjustment = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
-        -0.20
-    } else if lower.target_temp_c >= 100 && upper.target_temp_c <= 180 {
-        if upper.target_temp_c <= 140 {
-            0.55
-        } else {
-            0.20
-        }
-    } else {
-        0.0
-    };
+    let intermediate_brake_adjustment = thermal_brake_adjustment(lower, upper);
     let interpolated_brake_distance = (f32::from(linear_brake_distance)
         * (1.0 - intermediate_brake_adjustment * midpoint_weight)
         + 0.5) as u16;
-    let low_temp_hold_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
-        1.0 - (0.20 * midpoint_weight)
-    } else {
-        1.0
-    };
-    let low_temp_reheat_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
-        1.0 - (0.10 * midpoint_weight)
-    } else {
-        1.0
-    };
+    let low_temp_hold_scale = thermal_low_temp_hold_scale(lower, upper, midpoint_weight);
+    let low_temp_reheat_scale = thermal_low_temp_reheat_scale(lower, upper, midpoint_weight);
     let scale_low_temp_hold =
         |value: u16| (f32::from(value) * low_temp_hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
-    Some(MockThermalCandidatePoint {
-        target_temp_c,
+    MockThermalRuntimePointValues {
         brake_distance_centi_c: interpolated_brake_distance,
-        warmup_power_permille: lerp(
-            lower.warmup_power_permille,
-            upper.warmup_power_permille,
-            1_000,
-        ),
-        approach_power_permille: lerp(
-            lower.approach_power_permille,
-            upper.approach_power_permille,
-            1_000,
-        ),
-        approach_floor_power_permille: lerp(
-            lower.approach_floor_power_permille,
-            upper.approach_floor_power_permille,
-            1_000,
-        ),
-        approach_damping_exponent_permille: lerp(
-            lower.approach_damping_exponent_permille,
-            upper.approach_damping_exponent_permille,
-            THERMAL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
-        ),
-        approach_tail_window_centi_c: lerp(
-            lower.approach_tail_window_centi_c,
-            upper.approach_tail_window_centi_c,
-            THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX,
-        ),
-        hold_power_permille: scale_low_temp_hold(lerp(
-            lower.hold_power_permille,
-            upper.hold_power_permille,
-            1_000,
-        )),
-        hold_reheat_power_permille: (f32::from(lerp(
-            lower.hold_reheat_power_permille,
-            upper.hold_reheat_power_permille,
-            1_000,
-        )) * low_temp_reheat_scale
-            + 0.5) as u16,
-        warmup_reenter_centi_c: lerp(
-            lower.warmup_reenter_centi_c,
-            upper.warmup_reenter_centi_c,
-            5_000,
-        ),
+        warmup_power_permille: lerp(lower.warmup_power_permille, upper.warmup_power_permille, 1_000),
+        approach_power_permille: lerp(lower.approach_power_permille, upper.approach_power_permille, 1_000),
+        approach_floor_power_permille: lerp(lower.approach_floor_power_permille, upper.approach_floor_power_permille, 1_000),
+        approach_damping_exponent_permille: lerp(lower.approach_damping_exponent_permille, upper.approach_damping_exponent_permille, THERMAL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX),
+        approach_tail_window_centi_c: lerp(lower.approach_tail_window_centi_c, upper.approach_tail_window_centi_c, THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX),
+        hold_power_permille: scale_low_temp_hold(lerp(lower.hold_power_permille, upper.hold_power_permille, 1_000)),
+        hold_reheat_power_permille: (f32::from(lerp(lower.hold_reheat_power_permille, upper.hold_reheat_power_permille, 1_000)) * low_temp_reheat_scale + 0.5) as u16,
+        warmup_reenter_centi_c: lerp(lower.warmup_reenter_centi_c, upper.warmup_reenter_centi_c, 5_000),
         hold_entry_centi_c: lerp(lower.hold_entry_centi_c, upper.hold_entry_centi_c, 5_000),
         hold_exit_centi_c: lerp(lower.hold_exit_centi_c, upper.hold_exit_centi_c, 5_000),
         hold_on_centi_c: lerp(lower.hold_on_centi_c, upper.hold_on_centi_c, 5_000),
         hold_off_centi_c: lerp(lower.hold_off_centi_c, upper.hold_off_centi_c, 5_000),
-        overshoot_cutoff_centi_c: lerp(
-            lower.overshoot_cutoff_centi_c,
-            upper.overshoot_cutoff_centi_c,
-            5_000,
-        ),
-        hold_kp_permille_per_c: lerp(
-            lower.hold_kp_permille_per_c,
-            upper.hold_kp_permille_per_c,
-            10_000,
-        ),
-        hold_ki_permille_per_c_tick: {
-            let interpolated = lerp(
-                lower.hold_ki_permille_per_c_tick,
-                upper.hold_ki_permille_per_c_tick,
-                10_000,
-            );
-            interpolated.max(1)
-        },
-        hold_blend_ticks: lerp(
-            lower.hold_blend_ticks,
-            upper.hold_blend_ticks,
-            u16::from(u8::MAX),
-        )
-        .clamp(1, u16::from(u8::MAX)),
-        approach_lead_ticks: lerp(
-            lower.approach_lead_ticks,
-            upper.approach_lead_ticks,
-            u16::from(u8::MAX),
-        ),
-        hold_lead_ticks: lerp(
-            lower.hold_lead_ticks,
-            upper.hold_lead_ticks,
-            u16::from(u8::MAX),
-        ),
-    })
+        overshoot_cutoff_centi_c: lerp(lower.overshoot_cutoff_centi_c, upper.overshoot_cutoff_centi_c, 5_000),
+        hold_kp_permille_per_c: lerp(lower.hold_kp_permille_per_c, upper.hold_kp_permille_per_c, 10_000),
+        hold_ki_permille_per_c_tick: lerp(lower.hold_ki_permille_per_c_tick, upper.hold_ki_permille_per_c_tick, 10_000).max(1),
+        hold_blend_ticks: lerp(lower.hold_blend_ticks, upper.hold_blend_ticks, u16::from(u8::MAX)).clamp(1, u16::from(u8::MAX)),
+        approach_lead_ticks: lerp(lower.approach_lead_ticks, upper.approach_lead_ticks, u16::from(u8::MAX)),
+        hold_lead_ticks: lerp(lower.hold_lead_ticks, upper.hold_lead_ticks, u16::from(u8::MAX)),
+    }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
+fn thermal_brake_adjustment(
+    lower: MockThermalCandidatePoint,
+    upper: MockThermalCandidatePoint,
+) -> f32 {
+    if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        -0.20
+    } else if lower.target_temp_c >= 100 && upper.target_temp_c <= 180 {
+        if upper.target_temp_c <= 140 { 0.55 } else { 0.20 }
+    } else {
+        0.0
+    }
+}
+
+fn thermal_low_temp_hold_scale(
+    lower: MockThermalCandidatePoint,
+    upper: MockThermalCandidatePoint,
+    midpoint_weight: f32,
+) -> f32 {
+    if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        1.0 - (0.20 * midpoint_weight)
+    } else {
+        1.0
+    }
+}
+
+fn thermal_low_temp_reheat_scale(
+    lower: MockThermalCandidatePoint,
+    upper: MockThermalCandidatePoint,
+    midpoint_weight: f32,
+) -> f32 {
+    if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        1.0 - (0.10 * midpoint_weight)
+    } else {
+        1.0
+    }
+}
+
 fn mock_thermal_runtime(
     target_temp_c: i16,
     package: Option<&ThermalControlProfilePackage>,
@@ -1085,13 +1125,7 @@ fn mock_thermal_runtime(
 ) -> ThermalControlRuntime {
     let target_temp_c = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
     let profile = package.map(mock_thermal_profile_from_package);
-    let profile_source = if preview_active {
-        "preview"
-    } else if profile.is_some() {
-        "saved"
-    } else {
-        "default"
-    };
+    let profile_source = thermal_profile_source(preview_active, profile.is_some());
     let profile_covers_target = profile
         .as_ref()
         .and_then(|profile| mock_thermal_interpolated_candidate_point(profile, target_temp_c))
@@ -1099,78 +1133,7 @@ fn mock_thermal_runtime(
     let point = profile
         .as_ref()
         .and_then(|profile| mock_thermal_interpolated_candidate_point(profile, target_temp_c));
-    let (
-        brake_distance_centi_c,
-        _default_warmup_power_permille,
-        approach_power_permille,
-        approach_floor_power_permille,
-        approach_damping_exponent_permille,
-        hold_power_permille,
-        hold_reheat_power_permille,
-        warmup_reenter_centi_c,
-        hold_entry_centi_c,
-        hold_exit_centi_c,
-        hold_on_centi_c,
-        hold_off_centi_c,
-        overshoot_cutoff_centi_c,
-        hold_kp_permille_per_c,
-        hold_ki_permille_per_c_tick,
-        hold_blend_ticks,
-        approach_lead_ticks,
-        hold_lead_ticks,
-    ) = point
-        .map(|point| {
-            (
-                point.brake_distance_centi_c,
-                point.warmup_power_permille,
-                point.approach_power_permille,
-                point.approach_floor_power_permille,
-                point.approach_damping_exponent_permille,
-                point.hold_power_permille,
-                point.hold_reheat_power_permille,
-                point.warmup_reenter_centi_c,
-                point.hold_entry_centi_c,
-                point.hold_exit_centi_c,
-                point.hold_on_centi_c,
-                point.hold_off_centi_c,
-                point.overshoot_cutoff_centi_c,
-                point.hold_kp_permille_per_c,
-                point.hold_ki_permille_per_c_tick,
-                point.hold_blend_ticks,
-                point.approach_lead_ticks,
-                point.hold_lead_ticks,
-            )
-        })
-        .unwrap_or_else(|| {
-            let default_point = mock_thermal_default_target_point(target_temp_c);
-            (
-                default_point.brake_distance_centi_c,
-                default_point.warmup_power_permille,
-                default_point.approach_power_permille,
-                default_point.approach_floor_power_permille,
-                default_point.approach_damping_exponent_permille,
-                default_point.hold_power_permille,
-                default_point.hold_reheat_power_permille,
-                default_point.warmup_reenter_centi_c,
-                default_point.hold_entry_centi_c,
-                default_point.hold_exit_centi_c,
-                default_point.hold_on_centi_c,
-                default_point.hold_off_centi_c,
-                default_point.overshoot_cutoff_centi_c,
-                default_point.hold_kp_permille_per_c,
-                default_point.hold_ki_permille_per_c_tick,
-                default_point.hold_blend_ticks,
-                default_point.approach_lead_ticks,
-                default_point.hold_lead_ticks,
-            )
-        });
-    let warmup_power_permille = if let Some(point) = point {
-        point
-            .warmup_power_permille
-            .max(point.approach_power_permille)
-    } else {
-        1_000
-    };
+    let values = thermal_runtime_point_values(point, target_temp_c);
     let settings = profile
         .as_ref()
         .map(|profile| profile.settings)
@@ -1180,34 +1143,92 @@ fn mock_thermal_runtime(
         profile_covers_target,
         profile_source: profile_source.to_string(),
         target_temp_c,
-        brake_distance_centi_c,
-        warmup_power_permille,
-        approach_power_permille,
-        approach_floor_power_permille,
-        approach_damping_exponent_permille,
-        approach_tail_window_centi_c: point
-            .map(|point| point.approach_tail_window_centi_c)
-            .unwrap_or_default(),
-        hold_power_permille,
-        hold_reheat_power_permille,
-        hold_entry_centi_c,
-        hold_exit_centi_c,
-        hold_on_centi_c,
-        hold_off_centi_c,
-        overshoot_cutoff_centi_c,
-        hold_kp_permille_per_c,
-        hold_ki_permille_per_c_tick,
-        hold_blend_ticks,
-        approach_lead_ticks,
-        hold_lead_ticks,
+        brake_distance_centi_c: values.brake_distance_centi_c,
+        warmup_power_permille: values.warmup_power_permille,
+        approach_power_permille: values.approach_power_permille,
+        approach_floor_power_permille: values.approach_floor_power_permille,
+        approach_damping_exponent_permille: values.approach_damping_exponent_permille,
+        approach_tail_window_centi_c: values.approach_tail_window_centi_c,
+        hold_power_permille: values.hold_power_permille,
+        hold_reheat_power_permille: values.hold_reheat_power_permille,
+        hold_entry_centi_c: values.hold_entry_centi_c,
+        hold_exit_centi_c: values.hold_exit_centi_c,
+        hold_on_centi_c: values.hold_on_centi_c,
+        hold_off_centi_c: values.hold_off_centi_c,
+        overshoot_cutoff_centi_c: values.overshoot_cutoff_centi_c,
+        hold_kp_permille_per_c: values.hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick: values.hold_ki_permille_per_c_tick,
+        hold_blend_ticks: values.hold_blend_ticks,
+        approach_lead_ticks: values.approach_lead_ticks,
+        hold_lead_ticks: values.hold_lead_ticks,
         temp_filter_alpha_permille: settings.temp_filter_alpha_permille,
-        warmup_reenter_centi_c,
+        warmup_reenter_centi_c: values.warmup_reenter_centi_c,
         approach_max_ticks: settings.approach_max_ticks,
         approach_min_power_ratio_permille: settings.approach_min_power_ratio_permille,
         auto_adjustable_working_floor_mv: settings.auto_adjustable_working_floor_mv,
         heater_current_reserve_ma: settings
             .heater_current_reserve_ma
             .min(THERMAL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX),
+    }
+}
+
+struct MockThermalRuntimePointValues {
+    brake_distance_centi_c: u16,
+    warmup_power_permille: u16,
+    approach_power_permille: u16,
+    approach_floor_power_permille: u16,
+    approach_damping_exponent_permille: u16,
+    approach_tail_window_centi_c: u16,
+    hold_power_permille: u16,
+    hold_reheat_power_permille: u16,
+    warmup_reenter_centi_c: u16,
+    hold_entry_centi_c: u16,
+    hold_exit_centi_c: u16,
+    hold_on_centi_c: u16,
+    hold_off_centi_c: u16,
+    overshoot_cutoff_centi_c: u16,
+    hold_kp_permille_per_c: u16,
+    hold_ki_permille_per_c_tick: u16,
+    hold_blend_ticks: u16,
+    approach_lead_ticks: u16,
+    hold_lead_ticks: u16,
+}
+
+fn thermal_profile_source(preview_active: bool, profile_active: bool) -> &'static str {
+    if preview_active {
+        "preview"
+    } else if profile_active {
+        "saved"
+    } else {
+        "default"
+    }
+}
+
+fn thermal_runtime_point_values(
+    point: Option<MockThermalCandidatePoint>,
+    target_temp_c: i16,
+) -> MockThermalRuntimePointValues {
+    let point = point.unwrap_or_else(|| mock_thermal_default_target_point(target_temp_c));
+    MockThermalRuntimePointValues {
+        brake_distance_centi_c: point.brake_distance_centi_c,
+        warmup_power_permille: point.warmup_power_permille.max(point.approach_power_permille),
+        approach_power_permille: point.approach_power_permille,
+        approach_floor_power_permille: point.approach_floor_power_permille,
+        approach_damping_exponent_permille: point.approach_damping_exponent_permille,
+        approach_tail_window_centi_c: point.approach_tail_window_centi_c,
+        hold_power_permille: point.hold_power_permille,
+        hold_reheat_power_permille: point.hold_reheat_power_permille,
+        warmup_reenter_centi_c: point.warmup_reenter_centi_c,
+        hold_entry_centi_c: point.hold_entry_centi_c,
+        hold_exit_centi_c: point.hold_exit_centi_c,
+        hold_on_centi_c: point.hold_on_centi_c,
+        hold_off_centi_c: point.hold_off_centi_c,
+        overshoot_cutoff_centi_c: point.overshoot_cutoff_centi_c,
+        hold_kp_permille_per_c: point.hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick: point.hold_ki_permille_per_c_tick,
+        hold_blend_ticks: point.hold_blend_ticks,
+        approach_lead_ticks: point.approach_lead_ticks,
+        hold_lead_ticks: point.hold_lead_ticks,
     }
 }
 
@@ -1226,141 +1247,173 @@ fn validate_calibration_control_request(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 fn apply_mock_calibration_config(
     calibration: &mut CalibrationState,
     payload: &CalibrationConfigRequest,
 ) -> Result<(), HttpError> {
     match payload.op {
-        CalibrationConfigOp::Capture => {
-            let channel = payload.channel.ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_channel_required",
-                    "Calibration capture requires a channel.",
-                )
-            })?;
-            let observed_mv = payload
-                .observed_mv
-                .unwrap_or_else(|| mock_observed_adc_mv(channel));
-            let expected_mv = expected_calibration_adc_mv(payload, channel).ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_reference_required",
-                    "Calibration capture requires a valid physical reference.",
-                )
-            })?;
-            let samples = &mut calibration.channel_mut(channel).samples;
-            let Some(slot) = samples.iter_mut().find(|slot| slot.is_none()) else {
-                return Err(HttpError::bad_request(
-                    "calibration_samples_full",
-                    "Calibration channel already has 8 samples.",
-                ));
-            };
-            *slot = Some(CalibrationSample {
-                observed_mv,
-                expected_mv,
-                reference_temp_c: payload
-                    .reference_temp_c
-                    .filter(|_| channel == CalibrationChannel::RtdAdc),
-                target_adc_mv: payload
-                    .target_adc_mv
-                    .filter(|_| channel == CalibrationChannel::RtdAdc),
-                reference_vin_mv: payload
-                    .reference_vin_mv
-                    .and_then(|millivolts| u16::try_from(millivolts).ok())
-                    .filter(|_| channel == CalibrationChannel::VinAdc),
-            });
-        }
-        CalibrationConfigOp::Delete => {
-            let channel = payload.channel.ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_channel_required",
-                    "Calibration delete requires a channel.",
-                )
-            })?;
-            let index = payload.sample_index.ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_index_required",
-                    "Calibration delete requires sampleIndex.",
-                )
-            })?;
-            let samples = &mut calibration.channel_mut(channel).samples;
-            let Some(slot) = samples.get_mut(index) else {
-                return Err(HttpError::bad_request(
-                    "calibration_sample_not_found",
-                    "Calibration sample index was not present.",
-                ));
-            };
-            if slot.is_none() {
-                return Err(HttpError::bad_request(
-                    "calibration_sample_not_found",
-                    "Calibration sample index was not present.",
-                ));
-            }
-            *slot = None;
-            compact_calibration_samples(samples);
-        }
-        CalibrationConfigOp::Clear => {
-            let channel = payload.channel.ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_channel_required",
-                    "Calibration clear requires a channel.",
-                )
-            })?;
-            calibration.channel_mut(channel).samples = vec![None; ADC_CALIBRATION_MAX_SAMPLES];
-        }
-        CalibrationConfigOp::Import => {
-            let state = payload.state.clone().ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_state_required",
-                    "Calibration import requires state.",
-                )
-            })?;
-            validate_calibration_state(&state)?;
-            *calibration = normalize_calibration_state(state);
-        }
-        CalibrationConfigOp::SetActiveSlot => {
-            let channel = payload.channel.ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_channel_required",
-                    "Setting active slot requires a channel.",
-                )
-            })?;
-            let slot = payload.slot.ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_slot_required",
-                    "Setting active slot requires slot.",
-                )
-            })?;
-            calibration.channel_mut(channel).active_slot = slot;
-        }
-        CalibrationConfigOp::SetSlotFit => {
-            let channel = payload.channel.ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_channel_required",
-                    "Setting slot fit requires a channel.",
-                )
-            })?;
-            let slot = payload.slot.ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_slot_required",
-                    "Setting slot fit requires slot.",
-                )
-            })?;
-            let fit = payload.fit.ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_fit_required",
-                    "Setting slot fit requires gain/offset.",
-                )
-            })?;
-            *calibration.channel_mut(channel).slot_fit_mut(slot) = fit;
-        }
+        CalibrationConfigOp::Capture => capture_calibration_sample(calibration, payload)?,
+        CalibrationConfigOp::Delete => delete_calibration_sample(calibration, payload)?,
+        CalibrationConfigOp::Clear => clear_calibration_samples(calibration, payload)?,
+        CalibrationConfigOp::Import => import_calibration_state(calibration, payload)?,
+        CalibrationConfigOp::SetActiveSlot => set_calibration_active_slot(calibration, payload)?,
+        CalibrationConfigOp::SetSlotFit => set_calibration_slot_fit(calibration, payload)?,
     }
     calibration.rtd_adc.sanitize_slot_fits();
     calibration.vin_adc.sanitize_slot_fits();
     calibration.refresh_fits();
+    Ok(())
+}
+
+fn capture_calibration_sample(
+    calibration: &mut CalibrationState,
+    payload: &CalibrationConfigRequest,
+) -> Result<(), HttpError> {
+    let channel = payload.channel.ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_channel_required",
+            "Calibration capture requires a channel.",
+        )
+    })?;
+    let observed_mv = payload
+        .observed_mv
+        .unwrap_or_else(|| mock_observed_adc_mv(channel));
+    let expected_mv = expected_calibration_adc_mv(payload, channel).ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_reference_required",
+            "Calibration capture requires a valid physical reference.",
+        )
+    })?;
+    let samples = &mut calibration.channel_mut(channel).samples;
+    let Some(slot) = samples.iter_mut().find(|slot| slot.is_none()) else {
+        return Err(HttpError::bad_request(
+            "calibration_samples_full",
+            "Calibration channel already has 8 samples.",
+        ));
+    };
+    *slot = Some(CalibrationSample {
+        observed_mv,
+        expected_mv,
+        reference_temp_c: payload
+            .reference_temp_c
+            .filter(|_| channel == CalibrationChannel::RtdAdc),
+        target_adc_mv: payload
+            .target_adc_mv
+            .filter(|_| channel == CalibrationChannel::RtdAdc),
+        reference_vin_mv: payload
+            .reference_vin_mv
+            .and_then(|millivolts| u16::try_from(millivolts).ok())
+            .filter(|_| channel == CalibrationChannel::VinAdc),
+    });
+    Ok(())
+}
+
+fn delete_calibration_sample(
+    calibration: &mut CalibrationState,
+    payload: &CalibrationConfigRequest,
+) -> Result<(), HttpError> {
+    let channel = payload.channel.ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_channel_required",
+            "Calibration delete requires a channel.",
+        )
+    })?;
+    let index = payload.sample_index.ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_index_required",
+            "Calibration delete requires sampleIndex.",
+        )
+    })?;
+    let samples = &mut calibration.channel_mut(channel).samples;
+    let Some(slot) = samples.get_mut(index) else {
+        return Err(HttpError::bad_request(
+            "calibration_sample_not_found",
+            "Calibration sample index was not present.",
+        ));
+    };
+    if slot.is_none() {
+        return Err(HttpError::bad_request(
+            "calibration_sample_not_found",
+            "Calibration sample index was not present.",
+        ));
+    }
+    *slot = None;
+    compact_calibration_samples(samples);
+    Ok(())
+}
+
+fn clear_calibration_samples(
+    calibration: &mut CalibrationState,
+    payload: &CalibrationConfigRequest,
+) -> Result<(), HttpError> {
+    let channel = payload.channel.ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_channel_required",
+            "Calibration clear requires a channel.",
+        )
+    })?;
+    calibration.channel_mut(channel).samples = vec![None; ADC_CALIBRATION_MAX_SAMPLES];
+    Ok(())
+}
+
+fn import_calibration_state(
+    calibration: &mut CalibrationState,
+    payload: &CalibrationConfigRequest,
+) -> Result<(), HttpError> {
+    let state = payload.state.clone().ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_state_required",
+            "Calibration import requires state.",
+        )
+    })?;
+    validate_calibration_state(&state)?;
+    *calibration = normalize_calibration_state(state);
+    Ok(())
+}
+
+fn set_calibration_active_slot(
+    calibration: &mut CalibrationState,
+    payload: &CalibrationConfigRequest,
+) -> Result<(), HttpError> {
+    let channel = payload.channel.ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_channel_required",
+            "Setting active slot requires a channel.",
+        )
+    })?;
+    let slot = payload.slot.ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_slot_required",
+            "Setting active slot requires slot.",
+        )
+    })?;
+    calibration.channel_mut(channel).active_slot = slot;
+    Ok(())
+}
+
+fn set_calibration_slot_fit(
+    calibration: &mut CalibrationState,
+    payload: &CalibrationConfigRequest,
+) -> Result<(), HttpError> {
+    let channel = payload.channel.ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_channel_required",
+            "Setting slot fit requires a channel.",
+        )
+    })?;
+    let slot = payload.slot.ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_slot_required",
+            "Setting slot fit requires slot.",
+        )
+    })?;
+    let fit = payload.fit.ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_fit_required",
+            "Setting slot fit requires gain/offset.",
+        )
+    })?;
+    *calibration.channel_mut(channel).slot_fit_mut(slot) = fit;
     Ok(())
 }
 

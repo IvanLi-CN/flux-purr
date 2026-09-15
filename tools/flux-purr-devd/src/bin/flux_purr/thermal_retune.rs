@@ -7,16 +7,17 @@ use reqwest::{Client, Method};
 use serde_json::{Value, json};
 
 use super::{
-    ThermalProfileMode, ThermalRetuneArgs, ThermalStageResult, parse_thermal_targets,
-    parse_thermal_targets_from_summary, read_ndjson_values, request_with_lease, resolve_target,
-    thermal_candidate_point_mut, thermal_candidate_profile_to_value,
-    thermal_heater_parameters_value, thermal_profile_preview_runtime_body,
-    thermal_rebuild_profile_from_anchor_targets, thermal_replay_applied_profile,
-    thermal_replay_full_speed_to_stable, thermal_replay_stage_analysis,
-    thermal_replay_stage_samples, thermal_self_test_evaluation_mode_from_summary,
-    thermal_stage_result_from_value, thermal_summary_attach_replay_source_analysis,
-    tune_thermal_candidate_point, validate_thermal_applied_results,
-    verify_thermal_control_readback, verify_thermal_profile_mode_readback,
+    TargetSelector, ThermalProfileMode, ThermalRetuneArgs, ThermalStageResult,
+    parse_thermal_targets, parse_thermal_targets_from_summary, read_ndjson_values,
+    request_with_lease, resolve_target, thermal_candidate_point_mut,
+    thermal_candidate_profile_to_value, thermal_heater_parameters_value,
+    thermal_profile_preview_runtime_body, thermal_rebuild_profile_from_anchor_targets,
+    thermal_replay_applied_profile, thermal_replay_full_speed_to_stable,
+    thermal_replay_stage_analysis, thermal_replay_stage_samples,
+    thermal_self_test_evaluation_mode_from_summary, thermal_stage_result_from_value,
+    thermal_summary_attach_replay_source_analysis, tune_thermal_candidate_point,
+    validate_thermal_applied_results, verify_thermal_control_readback,
+    verify_thermal_profile_mode_readback,
 };
 
 #[derive(Debug, Clone)]
@@ -66,10 +67,6 @@ impl ThermalRetuneOutput {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "retune workflow preserves validation and artifact ordering"
-)]
 pub(super) fn retune_thermal_self_test_run(
     input: ThermalRetuneInput,
 ) -> Result<ThermalRetuneOutput, Box<dyn std::error::Error + Send + Sync>> {
@@ -137,60 +134,90 @@ pub(super) fn retune_thermal_self_test_run(
     let evaluation_mode = thermal_self_test_evaluation_mode_from_summary(&summary);
     let validation =
         validate_thermal_applied_results(&applied_results, &target_temps_c, evaluation_mode);
-    let replay_summary_path = input.run_dir.join("run.replayed.json");
-    let replay_candidate_path = input
+    write_replay_artifacts(RetuneReplayArtifacts {
+        run_dir: input.run_dir,
+        summary_path,
+        samples_path,
+        summary,
+        target_temps_c,
+        optimize_targets_c,
+        candidate_profile_value,
+        tuning_steps,
+        applied_results,
+        validation,
+        profile_mode,
+    })
+}
+
+struct RetuneReplayArtifacts {
+    run_dir: PathBuf,
+    summary_path: PathBuf,
+    samples_path: PathBuf,
+    summary: Value,
+    target_temps_c: Vec<i16>,
+    optimize_targets_c: Vec<i16>,
+    candidate_profile_value: Value,
+    tuning_steps: Vec<Value>,
+    applied_results: Vec<ThermalStageResult>,
+    validation: Value,
+    profile_mode: Option<ThermalProfileMode>,
+}
+
+fn write_replay_artifacts(
+    artifacts: RetuneReplayArtifacts,
+) -> Result<ThermalRetuneOutput, Box<dyn std::error::Error + Send + Sync>> {
+    let replay_summary_path = artifacts.run_dir.join("run.replayed.json");
+    let replay_candidate_path = artifacts
         .run_dir
         .join("thermal-profile.replayed.candidate.json");
+    let evaluation_mode = thermal_self_test_evaluation_mode_from_summary(&artifacts.summary);
     let mut replay_summary = json!({
         "kind": "thermal_self_test_replay",
-        "ok": validation.get("passed").and_then(Value::as_bool) == Some(true),
-        "runId": summary.get("runId").cloned().unwrap_or(Value::Null),
-        "replayOf": summary_path,
-        "target": summary.get("target").cloned().unwrap_or(Value::Null),
-        "source": summary.get("source").cloned().unwrap_or(Value::Null),
-        "selectedMode": summary.get("selectedMode").cloned().unwrap_or(Value::Null),
+        "ok": artifacts.validation.get("passed").and_then(Value::as_bool) == Some(true),
+        "runId": artifacts.summary.get("runId").cloned().unwrap_or(Value::Null),
+        "replayOf": artifacts.summary_path,
+        "target": artifacts.summary.get("target").cloned().unwrap_or(Value::Null),
+        "source": artifacts.summary.get("source").cloned().unwrap_or(Value::Null),
+        "selectedMode": artifacts.summary.get("selectedMode").cloned().unwrap_or(Value::Null),
         "parameters": {
-            "targetsC": target_temps_c,
-            "optimizeTargetsC": optimize_targets_c,
-            "sampleIntervalMs": summary.pointer("/parameters/sampleIntervalMs").cloned().unwrap_or(Value::Null),
-            "effectiveSampleIntervalMs": summary.pointer("/parameters/effectiveSampleIntervalMs").cloned().unwrap_or(Value::Null),
-            "holdSeconds": summary.pointer("/parameters/holdSeconds").cloned().unwrap_or(Value::Null),
-            "stageTimeoutSeconds": summary.pointer("/parameters/stageTimeoutSeconds").cloned().unwrap_or(Value::Null),
-            "runtimeRearmAttempts": summary.pointer("/parameters/runtimeRearmAttempts").cloned().unwrap_or(Value::Null),
-            "cooldownTempC": summary.pointer("/parameters/cooldownTempC").cloned().unwrap_or(Value::Null),
-            "cooldownTimeoutSeconds": summary.pointer("/parameters/cooldownTimeoutSeconds").cloned().unwrap_or(Value::Null),
-            "limits": summary.pointer("/parameters/limits").cloned().unwrap_or(Value::Null),
-            "seedProfileFile": summary.pointer("/parameters/seedProfileFile").cloned().unwrap_or(Value::Null),
+            "targetsC": artifacts.target_temps_c,
+            "optimizeTargetsC": artifacts.optimize_targets_c,
+            "sampleIntervalMs": artifacts.summary.pointer("/parameters/sampleIntervalMs").cloned().unwrap_or(Value::Null),
+            "effectiveSampleIntervalMs": artifacts.summary.pointer("/parameters/effectiveSampleIntervalMs").cloned().unwrap_or(Value::Null),
+            "holdSeconds": artifacts.summary.pointer("/parameters/holdSeconds").cloned().unwrap_or(Value::Null),
+            "stageTimeoutSeconds": artifacts.summary.pointer("/parameters/stageTimeoutSeconds").cloned().unwrap_or(Value::Null),
+            "runtimeRearmAttempts": artifacts.summary.pointer("/parameters/runtimeRearmAttempts").cloned().unwrap_or(Value::Null),
+            "cooldownTempC": artifacts.summary.pointer("/parameters/cooldownTempC").cloned().unwrap_or(Value::Null),
+            "cooldownTimeoutSeconds": artifacts.summary.pointer("/parameters/cooldownTimeoutSeconds").cloned().unwrap_or(Value::Null),
+            "limits": artifacts.summary.pointer("/parameters/limits").cloned().unwrap_or(Value::Null),
+            "seedProfileFile": artifacts.summary.pointer("/parameters/seedProfileFile").cloned().unwrap_or(Value::Null),
             "evaluationMode": evaluation_mode.as_str(),
         },
         "files": {
-            "runDir": input.run_dir,
+            "runDir": artifacts.run_dir,
             "summaryPath": replay_summary_path,
-            "samplesPath": samples_path,
+            "samplesPath": artifacts.samples_path,
             "candidateProfilePath": replay_candidate_path,
         },
-        "sampleCount": summary.get("sampleCount").cloned().unwrap_or(Value::Null),
-        "candidateProfile": candidate_profile_value.clone(),
+        "sampleCount": artifacts.summary.get("sampleCount").cloned().unwrap_or(Value::Null),
+        "candidateProfile": artifacts.candidate_profile_value.clone(),
         "profilePersistence": "not_saved",
-        "tuningSteps": tuning_steps,
-        "applied": applied_results.iter().map(ThermalStageResult::to_value).collect::<Vec<_>>(),
-        "validation": validation,
+        "tuningSteps": artifacts.tuning_steps,
+        "applied": artifacts.applied_results.iter().map(ThermalStageResult::to_value).collect::<Vec<_>>(),
+        "validation": artifacts.validation,
     });
+    let samples = read_ndjson_values(&artifacts.samples_path)?;
     thermal_summary_attach_replay_source_analysis(&mut replay_summary, &samples)?;
-    write_json_pretty(&replay_candidate_path, &candidate_profile_value)?;
+    write_json_pretty(&replay_candidate_path, &artifacts.candidate_profile_value)?;
     write_json_pretty(&replay_summary_path, &replay_summary)?;
     Ok(ThermalRetuneOutput {
         summary: replay_summary,
-        candidate_profile: candidate_profile_value,
-        profile_mode,
+        candidate_profile: artifacts.candidate_profile_value,
+        profile_mode: artifacts.profile_mode,
         summary_path: replay_summary_path,
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "retune workflow preserves validation and artifact ordering"
-)]
 pub(super) async fn run_thermal_retune(
     client: &Client,
     default_devd: &str,
@@ -205,7 +232,16 @@ pub(super) async fn run_thermal_retune(
     if !apply_preview {
         return Ok(output.summary);
     }
+    apply_retune_preview(client, default_devd, target, &mut output).await?;
+    Ok(output.summary)
+}
 
+async fn apply_retune_preview(
+    client: &Client,
+    default_devd: &str,
+    target: TargetSelector,
+    output: &mut ThermalRetuneOutput,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let target_value = json!({
         "deviceId": target.device,
         "hardwareId": target.hardware,
@@ -214,13 +250,7 @@ pub(super) async fn run_thermal_retune(
     let resolved = match resolve_target(target, default_devd) {
         Ok(resolved) => resolved,
         Err(error) => {
-            output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
-                ok: false,
-                target: target_value,
-                preview_response: None,
-                status_readback: None,
-                error: Some(error.to_string()),
-            })?;
+            record_retune_failure(output, target_value, None, None, error.as_ref())?;
             return Err(error);
         }
     };
@@ -232,13 +262,7 @@ pub(super) async fn run_thermal_retune(
                 io::ErrorKind::InvalidData,
                 "thermal retune preview apply requires run.json selectedMode=auto|65w|100w",
             );
-            output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
-                ok: false,
-                target: target_value,
-                preview_response: None,
-                status_readback: None,
-                error: Some(error.to_string()),
-            })?;
+            record_retune_failure(output, target_value, None, None, &error)?;
             return Err(error.into());
         }
     };
@@ -257,13 +281,7 @@ pub(super) async fn run_thermal_retune(
     {
         Ok(response) => response,
         Err(error) => {
-            output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
-                ok: false,
-                target: target_value,
-                preview_response: None,
-                status_readback: None,
-                error: Some(error.to_string()),
-            })?;
+            record_retune_failure(output, target_value, None, None, error.as_ref())?;
             return Err(error);
         }
     };
@@ -271,13 +289,13 @@ pub(super) async fn run_thermal_retune(
     let status = match request_with_lease(client, resolved, Method::GET, "/status", None).await {
         Ok(status) => status,
         Err(error) => {
-            output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
-                ok: false,
-                target: target_value,
-                preview_response: Some(thermal_retune_status_summary(&preview_response)),
-                status_readback: None,
-                error: Some(error.to_string()),
-            })?;
+            record_retune_failure(
+                output,
+                target_value,
+                Some(&preview_response),
+                None,
+                error.as_ref(),
+            )?;
             return Err(error);
         }
     };
@@ -301,13 +319,13 @@ pub(super) async fn run_thermal_retune(
         verify_thermal_control_readback(&status, &expected, "preview")
     })();
     if let Err(error) = readback_result {
-        output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
-            ok: false,
-            target: target_value,
-            preview_response: Some(thermal_retune_status_summary(&preview_response)),
-            status_readback: Some(thermal_retune_status_summary(&status)),
-            error: Some(error.to_string()),
-        })?;
+        record_retune_failure(
+            output,
+            target_value,
+            Some(&preview_response),
+            Some(&status),
+            error.as_ref(),
+        )?;
         return Err(error);
     }
 
@@ -318,7 +336,23 @@ pub(super) async fn run_thermal_retune(
         status_readback: Some(thermal_retune_status_summary(&status)),
         error: None,
     })?;
-    Ok(output.summary)
+    Ok(())
+}
+
+fn record_retune_failure(
+    output: &mut ThermalRetuneOutput,
+    target: Value,
+    preview_response: Option<&Value>,
+    status_readback: Option<&Value>,
+    error: &dyn std::error::Error,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
+        ok: false,
+        target,
+        preview_response: preview_response.map(thermal_retune_status_summary),
+        status_readback: status_readback.map(thermal_retune_status_summary),
+        error: Some(error.to_string()),
+    })
 }
 
 fn thermal_retune_profile_mode(summary: &Value) -> Option<ThermalProfileMode> {

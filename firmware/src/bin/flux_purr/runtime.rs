@@ -16,6 +16,7 @@ include!("control_plane.rs");
 include!("lan.rs");
 include!("display_io.rs");
 include!("boot.rs");
+include!("runtime_loop.rs");
 
 #[cfg(test)]
 #[path = "runtime_tests.rs"]

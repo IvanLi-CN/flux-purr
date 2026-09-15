@@ -911,10 +911,6 @@ async fn device_thermal_plant_run(
     )))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "HTTP handler keeps transport-specific calibration transitions atomic"
-)]
 async fn configure_calibration_job(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -930,133 +926,178 @@ async fn configure_calibration_job(
             .clone()
     };
 
-    if target.transport == DeviceTransport::NativeSerial {
-        let job = match serial_calibration_job_config(&state, &target, &payload).await {
-            Ok(job) => job,
-            Err(error) => {
-                record_serial_bridge_error(&state, &device_id, "calibration_job", &error);
-                return Err(error);
-            }
-        };
-        let mut state_lock = state.lock()?;
-        if let Some(device) = state_lock.devices.get_mut(&device_id) {
-            device.status.calibration.job = job.clone();
-            device.connection = ConnectionState::Connected;
+    match target.transport {
+        DeviceTransport::NativeSerial => {
+            configure_native_calibration_job(&state, &device_id, &target, &payload).await
         }
-        return Ok(Json(job));
-    }
-
-    if target.transport == DeviceTransport::Lan {
-        let configured = lan_bridge_config(&target)?;
-        let job = lan_bridge_write::<CalibrationJobState>(
-            &configured,
-            "calibration/job",
-            Method::POST,
-            Some(lan_bridge_payload(&payload)?),
-        )
-        .await?;
-        let mut state_lock = state.lock()?;
-        if let Some(device) = state_lock.devices.get_mut(&device_id) {
-            device.status.calibration.job = job.clone();
-            device.connection = ConnectionState::Connected;
+        DeviceTransport::Lan => {
+            configure_lan_calibration_job(&state, &device_id, &target, &payload).await
         }
-        return Ok(Json(job));
+        DeviceTransport::Mock => configure_mock_calibration_job(&state, &device_id, &payload),
     }
+}
 
+async fn configure_native_calibration_job(
+    state: &AppState,
+    device_id: &str,
+    target: &DeviceRecord,
+    payload: &CalibrationJobRequest,
+) -> Result<Json<CalibrationJobState>, HttpError> {
+    let job = match serial_calibration_job_config(state, target, payload).await {
+        Ok(job) => job,
+        Err(error) => {
+            record_serial_bridge_error(state, device_id, "calibration_job", &error);
+            return Err(error);
+        }
+    };
+    store_calibration_job(state, device_id, job)
+}
+
+async fn configure_lan_calibration_job(
+    state: &AppState,
+    device_id: &str,
+    target: &DeviceRecord,
+    payload: &CalibrationJobRequest,
+) -> Result<Json<CalibrationJobState>, HttpError> {
+    let configured = lan_bridge_config(target)?;
+    let job = lan_bridge_write::<CalibrationJobState>(
+        &configured,
+        "calibration/job",
+        Method::POST,
+        Some(lan_bridge_payload(payload)?),
+    )
+    .await?;
+    store_calibration_job(state, device_id, job)
+}
+
+fn store_calibration_job(
+    state: &AppState,
+    device_id: &str,
+    job: CalibrationJobState,
+) -> Result<Json<CalibrationJobState>, HttpError> {
+    let mut state_lock = state.lock()?;
+    if let Some(device) = state_lock.devices.get_mut(device_id) {
+        device.status.calibration.job = job.clone();
+        device.connection = ConnectionState::Connected;
+    }
+    Ok(Json(job))
+}
+
+fn configure_mock_calibration_job(
+    state: &AppState,
+    device_id: &str,
+    payload: &CalibrationJobRequest,
+) -> Result<Json<CalibrationJobState>, HttpError> {
     let mut state_lock = state.lock()?;
     let device = state_lock
         .devices
-        .get_mut(&device_id)
+        .get_mut(device_id)
         .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
     match payload.op {
-        CalibrationJobOp::Cancel => {
-            if device.status.calibration.job.status != CalibrationJobStatus::Running {
-                return Ok(Json(device.status.calibration.job.clone()));
-            }
-            device.status.calibration.job = CalibrationJobState {
-                status: CalibrationJobStatus::Canceled,
-                ..CalibrationJobState::default()
-            };
-            disarm_mock_thermal_plant(&mut device.status);
-            device.status.calibration.mode = CalibrationMode::Off;
-            if let Some(attempt) = device.thermal_plant_run.attempt.as_mut() {
-                attempt.status = CalibrationJobStatus::Canceled;
-                attempt.phase = Some(ThermalPlantRunPhase::Cooling);
-                attempt.restart_allowed = true;
-                attempt.duty_percent = 0;
-                attempt.heater_voltage_mv = 0;
-                attempt.error = None;
-            }
-        }
-        CalibrationJobOp::Start => {
-            if device.status.calibration.job.status == CalibrationJobStatus::Running {
-                return Err(HttpError::bad_request(
-                    "heater_disarm_pending",
-                    "The previous heater session is still being physically disarmed.",
-                ));
-            }
-            let kind = payload.kind.ok_or_else(|| {
-                HttpError::bad_request(
-                    "calibration_job_kind_required",
-                    "Calibration auto job requires a job kind.",
-                )
-            })?;
-            let mut next_request_mv = device.status.calibration.pps_mv;
-            let mut thermal_request_mv = device
-                .status
-                .calibration
-                .pps_mv
-                .unwrap_or(DEFAULT_PD_REQUEST_MV);
-            if kind == CalibrationJobKind::ThermalPlantAuto {
-                let (source, request_mv) = thermal_plant_start_request_for_device(device)?;
-                thermal_request_mv = request_mv;
-                device.status.calibration.mode = CalibrationMode::ThermalPlant;
-                disarm_mock_thermal_plant(&mut device.status);
-                device.status.manual_pps_enabled = true;
-                device.status.manual_pps_mv = Some(request_mv);
-                device.status.manual_pps_ma = Some(source.max_ma);
-                device.status.pd_request_mv = request_mv;
-                device.status.pd_contract_mv = request_mv;
-                device.status.voltage_mv = u32::from(request_mv);
-                device.status.calibration.pps_enabled = true;
-                device.status.calibration.pps_mv = Some(request_mv);
-                device.status.calibration.pps_ma = Some(source.max_ma);
-                next_request_mv = Some(request_mv);
-            }
-            device.status.calibration.job = CalibrationJobState {
-                kind: Some(kind),
-                status: CalibrationJobStatus::Running,
-                progress_percent: 0,
-                samples_collected: 0,
-                next_request_mv,
-                message: None,
-            };
-            if kind == CalibrationJobKind::ThermalPlantAuto {
-                let next_run_id = device
-                    .thermal_plant_run
-                    .attempt
-                    .as_ref()
-                    .map(|attempt| attempt.run_id.saturating_add(1))
-                    .unwrap_or(1);
-                device.thermal_plant_run.attempt = Some(ThermalPlantRunAttempt {
-                    run_id: next_run_id,
-                    status: CalibrationJobStatus::Running,
-                    phase: Some(ThermalPlantRunPhase::Ambient),
-                    progress_percent: 0,
-                    elapsed_ms: 0,
-                    current_temp_centi_c: 2500,
-                    heater_voltage_mv: thermal_request_mv,
-                    duty_percent: 0,
-                    sample_count: 0,
-                    restart_allowed: false,
-                    error: None,
-                });
-                device.thermal_plant_run.trace_page = ThermalPlantTracePage::default();
-                device.thermal_plant_run.provisional_curve = None;
-            }
-        }
+        CalibrationJobOp::Cancel => cancel_mock_calibration_job(device),
+        CalibrationJobOp::Start => start_mock_calibration_job(device, payload.kind)?,
     }
     Ok(Json(device.status.calibration.job.clone()))
+}
+
+fn cancel_mock_calibration_job(device: &mut DeviceRecord) {
+    if device.status.calibration.job.status != CalibrationJobStatus::Running {
+        return;
+    }
+    device.status.calibration.job = CalibrationJobState {
+        status: CalibrationJobStatus::Canceled,
+        ..CalibrationJobState::default()
+    };
+    disarm_mock_thermal_plant(&mut device.status);
+    device.status.calibration.mode = CalibrationMode::Off;
+    if let Some(attempt) = device.thermal_plant_run.attempt.as_mut() {
+        attempt.status = CalibrationJobStatus::Canceled;
+        attempt.phase = Some(ThermalPlantRunPhase::Cooling);
+        attempt.restart_allowed = true;
+        attempt.duty_percent = 0;
+        attempt.heater_voltage_mv = 0;
+        attempt.error = None;
+    }
+}
+
+fn start_mock_calibration_job(
+    device: &mut DeviceRecord,
+    kind: Option<CalibrationJobKind>,
+) -> Result<(), HttpError> {
+    if device.status.calibration.job.status == CalibrationJobStatus::Running {
+        return Err(HttpError::bad_request(
+            "heater_disarm_pending",
+            "The previous heater session is still being physically disarmed.",
+        ));
+    }
+    let kind = kind.ok_or_else(|| {
+        HttpError::bad_request(
+            "calibration_job_kind_required",
+            "Calibration auto job requires a job kind.",
+        )
+    })?;
+    let mut next_request_mv = device.status.calibration.pps_mv;
+    let mut thermal_request_mv = device
+        .status
+        .calibration
+        .pps_mv
+        .unwrap_or(DEFAULT_PD_REQUEST_MV);
+    if kind == CalibrationJobKind::ThermalPlantAuto {
+        let (source, request_mv) = thermal_plant_start_request_for_device(device)?;
+        thermal_request_mv = request_mv;
+        apply_mock_thermal_plant_start(device, source.max_ma, request_mv);
+        next_request_mv = Some(request_mv);
+    }
+    device.status.calibration.job = CalibrationJobState {
+        kind: Some(kind),
+        status: CalibrationJobStatus::Running,
+        progress_percent: 0,
+        samples_collected: 0,
+        next_request_mv,
+        message: None,
+    };
+    if kind == CalibrationJobKind::ThermalPlantAuto {
+        initialize_mock_thermal_plant_run(device, thermal_request_mv);
+    }
+    Ok(())
+}
+
+fn apply_mock_thermal_plant_start(device: &mut DeviceRecord, max_ma: u16, request_mv: u16) {
+    device.status.calibration.mode = CalibrationMode::ThermalPlant;
+    disarm_mock_thermal_plant(&mut device.status);
+    device.status.manual_pps_enabled = true;
+    device.status.manual_pps_mv = Some(request_mv);
+    device.status.manual_pps_ma = Some(max_ma);
+    device.status.pd_request_mv = request_mv;
+    device.status.pd_contract_mv = request_mv;
+    device.status.voltage_mv = u32::from(request_mv);
+    device.status.calibration.pps_enabled = true;
+    device.status.calibration.pps_mv = Some(request_mv);
+    device.status.calibration.pps_ma = Some(max_ma);
+}
+
+fn initialize_mock_thermal_plant_run(device: &mut DeviceRecord, request_mv: u16) {
+    let next_run_id = device
+        .thermal_plant_run
+        .attempt
+        .as_ref()
+        .map(|attempt| attempt.run_id.saturating_add(1))
+        .unwrap_or(1);
+    device.thermal_plant_run.attempt = Some(ThermalPlantRunAttempt {
+        run_id: next_run_id,
+        status: CalibrationJobStatus::Running,
+        phase: Some(ThermalPlantRunPhase::Ambient),
+        progress_percent: 0,
+        elapsed_ms: 0,
+        current_temp_centi_c: 2500,
+        heater_voltage_mv: request_mv,
+        duty_percent: 0,
+        sample_count: 0,
+        restart_allowed: false,
+        error: None,
+    });
+    device.thermal_plant_run.trace_page = ThermalPlantTracePage::default();
+    device.thermal_plant_run.provisional_curve = None;
 }
 
 fn disarm_mock_thermal_plant(status: &mut ControlPlaneStatus) {

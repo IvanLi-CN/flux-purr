@@ -91,153 +91,33 @@ fn default_thermal_control_target(target_temp_c: i16) -> ThermalControlTarget {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 fn default_thermal_control_target_with_settings(
     target_temp_c: i16,
     settings: ThermalControlProfileSettings,
 ) -> ThermalControlTarget {
     let target = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
-    let brake_distance_centi_c = if target <= 100 {
-        450
-    } else if target <= 180 {
-        700
-    } else if target <= 250 {
-        1_000
-    } else {
-        1_400
-    };
-    let approach_power_permille = if target <= 100 {
-        380
-    } else if target <= 180 {
-        320
-    } else if target <= 250 {
-        260
-    } else {
-        220
-    };
-    let warmup_power_permille = 1_000;
-    let approach_floor_power_permille = if target <= 100 {
-        120
-    } else if target <= 180 {
-        200
-    } else if target <= 250 {
-        320
-    } else {
-        380
-    };
-    let hold_power_permille = if target <= 100 {
-        180
-    } else if target <= 180 {
-        220
-    } else if target <= 250 {
-        260
-    } else {
-        300
-    };
-    let approach_damping_exponent_permille: u16 = if target <= 100 {
-        1_400
-    } else if target <= 140 {
-        1_000
-    } else if target <= 180 {
-        800
-    } else if target <= 220 {
-        550
-    } else {
-        350
-    };
+    let (brake_distance_centi_c, approach_power_permille, approach_floor_power_permille,
+        hold_power_permille, approach_damping_exponent_permille) =
+        default_power_parameters(target);
+    let (hold_entry_error_c, hold_exit_error_c, hold_off_error_c, overshoot_cutoff_c,
+        hold_kp_permille_per_c, hold_ki_permille_per_c_tick, hold_blend_ticks) =
+        default_hold_parameters(target);
     ThermalControlTarget {
         brake_distance_c: brake_distance_centi_c as f32 / 100.0,
-        warmup_power_permille,
+        warmup_power_permille: 1_000,
         warmup_reenter_error_c: settings.warmup_reenter_error_c,
         approach_power_permille,
         approach_floor_power_permille,
         approach_damping_exponent: f32::from(approach_damping_exponent_permille) / 1_000.0,
         approach_tail_window_c: 0.0,
         hold_power_permille,
-        hold_entry_error_c: if target <= 60 {
-            0.35
-        } else if target <= 100 {
-            0.25
-        } else if target <= 140 {
-            0.20
-        } else if target <= 180 {
-            0.18
-        } else if target <= 220 {
-            0.15
-        } else {
-            0.12
-        },
-        hold_exit_error_c: if target <= 60 {
-            1.6
-        } else if target <= 100 {
-            1.2
-        } else if target <= 140 {
-            1.0
-        } else if target <= 180 {
-            0.9
-        } else if target <= 220 {
-            0.8
-        } else {
-            0.7
-        },
-        hold_off_error_c: if target <= 60 {
-            0.7
-        } else if target <= 100 {
-            0.8
-        } else if target <= 140 {
-            0.9
-        } else if target <= 180 {
-            1.0
-        } else if target <= 220 {
-            1.2
-        } else {
-            1.5
-        },
-        overshoot_cutoff_c: if target <= 60 {
-            0.8
-        } else if target <= 100 {
-            0.9
-        } else if target <= 140 {
-            1.0
-        } else if target <= 180 {
-            1.2
-        } else if target <= 220 {
-            1.4
-        } else {
-            1.6
-        },
-        hold_kp_permille_per_c: if target <= 60 {
-            70.0
-        } else if target <= 100 {
-            55.0
-        } else if target <= 140 {
-            42.0
-        } else if target <= 180 {
-            30.0
-        } else if target <= 220 {
-            22.0
-        } else {
-            18.0
-        },
-        hold_ki_permille_per_c_tick: if target <= 60 {
-            3.0
-        } else if target <= 100 {
-            2.0
-        } else if target <= 140 {
-            1.5
-        } else {
-            1.0
-        },
-        hold_blend_ticks: if target <= 100 {
-            16
-        } else if target <= 180 {
-            12
-        } else {
-            8
-        },
+        hold_entry_error_c,
+        hold_exit_error_c,
+        hold_off_error_c,
+        overshoot_cutoff_c,
+        hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick,
+        hold_blend_ticks,
         hold_reheat_power_permille: hold_power_permille,
         approach_lead_ticks: 0,
         hold_lead_ticks: 0,
@@ -247,10 +127,98 @@ fn default_thermal_control_target_with_settings(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
+fn default_power_parameters(target: i16) -> (u16, u16, u16, u16, u16) {
+    let brake = match target {
+        ..=100 => 450,
+        101..=180 => 700,
+        181..=250 => 1_000,
+        _ => 1_400,
+    };
+    let approach = match target {
+        ..=100 => 380,
+        101..=180 => 320,
+        181..=250 => 260,
+        _ => 220,
+    };
+    let floor = match target {
+        ..=100 => 120,
+        101..=180 => 200,
+        181..=250 => 320,
+        _ => 380,
+    };
+    let hold = match target {
+        ..=100 => 180,
+        101..=180 => 220,
+        181..=250 => 260,
+        _ => 300,
+    };
+    let damping = match target {
+        ..=100 => 1_400,
+        101..=140 => 1_000,
+        141..=180 => 800,
+        181..=220 => 550,
+        _ => 350,
+    };
+    (brake, approach, floor, hold, damping)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn default_hold_parameters(target: i16) -> (f32, f32, f32, f32, f32, f32, u8) {
+    let hold_entry = match target {
+        ..=60 => 0.35,
+        61..=100 => 0.25,
+        101..=140 => 0.20,
+        141..=180 => 0.18,
+        181..=220 => 0.15,
+        _ => 0.12,
+    };
+    let hold_exit = match target {
+        ..=60 => 1.6,
+        61..=100 => 1.2,
+        101..=140 => 1.0,
+        141..=180 => 0.9,
+        181..=220 => 0.8,
+        _ => 0.7,
+    };
+    let hold_off = match target {
+        ..=60 => 0.7,
+        61..=100 => 0.8,
+        101..=140 => 0.9,
+        141..=180 => 1.0,
+        181..=220 => 1.2,
+        _ => 1.5,
+    };
+    let overshoot = match target {
+        ..=60 => 0.8,
+        61..=100 => 0.9,
+        101..=140 => 1.0,
+        141..=180 => 1.2,
+        181..=220 => 1.4,
+        _ => 1.6,
+    };
+    let kp = match target {
+        ..=60 => 70.0,
+        61..=100 => 55.0,
+        101..=140 => 42.0,
+        141..=180 => 30.0,
+        181..=220 => 22.0,
+        _ => 18.0,
+    };
+    let ki = match target {
+        ..=60 => 3.0,
+        61..=100 => 2.0,
+        101..=140 => 1.5,
+        _ => 1.0,
+    };
+    let blend = match target {
+        ..=100 => 16,
+        101..=180 => 12,
+        _ => 8,
+    };
+    (hold_entry, hold_exit, hold_off, overshoot, kp, ki, blend)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn interpolate_thermal_control_target(
     target_temp_c: i16,
     lower: ThermalControlProfilePoint,
@@ -258,163 +226,132 @@ fn interpolate_thermal_control_target(
     settings: ThermalControlProfileSettings,
 ) -> ThermalControlTarget {
     if lower.target_temp_c >= upper.target_temp_c {
-        return ThermalControlTarget {
-            brake_distance_c: lower.brake_distance_centi_c as f32 / 100.0,
-            warmup_power_permille: 1_000,
-            warmup_reenter_error_c: f32::from(lower.warmup_reenter_centi_c) / 100.0,
-            approach_power_permille: lower.approach_power_permille,
-            approach_floor_power_permille: lower.approach_floor_power_permille,
-            approach_damping_exponent: f32::from(lower.approach_damping_exponent_permille)
-                / 1_000.0,
-            approach_tail_window_c: f32::from(lower.approach_tail_window_centi_c) / 100.0,
-            hold_power_permille: lower.hold_power_permille,
-            hold_reheat_power_permille: lower.hold_reheat_power_permille,
-            hold_entry_error_c: f32::from(lower.hold_entry_centi_c) / 100.0,
-            hold_exit_error_c: f32::from(lower.hold_exit_centi_c) / 100.0,
-            hold_on_error_c: f32::from(lower.hold_on_centi_c) / 100.0,
-            hold_off_error_c: f32::from(lower.hold_off_centi_c) / 100.0,
-            overshoot_cutoff_c: f32::from(lower.overshoot_cutoff_centi_c) / 100.0,
-            hold_kp_permille_per_c: f32::from(lower.hold_kp_permille_per_c),
-            hold_ki_permille_per_c_tick: f32::from(lower.hold_ki_permille_per_c_tick),
-            hold_blend_ticks: lower.hold_blend_ticks.clamp(1, u16::from(u8::MAX)) as u8,
-            approach_lead_ticks: lower.approach_lead_ticks.min(u16::from(u8::MAX)) as u8,
-            hold_lead_ticks: lower.hold_lead_ticks.min(u16::from(u8::MAX)) as u8,
-            settings,
-        };
+        return direct_thermal_control_target(lower, settings);
     }
 
     let span = f32::from(upper.target_temp_c - lower.target_temp_c);
     let ratio = (f32::from(target_temp_c - lower.target_temp_c) / span).clamp(0.0, 1.0);
-    let lerp_u16 = |left: u16, right: u16, upper_bound: u16| -> u16 {
-        (f32::from(left) + ((f32::from(right) - f32::from(left)) * ratio) + 0.5)
-            .clamp(0.0, f32::from(upper_bound)) as u16
-    };
-    let linear_brake_distance = lerp_u16(
-        lower.brake_distance_centi_c,
-        upper.brake_distance_centi_c,
-        5_000,
-    );
-    let midpoint_weight = 4.0 * ratio * (1.0 - ratio);
-    let intermediate_brake_adjustment = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
-        -0.20
-    } else if lower.target_temp_c >= 100 && upper.target_temp_c <= 180 {
-        if upper.target_temp_c <= 140 {
-            0.55
-        } else {
-            0.20
-        }
-    } else {
-        0.0
-    };
-    let interpolated_brake_distance = (f32::from(linear_brake_distance)
-        * (1.0 - intermediate_brake_adjustment * midpoint_weight)
-        + 0.5) as u16;
-    let low_temp_hold_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
-        1.0 - (0.20 * midpoint_weight)
-    } else {
-        1.0
-    };
-    let low_temp_reheat_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
-        1.0 - (0.10 * midpoint_weight)
-    } else {
-        1.0
-    };
-    let scale_low_temp_hold =
-        |value: u16| (f32::from(value) * low_temp_hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
+    interpolate_thermal_control_target_linear(lower, upper, settings, ratio)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn direct_thermal_control_target(
+    point: ThermalControlProfilePoint,
+    settings: ThermalControlProfileSettings,
+) -> ThermalControlTarget {
     ThermalControlTarget {
-        brake_distance_c: f32::from(interpolated_brake_distance) / 100.0,
+            brake_distance_c: point.brake_distance_centi_c as f32 / 100.0,
+            warmup_power_permille: 1_000,
+            warmup_reenter_error_c: f32::from(point.warmup_reenter_centi_c) / 100.0,
+            approach_power_permille: point.approach_power_permille,
+            approach_floor_power_permille: point.approach_floor_power_permille,
+            approach_damping_exponent: f32::from(point.approach_damping_exponent_permille)
+                / 1_000.0,
+            approach_tail_window_c: f32::from(point.approach_tail_window_centi_c) / 100.0,
+            hold_power_permille: point.hold_power_permille,
+            hold_reheat_power_permille: point.hold_reheat_power_permille,
+            hold_entry_error_c: f32::from(point.hold_entry_centi_c) / 100.0,
+            hold_exit_error_c: f32::from(point.hold_exit_centi_c) / 100.0,
+            hold_on_error_c: f32::from(point.hold_on_centi_c) / 100.0,
+            hold_off_error_c: f32::from(point.hold_off_centi_c) / 100.0,
+            overshoot_cutoff_c: f32::from(point.overshoot_cutoff_centi_c) / 100.0,
+            hold_kp_permille_per_c: f32::from(point.hold_kp_permille_per_c),
+            hold_ki_permille_per_c_tick: f32::from(point.hold_ki_permille_per_c_tick),
+            hold_blend_ticks: point.hold_blend_ticks.clamp(1, u16::from(u8::MAX)) as u8,
+            approach_lead_ticks: point.approach_lead_ticks.min(u16::from(u8::MAX)) as u8,
+            hold_lead_ticks: point.hold_lead_ticks.min(u16::from(u8::MAX)) as u8,
+            settings,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn interpolate_thermal_control_target_linear(
+    lower: ThermalControlProfilePoint,
+    upper: ThermalControlProfilePoint,
+    settings: ThermalControlProfileSettings,
+    ratio: f32,
+) -> ThermalControlTarget {
+    let (brake, approach, floor, damping, tail, hold, reheat) =
+        interpolated_power_values(lower, upper, ratio);
+    let (entry, exit, on, off, overshoot, kp, ki, blend, approach_lead, hold_lead) =
+        interpolated_error_values(lower, upper, ratio);
+    ThermalControlTarget {
+        brake_distance_c: f32::from(brake) / 100.0,
         warmup_power_permille: 1_000,
-        warmup_reenter_error_c: f32::from(lerp_u16(
-            lower.warmup_reenter_centi_c,
-            upper.warmup_reenter_centi_c,
-            5_000,
-        )) / 100.0,
-        approach_power_permille: lerp_u16(
-            lower.approach_power_permille,
-            upper.approach_power_permille,
-            1_000,
-        ),
-        approach_floor_power_permille: lerp_u16(
-            lower.approach_floor_power_permille,
-            upper.approach_floor_power_permille,
-            1_000,
-        ),
-        approach_damping_exponent: f32::from(lerp_u16(
-            lower.approach_damping_exponent_permille,
-            upper.approach_damping_exponent_permille,
-            THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
-        )) / 1_000.0,
-        approach_tail_window_c: f32::from(lerp_u16(
-            lower.approach_tail_window_centi_c,
-            upper.approach_tail_window_centi_c,
-            THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX,
-        )) / 100.0,
-        hold_power_permille: scale_low_temp_hold(lerp_u16(
-            lower.hold_power_permille,
-            upper.hold_power_permille,
-            1_000,
-        )),
-        hold_reheat_power_permille: (f32::from(lerp_u16(
-            lower.hold_reheat_power_permille,
-            upper.hold_reheat_power_permille,
-            1_000,
-        )) * low_temp_reheat_scale
-            + 0.5) as u16,
-        hold_entry_error_c: f32::from(lerp_u16(
-            lower.hold_entry_centi_c,
-            upper.hold_entry_centi_c,
-            5_000,
-        )) / 100.0,
-        hold_exit_error_c: f32::from(lerp_u16(
-            lower.hold_exit_centi_c,
-            upper.hold_exit_centi_c,
-            5_000,
-        )) / 100.0,
-        hold_on_error_c: f32::from(lerp_u16(
-            lower.hold_on_centi_c,
-            upper.hold_on_centi_c,
-            5_000,
-        )) / 100.0,
-        hold_off_error_c: f32::from(lerp_u16(
-            lower.hold_off_centi_c,
-            upper.hold_off_centi_c,
-            5_000,
-        )) / 100.0,
-        overshoot_cutoff_c: f32::from(lerp_u16(
-            lower.overshoot_cutoff_centi_c,
-            upper.overshoot_cutoff_centi_c,
-            5_000,
-        )) / 100.0,
-        hold_kp_permille_per_c: f32::from(lerp_u16(
-            lower.hold_kp_permille_per_c,
-            upper.hold_kp_permille_per_c,
-            10_000,
-        )),
-        hold_ki_permille_per_c_tick: f32::from(lerp_u16(
-            lower.hold_ki_permille_per_c_tick,
-            upper.hold_ki_permille_per_c_tick,
-            10_000,
-        )),
-        hold_blend_ticks: lerp_u16(
-            lower.hold_blend_ticks,
-            upper.hold_blend_ticks,
-            u16::from(u8::MAX),
-        )
-        .clamp(1, u16::from(u8::MAX)) as u8,
-        approach_lead_ticks: lerp_u16(
-            lower.approach_lead_ticks,
-            upper.approach_lead_ticks,
-            u16::from(u8::MAX),
-        )
-        .min(u16::from(u8::MAX)) as u8,
-        hold_lead_ticks: lerp_u16(
-            lower.hold_lead_ticks,
-            upper.hold_lead_ticks,
-            u16::from(u8::MAX),
-        )
-        .min(u16::from(u8::MAX)) as u8,
+        warmup_reenter_error_c: f32::from(interpolate_u16(lower.warmup_reenter_centi_c, upper.warmup_reenter_centi_c, ratio, 5_000)) / 100.0,
+        approach_power_permille: approach,
+        approach_floor_power_permille: floor,
+        approach_damping_exponent: f32::from(damping) / 1_000.0,
+        approach_tail_window_c: f32::from(tail) / 100.0,
+        hold_power_permille: hold,
+        hold_reheat_power_permille: reheat,
+        hold_entry_error_c: f32::from(entry) / 100.0,
+        hold_exit_error_c: f32::from(exit) / 100.0,
+        hold_on_error_c: f32::from(on) / 100.0,
+        hold_off_error_c: f32::from(off) / 100.0,
+        overshoot_cutoff_c: f32::from(overshoot) / 100.0,
+        hold_kp_permille_per_c: f32::from(kp),
+        hold_ki_permille_per_c_tick: f32::from(ki),
+        hold_blend_ticks: blend,
+        approach_lead_ticks: approach_lead,
+        hold_lead_ticks: hold_lead,
         settings,
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn interpolate_u16(left: u16, right: u16, ratio: f32, upper_bound: u16) -> u16 {
+    (f32::from(left) + ((f32::from(right) - f32::from(left)) * ratio) + 0.5)
+        .clamp(0.0, f32::from(upper_bound)) as u16
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn interpolated_power_values(
+    lower: ThermalControlProfilePoint,
+    upper: ThermalControlProfilePoint,
+    ratio: f32,
+) -> (u16, u16, u16, u16, u16, u16, u16) {
+    let linear_brake = interpolate_u16(lower.brake_distance_centi_c, upper.brake_distance_centi_c, ratio, 5_000);
+    let midpoint = 4.0 * ratio * (1.0 - ratio);
+    let adjustment = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        -0.20
+    } else if lower.target_temp_c >= 100 && upper.target_temp_c <= 180 {
+        if upper.target_temp_c <= 140 { 0.55 } else { 0.20 }
+    } else { 0.0 };
+    let brake = (f32::from(linear_brake) * (1.0 - adjustment * midpoint) + 0.5) as u16;
+    let hold_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 { 1.0 - 0.20 * midpoint } else { 1.0 };
+    let reheat_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 { 1.0 - 0.10 * midpoint } else { 1.0 };
+    let scale_hold = |value: u16| (f32::from(value) * hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
+    (
+        brake,
+        interpolate_u16(lower.approach_power_permille, upper.approach_power_permille, ratio, 1_000),
+        interpolate_u16(lower.approach_floor_power_permille, upper.approach_floor_power_permille, ratio, 1_000),
+        interpolate_u16(lower.approach_damping_exponent_permille, upper.approach_damping_exponent_permille, ratio, THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX),
+        interpolate_u16(lower.approach_tail_window_centi_c, upper.approach_tail_window_centi_c, ratio, THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX),
+        scale_hold(interpolate_u16(lower.hold_power_permille, upper.hold_power_permille, ratio, 1_000)),
+        (f32::from(interpolate_u16(lower.hold_reheat_power_permille, upper.hold_reheat_power_permille, ratio, 1_000)) * reheat_scale + 0.5) as u16,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn interpolated_error_values(
+    lower: ThermalControlProfilePoint,
+    upper: ThermalControlProfilePoint,
+    ratio: f32,
+) -> (u16, u16, u16, u16, u16, u16, u16, u8, u8, u8) {
+    let interpolate = |left: u16, right: u16, bound: u16| interpolate_u16(left, right, ratio, bound);
+    (
+        interpolate(lower.hold_entry_centi_c, upper.hold_entry_centi_c, 5_000),
+        interpolate(lower.hold_exit_centi_c, upper.hold_exit_centi_c, 5_000),
+        interpolate(lower.hold_on_centi_c, upper.hold_on_centi_c, 5_000),
+        interpolate(lower.hold_off_centi_c, upper.hold_off_centi_c, 5_000),
+        interpolate(lower.overshoot_cutoff_centi_c, upper.overshoot_cutoff_centi_c, 5_000),
+        interpolate(lower.hold_kp_permille_per_c, upper.hold_kp_permille_per_c, 10_000),
+        interpolate(lower.hold_ki_permille_per_c_tick, upper.hold_ki_permille_per_c_tick, 10_000),
+        interpolate(lower.hold_blend_ticks, upper.hold_blend_ticks, u16::from(u8::MAX)).clamp(1, u16::from(u8::MAX)) as u8,
+        interpolate(lower.approach_lead_ticks, upper.approach_lead_ticks, u16::from(u8::MAX)).min(u16::from(u8::MAX)) as u8,
+        interpolate(lower.hold_lead_ticks, upper.hold_lead_ticks, u16::from(u8::MAX)).min(u16::from(u8::MAX)) as u8,
+    )
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -676,6 +613,45 @@ struct ThermalPlantRuntimeInput {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy)]
+struct ThermalControlFrame {
+    control_target: ThermalControlTarget,
+    approach_max_cycles: u16,
+    hold_blend_cycles: u16,
+    hold_ki: f32,
+    error_c: f32,
+    previous_error_c: f32,
+    filtered_temp_c: f32,
+    filtered_slope_c_per_profile_tick: f32,
+    control_error_c: f32,
+    approach_control_error_c: f32,
+    hold_control_error_c: f32,
+    hold_prediction_blocks_reheat: bool,
+    hold_filter_lag_blocks_reheat: bool,
+    hold_actual_overshoot_blocks_reheat: bool,
+    approach_guard_error_c: f32,
+    hold_entry_gate_c: f32,
+    hold_state_ready: bool,
+    actual_crossed_target_ready: bool,
+    hold_guard_error_c: f32,
+    hold_reenter_error_c: f32,
+    approach_predictive_coast_ready: bool,
+    hold_exit_error_c: f32,
+    brake_distance_c: f32,
+    warmup_handoff_error_c: f32,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn control_cycle_parameters(target: ThermalControlTarget) -> (f32, u16, u16, f32) {
+    (
+        scaled_filter_alpha_for_control_interval(target.settings.temp_filter_alpha),
+        control_cycles_from_profile_ticks(u16::from(target.settings.approach_max_ticks)).max(1),
+        control_cycles_from_profile_ticks(u16::from(target.hold_blend_ticks)).max(1),
+        scaled_hold_ki_for_control_interval(target.hold_ki_permille_per_c_tick),
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 impl HeaterController {
     const fn new() -> Self {
         Self {
@@ -751,10 +727,6 @@ impl HeaterController {
     }
 
     #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
     fn update_thermal_plant_at(&mut self, input: ThermalPlantRuntimeInput) -> HeaterPidSnapshot {
         let ThermalPlantRuntimeInput {
             target_temp_c,
@@ -766,20 +738,7 @@ impl HeaterController {
             now_ms,
         } = input;
         if !heater_enabled || self.fault_latched.is_some() {
-            self.thermal_plant_controller.reset();
-            self.reseed_measurement(measured_temp_c);
-            self.duty_percent = 0;
-            self.heater_was_enabled = false;
-            return HeaterPidSnapshot {
-                duty_percent: 0,
-                warmup_soft_start_percent: 0,
-                error_c: f32::from(target_temp_c) - measured_temp_c,
-                control_error_c: f32::from(target_temp_c) - measured_temp_c,
-                filtered_temp_c: measured_temp_c,
-                filtered_slope_c_per_s: 0.0,
-                coast_active: false,
-                phase: HeaterControlPhase::Warmup,
-            };
+            return self.reset_thermal_plant_output(target_temp_c, measured_temp_c);
         }
         if measured_temp_c >= f32::from(HEATER_HARD_CUTOFF_TEMP_C) {
             self.latch_fault(HeaterFaultReason::OverTemp);
@@ -859,6 +818,27 @@ impl HeaterController {
         }
     }
 
+    fn reset_thermal_plant_output(
+        &mut self,
+        target_temp_c: i16,
+        measured_temp_c: f32,
+    ) -> HeaterPidSnapshot {
+        self.thermal_plant_controller.reset();
+        self.reseed_measurement(measured_temp_c);
+        self.duty_percent = 0;
+        self.heater_was_enabled = false;
+        HeaterPidSnapshot {
+            duty_percent: 0,
+            warmup_soft_start_percent: 0,
+            error_c: f32::from(target_temp_c) - measured_temp_c,
+            control_error_c: f32::from(target_temp_c) - measured_temp_c,
+            filtered_temp_c: measured_temp_c,
+            filtered_slope_c_per_s: 0.0,
+            coast_active: false,
+            phase: HeaterControlPhase::Warmup,
+        }
+    }
+
     #[cfg(test)]
     fn update(
         &mut self,
@@ -876,11 +856,6 @@ impl HeaterController {
         )
     }
 
-#[expect(
-    clippy::too_many_lines,
-    clippy::excessive_nesting,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
     fn update_at(
         &mut self,
         target_temp_c: i16,
@@ -903,46 +878,11 @@ impl HeaterController {
         }
 
         if !heater_enabled || self.fault_latched.is_some() {
-            self.filtered_temp_c = Some(measured_temp_c);
-            self.previous_filtered_temp_c = Some(measured_temp_c);
-            self.filtered_slope_c_per_profile_tick = 0.0;
-            self.previous_measured_temp_c = Some(measured_temp_c);
-            self.phase = HeaterControlPhase::Warmup;
-            self.phase_ticks = 0;
-            self.recovering_from_hold = false;
-            self.duty_percent = 0;
-            self.hold_entry_output_percent = 0;
-            self.hold_integral_c = 0.0;
-            self.hold_coast_active = false;
-            self.hold_coast_cooling_samples = 0;
-            self.heater_was_enabled = false;
-            self.warmup_started_at_ms = None;
-            return HeaterPidSnapshot {
-                duty_percent: 0,
-                warmup_soft_start_percent: 0,
-                error_c: f32::from(target_temp_c) - measured_temp_c,
-                control_error_c: f32::from(target_temp_c) - measured_temp_c,
-                filtered_temp_c: measured_temp_c,
-                filtered_slope_c_per_s: 0.0,
-                coast_active: false,
-                phase: self.phase,
-            };
+            return self.reset_disabled_output(target_temp_c, measured_temp_c);
         }
 
         if target_temp_c != last_target_temp_c {
-            self.filtered_temp_c = Some(measured_temp_c);
-            self.previous_filtered_temp_c = Some(measured_temp_c);
-            self.filtered_slope_c_per_profile_tick = 0.0;
-            self.previous_measured_temp_c = Some(measured_temp_c);
-            self.phase = HeaterControlPhase::Warmup;
-            self.phase_ticks = 0;
-            self.recovering_from_hold = false;
-            self.duty_percent = 0;
-            self.hold_entry_output_percent = 0;
-            self.hold_integral_c = 0.0;
-            self.hold_coast_active = false;
-            self.hold_coast_cooling_samples = 0;
-            self.warmup_started_at_ms = Some(now_ms);
+            self.reset_for_target_change(measured_temp_c, now_ms);
         }
 
         if !self.heater_was_enabled {
@@ -953,326 +893,31 @@ impl HeaterController {
         let control_target = thermal_profile
             .map(|profile| profile.control_target(target_temp_c))
             .unwrap_or_else(|| default_thermal_control_target(target_temp_c));
-        let settings = control_target.settings;
-        let filter_alpha = scaled_filter_alpha_for_control_interval(settings.temp_filter_alpha);
-        let approach_max_cycles =
-            control_cycles_from_profile_ticks(u16::from(settings.approach_max_ticks)).max(1);
-        let hold_blend_cycles =
-            control_cycles_from_profile_ticks(u16::from(control_target.hold_blend_ticks)).max(1);
-        let hold_ki =
-            scaled_hold_ki_for_control_interval(control_target.hold_ki_permille_per_c_tick);
-        let error_c = f32::from(target_temp_c) - measured_temp_c;
-        let previous_error_c = f32::from(target_temp_c) - previous_measured_temp_c;
-        let last_filtered_temp_c = self.filtered_temp_c;
-        let filtered_temp_c = if let Some(previous_filtered_temp_c) = last_filtered_temp_c {
-            previous_filtered_temp_c + filter_alpha * (measured_temp_c - previous_filtered_temp_c)
-        } else {
-            measured_temp_c
-        };
-        let instantaneous_slope_c_per_profile_tick = last_filtered_temp_c
-            .map(|last| {
-                (filtered_temp_c - last)
-                    * (HEATER_PROFILE_TICK_MS as f32 / HEATER_CONTROL_INTERVAL_MS as f32)
-            })
-            .unwrap_or(0.0);
-        let slope_filter_alpha = filter_alpha.sqrt();
-        self.filtered_slope_c_per_profile_tick += slope_filter_alpha
-            * (instantaneous_slope_c_per_profile_tick - self.filtered_slope_c_per_profile_tick);
-        let filtered_temp_slope_c_per_profile_tick = self.filtered_slope_c_per_profile_tick;
-        self.previous_filtered_temp_c = last_filtered_temp_c;
-        self.filtered_temp_c = Some(filtered_temp_c);
-        let control_error_c = f32::from(target_temp_c) - filtered_temp_c;
-        let approach_projected_temp_c = filtered_temp_c
-            + (filtered_temp_slope_c_per_profile_tick
-                * f32::from(control_target.approach_lead_ticks));
-        let hold_projected_temp_c = filtered_temp_c
-            + (filtered_temp_slope_c_per_profile_tick * f32::from(control_target.hold_lead_ticks));
-        let approach_control_error_c = f32::from(target_temp_c) - approach_projected_temp_c;
-        let hold_control_error_c = f32::from(target_temp_c) - hold_projected_temp_c;
-        let hold_prediction_guard_c = control_target.hold_on_error_c.max(0.05) * 2.0;
-        let hold_prediction_blocks_reheat = error_c > 0.0
-            && error_c <= hold_prediction_guard_c
-            && filtered_temp_slope_c_per_profile_tick > 0.0
-            && hold_control_error_c <= 0.0;
-        let hold_filter_lag_blocks_reheat =
-            error_c <= 0.0 && control_error_c > 0.0 && filtered_temp_slope_c_per_profile_tick > 0.0;
-        let hold_actual_overshoot_blocks_reheat = error_c <= 0.0
-            && control_error_c <= 0.0
-            && (control_error_c - error_c) >= 0.05
-            && filtered_temp_slope_c_per_profile_tick > 0.0;
-        let approach_guard_error_c = approach_control_error_c.min(error_c);
-        let hold_entry_gate_c = control_target.hold_entry_error_c.max(0.05);
-        let hold_entry_measurement_margin_c = 0.5;
-        let hold_state_ready = control_error_c <= control_target.hold_exit_error_c;
-        let actual_crossed_target_ready =
-            error_c <= 0.0 && previous_error_c <= 0.0 && approach_control_error_c <= 0.0;
-        let hold_guard_error_c = if error_c >= 0.0 {
-            let filter_lag_allowance_c = control_target
-                .hold_on_error_c
-                .max(0.05)
-                .min(hold_entry_gate_c);
-            hold_control_error_c
-                .max(0.0)
-                .min(error_c + filter_lag_allowance_c)
-        } else {
-            // Above target, predictive lead was cutting hold power too aggressively and
-            // creating wide bang-bang cycles. Keep actual-temperature guard on the
-            // overshoot side and reserve predictive lead for under-target recovery.
-            error_c
-        };
-        let hold_reenter_error_c = control_target
-            .hold_exit_error_c
-            .max(control_target.hold_on_error_c)
-            .max(hold_entry_gate_c + HEATER_HOLD_PHASE_HYSTERESIS_C);
-        // A projected crossing alone is not enough to coast. The physical sensor and the
-        // filtered controller state must both be inside the profile's Hold exit gate first.
-        // Otherwise a high rising slope can cut heating several degrees below target.
-        let approach_coast_gate_c = hold_entry_gate_c.max(control_target.hold_exit_error_c)
-            + (hold_entry_measurement_margin_c * 2.0);
-        let approach_predictive_coast_ready = approach_control_error_c <= 0.0
-            && error_c <= approach_coast_gate_c
-            && control_error_c <= control_target.hold_exit_error_c;
-        // Phase residency follows the actual plate temperature. Filtered and projected errors
-        // shape power, but using their lag to leave Hold creates rapid Hold/Approach oscillation.
-        let hold_exit_error_c = error_c;
-        let brake_distance_c = control_target
-            .brake_distance_c
-            .max(control_target.hold_entry_error_c + 0.1);
-        let warmup_handoff_error_c = warmup_handoff_error_c(
-            brake_distance_c,
-            control_target.warmup_reenter_error_c,
-            filtered_temp_slope_c_per_profile_tick,
-            control_target.approach_lead_ticks,
+        let frame = self.measure_control_frame(
+            target_temp_c,
+            measured_temp_c,
+            previous_measured_temp_c,
+            control_target,
         );
+        let ThermalControlFrame {
+            control_target,
+            error_c,
+            filtered_temp_c,
+            filtered_slope_c_per_profile_tick,
+            control_error_c,
+            hold_control_error_c,
+            approach_predictive_coast_ready,
+            ..
+        } = frame;
 
-        let mut next_phase = self.phase;
         let previous_phase = self.phase;
-        match self.phase {
-            HeaterControlPhase::Warmup => {
-                if warmup_handoff_ready(
-                    error_c,
-                    previous_error_c,
-                    control_error_c,
-                    brake_distance_c,
-                    warmup_handoff_error_c,
-                ) {
-                    next_phase = HeaterControlPhase::Approach;
-                }
-            }
-            HeaterControlPhase::Approach => {
-                let timeout_hold_ready = self.phase_ticks >= approach_max_cycles
-                    && error_c <= hold_entry_gate_c
-                    && hold_state_ready;
-                // Re-enter warmup only when the actual plate reading is well below the brake
-                // boundary. Filter lag after a rising sample must not undo a deliberate brake.
-                if error_c >= brake_distance_c + control_target.warmup_reenter_error_c {
-                    next_phase = HeaterControlPhase::Warmup;
-                } else if (approach_control_error_c <= hold_entry_gate_c
-                    && error_c <= hold_entry_gate_c
-                    && previous_error_c <= hold_entry_gate_c + hold_entry_measurement_margin_c)
-                    || actual_crossed_target_ready
-                    || timeout_hold_ready
-                {
-                    next_phase = HeaterControlPhase::Hold;
-                }
-            }
-            HeaterControlPhase::Hold => {
-                if hold_exit_error_c >= hold_reenter_error_c
-                    && previous_error_c >= hold_reenter_error_c
-                {
-                    next_phase = HeaterControlPhase::Approach;
-                }
-            }
-        }
-
-        if next_phase != self.phase {
-            self.phase = next_phase;
-            self.phase_ticks = 0;
-            self.recovering_from_hold = previous_phase == HeaterControlPhase::Hold
-                && self.phase == HeaterControlPhase::Approach;
-            if self.phase == HeaterControlPhase::Warmup {
-                self.warmup_started_at_ms = Some(now_ms);
-            }
-        } else {
-            self.phase_ticks = self.phase_ticks.saturating_add(1);
-            if self.phase != HeaterControlPhase::Approach {
-                self.recovering_from_hold = false;
-            }
-        }
+        self.advance_phase(&frame, now_ms);
 
         if previous_phase != self.phase {
-            if self.phase == HeaterControlPhase::Hold {
-                let hold_entry_coast_guard_c = control_target
-                    .hold_exit_error_c
-                    .max(control_target.hold_on_error_c.max(0.05) * 2.0);
-                let hold_entry_zero_output_ready = self.duty_percent == 0
-                    && error_c <= control_target.hold_on_error_c.max(0.05) * 2.0;
-                let hold_entry_projection_ready = self.duty_percent > 0
-                    && error_c <= hold_entry_coast_guard_c
-                    && (approach_control_error_c <= 0.0 || hold_control_error_c <= 0.0);
-                self.hold_coast_active = filtered_temp_slope_c_per_profile_tick > 0.0
-                    && (actual_crossed_target_ready
-                        || error_c <= 0.0
-                        || control_error_c <= 0.0
-                        || hold_entry_zero_output_ready
-                        || hold_entry_projection_ready);
-                self.hold_coast_cooling_samples = 0;
-                if actual_crossed_target_ready {
-                    self.filtered_temp_c = Some(measured_temp_c);
-                    self.previous_filtered_temp_c = Some(measured_temp_c);
-                }
-                let hold_entry_guard_error_c = if error_c > 0.0 {
-                    hold_guard_error_c
-                } else {
-                    error_c
-                };
-                let hold_base_permille = hold_effective_base_permille(
-                    hold_entry_guard_error_c,
-                    hold_reenter_error_c,
-                    control_target,
-                );
-                let positive_integral_limit = if hold_ki > 0.0 {
-                    ((1_000.0 - hold_base_permille) / hold_ki).clamp(0.0, 255.0)
-                } else {
-                    0.0
-                };
-                let previous_output_permille = f32::from(self.duty_percent.min(100)) * 10.0;
-                let hold_entry_base_permille = hold_base_permille
-                    + (control_target.hold_kp_permille_per_c * hold_entry_guard_error_c);
-                let actual_preload_ratio = if error_c > 0.0 {
-                    (error_c / hold_entry_gate_c).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let projected_preload_ratio = if approach_guard_error_c > 0.0 {
-                    (approach_guard_error_c / hold_entry_gate_c).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let preload_ratio = actual_preload_ratio.min(projected_preload_ratio);
-                let carry_permille = (previous_output_permille - hold_entry_base_permille).max(0.0);
-                let hold_entry_output_permille =
-                    hold_entry_base_permille + (carry_permille * preload_ratio);
-                self.hold_entry_output_percent =
-                    percent_from_permille(hold_entry_output_permille.clamp(0.0, 1_000.0) as u16);
-                self.hold_integral_c = if hold_ki > 0.0 {
-                    ((carry_permille * preload_ratio) / hold_ki).clamp(0.0, positive_integral_limit)
-                } else {
-                    0.0
-                };
-            } else {
-                self.hold_coast_active = false;
-                self.hold_coast_cooling_samples = 0;
-                self.hold_entry_output_percent = 0;
-                if self.phase != HeaterControlPhase::Hold {
-                    self.hold_integral_c = 0.0;
-                }
-            }
+            self.update_hold_transition(&frame, measured_temp_c);
         }
-        let coast_raw_cooling = measured_temp_c + 0.05 < previous_measured_temp_c
-            && error_c >= control_target.hold_on_error_c.max(0.05);
-        if self.hold_coast_active && coast_raw_cooling {
-            self.hold_coast_cooling_samples = self.hold_coast_cooling_samples.saturating_add(1);
-        } else {
-            self.hold_coast_cooling_samples = 0;
-        }
-        let coast_plate_is_cooling =
-            filtered_temp_slope_c_per_profile_tick <= -0.02 && self.hold_coast_cooling_samples >= 2;
-        if self.hold_coast_active && coast_plate_is_cooling {
-            self.hold_coast_active = false;
-            self.hold_coast_cooling_samples = 0;
-            self.phase_ticks = 0;
-            self.hold_entry_output_percent = 0;
-        }
-        let duty_percent = if self.hold_coast_active
-            || hold_guard_error_c <= -control_target.overshoot_cutoff_c
-        {
-            self.hold_integral_c = 0.0;
-            0
-        } else {
-            match self.phase {
-                HeaterControlPhase::Warmup => {
-                    percent_from_permille(control_target.warmup_power_permille)
-                }
-                HeaterControlPhase::Approach => {
-                    if approach_predictive_coast_ready {
-                        0
-                    } else {
-                        let span = (brake_distance_c - control_target.hold_entry_error_c).max(0.1);
-                        let ratio = ((approach_guard_error_c - control_target.hold_entry_error_c)
-                            / span)
-                            .clamp(0.0, 1.0);
-                        let shaped_ratio = ratio.powf(control_target.approach_damping_exponent);
-                        let sustain_floor =
-                            f32::from(approach_sustain_floor_permille(control_target, error_c));
-                        let approach_ceiling =
-                            f32::from(control_target.approach_power_permille.min(1_000))
-                                .max(sustain_floor);
-                        let requested_permille =
-                            sustain_floor + ((approach_ceiling - sustain_floor) * shaped_ratio);
-                        percent_from_permille(requested_permille.clamp(0.0, 1_000.0) as u16)
-                    }
-                }
-                HeaterControlPhase::Hold => {
-                    if hold_prediction_blocks_reheat
-                        || hold_filter_lag_blocks_reheat
-                        || hold_actual_overshoot_blocks_reheat
-                    {
-                        self.hold_integral_c = 0.0;
-                        0
-                    } else {
-                        let hold_base_permille = hold_effective_base_permille(
-                            hold_guard_error_c,
-                            hold_reenter_error_c,
-                            control_target,
-                        );
-                        let positive_integral_limit = if hold_ki > 0.0 {
-                            ((1_000.0 - hold_base_permille) / hold_ki).clamp(0.0, 255.0)
-                        } else {
-                            0.0
-                        };
-                        self.hold_integral_c = if hold_ki > 0.0 {
-                            // The integral term only represents missing equilibrium heat. Letting it
-                            // go negative turns a brief overshoot into a long zero-output valley.
-                            (self.hold_integral_c + hold_guard_error_c)
-                                .clamp(0.0, positive_integral_limit)
-                        } else {
-                            0.0
-                        };
-                        let mut requested_permille = hold_base_permille
-                            + (control_target.hold_kp_permille_per_c * hold_guard_error_c)
-                            + (hold_ki * self.hold_integral_c);
-                        if hold_guard_error_c <= -control_target.hold_off_error_c {
-                            self.hold_integral_c = 0.0;
-                            let taper_span = (control_target.overshoot_cutoff_c
-                                - control_target.hold_off_error_c)
-                                .max(0.05);
-                            let overshoot_c =
-                                (-hold_guard_error_c).max(control_target.hold_off_error_c);
-                            let taper_ratio = ((control_target.overshoot_cutoff_c - overshoot_c)
-                                / taper_span)
-                                .clamp(0.0, 1.0);
-                            requested_permille =
-                                requested_permille.clamp(0.0, 1_000.0) * taper_ratio;
-                        }
-                        let pi_percent =
-                            percent_from_permille(requested_permille.clamp(0.0, 1_000.0) as u16);
-                        if hold_guard_error_c > 0.0 && self.phase_ticks < hold_blend_cycles {
-                            let blend_ratio = f32::from(self.phase_ticks.saturating_add(1))
-                                / f32::from(hold_blend_cycles.max(1));
-                            ((f32::from(self.hold_entry_output_percent)
-                                + ((f32::from(pi_percent)
-                                    - f32::from(self.hold_entry_output_percent))
-                                    * blend_ratio))
-                                .clamp(0.0, 100.0)
-                                + 0.5) as u8
-                        } else {
-                            pi_percent
-                        }
-                    }
-                }
-            }
-        };
+        self.update_coast_state(&frame, measured_temp_c, previous_measured_temp_c);
+        let duty_percent = self.calculate_duty_percent(&frame);
         let predictive_coast_active = self.hold_coast_active
             || (self.phase == HeaterControlPhase::Approach && approach_predictive_coast_ready);
         let duty_percent = if predictive_coast_active {
@@ -1304,10 +949,393 @@ impl HeaterController {
             error_c,
             control_error_c,
             filtered_temp_c,
-            filtered_slope_c_per_s: filtered_temp_slope_c_per_profile_tick,
+            filtered_slope_c_per_s: filtered_slope_c_per_profile_tick,
             coast_active: self.hold_coast_active,
             phase: self.phase,
         }
+    }
+
+    fn reset_disabled_output(
+        &mut self,
+        target_temp_c: i16,
+        measured_temp_c: f32,
+    ) -> HeaterPidSnapshot {
+        self.reseed_measurement(measured_temp_c);
+        self.phase = HeaterControlPhase::Warmup;
+        self.phase_ticks = 0;
+        self.recovering_from_hold = false;
+        self.duty_percent = 0;
+        self.hold_entry_output_percent = 0;
+        self.hold_integral_c = 0.0;
+        self.hold_coast_active = false;
+        self.hold_coast_cooling_samples = 0;
+        self.heater_was_enabled = false;
+        self.warmup_started_at_ms = None;
+        HeaterPidSnapshot {
+            duty_percent: 0,
+            warmup_soft_start_percent: 0,
+            error_c: f32::from(target_temp_c) - measured_temp_c,
+            control_error_c: f32::from(target_temp_c) - measured_temp_c,
+            filtered_temp_c: measured_temp_c,
+            filtered_slope_c_per_s: 0.0,
+            coast_active: false,
+            phase: self.phase,
+        }
+    }
+
+    fn update_coast_state(
+        &mut self,
+        frame: &ThermalControlFrame,
+        measured_temp_c: f32,
+        previous_measured_temp_c: f32,
+    ) {
+        let cooling = measured_temp_c + 0.05 < previous_measured_temp_c
+            && frame.error_c >= frame.control_target.hold_on_error_c.max(0.05);
+        if self.hold_coast_active && cooling {
+            self.hold_coast_cooling_samples = self.hold_coast_cooling_samples.saturating_add(1);
+        } else {
+            self.hold_coast_cooling_samples = 0;
+        }
+        let plate_cooling = frame.filtered_slope_c_per_profile_tick <= -0.02
+            && self.hold_coast_cooling_samples >= 2;
+        if self.hold_coast_active && plate_cooling {
+            self.hold_coast_active = false;
+            self.hold_coast_cooling_samples = 0;
+            self.phase_ticks = 0;
+            self.hold_entry_output_percent = 0;
+        }
+    }
+
+    fn calculate_duty_percent(&mut self, frame: &ThermalControlFrame) -> u8 {
+        if self.hold_coast_active
+            || frame.hold_guard_error_c <= -frame.control_target.overshoot_cutoff_c
+        {
+            self.hold_integral_c = 0.0;
+            return 0;
+        }
+        match self.phase {
+            HeaterControlPhase::Warmup => {
+                percent_from_permille(frame.control_target.warmup_power_permille)
+            }
+            HeaterControlPhase::Approach => self.calculate_approach_duty(frame),
+            HeaterControlPhase::Hold => self.calculate_hold_duty(frame),
+        }
+    }
+
+    fn calculate_approach_duty(&self, frame: &ThermalControlFrame) -> u8 {
+        if frame.approach_predictive_coast_ready {
+            return 0;
+        }
+        let target = frame.control_target;
+        let span = (frame.brake_distance_c - target.hold_entry_error_c).max(0.1);
+        let ratio = ((frame.approach_guard_error_c - target.hold_entry_error_c) / span)
+            .clamp(0.0, 1.0);
+        let shaped_ratio = ratio.powf(target.approach_damping_exponent);
+        let sustain_floor = f32::from(approach_sustain_floor_permille(target, frame.error_c));
+        let approach_ceiling = f32::from(target.approach_power_permille.min(1_000))
+            .max(sustain_floor);
+        percent_from_permille(
+            (sustain_floor + ((approach_ceiling - sustain_floor) * shaped_ratio))
+                .clamp(0.0, 1_000.0) as u16,
+        )
+    }
+
+    fn calculate_hold_duty(&mut self, frame: &ThermalControlFrame) -> u8 {
+        if frame.hold_prediction_blocks_reheat
+            || frame.hold_filter_lag_blocks_reheat
+            || frame.hold_actual_overshoot_blocks_reheat
+        {
+            self.hold_integral_c = 0.0;
+            return 0;
+        }
+        let target = frame.control_target;
+        let base_permille = hold_effective_base_permille(
+            frame.hold_guard_error_c,
+            frame.hold_reenter_error_c,
+            target,
+        );
+        let integral_limit = if frame.hold_ki > 0.0 {
+            ((1_000.0 - base_permille) / frame.hold_ki).clamp(0.0, 255.0)
+        } else {
+            0.0
+        };
+        self.hold_integral_c = if frame.hold_ki > 0.0 {
+            (self.hold_integral_c + frame.hold_guard_error_c).clamp(0.0, integral_limit)
+        } else {
+            0.0
+        };
+        let requested_permille = self.hold_requested_permille(frame, base_permille);
+        let pi_percent = percent_from_permille(requested_permille.clamp(0.0, 1_000.0) as u16);
+        if frame.hold_guard_error_c > 0.0 && self.phase_ticks < frame.hold_blend_cycles {
+            let blend_ratio = f32::from(self.phase_ticks.saturating_add(1))
+                / f32::from(frame.hold_blend_cycles.max(1));
+            ((f32::from(self.hold_entry_output_percent)
+                + ((f32::from(pi_percent) - f32::from(self.hold_entry_output_percent))
+                    * blend_ratio))
+                .clamp(0.0, 100.0)
+                + 0.5) as u8
+        } else {
+            pi_percent
+        }
+    }
+
+    fn hold_requested_permille(&mut self, frame: &ThermalControlFrame, base_permille: f32) -> f32 {
+        let target = frame.control_target;
+        let mut requested = base_permille
+            + (target.hold_kp_permille_per_c * frame.hold_guard_error_c)
+            + (frame.hold_ki * self.hold_integral_c);
+        if frame.hold_guard_error_c <= -target.hold_off_error_c {
+            self.hold_integral_c = 0.0;
+            let taper_span = (target.overshoot_cutoff_c - target.hold_off_error_c).max(0.05);
+            let overshoot_c = (-frame.hold_guard_error_c).max(target.hold_off_error_c);
+            let taper_ratio = ((target.overshoot_cutoff_c - overshoot_c) / taper_span)
+                .clamp(0.0, 1.0);
+            requested = requested.clamp(0.0, 1_000.0) * taper_ratio;
+        }
+        requested
+    }
+
+    fn advance_phase(&mut self, frame: &ThermalControlFrame, now_ms: u64) {
+        let mut next_phase = self.phase;
+        match self.phase {
+            HeaterControlPhase::Warmup => {
+                if warmup_handoff_ready(
+                    frame.error_c,
+                    frame.previous_error_c,
+                    frame.control_error_c,
+                    frame.brake_distance_c,
+                    frame.warmup_handoff_error_c,
+                ) {
+                    next_phase = HeaterControlPhase::Approach;
+                }
+            }
+            HeaterControlPhase::Approach => {
+                let timeout_hold_ready = self.phase_ticks >= frame.approach_max_cycles
+                    && frame.error_c <= frame.hold_entry_gate_c
+                    && frame.hold_state_ready;
+                let reenter_warmup =
+                    frame.error_c >= frame.brake_distance_c
+                        + frame.control_target.warmup_reenter_error_c;
+                let approach_hold_ready = frame.approach_control_error_c <= frame.hold_entry_gate_c
+                    && frame.error_c <= frame.hold_entry_gate_c
+                    && frame.previous_error_c <= frame.hold_entry_gate_c + 0.5;
+                if reenter_warmup {
+                    next_phase = HeaterControlPhase::Warmup;
+                } else if approach_hold_ready || frame.actual_crossed_target_ready || timeout_hold_ready
+                {
+                    next_phase = HeaterControlPhase::Hold;
+                }
+            }
+            HeaterControlPhase::Hold => {
+                if frame.hold_exit_error_c >= frame.hold_reenter_error_c
+                    && frame.previous_error_c >= frame.hold_reenter_error_c
+                {
+                    next_phase = HeaterControlPhase::Approach;
+                }
+            }
+        }
+
+        if next_phase != self.phase {
+            let previous_phase = self.phase;
+            self.phase = next_phase;
+            self.phase_ticks = 0;
+            self.recovering_from_hold = previous_phase == HeaterControlPhase::Hold
+                && self.phase == HeaterControlPhase::Approach;
+            if self.phase == HeaterControlPhase::Warmup {
+                self.warmup_started_at_ms = Some(now_ms);
+            }
+        } else {
+            self.phase_ticks = self.phase_ticks.saturating_add(1);
+            if self.phase != HeaterControlPhase::Approach {
+                self.recovering_from_hold = false;
+            }
+        }
+    }
+
+    fn update_hold_transition(&mut self, frame: &ThermalControlFrame, measured_temp_c: f32) {
+        if self.phase != HeaterControlPhase::Hold {
+            self.hold_coast_active = false;
+            self.hold_coast_cooling_samples = 0;
+            self.hold_entry_output_percent = 0;
+            self.hold_integral_c = 0.0;
+            return;
+        }
+
+        let target = frame.control_target;
+        let coast_guard_c = target.hold_exit_error_c.max(target.hold_on_error_c.max(0.05) * 2.0);
+        let zero_output_ready = self.duty_percent == 0
+            && frame.error_c <= target.hold_on_error_c.max(0.05) * 2.0;
+        let projection_ready = self.duty_percent > 0
+            && frame.error_c <= coast_guard_c
+            && (frame.approach_control_error_c <= 0.0 || frame.hold_control_error_c <= 0.0);
+        self.hold_coast_active = frame.filtered_slope_c_per_profile_tick > 0.0
+            && (frame.actual_crossed_target_ready
+                || frame.error_c <= 0.0
+                || frame.control_error_c <= 0.0
+                || zero_output_ready
+                || projection_ready);
+        self.hold_coast_cooling_samples = 0;
+        if frame.actual_crossed_target_ready {
+            self.filtered_temp_c = Some(measured_temp_c);
+            self.previous_filtered_temp_c = Some(measured_temp_c);
+        }
+        let guard_error_c = if frame.error_c > 0.0 {
+            frame.hold_guard_error_c
+        } else {
+            frame.error_c
+        };
+        let base_permille = hold_effective_base_permille(
+            guard_error_c,
+            frame.hold_reenter_error_c,
+            target,
+        );
+        let integral_limit = if frame.hold_ki > 0.0 {
+            ((1_000.0 - base_permille) / frame.hold_ki).clamp(0.0, 255.0)
+        } else {
+            0.0
+        };
+        let previous_output_permille = f32::from(self.duty_percent.min(100)) * 10.0;
+        let base_output = base_permille + (target.hold_kp_permille_per_c * guard_error_c);
+        let actual_ratio = if frame.error_c > 0.0 {
+            (frame.error_c / frame.hold_entry_gate_c).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let projected_ratio = if frame.approach_guard_error_c > 0.0 {
+            (frame.approach_guard_error_c / frame.hold_entry_gate_c).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let carry_permille = (previous_output_permille - base_output).max(0.0);
+        let preload = carry_permille * actual_ratio.min(projected_ratio);
+        self.hold_entry_output_percent = percent_from_permille(
+            (base_output + preload).clamp(0.0, 1_000.0) as u16,
+        );
+        self.hold_integral_c = if frame.hold_ki > 0.0 {
+            (preload / frame.hold_ki).clamp(0.0, integral_limit)
+        } else {
+            0.0
+        };
+    }
+
+    fn measure_control_frame(
+        &mut self,
+        target_temp_c: i16,
+        measured_temp_c: f32,
+        previous_measured_temp_c: f32,
+        control_target: ThermalControlTarget,
+    ) -> ThermalControlFrame {
+        let (filter_alpha, approach_max_cycles, hold_blend_cycles, hold_ki) =
+            control_cycle_parameters(control_target);
+        let error_c = f32::from(target_temp_c) - measured_temp_c;
+        let previous_error_c = f32::from(target_temp_c) - previous_measured_temp_c;
+        let last_filtered_temp_c = self.filtered_temp_c;
+        let filtered_temp_c = last_filtered_temp_c
+            .map(|previous| previous + filter_alpha * (measured_temp_c - previous))
+            .unwrap_or(measured_temp_c);
+        let instantaneous_slope_c_per_profile_tick = last_filtered_temp_c
+            .map(|last| {
+                (filtered_temp_c - last)
+                    * (HEATER_PROFILE_TICK_MS as f32 / HEATER_CONTROL_INTERVAL_MS as f32)
+            })
+            .unwrap_or(0.0);
+        let slope_filter_alpha = filter_alpha.sqrt();
+        self.filtered_slope_c_per_profile_tick += slope_filter_alpha
+            * (instantaneous_slope_c_per_profile_tick - self.filtered_slope_c_per_profile_tick);
+        let filtered_slope_c_per_profile_tick = self.filtered_slope_c_per_profile_tick;
+        self.previous_filtered_temp_c = last_filtered_temp_c;
+        self.filtered_temp_c = Some(filtered_temp_c);
+        let control_error_c = f32::from(target_temp_c) - filtered_temp_c;
+        let approach_projected_temp_c = filtered_temp_c
+            + (filtered_slope_c_per_profile_tick * f32::from(control_target.approach_lead_ticks));
+        let hold_projected_temp_c = filtered_temp_c
+            + (filtered_slope_c_per_profile_tick * f32::from(control_target.hold_lead_ticks));
+        let approach_control_error_c = f32::from(target_temp_c) - approach_projected_temp_c;
+        let hold_control_error_c = f32::from(target_temp_c) - hold_projected_temp_c;
+        let hold_prediction_guard_c = control_target.hold_on_error_c.max(0.05) * 2.0;
+        let hold_prediction_blocks_reheat = error_c > 0.0
+            && error_c <= hold_prediction_guard_c
+            && filtered_slope_c_per_profile_tick > 0.0
+            && hold_control_error_c <= 0.0;
+        let hold_filter_lag_blocks_reheat =
+            error_c <= 0.0 && control_error_c > 0.0 && filtered_slope_c_per_profile_tick > 0.0;
+        let hold_actual_overshoot_blocks_reheat = error_c <= 0.0
+            && control_error_c <= 0.0
+            && (control_error_c - error_c) >= 0.05
+            && filtered_slope_c_per_profile_tick > 0.0;
+        let approach_guard_error_c = approach_control_error_c.min(error_c);
+        let hold_entry_gate_c = control_target.hold_entry_error_c.max(0.05);
+        let hold_state_ready = control_error_c <= control_target.hold_exit_error_c;
+        let actual_crossed_target_ready =
+            error_c <= 0.0 && previous_error_c <= 0.0 && approach_control_error_c <= 0.0;
+        let hold_guard_error_c = if error_c >= 0.0 {
+            let filter_lag_allowance_c = control_target
+                .hold_on_error_c
+                .max(0.05)
+                .min(hold_entry_gate_c);
+            hold_control_error_c
+                .max(0.0)
+                .min(error_c + filter_lag_allowance_c)
+        } else {
+            error_c
+        };
+        let hold_reenter_error_c = control_target
+            .hold_exit_error_c
+            .max(control_target.hold_on_error_c)
+            .max(hold_entry_gate_c + HEATER_HOLD_PHASE_HYSTERESIS_C);
+        let approach_coast_gate_c = hold_entry_gate_c.max(control_target.hold_exit_error_c) + 1.0;
+        let approach_predictive_coast_ready = approach_control_error_c <= 0.0
+            && error_c <= approach_coast_gate_c
+            && control_error_c <= control_target.hold_exit_error_c;
+        let hold_exit_error_c = error_c;
+        let brake_distance_c = control_target
+            .brake_distance_c
+            .max(control_target.hold_entry_error_c + 0.1);
+        let warmup_handoff_error_c = warmup_handoff_error_c(
+            brake_distance_c,
+            control_target.warmup_reenter_error_c,
+            filtered_slope_c_per_profile_tick,
+            control_target.approach_lead_ticks,
+        );
+        ThermalControlFrame {
+            control_target,
+            approach_max_cycles,
+            hold_blend_cycles,
+            hold_ki,
+            error_c,
+            previous_error_c,
+            filtered_temp_c,
+            filtered_slope_c_per_profile_tick,
+            control_error_c,
+            approach_control_error_c,
+            hold_control_error_c,
+            hold_prediction_blocks_reheat,
+            hold_filter_lag_blocks_reheat,
+            hold_actual_overshoot_blocks_reheat,
+            approach_guard_error_c,
+            hold_entry_gate_c,
+            hold_state_ready,
+            actual_crossed_target_ready,
+            hold_guard_error_c,
+            hold_reenter_error_c,
+            approach_predictive_coast_ready,
+            hold_exit_error_c,
+            brake_distance_c,
+            warmup_handoff_error_c,
+        }
+    }
+
+    fn reset_for_target_change(&mut self, measured_temp_c: f32, now_ms: u64) {
+        self.reseed_measurement(measured_temp_c);
+        self.phase = HeaterControlPhase::Warmup;
+        self.phase_ticks = 0;
+        self.recovering_from_hold = false;
+        self.duty_percent = 0;
+        self.hold_entry_output_percent = 0;
+        self.hold_integral_c = 0.0;
+        self.hold_coast_active = false;
+        self.hold_coast_cooling_samples = 0;
+        self.warmup_started_at_ms = Some(now_ms);
     }
 
     fn apply_under_target_reheat_floor(

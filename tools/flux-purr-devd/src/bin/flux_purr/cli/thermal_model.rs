@@ -318,10 +318,6 @@ struct BenchSourceTelemetrySampler {
 }
 
 impl BenchSourceTelemetrySampler {
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "source polling keeps cache update and transient error handling ordered"
-    )]
     fn new(
         source_kind: BenchSourceKind,
         source_url: &str,
@@ -334,33 +330,11 @@ impl BenchSourceTelemetrySampler {
         }));
         let poller_cache = Arc::clone(&cache);
         let poller_source_url = source_url.to_string();
-        let poller = tokio::spawn(async move {
-            loop {
-                let source_url = poller_source_url.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    read_bench_source_live_telemetry(source_kind, &source_url)
-                })
-                .await;
-                if let Ok(result) = result {
-                    let mut cache = match poller_cache.lock() {
-                        Ok(cache) => cache,
-                        Err(_) => break,
-                    };
-                    match result {
-                        Ok(telemetry) => {
-                            if telemetry.sample_uptime_ms != cache.latest.sample_uptime_ms {
-                                cache.latest_sample_seen_at = tokio::time::Instant::now();
-                            }
-                            cache.latest = telemetry;
-                            cache.terminal_error = None;
-                        }
-                        Err(error) if thermal_source_probe_transient_error(error.as_ref()) => {}
-                        Err(error) => cache.terminal_error = Some(error.to_string()),
-                    }
-                }
-                tokio::time::sleep(THERMAL_SOURCE_TELEMETRY_POLL_INTERVAL).await;
-            }
-        });
+        let poller = tokio::spawn(run_bench_source_poller(
+            source_kind,
+            poller_source_url,
+            poller_cache,
+        ));
         Self {
             source_kind,
             source_url: source_url.to_string(),
@@ -430,6 +404,50 @@ impl BenchSourceTelemetrySampler {
                 status: "cache_lock_failed".to_string(),
             })
     }
+}
+
+async fn run_bench_source_poller(
+    source_kind: BenchSourceKind,
+    source_url: String,
+    cache: Arc<Mutex<BenchSourceTelemetryCache>>,
+) {
+    loop {
+        if !poll_bench_source_once(source_kind, &source_url, &cache).await {
+            return;
+        }
+        tokio::time::sleep(THERMAL_SOURCE_TELEMETRY_POLL_INTERVAL).await;
+    }
+}
+
+async fn poll_bench_source_once(
+    source_kind: BenchSourceKind,
+    source_url: &str,
+    cache: &Arc<Mutex<BenchSourceTelemetryCache>>,
+) -> bool {
+    let source_url = source_url.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        read_bench_source_live_telemetry(source_kind, &source_url)
+    })
+    .await;
+    let Ok(result) = result else { return true };
+    let Ok(mut cache) = cache.lock() else { return false };
+    match result {
+        Ok(telemetry) => update_bench_source_cache(&mut cache, telemetry),
+        Err(error) if thermal_source_probe_transient_error(error.as_ref()) => {}
+        Err(error) => cache.terminal_error = Some(error.to_string()),
+    }
+    true
+}
+
+fn update_bench_source_cache(
+    cache: &mut BenchSourceTelemetryCache,
+    telemetry: BenchSourceLiveTelemetry,
+) {
+    if telemetry.sample_uptime_ms != cache.latest.sample_uptime_ms {
+        cache.latest_sample_seen_at = tokio::time::Instant::now();
+    }
+    cache.latest = telemetry;
+    cache.terminal_error = None;
 }
 
 impl Drop for BenchSourceTelemetrySampler {
@@ -582,10 +600,6 @@ impl ThermalApproachGuardTracker {
         }
     }
 
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "thermal approach guard preserves phase-specific safety precedence"
-    )]
     fn observe(
         &mut self,
         current_temp_c: f64,
@@ -593,34 +607,45 @@ impl ThermalApproachGuardTracker {
         control_phase: Option<&str>,
     ) -> Option<&'static str> {
         match control_phase {
-            Some("approach") => {
-                let approach_started_at_ms = *self.approach_started_at_ms.get_or_insert(elapsed_ms);
-                if current_temp_c >= self.hold_threshold_temp_c {
-                    self.hold_threshold_crossed_at_ms.get_or_insert(elapsed_ms);
-                }
-                let approach_elapsed_ms = elapsed_ms.saturating_sub(approach_started_at_ms);
-                if self.hold_threshold_crossed_at_ms.is_none() && approach_elapsed_ms > 10_000 {
-                    return Some("approach_threshold_timeout");
-                }
-                if self.first_hold_at_ms.is_none() && approach_elapsed_ms > 30_000 {
-                    return Some("approach_hold_timeout");
-                }
-            }
+            Some("approach") => self.observe_approach(current_temp_c, elapsed_ms),
             Some("hold") => {
-                if self.approach_started_at_ms.is_some() {
-                    if current_temp_c >= self.hold_threshold_temp_c {
-                        self.hold_threshold_crossed_at_ms.get_or_insert(elapsed_ms);
-                    }
-                    self.first_hold_at_ms.get_or_insert(elapsed_ms);
-                }
+                self.observe_hold(current_temp_c, elapsed_ms);
+                None
             }
-            Some("warmup") => {
-                if self.approach_started_at_ms.is_some() && self.first_hold_at_ms.is_none() {
-                    self.warmup_reentered_at_ms.get_or_insert(elapsed_ms);
-                    return Some("approach_reentered_warmup");
-                }
-            }
-            _ => {}
+            Some("warmup") => self.observe_warmup(elapsed_ms),
+            _ => None,
+        }
+    }
+
+    fn observe_approach(&mut self, current_temp_c: f64, elapsed_ms: u64) -> Option<&'static str> {
+        let approach_started_at_ms = *self.approach_started_at_ms.get_or_insert(elapsed_ms);
+        if current_temp_c >= self.hold_threshold_temp_c {
+            self.hold_threshold_crossed_at_ms.get_or_insert(elapsed_ms);
+        }
+        let approach_elapsed_ms = elapsed_ms.saturating_sub(approach_started_at_ms);
+        if self.hold_threshold_crossed_at_ms.is_none() && approach_elapsed_ms > 10_000 {
+            return Some("approach_threshold_timeout");
+        }
+        if self.first_hold_at_ms.is_none() && approach_elapsed_ms > 30_000 {
+            return Some("approach_hold_timeout");
+        }
+        None
+    }
+
+    fn observe_hold(&mut self, current_temp_c: f64, elapsed_ms: u64) {
+        if self.approach_started_at_ms.is_none() {
+            return;
+        }
+        if current_temp_c >= self.hold_threshold_temp_c {
+            self.hold_threshold_crossed_at_ms.get_or_insert(elapsed_ms);
+        }
+        self.first_hold_at_ms.get_or_insert(elapsed_ms);
+    }
+
+    fn observe_warmup(&mut self, elapsed_ms: u64) -> Option<&'static str> {
+        if self.approach_started_at_ms.is_some() && self.first_hold_at_ms.is_none() {
+            self.warmup_reentered_at_ms.get_or_insert(elapsed_ms);
+            return Some("approach_reentered_warmup");
         }
         None
     }
@@ -1106,10 +1131,6 @@ fn require_value_str<'a>(
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "CLI workflow or fixture preserves an ordered protocol scenario"
-)]
 fn thermal_stage_result_from_value(
     value: &Value,
 ) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
@@ -1170,56 +1191,39 @@ fn thermal_stage_result_from_value(
                 _ => None,
             }),
         analysis: ThermalStageAnalysis::default(),
-        guard: ThermalApproachGuardAnalysis {
-            hold_threshold_temp_c: value
-                .get("guard")
-                .and_then(|guard| guard.get("holdThresholdTempC"))
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0),
-            approach_started_at_ms: value
-                .get("guard")
-                .and_then(|guard| guard.get("approachStartedAtMs"))
-                .and_then(Value::as_u64),
-            hold_threshold_crossed_at_ms: value
-                .get("guard")
-                .and_then(|guard| guard.get("holdThresholdCrossedAtMs"))
-                .and_then(Value::as_u64),
-            first_hold_at_ms: value
-                .get("guard")
-                .and_then(|guard| guard.get("firstHoldAtMs"))
-                .and_then(Value::as_u64),
-            warmup_reentered_at_ms: value
-                .get("guard")
-                .and_then(|guard| guard.get("warmupReenteredAtMs"))
-                .and_then(Value::as_u64),
-        },
-        full_speed_to_stable: ThermalFullSpeedStableAnalysis {
-            warmup_exited_at_ms: value
-                .get("fullSpeedToStable")
-                .and_then(|value| value.get("warmupExitedAtMs"))
-                .and_then(Value::as_u64),
-            stable_window_started_at_ms: value
-                .get("fullSpeedToStable")
-                .and_then(|value| value.get("stableWindowStartedAtMs"))
-                .and_then(Value::as_u64),
-            stable_window_verified_at_ms: value
-                .get("fullSpeedToStable")
-                .and_then(|value| value.get("stableWindowVerifiedAtMs"))
-                .and_then(Value::as_u64),
-            settle_time_ms: value
-                .get("fullSpeedToStable")
-                .and_then(|value| value.get("settleTimeMs"))
-                .and_then(Value::as_u64),
-            failure_reason: value
-                .get("fullSpeedToStable")
-                .and_then(|value| value.get("failureReason"))
-                .and_then(Value::as_str)
-                .and_then(|reason| match reason {
-                    "full_speed_to_stable_timeout" => Some("full_speed_to_stable_timeout"),
-                    _ => None,
-                }),
-        },
+        guard: thermal_guard_analysis(value),
+        full_speed_to_stable: thermal_full_speed_analysis(value),
     })
+}
+
+fn thermal_guard_analysis(value: &Value) -> ThermalApproachGuardAnalysis {
+    let field = |key| value.get("guard").and_then(|guard| guard.get(key)).and_then(Value::as_u64);
+    ThermalApproachGuardAnalysis {
+        hold_threshold_temp_c: value.pointer("/guard/holdThresholdTempC").and_then(Value::as_f64).unwrap_or(0.0),
+        approach_started_at_ms: field("approachStartedAtMs"),
+        hold_threshold_crossed_at_ms: field("holdThresholdCrossedAtMs"),
+        first_hold_at_ms: field("firstHoldAtMs"),
+        warmup_reentered_at_ms: field("warmupReenteredAtMs"),
+    }
+}
+
+fn thermal_full_speed_analysis(value: &Value) -> ThermalFullSpeedStableAnalysis {
+    let field = |key| value.get("fullSpeedToStable").and_then(|item| item.get(key)).and_then(Value::as_u64);
+    let failure_reason = value
+        .pointer("/fullSpeedToStable/failureReason")
+        .and_then(Value::as_str)
+        .filter(|reason| *reason == "full_speed_to_stable_timeout")
+        .map(|reason| match reason {
+            "full_speed_to_stable_timeout" => "full_speed_to_stable_timeout",
+            _ => unreachable!(),
+        });
+    ThermalFullSpeedStableAnalysis {
+        warmup_exited_at_ms: field("warmupExitedAtMs"),
+        stable_window_started_at_ms: field("stableWindowStartedAtMs"),
+        stable_window_verified_at_ms: field("stableWindowVerifiedAtMs"),
+        settle_time_ms: field("settleTimeMs"),
+        failure_reason,
+    }
 }
 
 fn read_ndjson_values(path: &Path) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1367,48 +1371,6 @@ fn thermal_approach_curve_reference_temp_c(
     };
     let progress = 1.0 - (1.0 - normalized).powi(2);
     start_temp_c + (target_temp_c - start_temp_c) * progress
-}
-
-fn thermal_stage_approach_curve_sample_series(
-    samples: &[ThermalReplayStageSample],
-    target_temp_c: i16,
-    guard: &ThermalApproachGuardAnalysis,
-    analysis: &ThermalStageAnalysis,
-) -> Vec<Option<f64>> {
-    let Some(start_temp_c) = analysis.approach_curve_start_temp_c else {
-        return vec![None; samples.len()];
-    };
-    let Some(fitted_ms) = analysis.approach_curve_fitted_ms else {
-        return vec![None; samples.len()];
-    };
-    let Some(started_at_ms) = guard
-        .approach_started_at_ms
-        .or(guard.hold_threshold_crossed_at_ms)
-        .or(guard.first_hold_at_ms)
-        .or_else(|| samples.first().map(|sample| sample.elapsed_ms))
-    else {
-        return vec![None; samples.len()];
-    };
-    let stop_at_ms = guard
-        .first_hold_at_ms
-        .or(guard.hold_threshold_crossed_at_ms)
-        .unwrap_or_else(|| started_at_ms.saturating_add(fitted_ms));
-    let target_temp_c = f64::from(target_temp_c);
-
-    samples
-        .iter()
-        .map(|sample| {
-            if sample.elapsed_ms < started_at_ms || sample.elapsed_ms > stop_at_ms {
-                return None;
-            }
-            Some(thermal_approach_curve_reference_temp_c(
-                start_temp_c,
-                target_temp_c,
-                sample.elapsed_ms.saturating_sub(started_at_ms),
-                fitted_ms,
-            ))
-        })
-        .collect()
 }
 
 fn thermal_stage_populate_approach_curve_analysis(

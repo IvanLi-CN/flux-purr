@@ -1,240 +1,24 @@
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cli = Cli::parse();
     let direct_flash_command = matches!(&cli.command, Command::Flash(_) | Command::Recover(_));
     let explicit_devd_endpoint = devd_flag_was_supplied();
-    if direct_flash_command && explicit_devd_endpoint {
-        return Err("flash and recover are direct-serial commands and do not accept --devd".into());
-    }
-    let mut managed_devd = None;
-    if should_start_managed_devd(direct_flash_command, explicit_devd_endpoint) {
-        let managed = ManagedDevd::start().await?;
-        cli.devd = managed.endpoint.to_string_lossy().into_owned();
-        managed_devd = Some(managed);
-    } else if !direct_flash_command {
-        validate_local_control_endpoint(&cli.devd)?;
-    }
+    let managed_devd = prepare_devd(&mut cli, direct_flash_command, explicit_devd_endpoint).await?;
     let client = Client::new();
     let payload = match cli.command {
         Command::Devices => {
             request_json(&client, Method::GET, &cli.devd, "/api/v1/devices", None).await?
         }
-        Command::Lan { command } => match command {
-            LanCommand::Devices => {
-                let config = read_user_config()?;
-                json!({
-                    "devices": config.lan_devices.iter().map(flux_purr_devd::lan::LanDeviceSummary::from).collect::<Vec<_>>()
-                })
-            }
-            LanCommand::Refresh => {
-                json!({ "devices": persist_cli_lan_discoveries(discover_mdns(Duration::from_secs(2)).await?)? })
-            }
-            LanCommand::Scan(args) => {
-                json!({ "devices": persist_cli_lan_discoveries(discover_cidr(LanScanRequest { cidr: args.cidr }).await?)? })
-            }
-            LanCommand::Reset(target) => {
-                request_with_lease(
-                    &client,
-                    resolve_target(target, &cli.devd)?,
-                    Method::POST,
-                    "/lan-pairing/reset",
-                    None,
-                )
-                .await?
-            }
-            LanCommand::Pair(args) => {
-                let device = pair_device(LanPairRequest {
-                    base_url: args.base_url,
-                    code: args.code,
-                })
-                .await?;
-                let summary = flux_purr_devd::lan::LanDeviceSummary::from(&device);
-                let mut config = read_user_config()?;
-                merge_lan_device(&mut config.lan_devices, device);
-                write_user_config(&config)?;
-                serde_json::to_value(summary)?
-            }
-            LanCommand::PairingCode(selector) => {
-                request_device_read(
-                    &client,
-                    resolve_target(selector, &cli.devd)?,
-                    "/lan-pairing/code",
-                )
-                .await?
-            }
-            LanCommand::PairingOpen(selector) => {
-                request_with_lease(
-                    &client,
-                    resolve_target(selector, &cli.devd)?,
-                    Method::POST,
-                    "/lan-pairing/window",
-                    None,
-                )
-                .await?
-            }
-            LanCommand::PairingClose(selector) => {
-                request_with_lease(
-                    &client,
-                    resolve_target(selector, &cli.devd)?,
-                    Method::DELETE,
-                    "/lan-pairing/window",
-                    None,
-                )
-                .await?
-            }
-            LanCommand::Status(args) => {
-                let device = resolve_lan_target(&args.id)?;
-                authorized_json(&device, Method::GET, "status", None, None).await?
-            }
-            LanCommand::RuntimeSet(args) => {
-                let device = resolve_lan_target(&args.target.id)?;
-                let body = json!({
-                    "targetTempC": args.target_temp_c,
-                    "activeCoolingEnabled": args.active_cooling,
-                    "postHeatCoolingMode": args.post_heat_cooling,
-                    "heatingFanGuardMode": args.heating_fan_guard,
-                    "heaterEnabled": args.heater_enabled,
-                });
-                lan_api_request(&device, Method::PUT, "runtime", Some(body)).await?
-            }
-            LanCommand::Request(args) => {
-                let device = resolve_lan_target(&args.target.id)?;
-                let body = match (args.body, args.body_file) {
-                    (Some(value), None) => Some(serde_json::from_str(&value)?),
-                    (None, Some(path)) => Some(read_json_file(&path)?),
-                    (None, None) => None,
-                    (Some(_), Some(_)) => unreachable!("clap rejects conflicting body arguments"),
-                };
-                lan_api_request(&device, args.method.as_reqwest(), &args.path, body).await?
-            }
-        },
+        Command::Lan { command } => execute_lan_command(&client, &cli.devd, command).await?,
         Command::Identity(selector) => {
             request_device_read(&client, resolve_target(selector, &cli.devd)?, "/identity").await?
         }
         Command::Status(selector) => {
             request_device_read(&client, resolve_target(selector, &cli.devd)?, "/status").await?
         }
-        Command::Runtime { command } => match command {
-            RuntimeCommand::Get(selector) => {
-                request_device_read(&client, resolve_target(selector, &cli.devd)?, "/status")
-                    .await?
-            }
-            RuntimeCommand::Set(args) => {
-                let resolved = resolve_target(args.target.clone(), &cli.devd)?;
-                let body = runtime_body(&client, &resolved, args).await?;
-                request_with_lease(&client, resolved, Method::PUT, "/runtime", Some(body)).await?
-            }
-        },
-        Command::Buzzer { command } => match command {
-            BuzzerCommand::Test(args) => {
-                let BuzzerTestArgs {
-                    target,
-                    cue,
-                    scenario,
-                    repeat,
-                    stop,
-                    status,
-                } = args;
-                buzzer_test(
-                    &client,
-                    resolve_target(target, &cli.devd)?,
-                    cue,
-                    scenario,
-                    repeat,
-                    stop,
-                    status,
-                )
-                .await?
-            }
-            BuzzerCommand::Play(args) => {
-                if cli.json {
-                    return Err("buzzer play is interactive and cannot be used with --json".into());
-                }
-                buzzer_play_interactive(
-                    &client,
-                    resolve_target(args.target, &cli.devd)?,
-                    args.pointer,
-                )
-                .await?;
-                return Ok(());
-            }
-        },
-        Command::Pd { command } => match command {
-            PdCommand::Pps { command } => match command {
-                PpsCommand::Set(args) => {
-                    let millivolts = parse_pps_volts(&args.volts)?;
-                    let mut body = json!({
-                        "manualPpsEnabled": true,
-                        "manualPpsMv": millivolts,
-                    });
-                    if let Some(amps) = &args.amps {
-                        body["manualPpsMa"] = json!(parse_pps_amps(amps)?);
-                    }
-                    request_with_lease(
-                        &client,
-                        resolve_target(args.target.clone(), &cli.devd)?,
-                        Method::PUT,
-                        "/runtime",
-                        Some(body),
-                    )
-                    .await?
-                }
-                PpsCommand::Clear(selector) => {
-                    let body = json!({"manualPpsEnabled": false});
-                    request_with_lease(
-                        &client,
-                        resolve_target(selector, &cli.devd)?,
-                        Method::PUT,
-                        "/runtime",
-                        Some(body),
-                    )
-                    .await?
-                }
-            },
-        },
-        Command::Wifi { command } => match command {
-            WifiCommand::Set(args) => {
-                let resolved = resolve_target(args.target.clone(), &cli.devd)?;
-                let static_ipv4 = static_ipv4_value(
-                    args.static_ip,
-                    args.static_prefix_len,
-                    args.static_gateway,
-                    args.static_dns,
-                )?;
-                let body = wifi_set_body(
-                    args.ssid,
-                    args.password,
-                    static_ipv4,
-                    args.telemetry_interval_ms,
-                );
-                request_with_lease(&client, resolved, Method::PUT, "/wifi", Some(body)).await?
-            }
-            WifiCommand::Clear(selector) => {
-                let body = json!({"op": WifiConfigOp::Clear});
-                request_with_lease(
-                    &client,
-                    resolve_target(selector, &cli.devd)?,
-                    Method::PUT,
-                    "/wifi",
-                    Some(body),
-                )
-                .await?
-            }
-            WifiCommand::Cancel(selector) => {
-                let body = json!({"op": WifiConfigOp::Cancel});
-                request_with_lease(
-                    &client,
-                    resolve_target(selector, &cli.devd)?,
-                    Method::PUT,
-                    "/wifi",
-                    Some(body),
-                )
-                .await?
-            }
-        },
+        Command::Runtime { command } => execute_runtime_command(&client, &cli.devd, command).await?,
+        Command::Buzzer { command } => execute_buzzer_command(&client, &cli.devd, cli.json, command).await?,
+        Command::Pd { command } => execute_pd_command(&client, &cli.devd, command).await?,
+        Command::Wifi { command } => execute_wifi_command(&client, &cli.devd, command).await?,
         Command::Calibration { command } => {
             handle_calibration_command(&client, &cli.devd, command).await?
         }
@@ -273,6 +57,187 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     drop(managed_devd);
     Ok(())
+}
+
+async fn prepare_devd(
+    cli: &mut Cli,
+    direct_flash_command: bool,
+    explicit_devd_endpoint: bool,
+) -> Result<Option<ManagedDevd>, Box<dyn std::error::Error + Send + Sync>> {
+    if direct_flash_command && explicit_devd_endpoint {
+        return Err("flash and recover are direct-serial commands and do not accept --devd".into());
+    }
+    if should_start_managed_devd(direct_flash_command, explicit_devd_endpoint) {
+        let managed = ManagedDevd::start().await?;
+        cli.devd = managed.endpoint.to_string_lossy().into_owned();
+        return Ok(Some(managed));
+    }
+    if !direct_flash_command {
+        validate_local_control_endpoint(&cli.devd)?;
+    }
+    Ok(None)
+}
+
+async fn execute_lan_command(
+    client: &Client,
+    devd: &str,
+    command: LanCommand,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    match command {
+        LanCommand::Devices => {
+            let config = read_user_config()?;
+            Ok(json!({"devices": config.lan_devices.iter().map(flux_purr_devd::lan::LanDeviceSummary::from).collect::<Vec<_>>() }))
+        }
+        LanCommand::Refresh => Ok(json!({"devices": persist_cli_lan_discoveries(discover_mdns(Duration::from_secs(2)).await?)?})),
+        LanCommand::Scan(args) => Ok(json!({"devices": persist_cli_lan_discoveries(discover_cidr(LanScanRequest { cidr: args.cidr }).await?)?})),
+        LanCommand::Reset(target) => request_with_lease(client, resolve_target(target, devd)?, Method::POST, "/lan-pairing/reset", None).await,
+        LanCommand::Pair(args) => pair_lan_device(args).await,
+        LanCommand::PairingCode(selector) => request_device_read(client, resolve_target(selector, devd)?, "/lan-pairing/code").await,
+        LanCommand::PairingOpen(selector) => request_with_lease(client, resolve_target(selector, devd)?, Method::POST, "/lan-pairing/window", None).await,
+        LanCommand::PairingClose(selector) => request_with_lease(client, resolve_target(selector, devd)?, Method::DELETE, "/lan-pairing/window", None).await,
+        LanCommand::Status(args) => {
+            let device = resolve_lan_target(&args.id)?;
+            Ok(authorized_json(&device, Method::GET, "status", None, None).await?)
+        }
+        LanCommand::RuntimeSet(args) => set_lan_runtime(args).await,
+        LanCommand::Request(args) => request_lan_path(args).await,
+    }
+}
+
+async fn pair_lan_device(
+    args: LanPairArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let device = pair_device(LanPairRequest { base_url: args.base_url, code: args.code }).await?;
+    let summary = flux_purr_devd::lan::LanDeviceSummary::from(&device);
+    let mut config = read_user_config()?;
+    merge_lan_device(&mut config.lan_devices, device);
+    write_user_config(&config)?;
+    Ok(serde_json::to_value(summary)?)
+}
+
+async fn set_lan_runtime(
+    args: LanRuntimeSetArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let device = resolve_lan_target(&args.target.id)?;
+    let body = json!({"targetTempC": args.target_temp_c, "activeCoolingEnabled": args.active_cooling, "postHeatCoolingMode": args.post_heat_cooling, "heatingFanGuardMode": args.heating_fan_guard, "heaterEnabled": args.heater_enabled});
+    lan_api_request(&device, Method::PUT, "runtime", Some(body)).await
+}
+
+async fn request_lan_path(
+    args: LanRequestArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let device = resolve_lan_target(&args.target.id)?;
+    let body = match (args.body, args.body_file) {
+        (Some(value), None) => Some(serde_json::from_str(&value)?),
+        (None, Some(path)) => Some(read_json_file(&path)?),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("clap rejects conflicting body arguments"),
+    };
+    lan_api_request(&device, args.method.as_reqwest(), &args.path, body).await
+}
+
+async fn execute_runtime_command(
+    client: &Client,
+    devd: &str,
+    command: RuntimeCommand,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    match command {
+        RuntimeCommand::Get(selector) => {
+            request_device_read(client, resolve_target(selector, devd)?, "/status").await
+        }
+        RuntimeCommand::Set(args) => {
+            let resolved = resolve_target(args.target.clone(), devd)?;
+            let body = runtime_body(client, &resolved, args).await?;
+            request_with_lease(client, resolved, Method::PUT, "/runtime", Some(body)).await
+        }
+    }
+}
+
+async fn execute_buzzer_command(
+    client: &Client,
+    devd: &str,
+    json_output: bool,
+    command: BuzzerCommand,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    match command {
+        BuzzerCommand::Test(args) => execute_buzzer_test(client, devd, args).await,
+        BuzzerCommand::Play(args) => {
+            if json_output {
+                return Err("buzzer play is interactive and cannot be used with --json".into());
+            }
+            buzzer_play_interactive(client, resolve_target(args.target, devd)?, args.pointer).await?;
+            Ok(json!({"ok": true}))
+        }
+    }
+}
+
+async fn execute_buzzer_test(
+    client: &Client,
+    devd: &str,
+    args: BuzzerTestArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let BuzzerTestArgs { target, cue, scenario, repeat, stop, status } = args;
+    buzzer_test(client, resolve_target(target, devd)?, cue, scenario, repeat, stop, status).await
+}
+
+async fn execute_pd_command(
+    client: &Client,
+    devd: &str,
+    command: PdCommand,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    match command {
+        PdCommand::Pps { command } => match command {
+            PpsCommand::Set(args) => set_pps(client, devd, args).await,
+            PpsCommand::Clear(selector) => {
+                request_with_lease(client, resolve_target(selector, devd)?, Method::PUT, "/runtime", Some(json!({"manualPpsEnabled": false}))).await
+            }
+        },
+    }
+}
+
+async fn set_pps(
+    client: &Client,
+    devd: &str,
+    args: PpsSetArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let millivolts = parse_pps_volts(&args.volts)?;
+    let mut body = json!({"manualPpsEnabled": true, "manualPpsMv": millivolts});
+    if let Some(amps) = &args.amps {
+        body["manualPpsMa"] = json!(parse_pps_amps(amps)?);
+    }
+    request_with_lease(client, resolve_target(args.target, devd)?, Method::PUT, "/runtime", Some(body)).await
+}
+
+async fn execute_wifi_command(
+    client: &Client,
+    devd: &str,
+    command: WifiCommand,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    match command {
+        WifiCommand::Set(args) => set_wifi(client, devd, args).await,
+        WifiCommand::Clear(selector) => update_wifi(client, devd, selector, WifiConfigOp::Clear).await,
+        WifiCommand::Cancel(selector) => update_wifi(client, devd, selector, WifiConfigOp::Cancel).await,
+    }
+}
+
+async fn set_wifi(
+    client: &Client,
+    devd: &str,
+    args: WifiSetArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let resolved = resolve_target(args.target.clone(), devd)?;
+    let static_ipv4 = static_ipv4_value(args.static_ip, args.static_prefix_len, args.static_gateway, args.static_dns)?;
+    let body = wifi_set_body(args.ssid, args.password, static_ipv4, args.telemetry_interval_ms);
+    request_with_lease(client, resolved, Method::PUT, "/wifi", Some(body)).await
+}
+
+async fn update_wifi(
+    client: &Client,
+    devd: &str,
+    selector: TargetSelector,
+    operation: WifiConfigOp,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    request_with_lease(client, resolve_target(selector, devd)?, Method::PUT, "/wifi", Some(json!({"op": operation}))).await
 }
 
 fn devd_flag_was_supplied() -> bool {
@@ -1066,147 +1031,165 @@ async fn request_json(
 const EEPROM_CAPACITY_BYTES: usize = 8 * 1024;
 const EEPROM_CHUNK_BYTES: usize = 32;
 
-#[expect(
-    clippy::too_many_lines,
-    clippy::excessive_nesting,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 async fn handle_eeprom_command(
     client: &Client,
     devd: &str,
     command: EepromCommand,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     match command {
-        EepromCommand::Export(args) => {
-            let resolved = resolve_target(args.target, devd)?;
-            let lease = create_lease(client, &resolved).await?;
-            let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-            let result = async {
-                let mut image = Vec::with_capacity(EEPROM_CAPACITY_BYTES);
-                for offset in (0..EEPROM_CAPACITY_BYTES).step_by(EEPROM_CHUNK_BYTES) {
-                    let length = (EEPROM_CAPACITY_BYTES - offset).min(EEPROM_CHUNK_BYTES);
-                    let value = request_leased(
-                        client,
-                        &resolved,
-                        &lease.lease_id,
-                        Method::POST,
-                        "/eeprom",
-                        Some(json!({
-                            "op": "read",
-                            "offset": offset,
-                            "length": length,
-                        })),
-                    )
-                    .await?;
-                    let bytes: Vec<u8> =
-                        serde_json::from_value(value.get("bytes").cloned().unwrap_or(Value::Null))?;
-                    if bytes.len() != length {
-                        return Err(format!(
-                            "EEPROM read returned {} bytes, expected {length}",
-                            bytes.len()
-                        )
-                        .into());
-                    }
-                    image.extend_from_slice(&bytes);
-                }
-                fs::write(&args.output, &image)?;
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(json!({
-                    "path": args.output,
-                    "bytes": image.len(),
-                }))
-            }
-            .await;
-            let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-            heartbeat.abort();
-            result
+        EepromCommand::Export(args) => export_eeprom(client, devd, args).await,
+        EepromCommand::Import(args) => import_eeprom(client, devd, args).await,
+        EepromCommand::Erase(args) => erase_eeprom(client, devd, args).await,
+    }
+}
+
+async fn export_eeprom(
+    client: &Client,
+    devd: &str,
+    args: EepromExportArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let resolved = resolve_target(args.target, devd)?;
+    let lease = create_lease(client, &resolved).await?;
+    let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let result = export_eeprom_chunks(client, &resolved, &lease.lease_id, &args.output).await;
+    let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+    heartbeat.abort();
+    result
+}
+
+async fn export_eeprom_chunks(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    output: &Path,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut image = Vec::with_capacity(EEPROM_CAPACITY_BYTES);
+    for offset in (0..EEPROM_CAPACITY_BYTES).step_by(EEPROM_CHUNK_BYTES) {
+        let length = (EEPROM_CAPACITY_BYTES - offset).min(EEPROM_CHUNK_BYTES);
+        let value = request_leased(
+            client,
+            resolved,
+            lease_id,
+            Method::POST,
+            "/eeprom",
+            Some(json!({"op": "read", "offset": offset, "length": length})),
+        )
+        .await?;
+        let bytes: Vec<u8> = serde_json::from_value(
+            value.get("bytes").cloned().unwrap_or(Value::Null),
+        )?;
+        if bytes.len() != length {
+            return Err(format!(
+                "EEPROM read returned {} bytes, expected {length}",
+                bytes.len()
+            )
+            .into());
         }
-        EepromCommand::Import(args) => {
-            let image = fs::read(&args.input)?;
-            if image.len() != EEPROM_CAPACITY_BYTES {
-                return Err(
-                    format!("EEPROM image must be exactly {EEPROM_CAPACITY_BYTES} bytes").into(),
-                );
-            }
-            let resolved = resolve_target(args.target, devd)?;
-            let lease = create_lease(client, &resolved).await?;
-            let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-            let result = async {
-                for (offset, chunk) in image.chunks(EEPROM_CHUNK_BYTES).enumerate() {
-                    request_leased(
-                        client,
-                        &resolved,
-                        &lease.lease_id,
-                        Method::POST,
-                        "/eeprom",
-                        Some(json!({
-                            "op": "write",
-                            "offset": offset * EEPROM_CHUNK_BYTES,
-                            "bytes": chunk,
-                        })),
-                    )
-                    .await?;
-                }
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(json!({
-                    "bytes": image.len(),
-                    "rebootRequired": true,
-                }))
-            }
-            .await;
-            let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-            heartbeat.abort();
-            result
-        }
-        EepromCommand::Erase(args) => {
-            if args.confirm != "ERASE EEPROM" {
-                return Err("erase requires --confirm 'ERASE EEPROM'".into());
-            }
-            let resolved = resolve_target(args.target, devd)?;
-            let lease = create_lease(client, &resolved).await?;
-            let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-            let result = async {
-                request_leased(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
-                    Method::POST,
-                    "/eeprom",
-                    Some(json!({ "op": "erase" })),
-                )
-                .await?;
-                for offset in (0..EEPROM_CAPACITY_BYTES).step_by(EEPROM_CHUNK_BYTES) {
-                    let value = request_leased(
-                        client,
-                        &resolved,
-                        &lease.lease_id,
-                        Method::POST,
-                        "/eeprom",
-                        Some(json!({
-                            "op": "read",
-                            "offset": offset,
-                            "length": EEPROM_CHUNK_BYTES,
-                        })),
-                    )
-                    .await?;
-                    let bytes: Vec<u8> =
-                        serde_json::from_value(value.get("bytes").cloned().unwrap_or(Value::Null))?;
-                    if bytes.len() != EEPROM_CHUNK_BYTES || bytes.iter().any(|byte| *byte != 0xff) {
-                        return Err(
-                            format!("EEPROM erase verification failed at offset {offset}").into(),
-                        );
-                    }
-                }
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(json!({
-                    "erased": true,
-                    "bytes": EEPROM_CAPACITY_BYTES,
-                    "rebootRequired": true,
-                }))
-            }
-            .await;
-            let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-            heartbeat.abort();
-            result
+        image.extend_from_slice(&bytes);
+    }
+    fs::write(output, &image)?;
+    Ok(json!({"path": output, "bytes": image.len()}))
+}
+
+async fn import_eeprom(
+    client: &Client,
+    devd: &str,
+    args: EepromImportArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let image = fs::read(&args.input)?;
+    if image.len() != EEPROM_CAPACITY_BYTES {
+        return Err(format!("EEPROM image must be exactly {EEPROM_CAPACITY_BYTES} bytes").into());
+    }
+    let resolved = resolve_target(args.target, devd)?;
+    let lease = create_lease(client, &resolved).await?;
+    let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let result = import_eeprom_chunks(client, &resolved, &lease.lease_id, &image).await;
+    let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+    heartbeat.abort();
+    result
+}
+
+async fn import_eeprom_chunks(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    image: &[u8],
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    for (offset, chunk) in image.chunks(EEPROM_CHUNK_BYTES).enumerate() {
+        request_leased(
+            client,
+            resolved,
+            lease_id,
+            Method::POST,
+            "/eeprom",
+            Some(json!({
+                "op": "write",
+                "offset": offset * EEPROM_CHUNK_BYTES,
+                "bytes": chunk,
+            })),
+        )
+        .await?;
+    }
+    Ok(json!({"bytes": image.len(), "rebootRequired": true}))
+}
+
+async fn erase_eeprom(
+    client: &Client,
+    devd: &str,
+    args: EepromEraseArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    if args.confirm != "ERASE EEPROM" {
+        return Err("erase requires --confirm 'ERASE EEPROM'".into());
+    }
+    let resolved = resolve_target(args.target, devd)?;
+    let lease = create_lease(client, &resolved).await?;
+    let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let result = erase_and_verify_eeprom(client, &resolved, &lease.lease_id).await;
+    let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+    heartbeat.abort();
+    result
+}
+
+async fn erase_and_verify_eeprom(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    request_leased(
+        client,
+        resolved,
+        lease_id,
+        Method::POST,
+        "/eeprom",
+        Some(json!({"op": "erase"})),
+    )
+    .await?;
+    for offset in (0..EEPROM_CAPACITY_BYTES).step_by(EEPROM_CHUNK_BYTES) {
+        let value = request_leased(
+            client,
+            resolved,
+            lease_id,
+            Method::POST,
+            "/eeprom",
+            Some(json!({
+                "op": "read",
+                "offset": offset,
+                "length": EEPROM_CHUNK_BYTES,
+            })),
+        )
+        .await?;
+        let bytes: Vec<u8> = serde_json::from_value(
+            value.get("bytes").cloned().unwrap_or(Value::Null),
+        )?;
+        if bytes.len() != EEPROM_CHUNK_BYTES || bytes.iter().any(|byte| *byte != 0xff) {
+            return Err(format!("EEPROM erase verification failed at offset {offset}").into());
         }
     }
+    Ok(json!({
+        "erased": true,
+        "bytes": EEPROM_CAPACITY_BYTES,
+        "rebootRequired": true,
+    }))
 }
 
 async fn request_with_lease(

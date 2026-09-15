@@ -1459,73 +1459,151 @@ fn test_thermal_control_profile_point(target_temp_c: i16) -> ThermalControlProfi
     }
 }
 
+fn thermal_profile_runtime_request(
+    lease_id: String,
+    op: ThermalControlProfileOp,
+    profile: Option<ThermalControlProfilePackage>,
+) -> RuntimeConfigRequest {
+    RuntimeConfigRequest {
+        lease_id,
+        target_temp_c: None,
+        selected_preset_slot: None,
+        presets_c: None,
+        active_cooling_enabled: None,
+        post_heat_cooling_mode: None,
+        heating_fan_guard_mode: None,
+        heater_enabled: None,
+        manual_pps_enabled: None,
+        manual_pps_mv: None,
+        manual_pps_ma: None,
+        calibration: None,
+        thermal_profile_mode: None,
+        fault_attention_acknowledged: None,
+        thermal_control_profile: Some(ThermalControlProfileRequest {
+            op,
+            bank: None,
+            profile,
+        }),
+    }
+}
+
+fn thermal_preview_profile() -> ThermalControlProfilePackage {
+    ThermalControlProfilePackage {
+        settings: None,
+        points: vec![
+            Some(ThermalControlProfilePoint {
+                target_temp_c: 100,
+                brake_distance_centi_c: 700,
+                warmup_power_permille: 320,
+                warmup_reenter_centi_c: 0,
+                approach_power_permille: 320,
+                approach_floor_power_permille: 220,
+                approach_damping_exponent_permille: 1_000,
+                approach_tail_window_centi_c: 0,
+                hold_power_permille: 220,
+                hold_reheat_power_permille: 0,
+                hold_entry_centi_c: 0,
+                hold_exit_centi_c: 0,
+                hold_on_centi_c: 0,
+                hold_off_centi_c: 0,
+                overshoot_cutoff_centi_c: 0,
+                hold_kp_permille_per_c: 0,
+                hold_ki_permille_per_c_tick: 0,
+                hold_blend_ticks: 0,
+                approach_lead_ticks: 0,
+                hold_lead_ticks: 0,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ],
+    }
+}
+
+fn mock_runtime_request(
+    lease_id: String,
+    target_temp_c: Option<i16>,
+    active_cooling_enabled: Option<bool>,
+    heater_enabled: Option<bool>,
+    manual_pps_enabled: Option<bool>,
+    manual_pps_mv: Option<u16>,
+    manual_pps_ma: Option<u16>,
+) -> RuntimeConfigRequest {
+    RuntimeConfigRequest {
+        lease_id,
+        target_temp_c,
+        selected_preset_slot: None,
+        presets_c: None,
+        active_cooling_enabled,
+        post_heat_cooling_mode: None,
+        heating_fan_guard_mode: None,
+        heater_enabled,
+        manual_pps_enabled,
+        manual_pps_mv,
+        manual_pps_ma,
+        calibration: None,
+        thermal_profile_mode: None,
+        fault_attention_acknowledged: None,
+        thermal_control_profile: None,
+    }
+}
+
+fn assert_wifi_runtime_events(state: &AppState) {
+    let inner = state.lock().unwrap();
+    let device = inner.devices.get("mock-fp-lab-01").unwrap();
+    let wifi_event = device
+        .events
+        .iter()
+        .find(|event| event.kind == "wifi" && event.message == "wifi config accepted")
+        .unwrap();
+    assert_eq!(wifi_event.payload["ssid"], "FluxPurr-Lab");
+    assert_eq!(wifi_event.payload["passwordPresent"], true);
+    assert!(
+        !serde_json::to_string(&wifi_event.payload)
+            .unwrap()
+            .contains("secret-pass")
+    );
+    let runtime_event = device
+        .events
+        .iter()
+        .find(|event| event.kind == "runtime" && event.message == "runtime config applied")
+        .unwrap();
+    assert_eq!(runtime_event.payload["status"]["targetTempC"], 231);
+    assert_eq!(
+        runtime_event.payload["status"]["activeCoolingEnabled"],
+        false
+    );
+    assert_eq!(runtime_event.payload["status"]["heaterEnabled"], false);
+}
+
+fn assert_flash_blocked_event(state: &AppState) {
+    let inner = state.lock().unwrap();
+    let device = inner.devices.get("serial-test").unwrap();
+    assert!(device.events.iter().any(|event| {
+        event.kind == "flash"
+            && event.message == "real flash blocked"
+            && event.payload["code"] == "real_flash_disabled"
+    }));
+}
+
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "runtime endpoint fixture covers preview and clear transitions"
-)]
 async fn runtime_endpoint_previews_and_clears_thermal_control_profile() {
     let state = AppState::test();
     let lease = state.lease_device("mock-fp-lab-01").unwrap();
     let preview = configure_runtime(
         State(state.clone()),
         AxumPath("mock-fp-lab-01".to_string()),
-        Json(RuntimeConfigRequest {
-            lease_id: lease.lease_id.clone(),
-            target_temp_c: None,
-            selected_preset_slot: None,
-            presets_c: None,
-            active_cooling_enabled: None,
-            post_heat_cooling_mode: None,
-            heating_fan_guard_mode: None,
-            heater_enabled: None,
-            manual_pps_enabled: None,
-            manual_pps_mv: None,
-            manual_pps_ma: None,
-            calibration: None,
-            thermal_profile_mode: None,
-            fault_attention_acknowledged: None,
-            thermal_control_profile: Some(ThermalControlProfileRequest {
-                op: ThermalControlProfileOp::Preview,
-                bank: None,
-                profile: Some(ThermalControlProfilePackage {
-                    settings: None,
-                    points: vec![
-                        Some(ThermalControlProfilePoint {
-                            target_temp_c: 100,
-                            brake_distance_centi_c: 700,
-                            warmup_power_permille: 320,
-                            warmup_reenter_centi_c: 0,
-                            approach_power_permille: 320,
-                            approach_floor_power_permille: 220,
-                            approach_damping_exponent_permille: 1_000,
-                            approach_tail_window_centi_c: 0,
-                            hold_power_permille: 220,
-                            hold_reheat_power_permille: 0,
-                            hold_entry_centi_c: 0,
-                            hold_exit_centi_c: 0,
-                            hold_on_centi_c: 0,
-                            hold_off_centi_c: 0,
-                            overshoot_cutoff_centi_c: 0,
-                            hold_kp_permille_per_c: 0,
-                            hold_ki_permille_per_c_tick: 0,
-                            hold_blend_ticks: 0,
-                            approach_lead_ticks: 0,
-                            hold_lead_ticks: 0,
-                        }),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    ],
-                }),
-            }),
-        }),
+        Json(thermal_profile_runtime_request(
+            lease.lease_id.clone(),
+            ThermalControlProfileOp::Preview,
+            Some(thermal_preview_profile()),
+        )),
     )
     .await
     .unwrap()
@@ -1537,27 +1615,11 @@ async fn runtime_endpoint_previews_and_clears_thermal_control_profile() {
     let clear_saved = configure_runtime(
         State(state.clone()),
         AxumPath("mock-fp-lab-01".to_string()),
-        Json(RuntimeConfigRequest {
-            lease_id: lease.lease_id.clone(),
-            target_temp_c: None,
-            selected_preset_slot: None,
-            presets_c: None,
-            active_cooling_enabled: None,
-            post_heat_cooling_mode: None,
-            heating_fan_guard_mode: None,
-            heater_enabled: None,
-            manual_pps_enabled: None,
-            manual_pps_mv: None,
-            manual_pps_ma: None,
-            calibration: None,
-            thermal_profile_mode: None,
-            fault_attention_acknowledged: None,
-            thermal_control_profile: Some(ThermalControlProfileRequest {
-                op: ThermalControlProfileOp::ClearSaved,
-                bank: None,
-                profile: None,
-            }),
-        }),
+        Json(thermal_profile_runtime_request(
+            lease.lease_id.clone(),
+            ThermalControlProfileOp::ClearSaved,
+            None,
+        )),
     )
     .await
     .unwrap()
@@ -1569,27 +1631,11 @@ async fn runtime_endpoint_previews_and_clears_thermal_control_profile() {
     let clear = configure_runtime(
         State(state),
         AxumPath("mock-fp-lab-01".to_string()),
-        Json(RuntimeConfigRequest {
-            lease_id: lease.lease_id,
-            target_temp_c: None,
-            selected_preset_slot: None,
-            presets_c: None,
-            active_cooling_enabled: None,
-            post_heat_cooling_mode: None,
-            heating_fan_guard_mode: None,
-            heater_enabled: None,
-            manual_pps_enabled: None,
-            manual_pps_mv: None,
-            manual_pps_ma: None,
-            calibration: None,
-            thermal_profile_mode: None,
-            fault_attention_acknowledged: None,
-            thermal_control_profile: Some(ThermalControlProfileRequest {
-                op: ThermalControlProfileOp::ClearPreview,
-                bank: None,
-                profile: None,
-            }),
-        }),
+        Json(thermal_profile_runtime_request(
+            lease.lease_id,
+            ThermalControlProfileOp::ClearPreview,
+            None,
+        )),
     )
     .await
     .unwrap()
@@ -1927,10 +1973,6 @@ async fn daemon_local_device_mutations_require_valid_lease() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "success fixture covers wifi and runtime event contracts"
-)]
 async fn wifi_and_runtime_successes_record_safe_events() {
     let state = AppState::test();
     let lease = state.lease_device("mock-fp-lab-01").unwrap();
@@ -1953,76 +1995,33 @@ async fn wifi_and_runtime_successes_record_safe_events() {
     let _ = configure_runtime(
         State(state.clone()),
         AxumPath("mock-fp-lab-01".to_string()),
-        Json(RuntimeConfigRequest {
-            lease_id: lease.lease_id.clone(),
-            target_temp_c: Some(231),
-            selected_preset_slot: None,
-            presets_c: None,
-            active_cooling_enabled: Some(false),
-            post_heat_cooling_mode: None,
-            heating_fan_guard_mode: None,
-            heater_enabled: Some(false),
-            manual_pps_enabled: None,
-            manual_pps_mv: None,
-            manual_pps_ma: None,
-            calibration: None,
-            thermal_profile_mode: None,
-            fault_attention_acknowledged: None,
-            thermal_control_profile: None,
-        }),
+        Json(mock_runtime_request(
+            lease.lease_id.clone(),
+            Some(231),
+            Some(false),
+            Some(false),
+            None,
+            None,
+            None,
+        )),
     )
     .await
     .unwrap();
 
-    {
-        let inner = state.lock().unwrap();
-        let device = inner.devices.get("mock-fp-lab-01").unwrap();
-        let wifi_event = device
-            .events
-            .iter()
-            .find(|event| event.kind == "wifi" && event.message == "wifi config accepted")
-            .unwrap();
-        assert_eq!(wifi_event.payload["ssid"], "FluxPurr-Lab");
-        assert_eq!(wifi_event.payload["passwordPresent"], true);
-        assert!(
-            !serde_json::to_string(&wifi_event.payload)
-                .unwrap()
-                .contains("secret-pass")
-        );
-
-        let runtime_event = device
-            .events
-            .iter()
-            .find(|event| event.kind == "runtime" && event.message == "runtime config applied")
-            .unwrap();
-        assert_eq!(runtime_event.payload["status"]["targetTempC"], 231);
-        assert_eq!(
-            runtime_event.payload["status"]["activeCoolingEnabled"],
-            false
-        );
-        assert_eq!(runtime_event.payload["status"]["heaterEnabled"], false);
-    }
+    assert_wifi_runtime_events(&state);
 
     let invalid_manual = configure_runtime(
         State(state.clone()),
         AxumPath("mock-fp-lab-01".to_string()),
-        Json(RuntimeConfigRequest {
-            lease_id: lease.lease_id.clone(),
-            target_temp_c: Some(199),
-            selected_preset_slot: None,
-            presets_c: None,
-            active_cooling_enabled: None,
-            post_heat_cooling_mode: None,
-            heating_fan_guard_mode: None,
-            heater_enabled: None,
-            manual_pps_enabled: Some(true),
-            manual_pps_mv: None,
-            manual_pps_ma: None,
-            calibration: None,
-            thermal_profile_mode: None,
-            fault_attention_acknowledged: None,
-            thermal_control_profile: None,
-        }),
+        Json(mock_runtime_request(
+            lease.lease_id.clone(),
+            Some(199),
+            None,
+            None,
+            Some(true),
+            None,
+            None,
+        )),
     )
     .await
     .unwrap_err();
@@ -2037,23 +2036,15 @@ async fn wifi_and_runtime_successes_record_safe_events() {
     let manual_status = configure_runtime(
         State(state.clone()),
         AxumPath("mock-fp-lab-01".to_string()),
-        Json(RuntimeConfigRequest {
-            lease_id: lease.lease_id.clone(),
-            target_temp_c: None,
-            selected_preset_slot: None,
-            presets_c: None,
-            active_cooling_enabled: None,
-            post_heat_cooling_mode: None,
-            heating_fan_guard_mode: None,
-            heater_enabled: None,
-            manual_pps_enabled: Some(true),
-            manual_pps_mv: Some(10_400),
-            manual_pps_ma: Some(2_500),
-            calibration: None,
-            thermal_profile_mode: None,
-            fault_attention_acknowledged: None,
-            thermal_control_profile: None,
-        }),
+        Json(mock_runtime_request(
+            lease.lease_id.clone(),
+            None,
+            None,
+            None,
+            Some(true),
+            Some(10_400),
+            Some(2_500),
+        )),
     )
     .await
     .unwrap()
@@ -2066,23 +2057,15 @@ async fn wifi_and_runtime_successes_record_safe_events() {
     let cleared_status = configure_runtime(
         State(state.clone()),
         AxumPath("mock-fp-lab-01".to_string()),
-        Json(RuntimeConfigRequest {
-            lease_id: lease.lease_id,
-            target_temp_c: None,
-            selected_preset_slot: None,
-            presets_c: None,
-            active_cooling_enabled: None,
-            post_heat_cooling_mode: None,
-            heating_fan_guard_mode: None,
-            heater_enabled: None,
-            manual_pps_enabled: Some(false),
-            manual_pps_mv: None,
-            manual_pps_ma: None,
-            calibration: None,
-            thermal_profile_mode: None,
-            fault_attention_acknowledged: None,
-            thermal_control_profile: None,
-        }),
+        Json(mock_runtime_request(
+            lease.lease_id,
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+        )),
     )
     .await
     .unwrap()
@@ -2292,10 +2275,6 @@ async fn thermal_plant_mock_job_requires_20v_three_amp_capability() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "thermal plant fixture covers lock and transition contracts"
-)]
 async fn thermal_plant_mock_job_locks_runtime_overrides_and_state_transitions() {
     let state = AppState::test();
     let lease = state.lease_device("mock-fp-lab-01").unwrap();
@@ -2328,23 +2307,15 @@ async fn thermal_plant_mock_job_locks_runtime_overrides_and_state_transitions() 
     let manual_override = configure_runtime(
         State(state.clone()),
         AxumPath("mock-fp-lab-01".to_string()),
-        Json(RuntimeConfigRequest {
-            lease_id: lease.lease_id.clone(),
-            target_temp_c: None,
-            selected_preset_slot: None,
-            presets_c: None,
-            active_cooling_enabled: None,
-            post_heat_cooling_mode: None,
-            heating_fan_guard_mode: None,
-            heater_enabled: None,
-            manual_pps_enabled: Some(true),
-            manual_pps_mv: Some(20_000),
-            manual_pps_ma: Some(3_000),
-            calibration: None,
-            thermal_profile_mode: None,
-            fault_attention_acknowledged: None,
-            thermal_control_profile: None,
-        }),
+        Json(mock_runtime_request(
+            lease.lease_id.clone(),
+            None,
+            None,
+            None,
+            Some(true),
+            Some(20_000),
+            Some(3_000),
+        )),
     )
     .await
     .unwrap_err();
@@ -2353,23 +2324,15 @@ async fn thermal_plant_mock_job_locks_runtime_overrides_and_state_transitions() 
     let heater_override = configure_runtime(
         State(state.clone()),
         AxumPath("mock-fp-lab-01".to_string()),
-        Json(RuntimeConfigRequest {
-            lease_id: lease.lease_id.clone(),
-            target_temp_c: None,
-            selected_preset_slot: None,
-            presets_c: None,
-            active_cooling_enabled: None,
-            post_heat_cooling_mode: None,
-            heating_fan_guard_mode: None,
-            heater_enabled: Some(true),
-            manual_pps_enabled: None,
-            manual_pps_mv: None,
-            manual_pps_ma: None,
-            calibration: None,
-            thermal_profile_mode: None,
-            fault_attention_acknowledged: None,
-            thermal_control_profile: None,
-        }),
+        Json(mock_runtime_request(
+            lease.lease_id.clone(),
+            None,
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+        )),
     )
     .await
     .unwrap_err();
@@ -2567,10 +2530,6 @@ fn manual_calibration_cannot_select_the_thermal_plant_runtime_state() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "flash fixture covers dry-run, confirmation, and safety gates"
-)]
 async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
     let dir = tempdir().unwrap();
     let artifact = test_artifact_with_file(dir.path(), "firmware.bin", b"firmware-image");
@@ -2676,15 +2635,7 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
     .unwrap_err();
     assert_eq!(flash_disabled.status, StatusCode::FORBIDDEN);
     assert_eq!(flash_disabled.error.code, "real_flash_disabled");
-    {
-        let inner = state.lock().unwrap();
-        let device = inner.devices.get("serial-test").unwrap();
-        assert!(device.events.iter().any(|event| {
-            event.kind == "flash"
-                && event.message == "real flash blocked"
-                && event.payload["code"] == "real_flash_disabled"
-        }));
-    }
+    assert_flash_blocked_event(&state);
 }
 
 #[test]
@@ -3071,10 +3022,6 @@ fn usb_response_decoder_marks_startup_busy_retryable() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "runtime matcher fixture populates the complete status contract"
-)]
 fn runtime_config_matcher_accepts_matching_calibration_status() {
     let payload = RuntimeConfigRequest {
         lease_id: "lease-1".to_string(),
@@ -3110,99 +3057,16 @@ fn runtime_config_matcher_accepts_matching_calibration_status() {
         fault_attention_acknowledged: None,
         thermal_control_profile: None,
     };
-    let status = ControlPlaneStatus {
-        mode: "sampling".to_string(),
-        uptime_seconds: 12,
-        current_temp_c: 31.5,
-        target_temp_c: 45,
-        selected_preset_slot: Some(2),
-        presets_c: payload.presets_c.clone(),
-        heater_enabled: true,
-        heater_output_percent: 12,
-        heater_physical_output_percent: 12,
-        active_cooling_enabled: false,
-        post_heat_cooling_mode: "off".to_string(),
-        heating_fan_guard_mode: "medium".to_string(),
-        fan_policy_source: "heating_guard".to_string(),
-        fan_output_level: "low".to_string(),
-        fan_display_state: "AUTO".to_string(),
-        fan_enabled: true,
-        fan_pwm_permille: 500,
-        voltage_mv: 12_000,
-        current_ma: 2_800,
-        board_temp_centi: 3150,
-        rtd_raw_adc_mv: Some(934),
-        rtd_raw_adc_min_mv: Some(933),
-        rtd_raw_adc_max_mv: Some(935),
-        rtd_raw_adc_spread_mv: Some(2),
-        vin_raw_adc_mv: Some(1003),
-        adc_diagnostics: None,
-        pd_request_mv: 12_000,
-        pd_contract_mv: 12_000,
-        pd_state: "ready".to_string(),
-        pd_controller: Some("fusb302b".to_string()),
-        pd_contract_kind: Some("pps".to_string()),
-        pd_contract_current_ma: Some(3_000),
-        pd_contract_power_mw: Some(36_000),
-        pd_performance_guaranteed: Some(false),
-        pd_degraded_reason: Some("pd_contract_below_20v".to_string()),
-        manual_pps_enabled: false,
-        manual_pps_mv: None,
-        manual_pps_ma: None,
-        pps_capability_min_mv: Some(5_000),
-        pps_capability_max_mv: Some(21_000),
-        pps_capability_max_ma: Some(3_000),
-        manual_pps_error: None,
-        fault_attention_pending: false,
-        heater_fault_reason: None,
-        persistence_fault: None,
-        persistence_fault_attention_pending: false,
-        heater_lock_reason: None,
-        heater_control_phase: None,
-        heater_error_c: None,
-        heater_control_error_c: None,
-        heater_control_temp_c: None,
-        heater_control_measurement_guarded: false,
-        heater_filtered_temp_c: None,
-        heater_filtered_slope_c_per_s: None,
-        heater_coast_active: false,
-        heater_control_interval_ms: 0,
-        heater_control_cycle_ms: 0,
-        thermal_control_profile_preview: false,
-        thermal_profile_mode: "65w".to_string(),
-        thermal_profile_resolved_bank: "pps3a".to_string(),
-        thermal_control: ThermalControlRuntime::default(),
-        thermal_plant_model: ThermalPlantRuntime::default(),
-        calibration: CalibrationRuntimeState {
-            mode: CalibrationMode::RtdAdc,
-            pps_enabled: true,
-            pps_mv: Some(12_000),
-            pps_ma: Some(3_000),
-            heater_enabled: true,
-            target_adc_mv: Some(930),
-            stable: true,
-            stability_error_mv: Some(4),
-            error: None,
-            job: CalibrationJobState::default(),
-        },
-        frontpanel_key: None,
-        frontpanel_route: None,
-        frontpanel_presented_route: None,
-        frontpanel_presentation_count: None,
-        network: NetworkSummary {
-            state: NetworkState::Idle,
-            configuration_generation: 0,
-            transition_sequence: 0,
-            failure_code: None,
-            ssid: None,
-            wifi_password_length: 0,
-            ip: None,
-            gateway: None,
-            dns: Vec::new(),
-            wifi_rssi: None,
-            last_error: None,
-        },
-    };
+    let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
+    status.target_temp_c = 45;
+    status.selected_preset_slot = Some(2);
+    status.presets_c = payload.presets_c.clone();
+    status.active_cooling_enabled = false;
+    status.calibration.mode = CalibrationMode::RtdAdc;
+    status.calibration.pps_enabled = true;
+    status.calibration.pps_mv = Some(12_000);
+    status.calibration.heater_enabled = true;
+    status.calibration.target_adc_mv = Some(930);
 
     assert!(runtime_config_matches_status(&payload, &status));
 }

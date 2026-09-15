@@ -425,10 +425,6 @@ where
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 async fn load_eeprom_memory_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
@@ -444,13 +440,116 @@ where
         return (None, false, true, false);
     };
 
-    let mut contains_data = false;
-    let mut legacy_format_present = false;
-    let mut read_failed = false;
-    let mut latest_active_marker: Option<LayoutMarker> = None;
-    let mut latest_prepared_marker: Option<LayoutMarker> = None;
-    let mut domains: [Option<PersistRecord>; 6] = [None, None, None, None, None, None];
-    let staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
+    let mut marker_scan = scan_fpr2_layout_markers(
+        i2c,
+        pd_port,
+        service,
+        address,
+        &mut SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]),
+    )
+    .await;
+
+    // A valid ACTIVE marker makes the new format authoritative. Without one,
+    // keep reading legacy data so an interrupted migration can fall back
+    // safely instead of treating PREPARED records as production state.
+    if marker_scan.latest_active_marker.is_none() {
+        scan_legacy_slots(i2c, pd_port, service, address, scratch, &mut marker_scan).await;
+    }
+
+    let active_generation = marker_scan
+        .latest_active_marker
+        .map(|marker| marker.generation);
+    let read_generation = active_generation.or_else(|| {
+        marker_scan
+            .latest_prepared_marker
+            .filter(|marker| marker.kind == LayoutMarkerKind::LegacyMigration)
+            .map(|marker| marker.generation)
+    });
+    let mut staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
+    let (domains, domain_contains_data, domain_read_failed) = read_fpr2_domains(
+        i2c,
+        pd_port,
+        service,
+        address,
+        &mut staging,
+        read_generation,
+    )
+    .await;
+    marker_scan.contains_data |= domain_contains_data;
+    marker_scan.read_failed |= domain_read_failed;
+    let domains = domains;
+
+    let prepared_recovery = marker_scan.latest_active_marker.is_none()
+        && marker_scan.latest_prepared_marker.is_some_and(|marker| {
+            marker.kind == LayoutMarkerKind::LegacyMigration
+                && !marker_scan.legacy_format_present
+                && fpr2_prepared_generation_is_complete(&domains, marker.generation)
+        });
+    let selected = if let Some(generation) = active_generation {
+        merge_persist_records(&domains, generation)
+    } else if prepared_recovery {
+        merge_persist_records(
+            &domains,
+            marker_scan
+                .latest_prepared_marker
+                .map_or(0, |marker| marker.generation),
+        )
+    } else {
+        None
+    };
+    let current_format_valid = selected.is_some();
+
+    if let Some(record) = &selected {
+        info!(
+            "memory restore ok seq={=u32} target_c={=i16} slot={=u8} active_cooling={=bool} wifi_ssid_len={=u8} telemetry_ms={=u32}",
+            record.sequence,
+            record.config.target_temp_c,
+            record.config.selected_preset_slot as u8,
+            record.config.active_cooling_enabled,
+            record.config.wifi_ssid.len() as u8,
+            record.config.telemetry_interval_ms,
+        );
+    } else {
+        info!("memory restore unavailable -> using defaults");
+    }
+
+    let incompatible = marker_scan.legacy_format_present
+        || eeprom_data_is_incompatible(current_format_valid, marker_scan.contains_data);
+    let required = (marker_scan.read_failed && selected.is_none())
+        || (marker_scan.contains_data && (domains[0].is_none() || domains[1].is_none()))
+        || (marker_scan.contains_data
+            && marker_scan.latest_active_marker.is_none()
+            && !prepared_recovery);
+    (selected, incompatible, required, prepared_recovery)
+}
+
+#[cfg(target_arch = "xtensa")]
+struct EepromMarkerScan {
+    contains_data: bool,
+    legacy_format_present: bool,
+    read_failed: bool,
+    latest_active_marker: Option<LayoutMarker>,
+    latest_prepared_marker: Option<LayoutMarker>,
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn scan_fpr2_layout_markers<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    address: u8,
+    staging: &mut SensitiveEepromStaging<'_>,
+) -> EepromMarkerScan
+where
+    PWM: SetDutyCycle,
+{
+    let mut scan = EepromMarkerScan {
+        contains_data: false,
+        legacy_format_present: false,
+        read_failed: false,
+        latest_active_marker: None,
+        latest_prepared_marker: None,
+    };
     for offset in [FPR2_LAYOUT_A_OFFSET, FPR2_LAYOUT_B_OFFSET] {
         staging.bytes.fill(0xff);
         let candidate = read_eeprom_persist_record(
@@ -463,11 +562,11 @@ where
             staging.bytes,
         )
         .await;
-        contains_data |= eeprom_bytes_contain_data(&staging.bytes[..FPR2_HEADER_LEN]);
+        scan.contains_data |= eeprom_bytes_contain_data(&staging.bytes[..FPR2_HEADER_LEN]);
         let Some(candidate) = (match candidate {
             Ok(candidate) => candidate,
             Err(()) => {
-                read_failed = true;
+                scan.read_failed = true;
                 None
             }
         }) else {
@@ -481,107 +580,92 @@ where
         }
         match marker.status {
             LayoutMarkerStatus::Active
-                if latest_active_marker
+                if scan
+                    .latest_active_marker
                     .is_none_or(|current| candidate.sequence > current.generation) =>
             {
-                latest_active_marker = Some(marker);
+                scan.latest_active_marker = Some(marker);
             }
             LayoutMarkerStatus::Prepared
-                if latest_prepared_marker
+                if scan
+                    .latest_prepared_marker
                     .is_none_or(|current| candidate.sequence > current.generation) =>
             {
-                latest_prepared_marker = Some(marker);
+                scan.latest_prepared_marker = Some(marker);
             }
             _ => {}
         }
     }
+    scan
+}
 
-    // A valid ACTIVE marker makes the new format authoritative. Without one,
-    // keep reading legacy data so an interrupted migration can fall back
-    // safely instead of treating PREPARED records as production state.
-    if latest_active_marker.is_none() {
-        for offset in [
-            PREVIOUS_MEMORY_SLOT_A_OFFSET,
-            PREVIOUS_MEMORY_SLOT_B_OFFSET,
-            LEGACY_MEMORY_SLOT_A_OFFSET,
-            LEGACY_MEMORY_SLOT_B_OFFSET,
-            MEMORY_SLOT_A_OFFSET,
-            MEMORY_SLOT_B_OFFSET,
-        ] {
-            let probe_len = if matches!(
-                offset,
-                PREVIOUS_MEMORY_SLOT_A_OFFSET
-                    | PREVIOUS_MEMORY_SLOT_B_OFFSET
-                    | LEGACY_MEMORY_SLOT_A_OFFSET
-                    | LEGACY_MEMORY_SLOT_B_OFFSET
-                    | MEMORY_SLOT_A_OFFSET
-                    | MEMORY_SLOT_B_OFFSET
-            ) {
-                4
-            } else {
-                1
-            };
-            match read_eeprom_bytes_chunked_with_pd(
-                i2c,
-                pd_port,
-                service,
-                address,
-                offset,
-                &mut scratch.bytes[..probe_len],
-            )
-            .await
-            {
-                Ok(()) => {
-                    contains_data |= eeprom_bytes_contain_data(&scratch.bytes[..probe_len]);
-                    legacy_format_present |= probe_len == 4 && scratch.bytes[..4] == *b"FPM1";
-                }
-                Err(_) => read_failed = true,
+#[cfg(target_arch = "xtensa")]
+async fn scan_legacy_slots<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    address: u8,
+    scratch: &mut MemoryIoScratch,
+    scan: &mut EepromMarkerScan,
+)
+where
+    PWM: SetDutyCycle,
+{
+    for offset in [
+        PREVIOUS_MEMORY_SLOT_A_OFFSET,
+        PREVIOUS_MEMORY_SLOT_B_OFFSET,
+        LEGACY_MEMORY_SLOT_A_OFFSET,
+        LEGACY_MEMORY_SLOT_B_OFFSET,
+        MEMORY_SLOT_A_OFFSET,
+        MEMORY_SLOT_B_OFFSET,
+    ] {
+        let probe_len = 4;
+        match read_eeprom_bytes_chunked_with_pd(
+            i2c,
+            pd_port,
+            service,
+            address,
+            offset,
+            &mut scratch.bytes[..probe_len],
+        )
+        .await
+        {
+            Ok(()) => {
+                scan.contains_data |= eeprom_bytes_contain_data(&scratch.bytes[..probe_len]);
+                scan.legacy_format_present |= scratch.bytes[..4] == *b"FPM1";
             }
+            Err(_) => scan.read_failed = true,
         }
     }
+}
 
-    let active_generation = latest_active_marker.map(|marker| marker.generation);
-    let read_generation = active_generation.or_else(|| {
-        latest_prepared_marker
-            .filter(|marker| marker.kind == LayoutMarkerKind::LegacyMigration)
-            .map(|marker| marker.generation)
-    });
+#[cfg(target_arch = "xtensa")]
+async fn read_fpr2_domains<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    address: u8,
+    staging: &mut SensitiveEepromStaging<'_>,
+    read_generation: Option<u32>,
+) -> ([Option<PersistRecord>; 6], bool, bool)
+where
+    PWM: SetDutyCycle,
+{
+    let mut domains: [Option<PersistRecord>; 6] = [None, None, None, None, None, None];
+    let mut contains_data = false;
+    let mut read_failed = false;
     for (domain, offsets, slot_size) in [
-        (
-            PersistDomain::SafetyCalibration,
-            [FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET],
-            FPR2_SAFETY_SLOT_SIZE,
-        ),
-        (
-            PersistDomain::ThermalPolicy,
-            [FPR2_THERMAL_A_OFFSET, FPR2_THERMAL_B_OFFSET],
-            FPR2_THERMAL_SLOT_SIZE,
-        ),
-        (
-            PersistDomain::UserPreferences,
-            [FPR2_PREFERENCES_OFFSET, 0],
-            128,
-        ),
-        (
-            PersistDomain::NetworkAndPairing,
-            [FPR2_NETWORK_OFFSET, 0],
-            256,
-        ),
-        (
-            PersistDomain::ThermalPlant,
-            [FPR2_THERMAL_PLANT_OFFSET, 0],
-            FPR2_THERMAL_SLOT_SIZE,
-        ),
+        (PersistDomain::SafetyCalibration, [FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET], FPR2_SAFETY_SLOT_SIZE),
+        (PersistDomain::ThermalPolicy, [FPR2_THERMAL_A_OFFSET, FPR2_THERMAL_B_OFFSET], FPR2_THERMAL_SLOT_SIZE),
+        (PersistDomain::UserPreferences, [FPR2_PREFERENCES_OFFSET, 0], 128),
+        (PersistDomain::NetworkAndPairing, [FPR2_NETWORK_OFFSET, 0], 256),
+        (PersistDomain::ThermalPlant, [FPR2_THERMAL_PLANT_OFFSET, 0], FPR2_THERMAL_SLOT_SIZE),
     ] {
         let Some(read_generation) = read_generation else {
             break;
         };
-        let mut selected: Option<PersistRecord> = None;
-        for offset in offsets
-            .iter()
-            .copied()
-            .take(usize::from(domain.slot_count()))
-        {
+        let mut selected = None;
+        for offset in offsets.iter().copied().take(usize::from(domain.slot_count())) {
             staging.bytes.fill(0xff);
             let candidate = read_eeprom_persist_record(
                 i2c,
@@ -606,52 +690,14 @@ where
                 && candidate.sequence <= read_generation
                 && selected
                     .as_ref()
-                    .is_none_or(|current| candidate.sequence > current.sequence)
+                    .is_none_or(|current: &PersistRecord| candidate.sequence > current.sequence)
             {
                 selected = Some(candidate);
             }
         }
         domains[domain as usize - 1] = selected;
     }
-
-    let prepared_recovery = latest_active_marker.is_none()
-        && latest_prepared_marker.is_some_and(|marker| {
-            marker.kind == LayoutMarkerKind::LegacyMigration
-                && !legacy_format_present
-                && fpr2_prepared_generation_is_complete(&domains, marker.generation)
-        });
-    let selected = if let Some(generation) = active_generation {
-        merge_persist_records(&domains, generation)
-    } else if prepared_recovery {
-        merge_persist_records(
-            &domains,
-            latest_prepared_marker.map_or(0, |marker| marker.generation),
-        )
-    } else {
-        None
-    };
-    let current_format_valid = selected.is_some();
-
-    if let Some(record) = &selected {
-        info!(
-            "memory restore ok seq={=u32} target_c={=i16} slot={=u8} active_cooling={=bool} wifi_ssid_len={=u8} telemetry_ms={=u32}",
-            record.sequence,
-            record.config.target_temp_c,
-            record.config.selected_preset_slot as u8,
-            record.config.active_cooling_enabled,
-            record.config.wifi_ssid.len() as u8,
-            record.config.telemetry_interval_ms,
-        );
-    } else {
-        info!("memory restore unavailable -> using defaults");
-    }
-
-    let incompatible =
-        legacy_format_present || eeprom_data_is_incompatible(current_format_valid, contains_data);
-    let required = (read_failed && selected.is_none())
-        || (contains_data && (domains[0].is_none() || domains[1].is_none()))
-        || (contains_data && latest_active_marker.is_none() && !prepared_recovery);
-    (selected, incompatible, required, prepared_recovery)
+    (domains, contains_data, read_failed)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -743,10 +789,6 @@ struct LegacyRecordReadInput<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
 async fn read_legacy_record_stream<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
@@ -765,20 +807,9 @@ where
     } = input;
     let mut header = [0u8; MEMORY_RECORD_HEADER_LEN];
     read_eeprom_bytes_chunked_with_pd(i2c, pd_port, service, address, offset, &mut header).await?;
-    if header[..4] != *b"FPM1"
-        || !matches!(header[4], 1 | 2 | 3 | 4 | MEMORY_RECORD_FORMAT_VERSION)
-        || usize::from(header[5]) != MEMORY_RECORD_HEADER_LEN
-    {
+    let Some((payload_len, wide_tlv_lengths)) = legacy_record_shape(&header, slot_size) else {
         return Err(());
-    }
-    let payload_len = usize::from(u16::from_le_bytes([header[6], header[7]]));
-    let record_len = MEMORY_RECORD_HEADER_LEN
-        .checked_add(payload_len)
-        .ok_or(())?;
-    if record_len > slot_size {
-        return Err(());
-    }
-    let wide_tlv_lengths = header[4] >= 3;
+    };
     let mut config = MemoryConfig {
         commissioning_required: false,
         ..MemoryConfig::default()
@@ -863,6 +894,22 @@ where
         sequence: u32::from_le_bytes(header[8..12].try_into().map_err(|_| ())?),
         config,
     })
+}
+
+#[cfg(target_arch = "xtensa")]
+fn legacy_record_shape(
+    header: &[u8; MEMORY_RECORD_HEADER_LEN],
+    slot_size: usize,
+) -> Option<(usize, bool)> {
+    if header[..4] != *b"FPM1"
+        || !matches!(header[4], 1 | 2 | 3 | 4 | MEMORY_RECORD_FORMAT_VERSION)
+        || usize::from(header[5]) != MEMORY_RECORD_HEADER_LEN
+    {
+        return None;
+    }
+    let payload_len = usize::from(u16::from_le_bytes([header[6], header[7]]));
+    let record_len = MEMORY_RECORD_HEADER_LEN.checked_add(payload_len)?;
+    (record_len <= slot_size).then_some((payload_len, header[4] >= 3))
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1775,11 +1822,121 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-#[expect(
-    clippy::too_many_lines,
-    reason = "legacy workflow preserves protocol ordering and safety checks"
-)]
-async fn recover_prepared_fpr2_layout<PWM>(
+#[derive(Clone, Copy)]
+struct PreparedFpr2DomainSpec {
+    domain: PersistDomain,
+    offsets: [u16; 2],
+    slot_size: usize,
+    sequence: u32,
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn read_prepared_fpr2_domain<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    address: u8,
+    spec: PreparedFpr2DomainSpec,
+    staging: &mut SensitiveEepromStaging<'_>,
+) -> (Option<PersistRecord>, bool)
+where
+    PWM: SetDutyCycle,
+{
+    let mut selected: Option<PersistRecord> = None;
+    let mut read_failed = false;
+    for offset in spec
+        .offsets
+        .into_iter()
+        .take(usize::from(spec.domain.slot_count()))
+    {
+        staging.bytes.fill(0xff);
+        let candidate = read_eeprom_persist_record(
+            i2c,
+            pd_port,
+            service,
+            address,
+            offset,
+            spec.slot_size,
+            staging.bytes,
+        )
+        .await;
+        let candidate = match candidate {
+            Ok(candidate) => candidate,
+            Err(()) => {
+                read_failed = true;
+                None
+            }
+        };
+        if let Some(candidate) = candidate
+            && candidate.data.domain() == spec.domain
+            && candidate.sequence == spec.sequence
+            && selected
+                .as_ref()
+                .is_none_or(|current| candidate.sequence > current.sequence)
+        {
+            selected = Some(candidate);
+        }
+    }
+    (selected, read_failed)
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn read_prepared_fpr2_domains<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    address: u8,
+    sequence: u32,
+    staging: &mut SensitiveEepromStaging<'_>,
+) -> ([Option<PersistRecord>; 6], bool)
+where
+    PWM: SetDutyCycle,
+{
+    let specs = [
+        PreparedFpr2DomainSpec {
+            domain: PersistDomain::SafetyCalibration,
+            offsets: [FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET],
+            slot_size: FPR2_SAFETY_SLOT_SIZE,
+            sequence,
+        },
+        PreparedFpr2DomainSpec {
+            domain: PersistDomain::ThermalPolicy,
+            offsets: [FPR2_THERMAL_A_OFFSET, FPR2_THERMAL_B_OFFSET],
+            slot_size: FPR2_THERMAL_SLOT_SIZE,
+            sequence,
+        },
+        PreparedFpr2DomainSpec {
+            domain: PersistDomain::UserPreferences,
+            offsets: [FPR2_PREFERENCES_OFFSET, 0],
+            slot_size: 128,
+            sequence,
+        },
+        PreparedFpr2DomainSpec {
+            domain: PersistDomain::NetworkAndPairing,
+            offsets: [FPR2_NETWORK_OFFSET, 0],
+            slot_size: 256,
+            sequence,
+        },
+        PreparedFpr2DomainSpec {
+            domain: PersistDomain::ThermalPlant,
+            offsets: [FPR2_THERMAL_PLANT_OFFSET, 0],
+            slot_size: FPR2_THERMAL_SLOT_SIZE,
+            sequence,
+        },
+    ];
+    let mut domains = [None, None, None, None, None, None];
+    let mut read_failed = false;
+    for spec in specs {
+        let (selected, failed) =
+            read_prepared_fpr2_domain(i2c, pd_port, service, address, spec, staging).await;
+        domains[spec.domain as usize - 1] = selected;
+        read_failed |= failed;
+    }
+    (domains, read_failed)
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn write_recovered_active_markers<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1790,102 +1947,6 @@ async fn recover_prepared_fpr2_layout<PWM>(
 where
     PWM: SetDutyCycle,
 {
-    let Some(address) = probe_eeprom_address(i2c) else {
-        let failure = MemoryCommitFailure {
-            error: MemoryCommitError::VerifyUnreadable,
-            phase: "active-recovery",
-            attempt: 1,
-            sequence,
-            domain: PersistDomain::LayoutMarker,
-            slot: PersistSlot::A,
-        };
-        log_memory_commit_failure(persistence_log_sink, failure, true);
-        return Err(failure);
-    };
-    let mut domains: [Option<PersistRecord>; 6] = [None, None, None, None, None, None];
-    let mut read_failed = false;
-    let staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
-    for (domain, offsets, slot_size) in [
-        (
-            PersistDomain::SafetyCalibration,
-            [FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET],
-            FPR2_SAFETY_SLOT_SIZE,
-        ),
-        (
-            PersistDomain::ThermalPolicy,
-            [FPR2_THERMAL_A_OFFSET, FPR2_THERMAL_B_OFFSET],
-            FPR2_THERMAL_SLOT_SIZE,
-        ),
-        (
-            PersistDomain::UserPreferences,
-            [FPR2_PREFERENCES_OFFSET, 0],
-            128,
-        ),
-        (
-            PersistDomain::NetworkAndPairing,
-            [FPR2_NETWORK_OFFSET, 0],
-            256,
-        ),
-        (
-            PersistDomain::ThermalPlant,
-            [FPR2_THERMAL_PLANT_OFFSET, 0],
-            FPR2_THERMAL_SLOT_SIZE,
-        ),
-    ] {
-        let mut selected: Option<PersistRecord> = None;
-        for offset in offsets
-            .iter()
-            .copied()
-            .take(usize::from(domain.slot_count()))
-        {
-            staging.bytes.fill(0xff);
-            let candidate = read_eeprom_persist_record(
-                i2c,
-                pd_port,
-                service,
-                address,
-                offset,
-                slot_size,
-                staging.bytes,
-            )
-            .await;
-            let candidate = match candidate {
-                Ok(candidate) => candidate,
-                Err(()) => {
-                    read_failed = true;
-                    None
-                }
-            };
-            if let Some(candidate) = candidate
-                && candidate.data.domain() == domain
-                && candidate.sequence == sequence
-                && selected
-                    .as_ref()
-                    .is_none_or(|current| candidate.sequence > current.sequence)
-            {
-                selected = Some(candidate);
-            }
-        }
-        domains[domain as usize - 1] = selected;
-    }
-    if read_failed || !fpr2_prepared_generation_is_complete(&domains, sequence) {
-        let failure = MemoryCommitFailure {
-            error: if read_failed {
-                MemoryCommitError::VerifyUnreadable
-            } else {
-                MemoryCommitError::VerifyMismatch
-            },
-            phase: "active-recovery",
-            attempt: 1,
-            sequence,
-            domain: PersistDomain::LayoutMarker,
-            slot: PersistSlot::A,
-        };
-        log_memory_commit_failure(persistence_log_sink, failure, true);
-        return Err(failure);
-    }
-
-    drop(staging);
     let mut scratch = new_memory_io_scratch();
     let active = PersistDomainData::LayoutMarker(LayoutMarker {
         generation: sequence,
@@ -1920,6 +1981,61 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn recover_prepared_fpr2_layout<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    service: &mut EepromPdServiceContext<'_, PWM>,
+    sequence: u32,
+    persistence_log_sink: &mut dyn PersistenceLogSink,
+    record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
+) -> Result<(), MemoryCommitFailure>
+where
+    PWM: SetDutyCycle,
+{
+    let Some(address) = probe_eeprom_address(i2c) else {
+        let failure = MemoryCommitFailure {
+            error: MemoryCommitError::VerifyUnreadable,
+            phase: "active-recovery",
+            attempt: 1,
+            sequence,
+            domain: PersistDomain::LayoutMarker,
+            slot: PersistSlot::A,
+        };
+        log_memory_commit_failure(persistence_log_sink, failure, true);
+        return Err(failure);
+    };
+    let mut staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
+    let (domains, read_failed) =
+        read_prepared_fpr2_domains(i2c, pd_port, service, address, sequence, &mut staging).await;
+    if read_failed || !fpr2_prepared_generation_is_complete(&domains, sequence) {
+        let failure = MemoryCommitFailure {
+            error: if read_failed {
+                MemoryCommitError::VerifyUnreadable
+            } else {
+                MemoryCommitError::VerifyMismatch
+            },
+            phase: "active-recovery",
+            attempt: 1,
+            sequence,
+            domain: PersistDomain::LayoutMarker,
+            slot: PersistSlot::A,
+        };
+        log_memory_commit_failure(persistence_log_sink, failure, true);
+        return Err(failure);
+    }
+    drop(staging);
+    write_recovered_active_markers(
+        i2c,
+        pd_port,
+        service,
+        sequence,
+        persistence_log_sink,
+        record_staging,
+    )
+    .await
 }
 
 #[cfg(target_arch = "xtensa")]
