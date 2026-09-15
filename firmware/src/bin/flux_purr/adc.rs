@@ -559,7 +559,7 @@ pub(crate) enum Fusb302bReceivedResetAction {
 #[cfg(target_arch = "xtensa")]
 pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {
     PhyConfig {
-        pd_revision: PdRevision::Rev30,
+        pd_revision: PdRevision::Rev20,
         power_role: PowerRole::Sink,
         data_role: DataRole::Ufp,
         auto_goodcrc,
