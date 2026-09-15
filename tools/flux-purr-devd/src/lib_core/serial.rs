@@ -1,4 +1,6 @@
-fn firmware_preflight_digest(
+pub(crate) use super::*;
+
+pub(crate) fn firmware_preflight_digest(
     payload: &FirmwareOperationRequest,
     device_id: &str,
     port_path: &str,
@@ -20,7 +22,7 @@ fn firmware_preflight_digest(
     )
 }
 
-async fn serial_request_payload<T>(
+pub(crate) async fn serial_request_payload<T>(
     state: &AppState,
     target: &DeviceRecord,
     op: &'static str,
@@ -49,7 +51,7 @@ where
     extract_usb_payload(result, payload_key)
 }
 
-async fn serial_wifi_config(
+pub(crate) async fn serial_wifi_config(
     state: &AppState,
     target: &DeviceRecord,
     payload: &WifiConfigRequest,
@@ -78,7 +80,7 @@ async fn serial_wifi_config(
     extract_wifi_config_network(response, payload.op == WifiConfigOp::Cancel)
 }
 
-fn extract_wifi_config_network(
+pub(crate) fn extract_wifi_config_network(
     result: Value,
     accepts_idle_cancellation: bool,
 ) -> Result<NetworkSummary, HttpError> {
@@ -106,7 +108,7 @@ fn extract_wifi_config_network(
     Ok(receipt.network)
 }
 
-async fn serial_clear_lan_pairing(
+pub(crate) async fn serial_clear_lan_pairing(
     state: &AppState,
     target: &DeviceRecord,
 ) -> Result<(), HttpError> {
@@ -130,7 +132,7 @@ async fn serial_clear_lan_pairing(
     Ok(())
 }
 
-async fn serial_lan_pairing_code(
+pub(crate) async fn serial_lan_pairing_code(
     state: &AppState,
     target: &DeviceRecord,
 ) -> Result<LanPairingCode, HttpError> {
@@ -144,7 +146,7 @@ async fn serial_lan_pairing_code(
     validate_lan_pairing_code(code)
 }
 
-async fn serial_open_lan_pairing_window(
+pub(crate) async fn serial_open_lan_pairing_window(
     state: &AppState,
     target: &DeviceRecord,
 ) -> Result<LanPairingCode, HttpError> {
@@ -158,7 +160,7 @@ async fn serial_open_lan_pairing_window(
     validate_lan_pairing_code(code)
 }
 
-async fn serial_close_lan_pairing_window(
+pub(crate) async fn serial_close_lan_pairing_window(
     state: &AppState,
     target: &DeviceRecord,
 ) -> Result<(), HttpError> {
@@ -182,7 +184,7 @@ async fn serial_close_lan_pairing_window(
     Ok(())
 }
 
-fn validate_lan_pairing_code(code: LanPairingCode) -> Result<LanPairingCode, HttpError> {
+pub(crate) fn validate_lan_pairing_code(code: LanPairingCode) -> Result<LanPairingCode, HttpError> {
     let valid_code = code
         .code
         .as_deref()
@@ -198,7 +200,7 @@ fn validate_lan_pairing_code(code: LanPairingCode) -> Result<LanPairingCode, Htt
     Ok(code)
 }
 
-async fn serial_runtime_config(
+pub(crate) async fn serial_runtime_config(
     state: &AppState,
     target: &DeviceRecord,
     payload: &RuntimeConfigRequest,
@@ -252,7 +254,7 @@ async fn serial_runtime_config(
     }
 }
 
-async fn serial_buzzer_test(
+pub(crate) async fn serial_buzzer_test(
     state: &AppState,
     target: &DeviceRecord,
     payload: &BuzzerTestRequest,
@@ -280,7 +282,7 @@ async fn serial_buzzer_test(
     extract_usb_payload(result, "buzzer_test")
 }
 
-async fn serial_calibration_get(
+pub(crate) async fn serial_calibration_get(
     state: &AppState,
     target: &DeviceRecord,
 ) -> Result<CalibrationState, HttpError> {
@@ -291,7 +293,7 @@ async fn serial_calibration_get(
     Ok(calibration)
 }
 
-async fn serial_calibration_config(
+pub(crate) async fn serial_calibration_config(
     state: &AppState,
     target: &DeviceRecord,
     payload: &CalibrationConfigRequest,
@@ -329,7 +331,7 @@ async fn serial_calibration_config(
     Ok(calibration)
 }
 
-fn backfill_live_calibration_capture(
+pub(crate) fn backfill_live_calibration_capture(
     calibration: &mut CalibrationState,
     payload: &CalibrationConfigRequest,
 ) {
@@ -353,7 +355,7 @@ fn backfill_live_calibration_capture(
     calibration.rtd_adc.refresh(CalibrationChannel::RtdAdc);
 }
 
-fn merge_live_calibration_metadata(
+pub(crate) fn merge_live_calibration_metadata(
     calibration: &mut CalibrationState,
     previous: &CalibrationState,
 ) {
@@ -361,7 +363,7 @@ fn merge_live_calibration_metadata(
     calibration.refresh_fits();
 }
 
-fn merge_live_rtd_sample_metadata(
+pub(crate) fn merge_live_rtd_sample_metadata(
     samples: &mut [Option<CalibrationSample>],
     previous: &[Option<CalibrationSample>],
 ) {
@@ -383,7 +385,7 @@ fn merge_live_rtd_sample_metadata(
     }
 }
 
-async fn serial_calibration_job_get(
+pub(crate) async fn serial_calibration_job_get(
     state: &AppState,
     target: &DeviceRecord,
 ) -> Result<CalibrationJobState, HttpError> {
@@ -396,7 +398,7 @@ async fn serial_calibration_job_get(
     .await
 }
 
-async fn serial_thermal_plant_run_get(
+pub(crate) async fn serial_thermal_plant_run_get(
     state: &AppState,
     target: &DeviceRecord,
     after_sample: u8,
@@ -421,7 +423,7 @@ async fn serial_thermal_plant_run_get(
     extract_usb_payload(result, "thermal_plant_run")
 }
 
-async fn serial_calibration_job_config(
+pub(crate) async fn serial_calibration_job_config(
     state: &AppState,
     target: &DeviceRecord,
     payload: &CalibrationJobRequest,
@@ -447,10 +449,10 @@ async fn serial_calibration_job_config(
     extract_usb_payload(result, "calibration_job")
 }
 
-const EEPROM_CAPACITY_BYTES: usize = 8 * 1024;
-const EEPROM_MAINTENANCE_CHUNK_MAX: usize = 32;
+pub(crate) const EEPROM_CAPACITY_BYTES: usize = 8 * 1024;
+pub(crate) const EEPROM_MAINTENANCE_CHUNK_MAX: usize = 32;
 
-fn validate_eeprom_maintenance_request(
+pub(crate) fn validate_eeprom_maintenance_request(
     payload: &EepromMaintenanceRequest,
 ) -> Result<(), HttpError> {
     match payload.op {
@@ -502,7 +504,7 @@ fn validate_eeprom_maintenance_request(
     Ok(())
 }
 
-async fn serial_eeprom_maintenance(
+pub(crate) async fn serial_eeprom_maintenance(
     state: &AppState,
     target: &DeviceRecord,
     payload: &EepromMaintenanceRequest,
@@ -541,7 +543,7 @@ async fn serial_eeprom_maintenance(
     Ok(EepromMaintenanceResponse { bytes })
 }
 
-async fn configure_eeprom_maintenance(
+pub(crate) async fn configure_eeprom_maintenance(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<EepromMaintenanceRequest>,
@@ -566,7 +568,7 @@ async fn configure_eeprom_maintenance(
         .map(Json)
 }
 
-async fn serial_heater_curve_get(
+pub(crate) async fn serial_heater_curve_get(
     state: &AppState,
     target: &DeviceRecord,
 ) -> Result<HeaterCurveState, HttpError> {
@@ -574,7 +576,7 @@ async fn serial_heater_curve_get(
         .await
 }
 
-async fn serial_heater_curve_config(
+pub(crate) async fn serial_heater_curve_config(
     state: &AppState,
     target: &DeviceRecord,
     payload: &HeaterCurveConfigRequest,
@@ -606,7 +608,7 @@ async fn serial_heater_curve_config(
     extract_usb_payload(result, "heater_curve")
 }
 
-async fn serial_heater_curve_save(
+pub(crate) async fn serial_heater_curve_save(
     state: &AppState,
     target: &DeviceRecord,
 ) -> Result<HeaterCurveState, HttpError> {
@@ -629,7 +631,7 @@ async fn serial_heater_curve_save(
     extract_usb_payload(result, "heater_curve")
 }
 
-async fn serial_exchange(
+pub(crate) async fn serial_exchange(
     state: &AppState,
     device_id: &str,
     port_path: String,
@@ -649,7 +651,7 @@ async fn serial_exchange(
     .await
 }
 
-async fn serial_exchange_sensitive(
+pub(crate) async fn serial_exchange_sensitive(
     state: &AppState,
     device_id: &str,
     port_path: String,
@@ -669,7 +671,7 @@ async fn serial_exchange_sensitive(
     .await
 }
 
-async fn serial_exchange_with_visibility(
+pub(crate) async fn serial_exchange_with_visibility(
     state: &AppState,
     device_id: &str,
     port_path: String,
@@ -738,7 +740,7 @@ async fn serial_exchange_with_visibility(
     result
 }
 
-async fn spawn_serial_worker<T, F>(
+pub(crate) async fn spawn_serial_worker<T, F>(
     serial_rpc: Arc<tokio::sync::Mutex<()>>,
     worker: F,
 ) -> Result<T, HttpError>
@@ -749,7 +751,7 @@ where
     spawn_serial_worker_with_timeout(serial_rpc, SERIAL_RPC_TIMEOUT, worker).await
 }
 
-async fn spawn_serial_worker_with_timeout<T, F>(
+pub(crate) async fn spawn_serial_worker_with_timeout<T, F>(
     serial_rpc: Arc<tokio::sync::Mutex<()>>,
     lock_timeout: Duration,
     worker: F,
@@ -767,7 +769,7 @@ where
     .map_err(|_| HttpError::internal("serial worker failed"))
 }
 
-fn native_port_path(target: &DeviceRecord) -> Result<String, HttpError> {
+pub(crate) fn native_port_path(target: &DeviceRecord) -> Result<String, HttpError> {
     if target.transport != DeviceTransport::NativeSerial {
         return Err(HttpError::bad_request(
             "native_serial_required",
@@ -779,7 +781,10 @@ fn native_port_path(target: &DeviceRecord) -> Result<String, HttpError> {
     })
 }
 
-fn extract_usb_payload<T>(result: Value, payload_key: &'static str) -> Result<T, HttpError>
+pub(crate) fn extract_usb_payload<T>(
+    result: Value,
+    payload_key: &'static str,
+) -> Result<T, HttpError>
 where
     T: DeserializeOwned,
 {
@@ -805,7 +810,7 @@ where
     })
 }
 
-struct SerialExchangeContext<'a> {
+pub(crate) struct SerialExchangeContext<'a> {
     state: &'a Arc<Mutex<DevdState>>,
     events: &'a broadcast::Sender<DevdEvent>,
     device_id: &'a str,
@@ -816,7 +821,9 @@ struct SerialExchangeContext<'a> {
     retry_policy: SerialRetryPolicy,
 }
 
-fn serial_exchange_blocking(context: SerialExchangeContext<'_>) -> Result<Value, HttpError> {
+pub(crate) fn serial_exchange_blocking(
+    context: SerialExchangeContext<'_>,
+) -> Result<Value, HttpError> {
     let SerialExchangeContext {
         state,
         events,
@@ -908,7 +915,7 @@ fn serial_exchange_blocking(context: SerialExchangeContext<'_>) -> Result<Value,
     ))
 }
 
-fn observe_post_flash_boot_blocking(
+pub(crate) fn observe_post_flash_boot_blocking(
     state: &Arc<Mutex<DevdState>>,
     events: &broadcast::Sender<DevdEvent>,
     device_id: &str,
@@ -972,7 +979,7 @@ fn observe_post_flash_boot_blocking(
     ))
 }
 
-async fn observe_post_flash_boot(
+pub(crate) async fn observe_post_flash_boot(
     state: &AppState,
     device_id: &str,
     port_path: &str,
@@ -998,14 +1005,14 @@ async fn observe_post_flash_boot(
     .await?
 }
 
-fn serial_rpc_timeout(retry_policy: SerialRetryPolicy) -> Duration {
+pub(crate) fn serial_rpc_timeout(retry_policy: SerialRetryPolicy) -> Duration {
     match retry_policy {
         SerialRetryPolicy::ReadOnly => SERIAL_READ_ONLY_RPC_TIMEOUT,
         SerialRetryPolicy::SingleShot => SERIAL_RPC_TIMEOUT,
     }
 }
 
-fn emit_serial_log_line(
+pub(crate) fn emit_serial_log_line(
     state: &Arc<Mutex<DevdState>>,
     events: &broadcast::Sender<DevdEvent>,
     device_id: &str,
@@ -1049,7 +1056,7 @@ fn emit_serial_log_line(
     }
 }
 
-fn parse_persistence_fault_log(message: &str) -> Option<Value> {
+pub(crate) fn parse_persistence_fault_log(message: &str) -> Option<Value> {
     let terminal = if message.starts_with("PERSISTENCE_COMMIT_FAILED ") {
         true
     } else if message.starts_with("PERSISTENCE_COMMIT_ATTEMPT_FAILED ") {
@@ -1085,21 +1092,25 @@ fn parse_persistence_fault_log(message: &str) -> Option<Value> {
     }))
 }
 
-fn serial_line_is_usb_reset_marker(line: &[u8]) -> bool {
+pub(crate) fn serial_line_is_usb_reset_marker(line: &[u8]) -> bool {
     matches!(
         std::str::from_utf8(line).map(str::trim),
         Ok("reset_reason=core_usb_uart" | "reset_reason=core_usb_jtag")
     )
 }
 
-fn serial_line_is_runtime_ready(line: &[u8]) -> bool {
+pub(crate) fn serial_line_is_runtime_ready(line: &[u8]) -> bool {
     matches!(
         std::str::from_utf8(line).map(str::trim),
         Ok(RUNTIME_READY_BOOT_STAGE)
     )
 }
 
-fn serial_line_finished(line: &mut Vec<u8>, discarding_overlong_line: &mut bool, byte: u8) -> bool {
+pub(crate) fn serial_line_finished(
+    line: &mut Vec<u8>,
+    discarding_overlong_line: &mut bool,
+    byte: u8,
+) -> bool {
     if byte == b'\n' {
         if *discarding_overlong_line {
             *discarding_overlong_line = false;
@@ -1119,14 +1130,14 @@ fn serial_line_finished(line: &mut Vec<u8>, discarding_overlong_line: &mut bool,
     false
 }
 
-enum SerialLineAction {
+pub(crate) enum SerialLineAction {
     Continue(bool),
     Response(Value),
     Failure(HttpError),
 }
 
 #[derive(Clone, Copy)]
-struct SerialResponseLineContext<'a> {
+pub(crate) struct SerialResponseLineContext<'a> {
     state: &'a Arc<Mutex<DevdState>>,
     events: &'a broadcast::Sender<DevdEvent>,
     device_id: &'a str,
@@ -1136,7 +1147,7 @@ struct SerialResponseLineContext<'a> {
     deadline: Instant,
 }
 
-enum SerialChunkResult {
+pub(crate) enum SerialChunkResult {
     Continue {
         next_session: SerialSession,
         retry_after_runtime_ready: bool,
@@ -1144,7 +1155,7 @@ enum SerialChunkResult {
     Response(Value),
 }
 
-fn process_serial_read_chunk(
+pub(crate) fn process_serial_read_chunk(
     context: SerialResponseLineContext<'_>,
     bytes: &[u8],
     line: &mut Vec<u8>,
@@ -1157,12 +1168,8 @@ fn process_serial_read_chunk(
         if !serial_line_finished(line, discarding_overlong_line, *byte) {
             continue;
         }
-        let (next_session, action) = process_serial_response_line(
-            context,
-            session,
-            retry_after_runtime_ready,
-            line,
-        )?;
+        let (next_session, action) =
+            process_serial_response_line(context, session, retry_after_runtime_ready, line)?;
         session = next_session;
         match action {
             SerialLineAction::Continue(next_retry) => retry_after_runtime_ready = next_retry,
@@ -1183,7 +1190,7 @@ fn process_serial_read_chunk(
     })
 }
 
-fn process_serial_response_line(
+pub(crate) fn process_serial_response_line(
     context: SerialResponseLineContext<'_>,
     session: SerialSession,
     retry_after_runtime_ready: bool,
@@ -1212,9 +1219,7 @@ fn process_serial_response_line(
     let action = match decode_usb_response_line(line, context.request_id) {
         Ok(Some(payload)) => SerialLineAction::Response(payload),
         Ok(None) => SerialLineAction::Continue(retry_after_runtime_ready),
-        Err(error)
-            if is_retryable_startup_busy(&error) && Instant::now() < context.deadline =>
-        {
+        Err(error) if is_retryable_startup_busy(&error) && Instant::now() < context.deadline => {
             SerialLineAction::Continue(true)
         }
         Err(error) => SerialLineAction::Failure(error),
@@ -1222,7 +1227,7 @@ fn process_serial_response_line(
     Ok((session, action))
 }
 
-fn process_boot_observation_line(
+pub(crate) fn process_boot_observation_line(
     state: &Arc<Mutex<DevdState>>,
     events: &broadcast::Sender<DevdEvent>,
     device_id: &str,
@@ -1236,7 +1241,7 @@ fn process_boot_observation_line(
     observation.observe_line(text)
 }
 
-fn process_boot_read_chunk(
+pub(crate) fn process_boot_read_chunk(
     state: &Arc<Mutex<DevdState>>,
     events: &broadcast::Sender<DevdEvent>,
     device_id: &str,
@@ -1257,14 +1262,14 @@ fn process_boot_read_chunk(
     Ok(false)
 }
 
-type SerialSessionMap = HashMap<String, SerialSession>;
+pub(crate) type SerialSessionMap = HashMap<String, SerialSession>;
 
-struct SerialSession {
+pub(crate) struct SerialSession {
     _serial_lock: SerialPortProcessLock,
     port: Box<dyn SerialSessionPort>,
 }
 
-trait SerialSessionPort: Read + Write + Send {
+pub(crate) trait SerialSessionPort: Read + Write + Send {
     fn begin_write(&mut self) -> Result<(), HttpError>;
     fn finish_write(&mut self) -> Result<(), HttpError>;
 }
@@ -1282,7 +1287,7 @@ impl SerialSessionPort for Box<dyn serialport::SerialPort> {
 }
 
 #[cfg(target_os = "macos")]
-struct RawUsbSerialJtagPort {
+pub(crate) struct RawUsbSerialJtagPort {
     file: File,
 }
 
@@ -1315,7 +1320,7 @@ impl SerialSessionPort for RawUsbSerialJtagPort {
     }
 }
 
-fn lock_serial_sessions(
+pub(crate) fn lock_serial_sessions(
     serial_sessions: &Arc<Mutex<SerialSessionMap>>,
 ) -> Result<MutexGuard<'_, SerialSessionMap>, HttpError> {
     serial_sessions
@@ -1323,7 +1328,7 @@ fn lock_serial_sessions(
         .map_err(|_| HttpError::internal("serial session lock poisoned"))
 }
 
-fn take_or_open_serial_session(
+pub(crate) fn take_or_open_serial_session(
     serial_sessions: &mut SerialSessionMap,
     port_path: &str,
     deadline: Instant,
@@ -1334,7 +1339,7 @@ fn take_or_open_serial_session(
         .unwrap_or_else(|| open_serial_session(port_path, deadline))
 }
 
-fn store_serial_session(
+pub(crate) fn store_serial_session(
     serial_sessions: &mut SerialSessionMap,
     port_path: &str,
     session: SerialSession,
@@ -1342,13 +1347,13 @@ fn store_serial_session(
     serial_sessions.insert(port_path.to_string(), session);
 }
 
-struct SerialPortProcessLock {
+pub(crate) struct SerialPortProcessLock {
     #[cfg(unix)]
     file: File,
 }
 
 impl SerialPortProcessLock {
-    fn acquire(port_path: &str, deadline: Instant) -> Result<Self, HttpError> {
+    pub(crate) fn acquire(port_path: &str, deadline: Instant) -> Result<Self, HttpError> {
         #[cfg(unix)]
         {
             Self::acquire_unix(port_path, deadline).map(|file| Self { file })
@@ -1362,7 +1367,7 @@ impl SerialPortProcessLock {
     }
 
     #[cfg(unix)]
-    fn acquire_unix(port_path: &str, deadline: Instant) -> Result<File, HttpError> {
+    pub(crate) fn acquire_unix(port_path: &str, deadline: Instant) -> Result<File, HttpError> {
         let lock_path = serial_lock_path(port_path);
         let file = File::options()
             .create(true)
@@ -1374,7 +1379,10 @@ impl SerialPortProcessLock {
                 HttpError::new(
                     StatusCode::BAD_GATEWAY,
                     "serial_lock_failed",
-                    &format!("Failed to open serial lock {}: {error}", lock_path.display()),
+                    &format!(
+                        "Failed to open serial lock {}: {error}",
+                        lock_path.display()
+                    ),
                     true,
                 )
             })?;
@@ -1407,7 +1415,7 @@ impl Drop for SerialPortProcessLock {
 }
 
 #[cfg(unix)]
-fn serial_lock_path(port_path: &str) -> PathBuf {
+pub(crate) fn serial_lock_path(port_path: &str) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(port_path.as_bytes());
     let digest = hasher.finalize();
@@ -1419,11 +1427,11 @@ fn serial_lock_path(port_path: &str) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
-fn is_esp_usb_serial_jtag_port(port_path: &str) -> bool {
+pub(crate) fn is_esp_usb_serial_jtag_port(port_path: &str) -> bool {
     port_path.starts_with("/dev/cu.usbmodem")
 }
 
-fn open_serial_port(port_path: &str) -> Result<Box<dyn SerialSessionPort>, HttpError> {
+pub(crate) fn open_serial_port(port_path: &str) -> Result<Box<dyn SerialSessionPort>, HttpError> {
     #[cfg(target_os = "macos")]
     if is_esp_usb_serial_jtag_port(port_path) {
         let file = File::options()
@@ -1458,7 +1466,10 @@ fn open_serial_port(port_path: &str) -> Result<Box<dyn SerialSessionPort>, HttpE
         })
 }
 
-fn open_serial_session(port_path: &str, deadline: Instant) -> Result<SerialSession, HttpError> {
+pub(crate) fn open_serial_session(
+    port_path: &str,
+    deadline: Instant,
+) -> Result<SerialSession, HttpError> {
     let serial_lock = SerialPortProcessLock::acquire(port_path, deadline)?;
     let port = open_serial_port(port_path)?;
     Ok(SerialSession {
@@ -1467,7 +1478,10 @@ fn open_serial_session(port_path: &str, deadline: Instant) -> Result<SerialSessi
     })
 }
 
-fn reopen_serial_session(port_path: &str, deadline: Instant) -> Result<SerialSession, HttpError> {
+pub(crate) fn reopen_serial_session(
+    port_path: &str,
+    deadline: Instant,
+) -> Result<SerialSession, HttpError> {
     while Instant::now() < deadline {
         if Path::new(port_path).exists() {
             match open_serial_session(port_path, deadline) {
@@ -1487,7 +1501,10 @@ fn reopen_serial_session(port_path: &str, deadline: Instant) -> Result<SerialSes
     ))
 }
 
-fn write_serial_request(port: &mut dyn SerialSessionPort, request: &str) -> Result<(), HttpError> {
+pub(crate) fn write_serial_request(
+    port: &mut dyn SerialSessionPort,
+    request: &str,
+) -> Result<(), HttpError> {
     validate_serial_request_len(request)?;
     port.begin_write()?;
     let write_result = port
@@ -1499,7 +1516,7 @@ fn write_serial_request(port: &mut dyn SerialSessionPort, request: &str) -> Resu
     restore_result
 }
 
-fn validate_serial_request_len(request: &str) -> Result<(), HttpError> {
+pub(crate) fn validate_serial_request_len(request: &str) -> Result<(), HttpError> {
     if request.len().saturating_add(1) > SERIAL_LINE_LIMIT {
         return Err(HttpError::bad_request(
             "usb_request_too_large",
@@ -1509,7 +1526,7 @@ fn validate_serial_request_len(request: &str) -> Result<(), HttpError> {
     Ok(())
 }
 
-fn serial_timeout_config_http_error(error: serialport::Error) -> HttpError {
+pub(crate) fn serial_timeout_config_http_error(error: serialport::Error) -> HttpError {
     HttpError::new(
         StatusCode::BAD_GATEWAY,
         "serial_timeout_config_failed",
@@ -1518,7 +1535,7 @@ fn serial_timeout_config_http_error(error: serialport::Error) -> HttpError {
     )
 }
 
-fn write_serial_request_with_reopen(
+pub(crate) fn write_serial_request_with_reopen(
     mut session: SerialSession,
     port_path: &str,
     request: &str,
@@ -1536,7 +1553,7 @@ fn write_serial_request_with_reopen(
     }
 }
 
-fn should_retry_request_after_runtime_ready(
+pub(crate) fn should_retry_request_after_runtime_ready(
     retry_pending: bool,
     line: &[u8],
     now: Instant,
@@ -1545,7 +1562,7 @@ fn should_retry_request_after_runtime_ready(
     retry_pending && now < deadline && serial_line_is_runtime_ready(line)
 }
 
-fn is_recoverable_serial_io_error(error: &io::Error) -> bool {
+pub(crate) fn is_recoverable_serial_io_error(error: &io::Error) -> bool {
     let message = error.to_string();
     matches!(
         error.kind(),
@@ -1558,15 +1575,15 @@ fn is_recoverable_serial_io_error(error: &io::Error) -> bool {
         || message.contains("device not configured")
 }
 
-fn is_retryable_startup_busy(error: &HttpError) -> bool {
+pub(crate) fn is_retryable_startup_busy(error: &HttpError) -> bool {
     error.error.retryable && error.error.code == "startup_busy"
 }
 
-fn should_reconcile_runtime_config_timeout(error: &HttpError) -> bool {
+pub(crate) fn should_reconcile_runtime_config_timeout(error: &HttpError) -> bool {
     error.error.retryable && error.error.code == "usb_response_timeout"
 }
 
-fn runtime_config_matches_status(
+pub(crate) fn runtime_config_matches_status(
     payload: &RuntimeConfigRequest,
     status: &ControlPlaneStatus,
 ) -> bool {
@@ -1575,7 +1592,7 @@ fn runtime_config_matches_status(
         && runtime_request_matches_thermal_profile(payload, status)
 }
 
-fn runtime_request_matches_basic_fields(
+pub(crate) fn runtime_request_matches_basic_fields(
     payload: &RuntimeConfigRequest,
     status: &ControlPlaneStatus,
 ) -> bool {
@@ -1655,7 +1672,7 @@ fn runtime_request_matches_basic_fields(
     true
 }
 
-fn runtime_request_matches_calibration(
+pub(crate) fn runtime_request_matches_calibration(
     payload: &RuntimeConfigRequest,
     status: &ControlPlaneStatus,
 ) -> bool {
@@ -1693,7 +1710,7 @@ fn runtime_request_matches_calibration(
     true
 }
 
-fn runtime_request_matches_thermal_profile(
+pub(crate) fn runtime_request_matches_thermal_profile(
     payload: &RuntimeConfigRequest,
     status: &ControlPlaneStatus,
 ) -> bool {
@@ -1733,7 +1750,10 @@ fn runtime_request_matches_thermal_profile(
     true
 }
 
-fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Value>, HttpError> {
+pub(crate) fn decode_usb_response_line(
+    line: &[u8],
+    request_id: &str,
+) -> Result<Option<Value>, HttpError> {
     const FRAME_PREFIX: &[u8] = br#"{"type":"#;
     for (offset, candidate) in line.windows(FRAME_PREFIX.len()).enumerate() {
         if candidate != FRAME_PREFIX {
@@ -1751,7 +1771,7 @@ fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Valu
     Ok(None)
 }
 
-fn decode_usb_response_frame(
+pub(crate) fn decode_usb_response_frame(
     frame: UsbResponseWire,
     request_id: &str,
 ) -> Result<Option<Value>, HttpError> {
@@ -1784,7 +1804,7 @@ fn decode_usb_response_frame(
     })
 }
 
-fn serial_io_http_error(error: io::Error) -> HttpError {
+pub(crate) fn serial_io_http_error(error: io::Error) -> HttpError {
     HttpError::new(
         StatusCode::BAD_GATEWAY,
         "serial_io_failed",
@@ -1793,7 +1813,7 @@ fn serial_io_http_error(error: io::Error) -> HttpError {
     )
 }
 
-fn is_recoverable_write_http_error(error: &HttpError) -> bool {
+pub(crate) fn is_recoverable_write_http_error(error: &HttpError) -> bool {
     error.error.code == "serial_io_failed"
         && error.error.retryable
         && error

@@ -1,4 +1,8 @@
-fn parse_pps_volts(value: &str) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
+use super::*;
+
+pub(crate) fn parse_pps_volts(
+    value: &str,
+) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.starts_with('-') {
         return Err("PPS voltage must be a positive decimal value".into());
@@ -27,7 +31,9 @@ fn parse_pps_volts(value: &str) -> Result<u16, Box<dyn std::error::Error + Send 
     Ok(millivolts as u16)
 }
 
-fn parse_voltage_to_mv(value: &str) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn parse_voltage_to_mv(
+    value: &str,
+) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.starts_with('-') {
         return Err("voltage must be a positive decimal value".into());
@@ -59,7 +65,7 @@ fn parse_voltage_to_mv(value: &str) -> Result<u32, Box<dyn std::error::Error + S
     Ok(whole_mv.saturating_add(fractional_mv))
 }
 
-fn parse_pps_amps(value: &str) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn parse_pps_amps(value: &str) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.starts_with('-') {
         return Err("PPS current must be a positive decimal value".into());
@@ -91,20 +97,20 @@ fn parse_pps_amps(value: &str) -> Result<u16, Box<dyn std::error::Error + Send +
     Ok(milliamps as u16)
 }
 
-fn parse_thermal_targets(
+pub(crate) fn parse_thermal_targets(
     value: Option<&str>,
 ) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
     parse_thermal_targets_impl(value, false)
 }
 
 #[cfg(test)]
-fn parse_thermal_targets_preserve_order(
+pub(crate) fn parse_thermal_targets_preserve_order(
     value: Option<&str>,
 ) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
     parse_thermal_targets_impl(value, true)
 }
 
-fn parse_thermal_targets_impl(
+pub(crate) fn parse_thermal_targets_impl(
     value: Option<&str>,
     preserve_input_order: bool,
 ) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
@@ -142,7 +148,7 @@ fn parse_thermal_targets_impl(
     Ok(targets)
 }
 
-fn insert_if_some<T: Serialize>(
+pub(crate) fn insert_if_some<T: Serialize>(
     body: &mut serde_json::Map<String, Value>,
     key: &str,
     value: Option<T>,
@@ -153,7 +159,7 @@ fn insert_if_some<T: Serialize>(
 }
 
 #[cfg(test)]
-fn read_artifact_manifest(
+pub(crate) fn read_artifact_manifest(
     path: &Path,
 ) -> Result<Vec<FirmwareArtifact>, Box<dyn std::error::Error + Send + Sync>> {
     let value: Value = serde_json::from_slice(&fs::read(path)?)?;
@@ -166,7 +172,7 @@ fn read_artifact_manifest(
     serde_json::from_value::<Vec<FirmwareArtifact>>(value).map_err(Into::into)
 }
 
-async fn monitor_once(
+pub(crate) async fn monitor_once(
     client: &Client,
     resolved: ResolvedUsbTarget,
     tail: usize,
@@ -192,7 +198,7 @@ async fn monitor_once(
     Ok(json!({"device": resolved.device, "events": &events[start..]}))
 }
 
-async fn handle_hardware_command(
+pub(crate) async fn handle_hardware_command(
     client: &Client,
     default_devd: &str,
     command: HardwareCommand,
@@ -260,7 +266,7 @@ async fn handle_hardware_command(
     }
 }
 
-fn handle_usb_port_command(
+pub(crate) fn handle_usb_port_command(
     command: UsbPortCommand,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     match command {
@@ -281,7 +287,7 @@ fn handle_usb_port_command(
     }
 }
 
-fn resolve_target(
+pub(crate) fn resolve_target(
     selector: TargetSelector,
     default_devd: &str,
 ) -> Result<ResolvedUsbTarget, Box<dyn std::error::Error + Send + Sync>> {
@@ -312,7 +318,7 @@ fn resolve_target(
     }
 }
 
-fn resolve_lan_target(
+pub(crate) fn resolve_lan_target(
     id: &str,
 ) -> Result<LanDeviceConfig, Box<dyn std::error::Error + Send + Sync>> {
     read_user_config()?
@@ -322,7 +328,7 @@ fn resolve_lan_target(
         .ok_or_else(|| format!("saved LAN device not found: {id}").into())
 }
 
-fn persist_cli_lan_discoveries(
+pub(crate) fn persist_cli_lan_discoveries(
     discoveries: Vec<flux_purr_devd::lan::LanDiscovery>,
 ) -> Result<Vec<flux_purr_devd::lan::LanDeviceSummary>, Box<dyn std::error::Error + Send + Sync>> {
     let mut config = read_user_config()?;
@@ -344,7 +350,7 @@ fn persist_cli_lan_discoveries(
     Ok(summaries)
 }
 
-async fn lan_api_request(
+pub(crate) async fn lan_api_request(
     device: &LanDeviceConfig,
     method: Method,
     path: &str,
@@ -367,7 +373,9 @@ async fn lan_api_request(
     Ok(result?)
 }
 
-fn normalize_lan_api_path(value: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn normalize_lan_api_path(
+    value: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let path = value.trim().trim_matches('/');
     if path.is_empty()
         || path.split('/').any(|segment| {
@@ -384,7 +392,7 @@ fn normalize_lan_api_path(value: &str) -> Result<String, Box<dyn std::error::Err
     Ok(path.to_owned())
 }
 
-fn encode_path_segment(value: &str) -> String {
+pub(crate) fn encode_path_segment(value: &str) -> String {
     value
         .bytes()
         .flat_map(|byte| match byte {
@@ -396,15 +404,17 @@ fn encode_path_segment(value: &str) -> String {
         .collect()
 }
 
-fn read_json_file(path: &Path) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn read_json_file(
+    path: &Path,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
 }
 
-fn path_string(path: PathBuf) -> String {
+pub(crate) fn path_string(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn read_hardware_registry() -> io::Result<HardwareRegistry> {
+pub(crate) fn read_hardware_registry() -> io::Result<HardwareRegistry> {
     let path = hardware_registry_path()?;
     if !path.exists() {
         return Ok(HardwareRegistry::default());
@@ -417,7 +427,7 @@ fn read_hardware_registry() -> io::Result<HardwareRegistry> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn write_hardware_registry(registry: &HardwareRegistry) -> io::Result<()> {
+pub(crate) fn write_hardware_registry(registry: &HardwareRegistry) -> io::Result<()> {
     let path = hardware_registry_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -425,7 +435,7 @@ fn write_hardware_registry(registry: &HardwareRegistry) -> io::Result<()> {
     fs::write(path, serde_json::to_vec_pretty(registry)?)
 }
 
-fn remember_usb(id: &str, device: &str, devd: &str) -> io::Result<()> {
+pub(crate) fn remember_usb(id: &str, device: &str, devd: &str) -> io::Result<()> {
     let mut registry = read_hardware_registry()?;
     upsert_hardware(
         &mut registry,
@@ -441,7 +451,10 @@ fn remember_usb(id: &str, device: &str, devd: &str) -> io::Result<()> {
     write_hardware_registry(&registry)
 }
 
-fn upsert_hardware(registry: &mut HardwareRegistry, mut hardware: SavedHardware) -> SavedHardware {
+pub(crate) fn upsert_hardware(
+    registry: &mut HardwareRegistry,
+    mut hardware: SavedHardware,
+) -> SavedHardware {
     if let Some(existing) = registry
         .hardware
         .iter_mut()
@@ -460,18 +473,18 @@ fn upsert_hardware(registry: &mut HardwareRegistry, mut hardware: SavedHardware)
     hardware
 }
 
-fn current_unix_seconds() -> u64 {
+pub(crate) fn current_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
 }
 
-fn hardware_registry_schema_version() -> u8 {
+pub(crate) fn hardware_registry_schema_version() -> u8 {
     1
 }
 
-fn redact_cli_sensitive(value: &Value) -> Value {
+pub(crate) fn redact_cli_sensitive(value: &Value) -> Value {
     match value {
         Value::Object(map) => Value::Object(
             map.iter()

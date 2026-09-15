@@ -1,5 +1,8 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(target_arch = "xtensa")]
-fn present_ui<'a, BUS, DC, RST>(
+pub(crate) fn present_ui<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     state: &FrontPanelUiState,
@@ -23,7 +26,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn flush_ui<'a, BUS, DC, RST>(
+pub(crate) async fn flush_ui<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     state: &FrontPanelUiState,
@@ -45,17 +48,17 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-struct InitialFrontpanelContext<'a, 'i, PWM> {
-    state: &'a FrontPanelUiState,
-    i2c: &'a mut I2c<'i, esp_hal::Blocking>,
-    pd_port: &'a mut PdPort,
-    last_pd_observation: &'a mut Option<PdStatusObservation>,
-    heater_pwm: &'a mut PWM,
-    last_heater_duty: &'a mut u8,
+pub(crate) struct InitialFrontpanelContext<'a, 'i, PWM> {
+    pub(crate) state: &'a FrontPanelUiState,
+    pub(crate) i2c: &'a mut I2c<'i, esp_hal::Blocking>,
+    pub(crate) pd_port: &'a mut PdPort,
+    pub(crate) last_pd_observation: &'a mut Option<PdStatusObservation>,
+    pub(crate) heater_pwm: &'a mut PWM,
+    pub(crate) last_heater_duty: &'a mut u8,
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn present_initial_frontpanel_ui<'a, BUS, DC, RST, PWM>(
+pub(crate) async fn present_initial_frontpanel_ui<'a, BUS, DC, RST, PWM>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     context: InitialFrontpanelContext<'_, '_, PWM>,
@@ -100,7 +103,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn run_display_operation_with_pd<F>(
+pub(crate) async fn run_display_operation_with_pd<F>(
     operation: F,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
@@ -130,7 +133,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn run_display_operation_with_pd_and_heater<F, PWM>(
+pub(crate) async fn run_display_operation_with_pd_and_heater<F, PWM>(
     operation: F,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
@@ -170,10 +173,10 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-const DISPLAY_IO_TIMEOUT: Duration = Duration::from_secs(1);
+pub(crate) const DISPLAY_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(target_arch = "xtensa")]
-async fn request_pd_fixed_voltage(
+pub(crate) async fn request_pd_fixed_voltage(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     port: &mut PdPort,
     request: ch224q::VoltageRequest,
@@ -189,7 +192,7 @@ async fn request_pd_fixed_voltage(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn request_pd_adjustable_voltage(
+pub(crate) async fn request_pd_adjustable_voltage(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     port: &mut PdPort,
     request_mv: u16,
@@ -212,7 +215,7 @@ async fn request_pd_adjustable_voltage(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn read_pd_status(
+pub(crate) async fn read_pd_status(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     port: &mut PdPort,
     now: PdTimestamp,
@@ -242,7 +245,7 @@ async fn read_pd_status(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_pd_power_capabilities(
+pub(crate) fn read_pd_power_capabilities(
     _i2c: &mut I2c<'_, esp_hal::Blocking>,
     port: &mut PdPort,
 ) -> Option<ch224q::AdjustablePowerCapabilities> {
@@ -255,7 +258,7 @@ fn read_pd_power_capabilities(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn run_key_test_runtime<'a, BUS, DC, RST>(
+pub(crate) async fn run_key_test_runtime<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     inputs: FrontPanelInputs<'a>,

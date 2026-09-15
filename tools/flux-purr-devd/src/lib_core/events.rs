@@ -1,4 +1,9 @@
-fn espflash_reset_modes(artifact: &FirmwareArtifact, port_path: &str) -> Vec<&'static str> {
+pub(crate) use super::*;
+
+pub(crate) fn espflash_reset_modes(
+    artifact: &FirmwareArtifact,
+    port_path: &str,
+) -> Vec<&'static str> {
     if artifact.target_chip == "esp32s3" && port_path.contains("usbmodem") {
         vec!["usb-reset", "usb-reset", "default-reset"]
     } else {
@@ -6,7 +11,7 @@ fn espflash_reset_modes(artifact: &FirmwareArtifact, port_path: &str) -> Vec<&'s
     }
 }
 
-fn requires_lease(state: &DevdState, device_id: &str) -> bool {
+pub(crate) fn requires_lease(state: &DevdState, device_id: &str) -> bool {
     state
         .devices
         .get(device_id)
@@ -19,14 +24,17 @@ fn requires_lease(state: &DevdState, device_id: &str) -> bool {
         .unwrap_or(true)
 }
 
-fn device<'a>(state: &'a DevdState, device_id: &str) -> Result<&'a DeviceRecord, HttpError> {
+pub(crate) fn device<'a>(
+    state: &'a DevdState,
+    device_id: &str,
+) -> Result<&'a DeviceRecord, HttpError> {
     state
         .devices
         .get(device_id)
         .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))
 }
 
-fn record_serial_bridge_error(
+pub(crate) fn record_serial_bridge_error(
     state: &AppState,
     device_id: &str,
     stage: &'static str,
@@ -50,7 +58,11 @@ fn record_serial_bridge_error(
     ));
 }
 
-fn emit_wifi_config_event(state: &AppState, device_id: &str, payload: &WifiConfigRequest) {
+pub(crate) fn emit_wifi_config_event(
+    state: &AppState,
+    device_id: &str,
+    payload: &WifiConfigRequest,
+) {
     let message = match payload.op {
         WifiConfigOp::Set | WifiConfigOp::Clear => "wifi config accepted",
         WifiConfigOp::Cancel => "wifi cancellation confirmed",
@@ -68,7 +80,7 @@ fn emit_wifi_config_event(state: &AppState, device_id: &str, payload: &WifiConfi
     ));
 }
 
-fn emit_runtime_config_event(
+pub(crate) fn emit_runtime_config_event(
     state: &AppState,
     device_id: &str,
     payload: &RuntimeConfigRequest,
@@ -111,7 +123,7 @@ fn emit_runtime_config_event(
     ));
 }
 
-fn emit_calibration_event(
+pub(crate) fn emit_calibration_event(
     state: &AppState,
     device_id: &str,
     op: &CalibrationConfigOp,
@@ -143,7 +155,7 @@ fn emit_calibration_event(
     ));
 }
 
-fn record_transport_event(
+pub(crate) fn record_transport_event(
     state: &AppState,
     device_id: &str,
     direction: &str,
@@ -173,12 +185,12 @@ fn record_transport_event(
     ));
 }
 
-fn redact_transport_frame(mut frame: Value) -> Value {
+pub(crate) fn redact_transport_frame(mut frame: Value) -> Value {
     redact_sensitive_fields(&mut frame);
     frame
 }
 
-fn redact_sensitive_fields(value: &mut Value) {
+pub(crate) fn redact_sensitive_fields(value: &mut Value) {
     match value {
         Value::Object(object) => {
             for (key, field) in object.iter_mut() {
@@ -200,7 +212,7 @@ fn redact_sensitive_fields(value: &mut Value) {
     }
 }
 
-fn redact_lan_pairing_code(value: &mut Value) {
+pub(crate) fn redact_lan_pairing_code(value: &mut Value) {
     if let Value::Object(object) = value
         && let Some(code) = object.get_mut("code")
     {
@@ -208,31 +220,33 @@ fn redact_lan_pairing_code(value: &mut Value) {
     }
 }
 
-fn is_sensitive_field_key(key: &str) -> bool {
+pub(crate) fn is_sensitive_field_key(key: &str) -> bool {
     key.eq_ignore_ascii_case("password") || key.eq_ignore_ascii_case("psk")
 }
 
-fn flash_dry_run_approval(payload: &FlashRequest) -> Result<FlashDryRunApproval, HttpError> {
+pub(crate) fn flash_dry_run_approval(
+    payload: &FlashRequest,
+) -> Result<FlashDryRunApproval, HttpError> {
     Ok(FlashDryRunApproval {
         lease_id: payload.lease_id.clone(),
         artifact_fingerprint: artifact_fingerprint(&payload.artifact)?,
     })
 }
 
-fn artifact_fingerprint(artifact: &FirmwareArtifact) -> Result<String, HttpError> {
+pub(crate) fn artifact_fingerprint(artifact: &FirmwareArtifact) -> Result<String, HttpError> {
     let bytes = serde_json::to_vec(artifact)
         .map_err(|_| HttpError::internal("Failed to fingerprint firmware artifact."))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
-fn push_bounded<T>(values: &mut VecDeque<T>, value: T, limit: usize) {
+pub(crate) fn push_bounded<T>(values: &mut VecDeque<T>, value: T, limit: usize) {
     if values.len() >= limit {
         values.pop_front();
     }
     values.push_back(value);
 }
 
-fn event(device_id: &str, kind: &str, message: &str, payload: Value) -> DevdEvent {
+pub(crate) fn event(device_id: &str, kind: &str, message: &str, payload: Value) -> DevdEvent {
     DevdEvent {
         id: format!(
             "event-{}-{}",
@@ -247,22 +261,22 @@ fn event(device_id: &str, kind: &str, message: &str, payload: Value) -> DevdEven
     }
 }
 
-fn now_millis() -> u128 {
+pub(crate) fn now_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
 }
 
-fn timestamp() -> String {
+pub(crate) fn timestamp() -> String {
     now_millis().to_string()
 }
 
-fn expired_instant() -> Instant {
+pub(crate) fn expired_instant() -> Instant {
     Instant::now()
 }
 
-fn sanitize_io_error(error: io::Error) -> HttpError {
+pub(crate) fn sanitize_io_error(error: io::Error) -> HttpError {
     HttpError::bad_request(
         "artifact_io_error",
         &format!("Artifact file error: {}", error.kind()),

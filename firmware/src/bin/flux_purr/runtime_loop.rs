@@ -1,12 +1,15 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(target_arch = "xtensa")]
-struct RuntimeInputOutcome {
+pub(crate) struct RuntimeInputOutcome {
     sample: flux_purr_firmware::frontpanel::FrontPanelSampleResult,
     needs_redraw: bool,
     skip_iteration: bool,
     pairing_opened_by_usb: bool,
 }
 #[cfg(target_arch = "xtensa")]
-fn runtime_finish_frontpanel_event(
+pub(crate) fn runtime_finish_frontpanel_event(
     state: &mut RuntimeLoopState,
     event: flux_purr_firmware::frontpanel::KeyEvent,
     elapsed_ms: u64,
@@ -52,13 +55,13 @@ impl RuntimeInputOutcome {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct RuntimeUsbInputOutcome {
+pub(crate) struct RuntimeUsbInputOutcome {
     needs_redraw: bool,
     control_command_processed: bool,
 }
 
 #[cfg(target_arch = "xtensa")]
-struct RuntimeLanInputOutcome {
+pub(crate) struct RuntimeLanInputOutcome {
     needs_redraw: bool,
     command_processed: bool,
 }
@@ -74,7 +77,7 @@ impl RuntimeLanInputOutcome {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_service_pd(state: &mut RuntimeLoopState, pd_now: PdTimestamp) -> bool {
+pub(crate) async fn runtime_service_pd(state: &mut RuntimeLoopState, pd_now: PdTimestamp) -> bool {
     let mut needs_redraw = false;
 
     if pd_runtime_service_due(pd_now.as_millis(), state.next_pd_service_deadline_ms) {
@@ -82,7 +85,8 @@ async fn runtime_service_pd(state: &mut RuntimeLoopState, pd_now: PdTimestamp) -
             state.next_pd_service_deadline_ms,
             pd_now.as_millis(),
         );
-        let current_pd_observation = read_pd_status(&mut state.pd_i2c, &mut state.pd_port, pd_now).await;
+        let current_pd_observation =
+            read_pd_status(&mut state.pd_i2c, &mut state.pd_port, pd_now).await;
         if pd_status_log_key(current_pd_observation) != state.last_pd_status_log_key {
             match current_pd_observation {
                 Some(observation) => info!(
@@ -114,7 +118,7 @@ async fn runtime_service_pd(state: &mut RuntimeLoopState, pd_now: PdTimestamp) -
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_process_usb_snapshot_line(
+pub(crate) async fn runtime_process_usb_snapshot_line(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
 ) -> Option<bool> {
@@ -143,13 +147,17 @@ async fn runtime_process_usb_snapshot_line(
             None,
         );
     }
-    write_eeprom_snapshot_response(&mut state.transport.usb_serial, &response, state.transport.usb_tx_buf);
+    write_eeprom_snapshot_response(
+        &mut state.transport.usb_serial,
+        &response,
+        state.transport.usb_tx_buf,
+    );
     state.transport.usb_rx_line.clear();
     Some(storage_failed)
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_process_usb_control_line(
+pub(crate) async fn runtime_process_usb_control_line(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
 ) -> bool {
@@ -223,24 +231,34 @@ async fn runtime_process_usb_control_line(
         measured_vin_mv: state.latest_vin_mv,
     })
     .await;
-    usb_write_response_frame(&mut state.transport.usb_serial, &response, state.transport.usb_tx_buf);
+    usb_write_response_frame(
+        &mut state.transport.usb_serial,
+        &response,
+        state.transport.usb_tx_buf,
+    );
     state.transport.usb_rx_line.clear();
     needs_redraw
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_process_usb_line(state: &mut RuntimeLoopState, elapsed_ms: u64) -> (bool, bool) {
+pub(crate) async fn runtime_process_usb_line(
+    state: &mut RuntimeLoopState,
+    elapsed_ms: u64,
+) -> (bool, bool) {
     if runtime_process_usb_snapshot_line(state, elapsed_ms)
         .await
         .is_some()
     {
         return (false, true);
     }
-    (runtime_process_usb_control_line(state, elapsed_ms).await, true)
+    (
+        runtime_process_usb_control_line(state, elapsed_ms).await,
+        true,
+    )
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_process_usb_input(
+pub(crate) async fn runtime_process_usb_input(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
 ) -> RuntimeUsbInputOutcome {
@@ -285,7 +303,7 @@ async fn runtime_process_usb_input(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_lan_direct_response(
+pub(crate) async fn runtime_lan_direct_response(
     state: &mut RuntimeLoopState,
     command: &flux_purr_firmware::net_http::ControlMailboxCommand,
 ) -> Option<(u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>)> {
@@ -339,7 +357,7 @@ async fn runtime_lan_direct_response(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_process_lan_control(
+pub(crate) async fn runtime_process_lan_control(
     state: &mut RuntimeLoopState,
     line: &str,
     elapsed_ms: u64,
@@ -435,11 +453,14 @@ async fn runtime_process_lan_control(
         .await
     };
     let (control_needs_redraw, response) = result;
-    (control_needs_redraw, lan_frame_response(&response, network_summary))
+    (
+        control_needs_redraw,
+        lan_frame_response(&response, network_summary),
+    )
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_reject_lan_command(
+pub(crate) fn runtime_reject_lan_command(
     response_slot: u8,
     request_id: u32,
     code: &str,
@@ -456,7 +477,7 @@ fn runtime_reject_lan_command(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_process_lan(
+pub(crate) async fn runtime_process_lan(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
     _control_command_processed: bool,
@@ -558,7 +579,7 @@ async fn runtime_process_lan(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_reconcile_network_state(
+pub(crate) async fn runtime_reconcile_network_state(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
 ) -> bool {
@@ -622,7 +643,7 @@ async fn runtime_reconcile_network_state(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_process_input(
+pub(crate) async fn runtime_process_input(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
 ) -> RuntimeInputOutcome {
@@ -641,7 +662,6 @@ async fn runtime_process_input(
         state.suppress_pairing_input_until_released = true;
     }
 
-
     let lan_input =
         runtime_process_lan(state, elapsed_ms, usb_input.control_command_processed).await;
     needs_redraw |= lan_input.needs_redraw;
@@ -658,7 +678,7 @@ async fn runtime_process_input(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_process_frontpanel_raw_state(
+pub(crate) fn runtime_process_frontpanel_raw_state(
     state: &mut RuntimeLoopState,
     raw_state: FrontPanelRawState,
 ) -> bool {
@@ -686,9 +706,8 @@ fn runtime_process_frontpanel_raw_state(
         state.suppress_attention_ack_event_seen = false;
         state.suppress_attention_ack_clear_after_ms = None;
         state.suppress_attention_ack_clear_delay_ms = FRONTPANEL_DEBOUNCE_MS;
-        state.suppress_attention_ack_waits_for_event = raw_state
-            .first_pressed()
-            .is_some_and(|raw_key| {
+        state.suppress_attention_ack_waits_for_event =
+            raw_state.first_pressed().is_some_and(|raw_key| {
                 let key = FrontPanelKeyMap::default().logical_from_raw(raw_key);
                 let gestures = state.ui_state.gesture_capabilities().gestures_for(key);
                 if gestures.supports(KeyGesture::DoublePress) {
@@ -711,7 +730,7 @@ fn runtime_process_frontpanel_raw_state(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_retry_persistence_io(
+pub(crate) async fn runtime_retry_persistence_io(
     state: &mut RuntimeLoopState,
     retry_domains: PersistDomainMask,
     retry_blank_initialization: bool,
@@ -816,8 +835,9 @@ async fn runtime_retry_persistence_io(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_retry_persistence(state: &mut RuntimeLoopState) -> bool {
-    let changed = persist_domain_mask_between(&state.memory_config, &state.last_persisted_memory_config);
+pub(crate) async fn runtime_retry_persistence(state: &mut RuntimeLoopState) -> bool {
+    let changed =
+        persist_domain_mask_between(&state.memory_config, &state.last_persisted_memory_config);
     let retry_blank_initialization = state.eeprom_required
         && state.memory_sequence == 0
         && !state.eeprom_data_incompatible
@@ -881,11 +901,13 @@ async fn runtime_retry_persistence(state: &mut RuntimeLoopState) -> bool {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_reconcile_frontpanel_pairing(
+pub(crate) async fn runtime_reconcile_frontpanel_pairing(
     state: &mut RuntimeLoopState,
     route_before: FrontPanelRoute,
 ) {
-    if route_before != FrontPanelRoute::WifiInfo && state.ui_state.route == FrontPanelRoute::WifiInfo {
+    if route_before != FrontPanelRoute::WifiInfo
+        && state.ui_state.route == FrontPanelRoute::WifiInfo
+    {
         #[cfg(feature = "net_http")]
         {
             let mut eeprom_pd_service = EepromPdServiceContext::new(
@@ -945,7 +967,7 @@ async fn runtime_reconcile_frontpanel_pairing(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_apply_cooling_feedback(
+pub(crate) fn runtime_apply_cooling_feedback(
     state: &mut RuntimeLoopState,
     active_cooling_enabled_before: bool,
     elapsed_ms: u64,
@@ -978,7 +1000,7 @@ fn runtime_apply_cooling_feedback(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_apply_heater_feedback(
+pub(crate) fn runtime_apply_heater_feedback(
     state: &mut RuntimeLoopState,
     heater_enabled_before: bool,
     elapsed_ms: u64,
@@ -1020,13 +1042,17 @@ fn runtime_apply_heater_feedback(
         info!("heater re-arm -> cleared latched fault");
         return (true, false);
     }
-    state.buzzer.request_feedback(BuzzerCueSource::FrontPanel, BuzzerCueId::HeaterOn, elapsed_ms);
+    state.buzzer.request_feedback(
+        BuzzerCueSource::FrontPanel,
+        BuzzerCueId::HeaterOn,
+        elapsed_ms,
+    );
     info!("heater arm -> on");
     (true, false)
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_persist_frontpanel_memory(
+pub(crate) fn runtime_persist_frontpanel_memory(
     state: &mut RuntimeLoopState,
     interaction_handled: bool,
     elapsed_ms: u64,
@@ -1050,7 +1076,7 @@ fn runtime_persist_frontpanel_memory(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_read_heater_sensors(
+pub(crate) async fn runtime_read_heater_sensors(
     state: &mut RuntimeLoopState,
     current_request_mv: u16,
 ) -> (RtdSample, bool) {
@@ -1070,21 +1096,20 @@ async fn runtime_read_heater_sensors(
         },
     )
     .await;
-    if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) =
-        read_calibrated_vin_mv_with_pd(
-            &mut state.adc1,
-            &mut state.vin_adc_pin,
-            state.adc_curve.as_ref(),
-            &state.memory_config,
-            &mut PdAdcService {
-                i2c: &mut state.pd_i2c,
-                pd_port: &mut state.pd_port,
-                last_pd_observation: &mut state.last_pd_observation,
-                heater_pwm: &mut state.heater_pwm,
-                last_heater_duty: &mut state.last_heater_duty,
-            },
-        )
-        .await
+    if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) = read_calibrated_vin_mv_with_pd(
+        &mut state.adc1,
+        &mut state.vin_adc_pin,
+        state.adc_curve.as_ref(),
+        &state.memory_config,
+        &mut PdAdcService {
+            i2c: &mut state.pd_i2c,
+            pd_port: &mut state.pd_port,
+            last_pd_observation: &mut state.last_pd_observation,
+            heater_pwm: &mut state.heater_pwm,
+            last_heater_duty: &mut state.last_heater_duty,
+        },
+    )
+    .await
     {
         let retry_rtd_after_power_step = should_retry_rtd_sample_after_power_step(
             state.last_rtd_sample_request_mv,
@@ -1138,7 +1163,7 @@ async fn runtime_read_heater_sensors(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_process_frontpanel_input(
+pub(crate) async fn runtime_process_frontpanel_input(
     state: &mut RuntimeLoopState,
     sample: flux_purr_firmware::frontpanel::FrontPanelSampleResult,
     elapsed_ms: u64,
@@ -1234,7 +1259,7 @@ async fn runtime_process_frontpanel_input(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_apply_rtd_sample(
+pub(crate) fn runtime_apply_rtd_sample(
     state: &mut RuntimeLoopState,
     rtd_sample: RtdSample,
     current_request_mv: u16,
@@ -1298,7 +1323,10 @@ fn runtime_apply_rtd_sample(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_update_fault_attention(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
+pub(crate) fn runtime_update_fault_attention(
+    state: &mut RuntimeLoopState,
+    elapsed_ms: u64,
+) -> bool {
     let mut needs_redraw = false;
     if let Some(reason) = state.current_rtd_fault
         && state.heater_controller.latch_fault(reason)
@@ -1334,7 +1362,7 @@ fn runtime_update_fault_attention(state: &mut RuntimeLoopState, elapsed_ms: u64)
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) -> bool {
+pub(crate) fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) -> bool {
     if state.pd_port.controller_kind() != ControllerKind::Fusb302b {
         return false;
     }
@@ -1352,7 +1380,7 @@ fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) -> bool {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_update_calibration_job(
+pub(crate) fn runtime_update_calibration_job(
     state: &mut RuntimeLoopState,
     current_pd_observation: Option<PdStatusObservation>,
     calibration_live_rtd_temp_c: Option<f32>,
@@ -1401,7 +1429,7 @@ fn runtime_update_calibration_job(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_reconcile_heater_arming(
+pub(crate) async fn runtime_reconcile_heater_arming(
     state: &mut RuntimeLoopState,
     calibration_live_rtd_temp_c: Option<f32>,
     thermal_plant_was_running: bool,
@@ -1469,7 +1497,7 @@ async fn runtime_reconcile_heater_arming(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_update_heater_controller(
+pub(crate) fn runtime_update_heater_controller(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
     force_output_off: bool,
@@ -1493,17 +1521,19 @@ fn runtime_update_heater_controller(
         )
     } else if state.calibration_runtime_state.mode == CalibrationMode::Off {
         match runtime_plant {
-            Some((model, ambient_temp_c)) => state.heater_controller.update_thermal_plant_at(
-                ThermalPlantRuntimeInput {
-                    target_temp_c: state.ui_state.target_temp_c,
-                    measured_temp_c: state.latest_temp_c,
-                    ambient_temp_c,
-                    heater_enabled: state.ui_state.heater_enabled,
-                    model,
-                    max_power_mw: max_power_mw as f32,
-                    now_ms: elapsed_ms,
-                },
-            ),
+            Some((model, ambient_temp_c)) => {
+                state
+                    .heater_controller
+                    .update_thermal_plant_at(ThermalPlantRuntimeInput {
+                        target_temp_c: state.ui_state.target_temp_c,
+                        measured_temp_c: state.latest_temp_c,
+                        ambient_temp_c,
+                        heater_enabled: state.ui_state.heater_enabled,
+                        model,
+                        max_power_mw: max_power_mw as f32,
+                        now_ms: elapsed_ms,
+                    })
+            }
             None => state.heater_controller.update_at(
                 state.ui_state.target_temp_c,
                 state.latest_temp_c,
@@ -1514,7 +1544,8 @@ fn runtime_update_heater_controller(
         }
     } else {
         state.heater_controller.update_at(
-            state.calibration_runtime_state
+            state
+                .calibration_runtime_state
                 .model_target_temp_c
                 .unwrap_or(state.ui_state.target_temp_c),
             state.latest_temp_c,
@@ -1538,7 +1569,7 @@ fn runtime_update_heater_controller(
 }
 
 #[cfg(target_arch = "xtensa")]
-struct RuntimeHeaterOutputContext<'a> {
+pub(crate) struct RuntimeHeaterOutputContext<'a> {
     state: &'a mut RuntimeLoopState,
     pid_snapshot: HeaterPidSnapshot,
     requested_duty_percent: u8,
@@ -1551,7 +1582,7 @@ struct RuntimeHeaterOutputContext<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_apply_heater_output(context: RuntimeHeaterOutputContext<'_>) -> bool {
+pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputContext<'_>) -> bool {
     let RuntimeHeaterOutputContext {
         state,
         pid_snapshot,
@@ -1601,7 +1632,7 @@ async fn runtime_apply_heater_output(context: RuntimeHeaterOutputContext<'_>) ->
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_persist_completed_thermal_plant(state: &mut RuntimeLoopState) {
+pub(crate) async fn runtime_persist_completed_thermal_plant(state: &mut RuntimeLoopState) {
     let mut eeprom_pd_service = EepromPdServiceContext::new(
         &mut state.last_pd_observation,
         &mut state.heater_pwm,
@@ -1659,7 +1690,7 @@ async fn runtime_persist_completed_thermal_plant(state: &mut RuntimeLoopState) {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_reconcile_heater_status(
+pub(crate) fn runtime_reconcile_heater_status(
     state: &mut RuntimeLoopState,
     current_pd_observation: Option<PdStatusObservation>,
 ) -> bool {
@@ -1681,7 +1712,7 @@ fn runtime_reconcile_heater_status(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_log_heater_cycle(
+pub(crate) fn runtime_log_heater_cycle(
     state: &RuntimeLoopState,
     pid_snapshot: HeaterPidSnapshot,
     requested_duty_percent: u8,
@@ -1706,7 +1737,8 @@ fn runtime_log_heater_cycle(
         pid_snapshot.filtered_temp_c,
         pid_snapshot.phase.label(),
         state.ui_state.heater_enabled,
-        state.heater_controller
+        state
+            .heater_controller
             .fault_latched()
             .map(|reason| reason.label())
             .unwrap_or("none"),
@@ -1714,7 +1746,7 @@ fn runtime_log_heater_cycle(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_commit_deferred_memory(state: &mut RuntimeLoopState, elapsed_ms: u64) {
+pub(crate) async fn runtime_commit_deferred_memory(state: &mut RuntimeLoopState, elapsed_ms: u64) {
     discard_deferred_memory_commit_for_incompatible_eeprom(
         state.ui_state.persistence_locked(),
         &mut state.memory_commit_due_ms,
@@ -1765,7 +1797,7 @@ async fn runtime_commit_deferred_memory(state: &mut RuntimeLoopState, elapsed_ms
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_handle_memory_commit_failure(
+pub(crate) fn runtime_handle_memory_commit_failure(
     state: &mut RuntimeLoopState,
     error: MemoryCommitFailure,
     commit_domains: PersistDomainMask,
@@ -1793,15 +1825,13 @@ fn runtime_handle_memory_commit_failure(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_reconcile_persistence_and_cooling(state: &mut RuntimeLoopState) -> bool {
+pub(crate) fn runtime_reconcile_persistence_and_cooling(state: &mut RuntimeLoopState) -> bool {
     let mut needs_redraw = false;
     if state.ui_state.eeprom_required && !state.eeprom_required {
         state.eeprom_required = true;
         state.persistence_source = "none";
         state.persistence_record_state = "unavailable";
-    } else if state.ui_state.eeprom_data_incompatible
-        && state.persistence_record_state == "valid"
-    {
+    } else if state.ui_state.eeprom_data_incompatible && state.persistence_record_state == "valid" {
         state.persistence_record_state = "incompatible";
     }
     let (next_latched, next_armed, lock_just_latched) = reconcile_cooling_disabled_lock(
@@ -1829,7 +1859,7 @@ fn runtime_reconcile_persistence_and_cooling(state: &mut RuntimeLoopState) -> bo
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_force_heater_safe_off(
+pub(crate) async fn runtime_force_heater_safe_off(
     state: &mut RuntimeLoopState,
     active_thermal_settings: ThermalControlProfileSettings,
     elapsed_ms: u64,
@@ -1873,7 +1903,7 @@ async fn runtime_force_heater_safe_off(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
+pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
     let mut fan_decision = fan_policy_decision_with_modes(
         state.latest_display_temp_i16,
         elapsed_ms,
@@ -1881,7 +1911,10 @@ fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms: u64) -> b
         state.heater_enabled_last_cycle && !state.ui_state.heater_enabled,
         state.ui_state.post_heat_cooling_mode,
         state.ui_state.heating_fan_guard_mode,
-        (state.fan_policy_state, is_sensor_fault(state.current_rtd_fault)),
+        (
+            state.fan_policy_state,
+            is_sensor_fault(state.current_rtd_fault),
+        ),
     );
     if state.calibration_runtime_state.mode == CalibrationMode::ThermalPlant
         && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running
@@ -1894,9 +1927,10 @@ fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms: u64) -> b
             output_level: FanOutputLevel::Off,
         };
     }
-    if let Some(forced_fan_state) =
-        overtemp_forced_fan_state(state.latest_display_temp_i16, state.overtemp_forced_fan_active)
-    {
+    if let Some(forced_fan_state) = overtemp_forced_fan_state(
+        state.latest_display_temp_i16,
+        state.overtemp_forced_fan_active,
+    ) {
         let command = forced_fan_state.command(elapsed_ms);
         fan_decision = FanPolicyDecision {
             state: forced_fan_state,
@@ -1939,7 +1973,7 @@ fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms: u64) -> b
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_reconcile_network_and_status(
+pub(crate) async fn runtime_reconcile_network_and_status(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
 ) -> bool {
@@ -1967,7 +2001,10 @@ async fn runtime_reconcile_network_and_status(
         .await
     };
     #[cfg(feature = "net_http")]
-    if state.ui_state.apply_network_summary(runtime_network_summary) {
+    if state
+        .ui_state
+        .apply_network_summary(runtime_network_summary)
+    {
         needs_redraw = true;
     }
     if maybe_play_protection_alarm(
@@ -2012,7 +2049,7 @@ async fn runtime_reconcile_network_and_status(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
+pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
     let mut needs_redraw = false;
     if elapsed_ms >= state.next_control_deadline_ms {
         let control_started_ms = elapsed_ms;
@@ -2047,8 +2084,11 @@ async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed_ms: u64) -
             needs_redraw = true;
         }
         let memory_before_calibration_job = state.memory_config.clone();
-        let thermal_plant_was_running =
-            runtime_update_calibration_job(state, current_pd_observation, calibration_live_rtd_temp_c);
+        let thermal_plant_was_running = runtime_update_calibration_job(
+            state,
+            current_pd_observation,
+            calibration_live_rtd_temp_c,
+        );
         if fusb302b_capabilities_changed {
             disarm_calibration_after_capability_refresh(
                 &mut state.calibration_runtime_state,
@@ -2080,19 +2120,17 @@ async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed_ms: u64) -
         let thermal_plant_calibration_running = state.calibration_runtime_state.mode
             == CalibrationMode::ThermalPlant
             && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running;
-        needs_redraw |= runtime_apply_heater_output(
-            RuntimeHeaterOutputContext {
-                state,
-                pid_snapshot,
-                requested_duty_percent,
-                force_output_off: force_thermal_plant_output_off,
-                thermal_plant_calibration_running,
-                active_thermal_settings,
-                current_pd_observation,
-                control_started_ms,
-                elapsed_ms,
-            },
-        )
+        needs_redraw |= runtime_apply_heater_output(RuntimeHeaterOutputContext {
+            state,
+            pid_snapshot,
+            requested_duty_percent,
+            force_output_off: force_thermal_plant_output_off,
+            thermal_plant_calibration_running,
+            active_thermal_settings,
+            current_pd_observation,
+            control_started_ms,
+            elapsed_ms,
+        })
         .await;
         needs_redraw |= runtime_reconcile_heater_status(state, current_pd_observation);
         runtime_log_heater_cycle(
@@ -2107,7 +2145,7 @@ async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed_ms: u64) -
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_persist_and_update_safety(
+pub(crate) async fn runtime_persist_and_update_safety(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
 ) -> bool {
@@ -2127,7 +2165,7 @@ async fn runtime_persist_and_update_safety(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapsed_ms: u64) {
+pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapsed_ms: u64) {
     if state.ui_refresh_pending && elapsed_ms >= state.next_ui_refresh_ms {
         let display_flush_result = run_display_operation_with_pd_and_heater(
             flush_ui(&mut state.display, state.canvas, &state.ui_state),
@@ -2160,7 +2198,9 @@ async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapsed_ms: u64) 
                 state.manual_pps_state.clear();
                 state.calibration_runtime_state.heater_enabled = false;
                 state.calibration_runtime_state.mode = CalibrationMode::Off;
-                state.calibration_runtime_state.immediate_heater_disarm_pending = true;
+                state
+                    .calibration_runtime_state
+                    .immediate_heater_disarm_pending = true;
                 state.ui_state.heater_enabled = false;
                 state.ui_state.heater_output_percent = 0;
                 apply_heater_duty(&mut state.heater_pwm, 0, &mut state.last_heater_duty);
@@ -2198,12 +2238,13 @@ async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapsed_ms: u64) 
                 panic!("frontpanel UI refresh timed out");
             }
         }
-        state.next_ui_refresh_ms = elapsed_ms.saturating_add(DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS);
+        state.next_ui_refresh_ms =
+            elapsed_ms.saturating_add(DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS);
     }
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn run_runtime_loop(mut state: RuntimeLoopState) -> ! {
+pub(crate) async fn run_runtime_loop(mut state: RuntimeLoopState) -> ! {
     loop {
         #[cfg(feature = "web_serial")]
         embassy_futures::yield_now().await;

@@ -1,10 +1,12 @@
-fn devd_event_to_sse(event: DevdEvent) -> Event {
+pub(crate) use super::*;
+
+pub(crate) fn devd_event_to_sse(event: DevdEvent) -> Event {
     let kind = event.kind.clone();
     let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
     Event::default().event(kind).data(data)
 }
 
-async fn configure_wifi(
+pub(crate) async fn configure_wifi(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<WifiConfigRequest>,
@@ -85,7 +87,7 @@ async fn configure_wifi(
     Ok(Json(redacted))
 }
 
-fn mock_network_after_wifi_config(
+pub(crate) fn mock_network_after_wifi_config(
     current: &NetworkSummary,
     payload: &WifiConfigRequest,
 ) -> NetworkSummary {
@@ -139,19 +141,19 @@ fn mock_network_after_wifi_config(
     }
 }
 
-fn static_ipv4_request_is_valid(value: WifiStaticIpv4Request) -> bool {
+pub(crate) fn static_ipv4_request_is_valid(value: WifiStaticIpv4Request) -> bool {
     value.prefix_len <= 32
         && is_unicast_static_ipv4(value.address)
         && is_unicast_static_ipv4(value.gateway)
         && is_unicast_static_ipv4(value.dns)
 }
 
-fn is_unicast_static_ipv4(address: [u8; 4]) -> bool {
+pub(crate) fn is_unicast_static_ipv4(address: [u8; 4]) -> bool {
     let first = address[0];
     first != 0 && first != 127 && first < 224
 }
 
-async fn configure_runtime(
+pub(crate) async fn configure_runtime(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<RuntimeConfigRequest>,
@@ -175,7 +177,7 @@ async fn configure_runtime(
     }
 }
 
-async fn configure_native_runtime(
+pub(crate) async fn configure_native_runtime(
     state: &AppState,
     device_id: &str,
     target: &DeviceRecord,
@@ -199,7 +201,7 @@ async fn configure_native_runtime(
     Ok(Json(status))
 }
 
-async fn configure_lan_runtime(
+pub(crate) async fn configure_lan_runtime(
     state: &AppState,
     device_id: &str,
     target: &DeviceRecord,
@@ -224,7 +226,7 @@ async fn configure_lan_runtime(
     Ok(Json(status))
 }
 
-fn configure_mock_runtime(
+pub(crate) fn configure_mock_runtime(
     state: &AppState,
     device_id: &str,
     target: &DeviceRecord,
@@ -252,7 +254,7 @@ fn configure_mock_runtime(
     Ok(Json(status))
 }
 
-fn reject_mock_runtime_override_while_busy(
+pub(crate) fn reject_mock_runtime_override_while_busy(
     device: &DeviceRecord,
     payload: &RuntimeConfigRequest,
 ) -> Result<(), HttpError> {
@@ -262,7 +264,8 @@ fn reject_mock_runtime_override_while_busy(
     let manual_pps_requested = payload.manual_pps_enabled.is_some()
         || payload.manual_pps_mv.is_some()
         || payload.manual_pps_ma.is_some();
-    if manual_pps_requested || payload.calibration.is_some() || payload.heater_enabled == Some(true) {
+    if manual_pps_requested || payload.calibration.is_some() || payload.heater_enabled == Some(true)
+    {
         return Err(HttpError::bad_request(
             "manual_pps_calibration_busy",
             "Manual PPS and heater controls cannot override a running thermal-model calibration.",
@@ -271,7 +274,7 @@ fn reject_mock_runtime_override_while_busy(
     Ok(())
 }
 
-fn apply_mock_runtime_fields(device: &mut DeviceRecord, payload: &RuntimeConfigRequest) {
+pub(crate) fn apply_mock_runtime_fields(device: &mut DeviceRecord, payload: &RuntimeConfigRequest) {
     if let Some(target_temp_c) = payload.target_temp_c {
         device.status.target_temp_c = target_temp_c;
     }
@@ -364,7 +367,7 @@ fn apply_mock_runtime_fields(device: &mut DeviceRecord, payload: &RuntimeConfigR
         mock_thermal_runtime(device.status.target_temp_c, active_profile, preview_active);
 }
 
-fn apply_mock_thermal_profile(
+pub(crate) fn apply_mock_thermal_profile(
     device: &mut DeviceRecord,
     thermal_control_profile: Option<&ThermalControlProfileRequest>,
 ) {
@@ -401,7 +404,7 @@ fn apply_mock_thermal_profile(
     }
 }
 
-async fn configure_buzzer_test(
+pub(crate) async fn configure_buzzer_test(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<BuzzerTestRequest>,
@@ -456,7 +459,7 @@ async fn configure_buzzer_test(
     Ok(Json(status))
 }
 
-fn apply_mock_calibration_runtime_config(
+pub(crate) fn apply_mock_calibration_runtime_config(
     status: &mut ControlPlaneStatus,
     calibration: &CalibrationControlRequest,
 ) {
@@ -524,7 +527,7 @@ fn apply_mock_calibration_runtime_config(
         .is_some_and(|error_mv| error_mv.abs() <= 8);
 }
 
-fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpError> {
+pub(crate) fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpError> {
     if payload
         .post_heat_cooling_mode
         .as_deref()
@@ -611,7 +614,7 @@ fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpErr
     Ok(())
 }
 
-fn validate_buzzer_test_request(payload: &BuzzerTestRequest) -> Result<(), HttpError> {
+pub(crate) fn validate_buzzer_test_request(payload: &BuzzerTestRequest) -> Result<(), HttpError> {
     let valid = match payload.op {
         BuzzerTestOp::Trigger => payload.cue.is_some() && payload.scenario.is_none(),
         BuzzerTestOp::Run => payload.cue.is_none() && payload.scenario.is_some(),
@@ -629,7 +632,7 @@ fn validate_buzzer_test_request(payload: &BuzzerTestRequest) -> Result<(), HttpE
     }
 }
 
-fn validate_thermal_control_profile_request(
+pub(crate) fn validate_thermal_control_profile_request(
     request: &ThermalControlProfileRequest,
 ) -> Result<(), HttpError> {
     if request
@@ -709,23 +712,23 @@ fn validate_thermal_control_profile_request(
     Ok(())
 }
 
-const fn default_hold_blend_ticks() -> u16 {
+pub(crate) const fn default_hold_blend_ticks() -> u16 {
     12
 }
 
-const fn default_approach_damping_exponent_permille() -> u16 {
+pub(crate) const fn default_approach_damping_exponent_permille() -> u16 {
     1_000
 }
 
-const fn default_auto_adjustable_working_floor_mv() -> u16 {
+pub(crate) const fn default_auto_adjustable_working_floor_mv() -> u16 {
     AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT
 }
 
-const fn default_heater_current_reserve_ma() -> u16 {
+pub(crate) const fn default_heater_current_reserve_ma() -> u16 {
     200
 }
 
-fn mock_thermal_default_settings() -> MockThermalCandidateSettings {
+pub(crate) fn mock_thermal_default_settings() -> MockThermalCandidateSettings {
     MockThermalCandidateSettings {
         temp_filter_alpha_permille: 750,
         warmup_reenter_centi_c: 1_000,
@@ -747,7 +750,7 @@ fn mock_thermal_default_settings() -> MockThermalCandidateSettings {
     }
 }
 
-type MockThermalTargetValues = (
+pub(crate) type MockThermalTargetValues = (
     u16,
     u16,
     u16,
@@ -767,7 +770,7 @@ type MockThermalTargetValues = (
     u16,
 );
 
-fn mock_thermal_default_target_values(target_temp_c: i16) -> MockThermalTargetValues {
+pub(crate) fn mock_thermal_default_target_values(target_temp_c: i16) -> MockThermalTargetValues {
     if target_temp_c <= 60 {
         (
             1_310, 1_000, 590, 510, 1_320, 60, 60, 200, 540, 30, 120, 150, 8, 2, 1, 4, 2,
@@ -795,7 +798,7 @@ fn mock_thermal_default_target_values(target_temp_c: i16) -> MockThermalTargetVa
     }
 }
 
-fn mock_thermal_default_target_point(target_temp_c: i16) -> MockThermalCandidatePoint {
+pub(crate) fn mock_thermal_default_target_point(target_temp_c: i16) -> MockThermalCandidatePoint {
     let (
         brake_distance_centi_c,
         warmup_power_permille,
@@ -839,7 +842,7 @@ fn mock_thermal_default_target_point(target_temp_c: i16) -> MockThermalCandidate
     }
 }
 
-fn mock_thermal_profile_from_package(
+pub(crate) fn mock_thermal_profile_from_package(
     package: &ThermalControlProfilePackage,
 ) -> MockThermalCandidateProfile {
     let settings = mock_thermal_settings_from_package(package.settings);
@@ -850,7 +853,7 @@ fn mock_thermal_profile_from_package(
     MockThermalCandidateProfile { settings, points }
 }
 
-fn mock_thermal_settings_from_package(
+pub(crate) fn mock_thermal_settings_from_package(
     settings: Option<ThermalControlProfileSettings>,
 ) -> MockThermalCandidateSettings {
     settings
@@ -876,7 +879,7 @@ fn mock_thermal_settings_from_package(
         .unwrap_or_else(mock_thermal_default_settings)
 }
 
-fn thermal_profile_targets(package: &ThermalControlProfilePackage) -> Vec<i16> {
+pub(crate) fn thermal_profile_targets(package: &ThermalControlProfilePackage) -> Vec<i16> {
     let explicit = package
         .points
         .iter()
@@ -890,7 +893,7 @@ fn thermal_profile_targets(package: &ThermalControlProfilePackage) -> Vec<i16> {
     }
 }
 
-fn mock_thermal_point_from_package(
+pub(crate) fn mock_thermal_point_from_package(
     package: &ThermalControlProfilePackage,
     target_temp_c: i16,
 ) -> MockThermalCandidatePoint {
@@ -962,7 +965,7 @@ fn mock_thermal_point_from_package(
     }
 }
 
-fn mock_thermal_candidate_point(
+pub(crate) fn mock_thermal_candidate_point(
     profile: &MockThermalCandidateProfile,
     target_temp_c: i16,
 ) -> Option<MockThermalCandidatePoint> {
@@ -973,7 +976,7 @@ fn mock_thermal_candidate_point(
         .find(|point| point.target_temp_c == target_temp_c)
 }
 
-fn mock_thermal_interpolated_candidate_point(
+pub(crate) fn mock_thermal_interpolated_candidate_point(
     profile: &MockThermalCandidateProfile,
     target_temp_c: i16,
 ) -> Option<MockThermalCandidatePoint> {
@@ -983,10 +986,15 @@ fn mock_thermal_interpolated_candidate_point(
     let (lower, upper) = interpolation_bounds(profile, target_temp_c)?;
     let ratio = f32::from(target_temp_c - lower.target_temp_c)
         / f32::from(upper.target_temp_c - lower.target_temp_c);
-    Some(interpolate_thermal_candidate_point(lower, upper, target_temp_c, ratio))
+    Some(interpolate_thermal_candidate_point(
+        lower,
+        upper,
+        target_temp_c,
+        ratio,
+    ))
 }
 
-fn interpolation_bounds(
+pub(crate) fn interpolation_bounds(
     profile: &MockThermalCandidateProfile,
     target_temp_c: i16,
 ) -> Option<(MockThermalCandidatePoint, MockThermalCandidatePoint)> {
@@ -1004,7 +1012,7 @@ fn interpolation_bounds(
     Some((lower, upper))
 }
 
-fn interpolate_thermal_candidate_point(
+pub(crate) fn interpolate_thermal_candidate_point(
     lower: MockThermalCandidatePoint,
     upper: MockThermalCandidatePoint,
     target_temp_c: i16,
@@ -1035,7 +1043,7 @@ fn interpolate_thermal_candidate_point(
     }
 }
 
-fn interpolated_thermal_point_values(
+pub(crate) fn interpolated_thermal_point_values(
     lower: MockThermalCandidatePoint,
     upper: MockThermalCandidatePoint,
     ratio: f32,
@@ -1060,41 +1068,104 @@ fn interpolated_thermal_point_values(
         |value: u16| (f32::from(value) * low_temp_hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
     MockThermalRuntimePointValues {
         brake_distance_centi_c: interpolated_brake_distance,
-        warmup_power_permille: lerp(lower.warmup_power_permille, upper.warmup_power_permille, 1_000),
-        approach_power_permille: lerp(lower.approach_power_permille, upper.approach_power_permille, 1_000),
-        approach_floor_power_permille: lerp(lower.approach_floor_power_permille, upper.approach_floor_power_permille, 1_000),
-        approach_damping_exponent_permille: lerp(lower.approach_damping_exponent_permille, upper.approach_damping_exponent_permille, THERMAL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX),
-        approach_tail_window_centi_c: lerp(lower.approach_tail_window_centi_c, upper.approach_tail_window_centi_c, THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX),
-        hold_power_permille: scale_low_temp_hold(lerp(lower.hold_power_permille, upper.hold_power_permille, 1_000)),
-        hold_reheat_power_permille: (f32::from(lerp(lower.hold_reheat_power_permille, upper.hold_reheat_power_permille, 1_000)) * low_temp_reheat_scale + 0.5) as u16,
-        warmup_reenter_centi_c: lerp(lower.warmup_reenter_centi_c, upper.warmup_reenter_centi_c, 5_000),
+        warmup_power_permille: lerp(
+            lower.warmup_power_permille,
+            upper.warmup_power_permille,
+            1_000,
+        ),
+        approach_power_permille: lerp(
+            lower.approach_power_permille,
+            upper.approach_power_permille,
+            1_000,
+        ),
+        approach_floor_power_permille: lerp(
+            lower.approach_floor_power_permille,
+            upper.approach_floor_power_permille,
+            1_000,
+        ),
+        approach_damping_exponent_permille: lerp(
+            lower.approach_damping_exponent_permille,
+            upper.approach_damping_exponent_permille,
+            THERMAL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+        ),
+        approach_tail_window_centi_c: lerp(
+            lower.approach_tail_window_centi_c,
+            upper.approach_tail_window_centi_c,
+            THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX,
+        ),
+        hold_power_permille: scale_low_temp_hold(lerp(
+            lower.hold_power_permille,
+            upper.hold_power_permille,
+            1_000,
+        )),
+        hold_reheat_power_permille: (f32::from(lerp(
+            lower.hold_reheat_power_permille,
+            upper.hold_reheat_power_permille,
+            1_000,
+        )) * low_temp_reheat_scale
+            + 0.5) as u16,
+        warmup_reenter_centi_c: lerp(
+            lower.warmup_reenter_centi_c,
+            upper.warmup_reenter_centi_c,
+            5_000,
+        ),
         hold_entry_centi_c: lerp(lower.hold_entry_centi_c, upper.hold_entry_centi_c, 5_000),
         hold_exit_centi_c: lerp(lower.hold_exit_centi_c, upper.hold_exit_centi_c, 5_000),
         hold_on_centi_c: lerp(lower.hold_on_centi_c, upper.hold_on_centi_c, 5_000),
         hold_off_centi_c: lerp(lower.hold_off_centi_c, upper.hold_off_centi_c, 5_000),
-        overshoot_cutoff_centi_c: lerp(lower.overshoot_cutoff_centi_c, upper.overshoot_cutoff_centi_c, 5_000),
-        hold_kp_permille_per_c: lerp(lower.hold_kp_permille_per_c, upper.hold_kp_permille_per_c, 10_000),
-        hold_ki_permille_per_c_tick: lerp(lower.hold_ki_permille_per_c_tick, upper.hold_ki_permille_per_c_tick, 10_000).max(1),
-        hold_blend_ticks: lerp(lower.hold_blend_ticks, upper.hold_blend_ticks, u16::from(u8::MAX)).clamp(1, u16::from(u8::MAX)),
-        approach_lead_ticks: lerp(lower.approach_lead_ticks, upper.approach_lead_ticks, u16::from(u8::MAX)),
-        hold_lead_ticks: lerp(lower.hold_lead_ticks, upper.hold_lead_ticks, u16::from(u8::MAX)),
+        overshoot_cutoff_centi_c: lerp(
+            lower.overshoot_cutoff_centi_c,
+            upper.overshoot_cutoff_centi_c,
+            5_000,
+        ),
+        hold_kp_permille_per_c: lerp(
+            lower.hold_kp_permille_per_c,
+            upper.hold_kp_permille_per_c,
+            10_000,
+        ),
+        hold_ki_permille_per_c_tick: lerp(
+            lower.hold_ki_permille_per_c_tick,
+            upper.hold_ki_permille_per_c_tick,
+            10_000,
+        )
+        .max(1),
+        hold_blend_ticks: lerp(
+            lower.hold_blend_ticks,
+            upper.hold_blend_ticks,
+            u16::from(u8::MAX),
+        )
+        .clamp(1, u16::from(u8::MAX)),
+        approach_lead_ticks: lerp(
+            lower.approach_lead_ticks,
+            upper.approach_lead_ticks,
+            u16::from(u8::MAX),
+        ),
+        hold_lead_ticks: lerp(
+            lower.hold_lead_ticks,
+            upper.hold_lead_ticks,
+            u16::from(u8::MAX),
+        ),
     }
 }
 
-fn thermal_brake_adjustment(
+pub(crate) fn thermal_brake_adjustment(
     lower: MockThermalCandidatePoint,
     upper: MockThermalCandidatePoint,
 ) -> f32 {
     if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
         -0.20
     } else if lower.target_temp_c >= 100 && upper.target_temp_c <= 180 {
-        if upper.target_temp_c <= 140 { 0.55 } else { 0.20 }
+        if upper.target_temp_c <= 140 {
+            0.55
+        } else {
+            0.20
+        }
     } else {
         0.0
     }
 }
 
-fn thermal_low_temp_hold_scale(
+pub(crate) fn thermal_low_temp_hold_scale(
     lower: MockThermalCandidatePoint,
     upper: MockThermalCandidatePoint,
     midpoint_weight: f32,
@@ -1106,7 +1177,7 @@ fn thermal_low_temp_hold_scale(
     }
 }
 
-fn thermal_low_temp_reheat_scale(
+pub(crate) fn thermal_low_temp_reheat_scale(
     lower: MockThermalCandidatePoint,
     upper: MockThermalCandidatePoint,
     midpoint_weight: f32,
@@ -1118,7 +1189,7 @@ fn thermal_low_temp_reheat_scale(
     }
 }
 
-fn mock_thermal_runtime(
+pub(crate) fn mock_thermal_runtime(
     target_temp_c: i16,
     package: Option<&ThermalControlProfilePackage>,
     preview_active: bool,
@@ -1172,7 +1243,7 @@ fn mock_thermal_runtime(
     }
 }
 
-struct MockThermalRuntimePointValues {
+pub(crate) struct MockThermalRuntimePointValues {
     brake_distance_centi_c: u16,
     warmup_power_permille: u16,
     approach_power_permille: u16,
@@ -1194,7 +1265,7 @@ struct MockThermalRuntimePointValues {
     hold_lead_ticks: u16,
 }
 
-fn thermal_profile_source(preview_active: bool, profile_active: bool) -> &'static str {
+pub(crate) fn thermal_profile_source(preview_active: bool, profile_active: bool) -> &'static str {
     if preview_active {
         "preview"
     } else if profile_active {
@@ -1204,14 +1275,16 @@ fn thermal_profile_source(preview_active: bool, profile_active: bool) -> &'stati
     }
 }
 
-fn thermal_runtime_point_values(
+pub(crate) fn thermal_runtime_point_values(
     point: Option<MockThermalCandidatePoint>,
     target_temp_c: i16,
 ) -> MockThermalRuntimePointValues {
     let point = point.unwrap_or_else(|| mock_thermal_default_target_point(target_temp_c));
     MockThermalRuntimePointValues {
         brake_distance_centi_c: point.brake_distance_centi_c,
-        warmup_power_permille: point.warmup_power_permille.max(point.approach_power_permille),
+        warmup_power_permille: point
+            .warmup_power_permille
+            .max(point.approach_power_permille),
         approach_power_permille: point.approach_power_permille,
         approach_floor_power_permille: point.approach_floor_power_permille,
         approach_damping_exponent_permille: point.approach_damping_exponent_permille,
@@ -1232,7 +1305,7 @@ fn thermal_runtime_point_values(
     }
 }
 
-fn validate_calibration_control_request(
+pub(crate) fn validate_calibration_control_request(
     calibration: &CalibrationControlRequest,
 ) -> Result<(), HttpError> {
     if calibration.pps_mv.is_some_and(|millivolts| {
@@ -1247,7 +1320,7 @@ fn validate_calibration_control_request(
     Ok(())
 }
 
-fn apply_mock_calibration_config(
+pub(crate) fn apply_mock_calibration_config(
     calibration: &mut CalibrationState,
     payload: &CalibrationConfigRequest,
 ) -> Result<(), HttpError> {
@@ -1265,7 +1338,7 @@ fn apply_mock_calibration_config(
     Ok(())
 }
 
-fn capture_calibration_sample(
+pub(crate) fn capture_calibration_sample(
     calibration: &mut CalibrationState,
     payload: &CalibrationConfigRequest,
 ) -> Result<(), HttpError> {
@@ -1308,7 +1381,7 @@ fn capture_calibration_sample(
     Ok(())
 }
 
-fn delete_calibration_sample(
+pub(crate) fn delete_calibration_sample(
     calibration: &mut CalibrationState,
     payload: &CalibrationConfigRequest,
 ) -> Result<(), HttpError> {
@@ -1342,7 +1415,7 @@ fn delete_calibration_sample(
     Ok(())
 }
 
-fn clear_calibration_samples(
+pub(crate) fn clear_calibration_samples(
     calibration: &mut CalibrationState,
     payload: &CalibrationConfigRequest,
 ) -> Result<(), HttpError> {
@@ -1356,7 +1429,7 @@ fn clear_calibration_samples(
     Ok(())
 }
 
-fn import_calibration_state(
+pub(crate) fn import_calibration_state(
     calibration: &mut CalibrationState,
     payload: &CalibrationConfigRequest,
 ) -> Result<(), HttpError> {
@@ -1371,7 +1444,7 @@ fn import_calibration_state(
     Ok(())
 }
 
-fn set_calibration_active_slot(
+pub(crate) fn set_calibration_active_slot(
     calibration: &mut CalibrationState,
     payload: &CalibrationConfigRequest,
 ) -> Result<(), HttpError> {
@@ -1391,7 +1464,7 @@ fn set_calibration_active_slot(
     Ok(())
 }
 
-fn set_calibration_slot_fit(
+pub(crate) fn set_calibration_slot_fit(
     calibration: &mut CalibrationState,
     payload: &CalibrationConfigRequest,
 ) -> Result<(), HttpError> {
@@ -1417,14 +1490,14 @@ fn set_calibration_slot_fit(
     Ok(())
 }
 
-fn compact_calibration_samples(samples: &mut Vec<Option<CalibrationSample>>) {
+pub(crate) fn compact_calibration_samples(samples: &mut Vec<Option<CalibrationSample>>) {
     let mut compacted: Vec<Option<CalibrationSample>> =
         samples.iter().flatten().copied().map(Some).collect();
     compacted.resize(ADC_CALIBRATION_MAX_SAMPLES, None);
     *samples = compacted;
 }
 
-fn normalize_calibration_sample(
+pub(crate) fn normalize_calibration_sample(
     sample: CalibrationSample,
     channel: CalibrationChannel,
 ) -> CalibrationSample {
@@ -1440,7 +1513,9 @@ fn normalize_calibration_sample(
     }
 }
 
-fn validate_calibration_channel_state(channel: &CalibrationChannelState) -> Result<(), HttpError> {
+pub(crate) fn validate_calibration_channel_state(
+    channel: &CalibrationChannelState,
+) -> Result<(), HttpError> {
     if channel.samples.len() > ADC_CALIBRATION_MAX_SAMPLES {
         return Err(HttpError::bad_request(
             "calibration_samples_too_large",
@@ -1450,13 +1525,13 @@ fn validate_calibration_channel_state(channel: &CalibrationChannelState) -> Resu
     Ok(())
 }
 
-fn validate_calibration_state(state: &CalibrationState) -> Result<(), HttpError> {
+pub(crate) fn validate_calibration_state(state: &CalibrationState) -> Result<(), HttpError> {
     validate_calibration_channel_state(&state.rtd_adc)?;
     validate_calibration_channel_state(&state.vin_adc)?;
     Ok(())
 }
 
-fn normalize_calibration_channel_state(
+pub(crate) fn normalize_calibration_channel_state(
     mut channel_state: CalibrationChannelState,
     channel: CalibrationChannel,
 ) -> CalibrationChannelState {
@@ -1469,13 +1544,13 @@ fn normalize_calibration_channel_state(
     channel_state
 }
 
-fn normalize_calibration_state(mut state: CalibrationState) -> CalibrationState {
+pub(crate) fn normalize_calibration_state(mut state: CalibrationState) -> CalibrationState {
     state.rtd_adc = normalize_calibration_channel_state(state.rtd_adc, CalibrationChannel::RtdAdc);
     state.vin_adc = normalize_calibration_channel_state(state.vin_adc, CalibrationChannel::VinAdc);
     state
 }
 
-fn validate_heater_curve_package(package: &HeaterCurvePackage) -> Result<(), HttpError> {
+pub(crate) fn validate_heater_curve_package(package: &HeaterCurvePackage) -> Result<(), HttpError> {
     if package.points.len() > HEATER_CURVE_MAX_POINTS {
         return Err(HttpError::bad_request(
             "heater_curve_package_too_large",
@@ -1495,7 +1570,9 @@ fn validate_heater_curve_package(package: &HeaterCurvePackage) -> Result<(), Htt
     Ok(())
 }
 
-fn normalize_heater_curve_package(mut package: HeaterCurvePackage) -> HeaterCurvePackage {
+pub(crate) fn normalize_heater_curve_package(
+    mut package: HeaterCurvePackage,
+) -> HeaterCurvePackage {
     package
         .points
         .sort_by_key(|point| point.map(|point| point.temp_centi_c).unwrap_or(i16::MAX));
@@ -1513,14 +1590,14 @@ fn normalize_heater_curve_package(mut package: HeaterCurvePackage) -> HeaterCurv
     package
 }
 
-fn mock_observed_adc_mv(channel: CalibrationChannel) -> u16 {
+pub(crate) fn mock_observed_adc_mv(channel: CalibrationChannel) -> u16 {
     match channel {
         CalibrationChannel::RtdAdc => 1_120,
         CalibrationChannel::VinAdc => 1_670,
     }
 }
 
-fn expected_calibration_adc_mv(
+pub(crate) fn expected_calibration_adc_mv(
     payload: &CalibrationConfigRequest,
     channel: CalibrationChannel,
 ) -> Option<u16> {
@@ -1533,14 +1610,14 @@ fn expected_calibration_adc_mv(
     }
 }
 
-fn effective_pps_current_capability_ma(status: &ControlPlaneStatus) -> Option<u16> {
+pub(crate) fn effective_pps_current_capability_ma(status: &ControlPlaneStatus) -> Option<u16> {
     u16::try_from(status.current_ma)
         .ok()
         .filter(|value| *value > 0)
         .or(status.pps_capability_max_ma)
 }
 
-fn validate_pps_voltage_against_status(
+pub(crate) fn validate_pps_voltage_against_status(
     millivolts: u16,
     status: &ControlPlaneStatus,
 ) -> Result<(), HttpError> {
@@ -1560,7 +1637,7 @@ fn validate_pps_voltage_against_status(
     Ok(())
 }
 
-fn validate_manual_pps_request_against_status(
+pub(crate) fn validate_manual_pps_request_against_status(
     payload: &RuntimeConfigRequest,
     status: &ControlPlaneStatus,
 ) -> Result<(), HttpError> {
@@ -1583,7 +1660,7 @@ fn validate_manual_pps_request_against_status(
     validate_manual_pps_against_status(manual_pps_mv, manual_pps_ma, status)
 }
 
-fn validate_calibration_request_against_status(
+pub(crate) fn validate_calibration_request_against_status(
     calibration: &CalibrationControlRequest,
     status: &ControlPlaneStatus,
     current: &CalibrationRuntimeState,
@@ -1624,12 +1701,12 @@ fn validate_calibration_request_against_status(
     Ok(())
 }
 
-fn mock_thermal_plant_job_running(status: &ControlPlaneStatus) -> bool {
+pub(crate) fn mock_thermal_plant_job_running(status: &ControlPlaneStatus) -> bool {
     status.calibration.mode == CalibrationMode::ThermalPlant
         && status.calibration.job.status == CalibrationJobStatus::Running
 }
 
-fn thermal_plant_start_request_for_device(
+pub(crate) fn thermal_plant_start_request_for_device(
     device: &DeviceRecord,
 ) -> Result<(MockPpsApdo, u16), HttpError> {
     let source = mock_thermal_plant_source_limits(device).ok_or_else(|| {
@@ -1641,7 +1718,7 @@ fn thermal_plant_start_request_for_device(
     Ok((source, source.max_mv))
 }
 
-fn mock_thermal_plant_source_limits(device: &DeviceRecord) -> Option<MockPpsApdo> {
+pub(crate) fn mock_thermal_plant_source_limits(device: &DeviceRecord) -> Option<MockPpsApdo> {
     let mut selected = None;
     let mut consider = |candidate: MockPpsApdo| {
         if candidate.min_mv > 20_000 || candidate.max_mv < 20_000 || candidate.max_ma < 3_000 {

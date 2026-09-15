@@ -1,52 +1,55 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-struct ControlLineContext<'a, 'i, 'e, PWM> {
-    controller: &'a mut FrontPanelInputController,
-    ui_state: &'a mut FrontPanelUiState,
-    memory_config: &'a mut MemoryConfig,
-    last_persisted_memory_config: &'a mut MemoryConfig,
-    preview_heater_curve: &'a mut Option<HeaterCurvePreview>,
-    memory_commit_due_ms: &'a mut Option<u64>,
-    memory_sequence: &'a mut u32,
-    persistence_source: &'static str,
-    persistence_record_state: &'static str,
-    pd_i2c: &'a mut I2c<'i, esp_hal::Blocking>,
-    pd_controller: ControllerKind,
-    pd_port: &'a mut PdPort,
-    eeprom_pd_service: &'a mut EepromPdServiceContext<'e, PWM>,
-    calibration_runtime_state: &'a mut CalibrationRuntimeState,
-    thermal_plant_workspace: &'a mut CalibrationThermalPlantWorkspace,
-    elapsed_ms: u64,
-    last_pd_observation: Option<PdStatusObservation>,
-    pd_contract_ready: &'a mut bool,
-    heater_power_backend: &'a mut HeaterPowerBackend,
-    heater_controller: &'a mut HeaterController,
-    pid_snapshot: HeaterPidSnapshot,
-    manual_pps: &'a mut ManualPpsState,
-    fan_command: FanHardwareCommand,
-    current_rtd_fault: Option<HeaterFaultReason>,
-    overtemp_attention_acknowledged: &'a mut bool,
-    attention_pending_after_fault_clear: &'a mut bool,
-    overtemp_forced_fan_active: &'a mut bool,
-    next_attention_reminder_ms: &'a mut Option<u64>,
-    buzzer: &'a mut BuzzerRuntime,
-    thermal_control_profile_preview: &'a mut Option<ThermalControlProfile>,
-    last_raw_state: FrontPanelRawState,
-    latest_status_temp_c: f32,
-    latest_control_temp_c: f32,
-    control_measurement_guarded: bool,
-    latest_rtd_raw_adc_mv: u16,
-    latest_rtd_raw_adc_min_mv: u16,
-    latest_rtd_raw_adc_max_mv: u16,
-    latest_vin_raw_adc_mv: u16,
-    latest_vin_mv: u32,
-    last_heater_duty: u8,
-    heater_control_timing: HeaterControlTiming,
-    persistence_log_sink: &'a mut dyn PersistenceLogSink,
-    record_staging: &'a mut [u8; EEPROM_RECORD_STAGING_BYTES],
+pub(crate) struct ControlLineContext<'a, 'i, 'e, PWM> {
+    pub(crate) controller: &'a mut FrontPanelInputController,
+    pub(crate) ui_state: &'a mut FrontPanelUiState,
+    pub(crate) memory_config: &'a mut MemoryConfig,
+    pub(crate) last_persisted_memory_config: &'a mut MemoryConfig,
+    pub(crate) preview_heater_curve: &'a mut Option<HeaterCurvePreview>,
+    pub(crate) memory_commit_due_ms: &'a mut Option<u64>,
+    pub(crate) memory_sequence: &'a mut u32,
+    pub(crate) persistence_source: &'static str,
+    pub(crate) persistence_record_state: &'static str,
+    pub(crate) pd_i2c: &'a mut I2c<'i, esp_hal::Blocking>,
+    pub(crate) pd_controller: ControllerKind,
+    pub(crate) pd_port: &'a mut PdPort,
+    pub(crate) eeprom_pd_service: &'a mut EepromPdServiceContext<'e, PWM>,
+    pub(crate) calibration_runtime_state: &'a mut CalibrationRuntimeState,
+    pub(crate) thermal_plant_workspace: &'a mut CalibrationThermalPlantWorkspace,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) last_pd_observation: Option<PdStatusObservation>,
+    pub(crate) pd_contract_ready: &'a mut bool,
+    pub(crate) heater_power_backend: &'a mut HeaterPowerBackend,
+    pub(crate) heater_controller: &'a mut HeaterController,
+    pub(crate) pid_snapshot: HeaterPidSnapshot,
+    pub(crate) manual_pps: &'a mut ManualPpsState,
+    pub(crate) fan_command: FanHardwareCommand,
+    pub(crate) current_rtd_fault: Option<HeaterFaultReason>,
+    pub(crate) overtemp_attention_acknowledged: &'a mut bool,
+    pub(crate) attention_pending_after_fault_clear: &'a mut bool,
+    pub(crate) overtemp_forced_fan_active: &'a mut bool,
+    pub(crate) next_attention_reminder_ms: &'a mut Option<u64>,
+    pub(crate) buzzer: &'a mut BuzzerRuntime,
+    pub(crate) thermal_control_profile_preview: &'a mut Option<ThermalControlProfile>,
+    pub(crate) last_raw_state: FrontPanelRawState,
+    pub(crate) latest_status_temp_c: f32,
+    pub(crate) latest_control_temp_c: f32,
+    pub(crate) control_measurement_guarded: bool,
+    pub(crate) latest_rtd_raw_adc_mv: u16,
+    pub(crate) latest_rtd_raw_adc_min_mv: u16,
+    pub(crate) latest_rtd_raw_adc_max_mv: u16,
+    pub(crate) latest_vin_raw_adc_mv: u16,
+    pub(crate) latest_vin_mv: u32,
+    pub(crate) last_heater_duty: u8,
+    pub(crate) heater_control_timing: HeaterControlTiming,
+    pub(crate) persistence_log_sink: &'a mut dyn PersistenceLogSink,
+    pub(crate) record_staging: &'a mut [u8; EEPROM_RECORD_STAGING_BYTES],
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_control_line<PWM>(
+pub(crate) async fn process_control_line<PWM>(
     line: &str,
     mut context: ControlLineContext<'_, '_, '_, PWM>,
 ) -> (bool, UsbFrame)
@@ -59,13 +62,14 @@ where
         *context.thermal_control_profile_preview,
         context.manual_pps,
     );
-    let (handler_redraw, response) = dispatch_control_frame(&mut context, line, active_profile).await;
+    let (handler_redraw, response) =
+        dispatch_control_frame(&mut context, line, active_profile).await;
     needs_redraw |= handler_redraw;
     (needs_redraw, response)
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn refresh_control_network<PWM>(
+pub(crate) async fn refresh_control_network<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
 ) -> bool
 where
@@ -99,7 +103,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn control_runtime_status_context<PWM>(
+pub(crate) fn control_runtime_status_context<PWM>(
     context: &ControlLineContext<'_, '_, '_, PWM>,
     active_profile: Option<ThermalControlProfile>,
     manual_pps: ManualPpsState,
@@ -137,7 +141,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn dispatch_control_frame<PWM>(
+pub(crate) async fn dispatch_control_frame<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     line: &str,
     active_profile: Option<ThermalControlProfile>,
@@ -152,10 +156,9 @@ where
         Ok(UsbFrame::WifiConfig { request_id, config }) => {
             process_wifi_config_frame(context, request_id, config).await
         }
-        Ok(UsbFrame::RuntimeConfig {
-            request_id,
-            config,
-        }) => process_runtime_config_frame(context, request_id, config, active_profile),
+        Ok(UsbFrame::RuntimeConfig { request_id, config }) => {
+            process_runtime_config_frame(context, request_id, config, active_profile)
+        }
         #[cfg(feature = "buzzer-test")]
         Ok(UsbFrame::BuzzerTest {
             request_id,
@@ -219,7 +222,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_request_frame<PWM>(
+pub(crate) async fn process_request_frame<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     op: UsbRequestOp,
@@ -289,7 +292,9 @@ where
             false,
             usb_response(
                 request_id,
-                UsbResponsePayload::Calibration(calibration_state_from_memory(context.memory_config)),
+                UsbResponsePayload::Calibration(calibration_state_from_memory(
+                    context.memory_config,
+                )),
             ),
         ),
         UsbRequestOp::GetCalibrationJob => (
@@ -319,7 +324,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn process_complete_setup<PWM>(
+pub(crate) fn process_complete_setup<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame)
@@ -336,8 +341,8 @@ where
             ),
         );
     }
-    let sensor_ready = context.current_rtd_fault.is_none()
-        && context.latest_status_temp_c.is_finite();
+    let sensor_ready =
+        context.current_rtd_fault.is_none() && context.latest_status_temp_c.is_finite();
     let calibration_ready = flux_purr_firmware::memory::adc_calibration_fit(
         &context.memory_config.adc_calibration,
         flux_purr_firmware::memory::AdcCalibrationChannel::Rtd,
@@ -386,7 +391,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn process_reset_persistence<PWM>(
+pub(crate) fn process_reset_persistence<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame)
@@ -411,7 +416,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_network_request<PWM>(
+pub(crate) async fn process_network_request<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     op: UsbRequestOp,
@@ -424,13 +429,15 @@ where
         UsbRequestOp::GetLanPairingCode => process_get_lan_pairing_code(request_id),
         UsbRequestOp::OpenLanPairingWindow => process_open_lan_pairing(context, request_id).await,
         UsbRequestOp::CloseLanPairingWindow => process_close_lan_pairing(context, request_id).await,
-        UsbRequestOp::ClearLanPairingToken => process_clear_lan_pairing_token(context, request_id).await,
+        UsbRequestOp::ClearLanPairingToken => {
+            process_clear_lan_pairing_token(context, request_id).await
+        }
         _ => unreachable!("non-network request routed to process_network_request"),
     }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_get_network<PWM>(
+pub(crate) async fn process_get_network<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame)
@@ -456,11 +463,14 @@ where
     };
     #[cfg(not(feature = "net_http"))]
     let network = network_from_memory(context.memory_config);
-    (false, usb_response(request_id, UsbResponsePayload::Network(network)))
+    (
+        false,
+        usb_response(request_id, UsbResponsePayload::Network(network)),
+    )
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn process_get_lan_pairing_code(
+pub(crate) fn process_get_lan_pairing_code(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame) {
     #[cfg(feature = "net_http")]
@@ -486,7 +496,7 @@ fn process_get_lan_pairing_code(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_open_lan_pairing<PWM>(
+pub(crate) async fn process_open_lan_pairing<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame)
@@ -525,7 +535,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_close_lan_pairing<PWM>(
+pub(crate) async fn process_close_lan_pairing<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame)
@@ -557,7 +567,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_clear_lan_pairing_token<PWM>(
+pub(crate) async fn process_clear_lan_pairing_token<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame)
@@ -600,8 +610,12 @@ where
     lan_unavailable_response(request_id)
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "web_serial", not(feature = "net_http")))]
-fn lan_unavailable_response(
+#[cfg(all(
+    target_arch = "xtensa",
+    feature = "web_serial",
+    not(feature = "net_http")
+))]
+pub(crate) fn lan_unavailable_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame) {
     (
@@ -615,7 +629,7 @@ fn lan_unavailable_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_wifi_config_frame<PWM>(
+pub(crate) async fn process_wifi_config_frame<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: WifiConfigCommand,
@@ -715,7 +729,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn process_runtime_config_frame<PWM>(
+pub(crate) fn process_runtime_config_frame<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     mut config: RuntimeConfigCommand,
@@ -743,7 +757,12 @@ where
     let heater_rearm_requested = config.heater_enabled == Some(true);
     let overtemp_active = is_overtemp_fault(context.current_rtd_fault);
     acknowledge_runtime_attention(context, &config, overtemp_active);
-    reject_runtime_rearm_if_attention_pending(context, &mut config, heater_rearm_requested, overtemp_active);
+    reject_runtime_rearm_if_attention_pending(
+        context,
+        &mut config,
+        heater_rearm_requested,
+        overtemp_active,
+    );
     if should_clear_runtime_fault_latch(
         heater_rearm_requested,
         context.current_rtd_fault,
@@ -777,17 +796,14 @@ where
             .clear_pending_short_press(RawFrontPanelKey::CenterBoot);
     }
     if *context.memory_config != previous_memory_config {
-        *context.memory_commit_due_ms = Some(
-            context
-                .elapsed_ms
-                .saturating_add(MEMORY_WRITE_DEBOUNCE_MS),
-        );
+        *context.memory_commit_due_ms =
+            Some(context.elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
     }
     (true, response)
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn acknowledge_runtime_attention<PWM>(
+pub(crate) fn acknowledge_runtime_attention<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     config: &RuntimeConfigCommand,
     overtemp_active: bool,
@@ -809,7 +825,7 @@ fn acknowledge_runtime_attention<PWM>(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn reject_runtime_rearm_if_attention_pending<PWM>(
+pub(crate) fn reject_runtime_rearm_if_attention_pending<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     config: &mut RuntimeConfigCommand,
     heater_rearm_requested: bool,
@@ -817,9 +833,7 @@ fn reject_runtime_rearm_if_attention_pending<PWM>(
 ) where
     PWM: SetDutyCycle,
 {
-    if heater_rearm_requested
-        && (overtemp_active || *context.attention_pending_after_fault_clear)
-    {
+    if heater_rearm_requested && (overtemp_active || *context.attention_pending_after_fault_clear) {
         config.heater_enabled = Some(false);
         context.buzzer.request_feedback(
             BuzzerCueSource::RuntimeControl,
@@ -830,8 +844,12 @@ fn reject_runtime_rearm_if_attention_pending<PWM>(
     }
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "web_serial", feature = "buzzer-test"))]
-fn process_buzzer_test_frame<PWM>(
+#[cfg(all(
+    target_arch = "xtensa",
+    feature = "web_serial",
+    feature = "buzzer-test"
+))]
+pub(crate) fn process_buzzer_test_frame<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: BuzzerTestCommand,
@@ -882,8 +900,12 @@ where
     (false, response)
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "web_serial", feature = "buzzer-test"))]
-fn submit_buzzer_test_if_idle(
+#[cfg(all(
+    target_arch = "xtensa",
+    feature = "web_serial",
+    feature = "buzzer-test"
+))]
+pub(crate) fn submit_buzzer_test_if_idle(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: BuzzerTestCommand,
     reject_when_running: bool,
@@ -905,7 +927,7 @@ fn submit_buzzer_test_if_idle(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_calibration_config_frame<PWM>(
+pub(crate) async fn process_calibration_config_frame<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: CalibrationConfigCommand,
@@ -941,7 +963,9 @@ where
         context.latest_rtd_raw_adc_mv,
         context.latest_vin_raw_adc_mv,
     );
-    if previous_memory_config.thermal_plant_transient_active.is_some()
+    if previous_memory_config
+        .thermal_plant_transient_active
+        .is_some()
         && previous_memory_config.adc_calibration != context.memory_config.adc_calibration
     {
         disarm_calibration_after_transient_input_change(
@@ -1005,7 +1029,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn process_calibration_job_frame<PWM>(
+pub(crate) fn process_calibration_job_frame<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: CalibrationJobCommandWire,
@@ -1049,7 +1073,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn process_thermal_plant_run_frame<PWM>(
+pub(crate) fn process_thermal_plant_run_frame<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     after_sample: u8,
@@ -1075,7 +1099,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn process_heater_curve_config_frame<PWM>(
+pub(crate) fn process_heater_curve_config_frame<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: HeaterCurveConfigCommand,
@@ -1105,7 +1129,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_heater_curve_save_frame<PWM>(
+pub(crate) async fn process_heater_curve_save_frame<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame)
@@ -1150,7 +1174,9 @@ where
     context.memory_config.sanitize();
     if context.memory_config.heater_curve_raw_observations
         != previous_memory_config.heater_curve_raw_observations
-        && previous_memory_config.thermal_plant_transient_active.is_some()
+        && previous_memory_config
+            .thermal_plant_transient_active
+            .is_some()
     {
         context.memory_config.heater_curve_transaction_id = None;
         invalidate_transient_thermal_plant(context.memory_config);
@@ -1199,7 +1225,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn persist_heater_curve<PWM>(
+pub(crate) async fn persist_heater_curve<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
 ) -> Result<(), MemoryCommitFailure>
 where
@@ -1221,7 +1247,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_eeprom_maintenance_frame<PWM>(
+pub(crate) async fn process_eeprom_maintenance_frame<PWM>(
     context: &mut ControlLineContext<'_, '_, '_, PWM>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: EepromMaintenanceCommand,
@@ -1248,12 +1274,8 @@ where
             context.memory_commit_due_ms,
         );
         if !matches!(
-            request_pd_fixed_voltage(
-                context.pd_i2c,
-                context.pd_port,
-                DEFAULT_PD_VOLTAGE_REQUEST,
-            )
-            .await,
+            request_pd_fixed_voltage(context.pd_i2c, context.pd_port, DEFAULT_PD_VOLTAGE_REQUEST,)
+                .await,
             PdContractRequestState::Confirmed
         ) {
             return (
@@ -1296,7 +1318,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-fn lan_pairing_code_payload(code: Option<[u8; 4]>) -> LanPairingCode {
+pub(crate) fn lan_pairing_code_payload(code: Option<[u8; 4]>) -> LanPairingCode {
     let code = code.map(|digits| {
         let mut rendered = heapless::String::new();
         for digit in digits {
@@ -1311,7 +1333,7 @@ fn lan_pairing_code_payload(code: Option<[u8; 4]>) -> LanPairingCode {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-fn lan_command_to_control_line(
+pub(crate) fn lan_command_to_control_line(
     command: &ControlMailboxCommand,
 ) -> Result<heapless::String<USB_CONTROL_LINE_CAPACITY>, &'static str> {
     let request_op = match (command.endpoint, command.method) {
@@ -1394,7 +1416,7 @@ fn lan_command_to_control_line(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-fn lan_error_json(code: &str, message: &str) -> heapless::String<LAN_HTTP_BODY_MAX_LEN> {
+pub(crate) fn lan_error_json(code: &str, message: &str) -> heapless::String<LAN_HTTP_BODY_MAX_LEN> {
     let mut body = heapless::String::new();
     let _ = write!(
         body,
@@ -1404,7 +1426,7 @@ fn lan_error_json(code: &str, message: &str) -> heapless::String<LAN_HTTP_BODY_M
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-fn lan_frame_response(
+pub(crate) fn lan_frame_response(
     frame: &UsbFrame,
     network: flux_purr_firmware::control_plane::NetworkSummary,
 ) -> (u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>) {
@@ -1465,7 +1487,9 @@ fn lan_frame_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-fn lan_json_response<T: Serialize>(value: &T) -> (u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>) {
+pub(crate) fn lan_json_response<T: Serialize>(
+    value: &T,
+) -> (u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>) {
     let mut buffer = [0u8; LAN_HTTP_BODY_MAX_LEN];
     match serde_json_core::to_slice(value, &mut buffer) {
         Ok(written) => match core::str::from_utf8(&buffer[..written]) {
@@ -1493,7 +1517,7 @@ fn lan_json_response<T: Serialize>(value: &T) -> (u16, heapless::String<LAN_HTTP
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-fn lan_error_status(code: &str) -> u16 {
+pub(crate) fn lan_error_status(code: &str) -> u16 {
     if code.starts_with("invalid_")
         || code.ends_with("_required")
         || matches!(

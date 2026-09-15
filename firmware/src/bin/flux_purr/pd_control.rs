@@ -1,5 +1,8 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn fusb302b_degraded_reason() -> &'static str {
+pub(crate) fn fusb302b_degraded_reason() -> &'static str {
     match FUSB302B_DIAGNOSTIC.load(Ordering::Relaxed) {
         FUSB302B_DIAG_WAITING_CC_ATTACH => "pd_fusb_cc_attach_pending",
         FUSB302B_DIAG_WAITING_SOURCE_CAPS => "pd_fusb_source_caps_waiting",
@@ -24,7 +27,7 @@ fn fusb302b_degraded_reason() -> &'static str {
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn adc_diagnostics_wire() -> AdcDiagnosticsWire {
+pub(crate) fn adc_diagnostics_wire() -> AdcDiagnosticsWire {
     let optional_code = |value: u16| (value != u16::MAX).then_some(value);
     let raw_min = RTD_RAW_CODE_MIN.load(Ordering::Relaxed);
     let raw_max = RTD_RAW_CODE_MAX.load(Ordering::Relaxed);
@@ -49,7 +52,7 @@ fn adc_diagnostics_wire() -> AdcDiagnosticsWire {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum RtdSample {
+pub(crate) enum RtdSample {
     Valid(RtdMeasurement),
     Fault {
         adc_mv: Option<u16>,
@@ -59,18 +62,18 @@ enum RtdSample {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PdStatusObservation {
-    status_raw: u8,
-    status: Status,
-    current_raw: u8,
-    current_ma: u16,
-    contract_voltage_mv: Option<u16>,
-    contract: Contract,
+pub(crate) struct PdStatusObservation {
+    pub(crate) status_raw: u8,
+    pub(crate) status: Status,
+    pub(crate) current_raw: u8,
+    pub(crate) current_ma: u16,
+    pub(crate) contract_voltage_mv: Option<u16>,
+    pub(crate) contract: Contract,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PdStatusLogKey {
+pub(crate) struct PdStatusLogKey {
     status_raw: u8,
     pd_active: bool,
     epr_active: bool,
@@ -78,7 +81,9 @@ struct PdStatusLogKey {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn pd_status_log_key(observation: Option<PdStatusObservation>) -> Option<PdStatusLogKey> {
+pub(crate) fn pd_status_log_key(
+    observation: Option<PdStatusObservation>,
+) -> Option<PdStatusLogKey> {
     observation.map(|observation| PdStatusLogKey {
         status_raw: observation.status_raw,
         pd_active: observation.status.pd_active,
@@ -88,7 +93,7 @@ fn pd_status_log_key(observation: Option<PdStatusObservation>) -> Option<PdStatu
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn pd_contract_allows_calibration(
+pub(crate) fn pd_contract_allows_calibration(
     controller: ControllerKind,
     observation: Option<PdStatusObservation>,
 ) -> bool {
@@ -106,7 +111,7 @@ fn pd_contract_allows_calibration(
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HeaterPowerBackendReason {
+pub(crate) enum HeaterPowerBackendReason {
     PpsCovers20v,
     NoPps20vCapability,
     CapabilityReadFailed,
@@ -116,7 +121,7 @@ enum HeaterPowerBackendReason {
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 impl HeaterPowerBackendReason {
-    const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::PpsCovers20v => "pps-covers-20v",
             Self::NoPps20vCapability => "no-pps-20v-capability",
@@ -128,7 +133,7 @@ impl HeaterPowerBackendReason {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HeaterPowerBackend {
+pub(crate) enum HeaterPowerBackend {
     PpsMos {
         pps_min_mv: u16,
         idle_request_mv: u16,
@@ -155,34 +160,34 @@ enum HeaterPowerBackend {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct HoldPpsGovernor {
+pub(crate) struct HoldPpsGovernor {
     active: bool,
     next_adjust_at_ms: u64,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy)]
-struct HoldPpsRequestInput {
-    phase: HeaterControlPhase,
-    duty_percent: u8,
-    actual_error_c: f32,
-    filtered_slope_c_per_s: f32,
-    current_request_mv: u16,
-    control_floor_mv: u16,
-    safe_max_mv: u16,
-    now_ms: u64,
+pub(crate) struct HoldPpsRequestInput {
+    pub(crate) phase: HeaterControlPhase,
+    pub(crate) duty_percent: u8,
+    pub(crate) actual_error_c: f32,
+    pub(crate) filtered_slope_c_per_s: f32,
+    pub(crate) current_request_mv: u16,
+    pub(crate) control_floor_mv: u16,
+    pub(crate) safe_max_mv: u16,
+    pub(crate) now_ms: u64,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl HoldPpsGovernor {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             active: false,
             next_adjust_at_ms: 0,
         }
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         *self = Self::new();
     }
 
@@ -205,7 +210,7 @@ impl HoldPpsGovernor {
         }
     }
 
-    fn request_mv(&mut self, input: HoldPpsRequestInput) -> Option<u16> {
+    pub(crate) fn request_mv(&mut self, input: HoldPpsRequestInput) -> Option<u16> {
         let HoldPpsRequestInput {
             phase,
             duty_percent,
@@ -268,7 +273,7 @@ impl HoldPpsGovernor {
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ManualPpsError {
+pub(crate) enum ManualPpsError {
     NoPpsCapability,
     InvalidVoltage,
     CalibrationInProgress,
@@ -283,14 +288,14 @@ enum ManualPpsError {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ManualPpsOwner {
+pub(crate) enum ManualPpsOwner {
     Debug,
     Calibration,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl ManualPpsError {
-    const fn code(self) -> &'static str {
+    pub(crate) const fn code(self) -> &'static str {
         match self {
             Self::NoPpsCapability => "manual_pps_no_capability",
             Self::InvalidVoltage => "manual_pps_invalid_voltage",
@@ -305,7 +310,7 @@ impl ManualPpsError {
         }
     }
 
-    const fn message(self) -> &'static str {
+    pub(crate) const fn message(self) -> &'static str {
         match self {
             Self::NoPpsCapability => "PPS capability is unavailable.",
             Self::InvalidVoltage => {
@@ -337,20 +342,20 @@ impl ManualPpsError {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ManualPpsState {
-    enabled: bool,
-    owner: ManualPpsOwner,
-    request_min_mv: u16,
-    request_max_mv: u16,
-    target_mv: Option<u16>,
-    target_ma: Option<u16>,
-    applied_mv: Option<u16>,
-    capability_min_mv: Option<u16>,
-    capability_max_mv: Option<u16>,
-    capability_max_ma: Option<u16>,
-    capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
-    error: Option<ManualPpsError>,
-    automatic_restore_pending: bool,
+pub(crate) struct ManualPpsState {
+    pub(crate) enabled: bool,
+    pub(crate) owner: ManualPpsOwner,
+    pub(crate) request_min_mv: u16,
+    pub(crate) request_max_mv: u16,
+    pub(crate) target_mv: Option<u16>,
+    pub(crate) target_ma: Option<u16>,
+    pub(crate) applied_mv: Option<u16>,
+    pub(crate) capability_min_mv: Option<u16>,
+    pub(crate) capability_max_mv: Option<u16>,
+    pub(crate) capability_max_ma: Option<u16>,
+    pub(crate) capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
+    pub(crate) error: Option<ManualPpsError>,
+    pub(crate) automatic_restore_pending: bool,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -376,7 +381,7 @@ impl Default for ManualPpsState {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CalibrationMode {
+pub(crate) enum CalibrationMode {
     Off,
     VinAdc,
     RtdAdc,
@@ -412,7 +417,7 @@ impl From<CalibrationModeWire> for CalibrationMode {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CalibrationJobKind {
+pub(crate) enum CalibrationJobKind {
     VinAdc,
     ThermalPlant,
 }
@@ -440,7 +445,7 @@ impl From<CalibrationJobKindWire> for CalibrationJobKind {
 #[cfg_attr(test, allow(dead_code))]
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CalibrationJobStatus {
+pub(crate) enum CalibrationJobStatus {
     Idle,
     Running,
     Completed,
@@ -463,13 +468,13 @@ impl CalibrationJobStatus {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CalibrationJobState {
-    kind: Option<CalibrationJobKind>,
-    status: CalibrationJobStatus,
-    progress_percent: u8,
-    samples_collected: u8,
-    next_request_mv: Option<u16>,
-    message: Option<ManualPpsError>,
+pub(crate) struct CalibrationJobState {
+    pub(crate) kind: Option<CalibrationJobKind>,
+    pub(crate) status: CalibrationJobStatus,
+    pub(crate) progress_percent: u8,
+    pub(crate) samples_collected: u8,
+    pub(crate) next_request_mv: Option<u16>,
+    pub(crate) message: Option<ManualPpsError>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -487,54 +492,54 @@ impl Default for CalibrationJobState {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-const CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES: usize = 24;
+pub(crate) const CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES: usize = 24;
 #[cfg(any(target_arch = "xtensa", test))]
-const THERMAL_PLANT_CURVE_MIN_SAMPLES_PER_BIN: u16 = 20;
+pub(crate) const THERMAL_PLANT_CURVE_MIN_SAMPLES_PER_BIN: u16 = 20;
 #[cfg(any(target_arch = "xtensa", test))]
-const CALIBRATION_VIN_AUTO_MIN_MOVED_ADC_MV: u16 = 40;
+pub(crate) const CALIBRATION_VIN_AUTO_MIN_MOVED_ADC_MV: u16 = 40;
 #[cfg(any(target_arch = "xtensa", test))]
-const THERMAL_PLANT_AMBIENT_TICKS: u16 = 40;
+pub(crate) const THERMAL_PLANT_AMBIENT_TICKS: u16 = 40;
 #[cfg(any(target_arch = "xtensa", test))]
-const THERMAL_PLANT_HEAT_TIMEOUT_TICKS: u32 = 24_000;
+pub(crate) const THERMAL_PLANT_HEAT_TIMEOUT_TICKS: u32 = 24_000;
 #[cfg(any(target_arch = "xtensa", test))]
-const THERMAL_PLANT_COOL_TIMEOUT_TICKS: u32 = 24_000;
+pub(crate) const THERMAL_PLANT_COOL_TIMEOUT_TICKS: u32 = 24_000;
 #[cfg(any(target_arch = "xtensa", test))]
-const THERMAL_PLANT_TARGET_TEMP_C: f32 = 220.0;
+pub(crate) const THERMAL_PLANT_TARGET_TEMP_C: f32 = 220.0;
 #[cfg(any(target_arch = "xtensa", test))]
-const THERMAL_PLANT_COOL_COMPLETE_TEMP_C: f32 = 80.0;
+pub(crate) const THERMAL_PLANT_COOL_COMPLETE_TEMP_C: f32 = 80.0;
 #[cfg(any(target_arch = "xtensa", test))]
-const THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C: f32 = 4.0;
+pub(crate) const THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C: f32 = 4.0;
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct CalibrationVinAutoJob {
-    start_request_mv: u16,
-    next_request_mv: u16,
-    max_request_mv: u16,
-    target_ma: u16,
-    settle_ticks: u8,
-    stable_ticks: u8,
-    last_observed_mv: Option<u16>,
-    sample_count: u8,
-    samples: [Option<AdcCalibrationSample>; CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES],
+pub(crate) struct CalibrationVinAutoJob {
+    pub(crate) start_request_mv: u16,
+    pub(crate) next_request_mv: u16,
+    pub(crate) max_request_mv: u16,
+    pub(crate) target_ma: u16,
+    pub(crate) settle_ticks: u8,
+    pub(crate) stable_ticks: u8,
+    pub(crate) last_observed_mv: Option<u16>,
+    pub(crate) sample_count: u8,
+    pub(crate) samples: [Option<AdcCalibrationSample>; CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES],
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ThermalPlantCurveBin {
-    min_temp_c: f32,
-    max_temp_c: f32,
-    samples: u16,
-    temp_sum_c: f32,
-    resistance_sum_ohms: f32,
-    raw_adc_sum_mv: u32,
-    voltage_sum_mv: u64,
-    current_sum_ma: u64,
+pub(crate) struct ThermalPlantCurveBin {
+    pub(crate) min_temp_c: f32,
+    pub(crate) max_temp_c: f32,
+    pub(crate) samples: u16,
+    pub(crate) temp_sum_c: f32,
+    pub(crate) resistance_sum_ohms: f32,
+    pub(crate) raw_adc_sum_mv: u32,
+    pub(crate) voltage_sum_mv: u64,
+    pub(crate) current_sum_ma: u64,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl ThermalPlantCurveBin {
-    const fn new(min_temp_c: f32, max_temp_c: f32) -> Self {
+    pub(crate) const fn new(min_temp_c: f32, max_temp_c: f32) -> Self {
         Self {
             min_temp_c,
             max_temp_c,
@@ -547,17 +552,17 @@ impl ThermalPlantCurveBin {
         }
     }
 
-    fn contains(self, temp_c: f32) -> bool {
+    pub(crate) fn contains(self, temp_c: f32) -> bool {
         temp_c >= self.min_temp_c && temp_c < self.max_temp_c
     }
 
-    fn observe(&mut self, temp_c: f32, resistance_ohms: f32) {
+    pub(crate) fn observe(&mut self, temp_c: f32, resistance_ohms: f32) {
         self.samples = self.samples.saturating_add(1);
         self.temp_sum_c += temp_c;
         self.resistance_sum_ohms += resistance_ohms;
     }
 
-    fn observe_electrical(
+    pub(crate) fn observe_electrical(
         &mut self,
         temp_c: f32,
         raw_rtd_adc_mv: u16,
@@ -579,7 +584,7 @@ impl ThermalPlantCurveBin {
             .saturating_add(u64::from(heater_current_ma));
     }
 
-    fn averaged_raw_observation(self) -> Option<HeaterCurveRawObservation> {
+    pub(crate) fn averaged_raw_observation(self) -> Option<HeaterCurveRawObservation> {
         if self.samples == 0 || self.raw_adc_sum_mv == 0 || self.current_sum_ma == 0 {
             return None;
         }
@@ -596,7 +601,7 @@ impl ThermalPlantCurveBin {
         })
     }
 
-    fn averaged_point(self) -> Option<(i16, u16)> {
+    pub(crate) fn averaged_point(self) -> Option<(i16, u16)> {
         if self.samples == 0 {
             return None;
         }
@@ -611,7 +616,7 @@ impl ThermalPlantCurveBin {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn round_to_i16(value: f32) -> i16 {
+pub(crate) fn round_to_i16(value: f32) -> i16 {
     if !value.is_finite() {
         return 0;
     }
@@ -624,7 +629,7 @@ fn round_to_i16(value: f32) -> i16 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn round_to_u16_nonnegative(value: f32) -> u16 {
+pub(crate) fn round_to_u16_nonnegative(value: f32) -> u16 {
     if !value.is_finite() {
         return 0;
     }
@@ -633,14 +638,14 @@ fn round_to_u16_nonnegative(value: f32) -> u16 {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ThermalPlantCurveSampler {
-    cold_bin: ThermalPlantCurveBin,
-    bins: [ThermalPlantCurveBin; 4],
+pub(crate) struct ThermalPlantCurveSampler {
+    pub(crate) cold_bin: ThermalPlantCurveBin,
+    pub(crate) bins: [ThermalPlantCurveBin; 4],
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum ThermalPlantAutoPhase {
+pub(crate) enum ThermalPlantAutoPhase {
     Ambient,
     Heating,
     Cooling,
@@ -649,20 +654,20 @@ enum ThermalPlantAutoPhase {
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Debug)]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-struct CalibrationThermalPlantAutoJob {
-    run_id: u32,
-    phase: ThermalPlantAutoPhase,
-    source_max_mv: u16,
-    source_current_ma: u16,
-    ambient_raw_rtd_adc_mv: u16,
-    idle_samples: u16,
-    heater_curve: ThermalPlantCurveSampler,
-    elapsed_ticks: u32,
-    phase_started_tick: u32,
-    sample_count: u8,
-    last_saved_temp_c: f32,
-    last_saved_tick: u16,
-    samples: [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+pub(crate) struct CalibrationThermalPlantAutoJob {
+    pub(crate) run_id: u32,
+    pub(crate) phase: ThermalPlantAutoPhase,
+    pub(crate) source_max_mv: u16,
+    pub(crate) source_current_ma: u16,
+    pub(crate) ambient_raw_rtd_adc_mv: u16,
+    pub(crate) idle_samples: u16,
+    pub(crate) heater_curve: ThermalPlantCurveSampler,
+    pub(crate) elapsed_ticks: u32,
+    pub(crate) phase_started_tick: u32,
+    pub(crate) sample_count: u8,
+    pub(crate) last_saved_temp_c: f32,
+    pub(crate) last_saved_tick: u16,
+    pub(crate) samples: [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
 }
 
 // Keep the bounded transient trace out of the Embassy main task. The job is
@@ -670,9 +675,9 @@ struct CalibrationThermalPlantAutoJob {
 // application stack during Wi-Fi initialization.
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Debug, Default)]
-struct CalibrationThermalPlantWorkspace {
-    job: Option<CalibrationThermalPlantAutoJob>,
-    next_run_id: u32,
+pub(crate) struct CalibrationThermalPlantWorkspace {
+    pub(crate) job: Option<CalibrationThermalPlantAutoJob>,
+    pub(crate) next_run_id: u32,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -693,41 +698,43 @@ impl Default for ThermalPlantCurveSampler {
 #[cfg(any(target_arch = "xtensa", test))]
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum CalibrationJobData {
+pub(crate) enum CalibrationJobData {
     VinAdc(CalibrationVinAutoJob),
     ThermalPlant,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct HeaterCurvePreview {
-    curve: HeaterCurveConfig,
-    raw_observations: Option<HeaterCurveRawObservations>,
+pub(crate) struct HeaterCurvePreview {
+    pub(crate) curve: HeaterCurveConfig,
+    pub(crate) raw_observations: Option<HeaterCurveRawObservations>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn preview_heater_curve_config(preview: Option<&HeaterCurvePreview>) -> Option<&HeaterCurveConfig> {
+pub(crate) fn preview_heater_curve_config(
+    preview: Option<&HeaterCurvePreview>,
+) -> Option<&HeaterCurveConfig> {
     preview.map(|preview| &preview.curve)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct CalibrationRuntimeState {
-    mode: CalibrationMode,
-    pps_enabled: bool,
-    pps_mv: Option<u16>,
-    pps_ma: Option<u16>,
-    heater_enabled: bool,
-    target_adc_mv: Option<u16>,
-    stable: bool,
-    stability_error_mv: Option<i16>,
-    error: Option<ManualPpsError>,
-    job: CalibrationJobState,
-    job_data: Option<CalibrationJobData>,
-    model_target_temp_c: Option<i16>,
-    thermal_plant_completion_disarm_pending: bool,
-    immediate_heater_disarm_pending: bool,
+pub(crate) struct CalibrationRuntimeState {
+    pub(crate) mode: CalibrationMode,
+    pub(crate) pps_enabled: bool,
+    pub(crate) pps_mv: Option<u16>,
+    pub(crate) pps_ma: Option<u16>,
+    pub(crate) heater_enabled: bool,
+    pub(crate) target_adc_mv: Option<u16>,
+    pub(crate) stable: bool,
+    pub(crate) stability_error_mv: Option<i16>,
+    pub(crate) error: Option<ManualPpsError>,
+    pub(crate) job: CalibrationJobState,
+    pub(crate) job_data: Option<CalibrationJobData>,
+    pub(crate) model_target_temp_c: Option<i16>,
+    pub(crate) thermal_plant_completion_disarm_pending: bool,
+    pub(crate) immediate_heater_disarm_pending: bool,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -753,7 +760,7 @@ impl Default for CalibrationRuntimeState {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn calibration_runtime_state_to_wire(
+pub(crate) fn calibration_runtime_state_to_wire(
     state: &CalibrationRuntimeState,
 ) -> CalibrationRuntimeStateWire {
     CalibrationRuntimeStateWire {
@@ -782,7 +789,7 @@ fn calibration_runtime_state_to_wire(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn reconcile_runtime_heater_enabled(
+pub(crate) fn reconcile_runtime_heater_enabled(
     current_heater_enabled: bool,
     calibration_runtime_state: impl core::borrow::Borrow<CalibrationRuntimeState>,
     current_rtd_fault: Option<HeaterFaultReason>,
@@ -809,7 +816,7 @@ fn reconcile_runtime_heater_enabled(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn disarm_stale_heater_arm_after_pd_transition(
+pub(crate) fn disarm_stale_heater_arm_after_pd_transition(
     previous_pd_ready: bool,
     current_pd_ready: bool,
     ui_state: &mut FrontPanelUiState,
@@ -826,7 +833,7 @@ fn disarm_stale_heater_arm_after_pd_transition(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn apply_pd_contract_observation<PWM>(
+pub(crate) fn apply_pd_contract_observation<PWM>(
     observation: Option<PdStatusObservation>,
     pd_contract_ready: &mut bool,
     ui_state: &mut FrontPanelUiState,
@@ -883,22 +890,22 @@ where
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_STALE_CONTRACT_VIN_CONFIRM_MS: u64 = 100;
+pub(crate) const FUSB302B_STALE_CONTRACT_VIN_CONFIRM_MS: u64 = 100;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_STALE_CONTRACT_VIN_DEFICIT_MV: u32 = 2_000;
+pub(crate) const FUSB302B_STALE_CONTRACT_VIN_DEFICIT_MV: u32 = 2_000;
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-const FUSB302B_STALE_CONTRACT_VIN_SETTLE_GRACE_MS: u64 = 500;
+pub(crate) const FUSB302B_STALE_CONTRACT_VIN_SETTLE_GRACE_MS: u64 = 500;
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct PdContractVinGuard {
+pub(crate) struct PdContractVinGuard {
     mismatch_since_ms: Option<u64>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl PdContractVinGuard {
-    fn observe(
+    pub(crate) fn observe(
         &mut self,
         observation: Option<PdStatusObservation>,
         measured_vin_mv: Option<u32>,
@@ -929,19 +936,19 @@ impl PdContractVinGuard {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct PdContractVinContext<'a, PWM> {
-    pd_port: &'a mut PdPort,
-    last_pd_observation: &'a mut Option<PdStatusObservation>,
-    pd_contract_ready: &'a mut bool,
-    ui_state: &'a mut FrontPanelUiState,
-    calibration_runtime_state: &'a mut CalibrationRuntimeState,
-    manual_pps_state: &'a mut ManualPpsState,
-    heater_pwm: &'a mut PWM,
-    last_heater_duty: &'a mut u8,
+pub(crate) struct PdContractVinContext<'a, PWM> {
+    pub(crate) pd_port: &'a mut PdPort,
+    pub(crate) last_pd_observation: &'a mut Option<PdStatusObservation>,
+    pub(crate) pd_contract_ready: &'a mut bool,
+    pub(crate) ui_state: &'a mut FrontPanelUiState,
+    pub(crate) calibration_runtime_state: &'a mut CalibrationRuntimeState,
+    pub(crate) manual_pps_state: &'a mut ManualPpsState,
+    pub(crate) heater_pwm: &'a mut PWM,
+    pub(crate) last_heater_duty: &'a mut u8,
 }
 
 #[cfg(target_arch = "xtensa")]
-fn reconcile_pd_contract_with_vin<PWM>(
+pub(crate) fn reconcile_pd_contract_with_vin<PWM>(
     guard: &mut PdContractVinGuard,
     observation: Option<PdStatusObservation>,
     measured_vin_mv: Option<u32>,
@@ -988,7 +995,7 @@ where
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_calibration_snapshot(
+pub(crate) fn thermal_plant_calibration_snapshot(
     measured_temp_c: f32,
     heater_enabled: bool,
 ) -> HeaterPidSnapshot {
@@ -1005,7 +1012,7 @@ fn thermal_plant_calibration_snapshot(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_calibration_temperature_c(
+pub(crate) fn thermal_plant_calibration_temperature_c(
     calibration: CalibrationRuntimeState,
     live_rtd_temp_c: Option<f32>,
     control_temp_c: f32,
@@ -1018,13 +1025,13 @@ fn thermal_plant_calibration_temperature_c(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_cooling_complete(live_temp_c: f32, recorded_temp_c: f32) -> bool {
+pub(crate) fn thermal_plant_cooling_complete(live_temp_c: f32, recorded_temp_c: f32) -> bool {
     live_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
         && recorded_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_output_must_be_off(
+pub(crate) fn thermal_plant_output_must_be_off(
     calibration: CalibrationRuntimeState,
     was_running: bool,
     measured_temp_c: f32,
@@ -1037,7 +1044,7 @@ fn thermal_plant_output_must_be_off(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn consume_thermal_plant_completion_disarm(
+pub(crate) fn consume_thermal_plant_completion_disarm(
     calibration_runtime_state: &mut CalibrationRuntimeState,
     desired_heater_enabled: bool,
 ) -> bool {
@@ -1050,7 +1057,9 @@ fn consume_thermal_plant_completion_disarm(
 }
 
 #[cfg(test)]
-fn take_immediate_heater_disarm(calibration_runtime_state: &mut CalibrationRuntimeState) -> bool {
+pub(crate) fn take_immediate_heater_disarm(
+    calibration_runtime_state: &mut CalibrationRuntimeState,
+) -> bool {
     let pending = calibration_runtime_state.immediate_heater_disarm_pending;
     calibration_runtime_state.immediate_heater_disarm_pending = false;
     pending
@@ -1058,7 +1067,7 @@ fn take_immediate_heater_disarm(calibration_runtime_state: &mut CalibrationRunti
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn thermal_model_heater_allowed(
+pub(crate) fn thermal_model_heater_allowed(
     memory_config: &MemoryConfig,
     calibration: impl core::borrow::Borrow<CalibrationRuntimeState>,
     manual_pps: ManualPpsState,
@@ -1090,7 +1099,7 @@ fn thermal_model_heater_allowed(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_curve_is_bound(
+pub(crate) fn thermal_plant_curve_is_bound(
     memory_config: &MemoryConfig,
     transaction: ThermalPlantTransientTransaction,
 ) -> bool {
@@ -1098,7 +1107,7 @@ fn thermal_plant_curve_is_bound(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_transient_trace_reaches_targets(
+pub(crate) fn thermal_plant_transient_trace_reaches_targets(
     transaction: &ThermalPlantTransientTransaction,
     memory_config: &MemoryConfig,
 ) -> bool {
@@ -1149,7 +1158,9 @@ fn thermal_plant_transient_trace_reaches_targets(
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 impl ManualPpsState {
-    fn from_capabilities(capabilities: Option<ch224q::AdjustablePowerCapabilities>) -> Self {
+    pub(crate) fn from_capabilities(
+        capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+    ) -> Self {
         Self::from_capabilities_with_request_bounds(
             capabilities,
             CH224Q_ADJUSTABLE_REQUEST_MIN_MV,
@@ -1157,7 +1168,7 @@ impl ManualPpsState {
         )
     }
 
-    fn from_fusb302b_capabilities(
+    pub(crate) fn from_fusb302b_capabilities(
         capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     ) -> Self {
         Self::from_capabilities_with_request_bounds(
@@ -1207,7 +1218,11 @@ impl ManualPpsState {
         state
     }
 
-    fn validate_target(&self, target_mv: u16, target_ma: u16) -> Result<(), ManualPpsError> {
+    pub(crate) fn validate_target(
+        &self,
+        target_mv: u16,
+        target_ma: u16,
+    ) -> Result<(), ManualPpsError> {
         let (Some(min_mv), Some(max_mv), Some(_max_ma)) = (
             self.capability_min_mv,
             self.capability_max_mv,
@@ -1227,7 +1242,7 @@ impl ManualPpsState {
         Ok(())
     }
 
-    fn has_matching_pps_apdo(&self, target_mv: u16, target_ma: u16) -> bool {
+    pub(crate) fn has_matching_pps_apdo(&self, target_mv: u16, target_ma: u16) -> bool {
         self.capability_apdos.iter().flatten().any(|apdo| {
             let min_mv = apdo.min_mv.max(self.request_min_mv);
             let max_mv = apdo.max_mv.min(self.request_max_mv);
@@ -1235,7 +1250,7 @@ impl ManualPpsState {
         })
     }
 
-    fn maximum_pps_current_for_target(&self, target_mv: u16) -> Option<u16> {
+    pub(crate) fn maximum_pps_current_for_target(&self, target_mv: u16) -> Option<u16> {
         self.capability_apdos
             .iter()
             .flatten()
@@ -1247,11 +1262,11 @@ impl ManualPpsState {
             .max()
     }
 
-    fn thermal_plant_source_limits(&self) -> Option<(u16, u16, u16)> {
+    pub(crate) fn thermal_plant_source_limits(&self) -> Option<(u16, u16, u16)> {
         self.single_pps_source_limits(20_000)
     }
 
-    fn heater_source_limits(&self) -> Option<(u16, u16, u16)> {
+    pub(crate) fn heater_source_limits(&self) -> Option<(u16, u16, u16)> {
         self.contiguous_pps_source_limits(HEATER_ADJUSTABLE_MIN_MV)
     }
 
@@ -1302,7 +1317,8 @@ impl ManualPpsState {
         // whole automatic voltage range. Derive a ceiling that is valid at
         // every boundary of the continuous APDO component, rather than taking
         // the (potentially higher) current offered only at its top voltage.
-        let conservative_current_ma = self.conservative_current_for_range(minimum_mv, reachable_max_mv)?;
+        let conservative_current_ma =
+            self.conservative_current_for_range(minimum_mv, reachable_max_mv)?;
         Some((minimum_mv, reachable_max_mv, conservative_current_ma))
     }
 
@@ -1351,8 +1367,7 @@ impl ManualPpsState {
             .into_iter()
             .filter(|checkpoint_mv| {
                 *checkpoint_mv >= minimum_mv && *checkpoint_mv <= reachable_max_mv
-            })
-            {
+            }) {
                 let current_ma = self.maximum_pps_current_for_target(checkpoint_mv)?;
                 conservative_current_ma = conservative_current_ma.min(current_ma);
                 current_observed = true;
@@ -1361,7 +1376,7 @@ impl ManualPpsState {
         current_observed.then_some(conservative_current_ma)
     }
 
-    fn enable(
+    pub(crate) fn enable(
         &mut self,
         owner: ManualPpsOwner,
         target_mv: u16,
@@ -1380,7 +1395,7 @@ impl ManualPpsState {
         Ok(())
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         let had_override = self.enabled
             || self.target_mv.is_some()
             || self.target_ma.is_some()
@@ -1394,7 +1409,7 @@ impl ManualPpsState {
         self.automatic_restore_pending |= had_override;
     }
 
-    fn fail(&mut self, error: ManualPpsError) {
+    pub(crate) fn fail(&mut self, error: ManualPpsError) {
         self.enabled = false;
         self.owner = ManualPpsOwner::Debug;
         self.target_mv = None;
@@ -1404,7 +1419,7 @@ impl ManualPpsState {
         self.automatic_restore_pending = true;
     }
 
-    fn consume_automatic_restore_pending(&mut self) -> bool {
+    pub(crate) fn consume_automatic_restore_pending(&mut self) -> bool {
         let pending = self.automatic_restore_pending;
         self.automatic_restore_pending = false;
         pending
@@ -1412,14 +1427,14 @@ impl ManualPpsState {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn manual_pps_error_code(
+pub(crate) fn manual_pps_error_code(
     error: ManualPpsError,
 ) -> heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }> {
     error_code_string(error.code())
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn error_code_string(
+pub(crate) fn error_code_string(
     value: &str,
 ) -> heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }> {
     let mut out = heapless::String::new();
@@ -1430,14 +1445,14 @@ fn error_code_string(
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 impl HeaterPowerBackend {
-    const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::PpsMos { .. } => "pps-mos",
             Self::FixedPdPwmFallback { .. } => "fixed-pd-pwm-fallback",
         }
     }
 
-    const fn pd_request_mv(self) -> u16 {
+    pub(crate) const fn pd_request_mv(self) -> u16 {
         match self {
             Self::PpsMos {
                 current_request_mv, ..
@@ -1446,11 +1461,11 @@ impl HeaterPowerBackend {
         }
     }
 
-    const fn pd_contract_mv(self) -> u16 {
+    pub(crate) const fn pd_contract_mv(self) -> u16 {
         self.pd_request_mv()
     }
 
-    const fn terminal_fixed_pd_disarmed(self) -> bool {
+    pub(crate) const fn terminal_fixed_pd_disarmed(self) -> bool {
         match self {
             Self::PpsMos {
                 terminal_fixed_pd_disarmed,
@@ -1463,7 +1478,7 @@ impl HeaterPowerBackend {
         }
     }
 
-    fn set_terminal_fixed_pd_disarmed(&mut self, disarmed: bool) {
+    pub(crate) fn set_terminal_fixed_pd_disarmed(&mut self, disarmed: bool) {
         match self {
             Self::PpsMos {
                 terminal_fixed_pd_disarmed,
@@ -1478,7 +1493,7 @@ impl HeaterPowerBackend {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn effective_pd_contract_mv(
+pub(crate) fn effective_pd_contract_mv(
     manual_pps: &ManualPpsState,
     observation: Option<PdStatusObservation>,
     backend: HeaterPowerBackend,
@@ -1495,7 +1510,7 @@ fn effective_pd_contract_mv(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn log_ui_state(state: &FrontPanelUiState) {
+pub(crate) fn log_ui_state(state: &FrontPanelUiState) {
     info!(
         "ui route={=str} temp_c={=i16} target_c={=i16} heater_arm={=bool} heater_out={=u8}% fan_runtime={=bool} fan_display={=str} cooling_policy={=bool} heater_lock={=str} warn_visible={=bool}",
         route_label(state.route),
@@ -1515,7 +1530,7 @@ fn log_ui_state(state: &FrontPanelUiState) {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn pt1000_resistance_ohms_at(temp_c: f32) -> f32 {
+pub(crate) fn pt1000_resistance_ohms_at(temp_c: f32) -> f32 {
     let polynomial = 1.0 + PT1000_A * temp_c + PT1000_B * temp_c * temp_c;
     if temp_c >= 0.0 {
         PT1000_R0_OHMS * polynomial
@@ -1525,7 +1540,7 @@ fn pt1000_resistance_ohms_at(temp_c: f32) -> f32 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn pt1000_temperature_c_from_resistance(resistance_ohms: f32) -> f32 {
+pub(crate) fn pt1000_temperature_c_from_resistance(resistance_ohms: f32) -> f32 {
     let mut low = RTD_TEMP_MIN_C;
     let mut high = RTD_TEMP_MAX_C;
     for _ in 0..32 {
@@ -1540,12 +1555,14 @@ fn pt1000_temperature_c_from_resistance(resistance_ohms: f32) -> f32 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn rtd_resistance_ohms_from_mv(adc_mv: u16) -> Result<f32, HeaterFaultReason> {
+pub(crate) fn rtd_resistance_ohms_from_mv(adc_mv: u16) -> Result<f32, HeaterFaultReason> {
     rtd_resistance_ohms_from_fractional_mv(f32::from(adc_mv))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn rtd_resistance_ohms_from_fractional_mv(adc_mv: f32) -> Result<f32, HeaterFaultReason> {
+pub(crate) fn rtd_resistance_ohms_from_fractional_mv(
+    adc_mv: f32,
+) -> Result<f32, HeaterFaultReason> {
     if adc_mv <= f32::from(RTD_SHORT_FAULT_MAX_MV) {
         return Err(HeaterFaultReason::SensorShort);
     }
@@ -1561,7 +1578,7 @@ fn rtd_resistance_ohms_from_fractional_mv(adc_mv: f32) -> Result<f32, HeaterFaul
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn correct_adc_fractional_mv(
+pub(crate) fn correct_adc_fractional_mv(
     memory_config: &MemoryConfig,
     channel: AdcCalibrationChannel,
     raw_adc_mv: f32,
@@ -1585,7 +1602,10 @@ fn correct_adc_fractional_mv(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn projected_rtd_temperature_c(memory_config: &MemoryConfig, raw_adc_mv: u16) -> Option<f32> {
+pub(crate) fn projected_rtd_temperature_c(
+    memory_config: &MemoryConfig,
+    raw_adc_mv: u16,
+) -> Option<f32> {
     let corrected_mv = correct_adc_fractional_mv(
         memory_config,
         AdcCalibrationChannel::Rtd,
@@ -1597,7 +1617,7 @@ fn projected_rtd_temperature_c(memory_config: &MemoryConfig, raw_adc_mv: u16) ->
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_runtime_wire(memory_config: &MemoryConfig) -> ThermalPlantRuntimeWire {
+pub(crate) fn thermal_plant_runtime_wire(memory_config: &MemoryConfig) -> ThermalPlantRuntimeWire {
     let active_projection = memory_config
         .thermal_plant_transient_active
         .and_then(|transaction| {
@@ -1632,7 +1652,7 @@ fn thermal_plant_runtime_wire(memory_config: &MemoryConfig) -> ThermalPlantRunti
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn thermal_plant_run_snapshot_wire(
+pub(crate) fn thermal_plant_run_snapshot_wire(
     calibration: &CalibrationRuntimeState,
     memory_config: &MemoryConfig,
     workspace: &CalibrationThermalPlantWorkspace,
@@ -1687,7 +1707,7 @@ fn thermal_plant_run_snapshot_wire(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_trace_page(
+pub(crate) fn thermal_plant_trace_page(
     memory_config: &MemoryConfig,
     samples: &[ThermalPlantTransientSample],
     sample_count: u8,
@@ -1732,7 +1752,10 @@ fn thermal_plant_trace_page(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_trace_phase(saw_heating: &mut bool, duty_percent: u8) -> ThermalPlantRunPhaseWire {
+pub(crate) fn thermal_plant_trace_phase(
+    saw_heating: &mut bool,
+    duty_percent: u8,
+) -> ThermalPlantRunPhaseWire {
     if duty_percent > 0 {
         *saw_heating = true;
         ThermalPlantRunPhaseWire::Heating
@@ -1744,7 +1767,7 @@ fn thermal_plant_trace_phase(saw_heating: &mut bool, duty_percent: u8) -> Therma
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_provisional_curve(
+pub(crate) fn thermal_plant_provisional_curve(
     job: &CalibrationThermalPlantAutoJob,
 ) -> Option<ThermalPlantProvisionalCurveWire> {
     let curve = heater_curve_from_transient_bins(&job.heater_curve.bins)?;
@@ -1764,7 +1787,7 @@ fn thermal_plant_provisional_curve(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_active_result(
+pub(crate) fn thermal_plant_active_result(
     memory_config: &MemoryConfig,
     transaction: &ThermalPlantTransientTransaction,
 ) -> Option<ThermalPlantActiveResultWire> {
@@ -1783,7 +1806,7 @@ fn thermal_plant_active_result(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_run_attempt(
+pub(crate) fn thermal_plant_run_attempt(
     calibration: &CalibrationRuntimeState,
     job: &CalibrationThermalPlantAutoJob,
     run_id: u32,
@@ -1816,7 +1839,7 @@ fn thermal_plant_run_attempt(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn thermal_plant_projection_for_runtime(
+pub(crate) fn thermal_plant_projection_for_runtime(
     memory_config: &MemoryConfig,
 ) -> Option<(flux_purr_firmware::memory::ThermalPlantProjection, f32)> {
     let transaction = memory_config.thermal_plant_transient_active?;

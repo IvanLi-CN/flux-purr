@@ -1,5 +1,10 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(target_arch = "xtensa")]
-async fn apply_heater_power_output<PWM>(mut context: HeaterPowerOutputContext<'_, '_, PWM>) -> bool
+pub(crate) async fn apply_heater_power_output<PWM>(
+    mut context: HeaterPowerOutputContext<'_, '_, PWM>,
+) -> bool
 where
     PWM: SetDutyCycle,
 {
@@ -16,7 +21,11 @@ where
         let previous_duty_percent = *context.last_physical_duty_percent;
         apply_heater_duty(
             context.heater_pwm,
-            if context.heater_enabled { context.duty_percent } else { 0 },
+            if context.heater_enabled {
+                context.duty_percent
+            } else {
+                0
+            },
             context.last_physical_duty_percent,
         );
         return manual_pps_request_changed
@@ -34,7 +43,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn prepare_manual_pps<PWM>(
+pub(crate) async fn prepare_manual_pps<PWM>(
     context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
 ) -> Option<bool>
 where
@@ -44,7 +53,13 @@ where
         return Some(false);
     }
     context.hold_pps_governor.reset();
-    let target_mv = context.manual_pps.target_mv?;
+    let target_mv = match require_manual_pps_target(context.manual_pps) {
+        Ok(target_mv) => target_mv,
+        Err(_) => {
+            apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+            return Some(true);
+        }
+    };
     let target_ma = context.manual_pps.target_ma.unwrap_or(0);
     if !context
         .pd_observation
@@ -52,12 +67,8 @@ where
     {
         context.manual_pps.fail(ManualPpsError::PdNotReady);
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-        let _ = request_pd_fixed_voltage(
-            context.i2c,
-            context.pd_port,
-            DEFAULT_PD_VOLTAGE_REQUEST,
-        )
-        .await;
+        let _ = request_pd_fixed_voltage(context.i2c, context.pd_port, DEFAULT_PD_VOLTAGE_REQUEST)
+            .await;
         return Some(false);
     }
     if !manual_pps_request_required(
@@ -78,7 +89,10 @@ where
     {
         PdContractRequestState::Confirmed => {
             context.manual_pps.applied_mv = Some(target_mv);
-            info!("manual pps override applied mv={=u16} ma={=u16}", target_mv, target_ma);
+            info!(
+                "manual pps override applied mv={=u16} ma={=u16}",
+                target_mv, target_ma
+            );
             Some(true)
         }
         PdContractRequestState::Pending => {
@@ -88,21 +102,33 @@ where
         PdContractRequestState::Failed => {
             context.manual_pps.fail(ManualPpsError::WriteFailed);
             apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-            let _ = request_pd_fixed_voltage(
-                context.i2c,
-                context.pd_port,
-                DEFAULT_PD_VOLTAGE_REQUEST,
-            )
-            .await;
-            info!("manual pps override cleared reason={=str}", ManualPpsError::WriteFailed.code());
+            let _ =
+                request_pd_fixed_voltage(context.i2c, context.pd_port, DEFAULT_PD_VOLTAGE_REQUEST)
+                    .await;
+            info!(
+                "manual pps override cleared reason={=str}",
+                ManualPpsError::WriteFailed.code()
+            );
             Some(false)
         }
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn require_manual_pps_target(
+    manual_pps: &mut ManualPpsState,
+) -> Result<u16, ManualPpsError> {
+    let Some(target_mv) = manual_pps.target_mv else {
+        manual_pps.fail(ManualPpsError::InvalidVoltage);
+        return Err(ManualPpsError::InvalidVoltage);
+    };
+    Ok(target_mv)
+}
+
 #[cfg(target_arch = "xtensa")]
-fn reset_backend_after_manual_pps_restore<PWM>(context: &mut HeaterPowerOutputContext<'_, '_, PWM>)
-where
+pub(crate) fn reset_backend_after_manual_pps_restore<PWM>(
+    context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
+) where
     PWM: SetDutyCycle,
 {
     if !context.manual_pps.consume_automatic_restore_pending() {
@@ -149,21 +175,24 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn apply_fixed_pd_backend<PWM>(
+pub(crate) async fn apply_fixed_pd_backend<PWM>(
     context: HeaterPowerOutputContext<'_, '_, PWM>,
     manual_pps_active: bool,
 ) -> bool
 where
     PWM: SetDutyCycle,
 {
-    if matches!(*context.backend, HeaterPowerBackend::FixedPdPwmFallback { .. }) {
+    if matches!(
+        *context.backend,
+        HeaterPowerBackend::FixedPdPwmFallback { .. }
+    ) {
         return apply_fixed_pd_fallback(context, manual_pps_active).await;
     }
     apply_pps_backend(context, manual_pps_active).await
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn apply_fixed_pd_fallback<PWM>(
+pub(crate) async fn apply_fixed_pd_fallback<PWM>(
     context: HeaterPowerOutputContext<'_, '_, PWM>,
     manual_pps_active: bool,
 ) -> bool
@@ -194,10 +223,10 @@ where
     } = context;
     match *backend {
         HeaterPowerBackend::FixedPdPwmFallback {
-        reason,
-        fixed_request_confirmed,
-        fixed_request,
-        terminal_fixed_pd_disarmed,
+            reason,
+            fixed_request_confirmed,
+            fixed_request,
+            terminal_fixed_pd_disarmed,
         } => {
             if !fixed_request_confirmed && !manual_pps_active {
                 match request_pd_fixed_voltage(i2c, pd_port, fixed_request).await {
@@ -256,7 +285,7 @@ where
 
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy)]
-struct PpsOperatingLimits {
+pub(crate) struct PpsOperatingLimits {
     pps_min_mv: u16,
     adjustable_max_mv: u16,
     capability_max_ma: u16,
@@ -264,7 +293,7 @@ struct PpsOperatingLimits {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn pps_operating_limits<PWM>(
+pub(crate) fn pps_operating_limits<PWM>(
     context: &HeaterPowerOutputContext<'_, '_, PWM>,
 ) -> Option<PpsOperatingLimits>
 where
@@ -288,7 +317,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-fn set_pps_current_limit_backend(
+pub(crate) fn set_pps_current_limit_backend(
     backend: &mut HeaterPowerBackend,
     request_mv: u16,
     settle_until_ms: Option<u64>,
@@ -322,14 +351,14 @@ fn set_pps_current_limit_backend(
 }
 
 #[cfg(target_arch = "xtensa")]
-enum CurrentLimitContractResult {
+pub(crate) enum CurrentLimitContractResult {
     Ready,
     Pending,
     Failed,
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn ensure_current_limit_contract<PWM>(
+pub(crate) async fn ensure_current_limit_contract<PWM>(
     context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
     confirmed: bool,
     settle_until_ms: Option<u64>,
@@ -378,7 +407,11 @@ where
             set_pps_current_limit_backend(
                 context.backend,
                 HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
-                Some(context.now_ms.saturating_add(HEATER_PPS_LARGE_TRANSITION_MS)),
+                Some(
+                    context
+                        .now_ms
+                        .saturating_add(HEATER_PPS_LARGE_TRANSITION_MS),
+                ),
                 false,
             );
             CurrentLimitContractResult::Pending
@@ -396,7 +429,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn apply_pps_current_limit_fallback<PWM>(
+pub(crate) async fn apply_pps_current_limit_fallback<PWM>(
     context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
     manual_pps_active: bool,
     safe_max_mv: u16,
@@ -473,7 +506,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn handle_pps_settle_period<PWM>(
+pub(crate) async fn handle_pps_settle_period<PWM>(
     context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
     source_request_ceiling_mv: u16,
 ) -> Option<bool>
@@ -532,7 +565,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-struct PpsVoltageTransition {
+pub(crate) struct PpsVoltageTransition {
     request_mv: u16,
     request_mode: ch224q::AdjustableVoltageMode,
     mode_changed: bool,
@@ -543,7 +576,7 @@ struct PpsVoltageTransition {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn fallback_from_adjustable_request<PWM>(
+pub(crate) async fn fallback_from_adjustable_request<PWM>(
     context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
 ) -> bool
 where
@@ -551,12 +584,7 @@ where
 {
     apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
     let fixed_request_confirmed = matches!(
-        request_pd_fixed_voltage(
-            context.i2c,
-            context.pd_port,
-            DEFAULT_PD_VOLTAGE_REQUEST,
-        )
-        .await,
+        request_pd_fixed_voltage(context.i2c, context.pd_port, DEFAULT_PD_VOLTAGE_REQUEST,).await,
         PdContractRequestState::Confirmed
     );
     *context.backend = HeaterPowerBackend::FixedPdPwmFallback {
@@ -598,7 +626,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn apply_pps_voltage_transition<PWM>(
+pub(crate) async fn apply_pps_voltage_transition<PWM>(
     context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
     request: PpsVoltageTransition,
 ) -> Option<bool>
@@ -637,10 +665,8 @@ where
             return Some(fallback_from_adjustable_request(context).await);
         }
     }
-    if should_restore_gate_after_adjustable_request(
-        request.blank_heater,
-        request.gate_duty_percent,
-    ) {
+    if should_restore_gate_after_adjustable_request(request.blank_heater, request.gate_duty_percent)
+    {
         apply_heater_duty(
             context.heater_pwm,
             request.gate_duty_percent,
@@ -655,9 +681,11 @@ where
         capability_max_ma,
         current_mode: Some(request.request_mode),
         current_request_mv: request.request_mv,
-        settle_until_ms: request
-            .blank_heater
-            .then_some(context.now_ms.saturating_add(pps_request_transition_ms(request.mode_changed))),
+        settle_until_ms: request.blank_heater.then_some(
+            context
+                .now_ms
+                .saturating_add(pps_request_transition_ms(request.mode_changed)),
+        ),
         next_request_at_ms: context
             .now_ms
             .saturating_add(pps_request_transition_ms(request.mode_changed)),
@@ -669,7 +697,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn apply_pps_voltage_request<PWM>(
+pub(crate) async fn apply_pps_voltage_request<PWM>(
     context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
     manual_pps_active: bool,
     safe_max_mv: u16,
@@ -776,7 +804,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn apply_pps_backend<PWM>(
+pub(crate) async fn apply_pps_backend<PWM>(
     context: HeaterPowerOutputContext<'_, '_, PWM>,
     manual_pps_active: bool,
 ) -> bool
@@ -819,9 +847,7 @@ where
     {
         return result;
     }
-    if let Some(result) =
-        handle_pps_settle_period(&mut context, source_request_ceiling_mv).await
-    {
+    if let Some(result) = handle_pps_settle_period(&mut context, source_request_ceiling_mv).await {
         return result;
     }
     apply_pps_voltage_request(
@@ -835,7 +861,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-fn apply_fan_output<PWM>(
+pub(crate) fn apply_fan_output<PWM>(
     fan_enable: &mut Output<'_>,
     fan_pwm: &mut PWM,
     command: FanHardwareCommand,
@@ -866,7 +892,7 @@ fn apply_fan_output<PWM>(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn apply_buzzer_output<'a, PWM>(
+pub(crate) fn apply_buzzer_output<'a, PWM>(
     buzzer_timer: &mut esp_hal::mcpwm::timer::Timer<2, esp_hal::peripherals::MCPWM0<'a>>,
     buzzer_pwm: &mut PWM,
     peripheral_clock: &PeripheralClockConfig,
@@ -919,11 +945,11 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-const BUZZER_COMMAND_CAPACITY: usize = 32;
+pub(crate) const BUZZER_COMMAND_CAPACITY: usize = 32;
 
 #[cfg(target_arch = "xtensa")]
 #[derive(Debug, Clone)]
-enum BuzzerRuntimeCommand {
+pub(crate) enum BuzzerRuntimeCommand {
     Feedback {
         source: BuzzerCueSource,
         cue: BuzzerCueId,
@@ -940,38 +966,38 @@ enum BuzzerRuntimeCommand {
 
 #[cfg(target_arch = "xtensa")]
 #[derive(Debug, Clone, Copy)]
-enum BuzzerSafetyCommand {
+pub(crate) enum BuzzerSafetyCommand {
     ActivateProtection { source: BuzzerCueSource },
     EnterAttentionPendingAndRequestReminder { source: BuzzerCueSource },
     ClearAttention,
 }
 
 #[cfg(target_arch = "xtensa")]
-static BUZZER_COMMANDS: Channel<
+pub(crate) static BUZZER_COMMANDS: Channel<
     CriticalSectionRawMutex,
     BuzzerRuntimeCommand,
     BUZZER_COMMAND_CAPACITY,
 > = Channel::new();
 
 #[cfg(target_arch = "xtensa")]
-static BUZZER_SAFETY_COMMAND: Signal<CriticalSectionRawMutex, BuzzerSafetyCommand> = Signal::new();
-
+pub(crate) static BUZZER_SAFETY_COMMAND: Signal<CriticalSectionRawMutex, BuzzerSafetyCommand> =
+    Signal::new();
 
 // GPIO48 transitions have 25-80 ms deadlines. Keep their sole owner out of the
 // thread-mode executor, where display or control work can otherwise defer a cue
 // transition until the next cooperative poll.
 #[cfg(target_arch = "xtensa")]
-static BUZZER_REALTIME_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
+pub(crate) static BUZZER_REALTIME_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
 
 /// Runtime callers submit cue requests. The dedicated task owns arbitration,
 /// cue progression, and every GPIO48 PWM write.
 #[cfg(target_arch = "xtensa")]
 #[derive(Default)]
-struct BuzzerRuntime;
+pub(crate) struct BuzzerRuntime;
 
 #[cfg(target_arch = "xtensa")]
 impl BuzzerRuntime {
-    fn submit(command: BuzzerRuntimeCommand) {
+    pub(crate) fn submit(command: BuzzerRuntimeCommand) {
         if BUZZER_COMMANDS.try_send(command).is_err() {
             // Feedback is best effort, but this capacity is intentionally far
             // larger than one front-panel/control-loop iteration can produce.
@@ -979,42 +1005,47 @@ impl BuzzerRuntime {
         }
     }
 
-    fn request_feedback(&mut self, source: BuzzerCueSource, cue: BuzzerCueId, _: u64) {
+    pub(crate) fn request_feedback(&mut self, source: BuzzerCueSource, cue: BuzzerCueId, _: u64) {
         Self::submit(BuzzerRuntimeCommand::Feedback { source, cue });
     }
 
-    fn activate_protection(&mut self, source: BuzzerCueSource, _: u64) {
+    pub(crate) fn activate_protection(&mut self, source: BuzzerCueSource, _: u64) {
         BUZZER_SAFETY_COMMAND.signal(BuzzerSafetyCommand::ActivateProtection { source });
     }
 
-    fn request_protection_replay(&mut self, source: BuzzerCueSource, _: u64) {
+    pub(crate) fn request_protection_replay(&mut self, source: BuzzerCueSource, _: u64) {
         Self::submit(BuzzerRuntimeCommand::ProtectionReplay { source });
     }
 
-    fn enter_attention_pending_and_request_reminder(&mut self, source: BuzzerCueSource, _: u64) {
+    pub(crate) fn enter_attention_pending_and_request_reminder(
+        &mut self,
+        source: BuzzerCueSource,
+        _: u64,
+    ) {
         BUZZER_SAFETY_COMMAND
             .signal(BuzzerSafetyCommand::EnterAttentionPendingAndRequestReminder { source });
     }
 
-    fn clear_attention(&mut self) {
+    pub(crate) fn clear_attention(&mut self) {
         BUZZER_SAFETY_COMMAND.signal(BuzzerSafetyCommand::ClearAttention);
     }
 
-    fn request_attention_reminder(&mut self, source: BuzzerCueSource, _: u64) {
+    pub(crate) fn request_attention_reminder(&mut self, source: BuzzerCueSource, _: u64) {
         Self::submit(BuzzerRuntimeCommand::RequestAttentionReminder { source });
     }
 
     #[cfg(feature = "buzzer-test")]
-    fn submit_test(command: BuzzerTestCommand) {
+    pub(crate) fn submit_test(command: BuzzerTestCommand) {
         Self::submit(BuzzerRuntimeCommand::Test(command));
     }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
-type BuzzerTestStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<BuzzerTestStatus>>;
+pub(crate) type BuzzerTestStatusMutex =
+    BlockingMutex<CriticalSectionRawMutex, RefCell<BuzzerTestStatus>>;
 
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
-static BUZZER_TEST_STATUS: BuzzerTestStatusMutex =
+pub(crate) static BUZZER_TEST_STATUS: BuzzerTestStatusMutex =
     BlockingMutex::new(RefCell::new(BuzzerTestStatus {
         state: BuzzerTestSessionState::Idle,
         scenario: None,
@@ -1027,13 +1058,13 @@ static BUZZER_TEST_STATUS: BuzzerTestStatusMutex =
     }));
 
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
-fn buzzer_test_status() -> BuzzerTestStatus {
+pub(crate) fn buzzer_test_status() -> BuzzerTestStatus {
     BUZZER_TEST_STATUS.lock(|status| status.borrow().clone())
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
 #[cfg(feature = "buzzer-observe")]
-fn publish_buzzer_test_status(
+pub(crate) fn publish_buzzer_test_status(
     session: &BuzzerTestSession,
     arbiter: &BuzzerArbiter,
     output_trace: &BuzzerTestOutputTrace,
@@ -1048,13 +1079,13 @@ fn publish_buzzer_test_status(
     feature = "buzzer-test",
     not(feature = "buzzer-observe")
 ))]
-fn publish_buzzer_test_status(session: &BuzzerTestSession, arbiter: &BuzzerArbiter) {
+pub(crate) fn publish_buzzer_test_status(session: &BuzzerTestSession, arbiter: &BuzzerArbiter) {
     let status = session.status(arbiter.active_cue());
     BUZZER_TEST_STATUS.lock(|published| *published.borrow_mut() = status);
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-observe"))]
-struct BuzzerTestOutputTrace {
+pub(crate) struct BuzzerTestOutputTrace {
     started_at_ms: u64,
     last_recorded_ms: u64,
     last_pad_rising_edges: u16,
@@ -1119,7 +1150,7 @@ impl BuzzerTestOutputTrace {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn apply_buzzer_command(
+pub(crate) fn apply_buzzer_command(
     command: BuzzerRuntimeCommand,
     arbiter: &mut BuzzerArbiter,
     now_ms: u64,
@@ -1147,7 +1178,7 @@ fn apply_buzzer_command(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn apply_buzzer_safety_command(
+pub(crate) fn apply_buzzer_safety_command(
     command: BuzzerSafetyCommand,
     arbiter: &mut BuzzerArbiter,
     now_ms: u64,
@@ -1173,7 +1204,7 @@ fn apply_buzzer_safety_command(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
-fn log_buzzer_decisions<I>(decisions: I)
+pub(crate) fn log_buzzer_decisions<I>(decisions: I)
 where
     I: IntoIterator<Item = BuzzerDecision>,
 {
@@ -1183,7 +1214,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
-fn apply_buzzer_test_command(
+pub(crate) fn apply_buzzer_test_command(
     test_session: &mut BuzzerTestSession,
     arbiter: &mut BuzzerArbiter,
     command: BuzzerTestCommand,
@@ -1227,13 +1258,13 @@ fn apply_buzzer_test_command(
 }
 
 #[cfg(target_arch = "xtensa")]
-enum BuzzerTaskWake {
+pub(crate) enum BuzzerTaskWake {
     Command(BuzzerRuntimeCommand),
     Safety(BuzzerSafetyCommand),
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn wait_for_buzzer_wake(next_deadline_ms: Option<u64>) -> Option<BuzzerTaskWake> {
+pub(crate) async fn wait_for_buzzer_wake(next_deadline_ms: Option<u64>) -> Option<BuzzerTaskWake> {
     if let Some(deadline_ms) = next_deadline_ms {
         let delay_ms = deadline_ms
             .saturating_sub(Instant::now().as_millis())
@@ -1259,7 +1290,7 @@ async fn wait_for_buzzer_wake(next_deadline_ms: Option<u64>) -> Option<BuzzerTas
 
 #[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
-async fn run_buzzer_task(
+pub(crate) async fn run_buzzer_task(
     mut buzzer_timer: esp_hal::mcpwm::timer::Timer<2, esp_hal::peripherals::MCPWM0<'static>>,
     mut buzzer_pwm: PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 2, true>,
     peripheral_clock: PeripheralClockConfig,
@@ -1352,7 +1383,7 @@ async fn run_buzzer_task(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn apply_status_light_output(
+pub(crate) fn apply_status_light_output(
     red: &mut Output<'_>,
     green: &mut Output<'_>,
     blue: &mut Output<'_>,
@@ -1383,15 +1414,15 @@ fn apply_status_light_output(
 }
 
 #[cfg(target_arch = "xtensa")]
-static STATUS_LIGHT_STATE: AtomicU8 = AtomicU8::new(StatusLightState::Booting as u8);
+pub(crate) static STATUS_LIGHT_STATE: AtomicU8 = AtomicU8::new(StatusLightState::Booting as u8);
 
 #[cfg(target_arch = "xtensa")]
-fn set_status_light_state(state: StatusLightState) {
+pub(crate) fn set_status_light_state(state: StatusLightState) {
     STATUS_LIGHT_STATE.store(state as u8, Ordering::Relaxed);
 }
 
 #[cfg(target_arch = "xtensa")]
-fn status_light_state_from_code(code: u8) -> StatusLightState {
+pub(crate) fn status_light_state_from_code(code: u8) -> StatusLightState {
     match code {
         0 => StatusLightState::Booting,
         1 => StatusLightState::Ready,
@@ -1409,7 +1440,7 @@ fn status_light_state_from_code(code: u8) -> StatusLightState {
 
 #[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
-async fn run_status_light_task(
+pub(crate) async fn run_status_light_task(
     mut red: Output<'static>,
     mut green: Output<'static>,
     mut blue: Output<'static>,
@@ -1430,7 +1461,7 @@ async fn run_status_light_task(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn refresh_status_light(
+pub(crate) fn refresh_status_light(
     red: &mut Output<'_>,
     green: &mut Output<'_>,
     blue: &mut Output<'_>,
@@ -1449,7 +1480,7 @@ fn refresh_status_light(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn sync_frontpanel_runtime_state(
+pub(crate) fn sync_frontpanel_runtime_state(
     ui_state: &mut FrontPanelUiState,
     fan_decision: FanPolicyDecision,
     heater_lock_reason: Option<HeaterLockReason>,
@@ -1489,30 +1520,30 @@ fn sync_frontpanel_runtime_state(
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 #[derive(Clone, Copy)]
-struct UsbRuntimeStatusContext {
-    elapsed_ms: u64,
-    pd_controller: ControllerKind,
-    last_pd_observation: Option<PdStatusObservation>,
-    heater_power_backend: HeaterPowerBackend,
-    pid_snapshot: HeaterPidSnapshot,
-    heater_control_timing: HeaterControlTiming,
-    heater_physical_output_percent: u8,
-    manual_pps: ManualPpsState,
+pub(crate) struct UsbRuntimeStatusContext {
+    pub(crate) elapsed_ms: u64,
+    pub(crate) pd_controller: ControllerKind,
+    pub(crate) last_pd_observation: Option<PdStatusObservation>,
+    pub(crate) heater_power_backend: HeaterPowerBackend,
+    pub(crate) pid_snapshot: HeaterPidSnapshot,
+    pub(crate) heater_control_timing: HeaterControlTiming,
+    pub(crate) heater_physical_output_percent: u8,
+    pub(crate) manual_pps: ManualPpsState,
     #[cfg(test)]
-    calibration: CalibrationRuntimeState,
-    fan_command: FanHardwareCommand,
-    current_rtd_fault: Option<HeaterFaultReason>,
-    heater_fault_latched: Option<HeaterFaultReason>,
-    attention_pending_after_fault_clear: bool,
-    thermal_control_profile_preview: bool,
-    active_thermal_control_profile: Option<ThermalControlProfile>,
-    last_raw_state: FrontPanelRawState,
-    latest_status_temp_c: f32,
-    latest_control_temp_c: f32,
-    control_measurement_guarded: bool,
-    latest_rtd_raw_adc_mv: u16,
-    latest_rtd_raw_adc_min_mv: u16,
-    latest_rtd_raw_adc_max_mv: u16,
-    latest_vin_raw_adc_mv: u16,
-    vin_mv: u32,
+    pub(crate) calibration: CalibrationRuntimeState,
+    pub(crate) fan_command: FanHardwareCommand,
+    pub(crate) current_rtd_fault: Option<HeaterFaultReason>,
+    pub(crate) heater_fault_latched: Option<HeaterFaultReason>,
+    pub(crate) attention_pending_after_fault_clear: bool,
+    pub(crate) thermal_control_profile_preview: bool,
+    pub(crate) active_thermal_control_profile: Option<ThermalControlProfile>,
+    pub(crate) last_raw_state: FrontPanelRawState,
+    pub(crate) latest_status_temp_c: f32,
+    pub(crate) latest_control_temp_c: f32,
+    pub(crate) control_measurement_guarded: bool,
+    pub(crate) latest_rtd_raw_adc_mv: u16,
+    pub(crate) latest_rtd_raw_adc_min_mv: u16,
+    pub(crate) latest_rtd_raw_adc_max_mv: u16,
+    pub(crate) latest_vin_raw_adc_mv: u16,
+    pub(crate) vin_mv: u32,
 }

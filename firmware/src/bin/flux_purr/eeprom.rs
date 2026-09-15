@@ -1,5 +1,10 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(target_arch = "xtensa")]
-fn memory_commit_error_from_eeprom<I2cError>(error: EepromError<I2cError>) -> MemoryCommitError
+pub(crate) fn memory_commit_error_from_eeprom<I2cError>(
+    error: EepromError<I2cError>,
+) -> MemoryCommitError
 where
     I2cError: embedded_hal::i2c::Error,
 {
@@ -23,7 +28,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-fn probe_eeprom_address(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<u8> {
+pub(crate) fn probe_eeprom_address(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<u8> {
     let mut eeprom = M24c64::with_address(i2c, M24C64_I2C_ADDRESS);
     let mut byte = [0u8; 1];
     eeprom
@@ -33,7 +38,7 @@ fn probe_eeprom_address(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<u8> {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn read_eeprom_bytes_chunked_with_pd<PWM>(
+pub(crate) async fn read_eeprom_bytes_chunked_with_pd<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -61,12 +66,12 @@ where
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn eeprom_bytes_contain_data(bytes: &[u8]) -> bool {
+pub(crate) fn eeprom_bytes_contain_data(bytes: &[u8]) -> bool {
     bytes.iter().any(|byte| *byte != 0xff)
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn write_eeprom_bytes_verified<PWM>(
+pub(crate) async fn write_eeprom_bytes_verified<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -119,7 +124,10 @@ where
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn eeprom_maintenance_write_chunk_len(absolute_offset: usize, remaining: usize) -> usize {
+pub(crate) fn eeprom_maintenance_write_chunk_len(
+    absolute_offset: usize,
+    remaining: usize,
+) -> usize {
     let page_size = flux_purr_firmware::memory::M24C64_PAGE_SIZE;
     let page_room = page_size - (absolute_offset % page_size);
     remaining.min(page_room).min(EEPROM_WRITE_CHUNK_MAX_BYTES)
@@ -129,19 +137,19 @@ fn eeprom_maintenance_write_chunk_len(absolute_offset: usize, remaining: usize) 
 /// program cycle is the longest maintenance interval, so service PD after every
 /// completed page instead of waiting for a command-sized batch to finish.
 #[cfg(any(target_arch = "xtensa", test))]
-struct EepromMaintenancePdServiceSchedule {
+pub(crate) struct EepromMaintenancePdServiceSchedule {
     page_writes_since_service: u8,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl EepromMaintenancePdServiceSchedule {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             page_writes_since_service: 0,
         }
     }
 
-    fn after_page_write(&mut self) -> bool {
+    pub(crate) fn after_page_write(&mut self) -> bool {
         self.page_writes_since_service = self.page_writes_since_service.saturating_add(1);
         if self.page_writes_since_service >= EEPROM_MAINTENANCE_PD_MAX_PAGE_WRITES_WITHOUT_SERVICE {
             self.page_writes_since_service = 0;
@@ -153,17 +161,17 @@ impl EepromMaintenancePdServiceSchedule {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn eeprom_data_is_incompatible(has_valid_record: bool, contains_data: bool) -> bool {
+pub(crate) fn eeprom_data_is_incompatible(has_valid_record: bool, contains_data: bool) -> bool {
     !has_valid_record && contains_data
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-const fn raw_eeprom_operation_mutates(op: EepromMaintenanceOp) -> bool {
+pub(crate) const fn raw_eeprom_operation_mutates(op: EepromMaintenanceOp) -> bool {
     matches!(op, EepromMaintenanceOp::Write | EepromMaintenanceOp::Erase)
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn begin_mutating_eeprom_maintenance(
+pub(crate) fn begin_mutating_eeprom_maintenance(
     ui_state: &mut FrontPanelUiState,
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
@@ -190,7 +198,7 @@ fn begin_mutating_eeprom_maintenance(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn mark_eeprom_required(
+pub(crate) fn mark_eeprom_required(
     ui_state: &mut FrontPanelUiState,
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
@@ -210,7 +218,7 @@ fn mark_eeprom_required(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn eeprom_storage_failure_response(response: &UsbFrame) -> bool {
+pub(crate) fn eeprom_storage_failure_response(response: &UsbFrame) -> bool {
     let UsbFrame::Response {
         ok: false,
         error: Some(error),
@@ -242,7 +250,7 @@ fn eeprom_storage_failure_response(response: &UsbFrame) -> bool {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn apply_successful_eeprom_maintenance_operation(
+pub(crate) fn apply_successful_eeprom_maintenance_operation(
     op: EepromMaintenanceOp,
     ui_state: &mut FrontPanelUiState,
     memory_config: &mut MemoryConfig,
@@ -256,7 +264,7 @@ fn apply_successful_eeprom_maintenance_operation(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn discard_deferred_memory_commit_for_incompatible_eeprom(
+pub(crate) fn discard_deferred_memory_commit_for_incompatible_eeprom(
     eeprom_data_incompatible: bool,
     memory_commit_due_ms: &mut Option<u64>,
 ) {
@@ -266,7 +274,7 @@ fn discard_deferred_memory_commit_for_incompatible_eeprom(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn usb_eeprom_maintenance_response<PWM>(
+pub(crate) async fn usb_eeprom_maintenance_response<PWM>(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: EepromMaintenanceCommand,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
@@ -362,7 +370,7 @@ where
 
 #[cfg(test)]
 #[inline(never)]
-fn memory_record_length_from_header(header: &[u8], slot_size: usize) -> Option<usize> {
+pub(crate) fn memory_record_length_from_header(header: &[u8], slot_size: usize) -> Option<usize> {
     if header.len() < MEMORY_RECORD_HEADER_LEN
         || header[0..4] != *b"FPM1"
         || header[4] != MEMORY_RECORD_FORMAT_VERSION
@@ -377,7 +385,7 @@ fn memory_record_length_from_header(header: &[u8], slot_size: usize) -> Option<u
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-async fn read_eeprom_persist_record<PWM>(
+pub(crate) async fn read_eeprom_persist_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -425,7 +433,7 @@ where
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-async fn load_eeprom_memory_record<PWM>(
+pub(crate) async fn load_eeprom_memory_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -524,7 +532,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-struct EepromMarkerScan {
+pub(crate) struct EepromMarkerScan {
     contains_data: bool,
     legacy_format_present: bool,
     read_failed: bool,
@@ -533,7 +541,7 @@ struct EepromMarkerScan {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn scan_fpr2_layout_markers<PWM>(
+pub(crate) async fn scan_fpr2_layout_markers<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -600,15 +608,14 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn scan_legacy_slots<PWM>(
+pub(crate) async fn scan_legacy_slots<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
     address: u8,
     scratch: &mut MemoryIoScratch,
     scan: &mut EepromMarkerScan,
-)
-where
+) where
     PWM: SetDutyCycle,
 {
     for offset in [
@@ -640,7 +647,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn read_fpr2_domains<PWM>(
+pub(crate) async fn read_fpr2_domains<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -655,17 +662,41 @@ where
     let mut contains_data = false;
     let mut read_failed = false;
     for (domain, offsets, slot_size) in [
-        (PersistDomain::SafetyCalibration, [FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET], FPR2_SAFETY_SLOT_SIZE),
-        (PersistDomain::ThermalPolicy, [FPR2_THERMAL_A_OFFSET, FPR2_THERMAL_B_OFFSET], FPR2_THERMAL_SLOT_SIZE),
-        (PersistDomain::UserPreferences, [FPR2_PREFERENCES_OFFSET, 0], 128),
-        (PersistDomain::NetworkAndPairing, [FPR2_NETWORK_OFFSET, 0], 256),
-        (PersistDomain::ThermalPlant, [FPR2_THERMAL_PLANT_OFFSET, 0], FPR2_THERMAL_SLOT_SIZE),
+        (
+            PersistDomain::SafetyCalibration,
+            [FPR2_SAFETY_A_OFFSET, FPR2_SAFETY_B_OFFSET],
+            FPR2_SAFETY_SLOT_SIZE,
+        ),
+        (
+            PersistDomain::ThermalPolicy,
+            [FPR2_THERMAL_A_OFFSET, FPR2_THERMAL_B_OFFSET],
+            FPR2_THERMAL_SLOT_SIZE,
+        ),
+        (
+            PersistDomain::UserPreferences,
+            [FPR2_PREFERENCES_OFFSET, 0],
+            128,
+        ),
+        (
+            PersistDomain::NetworkAndPairing,
+            [FPR2_NETWORK_OFFSET, 0],
+            256,
+        ),
+        (
+            PersistDomain::ThermalPlant,
+            [FPR2_THERMAL_PLANT_OFFSET, 0],
+            FPR2_THERMAL_SLOT_SIZE,
+        ),
     ] {
         let Some(read_generation) = read_generation else {
             break;
         };
         let mut selected = None;
-        for offset in offsets.iter().copied().take(usize::from(domain.slot_count())) {
+        for offset in offsets
+            .iter()
+            .copied()
+            .take(usize::from(domain.slot_count()))
+        {
             staging.bytes.fill(0xff);
             let candidate = read_eeprom_persist_record(
                 i2c,
@@ -701,7 +732,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-fn merge_persist_records(
+pub(crate) fn merge_persist_records(
     domains: &[Option<PersistRecord>; 6],
     sequence: u32,
 ) -> Option<MemoryRecord> {
@@ -727,7 +758,7 @@ fn merge_persist_records(
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-async fn load_legacy_eeprom_memory_record<PWM>(
+pub(crate) async fn load_legacy_eeprom_memory_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -780,7 +811,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-struct LegacyRecordReadInput<'a> {
+pub(crate) struct LegacyRecordReadInput<'a> {
     address: u8,
     offset: u16,
     slot_size: usize,
@@ -789,7 +820,7 @@ struct LegacyRecordReadInput<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn read_legacy_record_stream<PWM>(
+pub(crate) async fn read_legacy_record_stream<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -897,7 +928,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-fn legacy_record_shape(
+pub(crate) fn legacy_record_shape(
     header: &[u8; MEMORY_RECORD_HEADER_LEN],
     slot_size: usize,
 ) -> Option<(usize, bool)> {
@@ -914,7 +945,7 @@ fn legacy_record_shape(
 
 #[cfg(target_arch = "xtensa")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MemoryCommitError {
+pub(crate) enum MemoryCommitError {
     EncodeFailed,
     WriteFailed,
     WriteAddressNoAck,
@@ -931,7 +962,7 @@ enum MemoryCommitError {
 
 #[cfg(target_arch = "xtensa")]
 impl MemoryCommitError {
-    const fn code(self) -> &'static str {
+    pub(crate) const fn code(self) -> &'static str {
         match self {
             Self::EncodeFailed => "memory_commit_encode_failed",
             Self::WriteFailed => "memory_commit_write_failed",
@@ -948,7 +979,7 @@ impl MemoryCommitError {
         }
     }
 
-    const fn message(self) -> &'static str {
+    pub(crate) const fn message(self) -> &'static str {
         match self {
             Self::EncodeFailed => "Memory record could not be encoded.",
             Self::WriteFailed => "Memory record could not be written to EEPROM.",
@@ -968,27 +999,27 @@ impl MemoryCommitError {
 
 #[cfg(target_arch = "xtensa")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MemoryCommitFailure {
-    error: MemoryCommitError,
-    phase: &'static str,
-    attempt: u8,
-    sequence: u32,
-    domain: PersistDomain,
-    slot: PersistSlot,
+pub(crate) struct MemoryCommitFailure {
+    pub(crate) error: MemoryCommitError,
+    pub(crate) phase: &'static str,
+    pub(crate) attempt: u8,
+    pub(crate) sequence: u32,
+    pub(crate) domain: PersistDomain,
+    pub(crate) slot: PersistSlot,
 }
 
 #[cfg(target_arch = "xtensa")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PersistDomainMask(u8);
+pub(crate) struct PersistDomainMask(u8);
 
 #[cfg(target_arch = "xtensa")]
 impl PersistDomainMask {
-    const SAFETY: Self = Self(1 << 0);
+    pub(crate) const SAFETY: Self = Self(1 << 0);
     const THERMAL: Self = Self(1 << 1);
     const PREFERENCES: Self = Self(1 << 2);
     const NETWORK: Self = Self(1 << 3);
-    const THERMAL_PLANT: Self = Self(1 << 4);
-    const ALL: Self = Self(
+    pub(crate) const THERMAL_PLANT: Self = Self(1 << 4);
+    pub(crate) const ALL: Self = Self(
         Self::SAFETY.0
             | Self::THERMAL.0
             | Self::PREFERENCES.0
@@ -996,7 +1027,7 @@ impl PersistDomainMask {
             | Self::THERMAL_PLANT.0,
     );
 
-    const fn includes(self, domain: PersistDomain) -> bool {
+    pub(crate) const fn includes(self, domain: PersistDomain) -> bool {
         match domain {
             PersistDomain::SafetyCalibration => self.0 & Self::SAFETY.0 != 0,
             PersistDomain::ThermalPolicy => self.0 & Self::THERMAL.0 != 0,
@@ -1011,11 +1042,11 @@ impl PersistDomainMask {
         self.0 == 0
     }
 
-    const fn union(self, other: Self) -> Self {
+    pub(crate) const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
-    fn from_fault(fault: Option<&PersistenceFault>) -> Self {
+    pub(crate) fn from_fault(fault: Option<&PersistenceFault>) -> Self {
         let Some(fault) = fault else {
             return Self(0);
         };
@@ -1032,7 +1063,7 @@ impl PersistDomainMask {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn persist_domain_mask_between(
+pub(crate) fn persist_domain_mask_between(
     current: &MemoryConfig,
     persisted: &MemoryConfig,
 ) -> PersistDomainMask {
@@ -1076,7 +1107,7 @@ fn persist_domain_mask_between(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn copy_persisted_domains(
+pub(crate) fn copy_persisted_domains(
     persisted: &mut MemoryConfig,
     current: &MemoryConfig,
     domains: PersistDomainMask,
@@ -1116,7 +1147,7 @@ fn copy_persisted_domains(
 
 #[cfg(target_arch = "xtensa")]
 impl MemoryCommitFailure {
-    const fn code(self) -> &'static str {
+    pub(crate) const fn code(self) -> &'static str {
         match self.domain {
             PersistDomain::SafetyCalibration => "safety_calibration_persistence_failed",
             PersistDomain::ThermalPolicy => "thermal_policy_persistence_failed",
@@ -1127,13 +1158,13 @@ impl MemoryCommitFailure {
         }
     }
 
-    const fn message(self) -> &'static str {
+    pub(crate) const fn message(self) -> &'static str {
         self.error.message()
     }
 }
 
 #[cfg(target_arch = "xtensa")]
-const fn memory_failure_requires_heater_lock(failure: MemoryCommitFailure) -> bool {
+pub(crate) const fn memory_failure_requires_heater_lock(failure: MemoryCommitFailure) -> bool {
     matches!(
         failure.domain,
         PersistDomain::SafetyCalibration
@@ -1144,7 +1175,7 @@ const fn memory_failure_requires_heater_lock(failure: MemoryCommitFailure) -> bo
 }
 
 #[cfg(target_arch = "xtensa")]
-fn persistence_fault_from_commit(failure: MemoryCommitFailure) -> PersistenceFault {
+pub(crate) fn persistence_fault_from_commit(failure: MemoryCommitFailure) -> PersistenceFault {
     let mut phase = heapless::String::new();
     let _ = phase.push_str(failure.phase);
     let mut slot = heapless::String::new();
@@ -1162,7 +1193,7 @@ fn persistence_fault_from_commit(failure: MemoryCommitFailure) -> PersistenceFau
 }
 
 #[cfg(target_arch = "xtensa")]
-fn log_memory_commit_failure(
+pub(crate) fn log_memory_commit_failure(
     sink: &mut dyn PersistenceLogSink,
     failure: MemoryCommitFailure,
     terminal: bool,
@@ -1189,15 +1220,15 @@ fn log_memory_commit_failure(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn memory_record_write_chunk_len(absolute_offset: usize, remaining: usize) -> usize {
+pub(crate) fn memory_record_write_chunk_len(absolute_offset: usize, remaining: usize) -> usize {
     eeprom_maintenance_write_chunk_len(absolute_offset, remaining)
 }
 
 #[cfg(target_arch = "xtensa")]
-struct EepromPdServiceContext<'a, PWM> {
-    last_pd_observation: &'a mut Option<PdStatusObservation>,
-    heater_pwm: &'a mut PWM,
-    last_heater_duty: &'a mut u8,
+pub(crate) struct EepromPdServiceContext<'a, PWM> {
+    pub(crate) last_pd_observation: &'a mut Option<PdStatusObservation>,
+    pub(crate) heater_pwm: &'a mut PWM,
+    pub(crate) last_heater_duty: &'a mut u8,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1205,7 +1236,7 @@ impl<'a, PWM> EepromPdServiceContext<'a, PWM>
 where
     PWM: SetDutyCycle,
 {
-    fn new(
+    pub(crate) fn new(
         last_pd_observation: &'a mut Option<PdStatusObservation>,
         heater_pwm: &'a mut PWM,
         last_heater_duty: &'a mut u8,
@@ -1219,16 +1250,16 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-struct PdNetworkServiceContext<'a, 'b, PWM> {
-    eeprom: &'a mut EepromPdServiceContext<'b, PWM>,
-    pd_contract_ready: &'a mut bool,
-    ui_state: &'a mut FrontPanelUiState,
-    calibration_runtime_state: &'a mut CalibrationRuntimeState,
-    manual_pps: &'a mut ManualPpsState,
+pub(crate) struct PdNetworkServiceContext<'a, 'b, PWM> {
+    pub(crate) eeprom: &'a mut EepromPdServiceContext<'b, PWM>,
+    pub(crate) pd_contract_ready: &'a mut bool,
+    pub(crate) ui_state: &'a mut FrontPanelUiState,
+    pub(crate) calibration_runtime_state: &'a mut CalibrationRuntimeState,
+    pub(crate) manual_pps: &'a mut ManualPpsState,
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn service_pd_during_network_operation<PWM>(
+pub(crate) async fn service_pd_during_network_operation<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     context: &mut PdNetworkServiceContext<'_, '_, PWM>,
@@ -1251,7 +1282,7 @@ async fn service_pd_during_network_operation<PWM>(
 /// Network control can wait on a background task for seconds. Keep that wait
 /// from starving the FUSB302B policy or leaving stale heater intent armed.
 #[cfg(target_arch = "xtensa")]
-async fn run_network_operation_with_pd<F, PWM>(
+pub(crate) async fn run_network_operation_with_pd<F, PWM>(
     operation: F,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
@@ -1276,7 +1307,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn service_pd_during_eeprom_operation<PWM>(
+pub(crate) async fn service_pd_during_eeprom_operation<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1294,7 +1325,7 @@ async fn service_pd_during_eeprom_operation<PWM>(
 }
 
 #[cfg(target_arch = "xtensa")]
-struct PersistRecordWriteInput<'a> {
+pub(crate) struct PersistRecordWriteInput<'a> {
     sequence: u32,
     data: &'a PersistDomainData,
     slot: PersistSlot,
@@ -1303,7 +1334,7 @@ struct PersistRecordWriteInput<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn write_eeprom_persist_record<PWM>(
+pub(crate) async fn write_eeprom_persist_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1371,7 +1402,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-struct LayoutMarkerWriteInput<'a> {
+pub(crate) struct LayoutMarkerWriteInput<'a> {
     generation: u32,
     status: LayoutMarkerStatus,
     kind: LayoutMarkerKind,
@@ -1382,7 +1413,7 @@ struct LayoutMarkerWriteInput<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn write_layout_marker_record<PWM>(
+pub(crate) async fn write_layout_marker_record<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1444,7 +1475,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-struct PersistMemoryDomainsInput<'a> {
+pub(crate) struct PersistMemoryDomainsInput<'a> {
     sequence: u32,
     expected_config: &'a MemoryConfig,
     domains_to_write: PersistDomainMask,
@@ -1455,7 +1486,7 @@ struct PersistMemoryDomainsInput<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn persist_memory_domains<PWM>(
+pub(crate) async fn persist_memory_domains<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1543,17 +1574,17 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-struct CommitMemoryConfigInput<'a> {
-    memory_sequence: &'a mut u32,
-    memory_config: &'a MemoryConfig,
-    domains_to_write: PersistDomainMask,
-    persistence_log_sink: &'a mut dyn PersistenceLogSink,
-    record_staging: &'a mut [u8; EEPROM_RECORD_STAGING_BYTES],
+pub(crate) struct CommitMemoryConfigInput<'a> {
+    pub(crate) memory_sequence: &'a mut u32,
+    pub(crate) memory_config: &'a MemoryConfig,
+    pub(crate) domains_to_write: PersistDomainMask,
+    pub(crate) persistence_log_sink: &'a mut dyn PersistenceLogSink,
+    pub(crate) record_staging: &'a mut [u8; EEPROM_RECORD_STAGING_BYTES],
 }
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-async fn commit_memory_config_now<PWM>(
+pub(crate) async fn commit_memory_config_now<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1648,7 +1679,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-struct CommitMemoryDomainsWithoutMarkerInput<'a> {
+pub(crate) struct CommitMemoryDomainsWithoutMarkerInput<'a> {
     sequence: u32,
     memory_config: &'a MemoryConfig,
     domains_to_write: PersistDomainMask,
@@ -1658,7 +1689,7 @@ struct CommitMemoryDomainsWithoutMarkerInput<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn commit_memory_config_domains_without_marker<PWM>(
+pub(crate) async fn commit_memory_config_domains_without_marker<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1710,7 +1741,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn initialize_fpr2_defaults<PWM>(
+pub(crate) async fn initialize_fpr2_defaults<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1742,7 +1773,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn migrate_legacy_memory_config<PWM>(
+pub(crate) async fn migrate_legacy_memory_config<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1823,7 +1854,7 @@ where
 
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy)]
-struct PreparedFpr2DomainSpec {
+pub(crate) struct PreparedFpr2DomainSpec {
     domain: PersistDomain,
     offsets: [u16; 2],
     slot_size: usize,
@@ -1831,7 +1862,7 @@ struct PreparedFpr2DomainSpec {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn read_prepared_fpr2_domain<PWM>(
+pub(crate) async fn read_prepared_fpr2_domain<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1881,7 +1912,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn read_prepared_fpr2_domains<PWM>(
+pub(crate) async fn read_prepared_fpr2_domains<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1936,7 +1967,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn write_recovered_active_markers<PWM>(
+pub(crate) async fn write_recovered_active_markers<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -1984,7 +2015,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn recover_prepared_fpr2_layout<PWM>(
+pub(crate) async fn recover_prepared_fpr2_layout<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -2039,7 +2070,7 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn invalidate_legacy_v5_magic<PWM>(
+pub(crate) async fn invalidate_legacy_v5_magic<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -2066,7 +2097,7 @@ where
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn apply_memory_config_to_ui(state: &mut FrontPanelUiState, config: &MemoryConfig) {
+pub(crate) fn apply_memory_config_to_ui(state: &mut FrontPanelUiState, config: &MemoryConfig) {
     state.set_target_temp_c(config.target_temp_c);
     state.selected_preset_slot = config.selected_preset_slot;
     state.ensure_selected_preset_slot();
@@ -2075,7 +2106,7 @@ fn apply_memory_config_to_ui(state: &mut FrontPanelUiState, config: &MemoryConfi
 }
 
 #[cfg(test)]
-fn restore_last_persisted_memory_config(
+pub(crate) fn restore_last_persisted_memory_config(
     memory_config: &mut MemoryConfig,
     ui_state: &mut FrontPanelUiState,
     last_persisted_memory_config: &MemoryConfig,
@@ -2085,7 +2116,7 @@ fn restore_last_persisted_memory_config(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn restore_persisted_memory_domains(
+pub(crate) fn restore_persisted_memory_domains(
     memory_config: &mut MemoryConfig,
     ui_state: &mut FrontPanelUiState,
     last_persisted_memory_config: &MemoryConfig,
@@ -2096,7 +2127,10 @@ fn restore_persisted_memory_domains(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> MemoryConfig {
+pub(crate) fn memory_config_from_ui(
+    state: &FrontPanelUiState,
+    previous: &MemoryConfig,
+) -> MemoryConfig {
     MemoryConfig {
         commissioning_required: previous.commissioning_required,
         target_temp_c: state.target_temp_c,
@@ -2124,18 +2158,18 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
 }
 
 #[allow(dead_code)]
-fn floor_mv_to_100mv(millivolts: u16) -> u16 {
+pub(crate) fn floor_mv_to_100mv(millivolts: u16) -> u16 {
     (millivolts / 100) * 100
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn default_estimated_heater_resistance_ohms(current_temp_c: f32) -> f32 {
+pub(crate) fn default_estimated_heater_resistance_ohms(current_temp_c: f32) -> f32 {
     HEATER_PROFILE_R20_OHMS
         * (1.0 + HEATER_PROFILE_TEMP_COEFFICIENT_PER_C * (current_temp_c - 20.0))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn projected_heater_curve(memory_config: &MemoryConfig) -> Option<HeaterCurveConfig> {
+pub(crate) fn projected_heater_curve(memory_config: &MemoryConfig) -> Option<HeaterCurveConfig> {
     let mut curve = HeaterCurveConfig::default();
     curve.points[0] = Some(default_heater_curve_point(HEATER_CURVE_COLD_ANCHOR_TEMP_C));
     curve.points[1] = Some(default_heater_curve_point(HEATER_CURVE_R20_ANCHOR_TEMP_C));
@@ -2169,7 +2203,7 @@ fn projected_heater_curve(memory_config: &MemoryConfig) -> Option<HeaterCurveCon
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn estimated_heater_resistance_ohms(
+pub(crate) fn estimated_heater_resistance_ohms(
     current_temp_c: f32,
     preview_heater_curve: Option<&HeaterCurveConfig>,
     memory_config: &MemoryConfig,
@@ -2188,7 +2222,7 @@ fn estimated_heater_resistance_ohms(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn effective_pps_current_limit_ma(
+pub(crate) fn effective_pps_current_limit_ma(
     capability_max_ma: u16,
     pd_observation: Option<PdStatusObservation>,
 ) -> u16 {
@@ -2208,12 +2242,12 @@ fn effective_pps_current_limit_ma(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heater_available_current_ma(current_limit_ma: u16, reserve_ma: u16) -> u16 {
+pub(crate) fn heater_available_current_ma(current_limit_ma: u16, reserve_ma: u16) -> u16 {
     current_limit_ma.saturating_sub(reserve_ma.min(current_limit_ma))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heater_safe_max_mv_for_temp(
+pub(crate) fn heater_safe_max_mv_for_temp(
     current_temp_c: f32,
     effective_current_limit_ma: u16,
     source_voltage_max_mv: u16,
@@ -2233,7 +2267,7 @@ fn heater_safe_max_mv_for_temp(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn production_pps_request_ceiling_mv(
+pub(crate) fn production_pps_request_ceiling_mv(
     _current_temp_c: f32,
     _source_current_limit_ma: u16,
     _reserve_ma: u16,
@@ -2245,7 +2279,7 @@ fn production_pps_request_ceiling_mv(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heater_available_power_mw_for_temp(
+pub(crate) fn heater_available_power_mw_for_temp(
     current_temp_c: f32,
     capability_max_mv: Option<u16>,
     capability_max_ma: Option<u16>,
@@ -2276,7 +2310,7 @@ fn heater_available_power_mw_for_temp(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heater_source_request_ceiling_mv(
+pub(crate) fn heater_source_request_ceiling_mv(
     safe_heater_mv: u16,
     current_request_mv: u16,
     measured_heater_mv: u32,
@@ -2295,7 +2329,7 @@ fn heater_source_request_ceiling_mv(
 }
 
 #[cfg(test)]
-fn has_calibrated_heater_resistance_curve(memory_config: &MemoryConfig) -> bool {
+pub(crate) fn has_calibrated_heater_resistance_curve(memory_config: &MemoryConfig) -> bool {
     memory_config
         .active_heater_curve
         .points
@@ -2307,12 +2341,12 @@ fn has_calibrated_heater_resistance_curve(memory_config: &MemoryConfig) -> bool 
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn has_persisted_heater_resistance_curve(memory_config: &MemoryConfig) -> bool {
+pub(crate) fn has_persisted_heater_resistance_curve(memory_config: &MemoryConfig) -> bool {
     projected_heater_curve(memory_config).is_some()
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn should_use_current_limit_fixed_pwm_fallback(
+pub(crate) fn should_use_current_limit_fixed_pwm_fallback(
     duty_percent: u8,
     was_active: bool,
     safe_max_mv: u16,
@@ -2330,7 +2364,7 @@ fn should_use_current_limit_fixed_pwm_fallback(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn should_apply_current_limit_fixed_pwm_fallback(
+pub(crate) fn should_apply_current_limit_fixed_pwm_fallback(
     duty_percent: u8,
     manual_pps_active: bool,
     was_active: bool,
@@ -2347,7 +2381,7 @@ fn should_apply_current_limit_fixed_pwm_fallback(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn effective_auto_adjustable_working_floor_mv(
+pub(crate) fn effective_auto_adjustable_working_floor_mv(
     settings: ThermalControlProfileSettings,
     capability_floor_mv: u16,
     adjustable_max_mv: u16,
@@ -2359,7 +2393,7 @@ fn effective_auto_adjustable_working_floor_mv(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn current_limit_fixed_pwm_duty_percent(
+pub(crate) fn current_limit_fixed_pwm_duty_percent(
     duty_percent: u8,
     current_temp_c: f32,
     effective_current_limit_ma: u16,
@@ -2383,7 +2417,7 @@ fn current_limit_fixed_pwm_duty_percent(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fixed_pd_pwm_duty_percent(
+pub(crate) fn fixed_pd_pwm_duty_percent(
     duty_percent: u8,
     current_temp_c: f32,
     fixed_mv: u16,
@@ -2409,7 +2443,11 @@ fn fixed_pd_pwm_duty_percent(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heater_request_mv_from_power_percent(duty_percent: u8, floor_mv: u16, ceiling_mv: u16) -> u16 {
+pub(crate) fn heater_request_mv_from_power_percent(
+    duty_percent: u8,
+    floor_mv: u16,
+    ceiling_mv: u16,
+) -> u16 {
     let bounded_min_mv = floor_mv.clamp(CH224Q_ADJUSTABLE_REQUEST_MIN_MV, HEATER_ADJUSTABLE_MAX_MV);
     let bounded_max_mv = ceiling_mv
         .max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV)
@@ -2430,7 +2468,7 @@ fn heater_request_mv_from_power_percent(duty_percent: u8, floor_mv: u16, ceiling
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heater_physical_pwm_percent(
+pub(crate) fn heater_physical_pwm_percent(
     duty_percent: u8,
     ceiling_mv: u16,
     active_request_mv: u16,
@@ -2451,13 +2489,13 @@ fn heater_physical_pwm_percent(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn apply_warmup_soft_start(duty_percent: u8, warmup_soft_start_percent: u8) -> u8 {
+pub(crate) fn apply_warmup_soft_start(duty_percent: u8, warmup_soft_start_percent: u8) -> u8 {
     (u16::from(duty_percent.min(100)).saturating_mul(u16::from(warmup_soft_start_percent.min(100)))
         / 100) as u8
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn integer_sqrt_floor(value: u64) -> u32 {
+pub(crate) fn integer_sqrt_floor(value: u64) -> u32 {
     let mut low = 0_u64;
     let mut high = u64::from(u32::MAX);
     while low <= high {
@@ -2479,7 +2517,10 @@ fn integer_sqrt_floor(value: u64) -> u32 {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn adjustable_mode_for_request(request_mv: u16, pps_max_mv: u16) -> ch224q::AdjustableVoltageMode {
+pub(crate) fn adjustable_mode_for_request(
+    request_mv: u16,
+    pps_max_mv: u16,
+) -> ch224q::AdjustableVoltageMode {
     if request_mv <= pps_max_mv {
         ch224q::AdjustableVoltageMode::Pps
     } else {
@@ -2488,7 +2529,7 @@ fn adjustable_mode_for_request(request_mv: u16, pps_max_mv: u16) -> ch224q::Adju
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn should_blank_heater_for_adjustable_request(
+pub(crate) fn should_blank_heater_for_adjustable_request(
     _current_request_mv: u16,
     _next_request_mv: u16,
     mode_changed: bool,
@@ -2497,12 +2538,15 @@ fn should_blank_heater_for_adjustable_request(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn should_restore_gate_after_adjustable_request(blank_heater: bool, gate_duty_percent: u8) -> bool {
+pub(crate) fn should_restore_gate_after_adjustable_request(
+    blank_heater: bool,
+    gate_duty_percent: u8,
+) -> bool {
     !blank_heater && gate_duty_percent > 0
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn pps_request_transition_ms(mode_changed: bool) -> u64 {
+pub(crate) fn pps_request_transition_ms(mode_changed: bool) -> u64 {
     if mode_changed {
         HEATER_PPS_LARGE_TRANSITION_MS
     } else {
@@ -2511,12 +2555,12 @@ fn pps_request_transition_ms(mode_changed: bool) -> u64 {
 }
 
 #[cfg(test)]
-fn clamp_ch224q_adjustable_request_mv(request_mv: u16) -> u16 {
+pub(crate) fn clamp_ch224q_adjustable_request_mv(request_mv: u16) -> u16 {
     request_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heater_adjustable_request_mv(
+pub(crate) fn heater_adjustable_request_mv(
     duty_percent: u8,
     heater_enabled: bool,
     current_request_mv: u16,
@@ -2550,7 +2594,7 @@ fn heater_adjustable_request_mv(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn select_heater_power_backend(
+pub(crate) fn select_heater_power_backend(
     capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     status: Option<Status>,
 ) -> HeaterPowerBackend {
@@ -2571,7 +2615,7 @@ fn select_heater_power_backend(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn select_heater_power_backend_with_capability_state(
+pub(crate) fn select_heater_power_backend_with_capability_state(
     capabilities: ch224q::AdjustablePowerCapabilities,
     status: Option<Status>,
     capability_state: ManualPpsState,
@@ -2584,7 +2628,7 @@ fn select_heater_power_backend_with_capability_state(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn select_heater_power_backend_with_source_limits(
+pub(crate) fn select_heater_power_backend_with_source_limits(
     capabilities: ch224q::AdjustablePowerCapabilities,
     status: Option<Status>,
     source_limits: Option<(u16, u16, u16)>,
@@ -2633,7 +2677,7 @@ fn select_heater_power_backend_with_source_limits(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn constrain_heater_backend_to_controller(
+pub(crate) fn constrain_heater_backend_to_controller(
     controller: ControllerKind,
     backend: HeaterPowerBackend,
 ) -> HeaterPowerBackend {
@@ -2701,7 +2745,7 @@ fn constrain_heater_backend_to_controller(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn select_fusb302b_heater_power_backend(
+pub(crate) fn select_fusb302b_heater_power_backend(
     capabilities: Option<ch224q::AdjustablePowerCapabilities>,
 ) -> HeaterPowerBackend {
     let Some(capabilities) = capabilities else {
@@ -2724,7 +2768,7 @@ fn select_fusb302b_heater_power_backend(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn refresh_fusb302b_heater_power_backend(
+pub(crate) fn refresh_fusb302b_heater_power_backend(
     previous: HeaterPowerBackend,
     capabilities: Option<ch224q::AdjustablePowerCapabilities>,
 ) -> HeaterPowerBackend {
@@ -2734,8 +2778,11 @@ fn refresh_fusb302b_heater_power_backend(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn apply_heater_duty<PWM>(heater_pwm: &mut PWM, duty_percent: u8, last_duty_percent: &mut u8)
-where
+pub(crate) fn apply_heater_duty<PWM>(
+    heater_pwm: &mut PWM,
+    duty_percent: u8,
+    last_duty_percent: &mut u8,
+) where
     PWM: SetDutyCycle,
 {
     if duty_percent == *last_duty_percent {
@@ -2751,21 +2798,21 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-struct ThermalPlantDisarmContext<'a, 'i, PWM> {
-    calibration_runtime_state: &'a mut CalibrationRuntimeState,
-    backend: &'a mut HeaterPowerBackend,
-    manual_pps: &'a mut ManualPpsState,
-    i2c: &'a mut I2c<'i, esp_hal::Blocking>,
-    pd_port: &'a mut PdPort,
-    heater_pwm: &'a mut PWM,
-    hold_pps_governor: &'a mut HoldPpsGovernor,
-    ui_state: &'a mut FrontPanelUiState,
-    last_heater_duty: &'a mut u8,
-    measured_vin_mv: u32,
+pub(crate) struct ThermalPlantDisarmContext<'a, 'i, PWM> {
+    pub(crate) calibration_runtime_state: &'a mut CalibrationRuntimeState,
+    pub(crate) backend: &'a mut HeaterPowerBackend,
+    pub(crate) manual_pps: &'a mut ManualPpsState,
+    pub(crate) i2c: &'a mut I2c<'i, esp_hal::Blocking>,
+    pub(crate) pd_port: &'a mut PdPort,
+    pub(crate) heater_pwm: &'a mut PWM,
+    pub(crate) hold_pps_governor: &'a mut HoldPpsGovernor,
+    pub(crate) ui_state: &'a mut FrontPanelUiState,
+    pub(crate) last_heater_duty: &'a mut u8,
+    pub(crate) measured_vin_mv: u32,
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn disarm_pending_thermal_plant_output<PWM>(
+pub(crate) async fn disarm_pending_thermal_plant_output<PWM>(
     context: ThermalPlantDisarmContext<'_, '_, PWM>,
 ) -> bool
 where
@@ -2813,12 +2860,12 @@ where
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn terminal_fixed_pd_voltage_confirmed(measured_vin_mv: u32) -> bool {
+pub(crate) fn terminal_fixed_pd_voltage_confirmed(measured_vin_mv: u32) -> bool {
     measured_vin_mv.abs_diff(u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts())) <= 1_000
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn pd_observation_confirms_fixed_contract(
+pub(crate) fn pd_observation_confirms_fixed_contract(
     observation: Option<PdStatusObservation>,
     requested_mv: u16,
 ) -> bool {
@@ -2830,7 +2877,7 @@ fn pd_observation_confirms_fixed_contract(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn latch_terminal_fixed_pd_disarm(
+pub(crate) fn latch_terminal_fixed_pd_disarm(
     calibration_runtime_state: &CalibrationRuntimeState,
     backend: &mut HeaterPowerBackend,
 ) -> bool {
@@ -2842,7 +2889,7 @@ fn latch_terminal_fixed_pd_disarm(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn release_terminal_fixed_pd_disarm_for_manual_pps(
+pub(crate) fn release_terminal_fixed_pd_disarm_for_manual_pps(
     backend: &mut HeaterPowerBackend,
     manual_pps_active: bool,
 ) -> bool {
@@ -2889,7 +2936,7 @@ fn release_terminal_fixed_pd_disarm_for_manual_pps(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn manual_pps_request_required(
+pub(crate) fn manual_pps_request_required(
     manual_pps: ManualPpsState,
     controller: ControllerKind,
     observation: Option<PdStatusObservation>,

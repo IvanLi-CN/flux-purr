@@ -1,4 +1,6 @@
-fn resolve_artifact_path(root: Option<&Path>, path: &str) -> PathBuf {
+pub(crate) use super::*;
+
+pub(crate) fn resolve_artifact_path(root: Option<&Path>, path: &str) -> PathBuf {
     let path = PathBuf::from(path);
     if path.is_absolute() {
         path
@@ -9,7 +11,10 @@ fn resolve_artifact_path(root: Option<&Path>, path: &str) -> PathBuf {
     }
 }
 
-fn resolve_verified_artifact_path(root: Option<&Path>, path: &str) -> io::Result<PathBuf> {
+pub(crate) fn resolve_verified_artifact_path(
+    root: Option<&Path>,
+    path: &str,
+) -> io::Result<PathBuf> {
     let relative = PathBuf::from(path);
     if relative.is_absolute()
         || relative.components().any(|component| {
@@ -37,7 +42,7 @@ fn resolve_verified_artifact_path(root: Option<&Path>, path: &str) -> io::Result
     Ok(candidate)
 }
 
-async fn run_espflash_with_program(
+pub(crate) async fn run_espflash_with_program(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
     port_path: &str,
@@ -49,7 +54,7 @@ async fn run_espflash_with_program(
     .await
 }
 
-async fn run_espflash_with_reset_fallback_with_program<F>(
+pub(crate) async fn run_espflash_with_reset_fallback_with_program<F>(
     program: &Path,
     artifact: &FirmwareArtifact,
     port_path: &str,
@@ -95,7 +100,7 @@ where
     ))
 }
 
-async fn handle_failed_espflash_attempt(
+pub(crate) async fn handle_failed_espflash_attempt(
     program: &Path,
     artifact: &FirmwareArtifact,
     port_path: &str,
@@ -136,7 +141,7 @@ async fn handle_failed_espflash_attempt(
     Ok(true)
 }
 
-async fn run_espflash_command_with_timeout(
+pub(crate) async fn run_espflash_command_with_timeout(
     program: &Path,
     args: &[String],
     timeout: Duration,
@@ -168,7 +173,7 @@ async fn run_espflash_command_with_timeout(
         })
 }
 
-fn build_espflash_reset_args(
+pub(crate) fn build_espflash_reset_args(
     artifact: &FirmwareArtifact,
     port_path: &str,
     before_reset: &str,
@@ -193,7 +198,7 @@ fn build_espflash_reset_args(
     ])
 }
 
-fn build_bundle_write_bin_args(
+pub(crate) fn build_bundle_write_bin_args(
     common: &[String],
     before_reset: &str,
     address: u64,
@@ -212,7 +217,7 @@ fn build_bundle_write_bin_args(
     args
 }
 
-async fn run_flash_transaction_with_program(
+pub(crate) async fn run_flash_transaction_with_program(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
     port_path: &str,
@@ -221,7 +226,7 @@ async fn run_flash_transaction_with_program(
     run_espflash_with_program(artifact, root, port_path, program).await
 }
 
-fn resolve_espflash_program() -> PathBuf {
+pub(crate) fn resolve_espflash_program() -> PathBuf {
     if let Some(program) = env::var_os("FLUX_PURR_ESPFLASH").filter(|value| !value.is_empty()) {
         return PathBuf::from(program);
     }
@@ -243,7 +248,7 @@ fn resolve_espflash_program() -> PathBuf {
     PathBuf::from("espflash")
 }
 
-fn espflash_failure_details(program: &Path, args: &[String], output: &Output) -> Value {
+pub(crate) fn espflash_failure_details(program: &Path, args: &[String], output: &Output) -> Value {
     json!({
         "program": program,
         "args": args,
@@ -253,17 +258,17 @@ fn espflash_failure_details(program: &Path, args: &[String], output: &Output) ->
     })
 }
 
-fn espflash_connection_failed(output: &Output) -> bool {
+pub(crate) fn espflash_connection_failed(output: &Output) -> bool {
     espflash_connection_failure_text(&bounded_espflash_output(&output.stderr))
         || espflash_connection_failure_text(&bounded_espflash_output(&output.stdout))
 }
 
-fn espflash_flash_end_requires_reset(args: &[String], output: &Output) -> bool {
+pub(crate) fn espflash_flash_end_requires_reset(args: &[String], output: &Output) -> bool {
     args.first().map(String::as_str) == Some("flash")
         && bounded_espflash_output(&output.stderr).contains("Error while running FlashEnd command")
 }
 
-fn espflash_connection_failure_text(output: &str) -> bool {
+pub(crate) fn espflash_connection_failure_text(output: &str) -> bool {
     let output = output.to_ascii_lowercase();
     output.contains("failed to connect to the device")
         || output.contains("error while connecting to device")
@@ -271,7 +276,7 @@ fn espflash_connection_failure_text(output: &str) -> bool {
         || output.contains("broken pipe")
 }
 
-fn bounded_espflash_output(bytes: &[u8]) -> String {
+pub(crate) fn bounded_espflash_output(bytes: &[u8]) -> String {
     const MAX_OUTPUT_BYTES: usize = 4_096;
     let text = String::from_utf8_lossy(bytes);
     if text.len() <= MAX_OUTPUT_BYTES {
@@ -284,7 +289,7 @@ fn bounded_espflash_output(bytes: &[u8]) -> String {
     format!("{} [truncated]", text[..end].trim())
 }
 
-async fn run_espflash_with_exclusive_serial(
+pub(crate) async fn run_espflash_with_exclusive_serial(
     state: &AppState,
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
@@ -297,7 +302,7 @@ async fn run_espflash_with_exclusive_serial(
     run_flash_transaction_with_program(artifact, root, port_path, &program).await
 }
 
-async fn acquire_serial_rpc_with_timeout(
+pub(crate) async fn acquire_serial_rpc_with_timeout(
     serial_rpc: Arc<tokio::sync::Mutex<()>>,
     timeout: Duration,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>, HttpError> {
@@ -313,7 +318,7 @@ async fn acquire_serial_rpc_with_timeout(
         })
 }
 
-fn drop_cached_serial_session(
+pub(crate) fn drop_cached_serial_session(
     serial_sessions: &Arc<Mutex<SerialSessionMap>>,
     port_path: &str,
 ) -> Result<(), HttpError> {
@@ -322,7 +327,7 @@ fn drop_cached_serial_session(
     Ok(())
 }
 
-fn build_espflash_args_with_reset_mode(
+pub(crate) fn build_espflash_args_with_reset_mode(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
     port_path: &str,
@@ -401,7 +406,7 @@ fn build_espflash_args_with_reset_mode(
     Ok(vec![partition_table_args, app_args, reset_args])
 }
 
-fn firmware_partition_table_path(root: Option<&Path>) -> Result<PathBuf, HttpError> {
+pub(crate) fn firmware_partition_table_path(root: Option<&Path>) -> Result<PathBuf, HttpError> {
     let Some(root) = root else {
         return Err(HttpError::bad_request(
             "firmware_partition_table_required",
@@ -419,7 +424,9 @@ fn firmware_partition_table_path(root: Option<&Path>) -> Result<PathBuf, HttpErr
     }
 }
 
-fn firmware_partition_table_binary_path(root: Option<&Path>) -> Result<PathBuf, HttpError> {
+pub(crate) fn firmware_partition_table_binary_path(
+    root: Option<&Path>,
+) -> Result<PathBuf, HttpError> {
     let Some(root) = root else {
         return Err(HttpError::bad_request(
             "firmware_partition_table_required",

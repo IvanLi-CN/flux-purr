@@ -1,3 +1,5 @@
+pub(crate) use super::*;
+
 #[derive(Debug, Deserialize)]
 pub struct BindRequest {
     pub alias: Option<String>,
@@ -6,7 +8,7 @@ pub struct BindRequest {
 /// Versioned local-only control protocol used by the CLI and the native daemon.
 /// The wire format is a four-byte big-endian length followed by a CBOR frame.
 pub const LOCAL_CONTROL_PROTOCOL_VERSION: u16 = 1;
-const LOCAL_CONTROL_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const LOCAL_CONTROL_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalControlRequest {
@@ -51,7 +53,7 @@ pub fn validate_local_control_endpoint(endpoint: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-fn local_control_request_id() -> String {
+pub(crate) fn local_control_request_id() -> String {
     let sequence = LOCAL_CONTROL_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!("cli-{}-{sequence}", now_millis())
 }
@@ -220,7 +222,7 @@ pub async fn serve_local_control(endpoint: String, state: AppState) -> io::Resul
     }
 }
 
-async fn handle_local_control_connection<T>(
+pub(crate) async fn handle_local_control_connection<T>(
     stream: &mut T,
     state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
@@ -269,7 +271,7 @@ where
     Ok(())
 }
 
-async fn write_local_control_frame<T, V>(stream: &mut T, value: &V) -> io::Result<()>
+pub(crate) async fn write_local_control_frame<T, V>(stream: &mut T, value: &V) -> io::Result<()>
 where
     T: AsyncWrite + Unpin,
     V: Serialize,
@@ -287,7 +289,7 @@ where
     stream.write_all(&bytes).await
 }
 
-async fn read_local_control_frame<T, V>(stream: &mut T) -> io::Result<V>
+pub(crate) async fn read_local_control_frame<T, V>(stream: &mut T) -> io::Result<V>
 where
     T: AsyncRead + Unpin,
     V: DeserializeOwned,

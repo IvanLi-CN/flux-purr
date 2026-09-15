@@ -1,122 +1,122 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(target_arch = "xtensa")]
-type RuntimeDisplayBus = ExclusiveDevice<
-    Spi<'static, esp_hal::Async>,
-    Output<'static>,
-    embedded_hal_bus::spi::NoDelay,
->;
+pub(crate) type RuntimeDisplayBus =
+    ExclusiveDevice<Spi<'static, esp_hal::Async>, Output<'static>, embedded_hal_bus::spi::NoDelay>;
 #[cfg(target_arch = "xtensa")]
-type RuntimeDisplay =
+pub(crate) type RuntimeDisplay =
     GC9D01<'static, RuntimeDisplayBus, Output<'static>, Output<'static>, DisplayTimer>;
 
 #[cfg(target_arch = "xtensa")]
-type RuntimePwm0 = PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 0, true>;
+pub(crate) type RuntimePwm0 = PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 0, true>;
 
 #[cfg(target_arch = "xtensa")]
-type RuntimePwm1 = PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 1, true>;
+pub(crate) type RuntimePwm1 = PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 1, true>;
 
 #[cfg(target_arch = "xtensa")]
-type RuntimeMcpwm = McPwm<'static, esp_hal::peripherals::MCPWM0<'static>>;
+pub(crate) type RuntimeMcpwm = McPwm<'static, esp_hal::peripherals::MCPWM0<'static>>;
 
 #[cfg(target_arch = "xtensa")]
-struct RuntimeTransportState {
+pub(crate) struct RuntimeTransportState {
     #[cfg(feature = "web_serial")]
-    usb_serial: RawUsbSerialJtag,
+    pub(crate) usb_serial: RawUsbSerialJtag,
     #[cfg(feature = "web_serial")]
-    usb_rx_line: heapless::String<USB_CONTROL_LINE_CAPACITY>,
+    pub(crate) usb_rx_line: heapless::String<USB_CONTROL_LINE_CAPACITY>,
     #[cfg(feature = "web_serial")]
-    usb_tx_buf: &'static mut [u8; USB_CONTROL_TX_BUFFER_LEN],
+    pub(crate) usb_tx_buf: &'static mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     #[cfg(feature = "web_serial")]
-    eeprom_snapshot_session: EepromSnapshotSession,
+    pub(crate) eeprom_snapshot_session: EepromSnapshotSession,
     #[cfg(not(feature = "web_serial"))]
-    persistence_log_sink: NoopPersistenceLogSink,
+    pub(crate) persistence_log_sink: NoopPersistenceLogSink,
 }
 
 #[cfg(target_arch = "xtensa")]
-struct RuntimeLoopState {
-    runtime_mode: FrontPanelRuntimeMode,
-    display: RuntimeDisplay,
-    canvas: &'static mut DisplayCanvas,
-    inputs: FrontPanelInputs<'static>,
-    controller: FrontPanelInputController,
-    pd_i2c: I2c<'static, Blocking>,
-    pd_port: PdPort,
-    fan_enable: Output<'static>,
-    fan_pwm: RuntimePwm0,
-    heater_pwm: RuntimePwm1,
-    adc1: Adc1Driver,
-    vin_adc_pin: VinAdcPin,
-    rtd_adc_pin: RtdAdcPin,
-    adc_curve: Option<Adc1Curve>,
-    transport: RuntimeTransportState,
-    eeprom_record_staging: &'static mut [u8; EEPROM_RECORD_STAGING_BYTES],
-    memory_config: MemoryConfig,
-    last_persisted_memory_config: MemoryConfig,
-    memory_commit_due_ms: Option<u64>,
-    memory_sequence: u32,
-    eeprom_required: bool,
-    eeprom_data_incompatible: bool,
-    prepared_layout_recovery_pending: bool,
-    persistence_source: &'static str,
-    persistence_record_state: &'static str,
-    preview_heater_curve: Option<HeaterCurvePreview>,
-    pd_contract_ready: bool,
-    manual_pps_state: ManualPpsState,
-    calibration_runtime_state: CalibrationRuntimeState,
-    thermal_plant_workspace: &'static mut CalibrationThermalPlantWorkspace,
-    thermal_control_profile_preview: Option<ThermalControlProfile>,
-    heater_power_backend: HeaterPowerBackend,
-    hold_pps_governor: HoldPpsGovernor,
-    heater_controller: HeaterController,
-    ui_state: FrontPanelUiState,
-    current_rtd_fault: Option<HeaterFaultReason>,
-    latest_temp_c: f32,
-    latest_temp_i16: i16,
-    latest_display_temp_c: f32,
-    latest_display_temp_i16: i16,
-    latest_rtd_raw_adc_mv: u16,
-    latest_rtd_raw_adc_min_mv: u16,
-    latest_rtd_raw_adc_max_mv: u16,
-    latest_vin_raw_adc_mv: u16,
-    latest_vin_mv: u32,
-    pd_contract_vin_guard: PdContractVinGuard,
-    rtd_pps_transition_guard: RtdPpsTransitionGuard,
-    rtd_control_measurement_guard: RtdControlMeasurementGuard,
-    control_measurement_guarded: bool,
-    last_rtd_sample_request_mv: u16,
-    last_pd_observation: Option<PdStatusObservation>,
-    last_pd_status_log_key: Option<PdStatusLogKey>,
-    last_fusb302b_power_capabilities: Option<ch224q::AdjustablePowerCapabilities>,
-    active_thermal_settings: ThermalControlProfileSettings,
-    last_pid_snapshot: HeaterPidSnapshot,
-    last_heater_duty: u8,
-    cooling_disabled_lock_latched: bool,
-    cooling_disabled_lock_armed: bool,
-    fan_policy_state: FanPolicyState,
-    heater_enabled_last_cycle: bool,
-    last_fan_command: Option<FanHardwareCommand>,
-    last_raw_state: FrontPanelRawState,
-    fan_command: FanHardwareCommand,
-    buzzer: BuzzerRuntime,
-    last_fault_present: bool,
-    overtemp_attention_acknowledged: bool,
-    attention_pending_after_fault_clear: bool,
-    overtemp_forced_fan_active: bool,
-    suppress_attention_ack_input: bool,
-    suppress_attention_ack_waits_for_event: bool,
-    suppress_attention_ack_event_seen: bool,
-    suppress_attention_ack_clear_delay_ms: u64,
-    suppress_attention_ack_clear_after_ms: Option<u64>,
-    protection_alarm: ProtectionAlarmCadence,
-    next_attention_reminder_ms: Option<u64>,
-    status_light_started_ms: u64,
-    runtime_started_ms: u64,
-    last_control_ms: u64,
-    next_control_deadline_ms: u64,
-    next_pd_service_deadline_ms: u64,
-    heater_control_timing: HeaterControlTiming,
-    ui_refresh_pending: bool,
-    next_ui_refresh_ms: u64,
-    suppress_pairing_input_until_released: bool,
+pub(crate) struct RuntimeLoopState {
+    pub(crate) runtime_mode: FrontPanelRuntimeMode,
+    pub(crate) display: RuntimeDisplay,
+    pub(crate) canvas: &'static mut DisplayCanvas,
+    pub(crate) inputs: FrontPanelInputs<'static>,
+    pub(crate) controller: FrontPanelInputController,
+    pub(crate) pd_i2c: I2c<'static, Blocking>,
+    pub(crate) pd_port: PdPort,
+    pub(crate) fan_enable: Output<'static>,
+    pub(crate) fan_pwm: RuntimePwm0,
+    pub(crate) heater_pwm: RuntimePwm1,
+    pub(crate) adc1: Adc1Driver,
+    pub(crate) vin_adc_pin: VinAdcPin,
+    pub(crate) rtd_adc_pin: RtdAdcPin,
+    pub(crate) adc_curve: Option<Adc1Curve>,
+    pub(crate) transport: RuntimeTransportState,
+    pub(crate) eeprom_record_staging: &'static mut [u8; EEPROM_RECORD_STAGING_BYTES],
+    pub(crate) memory_config: MemoryConfig,
+    pub(crate) last_persisted_memory_config: MemoryConfig,
+    pub(crate) memory_commit_due_ms: Option<u64>,
+    pub(crate) memory_sequence: u32,
+    pub(crate) eeprom_required: bool,
+    pub(crate) eeprom_data_incompatible: bool,
+    pub(crate) prepared_layout_recovery_pending: bool,
+    pub(crate) persistence_source: &'static str,
+    pub(crate) persistence_record_state: &'static str,
+    pub(crate) preview_heater_curve: Option<HeaterCurvePreview>,
+    pub(crate) pd_contract_ready: bool,
+    pub(crate) manual_pps_state: ManualPpsState,
+    pub(crate) calibration_runtime_state: CalibrationRuntimeState,
+    pub(crate) thermal_plant_workspace: &'static mut CalibrationThermalPlantWorkspace,
+    pub(crate) thermal_control_profile_preview: Option<ThermalControlProfile>,
+    pub(crate) heater_power_backend: HeaterPowerBackend,
+    pub(crate) hold_pps_governor: HoldPpsGovernor,
+    pub(crate) heater_controller: HeaterController,
+    pub(crate) ui_state: FrontPanelUiState,
+    pub(crate) current_rtd_fault: Option<HeaterFaultReason>,
+    pub(crate) latest_temp_c: f32,
+    pub(crate) latest_temp_i16: i16,
+    pub(crate) latest_display_temp_c: f32,
+    pub(crate) latest_display_temp_i16: i16,
+    pub(crate) latest_rtd_raw_adc_mv: u16,
+    pub(crate) latest_rtd_raw_adc_min_mv: u16,
+    pub(crate) latest_rtd_raw_adc_max_mv: u16,
+    pub(crate) latest_vin_raw_adc_mv: u16,
+    pub(crate) latest_vin_mv: u32,
+    pub(crate) pd_contract_vin_guard: PdContractVinGuard,
+    pub(crate) rtd_pps_transition_guard: RtdPpsTransitionGuard,
+    pub(crate) rtd_control_measurement_guard: RtdControlMeasurementGuard,
+    pub(crate) control_measurement_guarded: bool,
+    pub(crate) last_rtd_sample_request_mv: u16,
+    pub(crate) last_pd_observation: Option<PdStatusObservation>,
+    pub(crate) last_pd_status_log_key: Option<PdStatusLogKey>,
+    pub(crate) last_fusb302b_power_capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+    pub(crate) active_thermal_settings: ThermalControlProfileSettings,
+    pub(crate) last_pid_snapshot: HeaterPidSnapshot,
+    pub(crate) last_heater_duty: u8,
+    pub(crate) cooling_disabled_lock_latched: bool,
+    pub(crate) cooling_disabled_lock_armed: bool,
+    pub(crate) fan_policy_state: FanPolicyState,
+    pub(crate) heater_enabled_last_cycle: bool,
+    pub(crate) last_fan_command: Option<FanHardwareCommand>,
+    pub(crate) last_raw_state: FrontPanelRawState,
+    pub(crate) fan_command: FanHardwareCommand,
+    pub(crate) buzzer: BuzzerRuntime,
+    pub(crate) last_fault_present: bool,
+    pub(crate) overtemp_attention_acknowledged: bool,
+    pub(crate) attention_pending_after_fault_clear: bool,
+    pub(crate) overtemp_forced_fan_active: bool,
+    pub(crate) suppress_attention_ack_input: bool,
+    pub(crate) suppress_attention_ack_waits_for_event: bool,
+    pub(crate) suppress_attention_ack_event_seen: bool,
+    pub(crate) suppress_attention_ack_clear_delay_ms: u64,
+    pub(crate) suppress_attention_ack_clear_after_ms: Option<u64>,
+    pub(crate) protection_alarm: ProtectionAlarmCadence,
+    pub(crate) next_attention_reminder_ms: Option<u64>,
+    pub(crate) status_light_started_ms: u64,
+    pub(crate) runtime_started_ms: u64,
+    pub(crate) last_control_ms: u64,
+    pub(crate) next_control_deadline_ms: u64,
+    pub(crate) next_pd_service_deadline_ms: u64,
+    pub(crate) heater_control_timing: HeaterControlTiming,
+    pub(crate) ui_refresh_pending: bool,
+    pub(crate) next_ui_refresh_ms: u64,
+    pub(crate) suppress_pairing_input_until_released: bool,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -126,10 +126,11 @@ macro_rules! assemble_runtime_loop {
     };
 }
 
-include!("runtime_assembly.rs");
+#[path = "runtime_assembly.rs"]
+pub(crate) mod runtime_assembly;
 
 #[cfg(target_arch = "xtensa")]
-struct BootSystemTokens {
+pub(crate) struct BootSystemTokens {
     gpio13: esp_hal::peripherals::GPIO13<'static>,
     timg0: esp_hal::peripherals::TIMG0<'static>,
     software_interrupt: esp_hal::peripherals::SW_INTERRUPT<'static>,
@@ -144,7 +145,7 @@ struct BootSystemTokens {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootDeviceTokens {
+pub(crate) struct BootDeviceTokens {
     spi2: esp_hal::peripherals::SPI2<'static>,
     display_sck: esp_hal::peripherals::GPIO12<'static>,
     display_mosi: esp_hal::peripherals::GPIO11<'static>,
@@ -171,7 +172,7 @@ struct BootDeviceTokens {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootSystem {
+pub(crate) struct BootSystem {
     reset_reason: &'static str,
     startup_sequence: StartupSequence,
     runtime_mode: FrontPanelRuntimeMode,
@@ -196,7 +197,7 @@ struct BootSystem {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootRuntimeTokens {
+pub(crate) struct BootRuntimeTokens {
     fan_enable: esp_hal::peripherals::GPIO35<'static>,
     fan_pwm: esp_hal::peripherals::GPIO36<'static>,
     heater_pwm: esp_hal::peripherals::GPIO47<'static>,
@@ -212,7 +213,7 @@ struct BootRuntimeTokens {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootDisplay {
+pub(crate) struct BootDisplay {
     system: BootSystem,
     tokens: BootRuntimeTokens,
     display: RuntimeDisplay,
@@ -221,7 +222,7 @@ struct BootDisplay {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootAdcTokens {
+pub(crate) struct BootAdcTokens {
     adc1: esp_hal::peripherals::ADC1<'static>,
     vin_adc: esp_hal::peripherals::GPIO1<'static>,
     rtd_adc: esp_hal::peripherals::GPIO2<'static>,
@@ -230,7 +231,7 @@ struct BootAdcTokens {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootOutput {
+pub(crate) struct BootOutput {
     system: BootSystem,
     tokens: BootAdcTokens,
     display: RuntimeDisplay,
@@ -244,7 +245,7 @@ struct BootOutput {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootOutputContext<'a> {
+pub(crate) struct BootOutputContext<'a> {
     startup_sequence: &'a mut StartupSequence,
     fan_enable_pin: esp_hal::peripherals::GPIO35<'static>,
     fan_pwm_pin: esp_hal::peripherals::GPIO36<'static>,
@@ -259,7 +260,7 @@ struct BootOutputContext<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootKeyTestContext<'a> {
+pub(crate) struct BootKeyTestContext<'a> {
     display: &'a mut RuntimeDisplay,
     canvas: &'a mut DisplayCanvas,
     inputs: FrontPanelInputs<'static>,
@@ -278,7 +279,7 @@ struct BootKeyTestContext<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootMemoryReady {
+pub(crate) struct BootMemoryReady {
     system: BootSystem,
     tokens: BootAdcTokens,
     display: RuntimeDisplay,
@@ -292,8 +293,8 @@ struct BootMemoryReady {
     memory: BootMemoryState,
 }
 
-    #[cfg(target_arch = "xtensa")]
-struct BootRuntimeState {
+#[cfg(target_arch = "xtensa")]
+pub(crate) struct BootRuntimeState {
     system: BootSystem,
     tokens: Option<BootAdcTokens>,
     #[cfg(feature = "net_http")]
@@ -370,7 +371,7 @@ struct BootRuntimeState {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootSystemRuntimeParts {
+pub(crate) struct BootSystemRuntimeParts {
     reset_reason: &'static str,
     runtime_mode: FrontPanelRuntimeMode,
     status_light_started_ms: u64,
@@ -433,7 +434,7 @@ impl From<BootSystem> for BootSystemRuntimeParts {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootMemoryRuntimeParts {
+pub(crate) struct BootMemoryRuntimeParts {
     memory_config: MemoryConfig,
     memory_sequence: u32,
     eeprom_required: bool,
@@ -585,10 +586,15 @@ impl BootRuntimeState {
         );
         self.last_pd_observation = self.system.initial_pd_observation;
         log_initial_pd_observation(self.last_pd_observation);
-        self.active_thermal_settings =
-            ThermalControlProfileSettings::from(self.memory.memory_config.active_thermal_control_profile.settings);
+        self.active_thermal_settings = ThermalControlProfileSettings::from(
+            self.memory
+                .memory_config
+                .active_thermal_control_profile
+                .settings,
+        );
         log_thermal_control_policy(self.active_thermal_settings);
-        let capabilities = read_pd_power_capabilities(&mut self.system.pd_i2c, &mut self.system.pd_port);
+        let capabilities =
+            read_pd_power_capabilities(&mut self.system.pd_i2c, &mut self.system.pd_port);
         log_pd_power_capabilities(capabilities);
         self.manual_pps_state = ManualPpsState::from_fusb302b_capabilities(capabilities);
         self.last_fusb302b_power_capabilities = capabilities;
@@ -638,7 +644,10 @@ impl BootRuntimeState {
     }
 
     async fn initialize_adc(&mut self) {
-        let tokens = self.tokens.take().expect("boot ADC tokens are available once");
+        let tokens = self
+            .tokens
+            .take()
+            .expect("boot ADC tokens are available once");
         #[cfg(feature = "net_http")]
         let BootAdcTokens {
             adc1: adc1_peripheral,
@@ -657,12 +666,13 @@ impl BootRuntimeState {
             self.wifi = Some(wifi);
         }
         #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(
-            &mut self.system.usb_serial,
-            b"boot_stage=adc_init_start\n",
+        let _ =
+            usb_write_bytes_bounded(&mut self.system.usb_serial, b"boot_stage=adc_init_start\n");
+        let (adc1, vin_adc_pin, rtd_adc_pin, adc_curve) = initialize_adc1(
+            adc1_peripheral,
+            vin_adc_pin_peripheral,
+            rtd_adc_pin_peripheral,
         );
-        let (adc1, vin_adc_pin, rtd_adc_pin, adc_curve) =
-            initialize_adc1(adc1_peripheral, vin_adc_pin_peripheral, rtd_adc_pin_peripheral);
         self.adc1 = Some(adc1);
         self.vin_adc_pin = Some(vin_adc_pin);
         self.rtd_adc_pin = Some(rtd_adc_pin);
@@ -723,7 +733,8 @@ impl BootRuntimeState {
                 self.latest_rtd_raw_adc_max_mv = measurement.raw_adc_max_mv;
                 self.latest_temp_c = measurement.temp_c;
                 self.latest_temp_i16 = temp_c_to_whole_c(measurement.temp_c);
-                self.rtd_control_measurement_guard.reseed(measurement.temp_c, 0);
+                self.rtd_control_measurement_guard
+                    .reseed(measurement.temp_c, 0);
                 let _ = update_runtime_display_temperature(
                     &mut self.ui_state,
                     &mut self.latest_display_temp_c,
@@ -732,14 +743,20 @@ impl BootRuntimeState {
                 );
                 if let Some(reason) = overtemp_fault_from_control_temperature(self.latest_temp_c) {
                     self.current_rtd_fault = Some(reason);
-                    let _ = self.heater_controller.latch_fault(HeaterFaultReason::OverTemp);
-                    info!("heater initial fault latched reason={=str}", HeaterFaultReason::OverTemp.label());
+                    let _ = self
+                        .heater_controller
+                        .latch_fault(HeaterFaultReason::OverTemp);
+                    info!(
+                        "heater initial fault latched reason={=str}",
+                        HeaterFaultReason::OverTemp.label()
+                    );
                 }
-                self.ui_state.set_dashboard_presentation(if self.memory.eeprom_restore_pending {
-                    flux_purr_firmware::frontpanel::DashboardPresentationState::EepromRestore
-                } else {
-                    flux_purr_firmware::frontpanel::DashboardPresentationState::Ready
-                });
+                self.ui_state
+                    .set_dashboard_presentation(if self.memory.eeprom_restore_pending {
+                        flux_purr_firmware::frontpanel::DashboardPresentationState::EepromRestore
+                    } else {
+                        flux_purr_firmware::frontpanel::DashboardPresentationState::Ready
+                    });
                 info!(
                     "rtd initial raw_adc_mv={=u16} adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32}",
                     measurement.raw_adc_mv,
@@ -893,8 +910,7 @@ impl BootRuntimeState {
         self.overtemp_forced_fan_active = self.last_fault_present;
         if self.last_fault_present {
             self.protection_alarm.arm(0);
-            self.buzzer
-                .activate_protection(BuzzerCueSource::Startup, 0);
+            self.buzzer.activate_protection(BuzzerCueSource::Startup, 0);
         }
     }
 
@@ -1040,11 +1056,18 @@ impl BootRuntimeState {
             flux_purr_firmware::frontpanel::DashboardPresentationState::Ready,
         );
         apply_memory_config_to_ui(&mut self.ui_state, &self.memory.memory_config);
-        self.active_thermal_settings =
-            ThermalControlProfileSettings::from(self.memory.memory_config.active_thermal_control_profile.settings);
+        self.active_thermal_settings = ThermalControlProfileSettings::from(
+            self.memory
+                .memory_config
+                .active_thermal_control_profile
+                .settings,
+        );
         self.memory.persistence_source = "eeprom";
         self.memory.persistence_record_state = "valid";
-        info!("legacy memory restore and FPR2 migration complete seq={=u32}", sequence);
+        info!(
+            "legacy memory restore and FPR2 migration complete seq={=u32}",
+            sequence
+        );
     }
 
     fn mark_legacy_memory_failed(&mut self) {
@@ -1096,7 +1119,9 @@ impl BootRuntimeState {
             manual_pps: &mut self.manual_pps_state,
         };
         run_network_operation_with_pd(
-            flux_purr_firmware::net::initialize_control_state(self.memory.memory_config.lan_pairing_token),
+            flux_purr_firmware::net::initialize_control_state(
+                self.memory.memory_config.lan_pairing_token,
+            ),
             &mut self.system.pd_i2c,
             &mut self.system.pd_port,
             &mut service,
@@ -1177,12 +1202,12 @@ impl BootRuntimeState {
     }
 
     fn into_runtime_loop(self) -> RuntimeLoopState {
-        build_runtime_loop_state!(self)
+        crate::build_runtime_loop_state!(self)
     }
 }
 
 #[cfg(target_arch = "xtensa")]
-fn log_initial_pd_observation(observation: Option<PdStatusObservation>) {
+pub(crate) fn log_initial_pd_observation(observation: Option<PdStatusObservation>) {
     if let Some(PdStatusObservation {
         status_raw,
         status,
@@ -1209,7 +1234,7 @@ fn log_initial_pd_observation(observation: Option<PdStatusObservation>) {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn log_thermal_control_policy(settings: ThermalControlProfileSettings) {
+pub(crate) fn log_thermal_control_policy(settings: ThermalControlProfileSettings) {
     info!(
         "heater control policy mode=hybrid interval_ms={=u64} warmup_reenter={=f32}C hold_entry={=f32}C hold_exit={=f32}C approach_max_s={=u8} hold_kp={=f32} hold_ki={=f32} auto_floor_mv={=u16} current_reserve_ma={=u16}",
         HEATER_CONTROL_INTERVAL_MS,
@@ -1225,9 +1250,7 @@ fn log_thermal_control_policy(settings: ThermalControlProfileSettings) {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn log_pd_power_capabilities(
-    capabilities: Option<ch224q::AdjustablePowerCapabilities>,
-) {
+pub(crate) fn log_pd_power_capabilities(capabilities: Option<ch224q::AdjustablePowerCapabilities>) {
     match capabilities {
         Some(capabilities) => info!(
             "pd power data pps20={=bool} pps_min_mv={=u16} pps_max_mv={=u16} pps_max_ma={=u16}",
@@ -1241,7 +1264,7 @@ fn log_pd_power_capabilities(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn select_boot_heater_backend(
+pub(crate) fn select_boot_heater_backend(
     pd_port: &PdPort,
     capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     observation: Option<PdStatusObservation>,
@@ -1256,7 +1279,7 @@ fn select_boot_heater_backend(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn log_heater_backend(backend: HeaterPowerBackend) {
+pub(crate) fn log_heater_backend(backend: HeaterPowerBackend) {
     match backend {
         HeaterPowerBackend::PpsMos {
             pps_min_mv,
@@ -1287,7 +1310,7 @@ fn log_heater_backend(backend: HeaterPowerBackend) {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn initial_boot_fan_decision(
+pub(crate) fn initial_boot_fan_decision(
     display_temp_i16: i16,
     heater_enabled: bool,
     post_heat_cooling_mode: PostHeatCoolingMode,
@@ -1323,7 +1346,7 @@ fn initial_boot_fan_decision(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn split_boot_tokens(
+pub(crate) fn split_boot_tokens(
     peripherals: esp_hal::peripherals::Peripherals,
 ) -> (BootSystemTokens, BootDeviceTokens) {
     (
@@ -1369,7 +1392,7 @@ fn split_boot_tokens(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn initialize_boot_system(
+pub(crate) async fn initialize_boot_system(
     spawner: Spawner,
     tokens: BootSystemTokens,
 ) -> BootSystem {
@@ -1472,7 +1495,7 @@ async fn initialize_boot_system(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn initialize_boot_pd(system: &mut BootSystem) {
+pub(crate) async fn initialize_boot_pd(system: &mut BootSystem) {
     let detected_pd_controller = detect_pd_controller(&mut system.pd_i2c).await;
     system.pd_port = match detected_pd_controller {
         DetectedPdController::Fusb302b(device_id) => {
@@ -1519,10 +1542,7 @@ async fn initialize_boot_pd(system: &mut BootSystem) {
         }
     };
     #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(
-        &mut system.usb_serial,
-        b"boot_stage=pd_contract_pending\n",
-    );
+    let _ = usb_write_bytes_bounded(&mut system.usb_serial, b"boot_stage=pd_contract_pending\n");
     let pd_runtime_started_ms = Instant::now().as_millis();
     let fusb302b_present = matches!(&system.pd_port, PdPort::Fusb302b(_));
     let mut initial_pd_observation =
@@ -1549,21 +1569,20 @@ async fn initialize_boot_pd(system: &mut BootSystem) {
         );
     } else {
         #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(
-            &mut system.usb_serial,
-            b"boot_stage=pd_contract_ready\n",
-        );
+        let _ = usb_write_bytes_bounded(&mut system.usb_serial, b"boot_stage=pd_contract_ready\n");
     }
     system.initial_pd_observation = initial_pd_observation;
     system.pd_runtime_started_ms = pd_runtime_started_ms;
     system.pd_contract_ready = pd_contract_ready;
-    assert!(system
-        .startup_sequence
-        .advance(StartupSequenceStage::PdServiceComplete));
+    assert!(
+        system
+            .startup_sequence
+            .advance(StartupSequenceStage::PdServiceComplete)
+    );
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootDisplayContext<'a> {
+pub(crate) struct BootDisplayContext<'a> {
     runtime_mode: FrontPanelRuntimeMode,
     runtime: BootDisplayRuntimeContext<'a>,
     spi2: esp_hal::peripherals::SPI2<'static>,
@@ -1580,7 +1599,7 @@ struct BootDisplayContext<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootDisplayRuntimeContext<'a> {
+pub(crate) struct BootDisplayRuntimeContext<'a> {
     startup_sequence: &'a mut StartupSequence,
     pd_i2c: &'a mut I2c<'static, Blocking>,
     pd_port: &'a mut PdPort,
@@ -1597,7 +1616,7 @@ struct BootDisplayRuntimeContext<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn initialize_display_driver(
+pub(crate) fn initialize_display_driver(
     spi2: esp_hal::peripherals::SPI2<'static>,
     display_sck: esp_hal::peripherals::GPIO12<'static>,
     display_mosi: esp_hal::peripherals::GPIO11<'static>,
@@ -1637,7 +1656,7 @@ fn initialize_display_driver(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn initialize_display_panel(
+pub(crate) async fn initialize_display_panel(
     context: &mut BootDisplayRuntimeContext<'_>,
     display: &mut RuntimeDisplay,
 ) {
@@ -1658,9 +1677,11 @@ async fn initialize_display_panel(
     )
     .await;
     if matches!(result, Some(Ok(()))) {
-        assert!(context
-            .startup_sequence
-            .advance(StartupSequenceStage::DisplayReady));
+        assert!(
+            context
+                .startup_sequence
+                .advance(StartupSequenceStage::DisplayReady)
+        );
         #[cfg(feature = "web_serial")]
         let _ = usb_write_bytes_bounded(context.usb_serial, b"boot_stage=display_init_complete\n");
         return;
@@ -1683,7 +1704,7 @@ async fn initialize_display_panel(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn present_startup_display(
+pub(crate) async fn present_startup_display(
     context: &mut BootDisplayRuntimeContext<'_>,
     display: &mut RuntimeDisplay,
     canvas: &'static mut DisplayCanvas,
@@ -1729,7 +1750,8 @@ async fn present_startup_display(
     if !ready {
         #[cfg(feature = "web_serial")]
         {
-            let _ = usb_write_bytes_bounded(context.usb_serial, b"boot_stage=display_flush_failed\n");
+            let _ =
+                usb_write_bytes_bounded(context.usb_serial, b"boot_stage=display_flush_failed\n");
             run_usb_recovery_control_loop(
                 context.usb_serial,
                 context.usb_rx_line,
@@ -1743,16 +1765,18 @@ async fn present_startup_display(
         #[cfg(not(feature = "web_serial"))]
         panic!("failed to draw startup calibration screen");
     }
-    assert!(context
-        .startup_sequence
-        .advance(StartupSequenceStage::StartupFrameReady));
+    assert!(
+        context
+            .startup_sequence
+            .advance(StartupSequenceStage::StartupFrameReady)
+    );
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(context.usb_serial, b"boot_stage=display_flush_complete\n");
     canvas
 }
 
 #[cfg(target_arch = "xtensa")]
-fn initialize_frontpanel_inputs(
+pub(crate) fn initialize_frontpanel_inputs(
     center: esp_hal::peripherals::GPIO0<'static>,
     right: esp_hal::peripherals::GPIO16<'static>,
     down: esp_hal::peripherals::GPIO17<'static>,
@@ -1770,9 +1794,13 @@ fn initialize_frontpanel_inputs(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn initialize_boot_display(
+pub(crate) async fn initialize_boot_display(
     context: BootDisplayContext<'_>,
-) -> (RuntimeDisplay, &'static mut DisplayCanvas, FrontPanelInputs<'static>) {
+) -> (
+    RuntimeDisplay,
+    &'static mut DisplayCanvas,
+    FrontPanelInputs<'static>,
+) {
     let BootDisplayContext {
         runtime_mode,
         mut runtime,
@@ -1818,13 +1846,7 @@ async fn initialize_boot_display(
     initialize_display_panel(&mut runtime, &mut display).await;
     let canvas = present_startup_display(&mut runtime, &mut display, canvas, runtime_mode).await;
     info!("backlight active-low: gpio13 low -> on");
-    let inputs = initialize_frontpanel_inputs(
-        center,
-        right,
-        down,
-        left,
-        up,
-    );
+    let inputs = initialize_frontpanel_inputs(center, right, down, left, up);
     #[cfg(feature = "web_serial")]
     poll_usb_early_control(
         runtime.usb_serial,
@@ -1840,7 +1862,7 @@ async fn initialize_boot_display(
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BuzzerPwmParts {
+pub(crate) struct BuzzerPwmParts {
     timer: esp_hal::mcpwm::timer::Timer<2, esp_hal::peripherals::MCPWM0<'static>>,
     pwm: PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 2, true>,
     #[cfg(feature = "buzzer-observe")]
@@ -1848,7 +1870,7 @@ struct BuzzerPwmParts {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn initialize_buzzer_pwm(
+pub(crate) fn initialize_buzzer_pwm(
     mut buzzer_timer: Timer<2, esp_hal::peripherals::MCPWM0<'static>>,
     mut buzzer_operator: Operator<'static, 2, esp_hal::peripherals::MCPWM0<'static>>,
     buzzer_pin: esp_hal::peripherals::GPIO48<'static>,
@@ -1890,7 +1912,7 @@ fn initialize_buzzer_pwm(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn spawn_buzzer_runtime(
+pub(crate) fn spawn_buzzer_runtime(
     buzzer_timer: esp_hal::mcpwm::timer::Timer<2, esp_hal::peripherals::MCPWM0<'static>>,
     buzzer_pwm: PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 2, true>,
     peripheral_clock: PeripheralClockConfig,
@@ -1917,23 +1939,20 @@ fn spawn_buzzer_runtime(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn initialize_boot_outputs(
+pub(crate) fn initialize_boot_outputs(
     context: BootOutputContext<'_>,
 ) -> (Output<'static>, RuntimePwm0, RuntimePwm1, u8) {
-    assert!(context
-        .startup_sequence
-        .advance(StartupSequenceStage::OtherInitialization));
+    assert!(
+        context
+            .startup_sequence
+            .advance(StartupSequenceStage::OtherInitialization)
+    );
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(context.usb_serial, b"boot_stage=outputs_init_start\n");
-    let mut fan_enable = Output::new(
-        context.fan_enable_pin,
-        Level::Low,
-        OutputConfig::default(),
-    );
-    let pwm_clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_hz(
-        MCPWM_PERIPHERAL_CLOCK_HZ,
-    ))
-    .expect("failed to derive MCPWM peripheral clock");
+    let mut fan_enable = Output::new(context.fan_enable_pin, Level::Low, OutputConfig::default());
+    let pwm_clock_cfg =
+        PeripheralClockConfig::with_frequency(Rate::from_hz(MCPWM_PERIPHERAL_CLOCK_HZ))
+            .expect("failed to derive MCPWM peripheral clock");
     let mcpwm = McPwm::new(context.mcpwm0, pwm_clock_cfg);
     let RuntimeMcpwm {
         mut timer0,
@@ -1945,8 +1964,7 @@ fn initialize_boot_outputs(
         ..
     } = mcpwm;
     operator0.set_timer(&timer0);
-    let mut fan_pwm = operator0
-        .with_pin_a(context.fan_pwm_pin, PwmPinConfig::UP_ACTIVE_HIGH);
+    let mut fan_pwm = operator0.with_pin_a(context.fan_pwm_pin, PwmPinConfig::UP_ACTIVE_HIGH);
     let fan_timer_cfg = pwm_clock_cfg
         .timer_clock_with_frequency(
             FAN_PWM_PERIOD_TICKS,
@@ -1959,8 +1977,7 @@ fn initialize_boot_outputs(
         FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
     ));
     operator1.set_timer(&timer1);
-    let mut heater_pwm = operator1
-        .with_pin_a(context.heater_pwm_pin, PwmPinConfig::UP_ACTIVE_HIGH);
+    let mut heater_pwm = operator1.with_pin_a(context.heater_pwm_pin, PwmPinConfig::UP_ACTIVE_HIGH);
     let heater_timer_cfg = pwm_clock_cfg
         .timer_clock_with_frequency(
             HEATER_PWM_PERIOD_TICKS,
@@ -2006,7 +2023,7 @@ fn initialize_boot_outputs(
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootMemoryContext<'a> {
+pub(crate) struct BootMemoryContext<'a> {
     pd_i2c: &'a mut I2c<'static, Blocking>,
     pd_port: &'a mut PdPort,
     initial_pd_observation: &'a mut Option<PdStatusObservation>,
@@ -2020,7 +2037,7 @@ struct BootMemoryContext<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootMemoryState {
+pub(crate) struct BootMemoryState {
     memory_config: MemoryConfig,
     memory_sequence: u32,
     eeprom_required: bool,
@@ -2032,7 +2049,7 @@ struct BootMemoryState {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct BootMemoryRecoveryState<'a> {
+pub(crate) struct BootMemoryRecoveryState<'a> {
     recovery_pending: &'a mut bool,
     eeprom_required: &'a mut bool,
     eeprom_restore_pending: &'a mut bool,
@@ -2041,7 +2058,7 @@ struct BootMemoryRecoveryState<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn load_boot_memory_record(
+pub(crate) async fn load_boot_memory_record(
     context: &mut BootMemoryContext<'_>,
     eeprom_record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
 ) -> (Option<MemoryRecord>, bool, bool, bool) {
@@ -2064,7 +2081,7 @@ async fn load_boot_memory_record(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn initialize_blank_boot_memory(
+pub(crate) async fn initialize_blank_boot_memory(
     context: &mut BootMemoryContext<'_>,
     eeprom_record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
     record: &mut Option<MemoryRecord>,
@@ -2105,7 +2122,7 @@ async fn initialize_blank_boot_memory(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn recover_boot_memory_layout(
+pub(crate) async fn recover_boot_memory_layout(
     context: &mut BootMemoryContext<'_>,
     eeprom_record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
     memory_sequence: u32,
@@ -2161,10 +2178,14 @@ async fn recover_boot_memory_layout(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn initialize_boot_memory<'a>(
+pub(crate) async fn initialize_boot_memory<'a>(
     mut context: BootMemoryContext<'a>,
     eeprom_record_staging: &'static mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> (BootMemoryState, Option<MemoryIoScratch>, &'static mut [u8; EEPROM_RECORD_STAGING_BYTES]) {
+) -> (
+    BootMemoryState,
+    Option<MemoryIoScratch>,
+    &'static mut [u8; EEPROM_RECORD_STAGING_BYTES],
+) {
     let (mut record, eeprom_data_incompatible, mut eeprom_required, recovery_pending) =
         load_boot_memory_record(&mut context, &mut *eeprom_record_staging).await;
     if eeprom_data_incompatible && record.is_none() {
@@ -2232,7 +2253,7 @@ async fn initialize_boot_memory<'a>(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn run_key_test_boot(context: BootKeyTestContext<'_>) -> ! {
+pub(crate) async fn run_key_test_boot(context: BootKeyTestContext<'_>) -> ! {
     let BootKeyTestContext {
         display,
         canvas,
@@ -2281,7 +2302,7 @@ async fn run_key_test_boot(context: BootKeyTestContext<'_>) -> ! {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn initialize_boot_display_stage(
+pub(crate) async fn initialize_boot_display_stage(
     mut system: BootSystem,
     tokens: BootDeviceTokens,
 ) -> BootDisplay {
@@ -2383,7 +2404,7 @@ async fn initialize_boot_display_stage(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn initialize_boot_outputs_stage(boot: BootDisplay) -> BootOutput {
+pub(crate) fn initialize_boot_outputs_stage(boot: BootDisplay) -> BootOutput {
     let BootDisplay {
         mut system,
         tokens:
@@ -2405,8 +2426,8 @@ fn initialize_boot_outputs_stage(boot: BootDisplay) -> BootOutput {
         canvas,
         inputs,
     } = boot;
-    let (fan_enable, fan_pwm, heater_pwm, last_heater_duty) = initialize_boot_outputs(
-        BootOutputContext {
+    let (fan_enable, fan_pwm, heater_pwm, last_heater_duty) =
+        initialize_boot_outputs(BootOutputContext {
             startup_sequence: &mut system.startup_sequence,
             fan_enable_pin,
             fan_pwm_pin,
@@ -2418,8 +2439,7 @@ fn initialize_boot_outputs_stage(boot: BootDisplay) -> BootOutput {
             buzzer_realtime_spawner: system.buzzer_realtime_spawner,
             #[cfg(feature = "web_serial")]
             usb_serial: &mut system.usb_serial,
-        },
-    );
+        });
     BootOutput {
         system,
         tokens: BootAdcTokens {
@@ -2441,7 +2461,7 @@ fn initialize_boot_outputs_stage(boot: BootDisplay) -> BootOutput {
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn initialize_boot_memory_stage(output: BootOutput) -> BootMemoryReady {
+pub(crate) async fn initialize_boot_memory_stage(output: BootOutput) -> BootMemoryReady {
     let BootOutput {
         mut system,
         tokens,

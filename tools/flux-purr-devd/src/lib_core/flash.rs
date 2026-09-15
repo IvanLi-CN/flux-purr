@@ -1,4 +1,6 @@
-fn is_recoverable_serial_error_message(message: &str) -> bool {
+pub(crate) use super::*;
+
+pub(crate) fn is_recoverable_serial_error_message(message: &str) -> bool {
     message.contains("Broken pipe")
         || message.contains("broken pipe")
         || message.contains("No such file or directory")
@@ -9,7 +11,7 @@ fn is_recoverable_serial_error_message(message: &str) -> bool {
         || message.contains("device not configured")
 }
 
-async fn flash_device(
+pub(crate) async fn flash_device(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<FlashRequest>,
@@ -42,7 +44,7 @@ async fn flash_device(
     .await
 }
 
-fn resolve_flash_port(
+pub(crate) fn resolve_flash_port(
     state: &AppState,
     device_id: &str,
     lease_id: Option<&str>,
@@ -70,7 +72,7 @@ fn resolve_flash_port(
     }
 }
 
-fn verify_flash_artifact(
+pub(crate) fn verify_flash_artifact(
     state: &AppState,
     device_id: &str,
     artifact: &FirmwareArtifact,
@@ -93,7 +95,7 @@ fn verify_flash_artifact(
     ))
 }
 
-fn record_flash_dry_run(
+pub(crate) fn record_flash_dry_run(
     state: &AppState,
     device_id: &str,
     artifact_id: String,
@@ -121,7 +123,7 @@ fn record_flash_dry_run(
     })
 }
 
-fn require_flash_dry_run(
+pub(crate) fn require_flash_dry_run(
     state: &AppState,
     device_id: &str,
     approval: &FlashDryRunApproval,
@@ -144,7 +146,7 @@ fn require_flash_dry_run(
     ))
 }
 
-fn require_flash_confirmation(
+pub(crate) fn require_flash_confirmation(
     state: &AppState,
     device_id: &str,
     confirm: &Option<String>,
@@ -165,7 +167,7 @@ fn require_flash_confirmation(
     ))
 }
 
-fn require_real_flash_enabled(
+pub(crate) fn require_real_flash_enabled(
     state: &AppState,
     device_id: &str,
     artifact_id: &str,

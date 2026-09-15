@@ -404,13 +404,7 @@ fn has_inline_tests(file: &File) -> bool {
 
 fn scan_sources(root: &Path) -> io::Result<Vec<Violation>> {
     let mut paths = Vec::new();
-    for source_root in [
-        root.join("firmware/src"),
-        root.join("firmware/build.rs"),
-        root.join("tools/flux-purr-devd/src"),
-        root.join("tools/flux-purr-devd/build.rs"),
-        root.join("tools/rust-style-check/src"),
-    ] {
+    for source_root in source_roots(root) {
         collect_rust_files(&source_root, &mut paths)?;
     }
     paths.sort();
@@ -435,6 +429,18 @@ fn scan_sources(root: &Path) -> io::Result<Vec<Violation>> {
         violations.extend(visitor.violations);
     }
     Ok(violations)
+}
+
+fn source_roots(root: &Path) -> [PathBuf; 7] {
+    [
+        root.join("firmware/src"),
+        root.join("firmware/tests"),
+        root.join("firmware/build.rs"),
+        root.join("tools/flux-purr-devd/src"),
+        root.join("tools/flux-purr-devd/tests"),
+        root.join("tools/flux-purr-devd/build.rs"),
+        root.join("tools/rust-style-check/src"),
+    ]
 }
 
 fn workspace_root() -> io::Result<PathBuf> {
@@ -742,6 +748,32 @@ mod tests {
                 .violations
                 .iter()
                 .any(|violation| violation.message.contains("structural expect"))
+        );
+    }
+
+    #[test]
+    fn integration_test_roots_are_part_of_the_scan_contract() {
+        let roots = source_roots(Path::new("workspace"));
+        assert!(roots.contains(&PathBuf::from("workspace/firmware/tests")));
+        assert!(roots.contains(&PathBuf::from("workspace/tools/flux-purr-devd/tests")));
+
+        let source =
+            "fn integration_fixture(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8) {}";
+        let file = syn::parse_file(source).expect("integration fixture parses");
+        let Item::Fn(function) = &file.items[0] else {
+            panic!("fixture starts with a function");
+        };
+        let mut visitor = SourceVisitor {
+            path: Path::new("tools/flux-purr-devd/tests/mock_smoke.rs"),
+            source,
+            violations: Vec::new(),
+        };
+        visitor.visit_item_fn(function);
+        assert!(
+            visitor
+                .violations
+                .iter()
+                .any(|violation| violation.message.contains("has 8 parameters"))
         );
     }
 }

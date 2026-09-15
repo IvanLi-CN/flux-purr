@@ -34,6 +34,24 @@ fn pd_startup_and_runtime_share_one_timestamp_epoch() {
 }
 
 #[test]
+fn manual_pps_missing_target_disarms_and_records_invalid_voltage() {
+    let mut manual_pps = ManualPpsState {
+        enabled: true,
+        ..ManualPpsState::default()
+    };
+
+    assert_eq!(
+        require_manual_pps_target(&mut manual_pps),
+        Err(ManualPpsError::InvalidVoltage)
+    );
+    assert!(!manual_pps.enabled);
+    assert_eq!(manual_pps.target_mv, None);
+    assert_eq!(manual_pps.target_ma, None);
+    assert_eq!(manual_pps.error, Some(ManualPpsError::InvalidVoltage));
+    assert!(manual_pps.consume_automatic_restore_pending());
+}
+
+#[test]
 fn pd_service_does_not_feed_control_elapsed_time_into_protocol_deadlines() {
     let source = RUNTIME_IMPLEMENTATION;
     let implementation = source
@@ -9850,12 +9868,13 @@ fn runtime_loop_services_pd_before_control_plane_work() {
 fn runtime_control_work_is_bounded_before_the_next_pd_service() {
     let source = RUNTIME_IMPLEMENTATION;
     let usb_input = source;
+    let normalized_source: String = source.split_whitespace().collect();
 
     assert!(usb_input.contains("if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET"));
-    let control_frame = usb_input
-        .find("usb_write_response_frame(&mut state.transport.usb_serial, &response, state.transport.usb_tx_buf);")
+    let control_frame = normalized_source
+        .find("usb_write_response_frame(&mutstate.transport.usb_serial,&response,state.transport.usb_tx_buf,);")
         .expect("USB control path must write a bounded response");
-    let control_frame_tail = &usb_input[control_frame..];
+    let control_frame_tail = &normalized_source[control_frame..];
     assert!(control_frame_tail.contains("usb_rx_line.clear();"));
     assert!(control_frame_tail.contains("break;"));
     assert!(source.contains("let Some(command) = flux_purr_firmware::net::try_receive_command()"));

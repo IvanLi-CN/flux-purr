@@ -1,4 +1,8 @@
-fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+use super::*;
+
+pub(crate) fn render_human(
+    payload: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     if matches!(
         payload.get("operation").and_then(Value::as_str),
         Some("flash" | "recover")
@@ -16,7 +20,14 @@ fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + S
         return render_device_status(payload, device);
     }
     if payload.get("artifactId").is_some() && payload.get("status").is_some() {
-        return Ok(format!("Flash {}: {}", payload.get("artifactId").and_then(Value::as_str).unwrap_or("-"), payload.get("status").and_then(Value::as_str).unwrap_or("-")));
+        return Ok(format!(
+            "Flash {}: {}",
+            payload
+                .get("artifactId")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            payload.get("status").and_then(Value::as_str).unwrap_or("-")
+        ));
     }
     if payload.get("rtdAdc").is_some() && payload.get("vinAdc").is_some() {
         return render_calibration_summary(payload);
@@ -30,7 +41,13 @@ fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + S
     if payload.get("operation").and_then(Value::as_str)
         == Some("thermal_report.rerender_legacy_preliminary_review_bundle")
     {
-        return Ok(format!("Thermal report bundle: {}", payload.get("bundleIndexHtml").and_then(Value::as_str).unwrap_or("-")));
+        return Ok(format!(
+            "Thermal report bundle: {}",
+            payload
+                .get("bundleIndexHtml")
+                .and_then(Value::as_str)
+                .unwrap_or("-")
+        ));
     }
     if payload.get("runId").is_some() && payload.get("sampleCount").is_some() {
         return render_calibration_run(payload);
@@ -48,38 +65,105 @@ fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + S
     ))?)
 }
 
-fn render_pairing_code(payload: &Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn render_pairing_code(
+    payload: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     if payload.get("active").and_then(Value::as_bool) == Some(true) {
-        let code = payload.get("code").and_then(Value::as_str).ok_or("LAN pairing code response is missing the code")?;
+        let code = payload
+            .get("code")
+            .and_then(Value::as_str)
+            .ok_or("LAN pairing code response is missing the code")?;
         return Ok(format!("LAN pairing code: {code}"));
     }
     Ok("LAN pairing code is inactive. Open WiFi Info on the device first.".to_string())
 }
 
-fn render_device_status(payload: &Value, device: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn render_device_status(
+    payload: &Value,
+    device: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     Ok(format!(
-        "{} target={}C current={}C heater={} cooling={}", device,
-        payload.get("targetTempC").and_then(Value::as_i64).unwrap_or_default(),
-        payload.get("currentTempC").and_then(Value::as_f64).unwrap_or_default(),
-        payload.get("heaterEnabled").and_then(Value::as_bool).unwrap_or(false),
-        payload.get("activeCoolingEnabled").and_then(Value::as_bool).unwrap_or(false)
+        "{} target={}C current={}C heater={} cooling={}",
+        device,
+        payload
+            .get("targetTempC")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        payload
+            .get("currentTempC")
+            .and_then(Value::as_f64)
+            .unwrap_or_default(),
+        payload
+            .get("heaterEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        payload
+            .get("activeCoolingEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     ))
 }
 
-fn render_calibration_summary(payload: &Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let sample_count = |key: &str| payload.get(key).and_then(|channel| channel.get("samples")).and_then(Value::as_array).map(|items| items.iter().filter(|item| !item.is_null()).count()).unwrap_or(0);
-    Ok(format!("Calibration: rtd_adc={} samples vin_adc={} samples", sample_count("rtdAdc"), sample_count("vinAdc")))
+pub(crate) fn render_calibration_summary(
+    payload: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let sample_count = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|channel| channel.get("samples"))
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter(|item| !item.is_null()).count())
+            .unwrap_or(0)
+    };
+    Ok(format!(
+        "Calibration: rtd_adc={} samples vin_adc={} samples",
+        sample_count("rtdAdc"),
+        sample_count("vinAdc")
+    ))
 }
 
-fn render_thermal_summary(payload: &Value, label: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(format!("{} {}: {} samples passed={}", label, payload.get("runId").and_then(Value::as_str).unwrap_or("-"), payload.get("sampleCount").and_then(Value::as_u64).unwrap_or(0), payload.get("validation").and_then(|validation| validation.get("passed")).and_then(Value::as_bool).unwrap_or(false)))
+pub(crate) fn render_thermal_summary(
+    payload: &Value,
+    label: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(format!(
+        "{} {}: {} samples passed={}",
+        label,
+        payload.get("runId").and_then(Value::as_str).unwrap_or("-"),
+        payload
+            .get("sampleCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        payload
+            .get("validation")
+            .and_then(|validation| validation.get("passed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    ))
 }
 
-fn render_calibration_run(payload: &Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(format!("Calibration run {}: {} samples stop={} complete={}", payload.get("runId").and_then(Value::as_str).unwrap_or("-"), payload.get("sampleCount").and_then(Value::as_u64).unwrap_or(0), payload.get("stopReason").and_then(Value::as_str).unwrap_or("-"), payload.get("complete").and_then(Value::as_bool).unwrap_or(false)))
+pub(crate) fn render_calibration_run(
+    payload: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(format!(
+        "Calibration run {}: {} samples stop={} complete={}",
+        payload.get("runId").and_then(Value::as_str).unwrap_or("-"),
+        payload
+            .get("sampleCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        payload
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .unwrap_or("-"),
+        payload
+            .get("complete")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    ))
 }
 
-fn render_espflash_human(
+pub(crate) fn render_espflash_human(
     payload: &Value,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let operation = payload

@@ -1,4 +1,6 @@
-async fn handle_calibration_command(
+use super::*;
+
+pub(crate) async fn handle_calibration_command(
     client: &Client,
     default_devd: &str,
     command: CalibrationCommand,
@@ -8,38 +10,58 @@ async fn handle_calibration_command(
         CalibrationCommand::Capture(args) => capture_calibration(client, default_devd, args).await,
         CalibrationCommand::Delete(args) => delete_calibration(client, default_devd, args).await,
         CalibrationCommand::Clear(args) => clear_calibration(client, default_devd, args).await,
-        CalibrationCommand::SetSlotFit(args) => set_calibration_slot_fit(client, default_devd, args).await,
-        CalibrationCommand::SetActiveSlot(args) => set_active_calibration_slot(client, default_devd, args).await,
+        CalibrationCommand::SetSlotFit(args) => {
+            set_calibration_slot_fit(client, default_devd, args).await
+        }
+        CalibrationCommand::SetActiveSlot(args) => {
+            set_active_calibration_slot(client, default_devd, args).await
+        }
         CalibrationCommand::Import(args) => import_calibration(client, default_devd, args).await,
         CalibrationCommand::Export(args) => export_calibration(client, default_devd, args).await,
-        CalibrationCommand::Collect(args) => collect_calibration_run(client, default_devd, args).await,
+        CalibrationCommand::Collect(args) => {
+            collect_calibration_run(client, default_devd, args).await
+        }
     }
 }
 
-async fn get_calibration(
+pub(crate) async fn get_calibration(
     client: &Client,
     default_devd: &str,
     selector: TargetSelector,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    request_with_lease(client, resolve_target(selector, default_devd)?, Method::GET, "/calibration", None).await
+    request_with_lease(
+        client,
+        resolve_target(selector, default_devd)?,
+        Method::GET,
+        "/calibration",
+        None,
+    )
+    .await
 }
 
-async fn capture_calibration(
+pub(crate) async fn capture_calibration(
     client: &Client,
     default_devd: &str,
     args: CalibrationCaptureArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let mut body = serde_json::Map::new();
     body.insert("op".to_string(), json!("capture"));
-    body.insert("channel".to_string(), json!(parse_calibration_channel(&args.channel)?));
+    body.insert(
+        "channel".to_string(),
+        json!(parse_calibration_channel(&args.channel)?),
+    );
     insert_if_some(&mut body, "referenceTempC", args.reference_temp_c);
-    insert_if_some(&mut body, "referenceVinMv", parse_reference_vin_mv(args.reference_vin_mv, args.reference_vin_volts.as_deref())?);
+    insert_if_some(
+        &mut body,
+        "referenceVinMv",
+        parse_reference_vin_mv(args.reference_vin_mv, args.reference_vin_volts.as_deref())?,
+    );
     insert_if_some(&mut body, "observedMv", args.observed_mv);
     insert_if_some(&mut body, "expectedMv", args.expected_mv);
     put_calibration(client, default_devd, args.target, Value::Object(body)).await
 }
 
-async fn delete_calibration(
+pub(crate) async fn delete_calibration(
     client: &Client,
     default_devd: &str,
     args: CalibrationDeleteArgs,
@@ -48,7 +70,7 @@ async fn delete_calibration(
     put_calibration(client, default_devd, args.target, body).await
 }
 
-async fn clear_calibration(
+pub(crate) async fn clear_calibration(
     client: &Client,
     default_devd: &str,
     args: CalibrationChannelArgs,
@@ -57,7 +79,7 @@ async fn clear_calibration(
     put_calibration(client, default_devd, args.target, body).await
 }
 
-async fn set_calibration_slot_fit(
+pub(crate) async fn set_calibration_slot_fit(
     client: &Client,
     default_devd: &str,
     args: CalibrationSetSlotFitArgs,
@@ -66,7 +88,7 @@ async fn set_calibration_slot_fit(
     put_calibration(client, default_devd, args.target, body).await
 }
 
-async fn set_active_calibration_slot(
+pub(crate) async fn set_active_calibration_slot(
     client: &Client,
     default_devd: &str,
     args: CalibrationSetActiveSlotArgs,
@@ -75,38 +97,55 @@ async fn set_active_calibration_slot(
     put_calibration(client, default_devd, args.target, body).await
 }
 
-async fn import_calibration(
+pub(crate) async fn import_calibration(
     client: &Client,
     default_devd: &str,
     args: CalibrationImportArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let imported: Value = serde_json::from_slice(&fs::read(&args.file)?)?;
-    put_calibration(client, default_devd, args.target, json!({"op": "import", "state": imported})).await
+    put_calibration(
+        client,
+        default_devd,
+        args.target,
+        json!({"op": "import", "state": imported}),
+    )
+    .await
 }
 
-async fn export_calibration(
+pub(crate) async fn export_calibration(
     client: &Client,
     default_devd: &str,
     args: CalibrationExportArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let payload = get_calibration(client, default_devd, args.target).await?;
-    if let Some(parent) = args.file.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = args
+        .file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent)?;
     }
     fs::write(&args.file, serde_json::to_vec_pretty(&payload)?)?;
     Ok(json!({"ok": true, "path": args.file}))
 }
 
-async fn put_calibration(
+pub(crate) async fn put_calibration(
     client: &Client,
     default_devd: &str,
     selector: TargetSelector,
     body: Value,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    request_with_lease(client, resolve_target(selector, default_devd)?, Method::PUT, "/calibration", Some(body)).await
+    request_with_lease(
+        client,
+        resolve_target(selector, default_devd)?,
+        Method::PUT,
+        "/calibration",
+        Some(body),
+    )
+    .await
 }
 
-async fn handle_calibration_mode_command(
+pub(crate) async fn handle_calibration_mode_command(
     client: &Client,
     default_devd: &str,
     command: CalibrationModeCommand,
@@ -151,7 +190,7 @@ async fn handle_calibration_mode_command(
     }
 }
 
-async fn handle_voltage_calibration_command(
+pub(crate) async fn handle_voltage_calibration_command(
     client: &Client,
     default_devd: &str,
     command: VoltageCalibrationCommand,
@@ -240,7 +279,7 @@ async fn handle_voltage_calibration_command(
     }
 }
 
-async fn handle_temperature_calibration_command(
+pub(crate) async fn handle_temperature_calibration_command(
     client: &Client,
     default_devd: &str,
     command: TemperatureCalibrationCommand,
@@ -307,7 +346,7 @@ async fn handle_temperature_calibration_command(
     }
 }
 
-async fn handle_heater_curve_calibration_command(
+pub(crate) async fn handle_heater_curve_calibration_command(
     client: &Client,
     default_devd: &str,
     command: HeaterCurveCalibrationCommand,
@@ -359,7 +398,7 @@ async fn handle_heater_curve_calibration_command(
     }
 }
 
-async fn handle_calibration_job_command(
+pub(crate) async fn handle_calibration_job_command(
     client: &Client,
     default_devd: &str,
     command: CalibrationJobCommand,
@@ -388,7 +427,7 @@ async fn handle_calibration_job_command(
     }
 }
 
-fn calibration_pps_payload(
+pub(crate) fn calibration_pps_payload(
     mode: &'static str,
     volts: Option<&str>,
     heater_enabled: Option<bool>,
@@ -401,13 +440,13 @@ fn calibration_pps_payload(
     Ok(payload)
 }
 
-fn calibration_pps_payload_partial(
+pub(crate) fn calibration_pps_payload_partial(
     volts: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     calibration_pps_payload_partial_opt(Some(volts))
 }
 
-fn calibration_pps_payload_partial_opt(
+pub(crate) fn calibration_pps_payload_partial_opt(
     volts: Option<&str>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let mut payload = serde_json::Map::new();
@@ -418,7 +457,7 @@ fn calibration_pps_payload_partial_opt(
     Ok(Value::Object(payload))
 }
 
-fn stepped_pps_mv(
+pub(crate) fn stepped_pps_mv(
     current_mv: u16,
     delta_v: i16,
 ) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
@@ -429,7 +468,7 @@ fn stepped_pps_mv(
     Ok(stepped as u16)
 }
 
-async fn handle_heater_curve_command(
+pub(crate) async fn handle_heater_curve_command(
     client: &Client,
     default_devd: &str,
     command: HeaterCurveCommand,
@@ -511,17 +550,20 @@ async fn handle_heater_curve_command(
     }
 }
 
-const THERMAL_SUPPORTED_TARGETS_C: [i16; 11] =
+pub(crate) const THERMAL_SUPPORTED_TARGETS_C: [i16; 11] =
     [60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 250];
-const THERMAL_PROFILE_ANCHOR_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250];
-const THERMAL_SELF_TEST_DEFAULT_TARGETS_C: [i16; 3] = [60, 140, 220];
-const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = 10;
-const THERMAL_APPROACH_CURVE_PREFERRED_MS: u64 = 5_000;
-const THERMAL_APPROACH_CURVE_LIMIT_MS: u64 = 10_000;
-const THERMAL_APPROACH_CURVE_SIGNIFICANT_DEVIATION_C: f64 = 0.5;
-const THERMAL_APPROACH_CURVE_CLASS_MARGIN_C: f64 = 0.4;
+pub(crate) const THERMAL_PROFILE_ANCHOR_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250];
+pub(crate) const THERMAL_SELF_TEST_DEFAULT_TARGETS_C: [i16; 3] = [60, 140, 220];
+pub(crate) const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = 10;
+pub(crate) const THERMAL_APPROACH_CURVE_PREFERRED_MS: u64 = 5_000;
+pub(crate) const THERMAL_APPROACH_CURVE_LIMIT_MS: u64 = 10_000;
+pub(crate) const THERMAL_APPROACH_CURVE_SIGNIFICANT_DEVIATION_C: f64 = 0.5;
+pub(crate) const THERMAL_APPROACH_CURVE_CLASS_MARGIN_C: f64 = 0.4;
 
-fn thermal_profile_preview_runtime_body(mode: ThermalProfileMode, profile: Value) -> Value {
+pub(crate) fn thermal_profile_preview_runtime_body(
+    mode: ThermalProfileMode,
+    profile: Value,
+) -> Value {
     json!({
         "thermalProfileMode": mode.as_str(),
         "thermalControlProfile": {
@@ -531,7 +573,7 @@ fn thermal_profile_preview_runtime_body(mode: ThermalProfileMode, profile: Value
     })
 }
 
-fn expected_thermal_profile_mode_bank(
+pub(crate) fn expected_thermal_profile_mode_bank(
     status: &Value,
     expected_mode: ThermalProfileMode,
 ) -> Result<&str, Box<dyn std::error::Error + Send + Sync>> {
@@ -545,7 +587,7 @@ fn expected_thermal_profile_mode_bank(
     }
 }
 
-async fn request_thermal_profile_persist_with_resolved_bank(
+pub(crate) async fn request_thermal_profile_persist_with_resolved_bank(
     client: &Client,
     resolved: ResolvedUsbTarget,
     profile_mode: ThermalProfileMode,

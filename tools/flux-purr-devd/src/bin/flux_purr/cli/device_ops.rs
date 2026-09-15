@@ -1,3 +1,5 @@
+use super::*;
+
 pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cli = Cli::parse();
     let direct_flash_command = matches!(&cli.command, Command::Flash(_) | Command::Recover(_));
@@ -15,8 +17,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::Status(selector) => {
             request_device_read(&client, resolve_target(selector, &cli.devd)?, "/status").await?
         }
-        Command::Runtime { command } => execute_runtime_command(&client, &cli.devd, command).await?,
-        Command::Buzzer { command } => execute_buzzer_command(&client, &cli.devd, cli.json, command).await?,
+        Command::Runtime { command } => {
+            execute_runtime_command(&client, &cli.devd, command).await?
+        }
+        Command::Buzzer { command } => {
+            execute_buzzer_command(&client, &cli.devd, cli.json, command).await?
+        }
         Command::Pd { command } => execute_pd_command(&client, &cli.devd, command).await?,
         Command::Wifi { command } => execute_wifi_command(&client, &cli.devd, command).await?,
         Command::Calibration { command } => {
@@ -59,7 +65,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-async fn prepare_devd(
+pub(crate) async fn prepare_devd(
     cli: &mut Cli,
     direct_flash_command: bool,
     explicit_devd_endpoint: bool,
@@ -78,7 +84,7 @@ async fn prepare_devd(
     Ok(None)
 }
 
-async fn execute_lan_command(
+pub(crate) async fn execute_lan_command(
     client: &Client,
     devd: &str,
     command: LanCommand,
@@ -86,15 +92,50 @@ async fn execute_lan_command(
     match command {
         LanCommand::Devices => {
             let config = read_user_config()?;
-            Ok(json!({"devices": config.lan_devices.iter().map(flux_purr_devd::lan::LanDeviceSummary::from).collect::<Vec<_>>() }))
+            Ok(
+                json!({"devices": config.lan_devices.iter().map(flux_purr_devd::lan::LanDeviceSummary::from).collect::<Vec<_>>() }),
+            )
         }
-        LanCommand::Refresh => Ok(json!({"devices": persist_cli_lan_discoveries(discover_mdns(Duration::from_secs(2)).await?)?})),
-        LanCommand::Scan(args) => Ok(json!({"devices": persist_cli_lan_discoveries(discover_cidr(LanScanRequest { cidr: args.cidr }).await?)?})),
-        LanCommand::Reset(target) => request_with_lease(client, resolve_target(target, devd)?, Method::POST, "/lan-pairing/reset", None).await,
+        LanCommand::Refresh => Ok(
+            json!({"devices": persist_cli_lan_discoveries(discover_mdns(Duration::from_secs(2)).await?)?}),
+        ),
+        LanCommand::Scan(args) => Ok(
+            json!({"devices": persist_cli_lan_discoveries(discover_cidr(LanScanRequest { cidr: args.cidr }).await?)?}),
+        ),
+        LanCommand::Reset(target) => {
+            request_with_lease(
+                client,
+                resolve_target(target, devd)?,
+                Method::POST,
+                "/lan-pairing/reset",
+                None,
+            )
+            .await
+        }
         LanCommand::Pair(args) => pair_lan_device(args).await,
-        LanCommand::PairingCode(selector) => request_device_read(client, resolve_target(selector, devd)?, "/lan-pairing/code").await,
-        LanCommand::PairingOpen(selector) => request_with_lease(client, resolve_target(selector, devd)?, Method::POST, "/lan-pairing/window", None).await,
-        LanCommand::PairingClose(selector) => request_with_lease(client, resolve_target(selector, devd)?, Method::DELETE, "/lan-pairing/window", None).await,
+        LanCommand::PairingCode(selector) => {
+            request_device_read(client, resolve_target(selector, devd)?, "/lan-pairing/code").await
+        }
+        LanCommand::PairingOpen(selector) => {
+            request_with_lease(
+                client,
+                resolve_target(selector, devd)?,
+                Method::POST,
+                "/lan-pairing/window",
+                None,
+            )
+            .await
+        }
+        LanCommand::PairingClose(selector) => {
+            request_with_lease(
+                client,
+                resolve_target(selector, devd)?,
+                Method::DELETE,
+                "/lan-pairing/window",
+                None,
+            )
+            .await
+        }
         LanCommand::Status(args) => {
             let device = resolve_lan_target(&args.id)?;
             Ok(authorized_json(&device, Method::GET, "status", None, None).await?)
@@ -104,10 +145,14 @@ async fn execute_lan_command(
     }
 }
 
-async fn pair_lan_device(
+pub(crate) async fn pair_lan_device(
     args: LanPairArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let device = pair_device(LanPairRequest { base_url: args.base_url, code: args.code }).await?;
+    let device = pair_device(LanPairRequest {
+        base_url: args.base_url,
+        code: args.code,
+    })
+    .await?;
     let summary = flux_purr_devd::lan::LanDeviceSummary::from(&device);
     let mut config = read_user_config()?;
     merge_lan_device(&mut config.lan_devices, device);
@@ -115,7 +160,7 @@ async fn pair_lan_device(
     Ok(serde_json::to_value(summary)?)
 }
 
-async fn set_lan_runtime(
+pub(crate) async fn set_lan_runtime(
     args: LanRuntimeSetArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let device = resolve_lan_target(&args.target.id)?;
@@ -123,7 +168,7 @@ async fn set_lan_runtime(
     lan_api_request(&device, Method::PUT, "runtime", Some(body)).await
 }
 
-async fn request_lan_path(
+pub(crate) async fn request_lan_path(
     args: LanRequestArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let device = resolve_lan_target(&args.target.id)?;
@@ -136,7 +181,7 @@ async fn request_lan_path(
     lan_api_request(&device, args.method.as_reqwest(), &args.path, body).await
 }
 
-async fn execute_runtime_command(
+pub(crate) async fn execute_runtime_command(
     client: &Client,
     devd: &str,
     command: RuntimeCommand,
@@ -153,7 +198,7 @@ async fn execute_runtime_command(
     }
 }
 
-async fn execute_buzzer_command(
+pub(crate) async fn execute_buzzer_command(
     client: &Client,
     devd: &str,
     json_output: bool,
@@ -165,22 +210,39 @@ async fn execute_buzzer_command(
             if json_output {
                 return Err("buzzer play is interactive and cannot be used with --json".into());
             }
-            buzzer_play_interactive(client, resolve_target(args.target, devd)?, args.pointer).await?;
+            buzzer_play_interactive(client, resolve_target(args.target, devd)?, args.pointer)
+                .await?;
             Ok(json!({"ok": true}))
         }
     }
 }
 
-async fn execute_buzzer_test(
+pub(crate) async fn execute_buzzer_test(
     client: &Client,
     devd: &str,
     args: BuzzerTestArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let BuzzerTestArgs { target, cue, scenario, repeat, stop, status } = args;
-    buzzer_test(client, resolve_target(target, devd)?, cue, scenario, repeat, stop, status).await
+    let BuzzerTestArgs {
+        target,
+        cue,
+        scenario,
+        repeat,
+        stop,
+        status,
+    } = args;
+    buzzer_test(
+        client,
+        resolve_target(target, devd)?,
+        cue,
+        scenario,
+        repeat,
+        stop,
+        status,
+    )
+    .await
 }
 
-async fn execute_pd_command(
+pub(crate) async fn execute_pd_command(
     client: &Client,
     devd: &str,
     command: PdCommand,
@@ -189,13 +251,20 @@ async fn execute_pd_command(
         PdCommand::Pps { command } => match command {
             PpsCommand::Set(args) => set_pps(client, devd, args).await,
             PpsCommand::Clear(selector) => {
-                request_with_lease(client, resolve_target(selector, devd)?, Method::PUT, "/runtime", Some(json!({"manualPpsEnabled": false}))).await
+                request_with_lease(
+                    client,
+                    resolve_target(selector, devd)?,
+                    Method::PUT,
+                    "/runtime",
+                    Some(json!({"manualPpsEnabled": false})),
+                )
+                .await
             }
         },
     }
 }
 
-async fn set_pps(
+pub(crate) async fn set_pps(
     client: &Client,
     devd: &str,
     args: PpsSetArgs,
@@ -205,59 +274,87 @@ async fn set_pps(
     if let Some(amps) = &args.amps {
         body["manualPpsMa"] = json!(parse_pps_amps(amps)?);
     }
-    request_with_lease(client, resolve_target(args.target, devd)?, Method::PUT, "/runtime", Some(body)).await
+    request_with_lease(
+        client,
+        resolve_target(args.target, devd)?,
+        Method::PUT,
+        "/runtime",
+        Some(body),
+    )
+    .await
 }
 
-async fn execute_wifi_command(
+pub(crate) async fn execute_wifi_command(
     client: &Client,
     devd: &str,
     command: WifiCommand,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     match command {
         WifiCommand::Set(args) => set_wifi(client, devd, args).await,
-        WifiCommand::Clear(selector) => update_wifi(client, devd, selector, WifiConfigOp::Clear).await,
-        WifiCommand::Cancel(selector) => update_wifi(client, devd, selector, WifiConfigOp::Cancel).await,
+        WifiCommand::Clear(selector) => {
+            update_wifi(client, devd, selector, WifiConfigOp::Clear).await
+        }
+        WifiCommand::Cancel(selector) => {
+            update_wifi(client, devd, selector, WifiConfigOp::Cancel).await
+        }
     }
 }
 
-async fn set_wifi(
+pub(crate) async fn set_wifi(
     client: &Client,
     devd: &str,
     args: WifiSetArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let resolved = resolve_target(args.target.clone(), devd)?;
-    let static_ipv4 = static_ipv4_value(args.static_ip, args.static_prefix_len, args.static_gateway, args.static_dns)?;
-    let body = wifi_set_body(args.ssid, args.password, static_ipv4, args.telemetry_interval_ms);
+    let static_ipv4 = static_ipv4_value(
+        args.static_ip,
+        args.static_prefix_len,
+        args.static_gateway,
+        args.static_dns,
+    )?;
+    let body = wifi_set_body(
+        args.ssid,
+        args.password,
+        static_ipv4,
+        args.telemetry_interval_ms,
+    );
     request_with_lease(client, resolved, Method::PUT, "/wifi", Some(body)).await
 }
 
-async fn update_wifi(
+pub(crate) async fn update_wifi(
     client: &Client,
     devd: &str,
     selector: TargetSelector,
     operation: WifiConfigOp,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    request_with_lease(client, resolve_target(selector, devd)?, Method::PUT, "/wifi", Some(json!({"op": operation}))).await
+    request_with_lease(
+        client,
+        resolve_target(selector, devd)?,
+        Method::PUT,
+        "/wifi",
+        Some(json!({"op": operation})),
+    )
+    .await
 }
 
-fn devd_flag_was_supplied() -> bool {
+pub(crate) fn devd_flag_was_supplied() -> bool {
     std::env::args_os().skip(1).any(|argument| {
         let argument = argument.to_string_lossy();
         argument == "--devd" || argument.starts_with("--devd=")
     })
 }
 
-const fn should_start_managed_devd(
+pub(crate) const fn should_start_managed_devd(
     direct_flash_command: bool,
     explicit_devd_endpoint: bool,
 ) -> bool {
     !direct_flash_command && !explicit_devd_endpoint
 }
 
-struct ManagedDevd {
-    endpoint: PathBuf,
-    _directory: tempfile::TempDir,
-    child: Child,
+pub(crate) struct ManagedDevd {
+    pub(crate) endpoint: PathBuf,
+    pub(crate) _directory: tempfile::TempDir,
+    pub(crate) child: Child,
 }
 
 impl Drop for ManagedDevd {
@@ -267,7 +364,7 @@ impl Drop for ManagedDevd {
     }
 }
 
-async fn update_from_local_bundle(
+pub(crate) async fn update_from_local_bundle(
     _client: &Client,
     devd: &str,
     args: UpdateArgs,
@@ -308,12 +405,14 @@ async fn update_from_local_bundle(
     .await
 }
 
-async fn direct_flash(args: FlashArgs) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) async fn direct_flash(
+    args: FlashArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let program = resolve_espflash_program();
     direct_flash_with_program(args, &program, true)
 }
 
-fn direct_flash_with_program(
+pub(crate) fn direct_flash_with_program(
     args: FlashArgs,
     program: &Path,
     require_real_flash_enablement: bool,
@@ -333,10 +432,11 @@ fn direct_flash_with_program(
     )
 }
 
-type SnapshotReader = fn(&str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
-type RomProbe = fn(&str) -> bool;
+pub(crate) type SnapshotReader =
+    fn(&str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
+pub(crate) type RomProbe = fn(&str) -> bool;
 
-fn direct_flash_with_program_inner(
+pub(crate) fn direct_flash_with_program_inner(
     args: FlashArgs,
     program: &Path,
     require_real_flash_enablement: bool,
@@ -386,7 +486,7 @@ fn direct_flash_with_program_inner(
     )
 }
 
-async fn direct_recover(
+pub(crate) async fn direct_recover(
     args: RecoverArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_serial_port(&args.port)?;
@@ -406,7 +506,9 @@ async fn direct_recover(
     )
 }
 
-fn validate_serial_port(port: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn validate_serial_port(
+    port: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if port.trim().is_empty()
         || port.contains("://")
         || port.starts_with("tcp:")
@@ -417,7 +519,9 @@ fn validate_serial_port(port: &str) -> Result<(), Box<dyn std::error::Error + Se
     Ok(())
 }
 
-fn validate_local_elf(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn validate_local_elf(
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !path.is_file() {
         return Err(format!("local ELF does not exist: {}", path.display()).into());
     }
@@ -427,7 +531,7 @@ fn validate_local_elf(path: &Path) -> Result<(), Box<dyn std::error::Error + Sen
     Ok(())
 }
 
-fn embedded_partition_table()
+pub(crate) fn embedded_partition_table()
 -> Result<tempfile::NamedTempFile, Box<dyn std::error::Error + Send + Sync>> {
     let mut file = tempfile::Builder::new()
         .prefix("flux-purr-partitions-")
@@ -441,7 +545,7 @@ fn embedded_partition_table()
     Ok(file)
 }
 
-fn direct_elf_flash_args(
+pub(crate) fn direct_elf_flash_args(
     port: &str,
     partition_table: &Path,
     elf: &Path,
@@ -464,7 +568,7 @@ fn direct_elf_flash_args(
     ])
 }
 
-fn direct_erase_flash_args(port: &str) -> Vec<String> {
+pub(crate) fn direct_erase_flash_args(port: &str) -> Vec<String> {
     vec![
         "erase-flash".into(),
         "--chip".into(),
@@ -477,7 +581,7 @@ fn direct_erase_flash_args(port: &str) -> Vec<String> {
     ]
 }
 
-fn ensure_real_flash_enabled() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn ensure_real_flash_enabled() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if std::env::var("FLUX_PURR_DEVD_ALLOW_REAL_FLASH").as_deref() != Ok("1") {
         return Err(
             "real flashing is disabled; set FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1 only with explicit port authorization"
@@ -487,11 +591,11 @@ fn ensure_real_flash_enabled() -> Result<(), Box<dyn std::error::Error + Send + 
     Ok(())
 }
 
-fn default_release_elf() -> PathBuf {
+pub(crate) fn default_release_elf() -> PathBuf {
     flux_purr_repo_root().join("firmware/target/xtensa-esp32s3-none-elf/release/flux-purr")
 }
 
-fn resolve_espflash_program() -> PathBuf {
+pub(crate) fn resolve_espflash_program() -> PathBuf {
     std::env::var_os("FLUX_PURR_ESPFLASH")
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
@@ -500,19 +604,19 @@ fn resolve_espflash_program() -> PathBuf {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct EspflashDiagnostics {
-    command: String,
-    success: bool,
-    exit_code: Option<i32>,
-    phase: String,
-    phases: Vec<String>,
-    diagnosis: String,
-    hint: String,
-    stdout: String,
-    stderr: String,
+pub(crate) struct EspflashDiagnostics {
+    pub(crate) command: String,
+    pub(crate) success: bool,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) phase: String,
+    pub(crate) phases: Vec<String>,
+    pub(crate) diagnosis: String,
+    pub(crate) hint: String,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
-fn run_espflash_command(
+pub(crate) fn run_espflash_command(
     program: &Path,
     args: &[String],
 ) -> Result<EspflashDiagnostics, Box<dyn std::error::Error + Send + Sync>> {
@@ -531,7 +635,7 @@ fn run_espflash_command(
     Ok(diagnostics)
 }
 
-fn classify_espflash_diagnostics(
+pub(crate) fn classify_espflash_diagnostics(
     command: &str,
     exit_code: Option<i32>,
     stdout: &str,
@@ -570,7 +674,7 @@ fn classify_espflash_diagnostics(
     }
 }
 
-fn espflash_phase_for_line(line: &str) -> Option<&'static str> {
+pub(crate) fn espflash_phase_for_line(line: &str) -> Option<&'static str> {
     let line = line.to_ascii_lowercase();
     if line.contains("flashend")
         || line.contains("bootloader returned an error")
@@ -601,7 +705,7 @@ fn espflash_phase_for_line(line: &str) -> Option<&'static str> {
     None
 }
 
-fn espflash_diagnosis_for(phase: &str, success: bool) -> String {
+pub(crate) fn espflash_diagnosis_for(phase: &str, success: bool) -> String {
     if success {
         return "completed".to_string();
     }
@@ -614,7 +718,7 @@ fn espflash_diagnosis_for(phase: &str, success: bool) -> String {
     }
 }
 
-fn espflash_hint(phase: &str, success: bool) -> String {
+pub(crate) fn espflash_hint(phase: &str, success: bool) -> String {
     if success {
         return "espflash reported completion for all observed stages".to_string();
     }
@@ -639,7 +743,7 @@ fn espflash_hint(phase: &str, success: bool) -> String {
     }
 }
 
-fn truncate_espflash_output(output: &str) -> String {
+pub(crate) fn truncate_espflash_output(output: &str) -> String {
     const MAX_OUTPUT_BYTES: usize = 16 * 1024;
     if output.len() <= MAX_OUTPUT_BYTES {
         return output.to_string();
@@ -651,7 +755,7 @@ fn truncate_espflash_output(output: &str) -> String {
     format!("{}\n<output truncated>", &output[..end])
 }
 
-fn format_espflash_failure(diagnostics: &EspflashDiagnostics) -> String {
+pub(crate) fn format_espflash_failure(diagnostics: &EspflashDiagnostics) -> String {
     format!(
         "espflash `{}` failed at phase `{}` (exit_code={:?} diagnosis={}): {}\nphases: {}\nstdout:\n{}\nstderr:\n{}",
         diagnostics.command,
@@ -677,11 +781,14 @@ fn format_espflash_failure(diagnostics: &EspflashDiagnostics) -> String {
     )
 }
 
-fn developer_backup_directory() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn developer_backup_directory()
+-> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     Ok(flux_purr_devd::user_config_dir()?.join("developer-flash-backups"))
 }
 
-fn read_eeprom_snapshot(port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn read_eeprom_snapshot(
+    port: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     match read_eeprom_snapshot_protocol(port) {
         Ok(snapshot) => Ok(snapshot),
         Err(error) if snapshot_protocol_compatibility_fallback(error.as_ref()) => {
@@ -691,13 +798,13 @@ fn read_eeprom_snapshot(port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error
     }
 }
 
-fn snapshot_protocol_compatibility_fallback(error: &dyn std::error::Error) -> bool {
+pub(crate) fn snapshot_protocol_compatibility_fallback(error: &dyn std::error::Error) -> bool {
     error
         .to_string()
         .contains("none matched the EEPROM snapshot request")
 }
 
-fn read_eeprom_snapshot_protocol(
+pub(crate) fn read_eeprom_snapshot_protocol(
     port: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     const SNAPSHOT_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -752,7 +859,7 @@ fn read_eeprom_snapshot_protocol(
     Ok(snapshot)
 }
 
-fn read_legacy_eeprom_snapshot(
+pub(crate) fn read_legacy_eeprom_snapshot(
     port: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     const LEGACY_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -798,7 +905,7 @@ fn read_legacy_eeprom_snapshot(
     Ok(image)
 }
 
-fn write_snapshot_request(
+pub(crate) fn write_snapshot_request(
     serial: &mut dyn serialport::SerialPort,
     value: &Value,
 ) -> io::Result<()> {
@@ -808,12 +915,12 @@ fn write_snapshot_request(
 }
 
 #[derive(Debug, Default)]
-struct SnapshotResponseObservation {
-    nonempty_lines: u16,
-    json_lines: u16,
+pub(crate) struct SnapshotResponseObservation {
+    pub(crate) nonempty_lines: u16,
+    pub(crate) json_lines: u16,
 }
 
-fn snapshot_timeout_error(observation: &SnapshotResponseObservation) -> io::Error {
+pub(crate) fn snapshot_timeout_error(observation: &SnapshotResponseObservation) -> io::Error {
     let message = match (observation.nonempty_lines, observation.json_lines) {
         (0, _) => {
             "EEPROM backup preflight failed: no USB JSONL response from the Device. The Device application may be stopped, in ROM download mode, or unreachable through this USB data path; EEPROM health is unknown and firmware was not written."
@@ -828,7 +935,7 @@ fn snapshot_timeout_error(observation: &SnapshotResponseObservation) -> io::Erro
     io::Error::new(io::ErrorKind::TimedOut, message)
 }
 
-fn snapshot_rejection_error(error_code: &str) -> io::Error {
+pub(crate) fn snapshot_rejection_error(error_code: &str) -> io::Error {
     let message = match error_code {
         "heater_active" => {
             "EEPROM backup preflight blocked: the Device reports active heater output. Disable heating before developer flash; firmware was not written."
@@ -862,12 +969,12 @@ fn snapshot_rejection_error(error_code: &str) -> io::Error {
     io::Error::other(message)
 }
 
-fn snapshot_error_may_be_rom_mode(error: &dyn std::error::Error) -> bool {
+pub(crate) fn snapshot_error_may_be_rom_mode(error: &dyn std::error::Error) -> bool {
     let message = error.to_string();
     message.contains("no USB JSONL response") || message.contains("non-JSON serial output")
 }
 
-fn detect_rom_download_mode(port: &str) -> bool {
+pub(crate) fn detect_rom_download_mode(port: &str) -> bool {
     let program = resolve_espflash_program();
     ProcessCommand::new(program)
         .args(rom_download_probe_args(port))
@@ -876,7 +983,7 @@ fn detect_rom_download_mode(port: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn rom_download_probe_args(port: &str) -> Vec<String> {
+pub(crate) fn rom_download_probe_args(port: &str) -> Vec<String> {
     vec![
         "--skip-update-check".into(),
         "board-info".into(),
@@ -893,7 +1000,7 @@ fn rom_download_probe_args(port: &str) -> Vec<String> {
     ]
 }
 
-fn read_snapshot_response<R: Read + ?Sized>(
+pub(crate) fn read_snapshot_response<R: Read + ?Sized>(
     serial: &mut R,
     request_id: &str,
     deadline: StdInstant,
@@ -989,7 +1096,7 @@ impl ManagedDevd {
     }
 }
 
-async fn request_json(
+pub(crate) async fn request_json(
     _client: &Client,
     method: Method,
     base: &str,
@@ -1028,10 +1135,10 @@ async fn request_json(
     Ok(response.body)
 }
 
-const EEPROM_CAPACITY_BYTES: usize = 8 * 1024;
-const EEPROM_CHUNK_BYTES: usize = 32;
+pub(crate) const EEPROM_CAPACITY_BYTES: usize = 8 * 1024;
+pub(crate) const EEPROM_CHUNK_BYTES: usize = 32;
 
-async fn handle_eeprom_command(
+pub(crate) async fn handle_eeprom_command(
     client: &Client,
     devd: &str,
     command: EepromCommand,
@@ -1043,7 +1150,7 @@ async fn handle_eeprom_command(
     }
 }
 
-async fn export_eeprom(
+pub(crate) async fn export_eeprom(
     client: &Client,
     devd: &str,
     args: EepromExportArgs,
@@ -1057,7 +1164,7 @@ async fn export_eeprom(
     result
 }
 
-async fn export_eeprom_chunks(
+pub(crate) async fn export_eeprom_chunks(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
@@ -1075,9 +1182,8 @@ async fn export_eeprom_chunks(
             Some(json!({"op": "read", "offset": offset, "length": length})),
         )
         .await?;
-        let bytes: Vec<u8> = serde_json::from_value(
-            value.get("bytes").cloned().unwrap_or(Value::Null),
-        )?;
+        let bytes: Vec<u8> =
+            serde_json::from_value(value.get("bytes").cloned().unwrap_or(Value::Null))?;
         if bytes.len() != length {
             return Err(format!(
                 "EEPROM read returned {} bytes, expected {length}",
@@ -1091,7 +1197,7 @@ async fn export_eeprom_chunks(
     Ok(json!({"path": output, "bytes": image.len()}))
 }
 
-async fn import_eeprom(
+pub(crate) async fn import_eeprom(
     client: &Client,
     devd: &str,
     args: EepromImportArgs,
@@ -1109,7 +1215,7 @@ async fn import_eeprom(
     result
 }
 
-async fn import_eeprom_chunks(
+pub(crate) async fn import_eeprom_chunks(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
@@ -1133,7 +1239,7 @@ async fn import_eeprom_chunks(
     Ok(json!({"bytes": image.len(), "rebootRequired": true}))
 }
 
-async fn erase_eeprom(
+pub(crate) async fn erase_eeprom(
     client: &Client,
     devd: &str,
     args: EepromEraseArgs,
@@ -1150,7 +1256,7 @@ async fn erase_eeprom(
     result
 }
 
-async fn erase_and_verify_eeprom(
+pub(crate) async fn erase_and_verify_eeprom(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
@@ -1178,9 +1284,8 @@ async fn erase_and_verify_eeprom(
             })),
         )
         .await?;
-        let bytes: Vec<u8> = serde_json::from_value(
-            value.get("bytes").cloned().unwrap_or(Value::Null),
-        )?;
+        let bytes: Vec<u8> =
+            serde_json::from_value(value.get("bytes").cloned().unwrap_or(Value::Null))?;
         if bytes.len() != EEPROM_CHUNK_BYTES || bytes.iter().any(|byte| *byte != 0xff) {
             return Err(format!("EEPROM erase verification failed at offset {offset}").into());
         }
@@ -1192,7 +1297,7 @@ async fn erase_and_verify_eeprom(
     }))
 }
 
-async fn request_with_lease(
+pub(crate) async fn request_with_lease(
     client: &Client,
     resolved: ResolvedUsbTarget,
     method: Method,
@@ -1211,7 +1316,7 @@ async fn request_with_lease(
     Ok(value)
 }
 
-async fn request_device_read(
+pub(crate) async fn request_device_read(
     client: &Client,
     resolved: ResolvedUsbTarget,
     suffix: &str,
@@ -1219,7 +1324,7 @@ async fn request_device_read(
     request_with_lease(client, resolved, Method::GET, suffix, None).await
 }
 
-async fn request_leased(
+pub(crate) async fn request_leased(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
@@ -1249,7 +1354,7 @@ async fn request_leased(
     request_json(client, method, &resolved.devd, &path, body).await
 }
 
-async fn request_thermal_status_with_retry(
+pub(crate) async fn request_thermal_status_with_retry(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
@@ -1264,7 +1369,7 @@ async fn request_thermal_status_with_retry(
     .await
 }
 
-async fn request_thermal_status_with_retry_config(
+pub(crate) async fn request_thermal_status_with_retry_config(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
@@ -1297,10 +1402,10 @@ async fn request_thermal_status_with_retry_config(
     Err(format!("thermal /status failed after {attempts} attempt(s): {last_error}").into())
 }
 
-const THERMAL_RUNTIME_WRITE_RETRY_ATTEMPTS: usize = 2;
-const THERMAL_RUNTIME_WRITE_RETRY_BACKOFF_MS: u64 = 150;
+pub(crate) const THERMAL_RUNTIME_WRITE_RETRY_ATTEMPTS: usize = 2;
+pub(crate) const THERMAL_RUNTIME_WRITE_RETRY_BACKOFF_MS: u64 = 150;
 
-async fn request_thermal_runtime_with_retry(
+pub(crate) async fn request_thermal_runtime_with_retry(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
@@ -1337,7 +1442,7 @@ async fn request_thermal_runtime_with_retry(
     Err(format!("thermal /runtime write failed after {attempts} attempt(s): {last_error}").into())
 }
 
-fn thermal_retryable_runtime_write_error_message(message: &str) -> bool {
+pub(crate) fn thermal_retryable_runtime_write_error_message(message: &str) -> bool {
     message.contains("usb_response_timeout")
         || (message.contains("\"code\":\"serial_io_failed\"")
             && (message.contains("Broken pipe")

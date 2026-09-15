@@ -1,17 +1,19 @@
+use super::*;
+
 #[derive(Debug, Parser)]
 #[command(name = "flux-purr", version = flux_purr_devd::PRODUCT_VERSION)]
 #[command(about = "Flux Purr CLI for USB/devd hardware workflows")]
-struct Cli {
+pub(crate) struct Cli {
     #[arg(long, global = true, default_value = DEFAULT_DEVD_ENDPOINT)]
-    devd: String,
+    pub(crate) devd: String,
     #[arg(long, global = true)]
-    json: bool,
+    pub(crate) json: bool,
     #[command(subcommand)]
-    command: Command,
+    pub(crate) command: Command,
 }
 
 #[derive(Debug, Subcommand)]
-enum Command {
+pub(crate) enum Command {
     Devices,
     Lan {
         #[command(subcommand)]
@@ -70,7 +72,7 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
-enum LanCommand {
+pub(crate) enum LanCommand {
     Devices,
     #[command(
         about = "Explicitly browse Flux Purr mDNS records. This never starts a background scan."
@@ -104,71 +106,71 @@ enum LanCommand {
 }
 
 #[derive(Debug, Args)]
-struct LanPairArgs {
+pub(crate) struct LanPairArgs {
     #[arg(long = "url")]
-    base_url: String,
+    pub(crate) base_url: String,
     #[arg(
         long,
         help = "Required only when the connected device reports required pairing"
     )]
-    code: Option<String>,
+    pub(crate) code: Option<String>,
 }
 
 #[derive(Debug, Args)]
-struct LanScanArgs {
+pub(crate) struct LanScanArgs {
     #[arg(long)]
-    cidr: String,
+    pub(crate) cidr: String,
 }
 
 #[derive(Debug, Args)]
-struct LanTargetArgs {
+pub(crate) struct LanTargetArgs {
     #[arg(long)]
-    id: String,
+    pub(crate) id: String,
 }
 
 #[derive(Debug, Args)]
-struct LanRuntimeSetArgs {
+pub(crate) struct LanRuntimeSetArgs {
     #[command(flatten)]
-    target: LanTargetArgs,
+    pub(crate) target: LanTargetArgs,
     #[arg(long = "target-temp-c")]
-    target_temp_c: Option<i16>,
+    pub(crate) target_temp_c: Option<i16>,
     #[arg(long = "active-cooling")]
-    active_cooling: Option<bool>,
+    pub(crate) active_cooling: Option<bool>,
     #[arg(long = "post-heat-cooling", value_parser = ["off", "normal", "fast"])]
-    post_heat_cooling: Option<String>,
+    pub(crate) post_heat_cooling: Option<String>,
     #[arg(long = "heating-fan-guard", value_parser = ["off", "low", "medium", "high"])]
-    heating_fan_guard: Option<String>,
+    pub(crate) heating_fan_guard: Option<String>,
     #[arg(long = "heater-enabled")]
-    heater_enabled: Option<bool>,
+    pub(crate) heater_enabled: Option<bool>,
 }
 
 #[derive(Debug, Args)]
-struct LanRequestArgs {
+pub(crate) struct LanRequestArgs {
     #[command(flatten)]
-    target: LanTargetArgs,
+    pub(crate) target: LanTargetArgs,
     #[arg(long, value_enum)]
-    method: LanHttpMethod,
+    pub(crate) method: LanHttpMethod,
     #[arg(
         long,
         help = "API path below /api/v1, for example calibration or thermal-profile."
     )]
-    path: String,
+    pub(crate) path: String,
     #[arg(
         long,
         conflicts_with = "body_file",
         help = "JSON request body for POST or PUT."
     )]
-    body: Option<String>,
+    pub(crate) body: Option<String>,
     #[arg(
         long = "body-file",
         conflicts_with = "body",
         help = "Path to a JSON request body."
     )]
-    body_file: Option<PathBuf>,
+    pub(crate) body_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum LanHttpMethod {
+pub(crate) enum LanHttpMethod {
     Get,
     Post,
     Put,
@@ -176,7 +178,7 @@ enum LanHttpMethod {
 }
 
 impl LanHttpMethod {
-    const fn as_reqwest(self) -> Method {
+    pub(crate) const fn as_reqwest(self) -> Method {
         match self {
             Self::Get => Method::GET,
             Self::Post => Method::POST,
@@ -187,21 +189,21 @@ impl LanHttpMethod {
 }
 
 #[derive(Debug, Args, Clone)]
-struct TargetSelector {
+pub(crate) struct TargetSelector {
     #[arg(long)]
-    device: Option<String>,
+    pub(crate) device: Option<String>,
     #[arg(long)]
-    hardware: Option<String>,
+    pub(crate) hardware: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
-enum BenchSourceKind {
+pub(crate) enum BenchSourceKind {
     Isolapurr,
 }
 
 impl BenchSourceKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Isolapurr => "isolapurr",
         }
@@ -210,7 +212,7 @@ impl BenchSourceKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
-enum ThermalProfileMode {
+pub(crate) enum ThermalProfileMode {
     Auto,
     #[value(name = "65w")]
     W65,
@@ -219,7 +221,7 @@ enum ThermalProfileMode {
 }
 
 impl ThermalProfileMode {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
             Self::W65 => "65w",
@@ -227,7 +229,7 @@ impl ThermalProfileMode {
         }
     }
 
-    fn explicit_bank(self) -> Option<&'static str> {
+    pub(crate) fn explicit_bank(self) -> Option<&'static str> {
         match self {
             Self::Auto => None,
             Self::W65 => Some("pps3a"),
@@ -235,7 +237,7 @@ impl ThermalProfileMode {
         }
     }
 
-    fn explicit_source_defaults(self) -> Option<(u16, u16)> {
+    pub(crate) fn explicit_source_defaults(self) -> Option<(u16, u16)> {
         match self {
             Self::Auto => None,
             Self::W65 => Some((20_000, 3_250)),
@@ -246,36 +248,36 @@ impl ThermalProfileMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
-enum ThermalSelfTestEvaluationMode {
+pub(crate) enum ThermalSelfTestEvaluationMode {
     TuningScout,
     HoldConfirm,
 }
 
 impl ThermalSelfTestEvaluationMode {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::TuningScout => "tuning-scout",
             Self::HoldConfirm => "hold-confirm",
         }
     }
 
-    fn enforces_stage_limits(self) -> bool {
+    pub(crate) fn enforces_stage_limits(self) -> bool {
         matches!(self, Self::HoldConfirm)
     }
 
-    fn reports_stage_limits(self) -> bool {
+    pub(crate) fn reports_stage_limits(self) -> bool {
         true
     }
 }
 
 #[derive(Debug, Subcommand)]
-enum RuntimeCommand {
+pub(crate) enum RuntimeCommand {
     Get(TargetSelector),
     Set(RuntimeSetArgs),
 }
 
 #[derive(Debug, Subcommand)]
-enum BuzzerCommand {
+pub(crate) enum BuzzerCommand {
     #[command(about = "Run a feature-gated, module-level buzzer test through a USB/devd lease.")]
     Test(BuzzerTestArgs),
     #[command(about = "Interactively select and play a feature-gated buzzer cue through USB/devd.")]
@@ -289,34 +291,34 @@ enum BuzzerCommand {
         .multiple(false)
         .args(["cue", "scenario", "stop", "status"])
 ))]
-struct BuzzerTestArgs {
+pub(crate) struct BuzzerTestArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long, value_enum)]
-    cue: Option<BuzzerCueArg>,
+    pub(crate) cue: Option<BuzzerCueArg>,
     #[arg(long, value_enum)]
-    scenario: Option<BuzzerScenarioArg>,
+    pub(crate) scenario: Option<BuzzerScenarioArg>,
     #[arg(long, visible_alias = "loop", requires = "cue")]
-    repeat: bool,
+    pub(crate) repeat: bool,
     #[arg(long)]
-    stop: bool,
+    pub(crate) stop: bool,
     #[arg(long)]
-    status: bool,
+    pub(crate) status: bool,
 }
 
 #[derive(Debug, Args)]
-struct BuzzerPlayArgs {
+pub(crate) struct BuzzerPlayArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(
         long,
         help = "Enable pointer capture at startup; turn it off with M to copy terminal text."
     )]
-    pointer: bool,
+    pub(crate) pointer: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum BuzzerCueArg {
+pub(crate) enum BuzzerCueArg {
     UiInput,
     HeaterOn,
     HeaterOff,
@@ -329,7 +331,7 @@ enum BuzzerCueArg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BuzzerInteractiveAction {
+pub(crate) enum BuzzerInteractiveAction {
     Exit,
     Refresh,
     Stop,
@@ -345,7 +347,7 @@ enum BuzzerInteractiveAction {
 }
 
 impl BuzzerCueArg {
-    const fn wire_value(self) -> &'static str {
+    pub(crate) const fn wire_value(self) -> &'static str {
         match self {
             Self::UiInput => "ui_input",
             Self::HeaterOn => "heater_on",
@@ -359,7 +361,7 @@ impl BuzzerCueArg {
         }
     }
 
-    const fn one_shot_duration_ms(self) -> u64 {
+    pub(crate) const fn one_shot_duration_ms(self) -> u64 {
         match self {
             Self::UiInput => 45,
             Self::HeaterOn | Self::HeaterOff => 170,
@@ -375,14 +377,14 @@ impl BuzzerCueArg {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct BuzzerCueDescriptor {
-    cue: BuzzerCueArg,
-    label: &'static str,
-    kind: &'static str,
-    rhythm: &'static str,
+pub(crate) struct BuzzerCueDescriptor {
+    pub(crate) cue: BuzzerCueArg,
+    pub(crate) label: &'static str,
+    pub(crate) kind: &'static str,
+    pub(crate) rhythm: &'static str,
 }
 
-const BUZZER_CUE_CATALOG: [BuzzerCueDescriptor; 9] = [
+pub(crate) const BUZZER_CUE_CATALOG: [BuzzerCueDescriptor; 9] = [
     BuzzerCueDescriptor {
         cue: BuzzerCueArg::UiInput,
         label: "UI input",
@@ -440,13 +442,13 @@ const BUZZER_CUE_CATALOG: [BuzzerCueDescriptor; 9] = [
 ];
 
 #[derive(Debug, Clone, Copy)]
-struct BuzzerScenarioDescriptor {
-    scenario: BuzzerScenarioArg,
-    label: &'static str,
-    description: &'static str,
+pub(crate) struct BuzzerScenarioDescriptor {
+    pub(crate) scenario: BuzzerScenarioArg,
+    pub(crate) label: &'static str,
+    pub(crate) description: &'static str,
 }
 
-const BUZZER_SCENARIO_CATALOG: [BuzzerScenarioDescriptor; 3] = [
+pub(crate) const BUZZER_SCENARIO_CATALOG: [BuzzerScenarioDescriptor; 3] = [
     BuzzerScenarioDescriptor {
         scenario: BuzzerScenarioArg::FeedbackCoalesce,
         label: "Feedback coalesce",
@@ -465,14 +467,14 @@ const BUZZER_SCENARIO_CATALOG: [BuzzerScenarioDescriptor; 3] = [
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum BuzzerScenarioArg {
+pub(crate) enum BuzzerScenarioArg {
     FeedbackCoalesce,
     FeedbackReplace,
     ActiveCoolingRetrigger,
 }
 
 impl BuzzerScenarioArg {
-    const fn wire_value(self) -> &'static str {
+    pub(crate) const fn wire_value(self) -> &'static str {
         match self {
             Self::FeedbackCoalesce => "feedback_coalesce",
             Self::FeedbackReplace => "feedback_replace",
@@ -480,7 +482,7 @@ impl BuzzerScenarioArg {
         }
     }
 
-    const fn duration_ms(self) -> u64 {
+    pub(crate) const fn duration_ms(self) -> u64 {
         match self {
             Self::FeedbackCoalesce => 250,
             Self::FeedbackReplace => 350,
@@ -490,22 +492,22 @@ impl BuzzerScenarioArg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BuzzerTerminalItem {
+pub(crate) enum BuzzerTerminalItem {
     Cue(BuzzerCueArg),
     Scenario(BuzzerScenarioArg),
 }
 
-const fn buzzer_terminal_item_count() -> usize {
+pub(crate) const fn buzzer_terminal_item_count() -> usize {
     BUZZER_CUE_CATALOG.len() + BUZZER_SCENARIO_CATALOG.len()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct BuzzerTerminalSelection {
-    index: usize,
+pub(crate) struct BuzzerTerminalSelection {
+    pub(crate) index: usize,
 }
 
 impl BuzzerTerminalSelection {
-    fn item(self) -> BuzzerTerminalItem {
+    pub(crate) fn item(self) -> BuzzerTerminalItem {
         if let Some(descriptor) = BUZZER_CUE_CATALOG.get(self.index) {
             return BuzzerTerminalItem::Cue(descriptor.cue);
         }
@@ -514,15 +516,15 @@ impl BuzzerTerminalSelection {
         )
     }
 
-    fn move_previous(&mut self) {
+    pub(crate) fn move_previous(&mut self) {
         self.index = self.index.saturating_sub(1);
     }
 
-    fn move_next(&mut self) {
+    pub(crate) fn move_next(&mut self) {
         self.index = (self.index + 1).min(buzzer_terminal_item_count() - 1);
     }
 
-    fn select_row(&mut self, row: u16) -> bool {
+    pub(crate) fn select_row(&mut self, row: u16) -> bool {
         let Some(index) = buzzer_terminal_item_index_at_row(row) else {
             return false;
         };
@@ -530,7 +532,7 @@ impl BuzzerTerminalSelection {
         true
     }
 
-    fn primary_action(self, session_running: bool) -> BuzzerInteractiveAction {
+    pub(crate) fn primary_action(self, session_running: bool) -> BuzzerInteractiveAction {
         if session_running {
             return BuzzerInteractiveAction::Stop;
         }
@@ -547,7 +549,10 @@ impl BuzzerTerminalSelection {
         }
     }
 
-    fn continuous_action(self, session_running: bool) -> Option<BuzzerInteractiveAction> {
+    pub(crate) fn continuous_action(
+        self,
+        session_running: bool,
+    ) -> Option<BuzzerInteractiveAction> {
         if session_running {
             return None;
         }
@@ -562,17 +567,17 @@ impl BuzzerTerminalSelection {
     }
 }
 
-const BUZZER_TERMINAL_CUE_START_ROW: u16 = 6;
+pub(crate) const BUZZER_TERMINAL_CUE_START_ROW: u16 = 6;
 
-const fn buzzer_terminal_scenario_start_row() -> u16 {
+pub(crate) const fn buzzer_terminal_scenario_start_row() -> u16 {
     BUZZER_TERMINAL_CUE_START_ROW + BUZZER_CUE_CATALOG.len() as u16 + 1
 }
 
-const fn buzzer_terminal_actions_row() -> u16 {
+pub(crate) const fn buzzer_terminal_actions_row() -> u16 {
     buzzer_terminal_scenario_start_row() + BUZZER_SCENARIO_CATALOG.len() as u16 + 2
 }
 
-fn buzzer_terminal_item_index_at_row(row: u16) -> Option<usize> {
+pub(crate) fn buzzer_terminal_item_index_at_row(row: u16) -> Option<usize> {
     let cue_end = BUZZER_TERMINAL_CUE_START_ROW + BUZZER_CUE_CATALOG.len() as u16;
     if (BUZZER_TERMINAL_CUE_START_ROW..cue_end).contains(&row) {
         return Some((row - BUZZER_TERMINAL_CUE_START_ROW) as usize);
@@ -586,7 +591,7 @@ fn buzzer_terminal_item_index_at_row(row: u16) -> Option<usize> {
     None
 }
 
-fn buzzer_terminal_move_selection(
+pub(crate) fn buzzer_terminal_move_selection(
     selection: &mut BuzzerTerminalSelection,
     key: KeyCode,
     kind: KeyEventKind,
@@ -604,7 +609,7 @@ fn buzzer_terminal_move_selection(
     true
 }
 
-fn buzzer_terminal_key_action(
+pub(crate) fn buzzer_terminal_key_action(
     key: KeyCode,
     kind: KeyEventKind,
     selection: BuzzerTerminalSelection,
@@ -627,7 +632,7 @@ fn buzzer_terminal_key_action(
     }
 }
 
-fn buzzer_terminal_pointer_action(
+pub(crate) fn buzzer_terminal_pointer_action(
     row: u16,
     column: u16,
     selection: BuzzerTerminalSelection,
@@ -646,7 +651,7 @@ fn buzzer_terminal_pointer_action(
 }
 
 #[derive(Debug, Subcommand)]
-enum PdCommand {
+pub(crate) enum PdCommand {
     Pps {
         #[command(subcommand)]
         command: PpsCommand,
@@ -654,7 +659,7 @@ enum PdCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum PpsCommand {
+pub(crate) enum PpsCommand {
     #[command(about = "Set a manual PPS override. Avoid large changes while heating.")]
     Set(PpsSetArgs),
     #[command(about = "Clear the manual PPS override and return to automatic power control.")]
@@ -662,51 +667,51 @@ enum PpsCommand {
 }
 
 #[derive(Debug, Args)]
-struct PpsSetArgs {
+pub(crate) struct PpsSetArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(
         long = "volts",
         help = "Manual PPS voltage in volts, using 0.1V steps."
     )]
-    volts: String,
+    pub(crate) volts: String,
     #[arg(
         long = "amps",
         help = "Manual PPS requested current in amps, using 0.05A steps."
     )]
-    amps: Option<String>,
+    pub(crate) amps: Option<String>,
 }
 
 #[derive(Debug, Args)]
-struct RuntimeSetArgs {
+pub(crate) struct RuntimeSetArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "target-temp-c")]
-    target_temp_c: Option<i16>,
+    pub(crate) target_temp_c: Option<i16>,
     #[arg(long = "selected-preset-slot")]
-    selected_preset_slot: Option<usize>,
+    pub(crate) selected_preset_slot: Option<usize>,
     #[arg(long = "presets-file")]
-    presets_file: Option<PathBuf>,
+    pub(crate) presets_file: Option<PathBuf>,
     #[arg(long = "preset-slot")]
-    preset_slot: Option<usize>,
+    pub(crate) preset_slot: Option<usize>,
     #[arg(long = "preset-temp-c")]
-    preset_temp_c: Option<i16>,
+    pub(crate) preset_temp_c: Option<i16>,
     #[arg(long = "preset-disabled")]
-    preset_disabled: bool,
+    pub(crate) preset_disabled: bool,
     #[arg(long = "active-cooling")]
-    active_cooling: Option<bool>,
+    pub(crate) active_cooling: Option<bool>,
     #[arg(long = "post-heat-cooling", value_parser = ["off", "normal", "fast"])]
-    post_heat_cooling: Option<String>,
+    pub(crate) post_heat_cooling: Option<String>,
     #[arg(long = "heating-fan-guard", value_parser = ["off", "low", "medium", "high"])]
-    heating_fan_guard: Option<String>,
+    pub(crate) heating_fan_guard: Option<String>,
     #[arg(long = "heater-enabled")]
-    heater_enabled: Option<bool>,
+    pub(crate) heater_enabled: Option<bool>,
     #[arg(long = "fault-attention-acknowledged")]
-    fault_attention_acknowledged: bool,
+    pub(crate) fault_attention_acknowledged: bool,
 }
 
 #[derive(Debug, Subcommand)]
-enum WifiCommand {
+pub(crate) enum WifiCommand {
     Set(WifiSetArgs),
     Clear(TargetSelector),
     /// Stop the current WiFi station attempt without erasing saved credentials.
@@ -714,7 +719,7 @@ enum WifiCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum CalibrationCommand {
+pub(crate) enum CalibrationCommand {
     Get(TargetSelector),
     Capture(CalibrationCaptureArgs),
     Delete(CalibrationDeleteArgs),
@@ -727,7 +732,7 @@ enum CalibrationCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum CalibrationModeCommand {
+pub(crate) enum CalibrationModeCommand {
     Status(TargetSelector),
     Exit(TargetSelector),
     Voltage {
@@ -745,7 +750,7 @@ enum CalibrationModeCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum VoltageCalibrationCommand {
+pub(crate) enum VoltageCalibrationCommand {
     Enter(PpsCalibrationEnterArgs),
     Set(PpsCalibrationSetArgs),
     Step(PpsCalibrationStepArgs),
@@ -758,7 +763,7 @@ enum VoltageCalibrationCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum TemperatureCalibrationCommand {
+pub(crate) enum TemperatureCalibrationCommand {
     Enter(TemperatureCalibrationEnterArgs),
     SetTarget(TemperatureCalibrationTargetArgs),
     Heater(TemperatureCalibrationHeaterArgs),
@@ -766,7 +771,7 @@ enum TemperatureCalibrationCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum HeaterCurveCalibrationCommand {
+pub(crate) enum HeaterCurveCalibrationCommand {
     Enter(PpsCalibrationEnterArgs),
     Set(PpsCalibrationSetArgs),
     Heater(HeaterCurveCalibrationHeaterArgs),
@@ -777,13 +782,13 @@ enum HeaterCurveCalibrationCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum CalibrationJobCommand {
+pub(crate) enum CalibrationJobCommand {
     Status(TargetSelector),
     Cancel(TargetSelector),
 }
 
 #[derive(Debug, Subcommand)]
-enum HeaterCurveCommand {
+pub(crate) enum HeaterCurveCommand {
     Get(TargetSelector),
     Preview(HeaterCurveFileArgs),
     ClearPreview(TargetSelector),
@@ -792,7 +797,7 @@ enum HeaterCurveCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum ThermalCommand {
+pub(crate) enum ThermalCommand {
     Model {
         #[command(subcommand)]
         command: ThermalModelCommand,
@@ -819,7 +824,7 @@ enum ThermalCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum ThermalModelCommand {
+pub(crate) enum ThermalModelCommand {
     #[command(
         about = "Start one selected-APDO full-voltage transient calibration run to 220C, including heater-curve sampling."
     )]
@@ -827,7 +832,7 @@ enum ThermalModelCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum ThermalReportCommand {
+pub(crate) enum ThermalReportCommand {
     #[command(
         about = "Render a completed raw thermal self-test as the canonical four-file HTML evidence bundle."
     )]
@@ -839,7 +844,7 @@ enum ThermalReportCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum ThermalProfileCommand {
+pub(crate) enum ThermalProfileCommand {
     Preview(ThermalProfileFileArgs),
     ClearPreview(TargetSelector),
     Save(ThermalProfileFileArgs),
@@ -847,580 +852,580 @@ enum ThermalProfileCommand {
 }
 
 #[derive(Debug, Args)]
-struct ThermalProfileFileArgs {
+pub(crate) struct ThermalProfileFileArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    file: PathBuf,
+    pub(crate) file: PathBuf,
     #[arg(long = "profile-mode", value_enum, default_value = "65w")]
-    profile_mode: ThermalProfileMode,
+    pub(crate) profile_mode: ThermalProfileMode,
 }
 
 #[derive(Debug, Args)]
-struct ThermalProfileClearArgs {
+pub(crate) struct ThermalProfileClearArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "profile-mode", value_enum, default_value = "65w")]
-    profile_mode: ThermalProfileMode,
+    pub(crate) profile_mode: ThermalProfileMode,
 }
 
 #[derive(Debug, Args, Clone)]
-struct ThermalSelfTestArgs {
+pub(crate) struct ThermalSelfTestArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(
         long = "source-kind",
         value_enum,
         default_value = "isolapurr",
         help = "Bench source provider used for thermal HIL. The current default is isolapurr."
     )]
-    source_kind: BenchSourceKind,
+    pub(crate) source_kind: BenchSourceKind,
     #[arg(
         long = "source-id",
         alias = "source-device-id",
         help = "Expected bench source identity returned by the selected source provider."
     )]
-    source_id: String,
+    pub(crate) source_id: String,
     #[arg(
         long = "source-url",
         help = "Bench source URL used by the selected source provider. The default isolapurr provider uses LAN HTTP only."
     )]
-    source_url: String,
+    pub(crate) source_url: String,
     #[arg(long = "profile-mode", value_enum, default_value = "auto")]
-    profile_mode: ThermalProfileMode,
+    pub(crate) profile_mode: ThermalProfileMode,
     #[arg(
         long = "source-voltage-v",
         help = "Optional low-level source-voltage override."
     )]
-    source_voltage_v: Option<String>,
+    pub(crate) source_voltage_v: Option<String>,
     #[arg(
         long = "source-current-a",
         help = "Optional low-level source-current override."
     )]
-    source_current_a: Option<String>,
+    pub(crate) source_current_a: Option<String>,
     #[arg(
         long = "source-power-watts",
         default_value_t = 0,
         help = "Requested bench-source capability power ceiling used for thermal HIL source setup. Defaults to the resolved thermal profile mode/bank ceiling."
     )]
-    source_power_watts: u16,
+    pub(crate) source_power_watts: u16,
     #[arg(
         long = "source-mode",
         default_value = "auto-follow",
         value_parser = ["auto-follow", "manual-forced"],
         help = "Bench source mode. The default isolapurr provider supports auto-follow or manual-forced."
     )]
-    source_mode: String,
+    pub(crate) source_mode: String,
     #[arg(long = "sample-interval-ms", default_value_t = 300)]
-    sample_interval_ms: u64,
+    pub(crate) sample_interval_ms: u64,
     #[arg(
         long = "evaluation-mode",
         value_enum,
         default_value = "hold-confirm",
         help = "Host-side evaluation mode. tuning-scout keeps source/runtime/sample-rate faults hard, but leaves full-speed/overshoot/p2p as scored diagnostics."
     )]
-    evaluation_mode: ThermalSelfTestEvaluationMode,
+    pub(crate) evaluation_mode: ThermalSelfTestEvaluationMode,
     #[arg(long = "hold-seconds", default_value_t = 60)]
-    hold_seconds: u64,
+    pub(crate) hold_seconds: u64,
     #[arg(long = "stage-timeout-seconds", default_value_t = 180)]
-    stage_timeout_seconds: u64,
+    pub(crate) stage_timeout_seconds: u64,
     #[arg(
         long = "warmup-timeout-seconds",
         default_value_t = 180,
         help = "Explicit warmup timeout. It is tracked separately from the overall stage timeout and must not be derived from remaining target budget."
     )]
-    warmup_timeout_seconds: u64,
+    pub(crate) warmup_timeout_seconds: u64,
     #[arg(
         long = "runtime-rearm-attempts",
         default_value_t = 1,
         help = "Bounded automatic recovery count for transient sensor faults, guarded temperature observations, and recoverable runtime resets during thermal HIL."
     )]
-    runtime_rearm_attempts: u8,
+    pub(crate) runtime_rearm_attempts: u8,
     #[arg(
         long = "calibration-run",
         action = ArgAction::SetTrue,
         help = "Collect the full hold window even when timing acceptance gates fail; safety faults still stop immediately."
     )]
-    calibration_run: bool,
+    pub(crate) calibration_run: bool,
     #[arg(
         long = "optimize-targets-c",
         help = "Comma-separated sparse tuning targets. Defaults to a range-covering subset of the validation targets."
     )]
-    optimize_targets_c: Option<String>,
+    pub(crate) optimize_targets_c: Option<String>,
     #[arg(
         long = "skip-optimize",
         action = ArgAction::SetTrue,
         help = "Skip the tuning pass and run the validation ladder once with the provided seed profile."
     )]
-    skip_optimize: bool,
+    pub(crate) skip_optimize: bool,
     #[arg(long = "cooldown-temp-c", default_value_t = 40.0)]
-    cooldown_temp_c: f64,
+    pub(crate) cooldown_temp_c: f64,
     #[arg(long = "cooldown-timeout-seconds", default_value_t = 7200)]
-    cooldown_timeout_seconds: u64,
+    pub(crate) cooldown_timeout_seconds: u64,
     #[arg(
         long = "targets-c",
         help = "Comma-separated validation target list. Defaults to 60,140,220 during development runs. Supported values are 60,80,100,120,140,160,180,200,220,240,250."
     )]
-    targets_c: Option<String>,
+    pub(crate) targets_c: Option<String>,
     #[arg(long = "seed-profile-file")]
-    seed_profile_file: Option<PathBuf>,
+    pub(crate) seed_profile_file: Option<PathBuf>,
     #[arg(
         long = "candidate-profile-file",
         action = ArgAction::Append,
         help = "Repeat for batch comparison of multiple profiles at one target. Batch runs never save EEPROM."
     )]
-    candidate_profile_files: Vec<PathBuf>,
+    pub(crate) candidate_profile_files: Vec<PathBuf>,
     #[arg(long = "output-dir", default_value = "thermal-self-test-runs")]
-    output_dir: PathBuf,
+    pub(crate) output_dir: PathBuf,
     #[arg(long = "dry-run", action = ArgAction::SetTrue)]
-    dry_run: bool,
+    pub(crate) dry_run: bool,
     // Internal flagship-tuning deadline. The public self-test command remains unbounded
     // except for its explicit stage and cooldown timeouts.
     #[arg(skip)]
-    execution_deadline: Option<StdInstant>,
+    pub(crate) execution_deadline: Option<StdInstant>,
 }
 
 #[derive(Debug, Clone)]
-struct ThermalSourceSelection {
-    resolved_bank: &'static str,
-    detected_source_class: &'static str,
-    detected_source_class_basis: &'static str,
-    default_voltage_mv: u16,
-    default_current_ma: u16,
+pub(crate) struct ThermalSourceSelection {
+    pub(crate) resolved_bank: &'static str,
+    pub(crate) detected_source_class: &'static str,
+    pub(crate) detected_source_class_basis: &'static str,
+    pub(crate) default_voltage_mv: u16,
+    pub(crate) default_current_ma: u16,
 }
 
 #[derive(Debug, Args, Clone)]
-struct ThermalRetuneArgs {
+pub(crate) struct ThermalRetuneArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "run-dir")]
-    run_dir: PathBuf,
+    pub(crate) run_dir: PathBuf,
     #[arg(
         long = "optimize-targets-c",
         help = "Optional override for the sparse tuning targets used during replay."
     )]
-    optimize_targets_c: Option<String>,
+    pub(crate) optimize_targets_c: Option<String>,
     #[arg(
         long = "apply-preview",
         action = ArgAction::SetTrue,
         help = "Apply the replayed candidate as a RAM-only thermal profile preview after artifacts are written."
     )]
-    apply_preview: bool,
+    pub(crate) apply_preview: bool,
 }
 
 #[derive(Debug, Args, Clone)]
-struct ThermalFlagshipTuneArgs {
+pub(crate) struct ThermalFlagshipTuneArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(
         long = "source-kind",
         value_enum,
         default_value = "isolapurr",
         help = "Bench source provider used for flagship thermal HIL."
     )]
-    source_kind: BenchSourceKind,
+    pub(crate) source_kind: BenchSourceKind,
     #[arg(
         long = "source-id",
         alias = "source-device-id",
         help = "Expected bench source identity returned by the selected source provider."
     )]
-    source_id: String,
+    pub(crate) source_id: String,
     #[arg(
         long = "source-url",
         help = "Bench source URL used by the selected source provider."
     )]
-    source_url: String,
+    pub(crate) source_url: String,
     #[arg(long = "profile-mode", value_enum, default_value = "100w")]
-    profile_mode: ThermalProfileMode,
+    pub(crate) profile_mode: ThermalProfileMode,
     #[arg(
         long = "source-voltage-v",
         help = "Optional low-level source-voltage override."
     )]
-    source_voltage_v: Option<String>,
+    pub(crate) source_voltage_v: Option<String>,
     #[arg(
         long = "source-current-a",
         help = "Optional low-level source-current override."
     )]
-    source_current_a: Option<String>,
+    pub(crate) source_current_a: Option<String>,
     #[arg(
         long = "source-power-watts",
         help = "Requested bench-source capability power ceiling used for flagship thermal HIL source setup."
     )]
-    source_power_watts: Option<u16>,
+    pub(crate) source_power_watts: Option<u16>,
     #[arg(
         long = "source-mode",
         default_value = "auto-follow",
         value_parser = ["auto-follow", "manual-forced"],
         help = "Bench source mode."
     )]
-    source_mode: String,
+    pub(crate) source_mode: String,
     #[arg(long = "sample-interval-ms", default_value_t = 300)]
-    sample_interval_ms: u64,
+    pub(crate) sample_interval_ms: u64,
     #[arg(
         long = "runtime-rearm-attempts",
         default_value_t = 3,
         help = "Bounded automatic recovery count for transient sensor faults and recoverable runtime resets during flagship thermal HIL."
     )]
-    runtime_rearm_attempts: u8,
+    pub(crate) runtime_rearm_attempts: u8,
     #[arg(
         long = "anchor-targets-c",
         default_value = "60,80,100,120,140,160,180,220,240",
         help = "Deprecated legacy flag. Canonical 5A full-batch tuning now uses a single same-grade target set."
     )]
-    anchor_targets_c: String,
+    pub(crate) anchor_targets_c: String,
     #[arg(
         long = "validation-targets-c",
         default_value = "60,80,100,120,140,160,180,220,240",
         help = "Deprecated legacy flag. Canonical 5A full-batch tuning no longer runs a separate validation tier."
     )]
-    validation_targets_c: String,
+    pub(crate) validation_targets_c: String,
     #[arg(
         long = "tune-targets-c",
         default_value = "60,80,100,120,140,160,180,220,240",
         help = "Comma-separated full-batch tuning target set. Execution order is derived recursively from the physical temperature order."
     )]
-    tune_targets_c: String,
+    pub(crate) tune_targets_c: String,
     #[arg(
         long = "seed-profile-file",
         help = "Optional starting sparse/full thermal profile. Defaults to the resolved bank seed path."
     )]
-    seed_profile_file: Option<PathBuf>,
+    pub(crate) seed_profile_file: Option<PathBuf>,
     #[arg(
         long = "output-root",
         default_value = "thermal-self-test-runs",
         help = "Root directory for flagship tuning artifacts."
     )]
-    output_root: PathBuf,
+    pub(crate) output_root: PathBuf,
     #[arg(
         long = "bundle-dir",
         help = "Output directory for the canonical owner-facing preliminary review bundle."
     )]
-    bundle_dir: Option<PathBuf>,
+    pub(crate) bundle_dir: Option<PathBuf>,
     #[arg(long = "per-target-budget-seconds", default_value_t = 1_200)]
-    per_target_budget_seconds: u64,
+    pub(crate) per_target_budget_seconds: u64,
     #[arg(
         long = "max-tuning-rounds",
         help = "Optional debug-only round cap. Omit to tune until the per-target budget is exhausted."
     )]
-    max_tuning_rounds: Option<u32>,
+    pub(crate) max_tuning_rounds: Option<u32>,
     #[arg(long = "scout-hold-seconds", default_value_t = 12)]
-    scout_hold_seconds: u64,
+    pub(crate) scout_hold_seconds: u64,
     #[arg(long = "confirm-hold-seconds", default_value_t = 60)]
-    confirm_hold_seconds: u64,
+    pub(crate) confirm_hold_seconds: u64,
     #[arg(long = "dry-run", action = ArgAction::SetTrue)]
-    dry_run: bool,
+    pub(crate) dry_run: bool,
 }
 
 #[derive(Debug, Args, Clone)]
-struct ThermalLegacyReportArgs {
+pub(crate) struct ThermalLegacyReportArgs {
     #[arg(
         long = "legacy-bundle-dir",
         help = "Directory containing legacy run.bundle.json / samples.ndjson / thermal-profile.accepted.json."
     )]
-    legacy_bundle_dir: PathBuf,
+    pub(crate) legacy_bundle_dir: PathBuf,
     #[arg(
         long = "output-dir",
         help = "Output directory for the rerendered compliant bundle. Defaults to <legacy-bundle-dir>-rerendered."
     )]
-    output_dir: Option<PathBuf>,
+    pub(crate) output_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
-struct ThermalSelfTestReportArgs {
+pub(crate) struct ThermalSelfTestReportArgs {
     #[arg(
         long = "run-dir",
         help = "Directory containing a completed thermal self-test run.json and samples.ndjson."
     )]
-    run_dir: Vec<PathBuf>,
+    pub(crate) run_dir: Vec<PathBuf>,
     #[arg(
         long = "output-dir",
         help = "Output directory for the canonical HTML bundle. Defaults to a sibling <run-dir>-html-report directory."
     )]
-    output_dir: Option<PathBuf>,
+    pub(crate) output_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
-struct HeaterCurveFileArgs {
+pub(crate) struct HeaterCurveFileArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    file: PathBuf,
+    pub(crate) file: PathBuf,
 }
 
 #[derive(Debug, Args)]
-struct CalibrationChannelArgs {
+pub(crate) struct CalibrationChannelArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    channel: String,
+    pub(crate) channel: String,
 }
 
 #[derive(Debug, Args)]
-struct CalibrationCaptureArgs {
+pub(crate) struct CalibrationCaptureArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    channel: String,
+    pub(crate) channel: String,
     #[arg(long = "reference-temp-c")]
-    reference_temp_c: Option<f32>,
+    pub(crate) reference_temp_c: Option<f32>,
     #[arg(long = "reference-vin-volts")]
-    reference_vin_volts: Option<String>,
+    pub(crate) reference_vin_volts: Option<String>,
     #[arg(long = "reference-vin-mv")]
-    reference_vin_mv: Option<u32>,
+    pub(crate) reference_vin_mv: Option<u32>,
     #[arg(long = "observed-mv")]
-    observed_mv: Option<u16>,
+    pub(crate) observed_mv: Option<u16>,
     #[arg(long = "expected-mv")]
-    expected_mv: Option<u16>,
+    pub(crate) expected_mv: Option<u16>,
 }
 
 #[derive(Debug, Args)]
-struct CalibrationDeleteArgs {
+pub(crate) struct CalibrationDeleteArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    channel: String,
+    pub(crate) channel: String,
     #[arg(long = "sample-index")]
-    sample_index: usize,
+    pub(crate) sample_index: usize,
 }
 
 #[derive(Debug, Args)]
-struct CalibrationSetSlotFitArgs {
+pub(crate) struct CalibrationSetSlotFitArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    channel: String,
+    pub(crate) channel: String,
     #[arg(long)]
-    slot: String,
+    pub(crate) slot: String,
     #[arg(long)]
-    gain: f32,
+    pub(crate) gain: f32,
     #[arg(long = "offset-mv")]
-    offset_mv: f32,
+    pub(crate) offset_mv: f32,
 }
 
 #[derive(Debug, Args)]
-struct CalibrationSetActiveSlotArgs {
+pub(crate) struct CalibrationSetActiveSlotArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    channel: String,
+    pub(crate) channel: String,
     #[arg(long)]
-    slot: String,
+    pub(crate) slot: String,
 }
 
 #[derive(Debug, Args)]
-struct CalibrationImportArgs {
+pub(crate) struct CalibrationImportArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    file: PathBuf,
+    pub(crate) file: PathBuf,
 }
 
 #[derive(Debug, Args)]
-struct CalibrationExportArgs {
+pub(crate) struct CalibrationExportArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    file: PathBuf,
+    pub(crate) file: PathBuf,
 }
 
 #[derive(Debug, Args)]
-struct CalibrationCollectArgs {
+pub(crate) struct CalibrationCollectArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(
         long = "source-current-a",
         alias = "current-a",
         help = "External bench source current in amps, using decimal notation."
     )]
-    source_current_a: String,
+    pub(crate) source_current_a: String,
     #[arg(
         long = "source-device-id",
         default_value = "856a14",
         help = "External bench source device id recorded in the output package."
     )]
-    source_device_id: String,
+    pub(crate) source_device_id: String,
     #[arg(
         long = "target-temp-c",
         default_value_t = 270,
         help = "Heater target temperature used to avoid hold logic during capture."
     )]
-    target_temp_c: i16,
+    pub(crate) target_temp_c: i16,
     #[arg(
         long = "stop-temp-c",
         default_value_t = 250.0,
         help = "Temperature at which the script automatically disables heating."
     )]
-    stop_temp_c: f32,
+    pub(crate) stop_temp_c: f32,
     #[arg(
         long = "sample-interval-ms",
         default_value_t = 500,
         help = "Polling interval for status capture."
     )]
-    sample_interval_ms: u64,
+    pub(crate) sample_interval_ms: u64,
     #[arg(
         long = "max-runtime-seconds",
         default_value_t = 3600,
         help = "Safety timeout for a single capture run."
     )]
-    max_runtime_seconds: u64,
+    pub(crate) max_runtime_seconds: u64,
     #[arg(
         long = "output-dir",
         default_value = "calibration-runs",
         help = "Directory where the raw and derived run artifacts are written."
     )]
-    output_dir: PathBuf,
+    pub(crate) output_dir: PathBuf,
     #[arg(long = "dry-run", action = ArgAction::SetTrue)]
-    dry_run: bool,
+    pub(crate) dry_run: bool,
 }
 
 #[derive(Debug, Args)]
-struct PpsCalibrationEnterArgs {
+pub(crate) struct PpsCalibrationEnterArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "volts")]
-    volts: Option<String>,
+    pub(crate) volts: Option<String>,
     #[arg(long = "heater-enabled")]
-    heater_enabled: Option<bool>,
+    pub(crate) heater_enabled: Option<bool>,
 }
 
 #[derive(Debug, Args)]
-struct PpsCalibrationSetArgs {
+pub(crate) struct PpsCalibrationSetArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "volts")]
-    volts: String,
+    pub(crate) volts: String,
 }
 
 #[derive(Debug, Args)]
-struct PpsCalibrationStepArgs {
+pub(crate) struct PpsCalibrationStepArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "delta-v", default_value_t = 1)]
-    delta_v: i16,
+    pub(crate) delta_v: i16,
 }
 
 #[derive(Debug, Args)]
-struct VoltageCalibrationCaptureArgs {
+pub(crate) struct VoltageCalibrationCaptureArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "volts")]
-    volts: Option<String>,
+    pub(crate) volts: Option<String>,
     #[arg(long = "millivolts")]
-    millivolts: Option<u32>,
+    pub(crate) millivolts: Option<u32>,
 }
 
 #[derive(Debug, Args)]
-struct TemperatureCalibrationEnterArgs {
+pub(crate) struct TemperatureCalibrationEnterArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "target-adc-mv")]
-    target_adc_mv: Option<u16>,
+    pub(crate) target_adc_mv: Option<u16>,
     #[arg(long = "volts")]
-    volts: Option<String>,
+    pub(crate) volts: Option<String>,
     #[arg(long = "heater-enabled")]
-    heater_enabled: Option<bool>,
+    pub(crate) heater_enabled: Option<bool>,
 }
 
 #[derive(Debug, Args)]
-struct TemperatureCalibrationTargetArgs {
+pub(crate) struct TemperatureCalibrationTargetArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "target-adc-mv")]
-    target_adc_mv: u16,
+    pub(crate) target_adc_mv: u16,
 }
 
 #[derive(Debug, Args)]
-struct TemperatureCalibrationHeaterArgs {
+pub(crate) struct TemperatureCalibrationHeaterArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "enabled", action = ArgAction::Set, value_parser = clap::value_parser!(bool))]
-    enabled: bool,
+    pub(crate) enabled: bool,
 }
 
 #[derive(Debug, Args)]
-struct TemperatureCalibrationCaptureArgs {
+pub(crate) struct TemperatureCalibrationCaptureArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "reference-temp-c")]
-    reference_temp_c: f32,
+    pub(crate) reference_temp_c: f32,
     #[arg(long = "observed-mv")]
-    observed_mv: Option<u16>,
+    pub(crate) observed_mv: Option<u16>,
 }
 
 #[derive(Debug, Args)]
-struct HeaterCurveCalibrationHeaterArgs {
+pub(crate) struct HeaterCurveCalibrationHeaterArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long = "enabled", action = ArgAction::Set, value_parser = clap::value_parser!(bool))]
-    enabled: bool,
+    pub(crate) enabled: bool,
 }
 
 #[derive(Debug, Args)]
-struct WifiSetArgs {
+pub(crate) struct WifiSetArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    ssid: String,
+    pub(crate) ssid: String,
     #[arg(long)]
-    password: Option<String>,
+    pub(crate) password: Option<String>,
     #[arg(long = "static-ip")]
-    static_ip: Option<Ipv4Addr>,
+    pub(crate) static_ip: Option<Ipv4Addr>,
     #[arg(long = "static-prefix-len")]
-    static_prefix_len: Option<u8>,
+    pub(crate) static_prefix_len: Option<u8>,
     #[arg(long = "static-gateway")]
-    static_gateway: Option<Ipv4Addr>,
+    pub(crate) static_gateway: Option<Ipv4Addr>,
     #[arg(long = "static-dns")]
-    static_dns: Option<Ipv4Addr>,
+    pub(crate) static_dns: Option<Ipv4Addr>,
     #[arg(long = "telemetry-interval-ms")]
-    telemetry_interval_ms: Option<u32>,
+    pub(crate) telemetry_interval_ms: Option<u32>,
 }
 
 #[derive(Debug, Args)]
-struct UpdateArgs {
+pub(crate) struct UpdateArgs {
     #[arg(long, value_name = "SERIAL_PORT")]
-    port: String,
+    pub(crate) port: String,
     #[arg(long, value_name = "BUNDLE")]
-    bundle: PathBuf,
+    pub(crate) bundle: PathBuf,
 }
 
 #[derive(Debug, Args)]
-struct FlashArgs {
+pub(crate) struct FlashArgs {
     #[arg(long, value_name = "SERIAL_PORT")]
-    port: String,
+    pub(crate) port: String,
     #[arg(long, value_name = "ELF")]
-    elf: Option<PathBuf>,
+    pub(crate) elf: Option<PathBuf>,
     #[arg(
         long,
         help = "Skip the Developer EEPROM backup when paired with --confirm NO_EEPROM_BACKUP; no ROM-mode precondition applies"
     )]
-    skip_backup: bool,
+    pub(crate) skip_backup: bool,
     #[arg(
         long,
         help = "Literal confirmation required by --skip-backup: NO_EEPROM_BACKUP"
     )]
-    confirm: Option<String>,
+    pub(crate) confirm: Option<String>,
 }
 
 #[derive(Debug, Args)]
-struct RecoverArgs {
+pub(crate) struct RecoverArgs {
     #[arg(long, value_name = "SERIAL_PORT")]
-    port: String,
+    pub(crate) port: String,
     #[arg(long, value_name = "ELF")]
-    elf: PathBuf,
+    pub(crate) elf: PathBuf,
     #[arg(long)]
-    confirm: String,
+    pub(crate) confirm: String,
 }
 
 #[derive(Debug, Args)]
-struct MonitorArgs {
+pub(crate) struct MonitorArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long, default_value_t = 20)]
-    tail: usize,
+    pub(crate) tail: usize,
 }
 
 #[derive(Debug, Subcommand)]
-enum HardwareCommand {
+pub(crate) enum HardwareCommand {
     Available,
     Recent,
     List,
@@ -1441,83 +1446,83 @@ enum HardwareCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum UsbPortCommand {
+pub(crate) enum UsbPortCommand {
     Set { port: String },
     Show,
 }
 
 #[derive(Debug, Subcommand)]
-enum EepromCommand {
+pub(crate) enum EepromCommand {
     Export(EepromExportArgs),
     Import(EepromImportArgs),
     Erase(EepromEraseArgs),
 }
 
 #[derive(Debug, Args)]
-struct EepromExportArgs {
+pub(crate) struct EepromExportArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    output: PathBuf,
+    pub(crate) output: PathBuf,
 }
 
 #[derive(Debug, Args)]
-struct EepromImportArgs {
+pub(crate) struct EepromImportArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long)]
-    input: PathBuf,
+    pub(crate) input: PathBuf,
 }
 
 #[derive(Debug, Args)]
-struct EepromEraseArgs {
+pub(crate) struct EepromEraseArgs {
     #[command(flatten)]
-    target: TargetSelector,
+    pub(crate) target: TargetSelector,
     #[arg(long, default_value = "ERASE EEPROM")]
-    confirm: String,
+    pub(crate) confirm: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum SavedTransport {
+pub(crate) enum SavedTransport {
     Usb,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-struct SavedHardware {
-    id: String,
+pub(crate) struct SavedHardware {
+    pub(crate) id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    transport: SavedTransport,
-    device: String,
+    pub(crate) name: Option<String>,
+    pub(crate) transport: SavedTransport,
+    pub(crate) device: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    devd: Option<String>,
+    pub(crate) devd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_seen_unix_seconds: Option<u64>,
+    pub(crate) last_seen_unix_seconds: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct HardwareRegistry {
+pub(crate) struct HardwareRegistry {
     #[serde(default = "hardware_registry_schema_version")]
-    schema_version: u8,
+    pub(crate) schema_version: u8,
     #[serde(default)]
-    hardware: Vec<SavedHardware>,
+    pub(crate) hardware: Vec<SavedHardware>,
 }
 
 #[derive(Debug, Clone)]
-struct ResolvedUsbTarget {
-    device: String,
-    devd: String,
-    hardware_id: Option<String>,
+pub(crate) struct ResolvedUsbTarget {
+    pub(crate) device: String,
+    pub(crate) devd: String,
+    pub(crate) hardware_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Lease {
-    lease_id: String,
-    ttl_ms: u64,
+pub(crate) struct Lease {
+    pub(crate) lease_id: String,
+    pub(crate) ttl_ms: u64,
 }
 
 impl Default for HardwareRegistry {
@@ -1529,7 +1534,7 @@ impl Default for HardwareRegistry {
     }
 }
 
-fn static_ipv4_value(
+pub(crate) fn static_ipv4_value(
     address: Option<Ipv4Addr>,
     prefix_len: Option<u8>,
     gateway: Option<Ipv4Addr>,
@@ -1580,7 +1585,7 @@ fn static_ipv4_value(
     })))
 }
 
-fn wifi_set_body(
+pub(crate) fn wifi_set_body(
     ssid: String,
     password: Option<String>,
     static_ipv4: Option<Value>,
@@ -1602,7 +1607,7 @@ fn wifi_set_body(
     Value::Object(body)
 }
 
-fn is_unicast_static_ipv4(address: Ipv4Addr) -> bool {
+pub(crate) fn is_unicast_static_ipv4(address: Ipv4Addr) -> bool {
     let first = address.octets()[0];
     first != 0 && first != 127 && first < 224
 }

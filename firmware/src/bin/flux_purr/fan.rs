@@ -1,5 +1,11 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(any(target_arch = "xtensa", test))]
-fn approach_sustain_floor_permille(control_target: ThermalControlTarget, error_c: f32) -> u16 {
+pub(crate) fn approach_sustain_floor_permille(
+    control_target: ThermalControlTarget,
+    error_c: f32,
+) -> u16 {
     let full_floor = control_target
         .approach_floor_power_permille
         .max(control_target.hold_power_permille)
@@ -19,7 +25,7 @@ fn approach_sustain_floor_permille(control_target: ThermalControlTarget, error_c
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FanVoltageProfile {
+pub(crate) enum FanVoltageProfile {
     Minimum,
     SafeHalf,
     Full,
@@ -38,21 +44,21 @@ impl FanVoltageProfile {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FanHardwareCommand {
-    enabled: bool,
-    pwm_permille: u16,
+pub(crate) struct FanHardwareCommand {
+    pub(crate) enabled: bool,
+    pub(crate) pwm_permille: u16,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl FanHardwareCommand {
-    const fn disabled() -> Self {
+    pub(crate) const fn disabled() -> Self {
         Self {
             enabled: false,
             pwm_permille: FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
         }
     }
 
-    const fn from_profile(profile: FanVoltageProfile) -> Self {
+    pub(crate) const fn from_profile(profile: FanVoltageProfile) -> Self {
         Self {
             enabled: true,
             pwm_permille: profile.pwm_permille(),
@@ -62,7 +68,7 @@ impl FanHardwareCommand {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FanPolicyState {
+pub(crate) enum FanPolicyState {
     Disabled,
     ActiveCooling,
     PostHeatMedium,
@@ -89,7 +95,7 @@ enum FanPolicyState {
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl FanPolicyState {
-    const fn command(self, elapsed_ms: u64) -> FanHardwareCommand {
+    pub(crate) const fn command(self, elapsed_ms: u64) -> FanHardwareCommand {
         match self {
             Self::Disabled => FanHardwareCommand::disabled(),
             Self::ActiveCooling => FanHardwareCommand::from_profile(FanVoltageProfile::Full),
@@ -147,17 +153,17 @@ impl FanPolicyState {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FanPolicyDecision {
-    state: FanPolicyState,
-    command: FanHardwareCommand,
-    display_state: FanDisplayState,
-    source: FanPolicySource,
-    output_level: FanOutputLevel,
+pub(crate) struct FanPolicyDecision {
+    pub(crate) state: FanPolicyState,
+    pub(crate) command: FanHardwareCommand,
+    pub(crate) display_state: FanDisplayState,
+    pub(crate) source: FanPolicySource,
+    pub(crate) output_level: FanOutputLevel,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn is_sensor_fault(reason: Option<HeaterFaultReason>) -> bool {
+pub(crate) fn is_sensor_fault(reason: Option<HeaterFaultReason>) -> bool {
     matches!(
         reason,
         Some(
@@ -169,12 +175,12 @@ fn is_sensor_fault(reason: Option<HeaterFaultReason>) -> bool {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn is_overtemp_fault(reason: Option<HeaterFaultReason>) -> bool {
+pub(crate) fn is_overtemp_fault(reason: Option<HeaterFaultReason>) -> bool {
     reason == Some(HeaterFaultReason::OverTemp)
 }
 
 #[cfg(test)]
-fn auto_cooling_command(
+pub(crate) fn auto_cooling_command(
     current_temp_c: i16,
     elapsed_ms: u64,
     previous_state: FanPolicyState,
@@ -197,7 +203,7 @@ fn auto_cooling_command(
 }
 
 #[cfg(test)]
-fn cooling_disabled_pulse_duty_percent(current_temp_c: i16) -> u8 {
+pub(crate) fn cooling_disabled_pulse_duty_percent(current_temp_c: i16) -> u8 {
     if current_temp_c <= COOLING_DISABLED_PULSE_START_TEMP_C {
         return 0;
     }
@@ -206,14 +212,14 @@ fn cooling_disabled_pulse_duty_percent(current_temp_c: i16) -> u8 {
 }
 
 #[cfg(test)]
-fn heating_fan_pulse_duty_percent(current_temp_c: i16) -> u8 {
+pub(crate) fn heating_fan_pulse_duty_percent(current_temp_c: i16) -> u8 {
     cooling_disabled_pulse_duty_percent(current_temp_c)
         .saturating_mul(2)
         .min(HEATING_FAN_PULSE_MAX_DUTY_PERCENT)
 }
 
 #[cfg(test)]
-fn heating_fan_state(current_temp_c: i16, heater_output_percent: u8) -> FanPolicyState {
+pub(crate) fn heating_fan_state(current_temp_c: i16, heater_output_percent: u8) -> FanPolicyState {
     if current_temp_c > COOLING_DISABLED_FAN_FULL_TEMP_C {
         return FanPolicyState::Full;
     }
@@ -233,7 +239,7 @@ fn heating_fan_state(current_temp_c: i16, heater_output_percent: u8) -> FanPolic
 }
 
 #[cfg(test)]
-fn cooling_disabled_state(current_temp_c: i16) -> FanPolicyState {
+pub(crate) fn cooling_disabled_state(current_temp_c: i16) -> FanPolicyState {
     if current_temp_c > COOLING_DISABLED_FAN_FULL_TEMP_C {
         return FanPolicyState::Full;
     }
@@ -253,7 +259,7 @@ fn cooling_disabled_state(current_temp_c: i16) -> FanPolicyState {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fan_display_state_for_command(
+pub(crate) fn fan_display_state_for_command(
     active_cooling_enabled: bool,
     command: FanHardwareCommand,
 ) -> FanDisplayState {
@@ -267,7 +273,7 @@ fn fan_display_state_for_command(
 }
 
 #[cfg(test)]
-fn fan_policy_decision(
+pub(crate) fn fan_policy_decision(
     current_temp_c: i16,
     elapsed_ms: u64,
     heater_enabled: bool,
@@ -301,7 +307,7 @@ fn fan_policy_decision(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fan_output_level_for_command(command: FanHardwareCommand) -> FanOutputLevel {
+pub(crate) fn fan_output_level_for_command(command: FanHardwareCommand) -> FanOutputLevel {
     if !command.enabled {
         FanOutputLevel::Off
     } else if command.pwm_permille == FAN_FULL_SPEED_PWM_PERMILLE {
@@ -316,7 +322,7 @@ fn fan_output_level_for_command(command: FanHardwareCommand) -> FanOutputLevel {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fan_display_state_for_policy(
+pub(crate) fn fan_display_state_for_policy(
     source: FanPolicySource,
     post_heat_mode: PostHeatCoolingMode,
     command: FanHardwareCommand,
@@ -329,7 +335,7 @@ fn fan_display_state_for_policy(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn interpolate_limited_fan_pwm(current_temp_c: i16) -> u16 {
+pub(crate) fn interpolate_limited_fan_pwm(current_temp_c: i16) -> u16 {
     const LIMITED_OUTPUT_START_C: i16 = 150;
     const LIMITED_OUTPUT_END_C: i16 = 240;
     const LIMITED_OUTPUT_PWM_PERMILLE: u16 = 700;
@@ -346,7 +352,7 @@ fn interpolate_limited_fan_pwm(current_temp_c: i16) -> u16 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn guard_pulse_percent(current_temp_c: i16, mode: HeatingFanGuardMode) -> u8 {
+pub(crate) fn guard_pulse_percent(current_temp_c: i16, mode: HeatingFanGuardMode) -> u8 {
     let (start_c, full_c) = match mode {
         HeatingFanGuardMode::Low => (100, 200),
         HeatingFanGuardMode::Medium => (80, 150),
@@ -361,7 +367,7 @@ fn guard_pulse_percent(current_temp_c: i16, mode: HeatingFanGuardMode) -> u8 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fan_policy_decision_with_modes(
+pub(crate) fn fan_policy_decision_with_modes(
     current_temp_c: i16,
     elapsed_ms: u64,
     heater_enabled: bool,
@@ -444,7 +450,7 @@ fn fan_policy_decision_with_modes(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heating_guard_pulse_state(
+pub(crate) fn heating_guard_pulse_state(
     current_temp_c: i16,
     guard_mode: HeatingFanGuardMode,
 ) -> (FanPolicyState, FanPolicySource) {
@@ -467,7 +473,7 @@ fn heating_guard_pulse_state(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn overtemp_forced_fan_state(
+pub(crate) fn overtemp_forced_fan_state(
     current_temp_c: i16,
     forced_fan_active: bool,
 ) -> Option<FanPolicyState> {
@@ -482,19 +488,19 @@ fn overtemp_forced_fan_state(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn startup_pd_contract_ready(observation: Option<PdStatusObservation>) -> bool {
+pub(crate) fn startup_pd_contract_ready(observation: Option<PdStatusObservation>) -> bool {
     observation.is_some_and(|observation| observation.status.pd_active)
 }
 
 // Source_Capabilities may arrive immediately after CC attachment. Reserve one
 // bounded startup window for the policy before shared-I2C initialization work.
 #[cfg(any(target_arch = "xtensa", test))]
-const STARTUP_PD_SERVICE_BUDGET_MS: u64 = 750;
+pub(crate) const STARTUP_PD_SERVICE_BUDGET_MS: u64 = 750;
 #[cfg(target_arch = "xtensa")]
-const STARTUP_PD_SERVICE_INTERVAL_MS: u64 = 1;
+pub(crate) const STARTUP_PD_SERVICE_INTERVAL_MS: u64 = 1;
 
 #[cfg(any(target_arch = "xtensa", test))]
-const fn startup_pd_service_should_continue(
+pub(crate) const fn startup_pd_service_should_continue(
     fusb302b_present: bool,
     contract_ready: bool,
     service_available: bool,
@@ -508,7 +514,7 @@ const fn startup_pd_service_should_continue(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StartupSequenceStage {
+pub(crate) enum StartupSequenceStage {
     BacklightReady,
     PdServiceComplete,
     DisplayReady,
@@ -518,17 +524,17 @@ enum StartupSequenceStage {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct StartupSequence {
+pub(crate) struct StartupSequence {
     completed: Option<StartupSequenceStage>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl StartupSequence {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { completed: None }
     }
 
-    const fn advance(&mut self, next: StartupSequenceStage) -> bool {
+    pub(crate) const fn advance(&mut self, next: StartupSequenceStage) -> bool {
         let expected = match self.completed {
             None => StartupSequenceStage::BacklightReady,
             Some(StartupSequenceStage::BacklightReady) => StartupSequenceStage::PdServiceComplete,
@@ -558,13 +564,13 @@ impl StartupSequence {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StartupFrontPanelPresentation {
+pub(crate) enum StartupFrontPanelPresentation {
     Splash,
     Calibration,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-const fn startup_frontpanel_presentation(
+pub(crate) const fn startup_frontpanel_presentation(
     runtime_mode: FrontPanelRuntimeMode,
 ) -> StartupFrontPanelPresentation {
     match runtime_mode {
@@ -575,7 +581,7 @@ const fn startup_frontpanel_presentation(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn next_heater_lock_reason(
+pub(crate) fn next_heater_lock_reason(
     heater_fault: Option<HeaterFaultReason>,
     cooling_disabled_lock_latched: bool,
     thermal_model_heater_allowed: bool,
@@ -598,7 +604,7 @@ fn next_heater_lock_reason(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn next_heater_lock_reason_with_persistence(
+pub(crate) fn next_heater_lock_reason_with_persistence(
     persistence_locked: bool,
     heater_fault: Option<HeaterFaultReason>,
     cooling_disabled_lock_latched: bool,
@@ -619,7 +625,7 @@ fn next_heater_lock_reason_with_persistence(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn next_dashboard_warning_visible(
+pub(crate) fn next_dashboard_warning_visible(
     elapsed_ms: u64,
     heater_lock_reason: Option<HeaterLockReason>,
 ) -> bool {
@@ -628,7 +634,7 @@ fn next_dashboard_warning_visible(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn reconcile_cooling_disabled_lock(
+pub(crate) fn reconcile_cooling_disabled_lock(
     active_cooling_enabled: bool,
     current_temp_c: i16,
     has_sensor_fault: bool,
@@ -652,23 +658,23 @@ fn reconcile_cooling_disabled_lock(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn is_overtemp_sample(temp_c: f32) -> bool {
+pub(crate) fn is_overtemp_sample(temp_c: f32) -> bool {
     temp_c >= f32::from(HEATER_HARD_CUTOFF_TEMP_C)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn overtemp_fault_from_control_temperature(temp_c: f32) -> Option<HeaterFaultReason> {
+pub(crate) fn overtemp_fault_from_control_temperature(temp_c: f32) -> Option<HeaterFaultReason> {
     is_overtemp_sample(temp_c).then_some(HeaterFaultReason::OverTemp)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn clear_runtime_temperature(latest_temp_c: &mut f32, latest_temp_i16: &mut i16) {
+pub(crate) fn clear_runtime_temperature(latest_temp_c: &mut f32, latest_temp_i16: &mut i16) {
     *latest_temp_c = 0.0;
     *latest_temp_i16 = 0;
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn sync_runtime_temperature_ui(
+pub(crate) fn sync_runtime_temperature_ui(
     ui_state: &mut FrontPanelUiState,
     current_temp_c: i16,
     current_temp_deci_c: i16,
@@ -686,7 +692,7 @@ fn sync_runtime_temperature_ui(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn update_runtime_display_temperature(
+pub(crate) fn update_runtime_display_temperature(
     ui_state: &mut FrontPanelUiState,
     latest_display_temp_c: &mut f32,
     latest_display_temp_i16: &mut i16,
@@ -710,24 +716,24 @@ fn update_runtime_display_temperature(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-struct RuntimeDisplayTemperatureState<'a> {
-    ui_state: &'a mut FrontPanelUiState,
-    latest_display_temp_c: &'a mut f32,
-    latest_display_temp_i16: &'a mut i16,
+pub(crate) struct RuntimeDisplayTemperatureState<'a> {
+    pub(crate) ui_state: &'a mut FrontPanelUiState,
+    pub(crate) latest_display_temp_c: &'a mut f32,
+    pub(crate) latest_display_temp_i16: &'a mut i16,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-struct RuntimeControlTemperatureState<'a> {
-    latest_control_temp_c: &'a mut f32,
-    latest_control_temp_i16: &'a mut i16,
-    transition_guard: &'a mut RtdPpsTransitionGuard,
-    measurement_guard: &'a mut RtdControlMeasurementGuard,
-    control_measurement_guarded: &'a mut bool,
-    heater_controller: &'a mut HeaterController,
+pub(crate) struct RuntimeControlTemperatureState<'a> {
+    pub(crate) latest_control_temp_c: &'a mut f32,
+    pub(crate) latest_control_temp_i16: &'a mut i16,
+    pub(crate) transition_guard: &'a mut RtdPpsTransitionGuard,
+    pub(crate) measurement_guard: &'a mut RtdControlMeasurementGuard,
+    pub(crate) control_measurement_guarded: &'a mut bool,
+    pub(crate) heater_controller: &'a mut HeaterController,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn apply_valid_rtd_measurement(
+pub(crate) fn apply_valid_rtd_measurement(
     display: RuntimeDisplayTemperatureState<'_>,
     control: RuntimeControlTemperatureState<'_>,
     request_mv: u16,
@@ -758,7 +764,7 @@ fn apply_valid_rtd_measurement(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn retain_runtime_display_temperature(
+pub(crate) fn retain_runtime_display_temperature(
     ui_state: &mut FrontPanelUiState,
     latest_display_temp_c: &mut f32,
     latest_display_temp_i16: &mut i16,
@@ -772,21 +778,21 @@ fn retain_runtime_display_temperature(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct RtdPpsTransitionGuard {
+pub(crate) struct RtdPpsTransitionGuard {
     request_mv: Option<u16>,
     blocked_until_ms: Option<u64>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl RtdPpsTransitionGuard {
-    fn new(request_mv: u16) -> Self {
+    pub(crate) fn new(request_mv: u16) -> Self {
         Self {
             request_mv: Some(request_mv),
             ..Self::default()
         }
     }
 
-    fn observe(&mut self, request_mv: u16, now_ms: u64) -> (bool, bool) {
+    pub(crate) fn observe(&mut self, request_mv: u16, now_ms: u64) -> (bool, bool) {
         let request_changed = self.request_mv != Some(request_mv);
         self.request_mv = Some(request_mv);
         if request_changed {
@@ -810,21 +816,21 @@ impl RtdPpsTransitionGuard {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct RtdControlMeasurementGuard {
-    last_accepted_temp_c: Option<f32>,
-    last_accepted_at_ms: Option<u64>,
-    guarded_candidate_temp_c: Option<f32>,
-    guarded_candidate_since_ms: Option<u64>,
-    guarded: bool,
+pub(crate) struct RtdControlMeasurementGuard {
+    pub(crate) last_accepted_temp_c: Option<f32>,
+    pub(crate) last_accepted_at_ms: Option<u64>,
+    pub(crate) guarded_candidate_temp_c: Option<f32>,
+    pub(crate) guarded_candidate_since_ms: Option<u64>,
+    pub(crate) guarded: bool,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl RtdControlMeasurementGuard {
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         *self = Self::default();
     }
 
-    fn reseed(&mut self, temp_c: f32, now_ms: u64) {
+    pub(crate) fn reseed(&mut self, temp_c: f32, now_ms: u64) {
         self.last_accepted_temp_c = Some(temp_c);
         self.last_accepted_at_ms = Some(now_ms);
         self.guarded_candidate_temp_c = None;
@@ -832,7 +838,7 @@ impl RtdControlMeasurementGuard {
         self.guarded = false;
     }
 
-    fn observe(&mut self, measurement_temp_c: f32, now_ms: u64) -> Option<f32> {
+    pub(crate) fn observe(&mut self, measurement_temp_c: f32, now_ms: u64) -> Option<f32> {
         self.guarded = false;
         let Some(last_temp_c) = self.last_accepted_temp_c else {
             self.reseed(measurement_temp_c, now_ms);
@@ -866,7 +872,7 @@ impl RtdControlMeasurementGuard {
         Some(measurement_temp_c)
     }
 
-    fn observe_with_heater_duty(
+    pub(crate) fn observe_with_heater_duty(
         &mut self,
         measurement_temp_c: f32,
         now_ms: u64,
@@ -900,7 +906,7 @@ impl RtdControlMeasurementGuard {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn preserve_rtd_control_guard_when_heater_disabled(
+pub(crate) fn preserve_rtd_control_guard_when_heater_disabled(
     heater_enabled: bool,
     measurement_guarded: &mut bool,
 ) {
@@ -910,7 +916,7 @@ fn preserve_rtd_control_guard_when_heater_disabled(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn accept_rtd_control_sample_after_pps_transition(
+pub(crate) fn accept_rtd_control_sample_after_pps_transition(
     transition_guard: &mut RtdPpsTransitionGuard,
     heater_controller: &mut HeaterController,
     measurement_guard: &mut RtdControlMeasurementGuard,
@@ -941,7 +947,7 @@ fn accept_rtd_control_sample_after_pps_transition(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn should_retry_rtd_sample_after_power_step(
+pub(crate) fn should_retry_rtd_sample_after_power_step(
     previous_request_mv: u16,
     current_request_mv: u16,
     previous_vin_raw_adc_mv: u16,
@@ -953,7 +959,7 @@ fn should_retry_rtd_sample_after_power_step(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn should_clear_runtime_fault_latch(
+pub(crate) fn should_clear_runtime_fault_latch(
     heater_rearm_requested: bool,
     current_rtd_fault: Option<HeaterFaultReason>,
     latched_fault: Option<HeaterFaultReason>,
@@ -962,7 +968,7 @@ fn should_clear_runtime_fault_latch(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-trait BuzzerCueSink {
+pub(crate) trait BuzzerCueSink {
     fn request_feedback(&mut self, source: BuzzerCueSource, cue: BuzzerCueId, now_ms: u64);
     fn activate_protection(&mut self, source: BuzzerCueSource, now_ms: u64);
     fn request_protection_replay(&mut self, source: BuzzerCueSource, now_ms: u64);
@@ -1030,7 +1036,7 @@ impl BuzzerCueSink for BuzzerRuntime {
     }
 
     fn clear_attention(&mut self) {
-        self.clear_attention();
+        BuzzerRuntime::clear_attention(self);
     }
 
     fn request_attention_reminder(&mut self, source: BuzzerCueSource, now_ms: u64) {
@@ -1039,17 +1045,17 @@ impl BuzzerCueSink for BuzzerRuntime {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-struct FaultAttentionState<'a> {
-    last_fault_present: &'a mut bool,
-    attention_acknowledged: &'a mut bool,
-    attention_pending_after_fault_clear: &'a mut bool,
-    forced_fan_active: &'a mut bool,
-    protection_alarm: &'a mut ProtectionAlarmCadence,
-    next_attention_reminder_ms: &'a mut Option<u64>,
+pub(crate) struct FaultAttentionState<'a> {
+    pub(crate) last_fault_present: &'a mut bool,
+    pub(crate) attention_acknowledged: &'a mut bool,
+    pub(crate) attention_pending_after_fault_clear: &'a mut bool,
+    pub(crate) forced_fan_active: &'a mut bool,
+    pub(crate) protection_alarm: &'a mut ProtectionAlarmCadence,
+    pub(crate) next_attention_reminder_ms: &'a mut Option<u64>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn update_fault_attention_state<B: BuzzerCueSink>(
+pub(crate) fn update_fault_attention_state<B: BuzzerCueSink>(
     fault_present: bool,
     state: FaultAttentionState<'_>,
     current_temp_c: i16,
@@ -1105,7 +1111,7 @@ fn update_fault_attention_state<B: BuzzerCueSink>(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn overtemp_attention_requires_ack(
+pub(crate) fn overtemp_attention_requires_ack(
     overtemp_active: bool,
     attention_acknowledged: bool,
     attention_pending_after_fault_clear: bool,
@@ -1114,7 +1120,7 @@ fn overtemp_attention_requires_ack(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn acknowledge_overtemp_attention<B: BuzzerCueSink>(
+pub(crate) fn acknowledge_overtemp_attention<B: BuzzerCueSink>(
     overtemp_active: bool,
     attention_acknowledged: &mut bool,
     attention_pending_after_fault_clear: &mut bool,
@@ -1141,7 +1147,7 @@ fn acknowledge_overtemp_attention<B: BuzzerCueSink>(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn maybe_play_protection_alarm<B: BuzzerCueSink>(
+pub(crate) fn maybe_play_protection_alarm<B: BuzzerCueSink>(
     fault_present: bool,
     protection_alarm: &mut ProtectionAlarmCadence,
     buzzer: &mut B,
@@ -1155,7 +1161,7 @@ fn maybe_play_protection_alarm<B: BuzzerCueSink>(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn should_consume_attention_raw_input(
+pub(crate) fn should_consume_attention_raw_input(
     attention_pending_after_fault_clear: bool,
     suppressing_current_input: bool,
     previous_raw_state: FrontPanelRawState,
@@ -1168,7 +1174,7 @@ fn should_consume_attention_raw_input(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn should_clear_attention_ack_suppression(
+pub(crate) fn should_clear_attention_ack_suppression(
     suppressing_current_input: bool,
     waits_for_delayed_event: bool,
     suppressed_event_seen: bool,
@@ -1184,7 +1190,7 @@ fn should_clear_attention_ack_suppression(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn maybe_play_attention_reminder<B: BuzzerCueSink>(
+pub(crate) fn maybe_play_attention_reminder<B: BuzzerCueSink>(
     attention_pending_after_fault_clear: bool,
     fault_present: bool,
     next_attention_reminder_ms: &mut Option<u64>,
@@ -1206,7 +1212,7 @@ fn maybe_play_attention_reminder<B: BuzzerCueSink>(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn maybe_play_frontpanel_ui_input_feedback<B: BuzzerCueSink>(
+pub(crate) fn maybe_play_frontpanel_ui_input_feedback<B: BuzzerCueSink>(
     interaction_handled: bool,
     specialized_feedback_played: bool,
     buzzer: &mut B,
@@ -1221,7 +1227,7 @@ fn maybe_play_frontpanel_ui_input_feedback<B: BuzzerCueSink>(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn log_buzzer_decision(decision: BuzzerDecision) {
+pub(crate) fn log_buzzer_decision(decision: BuzzerDecision) {
     info!(
         "buzzer arbitration source={=str} cue={=str} disposition={=str}",
         decision.source.label(),
@@ -1231,7 +1237,7 @@ fn log_buzzer_decision(decision: BuzzerDecision) {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn temp_c_to_deci_c(temp_c: f32) -> i16 {
+pub(crate) fn temp_c_to_deci_c(temp_c: f32) -> i16 {
     let scaled = temp_c * 10.0;
     let rounded = if scaled >= 0.0 {
         scaled + 0.5
@@ -1242,7 +1248,7 @@ fn temp_c_to_deci_c(temp_c: f32) -> i16 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn temp_c_to_centi_c(temp_c: f32) -> i32 {
+pub(crate) fn temp_c_to_centi_c(temp_c: f32) -> i32 {
     let scaled = temp_c * 100.0;
     let rounded = if scaled >= 0.0 {
         scaled + 0.5
@@ -1253,7 +1259,7 @@ fn temp_c_to_centi_c(temp_c: f32) -> i32 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn temp_c_to_whole_c(temp_c: f32) -> i16 {
+pub(crate) fn temp_c_to_whole_c(temp_c: f32) -> i16 {
     let rounded = if temp_c >= 0.0 {
         temp_c + 0.5
     } else {
@@ -1264,95 +1270,95 @@ fn temp_c_to_whole_c(temp_c: f32) -> i16 {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct RtdMeasurement {
-    raw_adc_mv: u16,
-    raw_adc_min_mv: u16,
-    raw_adc_max_mv: u16,
-    adc_mv: u16,
-    resistance_ohms: f32,
-    temp_c: f32,
-    current_temp_c: i16,
+pub(crate) struct RtdMeasurement {
+    pub(crate) raw_adc_mv: u16,
+    pub(crate) raw_adc_min_mv: u16,
+    pub(crate) raw_adc_max_mv: u16,
+    pub(crate) adc_mv: u16,
+    pub(crate) resistance_ohms: f32,
+    pub(crate) temp_c: f32,
+    pub(crate) current_temp_c: i16,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct RtdAdcBatch {
-    mean_mv: f32,
-    min_mv: u16,
-    max_mv: u16,
-    mean_raw_code: u16,
-    min_raw_code: u16,
-    max_raw_code: u16,
+pub(crate) struct RtdAdcBatch {
+    pub(crate) mean_mv: f32,
+    pub(crate) min_mv: u16,
+    pub(crate) max_mv: u16,
+    pub(crate) mean_raw_code: u16,
+    pub(crate) min_raw_code: u16,
+    pub(crate) max_raw_code: u16,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AdcConvertedSample {
-    raw_code: u16,
-    calibrated_mv: u16,
+pub(crate) struct AdcConvertedSample {
+    pub(crate) raw_code: u16,
+    pub(crate) calibrated_mv: u16,
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-static ADC_CALIBRATION_SOURCE: AtomicU8 = AtomicU8::new(2);
+pub(crate) static ADC_CALIBRATION_SOURCE: AtomicU8 = AtomicU8::new(2);
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-static ADC_EFUSE_VERSION: AtomicU8 = AtomicU8::new(0);
+pub(crate) static ADC_EFUSE_VERSION: AtomicU8 = AtomicU8::new(0);
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-static ADC_INIT_CODE: AtomicU16 = AtomicU16::new(u16::MAX);
+pub(crate) static ADC_INIT_CODE: AtomicU16 = AtomicU16::new(u16::MAX);
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-static ADC_REFERENCE_CODE: AtomicU16 = AtomicU16::new(u16::MAX);
+pub(crate) static ADC_REFERENCE_CODE: AtomicU16 = AtomicU16::new(u16::MAX);
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-static ADC_REFERENCE_MV: AtomicU16 = AtomicU16::new(u16::MAX);
+pub(crate) static ADC_REFERENCE_MV: AtomicU16 = AtomicU16::new(u16::MAX);
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-static RTD_RAW_CODE_MEAN: AtomicU16 = AtomicU16::new(0);
+pub(crate) static RTD_RAW_CODE_MEAN: AtomicU16 = AtomicU16::new(0);
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-static RTD_RAW_CODE_MIN: AtomicU16 = AtomicU16::new(0);
+pub(crate) static RTD_RAW_CODE_MIN: AtomicU16 = AtomicU16::new(0);
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-static RTD_RAW_CODE_MAX: AtomicU16 = AtomicU16::new(0);
+pub(crate) static RTD_RAW_CODE_MAX: AtomicU16 = AtomicU16::new(0);
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-static VIN_RAW_CODE_MEAN: AtomicU16 = AtomicU16::new(0);
+pub(crate) static VIN_RAW_CODE_MEAN: AtomicU16 = AtomicU16::new(0);
 
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_IDLE: u8 = 0;
+pub(crate) const FUSB302B_DIAG_IDLE: u8 = 0;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_WAITING_CC_ATTACH: u8 = 1;
+pub(crate) const FUSB302B_DIAG_WAITING_CC_ATTACH: u8 = 1;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_WAITING_SOURCE_CAPS: u8 = 2;
+pub(crate) const FUSB302B_DIAG_WAITING_SOURCE_CAPS: u8 = 2;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_SOURCE_CAPS_REQUESTED: u8 = 3;
+pub(crate) const FUSB302B_DIAG_SOURCE_CAPS_REQUESTED: u8 = 3;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_WAITING_ACCEPT: u8 = 4;
+pub(crate) const FUSB302B_DIAG_WAITING_ACCEPT: u8 = 4;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_WAITING_PS_RDY: u8 = 5;
+pub(crate) const FUSB302B_DIAG_WAITING_PS_RDY: u8 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_RECOVERING: u8 = 6;
+pub(crate) const FUSB302B_DIAG_RECOVERING: u8 = 6;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_FAULT: u8 = 7;
+pub(crate) const FUSB302B_DIAG_FAULT: u8 = 7;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_SOURCE_CAPS_TX_CONFIRMED: u8 = 8;
+pub(crate) const FUSB302B_DIAG_SOURCE_CAPS_TX_CONFIRMED: u8 = 8;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_SOURCE_CAPS_GCRC_SEEN: u8 = 9;
+pub(crate) const FUSB302B_DIAG_SOURCE_CAPS_GCRC_SEEN: u8 = 9;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_PROTECTION: u8 = 10;
+pub(crate) const FUSB302B_DIAG_PROTECTION: u8 = 10;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_MISSING_CRC: u8 = 11;
+pub(crate) const FUSB302B_DIAG_MISSING_CRC: u8 = 11;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_MISSING_SOP: u8 = 12;
+pub(crate) const FUSB302B_DIAG_MISSING_SOP: u8 = 12;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_UNSUPPORTED_SOP: u8 = 13;
+pub(crate) const FUSB302B_DIAG_UNSUPPORTED_SOP: u8 = 13;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_RX_I2C_ERROR: u8 = 14;
+pub(crate) const FUSB302B_DIAG_RX_I2C_ERROR: u8 = 14;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_TX_I2C_ERROR: u8 = 15;
+pub(crate) const FUSB302B_DIAG_TX_I2C_ERROR: u8 = 15;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_NO_USABLE_CONTRACT: u8 = 16;
+pub(crate) const FUSB302B_DIAG_NO_USABLE_CONTRACT: u8 = 16;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_RX_PARTIAL: u8 = 17;
+pub(crate) const FUSB302B_DIAG_RX_PARTIAL: u8 = 17;
 #[cfg(any(target_arch = "xtensa", test))]
-const FUSB302B_DIAG_REQUEST_TIMEOUT: u8 = 19;
+pub(crate) const FUSB302B_DIAG_REQUEST_TIMEOUT: u8 = 19;
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg(target_arch = "xtensa")]
-const FUSB302B_PARTIAL_RX_TIMEOUT_MS: u64 = 250;
+pub(crate) const FUSB302B_PARTIAL_RX_TIMEOUT_MS: u64 = 250;
 #[cfg(target_arch = "xtensa")]
-const FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS: u64 = 1_500;
+pub(crate) const FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS: u64 = 1_500;
 #[cfg(any(target_arch = "xtensa", test))]
-static FUSB302B_DIAGNOSTIC: AtomicU8 = AtomicU8::new(FUSB302B_DIAG_IDLE);
+pub(crate) static FUSB302B_DIAGNOSTIC: AtomicU8 = AtomicU8::new(FUSB302B_DIAG_IDLE);

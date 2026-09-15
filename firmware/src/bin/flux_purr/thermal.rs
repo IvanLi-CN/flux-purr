@@ -1,5 +1,8 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(any(target_arch = "xtensa", test))]
-fn active_thermal_control_profile(
+pub(crate) fn active_thermal_control_profile(
     memory_config: &MemoryConfig,
     preview: Option<ThermalControlProfile>,
     manual_pps: &ManualPpsState,
@@ -12,7 +15,7 @@ fn active_thermal_control_profile(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn resolve_thermal_profile_bank(
+pub(crate) fn resolve_thermal_profile_bank(
     mode: ThermalProfileMode,
     manual_pps: &ManualPpsState,
 ) -> ThermalProfileBank {
@@ -24,7 +27,7 @@ fn resolve_thermal_profile_bank(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn thermal_control_runtime_wire(
+pub(crate) fn thermal_control_runtime_wire(
     target_temp_c: i16,
     profile: Option<ThermalControlProfile>,
     preview_active: bool,
@@ -83,7 +86,7 @@ fn thermal_control_runtime_wire(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn default_thermal_control_target(target_temp_c: i16) -> ThermalControlTarget {
+pub(crate) fn default_thermal_control_target(target_temp_c: i16) -> ThermalControlTarget {
     default_thermal_control_target_with_settings(
         target_temp_c,
         ThermalControlProfileSettings::default(),
@@ -91,17 +94,27 @@ fn default_thermal_control_target(target_temp_c: i16) -> ThermalControlTarget {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn default_thermal_control_target_with_settings(
+pub(crate) fn default_thermal_control_target_with_settings(
     target_temp_c: i16,
     settings: ThermalControlProfileSettings,
 ) -> ThermalControlTarget {
     let target = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
-    let (brake_distance_centi_c, approach_power_permille, approach_floor_power_permille,
-        hold_power_permille, approach_damping_exponent_permille) =
-        default_power_parameters(target);
-    let (hold_entry_error_c, hold_exit_error_c, hold_off_error_c, overshoot_cutoff_c,
-        hold_kp_permille_per_c, hold_ki_permille_per_c_tick, hold_blend_ticks) =
-        default_hold_parameters(target);
+    let (
+        brake_distance_centi_c,
+        approach_power_permille,
+        approach_floor_power_permille,
+        hold_power_permille,
+        approach_damping_exponent_permille,
+    ) = default_power_parameters(target);
+    let (
+        hold_entry_error_c,
+        hold_exit_error_c,
+        hold_off_error_c,
+        overshoot_cutoff_c,
+        hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick,
+        hold_blend_ticks,
+    ) = default_hold_parameters(target);
     ThermalControlTarget {
         brake_distance_c: brake_distance_centi_c as f32 / 100.0,
         warmup_power_permille: 1_000,
@@ -127,7 +140,7 @@ fn default_thermal_control_target_with_settings(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn default_power_parameters(target: i16) -> (u16, u16, u16, u16, u16) {
+pub(crate) fn default_power_parameters(target: i16) -> (u16, u16, u16, u16, u16) {
     let brake = match target {
         ..=100 => 450,
         101..=180 => 700,
@@ -163,7 +176,7 @@ fn default_power_parameters(target: i16) -> (u16, u16, u16, u16, u16) {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn default_hold_parameters(target: i16) -> (f32, f32, f32, f32, f32, f32, u8) {
+pub(crate) fn default_hold_parameters(target: i16) -> (f32, f32, f32, f32, f32, f32, u8) {
     let hold_entry = match target {
         ..=60 => 0.35,
         61..=100 => 0.25,
@@ -219,7 +232,7 @@ fn default_hold_parameters(target: i16) -> (f32, f32, f32, f32, f32, f32, u8) {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn interpolate_thermal_control_target(
+pub(crate) fn interpolate_thermal_control_target(
     target_temp_c: i16,
     lower: ThermalControlProfilePoint,
     upper: ThermalControlProfilePoint,
@@ -235,37 +248,36 @@ fn interpolate_thermal_control_target(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn direct_thermal_control_target(
+pub(crate) fn direct_thermal_control_target(
     point: ThermalControlProfilePoint,
     settings: ThermalControlProfileSettings,
 ) -> ThermalControlTarget {
     ThermalControlTarget {
-            brake_distance_c: point.brake_distance_centi_c as f32 / 100.0,
-            warmup_power_permille: 1_000,
-            warmup_reenter_error_c: f32::from(point.warmup_reenter_centi_c) / 100.0,
-            approach_power_permille: point.approach_power_permille,
-            approach_floor_power_permille: point.approach_floor_power_permille,
-            approach_damping_exponent: f32::from(point.approach_damping_exponent_permille)
-                / 1_000.0,
-            approach_tail_window_c: f32::from(point.approach_tail_window_centi_c) / 100.0,
-            hold_power_permille: point.hold_power_permille,
-            hold_reheat_power_permille: point.hold_reheat_power_permille,
-            hold_entry_error_c: f32::from(point.hold_entry_centi_c) / 100.0,
-            hold_exit_error_c: f32::from(point.hold_exit_centi_c) / 100.0,
-            hold_on_error_c: f32::from(point.hold_on_centi_c) / 100.0,
-            hold_off_error_c: f32::from(point.hold_off_centi_c) / 100.0,
-            overshoot_cutoff_c: f32::from(point.overshoot_cutoff_centi_c) / 100.0,
-            hold_kp_permille_per_c: f32::from(point.hold_kp_permille_per_c),
-            hold_ki_permille_per_c_tick: f32::from(point.hold_ki_permille_per_c_tick),
-            hold_blend_ticks: point.hold_blend_ticks.clamp(1, u16::from(u8::MAX)) as u8,
-            approach_lead_ticks: point.approach_lead_ticks.min(u16::from(u8::MAX)) as u8,
-            hold_lead_ticks: point.hold_lead_ticks.min(u16::from(u8::MAX)) as u8,
-            settings,
+        brake_distance_c: point.brake_distance_centi_c as f32 / 100.0,
+        warmup_power_permille: 1_000,
+        warmup_reenter_error_c: f32::from(point.warmup_reenter_centi_c) / 100.0,
+        approach_power_permille: point.approach_power_permille,
+        approach_floor_power_permille: point.approach_floor_power_permille,
+        approach_damping_exponent: f32::from(point.approach_damping_exponent_permille) / 1_000.0,
+        approach_tail_window_c: f32::from(point.approach_tail_window_centi_c) / 100.0,
+        hold_power_permille: point.hold_power_permille,
+        hold_reheat_power_permille: point.hold_reheat_power_permille,
+        hold_entry_error_c: f32::from(point.hold_entry_centi_c) / 100.0,
+        hold_exit_error_c: f32::from(point.hold_exit_centi_c) / 100.0,
+        hold_on_error_c: f32::from(point.hold_on_centi_c) / 100.0,
+        hold_off_error_c: f32::from(point.hold_off_centi_c) / 100.0,
+        overshoot_cutoff_c: f32::from(point.overshoot_cutoff_centi_c) / 100.0,
+        hold_kp_permille_per_c: f32::from(point.hold_kp_permille_per_c),
+        hold_ki_permille_per_c_tick: f32::from(point.hold_ki_permille_per_c_tick),
+        hold_blend_ticks: point.hold_blend_ticks.clamp(1, u16::from(u8::MAX)) as u8,
+        approach_lead_ticks: point.approach_lead_ticks.min(u16::from(u8::MAX)) as u8,
+        hold_lead_ticks: point.hold_lead_ticks.min(u16::from(u8::MAX)) as u8,
+        settings,
     }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn interpolate_thermal_control_target_linear(
+pub(crate) fn interpolate_thermal_control_target_linear(
     lower: ThermalControlProfilePoint,
     upper: ThermalControlProfilePoint,
     settings: ThermalControlProfileSettings,
@@ -278,7 +290,12 @@ fn interpolate_thermal_control_target_linear(
     ThermalControlTarget {
         brake_distance_c: f32::from(brake) / 100.0,
         warmup_power_permille: 1_000,
-        warmup_reenter_error_c: f32::from(interpolate_u16(lower.warmup_reenter_centi_c, upper.warmup_reenter_centi_c, ratio, 5_000)) / 100.0,
+        warmup_reenter_error_c: f32::from(interpolate_u16(
+            lower.warmup_reenter_centi_c,
+            upper.warmup_reenter_centi_c,
+            ratio,
+            5_000,
+        )) / 100.0,
         approach_power_permille: approach,
         approach_floor_power_permille: floor,
         approach_damping_exponent: f32::from(damping) / 1_000.0,
@@ -300,67 +317,145 @@ fn interpolate_thermal_control_target_linear(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn interpolate_u16(left: u16, right: u16, ratio: f32, upper_bound: u16) -> u16 {
+pub(crate) fn interpolate_u16(left: u16, right: u16, ratio: f32, upper_bound: u16) -> u16 {
     (f32::from(left) + ((f32::from(right) - f32::from(left)) * ratio) + 0.5)
         .clamp(0.0, f32::from(upper_bound)) as u16
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn interpolated_power_values(
+pub(crate) fn interpolated_power_values(
     lower: ThermalControlProfilePoint,
     upper: ThermalControlProfilePoint,
     ratio: f32,
 ) -> (u16, u16, u16, u16, u16, u16, u16) {
-    let linear_brake = interpolate_u16(lower.brake_distance_centi_c, upper.brake_distance_centi_c, ratio, 5_000);
+    let linear_brake = interpolate_u16(
+        lower.brake_distance_centi_c,
+        upper.brake_distance_centi_c,
+        ratio,
+        5_000,
+    );
     let midpoint = 4.0 * ratio * (1.0 - ratio);
     let adjustment = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
         -0.20
     } else if lower.target_temp_c >= 100 && upper.target_temp_c <= 180 {
-        if upper.target_temp_c <= 140 { 0.55 } else { 0.20 }
-    } else { 0.0 };
+        if upper.target_temp_c <= 140 {
+            0.55
+        } else {
+            0.20
+        }
+    } else {
+        0.0
+    };
     let brake = (f32::from(linear_brake) * (1.0 - adjustment * midpoint) + 0.5) as u16;
-    let hold_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 { 1.0 - 0.20 * midpoint } else { 1.0 };
-    let reheat_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 { 1.0 - 0.10 * midpoint } else { 1.0 };
+    let hold_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        1.0 - 0.20 * midpoint
+    } else {
+        1.0
+    };
+    let reheat_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        1.0 - 0.10 * midpoint
+    } else {
+        1.0
+    };
     let scale_hold = |value: u16| (f32::from(value) * hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
     (
         brake,
-        interpolate_u16(lower.approach_power_permille, upper.approach_power_permille, ratio, 1_000),
-        interpolate_u16(lower.approach_floor_power_permille, upper.approach_floor_power_permille, ratio, 1_000),
-        interpolate_u16(lower.approach_damping_exponent_permille, upper.approach_damping_exponent_permille, ratio, THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX),
-        interpolate_u16(lower.approach_tail_window_centi_c, upper.approach_tail_window_centi_c, ratio, THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX),
-        scale_hold(interpolate_u16(lower.hold_power_permille, upper.hold_power_permille, ratio, 1_000)),
-        (f32::from(interpolate_u16(lower.hold_reheat_power_permille, upper.hold_reheat_power_permille, ratio, 1_000)) * reheat_scale + 0.5) as u16,
+        interpolate_u16(
+            lower.approach_power_permille,
+            upper.approach_power_permille,
+            ratio,
+            1_000,
+        ),
+        interpolate_u16(
+            lower.approach_floor_power_permille,
+            upper.approach_floor_power_permille,
+            ratio,
+            1_000,
+        ),
+        interpolate_u16(
+            lower.approach_damping_exponent_permille,
+            upper.approach_damping_exponent_permille,
+            ratio,
+            THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+        ),
+        interpolate_u16(
+            lower.approach_tail_window_centi_c,
+            upper.approach_tail_window_centi_c,
+            ratio,
+            THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX,
+        ),
+        scale_hold(interpolate_u16(
+            lower.hold_power_permille,
+            upper.hold_power_permille,
+            ratio,
+            1_000,
+        )),
+        (f32::from(interpolate_u16(
+            lower.hold_reheat_power_permille,
+            upper.hold_reheat_power_permille,
+            ratio,
+            1_000,
+        )) * reheat_scale
+            + 0.5) as u16,
     )
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn interpolated_error_values(
+pub(crate) fn interpolated_error_values(
     lower: ThermalControlProfilePoint,
     upper: ThermalControlProfilePoint,
     ratio: f32,
 ) -> (u16, u16, u16, u16, u16, u16, u16, u8, u8, u8) {
-    let interpolate = |left: u16, right: u16, bound: u16| interpolate_u16(left, right, ratio, bound);
+    let interpolate =
+        |left: u16, right: u16, bound: u16| interpolate_u16(left, right, ratio, bound);
     (
         interpolate(lower.hold_entry_centi_c, upper.hold_entry_centi_c, 5_000),
         interpolate(lower.hold_exit_centi_c, upper.hold_exit_centi_c, 5_000),
         interpolate(lower.hold_on_centi_c, upper.hold_on_centi_c, 5_000),
         interpolate(lower.hold_off_centi_c, upper.hold_off_centi_c, 5_000),
-        interpolate(lower.overshoot_cutoff_centi_c, upper.overshoot_cutoff_centi_c, 5_000),
-        interpolate(lower.hold_kp_permille_per_c, upper.hold_kp_permille_per_c, 10_000),
-        interpolate(lower.hold_ki_permille_per_c_tick, upper.hold_ki_permille_per_c_tick, 10_000),
-        interpolate(lower.hold_blend_ticks, upper.hold_blend_ticks, u16::from(u8::MAX)).clamp(1, u16::from(u8::MAX)) as u8,
-        interpolate(lower.approach_lead_ticks, upper.approach_lead_ticks, u16::from(u8::MAX)).min(u16::from(u8::MAX)) as u8,
-        interpolate(lower.hold_lead_ticks, upper.hold_lead_ticks, u16::from(u8::MAX)).min(u16::from(u8::MAX)) as u8,
+        interpolate(
+            lower.overshoot_cutoff_centi_c,
+            upper.overshoot_cutoff_centi_c,
+            5_000,
+        ),
+        interpolate(
+            lower.hold_kp_permille_per_c,
+            upper.hold_kp_permille_per_c,
+            10_000,
+        ),
+        interpolate(
+            lower.hold_ki_permille_per_c_tick,
+            upper.hold_ki_permille_per_c_tick,
+            10_000,
+        ),
+        interpolate(
+            lower.hold_blend_ticks,
+            upper.hold_blend_ticks,
+            u16::from(u8::MAX),
+        )
+        .clamp(1, u16::from(u8::MAX)) as u8,
+        interpolate(
+            lower.approach_lead_ticks,
+            upper.approach_lead_ticks,
+            u16::from(u8::MAX),
+        )
+        .min(u16::from(u8::MAX)) as u8,
+        interpolate(
+            lower.hold_lead_ticks,
+            upper.hold_lead_ticks,
+            u16::from(u8::MAX),
+        )
+        .min(u16::from(u8::MAX)) as u8,
     )
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn percent_from_permille(permille: u16) -> u8 {
+pub(crate) fn percent_from_permille(permille: u16) -> u8 {
     ((u32::from(permille.min(1_000)) + 5) / 10).min(100) as u8
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn control_cycles_from_profile_ticks(profile_ticks: u16) -> u16 {
+pub(crate) fn control_cycles_from_profile_ticks(profile_ticks: u16) -> u16 {
     if profile_ticks == 0 {
         return 0;
     }
@@ -370,7 +465,7 @@ fn control_cycles_from_profile_ticks(profile_ticks: u16) -> u16 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn scaled_filter_alpha_for_control_interval(alpha_per_profile_tick: f32) -> f32 {
+pub(crate) fn scaled_filter_alpha_for_control_interval(alpha_per_profile_tick: f32) -> f32 {
     let alpha = alpha_per_profile_tick.clamp(0.0, 1.0);
     if alpha <= 0.0 {
         return 0.0;
@@ -383,13 +478,13 @@ fn scaled_filter_alpha_for_control_interval(alpha_per_profile_tick: f32) -> f32 
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn scaled_hold_ki_for_control_interval(ki_per_profile_tick: f32) -> f32 {
+pub(crate) fn scaled_hold_ki_for_control_interval(ki_per_profile_tick: f32) -> f32 {
     ki_per_profile_tick.max(0.0)
         * (HEATER_CONTROL_INTERVAL_MS as f32 / HEATER_PROFILE_TICK_MS as f32)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn next_heater_control_deadline_ms(deadline_ms: u64, control_started_ms: u64) -> u64 {
+pub(crate) fn next_heater_control_deadline_ms(deadline_ms: u64, control_started_ms: u64) -> u64 {
     let next_deadline_ms = deadline_ms.saturating_add(HEATER_CONTROL_INTERVAL_MS);
     if next_deadline_ms > control_started_ms {
         return next_deadline_ms;
@@ -403,12 +498,15 @@ fn next_heater_control_deadline_ms(deadline_ms: u64, control_started_ms: u64) ->
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-const fn pd_runtime_service_due(now_ms: u64, deadline_ms: u64) -> bool {
+pub(crate) const fn pd_runtime_service_due(now_ms: u64, deadline_ms: u64) -> bool {
     now_ms >= deadline_ms
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn next_pd_runtime_service_deadline_ms(deadline_ms: u64, service_started_ms: u64) -> u64 {
+pub(crate) fn next_pd_runtime_service_deadline_ms(
+    deadline_ms: u64,
+    service_started_ms: u64,
+) -> u64 {
     let next_deadline_ms = deadline_ms.saturating_add(PD_RUNTIME_SERVICE_INTERVAL_MS);
     if next_deadline_ms > service_started_ms {
         return next_deadline_ms;
@@ -422,7 +520,7 @@ fn next_pd_runtime_service_deadline_ms(deadline_ms: u64, service_started_ms: u64
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fixed_contract_liveness_probe_due(
+pub(crate) fn fixed_contract_liveness_probe_due(
     contract_kind: ContractKind,
     contract_ready: bool,
     refresh_pending: bool,
@@ -441,7 +539,7 @@ fn fixed_contract_liveness_probe_due(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn warmup_handoff_error_c(
+pub(crate) fn warmup_handoff_error_c(
     brake_distance_c: f32,
     warmup_reenter_error_c: f32,
     filtered_slope_c_per_profile_tick: f32,
@@ -456,7 +554,7 @@ fn warmup_handoff_error_c(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn warmup_handoff_ready(
+pub(crate) fn warmup_handoff_ready(
     actual_error_c: f32,
     previous_actual_error_c: f32,
     filtered_error_c: f32,
@@ -483,7 +581,7 @@ fn warmup_handoff_ready(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn hold_effective_base_permille(
+pub(crate) fn hold_effective_base_permille(
     hold_guard_error_c: f32,
     hold_reenter_error_c: f32,
     control_target: ThermalControlTarget,
@@ -505,14 +603,14 @@ fn hold_effective_base_permille(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-struct BuzzerHardwareState {
-    frequency_hz: Option<u32>,
-    duty_percent: u8,
-    generation: u32,
+pub(crate) struct BuzzerHardwareState {
+    pub(crate) frequency_hz: Option<u32>,
+    pub(crate) duty_percent: u8,
+    pub(crate) generation: u32,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn buzzer_timer_reconfiguration_needed(
+pub(crate) fn buzzer_timer_reconfiguration_needed(
     configured_frequency_hz: u32,
     next_state: BuzzerHardwareState,
 ) -> bool {
@@ -523,14 +621,14 @@ fn buzzer_timer_reconfiguration_needed(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BuzzerHardwareAction {
+pub(crate) enum BuzzerHardwareAction {
     StopTimer,
     Retune(u32),
     SetDutyPercent(u8),
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn buzzer_hardware_actions(
+pub(crate) fn buzzer_hardware_actions(
     configured_frequency_hz: u32,
     next_state: BuzzerHardwareState,
 ) -> heapless::Vec<BuzzerHardwareAction, 4> {
@@ -550,12 +648,12 @@ fn buzzer_hardware_actions(
 }
 
 #[cfg(any(test, all(target_arch = "xtensa", feature = "buzzer-observe")))]
-fn mcpwm_timer_frequency_hz(prescaler: u8, period_ticks: u16) -> u32 {
+pub(crate) fn mcpwm_timer_frequency_hz(prescaler: u8, period_ticks: u16) -> u32 {
     MCPWM_PERIPHERAL_CLOCK_HZ / (u32::from(prescaler) + 1) / (u32::from(period_ticks) + 1)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn buzzer_timer_period_ticks(frequency_hz: u32) -> Option<u16> {
+pub(crate) fn buzzer_timer_period_ticks(frequency_hz: u32) -> Option<u16> {
     if frequency_hz == 0 {
         return None;
     }
@@ -570,7 +668,7 @@ fn buzzer_timer_period_ticks(frequency_hz: u32) -> Option<u16> {
 }
 
 #[cfg(any(test, all(target_arch = "xtensa", feature = "buzzer-observe")))]
-fn buzzer_observed_frequency_hz(rising_edges: u16, window_ms: u32) -> Option<u32> {
+pub(crate) fn buzzer_observed_frequency_hz(rising_edges: u16, window_ms: u32) -> Option<u32> {
     if window_ms == 0 {
         return None;
     }
@@ -579,42 +677,42 @@ fn buzzer_observed_frequency_hz(rising_edges: u16, window_ms: u32) -> Option<u32
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct HeaterController {
-    fault_latched: Option<HeaterFaultReason>,
-    last_target_temp_c: i16,
-    filtered_temp_c: Option<f32>,
-    previous_filtered_temp_c: Option<f32>,
-    filtered_slope_c_per_profile_tick: f32,
-    previous_measured_temp_c: Option<f32>,
-    phase: HeaterControlPhase,
-    phase_ticks: u16,
-    recovering_from_hold: bool,
-    duty_percent: u8,
-    hold_entry_output_percent: u8,
-    hold_integral_c: f32,
-    hold_coast_active: bool,
-    hold_coast_cooling_samples: u8,
-    heater_was_enabled: bool,
-    warmup_started_at_ms: Option<u64>,
-    thermal_plant_controller: ThermalPlantController,
+pub(crate) struct HeaterController {
+    pub(crate) fault_latched: Option<HeaterFaultReason>,
+    pub(crate) last_target_temp_c: i16,
+    pub(crate) filtered_temp_c: Option<f32>,
+    pub(crate) previous_filtered_temp_c: Option<f32>,
+    pub(crate) filtered_slope_c_per_profile_tick: f32,
+    pub(crate) previous_measured_temp_c: Option<f32>,
+    pub(crate) phase: HeaterControlPhase,
+    pub(crate) phase_ticks: u16,
+    pub(crate) recovering_from_hold: bool,
+    pub(crate) duty_percent: u8,
+    pub(crate) hold_entry_output_percent: u8,
+    pub(crate) hold_integral_c: f32,
+    pub(crate) hold_coast_active: bool,
+    pub(crate) hold_coast_cooling_samples: u8,
+    pub(crate) heater_was_enabled: bool,
+    pub(crate) warmup_started_at_ms: Option<u64>,
+    pub(crate) thermal_plant_controller: ThermalPlantController,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ThermalPlantRuntimeInput {
-    target_temp_c: i16,
-    measured_temp_c: f32,
-    ambient_temp_c: f32,
-    heater_enabled: bool,
-    model: flux_purr_firmware::memory::ThermalPlantProjection,
-    max_power_mw: f32,
-    now_ms: u64,
+pub(crate) struct ThermalPlantRuntimeInput {
+    pub(crate) target_temp_c: i16,
+    pub(crate) measured_temp_c: f32,
+    pub(crate) ambient_temp_c: f32,
+    pub(crate) heater_enabled: bool,
+    pub(crate) model: flux_purr_firmware::memory::ThermalPlantProjection,
+    pub(crate) max_power_mw: f32,
+    pub(crate) now_ms: u64,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy)]
-struct ThermalControlFrame {
+pub(crate) struct ThermalControlFrame {
     control_target: ThermalControlTarget,
     approach_max_cycles: u16,
     hold_blend_cycles: u16,
@@ -642,7 +740,7 @@ struct ThermalControlFrame {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn control_cycle_parameters(target: ThermalControlTarget) -> (f32, u16, u16, f32) {
+pub(crate) fn control_cycle_parameters(target: ThermalControlTarget) -> (f32, u16, u16, f32) {
     (
         scaled_filter_alpha_for_control_interval(target.settings.temp_filter_alpha),
         control_cycles_from_profile_ticks(u16::from(target.settings.approach_max_ticks)).max(1),
@@ -653,7 +751,7 @@ fn control_cycle_parameters(target: ThermalControlTarget) -> (f32, u16, u16, f32
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl HeaterController {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             fault_latched: None,
             last_target_temp_c: 0,
@@ -675,11 +773,11 @@ impl HeaterController {
         }
     }
 
-    const fn fault_latched(self) -> Option<HeaterFaultReason> {
+    pub(crate) const fn fault_latched(self) -> Option<HeaterFaultReason> {
         self.fault_latched
     }
 
-    fn clear_fault_latch(&mut self) {
+    pub(crate) fn clear_fault_latch(&mut self) {
         self.fault_latched = None;
         self.filtered_temp_c = None;
         self.previous_filtered_temp_c = None;
@@ -698,14 +796,14 @@ impl HeaterController {
         self.thermal_plant_controller.reset();
     }
 
-    fn reseed_measurement(&mut self, measured_temp_c: f32) {
+    pub(crate) fn reseed_measurement(&mut self, measured_temp_c: f32) {
         self.filtered_temp_c = Some(measured_temp_c);
         self.previous_filtered_temp_c = Some(measured_temp_c);
         self.filtered_slope_c_per_profile_tick = 0.0;
         self.previous_measured_temp_c = Some(measured_temp_c);
     }
 
-    fn latch_fault(&mut self, reason: HeaterFaultReason) -> bool {
+    pub(crate) fn latch_fault(&mut self, reason: HeaterFaultReason) -> bool {
         let changed = self.fault_latched != Some(reason);
         self.fault_latched = Some(reason);
         self.filtered_temp_c = None;
@@ -727,7 +825,10 @@ impl HeaterController {
     }
 
     #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-    fn update_thermal_plant_at(&mut self, input: ThermalPlantRuntimeInput) -> HeaterPidSnapshot {
+    pub(crate) fn update_thermal_plant_at(
+        &mut self,
+        input: ThermalPlantRuntimeInput,
+    ) -> HeaterPidSnapshot {
         let ThermalPlantRuntimeInput {
             target_temp_c,
             measured_temp_c,
@@ -840,7 +941,7 @@ impl HeaterController {
     }
 
     #[cfg(test)]
-    fn update(
+    pub(crate) fn update(
         &mut self,
         target_temp_c: i16,
         measured_temp_c: f32,
@@ -856,7 +957,7 @@ impl HeaterController {
         )
     }
 
-    fn update_at(
+    pub(crate) fn update_at(
         &mut self,
         target_temp_c: i16,
         measured_temp_c: f32,
@@ -1028,12 +1129,12 @@ impl HeaterController {
         }
         let target = frame.control_target;
         let span = (frame.brake_distance_c - target.hold_entry_error_c).max(0.1);
-        let ratio = ((frame.approach_guard_error_c - target.hold_entry_error_c) / span)
-            .clamp(0.0, 1.0);
+        let ratio =
+            ((frame.approach_guard_error_c - target.hold_entry_error_c) / span).clamp(0.0, 1.0);
         let shaped_ratio = ratio.powf(target.approach_damping_exponent);
         let sustain_floor = f32::from(approach_sustain_floor_permille(target, frame.error_c));
-        let approach_ceiling = f32::from(target.approach_power_permille.min(1_000))
-            .max(sustain_floor);
+        let approach_ceiling =
+            f32::from(target.approach_power_permille.min(1_000)).max(sustain_floor);
         percent_from_permille(
             (sustain_floor + ((approach_ceiling - sustain_floor) * shaped_ratio))
                 .clamp(0.0, 1_000.0) as u16,
@@ -1088,8 +1189,8 @@ impl HeaterController {
             self.hold_integral_c = 0.0;
             let taper_span = (target.overshoot_cutoff_c - target.hold_off_error_c).max(0.05);
             let overshoot_c = (-frame.hold_guard_error_c).max(target.hold_off_error_c);
-            let taper_ratio = ((target.overshoot_cutoff_c - overshoot_c) / taper_span)
-                .clamp(0.0, 1.0);
+            let taper_ratio =
+                ((target.overshoot_cutoff_c - overshoot_c) / taper_span).clamp(0.0, 1.0);
             requested = requested.clamp(0.0, 1_000.0) * taper_ratio;
         }
         requested
@@ -1113,15 +1214,16 @@ impl HeaterController {
                 let timeout_hold_ready = self.phase_ticks >= frame.approach_max_cycles
                     && frame.error_c <= frame.hold_entry_gate_c
                     && frame.hold_state_ready;
-                let reenter_warmup =
-                    frame.error_c >= frame.brake_distance_c
-                        + frame.control_target.warmup_reenter_error_c;
+                let reenter_warmup = frame.error_c
+                    >= frame.brake_distance_c + frame.control_target.warmup_reenter_error_c;
                 let approach_hold_ready = frame.approach_control_error_c <= frame.hold_entry_gate_c
                     && frame.error_c <= frame.hold_entry_gate_c
                     && frame.previous_error_c <= frame.hold_entry_gate_c + 0.5;
                 if reenter_warmup {
                     next_phase = HeaterControlPhase::Warmup;
-                } else if approach_hold_ready || frame.actual_crossed_target_ready || timeout_hold_ready
+                } else if approach_hold_ready
+                    || frame.actual_crossed_target_ready
+                    || timeout_hold_ready
                 {
                     next_phase = HeaterControlPhase::Hold;
                 }
@@ -1162,9 +1264,11 @@ impl HeaterController {
         }
 
         let target = frame.control_target;
-        let coast_guard_c = target.hold_exit_error_c.max(target.hold_on_error_c.max(0.05) * 2.0);
-        let zero_output_ready = self.duty_percent == 0
-            && frame.error_c <= target.hold_on_error_c.max(0.05) * 2.0;
+        let coast_guard_c = target
+            .hold_exit_error_c
+            .max(target.hold_on_error_c.max(0.05) * 2.0);
+        let zero_output_ready =
+            self.duty_percent == 0 && frame.error_c <= target.hold_on_error_c.max(0.05) * 2.0;
         let projection_ready = self.duty_percent > 0
             && frame.error_c <= coast_guard_c
             && (frame.approach_control_error_c <= 0.0 || frame.hold_control_error_c <= 0.0);
@@ -1184,11 +1288,8 @@ impl HeaterController {
         } else {
             frame.error_c
         };
-        let base_permille = hold_effective_base_permille(
-            guard_error_c,
-            frame.hold_reenter_error_c,
-            target,
-        );
+        let base_permille =
+            hold_effective_base_permille(guard_error_c, frame.hold_reenter_error_c, target);
         let integral_limit = if frame.hold_ki > 0.0 {
             ((1_000.0 - base_permille) / frame.hold_ki).clamp(0.0, 255.0)
         } else {
@@ -1208,9 +1309,8 @@ impl HeaterController {
         };
         let carry_permille = (previous_output_permille - base_output).max(0.0);
         let preload = carry_permille * actual_ratio.min(projected_ratio);
-        self.hold_entry_output_percent = percent_from_permille(
-            (base_output + preload).clamp(0.0, 1_000.0) as u16,
-        );
+        self.hold_entry_output_percent =
+            percent_from_permille((base_output + preload).clamp(0.0, 1_000.0) as u16);
         self.hold_integral_c = if frame.hold_ki > 0.0 {
             (preload / frame.hold_ki).clamp(0.0, integral_limit)
         } else {
@@ -1338,7 +1438,7 @@ impl HeaterController {
         self.warmup_started_at_ms = Some(now_ms);
     }
 
-    fn apply_under_target_reheat_floor(
+    pub(crate) fn apply_under_target_reheat_floor(
         &self,
         duty_percent: u8,
         error_c: f32,

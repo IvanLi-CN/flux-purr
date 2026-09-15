@@ -1,5 +1,8 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(target_arch = "xtensa")]
-async fn fusb302b_receive_event(
+pub(crate) async fn fusb302b_receive_event(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     retry_fail_recovery_pending: bool,
 ) -> Result<Fusb302bReceiveEvent, fusb302b::TransientTransportFault> {
@@ -63,7 +66,7 @@ async fn fusb302b_receive_event(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fusb302b_adjustable_power_capabilities(
+pub(crate) fn fusb302b_adjustable_power_capabilities(
     source_capabilities: SourceCapabilities,
 ) -> Option<ch224q::AdjustablePowerCapabilities> {
     let mut capabilities = ch224q::AdjustablePowerCapabilities::default();
@@ -112,34 +115,34 @@ fn fusb302b_adjustable_power_capabilities(
 }
 
 #[cfg(target_arch = "xtensa")]
-enum PdPort {
+pub(crate) enum PdPort {
     Fusb302b(Box<Fusb302bRuntime>),
     Unavailable,
 }
 
 #[cfg(target_arch = "xtensa")]
 impl PdPort {
-    const fn controller_kind(&self) -> ControllerKind {
+    pub(crate) const fn controller_kind(&self) -> ControllerKind {
         match self {
             Self::Fusb302b(_) => ControllerKind::Fusb302b,
             Self::Unavailable => ControllerKind::Unknown,
         }
     }
 
-    const fn service_available(&self) -> bool {
+    pub(crate) const fn service_available(&self) -> bool {
         match self {
             Self::Fusb302b(runtime) => !matches!(runtime.policy.phase(), SinkPhase::Fault),
             Self::Unavailable => false,
         }
     }
 
-    fn interlock_after_stale_contract(&mut self, now_ms: u64) {
+    pub(crate) fn interlock_after_stale_contract(&mut self, now_ms: u64) {
         if let Self::Fusb302b(runtime) = self {
             runtime.interlock_after_stale_contract(now_ms);
         }
     }
 
-    fn stale_contract_vin_guard_suspended(&self, now_ms: u64) -> bool {
+    pub(crate) fn stale_contract_vin_guard_suspended(&self, now_ms: u64) -> bool {
         match self {
             Self::Fusb302b(runtime) => runtime.stale_contract_vin_guard_suspended(now_ms),
             Self::Unavailable => false,
@@ -148,13 +151,13 @@ impl PdPort {
 }
 
 #[cfg(target_arch = "xtensa")]
-enum DetectedPdController {
+pub(crate) enum DetectedPdController {
     Fusb302b(u8),
     Unknown,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fusb302b_identity_is_stable(
+pub(crate) fn fusb302b_identity_is_stable(
     first_id: Option<u8>,
     second_id: Option<u8>,
     status0: Option<u8>,
@@ -168,7 +171,9 @@ fn fusb302b_identity_is_stable(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn detect_pd_controller(i2c: &mut I2c<'_, esp_hal::Blocking>) -> DetectedPdController {
+pub(crate) async fn detect_pd_controller(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+) -> DetectedPdController {
     let first = {
         let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
         phy.device_id().await.ok()

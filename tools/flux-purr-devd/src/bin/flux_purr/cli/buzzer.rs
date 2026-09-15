@@ -1,4 +1,6 @@
-async fn runtime_body(
+use super::*;
+
+pub(crate) async fn runtime_body(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     args: RuntimeSetArgs,
@@ -46,7 +48,7 @@ async fn runtime_body(
     Ok(Value::Object(body))
 }
 
-async fn buzzer_test(
+pub(crate) async fn buzzer_test(
     client: &Client,
     resolved: ResolvedUsbTarget,
     cue: Option<BuzzerCueArg>,
@@ -68,7 +70,7 @@ async fn buzzer_test(
     .await
 }
 
-async fn buzzer_test_live(
+pub(crate) async fn buzzer_test_live(
     client: &Client,
     resolved: ResolvedUsbTarget,
     cue: Option<BuzzerCueArg>,
@@ -90,10 +92,10 @@ async fn buzzer_test_live(
     .await
 }
 
-const BUZZER_CAPTURE_SETTLE_MS: u64 = 100;
-const BUZZER_STOP_SETTLE_MS: u64 = 25;
+pub(crate) const BUZZER_CAPTURE_SETTLE_MS: u64 = 100;
+pub(crate) const BUZZER_STOP_SETTLE_MS: u64 = 25;
 
-fn buzzer_capture_delay(
+pub(crate) fn buzzer_capture_delay(
     cue: Option<BuzzerCueArg>,
     scenario: Option<BuzzerScenarioArg>,
     repeat: bool,
@@ -119,18 +121,18 @@ fn buzzer_capture_delay(
     cue.map(|cue| Duration::from_millis(cue.one_shot_duration_ms() + BUZZER_CAPTURE_SETTLE_MS))
 }
 
-struct BuzzerRequestInput<'a> {
-    client: &'a Client,
-    resolved: ResolvedUsbTarget,
-    cue: Option<BuzzerCueArg>,
-    scenario: Option<BuzzerScenarioArg>,
-    repeat: bool,
-    stop: bool,
-    status: bool,
-    capture_readback: bool,
+pub(crate) struct BuzzerRequestInput<'a> {
+    pub(crate) client: &'a Client,
+    pub(crate) resolved: ResolvedUsbTarget,
+    pub(crate) cue: Option<BuzzerCueArg>,
+    pub(crate) scenario: Option<BuzzerScenarioArg>,
+    pub(crate) repeat: bool,
+    pub(crate) stop: bool,
+    pub(crate) status: bool,
+    pub(crate) capture_readback: bool,
 }
 
-async fn buzzer_test_request(
+pub(crate) async fn buzzer_test_request(
     input: BuzzerRequestInput<'_>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let BuzzerRequestInput {
@@ -204,21 +206,21 @@ async fn buzzer_test_request(
     Ok(value)
 }
 
-fn buzzer_cue_arg_from_wire(value: &str) -> Option<BuzzerCueArg> {
+pub(crate) fn buzzer_cue_arg_from_wire(value: &str) -> Option<BuzzerCueArg> {
     BUZZER_CUE_CATALOG
         .iter()
         .find(|descriptor| descriptor.cue.wire_value() == value)
         .map(|descriptor| descriptor.cue)
 }
 
-fn buzzer_scenario_arg_from_wire(value: &str) -> Option<BuzzerScenarioArg> {
+pub(crate) fn buzzer_scenario_arg_from_wire(value: &str) -> Option<BuzzerScenarioArg> {
     BUZZER_SCENARIO_CATALOG
         .iter()
         .find(|descriptor| descriptor.scenario.wire_value() == value)
         .map(|descriptor| descriptor.scenario)
 }
 
-async fn buzzer_play_interactive(
+pub(crate) async fn buzzer_play_interactive(
     client: &Client,
     resolved: ResolvedUsbTarget,
     pointer_capture: bool,
@@ -229,8 +231,8 @@ async fn buzzer_play_interactive(
     buzzer_play_line_interactive(client, resolved).await
 }
 
-struct BuzzerTerminalGuard {
-    pointer_capture: bool,
+pub(crate) struct BuzzerTerminalGuard {
+    pub(crate) pointer_capture: bool,
 }
 
 impl BuzzerTerminalGuard {
@@ -276,7 +278,7 @@ impl Drop for BuzzerTerminalGuard {
     }
 }
 
-async fn buzzer_play_terminal_interactive(
+pub(crate) async fn buzzer_play_terminal_interactive(
     client: &Client,
     resolved: ResolvedUsbTarget,
     pointer_capture: bool,
@@ -323,7 +325,7 @@ async fn buzzer_play_terminal_interactive(
     }
 }
 
-async fn apply_buzzer_interactive_action(
+pub(crate) async fn apply_buzzer_interactive_action(
     client: &Client,
     resolved: ResolvedUsbTarget,
     action: BuzzerInteractiveAction,
@@ -345,7 +347,7 @@ async fn apply_buzzer_interactive_action(
     }
 }
 
-fn read_buzzer_terminal_input(
+pub(crate) fn read_buzzer_terminal_input(
     output: &mut impl Write,
     terminal_guard: &mut BuzzerTerminalGuard,
     mut selection: BuzzerTerminalSelection,
@@ -405,7 +407,7 @@ fn read_buzzer_terminal_input(
     }
 }
 
-fn pointer_capture_notice(enabled: bool) -> String {
+pub(crate) fn pointer_capture_notice(enabled: bool) -> String {
     if enabled {
         "Pointer capture enabled. Press M again to release it for terminal copy.".to_string()
     } else {
@@ -413,7 +415,7 @@ fn pointer_capture_notice(enabled: bool) -> String {
     }
 }
 
-fn render_buzzer_terminal(
+pub(crate) fn render_buzzer_terminal(
     output: &mut impl Write,
     status: &Value,
     selection: BuzzerTerminalSelection,
@@ -509,7 +511,7 @@ fn render_buzzer_terminal(
     output.flush()
 }
 
-const fn buzzer_pointer_mode_label(pointer_capture: bool) -> &'static str {
+pub(crate) const fn buzzer_pointer_mode_label(pointer_capture: bool) -> &'static str {
     if pointer_capture {
         "[M] Copy mode"
     } else {
@@ -517,7 +519,7 @@ const fn buzzer_pointer_mode_label(pointer_capture: bool) -> &'static str {
     }
 }
 
-fn write_buzzer_terminal_item_line(
+pub(crate) fn write_buzzer_terminal_item_line(
     output: &mut impl Write,
     row: u16,
     columns: u16,
@@ -535,7 +537,7 @@ fn write_buzzer_terminal_item_line(
     Ok(())
 }
 
-fn write_buzzer_terminal_line(
+pub(crate) fn write_buzzer_terminal_line(
     output: &mut impl Write,
     row: u16,
     columns: u16,
@@ -549,7 +551,7 @@ fn write_buzzer_terminal_line(
     Ok(())
 }
 
-fn truncate_buzzer_terminal_line(line: &str, columns: u16) -> String {
+pub(crate) fn truncate_buzzer_terminal_line(line: &str, columns: u16) -> String {
     let limit = usize::from(columns.saturating_sub(1));
     if line.chars().count() <= limit {
         return line.to_string();
@@ -562,7 +564,7 @@ fn truncate_buzzer_terminal_line(line: &str, columns: u16) -> String {
     truncated
 }
 
-async fn buzzer_play_line_interactive(
+pub(crate) async fn buzzer_play_line_interactive(
     client: &Client,
     resolved: ResolvedUsbTarget,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -595,7 +597,7 @@ async fn buzzer_play_line_interactive(
     }
 }
 
-enum BuzzerInteractiveExecution {
+pub(crate) enum BuzzerInteractiveExecution {
     Exit,
     Updated {
         message: String,
@@ -603,7 +605,7 @@ enum BuzzerInteractiveExecution {
     },
 }
 
-async fn execute_buzzer_interactive_action(
+pub(crate) async fn execute_buzzer_interactive_action(
     client: &Client,
     resolved: ResolvedUsbTarget,
     action: BuzzerInteractiveAction,
@@ -676,7 +678,7 @@ async fn execute_buzzer_interactive_action(
     }
 }
 
-fn buzzer_interactive_repeat_status(cue: BuzzerCueArg) -> Value {
+pub(crate) fn buzzer_interactive_repeat_status(cue: BuzzerCueArg) -> Value {
     json!({
         "state": "running",
         "cue": cue.wire_value(),
@@ -687,7 +689,7 @@ fn buzzer_interactive_repeat_status(cue: BuzzerCueArg) -> Value {
     })
 }
 
-fn prompt_buzzer_play_action<R: BufRead, W: Write>(
+pub(crate) fn prompt_buzzer_play_action<R: BufRead, W: Write>(
     status: &Value,
     input: &mut R,
     output: &mut W,
@@ -726,7 +728,10 @@ fn prompt_buzzer_play_action<R: BufRead, W: Write>(
     }
 }
 
-fn write_buzzer_session_status<W: Write>(status: &Value, output: &mut W) -> io::Result<()> {
+pub(crate) fn write_buzzer_session_status<W: Write>(
+    status: &Value,
+    output: &mut W,
+) -> io::Result<()> {
     let active_cue = status
         .get("activeCue")
         .and_then(Value::as_str)
@@ -827,7 +832,7 @@ fn write_buzzer_session_status<W: Write>(status: &Value, output: &mut W) -> io::
     Ok(())
 }
 
-fn buzzer_output_trace_summary(status: &Value) -> String {
+pub(crate) fn buzzer_output_trace_summary(status: &Value) -> String {
     let Some(trace) = status.get("outputTrace").and_then(Value::as_array) else {
         return "MCPWM timer2 readback: unavailable on this firmware.".to_string();
     };
@@ -853,14 +858,14 @@ fn buzzer_output_trace_summary(status: &Value) -> String {
     format!("GPIO48: requested {requested}, timer {applied} Hz, pad {observed}, duty {duty}%")
 }
 
-fn buzzer_session_state(status: &Value) -> &str {
+pub(crate) fn buzzer_session_state(status: &Value) -> &str {
     status
         .get("state")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
 }
 
-fn prompt_buzzer_session_start<R: BufRead, W: Write>(
+pub(crate) fn prompt_buzzer_session_start<R: BufRead, W: Write>(
     input: &mut R,
     output: &mut W,
     stop_current: bool,
@@ -874,7 +879,7 @@ fn prompt_buzzer_session_start<R: BufRead, W: Write>(
     }
 }
 
-fn prompt_buzzer_cue<R: BufRead, W: Write>(
+pub(crate) fn prompt_buzzer_cue<R: BufRead, W: Write>(
     input: &mut R,
     output: &mut W,
     stop_current: bool,
@@ -912,7 +917,7 @@ fn prompt_buzzer_cue<R: BufRead, W: Write>(
     })
 }
 
-fn prompt_buzzer_scenario<R: BufRead, W: Write>(
+pub(crate) fn prompt_buzzer_scenario<R: BufRead, W: Write>(
     input: &mut R,
     output: &mut W,
     stop_current: bool,
@@ -935,21 +940,23 @@ fn prompt_buzzer_scenario<R: BufRead, W: Write>(
     })
 }
 
-fn buzzer_cue_descriptor(cue: BuzzerCueArg) -> &'static BuzzerCueDescriptor {
+pub(crate) fn buzzer_cue_descriptor(cue: BuzzerCueArg) -> &'static BuzzerCueDescriptor {
     BUZZER_CUE_CATALOG
         .iter()
         .find(|descriptor| descriptor.cue == cue)
         .expect("every CLI buzzer cue has a catalogue descriptor")
 }
 
-fn buzzer_scenario_descriptor(scenario: BuzzerScenarioArg) -> &'static BuzzerScenarioDescriptor {
+pub(crate) fn buzzer_scenario_descriptor(
+    scenario: BuzzerScenarioArg,
+) -> &'static BuzzerScenarioDescriptor {
     BUZZER_SCENARIO_CATALOG
         .iter()
         .find(|descriptor| descriptor.scenario == scenario)
         .expect("every CLI buzzer scenario has a catalogue descriptor")
 }
 
-fn prompt_menu_choice<R: BufRead, W: Write>(
+pub(crate) fn prompt_menu_choice<R: BufRead, W: Write>(
     input: &mut R,
     output: &mut W,
     prompt: &str,
@@ -975,7 +982,12 @@ fn prompt_menu_choice<R: BufRead, W: Write>(
     }
 }
 
-fn buzzer_test_body(op: &str, cue: Option<&str>, scenario: Option<&str>, repeat: bool) -> Value {
+pub(crate) fn buzzer_test_body(
+    op: &str,
+    cue: Option<&str>,
+    scenario: Option<&str>,
+    repeat: bool,
+) -> Value {
     json!({
         "op": op,
         "cue": cue,

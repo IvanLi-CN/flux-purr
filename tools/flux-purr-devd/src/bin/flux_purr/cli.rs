@@ -46,15 +46,34 @@ mod thermal_report;
 #[path = "thermal_retune.rs"]
 mod thermal_retune;
 
-include!("cli/args.rs");
-include!("cli/device_ops.rs");
-include!("cli/calibration.rs");
-include!("cli/thermal_model.rs");
-include!("cli/thermal_workflow.rs");
-include!("cli/calibration_capture.rs");
-include!("cli/buzzer.rs");
-include!("cli/transport.rs");
-include!("cli/presentation.rs");
+#[path = "cli/args.rs"]
+pub(crate) mod args;
+#[path = "cli/buzzer.rs"]
+pub(crate) mod buzzer;
+#[path = "cli/calibration.rs"]
+pub(crate) mod calibration;
+#[path = "cli/calibration_capture.rs"]
+pub(crate) mod calibration_capture;
+#[path = "cli/device_ops.rs"]
+pub(crate) mod device_ops;
+#[path = "cli/presentation.rs"]
+pub(crate) mod presentation;
+#[path = "cli/thermal_model.rs"]
+pub(crate) mod thermal_model;
+#[path = "cli/thermal_workflow.rs"]
+pub(crate) mod thermal_workflow;
+#[path = "cli/transport.rs"]
+pub(crate) mod transport;
+
+pub(crate) use args::*;
+pub(crate) use buzzer::*;
+pub(crate) use calibration::*;
+pub(crate) use calibration_capture::*;
+pub(crate) use device_ops::*;
+pub(crate) use presentation::*;
+pub(crate) use thermal_model::*;
+pub(crate) use thermal_workflow::*;
+pub(crate) use transport::*;
 
 #[cfg(test)]
 #[path = "cli_tests.rs"]

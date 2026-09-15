@@ -1,4 +1,6 @@
-fn is_allowed_dev_origin(origin: &HeaderValue) -> bool {
+pub(crate) use super::*;
+
+pub(crate) fn is_allowed_dev_origin(origin: &HeaderValue) -> bool {
     let Ok(origin) = origin.to_str() else {
         return false;
     };
@@ -14,7 +16,7 @@ fn is_allowed_dev_origin(origin: &HeaderValue) -> bool {
     is_loopback_origin_authority(authority)
 }
 
-fn is_loopback_origin_authority(authority: &str) -> bool {
+pub(crate) fn is_loopback_origin_authority(authority: &str) -> bool {
     if let Some(rest) = authority.strip_prefix("localhost") {
         return has_optional_port(rest);
     }
@@ -27,14 +29,14 @@ fn is_loopback_origin_authority(authority: &str) -> bool {
     false
 }
 
-fn has_optional_port(rest: &str) -> bool {
+pub(crate) fn has_optional_port(rest: &str) -> bool {
     rest.is_empty()
         || rest.strip_prefix(':').is_some_and(|port| {
             !port.is_empty() && port.chars().all(|value| value.is_ascii_digit())
         })
 }
 
-async fn health(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
+pub(crate) async fn health(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
     let state_lock = state.lock()?;
     Ok(Json(json!({
         "name": "flux-purr-devd",
@@ -52,7 +54,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, HttpError>
     })))
 }
 
-async fn list_devices(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
+pub(crate) async fn list_devices(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
     let serial_devices = scan_serial_devices(state.config.serial_port.as_deref());
     let mut state_lock = state.lock()?;
     refresh_serial_devices(&mut state_lock, serial_devices);
@@ -66,7 +68,7 @@ async fn list_devices(State(state): State<AppState>) -> Result<Json<Value>, Http
     Ok(Json(json!({ "devices": devices })))
 }
 
-async fn list_lan_devices() -> Result<Json<Value>, HttpError> {
+pub(crate) async fn list_lan_devices() -> Result<Json<Value>, HttpError> {
     let config = read_user_config()
         .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?;
     let devices = config
@@ -79,7 +81,7 @@ async fn list_lan_devices() -> Result<Json<Value>, HttpError> {
     ))
 }
 
-async fn refresh_lan_mdns() -> Result<Json<Value>, HttpError> {
+pub(crate) async fn refresh_lan_mdns() -> Result<Json<Value>, HttpError> {
     let discovered = lan::discover_mdns(Duration::from_secs(2))
         .await
         .map_err(|error| HttpError::bad_request("lan_mdns_failed", &error.to_string()))?;
@@ -89,7 +91,9 @@ async fn refresh_lan_mdns() -> Result<Json<Value>, HttpError> {
     ))
 }
 
-async fn scan_lan_cidr(Json(request): Json<lan::LanScanRequest>) -> Result<Json<Value>, HttpError> {
+pub(crate) async fn scan_lan_cidr(
+    Json(request): Json<lan::LanScanRequest>,
+) -> Result<Json<Value>, HttpError> {
     let discovered = lan::discover_cidr(request)
         .await
         .map_err(|error| HttpError::bad_request("lan_scan_failed", &error.to_string()))?;
@@ -99,7 +103,7 @@ async fn scan_lan_cidr(Json(request): Json<lan::LanScanRequest>) -> Result<Json<
     ))
 }
 
-fn persist_lan_discoveries(
+pub(crate) fn persist_lan_discoveries(
     discoveries: Vec<lan::LanDiscovery>,
 ) -> Result<Vec<lan::LanDeviceSummary>, HttpError> {
     let mut config = read_user_config()
@@ -124,7 +128,7 @@ fn persist_lan_discoveries(
     Ok(summaries)
 }
 
-async fn pair_lan_device(
+pub(crate) async fn pair_lan_device(
     Json(request): Json<lan::LanPairRequest>,
 ) -> Result<Json<lan::LanDeviceSummary>, HttpError> {
     let device = lan::pair_device(request)
@@ -142,7 +146,7 @@ async fn pair_lan_device(
 /// Establish a DEVD-owned control route for an already paired LAN device.
 /// The browser receives only the verified public record; the pairing token
 /// remains in DEVD's local registry and is never serialized by this endpoint.
-async fn connect_lan_device(
+pub(crate) async fn connect_lan_device(
     State(state): State<AppState>,
     AxumPath(lan_device_id): AxumPath<String>,
 ) -> Result<Json<Value>, HttpError> {
@@ -183,11 +187,11 @@ async fn connect_lan_device(
     Ok(Json(device_list_payload(record)))
 }
 
-fn bridge_lan_device_id(lan_device_id: &str) -> String {
+pub(crate) fn bridge_lan_device_id(lan_device_id: &str) -> String {
     format!("devd-{lan_device_id}")
 }
 
-fn lan_device_id_for_bridge(device_id: &str) -> Result<&str, HttpError> {
+pub(crate) fn lan_device_id_for_bridge(device_id: &str) -> Result<&str, HttpError> {
     device_id.strip_prefix("devd-lan-").ok_or_else(|| {
         HttpError::bad_request(
             "invalid_lan_bridge_device",
@@ -196,7 +200,7 @@ fn lan_device_id_for_bridge(device_id: &str) -> Result<&str, HttpError> {
     })
 }
 
-fn lan_bridge_config(target: &DeviceRecord) -> Result<lan::LanDeviceConfig, HttpError> {
+pub(crate) fn lan_bridge_config(target: &DeviceRecord) -> Result<lan::LanDeviceConfig, HttpError> {
     let lan_device_id = lan_device_id_for_bridge(&target.id)?;
     read_user_config()
         .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?
@@ -208,7 +212,7 @@ fn lan_bridge_config(target: &DeviceRecord) -> Result<lan::LanDeviceConfig, Http
         })
 }
 
-async fn lan_bridge_read<T: DeserializeOwned>(
+pub(crate) async fn lan_bridge_read<T: DeserializeOwned>(
     device: &lan::LanDeviceConfig,
     path: &str,
 ) -> Result<T, HttpError> {
@@ -223,7 +227,7 @@ async fn lan_bridge_read<T: DeserializeOwned>(
     })
 }
 
-async fn lan_bridge_write<T: DeserializeOwned>(
+pub(crate) async fn lan_bridge_write<T: DeserializeOwned>(
     device: &lan::LanDeviceConfig,
     path: &str,
     method: Method,
@@ -264,11 +268,11 @@ async fn lan_bridge_write<T: DeserializeOwned>(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct LanBridgeLease {
+pub(crate) struct LanBridgeLease {
     lease_id: String,
 }
 
-fn lan_bridge_payload<T: Serialize>(payload: &T) -> Result<Value, HttpError> {
+pub(crate) fn lan_bridge_payload<T: Serialize>(payload: &T) -> Result<Value, HttpError> {
     let mut body = serde_json::to_value(payload)
         .map_err(|_| HttpError::internal("failed to encode LAN control request"))?;
     if let Value::Object(fields) = &mut body {
@@ -279,7 +283,7 @@ fn lan_bridge_payload<T: Serialize>(payload: &T) -> Result<Value, HttpError> {
     Ok(body)
 }
 
-fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
+pub(crate) fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
     match error {
         lan::LanClientError::RemoteApi {
             status,
@@ -296,7 +300,7 @@ fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
     }
 }
 
-fn validate_lan_bridge_identity(identity: &Identity) -> Result<(), HttpError> {
+pub(crate) fn validate_lan_bridge_identity(identity: &Identity) -> Result<(), HttpError> {
     let valid = !identity.device_id.trim().is_empty()
         && identity.api_version == "2026-05-29"
         && identity.protocol_version == "flux-purr.usb.v1"
@@ -316,7 +320,7 @@ fn validate_lan_bridge_identity(identity: &Identity) -> Result<(), HttpError> {
     }
 }
 
-async fn reset_lan_pairing(
+pub(crate) async fn reset_lan_pairing(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -346,7 +350,7 @@ async fn reset_lan_pairing(
     Ok(Json(json!({ "cleared": true })))
 }
 
-async fn get_lan_pairing_code(
+pub(crate) async fn get_lan_pairing_code(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -372,7 +376,7 @@ async fn get_lan_pairing_code(
     Ok(Json(serial_lan_pairing_code(&state, &target).await?))
 }
 
-async fn open_lan_pairing_window(
+pub(crate) async fn open_lan_pairing_window(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -388,7 +392,7 @@ async fn open_lan_pairing_window(
     Ok(Json(code))
 }
 
-async fn close_lan_pairing_window(
+pub(crate) async fn close_lan_pairing_window(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -404,7 +408,7 @@ async fn close_lan_pairing_window(
     Ok(Json(json!({ "closed": true })))
 }
 
-fn native_lan_pairing_target(
+pub(crate) fn native_lan_pairing_target(
     state: &AppState,
     device_id: &str,
     lease_id: Option<&str>,
@@ -425,7 +429,7 @@ fn native_lan_pairing_target(
     Ok(target)
 }
 
-async fn bind_device(
+pub(crate) async fn bind_device(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -443,7 +447,7 @@ async fn bind_device(
     Ok(Json(device.clone()))
 }
 
-async fn connect_device(
+pub(crate) async fn connect_device(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -458,7 +462,7 @@ async fn connect_device(
     Ok(Json(device.clone()))
 }
 
-async fn disconnect_device(
+pub(crate) async fn disconnect_device(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -473,7 +477,7 @@ async fn disconnect_device(
     Ok(Json(device.clone()))
 }
 
-async fn create_lease(
+pub(crate) async fn create_lease(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
 ) -> Result<Json<WebLease>, HttpError> {
@@ -492,7 +496,7 @@ async fn create_lease(
     Ok(Json(lease))
 }
 
-async fn heartbeat_lease(
+pub(crate) async fn heartbeat_lease(
     State(state): State<AppState>,
     AxumPath(lease_id): AxumPath<String>,
 ) -> Result<Json<WebLease>, HttpError> {
@@ -507,7 +511,7 @@ async fn heartbeat_lease(
     Ok(Json(lease.clone()))
 }
 
-async fn delete_lease(
+pub(crate) async fn delete_lease(
     State(state): State<AppState>,
     AxumPath(lease_id): AxumPath<String>,
 ) -> Result<Json<Value>, HttpError> {
@@ -526,7 +530,7 @@ async fn delete_lease(
     Ok(Json(json!({ "released": removed.is_some() })))
 }
 
-async fn device_identity(
+pub(crate) async fn device_identity(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -570,7 +574,7 @@ async fn device_identity(
     Ok(Json(target.identity))
 }
 
-async fn device_install_status(
+pub(crate) async fn device_install_status(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -594,7 +598,7 @@ async fn device_install_status(
         .map(Json)
 }
 
-async fn device_network(
+pub(crate) async fn device_network(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -643,7 +647,7 @@ async fn device_network(
     Ok(Json(target.network))
 }
 
-async fn device_status(
+pub(crate) async fn device_status(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -692,7 +696,7 @@ async fn device_status(
     Ok(Json(target.status))
 }
 
-async fn device_calibration(
+pub(crate) async fn device_calibration(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -739,7 +743,7 @@ async fn device_calibration(
     Ok(Json(target.calibration))
 }
 
-async fn configure_calibration(
+pub(crate) async fn configure_calibration(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<CalibrationConfigRequest>,
@@ -803,7 +807,7 @@ async fn configure_calibration(
     Ok(Json(calibration))
 }
 
-async fn device_calibration_job(
+pub(crate) async fn device_calibration_job(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -850,7 +854,7 @@ async fn device_calibration_job(
     Ok(Json(target.status.calibration.job))
 }
 
-fn thermal_plant_trace_page(
+pub(crate) fn thermal_plant_trace_page(
     snapshot: &ThermalPlantRunSnapshot,
     after_sample: u8,
 ) -> ThermalPlantRunSnapshot {
@@ -874,7 +878,7 @@ fn thermal_plant_trace_page(
     page
 }
 
-async fn device_thermal_plant_run(
+pub(crate) async fn device_thermal_plant_run(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<ThermalPlantRunQuery>,
@@ -911,7 +915,7 @@ async fn device_thermal_plant_run(
     )))
 }
 
-async fn configure_calibration_job(
+pub(crate) async fn configure_calibration_job(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<CalibrationJobRequest>,
@@ -937,7 +941,7 @@ async fn configure_calibration_job(
     }
 }
 
-async fn configure_native_calibration_job(
+pub(crate) async fn configure_native_calibration_job(
     state: &AppState,
     device_id: &str,
     target: &DeviceRecord,
@@ -953,7 +957,7 @@ async fn configure_native_calibration_job(
     store_calibration_job(state, device_id, job)
 }
 
-async fn configure_lan_calibration_job(
+pub(crate) async fn configure_lan_calibration_job(
     state: &AppState,
     device_id: &str,
     target: &DeviceRecord,
@@ -970,7 +974,7 @@ async fn configure_lan_calibration_job(
     store_calibration_job(state, device_id, job)
 }
 
-fn store_calibration_job(
+pub(crate) fn store_calibration_job(
     state: &AppState,
     device_id: &str,
     job: CalibrationJobState,
@@ -983,7 +987,7 @@ fn store_calibration_job(
     Ok(Json(job))
 }
 
-fn configure_mock_calibration_job(
+pub(crate) fn configure_mock_calibration_job(
     state: &AppState,
     device_id: &str,
     payload: &CalibrationJobRequest,
@@ -1000,7 +1004,7 @@ fn configure_mock_calibration_job(
     Ok(Json(device.status.calibration.job.clone()))
 }
 
-fn cancel_mock_calibration_job(device: &mut DeviceRecord) {
+pub(crate) fn cancel_mock_calibration_job(device: &mut DeviceRecord) {
     if device.status.calibration.job.status != CalibrationJobStatus::Running {
         return;
     }
@@ -1020,7 +1024,7 @@ fn cancel_mock_calibration_job(device: &mut DeviceRecord) {
     }
 }
 
-fn start_mock_calibration_job(
+pub(crate) fn start_mock_calibration_job(
     device: &mut DeviceRecord,
     kind: Option<CalibrationJobKind>,
 ) -> Result<(), HttpError> {
@@ -1062,7 +1066,11 @@ fn start_mock_calibration_job(
     Ok(())
 }
 
-fn apply_mock_thermal_plant_start(device: &mut DeviceRecord, max_ma: u16, request_mv: u16) {
+pub(crate) fn apply_mock_thermal_plant_start(
+    device: &mut DeviceRecord,
+    max_ma: u16,
+    request_mv: u16,
+) {
     device.status.calibration.mode = CalibrationMode::ThermalPlant;
     disarm_mock_thermal_plant(&mut device.status);
     device.status.manual_pps_enabled = true;
@@ -1076,7 +1084,7 @@ fn apply_mock_thermal_plant_start(device: &mut DeviceRecord, max_ma: u16, reques
     device.status.calibration.pps_ma = Some(max_ma);
 }
 
-fn initialize_mock_thermal_plant_run(device: &mut DeviceRecord, request_mv: u16) {
+pub(crate) fn initialize_mock_thermal_plant_run(device: &mut DeviceRecord, request_mv: u16) {
     let next_run_id = device
         .thermal_plant_run
         .attempt
@@ -1100,7 +1108,7 @@ fn initialize_mock_thermal_plant_run(device: &mut DeviceRecord, request_mv: u16)
     device.thermal_plant_run.provisional_curve = None;
 }
 
-fn disarm_mock_thermal_plant(status: &mut ControlPlaneStatus) {
+pub(crate) fn disarm_mock_thermal_plant(status: &mut ControlPlaneStatus) {
     status.heater_enabled = false;
     status.heater_output_percent = 0;
     status.heater_physical_output_percent = 0;
@@ -1117,7 +1125,7 @@ fn disarm_mock_thermal_plant(status: &mut ControlPlaneStatus) {
     status.calibration.pps_ma = None;
 }
 
-async fn device_heater_curve(
+pub(crate) async fn device_heater_curve(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
@@ -1164,7 +1172,7 @@ async fn device_heater_curve(
     Ok(Json(target.heater_curve))
 }
 
-async fn configure_heater_curve(
+pub(crate) async fn configure_heater_curve(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<HeaterCurveConfigRequest>,
@@ -1235,7 +1243,7 @@ async fn configure_heater_curve(
     Ok(Json(device.heater_curve.clone()))
 }
 
-async fn save_heater_curve(
+pub(crate) async fn save_heater_curve(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<HeaterCurveSaveRequest>,
@@ -1298,7 +1306,7 @@ async fn save_heater_curve(
     Ok(Json(device.heater_curve.clone()))
 }
 
-async fn device_events(
+pub(crate) async fn device_events(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, axum::Error>>>, HttpError> {
@@ -1320,7 +1328,10 @@ async fn device_events(
     Ok(Sse::new(replay.chain(stream)))
 }
 
-fn device_event_backlog(state: &AppState, device_id: &str) -> Result<Vec<DevdEvent>, HttpError> {
+pub(crate) fn device_event_backlog(
+    state: &AppState,
+    device_id: &str,
+) -> Result<Vec<DevdEvent>, HttpError> {
     let state_lock = state.lock()?;
     let device = state_lock
         .devices
@@ -1339,7 +1350,7 @@ fn device_event_backlog(state: &AppState, device_id: &str) -> Result<Vec<DevdEve
         .collect())
 }
 
-fn trim_device_record_for_list(mut device: DeviceRecord) -> DeviceRecord {
+pub(crate) fn trim_device_record_for_list(mut device: DeviceRecord) -> DeviceRecord {
     device.events = device
         .events
         .iter()
@@ -1354,7 +1365,7 @@ fn trim_device_record_for_list(mut device: DeviceRecord) -> DeviceRecord {
     device
 }
 
-fn summarize_device_list_event(mut event: DevdEvent) -> DevdEvent {
+pub(crate) fn summarize_device_list_event(mut event: DevdEvent) -> DevdEvent {
     if event.kind == "transport"
         && let Some(payload) = event.payload.as_object_mut()
     {
@@ -1363,7 +1374,7 @@ fn summarize_device_list_event(mut event: DevdEvent) -> DevdEvent {
     event
 }
 
-fn device_list_payload(device: DeviceRecord) -> Value {
+pub(crate) fn device_list_payload(device: DeviceRecord) -> Value {
     json!({
         "id": device.id,
         "displayName": device.display_name,

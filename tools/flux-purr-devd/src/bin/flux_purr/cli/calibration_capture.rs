@@ -1,37 +1,39 @@
-struct CalibrationRunContext<'a> {
-    client: &'a Client,
-    resolved: &'a ResolvedUsbTarget,
-    lease: &'a Lease,
-    args: &'a CalibrationCollectArgs,
-    run_id: &'a str,
-    source_current_ma: u16,
-    run_started_unix_ms: u64,
-    sample_interval: Duration,
-    max_runtime: Duration,
+use super::*;
+
+pub(crate) struct CalibrationRunContext<'a> {
+    pub(crate) client: &'a Client,
+    pub(crate) resolved: &'a ResolvedUsbTarget,
+    pub(crate) lease: &'a Lease,
+    pub(crate) args: &'a CalibrationCollectArgs,
+    pub(crate) run_id: &'a str,
+    pub(crate) source_current_ma: u16,
+    pub(crate) run_started_unix_ms: u64,
+    pub(crate) sample_interval: Duration,
+    pub(crate) max_runtime: Duration,
 }
 
 #[derive(Default)]
-struct CalibrationCollectionState {
-    stop_reason: Option<&'static str>,
-    threshold_sample_index: Option<usize>,
-    stopped_sample_index: Option<usize>,
-    sample_index: usize,
-    samples_count: usize,
-    current_temp_stats: Option<CalibrationSeriesStats>,
-    voltage_stats: Option<CalibrationSeriesStats>,
-    current_ma_stats: Option<CalibrationSeriesStats>,
-    heater_output_stats: Option<CalibrationSeriesStats>,
-    board_temp_stats: Option<CalibrationSeriesStats>,
-    rtd_raw_stats: Option<CalibrationSeriesStats>,
-    vin_raw_stats: Option<CalibrationSeriesStats>,
-    first_status_snapshot: Option<Value>,
-    last_status_snapshot: Option<Value>,
-    heater_started: bool,
-    heater_stopped: bool,
-    final_status_snapshot: Option<Value>,
+pub(crate) struct CalibrationCollectionState {
+    pub(crate) stop_reason: Option<&'static str>,
+    pub(crate) threshold_sample_index: Option<usize>,
+    pub(crate) stopped_sample_index: Option<usize>,
+    pub(crate) sample_index: usize,
+    pub(crate) samples_count: usize,
+    pub(crate) current_temp_stats: Option<CalibrationSeriesStats>,
+    pub(crate) voltage_stats: Option<CalibrationSeriesStats>,
+    pub(crate) current_ma_stats: Option<CalibrationSeriesStats>,
+    pub(crate) heater_output_stats: Option<CalibrationSeriesStats>,
+    pub(crate) board_temp_stats: Option<CalibrationSeriesStats>,
+    pub(crate) rtd_raw_stats: Option<CalibrationSeriesStats>,
+    pub(crate) vin_raw_stats: Option<CalibrationSeriesStats>,
+    pub(crate) first_status_snapshot: Option<Value>,
+    pub(crate) last_status_snapshot: Option<Value>,
+    pub(crate) heater_started: bool,
+    pub(crate) heater_stopped: bool,
+    pub(crate) final_status_snapshot: Option<Value>,
 }
 
-async fn collect_calibration_run(
+pub(crate) async fn collect_calibration_run(
     client: &Client,
     default_devd: &str,
     args: CalibrationCollectArgs,
@@ -59,7 +61,8 @@ async fn collect_calibration_run(
         max_runtime: Duration::from_secs(args.max_runtime_seconds.max(1)),
     };
     let mut state = CalibrationCollectionState::default();
-    let collect_result = run_calibration_collection(&context, &mut state, &mut samples_writer).await;
+    let collect_result =
+        run_calibration_collection(&context, &mut state, &mut samples_writer).await;
     cleanup_calibration_heater(&context, &state).await;
     let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
     heartbeat.abort();
@@ -72,7 +75,11 @@ async fn collect_calibration_run(
     Ok(summary)
 }
 
-fn calibration_run_id(started_unix_ms: u64, resolved: &ResolvedUsbTarget, current_ma: u16) -> String {
+pub(crate) fn calibration_run_id(
+    started_unix_ms: u64,
+    resolved: &ResolvedUsbTarget,
+    current_ma: u16,
+) -> String {
     format!(
         "cal-{}-{}-{}mA",
         started_unix_ms,
@@ -81,7 +88,7 @@ fn calibration_run_id(started_unix_ms: u64, resolved: &ResolvedUsbTarget, curren
     )
 }
 
-async fn run_calibration_collection(
+pub(crate) async fn run_calibration_collection(
     context: &CalibrationRunContext<'_>,
     state: &mut CalibrationCollectionState,
     samples_writer: &mut BufWriter<File>,
@@ -91,7 +98,7 @@ async fn run_calibration_collection(
     stop_calibration_heater(context, state, samples_writer).await
 }
 
-async fn start_calibration_heater(
+pub(crate) async fn start_calibration_heater(
     context: &CalibrationRunContext<'_>,
     state: &mut CalibrationCollectionState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -130,7 +137,7 @@ async fn start_calibration_heater(
     verify_calibration_heater_start(context).await
 }
 
-async fn verify_calibration_heater_start(
+pub(crate) async fn verify_calibration_heater_start(
     context: &CalibrationRunContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let readback = request_leased(
@@ -154,7 +161,7 @@ async fn verify_calibration_heater_start(
     Ok(())
 }
 
-async fn collect_calibration_samples(
+pub(crate) async fn collect_calibration_samples(
     context: &CalibrationRunContext<'_>,
     state: &mut CalibrationCollectionState,
     samples_writer: &mut BufWriter<File>,
@@ -176,7 +183,8 @@ async fn collect_calibration_samples(
             None,
         )
         .await?;
-        let current_temp_c = record_calibration_sample(context, state, samples_writer, &status, "warmup")?;
+        let current_temp_c =
+            record_calibration_sample(context, state, samples_writer, &status, "warmup")?;
         if !context.args.dry_run && current_temp_c >= f64::from(context.args.stop_temp_c) {
             state.stop_reason = Some("temperature_threshold");
             state.threshold_sample_index = Some(state.sample_index);
@@ -189,7 +197,7 @@ async fn collect_calibration_samples(
     Ok(())
 }
 
-fn record_calibration_sample(
+pub(crate) fn record_calibration_sample(
     context: &CalibrationRunContext<'_>,
     state: &mut CalibrationCollectionState,
     samples_writer: &mut BufWriter<File>,
@@ -219,13 +227,22 @@ fn record_calibration_sample(
     Ok(current_temp_c)
 }
 
-fn observe_calibration_status(
+pub(crate) fn observe_calibration_status(
     state: &mut CalibrationCollectionState,
     status: &Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    observe_series(&mut state.current_temp_stats, require_status_f64(status, "currentTempC")?);
-    observe_series(&mut state.voltage_stats, require_status_u64(status, "voltageMv")? as f64);
-    observe_series(&mut state.current_ma_stats, require_status_u64(status, "currentMa")? as f64);
+    observe_series(
+        &mut state.current_temp_stats,
+        require_status_f64(status, "currentTempC")?,
+    );
+    observe_series(
+        &mut state.voltage_stats,
+        require_status_u64(status, "voltageMv")? as f64,
+    );
+    observe_series(
+        &mut state.current_ma_stats,
+        require_status_u64(status, "currentMa")? as f64,
+    );
     observe_series(
         &mut state.heater_output_stats,
         require_status_u64(status, "heaterOutputPercent")? as f64,
@@ -234,12 +251,18 @@ fn observe_calibration_status(
         &mut state.board_temp_stats,
         require_status_i32(status, "boardTempCenti")? as f64,
     );
-    observe_series(&mut state.rtd_raw_stats, require_status_u16(status, "rtdRawAdcMv")? as f64);
-    observe_series(&mut state.vin_raw_stats, require_status_u16(status, "vinRawAdcMv")? as f64);
+    observe_series(
+        &mut state.rtd_raw_stats,
+        require_status_u16(status, "rtdRawAdcMv")? as f64,
+    );
+    observe_series(
+        &mut state.vin_raw_stats,
+        require_status_u16(status, "vinRawAdcMv")? as f64,
+    );
     Ok(())
 }
 
-async fn stop_calibration_heater(
+pub(crate) async fn stop_calibration_heater(
     context: &CalibrationRunContext<'_>,
     state: &mut CalibrationCollectionState,
     samples_writer: &mut BufWriter<File>,
@@ -255,7 +278,10 @@ async fn stop_calibration_heater(
         &context.lease.lease_id,
         Method::PUT,
         "/runtime",
-        Some(thermal_self_test_runtime_body(false, context.args.target_temp_c)),
+        Some(thermal_self_test_runtime_body(
+            false,
+            context.args.target_temp_c,
+        )),
     )
     .await?;
     state.heater_stopped = true;
@@ -275,7 +301,7 @@ async fn stop_calibration_heater(
     Ok(())
 }
 
-fn write_stopped_calibration_sample(
+pub(crate) fn write_stopped_calibration_sample(
     context: &CalibrationRunContext<'_>,
     state: &mut CalibrationCollectionState,
     samples_writer: &mut BufWriter<File>,
@@ -300,7 +326,7 @@ fn write_stopped_calibration_sample(
     Ok(())
 }
 
-async fn cleanup_calibration_heater(
+pub(crate) async fn cleanup_calibration_heater(
     context: &CalibrationRunContext<'_>,
     state: &CalibrationCollectionState,
 ) {
@@ -311,13 +337,16 @@ async fn cleanup_calibration_heater(
             &context.lease.lease_id,
             Method::PUT,
             "/runtime",
-            Some(thermal_self_test_runtime_body(false, context.args.target_temp_c)),
+            Some(thermal_self_test_runtime_body(
+                false,
+                context.args.target_temp_c,
+            )),
         )
         .await;
     }
 }
 
-fn calibration_summary(
+pub(crate) fn calibration_summary(
     context: &CalibrationRunContext<'_>,
     state: &CalibrationCollectionState,
     run_dir: &Path,
@@ -353,7 +382,7 @@ fn calibration_summary(
     })
 }
 
-fn calibration_stats_value(state: &CalibrationCollectionState) -> Value {
+pub(crate) fn calibration_stats_value(state: &CalibrationCollectionState) -> Value {
     json!({
         "currentTempC": state.current_temp_stats.as_ref().map(CalibrationSeriesStats::to_value),
         "voltageMv": state.voltage_stats.as_ref().map(CalibrationSeriesStats::to_value),
@@ -365,7 +394,7 @@ fn calibration_stats_value(state: &CalibrationCollectionState) -> Value {
     })
 }
 
-async fn create_lease(
+pub(crate) async fn create_lease(
     client: &Client,
     resolved: &ResolvedUsbTarget,
 ) -> Result<Lease, Box<dyn std::error::Error + Send + Sync>> {
@@ -393,7 +422,7 @@ async fn create_lease(
     .into())
 }
 
-async fn create_ready_thermal_lease(
+pub(crate) async fn create_ready_thermal_lease(
     client: &Client,
     resolved: &ResolvedUsbTarget,
 ) -> Result<(Lease, Value), Box<dyn std::error::Error + Send + Sync>> {
@@ -416,19 +445,19 @@ async fn create_ready_thermal_lease(
     .into())
 }
 
-async fn try_create_ready_thermal_lease(
+pub(crate) async fn try_create_ready_thermal_lease(
     client: &Client,
     resolved: &ResolvedUsbTarget,
 ) -> Result<Option<(Lease, Value)>, Box<dyn std::error::Error + Send + Sync>> {
     let lease = create_lease(client, resolved).await?;
-    let mut status = match request_thermal_status_with_retry(client, resolved, &lease.lease_id).await
-    {
-        Ok(status) => status,
-        Err(error) => {
-            let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-            return Err(error);
-        }
-    };
+    let mut status =
+        match request_thermal_status_with_retry(client, resolved, &lease.lease_id).await {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+                return Err(error);
+            }
+        };
     if status.get("heaterEnabled").and_then(Value::as_bool) == Some(true) {
         force_thermal_self_test_shutdown(client, resolved, &lease.lease_id).await?;
         status = request_thermal_status_with_retry(client, resolved, &lease.lease_id).await?;
@@ -440,7 +469,7 @@ async fn try_create_ready_thermal_lease(
     Ok(None)
 }
 
-async fn release_lease(
+pub(crate) async fn release_lease(
     client: &Client,
     devd: &str,
     lease_id: &str,
@@ -456,7 +485,7 @@ async fn release_lease(
     Ok(())
 }
 
-async fn force_thermal_self_test_shutdown(
+pub(crate) async fn force_thermal_self_test_shutdown(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
@@ -488,7 +517,11 @@ async fn force_thermal_self_test_shutdown(
     result.map(|_| ())
 }
 
-fn spawn_heartbeat(client: Client, devd: String, lease: Lease) -> tokio::task::JoinHandle<()> {
+pub(crate) fn spawn_heartbeat(
+    client: Client,
+    devd: String,
+    lease: Lease,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let interval_ms = (lease.ttl_ms / 2).max(500);
         let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));

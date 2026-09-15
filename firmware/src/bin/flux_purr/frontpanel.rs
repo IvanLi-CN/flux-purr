@@ -1,5 +1,8 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(target_arch = "xtensa")]
-struct DisplayTimer;
+pub(crate) struct DisplayTimer;
 
 #[cfg(target_arch = "xtensa")]
 impl Gc9d01Timer for DisplayTimer {
@@ -9,17 +12,17 @@ impl Gc9d01Timer for DisplayTimer {
 }
 
 #[cfg(target_arch = "xtensa")]
-struct FrontPanelInputs<'d> {
-    center: Input<'d>,
-    right: Input<'d>,
-    down: Input<'d>,
-    left: Input<'d>,
-    up: Input<'d>,
+pub(crate) struct FrontPanelInputs<'d> {
+    pub(crate) center: Input<'d>,
+    pub(crate) right: Input<'d>,
+    pub(crate) down: Input<'d>,
+    pub(crate) left: Input<'d>,
+    pub(crate) up: Input<'d>,
 }
 
 #[cfg(target_arch = "xtensa")]
 impl<'d> FrontPanelInputs<'d> {
-    fn sample(&self) -> FrontPanelRawState {
+    pub(crate) fn sample(&self) -> FrontPanelRawState {
         let mut state = FrontPanelRawState::default();
         state.set_pressed(RawFrontPanelKey::CenterBoot, self.center.is_low());
         state.set_pressed(RawFrontPanelKey::Right, self.right.is_low());
@@ -31,7 +34,7 @@ impl<'d> FrontPanelInputs<'d> {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn runtime_mode_label(mode: FrontPanelRuntimeMode) -> &'static str {
+pub(crate) fn runtime_mode_label(mode: FrontPanelRuntimeMode) -> &'static str {
     match mode {
         FrontPanelRuntimeMode::KeyTest => "key-test",
         FrontPanelRuntimeMode::App => "app",
@@ -39,7 +42,7 @@ fn runtime_mode_label(mode: FrontPanelRuntimeMode) -> &'static str {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn route_label(route: FrontPanelRoute) -> &'static str {
+pub(crate) fn route_label(route: FrontPanelRoute) -> &'static str {
     match route {
         FrontPanelRoute::KeyTest => "key-test",
         FrontPanelRoute::Dashboard => "dashboard",
@@ -53,7 +56,7 @@ fn route_label(route: FrontPanelRoute) -> &'static str {
 
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HeaterFaultReason {
+pub(crate) enum HeaterFaultReason {
     SensorShort,
     SensorOpen,
     AdcReadFailed,
@@ -62,7 +65,7 @@ enum HeaterFaultReason {
 
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 impl HeaterFaultReason {
-    const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::SensorShort => "sensor-short",
             Self::SensorOpen => "sensor-open",
@@ -74,7 +77,7 @@ impl HeaterFaultReason {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum HeaterControlPhase {
+pub(crate) enum HeaterControlPhase {
     Warmup,
     Approach,
     Hold,
@@ -83,7 +86,7 @@ enum HeaterControlPhase {
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 impl HeaterControlPhase {
-    const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Warmup => "warmup",
             Self::Approach => "approach",
@@ -94,101 +97,101 @@ impl HeaterControlPhase {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct HeaterPidSnapshot {
-    duty_percent: u8,
-    warmup_soft_start_percent: u8,
-    error_c: f32,
-    control_error_c: f32,
-    filtered_temp_c: f32,
-    filtered_slope_c_per_s: f32,
-    coast_active: bool,
-    phase: HeaterControlPhase,
+pub(crate) struct HeaterPidSnapshot {
+    pub(crate) duty_percent: u8,
+    pub(crate) warmup_soft_start_percent: u8,
+    pub(crate) error_c: f32,
+    pub(crate) control_error_c: f32,
+    pub(crate) filtered_temp_c: f32,
+    pub(crate) filtered_slope_c_per_s: f32,
+    pub(crate) coast_active: bool,
+    pub(crate) phase: HeaterControlPhase,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Default)]
-struct HeaterControlTiming {
-    interval_ms: u16,
-    cycle_ms: u16,
+pub(crate) struct HeaterControlTiming {
+    pub(crate) interval_ms: u16,
+    pub(crate) cycle_ms: u16,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ThermalControlProfilePoint {
-    target_temp_c: i16,
-    brake_distance_centi_c: u16,
-    warmup_power_permille: u16,
-    warmup_reenter_centi_c: u16,
-    approach_power_permille: u16,
-    approach_floor_power_permille: u16,
-    approach_damping_exponent_permille: u16,
-    approach_tail_window_centi_c: u16,
-    hold_power_permille: u16,
-    hold_reheat_power_permille: u16,
-    hold_entry_centi_c: u16,
-    hold_exit_centi_c: u16,
-    hold_on_centi_c: u16,
-    hold_off_centi_c: u16,
-    overshoot_cutoff_centi_c: u16,
-    hold_kp_permille_per_c: u16,
-    hold_ki_permille_per_c_tick: u16,
-    hold_blend_ticks: u16,
-    approach_lead_ticks: u16,
-    hold_lead_ticks: u16,
+pub(crate) struct ThermalControlProfilePoint {
+    pub(crate) target_temp_c: i16,
+    pub(crate) brake_distance_centi_c: u16,
+    pub(crate) warmup_power_permille: u16,
+    pub(crate) warmup_reenter_centi_c: u16,
+    pub(crate) approach_power_permille: u16,
+    pub(crate) approach_floor_power_permille: u16,
+    pub(crate) approach_damping_exponent_permille: u16,
+    pub(crate) approach_tail_window_centi_c: u16,
+    pub(crate) hold_power_permille: u16,
+    pub(crate) hold_reheat_power_permille: u16,
+    pub(crate) hold_entry_centi_c: u16,
+    pub(crate) hold_exit_centi_c: u16,
+    pub(crate) hold_on_centi_c: u16,
+    pub(crate) hold_off_centi_c: u16,
+    pub(crate) overshoot_cutoff_centi_c: u16,
+    pub(crate) hold_kp_permille_per_c: u16,
+    pub(crate) hold_ki_permille_per_c_tick: u16,
+    pub(crate) hold_blend_ticks: u16,
+    pub(crate) approach_lead_ticks: u16,
+    pub(crate) hold_lead_ticks: u16,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ThermalControlProfile {
-    settings: ThermalControlProfileSettings,
-    points: [Option<ThermalControlProfilePoint>; FRONTPANEL_PRESET_COUNT],
+pub(crate) struct ThermalControlProfile {
+    pub(crate) settings: ThermalControlProfileSettings,
+    pub(crate) points: [Option<ThermalControlProfilePoint>; FRONTPANEL_PRESET_COUNT],
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ThermalControlTarget {
-    brake_distance_c: f32,
-    warmup_power_permille: u16,
-    warmup_reenter_error_c: f32,
-    approach_power_permille: u16,
-    approach_floor_power_permille: u16,
-    approach_damping_exponent: f32,
-    approach_tail_window_c: f32,
-    hold_power_permille: u16,
-    hold_reheat_power_permille: u16,
-    hold_entry_error_c: f32,
-    hold_exit_error_c: f32,
-    hold_on_error_c: f32,
-    hold_off_error_c: f32,
-    overshoot_cutoff_c: f32,
-    hold_kp_permille_per_c: f32,
-    hold_ki_permille_per_c_tick: f32,
-    hold_blend_ticks: u8,
-    approach_lead_ticks: u8,
-    hold_lead_ticks: u8,
-    settings: ThermalControlProfileSettings,
+pub(crate) struct ThermalControlTarget {
+    pub(crate) brake_distance_c: f32,
+    pub(crate) warmup_power_permille: u16,
+    pub(crate) warmup_reenter_error_c: f32,
+    pub(crate) approach_power_permille: u16,
+    pub(crate) approach_floor_power_permille: u16,
+    pub(crate) approach_damping_exponent: f32,
+    pub(crate) approach_tail_window_c: f32,
+    pub(crate) hold_power_permille: u16,
+    pub(crate) hold_reheat_power_permille: u16,
+    pub(crate) hold_entry_error_c: f32,
+    pub(crate) hold_exit_error_c: f32,
+    pub(crate) hold_on_error_c: f32,
+    pub(crate) hold_off_error_c: f32,
+    pub(crate) overshoot_cutoff_c: f32,
+    pub(crate) hold_kp_permille_per_c: f32,
+    pub(crate) hold_ki_permille_per_c_tick: f32,
+    pub(crate) hold_blend_ticks: u8,
+    pub(crate) approach_lead_ticks: u8,
+    pub(crate) hold_lead_ticks: u8,
+    pub(crate) settings: ThermalControlProfileSettings,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ThermalControlProfileSettings {
-    temp_filter_alpha: f32,
-    warmup_reenter_error_c: f32,
-    hold_entry_error_c: f32,
-    hold_exit_error_c: f32,
-    hold_on_error_c: f32,
-    hold_off_error_c: f32,
-    overshoot_cutoff_c: f32,
-    approach_max_ticks: u8,
-    approach_min_power_ratio: f32,
-    hold_kp_permille_per_c: f32,
-    hold_ki_permille_per_c_tick: f32,
-    hold_blend_ticks: u8,
-    hold_reheat_power_permille: u16,
-    approach_lead_ticks: u8,
-    hold_lead_ticks: u8,
-    auto_adjustable_working_floor_mv: u16,
-    heater_current_reserve_ma: u16,
+pub(crate) struct ThermalControlProfileSettings {
+    pub(crate) temp_filter_alpha: f32,
+    pub(crate) warmup_reenter_error_c: f32,
+    pub(crate) hold_entry_error_c: f32,
+    pub(crate) hold_exit_error_c: f32,
+    pub(crate) hold_on_error_c: f32,
+    pub(crate) hold_off_error_c: f32,
+    pub(crate) overshoot_cutoff_c: f32,
+    pub(crate) approach_max_ticks: u8,
+    pub(crate) approach_min_power_ratio: f32,
+    pub(crate) hold_kp_permille_per_c: f32,
+    pub(crate) hold_ki_permille_per_c_tick: f32,
+    pub(crate) hold_blend_ticks: u8,
+    pub(crate) hold_reheat_power_permille: u16,
+    pub(crate) approach_lead_ticks: u8,
+    pub(crate) hold_lead_ticks: u8,
+    pub(crate) auto_adjustable_working_floor_mv: u16,
+    pub(crate) heater_current_reserve_ma: u16,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -390,7 +393,7 @@ impl From<ThermalControlProfileConfig> for ThermalControlProfile {
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl ThermalControlProfile {
-    fn from_saved_config(config: &ThermalControlProfileConfig) -> Option<Self> {
+    pub(crate) fn from_saved_config(config: &ThermalControlProfileConfig) -> Option<Self> {
         (config.points.iter().any(Option::is_some)
             || config.settings != ThermalControlProfileSettingsConfig::default())
         .then_some(Self::from(*config))
@@ -471,7 +474,7 @@ impl ThermalControlProfile {
         self
     }
 
-    fn control_target(self, target_temp_c: i16) -> ThermalControlTarget {
+    pub(crate) fn control_target(self, target_temp_c: i16) -> ThermalControlTarget {
         let profile = self.sanitized();
         let mut dense: heapless::Vec<ThermalControlProfilePoint, FRONTPANEL_PRESET_COUNT> =
             heapless::Vec::new();
@@ -502,7 +505,7 @@ impl ThermalControlProfile {
         interpolate_thermal_control_target(target, lower, upper, profile.settings)
     }
 
-    fn covers_target(self, target_temp_c: i16) -> bool {
+    pub(crate) fn covers_target(self, target_temp_c: i16) -> bool {
         let profile = self.sanitized();
         let target = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
         let mut minimum = None::<i16>;

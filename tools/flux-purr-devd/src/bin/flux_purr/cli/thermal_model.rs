@@ -1,4 +1,6 @@
-async fn handle_thermal_command(
+use super::*;
+
+pub(crate) async fn handle_thermal_command(
     client: &Client,
     default_devd: &str,
     command: ThermalCommand,
@@ -103,222 +105,222 @@ async fn handle_thermal_command(
 }
 
 #[derive(Debug, Clone)]
-struct ThermalStageResult {
-    target_temp_c: i16,
-    rise_time_ms: u64,
-    max_overshoot_c: f64,
-    hold_peak_to_peak_c: f64,
-    sample_count: usize,
-    stop_reason: &'static str,
-    terminal_runtime_drop_reason: Option<&'static str>,
-    analysis: ThermalStageAnalysis,
-    guard: ThermalApproachGuardAnalysis,
-    full_speed_to_stable: ThermalFullSpeedStableAnalysis,
+pub(crate) struct ThermalStageResult {
+    pub(crate) target_temp_c: i16,
+    pub(crate) rise_time_ms: u64,
+    pub(crate) max_overshoot_c: f64,
+    pub(crate) hold_peak_to_peak_c: f64,
+    pub(crate) sample_count: usize,
+    pub(crate) stop_reason: &'static str,
+    pub(crate) terminal_runtime_drop_reason: Option<&'static str>,
+    pub(crate) analysis: ThermalStageAnalysis,
+    pub(crate) guard: ThermalApproachGuardAnalysis,
+    pub(crate) full_speed_to_stable: ThermalFullSpeedStableAnalysis,
 }
 
 #[derive(Debug, Clone, Default)]
-struct ThermalStageAnalysis {
-    first_hold_temp_c: Option<f64>,
-    first_hold_error_c: Option<f64>,
-    residual_heat_after_hold_entry_c: Option<f64>,
-    approach_median_output_permille: Option<u16>,
-    approach_median_slope_c_per_s: Option<f64>,
-    hold_median_output_permille: Option<u16>,
-    hold_p90_output_permille: Option<u16>,
-    hold_mean_error_c: Option<f64>,
-    hold_max_above_target_c: Option<f64>,
-    hold_max_below_target_c: Option<f64>,
-    approach_curve_fit_basis: Option<&'static str>,
-    approach_curve_start_temp_c: Option<f64>,
-    approach_curve_fitted_ms: Option<u64>,
-    approach_curve_preferred_ms: Option<u64>,
-    approach_curve_limit_ms: Option<u64>,
-    approach_curve_max_above_c: Option<f64>,
-    approach_curve_max_below_c: Option<f64>,
-    approach_curve_mean_abs_error_c: Option<f64>,
-    approach_curve_oscillation_c: Option<f64>,
-    approach_curve_deviation_class: Option<&'static str>,
-    approach_curve_tail_uses_half_floor: Option<bool>,
-    approach_sample_count: usize,
-    hold_sample_count: usize,
+pub(crate) struct ThermalStageAnalysis {
+    pub(crate) first_hold_temp_c: Option<f64>,
+    pub(crate) first_hold_error_c: Option<f64>,
+    pub(crate) residual_heat_after_hold_entry_c: Option<f64>,
+    pub(crate) approach_median_output_permille: Option<u16>,
+    pub(crate) approach_median_slope_c_per_s: Option<f64>,
+    pub(crate) hold_median_output_permille: Option<u16>,
+    pub(crate) hold_p90_output_permille: Option<u16>,
+    pub(crate) hold_mean_error_c: Option<f64>,
+    pub(crate) hold_max_above_target_c: Option<f64>,
+    pub(crate) hold_max_below_target_c: Option<f64>,
+    pub(crate) approach_curve_fit_basis: Option<&'static str>,
+    pub(crate) approach_curve_start_temp_c: Option<f64>,
+    pub(crate) approach_curve_fitted_ms: Option<u64>,
+    pub(crate) approach_curve_preferred_ms: Option<u64>,
+    pub(crate) approach_curve_limit_ms: Option<u64>,
+    pub(crate) approach_curve_max_above_c: Option<f64>,
+    pub(crate) approach_curve_max_below_c: Option<f64>,
+    pub(crate) approach_curve_mean_abs_error_c: Option<f64>,
+    pub(crate) approach_curve_oscillation_c: Option<f64>,
+    pub(crate) approach_curve_deviation_class: Option<&'static str>,
+    pub(crate) approach_curve_tail_uses_half_floor: Option<bool>,
+    pub(crate) approach_sample_count: usize,
+    pub(crate) hold_sample_count: usize,
 }
 
 #[derive(Debug, Clone, Default)]
-struct ThermalApproachGuardAnalysis {
-    hold_threshold_temp_c: f64,
-    approach_started_at_ms: Option<u64>,
-    hold_threshold_crossed_at_ms: Option<u64>,
-    first_hold_at_ms: Option<u64>,
-    warmup_reentered_at_ms: Option<u64>,
+pub(crate) struct ThermalApproachGuardAnalysis {
+    pub(crate) hold_threshold_temp_c: f64,
+    pub(crate) approach_started_at_ms: Option<u64>,
+    pub(crate) hold_threshold_crossed_at_ms: Option<u64>,
+    pub(crate) first_hold_at_ms: Option<u64>,
+    pub(crate) warmup_reentered_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
-struct ThermalFullSpeedStableAnalysis {
-    warmup_exited_at_ms: Option<u64>,
-    stable_window_started_at_ms: Option<u64>,
-    stable_window_verified_at_ms: Option<u64>,
-    settle_time_ms: Option<u64>,
-    failure_reason: Option<&'static str>,
+pub(crate) struct ThermalFullSpeedStableAnalysis {
+    pub(crate) warmup_exited_at_ms: Option<u64>,
+    pub(crate) stable_window_started_at_ms: Option<u64>,
+    pub(crate) stable_window_verified_at_ms: Option<u64>,
+    pub(crate) settle_time_ms: Option<u64>,
+    pub(crate) failure_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
-struct ThermalReplayStageSample {
-    elapsed_ms: u64,
-    current_temp_c: f64,
-    heater_output_percent: u8,
-    control_phase: Option<String>,
-    control_phase_in_hold: bool,
-    source_voltage_mv: Option<u64>,
-    source_current_ma: Option<u64>,
-    source_power_mw: Option<u64>,
+pub(crate) struct ThermalReplayStageSample {
+    pub(crate) elapsed_ms: u64,
+    pub(crate) current_temp_c: f64,
+    pub(crate) heater_output_percent: u8,
+    pub(crate) control_phase: Option<String>,
+    pub(crate) control_phase_in_hold: bool,
+    pub(crate) source_voltage_mv: Option<u64>,
+    pub(crate) source_current_ma: Option<u64>,
+    pub(crate) source_power_mw: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
-struct ThermalStageAnalyzer {
-    target_temp_c: f64,
-    first_hold_temp_c: Option<f64>,
-    last_elapsed_ms: Option<u64>,
-    last_temp_c: Option<f64>,
-    approach_output_permille: Vec<u16>,
-    approach_slope_c_per_s: Vec<f64>,
-    hold_output_permille: Vec<u16>,
-    hold_error_c: Vec<f64>,
+pub(crate) struct ThermalStageAnalyzer {
+    pub(crate) target_temp_c: f64,
+    pub(crate) first_hold_temp_c: Option<f64>,
+    pub(crate) last_elapsed_ms: Option<u64>,
+    pub(crate) last_temp_c: Option<f64>,
+    pub(crate) approach_output_permille: Vec<u16>,
+    pub(crate) approach_slope_c_per_s: Vec<f64>,
+    pub(crate) hold_output_permille: Vec<u16>,
+    pub(crate) hold_error_c: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
-struct ThermalSourceWindowAnalysis {
-    sample_count: usize,
-    voltage_mv: Option<CalibrationSeriesStats>,
-    current_ma: Option<CalibrationSeriesStats>,
-    power_mw: Option<CalibrationSeriesStats>,
+pub(crate) struct ThermalSourceWindowAnalysis {
+    pub(crate) sample_count: usize,
+    pub(crate) voltage_mv: Option<CalibrationSeriesStats>,
+    pub(crate) current_ma: Option<CalibrationSeriesStats>,
+    pub(crate) power_mw: Option<CalibrationSeriesStats>,
 }
 
 #[derive(Debug, Clone)]
-struct ThermalStageSourceAnalysisBuilder {
-    target_temp_c: f64,
-    first_hold_temp_c: Option<f64>,
-    approach: ThermalSourceWindowAnalysis,
-    hold: ThermalSourceWindowAnalysis,
+pub(crate) struct ThermalStageSourceAnalysisBuilder {
+    pub(crate) target_temp_c: f64,
+    pub(crate) first_hold_temp_c: Option<f64>,
+    pub(crate) approach: ThermalSourceWindowAnalysis,
+    pub(crate) hold: ThermalSourceWindowAnalysis,
 }
 
 #[derive(Debug, Clone)]
-struct ThermalApproachGuardTracker {
-    hold_threshold_temp_c: f64,
-    approach_started_at_ms: Option<u64>,
-    hold_threshold_crossed_at_ms: Option<u64>,
-    first_hold_at_ms: Option<u64>,
-    warmup_reentered_at_ms: Option<u64>,
+pub(crate) struct ThermalApproachGuardTracker {
+    pub(crate) hold_threshold_temp_c: f64,
+    pub(crate) approach_started_at_ms: Option<u64>,
+    pub(crate) hold_threshold_crossed_at_ms: Option<u64>,
+    pub(crate) first_hold_at_ms: Option<u64>,
+    pub(crate) warmup_reentered_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
-struct ThermalFullSpeedStableTracker {
-    target_temp_c: f64,
-    warmup_exited_at_ms: Option<u64>,
-    stable_window_started_at_ms: Option<u64>,
-    stable_window_verified_at_ms: Option<u64>,
-    settle_time_ms: Option<u64>,
-    failure_reason: Option<&'static str>,
+pub(crate) struct ThermalFullSpeedStableTracker {
+    pub(crate) target_temp_c: f64,
+    pub(crate) warmup_exited_at_ms: Option<u64>,
+    pub(crate) stable_window_started_at_ms: Option<u64>,
+    pub(crate) stable_window_verified_at_ms: Option<u64>,
+    pub(crate) settle_time_ms: Option<u64>,
+    pub(crate) failure_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
-struct ThermalSampleRateTracker {
-    elapsed_ms: Vec<u64>,
-    below_minimum_since_ms: Option<u64>,
+pub(crate) struct ThermalSampleRateTracker {
+    pub(crate) elapsed_ms: Vec<u64>,
+    pub(crate) below_minimum_since_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ThermalSampleRateObservation {
-    interval_ms: Option<u64>,
-    rolling_rate_hz: Option<f64>,
-    violation: bool,
+pub(crate) struct ThermalSampleRateObservation {
+    pub(crate) interval_ms: Option<u64>,
+    pub(crate) rolling_rate_hz: Option<f64>,
+    pub(crate) violation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ThermalFullSpeedStableObservation {
+pub(crate) enum ThermalFullSpeedStableObservation {
     Pending,
     Verified,
     Failed(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ThermalCandidateSettings {
-    temp_filter_alpha_permille: u16,
-    approach_max_ticks: u16,
-    approach_min_power_ratio_permille: u16,
-    auto_adjustable_working_floor_mv: u16,
-    heater_current_reserve_ma: u16,
+pub(crate) struct ThermalCandidateSettings {
+    pub(crate) temp_filter_alpha_permille: u16,
+    pub(crate) approach_max_ticks: u16,
+    pub(crate) approach_min_power_ratio_permille: u16,
+    pub(crate) auto_adjustable_working_floor_mv: u16,
+    pub(crate) heater_current_reserve_ma: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ThermalCandidatePoint {
-    target_temp_c: i16,
-    brake_distance_centi_c: u16,
-    warmup_power_permille: u16,
-    approach_power_permille: u16,
-    approach_floor_power_permille: u16,
-    approach_damping_exponent_permille: u16,
-    approach_tail_window_centi_c: u16,
-    hold_power_permille: u16,
-    hold_reheat_power_permille: u16,
-    warmup_reenter_centi_c: u16,
-    hold_entry_centi_c: u16,
-    hold_exit_centi_c: u16,
-    hold_on_centi_c: u16,
-    hold_off_centi_c: u16,
-    overshoot_cutoff_centi_c: u16,
-    hold_kp_permille_per_c: u16,
-    hold_ki_permille_per_c_tick: u16,
-    hold_blend_ticks: u16,
-    approach_lead_ticks: u16,
-    hold_lead_ticks: u16,
+pub(crate) struct ThermalCandidatePoint {
+    pub(crate) target_temp_c: i16,
+    pub(crate) brake_distance_centi_c: u16,
+    pub(crate) warmup_power_permille: u16,
+    pub(crate) approach_power_permille: u16,
+    pub(crate) approach_floor_power_permille: u16,
+    pub(crate) approach_damping_exponent_permille: u16,
+    pub(crate) approach_tail_window_centi_c: u16,
+    pub(crate) hold_power_permille: u16,
+    pub(crate) hold_reheat_power_permille: u16,
+    pub(crate) warmup_reenter_centi_c: u16,
+    pub(crate) hold_entry_centi_c: u16,
+    pub(crate) hold_exit_centi_c: u16,
+    pub(crate) hold_on_centi_c: u16,
+    pub(crate) hold_off_centi_c: u16,
+    pub(crate) overshoot_cutoff_centi_c: u16,
+    pub(crate) hold_kp_permille_per_c: u16,
+    pub(crate) hold_ki_permille_per_c_tick: u16,
+    pub(crate) hold_blend_ticks: u16,
+    pub(crate) approach_lead_ticks: u16,
+    pub(crate) hold_lead_ticks: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ThermalCandidateProfile {
-    settings: ThermalCandidateSettings,
-    points: Vec<ThermalCandidatePoint>,
+pub(crate) struct ThermalCandidateProfile {
+    pub(crate) settings: ThermalCandidateSettings,
+    pub(crate) points: Vec<ThermalCandidatePoint>,
 }
 
 #[derive(Debug, Clone)]
-struct BenchSourceLiveTelemetry {
-    voltage_mv: u64,
-    current_ma: u64,
-    power_mw: u64,
-    sample_uptime_ms: u64,
-    status: String,
+pub(crate) struct BenchSourceLiveTelemetry {
+    pub(crate) voltage_mv: u64,
+    pub(crate) current_ma: u64,
+    pub(crate) power_mw: u64,
+    pub(crate) sample_uptime_ms: u64,
+    pub(crate) status: String,
 }
 
-const THERMAL_SOURCE_65W_POWER_WATTS: u64 = 65;
-const THERMAL_SOURCE_100W_POWER_WATTS: u64 = 100;
-const THERMAL_SOURCE_MIN_READY_VOLTAGE_MV: u64 = 5_000;
-const THERMAL_STATUS_REQUEST_TIMEOUT_MS: u64 = 1_000;
-const THERMAL_STATUS_REQUEST_RETRY_ATTEMPTS: usize = 8;
-const THERMAL_STATUS_REQUEST_RETRY_BACKOFF_MS: u64 = 250;
-const THERMAL_RUNTIME_READBACK_TIMEOUT_MS: u64 = 3_000;
-const THERMAL_RUNTIME_READBACK_POLL_MS: u64 = 100;
-const ISOLAPURR_LIVE_TELEMETRY_TIMEOUT: Duration = Duration::from_millis(1_500);
-const ISOLAPURR_LIVE_TELEMETRY_ATTEMPTS: usize = 3;
-const THERMAL_SOURCE_TELEMETRY_STALE_TIMEOUT: Duration = Duration::from_secs(6);
+pub(crate) const THERMAL_SOURCE_65W_POWER_WATTS: u64 = 65;
+pub(crate) const THERMAL_SOURCE_100W_POWER_WATTS: u64 = 100;
+pub(crate) const THERMAL_SOURCE_MIN_READY_VOLTAGE_MV: u64 = 5_000;
+pub(crate) const THERMAL_STATUS_REQUEST_TIMEOUT_MS: u64 = 1_000;
+pub(crate) const THERMAL_STATUS_REQUEST_RETRY_ATTEMPTS: usize = 8;
+pub(crate) const THERMAL_STATUS_REQUEST_RETRY_BACKOFF_MS: u64 = 250;
+pub(crate) const THERMAL_RUNTIME_READBACK_TIMEOUT_MS: u64 = 3_000;
+pub(crate) const THERMAL_RUNTIME_READBACK_POLL_MS: u64 = 100;
+pub(crate) const ISOLAPURR_LIVE_TELEMETRY_TIMEOUT: Duration = Duration::from_millis(1_500);
+pub(crate) const ISOLAPURR_LIVE_TELEMETRY_ATTEMPTS: usize = 3;
+pub(crate) const THERMAL_SOURCE_TELEMETRY_STALE_TIMEOUT: Duration = Duration::from_secs(6);
 // IsolaPurr telemetry is already source-sampled; spawning its CLI at 10 Hz
 // competes with the USB status poller without producing fresher measurements.
 // A 500ms cache refresh remains well inside the six-second stale guard.
-const THERMAL_SOURCE_TELEMETRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+pub(crate) const THERMAL_SOURCE_TELEMETRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-struct BenchSourceTelemetryCache {
-    latest: BenchSourceLiveTelemetry,
-    latest_sample_seen_at: tokio::time::Instant,
-    terminal_error: Option<String>,
+pub(crate) struct BenchSourceTelemetryCache {
+    pub(crate) latest: BenchSourceLiveTelemetry,
+    pub(crate) latest_sample_seen_at: tokio::time::Instant,
+    pub(crate) terminal_error: Option<String>,
 }
 
-struct BenchSourceTelemetrySampler {
-    source_kind: BenchSourceKind,
-    source_url: String,
-    cache: Arc<Mutex<BenchSourceTelemetryCache>>,
-    poller: tokio::task::JoinHandle<()>,
+pub(crate) struct BenchSourceTelemetrySampler {
+    pub(crate) source_kind: BenchSourceKind,
+    pub(crate) source_url: String,
+    pub(crate) cache: Arc<Mutex<BenchSourceTelemetryCache>>,
+    pub(crate) poller: tokio::task::JoinHandle<()>,
 }
 
 impl BenchSourceTelemetrySampler {
-    fn new(
+    pub(crate) fn new(
         source_kind: BenchSourceKind,
         source_url: &str,
         initial: BenchSourceLiveTelemetry,
@@ -343,7 +345,7 @@ impl BenchSourceTelemetrySampler {
         }
     }
 
-    async fn refresh(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) async fn refresh(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let source_kind = self.source_kind;
         let source_url = self.source_url.clone();
         let telemetry = tokio::task::spawn_blocking(move || {
@@ -360,7 +362,7 @@ impl BenchSourceTelemetrySampler {
         Ok(())
     }
 
-    fn snapshot(
+    pub(crate) fn snapshot(
         &self,
     ) -> Result<(BenchSourceLiveTelemetry, u64), Box<dyn std::error::Error + Send + Sync>> {
         let cache = self
@@ -383,7 +385,7 @@ impl BenchSourceTelemetrySampler {
         Ok((cache.latest.clone(), stale_ms))
     }
 
-    fn latest_stale_ms(&self) -> u64 {
+    pub(crate) fn latest_stale_ms(&self) -> u64 {
         let elapsed = self
             .cache
             .lock()
@@ -392,7 +394,7 @@ impl BenchSourceTelemetrySampler {
         elapsed.as_millis().min(u128::from(u64::MAX)) as u64
     }
 
-    fn latest(&self) -> BenchSourceLiveTelemetry {
+    pub(crate) fn latest(&self) -> BenchSourceLiveTelemetry {
         self.cache
             .lock()
             .map(|cache| cache.latest.clone())
@@ -406,7 +408,7 @@ impl BenchSourceTelemetrySampler {
     }
 }
 
-async fn run_bench_source_poller(
+pub(crate) async fn run_bench_source_poller(
     source_kind: BenchSourceKind,
     source_url: String,
     cache: Arc<Mutex<BenchSourceTelemetryCache>>,
@@ -419,7 +421,7 @@ async fn run_bench_source_poller(
     }
 }
 
-async fn poll_bench_source_once(
+pub(crate) async fn poll_bench_source_once(
     source_kind: BenchSourceKind,
     source_url: &str,
     cache: &Arc<Mutex<BenchSourceTelemetryCache>>,
@@ -430,7 +432,9 @@ async fn poll_bench_source_once(
     })
     .await;
     let Ok(result) = result else { return true };
-    let Ok(mut cache) = cache.lock() else { return false };
+    let Ok(mut cache) = cache.lock() else {
+        return false;
+    };
     match result {
         Ok(telemetry) => update_bench_source_cache(&mut cache, telemetry),
         Err(error) if thermal_source_probe_transient_error(error.as_ref()) => {}
@@ -439,7 +443,7 @@ async fn poll_bench_source_once(
     true
 }
 
-fn update_bench_source_cache(
+pub(crate) fn update_bench_source_cache(
     cache: &mut BenchSourceTelemetryCache,
     telemetry: BenchSourceLiveTelemetry,
 ) {
@@ -457,25 +461,25 @@ impl Drop for BenchSourceTelemetrySampler {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ThermalHoldObservation {
+pub(crate) enum ThermalHoldObservation {
     Warmup,
     Hold,
     Completed,
 }
 
-struct ThermalHoldTracker {
-    target_temp_c: i16,
-    hold_duration: Duration,
-    entered_threshold_c: f64,
-    stable_band_c: f64,
-    first_hold_started_at: Option<tokio::time::Instant>,
-    rise_time_ms: Option<u64>,
-    min_c: f64,
-    max_c: f64,
+pub(crate) struct ThermalHoldTracker {
+    pub(crate) target_temp_c: i16,
+    pub(crate) hold_duration: Duration,
+    pub(crate) entered_threshold_c: f64,
+    pub(crate) stable_band_c: f64,
+    pub(crate) first_hold_started_at: Option<tokio::time::Instant>,
+    pub(crate) rise_time_ms: Option<u64>,
+    pub(crate) min_c: f64,
+    pub(crate) max_c: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ThermalRuntimeDropReason {
+pub(crate) enum ThermalRuntimeDropReason {
     UptimeReset,
     LatchedFault,
     HeaterDisarmed,
@@ -484,7 +488,7 @@ enum ThermalRuntimeDropReason {
 }
 
 impl ThermalRuntimeDropReason {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             ThermalRuntimeDropReason::UptimeReset => "uptime_reset",
             ThermalRuntimeDropReason::LatchedFault => "latched_fault",
@@ -496,7 +500,7 @@ impl ThermalRuntimeDropReason {
 }
 
 impl ThermalStageAnalyzer {
-    fn new(target_temp_c: i16) -> Self {
+    pub(crate) fn new(target_temp_c: i16) -> Self {
         Self {
             target_temp_c: f64::from(target_temp_c),
             first_hold_temp_c: None,
@@ -509,7 +513,7 @@ impl ThermalStageAnalyzer {
         }
     }
 
-    fn observe(
+    pub(crate) fn observe(
         &mut self,
         current_temp_c: f64,
         heater_output_percent: u8,
@@ -550,7 +554,7 @@ impl ThermalStageAnalyzer {
         self.last_temp_c = Some(current_temp_c);
     }
 
-    fn finalize(&self, max_temp_c: f64) -> ThermalStageAnalysis {
+    pub(crate) fn finalize(&self, max_temp_c: f64) -> ThermalStageAnalysis {
         let first_hold_temp_c = self.first_hold_temp_c;
         let hold_mean_error_c = (!self.hold_error_c.is_empty())
             .then_some(self.hold_error_c.iter().sum::<f64>() / self.hold_error_c.len() as f64);
@@ -589,7 +593,7 @@ impl ThermalStageAnalyzer {
 }
 
 impl ThermalApproachGuardTracker {
-    fn new(target_temp_c: i16, hold_entry_centi_c: u16) -> Self {
+    pub(crate) fn new(target_temp_c: i16, hold_entry_centi_c: u16) -> Self {
         Self {
             hold_threshold_temp_c: f64::from(target_temp_c)
                 - (f64::from(hold_entry_centi_c.max(1)) / 100.0),
@@ -600,7 +604,7 @@ impl ThermalApproachGuardTracker {
         }
     }
 
-    fn observe(
+    pub(crate) fn observe(
         &mut self,
         current_temp_c: f64,
         elapsed_ms: u64,
@@ -617,7 +621,11 @@ impl ThermalApproachGuardTracker {
         }
     }
 
-    fn observe_approach(&mut self, current_temp_c: f64, elapsed_ms: u64) -> Option<&'static str> {
+    pub(crate) fn observe_approach(
+        &mut self,
+        current_temp_c: f64,
+        elapsed_ms: u64,
+    ) -> Option<&'static str> {
         let approach_started_at_ms = *self.approach_started_at_ms.get_or_insert(elapsed_ms);
         if current_temp_c >= self.hold_threshold_temp_c {
             self.hold_threshold_crossed_at_ms.get_or_insert(elapsed_ms);
@@ -632,7 +640,7 @@ impl ThermalApproachGuardTracker {
         None
     }
 
-    fn observe_hold(&mut self, current_temp_c: f64, elapsed_ms: u64) {
+    pub(crate) fn observe_hold(&mut self, current_temp_c: f64, elapsed_ms: u64) {
         if self.approach_started_at_ms.is_none() {
             return;
         }
@@ -642,7 +650,7 @@ impl ThermalApproachGuardTracker {
         self.first_hold_at_ms.get_or_insert(elapsed_ms);
     }
 
-    fn observe_warmup(&mut self, elapsed_ms: u64) -> Option<&'static str> {
+    pub(crate) fn observe_warmup(&mut self, elapsed_ms: u64) -> Option<&'static str> {
         if self.approach_started_at_ms.is_some() && self.first_hold_at_ms.is_none() {
             self.warmup_reentered_at_ms.get_or_insert(elapsed_ms);
             return Some("approach_reentered_warmup");
@@ -650,7 +658,7 @@ impl ThermalApproachGuardTracker {
         None
     }
 
-    fn finalize(&self) -> ThermalApproachGuardAnalysis {
+    pub(crate) fn finalize(&self) -> ThermalApproachGuardAnalysis {
         ThermalApproachGuardAnalysis {
             hold_threshold_temp_c: self.hold_threshold_temp_c,
             approach_started_at_ms: self.approach_started_at_ms,
@@ -662,7 +670,7 @@ impl ThermalApproachGuardTracker {
 }
 
 impl ThermalSourceWindowAnalysis {
-    fn observe(&mut self, sample: &ThermalReplayStageSample) {
+    pub(crate) fn observe(&mut self, sample: &ThermalReplayStageSample) {
         self.sample_count = self.sample_count.saturating_add(1);
         if let Some(voltage_mv) = sample.source_voltage_mv {
             observe_series(&mut self.voltage_mv, voltage_mv as f64);
@@ -675,7 +683,7 @@ impl ThermalSourceWindowAnalysis {
         }
     }
 
-    fn to_value(&self) -> Option<Value> {
+    pub(crate) fn to_value(&self) -> Option<Value> {
         if self.sample_count == 0 {
             return None;
         }
@@ -695,7 +703,7 @@ impl ThermalSourceWindowAnalysis {
 }
 
 impl ThermalStageSourceAnalysisBuilder {
-    fn new(target_temp_c: i16) -> Self {
+    pub(crate) fn new(target_temp_c: i16) -> Self {
         Self {
             target_temp_c: f64::from(target_temp_c),
             first_hold_temp_c: None,
@@ -704,7 +712,7 @@ impl ThermalStageSourceAnalysisBuilder {
         }
     }
 
-    fn observe(&mut self, sample: &ThermalReplayStageSample) {
+    pub(crate) fn observe(&mut self, sample: &ThermalReplayStageSample) {
         let error_c = self.target_temp_c - sample.current_temp_c;
         if sample.control_phase_in_hold {
             self.first_hold_temp_c.get_or_insert(sample.current_temp_c);
@@ -723,7 +731,7 @@ impl ThermalStageSourceAnalysisBuilder {
         }
     }
 
-    fn to_value(&self) -> Value {
+    pub(crate) fn to_value(&self) -> Value {
         let mut object = serde_json::Map::new();
         if let Some(approach) = self.approach.to_value() {
             object.insert("approachSource".into(), approach);
@@ -736,13 +744,13 @@ impl ThermalStageSourceAnalysisBuilder {
 }
 
 impl ThermalFullSpeedStableTracker {
-    const STABLE_BAND_C: f64 = 1.5;
-    const STABLE_WINDOW_MS: u64 = 10_000;
-    const LOW_TEMP_SETTLE_LIMIT_MS: u64 = 10_000;
-    const HIGH_TEMP_SETTLE_LIMIT_MS: u64 = 5_000;
+    pub(crate) const STABLE_BAND_C: f64 = 1.5;
+    pub(crate) const STABLE_WINDOW_MS: u64 = 10_000;
+    pub(crate) const LOW_TEMP_SETTLE_LIMIT_MS: u64 = 10_000;
+    pub(crate) const HIGH_TEMP_SETTLE_LIMIT_MS: u64 = 5_000;
     const HIGH_TEMP_SETTLE_THRESHOLD_C: i16 = 150;
 
-    fn settle_limit_ms_for_target(target_temp_c: i16) -> u64 {
+    pub(crate) fn settle_limit_ms_for_target(target_temp_c: i16) -> u64 {
         if target_temp_c > Self::HIGH_TEMP_SETTLE_THRESHOLD_C {
             Self::HIGH_TEMP_SETTLE_LIMIT_MS
         } else {
@@ -750,11 +758,11 @@ impl ThermalFullSpeedStableTracker {
         }
     }
 
-    fn settle_limit_ms(&self) -> u64 {
+    pub(crate) fn settle_limit_ms(&self) -> u64 {
         Self::settle_limit_ms_for_target(self.target_temp_c.round() as i16)
     }
 
-    fn new(target_temp_c: i16) -> Self {
+    pub(crate) fn new(target_temp_c: i16) -> Self {
         Self {
             target_temp_c: f64::from(target_temp_c),
             warmup_exited_at_ms: None,
@@ -765,7 +773,7 @@ impl ThermalFullSpeedStableTracker {
         }
     }
 
-    fn observe(
+    pub(crate) fn observe(
         &mut self,
         current_temp_c: f64,
         elapsed_ms: u64,
@@ -818,7 +826,7 @@ impl ThermalFullSpeedStableTracker {
         ThermalFullSpeedStableObservation::Pending
     }
 
-    fn finalize(&self) -> ThermalFullSpeedStableAnalysis {
+    pub(crate) fn finalize(&self) -> ThermalFullSpeedStableAnalysis {
         ThermalFullSpeedStableAnalysis {
             warmup_exited_at_ms: self.warmup_exited_at_ms,
             stable_window_started_at_ms: self.stable_window_started_at_ms,
@@ -830,7 +838,7 @@ impl ThermalFullSpeedStableTracker {
 }
 
 impl ThermalHoldTracker {
-    fn new(target_temp_c: i16, hold_duration: Duration) -> Self {
+    pub(crate) fn new(target_temp_c: i16, hold_duration: Duration) -> Self {
         Self {
             target_temp_c,
             hold_duration,
@@ -843,7 +851,7 @@ impl ThermalHoldTracker {
         }
     }
 
-    fn observe(
+    pub(crate) fn observe(
         &mut self,
         current_temp_c: f64,
         elapsed_ms: u64,
@@ -876,11 +884,11 @@ impl ThermalHoldTracker {
         }
     }
 
-    fn rise_time_ms(&self) -> Option<u64> {
+    pub(crate) fn rise_time_ms(&self) -> Option<u64> {
         self.rise_time_ms
     }
 
-    fn peak_to_peak_c(&self) -> f64 {
+    pub(crate) fn peak_to_peak_c(&self) -> f64 {
         if self.min_c.is_finite() && self.max_c.is_finite() {
             self.max_c - self.min_c
         } else {
@@ -889,7 +897,7 @@ impl ThermalHoldTracker {
     }
 }
 
-fn thermal_runtime_drop_reason(
+pub(crate) fn thermal_runtime_drop_reason(
     status: &Value,
     target_temp_c: i16,
     last_uptime_seconds: Option<u64>,
@@ -930,14 +938,14 @@ fn thermal_runtime_drop_reason(
     None
 }
 
-fn thermal_recoverable_sensor_fault(status: &Value) -> bool {
+pub(crate) fn thermal_recoverable_sensor_fault(status: &Value) -> bool {
     matches!(
         status.get("heaterFaultReason").and_then(Value::as_str),
         Some("sensor-glitch" | "sensor-open" | "sensor-short" | "adc-read-failed")
     ) && status.get("mode").and_then(Value::as_str) != Some("fault")
 }
 
-fn thermal_stage_stop_reason_is_environment_fault(stop_reason: &str) -> bool {
+pub(crate) fn thermal_stage_stop_reason_is_environment_fault(stop_reason: &str) -> bool {
     matches!(
         stop_reason,
         "runtime_lost"
@@ -955,12 +963,14 @@ fn thermal_stage_stop_reason_is_environment_fault(stop_reason: &str) -> bool {
     )
 }
 
-fn thermal_stage_should_retry_after_environment_fault(result: &ThermalStageResult) -> bool {
+pub(crate) fn thermal_stage_should_retry_after_environment_fault(
+    result: &ThermalStageResult,
+) -> bool {
     thermal_stage_stop_reason_is_environment_fault(result.stop_reason)
 }
 
 impl ThermalStageResult {
-    fn to_value(&self) -> Value {
+    pub(crate) fn to_value(&self) -> Value {
         json!({
             "targetTempC": self.target_temp_c,
             "riseTimeMs": self.rise_time_ms,
@@ -1015,7 +1025,7 @@ impl ThermalStageResult {
     }
 }
 
-fn thermal_profile_package_from_value(imported: Value) -> Value {
+pub(crate) fn thermal_profile_package_from_value(imported: Value) -> Value {
     imported
         .get("profile")
         .cloned()
@@ -1028,7 +1038,7 @@ fn thermal_profile_package_from_value(imported: Value) -> Value {
         .unwrap_or(imported)
 }
 
-fn parse_thermal_targets_from_summary(
+pub(crate) fn parse_thermal_targets_from_summary(
     summary: &Value,
     key: &str,
 ) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1060,7 +1070,7 @@ fn parse_thermal_targets_from_summary(
     Ok(targets)
 }
 
-fn thermal_self_test_evaluation_mode_from_summary(
+pub(crate) fn thermal_self_test_evaluation_mode_from_summary(
     summary: &Value,
 ) -> ThermalSelfTestEvaluationMode {
     match summary
@@ -1073,7 +1083,7 @@ fn thermal_self_test_evaluation_mode_from_summary(
     }
 }
 
-fn require_value_u64(
+pub(crate) fn require_value_u64(
     value: &Value,
     key: &str,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
@@ -1086,7 +1096,7 @@ fn require_value_u64(
     })
 }
 
-fn require_value_i16(
+pub(crate) fn require_value_i16(
     value: &Value,
     key: &str,
 ) -> Result<i16, Box<dyn std::error::Error + Send + Sync>> {
@@ -1105,7 +1115,7 @@ fn require_value_i16(
     })
 }
 
-fn require_value_f64(
+pub(crate) fn require_value_f64(
     value: &Value,
     key: &str,
 ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
@@ -1118,7 +1128,7 @@ fn require_value_f64(
     })
 }
 
-fn require_value_str<'a>(
+pub(crate) fn require_value_str<'a>(
     value: &'a Value,
     key: &str,
 ) -> Result<&'a str, Box<dyn std::error::Error + Send + Sync>> {
@@ -1131,7 +1141,7 @@ fn require_value_str<'a>(
     })
 }
 
-fn thermal_stage_result_from_value(
+pub(crate) fn thermal_stage_result_from_value(
     value: &Value,
 ) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
     let stop_reason = match require_value_str(value, "stopReason")? {
@@ -1196,10 +1206,18 @@ fn thermal_stage_result_from_value(
     })
 }
 
-fn thermal_guard_analysis(value: &Value) -> ThermalApproachGuardAnalysis {
-    let field = |key| value.get("guard").and_then(|guard| guard.get(key)).and_then(Value::as_u64);
+pub(crate) fn thermal_guard_analysis(value: &Value) -> ThermalApproachGuardAnalysis {
+    let field = |key| {
+        value
+            .get("guard")
+            .and_then(|guard| guard.get(key))
+            .and_then(Value::as_u64)
+    };
     ThermalApproachGuardAnalysis {
-        hold_threshold_temp_c: value.pointer("/guard/holdThresholdTempC").and_then(Value::as_f64).unwrap_or(0.0),
+        hold_threshold_temp_c: value
+            .pointer("/guard/holdThresholdTempC")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
         approach_started_at_ms: field("approachStartedAtMs"),
         hold_threshold_crossed_at_ms: field("holdThresholdCrossedAtMs"),
         first_hold_at_ms: field("firstHoldAtMs"),
@@ -1207,8 +1225,13 @@ fn thermal_guard_analysis(value: &Value) -> ThermalApproachGuardAnalysis {
     }
 }
 
-fn thermal_full_speed_analysis(value: &Value) -> ThermalFullSpeedStableAnalysis {
-    let field = |key| value.get("fullSpeedToStable").and_then(|item| item.get(key)).and_then(Value::as_u64);
+pub(crate) fn thermal_full_speed_analysis(value: &Value) -> ThermalFullSpeedStableAnalysis {
+    let field = |key| {
+        value
+            .get("fullSpeedToStable")
+            .and_then(|item| item.get(key))
+            .and_then(Value::as_u64)
+    };
     let failure_reason = value
         .pointer("/fullSpeedToStable/failureReason")
         .and_then(Value::as_str)
@@ -1226,7 +1249,9 @@ fn thermal_full_speed_analysis(value: &Value) -> ThermalFullSpeedStableAnalysis 
     }
 }
 
-fn read_ndjson_values(path: &Path) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn read_ndjson_values(
+    path: &Path,
+) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let reader = BufReader::new(File::open(path)?);
     let mut values = Vec::new();
     for line in reader.lines() {
@@ -1239,7 +1264,7 @@ fn read_ndjson_values(path: &Path) -> Result<Vec<Value>, Box<dyn std::error::Err
     Ok(values)
 }
 
-fn thermal_control_temperature_c(
+pub(crate) fn thermal_control_temperature_c(
     status: &Value,
     heater: Option<&Value>,
 ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
@@ -1272,7 +1297,7 @@ fn thermal_control_temperature_c(
         })
 }
 
-fn thermal_replay_stage_samples(
+pub(crate) fn thermal_replay_stage_samples(
     samples: &[Value],
     target_temp_c: i16,
 ) -> Result<Vec<ThermalReplayStageSample>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1334,7 +1359,7 @@ fn thermal_replay_stage_samples(
     Ok(stage_samples)
 }
 
-fn thermal_replay_stage_analysis(
+pub(crate) fn thermal_replay_stage_analysis(
     samples: &[ThermalReplayStageSample],
     target_temp_c: i16,
 ) -> ThermalStageAnalysis {
@@ -1358,7 +1383,7 @@ fn thermal_replay_stage_analysis(
     }
 }
 
-fn thermal_approach_curve_reference_temp_c(
+pub(crate) fn thermal_approach_curve_reference_temp_c(
     start_temp_c: f64,
     target_temp_c: f64,
     elapsed_from_start_ms: u64,
@@ -1373,7 +1398,7 @@ fn thermal_approach_curve_reference_temp_c(
     start_temp_c + (target_temp_c - start_temp_c) * progress
 }
 
-fn thermal_stage_populate_approach_curve_analysis(
+pub(crate) fn thermal_stage_populate_approach_curve_analysis(
     analysis: &mut ThermalStageAnalysis,
     samples: &[ThermalReplayStageSample],
     target_temp_c: i16,
@@ -1484,7 +1509,7 @@ fn thermal_stage_populate_approach_curve_analysis(
     );
 }
 
-fn thermal_replay_stage_source_analysis(
+pub(crate) fn thermal_replay_stage_source_analysis(
     samples: &[ThermalReplayStageSample],
     target_temp_c: i16,
 ) -> Value {
@@ -1495,7 +1520,7 @@ fn thermal_replay_stage_source_analysis(
     builder.to_value()
 }
 
-fn thermal_stage_value_attach_source_analysis(
+pub(crate) fn thermal_stage_value_attach_source_analysis(
     stage_value: &mut Value,
     stage_samples: &[ThermalReplayStageSample],
     target_temp_c: i16,
@@ -1515,7 +1540,7 @@ fn thermal_stage_value_attach_source_analysis(
     }
 }
 
-fn thermal_summary_attach_replay_source_analysis(
+pub(crate) fn thermal_summary_attach_replay_source_analysis(
     summary: &mut Value,
     samples: &[Value],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1539,7 +1564,7 @@ fn thermal_summary_attach_replay_source_analysis(
     Ok(())
 }
 
-fn thermal_summary_attach_source_analysis_from_ndjson(
+pub(crate) fn thermal_summary_attach_source_analysis_from_ndjson(
     summary: &mut Value,
     samples_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1547,7 +1572,7 @@ fn thermal_summary_attach_source_analysis_from_ndjson(
     thermal_summary_attach_replay_source_analysis(summary, &samples)
 }
 
-fn thermal_replay_full_speed_to_stable(
+pub(crate) fn thermal_replay_full_speed_to_stable(
     samples: &[ThermalReplayStageSample],
     target_temp_c: i16,
 ) -> ThermalFullSpeedStableAnalysis {
@@ -1562,7 +1587,7 @@ fn thermal_replay_full_speed_to_stable(
     tracker.finalize()
 }
 
-fn thermal_candidate_point_from_heater_parameters(
+pub(crate) fn thermal_candidate_point_from_heater_parameters(
     heater_parameters: &Value,
 ) -> Result<ThermalCandidatePoint, Box<dyn std::error::Error + Send + Sync>> {
     let target_temp_c = require_value_i16(heater_parameters, "targetTempC")?;
@@ -1663,7 +1688,7 @@ fn thermal_candidate_point_from_heater_parameters(
     })
 }
 
-fn thermal_replay_applied_profile(
+pub(crate) fn thermal_replay_applied_profile(
     summary: &Value,
     samples: &[Value],
     target_temps_c: &[i16],

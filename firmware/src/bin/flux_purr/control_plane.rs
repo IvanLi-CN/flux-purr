@@ -1,5 +1,8 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_runtime_status_with_calibration(
+pub(crate) fn usb_runtime_status_with_calibration(
     ui_state: &FrontPanelUiState,
     memory_config: &MemoryConfig,
     calibration: &CalibrationRuntimeState,
@@ -43,7 +46,7 @@ fn usb_runtime_status_with_calibration(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn populate_status_measurements(
+pub(crate) fn populate_status_measurements(
     status: &mut ControlPlaneStatus,
     ui_state: &FrontPanelUiState,
     context: &UsbRuntimeStatusContext,
@@ -71,7 +74,7 @@ fn populate_status_measurements(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn populate_status_contract(
+pub(crate) fn populate_status_contract(
     status: &mut ControlPlaneStatus,
     context: &UsbRuntimeStatusContext,
     pd_contract_mv: u16,
@@ -94,13 +97,14 @@ fn populate_status_contract(
     } else {
         ContractKind::Fixed
     };
-    let contract_kind = observed_contract
-        .map(|contract| contract.kind)
-        .unwrap_or(if fusb_contract_pending {
-            ContractKind::None
-        } else {
-            fallback_contract_kind
-        });
+    let contract_kind =
+        observed_contract
+            .map(|contract| contract.kind)
+            .unwrap_or(if fusb_contract_pending {
+                ContractKind::None
+            } else {
+                fallback_contract_kind
+            });
     status.pd_contract_kind = error_code_string(contract_kind.as_str());
     status.pd_contract_current_ma = if fusb_contract_pending {
         0
@@ -131,25 +135,24 @@ fn populate_status_contract(
                     && status.pd_contract_current_ma >= 3_000,
             )
     };
-    status.pd_degraded_reason = if matches!(pd_state, PdState::Ready)
-        && !status.pd_performance_guaranteed
-    {
-        Some(error_code_string("pd_contract_below_20v"))
-    } else if !matches!(pd_state, PdState::Ready) {
-        Some(error_code_string(
-            if context.pd_controller == ControllerKind::Fusb302b {
-                fusb302b_degraded_reason()
-            } else {
-                "pd_contract_unavailable"
-            },
-        ))
-    } else {
-        None
-    };
+    status.pd_degraded_reason =
+        if matches!(pd_state, PdState::Ready) && !status.pd_performance_guaranteed {
+            Some(error_code_string("pd_contract_below_20v"))
+        } else if !matches!(pd_state, PdState::Ready) {
+            Some(error_code_string(
+                if context.pd_controller == ControllerKind::Fusb302b {
+                    fusb302b_degraded_reason()
+                } else {
+                    "pd_contract_unavailable"
+                },
+            ))
+        } else {
+            None
+        };
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn populate_status_control_and_faults(
+pub(crate) fn populate_status_control_and_faults(
     status: &mut ControlPlaneStatus,
     ui_state: &FrontPanelUiState,
     context: &UsbRuntimeStatusContext,
@@ -178,7 +181,7 @@ fn populate_status_control_and_faults(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn populate_status_calibration(
+pub(crate) fn populate_status_calibration(
     status: &mut ControlPlaneStatus,
     ui_state: &FrontPanelUiState,
     memory_config: &MemoryConfig,
@@ -208,7 +211,7 @@ fn populate_status_calibration(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn runtime_status_base(
+pub(crate) fn runtime_status_base(
     ui_state: &FrontPanelUiState,
     memory_config: &MemoryConfig,
     context: &UsbRuntimeStatusContext,
@@ -255,7 +258,7 @@ fn runtime_status_base(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn usb_runtime_status(
+pub(crate) fn usb_runtime_status(
     ui_state: &FrontPanelUiState,
     memory_config: &MemoryConfig,
     calibration: &CalibrationRuntimeState,
@@ -265,7 +268,7 @@ fn usb_runtime_status(
 }
 
 #[cfg(test)]
-fn usb_runtime_status(
+pub(crate) fn usb_runtime_status(
     ui_state: &FrontPanelUiState,
     memory_config: &MemoryConfig,
     context: UsbRuntimeStatusContext,
@@ -275,17 +278,17 @@ fn usb_runtime_status(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-struct UsbRuntimeConfigInput<'a> {
-    ui_state: &'a mut FrontPanelUiState,
-    memory_config: &'a mut MemoryConfig,
-    manual_pps: &'a mut ManualPpsState,
-    thermal_control_profile_preview: &'a mut Option<ThermalControlProfile>,
-    calibration: &'a mut CalibrationRuntimeState,
-    context: UsbRuntimeStatusContext,
+pub(crate) struct UsbRuntimeConfigInput<'a> {
+    pub(crate) ui_state: &'a mut FrontPanelUiState,
+    pub(crate) memory_config: &'a mut MemoryConfig,
+    pub(crate) manual_pps: &'a mut ManualPpsState,
+    pub(crate) thermal_control_profile_preview: &'a mut Option<ThermalControlProfile>,
+    pub(crate) calibration: &'a mut CalibrationRuntimeState,
+    pub(crate) context: UsbRuntimeStatusContext,
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_runtime_config_response_with_calibration(
+pub(crate) fn usb_runtime_config_response_with_calibration(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: RuntimeConfigCommand,
     input: UsbRuntimeConfigInput<'_>,
@@ -352,7 +355,7 @@ fn usb_runtime_config_response_with_calibration(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn runtime_config_validation(
+pub(crate) fn runtime_config_validation(
     config: &RuntimeConfigCommand,
     calibration: CalibrationRuntimeState,
 ) -> Option<ApiError> {
@@ -391,7 +394,9 @@ fn runtime_config_validation(
             op: ThermalControlProfileOp::Save,
             profile: Some(profile),
             ..
-        }) if profile.points.iter().flatten().count() > THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS => {
+        }) if profile.points.iter().flatten().count()
+            > THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS =>
+        {
             Some(ApiError::new(
                 "thermal_profile_too_many_saved_points",
                 "saved thermal profiles support at most 10 populated points.",
@@ -412,7 +417,7 @@ fn runtime_config_validation(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn apply_runtime_config_state(
+pub(crate) fn apply_runtime_config_state(
     config: &RuntimeConfigCommand,
     ui_state: &mut FrontPanelUiState,
     memory_config: &mut MemoryConfig,
@@ -456,7 +461,7 @@ fn apply_runtime_config_state(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn apply_rtd_calibration_hold_target(
+pub(crate) fn apply_rtd_calibration_hold_target(
     ui_state: &mut FrontPanelUiState,
     calibration: CalibrationRuntimeState,
 ) {
@@ -480,7 +485,7 @@ fn apply_rtd_calibration_hold_target(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn usb_runtime_config_response(
+pub(crate) fn usb_runtime_config_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: RuntimeConfigCommand,
     input: UsbRuntimeConfigInput<'_>,
@@ -489,7 +494,7 @@ fn usb_runtime_config_response(
 }
 
 #[cfg(test)]
-fn usb_runtime_config_response(
+pub(crate) fn usb_runtime_config_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: RuntimeConfigCommand,
     ui_state: &mut FrontPanelUiState,
@@ -515,7 +520,7 @@ fn usb_runtime_config_response(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn apply_manual_pps_config(
+pub(crate) fn apply_manual_pps_config(
     config: &RuntimeConfigCommand,
     calibration: CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
@@ -556,7 +561,7 @@ fn apply_manual_pps_config(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn apply_calibration_control_config(
+pub(crate) fn apply_calibration_control_config(
     config: &CalibrationControlCommand,
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
@@ -627,13 +632,13 @@ fn apply_calibration_control_config(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn thermal_plant_calibration_job_running(calibration: CalibrationRuntimeState) -> bool {
+pub(crate) fn thermal_plant_calibration_job_running(calibration: CalibrationRuntimeState) -> bool {
     calibration.mode == CalibrationMode::ThermalPlant
         && calibration.job.status == CalibrationJobStatus::Running
 }
 
 #[cfg(target_arch = "xtensa")]
-fn update_calibration_runtime_state(
+pub(crate) fn update_calibration_runtime_state(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &ManualPpsState,
     latest_rtd_raw_adc_mv: u16,
@@ -666,7 +671,7 @@ fn update_calibration_runtime_state(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn calibration_job_fail(
+pub(crate) fn calibration_job_fail(
     calibration: &mut CalibrationRuntimeState,
     error: ManualPpsError,
     clear_manual_pps: bool,
@@ -691,7 +696,7 @@ fn calibration_job_fail(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn calibration_job_complete(
+pub(crate) fn calibration_job_complete(
     calibration: &mut CalibrationRuntimeState,
     kind: CalibrationJobKind,
     samples_collected: u8,
@@ -708,7 +713,7 @@ fn calibration_job_complete(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn calibration_job_canceled(
+pub(crate) fn calibration_job_canceled(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
 ) {
@@ -730,7 +735,7 @@ fn calibration_job_canceled(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn disarm_calibration_after_transient_input_change(
+pub(crate) fn disarm_calibration_after_transient_input_change(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
 ) {
@@ -745,7 +750,7 @@ fn disarm_calibration_after_transient_input_change(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn disarm_calibration_after_capability_refresh(
+pub(crate) fn disarm_calibration_after_capability_refresh(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
 ) {
@@ -758,7 +763,7 @@ fn disarm_calibration_after_capability_refresh(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn calibration_job_start_with_workspace(
+pub(crate) fn calibration_job_start_with_workspace(
     calibration: &mut CalibrationRuntimeState,
     kind: CalibrationJobKind,
     memory_config: &mut MemoryConfig,
@@ -774,19 +779,17 @@ fn calibration_job_start_with_workspace(
         CalibrationJobKind::VinAdc => {
             start_vin_calibration_job(calibration, memory_config, manual_pps, kind)
         }
-        CalibrationJobKind::ThermalPlant => {
-            start_thermal_plant_calibration_job(
-                calibration,
-                manual_pps,
-                thermal_plant_workspace,
-                kind,
-            )
-        }
+        CalibrationJobKind::ThermalPlant => start_thermal_plant_calibration_job(
+            calibration,
+            manual_pps,
+            thermal_plant_workspace,
+            kind,
+        ),
     }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn start_vin_calibration_job(
+pub(crate) fn start_vin_calibration_job(
     calibration: &mut CalibrationRuntimeState,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
@@ -807,7 +810,11 @@ fn start_vin_calibration_job(
     let target_ma = manual_pps
         .maximum_pps_current_for_target(next_request_mv)
         .ok_or(ManualPpsError::NoPpsCapability)?;
-    manual_pps.enable(ManualPpsOwner::Calibration, next_request_mv, Some(target_ma))?;
+    manual_pps.enable(
+        ManualPpsOwner::Calibration,
+        next_request_mv,
+        Some(target_ma),
+    )?;
     memory_config.adc_calibration.vin.clear();
     memory_config.sanitize();
     calibration.pps_enabled = true;
@@ -837,7 +844,7 @@ fn start_vin_calibration_job(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn start_thermal_plant_calibration_job(
+pub(crate) fn start_thermal_plant_calibration_job(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
     workspace: &mut CalibrationThermalPlantWorkspace,
@@ -847,7 +854,11 @@ fn start_thermal_plant_calibration_job(
         .thermal_plant_source_limits()
         .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
     let request_mv = source_max_mv;
-    manual_pps.enable(ManualPpsOwner::Calibration, request_mv, Some(source_current_ma))?;
+    manual_pps.enable(
+        ManualPpsOwner::Calibration,
+        request_mv,
+        Some(source_current_ma),
+    )?;
     calibration.mode = CalibrationMode::ThermalPlant;
     calibration.pps_enabled = true;
     calibration.pps_mv = manual_pps.target_mv;
@@ -888,7 +899,7 @@ fn start_thermal_plant_calibration_job(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn calibration_job_start(
+pub(crate) fn calibration_job_start(
     calibration: &mut CalibrationRuntimeState,
     kind: CalibrationJobKind,
     memory_config: &mut MemoryConfig,
@@ -911,7 +922,7 @@ std::thread_local! {
 }
 
 #[cfg(test)]
-fn calibration_job_start(
+pub(crate) fn calibration_job_start(
     calibration: &mut CalibrationRuntimeState,
     kind: CalibrationJobKind,
     memory_config: &mut MemoryConfig,
@@ -929,20 +940,20 @@ fn calibration_job_start(
 }
 
 #[cfg(test)]
-fn test_thermal_plant_phase() -> Option<ThermalPlantAutoPhase> {
+pub(crate) fn test_thermal_plant_phase() -> Option<ThermalPlantAutoPhase> {
     TEST_THERMAL_PLANT_WORKSPACE
         .with(|workspace| workspace.borrow().job.as_ref().map(|job| job.phase))
 }
 
 #[cfg(test)]
-fn test_install_thermal_plant_job(job: CalibrationThermalPlantAutoJob) {
+pub(crate) fn test_install_thermal_plant_job(job: CalibrationThermalPlantAutoJob) {
     TEST_THERMAL_PLANT_WORKSPACE.with(|workspace| {
         workspace.borrow_mut().job = Some(job);
     });
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn monotonic_smooth_heater_curve_points(
+pub(crate) fn monotonic_smooth_heater_curve_points(
     points: &mut heapless::Vec<HeaterCurvePoint, { HEATER_CURVE_MAX_POINTS }>,
 ) {
     if points.len() <= 1 {
@@ -975,7 +986,7 @@ fn monotonic_smooth_heater_curve_points(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn enforce_heater_curve_model_floor(
+pub(crate) fn enforce_heater_curve_model_floor(
     points: &mut heapless::Vec<HeaterCurvePoint, { HEATER_CURVE_MAX_POINTS }>,
 ) {
     for point in points {
@@ -987,12 +998,12 @@ fn enforce_heater_curve_model_floor(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heater_curve_model_floor_milliohms(temp_c: f32) -> u16 {
+pub(crate) fn heater_curve_model_floor_milliohms(temp_c: f32) -> u16 {
     round_to_u16_nonnegative(default_estimated_heater_resistance_ohms(temp_c) * 1000.0)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn select_vin_auto_draft_samples(
+pub(crate) fn select_vin_auto_draft_samples(
     collected: &[Option<AdcCalibrationSample>; CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES],
     sample_count: usize,
 ) -> heapless::Vec<AdcCalibrationSample, ADC_CALIBRATION_MAX_SAMPLES> {
@@ -1034,7 +1045,7 @@ fn select_vin_auto_draft_samples(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn commit_vin_auto_samples_to_draft(
+pub(crate) fn commit_vin_auto_samples_to_draft(
     memory_config: &mut MemoryConfig,
     collected: &[Option<AdcCalibrationSample>; CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES],
     sample_count: usize,
@@ -1049,7 +1060,9 @@ fn commit_vin_auto_samples_to_draft(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heater_curve_from_transient_bins(bins: &[ThermalPlantCurveBin; 4]) -> Option<HeaterCurveConfig> {
+pub(crate) fn heater_curve_from_transient_bins(
+    bins: &[ThermalPlantCurveBin; 4],
+) -> Option<HeaterCurveConfig> {
     let mut measured = heapless::Vec::<HeaterCurvePoint, { HEATER_CURVE_MAX_POINTS }>::new();
     for bin in bins {
         let Some((temp_centi_c, resistance_milliohms)) = bin.averaged_point() else {
@@ -1087,7 +1100,7 @@ fn heater_curve_from_transient_bins(bins: &[ThermalPlantCurveBin; 4]) -> Option<
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heater_curve_raw_observations_from_transient_bins(
+pub(crate) fn heater_curve_raw_observations_from_transient_bins(
     cold_bin: ThermalPlantCurveBin,
     bins: &[ThermalPlantCurveBin; 4],
 ) -> Option<HeaterCurveRawObservations> {
@@ -1107,7 +1120,7 @@ fn heater_curve_raw_observations_from_transient_bins(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_curve_samples_ready(job: &ThermalPlantCurveSampler) -> bool {
+pub(crate) fn thermal_plant_curve_samples_ready(job: &ThermalPlantCurveSampler) -> bool {
     job.cold_bin.samples >= THERMAL_PLANT_CURVE_MIN_SAMPLES_PER_BIN
         && job
             .bins
@@ -1116,7 +1129,7 @@ fn thermal_plant_curve_samples_ready(job: &ThermalPlantCurveSampler) -> bool {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn default_heater_curve_point(temp_c: f32) -> HeaterCurvePoint {
+pub(crate) fn default_heater_curve_point(temp_c: f32) -> HeaterCurvePoint {
     HeaterCurvePoint {
         temp_centi_c: round_to_i16(temp_c * 100.0),
         resistance_milliohms: round_to_u16_nonnegative(
@@ -1126,7 +1139,7 @@ fn default_heater_curve_point(temp_c: f32) -> HeaterCurvePoint {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn push_heater_curve_point_monotonic(
+pub(crate) fn push_heater_curve_point_monotonic(
     points: &mut heapless::Vec<HeaterCurvePoint, { HEATER_CURVE_MAX_POINTS }>,
     mut point: HeaterCurvePoint,
 ) {
@@ -1142,7 +1155,7 @@ fn push_heater_curve_point_monotonic(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn record_thermal_plant_transient_sample(
+pub(crate) fn record_thermal_plant_transient_sample(
     job: &mut CalibrationThermalPlantAutoJob,
     raw_rtd_adc_mv: u16,
     latest_temp_c: f32,
@@ -1179,7 +1192,7 @@ fn record_thermal_plant_transient_sample(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn transient_sample_power_mw(
+pub(crate) fn transient_sample_power_mw(
     sample: ThermalPlantTransientSample,
     temp_c: f32,
     preview_heater_curve: Option<&HeaterCurveConfig>,
@@ -1198,7 +1211,7 @@ fn transient_sample_power_mw(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn solve_transient_normal_equations(
+pub(crate) fn solve_transient_normal_equations(
     normal: [[f32; 3]; 3],
     rhs: [f32; 3],
     mask: u8,
@@ -1261,14 +1274,14 @@ fn solve_transient_normal_equations(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn determinant_3x3(matrix: [[f32; 3]; 3]) -> f32 {
+pub(crate) fn determinant_3x3(matrix: [[f32; 3]; 3]) -> f32 {
     matrix[0][0] * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
         - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
         + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0])
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn transient_fit_row(
+pub(crate) fn transient_fit_row(
     samples: &[ThermalPlantTransientSample],
     temperatures_c: &[f32],
     powers_mw: &[f32],
@@ -1305,7 +1318,7 @@ fn transient_fit_row(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-struct TransientFitData {
+pub(crate) struct TransientFitData {
     samples: [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     count: usize,
     ambient_temp_c: f32,
@@ -1314,7 +1327,7 @@ struct TransientFitData {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn prepare_transient_fit(
+pub(crate) fn prepare_transient_fit(
     samples: &[ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     sample_count: u8,
     preview_heater_curve: Option<&HeaterCurveConfig>,
@@ -1366,7 +1379,10 @@ fn prepare_transient_fit(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn transient_fit_scales(data: &TransientFitData, delay_ticks: u16) -> Option<([f32; 3], usize)> {
+pub(crate) fn transient_fit_scales(
+    data: &TransientFitData,
+    delay_ticks: u16,
+) -> Option<([f32; 3], usize)> {
     let mut scale_sums = [0.0_f32; 3];
     let mut row_count = 0usize;
     for index in 1..data.count {
@@ -1395,10 +1411,10 @@ fn transient_fit_scales(data: &TransientFitData, delay_ticks: u16) -> Option<([f
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-type TransientFitNormalMatrix = ([[f32; 3]; 3], [f32; 3], f32, usize);
+pub(crate) type TransientFitNormalMatrix = ([[f32; 3]; 3], [f32; 3], f32, usize);
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn transient_fit_normal_matrix(
+pub(crate) fn transient_fit_normal_matrix(
     data: &TransientFitData,
     delay_ticks: u16,
     scales: [f32; 3],
@@ -1433,12 +1449,19 @@ fn transient_fit_normal_matrix(
         row_count += 1;
     }
     let gram = normal.map(|row| row.map(|value| value / row_count as f32));
-    (determinant_3x3(gram).abs() >= 1.0e-5 && power_sum_sq > 1.0)
-        .then_some((normal, rhs, power_sum_sq, row_count))
+    (determinant_3x3(gram).abs() >= 1.0e-5 && power_sum_sq > 1.0).then_some((
+        normal,
+        rhs,
+        power_sum_sq,
+        row_count,
+    ))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn transient_projection_is_valid(projection: ThermalPlantProjection, residual: f32) -> bool {
+pub(crate) fn transient_projection_is_valid(
+    projection: ThermalPlantProjection,
+    residual: f32,
+) -> bool {
     projection.thermal_capacity_mj_per_c.is_finite()
         && projection.convection_mw_per_c.is_finite()
         && projection.radiation_mw_per_k4.is_finite()
@@ -1451,7 +1474,7 @@ fn transient_projection_is_valid(projection: ThermalPlantProjection, residual: f
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn transient_projection_for_delay(
+pub(crate) fn transient_projection_for_delay(
     data: &TransientFitData,
     delay_ticks: u16,
 ) -> Option<(ThermalPlantProjection, f32)> {
@@ -1506,14 +1529,16 @@ fn transient_projection_for_delay(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn best_transient_projection(data: &TransientFitData) -> Option<(ThermalPlantProjection, f32)> {
+pub(crate) fn best_transient_projection(
+    data: &TransientFitData,
+) -> Option<(ThermalPlantProjection, f32)> {
     (0..=200_u16)
         .filter_map(|delay_ticks| transient_projection_for_delay(data, delay_ticks))
         .min_by(|(_, left), (_, right)| left.total_cmp(right))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fit_thermal_plant_transient(
+pub(crate) fn fit_thermal_plant_transient(
     transaction_id: u32,
     ambient_raw_rtd_adc_mv: u16,
     samples: &[ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
@@ -1541,7 +1566,9 @@ fn fit_thermal_plant_transient(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn rebuild_transient_thermal_plant_for_current_inputs(memory_config: &mut MemoryConfig) -> bool {
+pub(crate) fn rebuild_transient_thermal_plant_for_current_inputs(
+    memory_config: &mut MemoryConfig,
+) -> bool {
     let Some(previous) = memory_config.thermal_plant_transient_active else {
         return false;
     };
@@ -1577,7 +1604,7 @@ fn rebuild_transient_thermal_plant_for_current_inputs(memory_config: &mut Memory
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[allow(dead_code)]
-fn invalidate_transient_thermal_plant(memory_config: &mut MemoryConfig) {
+pub(crate) fn invalidate_transient_thermal_plant(memory_config: &mut MemoryConfig) {
     if let Some(transaction) = memory_config.thermal_plant_transient_active.as_mut() {
         transaction.projection = ThermalPlantProjectionRecord {
             convection_mw_per_c_bits: 0,
@@ -1590,17 +1617,17 @@ fn invalidate_transient_thermal_plant(memory_config: &mut MemoryConfig) {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy)]
-struct CalibrationJobUpdateInput {
-    latest_rtd_raw_adc_mv: u16,
-    latest_vin_raw_adc_mv: u16,
-    latest_temp_c: f32,
-    pd_current_ma: u16,
-    latest_vin_mv: u32,
-    heater_duty_percent: u8,
+pub(crate) struct CalibrationJobUpdateInput {
+    pub(crate) latest_rtd_raw_adc_mv: u16,
+    pub(crate) latest_vin_raw_adc_mv: u16,
+    pub(crate) latest_temp_c: f32,
+    pub(crate) pd_current_ma: u16,
+    pub(crate) latest_vin_mv: u32,
+    pub(crate) heater_duty_percent: u8,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn update_calibration_job_state_with_workspace(
+pub(crate) fn update_calibration_job_state_with_workspace(
     calibration: &mut CalibrationRuntimeState,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
@@ -1631,7 +1658,7 @@ fn update_calibration_job_state_with_workspace(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn update_vin_calibration_job(
+pub(crate) fn update_vin_calibration_job(
     calibration: &mut CalibrationRuntimeState,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
@@ -1643,12 +1670,9 @@ fn update_vin_calibration_job(
     };
     job.target_ma = target_ma;
     update_vin_calibration_stability(&mut job, input.latest_vin_raw_adc_mv, manual_pps);
-    if job.stable_ticks >= 2 && !record_vin_calibration_sample(
-        calibration,
-        memory_config,
-        manual_pps,
-        &mut job,
-    ) {
+    if job.stable_ticks >= 2
+        && !record_vin_calibration_sample(calibration, memory_config, manual_pps, &mut job)
+    {
         return;
     }
     let span_mv = job
@@ -1659,13 +1683,13 @@ fn update_vin_calibration_job(
         .next_request_mv
         .saturating_sub(job.start_request_mv)
         .min(span_mv);
-    calibration.job.progress_percent = ((u32::from(done_mv) * 100) / u32::from(span_mv)).min(99)
-        as u8;
+    calibration.job.progress_percent =
+        ((u32::from(done_mv) * 100) / u32::from(span_mv)).min(99) as u8;
     calibration.job_data = Some(CalibrationJobData::VinAdc(job));
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn configure_vin_calibration_pps(
+pub(crate) fn configure_vin_calibration_pps(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
     job: &mut CalibrationVinAutoJob,
@@ -1713,7 +1737,7 @@ fn configure_vin_calibration_pps(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn update_vin_calibration_stability(
+pub(crate) fn update_vin_calibration_stability(
     job: &mut CalibrationVinAutoJob,
     latest_vin_raw_adc_mv: u16,
     manual_pps: &ManualPpsState,
@@ -1744,7 +1768,7 @@ fn update_vin_calibration_stability(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn record_vin_calibration_sample(
+pub(crate) fn record_vin_calibration_sample(
     calibration: &mut CalibrationRuntimeState,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
@@ -1794,7 +1818,7 @@ fn record_vin_calibration_sample(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn update_thermal_plant_calibration_job(
+pub(crate) fn update_thermal_plant_calibration_job(
     calibration: &mut CalibrationRuntimeState,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
@@ -1802,7 +1826,11 @@ fn update_thermal_plant_calibration_job(
     input: CalibrationJobUpdateInput,
 ) {
     let Some(job) = workspace.job.as_mut() else {
-        fail_thermal_plant_calibration(calibration, manual_pps, ManualPpsError::ThermalPlantProjectionInvalid);
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::ThermalPlantProjectionInvalid,
+        );
         return;
     };
     if manual_pps.error.is_some()
@@ -1819,15 +1847,32 @@ fn update_thermal_plant_calibration_job(
         );
         return;
     }
-    let Some(recorded_temp_c) = projected_rtd_temperature_c(memory_config, input.latest_rtd_raw_adc_mv) else {
-        fail_thermal_plant_calibration(calibration, manual_pps, ManualPpsError::ThermalPlantProjectionInvalid);
+    let Some(recorded_temp_c) =
+        projected_rtd_temperature_c(memory_config, input.latest_rtd_raw_adc_mv)
+    else {
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::ThermalPlantProjectionInvalid,
+        );
         return;
     };
     job.elapsed_ticks = job.elapsed_ticks.saturating_add(1);
     let phase_ok = match job.phase {
-        ThermalPlantAutoPhase::Ambient => update_thermal_ambient_phase(calibration, manual_pps, job, input, recorded_temp_c),
-        ThermalPlantAutoPhase::Heating => update_thermal_heating_phase(calibration, manual_pps, job, input, recorded_temp_c),
-        ThermalPlantAutoPhase::Cooling => update_thermal_cooling_phase(calibration, memory_config, manual_pps, job, input, recorded_temp_c),
+        ThermalPlantAutoPhase::Ambient => {
+            update_thermal_ambient_phase(calibration, manual_pps, job, input, recorded_temp_c)
+        }
+        ThermalPlantAutoPhase::Heating => {
+            update_thermal_heating_phase(calibration, manual_pps, job, input, recorded_temp_c)
+        }
+        ThermalPlantAutoPhase::Cooling => update_thermal_cooling_phase(
+            calibration,
+            memory_config,
+            manual_pps,
+            job,
+            input,
+            recorded_temp_c,
+        ),
     };
     if phase_ok {
         calibration.job.samples_collected = job.sample_count;
@@ -1835,7 +1880,7 @@ fn update_thermal_plant_calibration_job(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn fail_thermal_plant_calibration(
+pub(crate) fn fail_thermal_plant_calibration(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
     error: ManualPpsError,
@@ -1844,7 +1889,7 @@ fn fail_thermal_plant_calibration(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn update_thermal_ambient_phase(
+pub(crate) fn update_thermal_ambient_phase(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
     job: &mut CalibrationThermalPlantAutoJob,
@@ -1886,7 +1931,7 @@ fn update_thermal_ambient_phase(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn update_thermal_heating_phase(
+pub(crate) fn update_thermal_heating_phase(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
     job: &mut CalibrationThermalPlantAutoJob,
@@ -1909,14 +1954,18 @@ fn update_thermal_heating_phase(
     calibration.pps_ma = Some(job.source_current_ma);
     calibration.job.next_request_mv = Some(request_mv);
     if input.heater_duty_percent > 0 && (input.latest_vin_mv == 0 || input.pd_current_ma == 0) {
-        fail_thermal_plant_calibration(calibration, manual_pps, ManualPpsError::ThermalPlantProjectionInvalid);
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::ThermalPlantProjectionInvalid,
+        );
         return false;
     }
     if input.heater_duty_percent > 0 {
         observe_thermal_curve(job, input);
     }
-    let timed_out = job.elapsed_ticks.saturating_sub(job.phase_started_tick)
-        > THERMAL_PLANT_HEAT_TIMEOUT_TICKS;
+    let timed_out =
+        job.elapsed_ticks.saturating_sub(job.phase_started_tick) > THERMAL_PLANT_HEAT_TIMEOUT_TICKS;
     if timed_out
         || !record_thermal_plant_transient_sample(
             job,
@@ -1927,7 +1976,11 @@ fn update_thermal_heating_phase(
             input.latest_temp_c >= THERMAL_PLANT_TARGET_TEMP_C,
         )
     {
-        fail_thermal_plant_calibration(calibration, manual_pps, ManualPpsError::ThermalPlantProjectionInvalid);
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::ThermalPlantProjectionInvalid,
+        );
         return false;
     }
     calibration.job.progress_percent =
@@ -1944,7 +1997,10 @@ fn update_thermal_heating_phase(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn observe_thermal_curve(job: &mut CalibrationThermalPlantAutoJob, input: CalibrationJobUpdateInput) {
+pub(crate) fn observe_thermal_curve(
+    job: &mut CalibrationThermalPlantAutoJob,
+    input: CalibrationJobUpdateInput,
+) {
     if job.heater_curve.cold_bin.contains(input.latest_temp_c) {
         job.heater_curve.cold_bin.observe_electrical(
             input.latest_temp_c,
@@ -1966,7 +2022,7 @@ fn observe_thermal_curve(job: &mut CalibrationThermalPlantAutoJob, input: Calibr
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn update_thermal_cooling_phase(
+pub(crate) fn update_thermal_cooling_phase(
     calibration: &mut CalibrationRuntimeState,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
@@ -1976,8 +2032,8 @@ fn update_thermal_cooling_phase(
 ) -> bool {
     calibration.heater_enabled = false;
     let cooling_complete = thermal_plant_cooling_complete(input.latest_temp_c, recorded_temp_c);
-    let timed_out = job.elapsed_ticks.saturating_sub(job.phase_started_tick)
-        > THERMAL_PLANT_COOL_TIMEOUT_TICKS;
+    let timed_out =
+        job.elapsed_ticks.saturating_sub(job.phase_started_tick) > THERMAL_PLANT_COOL_TIMEOUT_TICKS;
     if timed_out
         || !record_thermal_plant_transient_sample(
             job,
@@ -1988,7 +2044,11 @@ fn update_thermal_cooling_phase(
             cooling_complete,
         )
     {
-        fail_thermal_plant_calibration(calibration, manual_pps, ManualPpsError::ThermalPlantProjectionInvalid);
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::ThermalPlantProjectionInvalid,
+        );
         return false;
     }
     calibration.job.progress_percent = (60.0
@@ -2010,7 +2070,7 @@ fn update_thermal_cooling_phase(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn complete_thermal_plant_calibration(
+pub(crate) fn complete_thermal_plant_calibration(
     calibration: &mut CalibrationRuntimeState,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
@@ -2018,18 +2078,30 @@ fn complete_thermal_plant_calibration(
     latest_rtd_raw_adc_mv: u16,
 ) -> bool {
     if !thermal_plant_curve_samples_ready(&job.heater_curve) {
-        fail_thermal_plant_calibration(calibration, manual_pps, ManualPpsError::HeaterCurveCoverageInsufficient);
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::HeaterCurveCoverageInsufficient,
+        );
         return false;
     }
     let Some(curve) = heater_curve_from_transient_bins(&job.heater_curve.bins) else {
-        fail_thermal_plant_calibration(calibration, manual_pps, ManualPpsError::HeaterCurveCoverageInsufficient);
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::HeaterCurveCoverageInsufficient,
+        );
         return false;
     };
     let Some(raw_observations) = heater_curve_raw_observations_from_transient_bins(
         job.heater_curve.cold_bin,
         &job.heater_curve.bins,
     ) else {
-        fail_thermal_plant_calibration(calibration, manual_pps, ManualPpsError::HeaterCurveCoverageInsufficient);
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::HeaterCurveCoverageInsufficient,
+        );
         return false;
     };
     let transaction_id = (u32::from(job.ambient_raw_rtd_adc_mv) << 16)
@@ -2044,7 +2116,11 @@ fn complete_thermal_plant_calibration(
         Some(&curve),
         memory_config,
     ) else {
-        fail_thermal_plant_calibration(calibration, manual_pps, ManualPpsError::ThermalPlantProjectionInvalid);
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::ThermalPlantProjectionInvalid,
+        );
         return false;
     };
     memory_config.active_heater_curve = curve;
@@ -2061,12 +2137,17 @@ fn complete_thermal_plant_calibration(
     calibration.mode = CalibrationMode::Off;
     calibration.thermal_plant_completion_disarm_pending = true;
     calibration.job.samples_collected = job.sample_count;
-    calibration_job_complete(calibration, CalibrationJobKind::ThermalPlant, job.sample_count, None);
+    calibration_job_complete(
+        calibration,
+        CalibrationJobKind::ThermalPlant,
+        job.sample_count,
+        None,
+    );
     false
 }
 
 #[cfg(target_arch = "xtensa")]
-fn update_calibration_job_state(
+pub(crate) fn update_calibration_job_state(
     calibration: &mut CalibrationRuntimeState,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
@@ -2083,7 +2164,7 @@ fn update_calibration_job_state(
 }
 
 #[cfg(test)]
-fn update_calibration_job_state(
+pub(crate) fn update_calibration_job_state(
     calibration: &mut CalibrationRuntimeState,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
@@ -2101,7 +2182,7 @@ fn update_calibration_job_state(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn usb_calibration_config_response(
+pub(crate) fn usb_calibration_config_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: CalibrationConfigCommand,
     memory_config: &mut MemoryConfig,
@@ -2135,7 +2216,7 @@ fn usb_calibration_config_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn apply_calibration_config_command(
+pub(crate) fn apply_calibration_config_command(
     config: CalibrationConfigCommand,
     memory_config: &mut MemoryConfig,
     latest_rtd_raw_adc_mv: u16,
@@ -2157,7 +2238,7 @@ fn apply_calibration_config_command(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn capture_calibration_sample(
+pub(crate) fn capture_calibration_sample(
     config: CalibrationConfigCommand,
     memory_config: &mut MemoryConfig,
     latest_rtd_raw_adc_mv: u16,
@@ -2172,11 +2253,12 @@ fn capture_calibration_sample(
         CalibrationChannelWire::RtdAdc => latest_rtd_raw_adc_mv,
         CalibrationChannelWire::VinAdc => latest_vin_raw_adc_mv,
     });
-    let expected_mv = expected_calibration_adc_mv(&config, channel).ok_or(Box::new(ApiError::new(
-        "calibration_reference_required",
-        "Calibration capture requires a valid physical reference.",
-        false,
-    )))?;
+    let expected_mv =
+        expected_calibration_adc_mv(&config, channel).ok_or(Box::new(ApiError::new(
+            "calibration_reference_required",
+            "Calibration capture requires a valid physical reference.",
+            false,
+        )))?;
     let reference_temp_deci_c = config.reference_temp_c.map(|temp_c| {
         let scaled = if temp_c >= 0.0 {
             temp_c * 10.0 + 0.5
@@ -2209,7 +2291,7 @@ fn capture_calibration_sample(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn delete_calibration_sample(
+pub(crate) fn delete_calibration_sample(
     config: CalibrationConfigCommand,
     memory_config: &mut MemoryConfig,
 ) -> Result<usize, Box<ApiError>> {
@@ -2239,7 +2321,7 @@ fn delete_calibration_sample(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn clear_calibration_channel(
+pub(crate) fn clear_calibration_channel(
     config: CalibrationConfigCommand,
     memory_config: &mut MemoryConfig,
 ) -> Result<usize, Box<ApiError>> {
@@ -2256,7 +2338,7 @@ fn clear_calibration_channel(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn import_calibration_command(
+pub(crate) fn import_calibration_command(
     config: CalibrationConfigCommand,
     memory_config: &mut MemoryConfig,
 ) -> Result<usize, Box<ApiError>> {
@@ -2270,7 +2352,7 @@ fn import_calibration_command(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn set_calibration_slot(
+pub(crate) fn set_calibration_slot(
     config: CalibrationConfigCommand,
     memory_config: &mut MemoryConfig,
 ) -> Result<usize, Box<ApiError>> {
@@ -2292,7 +2374,7 @@ fn set_calibration_slot(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn set_calibration_fit(
+pub(crate) fn set_calibration_fit(
     config: CalibrationConfigCommand,
     memory_config: &mut MemoryConfig,
 ) -> Result<usize, Box<ApiError>> {
@@ -2319,7 +2401,10 @@ fn set_calibration_fit(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn import_calibration_state(memory_config: &mut MemoryConfig, state: CalibrationStateWire) {
+pub(crate) fn import_calibration_state(
+    memory_config: &mut MemoryConfig,
+    state: CalibrationStateWire,
+) {
     import_calibration_channel_state(
         &mut memory_config.adc_calibration.rtd,
         state.rtd_adc.samples,
@@ -2337,7 +2422,7 @@ fn import_calibration_state(memory_config: &mut MemoryConfig, state: Calibration
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn import_calibration_channel_state(
+pub(crate) fn import_calibration_channel_state(
     channel: &mut flux_purr_firmware::memory::AdcCalibrationChannelConfig,
     samples: [Option<CalibrationSampleWire>; ADC_CALIBRATION_MAX_SAMPLES],
     slot_a: CalibrationSlotFitWire,
@@ -2351,7 +2436,7 @@ fn import_calibration_channel_state(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn usb_heater_curve_config_response(
+pub(crate) fn usb_heater_curve_config_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: HeaterCurveConfigCommand,
     memory_config: &MemoryConfig,
@@ -2392,7 +2477,7 @@ fn usb_heater_curve_config_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn usb_calibration_job_response(
+pub(crate) fn usb_calibration_job_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: CalibrationJobCommandWire,
     calibration: &mut CalibrationRuntimeState,
@@ -2438,7 +2523,7 @@ fn usb_calibration_job_response(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn expected_calibration_adc_mv(
+pub(crate) fn expected_calibration_adc_mv(
     config: &CalibrationConfigCommand,
     channel: CalibrationChannelWire,
 ) -> Option<u16> {
@@ -2453,7 +2538,7 @@ fn expected_calibration_adc_mv(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn usb_write_frame(
+pub(crate) fn usb_write_frame(
     usb: &mut RawUsbSerialJtag,
     frame: &UsbFrame,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
@@ -2462,7 +2547,7 @@ fn usb_write_frame(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn usb_write_response_frame(
+pub(crate) fn usb_write_response_frame(
     usb: &mut RawUsbSerialJtag,
     frame: &UsbFrame,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
@@ -2471,7 +2556,7 @@ fn usb_write_response_frame(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn usb_write_frame_to<T: UsbControlTx>(
+pub(crate) fn usb_write_frame_to<T: UsbControlTx>(
     tx: &mut T,
     frame: &UsbFrame,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
@@ -2482,7 +2567,7 @@ fn usb_write_frame_to<T: UsbControlTx>(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_write_response_frame_to<T: UsbControlTx>(
+pub(crate) fn usb_write_response_frame_to<T: UsbControlTx>(
     tx: &mut T,
     frame: &UsbFrame,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
@@ -2494,14 +2579,14 @@ fn usb_write_response_frame_to<T: UsbControlTx>(
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UsbTxError {
+pub(crate) enum UsbTxError {
     WouldBlock,
     #[cfg_attr(all(target_arch = "xtensa", feature = "web_serial"), allow(dead_code))]
     Other,
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-trait UsbControlTx {
+pub(crate) trait UsbControlTx {
     fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError>;
     fn flush_tx_nb(&mut self) -> Result<(), UsbTxError>;
 
@@ -2539,12 +2624,12 @@ impl UsbControlTx for RawUsbSerialJtag {
     }
 
     fn write_response_bytes(&mut self, bytes: &[u8]) -> bool {
-        self.write_response_bytes(bytes)
+        RawUsbSerialJtag::write_response_bytes(self, bytes)
     }
 }
 
 #[cfg(target_arch = "xtensa")]
-trait PersistenceLogSink {
+pub(crate) trait PersistenceLogSink {
     fn write_line(&mut self, line: &[u8]);
 }
 
@@ -2556,7 +2641,7 @@ impl PersistenceLogSink for RawUsbSerialJtag {
 }
 
 #[cfg(all(target_arch = "xtensa", not(feature = "web_serial")))]
-struct NoopPersistenceLogSink;
+pub(crate) struct NoopPersistenceLogSink;
 
 #[cfg(all(target_arch = "xtensa", not(feature = "web_serial")))]
 impl PersistenceLogSink for NoopPersistenceLogSink {
@@ -2564,7 +2649,7 @@ impl PersistenceLogSink for NoopPersistenceLogSink {
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_write_bytes_bounded<T: UsbControlTx>(tx: &mut T, bytes: &[u8]) -> bool {
+pub(crate) fn usb_write_bytes_bounded<T: UsbControlTx>(tx: &mut T, bytes: &[u8]) -> bool {
     let mut packet_len = 0;
     for byte in bytes {
         if !usb_write_byte_bounded(tx, *byte, &mut packet_len) {
@@ -2576,7 +2661,7 @@ fn usb_write_bytes_bounded<T: UsbControlTx>(tx: &mut T, bytes: &[u8]) -> bool {
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_write_byte_bounded<T: UsbControlTx>(
+pub(crate) fn usb_write_byte_bounded<T: UsbControlTx>(
     tx: &mut T,
     byte: u8,
     packet_len: &mut usize,
@@ -2602,7 +2687,10 @@ fn usb_write_byte_bounded<T: UsbControlTx>(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_flush_full_packet_if_needed<T: UsbControlTx>(tx: &mut T, packet_len: &mut usize) -> bool {
+pub(crate) fn usb_flush_full_packet_if_needed<T: UsbControlTx>(
+    tx: &mut T,
+    packet_len: &mut usize,
+) -> bool {
     if *packet_len < USB_CONTROL_TX_PACKET_LEN {
         return true;
     }
@@ -2614,7 +2702,7 @@ fn usb_flush_full_packet_if_needed<T: UsbControlTx>(tx: &mut T, packet_len: &mut
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_retry_flush_tx<T: UsbControlTx>(tx: &mut T, packet_len: &mut usize) -> bool {
+pub(crate) fn usb_retry_flush_tx<T: UsbControlTx>(tx: &mut T, packet_len: &mut usize) -> bool {
     if !usb_flush_tx_bounded(tx) {
         return false;
     }
@@ -2623,7 +2711,7 @@ fn usb_retry_flush_tx<T: UsbControlTx>(tx: &mut T, packet_len: &mut usize) -> bo
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_flush_tx_bounded<T: UsbControlTx>(tx: &mut T) -> bool {
+pub(crate) fn usb_flush_tx_bounded<T: UsbControlTx>(tx: &mut T) -> bool {
     for _ in 0..USB_CONTROL_TX_RETRY_LIMIT {
         match tx.flush_tx_nb() {
             Ok(()) => return true,
@@ -2635,7 +2723,7 @@ fn usb_flush_tx_bounded<T: UsbControlTx>(tx: &mut T) -> bool {
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_response(
+pub(crate) fn usb_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     result: UsbResponsePayload,
 ) -> UsbFrame {
@@ -2648,7 +2736,7 @@ fn usb_response(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn hardware_identity() -> Identity {
+pub(crate) fn hardware_identity() -> Identity {
     #[cfg(target_arch = "xtensa")]
     {
         Identity::firmware_from_mac(esp_hal::efuse::Efuse::mac_address())
@@ -2660,7 +2748,7 @@ fn hardware_identity() -> Identity {
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_error_response(
+pub(crate) fn usb_error_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     code: &'static str,
     message: &'static str,
@@ -2669,7 +2757,7 @@ fn usb_error_response(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_error_response_with_retryable(
+pub(crate) fn usb_error_response_with_retryable(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     code: &'static str,
     message: &'static str,
@@ -2684,7 +2772,7 @@ fn usb_error_response_with_retryable(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
+pub(crate) fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
     match parse_usb_frame(line) {
         Ok(UsbFrame::Request { request_id, op }) => {
             usb_early_request_response(request_id, op, memory_config)
@@ -2729,89 +2817,86 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_early_request_response(
+pub(crate) fn usb_early_request_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     op: UsbRequestOp,
     memory_config: &MemoryConfig,
 ) -> UsbFrame {
     match op {
-            UsbRequestOp::GetIdentity => usb_response(
-                request_id,
-                UsbResponsePayload::Identity(Box::new(hardware_identity())),
-            ),
-            UsbRequestOp::GetInstallStatus => usb_error_response_with_retryable(
-                request_id,
-                "startup_busy",
-                "Install status is unavailable until EEPROM restoration completes.",
-                true,
-            ),
-            UsbRequestOp::CompleteSetup | UsbRequestOp::ResetPersistence => {
-                usb_error_response_with_retryable(
-                    request_id,
-                    "startup_busy",
-                    "Persistence changes are unavailable until EEPROM restoration completes.",
-                    true,
-                )
-            }
-            // The boot-time memory argument is still the zero-value placeholder
-            // until the main loop has completed EEPROM restoration. Never
-            // expose it as a network snapshot: a configured device would appear
-            // transiently disabled or connected with no address and the host
-            // could persist that false state. The devd read path retries this
-            // explicit startup boundary until the runtime owns the snapshot.
-            UsbRequestOp::GetNetwork => usb_error_response_with_retryable(
+        UsbRequestOp::GetIdentity => usb_response(
+            request_id,
+            UsbResponsePayload::Identity(Box::new(hardware_identity())),
+        ),
+        UsbRequestOp::GetInstallStatus => usb_error_response_with_retryable(
+            request_id,
+            "startup_busy",
+            "Install status is unavailable until EEPROM restoration completes.",
+            true,
+        ),
+        UsbRequestOp::CompleteSetup | UsbRequestOp::ResetPersistence => {
+            usb_error_response_with_retryable(
                 request_id,
                 "startup_busy",
-                "Network status is not available until EEPROM and WiFi initialization completes.",
+                "Persistence changes are unavailable until EEPROM restoration completes.",
                 true,
-            ),
-            UsbRequestOp::GetCalibration => usb_response(
-                request_id,
-                UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
-            ),
-            UsbRequestOp::GetCalibrationJob => usb_response(
-                request_id,
-                UsbResponsePayload::CalibrationJob(CalibrationRuntimeStateWire::default().job),
-            ),
-            UsbRequestOp::GetHeaterCurve => usb_response(
-                request_id,
-                UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
-                    memory_config,
-                    None,
-                )),
-            ),
-            UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
-            UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
+            )
+        }
+        // The boot-time memory argument is still the zero-value placeholder
+        // until the main loop has completed EEPROM restoration. Never
+        // expose it as a network snapshot: a configured device would appear
+        // transiently disabled or connected with no address and the host
+        // could persist that false state. The devd read path retries this
+        // explicit startup boundary until the runtime owns the snapshot.
+        UsbRequestOp::GetNetwork => usb_error_response_with_retryable(
+            request_id,
+            "startup_busy",
+            "Network status is not available until EEPROM and WiFi initialization completes.",
+            true,
+        ),
+        UsbRequestOp::GetCalibration => usb_response(
+            request_id,
+            UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
+        ),
+        UsbRequestOp::GetCalibrationJob => usb_response(
+            request_id,
+            UsbResponsePayload::CalibrationJob(CalibrationRuntimeStateWire::default().job),
+        ),
+        UsbRequestOp::GetHeaterCurve => usb_response(
+            request_id,
+            UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(memory_config, None)),
+        ),
+        UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
+        UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
+            request_id,
+            "startup_busy",
+            "LAN pairing code is not available until runtime initialization completes.",
+            true,
+        ),
+        UsbRequestOp::OpenLanPairingWindow | UsbRequestOp::CloseLanPairingWindow => {
+            usb_error_response_with_retryable(
                 request_id,
                 "startup_busy",
-                "LAN pairing code is not available until runtime initialization completes.",
+                "LAN pairing window is not available until runtime initialization completes.",
                 true,
-            ),
-            UsbRequestOp::OpenLanPairingWindow | UsbRequestOp::CloseLanPairingWindow => {
-                usb_error_response_with_retryable(
-                    request_id,
-                    "startup_busy",
-                    "LAN pairing window is not available until runtime initialization completes.",
-                    true,
-                )
-            }
-            UsbRequestOp::ClearLanPairingToken => usb_error_response_with_retryable(
-                request_id,
-                "startup_busy",
-                "LAN pairing reset is not available until runtime initialization completes.",
-                true,
-            ),
-            UsbRequestOp::GetStatus => usb_error_response_with_retryable(
-                request_id,
-                "startup_busy",
-                "Runtime status is not available until hardware initialization completes.",
-                true,
-            ),
+            )
+        }
+        UsbRequestOp::ClearLanPairingToken => usb_error_response_with_retryable(
+            request_id,
+            "startup_busy",
+            "LAN pairing reset is not available until runtime initialization completes.",
+            true,
+        ),
+        UsbRequestOp::GetStatus => usb_error_response_with_retryable(
+            request_id,
+            "startup_busy",
+            "Runtime status is not available until hardware initialization completes.",
+            true,
+        ),
     }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn poll_usb_early_control(
+pub(crate) fn poll_usb_early_control(
     usb: &mut RawUsbSerialJtag,
     rx_line: &mut heapless::String<USB_CONTROL_LINE_CAPACITY>,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
@@ -2845,7 +2930,7 @@ fn poll_usb_early_control(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn append_usb_recovery_byte(
+pub(crate) fn append_usb_recovery_byte(
     rx_line: &mut heapless::String<USB_CONTROL_LINE_CAPACITY>,
     byte: u8,
 ) {
@@ -2855,7 +2940,7 @@ fn append_usb_recovery_byte(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn run_usb_recovery_control_loop(
+pub(crate) async fn run_usb_recovery_control_loop(
     usb: &mut RawUsbSerialJtag,
     rx_line: &mut heapless::String<USB_CONTROL_LINE_CAPACITY>,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
@@ -2893,13 +2978,13 @@ async fn run_usb_recovery_control_loop(
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UsbRecoveryPhase {
+pub(crate) enum UsbRecoveryPhase {
     BeforePersistentState,
     RuntimeFault,
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_recovery_response_for_phase(
+pub(crate) fn usb_recovery_response_for_phase(
     line: &str,
     memory_config: &MemoryConfig,
     elapsed_ms: u64,
@@ -2915,7 +3000,10 @@ fn usb_recovery_response_for_phase(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_recovery_status(memory_config: &MemoryConfig, elapsed_ms: u64) -> Box<ControlPlaneStatus> {
+pub(crate) fn usb_recovery_status(
+    memory_config: &MemoryConfig,
+    elapsed_ms: u64,
+) -> Box<ControlPlaneStatus> {
     let mut status = ControlPlaneStatus::boxed_from_device_status(
         DeviceStatus {
             mode: DeviceMode::Fault,
@@ -2942,7 +3030,11 @@ fn usb_recovery_status(memory_config: &MemoryConfig, elapsed_ms: u64) -> Box<Con
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u64) -> UsbFrame {
+pub(crate) fn usb_recovery_response(
+    line: &str,
+    memory_config: &MemoryConfig,
+    elapsed_ms: u64,
+) -> UsbFrame {
     match parse_usb_frame(line) {
         Ok(UsbFrame::Request { request_id, op }) => {
             usb_recovery_request_response(request_id, op, memory_config, elapsed_ms)
@@ -2986,81 +3078,78 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_recovery_request_response(
+pub(crate) fn usb_recovery_request_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     op: UsbRequestOp,
     memory_config: &MemoryConfig,
     elapsed_ms: u64,
 ) -> UsbFrame {
     match op {
-            UsbRequestOp::GetIdentity => usb_response(
-                request_id,
-                UsbResponsePayload::Identity(Box::new(hardware_identity())),
-            ),
-            UsbRequestOp::GetInstallStatus => usb_response(
-                request_id,
-                UsbResponsePayload::InstallStatus(InstallStatus::from_runtime(
-                    InstallRuntimeSnapshot {
-                        config: memory_config,
-                        persistence_source: "defaults",
-                        record_state: "incompatible",
-                        record_sequence: 0,
-                        sensor_ready: false,
-                        heater_fault_latched: true,
-                        persistence_locked: true,
-                        last_persistence_fault: None,
-                        persistence_fault_attention_pending: true,
-                    },
-                )),
-            ),
-            UsbRequestOp::CompleteSetup | UsbRequestOp::ResetPersistence => usb_error_response(
+        UsbRequestOp::GetIdentity => usb_response(
+            request_id,
+            UsbResponsePayload::Identity(Box::new(hardware_identity())),
+        ),
+        UsbRequestOp::GetInstallStatus => usb_response(
+            request_id,
+            UsbResponsePayload::InstallStatus(InstallStatus::from_runtime(
+                InstallRuntimeSnapshot {
+                    config: memory_config,
+                    persistence_source: "defaults",
+                    record_state: "incompatible",
+                    record_sequence: 0,
+                    sensor_ready: false,
+                    heater_fault_latched: true,
+                    persistence_locked: true,
+                    last_persistence_fault: None,
+                    persistence_fault_attention_pending: true,
+                },
+            )),
+        ),
+        UsbRequestOp::CompleteSetup | UsbRequestOp::ResetPersistence => usb_error_response(
+            request_id,
+            "hardware_bringup_failed",
+            "Persistence changes are unavailable because hardware bring-up failed.",
+        ),
+        UsbRequestOp::GetNetwork => usb_response(
+            request_id,
+            UsbResponsePayload::Network(network_from_memory(memory_config)),
+        ),
+        UsbRequestOp::GetStatus => usb_response(
+            request_id,
+            UsbResponsePayload::Status(usb_recovery_status(memory_config, elapsed_ms)),
+        ),
+        UsbRequestOp::GetCalibration => usb_response(
+            request_id,
+            UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
+        ),
+        UsbRequestOp::GetCalibrationJob => usb_response(
+            request_id,
+            UsbResponsePayload::CalibrationJob(CalibrationJobStateWire::default()),
+        ),
+        UsbRequestOp::GetHeaterCurve => usb_response(
+            request_id,
+            UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(memory_config, None)),
+        ),
+        UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
+        UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
+            request_id,
+            "hardware_bringup_failed",
+            "LAN pairing code is unavailable because hardware bring-up did not complete.",
+            true,
+        ),
+        UsbRequestOp::OpenLanPairingWindow | UsbRequestOp::CloseLanPairingWindow => {
+            usb_error_response_with_retryable(
                 request_id,
                 "hardware_bringup_failed",
-                "Persistence changes are unavailable because hardware bring-up failed.",
-            ),
-            UsbRequestOp::GetNetwork => usb_response(
-                request_id,
-                UsbResponsePayload::Network(network_from_memory(memory_config)),
-            ),
-            UsbRequestOp::GetStatus => usb_response(
-                request_id,
-                UsbResponsePayload::Status(usb_recovery_status(memory_config, elapsed_ms)),
-            ),
-            UsbRequestOp::GetCalibration => usb_response(
-                request_id,
-                UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
-            ),
-            UsbRequestOp::GetCalibrationJob => usb_response(
-                request_id,
-                UsbResponsePayload::CalibrationJob(CalibrationJobStateWire::default()),
-            ),
-            UsbRequestOp::GetHeaterCurve => usb_response(
-                request_id,
-                UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
-                    memory_config,
-                    None,
-                )),
-            ),
-            UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
-            UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
-                request_id,
-                "hardware_bringup_failed",
-                "LAN pairing code is unavailable because hardware bring-up did not complete.",
+                "LAN pairing window is unavailable because hardware bring-up did not complete.",
                 true,
-            ),
-            UsbRequestOp::OpenLanPairingWindow | UsbRequestOp::CloseLanPairingWindow => {
-                usb_error_response_with_retryable(
-                    request_id,
-                    "hardware_bringup_failed",
-                    "LAN pairing window is unavailable because hardware bring-up did not complete.",
-                    true,
-                )
-            }
-            UsbRequestOp::ClearLanPairingToken => usb_error_response_with_retryable(
-                request_id,
-                "hardware_bringup_failed",
-                "LAN pairing reset is unavailable because hardware bring-up did not complete.",
-                true,
-            ),
+            )
+        }
+        UsbRequestOp::ClearLanPairingToken => usb_error_response_with_retryable(
+            request_id,
+            "hardware_bringup_failed",
+            "LAN pairing reset is unavailable because hardware bring-up did not complete.",
+            true,
+        ),
     }
 }

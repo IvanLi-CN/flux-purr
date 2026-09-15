@@ -1,8 +1,10 @@
+pub(crate) use super::*;
+
 #[cfg(unix)]
-use std::os::fd::AsRawFd;
+pub(crate) use std::os::fd::AsRawFd;
 #[cfg(target_os = "macos")]
-use std::os::unix::fs::OpenOptionsExt;
-use std::{
+pub(crate) use std::os::unix::fs::OpenOptionsExt;
+pub(crate) use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
     fs::{self, File},
@@ -17,7 +19,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use axum::{
+pub(crate) use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
     extract::{Path as AxumPath, Query, State},
@@ -28,17 +30,17 @@ use axum::{
     },
     routing::{delete, get, post, put},
 };
-use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use tokio::{
+pub(crate) use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
+pub(crate) use serde_json::{Value, json};
+pub(crate) use sha2::{Digest, Sha256};
+pub(crate) use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     process::Command,
     sync::broadcast,
 };
-use tokio_stream::{StreamExt, wrappers::BroadcastStream};
-use tower::ServiceExt;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+pub(crate) use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+pub(crate) use tower::ServiceExt;
+pub(crate) use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 pub const PRODUCT_VERSION: &str = env!("FLUX_PURR_PRODUCT_VERSION");
 pub const PRODUCT_CHANNEL: &str = env!("FLUX_PURR_PRODUCT_CHANNEL");
@@ -53,66 +55,66 @@ pub const DEVICE_EVENT_REPLAY_LIMIT: usize = 120;
 pub const DEFAULT_LEASE_TTL_MS: u64 = 30_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 pub const DEFAULT_DEVD_ENDPOINT: &str = "flux-purr-devd.sock";
-static LOCAL_CONTROL_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
-const PPS_HARDWARE_MIN_MV: u16 = 5_000;
-const PPS_HARDWARE_MAX_MV: u16 = 28_000;
-const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = PPS_HARDWARE_MIN_MV;
-const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 5_000;
-const HEATER_PID_TARGET_MIN_C: i16 = 0;
-const HEATER_PID_TARGET_MAX_C: i16 = 400;
-const THERMAL_PROFILE_ANCHOR_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250];
-const THERMAL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX: u16 = 4_000;
-const THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX: u16 = 375;
-const THERMAL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX: u16 = 1_000;
-const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
-const HEATER_CURVE_MAX_POINTS: usize = 8;
-const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
-const VIN_DIVIDER_R_LOW_OHMS: u32 = 5_100;
-const USER_CONFIG_FILE: &str = "config.json";
-const HARDWARE_REGISTRY_FILE: &str = "devices.json";
-const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
-const DEFAULT_PARTITION_TABLE_FLASH_ADDRESS: u64 = 0x8000;
-const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
-const ESPFLASH_USB_RESET_RETRY_DELAY: Duration = Duration::from_secs(1);
-const FRONT_PANEL_PRESET_COUNT: usize = 10;
-const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
-const LEASE_REAPER_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) static LOCAL_CONTROL_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+pub(crate) const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
+pub(crate) const PPS_HARDWARE_MIN_MV: u16 = 5_000;
+pub(crate) const PPS_HARDWARE_MAX_MV: u16 = 28_000;
+pub(crate) const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = PPS_HARDWARE_MIN_MV;
+pub(crate) const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 5_000;
+pub(crate) const HEATER_PID_TARGET_MIN_C: i16 = 0;
+pub(crate) const HEATER_PID_TARGET_MAX_C: i16 = 400;
+pub(crate) const THERMAL_PROFILE_ANCHOR_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250];
+pub(crate) const THERMAL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX: u16 = 4_000;
+pub(crate) const THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX: u16 = 375;
+pub(crate) const THERMAL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX: u16 = 1_000;
+pub(crate) const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
+pub(crate) const HEATER_CURVE_MAX_POINTS: usize = 8;
+pub(crate) const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
+pub(crate) const VIN_DIVIDER_R_LOW_OHMS: u32 = 5_100;
+pub(crate) const USER_CONFIG_FILE: &str = "config.json";
+pub(crate) const HARDWARE_REGISTRY_FILE: &str = "devices.json";
+pub(crate) const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
+pub(crate) const DEFAULT_PARTITION_TABLE_FLASH_ADDRESS: u64 = 0x8000;
+pub(crate) const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
+pub(crate) const ESPFLASH_USB_RESET_RETRY_DELAY: Duration = Duration::from_secs(1);
+pub(crate) const FRONT_PANEL_PRESET_COUNT: usize = 10;
+pub(crate) const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
+pub(crate) const LEASE_REAPER_INTERVAL: Duration = Duration::from_secs(1);
 // Opening an ESP32-S3 USB Serial/JTAG port can reset the device. Read-only
 // requests are idempotent and must remain alive through USB enumeration,
 // front-panel startup, and PD bring-up so the first native CLI query is usable.
 // Opening USB Serial/JTAG can reset the MCU. Allow a full cold boot plus
 // hardware discovery before declaring a read-only request unavailable.
-const SERIAL_READ_ONLY_RPC_TIMEOUT: Duration = Duration::from_secs(30);
-const POST_FLASH_BOOT_TIMEOUT: Duration = Duration::from_secs(90);
-const RUNTIME_READY_BOOT_STAGE: &str = "boot_stage=runtime_ready";
-const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
-const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
-const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
-const SERIAL_LINE_LIMIT: usize = 8 * 1024;
+pub(crate) const SERIAL_READ_ONLY_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const POST_FLASH_BOOT_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) const RUNTIME_READY_BOOT_STAGE: &str = "boot_stage=runtime_ready";
+pub(crate) const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
+pub(crate) const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
+pub(crate) const SERIAL_LINE_LIMIT: usize = 8 * 1024;
 // `serialport` configures termios and flushes both queues on macOS. USB
 // Serial/JTAG can interpret that control traffic as a host reset, so the
 // ESP32-S3 path uses an unconfigured raw descriptor instead.
 #[cfg(target_os = "macos")]
-const MACOS_O_NONBLOCK: i32 = 0x0004;
+pub(crate) const MACOS_O_NONBLOCK: i32 = 0x0004;
 #[cfg(unix)]
-const LOCK_EX: i32 = 2;
+pub(crate) const LOCK_EX: i32 = 2;
 #[cfg(unix)]
-const LOCK_NB: i32 = 4;
+pub(crate) const LOCK_NB: i32 = 4;
 #[cfg(unix)]
-const LOCK_UN: i32 = 8;
+pub(crate) const LOCK_UN: i32 = 8;
 
-static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+pub(crate) static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SerialRetryPolicy {
+pub(crate) enum SerialRetryPolicy {
     ReadOnly,
     SingleShot,
 }
 
 #[cfg(unix)]
 unsafe extern "C" {
-    fn flock(fd: i32, operation: i32) -> i32;
+    pub(crate) fn flock(fd: i32, operation: i32) -> i32;
 }
 
 #[derive(Debug, Clone)]
@@ -228,12 +230,12 @@ impl Default for AppConfig {
 
 #[derive(Clone)]
 pub struct AppState {
-    config: AppConfig,
-    inner: Arc<Mutex<DevdState>>,
-    events: broadcast::Sender<DevdEvent>,
-    serial_rpc: Arc<tokio::sync::Mutex<()>>,
-    serial_sessions: Arc<Mutex<SerialSessionMap>>,
-    bundle_store: Arc<tempfile::TempDir>,
+    pub(crate) config: AppConfig,
+    pub(crate) inner: Arc<Mutex<DevdState>>,
+    pub(crate) events: broadcast::Sender<DevdEvent>,
+    pub(crate) serial_rpc: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) serial_sessions: Arc<Mutex<SerialSessionMap>>,
+    pub(crate) bundle_store: Arc<tempfile::TempDir>,
 }
 
 impl AppState {
@@ -271,13 +273,13 @@ impl AppState {
         state.create_lease(device_id)
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, DevdState>, HttpError> {
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, DevdState>, HttpError> {
         self.inner
             .lock()
             .map_err(|_| HttpError::internal("state lock poisoned"))
     }
 
-    fn emit(&self, event: DevdEvent) {
+    pub(crate) fn emit(&self, event: DevdEvent) {
         if let Ok(mut state) = self.inner.lock() {
             state.push_event(event.clone());
         }
@@ -293,7 +295,7 @@ impl AppState {
         }
     }
 
-    async fn reap_expired_leases(&self) -> Result<usize, HttpError> {
+    pub(crate) async fn reap_expired_leases(&self) -> Result<usize, HttpError> {
         let _serial_rpc =
             acquire_serial_rpc_with_timeout(self.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
         let expired = {
@@ -320,7 +322,7 @@ impl AppState {
     }
 }
 
-fn remove_expired_serial_sessions(
+pub(crate) fn remove_expired_serial_sessions(
     state: &DevdState,
     active_device_ids: &HashSet<&str>,
     expired: &[WebLease],
@@ -342,45 +344,45 @@ fn remove_expired_serial_sessions(
 }
 
 #[derive(Debug, Default)]
-struct DevdState {
-    devices: HashMap<String, DeviceRecord>,
-    leases: HashMap<String, WebLease>,
-    dry_run_passes: HashMap<String, FlashDryRunApproval>,
-    firmware_approvals: HashMap<String, FirmwareApproval>,
+pub(crate) struct DevdState {
+    pub(crate) devices: HashMap<String, DeviceRecord>,
+    pub(crate) leases: HashMap<String, WebLease>,
+    pub(crate) dry_run_passes: HashMap<String, FlashDryRunApproval>,
+    pub(crate) firmware_approvals: HashMap<String, FirmwareApproval>,
     sequence: u64,
 }
 
 #[derive(Debug, Clone)]
-struct FirmwareApproval {
-    lease_id: String,
-    device_id: String,
-    port_path: String,
-    rom_mac: String,
-    bundle_sha256: String,
-    operation: FirmwareOperation,
-    allow_downgrade: bool,
-    preflight_digest: String,
-    expires_at: Instant,
+pub(crate) struct FirmwareApproval {
+    pub(crate) lease_id: String,
+    pub(crate) device_id: String,
+    pub(crate) port_path: String,
+    pub(crate) rom_mac: String,
+    pub(crate) bundle_sha256: String,
+    pub(crate) operation: FirmwareOperation,
+    pub(crate) allow_downgrade: bool,
+    pub(crate) preflight_digest: String,
+    pub(crate) expires_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FlashDryRunApproval {
-    lease_id: String,
-    artifact_fingerprint: String,
+pub(crate) struct FlashDryRunApproval {
+    pub(crate) lease_id: String,
+    pub(crate) artifact_fingerprint: String,
 }
 
 impl DevdState {
-    fn seed_mock_device(&mut self) {
+    pub(crate) fn seed_mock_device(&mut self) {
         let device = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock);
         self.devices.insert(device.id.clone(), device);
     }
 
-    fn next_id(&mut self, prefix: &str) -> String {
+    pub(crate) fn next_id(&mut self, prefix: &str) -> String {
         self.sequence = self.sequence.saturating_add(1);
         format!("{prefix}-{}-{}", now_millis(), self.sequence)
     }
 
-    fn push_event(&mut self, event: DevdEvent) {
+    pub(crate) fn push_event(&mut self, event: DevdEvent) {
         for device in self.devices.values_mut() {
             if event.device_id.as_deref() == Some(&device.id) {
                 push_bounded(&mut device.events, event.clone(), DEFAULT_EVENT_LIMIT);
@@ -388,7 +390,7 @@ impl DevdState {
         }
     }
 
-    fn cleanup_leases(&mut self) -> Vec<WebLease> {
+    pub(crate) fn cleanup_leases(&mut self) -> Vec<WebLease> {
         let now = Instant::now();
         let expired_ids = self
             .leases
@@ -402,7 +404,7 @@ impl DevdState {
             .collect()
     }
 
-    fn create_lease(&mut self, device_id: &str) -> Result<WebLease, HttpError> {
+    pub(crate) fn create_lease(&mut self, device_id: &str) -> Result<WebLease, HttpError> {
         self.cleanup_leases();
         if !self.devices.contains_key(device_id) {
             return Err(HttpError::not_found(
@@ -432,7 +434,11 @@ impl DevdState {
         Ok(lease)
     }
 
-    fn require_lease(&mut self, device_id: &str, lease_id: Option<&str>) -> Result<(), HttpError> {
+    pub(crate) fn require_lease(
+        &mut self,
+        device_id: &str,
+        lease_id: Option<&str>,
+    ) -> Result<(), HttpError> {
         self.cleanup_leases();
         let Some(lease_id) = lease_id else {
             return Err(HttpError::forbidden(
@@ -468,7 +474,7 @@ pub struct DeviceRecord {
     pub network: NetworkSummary,
     pub status: ControlPlaneStatus,
     #[serde(default, skip_serializing, skip_deserializing)]
-    mock_pps_apdos: Vec<MockPpsApdo>,
+    pub(crate) mock_pps_apdos: Vec<MockPpsApdo>,
     #[serde(default, skip_serializing, skip_deserializing)]
     pub preview_thermal_control_profile: Option<ThermalControlProfilePackage>,
     #[serde(default, skip_serializing, skip_deserializing)]
@@ -486,13 +492,13 @@ pub struct DeviceRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MockPpsApdo {
-    min_mv: u16,
-    max_mv: u16,
-    max_ma: u16,
+pub(crate) struct MockPpsApdo {
+    pub(crate) min_mv: u16,
+    pub(crate) max_mv: u16,
+    pub(crate) max_ma: u16,
 }
 
-fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
+pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
     let curve_points = [
         (25, 5_674),
         (61, 6_089),
@@ -568,7 +574,7 @@ fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
     }
 }
 
-fn mock_identity(id: &str) -> Identity {
+pub(crate) fn mock_identity(id: &str) -> Identity {
     Identity {
         device_id: id.to_string(),
         firmware_version: "fw/v0.4.0-dev".to_string(),
@@ -596,7 +602,7 @@ fn mock_identity(id: &str) -> Identity {
     }
 }
 
-fn mock_network() -> NetworkSummary {
+pub(crate) fn mock_network() -> NetworkSummary {
     NetworkSummary {
         state: NetworkState::Connected,
         configuration_generation: 1,
@@ -612,7 +618,7 @@ fn mock_network() -> NetworkSummary {
     }
 }
 
-fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
+pub(crate) fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
     ControlPlaneStatus {
         mode: "sampling".to_string(),
         uptime_seconds: 123,
@@ -696,7 +702,7 @@ fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
     }
 }
 
-fn native_placeholder_network() -> NetworkSummary {
+pub(crate) fn native_placeholder_network() -> NetworkSummary {
     NetworkSummary {
         state: NetworkState::Idle,
         configuration_generation: 0,
@@ -712,7 +718,7 @@ fn native_placeholder_network() -> NetworkSummary {
     }
 }
 
-fn native_placeholder_status(network: &NetworkSummary) -> ControlPlaneStatus {
+pub(crate) fn native_placeholder_status(network: &NetworkSummary) -> ControlPlaneStatus {
     ControlPlaneStatus {
         mode: "idle".to_string(),
         uptime_seconds: 0,
@@ -785,7 +791,7 @@ fn native_placeholder_status(network: &NetworkSummary) -> ControlPlaneStatus {
     }
 }
 
-fn native_placeholder_identity() -> Identity {
+pub(crate) fn native_placeholder_identity() -> Identity {
     Identity {
         device_id: String::new(),
         firmware_version: "unknown".to_string(),
@@ -812,7 +818,7 @@ fn native_placeholder_identity() -> Identity {
 }
 
 impl DeviceRecord {
-    fn mock(id: &str, transport: DeviceTransport) -> Self {
+    pub(crate) fn mock(id: &str, transport: DeviceTransport) -> Self {
         let identity = mock_identity(id);
         let network = mock_network();
         let status = mock_status(&network);
@@ -844,7 +850,11 @@ impl DeviceRecord {
         }
     }
 
-    fn native_serial_placeholder(id: &str, display_name: String, port_path: String) -> Self {
+    pub(crate) fn native_serial_placeholder(
+        id: &str,
+        display_name: String,
+        port_path: String,
+    ) -> Self {
         let network = native_placeholder_network();
         let status = native_placeholder_status(&network);
 
@@ -871,7 +881,7 @@ impl DeviceRecord {
         }
     }
 
-    fn lan_bridge(
+    pub(crate) fn lan_bridge(
         id: String,
         identity: Identity,
         network: NetworkSummary,
@@ -1003,7 +1013,7 @@ pub struct NetworkSummary {
 }
 
 impl NetworkSummary {
-    fn is_not_older_than(&self, current: &Self) -> bool {
+    pub(crate) fn is_not_older_than(&self, current: &Self) -> bool {
         self.configuration_generation > current.configuration_generation
             || (self.configuration_generation == current.configuration_generation
                 && self.transition_sequence >= current.transition_sequence)
@@ -1017,8 +1027,8 @@ impl NetworkSummary {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbWifiConfigReceipt {
-    network: NetworkSummary,
+pub(crate) struct UsbWifiConfigReceipt {
+    pub(crate) network: NetworkSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1206,61 +1216,61 @@ pub struct ThermalPlantRuntime {
     pub transport_delay_ms: Option<u32>,
 }
 
-fn default_thermal_profile_mode() -> String {
+pub(crate) fn default_thermal_profile_mode() -> String {
     "65w".to_string()
 }
 
-fn default_thermal_profile_resolved_bank() -> String {
+pub(crate) fn default_thermal_profile_resolved_bank() -> String {
     "pps3a".to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MockThermalCandidateSettings {
-    temp_filter_alpha_permille: u16,
-    warmup_reenter_centi_c: u16,
-    hold_entry_centi_c: u16,
-    hold_exit_centi_c: u16,
-    hold_on_centi_c: u16,
-    hold_off_centi_c: u16,
-    overshoot_cutoff_centi_c: u16,
-    approach_max_ticks: u16,
-    approach_min_power_ratio_permille: u16,
-    hold_kp_permille_per_c: u16,
-    hold_ki_permille_per_c_tick: u16,
-    hold_blend_ticks: u16,
-    hold_reheat_power_permille: u16,
-    approach_lead_ticks: u16,
-    hold_lead_ticks: u16,
-    auto_adjustable_working_floor_mv: u16,
-    heater_current_reserve_ma: u16,
+pub(crate) struct MockThermalCandidateSettings {
+    pub(crate) temp_filter_alpha_permille: u16,
+    pub(crate) warmup_reenter_centi_c: u16,
+    pub(crate) hold_entry_centi_c: u16,
+    pub(crate) hold_exit_centi_c: u16,
+    pub(crate) hold_on_centi_c: u16,
+    pub(crate) hold_off_centi_c: u16,
+    pub(crate) overshoot_cutoff_centi_c: u16,
+    pub(crate) approach_max_ticks: u16,
+    pub(crate) approach_min_power_ratio_permille: u16,
+    pub(crate) hold_kp_permille_per_c: u16,
+    pub(crate) hold_ki_permille_per_c_tick: u16,
+    pub(crate) hold_blend_ticks: u16,
+    pub(crate) hold_reheat_power_permille: u16,
+    pub(crate) approach_lead_ticks: u16,
+    pub(crate) hold_lead_ticks: u16,
+    pub(crate) auto_adjustable_working_floor_mv: u16,
+    pub(crate) heater_current_reserve_ma: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MockThermalCandidatePoint {
-    target_temp_c: i16,
-    brake_distance_centi_c: u16,
-    warmup_power_permille: u16,
-    approach_power_permille: u16,
-    approach_floor_power_permille: u16,
-    approach_damping_exponent_permille: u16,
-    approach_tail_window_centi_c: u16,
-    hold_power_permille: u16,
-    hold_reheat_power_permille: u16,
-    warmup_reenter_centi_c: u16,
-    hold_entry_centi_c: u16,
-    hold_exit_centi_c: u16,
-    hold_on_centi_c: u16,
-    hold_off_centi_c: u16,
-    overshoot_cutoff_centi_c: u16,
-    hold_kp_permille_per_c: u16,
-    hold_ki_permille_per_c_tick: u16,
-    hold_blend_ticks: u16,
-    approach_lead_ticks: u16,
-    hold_lead_ticks: u16,
+pub(crate) struct MockThermalCandidatePoint {
+    pub(crate) target_temp_c: i16,
+    pub(crate) brake_distance_centi_c: u16,
+    pub(crate) warmup_power_permille: u16,
+    pub(crate) approach_power_permille: u16,
+    pub(crate) approach_floor_power_permille: u16,
+    pub(crate) approach_damping_exponent_permille: u16,
+    pub(crate) approach_tail_window_centi_c: u16,
+    pub(crate) hold_power_permille: u16,
+    pub(crate) hold_reheat_power_permille: u16,
+    pub(crate) warmup_reenter_centi_c: u16,
+    pub(crate) hold_entry_centi_c: u16,
+    pub(crate) hold_exit_centi_c: u16,
+    pub(crate) hold_on_centi_c: u16,
+    pub(crate) hold_off_centi_c: u16,
+    pub(crate) overshoot_cutoff_centi_c: u16,
+    pub(crate) hold_kp_permille_per_c: u16,
+    pub(crate) hold_ki_permille_per_c_tick: u16,
+    pub(crate) hold_blend_ticks: u16,
+    pub(crate) approach_lead_ticks: u16,
+    pub(crate) hold_lead_ticks: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct MockThermalCandidateProfile {
-    settings: MockThermalCandidateSettings,
-    points: Vec<MockThermalCandidatePoint>,
+pub(crate) struct MockThermalCandidateProfile {
+    pub(crate) settings: MockThermalCandidateSettings,
+    pub(crate) points: Vec<MockThermalCandidatePoint>,
 }

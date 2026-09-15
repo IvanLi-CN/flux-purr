@@ -1,20 +1,23 @@
+#[allow(unused_imports)]
+use super::*;
+
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 #[derive(Debug, Default)]
-struct EepromSnapshotSession {
-    active: bool,
+pub(crate) struct EepromSnapshotSession {
+    pub(crate) active: bool,
     session_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     next_offset: u16,
     last_activity_ms: u64,
 }
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn snapshot_string<const N: usize>(value: &str) -> heapless::String<N> {
+pub(crate) fn snapshot_string<const N: usize>(value: &str) -> heapless::String<N> {
     let mut output = heapless::String::new();
     let _ = output.push_str(value);
     output
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn eeprom_snapshot_error(
+pub(crate) fn eeprom_snapshot_error(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     code: &'static str,
 ) -> EepromSnapshotResponse {
@@ -32,7 +35,7 @@ fn eeprom_snapshot_error(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn eeprom_snapshot_storage_failure(response: &EepromSnapshotResponse) -> bool {
+pub(crate) fn eeprom_snapshot_storage_failure(response: &EepromSnapshotResponse) -> bool {
     matches!(
         response.error.as_ref().map(|error| error.as_str()),
         Some("eeprom_unavailable" | "eeprom_read_failed" | "snapshot_hash_mismatch")
@@ -40,7 +43,7 @@ fn eeprom_snapshot_storage_failure(response: &EepromSnapshotResponse) -> bool {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn eeprom_snapshot_digest<PWM>(
+pub(crate) async fn eeprom_snapshot_digest<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     pd_port: &mut PdPort,
     service: &mut EepromPdServiceContext<'_, PWM>,
@@ -81,7 +84,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn write_eeprom_snapshot_response(
+pub(crate) fn write_eeprom_snapshot_response(
     usb: &mut RawUsbSerialJtag,
     response: &EepromSnapshotResponse,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
@@ -99,7 +102,7 @@ fn write_eeprom_snapshot_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_eeprom_snapshot_line<PWM>(
+pub(crate) async fn process_eeprom_snapshot_line<PWM>(
     line: &str,
     session: &mut EepromSnapshotSession,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
@@ -144,7 +147,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn process_eeprom_snapshot_request<PWM>(
+pub(crate) async fn process_eeprom_snapshot_request<PWM>(
     request: EepromSnapshotRequest,
     session: &mut EepromSnapshotSession,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
@@ -161,17 +164,38 @@ where
             open_eeprom_snapshot(request, session, memory_commit_due_ms, elapsed_ms, service)
         }
         "eeprom_snapshot_read" => {
-            read_eeprom_snapshot(request, session, i2c, pd_port, service, memory_commit_due_ms, elapsed_ms).await
+            read_eeprom_snapshot(
+                request,
+                session,
+                i2c,
+                pd_port,
+                service,
+                memory_commit_due_ms,
+                elapsed_ms,
+            )
+            .await
         }
         "eeprom_snapshot_close" => {
-            close_eeprom_snapshot(request, session, i2c, pd_port, service, memory_commit_due_ms, elapsed_ms).await
+            close_eeprom_snapshot(
+                request,
+                session,
+                i2c,
+                pd_port,
+                service,
+                memory_commit_due_ms,
+                elapsed_ms,
+            )
+            .await
         }
-        _ => Some(eeprom_snapshot_error(request.request_id, "snapshot_op_unsupported")),
+        _ => Some(eeprom_snapshot_error(
+            request.request_id,
+            "snapshot_op_unsupported",
+        )),
     }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn open_eeprom_snapshot<PWM>(
+pub(crate) fn open_eeprom_snapshot<PWM>(
     request: EepromSnapshotRequest,
     session: &mut EepromSnapshotSession,
     memory_commit_due_ms: &mut Option<u64>,
@@ -208,7 +232,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn read_eeprom_snapshot<PWM>(
+pub(crate) async fn read_eeprom_snapshot<PWM>(
     request: EepromSnapshotRequest,
     session: &mut EepromSnapshotSession,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
@@ -221,13 +245,12 @@ where
     PWM: SetDutyCycle,
 {
     let request_id = request.request_id;
-    let requested_session = request
-        .session_id
-        .as_ref()
-        .unwrap_or(&request_id)
-        .clone();
+    let requested_session = request.session_id.as_ref().unwrap_or(&request_id).clone();
     if !session.active || requested_session != session.session_id {
-        return Some(eeprom_snapshot_error(request_id, "snapshot_session_invalid"));
+        return Some(eeprom_snapshot_error(
+            request_id,
+            "snapshot_session_invalid",
+        ));
     }
     if *service.last_heater_duty != 0 {
         session.active = false;
@@ -280,7 +303,7 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn close_eeprom_snapshot<PWM>(
+pub(crate) async fn close_eeprom_snapshot<PWM>(
     request: EepromSnapshotRequest,
     session: &mut EepromSnapshotSession,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
@@ -293,13 +316,12 @@ where
     PWM: SetDutyCycle,
 {
     let request_id = request.request_id;
-    let requested_session = request
-        .session_id
-        .as_ref()
-        .unwrap_or(&request_id)
-        .clone();
+    let requested_session = request.session_id.as_ref().unwrap_or(&request_id).clone();
     if !session.active || requested_session != session.session_id {
-        return Some(eeprom_snapshot_error(request_id, "snapshot_session_invalid"));
+        return Some(eeprom_snapshot_error(
+            request_id,
+            "snapshot_session_invalid",
+        ));
     }
     if *service.last_heater_duty != 0 {
         session.active = false;

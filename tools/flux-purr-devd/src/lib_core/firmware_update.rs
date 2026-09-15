@@ -1,4 +1,6 @@
-fn validate_manual_pps_against_status(
+pub(crate) use super::*;
+
+pub(crate) fn validate_manual_pps_against_status(
     millivolts: u16,
     milliamps: u16,
     status: &ControlPlaneStatus,
@@ -19,7 +21,7 @@ fn validate_manual_pps_against_status(
     Ok(())
 }
 
-async fn verify_artifact_route(
+pub(crate) async fn verify_artifact_route(
     State(state): State<AppState>,
     Json(payload): Json<ArtifactVerifyRequest>,
 ) -> Result<Json<ArtifactVerifyResult>, HttpError> {
@@ -28,7 +30,7 @@ async fn verify_artifact_route(
         .map_err(sanitize_io_error)
 }
 
-async fn list_artifacts_route(
+pub(crate) async fn list_artifacts_route(
     State(state): State<AppState>,
 ) -> Result<Json<FirmwareArtifactCatalog>, HttpError> {
     discover_firmware_artifacts(state.config.artifact_root.as_deref())
@@ -36,7 +38,7 @@ async fn list_artifacts_route(
         .map_err(sanitize_io_error)
 }
 
-async fn list_firmware_bundles(
+pub(crate) async fn list_firmware_bundles(
     State(state): State<AppState>,
 ) -> Result<Json<FirmwareBundleCatalog>, HttpError> {
     let mut bundles = Vec::new();
@@ -53,7 +55,7 @@ async fn list_firmware_bundles(
     Ok(Json(FirmwareBundleCatalog { bundles }))
 }
 
-async fn import_firmware_bundle(
+pub(crate) async fn import_firmware_bundle(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<FirmwareBundleSummary>), HttpError> {
@@ -81,7 +83,7 @@ async fn import_firmware_bundle(
     Ok((StatusCode::CREATED, Json(bundle_summary(&bundle))))
 }
 
-async fn local_firmware_update(
+pub(crate) async fn local_firmware_update(
     State(state): State<AppState>,
     Json(payload): Json<LocalFirmwareUpdateRequest>,
 ) -> Result<Json<Value>, HttpError> {
@@ -140,7 +142,7 @@ async fn local_firmware_update(
     })))
 }
 
-fn validate_local_update_request(
+pub(crate) fn validate_local_update_request(
     state: &AppState,
     payload: &LocalFirmwareUpdateRequest,
 ) -> Result<(String, firmware_bundle::FirmwareBundle), HttpError> {
@@ -187,7 +189,10 @@ fn validate_local_update_request(
     Ok((port, bundle))
 }
 
-fn find_local_update_target(state: &AppState, port: &str) -> Result<DeviceRecord, HttpError> {
+pub(crate) fn find_local_update_target(
+    state: &AppState,
+    port: &str,
+) -> Result<DeviceRecord, HttpError> {
     let serial_devices = scan_serial_devices(Some(Path::new(port)));
     let mut state_lock = state.lock()?;
     refresh_serial_devices(&mut state_lock, serial_devices);
@@ -214,12 +219,13 @@ fn find_local_update_target(state: &AppState, port: &str) -> Result<DeviceRecord
     Ok(target)
 }
 
-async fn verify_reconnected_firmware(
+pub(crate) async fn verify_reconnected_firmware(
     state: &AppState,
     target: &DeviceRecord,
     bundle: &firmware_bundle::FirmwareBundle,
 ) -> bool {
-    let identity = serial_request_payload::<Identity>(state, target, "get_identity", "identity").await;
+    let identity =
+        serial_request_payload::<Identity>(state, target, "get_identity", "identity").await;
     let install_status = serial_request_payload::<InstallStatus>(
         state,
         target,
@@ -238,7 +244,7 @@ async fn verify_reconnected_firmware(
     })
 }
 
-fn bundle_summary(bundle: &firmware_bundle::FirmwareBundle) -> FirmwareBundleSummary {
+pub(crate) fn bundle_summary(bundle: &firmware_bundle::FirmwareBundle) -> FirmwareBundleSummary {
     FirmwareBundleSummary {
         artifact_id: bundle.bundle_sha256.clone(),
         source: "local".into(),
@@ -256,11 +262,11 @@ fn bundle_summary(bundle: &firmware_bundle::FirmwareBundle) -> FirmwareBundleSum
     }
 }
 
-fn bundle_http_error(error: firmware_bundle::BundleError) -> HttpError {
+pub(crate) fn bundle_http_error(error: firmware_bundle::BundleError) -> HttpError {
     HttpError::bad_request("firmware_bundle_invalid", &error.to_string())
 }
 
-fn validate_update_runtime_facts(
+pub(crate) fn validate_update_runtime_facts(
     transport: DeviceTransport,
     current_version: &str,
     status: &ControlPlaneStatus,
@@ -282,7 +288,7 @@ fn validate_update_runtime_facts(
     Ok(())
 }
 
-async fn refresh_native_update_runtime_facts(
+pub(crate) async fn refresh_native_update_runtime_facts(
     state: &AppState,
     target: &DeviceRecord,
     lease_id: &str,
@@ -316,7 +322,7 @@ async fn refresh_native_update_runtime_facts(
     Ok((identity, status))
 }
 
-struct PreparedFirmwareOperation {
+pub(crate) struct PreparedFirmwareOperation {
     bundle: firmware_bundle::FirmwareBundle,
     target: DeviceRecord,
     port_path: String,
@@ -326,7 +332,7 @@ struct PreparedFirmwareOperation {
     rom_mac: String,
 }
 
-async fn firmware_operation(
+pub(crate) async fn firmware_operation(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<FirmwareOperationRequest>,
@@ -352,7 +358,8 @@ async fn firmware_operation(
         &prepared.bundle.bundle_sha256,
     );
     if payload.dry_run {
-        let token = create_firmware_approval(&state, &device_id, &payload, &prepared, preflight_digest)?;
+        let token =
+            create_firmware_approval(&state, &device_id, &payload, &prepared, preflight_digest)?;
         progress.stage_completed("preflight", json!({}));
         progress.operation_completed("passed");
         return Ok(Json(FirmwareOperationResult {
@@ -368,7 +375,14 @@ async fn firmware_operation(
         }));
     }
 
-    authorize_firmware_operation(&state, &device_id, &payload, &prepared, preflight_digest, &mut progress)?;
+    authorize_firmware_operation(
+        &state,
+        &device_id,
+        &payload,
+        &prepared,
+        preflight_digest,
+        &mut progress,
+    )?;
     progress.stage_completed("authorization", json!({}));
 
     run_bundle_flash_transaction(
@@ -379,7 +393,8 @@ async fn firmware_operation(
         &mut progress,
     )
     .await?;
-    let verified = reconnect_firmware_operation(&state, &device_id, &prepared, &mut progress).await?;
+    let verified =
+        reconnect_firmware_operation(&state, &device_id, &prepared, &mut progress).await?;
     let outcome = if verified {
         progress.stage_completed("runtime_verify", json!({}));
         "verified"
@@ -406,14 +421,18 @@ async fn firmware_operation(
     }))
 }
 
-async fn prepare_firmware_operation(
+pub(crate) async fn prepare_firmware_operation(
     state: &AppState,
     device_id: &str,
     payload: &FirmwareOperationRequest,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<PreparedFirmwareOperation, HttpError> {
     progress.stage_started(
-        if payload.dry_run { "artifact" } else { "authorization" },
+        if payload.dry_run {
+            "artifact"
+        } else {
+            "authorization"
+        },
         json!({}),
     );
     let bundle = load_operation_bundle(state, payload, progress)?;
@@ -451,7 +470,7 @@ async fn prepare_firmware_operation(
     Ok(prepared)
 }
 
-fn load_operation_bundle(
+pub(crate) fn load_operation_bundle(
     state: &AppState,
     payload: &FirmwareOperationRequest,
     progress: &mut FirmwareOperationProgress,
@@ -475,7 +494,7 @@ fn load_operation_bundle(
     Ok(bundle)
 }
 
-fn load_operation_target(
+pub(crate) fn load_operation_target(
     state: &AppState,
     device_id: &str,
     payload: &FirmwareOperationRequest,
@@ -502,7 +521,7 @@ fn load_operation_target(
     progress.require(target)
 }
 
-async fn refresh_operation_facts(
+pub(crate) async fn refresh_operation_facts(
     state: &AppState,
     device_id: &str,
     payload: &FirmwareOperationRequest,
@@ -514,8 +533,10 @@ async fn refresh_operation_facts(
     }
     let identity = match prepared.transport {
         DeviceTransport::NativeSerial => {
-            let (identity, status) = progress
-                .require(refresh_native_update_runtime_facts(state, &prepared.target, &payload.lease_id).await)?;
+            let (identity, status) = progress.require(
+                refresh_native_update_runtime_facts(state, &prepared.target, &payload.lease_id)
+                    .await,
+            )?;
             prepared.status = status;
             Some(identity)
         }
@@ -538,7 +559,7 @@ async fn refresh_operation_facts(
     ))
 }
 
-fn update_operation_device(
+pub(crate) fn update_operation_device(
     state: &AppState,
     device_id: &str,
     prepared: &PreparedFirmwareOperation,
@@ -562,7 +583,7 @@ fn update_operation_device(
     Ok(())
 }
 
-async fn operation_rom_security(
+pub(crate) async fn operation_rom_security(
     state: &AppState,
     prepared: &PreparedFirmwareOperation,
     progress: &mut FirmwareOperationProgress,
@@ -587,7 +608,7 @@ async fn operation_rom_security(
     Ok(security.rom_mac)
 }
 
-fn validate_operation_downgrade(
+pub(crate) fn validate_operation_downgrade(
     prepared: &PreparedFirmwareOperation,
     payload: &FirmwareOperationRequest,
 ) -> Result<(), HttpError> {
@@ -608,7 +629,11 @@ fn validate_operation_downgrade(
             .version
             .trim_start_matches('v'),
     );
-    if current.ok().zip(target.ok()).is_some_and(|(current, target)| target < current) {
+    if current
+        .ok()
+        .zip(target.ok())
+        .is_some_and(|(current, target)| target < current)
+    {
         return Err(HttpError::forbidden(
             "downgrade_confirmation_required",
             "The target firmware is older; explicit allowDowngrade is required.",
@@ -617,7 +642,7 @@ fn validate_operation_downgrade(
     Ok(())
 }
 
-fn create_firmware_approval(
+pub(crate) fn create_firmware_approval(
     state: &AppState,
     device_id: &str,
     payload: &FirmwareOperationRequest,
@@ -643,7 +668,7 @@ fn create_firmware_approval(
     Ok(token)
 }
 
-fn authorize_firmware_operation(
+pub(crate) fn authorize_firmware_operation(
     state: &AppState,
     device_id: &str,
     payload: &FirmwareOperationRequest,
@@ -657,9 +682,14 @@ fn authorize_firmware_operation(
             "Execution requires a current single-use approval token.",
         )
     }))?;
-    let approval = progress.require(state.lock()?.firmware_approvals.remove(token).ok_or_else(|| {
-        HttpError::forbidden("approval_invalid", "The approval token is invalid or already used.")
-    }))?;
+    let approval = progress.require(state.lock()?.firmware_approvals.remove(token).ok_or_else(
+        || {
+            HttpError::forbidden(
+                "approval_invalid",
+                "The approval token is invalid or already used.",
+            )
+        },
+    ))?;
     let matches = approval.expires_at > Instant::now()
         && approval.lease_id == payload.lease_id
         && approval.device_id == device_id
@@ -700,7 +730,7 @@ fn authorize_firmware_operation(
     Ok(())
 }
 
-async fn reconnect_firmware_operation(
+pub(crate) async fn reconnect_firmware_operation(
     state: &AppState,
     device_id: &str,
     prepared: &PreparedFirmwareOperation,
@@ -715,7 +745,8 @@ async fn reconnect_firmware_operation(
             .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))
     }?;
     progress.stage_started("runtime_reconnect", json!({}));
-    let identity = serial_request_payload::<Identity>(state, &target, "get_identity", "identity").await;
+    let identity =
+        serial_request_payload::<Identity>(state, &target, "get_identity", "identity").await;
     let install_status = serial_request_payload::<InstallStatus>(
         state,
         &target,
@@ -736,11 +767,12 @@ async fn reconnect_firmware_operation(
     }) && install_status.as_ref().is_ok_and(|status| {
         status.layout_id == prepared.bundle.manifest.layout.id
             && status.layout_version == prepared.bundle.manifest.layout.version
-            && status.partition_table_sha256 == prepared.bundle.manifest.layout.partition_table_sha256
+            && status.partition_table_sha256
+                == prepared.bundle.manifest.layout.partition_table_sha256
     }))
 }
 
-async fn run_bundle_flash_transaction(
+pub(crate) async fn run_bundle_flash_transaction(
     state: &AppState,
     bundle: &firmware_bundle::FirmwareBundle,
     operation: FirmwareOperation,
@@ -775,13 +807,21 @@ async fn run_bundle_flash_transaction(
         progress,
     )
     .await?;
-    write_bundle_segments(&program, &common, port_path, bundle, workspace.path(), progress).await?;
+    write_bundle_segments(
+        &program,
+        &common,
+        port_path,
+        bundle,
+        workspace.path(),
+        progress,
+    )
+    .await?;
     verify_bundle_checksums(&program, &common, port_path, bundle, progress).await?;
     reset_after_bundle(&program, &common, port_path, progress).await?;
     Ok(())
 }
 
-fn stage_bundle_segments(
+pub(crate) fn stage_bundle_segments(
     bundle: &firmware_bundle::FirmwareBundle,
     workspace: &Path,
     progress: &mut FirmwareOperationProgress,
@@ -798,7 +838,7 @@ fn stage_bundle_segments(
     Ok(())
 }
 
-fn espflash_common_args(port_path: &str) -> Vec<String> {
+pub(crate) fn espflash_common_args(port_path: &str) -> Vec<String> {
     vec![
         "--chip".into(),
         "esp32s3".into(),
@@ -808,7 +848,7 @@ fn espflash_common_args(port_path: &str) -> Vec<String> {
     ]
 }
 
-async fn run_bundle_erase_if_needed(
+pub(crate) async fn run_bundle_erase_if_needed(
     operation: FirmwareOperation,
     program: &Path,
     common: &[String],
@@ -848,7 +888,7 @@ async fn run_bundle_erase_if_needed(
     Ok(())
 }
 
-async fn write_bundle_segments(
+pub(crate) async fn write_bundle_segments(
     program: &Path,
     common: &[String],
     port_path: &str,
@@ -880,7 +920,7 @@ async fn write_bundle_segments(
     Ok(())
 }
 
-async fn verify_bundle_checksums(
+pub(crate) async fn verify_bundle_checksums(
     program: &Path,
     common: &[String],
     port_path: &str,
@@ -916,7 +956,7 @@ async fn verify_bundle_checksums(
     Ok(())
 }
 
-async fn reset_after_bundle(
+pub(crate) async fn reset_after_bundle(
     program: &Path,
     common: &[String],
     port_path: &str,
@@ -930,7 +970,7 @@ async fn reset_after_bundle(
     Ok(())
 }
 
-fn build_checksum_md5_args(common: &[String], address: u64, length: u64) -> Vec<String> {
+pub(crate) fn build_checksum_md5_args(common: &[String], address: u64, length: u64) -> Vec<String> {
     let mut args = vec!["checksum-md5".to_string()];
     args.extend(common.iter().cloned());
     args.extend([
@@ -944,7 +984,7 @@ fn build_checksum_md5_args(common: &[String], address: u64, length: u64) -> Vec<
     args
 }
 
-async fn require_bundle_espflash_success(
+pub(crate) async fn require_bundle_espflash_success(
     program: &Path,
     args: &[String],
     port_path: &str,
@@ -1000,14 +1040,21 @@ async fn require_bundle_espflash_success(
     })
 }
 
-fn replace_espflash_before_reset(args: &[String], before_reset: &str) -> Option<Vec<String>> {
+pub(crate) fn replace_espflash_before_reset(
+    args: &[String],
+    before_reset: &str,
+) -> Option<Vec<String>> {
     let index = args.iter().position(|argument| argument == "--before")?;
     let mut replaced = args.to_vec();
     *replaced.get_mut(index + 1)? = before_reset.to_string();
     Some(replaced)
 }
 
-fn espflash_command_error(program: &Path, args: &[String], output: &Output) -> HttpError {
+pub(crate) fn espflash_command_error(
+    program: &Path,
+    args: &[String],
+    output: &Output,
+) -> HttpError {
     HttpError {
         status: StatusCode::BAD_GATEWAY,
         error: ApiError {
@@ -1019,11 +1066,11 @@ fn espflash_command_error(program: &Path, args: &[String], output: &Output) -> H
     }
 }
 
-async fn probe_native_rom_security(
+pub(crate) async fn probe_native_rom_security(
     state: &AppState,
     port_path: &str,
 ) -> Result<RomSecurityInfo, HttpError> {
-    use espflash::{
+    use ::espflash::{
         connection::{Connection, ResetAfterOperation, ResetBeforeOperation},
         flasher::Flasher,
     };
@@ -1105,7 +1152,7 @@ async fn probe_native_rom_security(
     })
 }
 
-fn firmware_preflight_stages() -> Vec<String> {
+pub(crate) fn firmware_preflight_stages() -> Vec<String> {
     [
         "artifact",
         "transport",
@@ -1118,7 +1165,7 @@ fn firmware_preflight_stages() -> Vec<String> {
     .collect()
 }
 
-fn firmware_execution_stages(operation: FirmwareOperation) -> Vec<String> {
+pub(crate) fn firmware_execution_stages(operation: FirmwareOperation) -> Vec<String> {
     let mut stages = vec!["authorization"];
     if operation == FirmwareOperation::InstallRecovery {
         stages.push("erase");

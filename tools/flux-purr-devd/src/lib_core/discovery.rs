@@ -1,4 +1,6 @@
-async fn execute_flash(
+pub(crate) use super::*;
+
+pub(crate) async fn execute_flash(
     state: &AppState,
     device_id: &str,
     artifact: &FirmwareArtifact,
@@ -79,7 +81,7 @@ pub fn scan_serial_devices(serial_port: Option<&Path>) -> Vec<DeviceRecord> {
     scan_serial_devices_from_available(serial_port, &available_ports)
 }
 
-fn scan_serial_devices_from_available(
+pub(crate) fn scan_serial_devices_from_available(
     serial_port: Option<&Path>,
     available_ports: &[serialport::SerialPortInfo],
 ) -> Vec<DeviceRecord> {
@@ -101,7 +103,7 @@ fn scan_serial_devices_from_available(
     vec![serial_device_record(&port_name, port_info)]
 }
 
-fn is_flux_purr_usb_candidate(port: &serialport::SerialPortInfo) -> bool {
+pub(crate) fn is_flux_purr_usb_candidate(port: &serialport::SerialPortInfo) -> bool {
     port.port_name.starts_with("/dev/cu.usbmodem")
         || matches!(
             &port.port_type,
@@ -109,7 +111,7 @@ fn is_flux_purr_usb_candidate(port: &serialport::SerialPortInfo) -> bool {
         )
 }
 
-fn refresh_serial_devices(state: &mut DevdState, serial_devices: Vec<DeviceRecord>) {
+pub(crate) fn refresh_serial_devices(state: &mut DevdState, serial_devices: Vec<DeviceRecord>) {
     let serial_ids = serial_devices
         .iter()
         .map(|device| device.id.clone())
@@ -133,7 +135,7 @@ fn refresh_serial_devices(state: &mut DevdState, serial_devices: Vec<DeviceRecor
     }
 }
 
-fn serial_device_record(
+pub(crate) fn serial_device_record(
     port_name: &str,
     port_info: Option<&serialport::SerialPortInfo>,
 ) -> DeviceRecord {
@@ -158,7 +160,7 @@ fn serial_device_record(
     DeviceRecord::native_serial_placeholder(&id, display_name, port_name.to_string())
 }
 
-fn missing_serial_device_record(
+pub(crate) fn missing_serial_device_record(
     port_name: &str,
     available_ports: &[serialport::SerialPortInfo],
 ) -> DeviceRecord {

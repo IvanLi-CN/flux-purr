@@ -1,3 +1,5 @@
+pub(crate) use super::*;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CalibrationMode {
@@ -298,21 +300,24 @@ impl Default for CalibrationSlotFit {
 }
 
 impl CalibrationState {
-    fn channel_mut(&mut self, channel: CalibrationChannel) -> &mut CalibrationChannelState {
+    pub(crate) fn channel_mut(
+        &mut self,
+        channel: CalibrationChannel,
+    ) -> &mut CalibrationChannelState {
         match channel {
             CalibrationChannel::RtdAdc => &mut self.rtd_adc,
             CalibrationChannel::VinAdc => &mut self.vin_adc,
         }
     }
 
-    fn refresh_fits(&mut self) {
+    pub(crate) fn refresh_fits(&mut self) {
         self.rtd_adc.refresh(CalibrationChannel::RtdAdc);
         self.vin_adc.refresh(CalibrationChannel::VinAdc);
     }
 }
 
 impl CalibrationChannelState {
-    fn refresh(&mut self, channel: CalibrationChannel) {
+    pub(crate) fn refresh(&mut self, channel: CalibrationChannel) {
         if channel == CalibrationChannel::RtdAdc {
             sanitize_web_facing_rtd_samples(&mut self.samples);
         } else {
@@ -321,12 +326,12 @@ impl CalibrationChannelState {
         self.fitted_fit = fit_calibration_channel(&self.samples, channel);
     }
 
-    fn sanitize_slot_fits(&mut self) {
+    pub(crate) fn sanitize_slot_fits(&mut self) {
         sanitize_calibration_slot_fit(&mut self.slots.a);
         sanitize_calibration_slot_fit(&mut self.slots.b);
     }
 
-    fn slot_fit_mut(&mut self, slot: CalibrationSlotId) -> &mut CalibrationSlotFit {
+    pub(crate) fn slot_fit_mut(&mut self, slot: CalibrationSlotId) -> &mut CalibrationSlotFit {
         match slot {
             CalibrationSlotId::A => &mut self.slots.a,
             CalibrationSlotId::B => &mut self.slots.b,
@@ -334,7 +339,7 @@ impl CalibrationChannelState {
     }
 }
 
-fn sanitize_calibration_slot_fit(fit: &mut CalibrationSlotFit) {
+pub(crate) fn sanitize_calibration_slot_fit(fit: &mut CalibrationSlotFit) {
     if !fit.gain.is_finite() || fit.gain == 0.0 {
         fit.gain = 1.0;
     }
@@ -343,7 +348,7 @@ fn sanitize_calibration_slot_fit(fit: &mut CalibrationSlotFit) {
     }
 }
 
-fn fit_calibration_channel(
+pub(crate) fn fit_calibration_channel(
     samples: &[Option<CalibrationSample>],
     channel: CalibrationChannel,
 ) -> CalibrationFit {
@@ -404,7 +409,7 @@ fn fit_calibration_channel(
     }
 }
 
-fn is_web_facing_calibration_sample(
+pub(crate) fn is_web_facing_calibration_sample(
     sample: CalibrationSample,
     channel: CalibrationChannel,
 ) -> bool {
@@ -416,7 +421,7 @@ fn is_web_facing_calibration_sample(
     }
 }
 
-fn sanitize_web_facing_rtd_samples(samples: &mut Vec<Option<CalibrationSample>>) {
+pub(crate) fn sanitize_web_facing_rtd_samples(samples: &mut Vec<Option<CalibrationSample>>) {
     let mut compacted: Vec<Option<CalibrationSample>> = samples
         .iter()
         .flatten()
@@ -428,7 +433,7 @@ fn sanitize_web_facing_rtd_samples(samples: &mut Vec<Option<CalibrationSample>>)
     *samples = compacted;
 }
 
-fn vin_adc_mv_for_input_mv(input_mv: u32) -> u16 {
+pub(crate) fn vin_adc_mv_for_input_mv(input_mv: u32) -> u16 {
     let denominator = VIN_DIVIDER_R_HIGH_OHMS + VIN_DIVIDER_R_LOW_OHMS;
     input_mv
         .saturating_mul(VIN_DIVIDER_R_LOW_OHMS)
@@ -518,7 +523,7 @@ pub struct WifiStaticIpv4Request {
 /// Preserve the three API states for `staticIpv4`: a missing field keeps the
 /// current mode, JSON `null` switches back to DHCP, and an object sets static
 /// IPv4. Nested `Option` derives otherwise merge the first two states.
-fn deserialize_static_ipv4_patch<'de, D>(
+pub(crate) fn deserialize_static_ipv4_patch<'de, D>(
     deserializer: D,
 ) -> Result<Option<Option<WifiStaticIpv4Request>>, D::Error>
 where
@@ -851,7 +856,7 @@ pub enum WifiConfigOp {
 }
 
 impl WifiConfigOp {
-    const fn usb_op(self) -> &'static str {
+    pub(crate) const fn usb_op(self) -> &'static str {
         match self {
             Self::Set => "set",
             Self::Clear => "clear",
@@ -862,91 +867,91 @@ impl WifiConfigOp {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbRequestWire<'a> {
+pub(crate) struct UsbRequestWire<'a> {
     #[serde(rename = "type")]
-    frame_type: &'static str,
-    request_id: &'a str,
-    op: &'static str,
+    pub(crate) frame_type: &'static str,
+    pub(crate) request_id: &'a str,
+    pub(crate) op: &'static str,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbThermalPlantRunWire<'a> {
+pub(crate) struct UsbThermalPlantRunWire<'a> {
     #[serde(rename = "type")]
-    frame_type: &'static str,
-    request_id: &'a str,
-    after_sample: u8,
+    pub(crate) frame_type: &'static str,
+    pub(crate) request_id: &'a str,
+    pub(crate) after_sample: u8,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbWifiConfigWire<'a> {
+pub(crate) struct UsbWifiConfigWire<'a> {
     #[serde(rename = "type")]
-    frame_type: &'static str,
-    request_id: &'a str,
-    op: &'static str,
+    pub(crate) frame_type: &'static str,
+    pub(crate) request_id: &'a str,
+    pub(crate) op: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    ssid: Option<&'a str>,
+    pub(crate) ssid: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    password: Option<&'a str>,
+    pub(crate) password: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    static_ipv4: Option<Option<WifiStaticIpv4Request>>,
+    pub(crate) static_ipv4: Option<Option<WifiStaticIpv4Request>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    telemetry_interval_ms: Option<u32>,
+    pub(crate) telemetry_interval_ms: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbRuntimeConfigWire<'a> {
+pub(crate) struct UsbRuntimeConfigWire<'a> {
     #[serde(rename = "type")]
-    frame_type: &'static str,
-    request_id: &'a str,
+    pub(crate) frame_type: &'static str,
+    pub(crate) request_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    target_temp_c: Option<i16>,
+    pub(crate) target_temp_c: Option<i16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    selected_preset_slot: Option<usize>,
+    pub(crate) selected_preset_slot: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    presets_c: Option<&'a Vec<Option<i16>>>,
+    pub(crate) presets_c: Option<&'a Vec<Option<i16>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    active_cooling_enabled: Option<bool>,
+    pub(crate) active_cooling_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    post_heat_cooling_mode: Option<&'a String>,
+    pub(crate) post_heat_cooling_mode: Option<&'a String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    heating_fan_guard_mode: Option<&'a String>,
+    pub(crate) heating_fan_guard_mode: Option<&'a String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    heater_enabled: Option<bool>,
+    pub(crate) heater_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    manual_pps_enabled: Option<bool>,
+    pub(crate) manual_pps_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    manual_pps_mv: Option<u16>,
+    pub(crate) manual_pps_mv: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    manual_pps_ma: Option<u16>,
+    pub(crate) manual_pps_ma: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    fault_attention_acknowledged: Option<bool>,
+    pub(crate) fault_attention_acknowledged: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    calibration: Option<&'a CalibrationControlRequest>,
+    pub(crate) calibration: Option<&'a CalibrationControlRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    thermal_profile_mode: Option<&'a String>,
+    pub(crate) thermal_profile_mode: Option<&'a String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    thermal_control_profile: Option<&'a ThermalControlProfileRequest>,
+    pub(crate) thermal_control_profile: Option<&'a ThermalControlProfileRequest>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbBuzzerTestWire<'a> {
+pub(crate) struct UsbBuzzerTestWire<'a> {
     #[serde(rename = "type")]
-    frame_type: &'static str,
-    request_id: &'a str,
-    op: BuzzerTestOp,
+    pub(crate) frame_type: &'static str,
+    pub(crate) request_id: &'a str,
+    pub(crate) op: BuzzerTestOp,
     #[serde(skip_serializing_if = "Option::is_none")]
-    buzzer_cue: Option<BuzzerTestCue>,
+    pub(crate) buzzer_cue: Option<BuzzerTestCue>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    buzzer_scenario: Option<BuzzerTestScenario>,
-    repeat: bool,
+    pub(crate) buzzer_scenario: Option<BuzzerTestScenario>,
+    pub(crate) repeat: bool,
 }
 
 #[cfg(test)]
-fn encode_usb_runtime_mode_for_test(mode: &String) -> String {
+pub(crate) fn encode_usb_runtime_mode_for_test(mode: &String) -> String {
     serde_json::to_string(&UsbRuntimeConfigWire {
         frame_type: "runtime_config",
         request_id: "mode-test",
@@ -970,87 +975,87 @@ fn encode_usb_runtime_mode_for_test(mode: &String) -> String {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbCalibrationConfigWire<'a> {
+pub(crate) struct UsbCalibrationConfigWire<'a> {
     #[serde(rename = "type")]
-    frame_type: &'static str,
-    request_id: &'a str,
-    op: CalibrationConfigOp,
+    pub(crate) frame_type: &'static str,
+    pub(crate) request_id: &'a str,
+    pub(crate) op: CalibrationConfigOp,
     #[serde(skip_serializing_if = "Option::is_none")]
-    channel: Option<CalibrationChannel>,
+    pub(crate) channel: Option<CalibrationChannel>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reference_temp_c: Option<f32>,
+    pub(crate) reference_temp_c: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reference_vin_mv: Option<u32>,
+    pub(crate) reference_vin_mv: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    target_adc_mv: Option<u16>,
+    pub(crate) target_adc_mv: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    observed_mv: Option<u16>,
+    pub(crate) observed_mv: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    expected_mv: Option<u16>,
+    pub(crate) expected_mv: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    sample_index: Option<usize>,
+    pub(crate) sample_index: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<&'a CalibrationState>,
+    pub(crate) state: Option<&'a CalibrationState>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    slot: Option<CalibrationSlotId>,
+    pub(crate) slot: Option<CalibrationSlotId>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    fit: Option<&'a CalibrationSlotFit>,
+    pub(crate) fit: Option<&'a CalibrationSlotFit>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbHeaterCurveConfigWire<'a> {
+pub(crate) struct UsbHeaterCurveConfigWire<'a> {
     #[serde(rename = "type")]
-    frame_type: &'static str,
-    request_id: &'a str,
-    op: HeaterCurveConfigOp,
+    pub(crate) frame_type: &'static str,
+    pub(crate) request_id: &'a str,
+    pub(crate) op: HeaterCurveConfigOp,
     #[serde(skip_serializing_if = "Option::is_none")]
-    heater_curve: Option<&'a HeaterCurvePackage>,
+    pub(crate) heater_curve: Option<&'a HeaterCurvePackage>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbHeaterCurveSaveWire<'a> {
+pub(crate) struct UsbHeaterCurveSaveWire<'a> {
     #[serde(rename = "type")]
-    frame_type: &'static str,
-    request_id: &'a str,
+    pub(crate) frame_type: &'static str,
+    pub(crate) request_id: &'a str,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbCalibrationJobWire<'a> {
+pub(crate) struct UsbCalibrationJobWire<'a> {
     #[serde(rename = "type")]
-    frame_type: &'static str,
-    request_id: &'a str,
-    op: CalibrationJobOp,
+    pub(crate) frame_type: &'static str,
+    pub(crate) request_id: &'a str,
+    pub(crate) op: CalibrationJobOp,
     #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<CalibrationJobKind>,
+    pub(crate) kind: Option<CalibrationJobKind>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbEepromMaintenanceWire<'a> {
+pub(crate) struct UsbEepromMaintenanceWire<'a> {
     #[serde(rename = "type")]
-    frame_type: &'static str,
-    request_id: &'a str,
-    op: EepromMaintenanceOp,
+    pub(crate) frame_type: &'static str,
+    pub(crate) request_id: &'a str,
+    pub(crate) op: EepromMaintenanceOp,
     #[serde(skip_serializing_if = "Option::is_none")]
-    offset: Option<u16>,
+    pub(crate) offset: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    length: Option<u8>,
+    pub(crate) length: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    bytes: Option<&'a Vec<u8>>,
+    pub(crate) bytes: Option<&'a Vec<u8>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbResponseWire {
+pub(crate) struct UsbResponseWire {
     #[serde(rename = "type")]
-    frame_type: String,
-    request_id: Option<String>,
-    ok: Option<bool>,
-    result: Option<Value>,
-    error: Option<ApiError>,
+    pub(crate) frame_type: String,
+    pub(crate) request_id: Option<String>,
+    pub(crate) ok: Option<bool>,
+    pub(crate) result: Option<Value>,
+    pub(crate) error: Option<ApiError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1126,14 +1131,14 @@ pub struct FlashResult {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct BootObservation {
-    reset_count: u8,
+pub(crate) struct BootObservation {
+    pub(crate) reset_count: u8,
     saw_boot_progress: bool,
-    last_stage: Option<String>,
+    pub(crate) last_stage: Option<String>,
 }
 
 impl BootObservation {
-    fn observe_line(&mut self, line: &str) -> Result<bool, HttpError> {
+    pub(crate) fn observe_line(&mut self, line: &str) -> Result<bool, HttpError> {
         let line = line.trim();
         if line.starts_with("reset_reason=") {
             self.reset_count = self.reset_count.saturating_add(1);
@@ -1214,9 +1219,9 @@ pub struct FirmwareOperationRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LocalFirmwareUpdateRequest {
-    port: String,
-    artifact_id: String,
+pub(crate) struct LocalFirmwareUpdateRequest {
+    pub(crate) port: String,
+    pub(crate) artifact_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1235,24 +1240,24 @@ pub struct FirmwareOperationResult {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum FirmwareOperationPhase {
+pub(crate) enum FirmwareOperationPhase {
     Preflight,
     Execution,
 }
 
-struct FirmwareOperationProgress {
+pub(crate) struct FirmwareOperationProgress {
     state: AppState,
     device_id: String,
     operation_id: String,
     phase: FirmwareOperationPhase,
     operation: FirmwareOperation,
-    artifact_id: String,
+    pub(crate) artifact_id: String,
     sequence: u64,
     active_stage: Option<String>,
 }
 
 impl FirmwareOperationProgress {
-    fn new(
+    pub(crate) fn new(
         state: &AppState,
         device_id: &str,
         operation: FirmwareOperation,
@@ -1279,11 +1284,11 @@ impl FirmwareOperationProgress {
         }
     }
 
-    fn operation_id(&self) -> &str {
+    pub(crate) fn operation_id(&self) -> &str {
         &self.operation_id
     }
 
-    fn emit(&mut self, event_name: &str, stage: Option<&str>, details: Value) {
+    pub(crate) fn emit(&mut self, event_name: &str, stage: Option<&str>, details: Value) {
         self.sequence = self.sequence.saturating_add(1);
         let mut payload = json!({
             "schemaVersion": 1,
@@ -1308,34 +1313,34 @@ impl FirmwareOperationProgress {
         ));
     }
 
-    fn operation_started(&mut self) {
+    pub(crate) fn operation_started(&mut self) {
         self.emit("operation_started", None, json!({}));
     }
 
-    fn stage_started(&mut self, stage: &str, details: Value) {
+    pub(crate) fn stage_started(&mut self, stage: &str, details: Value) {
         self.active_stage = Some(stage.to_string());
         self.emit("stage_started", Some(stage), details);
     }
 
-    fn stage_progress(&mut self, stage: &str, details: Value) {
+    pub(crate) fn stage_progress(&mut self, stage: &str, details: Value) {
         self.emit("stage_progress", Some(stage), details);
     }
 
-    fn stage_completed(&mut self, stage: &str, details: Value) {
+    pub(crate) fn stage_completed(&mut self, stage: &str, details: Value) {
         self.emit("stage_completed", Some(stage), details);
         self.active_stage = None;
     }
 
-    fn stage_failed(&mut self, stage: &str, code: &str) {
+    pub(crate) fn stage_failed(&mut self, stage: &str, code: &str) {
         self.emit("stage_failed", Some(stage), json!({ "code": code }));
         self.active_stage = None;
     }
 
-    fn operation_completed(&mut self, outcome: &str) {
+    pub(crate) fn operation_completed(&mut self, outcome: &str) {
         self.emit("operation_completed", None, json!({ "outcome": outcome }));
     }
 
-    fn fail(&mut self, error: HttpError) -> HttpError {
+    pub(crate) fn fail(&mut self, error: HttpError) -> HttpError {
         let outcome = if self.phase == FirmwareOperationPhase::Preflight
             || self.active_stage.as_deref() == Some("authorization")
         {
@@ -1350,7 +1355,7 @@ impl FirmwareOperationProgress {
         error
     }
 
-    fn require<T>(&mut self, result: Result<T, HttpError>) -> Result<T, HttpError> {
+    pub(crate) fn require<T>(&mut self, result: Result<T, HttpError>) -> Result<T, HttpError> {
         result.map_err(|error| self.fail(error))
     }
 }
@@ -1368,7 +1373,7 @@ pub struct RomSecurityInfo {
 }
 
 impl RomSecurityInfo {
-    fn validate_for_flash(&self) -> Result<(), HttpError> {
+    pub(crate) fn validate_for_flash(&self) -> Result<(), HttpError> {
         if !self.response_known {
             return Err(HttpError::forbidden(
                 "security_info_unknown",
@@ -1407,12 +1412,12 @@ pub struct ApiError {
 
 #[derive(Debug, Clone)]
 pub struct HttpError {
-    status: StatusCode,
-    error: ApiError,
+    pub(crate) status: StatusCode,
+    pub(crate) error: ApiError,
 }
 
 impl HttpError {
-    fn internal(message: &str) -> Self {
+    pub(crate) fn internal(message: &str) -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
@@ -1421,7 +1426,7 @@ impl HttpError {
         )
     }
 
-    fn internal_with_details(code: &str, message: &str, details: Value) -> Self {
+    pub(crate) fn internal_with_details(code: &str, message: &str, details: Value) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             error: ApiError {
@@ -1433,19 +1438,19 @@ impl HttpError {
         }
     }
 
-    fn not_found(code: &str, message: &str) -> Self {
+    pub(crate) fn not_found(code: &str, message: &str) -> Self {
         Self::new(StatusCode::NOT_FOUND, code, message, false)
     }
 
-    fn bad_request(code: &str, message: &str) -> Self {
+    pub(crate) fn bad_request(code: &str, message: &str) -> Self {
         Self::new(StatusCode::BAD_REQUEST, code, message, false)
     }
 
-    fn forbidden(code: &str, message: &str) -> Self {
+    pub(crate) fn forbidden(code: &str, message: &str) -> Self {
         Self::new(StatusCode::FORBIDDEN, code, message, true)
     }
 
-    fn conflict(code: &str, message: &str, details: Value) -> Self {
+    pub(crate) fn conflict(code: &str, message: &str, details: Value) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             error: ApiError {
@@ -1457,7 +1462,7 @@ impl HttpError {
         }
     }
 
-    fn new(status: StatusCode, code: &str, message: &str, retryable: bool) -> Self {
+    pub(crate) fn new(status: StatusCode, code: &str, message: &str, retryable: bool) -> Self {
         Self {
             status,
             error: ApiError {
