@@ -1494,9 +1494,7 @@ pub(crate) async fn initialize_boot_pd(spawner: Spawner, system: &mut BootSystem
                 );
                 info!(
                     "fusb302b selected device_id=0x{=u8:02x} policy=pps target_mv={=u16} max_current_ma={=u16}",
-                    device_id,
-                    DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
-                    MAX_HEATER_CONTRACT_MA,
+                    device_id, FUSB302B_INITIAL_PPS_REQUEST_MV, MAX_HEATER_CONTRACT_MA,
                 );
                 let client = PdServiceClient::mark_starting_fusb302b();
                 spawn_pd_service(spawner, pd_task_i2c, Box::new(runtime));

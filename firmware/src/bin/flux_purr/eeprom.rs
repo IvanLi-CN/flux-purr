@@ -2386,7 +2386,7 @@ pub(crate) fn constrain_heater_backend_to_controller(
         ) => HeaterPowerBackend::FixedPdPwmFallback {
             reason: HeaterPowerBackendReason::NoPps20vCapability,
             fixed_request_confirmed: false,
-            fixed_request: ch224q::VoltageRequest::V20,
+            fixed_request: ch224q::VoltageRequest::V12,
             terminal_fixed_pd_disarmed,
         },
         (
@@ -2399,7 +2399,7 @@ pub(crate) fn constrain_heater_backend_to_controller(
         ) => HeaterPowerBackend::FixedPdPwmFallback {
             reason,
             fixed_request_confirmed: false,
-            fixed_request: ch224q::VoltageRequest::V20,
+            fixed_request: ch224q::VoltageRequest::V12,
             terminal_fixed_pd_disarmed,
         },
         (_, backend) => backend,
@@ -2414,7 +2414,7 @@ pub(crate) fn select_fusb302b_heater_power_backend(
         return HeaterPowerBackend::FixedPdPwmFallback {
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: false,
-            fixed_request: ch224q::VoltageRequest::V20,
+            fixed_request: ch224q::VoltageRequest::V12,
             terminal_fixed_pd_disarmed: false,
         };
     };
@@ -2505,17 +2505,17 @@ where
     ui_state.heater_output_percent = 0;
 
     if !matches!(
-        pd_port.request_fixed_voltage(DEFAULT_PD_VOLTAGE_REQUEST),
+        pd_port.restore_automatic_idle_contract(),
         PdContractRequestState::Confirmed
     ) {
-        // Keep both the disarm latch and the PPS backend lock so the next
-        // control period retries fixed PD without re-applying a PPS request.
+        // Keep both the disarm latch and the PPS backend lock until the
+        // independent PD task restores its automatic idle contract.
         return true;
     }
 
-    if !terminal_fixed_pd_voltage_confirmed(measured_vin_mv) {
-        // The CH224Q accepts the register write before the source has actually
-        // left PPS. Keep the terminal lock active until VIN proves fixed PD.
+    if !terminal_idle_voltage_confirmed(measured_vin_mv) {
+        // A source may acknowledge the request before VBUS reaches the idle
+        // voltage. Keep the terminal lock active until VIN confirms it.
         return true;
     }
 
@@ -2525,8 +2525,8 @@ where
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn terminal_fixed_pd_voltage_confirmed(measured_vin_mv: u32) -> bool {
-    measured_vin_mv.abs_diff(u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts())) <= 1_000
+pub(crate) fn terminal_idle_voltage_confirmed(measured_vin_mv: u32) -> bool {
+    measured_vin_mv.abs_diff(u32::from(FUSB302B_INITIAL_PPS_REQUEST_MV)) <= 1_000
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

@@ -113,7 +113,7 @@ Current firmware runtime baseline also assumes:
 - the FUSB302BMPX board uses read-only `0x9x` identity selection at its colliding `0x22` address, has `GPIO7` PD interrupt wiring, preserves each usable live PPS APDO (a currently observed source advertises `5V..21V`), and retains fixed PDO fallback
 - `>=20 V @ >=3 A` is the performance-guaranteed PD tier; lower accepted contracts are degraded operation and cannot run calibration
 - contractual `3 A`/`5 A` limits bound software heater power (`60 W`/`100 W` at `20 V`) but are not measured VBUS current or physical OCP
-- optional firmware variants can switch the boot PD request to `12 V` or `28 V` via Cargo features
+- FUSB302B production always restores a usable PPS APDO to the `12 V` idle request; the legacy PD-request Cargo features are compatibility build coverage and do not override that controller policy
 - heater control uses the selected controller's supported path: CH224Q can use PPS/AVS, while FUSB302BMPX applies the absolute `5V..28V` PD guard before selecting its live PPS APDO, with fixed-PDO fallback and the `GPIO47` PWM backend
 - startup establishes the active-low backlight, runs the bounded FUSB302B Sink service window, initializes the display and flushes the startup frame, then initializes other outputs and control-plane hardware; an unavailable contract keeps the heater fail-closed while Dashboard startup continues
 - Dashboard center double toggles the active-cooling policy
@@ -122,13 +122,13 @@ Current firmware runtime baseline also assumes:
 PD request build variants:
 
 ```bash
-# default runtime image (20 V)
+# default runtime image (FUSB302B idle PPS: 12 V)
 cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release
 
-# 12 V variant
+# legacy 12 V compatibility build
 cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-12v --bin flux-purr --release
 
-# 28 V variant
+# legacy 28 V compatibility build
 cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-28v --bin flux-purr --release
 ```
 

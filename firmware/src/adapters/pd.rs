@@ -157,6 +157,8 @@ impl SourceCapabilities {
     /// Prefer a PPS APDO covering the requested operating voltage. The
     /// request is constrained by the absolute PD guard, then by the live APDO.
     /// A fixed PDO is used only when the source offers no usable PPS APDO.
+    /// Its voltage must not exceed the requested target, so automatic idle
+    /// fallback cannot silently raise the VBUS above its configured floor.
     pub fn select_fusb302b_contract(
         self,
         requested_mv: u16,
@@ -200,6 +202,7 @@ impl SourceCapabilities {
         for pdo in self.fixed.into_iter().flatten() {
             if pdo.voltage_mv < FUSB302B_PD_ABSOLUTE_MIN_MV
                 || pdo.voltage_mv > FUSB302B_FIXED_MAX_MV
+                || pdo.voltage_mv > requested_mv
                 || pdo.max_ma < MIN_HEATER_CONTRACT_MA
             {
                 continue;
@@ -483,6 +486,25 @@ mod tests {
             contract.degraded_reason(),
             Some(DegradedReason::BelowGuaranteedVoltage)
         );
+    }
+
+    #[test]
+    fn twelve_volt_idle_fallback_never_selects_a_higher_fixed_pdo() {
+        let capabilities = SourceCapabilities::from_pdos(&[
+            fixed_pdo(5_000, 3_000),
+            fixed_pdo(9_000, 3_000),
+            fixed_pdo(12_000, 3_000),
+            fixed_pdo(15_000, 3_000),
+            fixed_pdo(20_000, 5_000),
+        ]);
+
+        let contract = capabilities
+            .select_fusb302b_contract(12_000, 5_000)
+            .unwrap();
+
+        assert_eq!(contract.kind, ContractKind::Fixed);
+        assert_eq!(contract.voltage_mv, 12_000);
+        assert_eq!(contract.current_ma, 3_000);
     }
 
     #[test]

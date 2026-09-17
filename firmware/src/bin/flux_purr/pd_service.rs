@@ -13,6 +13,7 @@ pub(crate) const PD_SERVICE_MAX_COMMANDS_PER_TICK: usize = 1;
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy)]
 pub(crate) enum PdServiceCommand {
+    AutomaticIdle,
     FixedVoltage(u16),
     PpsVoltage(u16),
     Interlock { now_ms: u64 },
@@ -53,6 +54,17 @@ pub(crate) static PD_SERVICE_SNAPSHOT: BlockingMutex<
     CriticalSectionRawMutex,
     RefCell<PdServiceSnapshot>,
 > = BlockingMutex::new(RefCell::new(PdServiceSnapshot::unavailable()));
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn source_supports_fusb302b_idle_pps(
+    capabilities: ch224q::AdjustablePowerCapabilities,
+) -> bool {
+    capabilities.pps_apdos.into_iter().flatten().any(|apdo| {
+        apdo.min_mv <= FUSB302B_INITIAL_PPS_REQUEST_MV
+            && apdo.max_mv >= FUSB302B_INITIAL_PPS_REQUEST_MV
+            && apdo.max_ma >= MIN_HEATER_CONTRACT_MA
+    })
+}
 
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Default)]
@@ -157,6 +169,27 @@ impl PdServiceClient {
         )
     }
 
+    pub(crate) fn restore_automatic_idle_contract(&self) -> PdContractRequestState {
+        let snapshot = self.snapshot();
+        if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
+            return PdContractRequestState::Failed;
+        }
+        if snapshot.observation.is_some_and(|observation| {
+            (observation.contract.kind == ContractKind::Pps
+                && observation.contract.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV)
+                || (observation.contract.kind == ContractKind::Fixed
+                    && !snapshot
+                        .capabilities
+                        .is_some_and(source_supports_fusb302b_idle_pps))
+        }) {
+            return PdContractRequestState::Confirmed;
+        }
+        match PD_SERVICE_COMMANDS.try_send(PdServiceCommand::AutomaticIdle) {
+            Ok(()) => PdContractRequestState::Pending,
+            Err(_) => PdContractRequestState::Failed,
+        }
+    }
+
     pub(crate) fn request_pps_voltage(&self, request_mv: u16) -> PdContractRequestState {
         self.submit_request(
             PdServiceCommand::PpsVoltage(request_mv),
@@ -211,6 +244,11 @@ async fn process_pd_command(
     command: PdServiceCommand,
 ) {
     match command {
+        PdServiceCommand::AutomaticIdle => {
+            let _ = runtime
+                .request_automatic_idle_contract(i2c, PdTimestamp::now())
+                .await;
+        }
         PdServiceCommand::FixedVoltage(request_mv) => {
             let _ = runtime
                 .request_fixed_voltage(i2c, request_mv, PdTimestamp::now())

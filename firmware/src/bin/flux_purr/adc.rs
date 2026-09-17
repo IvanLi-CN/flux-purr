@@ -913,6 +913,38 @@ impl Fusb302bRuntime {
         PdContractRequestState::Pending
     }
 
+    pub(crate) async fn request_automatic_idle_contract(
+        &mut self,
+        i2c: &mut PdI2c<'_>,
+        now: PdTimestamp,
+    ) -> PdContractRequestState {
+        let now_ms = now.as_millis();
+        let active = self.policy.active_contract();
+        if active.kind == ContractKind::Pps && active.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
+        {
+            return PdContractRequestState::Confirmed;
+        }
+        if matches!(
+            self.policy.phase(),
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        ) {
+            return PdContractRequestState::Pending;
+        }
+        let Some(rdo) = self.policy.request_automatic_idle_contract() else {
+            return PdContractRequestState::Failed;
+        };
+        let header = fusb302b::request_header(self.next_message_id);
+        if let Err(fault) = self.transmit(i2c, header, &rdo).await {
+            let _ = self
+                .recover_transient_transport_fault(i2c, fault, now)
+                .await;
+            return PdContractRequestState::Failed;
+        }
+        self.last_request_at_ms = Some(now_ms);
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
+        PdContractRequestState::Pending
+    }
+
     pub(crate) async fn request_fixed_voltage(
         &mut self,
         i2c: &mut PdI2c<'_>,

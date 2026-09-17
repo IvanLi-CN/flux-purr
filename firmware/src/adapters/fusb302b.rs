@@ -208,6 +208,17 @@ impl SinkPolicy {
         Some(rdo)
     }
 
+    /// Restore the startup policy after a manual or thermal override ends.
+    /// This prefers the configured PPS idle voltage and uses the bounded fixed
+    /// PDO fallback only when the live capabilities provide no usable APDO.
+    pub fn request_automatic_idle_contract(&mut self) -> Option<[u8; 4]> {
+        if !self.source_capabilities_received {
+            return None;
+        }
+        self.requested_mv = self.default_requested_mv;
+        self.begin_request(self.source_capabilities)
+    }
+
     /// Move a PPS session to an exact fixed PDO before releasing a terminal
     /// heater-disarm latch. This is deliberately separate from the normal
     /// selector, which prefers PPS whenever an APDO covers the target.
@@ -498,6 +509,28 @@ mod tests {
         assert_eq!(policy.phase(), SinkPhase::Ready);
         assert_eq!(policy.active_contract().kind, ContractKind::Pps);
         assert_eq!(policy.active_contract().voltage_mv, 12_000);
+    }
+
+    #[test]
+    fn automatic_idle_restore_returns_a_twenty_volt_override_to_twelve_volt_pps() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        let source = [
+            ((20_000_u32 / 50) << 10) | (5_000_u32 / 10),
+            PPS_APDO_5V_TO_21V_5A,
+        ];
+        let _ = policy.on_source_capabilities(&source);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert_eq!(policy.active_contract().voltage_mv, 12_000);
+
+        let _ = policy.request_pps_voltage(20_000);
+        policy.on_control_message(3, 1);
+        policy.on_control_message(6, 1);
+        assert_eq!(policy.active_contract().voltage_mv, 20_000);
+
+        assert!(policy.request_automatic_idle_contract().is_some());
+        assert_eq!(policy.pending_contract.kind, ContractKind::Pps);
+        assert_eq!(policy.pending_contract.voltage_mv, 12_000);
     }
 
     #[test]

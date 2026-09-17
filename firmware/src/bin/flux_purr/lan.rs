@@ -1097,9 +1097,7 @@ pub(crate) async fn process_eeprom_maintenance_frame(
             context.memory_commit_due_ms,
         );
         if !matches!(
-            context
-                .pd_port
-                .request_fixed_voltage(DEFAULT_PD_VOLTAGE_REQUEST),
+            context.pd_port.restore_automatic_idle_contract(),
             PdContractRequestState::Confirmed
         ) {
             return (

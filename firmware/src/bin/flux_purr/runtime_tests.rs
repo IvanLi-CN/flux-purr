@@ -667,6 +667,37 @@ fn fusb302b_capability_bridge_retains_degraded_pps_apdo() {
 }
 
 #[test]
+fn fusb302b_missing_capabilities_never_restores_the_legacy_twenty_volt_default() {
+    let backend = select_fusb302b_heater_power_backend(None);
+
+    assert!(matches!(
+        backend,
+        HeaterPowerBackend::FixedPdPwmFallback {
+            fixed_request: ch224q::VoltageRequest::V12,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn fusb302b_idle_restore_requires_an_apdo_that_covers_twelve_volts() {
+    let mut capabilities = ch224q::AdjustablePowerCapabilities::default();
+    capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 5_000,
+        max_mv: 21_000,
+        max_ma: 3_000,
+    });
+    assert!(source_supports_fusb302b_idle_pps(capabilities));
+
+    capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 15_000,
+        max_mv: 21_000,
+        max_ma: 3_000,
+    });
+    assert!(!source_supports_fusb302b_idle_pps(capabilities));
+}
+
+#[test]
 fn automatic_heating_does_not_join_disjoint_pps_apdos() {
     let mut source = SourceCapabilities::empty();
     source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
@@ -9801,7 +9832,7 @@ fn fixed_pd_settle_requires_an_observed_fixed_contract() {
 }
 
 #[test]
-fn fusb302b_backend_never_inherits_a_ch224q_28v_default() {
+fn fusb302b_backend_never_inherits_a_ch224q_fixed_voltage_default() {
     let legacy = HeaterPowerBackend::FixedPdPwmFallback {
         reason: HeaterPowerBackendReason::CapabilityReadFailed,
         fixed_request_confirmed: true,
@@ -9810,7 +9841,7 @@ fn fusb302b_backend_never_inherits_a_ch224q_28v_default() {
     };
 
     let fusb = constrain_heater_backend_to_controller(ControllerKind::Fusb302b, legacy);
-    assert_eq!(fusb.pd_request_mv(), 20_000);
+    assert_eq!(fusb.pd_request_mv(), 12_000);
     let HeaterPowerBackend::FixedPdPwmFallback {
         fixed_request_confirmed,
         ..
@@ -10864,15 +10895,15 @@ fn fusb302b_retries_manual_pps_when_the_active_contract_is_fixed() {
 }
 
 #[test]
-fn terminal_disarm_waits_for_measured_fixed_pd_voltage() {
-    let fixed_mv = u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts());
-    assert!(!terminal_fixed_pd_voltage_confirmed(
+fn terminal_disarm_waits_for_measured_idle_voltage() {
+    let fixed_mv = u32::from(FUSB302B_INITIAL_PPS_REQUEST_MV);
+    assert!(!terminal_idle_voltage_confirmed(
         fixed_mv.saturating_add(9_000)
     ));
-    assert!(!terminal_fixed_pd_voltage_confirmed(
+    assert!(!terminal_idle_voltage_confirmed(
         fixed_mv.saturating_add(3_000)
     ));
-    assert!(terminal_fixed_pd_voltage_confirmed(
+    assert!(terminal_idle_voltage_confirmed(
         fixed_mv.saturating_add(450)
     ));
 }

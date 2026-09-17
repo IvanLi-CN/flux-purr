@@ -67,9 +67,7 @@ where
     {
         context.manual_pps.fail(ManualPpsError::PdNotReady);
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-        let _ = context
-            .pd_port
-            .request_fixed_voltage(DEFAULT_PD_VOLTAGE_REQUEST);
+        let _ = context.pd_port.restore_automatic_idle_contract();
         return Some(false);
     }
     if !manual_pps_request_required(
@@ -95,9 +93,7 @@ where
         PdContractRequestState::Failed => {
             context.manual_pps.fail(ManualPpsError::WriteFailed);
             apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-            let _ = context
-                .pd_port
-                .request_fixed_voltage(DEFAULT_PD_VOLTAGE_REQUEST);
+            let _ = context.pd_port.restore_automatic_idle_contract();
             info!(
                 "manual pps override cleared reason={=str}",
                 ManualPpsError::WriteFailed.code()
@@ -221,7 +217,7 @@ where
             terminal_fixed_pd_disarmed,
         } => {
             if !fixed_request_confirmed && !manual_pps_active {
-                match pd_port.request_fixed_voltage(fixed_request) {
+                match pd_port.restore_automatic_idle_contract() {
                     PdContractRequestState::Confirmed => {
                         *backend = HeaterPowerBackend::FixedPdPwmFallback {
                             reason,
@@ -573,15 +569,13 @@ where
 {
     apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
     let fixed_request_confirmed = matches!(
-        context
-            .pd_port
-            .request_fixed_voltage(DEFAULT_PD_VOLTAGE_REQUEST),
+        context.pd_port.restore_automatic_idle_contract(),
         PdContractRequestState::Confirmed
     );
     *context.backend = HeaterPowerBackend::FixedPdPwmFallback {
         reason: HeaterPowerBackendReason::AdjustableRequestFailed,
         fixed_request_confirmed,
-        fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+        fixed_request: ch224q::VoltageRequest::V12,
         terminal_fixed_pd_disarmed: false,
     };
     if fixed_request_confirmed {
@@ -596,7 +590,7 @@ where
             context
                 .pd_observation
                 .and_then(|observation| observation.contract_voltage_mv)
-                .unwrap_or_else(|| DEFAULT_PD_VOLTAGE_REQUEST.millivolts()),
+                .unwrap_or(FUSB302B_INITIAL_PPS_REQUEST_MV),
             negotiated_current_ma,
             context.active_thermal_settings.heater_current_reserve_ma,
             context.preview_heater_curve,
