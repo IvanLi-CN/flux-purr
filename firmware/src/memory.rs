@@ -2509,6 +2509,52 @@ where
     }
 }
 
+#[cfg(target_arch = "xtensa")]
+impl<I2C> M24c64<I2C>
+where
+    I2C: embedded_hal_async::i2c::I2c,
+{
+    pub async fn read_bytes_async(
+        &mut self,
+        offset: u16,
+        bytes: &mut [u8],
+    ) -> Result<(), EepromError<I2C::Error>> {
+        if usize::from(offset) + bytes.len() > usize::from(M24C64_CAPACITY_BYTES) {
+            return Err(EepromError::OutOfRange);
+        }
+        let address = offset.to_be_bytes();
+        self.i2c
+            .write_read(self.address, &address, bytes)
+            .await
+            .map_err(EepromError::I2c)
+    }
+
+    pub async fn write_page_async(
+        &mut self,
+        offset: u16,
+        bytes: &[u8],
+    ) -> Result<(), EepromError<I2C::Error>> {
+        if bytes.len() > M24C64_PAGE_SIZE {
+            return Err(EepromError::PageWriteTooLong);
+        }
+        if usize::from(offset) + bytes.len() > usize::from(M24C64_CAPACITY_BYTES) {
+            return Err(EepromError::OutOfRange);
+        }
+        let page_offset = usize::from(offset) % M24C64_PAGE_SIZE;
+        if page_offset + bytes.len() > M24C64_PAGE_SIZE {
+            return Err(EepromError::PageBoundaryCrossed);
+        }
+
+        let mut payload = [0u8; M24C64_PAGE_SIZE + 2];
+        payload[0..2].copy_from_slice(&offset.to_be_bytes());
+        payload[2..2 + bytes.len()].copy_from_slice(bytes);
+        self.i2c
+            .write(self.address, &payload[..2 + bytes.len()])
+            .await
+            .map_err(EepromError::I2c)
+    }
+}
+
 pub fn encode_memory_record(
     record: &MemoryRecord,
     out: &mut [u8],

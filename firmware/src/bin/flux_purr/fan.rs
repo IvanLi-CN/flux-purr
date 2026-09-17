@@ -496,8 +496,6 @@ pub(crate) fn startup_pd_contract_ready(observation: Option<PdStatusObservation>
 // bounded startup window for the policy before shared-I2C initialization work.
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const STARTUP_PD_SERVICE_BUDGET_MS: u64 = 750;
-#[cfg(target_arch = "xtensa")]
-pub(crate) const STARTUP_PD_SERVICE_INTERVAL_MS: u64 = 1;
 
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const fn startup_pd_service_should_continue(

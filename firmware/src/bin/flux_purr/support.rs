@@ -10,7 +10,7 @@ pub(crate) use core::fmt::Write as _;
 extern crate alloc;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use alloc::boxed::Box;
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
+#[cfg(target_arch = "xtensa")]
 pub(crate) use core::cell::RefCell;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use core::future::Future;
@@ -21,13 +21,17 @@ pub(crate) use core::{mem::MaybeUninit, panic::PanicInfo};
 #[cfg(target_arch = "xtensa")]
 pub(crate) use defmt::{info, warn};
 #[cfg(target_arch = "xtensa")]
-pub(crate) use embassy_embedded_hal::adapter::BlockingAsync;
+pub(crate) use embassy_embedded_hal::{
+    adapter::BlockingAsync, shared_bus::asynch::i2c::I2cDevice as SharedI2cDevice,
+};
 #[cfg(target_arch = "xtensa")]
 pub(crate) use embassy_executor::Spawner;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use embassy_futures::select::{Either, Either3, select, select3};
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
+#[cfg(target_arch = "xtensa")]
 pub(crate) use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
+#[cfg(target_arch = "xtensa")]
+pub(crate) use embassy_sync::mutex::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 #[cfg(target_arch = "xtensa")]
 pub(crate) use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
@@ -48,10 +52,9 @@ pub(crate) use esp_hal::{
     analog::adc::{
         Adc, AdcCalBasic, AdcCalCurve, AdcCalScheme, AdcChannel, AdcConfig, Attenuation,
     },
-    clock::CpuClock,
     efuse::{AdcCalibUnit, Efuse},
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
-    i2c::master::{Config as I2cConfig, I2c, SoftwareTimeout},
+    i2c::master::{Config as I2cConfig, I2c as HalI2c, SoftwareTimeout},
     interrupt::{Priority, software::SoftwareInterruptControl},
     mcpwm::{
         McPwm, PeripheralClockConfig,
@@ -263,29 +266,195 @@ pub(crate) use micromath::F32Ext;
 pub(crate) use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 pub(crate) use sha2::{Digest, Sha256};
+
+/// All I2C0 users share one async-arbitrated bus. The raw HAL is kept in
+/// blocking mode because esp-hal's async marker is not `Send` and therefore
+/// cannot cross into the interrupt executor's `SendSpawner`. BlockingAsync
+/// still gives each device an async bus contract: the critical section in the
+/// mutex protects only its short state transition, not the hardware transfer.
 #[cfg(target_arch = "xtensa")]
-pub(crate) use static_cell::StaticCell;
+pub(crate) type I2c<'a> =
+    SharedI2cDevice<'a, CriticalSectionRawMutex, BlockingAsync<HalI2c<'static, Blocking>>>;
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) type SharedI2cBus =
+    AsyncMutex<CriticalSectionRawMutex, BlockingAsync<HalI2c<'static, Blocking>>>;
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) static mut I2C_BUS_STORAGE: MaybeUninit<SharedI2cBus> = MaybeUninit::uninit();
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PdI2cError {
+    BusBusy,
+    I2c(esp_hal::i2c::master::Error),
+}
+
+#[cfg(target_arch = "xtensa")]
+impl embedded_hal::i2c::Error for PdI2cError {
+    fn kind(&self) -> embedded_hal::i2c::ErrorKind {
+        match self {
+            Self::BusBusy => embedded_hal::i2c::ErrorKind::Other,
+            Self::I2c(error) => embedded_hal::i2c::Error::kind(error),
+        }
+    }
+}
+
+/// PD's view of the shared I2C bus never waits for the EEPROM task. The
+/// service task tries to acquire the bus at the start of a turn, holds it only
+/// for that bounded PD turn, and retries on the next tick when EEPROM owns it.
+#[cfg(target_arch = "xtensa")]
+pub(crate) struct PdI2c<'a> {
+    bus: &'a SharedI2cBus,
+    guard: Option<
+        AsyncMutexGuard<'a, CriticalSectionRawMutex, BlockingAsync<HalI2c<'static, Blocking>>>,
+    >,
+}
+
+#[cfg(target_arch = "xtensa")]
+impl<'a> PdI2c<'a> {
+    pub(crate) fn new(bus: &'a SharedI2cBus) -> Self {
+        Self { bus, guard: None }
+    }
+
+    pub(crate) fn try_acquire(&mut self) -> bool {
+        if self.guard.is_some() {
+            return true;
+        }
+        self.guard = self.bus.try_lock().ok();
+        self.guard.is_some()
+    }
+
+    pub(crate) fn release(&mut self) {
+        self.guard = None;
+    }
+
+    fn bus_mut(&mut self) -> Result<&mut BlockingAsync<HalI2c<'static, Blocking>>, PdI2cError> {
+        self.guard.as_deref_mut().ok_or(PdI2cError::BusBusy)
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+impl embedded_hal::i2c::ErrorType for PdI2c<'_> {
+    type Error = PdI2cError;
+}
+
+#[cfg(target_arch = "xtensa")]
+impl embedded_hal_async::i2c::I2c for PdI2c<'_> {
+    async fn read(&mut self, address: u8, read: &mut [u8]) -> Result<(), Self::Error> {
+        self.bus_mut()?
+            .read(address, read)
+            .await
+            .map_err(PdI2cError::I2c)
+    }
+
+    async fn write(&mut self, address: u8, write: &[u8]) -> Result<(), Self::Error> {
+        self.bus_mut()?
+            .write(address, write)
+            .await
+            .map_err(PdI2cError::I2c)
+    }
+
+    async fn write_read(
+        &mut self,
+        address: u8,
+        write: &[u8],
+        read: &mut [u8],
+    ) -> Result<(), Self::Error> {
+        self.bus_mut()?
+            .write_read(address, write, read)
+            .await
+            .map_err(PdI2cError::I2c)
+    }
+
+    async fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut [embedded_hal_async::i2c::Operation<'_>],
+    ) -> Result<(), Self::Error> {
+        self.bus_mut()?
+            .transaction(address, operations)
+            .await
+            .map_err(PdI2cError::I2c)
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) type RawHeaterPwm = PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 1, true>;
+
+#[cfg(target_arch = "xtensa")]
+static HEATER_PWM_STORAGE: BlockingMutex<CriticalSectionRawMutex, RefCell<Option<RawHeaterPwm>>> =
+    BlockingMutex::new(RefCell::new(None));
+
+/// The PD task can revoke this permit and clear the physical PWM without
+/// waiting for the front-panel executor to reach its next control iteration.
+#[cfg(target_arch = "xtensa")]
+pub(crate) static PD_HEATER_PERMIT: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct HeaterPwmGate;
+
+#[cfg(target_arch = "xtensa")]
+impl HeaterPwmGate {
+    pub(crate) const fn new() -> Self {
+        Self
+    }
+
+    pub(crate) fn attach(pwm: RawHeaterPwm) {
+        HEATER_PWM_STORAGE.lock(|slot| {
+            *slot.borrow_mut() = Some(pwm);
+        });
+    }
+
+    pub(crate) fn force_off() {
+        PD_HEATER_PERMIT.store(0, Ordering::Release);
+        let mut gate = Self::new();
+        let _ = gate.set_duty_cycle(0);
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+impl embedded_hal::pwm::ErrorType for HeaterPwmGate {
+    type Error = core::convert::Infallible;
+}
+
+#[cfg(target_arch = "xtensa")]
+impl SetDutyCycle for HeaterPwmGate {
+    fn max_duty_cycle(&self) -> u16 {
+        HEATER_PWM_STORAGE.lock(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(SetDutyCycle::max_duty_cycle)
+                .unwrap_or(100)
+        })
+    }
+
+    fn set_duty_cycle(&mut self, duty: u16) -> Result<(), Self::Error> {
+        let permitted = PD_HEATER_PERMIT.load(Ordering::Acquire) != 0;
+        let effective_duty = if permitted { duty } else { 0 };
+        HEATER_PWM_STORAGE.lock(|slot| {
+            if let Some(pwm) = slot.borrow_mut().as_mut() {
+                let _ = pwm.set_duty_cycle(effective_duty);
+            }
+        });
+        Ok(())
+    }
+}
 
 #[cfg(target_arch = "xtensa")]
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-#[unsafe(link_section = ".dram2_uninit")]
-pub(crate) static mut RUNTIME_HEAP_STORAGE: MaybeUninit<[u8; RUNTIME_HEAP_SIZE]> =
-    MaybeUninit::uninit();
-
-#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-// The display canvas is reinitialized before every use and lives in DRAM2 so
-// the ProCPU control task retains enough guarded stack for USB requests.
+// Boot handoffs allocate complete runtime states after display initialization.
+// They need the same headroom regardless of whether the optional LAN task is
+// linked: a no-network diagnostic image must remain a valid boot diagnostic.
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RUNTIME_HEAP_SIZE: usize = 52 * 1024;
 
-#[cfg(all(target_arch = "xtensa", not(feature = "net_http")))]
+#[cfg(target_arch = "xtensa")]
 #[unsafe(link_section = ".dram2_uninit")]
 pub(crate) static mut RUNTIME_HEAP_STORAGE: MaybeUninit<[u8; RUNTIME_HEAP_SIZE]> =
     MaybeUninit::uninit();
-
-#[cfg(all(target_arch = "xtensa", not(feature = "net_http")))]
-pub(crate) const RUNTIME_HEAP_SIZE: usize = 8 * 1024;
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn init_runtime_heap() {
@@ -315,6 +484,10 @@ pub(crate) fn init_runtime_heap() {
 pub(crate) static mut USB_CONTROL_RESPONSE_BUFFER: MaybeUninit<[u8; USB_CONTROL_TX_BUFFER_LEN]> =
     MaybeUninit::uninit();
 
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+static mut USB_CONTROL_RX_LINE: heapless::String<USB_CONTROL_LINE_CAPACITY> =
+    heapless::String::new();
+
 #[cfg(target_arch = "xtensa")]
 #[unsafe(link_section = ".dram2_uninit")]
 pub(crate) static mut DISPLAY_CANVAS_STORAGE: MaybeUninit<DisplayCanvas> = MaybeUninit::uninit();
@@ -324,6 +497,21 @@ pub(crate) static mut DISPLAY_CANVAS_STORAGE: MaybeUninit<DisplayCanvas> = Maybe
 pub(crate) static mut EEPROM_RECORD_STAGING_STORAGE: MaybeUninit<
     [u8; EEPROM_RECORD_STAGING_BYTES],
 > = MaybeUninit::uninit();
+
+/// Overwrite retained runtime storage after an ESP software reset.
+///
+/// ESP application resets do not guarantee that the previous application's
+/// runtime markers have been cleared. The caller must ensure that no task from
+/// the previous application instance can still access the storage.
+#[cfg(target_arch = "xtensa")]
+pub(crate) unsafe fn initialize_after_software_reset<T>(
+    storage: *mut MaybeUninit<T>,
+    value: T,
+) -> &'static mut T {
+    // SAFETY: each storage slot is initialized once during the current boot,
+    // before any current-boot task receives its reference.
+    unsafe { (*storage).write(value) }
+}
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct MemoryIoScratch {
@@ -386,6 +574,20 @@ pub(crate) fn initialize_usb_control_response_buffer()
     unsafe {
         (&mut *core::ptr::addr_of_mut!(USB_CONTROL_RESPONSE_BUFFER))
             .write([0; USB_CONTROL_TX_BUFFER_LEN])
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+pub(crate) fn initialize_usb_control_rx_line()
+-> &'static mut heapless::String<USB_CONTROL_LINE_CAPACITY> {
+    // Keep the 8 KiB transport buffer out of both the boot future stack and
+    // the internal runtime heap reserved for Wi-Fi task stacks. The string has
+    // no async state, so clearing it before ownership moves to this boot is
+    // sufficient after a software reset.
+    unsafe {
+        let line = &mut *core::ptr::addr_of_mut!(USB_CONTROL_RX_LINE);
+        line.clear();
+        line
     }
 }
 
@@ -460,6 +662,14 @@ pub(crate) fn rom_log_line(line: &[u8]) {
         // SAFETY: this ROM routine is available on ESP32-S3 and accepts one byte.
         unsafe { esp_rom_output_tx_one_char(*byte) };
     }
+}
+
+#[cfg(target_arch = "xtensa")]
+#[inline(never)]
+pub(crate) fn rom_boot_stage(stage: &[u8]) {
+    rom_log_line(b"boot_rom=");
+    rom_log_line(stage);
+    rom_log_line(b"\n");
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -562,8 +772,8 @@ pub(crate) const HEATER_PROFILE_TICK_MS: u64 = 1_000;
 // Keep the per-cycle RTD aggregate unchanged while doubling control and RTD update cadence.
 pub(crate) const HEATER_CONTROL_INTERVAL_MS: u64 = 50;
 
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const PD_RUNTIME_SERVICE_INTERVAL_MS: u64 = 5;
+#[cfg(target_arch = "xtensa")]
+pub(crate) const PD_SNAPSHOT_REFRESH_INTERVAL_MS: u64 = 5;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 pub(crate) const PD_RUNTIME_USB_BYTE_BUDGET: u16 = 256;
 
@@ -705,7 +915,7 @@ pub(crate) const BUZZER_IDLE_FREQUENCY_HZ: u32 = 2_000;
 pub(crate) const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
 #[cfg(target_arch = "xtensa")]
 pub(crate) const STATUS_LIGHT_BOOT_DURATION_MS: u64 = 1_000;
-#[cfg(test)]
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RUNTIME_READY_BOOT_STAGE_LINE: &[u8] = b"boot_stage=runtime_ready\n";
 #[cfg(target_arch = "xtensa")]
 pub(crate) const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;
@@ -731,10 +941,6 @@ pub(crate) const RTD_CHANNEL_SWITCH_SETTLE_US: u32 = 5_000;
 pub(crate) const RTD_SETTLE_DISCARD_SAMPLE_COUNT: usize = 96;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_MIN_VALID_SAMPLE_COUNT: usize = 60;
-#[cfg(target_arch = "xtensa")]
-// Service the shared FUSB302B bus at least once per eight ADC conversions.
-// The time check in the sampler also covers a conversion that stalls.
-pub(crate) const ADC_PD_SERVICE_MAX_SAMPLES: usize = 8;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_RETRY_AFTER_VIN_STEP_RAW_ADC_DELTA_MV: u16 = 48;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -787,8 +993,6 @@ pub(crate) const I2C_TRANSACTION_TIMEOUT_MS: u64 = 5;
 pub(crate) const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const EEPROM_WRITE_CHUNK_MAX_BYTES: usize = 16;
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const EEPROM_MAINTENANCE_PD_MAX_PAGE_WRITES_WITHOUT_SERVICE: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 pub(crate) const EEPROM_READ_CHUNK_MAX_BYTES: usize = 16;
 #[cfg(target_arch = "xtensa")]

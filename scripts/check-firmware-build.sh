@@ -26,6 +26,8 @@ build_firmware() {
 }
 
 build_firmware default
+bash scripts/check-firmware-boot-stack.sh
 for voltage in 12v 20v 28v; do
   build_firmware "$voltage"
+  bash scripts/check-firmware-boot-stack.sh
 done

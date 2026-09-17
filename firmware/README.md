@@ -81,7 +81,7 @@
   - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, the two fan policy modes, the legacy `active_cooling_enabled` projection, Wi-Fi config fields, and the validated active thermal-model transaction with its bounded raw trace
   - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended, and newly persisted thermal-profile TLVs use an explicit `TCP2` layout marker while unmarked historical layouts remain readable
   - accepted front-panel edits debounce for about `2s` before writing the next slot
-  - on FUSB302B boards, each bounded EEPROM page write releases the shared I2C bus and services PD before the next page; a successful EEPROM save does not synchronously mirror to flash
+  - on FUSB302B boards, each bounded EEPROM page write releases the shared I2C bus before the next page; the independent PD task uses a non-blocking try-lock, skips only a turn when EEPROM owns the bus, and retries on the next cadence tick; a successful EEPROM save does not synchronously mirror to flash
   - `heater_enabled`, live temperatures, fan runtime output, fault latch, route/menu state, and buzzer reminders are never restored from EEPROM
 - Heater control:
   - PD controller detection, a ready PD contract, and later contract continuity gate heating only: the Front Panel Dashboard and USB runtime remain available for diagnostics when PD is unavailable, while `heaterLockReason=pd-contract-unavailable` holds `GPIO47` and calibration heat at `0%`
@@ -119,7 +119,7 @@
 - PD policy:
   - the production artifact targets `FUSB302BMPX`; it performs two stable Device ID reads plus a readable status-bank check before selecting the controller
   - an unreadable, conflicting, or non-FUSB identity becomes `unknown`; no CH224Q probe, guessed PD write, or startup wait is performed
-  - PD negotiation runs as a non-blocking runtime service; `Accept + PS_RDY` is required before a contract is usable, and it never arms heating automatically
+  - PD negotiation runs in a dedicated normal-executor Embassy task. The task owns its `5ms` cadence timer, FUSB302B policy, and physical PD I2C transactions; it processes at most one mailbox request before each poll and publishes snapshots. The Front Panel task never polls or mutates PD state. `Accept + PS_RDY` is required before a contract is usable, and it never arms heating automatically
   - until the contract is ready, the Dashboard shows `POWER/WAIT` with real sensor data while GPIO47 remains at `0%`
 - Historical `fan-cycle` smoke-test behavior remains documented in `s3-fan-cycle-bringup`; it is no longer the active runtime contract for the default `flux-purr` artifact.
 

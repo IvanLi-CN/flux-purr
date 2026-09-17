@@ -11,6 +11,21 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+use crate::{
+    control_plane::{Identity, NetworkState, NetworkSummary},
+    mdns::build_http_announcement,
+    memory::{MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig},
+    net_http::{
+        CommandOrigin, ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HttpGate, HttpMethod,
+        HttpReadGate, HttpRequest, HttpResponse, LAN_HTTP_BODY_MAX_LEN,
+        LAN_HTTP_LIGHT_BODY_MAX_LEN, LightHttpResponse, NetHttpState, device_names_from_mac,
+        format_http_response_headers, http_socket_slot_count, http_workspace_slot_count,
+        identity_from_device_names,
+    },
+    wifi_state::{
+        SAVING_TIMEOUT_MS, WifiEvent as ProvisioningEvent, WifiProvisioningMachine, WifiTransition,
+    },
+};
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_net::{
@@ -35,22 +50,6 @@ use esp_radio::{
 use heapless::{String, Vec};
 use serde::Serialize;
 use static_cell::StaticCell;
-
-use crate::{
-    control_plane::{Identity, NetworkState, NetworkSummary},
-    mdns::build_http_announcement,
-    memory::{MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig},
-    net_http::{
-        CommandOrigin, ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HttpGate, HttpMethod,
-        HttpReadGate, HttpRequest, HttpResponse, LAN_HTTP_BODY_MAX_LEN,
-        LAN_HTTP_LIGHT_BODY_MAX_LEN, LightHttpResponse, NetHttpState, device_names_from_mac,
-        format_http_response_headers, http_socket_slot_count, http_workspace_slot_count,
-        identity_from_device_names,
-    },
-    wifi_state::{
-        SAVING_TIMEOUT_MS, WifiEvent as ProvisioningEvent, WifiProvisioningMachine, WifiTransition,
-    },
-};
 
 // Three sockets at 1 KiB per direction use less static RAM than the previous
 // two-socket 2 KiB layout while still covering the largest HTTP header and

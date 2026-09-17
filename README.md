@@ -11,7 +11,7 @@ Firmware operations have two user classes and two firmware sources:
 | User class | Command | Firmware source |
 | --- | --- | --- |
 | 一般用户 | `flux-purr update --port <serial-port> --bundle <local.fluxpurr-fw>` | 本地 `.fluxpurr-fw`，且必须命中随 host-tools/Web 发布的 SHA-256 完整性清单 |
-| 开发者 | `flux-purr flash --port <serial-port> [--elf <local-elf>]` | 本地 ELF；默认自动备份 EEPROM，直连串口，不连接 devd |
+| 开发者 | `flux-purr flash --port <serial-port> [--elf <local-elf>] [--keep-download-mode]` | 本地 ELF；默认自动备份 EEPROM，直连串口，不连接 devd；已手动进入下载模式时可保持下载模式 |
 | 开发者 | `flux-purr recover --port <serial-port> --elf <local-elf> --confirm ERASE` | 本地 ELF；擦除 MCU 内部 Flash，不读写 EEPROM |
 
 Every firmware operation requires the exact serial port. `update` starts a managed local devd when no `--devd <local-control-socket>` is supplied; it neither selects nor remembers a port. `flash` uses no devd, URL, HTTP, bundle, artifact ID, or manifest. It automatically creates an encrypted EEPROM archive before writing unless the Developer explicitly confirms the emergency bypass. `recover` is the explicit MCU-internal-Flash erase path and does not touch EEPROM. The complete contract is [Firmware Update And Developer Flash](docs/specs/firmware-update-and-developer-flash/SPEC.md); its [implementation status](docs/specs/firmware-update-and-developer-flash/IMPLEMENTATION.md) records the current local verification boundary.
