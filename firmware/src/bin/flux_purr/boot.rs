@@ -393,6 +393,16 @@ static mut THERMAL_PLANT_WORKSPACE_STORAGE: MaybeUninit<CalibrationThermalPlantW
     MaybeUninit::uninit();
 
 #[cfg(target_arch = "xtensa")]
+fn new_thermal_plant_workspace() -> &'static mut CalibrationThermalPlantWorkspace {
+    unsafe {
+        initialize_after_software_reset(
+            core::ptr::addr_of_mut!(THERMAL_PLANT_WORKSPACE_STORAGE),
+            CalibrationThermalPlantWorkspace::default(),
+        )
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) struct BootSystemRuntimeParts {
     reset_reason: &'static str,
     runtime_mode: FrontPanelRuntimeMode,
@@ -531,12 +541,7 @@ impl BootRuntimeState {
                 manual_pps_state: ManualPpsState::default(),
                 last_fusb302b_power_capabilities: None,
                 calibration_runtime_state: CalibrationRuntimeState::default(),
-                thermal_plant_workspace: unsafe {
-                    initialize_after_software_reset(
-                        core::ptr::addr_of_mut!(THERMAL_PLANT_WORKSPACE_STORAGE),
-                        CalibrationThermalPlantWorkspace::default(),
-                    )
-                },
+                thermal_plant_workspace: new_thermal_plant_workspace(),
                 thermal_control_profile_preview: None,
                 heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
                     reason: HeaterPowerBackendReason::CapabilityReadFailed,
@@ -1517,16 +1522,8 @@ pub(crate) async fn initialize_boot_pd(spawner: Spawner, system: &mut BootSystem
     let _ = usb_write_bytes_bounded(&mut system.usb_serial, b"boot_stage=pd_contract_pending\n");
     let pd_runtime_started_ms = Instant::now().as_millis();
     let fusb302b_present = system.pd_port.controller_kind() == ControllerKind::Fusb302b;
-    let mut initial_pd_observation = system.pd_port.observation();
-    while startup_pd_service_should_continue(
-        fusb302b_present,
-        startup_pd_contract_ready(initial_pd_observation),
-        system.pd_port.service_available(),
-        pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
-    ) {
-        EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await;
-        initial_pd_observation = system.pd_port.observation();
-    }
+    let initial_pd_observation =
+        wait_for_initial_pd_contract(system, pd_runtime_started_ms, fusb302b_present).await;
     let pd_contract_ready = startup_pd_contract_ready(initial_pd_observation);
     if !pd_contract_ready {
         #[cfg(feature = "web_serial")]
@@ -1550,6 +1547,25 @@ pub(crate) async fn initialize_boot_pd(spawner: Spawner, system: &mut BootSystem
             .startup_sequence
             .advance(StartupSequenceStage::PdServiceComplete)
     );
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn wait_for_initial_pd_contract(
+    system: &BootSystem,
+    pd_runtime_started_ms: u64,
+    fusb302b_present: bool,
+) -> Option<PdStatusObservation> {
+    let mut observation = system.pd_port.observation();
+    while startup_pd_service_should_continue(
+        fusb302b_present,
+        startup_pd_contract_ready(observation),
+        system.pd_port.service_available(),
+        pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
+    ) {
+        EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await;
+        observation = system.pd_port.observation();
+    }
+    observation
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2346,26 +2362,47 @@ pub(crate) async fn initialize_boot_display_from_parts(
         })
         .await;
     }
+    finish_boot_display(
+        storage,
+        system,
+        BootAdcTokens {
+            adc1,
+            vin_adc,
+            rtd_adc,
+            #[cfg(feature = "net_http")]
+            wifi,
+        },
+        BootOutputTokens {
+            fan_enable,
+            fan_pwm,
+            heater_pwm,
+            buzzer,
+            mcpwm0,
+            #[cfg(feature = "buzzer-observe")]
+            pcnt,
+        },
+        display,
+        canvas,
+        inputs,
+    )
+}
+
+#[cfg(target_arch = "xtensa")]
+fn finish_boot_display(
+    storage: Box<MaybeUninit<BootDisplay>>,
+    system: Box<BootSystem>,
+    tokens: BootAdcTokens,
+    output_tokens: BootOutputTokens,
+    display: RuntimeDisplay,
+    canvas: &'static mut DisplayCanvas,
+    inputs: FrontPanelInputs<'static>,
+) -> Box<BootDisplay> {
     Box::write(
         storage,
         BootDisplay {
             system,
-            tokens: BootAdcTokens {
-                adc1,
-                vin_adc,
-                rtd_adc,
-                #[cfg(feature = "net_http")]
-                wifi,
-            },
-            output_tokens: Some(BootOutputTokens {
-                fan_enable,
-                fan_pwm,
-                heater_pwm,
-                buzzer,
-                mcpwm0,
-                #[cfg(feature = "buzzer-observe")]
-                pcnt,
-            }),
+            tokens,
+            output_tokens: Some(output_tokens),
             output_state: None,
             boot_memory_io_scratch: None,
             display,
