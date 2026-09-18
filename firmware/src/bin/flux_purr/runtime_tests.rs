@@ -186,6 +186,68 @@ fn pd_service_never_waits_for_the_shared_i2c_bus() {
 }
 
 #[test]
+fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
+    let contract = Contract {
+        kind: ContractKind::Pps,
+        object_position: 1,
+        voltage_mv: 20_000,
+        current_ma: 3_000,
+    };
+
+    assert!(fusb302b_status_confirms_ready_contract(
+        SinkPhase::Ready,
+        contract,
+        FUSB302B_STATUS0_VBUSOK,
+    ));
+    assert!(!fusb302b_status_confirms_ready_contract(
+        SinkPhase::WaitingForPsRdy,
+        contract,
+        FUSB302B_STATUS0_VBUSOK,
+    ));
+    assert!(!fusb302b_status_confirms_ready_contract(
+        SinkPhase::Ready,
+        Contract::none(),
+        FUSB302B_STATUS0_VBUSOK,
+    ));
+    assert!(!fusb302b_status_confirms_ready_contract(
+        SinkPhase::Ready,
+        contract,
+        0,
+    ));
+}
+
+#[test]
+fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
+    let pd_service = include_str!("pd_service.rs");
+    let support = include_str!("support.rs");
+    let pd_task = pd_service
+        .split("async fn pd_service_task")
+        .nth(1)
+        .and_then(|source| source.split("pub(crate) fn spawn_pd_service").next())
+        .expect("PD task body must remain present");
+
+    assert!(pd_service.contains("read_status().await.ok()?"));
+    assert!(pd_task.contains("let observation = pd_status_observation(&runtime, &mut i2c).await"));
+    assert!(pd_task.contains("None\n        };\n        publish_pd_snapshot"));
+
+    let permit_check = support
+        .split("fn set_duty_cycle(&mut self, duty: u16)")
+        .nth(1)
+        .and_then(|source| source.split("fn max_duty_cycle").next())
+        .unwrap_or_else(|| {
+            support
+                .split("fn set_duty_cycle(&mut self, duty: u16)")
+                .nth(1)
+                .expect("heater PWM gate must remain present")
+        });
+    assert!(
+        permit_check
+            .find("HEATER_PWM_STORAGE.lock")
+            .is_some_and(|lock| { permit_check[lock..].contains("PD_HEATER_PERMIT.load") })
+    );
+}
+
+#[test]
 fn buzzer_cadence_stays_with_the_realtime_owner() {
     let tasks = include_str!("tasks.rs");
     let boot = include_str!("boot.rs");

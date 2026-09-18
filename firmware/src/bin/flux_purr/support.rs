@@ -85,6 +85,8 @@ pub(crate) use flux_purr_firmware::adapters::ch224q::Status;
 #[cfg(test)]
 pub(crate) use flux_purr_firmware::adapters::fusb302b;
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) use flux_purr_firmware::adapters::fusb302b::SinkPhase;
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::adapters::pd::SourceCapabilities;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::adapters::pd::{
@@ -245,7 +247,7 @@ pub(crate) use flux_purr_firmware::{DeviceMode, DeviceStatus, PdState};
 pub(crate) use flux_purr_firmware::{
     adapters::{
         ch224q::{self, Status},
-        fusb302b::{self, SinkPhase},
+        fusb302b,
     },
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
     frontpanel::{
@@ -421,9 +423,12 @@ impl SetDutyCycle for HeaterPwmGate {
     }
 
     fn set_duty_cycle(&mut self, duty: u16) -> Result<(), Self::Error> {
-        let permitted = PD_HEATER_PERMIT.load(Ordering::Acquire) != 0;
-        let effective_duty = if permitted { duty } else { 0 };
         HEATER_PWM_STORAGE.lock(|slot| {
+            let effective_duty = if PD_HEATER_PERMIT.load(Ordering::Acquire) != 0 {
+                duty
+            } else {
+                0
+            };
             if let Some(pwm) = slot.borrow_mut().as_mut() {
                 let _ = pwm.set_duty_cycle(effective_duty);
             }

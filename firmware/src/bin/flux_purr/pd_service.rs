@@ -199,25 +199,41 @@ impl PdServiceClient {
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn fusb302b_status_confirms_ready_contract(
+    phase: SinkPhase,
+    contract: Contract,
+    status0: u8,
+) -> bool {
+    phase == SinkPhase::Ready
+        && contract != Contract::none()
+        && status0 & FUSB302B_STATUS0_VBUSOK != 0
+}
+
 #[cfg(target_arch = "xtensa")]
-fn pd_status_observation(runtime: &Fusb302bRuntime) -> Option<PdStatusObservation> {
+async fn pd_status_observation(
+    runtime: &Fusb302bRuntime,
+    i2c: &mut PdI2c<'_>,
+) -> Option<PdStatusObservation> {
     let contract = runtime.active_contract();
-    (contract != Contract::none()).then(|| {
-        let status_raw = 1 << 3;
-        PdStatusObservation {
-            status_raw,
-            status: Status::from_register(status_raw),
-            current_raw: 0,
-            current_ma: contract.current_ma,
-            contract_voltage_mv: Some(contract.voltage_mv),
-            contract,
-        }
+    let status = Fusb302::new(&mut *i2c).read_status().await.ok()?;
+    if !fusb302b_status_confirms_ready_contract(runtime.policy.phase(), contract, status.status0) {
+        return None;
+    }
+
+    let status_raw = 1 << 3;
+    Some(PdStatusObservation {
+        status_raw,
+        status: Status::from_register(status_raw),
+        current_raw: 0,
+        current_ma: contract.current_ma,
+        contract_voltage_mv: Some(contract.voltage_mv),
+        contract,
     })
 }
 
 #[cfg(target_arch = "xtensa")]
-fn publish_pd_snapshot(runtime: &Fusb302bRuntime) {
-    let observation = pd_status_observation(runtime);
+fn publish_pd_snapshot(runtime: &Fusb302bRuntime, observation: Option<PdStatusObservation>) {
     let ready = startup_pd_contract_ready(observation);
     PD_SERVICE_SNAPSHOT.lock(|snapshot| {
         *snapshot.borrow_mut() = PdServiceSnapshot {
@@ -231,8 +247,8 @@ fn publish_pd_snapshot(runtime: &Fusb302bRuntime) {
                 .stale_contract_vin_guard_suspended(PdTimestamp::now().as_millis()),
         };
     });
-    let previously_permitted = PD_HEATER_PERMIT.swap(u8::from(ready), Ordering::AcqRel) != 0;
-    if previously_permitted && !ready {
+    PD_HEATER_PERMIT.store(u8::from(ready), Ordering::Release);
+    if !ready {
         HeaterPwmGate::force_off();
     }
 }
@@ -274,7 +290,7 @@ async fn process_pd_command(
 #[embassy_executor::task]
 async fn pd_service_task(mut i2c: PdI2c<'static>, mut runtime: Box<Fusb302bRuntime>) {
     loop {
-        if i2c.try_acquire() {
+        let observation = if i2c.try_acquire() {
             for _ in 0..PD_SERVICE_MAX_COMMANDS_PER_TICK {
                 let Ok(command) = PD_SERVICE_COMMANDS.try_receive() else {
                     break;
@@ -285,9 +301,17 @@ async fn pd_service_task(mut i2c: PdI2c<'static>, mut runtime: Box<Fusb302bRunti
             // unbounded work queue. Poll once on every service turn regardless of
             // how many commands are waiting.
             let _ = runtime.poll(&mut i2c, PdTimestamp::now()).await;
+            // The policy contract is only heater-authorizing after a fresh
+            // hardware status read. Keep this read inside the same bus lease so
+            // an EEPROM turn cannot leave a stale contract looking active.
+            let observation = pd_status_observation(&runtime, &mut i2c).await;
             i2c.release();
-        }
-        publish_pd_snapshot(&runtime);
+            observation
+        } else {
+            // No current hardware observation means no heater authorization.
+            None
+        };
+        publish_pd_snapshot(&runtime, observation);
         EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await;
     }
 }
