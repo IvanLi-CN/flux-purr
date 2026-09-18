@@ -34,6 +34,8 @@ pub(crate) mod support;
 pub(crate) mod tasks;
 #[path = "thermal.rs"]
 pub(crate) mod thermal;
+#[path = "watchdog.rs"]
+pub(crate) mod watchdog;
 
 #[allow(unused_imports)]
 pub(crate) use adc::*;
@@ -69,6 +71,8 @@ pub(crate) use support::*;
 pub(crate) use tasks::*;
 #[allow(unused_imports)]
 pub(crate) use thermal::*;
+#[allow(unused_imports)]
+pub(crate) use watchdog::*;
 
 #[cfg(test)]
 #[path = "runtime_tests.rs"]

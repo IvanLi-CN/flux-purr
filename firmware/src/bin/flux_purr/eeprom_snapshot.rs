@@ -72,21 +72,23 @@ pub(crate) async fn eeprom_snapshot_digest(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn write_eeprom_snapshot_response(
-    usb: &mut RawUsbSerialJtag,
+pub(crate) fn queue_eeprom_snapshot_response(
+    response_tx: &mut UsbResponseTxState,
     response: &EepromSnapshotResponse,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
 ) {
     let Ok(written) = serde_json_core::to_slice(response, tx_buf) else {
-        let _ = usb_write_bytes_bounded(usb, b"{\"ok\":false,\"error\":\"output_too_small\"}\n");
+        let _ = response_tx
+            .queue_bytes_for_runtime(b"{\"ok\":false,\"error\":\"output_too_small\"}\n", tx_buf);
         return;
     };
     if written >= tx_buf.len() {
-        let _ = usb_write_bytes_bounded(usb, b"{\"ok\":false,\"error\":\"output_too_small\"}\n");
+        let _ = response_tx
+            .queue_bytes_for_runtime(b"{\"ok\":false,\"error\":\"output_too_small\"}\n", tx_buf);
         return;
     }
     tx_buf[written] = b'\n';
-    let _ = usb_write_bytes_bounded(usb, &tx_buf[..=written]);
+    let _ = response_tx.queue_serialized(written + 1, tx_buf.len());
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]

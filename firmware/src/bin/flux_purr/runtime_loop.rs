@@ -136,8 +136,8 @@ pub(crate) async fn runtime_process_usb_snapshot_line(
             None,
         );
     }
-    write_eeprom_snapshot_response(
-        &mut state.transport.usb_serial,
+    queue_eeprom_snapshot_response(
+        &mut state.transport.usb_response_tx,
         &response,
         state.transport.usb_tx_buf,
     );
@@ -212,8 +212,8 @@ pub(crate) async fn runtime_process_usb_control_line(
         measured_vin_mv: state.latest_vin_mv,
     })
     .await;
-    usb_write_response_frame(
-        &mut state.transport.usb_serial,
+    let _ = usb_queue_response_frame(
+        &mut state.transport.usb_response_tx,
         &response,
         state.transport.usb_tx_buf,
     );
@@ -245,6 +245,18 @@ pub(crate) async fn runtime_process_usb_input(
 ) -> RuntimeUsbInputOutcome {
     let mut needs_redraw = false;
     let mut control_command_processed = false;
+    #[cfg(feature = "web_serial")]
+    let response_progress = state
+        .transport
+        .usb_response_tx
+        .pump(&mut state.transport.usb_serial, state.transport.usb_tx_buf);
+    #[cfg(feature = "web_serial")]
+    if response_progress != UsbResponseTxProgress::Idle {
+        return RuntimeUsbInputOutcome {
+            needs_redraw,
+            control_command_processed,
+        };
+    }
     #[cfg(feature = "web_serial")]
     let mut usb_bytes_processed = 0_u16;
     #[cfg(feature = "web_serial")]
@@ -2009,6 +2021,7 @@ pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
     loop {
         #[cfg(feature = "web_serial")]
         embassy_futures::yield_now().await;
+        record_runtime_heartbeat();
         #[cfg(feature = "web_serial")]
         let elapsed_ms = Instant::now()
             .as_millis()

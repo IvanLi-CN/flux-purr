@@ -738,15 +738,6 @@ impl RawUsbSerialJtag {
             nb::Error::Other(_) => nb::Error::Other(()),
         })
     }
-
-    pub(crate) fn write_response_bytes(&mut self, bytes: &[u8]) -> bool {
-        // A control response is only sent after the host has delivered a full
-        // request line, so the USB endpoint is known to have an active reader.
-        // The HAL's blocking writer waits for each 64-byte packet to complete;
-        // this avoids silently losing a larger JSON response when a nonblocking
-        // flush observes a temporarily busy endpoint.
-        self.inner.write(bytes).is_ok()
-    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -882,10 +873,6 @@ pub(crate) const USB_CONTROL_LINE_CAPACITY: usize =
 pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize = 4 * 1024;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const USB_CONTROL_TX_PACKET_LEN: usize = 64;
-#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-pub(crate) const USB_CONTROL_TX_RETRY_LIMIT: usize = 4096;
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) const USB_CONTROL_TX_BACKOFF_US: u32 = 25;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const FAN_FULL_SPEED_PWM_PERMILLE: u16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]

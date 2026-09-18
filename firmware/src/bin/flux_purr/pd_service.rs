@@ -349,6 +349,7 @@ async fn pd_service_task(mut i2c: PdI2c<'static>, mut runtime: Box<Fusb302bRunti
             None
         };
         publish_pd_snapshot(&runtime, observation);
+        record_pd_heartbeat();
         EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await;
     }
 }

@@ -11,6 +11,7 @@ const RUNTIME_IMPLEMENTATION: &str = concat!(
     include_str!("eeprom.rs"),
     include_str!("power.rs"),
     include_str!("tasks.rs"),
+    include_str!("watchdog.rs"),
     include_str!("control_plane.rs"),
     include_str!("lan.rs"),
     include_str!("display_io.rs"),
@@ -18,6 +19,83 @@ const RUNTIME_IMPLEMENTATION: &str = concat!(
     include_str!("boot.rs"),
     include_str!("runtime_loop.rs"),
 );
+
+#[test]
+fn runtime_usb_response_tx_preserves_a_large_frame_across_backpressure_turns() {
+    struct BackpressuredUsbTx {
+        ready: bool,
+        pending: std::vec::Vec<u8>,
+        sent: std::vec::Vec<u8>,
+    }
+
+    impl UsbControlTx for BackpressuredUsbTx {
+        fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
+            if !self.ready || self.pending.len() == USB_CONTROL_TX_PACKET_LEN {
+                return Err(UsbTxError::WouldBlock);
+            }
+            self.pending.push(byte);
+            Ok(())
+        }
+
+        fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            if !self.ready {
+                return Err(UsbTxError::WouldBlock);
+            }
+            self.sent.extend_from_slice(&self.pending);
+            self.pending.clear();
+            Ok(())
+        }
+    }
+
+    let payload = std::vec![b'x'; 2 * 1024];
+    let mut buffer = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+    let mut response_tx = UsbResponseTxState::default();
+    let mut usb = BackpressuredUsbTx {
+        ready: false,
+        pending: std::vec::Vec::new(),
+        sent: std::vec::Vec::new(),
+    };
+
+    assert!(response_tx.queue_bytes(&payload, &mut buffer));
+    assert_eq!(
+        response_tx.pump(&mut usb, &buffer),
+        UsbResponseTxProgress::Pending
+    );
+    assert!(usb.sent.is_empty());
+    assert!(response_tx.is_pending());
+
+    usb.ready = true;
+    for _ in 0..(payload.len() * 3) {
+        if response_tx.pump(&mut usb, &buffer) == UsbResponseTxProgress::Complete {
+            break;
+        }
+    }
+
+    assert!(!response_tx.is_pending());
+    assert_eq!(usb.sent, payload);
+}
+
+#[test]
+fn watchdog_feed_gate_requires_both_runtime_and_pd_progress() {
+    let mut gate = WatchdogFeedGate::default();
+
+    assert!(!gate.observe(0, 0));
+    assert!(gate.observe(1, 1));
+    assert!(!gate.observe(2, 1));
+    assert!(gate.observe(2, 2));
+    assert!(!gate.observe(3, 2));
+    assert!(!gate.observe(4, 2));
+}
+
+#[test]
+fn runtime_usb_transport_has_no_blocking_write_or_spin_retry() {
+    let support = include_str!("support.rs");
+    let control_plane = include_str!("control_plane.rs");
+
+    assert!(!support.contains("self.inner.write(bytes)"));
+    assert!(!control_plane.contains("USB_CONTROL_TX_RETRY_LIMIT"));
+    assert!(!control_plane.contains("wait_for_tx_progress"));
+}
 const FIRMWARE_ENTRYPOINT: &str = include_str!("../flux_purr.rs");
 
 #[test]
@@ -1251,47 +1329,26 @@ fn usb_write_bytes_stops_on_hard_tx_error() {
 }
 
 #[test]
-fn usb_write_bytes_waits_for_a_busy_endpoint_before_replying() {
+fn usb_write_bytes_returns_without_retrying_a_busy_endpoint() {
     struct DelayedUsbTx {
-        waits_before_ready: usize,
-        waits: usize,
-        pending: std::vec::Vec<u8>,
-        sent: std::vec::Vec<u8>,
+        write_attempts: usize,
     }
 
     impl UsbControlTx for DelayedUsbTx {
-        fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
-            if self.waits < self.waits_before_ready {
-                return Err(UsbTxError::WouldBlock);
-            }
-            self.pending.push(byte);
-            Ok(())
+        fn write_byte_nb(&mut self, _byte: u8) -> Result<(), UsbTxError> {
+            self.write_attempts += 1;
+            Err(UsbTxError::WouldBlock)
         }
 
         fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
-            if self.waits < self.waits_before_ready {
-                return Err(UsbTxError::WouldBlock);
-            }
-            self.sent.extend_from_slice(&self.pending);
-            self.pending.clear();
-            Ok(())
-        }
-
-        fn wait_for_tx_progress(&mut self) {
-            self.waits += 1;
+            Err(UsbTxError::WouldBlock)
         }
     }
 
-    let mut tx = DelayedUsbTx {
-        waits_before_ready: 3,
-        waits: 0,
-        pending: std::vec::Vec::new(),
-        sent: std::vec::Vec::new(),
-    };
+    let mut tx = DelayedUsbTx { write_attempts: 0 };
 
-    assert!(usb_write_bytes_bounded(&mut tx, b"response\\n"));
-    assert_eq!(tx.waits, 3);
-    assert_eq!(tx.sent, b"response\\n");
+    assert!(!usb_write_bytes_bounded(&mut tx, b"response\\n"));
+    assert_eq!(tx.write_attempts, 1);
 }
 
 #[test]
@@ -1318,25 +1375,19 @@ fn usb_response_write_uses_default_bounded_chunks_for_host_requested_frames() {
 }
 
 #[test]
-fn usb_response_write_allows_the_runtime_transport_to_confirm_delivery() {
-    struct ConfirmingUsbTx {
-        response: std::vec::Vec<u8>,
-        fallback_write_attempts: usize,
+fn usb_response_write_uses_nonblocking_transport_calls() {
+    struct NonblockingUsbTx {
+        sent: std::vec::Vec<u8>,
     }
 
-    impl UsbControlTx for ConfirmingUsbTx {
-        fn write_byte_nb(&mut self, _byte: u8) -> Result<(), UsbTxError> {
-            self.fallback_write_attempts += 1;
-            Err(UsbTxError::Other)
+    impl UsbControlTx for NonblockingUsbTx {
+        fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
+            self.sent.push(byte);
+            Ok(())
         }
 
         fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
             Ok(())
-        }
-
-        fn write_response_bytes(&mut self, bytes: &[u8]) -> bool {
-            self.response.extend_from_slice(bytes);
-            true
         }
     }
 
@@ -1346,17 +1397,15 @@ fn usb_response_write_allows_the_runtime_transport_to_confirm_delivery() {
         request_id,
         UsbResponsePayload::Identity(Box::new(Identity::firmware_default())),
     );
-    let mut tx = ConfirmingUsbTx {
-        response: std::vec::Vec::new(),
-        fallback_write_attempts: 0,
+    let mut tx = NonblockingUsbTx {
+        sent: std::vec::Vec::new(),
     };
     let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
 
     usb_write_response_frame_to(&mut tx, &response, &mut tx_buf);
 
-    let line = core::str::from_utf8(&tx.response).expect("response is utf8");
+    let line = core::str::from_utf8(&tx.sent).expect("response is utf8");
     assert!(line.contains(r#""requestId":"confirmed-response""#));
-    assert_eq!(tx.fallback_write_attempts, 0);
 }
 
 #[test]
@@ -10519,11 +10568,17 @@ fn runtime_control_work_is_bounded_before_the_next_pd_service() {
 
     assert!(usb_input.contains("if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET"));
     let control_frame = normalized_source
-        .find("usb_write_response_frame(&mutstate.transport.usb_serial,&response,state.transport.usb_tx_buf,);")
-        .expect("USB control path must write a bounded response");
+        .find("usb_queue_response_frame(&mutstate.transport.usb_response_tx,&response,state.transport.usb_tx_buf,);")
+        .expect("USB control path must queue a bounded response");
     let control_frame_tail = &normalized_source[control_frame..];
     assert!(control_frame_tail.contains("usb_rx_line.clear();"));
     assert!(control_frame_tail.contains("break;"));
+    assert!(
+        normalized_source.contains(
+            "usb_response_tx.pump(&mutstate.transport.usb_serial,state.transport.usb_tx_buf);"
+        ),
+        "runtime must advance outbound USB one bounded turn at a time"
+    );
     assert!(source.contains("let Some(command) = flux_purr_firmware::net::try_receive_command()"));
     assert!(
         !source

@@ -26,6 +26,8 @@ pub(crate) struct RuntimeTransportState {
     #[cfg(feature = "web_serial")]
     pub(crate) usb_tx_buf: &'static mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     #[cfg(feature = "web_serial")]
+    pub(crate) usb_response_tx: UsbResponseTxState,
+    #[cfg(feature = "web_serial")]
     pub(crate) eeprom_snapshot_session: EepromSnapshotSession,
     #[cfg(not(feature = "web_serial"))]
     pub(crate) persistence_log_sink: NoopPersistenceLogSink,
@@ -2544,10 +2546,13 @@ pub(crate) async fn initialize_boot_memory_stage(pipeline: &mut BootPipeline) {
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-pub(crate) fn start_rtos(timg0: esp_hal::peripherals::TIMG0<'static>) {
+pub(crate) fn start_rtos(
+    timg0: esp_hal::peripherals::TIMG0<'static>,
+) -> esp_hal::timer::timg::Wdt<esp_hal::peripherals::TIMG0<'static>> {
     let timg0 = TimerGroup::new(timg0);
     esp_rtos::start(timg0.timer0);
     rom_boot_stage(b"rtos_started");
+    timg0.wdt
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2626,6 +2631,7 @@ async fn run_boot_runtime_finalize_task(spawner: Spawner, state: Box<BootRuntime
     spawner
         .spawn(run_frontpanel_runtime_task(state))
         .expect("failed to spawn front-panel runtime task");
+    arm_watchdog();
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2638,7 +2644,8 @@ pub(crate) async fn run(spawner: Spawner) {
     let peripherals = esp_hal::init(config);
     rom_boot_stage(b"hal_init_complete");
     let (timg0, system_tokens, device_tokens) = split_boot_tokens(peripherals);
-    start_rtos(timg0);
+    let watchdog = start_rtos(timg0);
+    spawn_watchdog(spawner, watchdog);
     init_runtime_heap();
     // The root task transfers both token groups into heap storage before any
     // asynchronous boot work. Every complete boot state then stays out of the
