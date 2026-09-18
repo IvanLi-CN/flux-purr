@@ -88,6 +88,31 @@ fn watchdog_feed_gate_requires_both_runtime_and_pd_progress() {
 }
 
 #[test]
+fn watchdog_configures_clock_derived_timeout_before_rtos_handoff() {
+    let watchdog = include_str!("watchdog.rs");
+    let boot = include_str!("boot.rs");
+    let configure = watchdog
+        .split("pub(crate) fn configure_watchdog_before_rtos")
+        .nth(1)
+        .expect("watchdog timeout configuration must remain explicit");
+    let task = watchdog
+        .split("pub(crate) async fn watchdog_task")
+        .nth(1)
+        .expect("watchdog supervisor task must remain present");
+    let start_rtos = boot
+        .split("pub(crate) fn start_rtos")
+        .nth(1)
+        .expect("RTOS startup must remain present");
+
+    assert!(configure.contains("watchdog.set_timeout("));
+    assert!(!task.contains("set_timeout("));
+    assert!(
+        start_rtos.find("configure_watchdog_before_rtos(timg0.wdt)")
+            < start_rtos.find("esp_rtos::start(timg0.timer0)")
+    );
+}
+
+#[test]
 fn runtime_usb_transport_has_no_blocking_write_or_spin_retry() {
     let support = include_str!("support.rs");
     let control_plane = include_str!("control_plane.rs");

@@ -2550,9 +2550,11 @@ pub(crate) fn start_rtos(
     timg0: esp_hal::peripherals::TIMG0<'static>,
 ) -> esp_hal::timer::timg::Wdt<esp_hal::peripherals::TIMG0<'static>> {
     let timg0 = TimerGroup::new(timg0);
+    let watchdog = configure_watchdog_before_rtos(timg0.wdt);
+    rom_boot_stage(b"watchdog_configured");
     esp_rtos::start(timg0.timer0);
     rom_boot_stage(b"rtos_started");
-    timg0.wdt
+    watchdog
 }
 
 #[cfg(target_arch = "xtensa")]

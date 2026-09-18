@@ -60,32 +60,43 @@ pub(crate) fn arm_watchdog() {
 }
 
 #[cfg(target_arch = "xtensa")]
-#[embassy_executor::task]
-pub(crate) async fn watchdog_task(
+pub(crate) fn configure_watchdog_before_rtos(
     mut watchdog: esp_hal::timer::timg::Wdt<esp_hal::peripherals::TIMG0<'static>>,
-) {
+) -> esp_hal::timer::timg::Wdt<esp_hal::peripherals::TIMG0<'static>> {
+    // `set_timeout` reads esp-hal's global clock singleton. Configure the
+    // hardware before esp-rtos transfers the bootstrap context to its timer
+    // scheduler; the runtime supervisor only performs register-level feed
+    // operations after that handoff.
     watchdog.set_timeout(
         esp_hal::timer::timg::MwdtStage::Stage0,
         HalDuration::from_millis(WATCHDOG_TIMEOUT_MS),
     );
+    watchdog
+}
 
+#[cfg(target_arch = "xtensa")]
+#[embassy_executor::task]
+pub(crate) async fn watchdog_task(
+    mut watchdog: esp_hal::timer::timg::Wdt<esp_hal::peripherals::TIMG0<'static>>,
+) {
     let mut gate = WatchdogFeedGate::default();
     let mut watchdog_enabled = false;
     loop {
-        EmbassyTimer::after_millis(WATCHDOG_SAMPLE_MS).await;
-        if WATCHDOG_ARMED.load(Ordering::Acquire) == 0 {
-            continue;
+        if WATCHDOG_ARMED.load(Ordering::Acquire) != 0 && !watchdog_enabled {
+            watchdog.enable();
+            watchdog_enabled = true;
+            rom_boot_stage(b"watchdog_armed");
         }
 
-        let runtime_heartbeat = RUNTIME_HEARTBEAT.load(Ordering::Acquire);
-        let pd_heartbeat = PD_HEARTBEAT.load(Ordering::Acquire);
-        if gate.observe(runtime_heartbeat, pd_heartbeat) {
-            if !watchdog_enabled {
-                watchdog.enable();
-                watchdog_enabled = true;
+        if watchdog_enabled {
+            let runtime_heartbeat = RUNTIME_HEARTBEAT.load(Ordering::Acquire);
+            let pd_heartbeat = PD_HEARTBEAT.load(Ordering::Acquire);
+            if gate.observe(runtime_heartbeat, pd_heartbeat) {
+                watchdog.feed();
             }
-            watchdog.feed();
         }
+
+        EmbassyTimer::after_millis(WATCHDOG_SAMPLE_MS).await;
     }
 }
 
