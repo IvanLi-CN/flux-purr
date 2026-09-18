@@ -86,7 +86,7 @@ macro_rules! build_runtime_loop_state {
             status_light_started_ms,
             pd_runtime_started_ms,
             pd_contract_ready,
-            pd_i2c,
+            eeprom_i2c,
             pd_port,
             eeprom_record_staging,
             #[cfg(feature = "web_serial")]
@@ -108,7 +108,10 @@ macro_rules! build_runtime_loop_state {
             persistence_record_state,
         } = memory.into();
         drop(boot_memory_io_scratch);
-        let BootAdcTokens { .. } = tokens.expect("boot ADC tokens consumed during initialization");
+        assert!(
+            tokens.is_none(),
+            "raw boot ADC tokens must be consumed before entering the runtime loop"
+        );
         let adc1 = adc1.expect("ADC driver initialized before runtime");
         let vin_adc_pin = vin_adc_pin.expect("VIN ADC initialized before runtime");
         let rtd_adc_pin = rtd_adc_pin.expect("RTD ADC initialized before runtime");
@@ -116,7 +119,6 @@ macro_rules! build_runtime_loop_state {
         let runtime_started_ms = pd_runtime_started_ms;
         let last_control_ms = 0;
         let next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
-        let next_pd_service_deadline_ms = 0;
         let heater_control_timing = HeaterControlTiming::default();
         let _ = reset_reason;
         let _ = status_light_started_ms;
@@ -138,7 +140,7 @@ macro_rules! build_runtime_loop_state {
             canvas,
             inputs,
             controller,
-            pd_i2c,
+            eeprom_i2c,
             pd_port,
             fan_enable,
             fan_pwm,
@@ -212,7 +214,6 @@ macro_rules! build_runtime_loop_state {
             runtime_started_ms,
             last_control_ms,
             next_control_deadline_ms,
-            next_pd_service_deadline_ms,
             heater_control_timing,
             ui_refresh_pending,
             next_ui_refresh_ms,

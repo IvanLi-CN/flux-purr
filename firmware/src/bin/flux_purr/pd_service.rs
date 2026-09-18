@@ -1,0 +1,366 @@
+#[allow(unused_imports)]
+use super::*;
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) const PD_SERVICE_TICK_MS: u64 = 5;
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) const PD_SERVICE_COMMAND_CAPACITY: usize = 8;
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) const PD_SERVICE_MAX_COMMANDS_PER_TICK: usize = 1;
+
+#[cfg(target_arch = "xtensa")]
+static PD_INTERLOCK_PENDING: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(target_arch = "xtensa")]
+static PD_INTERLOCK_LATCHED: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy)]
+pub(crate) enum PdServiceCommand {
+    AutomaticIdle,
+    FixedVoltage(u16),
+    PpsVoltage(u16),
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy)]
+pub(crate) struct PdServiceSnapshot {
+    pub(crate) observation: Option<PdStatusObservation>,
+    pub(crate) capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+    pub(crate) controller: ControllerKind,
+    pub(crate) service_available: bool,
+    pub(crate) stale_contract_vin_guard_suspended: bool,
+    pub(crate) published_at_ms: u64,
+}
+
+#[cfg(target_arch = "xtensa")]
+impl PdServiceSnapshot {
+    const fn unavailable() -> Self {
+        Self {
+            observation: None,
+            capabilities: None,
+            controller: ControllerKind::Unknown,
+            service_available: false,
+            stale_contract_vin_guard_suspended: false,
+            published_at_ms: 0,
+        }
+    }
+
+    fn with_fresh_observation(self, now_ms: u64) -> Self {
+        if self
+            .observation
+            .is_some_and(|_| !pd_snapshot_is_fresh(self.published_at_ms, now_ms))
+        {
+            Self {
+                observation: None,
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) static PD_SERVICE_COMMANDS: Channel<
+    CriticalSectionRawMutex,
+    PdServiceCommand,
+    PD_SERVICE_COMMAND_CAPACITY,
+> = Channel::new();
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) static PD_SERVICE_SNAPSHOT: BlockingMutex<
+    CriticalSectionRawMutex,
+    RefCell<PdServiceSnapshot>,
+> = BlockingMutex::new(RefCell::new(PdServiceSnapshot::unavailable()));
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn source_supports_fusb302b_idle_pps(
+    capabilities: ch224q::AdjustablePowerCapabilities,
+) -> bool {
+    capabilities.pps_apdos.into_iter().flatten().any(|apdo| {
+        apdo.min_mv <= FUSB302B_INITIAL_PPS_REQUEST_MV
+            && apdo.max_mv >= FUSB302B_INITIAL_PPS_REQUEST_MV
+            && apdo.max_ma >= MIN_HEATER_CONTRACT_MA
+    })
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PdServiceClient;
+
+#[cfg(target_arch = "xtensa")]
+impl PdServiceClient {
+    pub(crate) const fn new() -> Self {
+        Self
+    }
+
+    pub(crate) fn mark_starting_fusb302b() -> Self {
+        PD_INTERLOCK_PENDING.store(0, Ordering::Release);
+        PD_INTERLOCK_LATCHED.store(0, Ordering::Release);
+        PD_SERVICE_SNAPSHOT.lock(|snapshot| {
+            *snapshot.borrow_mut() = PdServiceSnapshot {
+                controller: ControllerKind::Fusb302b,
+                service_available: true,
+                ..PdServiceSnapshot::unavailable()
+            };
+        });
+        PD_HEATER_PERMIT.store(0, Ordering::Release);
+        Self::new()
+    }
+
+    pub(crate) fn mark_unavailable() -> Self {
+        PD_INTERLOCK_PENDING.store(0, Ordering::Release);
+        PD_INTERLOCK_LATCHED.store(0, Ordering::Release);
+        PD_SERVICE_SNAPSHOT.lock(|snapshot| {
+            *snapshot.borrow_mut() = PdServiceSnapshot::unavailable();
+        });
+        HeaterPwmGate::force_off();
+        Self::new()
+    }
+
+    pub(crate) fn snapshot(&self) -> PdServiceSnapshot {
+        PD_SERVICE_SNAPSHOT
+            .lock(|snapshot| *snapshot.borrow())
+            .with_fresh_observation(PdTimestamp::now().as_millis())
+    }
+
+    pub(crate) fn observation(&self) -> Option<PdStatusObservation> {
+        self.snapshot().observation
+    }
+
+    pub(crate) fn capabilities(&self) -> Option<ch224q::AdjustablePowerCapabilities> {
+        self.snapshot().capabilities
+    }
+
+    pub(crate) fn controller_kind(&self) -> ControllerKind {
+        self.snapshot().controller
+    }
+
+    pub(crate) fn service_available(&self) -> bool {
+        self.snapshot().service_available
+    }
+
+    pub(crate) fn stale_contract_vin_guard_suspended(&self, _now_ms: u64) -> bool {
+        self.snapshot().stale_contract_vin_guard_suspended
+    }
+
+    pub(crate) fn interlock_after_stale_contract(&self, _now_ms: u64) {
+        let snapshot = self.snapshot();
+        if snapshot.service_available {
+            PD_INTERLOCK_LATCHED.store(1, Ordering::Release);
+            PD_INTERLOCK_PENDING.store(1, Ordering::Release);
+        }
+        PD_SERVICE_SNAPSHOT.lock(|current| {
+            let mut current = current.borrow_mut();
+            current.observation = None;
+            current.stale_contract_vin_guard_suspended = false;
+        });
+        HeaterPwmGate::force_off();
+    }
+
+    fn submit_request(
+        &self,
+        command: PdServiceCommand,
+        requested_mv: u16,
+        kind: ContractKind,
+    ) -> PdContractRequestState {
+        let snapshot = self.snapshot();
+        if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
+            return PdContractRequestState::Failed;
+        }
+        if snapshot.observation.is_some_and(|observation| {
+            observation.contract.kind == kind && observation.contract.voltage_mv == requested_mv
+        }) {
+            return PdContractRequestState::Confirmed;
+        }
+        // Requests are deliberately non-blocking. The service task owns the
+        // request and the next snapshot establishes whether it was accepted.
+        // A full queue is a real failure; reporting Pending here would allow
+        // the front-panel loop to wait forever for a command that was dropped.
+        match PD_SERVICE_COMMANDS.try_send(command) {
+            Ok(()) => PdContractRequestState::Pending,
+            Err(_) => PdContractRequestState::Failed,
+        }
+    }
+
+    pub(crate) fn request_fixed_voltage(
+        &self,
+        request: ch224q::VoltageRequest,
+    ) -> PdContractRequestState {
+        self.submit_request(
+            PdServiceCommand::FixedVoltage(request.millivolts()),
+            request.millivolts(),
+            ContractKind::Fixed,
+        )
+    }
+
+    pub(crate) fn restore_automatic_idle_contract(&self) -> PdContractRequestState {
+        let snapshot = self.snapshot();
+        if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
+            return PdContractRequestState::Failed;
+        }
+        if snapshot.observation.is_some_and(|observation| {
+            (observation.contract.kind == ContractKind::Pps
+                && observation.contract.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV)
+                || (observation.contract.kind == ContractKind::Fixed
+                    && !snapshot
+                        .capabilities
+                        .is_some_and(source_supports_fusb302b_idle_pps))
+        }) {
+            return PdContractRequestState::Confirmed;
+        }
+        match PD_SERVICE_COMMANDS.try_send(PdServiceCommand::AutomaticIdle) {
+            Ok(()) => PdContractRequestState::Pending,
+            Err(_) => PdContractRequestState::Failed,
+        }
+    }
+
+    pub(crate) fn request_pps_voltage(&self, request_mv: u16) -> PdContractRequestState {
+        self.submit_request(
+            PdServiceCommand::PpsVoltage(request_mv),
+            request_mv,
+            ContractKind::Pps,
+        )
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn fusb302b_status_confirms_ready_contract(
+    phase: SinkPhase,
+    contract: Contract,
+    status0: u8,
+) -> bool {
+    phase == SinkPhase::Ready
+        && contract != Contract::none()
+        && status0 & FUSB302B_STATUS0_VBUSOK != 0
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn pd_status_observation(
+    runtime: &Fusb302bRuntime,
+    i2c: &mut PdI2c<'_>,
+) -> Option<PdStatusObservation> {
+    let contract = runtime.active_contract();
+    let status = Fusb302::new(&mut *i2c).read_status().await.ok()?;
+    if !fusb302b_status_confirms_ready_contract(runtime.policy.phase(), contract, status.status0) {
+        return None;
+    }
+
+    let status_raw = 1 << 3;
+    Some(PdStatusObservation {
+        status_raw,
+        status: Status::from_register(status_raw),
+        current_raw: 0,
+        current_ma: contract.current_ma,
+        contract_voltage_mv: Some(contract.voltage_mv),
+        contract,
+    })
+}
+
+#[cfg(target_arch = "xtensa")]
+fn publish_pd_snapshot(runtime: &Fusb302bRuntime, observation: Option<PdStatusObservation>) {
+    let now_ms = PdTimestamp::now().as_millis();
+    let interlock_latched = PD_INTERLOCK_LATCHED.load(Ordering::Acquire) != 0;
+    let observation = (!interlock_latched).then_some(observation).flatten();
+    let ready = startup_pd_contract_ready(observation);
+    PD_SERVICE_SNAPSHOT.lock(|snapshot| {
+        *snapshot.borrow_mut() = PdServiceSnapshot {
+            observation,
+            capabilities: runtime
+                .source_capabilities()
+                .and_then(fusb302b_adjustable_power_capabilities),
+            controller: ControllerKind::Fusb302b,
+            service_available: runtime.service_available(),
+            stale_contract_vin_guard_suspended: runtime.stale_contract_vin_guard_suspended(now_ms),
+            published_at_ms: now_ms,
+        };
+    });
+    if ready {
+        PD_HEATER_PERMIT_EXPIRES_AT_MS.store(
+            now_ms.saturating_add(PD_SNAPSHOT_MAX_AGE_MS) as u32,
+            Ordering::Release,
+        );
+        PD_HEATER_PERMIT.store(1, Ordering::Release);
+    } else {
+        HeaterPwmGate::force_off();
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn process_pd_command(
+    runtime: &mut Fusb302bRuntime,
+    i2c: &mut PdI2c<'static>,
+    command: PdServiceCommand,
+) {
+    match command {
+        PdServiceCommand::AutomaticIdle => {
+            let _ = runtime
+                .request_automatic_idle_contract(i2c, PdTimestamp::now())
+                .await;
+        }
+        PdServiceCommand::FixedVoltage(request_mv) => {
+            let _ = runtime
+                .request_fixed_voltage(i2c, request_mv, PdTimestamp::now())
+                .await;
+        }
+        PdServiceCommand::PpsVoltage(request_mv) => {
+            let _ = runtime
+                .request_pps_voltage(i2c, request_mv, PdTimestamp::now())
+                .await;
+        }
+    }
+}
+
+/// The sole owner of FUSB302B policy state and physical PD I2C transactions.
+/// Every loop turn does bounded work, releases the shared bus, and then yields
+/// to its own cadence timer. This task deliberately stays out of interrupt
+/// context because FUSB302B protocol recovery has a deep call stack.
+#[cfg(target_arch = "xtensa")]
+#[embassy_executor::task]
+async fn pd_service_task(mut i2c: PdI2c<'static>, mut runtime: Box<Fusb302bRuntime>) {
+    loop {
+        let observation = if i2c.try_acquire() {
+            if PD_INTERLOCK_PENDING.swap(0, Ordering::Acquire) != 0 {
+                runtime.interlock_after_stale_contract(PdTimestamp::now().as_millis());
+                PD_INTERLOCK_LATCHED.store(0, Ordering::Release);
+                HeaterPwmGate::force_off();
+            }
+            for _ in 0..PD_SERVICE_MAX_COMMANDS_PER_TICK {
+                let Ok(command) = PD_SERVICE_COMMANDS.try_receive() else {
+                    break;
+                };
+                process_pd_command(&mut runtime, &mut i2c, command).await;
+            }
+            // A request flood must never turn the command mailbox into a second
+            // unbounded work queue. Poll once on every service turn regardless of
+            // how many commands are waiting.
+            let _ = runtime.poll(&mut i2c, PdTimestamp::now()).await;
+            // The policy contract is only heater-authorizing after a fresh
+            // hardware status read. Keep this read inside the same bus lease so
+            // an EEPROM turn cannot leave a stale contract looking active.
+            let observation = pd_status_observation(&runtime, &mut i2c).await;
+            i2c.release();
+            observation
+        } else {
+            // No current hardware observation means no heater authorization.
+            None
+        };
+        publish_pd_snapshot(&runtime, observation);
+        EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await;
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn spawn_pd_service(
+    spawner: Spawner,
+    mut i2c: PdI2c<'static>,
+    runtime: Box<Fusb302bRuntime>,
+) {
+    i2c.release();
+    spawner
+        .spawn(pd_service_task(i2c, runtime))
+        .expect("failed to spawn PD service task");
+}

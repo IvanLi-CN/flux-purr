@@ -9,7 +9,10 @@ use super::pd::{Contract, ContractKind, SourceCapabilities};
 const PD_HEADER_REQUEST: u16 = 2;
 const PD_HEADER_ACCEPT: u16 = 3;
 const PD_HEADER_GET_SOURCE_CAP: u16 = 7;
-const PD_HEADER_SPEC_REV_30: u16 = 0b10 << 6;
+// FUSB302B documents the `0b10` PD revision encoding as unsupported. Keep
+// automatic GoodCRC and all locally initiated packets on the PD 2.0 encoding
+// so a source can complete the initial contract exchange reliably.
+const PD_HEADER_SPEC_REV_20: u16 = 0b01 << 6;
 const PPS_RDO_VOLTAGE_STEP_MV: u16 = 20;
 const PPS_RDO_CURRENT_STEP_MA: u16 = 50;
 const PPS_KEEPALIVE_INTERVAL_MS: u64 = 5_000;
@@ -205,6 +208,17 @@ impl SinkPolicy {
         Some(rdo)
     }
 
+    /// Restore the startup policy after a manual or thermal override ends.
+    /// This prefers the configured PPS idle voltage and uses the bounded fixed
+    /// PDO fallback only when the live capabilities provide no usable APDO.
+    pub fn request_automatic_idle_contract(&mut self) -> Option<[u8; 4]> {
+        if !self.source_capabilities_received {
+            return None;
+        }
+        self.requested_mv = self.default_requested_mv;
+        self.begin_request(self.source_capabilities)
+    }
+
     /// Move a PPS session to an exact fixed PDO before releasing a terminal
     /// heater-disarm latch. This is deliberately separate from the normal
     /// selector, which prefers PPS whenever an APDO covers the target.
@@ -344,15 +358,15 @@ impl SinkPolicy {
 }
 
 pub const fn request_header(message_id: u8) -> u16 {
-    PD_HEADER_REQUEST | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9) | (1 << 12)
+    PD_HEADER_REQUEST | PD_HEADER_SPEC_REV_20 | (((message_id & 0x07) as u16) << 9) | (1 << 12)
 }
 
 pub const fn accept_header(message_id: u8) -> u16 {
-    PD_HEADER_ACCEPT | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9)
+    PD_HEADER_ACCEPT | PD_HEADER_SPEC_REV_20 | (((message_id & 0x07) as u16) << 9)
 }
 
 pub const fn get_source_capabilities_header(message_id: u8) -> u16 {
-    PD_HEADER_GET_SOURCE_CAP | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9)
+    PD_HEADER_GET_SOURCE_CAP | PD_HEADER_SPEC_REV_20 | (((message_id & 0x07) as u16) << 9)
 }
 
 pub fn request_data_object(contract: Contract) -> Option<[u8; 4]> {
@@ -495,6 +509,28 @@ mod tests {
         assert_eq!(policy.phase(), SinkPhase::Ready);
         assert_eq!(policy.active_contract().kind, ContractKind::Pps);
         assert_eq!(policy.active_contract().voltage_mv, 12_000);
+    }
+
+    #[test]
+    fn automatic_idle_restore_returns_a_twenty_volt_override_to_twelve_volt_pps() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        let source = [
+            ((20_000_u32 / 50) << 10) | (5_000_u32 / 10),
+            PPS_APDO_5V_TO_21V_5A,
+        ];
+        let _ = policy.on_source_capabilities(&source);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert_eq!(policy.active_contract().voltage_mv, 12_000);
+
+        let _ = policy.request_pps_voltage(20_000);
+        policy.on_control_message(3, 1);
+        policy.on_control_message(6, 1);
+        assert_eq!(policy.active_contract().voltage_mv, 20_000);
+
+        assert!(policy.request_automatic_idle_contract().is_some());
+        assert_eq!(policy.pending_contract.kind, ContractKind::Pps);
+        assert_eq!(policy.pending_contract.voltage_mv, 12_000);
     }
 
     #[test]
@@ -805,9 +841,9 @@ mod tests {
     }
 
     #[test]
-    fn pd30_headers_keep_message_id_and_object_count() {
-        assert_eq!(request_header(5), 0x1a82);
-        assert_eq!(get_source_capabilities_header(5), 0x0a87);
-        assert_eq!(accept_header(0), 0x0083);
+    fn startup_headers_use_the_fusb302b_supported_pd20_revision() {
+        assert_eq!(request_header(5), 0x1a42);
+        assert_eq!(get_source_capabilities_header(5), 0x0a47);
+        assert_eq!(accept_header(0), 0x0043);
     }
 }

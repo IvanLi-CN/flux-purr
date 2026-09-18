@@ -131,7 +131,7 @@
 - 蜂鸣告警只允许存在两个 owner-facing 状态：`热失控` 与 `热失控待确认`。温度 `>=420°C` 的热失控期间必须每隔 `1s` 播放一次热失控提示；温度回落到 `<420°C` 后，若用户尚未确认，则进入待确认状态并每 `10s` 蜂鸣提醒一次。`SensorShort / SensorOpen / AdcReadFailed` 仍可停热并报告测温无效，但不得触发蜂鸣告警、待确认状态或 reminder。
 - defmt 日志必须覆盖 RTD 读数、PID 输入/输出、heater backend 选择、PPS/AVS 请求电压、MOS gate 输出、fault 原因、fan policy 输出与 PD 状态变化。
 - Dashboard 启动呈现必须区分 `Initializing`、`EepromRestore`、`Ready` 与 `InitialRtdFault` 四态。显示初始化后的首帧必须使用 `---.-°C`、`SET ---`、`PPS ---`、`FAN ---` 占位，不得显示伪造的数值（包括 `300°C`）；可信 v5 EEPROM 配置和首个 RTD 样本有效后才进入 `Ready`。旧格式恢复期间显示真实 RTD 与 `EEPROM/RESTORE`，但锁定配置编辑和加热；PD 未就绪时显示真实 Dashboard 数据与 `POWER/WAIT`。首个 RTD 样本失败时必须显示 `WARN/SENSOR`、保持加热锁定和占位温度；进入 `Ready` 后的 RTD fault 必须保留最后一个有效 owner-facing 温度。
-- 启动期间的 USB early-control 必须在启动阶段边界继续提供 `get_identity` 和既有 `startup_busy` 语义；背光控制建立后，固件先执行有界的 PD Sink 启动服务，再初始化显示并提交启动屏，之后才进入其它硬件初始化。PD 合同未就绪时仍必须在该有界窗口结束后继续到 Dashboard，并保持 `POWER/WAIT` 与 fail-closed 门控；显示初始化、启动帧刷屏和后续运行时都必须持续以独立 service cadence 处理 PD。GPIO47 默认保持 `0%`，只有显式 arm 且观察到 FUSB `Accept + PS_RDY` 后才允许输出。
+- 启动期间的 USB early-control 必须在启动阶段边界继续提供 `get_identity` 和既有 `startup_busy` 语义；背光控制建立后，固件先执行有界的 PD Sink 启动服务，再初始化显示并提交启动屏，之后才进入其它硬件初始化。PD 合同未就绪时仍必须在该有界窗口结束后继续到 Dashboard，并保持 `POWER/WAIT` 与 fail-closed 门控；显示初始化、启动帧刷屏和后续运行时都必须持续以独立 service cadence 处理 PD。任何被该 cadence 取消的显示 SPI transaction 都必须在 future drop 时释放 CS，不得把面板保持在选中状态。启动屏完成、恢复与网络初始化完成后，USB early-control 必须在进入 runtime loop 前发送 `boot_stage=runtime_ready`。GPIO47 默认保持 `0%`，只有显式 arm 且观察到 FUSB `Accept + PS_RDY` 后才允许输出。
 
 ### SHOULD
 

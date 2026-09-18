@@ -2,9 +2,8 @@
 use super::*;
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) struct HeaterPowerOutputContext<'a, 'i, PWM> {
-    pub(crate) i2c: &'a mut I2c<'i, esp_hal::Blocking>,
-    pub(crate) pd_port: &'a mut PdPort,
+pub(crate) struct HeaterPowerOutputContext<'a, PWM> {
+    pub(crate) pd_port: &'a PdPort,
     pub(crate) heater_pwm: &'a mut PWM,
     pub(crate) backend: &'a mut HeaterPowerBackend,
     pub(crate) hold_pps_governor: &'a mut HoldPpsGovernor,

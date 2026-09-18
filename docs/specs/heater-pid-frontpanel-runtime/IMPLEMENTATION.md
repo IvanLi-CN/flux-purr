@@ -4,6 +4,7 @@
 
 - PID heater control, fan policy, fault latching, dashboard state projection, and frontpanel runtime synchronization are implemented.
 - Dashboard startup presentation uses explicit initializing, EEPROM-restore, ready, and initial-RTD-fault states so the first framebuffer cannot expose a numeric bring-up placeholder. PD readiness is represented separately as `POWER/WAIT`; the fixed post-display and pre-ADC delays are removed from the Dashboard path.
+- The async display SPI device owns CS through a drop guard, so a PD-service timeout cannot leave the panel selected. USB early-control emits `boot_stage=runtime_ready` only after the first UI and startup work have completed, before the runtime loop begins.
 - Host fixtures and web/native contracts cover normal operation, cooling, over-temperature, sensor faults, and safe-off behavior.
 - The normalized heater/fan state is shared across firmware, devd, HTTP, and Web surfaces.
 

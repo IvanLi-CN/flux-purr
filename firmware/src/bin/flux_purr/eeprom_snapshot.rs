@@ -43,15 +43,10 @@ pub(crate) fn eeprom_snapshot_storage_failure(response: &EepromSnapshotResponse)
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn eeprom_snapshot_digest<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
-) -> Result<heapless::String<EEPROM_SNAPSHOT_HASH_LEN>, &'static str>
-where
-    PWM: SetDutyCycle,
-{
-    let Some(address) = probe_eeprom_address(i2c) else {
+pub(crate) async fn eeprom_snapshot_digest(
+    i2c: &mut I2c<'_>,
+) -> Result<heapless::String<EEPROM_SNAPSHOT_HASH_LEN>, &'static str> {
+    let Some(address) = probe_eeprom_address(i2c).await else {
         return Err("eeprom_unavailable");
     };
     let mut hasher = Sha256::new();
@@ -59,16 +54,9 @@ where
     let mut bytes = [0_u8; EEPROM_SNAPSHOT_CHUNK_MAX as usize];
     while offset < EEPROM_SNAPSHOT_SIZE {
         let length = usize::from((EEPROM_SNAPSHOT_SIZE - offset).min(EEPROM_SNAPSHOT_CHUNK_MAX));
-        read_eeprom_bytes_chunked_with_pd(
-            i2c,
-            pd_port,
-            service,
-            address,
-            offset,
-            &mut bytes[..length],
-        )
-        .await
-        .map_err(|_| "eeprom_read_failed")?;
+        read_eeprom_bytes_chunked(i2c, address, offset, &mut bytes[..length])
+            .await
+            .map_err(|_| "eeprom_read_failed")?;
         hasher.update(&bytes[..length]);
         offset = offset.saturating_add(length as u16);
     }
@@ -102,18 +90,14 @@ pub(crate) fn write_eeprom_snapshot_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_eeprom_snapshot_line<PWM>(
+pub(crate) async fn process_eeprom_snapshot_line(
     line: &str,
     session: &mut EepromSnapshotSession,
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+    i2c: &mut I2c<'_>,
     memory_commit_due_ms: &mut Option<u64>,
     elapsed_ms: u64,
-) -> Option<EepromSnapshotResponse>
-where
-    PWM: SetDutyCycle,
-{
+    heater_active: bool,
+) -> Option<EepromSnapshotResponse> {
     let parsed = serde_json_core::from_slice::<EepromSnapshotRequest>(line.as_bytes());
     let request = match parsed {
         Ok((request, _)) if request.op.as_str().starts_with("eeprom_snapshot_") => request,
@@ -138,40 +122,38 @@ where
         request,
         session,
         i2c,
-        pd_port,
-        service,
         memory_commit_due_ms,
         elapsed_ms,
+        heater_active,
     )
     .await
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_eeprom_snapshot_request<PWM>(
+pub(crate) async fn process_eeprom_snapshot_request(
     request: EepromSnapshotRequest,
     session: &mut EepromSnapshotSession,
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+    i2c: &mut I2c<'_>,
     memory_commit_due_ms: &mut Option<u64>,
     elapsed_ms: u64,
-) -> Option<EepromSnapshotResponse>
-where
-    PWM: SetDutyCycle,
-{
+    heater_active: bool,
+) -> Option<EepromSnapshotResponse> {
     match request.op.as_str() {
-        "eeprom_snapshot_open" => {
-            open_eeprom_snapshot(request, session, memory_commit_due_ms, elapsed_ms, service)
-        }
+        "eeprom_snapshot_open" => open_eeprom_snapshot(
+            request,
+            session,
+            memory_commit_due_ms,
+            elapsed_ms,
+            heater_active,
+        ),
         "eeprom_snapshot_read" => {
             read_eeprom_snapshot(
                 request,
                 session,
                 i2c,
-                pd_port,
-                service,
                 memory_commit_due_ms,
                 elapsed_ms,
+                heater_active,
             )
             .await
         }
@@ -180,10 +162,9 @@ where
                 request,
                 session,
                 i2c,
-                pd_port,
-                service,
                 memory_commit_due_ms,
                 elapsed_ms,
+                heater_active,
             )
             .await
         }
@@ -195,17 +176,14 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn open_eeprom_snapshot<PWM>(
+pub(crate) fn open_eeprom_snapshot(
     request: EepromSnapshotRequest,
     session: &mut EepromSnapshotSession,
     memory_commit_due_ms: &mut Option<u64>,
     elapsed_ms: u64,
-    service: &EepromPdServiceContext<'_, PWM>,
-) -> Option<EepromSnapshotResponse>
-where
-    PWM: SetDutyCycle,
-{
-    if *service.last_heater_duty != 0 {
+    heater_active: bool,
+) -> Option<EepromSnapshotResponse> {
+    if heater_active {
         return Some(eeprom_snapshot_error(request.request_id, "heater_active"));
     }
     let request_id = request.request_id;
@@ -232,18 +210,14 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn read_eeprom_snapshot<PWM>(
+pub(crate) async fn read_eeprom_snapshot(
     request: EepromSnapshotRequest,
     session: &mut EepromSnapshotSession,
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+    i2c: &mut I2c<'_>,
     memory_commit_due_ms: &mut Option<u64>,
     elapsed_ms: u64,
-) -> Option<EepromSnapshotResponse>
-where
-    PWM: SetDutyCycle,
-{
+    heater_active: bool,
+) -> Option<EepromSnapshotResponse> {
     let request_id = request.request_id;
     let requested_session = request.session_id.as_ref().unwrap_or(&request_id).clone();
     if !session.active || requested_session != session.session_id {
@@ -252,7 +226,7 @@ where
             "snapshot_session_invalid",
         ));
     }
-    if *service.last_heater_duty != 0 {
+    if heater_active {
         session.active = false;
         return Some(eeprom_snapshot_error(request_id, "heater_active"));
     }
@@ -266,22 +240,15 @@ where
     {
         return Some(eeprom_snapshot_error(request_id, "snapshot_range_invalid"));
     }
-    let Some(address) = probe_eeprom_address(i2c) else {
+    let Some(address) = probe_eeprom_address(i2c).await else {
         session.active = false;
         return Some(eeprom_snapshot_error(request_id, "eeprom_unavailable"));
     };
     let mut bytes = heapless::Vec::<u8, 32>::new();
     let _ = bytes.resize_default(usize::from(length));
-    if read_eeprom_bytes_chunked_with_pd(
-        i2c,
-        pd_port,
-        service,
-        address,
-        offset,
-        bytes.as_mut_slice(),
-    )
-    .await
-    .is_err()
+    if read_eeprom_bytes_chunked(i2c, address, offset, bytes.as_mut_slice())
+        .await
+        .is_err()
     {
         session.active = false;
         return Some(eeprom_snapshot_error(request_id, "eeprom_read_failed"));
@@ -303,18 +270,14 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn close_eeprom_snapshot<PWM>(
+pub(crate) async fn close_eeprom_snapshot(
     request: EepromSnapshotRequest,
     session: &mut EepromSnapshotSession,
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+    i2c: &mut I2c<'_>,
     memory_commit_due_ms: &mut Option<u64>,
     elapsed_ms: u64,
-) -> Option<EepromSnapshotResponse>
-where
-    PWM: SetDutyCycle,
-{
+    heater_active: bool,
+) -> Option<EepromSnapshotResponse> {
     let request_id = request.request_id;
     let requested_session = request.session_id.as_ref().unwrap_or(&request_id).clone();
     if !session.active || requested_session != session.session_id {
@@ -323,7 +286,7 @@ where
             "snapshot_session_invalid",
         ));
     }
-    if *service.last_heater_duty != 0 {
+    if heater_active {
         session.active = false;
         return Some(eeprom_snapshot_error(request_id, "heater_active"));
     }
@@ -331,7 +294,7 @@ where
         session.active = false;
         return Some(eeprom_snapshot_error(request_id, "snapshot_incomplete"));
     }
-    let digest = match eeprom_snapshot_digest(i2c, pd_port, service).await {
+    let digest = match eeprom_snapshot_digest(i2c).await {
         Ok(digest) => digest,
         Err(code) => {
             session.active = false;

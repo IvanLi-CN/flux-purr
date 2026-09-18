@@ -5670,6 +5670,7 @@ fn direct_firmware_commands_retain_explicit_confirmation_boundaries() {
         "--port",
         "/dev/cu.test",
         "--skip-backup",
+        "--keep-download-mode",
     ])
     .unwrap();
     let Command::Flash(args) = flash.command else {
@@ -5677,6 +5678,7 @@ fn direct_firmware_commands_retain_explicit_confirmation_boundaries() {
     };
     assert!(args.skip_backup);
     assert!(args.confirm.is_none());
+    assert!(args.keep_download_mode);
 
     let recover = Cli::try_parse_from([
         "flux-purr",
@@ -5723,6 +5725,7 @@ fn direct_flash_skip_backup_calls_only_espflash_flash() {
             elf: Some(elf),
             skip_backup: true,
             confirm: Some("NO_EEPROM_BACKUP".to_string()),
+            keep_download_mode: false,
         },
         &fake_espflash,
         false,
@@ -5775,6 +5778,7 @@ fn direct_flash_archives_before_invoking_espflash() {
             elf: Some(elf),
             skip_backup: false,
             confirm: None,
+            keep_download_mode: false,
         },
         &fake_espflash,
         false,
@@ -5827,6 +5831,7 @@ fn direct_flash_blocks_espflash_when_backup_directory_is_unavailable() {
             elf: Some(elf),
             skip_backup: false,
             confirm: None,
+            keep_download_mode: false,
         },
         &fake_espflash,
         false,
@@ -5945,6 +5950,7 @@ fn direct_elf_flash_rebuilds_the_checked_in_partition_layout() {
         "/dev/cu.test",
         Path::new("firmware/partitions.csv"),
         Path::new("firmware.elf"),
+        false,
     )
     .unwrap();
 
@@ -5960,6 +5966,47 @@ fn direct_elf_flash_rebuilds_the_checked_in_partition_layout() {
     assert!(!args.iter().any(|arg| arg == "--no-stub"));
     assert_eq!(args.last().map(String::as_str), Some("firmware.elf"));
     assert_eq!(direct_erase_flash_args("/dev/cu.test")[0], "erase-flash");
+}
+
+#[test]
+fn direct_elf_flash_uses_usb_reset_fallback_without_manual_download_mode() {
+    assert_eq!(
+        direct_elf_flash_reset_modes("/dev/cu.usbmodem2111401", false),
+        ["usb-reset", "usb-reset", "default-reset"]
+    );
+    assert_eq!(
+        direct_elf_flash_reset_modes("/dev/cu.usbserial-1410", false),
+        ["default-reset"]
+    );
+    assert_eq!(
+        direct_elf_flash_reset_modes("/dev/cu.usbmodem2111401", true),
+        ["no-reset"]
+    );
+}
+
+#[test]
+fn direct_elf_flash_can_keep_a_manually_entered_download_mode() {
+    let args = direct_elf_flash_args(
+        "/dev/cu.test",
+        Path::new("firmware/partitions.csv"),
+        Path::new("firmware.elf"),
+        true,
+    )
+    .unwrap();
+
+    assert!(
+        args.windows(2)
+            .any(|pair| { pair[0] == "--before" && pair[1] == "no-reset" })
+    );
+    assert!(
+        args.windows(2)
+            .any(|pair| { pair[0] == "--after" && pair[1] == "no-reset" })
+    );
+    assert!(
+        !args
+            .windows(2)
+            .any(|pair| { pair[0] == "--after" && pair[1] == "hard-reset" })
+    );
 }
 
 #[test]

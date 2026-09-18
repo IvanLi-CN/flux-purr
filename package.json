@@ -13,6 +13,7 @@
     "check:firmware:clippy": "bash scripts/check-firmware-clippy.sh",
     "check:firmware:clippy:xtensa": "bash scripts/check-firmware-clippy-xtensa.sh",
     "check:firmware:build": "bash scripts/check-firmware-build.sh",
+    "check:firmware:boot-stack": "bash scripts/check-firmware-boot-stack.sh",
     "build:firmware:web": "bash scripts/build-web-firmware-bundle.sh",
     "check:devd": "bash scripts/check-devd.sh",
     "check:rust:style": "bash scripts/check-rust-style.sh",

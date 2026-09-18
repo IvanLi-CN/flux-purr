@@ -81,7 +81,7 @@
   - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, the two fan policy modes, the legacy `active_cooling_enabled` projection, Wi-Fi config fields, and the validated active thermal-model transaction with its bounded raw trace
   - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended, and newly persisted thermal-profile TLVs use an explicit `TCP2` layout marker while unmarked historical layouts remain readable
   - accepted front-panel edits debounce for about `2s` before writing the next slot
-  - on FUSB302B boards, each bounded EEPROM page write releases the shared I2C bus and services PD before the next page; a successful EEPROM save does not synchronously mirror to flash
+  - on FUSB302B boards, each bounded EEPROM page write releases the shared I2C bus before the next page; the independent PD task uses a non-blocking try-lock, skips only a turn when EEPROM owns the bus, and retries on the next cadence tick; a successful EEPROM save does not synchronously mirror to flash
   - `heater_enabled`, live temperatures, fan runtime output, fault latch, route/menu state, and buzzer reminders are never restored from EEPROM
 - Heater control:
   - PD controller detection, a ready PD contract, and later contract continuity gate heating only: the Front Panel Dashboard and USB runtime remain available for diagnostics when PD is unavailable, while `heaterLockReason=pd-contract-unavailable` holds `GPIO47` and calibration heat at `0%`
@@ -119,7 +119,7 @@
 - PD policy:
   - the production artifact targets `FUSB302BMPX`; it performs two stable Device ID reads plus a readable status-bank check before selecting the controller
   - an unreadable, conflicting, or non-FUSB identity becomes `unknown`; no CH224Q probe, guessed PD write, or startup wait is performed
-  - PD negotiation runs as a non-blocking runtime service; `Accept + PS_RDY` is required before a contract is usable, and it never arms heating automatically
+  - PD negotiation runs in a dedicated normal-executor Embassy task. The task owns its `5ms` cadence timer, FUSB302B policy, and physical PD I2C transactions; it processes at most one mailbox request before each poll and publishes snapshots. The Front Panel task never polls or mutates PD state. `Accept + PS_RDY` is required before a contract is usable, and it never arms heating automatically
   - until the contract is ready, the Dashboard shows `POWER/WAIT` with real sensor data while GPIO47 remains at `0%`
 - Historical `fan-cycle` smoke-test behavior remains documented in `s3-fan-cycle-bringup`; it is no longer the active runtime contract for the default `flux-purr` artifact.
 
@@ -147,9 +147,9 @@ or supported by the production `flux-purr` firmware artifact.
 - Xtensa app runtime build:
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release`
   - Equivalent explicit feature form: `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --features esp32s3,web_serial,net_http --bin flux-purr --release`
-- Xtensa app runtime build (`12 V` variant):
+- Xtensa app runtime compatibility build (`12 V` legacy request feature):
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-12v --bin flux-purr --release`
-- Xtensa app runtime build (`28 V` variant):
+- Xtensa app runtime compatibility build (`28 V` legacy request feature):
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-28v --bin flux-purr --release`
 
 ## Host preview workflow
@@ -177,8 +177,8 @@ or supported by the production `flux-purr` firmware artifact.
 - `mcu-agentd` remains available for selector inspection and diagnostics. It is not a firmware installation path.
 - Typical diagnostic flow:
   - `source /Users/ivan/export-esp.sh`
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release` (default `20 V` + real control-plane transport)
-  - if a different PD cap is needed, rebuild with `--no-default-features --features esp32s3,web_serial,net_http,pd-request-12v` or `--no-default-features --features esp32s3,web_serial,net_http,pd-request-28v`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release` (FUSB302B production idle policy: `12 V` PPS + real control-plane transport)
+  - FUSB302B automatic idle policy is fixed at `12 V` PPS when the Source advertises a usable APDO; legacy Cargo request features exist for compatibility build coverage and do not change that policy
   - `mcu-agentd --non-interactive config validate`
   - `mcu-agentd --non-interactive selector get esp32s3_frontpanel`
   - if selector is missing, `mcu-agentd --non-interactive selector list esp32s3_frontpanel`
