@@ -80,6 +80,9 @@ impl RuntimeLanInputOutcome {
 pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
     let mut needs_redraw = false;
     let current_pd_observation = state.pd_port.observation();
+    if current_pd_observation.is_none() {
+        HeaterPwmGate::force_off();
+    }
     if pd_status_log_key(current_pd_observation) != state.last_pd_status_log_key {
         match current_pd_observation {
             Some(observation) => info!(

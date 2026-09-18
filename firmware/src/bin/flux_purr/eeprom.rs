@@ -2447,7 +2447,7 @@ pub(crate) fn apply_heater_duty<PWM>(
 ) where
     PWM: SetDutyCycle,
 {
-    let effective_duty_percent = if PD_HEATER_PERMIT.load(Ordering::Acquire) != 0 {
+    let effective_duty_percent = if heater_permit_is_active(Instant::now().as_millis()) {
         duty_percent
     } else {
         0

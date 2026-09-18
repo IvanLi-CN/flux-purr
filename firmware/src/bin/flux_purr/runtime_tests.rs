@@ -217,6 +217,12 @@ fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
 }
 
 #[test]
+fn pd_snapshot_authorization_expires_after_the_service_heartbeat_window() {
+    assert!(pd_snapshot_is_fresh(1_000, 1_000 + PD_SNAPSHOT_MAX_AGE_MS));
+    assert!(!pd_snapshot_is_fresh(1_000, 1_001 + PD_SNAPSHOT_MAX_AGE_MS));
+}
+
+#[test]
 fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
     let pd_service = include_str!("pd_service.rs");
     let support = include_str!("support.rs");
@@ -10599,22 +10605,18 @@ fn fixed_contract_does_not_emit_liveness_probes() {
 #[test]
 fn runtime_pd_service_interlocks_stale_heater_output_in_the_high_priority_path() {
     let source = RUNTIME_IMPLEMENTATION;
-    let command_handler = source
-        .split("async fn process_pd_command")
-        .nth(1)
-        .and_then(|value| value.split("async fn pd_service_task").next())
-        .expect("PD command handler must remain next to the PD task");
     let pd_service = source
         .find("async fn pd_service_task")
         .expect("PD task must own protocol polling");
-    let _interlock = command_handler
-        .find("HeaterPwmGate::force_off()")
-        .expect("PD task must clear the physical heater output");
     let control_tick = source
         .find("async fn runtime_control_heater")
         .expect("runtime loop must retain thermal control scheduling");
 
-    assert!(command_handler.contains("PdServiceCommand::Interlock"));
+    assert!(
+        source.contains("PD_INTERLOCK_LATCHED")
+            && source.contains("PD_INTERLOCK_PENDING")
+            && source.contains("PD_INTERLOCK_PENDING.swap")
+    );
     assert!(pd_service < control_tick);
     assert!(source.contains("PD_HEATER_PERMIT"));
 }

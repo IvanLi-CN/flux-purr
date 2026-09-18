@@ -14,6 +14,8 @@ pub(crate) use alloc::boxed::Box;
 pub(crate) use core::cell::RefCell;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use core::future::Future;
+#[cfg(target_arch = "xtensa")]
+pub(crate) use core::sync::atomic::AtomicU32;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 #[cfg(target_arch = "xtensa")]
@@ -384,6 +386,9 @@ static HEATER_PWM_STORAGE: BlockingMutex<CriticalSectionRawMutex, RefCell<Option
 pub(crate) static PD_HEATER_PERMIT: AtomicU8 = AtomicU8::new(0);
 
 #[cfg(target_arch = "xtensa")]
+pub(crate) static PD_HEATER_PERMIT_EXPIRES_AT_MS: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct HeaterPwmGate;
 
@@ -401,6 +406,7 @@ impl HeaterPwmGate {
 
     pub(crate) fn force_off() {
         PD_HEATER_PERMIT.store(0, Ordering::Release);
+        PD_HEATER_PERMIT_EXPIRES_AT_MS.store(0, Ordering::Release);
         let mut gate = Self::new();
         let _ = gate.set_duty_cycle(0);
     }
@@ -424,9 +430,10 @@ impl SetDutyCycle for HeaterPwmGate {
 
     fn set_duty_cycle(&mut self, duty: u16) -> Result<(), Self::Error> {
         HEATER_PWM_STORAGE.lock(|slot| {
-            let effective_duty = if PD_HEATER_PERMIT.load(Ordering::Acquire) != 0 {
+            let effective_duty = if heater_permit_is_active(Instant::now().as_millis()) {
                 duty
             } else {
+                PD_HEATER_PERMIT.store(0, Ordering::Release);
                 0
             };
             if let Some(pwm) = slot.borrow_mut().as_mut() {
@@ -435,6 +442,21 @@ impl SetDutyCycle for HeaterPwmGate {
         });
         Ok(())
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const PD_SNAPSHOT_MAX_AGE_MS: u64 = 100;
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const fn pd_snapshot_is_fresh(published_at_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(published_at_ms) <= PD_SNAPSHOT_MAX_AGE_MS
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn heater_permit_is_active(now_ms: u64) -> bool {
+    let now = now_ms as u32;
+    let expires_at = PD_HEATER_PERMIT_EXPIRES_AT_MS.load(Ordering::Acquire);
+    PD_HEATER_PERMIT.load(Ordering::Acquire) != 0 && (now.wrapping_sub(expires_at) as i32) < 0
 }
 
 #[cfg(target_arch = "xtensa")]

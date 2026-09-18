@@ -31,3 +31,13 @@ for voltage in 12v 20v 28v; do
   build_firmware "$voltage"
   bash scripts/check-firmware-boot-stack.sh
 done
+
+cargo +esp build --locked \
+  --manifest-path firmware/Cargo.toml \
+  --target xtensa-esp32s3-none-elf \
+  --target-dir firmware/target-no-net \
+  --no-default-features \
+  --features "esp32s3,web_serial,frontpanel-key-test,buzzer-test,pd-request-12v" \
+  --release
+bash scripts/check-firmware-boot-stack.sh \
+  firmware/target-no-net/xtensa-esp32s3-none-elf/release/flux-purr
