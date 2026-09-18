@@ -1414,11 +1414,12 @@ pub(crate) fn initialize_boot_system(
     )
     .expect("failed to create I2C0")
     .with_sda(tokens.pd_sda)
-    .with_scl(tokens.pd_scl);
+    .with_scl(tokens.pd_scl)
+    .into_async();
     let i2c_bus = unsafe {
         initialize_after_software_reset(
             core::ptr::addr_of_mut!(I2C_BUS_STORAGE),
-            AsyncMutex::new(BlockingAsync::new(raw_i2c)),
+            AsyncMutex::new(raw_i2c),
         )
     };
     let eeprom_i2c = SharedI2cDevice::new(i2c_bus);

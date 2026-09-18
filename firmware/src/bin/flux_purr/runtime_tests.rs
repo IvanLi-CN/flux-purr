@@ -69,6 +69,7 @@ fn pd_service_does_not_feed_control_elapsed_time_into_protocol_deadlines() {
 #[test]
 fn pd_service_is_owned_by_an_independent_normal_task() {
     let source = RUNTIME_IMPLEMENTATION;
+    let support = include_str!("support.rs");
     let pd_service = include_str!("pd_service.rs");
     let runtime_loop = include_str!("runtime_loop.rs");
 
@@ -127,19 +128,22 @@ fn pd_service_is_owned_by_an_independent_normal_task() {
         "the front-panel loop must not own PD polling"
     );
     assert!(
-        source.contains("pub(crate) type I2c<'a> =")
-            && source.contains("SharedI2cDevice<'a, CriticalSectionRawMutex, BlockingAsync")
-            && source.contains("BlockingAsync<HalI2c<'static, Blocking>>")
-            && source.contains("AsyncMutex<CriticalSectionRawMutex")
-            && source.contains("BlockingAsync::new(raw_i2c)")
-            && source.contains("pub(crate) struct PdI2c<'a>")
+        support.contains("pub(crate) type I2c<'a> =")
+            && support
+                .contains("SharedI2cDevice<'a, CriticalSectionRawMutex, HalI2c<'static, Async>>")
+            && support.contains("AsyncMutex<CriticalSectionRawMutex, HalI2c<'static, Async>>")
+            && support.contains("AsyncMutex<CriticalSectionRawMutex")
+            && source.contains(".with_scl(tokens.pd_scl)")
+            && source.contains(".into_async()")
+            && support.contains("pub(crate) struct PdI2c<'a>")
             && source.contains("let pd_task_i2c = PdI2c::new(i2c_bus)"),
-        "EEPROM may use the shared device, but PD must use its non-blocking device"
+        "EEPROM and PD must share the native async I2C driver"
     );
     assert!(
-        !source.contains("type I2c<'a, MODE = Blocking>")
-            && !source.contains("BlockingMutex<CriticalSectionRawMutex, HalI2c"),
-        "shared I2C access must not use a blocking bus mutex"
+        !support.contains("BlockingAsync")
+            && !support.contains("type I2c<'a, MODE = Blocking>")
+            && !support.contains("BlockingMutex<CriticalSectionRawMutex, HalI2c"),
+        "shared I2C access must not wrap the bus in a blocking async adapter"
     );
 }
 

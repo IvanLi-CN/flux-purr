@@ -21,9 +21,7 @@ pub(crate) use core::{mem::MaybeUninit, panic::PanicInfo};
 #[cfg(target_arch = "xtensa")]
 pub(crate) use defmt::{info, warn};
 #[cfg(target_arch = "xtensa")]
-pub(crate) use embassy_embedded_hal::{
-    adapter::BlockingAsync, shared_bus::asynch::i2c::I2cDevice as SharedI2cDevice,
-};
+pub(crate) use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice as SharedI2cDevice;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use embassy_executor::Spawner;
 #[cfg(target_arch = "xtensa")]
@@ -43,12 +41,14 @@ pub(crate) use embedded_graphics::prelude::RgbColor;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use embedded_hal::pwm::SetDutyCycle;
 #[cfg(target_arch = "xtensa")]
+pub(crate) use embedded_hal_async::i2c::I2c as AsyncI2c;
+#[cfg(target_arch = "xtensa")]
 pub(crate) use embedded_hal_bus::spi::ExclusiveDevice;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use esp_hal::{
-    Blocking,
+    Async, Blocking,
     analog::adc::{
         Adc, AdcCalBasic, AdcCalCurve, AdcCalScheme, AdcChannel, AdcConfig, Attenuation,
     },
@@ -267,18 +267,14 @@ pub(crate) use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 pub(crate) use sha2::{Digest, Sha256};
 
-/// All I2C0 users share one async-arbitrated bus. The raw HAL is kept in
-/// blocking mode because esp-hal's async marker is not `Send` and therefore
-/// cannot cross into the interrupt executor's `SendSpawner`. BlockingAsync
-/// still gives each device an async bus contract: the critical section in the
-/// mutex protects only its short state transition, not the hardware transfer.
+/// All I2C0 users share one async-arbitrated bus. The PD and EEPROM users run on
+/// the normal executor, so the ESP-HAL async driver can await each interrupt-
+/// driven transfer without crossing into the interrupt executor's `SendSpawner`.
 #[cfg(target_arch = "xtensa")]
-pub(crate) type I2c<'a> =
-    SharedI2cDevice<'a, CriticalSectionRawMutex, BlockingAsync<HalI2c<'static, Blocking>>>;
+pub(crate) type I2c<'a> = SharedI2cDevice<'a, CriticalSectionRawMutex, HalI2c<'static, Async>>;
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) type SharedI2cBus =
-    AsyncMutex<CriticalSectionRawMutex, BlockingAsync<HalI2c<'static, Blocking>>>;
+pub(crate) type SharedI2cBus = AsyncMutex<CriticalSectionRawMutex, HalI2c<'static, Async>>;
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) static mut I2C_BUS_STORAGE: MaybeUninit<SharedI2cBus> = MaybeUninit::uninit();
@@ -306,9 +302,7 @@ impl embedded_hal::i2c::Error for PdI2cError {
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct PdI2c<'a> {
     bus: &'a SharedI2cBus,
-    guard: Option<
-        AsyncMutexGuard<'a, CriticalSectionRawMutex, BlockingAsync<HalI2c<'static, Blocking>>>,
-    >,
+    guard: Option<AsyncMutexGuard<'a, CriticalSectionRawMutex, HalI2c<'static, Async>>>,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -329,7 +323,7 @@ impl<'a> PdI2c<'a> {
         self.guard = None;
     }
 
-    fn bus_mut(&mut self) -> Result<&mut BlockingAsync<HalI2c<'static, Blocking>>, PdI2cError> {
+    fn bus_mut(&mut self) -> Result<&mut HalI2c<'static, Async>, PdI2cError> {
         self.guard.as_deref_mut().ok_or(PdI2cError::BusBusy)
     }
 }
@@ -342,15 +336,13 @@ impl embedded_hal::i2c::ErrorType for PdI2c<'_> {
 #[cfg(target_arch = "xtensa")]
 impl embedded_hal_async::i2c::I2c for PdI2c<'_> {
     async fn read(&mut self, address: u8, read: &mut [u8]) -> Result<(), Self::Error> {
-        self.bus_mut()?
-            .read(address, read)
+        AsyncI2c::read(self.bus_mut()?, address, read)
             .await
             .map_err(PdI2cError::I2c)
     }
 
     async fn write(&mut self, address: u8, write: &[u8]) -> Result<(), Self::Error> {
-        self.bus_mut()?
-            .write(address, write)
+        AsyncI2c::write(self.bus_mut()?, address, write)
             .await
             .map_err(PdI2cError::I2c)
     }
@@ -361,8 +353,7 @@ impl embedded_hal_async::i2c::I2c for PdI2c<'_> {
         write: &[u8],
         read: &mut [u8],
     ) -> Result<(), Self::Error> {
-        self.bus_mut()?
-            .write_read(address, write, read)
+        AsyncI2c::write_read(self.bus_mut()?, address, write, read)
             .await
             .map_err(PdI2cError::I2c)
     }
@@ -372,8 +363,7 @@ impl embedded_hal_async::i2c::I2c for PdI2c<'_> {
         address: u8,
         operations: &mut [embedded_hal_async::i2c::Operation<'_>],
     ) -> Result<(), Self::Error> {
-        self.bus_mut()?
-            .transaction(address, operations)
+        AsyncI2c::transaction(self.bus_mut()?, address, operations)
             .await
             .map_err(PdI2cError::I2c)
     }
