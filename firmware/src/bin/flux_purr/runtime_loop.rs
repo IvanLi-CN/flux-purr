@@ -338,6 +338,13 @@ pub(crate) async fn runtime_process_usb_input(
     }
     #[cfg(feature = "web_serial")]
     if state.transport.usb_transport_faulted {
+        if state.transport.usb_recovery_marker_failed {
+            return RuntimeUsbInputOutcome {
+                needs_redraw,
+                control_command_processed,
+                response_pending: true,
+            };
+        }
         if !state.transport.usb_recovery_marker_failed
             && state.transport.usb_recovery_writer.is_complete()
             && !usb_start_transport_recovery(
@@ -365,17 +372,14 @@ pub(crate) async fn runtime_process_usb_input(
             }
         }
         if state.transport.usb_recovery_marker_failed {
-            warn!("USB recovery marker failed; dropping the bounded recovery frame");
-            state.transport.usb_transport_faulted = false;
-            state.transport.usb_recovery_marker_failed = false;
+            warn!("USB recovery marker failed; retaining terminal transport fault");
             state.transport.usb_recovery_writer.abort();
-        } else {
-            return RuntimeUsbInputOutcome {
-                needs_redraw,
-                control_command_processed,
-                response_pending: true,
-            };
         }
+        return RuntimeUsbInputOutcome {
+            needs_redraw,
+            control_command_processed,
+            response_pending: true,
+        };
     }
     #[cfg(feature = "web_serial")]
     if matches!(usb_response_state, UsbResponsePumpOutcome::Idle) {
