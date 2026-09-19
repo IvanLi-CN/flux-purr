@@ -2,7 +2,7 @@
 use super::*;
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) struct ControlLineContext<'a, 'i, 'e, PWM> {
+pub(crate) struct ControlLineContext<'a, 'i, 'e> {
     pub(crate) controller: &'a mut FrontPanelInputController,
     pub(crate) ui_state: &'a mut FrontPanelUiState,
     pub(crate) memory_config: &'a mut MemoryConfig,
@@ -12,15 +12,13 @@ pub(crate) struct ControlLineContext<'a, 'i, 'e, PWM> {
     pub(crate) memory_sequence: &'a mut u32,
     pub(crate) persistence_source: &'static str,
     pub(crate) persistence_record_state: &'static str,
-    pub(crate) pd_i2c: &'a mut I2c<'i, esp_hal::Blocking>,
+    pub(crate) eeprom_i2c: &'a mut I2c<'i>,
     pub(crate) pd_controller: ControllerKind,
-    pub(crate) pd_port: &'a mut PdPort,
-    pub(crate) eeprom_pd_service: &'a mut EepromPdServiceContext<'e, PWM>,
+    pub(crate) pd_port: &'e PdPort,
     pub(crate) calibration_runtime_state: &'a mut CalibrationRuntimeState,
     pub(crate) thermal_plant_workspace: &'a mut CalibrationThermalPlantWorkspace,
     pub(crate) elapsed_ms: u64,
     pub(crate) last_pd_observation: Option<PdStatusObservation>,
-    pub(crate) pd_contract_ready: &'a mut bool,
     pub(crate) heater_power_backend: &'a mut HeaterPowerBackend,
     pub(crate) heater_controller: &'a mut HeaterController,
     pub(crate) pid_snapshot: HeaterPidSnapshot,
@@ -49,70 +47,27 @@ pub(crate) struct ControlLineContext<'a, 'i, 'e, PWM> {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_control_line<PWM>(
+pub(crate) async fn process_control_line(
     line: &str,
-    mut context: ControlLineContext<'_, '_, '_, PWM>,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
-    let mut needs_redraw = refresh_control_network(&mut context).await;
+    mut context: ControlLineContext<'_, '_, '_>,
+) -> (bool, UsbFrame) {
     let active_profile = active_thermal_control_profile(
         context.memory_config,
         *context.thermal_control_profile_preview,
         context.manual_pps,
     );
-    let (handler_redraw, response) =
-        dispatch_control_frame(&mut context, line, active_profile).await;
-    needs_redraw |= handler_redraw;
+    let (needs_redraw, response) = dispatch_control_frame(&mut context, line, active_profile).await;
     (needs_redraw, response)
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn refresh_control_network<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
-) -> bool
-where
-    PWM: SetDutyCycle,
-{
-    #[cfg(feature = "net_http")]
-    {
-        let summary = {
-            let mut service = PdNetworkServiceContext {
-                eeprom: &mut *context.eeprom_pd_service,
-                pd_contract_ready: context.pd_contract_ready,
-                ui_state: context.ui_state,
-                calibration_runtime_state: context.calibration_runtime_state,
-                manual_pps: context.manual_pps,
-            };
-            run_network_operation_with_pd(
-                flux_purr_firmware::net::lan_network_summary(),
-                context.pd_i2c,
-                context.pd_port,
-                &mut service,
-            )
-            .await
-        };
-        context.ui_state.apply_network_summary(summary)
-    }
-    #[cfg(not(feature = "net_http"))]
-    {
-        let _ = context;
-        false
-    }
-}
-
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn control_runtime_status_context<PWM>(
-    context: &ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) fn control_runtime_status_context(
+    context: &ControlLineContext<'_, '_, '_>,
     active_profile: Option<ThermalControlProfile>,
     manual_pps: ManualPpsState,
     heater_fault_latched: Option<HeaterFaultReason>,
     attention_pending: bool,
-) -> UsbRuntimeStatusContext
-where
-    PWM: SetDutyCycle,
-{
+) -> UsbRuntimeStatusContext {
     UsbRuntimeStatusContext {
         elapsed_ms: context.elapsed_ms,
         pd_controller: context.pd_controller,
@@ -141,14 +96,11 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn dispatch_control_frame<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) async fn dispatch_control_frame(
+    context: &mut ControlLineContext<'_, '_, '_>,
     line: &str,
     active_profile: Option<ThermalControlProfile>,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     match parse_usb_frame(line) {
         Ok(UsbFrame::Request { request_id, op }) => {
             process_request_frame(context, request_id, op, active_profile).await
@@ -222,15 +174,12 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_request_frame<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) async fn process_request_frame(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     op: UsbRequestOp,
     active_profile: Option<ThermalControlProfile>,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     match op {
         UsbRequestOp::GetIdentity => (
             false,
@@ -324,13 +273,10 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn process_complete_setup<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) fn process_complete_setup(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -391,13 +337,10 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn process_reset_persistence<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) fn process_reset_persistence(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -416,14 +359,11 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_network_request<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) async fn process_network_request(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     op: UsbRequestOp,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     match op {
         UsbRequestOp::GetNetwork => process_get_network(context, request_id).await,
         UsbRequestOp::GetLanPairingCode => process_get_lan_pairing_code(request_id),
@@ -437,32 +377,14 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_get_network<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) async fn process_get_network(
+    _context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     #[cfg(feature = "net_http")]
-    let network = {
-        let mut service = PdNetworkServiceContext {
-            eeprom: &mut *context.eeprom_pd_service,
-            pd_contract_ready: context.pd_contract_ready,
-            ui_state: context.ui_state,
-            calibration_runtime_state: context.calibration_runtime_state,
-            manual_pps: context.manual_pps,
-        };
-        run_network_operation_with_pd(
-            flux_purr_firmware::net::lan_network_summary(),
-            context.pd_i2c,
-            context.pd_port,
-            &mut service,
-        )
-        .await
-    };
+    let network = flux_purr_firmware::net::lan_network_summary().await;
     #[cfg(not(feature = "net_http"))]
-    let network = network_from_memory(context.memory_config);
+    let network = network_from_memory(_context.memory_config);
     (
         false,
         usb_response(request_id, UsbResponsePayload::Network(network)),
@@ -496,31 +418,13 @@ pub(crate) fn process_get_lan_pairing_code(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_open_lan_pairing<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) async fn process_open_lan_pairing(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     #[cfg(feature = "net_http")]
     {
-        let code = {
-            let mut service = PdNetworkServiceContext {
-                eeprom: &mut *context.eeprom_pd_service,
-                pd_contract_ready: context.pd_contract_ready,
-                ui_state: context.ui_state,
-                calibration_runtime_state: context.calibration_runtime_state,
-                manual_pps: context.manual_pps,
-            };
-            run_network_operation_with_pd(
-                flux_purr_firmware::net::enter_pairing(),
-                context.pd_i2c,
-                context.pd_port,
-                &mut service,
-            )
-            .await
-        };
+        let code = flux_purr_firmware::net::enter_pairing().await;
         context.ui_state.enter_wifi_pairing(code);
         (
             true,
@@ -535,29 +439,13 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_close_lan_pairing<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) async fn process_close_lan_pairing(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     #[cfg(feature = "net_http")]
     {
-        let mut service = PdNetworkServiceContext {
-            eeprom: &mut *context.eeprom_pd_service,
-            pd_contract_ready: context.pd_contract_ready,
-            ui_state: context.ui_state,
-            calibration_runtime_state: context.calibration_runtime_state,
-            manual_pps: context.manual_pps,
-        };
-        run_network_operation_with_pd(
-            flux_purr_firmware::net::leave_pairing(),
-            context.pd_i2c,
-            context.pd_port,
-            &mut service,
-        )
-        .await;
+        flux_purr_firmware::net::leave_pairing().await;
         context.ui_state.leave_wifi_pairing();
         context.ui_state.route = FrontPanelRoute::Dashboard;
         (true, usb_response(request_id, UsbResponsePayload::Ack))
@@ -567,13 +455,10 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_clear_lan_pairing_token<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) async fn process_clear_lan_pairing_token(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     #[cfg(feature = "net_http")]
     {
         if context.ui_state.persistence_locked() {
@@ -586,20 +471,7 @@ where
                 ),
             );
         }
-        let mut service = PdNetworkServiceContext {
-            eeprom: &mut *context.eeprom_pd_service,
-            pd_contract_ready: context.pd_contract_ready,
-            ui_state: context.ui_state,
-            calibration_runtime_state: context.calibration_runtime_state,
-            manual_pps: context.manual_pps,
-        };
-        run_network_operation_with_pd(
-            flux_purr_firmware::net::clear_token_from_usb(),
-            context.pd_i2c,
-            context.pd_port,
-            &mut service,
-        )
-        .await;
+        flux_purr_firmware::net::clear_token_from_usb().await;
         context.memory_config.lan_pairing_token = None;
         *context.memory_commit_due_ms =
             Some(context.elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
@@ -629,14 +501,11 @@ pub(crate) fn lan_unavailable_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_wifi_config_frame<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) async fn process_wifi_config_frame(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: WifiConfigCommand,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     if context.ui_state.persistence_locked() && !matches!(config.op, WifiConfigOp::Cancel) {
         return (
             false,
@@ -650,22 +519,7 @@ where
     #[cfg(feature = "net_http")]
     let network = match config.op {
         WifiConfigOp::Cancel => {
-            let result = {
-                let mut service = PdNetworkServiceContext {
-                    eeprom: &mut *context.eeprom_pd_service,
-                    pd_contract_ready: context.pd_contract_ready,
-                    ui_state: context.ui_state,
-                    calibration_runtime_state: context.calibration_runtime_state,
-                    manual_pps: context.manual_pps,
-                };
-                run_network_operation_with_pd(
-                    flux_purr_firmware::net::cancel_wifi_connection(),
-                    context.pd_i2c,
-                    context.pd_port,
-                    &mut service,
-                )
-                .await
-            };
+            let result = flux_purr_firmware::net::cancel_wifi_connection().await;
             match result {
                 Ok(network) => network,
                 Err(error) => {
@@ -678,20 +532,7 @@ where
         }
         WifiConfigOp::Set | WifiConfigOp::Clear => {
             config.apply_to(context.memory_config);
-            let mut service = PdNetworkServiceContext {
-                eeprom: &mut *context.eeprom_pd_service,
-                pd_contract_ready: context.pd_contract_ready,
-                ui_state: context.ui_state,
-                calibration_runtime_state: context.calibration_runtime_state,
-                manual_pps: context.manual_pps,
-            };
-            run_network_operation_with_pd(
-                flux_purr_firmware::net::apply_wifi_config(context.memory_config),
-                context.pd_i2c,
-                context.pd_port,
-                &mut service,
-            )
-            .await
+            flux_purr_firmware::net::apply_wifi_config(context.memory_config).await
         }
     };
     #[cfg(not(feature = "net_http"))]
@@ -729,15 +570,12 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn process_runtime_config_frame<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) fn process_runtime_config_frame(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     mut config: RuntimeConfigCommand,
     active_profile: Option<ThermalControlProfile>,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     if context.ui_state.persistence_locked()
         && (config.heater_enabled == Some(true)
             || config.manual_pps_enabled == Some(true)
@@ -803,13 +641,11 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn acknowledge_runtime_attention<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) fn acknowledge_runtime_attention(
+    context: &mut ControlLineContext<'_, '_, '_>,
     config: &RuntimeConfigCommand,
     overtemp_active: bool,
-) where
-    PWM: SetDutyCycle,
-{
+) {
     if config.fault_attention_acknowledged == Some(true)
         && acknowledge_overtemp_attention(
             overtemp_active,
@@ -825,14 +661,12 @@ pub(crate) fn acknowledge_runtime_attention<PWM>(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn reject_runtime_rearm_if_attention_pending<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) fn reject_runtime_rearm_if_attention_pending(
+    context: &mut ControlLineContext<'_, '_, '_>,
     config: &mut RuntimeConfigCommand,
     heater_rearm_requested: bool,
     overtemp_active: bool,
-) where
-    PWM: SetDutyCycle,
-{
+) {
     if heater_rearm_requested && (overtemp_active || *context.attention_pending_after_fault_clear) {
         config.heater_enabled = Some(false);
         context.buzzer.request_feedback(
@@ -849,14 +683,11 @@ pub(crate) fn reject_runtime_rearm_if_attention_pending<PWM>(
     feature = "web_serial",
     feature = "buzzer-test"
 ))]
-pub(crate) fn process_buzzer_test_frame<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) fn process_buzzer_test_frame(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: BuzzerTestCommand,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     if !command.is_valid() {
         return (
             false,
@@ -927,14 +758,11 @@ pub(crate) fn submit_buzzer_test_if_idle(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_calibration_config_frame<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) async fn process_calibration_config_frame(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: CalibrationConfigCommand,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -977,9 +805,7 @@ where
         let changed_domains =
             persist_domain_mask_between(context.memory_config, &previous_memory_config);
         if let Err(error) = commit_memory_config_now(
-            context.pd_i2c,
-            context.pd_port,
-            context.eeprom_pd_service,
+            context.eeprom_i2c,
             CommitMemoryConfigInput {
                 memory_sequence: context.memory_sequence,
                 memory_config: context.memory_config,
@@ -1029,14 +855,11 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn process_calibration_job_frame<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) fn process_calibration_job_frame(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: CalibrationJobCommandWire,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -1073,14 +896,11 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn process_thermal_plant_run_frame<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) fn process_thermal_plant_run_frame(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     after_sample: u8,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     (
         false,
         usb_response(
@@ -1099,14 +919,11 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn process_heater_curve_config_frame<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) fn process_heater_curve_config_frame(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: HeaterCurveConfigCommand,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -1129,13 +946,10 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_heater_curve_save_frame<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) async fn process_heater_curve_save_frame(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -1225,16 +1039,11 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn persist_heater_curve<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
-) -> Result<(), MemoryCommitFailure>
-where
-    PWM: SetDutyCycle,
-{
+pub(crate) async fn persist_heater_curve(
+    context: &mut ControlLineContext<'_, '_, '_>,
+) -> Result<(), MemoryCommitFailure> {
     commit_memory_config_now(
-        context.pd_i2c,
-        context.pd_port,
-        context.eeprom_pd_service,
+        context.eeprom_i2c,
         CommitMemoryConfigInput {
             memory_sequence: context.memory_sequence,
             memory_config: context.memory_config,
@@ -1247,14 +1056,11 @@ where
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_eeprom_maintenance_frame<PWM>(
-    context: &mut ControlLineContext<'_, '_, '_, PWM>,
+pub(crate) async fn process_eeprom_maintenance_frame(
+    context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: EepromMaintenanceCommand,
-) -> (bool, UsbFrame)
-where
-    PWM: SetDutyCycle,
-{
+) -> (bool, UsbFrame) {
     if context.last_heater_duty != 0 {
         return (
             false,
@@ -1274,8 +1080,7 @@ where
             context.memory_commit_due_ms,
         );
         if !matches!(
-            request_pd_fixed_voltage(context.pd_i2c, context.pd_port, DEFAULT_PD_VOLTAGE_REQUEST,)
-                .await,
+            context.pd_port.restore_automatic_idle_contract(),
             PdContractRequestState::Confirmed
         ) {
             return (
@@ -1294,9 +1099,7 @@ where
     let response = usb_eeprom_maintenance_response(
         request_id,
         command,
-        context.pd_i2c,
-        context.pd_port,
-        context.eeprom_pd_service,
+        context.eeprom_i2c,
         context.elapsed_ms,
     )
     .await;
@@ -1377,7 +1180,7 @@ pub(crate) fn lan_command_to_control_line(
     // operation itself. USB JSONL carries the same operation under runtime
     // config's `thermalControlProfile` field.
     if command.endpoint == LanEndpoint::ThermalProfile {
-        let body = command.body.as_str().trim();
+        let body = command.body.as_ref().trim();
         if !body.starts_with('{') || !body.ends_with('}') {
             return Err("LAN command body must be a JSON object");
         }
@@ -1398,7 +1201,7 @@ pub(crate) fn lan_command_to_control_line(
     };
     let fields = command
         .body
-        .as_str()
+        .as_ref()
         .trim()
         .strip_prefix('{')
         .and_then(|value| value.strip_suffix('}'))

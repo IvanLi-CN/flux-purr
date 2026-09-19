@@ -3,10 +3,10 @@ use super::*;
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn fusb302b_receive_event(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    i2c: &mut PdI2c<'_>,
     retry_fail_recovery_pending: bool,
 ) -> Result<Fusb302bReceiveEvent, fusb302b::TransientTransportFault> {
-    let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+    let mut phy = Fusb302::new(&mut *i2c);
     // Clear transition latches first, then sample the non-destructive status
     // bank. This pairs a VBUSOK detach transition with its current low level
     // instead of leaving a status/interrupt race between the two I2C reads.
@@ -40,7 +40,7 @@ pub(crate) async fn fusb302b_receive_event(
         return Ok(Fusb302bReceiveEvent::Protection);
     }
     if fusb302b_retry_recovery_should_discard_frame(status.status1, retry_fail_recovery_pending) {
-        if !fusb302b_flush_receive_fifo(i2c) {
+        if !fusb302b_flush_receive_fifo(i2c).await {
             return Err(fusb302b::TransientTransportFault::ReceiveIoError);
         }
         return Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent });
@@ -115,40 +115,7 @@ pub(crate) fn fusb302b_adjustable_power_capabilities(
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) enum PdPort {
-    Fusb302b(Box<Fusb302bRuntime>),
-    Unavailable,
-}
-
-#[cfg(target_arch = "xtensa")]
-impl PdPort {
-    pub(crate) const fn controller_kind(&self) -> ControllerKind {
-        match self {
-            Self::Fusb302b(_) => ControllerKind::Fusb302b,
-            Self::Unavailable => ControllerKind::Unknown,
-        }
-    }
-
-    pub(crate) const fn service_available(&self) -> bool {
-        match self {
-            Self::Fusb302b(runtime) => !matches!(runtime.policy.phase(), SinkPhase::Fault),
-            Self::Unavailable => false,
-        }
-    }
-
-    pub(crate) fn interlock_after_stale_contract(&mut self, now_ms: u64) {
-        if let Self::Fusb302b(runtime) = self {
-            runtime.interlock_after_stale_contract(now_ms);
-        }
-    }
-
-    pub(crate) fn stale_contract_vin_guard_suspended(&self, now_ms: u64) -> bool {
-        match self {
-            Self::Fusb302b(runtime) => runtime.stale_contract_vin_guard_suspended(now_ms),
-            Self::Unavailable => false,
-        }
-    }
-}
+pub(crate) type PdPort = PdServiceClient;
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) enum DetectedPdController {
@@ -171,15 +138,13 @@ pub(crate) fn fusb302b_identity_is_stable(
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn detect_pd_controller(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-) -> DetectedPdController {
+pub(crate) async fn detect_pd_controller(i2c: &mut PdI2c<'_>) -> DetectedPdController {
     let first = {
-        let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+        let mut phy = Fusb302::new(&mut *i2c);
         phy.device_id().await.ok()
     };
     let second = {
-        let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+        let mut phy = Fusb302::new(&mut *i2c);
         phy.device_id().await.ok()
     };
     let (Some(first), Some(second)) = (first, second) else {
@@ -189,7 +154,7 @@ pub(crate) async fn detect_pd_controller(
         return DetectedPdController::Unknown;
     }
     let status = {
-        let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+        let mut phy = Fusb302::new(&mut *i2c);
         phy.read_status().await.ok()
     };
     let (status0, status1) = status

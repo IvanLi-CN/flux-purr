@@ -498,47 +498,6 @@ pub(crate) fn next_heater_control_deadline_ms(deadline_ms: u64, control_started_
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const fn pd_runtime_service_due(now_ms: u64, deadline_ms: u64) -> bool {
-    now_ms >= deadline_ms
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn next_pd_runtime_service_deadline_ms(
-    deadline_ms: u64,
-    service_started_ms: u64,
-) -> u64 {
-    let next_deadline_ms = deadline_ms.saturating_add(PD_RUNTIME_SERVICE_INTERVAL_MS);
-    if next_deadline_ms > service_started_ms {
-        return next_deadline_ms;
-    }
-
-    let missed_intervals = service_started_ms
-        .saturating_sub(next_deadline_ms)
-        .saturating_div(PD_RUNTIME_SERVICE_INTERVAL_MS)
-        .saturating_add(1);
-    next_deadline_ms.saturating_add(missed_intervals.saturating_mul(PD_RUNTIME_SERVICE_INTERVAL_MS))
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn fixed_contract_liveness_probe_due(
-    contract_kind: ContractKind,
-    contract_ready: bool,
-    refresh_pending: bool,
-    last_probe_at_ms: Option<u64>,
-    now_ms: u64,
-) -> bool {
-    contract_ready
-        && contract_kind == ContractKind::Fixed
-        && !refresh_pending
-        && match last_probe_at_ms {
-            Some(last_probe_at_ms) => {
-                fusb302b::source_capabilities_retry_due(last_probe_at_ms, now_ms)
-            }
-            None => false,
-        }
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn warmup_handoff_error_c(
     brake_distance_c: f32,
     warmup_reenter_error_c: f32,

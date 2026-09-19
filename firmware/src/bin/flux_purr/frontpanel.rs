@@ -5,9 +5,25 @@ use super::*;
 pub(crate) struct DisplayTimer;
 
 #[cfg(target_arch = "xtensa")]
+const DISPLAY_DELAY_YIELD_QUANTUM_US: u32 = 1_000;
+
+#[cfg(target_arch = "xtensa")]
 impl Gc9d01Timer for DisplayTimer {
-    fn after_millis(milliseconds: u64) -> impl core::future::Future<Output = ()> {
-        EmbassyTimer::after_millis(milliseconds)
+    async fn after_millis(milliseconds: u64) {
+        // GC9D01 init/reset delays are bounded hardware settling delays. Keep
+        // them off Embassy's per-task timer queue because the display timeout
+        // wrapper may own that queue item while this future runs. Yield between
+        // short busy-wait slices so the independent PD task is never starved by
+        // panel initialization.
+        let mut remaining_us = milliseconds.saturating_mul(1_000).min(u64::from(u32::MAX));
+        while remaining_us != 0 {
+            let delay_us = remaining_us.min(u64::from(DISPLAY_DELAY_YIELD_QUANTUM_US)) as u32;
+            esp_hal::rom::ets_delay_us(delay_us);
+            remaining_us -= u64::from(delay_us);
+            if remaining_us != 0 {
+                embassy_futures::yield_now().await;
+            }
+        }
     }
 }
 

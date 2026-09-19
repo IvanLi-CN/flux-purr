@@ -92,6 +92,7 @@ pub(crate) const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
 pub(crate) const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
 pub(crate) const SERIAL_LINE_LIMIT: usize = 8 * 1024;
+pub(crate) const SERIAL_LINE_CONTENT_LIMIT: usize = SERIAL_LINE_LIMIT - 1;
 // `serialport` configures termios and flushes both queues on macOS. USB
 // Serial/JTAG can interpret that control traffic as a host reset, so the
 // ESP32-S3 path uses an unconfigured raw descriptor instead.

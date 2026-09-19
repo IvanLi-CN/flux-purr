@@ -479,8 +479,13 @@ pub(crate) fn direct_flash_with_program_inner(
         let directory = backup_directory.ok_or("developer backup directory is unavailable")?;
         Some(developer_backup::write_atomic(directory, &snapshot)?)
     };
-    let flash_args = direct_elf_flash_args(&args.port, partition_table.path(), &elf)?;
-    let espflash = run_espflash_command(program, &flash_args)?;
+    let espflash = direct_elf_flash_with_reset_fallback(
+        program,
+        &args.port,
+        partition_table.path(),
+        &elf,
+        args.keep_download_mode,
+    )?;
     Ok(
         json!({"ok": true, "operation": "flash", "port": args.port, "elf": elf, "backup": backup_path, "espflash": espflash}),
     )
@@ -499,7 +504,7 @@ pub(crate) async fn direct_recover(
     let program = resolve_espflash_program();
     let erase_args = direct_erase_flash_args(&args.port);
     let erase_diagnostics = run_espflash_command(&program, &erase_args)?;
-    let flash_args = direct_elf_flash_args(&args.port, partition_table.path(), &args.elf)?;
+    let flash_args = direct_elf_flash_args(&args.port, partition_table.path(), &args.elf, false)?;
     let flash_diagnostics = run_espflash_command(&program, &flash_args)?;
     Ok(
         json!({"ok": true, "operation": "recover", "port": args.port, "elf": args.elf, "eeprom": "untouched", "espflash": {"erase": erase_diagnostics, "flash": flash_diagnostics}}),
@@ -549,23 +554,92 @@ pub(crate) fn direct_elf_flash_args(
     port: &str,
     partition_table: &Path,
     elf: &Path,
+    keep_download_mode: bool,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(vec![
+    let (before_reset, after_reset) = if keep_download_mode {
+        ("no-reset", "no-reset")
+    } else {
+        ("default-reset", "hard-reset")
+    };
+    direct_elf_flash_args_with_reset_mode(port, partition_table, elf, before_reset, after_reset)
+}
+
+pub(crate) fn direct_elf_flash_args_with_reset_mode(
+    port: &str,
+    partition_table: &Path,
+    elf: &Path,
+    before_reset: &str,
+    after_reset: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut args = vec![
         "flash".into(),
         "--chip".into(),
         "esp32s3".into(),
         "--port".into(),
         port.into(),
         "--non-interactive".into(),
+    ];
+    args.extend([
+        "--before".into(),
+        before_reset.into(),
         "--after".into(),
-        "hard-reset".into(),
+        after_reset.into(),
         "--partition-table".into(),
         partition_table
             .to_str()
             .ok_or("invalid partition table path")?
             .into(),
         elf.to_str().ok_or("invalid ELF path")?.into(),
-    ])
+    ]);
+    Ok(args)
+}
+
+pub(crate) fn direct_elf_flash_reset_modes(
+    port: &str,
+    keep_download_mode: bool,
+) -> Vec<&'static str> {
+    if keep_download_mode {
+        return vec!["no-reset"];
+    }
+    if port.contains("usbmodem") {
+        return vec!["usb-reset", "usb-reset", "default-reset"];
+    }
+    vec!["default-reset"]
+}
+
+pub(crate) fn direct_elf_flash_with_reset_fallback(
+    program: &Path,
+    port: &str,
+    partition_table: &Path,
+    elf: &Path,
+    keep_download_mode: bool,
+) -> Result<EspflashDiagnostics, Box<dyn std::error::Error + Send + Sync>> {
+    let reset_modes = direct_elf_flash_reset_modes(port, keep_download_mode);
+    for (index, before_reset) in reset_modes.iter().enumerate() {
+        let after_reset = if *before_reset == "no-reset" {
+            "no-reset"
+        } else {
+            "hard-reset"
+        };
+        let args = direct_elf_flash_args_with_reset_mode(
+            port,
+            partition_table,
+            elf,
+            before_reset,
+            after_reset,
+        )?;
+        match run_espflash_command(program, &args) {
+            Ok(diagnostics) => return Ok(diagnostics),
+            Err(error)
+                if index + 1 < reset_modes.len()
+                    && error.to_string().contains("diagnosis=connection") =>
+            {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the direct flash reset sequence is never empty")
 }
 
 pub(crate) fn direct_erase_flash_args(port: &str) -> Vec<String> {

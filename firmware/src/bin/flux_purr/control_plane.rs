@@ -2547,12 +2547,72 @@ pub(crate) fn usb_write_frame(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn usb_write_response_frame(
+pub(crate) async fn usb_write_response_frame(
     usb: &mut RawUsbSerialJtag,
     frame: &UsbFrame,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
-) {
-    usb_write_response_frame_to(usb, frame, tx_buf);
+    phase: UsbRecoveryPhase,
+) -> bool {
+    if let Ok(line) = write_usb_frame(frame, tx_buf) {
+        return usb_write_response_bytes(usb, line.as_bytes(), phase).await;
+    }
+    false
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+pub(crate) fn usb_start_response_frame(
+    writer: &mut UsbResponseWriter,
+    frame: &UsbFrame,
+    tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
+    now_ms: u64,
+) -> bool {
+    if !writer.is_complete() {
+        return false;
+    }
+    let line = if let Ok(line) = write_usb_frame(frame, tx_buf) {
+        line
+    } else {
+        let fallback = UsbFrame::Error {
+            request_id: usb_frame_request_id(frame),
+            error: ApiError::new(
+                "output_too_small",
+                "USB JSONL response exceeded the frame limit.",
+                false,
+            ),
+        };
+        let Ok(line) = write_usb_frame(&fallback, tx_buf) else {
+            return false;
+        };
+        line
+    };
+    writer.start(
+        line.len(),
+        now_ms.saturating_add(USB_CONTROL_RESPONSE_TIMEOUT_MS),
+    );
+    true
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_frame_request_id(
+    frame: &UsbFrame,
+) -> Option<heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>> {
+    match frame {
+        UsbFrame::Request { request_id, .. }
+        | UsbFrame::WifiConfig { request_id, .. }
+        | UsbFrame::RuntimeConfig { request_id, .. }
+        | UsbFrame::CalibrationConfig { request_id, .. }
+        | UsbFrame::CalibrationJob { request_id, .. }
+        | UsbFrame::ThermalPlantRun { request_id, .. }
+        | UsbFrame::HeaterCurveConfig { request_id, .. }
+        | UsbFrame::HeaterCurveSave { request_id }
+        | UsbFrame::EepromMaintenance { request_id, .. }
+        | UsbFrame::Response { request_id, .. } => Some(request_id.clone()),
+        #[cfg(feature = "buzzer-test")]
+        UsbFrame::BuzzerTest { request_id, .. }
+        | UsbFrame::BuzzerTestResponse { request_id, .. } => Some(request_id.clone()),
+        UsbFrame::Error { request_id, .. } => request_id.clone(),
+        UsbFrame::Hello { .. } | UsbFrame::Status { .. } | UsbFrame::Log { .. } => None,
+    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -2566,14 +2626,198 @@ pub(crate) fn usb_write_frame_to<T: UsbControlTx>(
     }
 }
 
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+pub(crate) async fn usb_write_response_bytes<T: UsbControlTx>(
+    tx: &mut T,
+    bytes: &[u8],
+    phase: UsbRecoveryPhase,
+) -> bool {
+    let mut writer = UsbResponseWriter::new(bytes);
+    writer.start(
+        bytes.len(),
+        Instant::now()
+            .as_millis()
+            .saturating_add(USB_CONTROL_RESPONSE_TIMEOUT_MS),
+    );
+
+    while !writer.is_complete() {
+        match phase {
+            UsbRecoveryPhase::BeforePersistentState => record_boot_heartbeat(),
+            UsbRecoveryPhase::RuntimeFault => record_runtime_heartbeat(),
+        }
+        if writer.is_expired(Instant::now().as_millis()) {
+            return false;
+        }
+        match writer.step(tx, bytes) {
+            Ok(true) => return true,
+            Ok(false) | Err(UsbTxError::WouldBlock) => {
+                embassy_futures::yield_now().await;
+            }
+            Err(UsbTxError::Other) => return false,
+        }
+    }
+
+    true
+}
+
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UsbResponsePumpOutcome {
+    Idle,
+    Pending,
+    Fault,
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn usb_pump_response<T: UsbControlTx>(
+    tx: &mut T,
+    writer: &mut UsbResponseWriter,
+    tx_buf: &[u8; USB_CONTROL_TX_BUFFER_LEN],
+    now_ms: u64,
+) -> UsbResponsePumpOutcome {
+    if writer.is_complete() {
+        return UsbResponsePumpOutcome::Idle;
+    }
+    if writer.is_expired(now_ms) {
+        writer.abort();
+        return UsbResponsePumpOutcome::Fault;
+    }
+    match writer.step(tx, tx_buf) {
+        Ok(true) => UsbResponsePumpOutcome::Idle,
+        Err(UsbTxError::Other) => {
+            writer.abort();
+            UsbResponsePumpOutcome::Fault
+        }
+        Ok(false) | Err(UsbTxError::WouldBlock) => UsbResponsePumpOutcome::Pending,
+    }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn usb_pump_recovery_response<T: UsbControlTx>(
+    tx: &mut T,
+    writer: &mut UsbResponseWriter,
+    tx_buf: &[u8; USB_CONTROL_TX_BUFFER_LEN],
+    now_ms: u64,
+) -> UsbResponsePumpOutcome {
+    if writer.is_complete() {
+        return UsbResponsePumpOutcome::Idle;
+    }
+    if writer.is_expired(now_ms) {
+        writer.abort();
+        return UsbResponsePumpOutcome::Fault;
+    }
+    match writer.step(tx, tx_buf) {
+        Ok(true) => UsbResponsePumpOutcome::Idle,
+        Ok(false) | Err(UsbTxError::WouldBlock) | Err(UsbTxError::Other) => {
+            UsbResponsePumpOutcome::Pending
+        }
+    }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+#[derive(Default)]
+pub(crate) struct UsbResponseWriter {
+    response_len: usize,
+    deadline_ms: u64,
+    offset: usize,
+    packet_len: usize,
+    flush_pending: bool,
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+impl UsbResponseWriter {
+    pub(crate) fn new(bytes: &[u8]) -> Self {
+        let mut writer = Self::default();
+        writer.start(bytes.len(), u64::MAX);
+        writer
+    }
+
+    pub(crate) fn start(&mut self, response_len: usize, deadline_ms: u64) {
+        self.response_len = response_len;
+        self.deadline_ms = deadline_ms;
+        self.offset = 0;
+        self.packet_len = 0;
+        self.flush_pending = false;
+    }
+
+    pub(crate) fn abort(&mut self) {
+        self.response_len = 0;
+        self.deadline_ms = 0;
+        self.offset = 0;
+        self.packet_len = 0;
+        self.flush_pending = false;
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.response_len == 0
+    }
+
+    pub(crate) fn is_expired(&self, now_ms: u64) -> bool {
+        !self.is_complete() && now_ms >= self.deadline_ms
+    }
+
+    /// Performs at most one non-blocking USB packet per call. The packet bound
+    /// keeps the response cooperative while avoiding one-byte-per-runtime-turn
+    /// latency for ordinary JSONL responses.
+    pub(crate) fn step<T: UsbControlTx>(
+        &mut self,
+        tx: &mut T,
+        bytes: &[u8],
+    ) -> Result<bool, UsbTxError> {
+        if self.response_len > bytes.len() {
+            return Err(UsbTxError::Other);
+        }
+        if self.flush_pending {
+            match tx.flush_tx_nb() {
+                Ok(()) => {
+                    let complete = self.offset == self.response_len;
+                    self.packet_len = 0;
+                    self.flush_pending = false;
+                    self.response_len = self.response_len.saturating_mul(usize::from(!complete));
+                    Ok(complete)
+                }
+                Err(UsbTxError::WouldBlock) => Err(UsbTxError::WouldBlock),
+                Err(error) => Err(error),
+            }
+        } else if self.offset < self.response_len {
+            while self.offset < self.response_len && self.packet_len < USB_CONTROL_TX_PACKET_LEN {
+                tx.write_byte_nb(bytes[self.offset])?;
+                self.offset += 1;
+                self.packet_len += 1;
+            }
+            // ESP32-S3 Serial/JTAG automatically submits full FIFO packets.
+            // Only a final short packet needs an explicit submit; requesting
+            // another submit after a full packet can remain WouldBlock.
+            match (
+                self.offset == self.response_len,
+                self.packet_len == USB_CONTROL_TX_PACKET_LEN,
+            ) {
+                (true, true) => {
+                    self.packet_len = 0;
+                    self.response_len = 0;
+                }
+                (false, true) => self.packet_len = 0,
+                (true, false) => self.flush_pending = self.packet_len != 0,
+                (false, false) => {}
+            }
+            Ok(self.is_complete())
+        } else if self.packet_len != 0 {
+            self.flush_pending = true;
+            Ok(false)
+        } else {
+            Ok(true)
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn usb_write_response_frame_to<T: UsbControlTx>(
     tx: &mut T,
     frame: &UsbFrame,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
 ) {
     if let Ok(line) = write_usb_frame(frame, tx_buf) {
-        let _ = tx.write_response_bytes(line.as_bytes());
+        let _ = usb_write_bytes_bounded(tx, line.as_bytes());
     }
 }
 
@@ -2589,15 +2833,6 @@ pub(crate) enum UsbTxError {
 pub(crate) trait UsbControlTx {
     fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError>;
     fn flush_tx_nb(&mut self) -> Result<(), UsbTxError>;
-
-    fn wait_for_tx_progress(&mut self) {}
-
-    fn write_response_bytes(&mut self, bytes: &[u8]) -> bool
-    where
-        Self: Sized,
-    {
-        usb_write_bytes_bounded(self, bytes)
-    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -2615,27 +2850,107 @@ impl UsbControlTx for RawUsbSerialJtag {
             nb::Error::Other(_) => UsbTxError::Other,
         })
     }
+}
 
-    fn wait_for_tx_progress(&mut self) {
-        // USB Serial/JTAG advances independently of this polling loop. A tight
-        // retry can exhaust its budget before the endpoint observes WR_DONE,
-        // which would silently drop host-requested JSONL responses.
-        esp_hal::rom::ets_delay_us(USB_CONTROL_TX_BACKOFF_US);
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) trait PersistenceLogSink {
+    fn write_line(&mut self, line: &[u8]);
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+const USB_PERSISTENCE_LOG_LINE_MAX: usize = 256;
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+const USB_PERSISTENCE_LOG_QUEUE_CAPACITY: usize = 4;
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+#[derive(Default)]
+pub(crate) struct DeferredPersistenceLogSink {
+    lines: heapless::Deque<
+        heapless::Vec<u8, USB_PERSISTENCE_LOG_LINE_MAX>,
+        USB_PERSISTENCE_LOG_QUEUE_CAPACITY,
+    >,
+    writer: UsbResponseWriter,
+    transport_fault: bool,
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+impl DeferredPersistenceLogSink {
+    #[cfg(any(target_arch = "xtensa", test))]
+    pub(crate) fn is_pending(&self) -> bool {
+        !self.transport_fault && (!self.lines.is_empty() || !self.writer.is_complete())
     }
 
-    fn write_response_bytes(&mut self, bytes: &[u8]) -> bool {
-        RawUsbSerialJtag::write_response_bytes(self, bytes)
+    #[cfg(any(target_arch = "xtensa", test))]
+    pub(crate) fn take_transport_fault(&mut self) -> bool {
+        let faulted = self.transport_fault;
+        self.transport_fault = false;
+        faulted
+    }
+
+    fn mark_transport_fault(&mut self) {
+        self.lines.clear();
+        self.writer.abort();
+        self.transport_fault = true;
+    }
+
+    pub(crate) fn flush_one<T: UsbControlTx>(&mut self, usb: &mut T) -> bool {
+        if self.transport_fault {
+            return false;
+        }
+        let Some(line) = self.lines.front() else {
+            return true;
+        };
+        if self.writer.is_complete() {
+            #[cfg(target_arch = "xtensa")]
+            self.writer.start(
+                line.len(),
+                Instant::now()
+                    .as_millis()
+                    .saturating_add(USB_CONTROL_RESPONSE_TIMEOUT_MS),
+            );
+            #[cfg(test)]
+            self.writer.start(line.len(), u64::MAX);
+        }
+        #[cfg(target_arch = "xtensa")]
+        if self.writer.is_expired(Instant::now().as_millis()) {
+            self.mark_transport_fault();
+            return false;
+        }
+        match self.writer.step(usb, line.as_slice()) {
+            Ok(true) => {
+                let _ = self.lines.pop_front();
+                self.writer.abort();
+                true
+            }
+            Ok(false) | Err(UsbTxError::WouldBlock) => false,
+            Err(UsbTxError::Other) => {
+                self.mark_transport_fault();
+                false
+            }
+        }
     }
 }
 
-#[cfg(target_arch = "xtensa")]
-pub(crate) trait PersistenceLogSink {
-    fn write_line(&mut self, line: &[u8]);
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+impl PersistenceLogSink for DeferredPersistenceLogSink {
+    fn write_line(&mut self, line: &[u8]) {
+        let mut buffered = heapless::Vec::new();
+        let length = line.len().min(USB_PERSISTENCE_LOG_LINE_MAX);
+        if buffered.extend_from_slice(&line[..length]).is_err() {
+            return;
+        }
+        if self.lines.is_full() {
+            let _ = self.lines.pop_front();
+        }
+        let _ = self.lines.push_back(buffered);
+    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 impl PersistenceLogSink for RawUsbSerialJtag {
     fn write_line(&mut self, line: &[u8]) {
+        // Persistence diagnostics are best-effort. They must never wait for a
+        // host endpoint while the normal executor owns UI and safety work.
         let _ = usb_write_bytes_bounded(self, line);
     }
 }
@@ -2650,6 +2965,8 @@ impl PersistenceLogSink for NoopPersistenceLogSink {
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn usb_write_bytes_bounded<T: UsbControlTx>(tx: &mut T, bytes: &[u8]) -> bool {
+    // Diagnostics remain best-effort. Runtime JSONL responses use a separate
+    // yielding packet writer so they cannot busy-wait an executor turn.
     let mut packet_len = 0;
     for byte in bytes {
         if !usb_write_byte_bounded(tx, *byte, &mut packet_len) {
@@ -2666,24 +2983,13 @@ pub(crate) fn usb_write_byte_bounded<T: UsbControlTx>(
     byte: u8,
     packet_len: &mut usize,
 ) -> bool {
-    for retry in 0..=USB_CONTROL_TX_RETRY_LIMIT {
-        match tx.write_byte_nb(byte) {
-            Ok(()) => {
-                *packet_len += 1;
-                if !usb_flush_full_packet_if_needed(tx, packet_len) {
-                    return false;
-                }
-                return true;
-            }
-            Err(UsbTxError::WouldBlock) if retry < USB_CONTROL_TX_RETRY_LIMIT => {
-                if !usb_retry_flush_tx(tx, packet_len) {
-                    return false;
-                }
-            }
-            Err(_) => return false,
+    match tx.write_byte_nb(byte) {
+        Ok(()) => {
+            *packet_len += 1;
+            usb_flush_full_packet_if_needed(tx, packet_len)
         }
+        Err(_) => false,
     }
-    false
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -2702,24 +3008,8 @@ pub(crate) fn usb_flush_full_packet_if_needed<T: UsbControlTx>(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-pub(crate) fn usb_retry_flush_tx<T: UsbControlTx>(tx: &mut T, packet_len: &mut usize) -> bool {
-    if !usb_flush_tx_bounded(tx) {
-        return false;
-    }
-    *packet_len = 0;
-    true
-}
-
-#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn usb_flush_tx_bounded<T: UsbControlTx>(tx: &mut T) -> bool {
-    for _ in 0..USB_CONTROL_TX_RETRY_LIMIT {
-        match tx.flush_tx_nb() {
-            Ok(()) => return true,
-            Err(UsbTxError::WouldBlock) => tx.wait_for_tx_progress(),
-            Err(_) => return false,
-        }
-    }
-    false
+    tx.flush_tx_nb().is_ok()
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -2769,6 +3059,125 @@ pub(crate) fn usb_error_response_with_retryable(
         result: None,
         error: Some(ApiError::new(code, message, retryable)),
     }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn usb_line_too_long_response() -> UsbFrame {
+    UsbFrame::Error {
+        request_id: None,
+        error: ApiError::new(
+            "frame_too_large",
+            "USB JSONL frame exceeded the 8 KiB limit and was discarded.",
+            false,
+        ),
+    }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn usb_mutating_request_id(
+    line: &str,
+) -> Option<heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>> {
+    let frame = parse_usb_frame(line).ok()?;
+    match frame {
+        UsbFrame::Request { request_id, op }
+            if matches!(
+                op,
+                UsbRequestOp::CompleteSetup
+                    | UsbRequestOp::ResetPersistence
+                    | UsbRequestOp::OpenLanPairingWindow
+                    | UsbRequestOp::CloseLanPairingWindow
+                    | UsbRequestOp::SetLogLevel
+                    | UsbRequestOp::ClearLanPairingToken
+            ) =>
+        {
+            Some(request_id)
+        }
+        UsbFrame::WifiConfig { request_id, .. }
+        | UsbFrame::RuntimeConfig { request_id, .. }
+        | UsbFrame::CalibrationConfig { request_id, .. }
+        | UsbFrame::CalibrationJob { request_id, .. }
+        | UsbFrame::ThermalPlantRun { request_id, .. }
+        | UsbFrame::HeaterCurveConfig { request_id, .. }
+        | UsbFrame::HeaterCurveSave { request_id } => Some(request_id),
+        #[cfg(feature = "buzzer-test")]
+        UsbFrame::BuzzerTest {
+            request_id,
+            command,
+        } if !matches!(command.op, BuzzerTestOp::Status) => Some(request_id),
+        UsbFrame::EepromMaintenance {
+            request_id,
+            command,
+        } if raw_eeprom_operation_mutates(command.op) => Some(request_id),
+        _ => None,
+    }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) const USB_TRANSPORT_FAULT_MARKER: &[u8] = b"\n{\"type\":\"error\",\"requestId\":null,\"error\":{\"code\":\"usb_transport_fault\",\"message\":\"Previous USB response was incomplete; use a new requestId after transport recovery.\",\"retryable\":true}}\n";
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) const USB_MUTATING_REQUEST_HISTORY_CAPACITY: usize = 8;
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn usb_mutating_request_id_is_recent(
+    history: &heapless::Deque<
+        heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+        USB_MUTATING_REQUEST_HISTORY_CAPACITY,
+    >,
+    request_id: &heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> bool {
+    history.iter().any(|known_id| known_id == request_id)
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn remember_mutating_request_id(
+    history: &mut heapless::Deque<
+        heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+        USB_MUTATING_REQUEST_HISTORY_CAPACITY,
+    >,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) {
+    if history.is_full() {
+        let _ = history.pop_front();
+    }
+    let _ = history.push_back(request_id);
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn usb_mutation_succeeded(response: &UsbFrame) -> bool {
+    match response {
+        UsbFrame::Response { ok, .. } => *ok,
+        #[cfg(feature = "buzzer-test")]
+        UsbFrame::BuzzerTestResponse { .. } => true,
+        _ => false,
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+pub(crate) fn usb_start_response_bytes(
+    writer: &mut UsbResponseWriter,
+    bytes: &[u8],
+    tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
+    now_ms: u64,
+) -> bool {
+    if !writer.is_complete() || bytes.len() > tx_buf.len() {
+        return false;
+    }
+    tx_buf[..bytes.len()].copy_from_slice(bytes);
+    writer.start(
+        bytes.len(),
+        now_ms.saturating_add(USB_CONTROL_RESPONSE_TIMEOUT_MS),
+    );
+    true
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+pub(crate) fn usb_start_transport_recovery(
+    writer: &mut UsbResponseWriter,
+    tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
+    now_ms: u64,
+) -> bool {
+    usb_start_response_bytes(writer, USB_TRANSPORT_FAULT_MARKER, tx_buf, now_ms)
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -2896,13 +3305,14 @@ pub(crate) fn usb_early_request_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn poll_usb_early_control(
+pub(crate) async fn poll_usb_early_control(
     usb: &mut RawUsbSerialJtag,
     rx_line: &mut heapless::String<USB_CONTROL_LINE_CAPACITY>,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     memory_config: &MemoryConfig,
 ) {
     let mut bytes_processed = 0_u16;
+    let mut rx_overflowed = false;
     loop {
         if bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET {
             break;
@@ -2910,18 +3320,44 @@ pub(crate) fn poll_usb_early_control(
         match usb.read_byte() {
             Ok(b'\n') => {
                 bytes_processed = bytes_processed.saturating_add(1);
-                let response = usb_early_response(rx_line.as_str(), memory_config);
-                usb_write_response_frame(usb, &response, tx_buf);
+                let response = if rx_overflowed {
+                    usb_line_too_long_response()
+                } else {
+                    usb_early_response(rx_line.as_str(), memory_config)
+                };
+                if !usb_write_response_frame(
+                    usb,
+                    &response,
+                    tx_buf,
+                    UsbRecoveryPhase::BeforePersistentState,
+                )
+                .await
+                {
+                    let _ = usb_write_response_bytes(
+                        usb,
+                        USB_TRANSPORT_FAULT_MARKER,
+                        UsbRecoveryPhase::BeforePersistentState,
+                    )
+                    .await;
+                    run_usb_recovery_control_loop(
+                        usb,
+                        rx_line,
+                        tx_buf,
+                        memory_config,
+                        StatusLightState::Booting,
+                        UsbRecoveryPhase::BeforePersistentState,
+                    )
+                    .await;
+                }
                 rx_line.clear();
+                rx_overflowed = false;
             }
             Ok(b'\r') => {
                 bytes_processed = bytes_processed.saturating_add(1);
             }
             Ok(byte) => {
                 bytes_processed = bytes_processed.saturating_add(1);
-                if rx_line.push(char::from(byte)).is_err() {
-                    rx_line.clear();
-                }
+                append_usb_control_byte(rx_line, &mut rx_overflowed, byte);
             }
             Err(nb::Error::WouldBlock) => break,
             Err(_) => break,
@@ -2929,13 +3365,33 @@ pub(crate) fn poll_usb_early_control(
     }
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) fn append_usb_recovery_byte(
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn append_usb_control_byte(
     rx_line: &mut heapless::String<USB_CONTROL_LINE_CAPACITY>,
+    overflowed: &mut bool,
     byte: u8,
 ) {
+    if *overflowed {
+        return;
+    }
     if rx_line.push(char::from(byte)).is_err() {
         rx_line.clear();
+        *overflowed = true;
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_recovery_input_response(
+    rx_line: &str,
+    rx_overflowed: bool,
+    memory_config: &MemoryConfig,
+    elapsed_ms: u64,
+    phase: UsbRecoveryPhase,
+) -> UsbFrame {
+    if rx_overflowed {
+        usb_line_too_long_response()
+    } else {
+        usb_recovery_response_for_phase(rx_line, memory_config, elapsed_ms, phase)
     }
 }
 
@@ -2950,22 +3406,31 @@ pub(crate) async fn run_usb_recovery_control_loop(
 ) -> ! {
     set_status_light_state(status_light_state);
     let mut elapsed_ms = 0_u64;
+    let mut rx_overflowed = false;
     loop {
+        // The recovery phase determines which watchdog epoch is alive. Boot
+        // recovery must never publish a runtime heartbeat before runtime_ready.
+        match phase {
+            UsbRecoveryPhase::BeforePersistentState => record_boot_heartbeat(),
+            UsbRecoveryPhase::RuntimeFault => record_runtime_heartbeat(),
+        }
         loop {
             match usb.read_byte() {
                 Ok(b'\n') => {
-                    let response = usb_recovery_response_for_phase(
+                    let response = usb_recovery_input_response(
                         rx_line.as_str(),
+                        rx_overflowed,
                         memory_config,
                         elapsed_ms,
                         phase,
                     );
-                    usb_write_response_frame(usb, &response, tx_buf);
+                    let _ = usb_write_response_frame(usb, &response, tx_buf, phase).await;
                     rx_line.clear();
+                    rx_overflowed = false;
                 }
                 Ok(b'\r') => {}
                 Ok(byte) => {
-                    append_usb_recovery_byte(rx_line, byte);
+                    append_usb_control_byte(rx_line, &mut rx_overflowed, byte);
                 }
                 Err(nb::Error::WouldBlock) => break,
                 Err(_) => break,

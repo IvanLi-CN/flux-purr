@@ -22,6 +22,8 @@ pub(crate) mod lan;
 pub(crate) mod pd_control;
 #[path = "pd_protocol.rs"]
 pub(crate) mod pd_protocol;
+#[path = "pd_service.rs"]
+pub(crate) mod pd_service;
 #[path = "power.rs"]
 pub(crate) mod power;
 #[path = "runtime_loop.rs"]
@@ -32,6 +34,8 @@ pub(crate) mod support;
 pub(crate) mod tasks;
 #[path = "thermal.rs"]
 pub(crate) mod thermal;
+#[path = "watchdog.rs"]
+pub(crate) mod watchdog;
 
 #[allow(unused_imports)]
 pub(crate) use adc::*;
@@ -56,6 +60,8 @@ pub(crate) use pd_control::*;
 #[allow(unused_imports)]
 pub(crate) use pd_protocol::*;
 #[allow(unused_imports)]
+pub(crate) use pd_service::*;
+#[allow(unused_imports)]
 pub(crate) use power::*;
 #[allow(unused_imports)]
 pub(crate) use runtime_loop::*;
@@ -65,6 +71,8 @@ pub(crate) use support::*;
 pub(crate) use tasks::*;
 #[allow(unused_imports)]
 pub(crate) use thermal::*;
+#[allow(unused_imports)]
+pub(crate) use watchdog::*;
 
 #[cfg(test)]
 #[path = "runtime_tests.rs"]

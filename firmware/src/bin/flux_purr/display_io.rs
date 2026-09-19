@@ -48,10 +48,9 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) struct InitialFrontpanelContext<'a, 'i, PWM> {
+pub(crate) struct InitialFrontpanelContext<'a, PWM> {
     pub(crate) state: &'a FrontPanelUiState,
-    pub(crate) i2c: &'a mut I2c<'i, esp_hal::Blocking>,
-    pub(crate) pd_port: &'a mut PdPort,
+    pub(crate) pd_port: &'a PdPort,
     pub(crate) last_pd_observation: &'a mut Option<PdStatusObservation>,
     pub(crate) heater_pwm: &'a mut PWM,
     pub(crate) last_heater_duty: &'a mut u8,
@@ -61,7 +60,7 @@ pub(crate) struct InitialFrontpanelContext<'a, 'i, PWM> {
 pub(crate) async fn present_initial_frontpanel_ui<'a, BUS, DC, RST, PWM>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
-    context: InitialFrontpanelContext<'_, '_, PWM>,
+    context: InitialFrontpanelContext<'_, PWM>,
 ) -> bool
 where
     BUS: embedded_hal_async::spi::SpiDevice,
@@ -73,16 +72,14 @@ where
 {
     let InitialFrontpanelContext {
         state,
-        i2c,
         pd_port,
         last_pd_observation,
         heater_pwm,
         last_heater_duty,
     } = context;
     if !matches!(
-        run_display_operation_with_pd_and_heater(
+        run_display_operation_with_snapshot_and_heater(
             flush_ui(display, canvas, state),
-            i2c,
             pd_port,
             last_pd_observation,
             heater_pwm,
@@ -103,10 +100,9 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn run_display_operation_with_pd<F>(
+pub(crate) async fn run_display_operation_with_snapshot<F>(
     operation: F,
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
+    pd_port: &PdPort,
     last_pd_observation: &mut Option<PdStatusObservation>,
 ) -> Option<F::Output>
 where
@@ -117,13 +113,13 @@ where
     loop {
         match select(
             pinned_operation.as_mut(),
-            EmbassyTimer::after_millis(PD_RUNTIME_SERVICE_INTERVAL_MS),
+            EmbassyTimer::after_millis(PD_SNAPSHOT_REFRESH_INTERVAL_MS),
         )
         .await
         {
             Either::First(output) => return Some(output),
             Either::Second(_) => {
-                *last_pd_observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+                *last_pd_observation = pd_port.observation();
                 if Instant::now().saturating_duration_since(started_at) >= DISPLAY_IO_TIMEOUT {
                     return None;
                 }
@@ -133,10 +129,9 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn run_display_operation_with_pd_and_heater<F, PWM>(
+pub(crate) async fn run_display_operation_with_snapshot_and_heater<F, PWM>(
     operation: F,
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
+    pd_port: &PdPort,
     last_pd_observation: &mut Option<PdStatusObservation>,
     heater_pwm: &mut PWM,
     last_heater_duty: &mut u8,
@@ -150,13 +145,13 @@ where
     loop {
         match select(
             pinned_operation.as_mut(),
-            EmbassyTimer::after_millis(PD_RUNTIME_SERVICE_INTERVAL_MS),
+            EmbassyTimer::after_millis(PD_SNAPSHOT_REFRESH_INTERVAL_MS),
         )
         .await
         {
             Either::First(output) => return Some(output),
             Either::Second(_) => {
-                let observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+                let observation = pd_port.observation();
                 *last_pd_observation = observation;
                 if !startup_pd_contract_ready(observation) {
                     // A failed status read is not proof of a detach, but it is
@@ -176,95 +171,12 @@ where
 pub(crate) const DISPLAY_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn request_pd_fixed_voltage(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    port: &mut PdPort,
-    request: ch224q::VoltageRequest,
-) -> PdContractRequestState {
-    match port {
-        PdPort::Fusb302b(runtime) => {
-            runtime
-                .request_fixed_voltage(i2c, request.millivolts(), PdTimestamp::now())
-                .await
-        }
-        PdPort::Unavailable => PdContractRequestState::Failed,
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-pub(crate) async fn request_pd_adjustable_voltage(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    port: &mut PdPort,
-    request_mv: u16,
-    mode: ch224q::AdjustableVoltageMode,
-    mode_changed: bool,
-) -> PdContractRequestState {
-    match port {
-        PdPort::Fusb302b(runtime) => {
-            let _ = mode_changed;
-            if mode == ch224q::AdjustableVoltageMode::Pps {
-                runtime
-                    .request_pps_voltage(i2c, request_mv, PdTimestamp::now())
-                    .await
-            } else {
-                PdContractRequestState::Failed
-            }
-        }
-        PdPort::Unavailable => PdContractRequestState::Failed,
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-pub(crate) async fn read_pd_status(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    port: &mut PdPort,
-    now: PdTimestamp,
-) -> Option<PdStatusObservation> {
-    match port {
-        PdPort::Fusb302b(runtime) => {
-            if !runtime.poll(i2c, now).await {
-                return None;
-            }
-            let contract = runtime.active_contract();
-            let status_raw = if contract == Contract::none() {
-                0
-            } else {
-                1 << 3
-            };
-            Some(PdStatusObservation {
-                status_raw,
-                status: Status::from_register(status_raw),
-                current_raw: 0,
-                current_ma: contract.current_ma,
-                contract_voltage_mv: (contract != Contract::none()).then_some(contract.voltage_mv),
-                contract,
-            })
-        }
-        PdPort::Unavailable => None,
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-pub(crate) fn read_pd_power_capabilities(
-    _i2c: &mut I2c<'_, esp_hal::Blocking>,
-    port: &mut PdPort,
-) -> Option<ch224q::AdjustablePowerCapabilities> {
-    match port {
-        PdPort::Fusb302b(runtime) => runtime
-            .source_capabilities()
-            .and_then(fusb302b_adjustable_power_capabilities),
-        PdPort::Unavailable => None,
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
 pub(crate) async fn run_key_test_runtime<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     inputs: FrontPanelInputs<'a>,
     status_light_started_ms: u64,
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
+    pd_port: &PdPort,
     last_pd_observation: &mut Option<PdStatusObservation>,
 ) -> Result<(), ()>
 where
@@ -281,9 +193,8 @@ where
     let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
-    let initial_flush_result = run_display_operation_with_pd(
+    let initial_flush_result = run_display_operation_with_snapshot(
         flush_ui(display, canvas, &ui_state),
-        i2c,
         pd_port,
         last_pd_observation,
     )
@@ -307,9 +218,9 @@ where
                 StatusLightState::Ready
             },
         );
-        for _ in 0..(20 / PD_RUNTIME_SERVICE_INTERVAL_MS) {
-            EmbassyTimer::after_millis(PD_RUNTIME_SERVICE_INTERVAL_MS).await;
-            *last_pd_observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
+        for _ in 0..(20 / PD_SNAPSHOT_REFRESH_INTERVAL_MS) {
+            EmbassyTimer::after_millis(PD_SNAPSHOT_REFRESH_INTERVAL_MS).await;
+            *last_pd_observation = pd_port.observation();
         }
         elapsed_ms = elapsed_ms.saturating_add(20);
 
@@ -342,9 +253,8 @@ where
         }
 
         if needs_redraw {
-            let flush_result = run_display_operation_with_pd(
+            let flush_result = run_display_operation_with_snapshot(
                 flush_ui(display, canvas, &ui_state),
-                i2c,
                 pd_port,
                 last_pd_observation,
             )

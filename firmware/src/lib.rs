@@ -25,21 +25,6 @@ use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(not(target_os = "none"))]
 extern crate std;
 
-#[cfg(all(feature = "pd-request-12v", feature = "pd-request-20v"))]
-compile_error!("pd-request-12v and pd-request-20v cannot be enabled together");
-#[cfg(all(feature = "pd-request-12v", feature = "pd-request-28v"))]
-compile_error!("pd-request-12v and pd-request-28v cannot be enabled together");
-#[cfg(all(feature = "pd-request-20v", feature = "pd-request-28v"))]
-compile_error!("pd-request-20v and pd-request-28v cannot be enabled together");
-#[cfg(not(any(
-    feature = "pd-request-12v",
-    feature = "pd-request-20v",
-    feature = "pd-request-28v"
-)))]
-compile_error!(
-    "one PD request feature must be enabled: pd-request-12v | pd-request-20v | pd-request-28v"
-);
-
 pub const FAN_PHASE_DURATION_SECS: u32 = 10;
 pub const FAN_PWM_FREQUENCY_HZ: u32 = 25_000;
 pub const FAN_HIGH_PWM_PERMILLE: u16 = 30;
@@ -48,26 +33,7 @@ pub const FAN_LOW_PWM_PERMILLE: u16 = 500;
 pub const FAN_STOP_SAFE_PWM_PERMILLE: u16 = FAN_LOW_PWM_PERMILLE;
 
 pub const DEFAULT_PD_VOLTAGE_REQUEST: adapters::ch224q::VoltageRequest =
-    default_pd_voltage_request();
-
-#[cfg(feature = "pd-request-12v")]
-const fn default_pd_voltage_request() -> adapters::ch224q::VoltageRequest {
-    adapters::ch224q::VoltageRequest::V12
-}
-
-#[cfg(all(not(feature = "pd-request-12v"), feature = "pd-request-28v"))]
-const fn default_pd_voltage_request() -> adapters::ch224q::VoltageRequest {
-    adapters::ch224q::VoltageRequest::V28
-}
-
-#[cfg(all(
-    not(feature = "pd-request-12v"),
-    not(feature = "pd-request-28v"),
-    feature = "pd-request-20v"
-))]
-const fn default_pd_voltage_request() -> adapters::ch224q::VoltageRequest {
-    adapters::ch224q::VoltageRequest::V20
-}
+    adapters::ch224q::VoltageRequest::V12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceMode {
@@ -356,23 +322,10 @@ mod tests {
     }
 
     #[test]
-    fn default_pd_request_matches_selected_feature() {
-        #[cfg(feature = "pd-request-12v")]
+    fn default_pd_request_matches_product_idle_policy() {
         assert_eq!(
             DEFAULT_PD_VOLTAGE_REQUEST,
             adapters::ch224q::VoltageRequest::V12
-        );
-
-        #[cfg(feature = "pd-request-20v")]
-        assert_eq!(
-            DEFAULT_PD_VOLTAGE_REQUEST,
-            adapters::ch224q::VoltageRequest::V20
-        );
-
-        #[cfg(feature = "pd-request-28v")]
-        assert_eq!(
-            DEFAULT_PD_VOLTAGE_REQUEST,
-            adapters::ch224q::VoltageRequest::V28
         );
     }
 
