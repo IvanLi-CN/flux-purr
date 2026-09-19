@@ -24,22 +24,35 @@ const RUNTIME_IMPLEMENTATION: &str = concat!(
 fn watchdog_feed_gate_requires_both_runtime_and_pd_progress() {
     let mut gate = WatchdogFeedGate::default();
 
-    assert!(!gate.observe(0, 0, true));
-    assert!(gate.observe(1, 1, true));
-    assert!(!gate.observe(2, 1, true));
-    assert!(gate.observe(2, 2, true));
-    assert!(!gate.observe(3, 2, true));
-    assert!(!gate.observe(4, 2, true));
+    assert!(gate.observe(1, 0, 0, true));
+    assert!(!gate.observe(1, 0, 0, true));
+    assert!(gate.observe(1, 1, 1, true));
+    assert!(!gate.observe(1, 2, 1, true));
+    assert!(gate.observe(1, 2, 2, true));
+    assert!(!gate.observe(1, 3, 2, true));
+    assert!(!gate.observe(1, 4, 2, true));
 }
 
 #[test]
 fn watchdog_feed_gate_uses_runtime_progress_when_pd_service_is_unavailable() {
     let mut gate = WatchdogFeedGate::default();
 
-    assert!(!gate.observe(0, 0, false));
-    assert!(gate.observe(1, 0, false));
-    assert!(gate.observe(2, 0, false));
-    assert!(!gate.observe(2, 1, false));
+    assert!(gate.observe(1, 0, 0, false));
+    assert!(gate.observe(1, 1, 0, false));
+    assert!(gate.observe(1, 2, 0, false));
+    assert!(!gate.observe(1, 2, 1, false));
+}
+
+#[test]
+fn watchdog_feed_gate_uses_boot_progress_until_runtime_starts() {
+    let mut gate = WatchdogFeedGate::default();
+
+    assert!(!gate.observe(0, 0, 0, true));
+    assert!(gate.observe(1, 0, 0, true));
+    assert!(!gate.observe(1, 0, 0, true));
+    assert!(gate.observe(2, 0, 0, true));
+    assert!(!gate.observe(2, 1, 0, true));
+    assert!(gate.observe(2, 1, 1, true));
 }
 
 #[test]
@@ -80,6 +93,12 @@ fn runtime_usb_transport_uses_yielding_nonblocking_response_packets() {
     assert!(!support.contains("self.inner.write(bytes)"));
     assert!(!control_plane.contains("USB_CONTROL_TX_RETRY_LIMIT"));
     assert!(!control_plane.contains("wait_for_tx_progress"));
+    let writer = control_plane
+        .split("struct UsbResponseWriter")
+        .nth(1)
+        .expect("response writer state machine must remain present");
+    assert!(writer.contains("at most one non-blocking endpoint operation"));
+    assert!(control_plane.contains("Ok(false) | Err(UsbTxError::WouldBlock)"));
 }
 const FIRMWARE_ENTRYPOINT: &str = include_str!("../flux_purr.rs");
 
@@ -325,15 +344,16 @@ fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
 fn watchdog_is_enabled_before_frontpanel_runtime_starts() {
     let watchdog = include_str!("watchdog.rs");
     let boot = include_str!("boot.rs");
-    let finalize = boot
-        .split("async fn run_boot_runtime_finalize_task")
+    let run = boot
+        .split("pub(crate) async fn run(spawner: Spawner)")
         .nth(1)
-        .expect("runtime finalize task must remain present");
+        .expect("runtime entrypoint must remain present");
 
     assert!(watchdog.contains("WATCHDOG_ENABLED.store(1, Ordering::Release)"));
-    assert!(
-        finalize.find("arm_watchdog().await") < finalize.find("spawn(run_frontpanel_runtime_task")
-    );
+    assert!(run.find("spawn_watchdog(spawner, watchdog)") < run.find("arm_watchdog().await"));
+    assert!(run.find("arm_watchdog().await") < run.find("init_runtime_heap()"));
+    assert_eq!(boot.matches("arm_watchdog().await").count(), 1);
+    assert!(boot.contains("record_boot_heartbeat();"));
 }
 
 #[test]
@@ -1257,6 +1277,7 @@ struct FakeUsbTx {
     pending: std::vec::Vec<u8>,
     sent: std::vec::Vec<u8>,
     flush_count: usize,
+    operation_count: usize,
 }
 
 impl FakeUsbTx {
@@ -1266,12 +1287,14 @@ impl FakeUsbTx {
             pending: std::vec::Vec::new(),
             sent: std::vec::Vec::new(),
             flush_count: 0,
+            operation_count: 0,
         }
     }
 }
 
 impl UsbControlTx for FakeUsbTx {
     fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
+        self.operation_count += 1;
         if self.pending.len() >= self.capacity {
             return Err(UsbTxError::WouldBlock);
         }
@@ -1280,6 +1303,7 @@ impl UsbControlTx for FakeUsbTx {
     }
 
     fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+        self.operation_count += 1;
         self.flush_count += 1;
         self.sent.extend_from_slice(&self.pending);
         self.pending.clear();
@@ -1437,6 +1461,25 @@ fn usb_response_write_uses_nonblocking_transport_calls() {
 
     let line = core::str::from_utf8(&tx.sent).expect("response is utf8");
     assert!(line.contains(r#""requestId":"confirmed-response""#));
+}
+
+#[test]
+fn usb_response_writer_limits_an_always_ready_endpoint_to_one_operation_per_step() {
+    let payload = std::vec![b'x'; 180];
+    let mut tx = FakeUsbTx::new(64);
+    let mut writer = UsbResponseWriter::new(&payload);
+    let mut operations_before = tx.operation_count;
+
+    while !writer.is_complete() {
+        let complete = writer.step(&mut tx).unwrap_or(false);
+        assert!(complete == writer.is_complete());
+        assert!(tx.operation_count.saturating_sub(operations_before) <= 1);
+        operations_before = tx.operation_count;
+        assert!(operations_before < 400);
+    }
+
+    assert_eq!(tx.sent, payload);
+    assert!(tx.pending.is_empty());
 }
 
 #[test]

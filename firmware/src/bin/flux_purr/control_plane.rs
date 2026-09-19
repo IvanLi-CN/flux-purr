@@ -2571,47 +2571,75 @@ pub(crate) fn usb_write_frame_to<T: UsbControlTx>(
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 pub(crate) async fn usb_write_response_bytes<T: UsbControlTx>(tx: &mut T, bytes: &[u8]) -> bool {
     let deadline = Instant::now() + Duration::from_millis(USB_CONTROL_RESPONSE_TIMEOUT_MS);
-    let mut offset = 0;
-    let mut packet_len = 0;
+    let mut writer = UsbResponseWriter::new(bytes);
 
-    while offset < bytes.len() {
+    while !writer.is_complete() {
         if Instant::now() >= deadline {
             return false;
         }
-        let packet_full = match tx.write_byte_nb(bytes[offset]) {
-            Ok(()) => {
-                offset += 1;
-                packet_len += 1;
-                packet_len == USB_CONTROL_TX_PACKET_LEN
-            }
-            Err(UsbTxError::WouldBlock) => {
+        match writer.step(tx) {
+            Ok(true) => return true,
+            Ok(false) | Err(UsbTxError::WouldBlock) => {
                 embassy_futures::yield_now().await;
-                false
             }
             Err(UsbTxError::Other) => return false,
-        };
-        if !packet_full {
-            continue;
         }
-        if !usb_flush_response_packet(tx, deadline).await {
-            return false;
-        }
-        packet_len = 0;
     }
 
-    packet_len == 0 || usb_flush_response_packet(tx, deadline).await
+    true
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn usb_flush_response_packet<T: UsbControlTx>(tx: &mut T, deadline: Instant) -> bool {
-    loop {
-        if Instant::now() >= deadline {
-            return false;
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) struct UsbResponseWriter<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+    packet_len: usize,
+    flush_pending: bool,
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+impl<'a> UsbResponseWriter<'a> {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            offset: 0,
+            packet_len: 0,
+            flush_pending: false,
         }
-        match tx.flush_tx_nb() {
-            Ok(()) => return true,
-            Err(UsbTxError::WouldBlock) => embassy_futures::yield_now().await,
-            Err(UsbTxError::Other) => return false,
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.offset == self.bytes.len() && self.packet_len == 0 && !self.flush_pending
+    }
+
+    /// Performs at most one non-blocking endpoint operation. The async caller
+    /// yields after every step so an always-ready endpoint cannot monopolize
+    /// the executor while a large response is in flight.
+    pub(crate) fn step<T: UsbControlTx>(&mut self, tx: &mut T) -> Result<bool, UsbTxError> {
+        if self.flush_pending {
+            match tx.flush_tx_nb() {
+                Ok(()) => {
+                    self.packet_len = 0;
+                    self.flush_pending = false;
+                    Ok(self.is_complete())
+                }
+                Err(error) => Err(error),
+            }
+        } else if self.offset < self.bytes.len() {
+            match tx.write_byte_nb(self.bytes[self.offset]) {
+                Ok(()) => {
+                    self.offset += 1;
+                    self.packet_len += 1;
+                    self.flush_pending = self.packet_len == USB_CONTROL_TX_PACKET_LEN;
+                    Ok(false)
+                }
+                Err(error) => Err(error),
+            }
+        } else if self.packet_len != 0 {
+            self.flush_pending = true;
+            Ok(false)
+        } else {
+            Ok(true)
         }
     }
 }

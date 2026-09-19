@@ -2566,6 +2566,7 @@ async fn run_frontpanel_runtime_task(state: Box<RuntimeLoopState>) {
 #[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
 async fn run_boot_system_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline>) {
+    record_boot_heartbeat();
     let system_tokens = pipeline
         .system_tokens
         .take()
@@ -2584,6 +2585,7 @@ async fn run_boot_system_stage_task(spawner: Spawner, mut pipeline: Box<BootPipe
 #[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
 async fn run_boot_pd_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline>) {
+    record_boot_heartbeat();
     initialize_boot_pd(
         spawner,
         pipeline
@@ -2600,6 +2602,7 @@ async fn run_boot_pd_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline
 #[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
 async fn run_boot_display_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline>) {
+    record_boot_heartbeat();
     initialize_boot_display_stage(&mut pipeline).await;
     spawner
         .spawn(run_boot_memory_stage_task(spawner, pipeline))
@@ -2609,6 +2612,7 @@ async fn run_boot_display_stage_task(spawner: Spawner, mut pipeline: Box<BootPip
 #[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
 async fn run_boot_memory_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline>) {
+    record_boot_heartbeat();
     initialize_boot_memory_stage(&mut pipeline).await;
     spawner
         .spawn(run_boot_runtime_stage_task(spawner, pipeline))
@@ -2618,6 +2622,7 @@ async fn run_boot_memory_stage_task(spawner: Spawner, mut pipeline: Box<BootPipe
 #[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
 async fn run_boot_runtime_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline>) {
+    record_boot_heartbeat();
     let state = initialize_runtime_state_stage(spawner, &mut pipeline).await;
     spawner
         .spawn(run_boot_runtime_finalize_task(spawner, state))
@@ -2627,10 +2632,10 @@ async fn run_boot_runtime_stage_task(spawner: Spawner, mut pipeline: Box<BootPip
 #[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
 async fn run_boot_runtime_finalize_task(spawner: Spawner, state: Box<BootRuntimeState>) {
+    record_boot_heartbeat();
     rom_boot_stage(b"runtime_ready");
     let runtime_loop_storage = Box::<RuntimeLoopState>::new_uninit();
     let state = state.into_runtime_loop(runtime_loop_storage);
-    arm_watchdog().await;
     spawner
         .spawn(run_frontpanel_runtime_task(state))
         .expect("failed to spawn front-panel runtime task");
@@ -2648,6 +2653,8 @@ pub(crate) async fn run(spawner: Spawner) {
     let (timg0, system_tokens, device_tokens) = split_boot_tokens(peripherals);
     let watchdog = start_rtos(timg0);
     spawn_watchdog(spawner, watchdog);
+    record_boot_heartbeat();
+    arm_watchdog().await;
     init_runtime_heap();
     // The root task transfers both token groups into heap storage before any
     // asynchronous boot work. Every complete boot state then stays out of the
