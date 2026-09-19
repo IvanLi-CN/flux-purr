@@ -58,6 +58,7 @@ impl RuntimeInputOutcome {
 pub(crate) struct RuntimeUsbInputOutcome {
     needs_redraw: bool,
     control_command_processed: bool,
+    response_pending: bool,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -329,6 +330,7 @@ pub(crate) async fn runtime_process_usb_input(
         return RuntimeUsbInputOutcome {
             needs_redraw,
             control_command_processed,
+            response_pending: true,
         };
     }
     #[cfg(feature = "web_serial")]
@@ -359,6 +361,7 @@ pub(crate) async fn runtime_process_usb_input(
         return RuntimeUsbInputOutcome {
             needs_redraw,
             control_command_processed,
+            response_pending: true,
         };
     }
     #[cfg(feature = "web_serial")]
@@ -381,6 +384,10 @@ pub(crate) async fn runtime_process_usb_input(
     RuntimeUsbInputOutcome {
         needs_redraw,
         control_command_processed,
+        #[cfg(feature = "web_serial")]
+        response_pending: !state.transport.usb_response_writer.is_complete(),
+        #[cfg(not(feature = "web_serial"))]
+        response_pending: false,
     }
 }
 
@@ -629,6 +636,9 @@ pub(crate) async fn runtime_process_input(
     let route_before_usb_control = state.ui_state.route;
     let usb_input = runtime_process_usb_input(state, elapsed_ms).await;
     let mut needs_redraw = usb_input.needs_redraw;
+    if usb_input.response_pending {
+        return RuntimeInputOutcome::skip(sample, needs_redraw);
+    }
     let pairing_opened_by_usb = route_before_usb_control != FrontPanelRoute::WifiInfo
         && state.ui_state.route == FrontPanelRoute::WifiInfo;
     if pairing_opened_by_usb {

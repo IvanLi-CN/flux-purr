@@ -84,6 +84,7 @@ fn watchdog_configures_clock_derived_timeout_before_rtos_handoff() {
 fn runtime_usb_transport_uses_yielding_nonblocking_response_packets() {
     let support = include_str!("support.rs");
     let control_plane = include_str!("control_plane.rs");
+    let runtime_loop = include_str!("runtime_loop.rs");
 
     assert!(support.contains("UsbSerialJtag<'static, Blocking>"));
     assert!(control_plane.contains("async fn usb_write_response_bytes"));
@@ -102,6 +103,8 @@ fn runtime_usb_transport_uses_yielding_nonblocking_response_packets() {
     assert!(control_plane.contains("DeferredPersistenceLogSink"));
     assert!(control_plane.contains("USB_TRANSPORT_FAULT_MARKER"));
     assert!(control_plane.contains("usb_mutating_request_id"));
+    assert!(runtime_loop.contains("response_pending"));
+    assert!(runtime_loop.contains("if usb_input.response_pending"));
 }
 const FIRMWARE_ENTRYPOINT: &str = include_str!("../flux_purr.rs");
 
