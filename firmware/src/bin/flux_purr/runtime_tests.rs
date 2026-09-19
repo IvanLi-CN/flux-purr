@@ -1441,6 +1441,131 @@ fn usb_response_pump_promotes_hard_tx_failure_to_transport_fault() {
 }
 
 #[test]
+fn usb_recovery_writer_resumes_after_a_partial_hard_failure() {
+    struct PartialFailureTx {
+        sent: std::vec::Vec<u8>,
+        attempts: usize,
+        fail_at: usize,
+    }
+
+    impl UsbControlTx for PartialFailureTx {
+        fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
+            if self.attempts == self.fail_at {
+                self.attempts += 1;
+                return Err(UsbTxError::Other);
+            }
+            self.attempts += 1;
+            self.sent.push(byte);
+            Ok(())
+        }
+
+        fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
+    }
+
+    let payload = [b'r'; 96];
+    let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+    tx_buf[..payload.len()].copy_from_slice(&payload);
+    let mut writer = UsbResponseWriter::new(&payload);
+    let mut tx = PartialFailureTx {
+        sent: std::vec::Vec::new(),
+        attempts: 0,
+        fail_at: 7,
+    };
+
+    assert_eq!(
+        usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, 0),
+        UsbResponsePumpOutcome::Pending
+    );
+    for now_ms in [1, 2, 3, 4] {
+        if usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, now_ms)
+            == UsbResponsePumpOutcome::Idle
+        {
+            break;
+        }
+    }
+
+    assert!(writer.is_complete());
+    assert_eq!(tx.sent, payload);
+}
+
+#[test]
+fn deferred_persistence_log_resumes_after_a_partial_hard_failure() {
+    struct PartialFailureTx {
+        sent: std::vec::Vec<u8>,
+        attempts: usize,
+        fail_at: usize,
+    }
+
+    impl UsbControlTx for PartialFailureTx {
+        fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
+            if self.attempts == self.fail_at {
+                self.attempts += 1;
+                return Err(UsbTxError::Other);
+            }
+            self.attempts += 1;
+            self.sent.push(byte);
+            Ok(())
+        }
+
+        fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
+    }
+
+    let line = b"PERSISTENCE_COMMIT_FAILED code=test phase=runtime attempt=1\n";
+    let mut sink = DeferredPersistenceLogSink::default();
+    sink.write_line(line);
+    let mut tx = PartialFailureTx {
+        sent: std::vec::Vec::new(),
+        attempts: 0,
+        fail_at: 5,
+    };
+
+    assert!(!sink.flush_one(&mut tx));
+    while !sink.flush_one(&mut tx) {}
+    assert_eq!(tx.sent, line);
+}
+
+#[test]
+fn mutating_request_history_rejects_a_b_a_and_keeps_failed_mutations_out() {
+    let mut history = heapless::Deque::new();
+    let mut request_a = heapless::String::new();
+    request_a.push_str("request-a").unwrap();
+    let mut request_b = heapless::String::new();
+    request_b.push_str("request-b").unwrap();
+
+    assert!(!usb_mutating_request_id_is_recent(&history, &request_a));
+    remember_mutating_request_id(&mut history, request_a.clone());
+    remember_mutating_request_id(&mut history, request_b);
+    assert!(usb_mutating_request_id_is_recent(&history, &request_a));
+
+    let failed = usb_error_response(request_a.clone(), "memory_commit_failed", "failed");
+    assert!(!usb_mutation_succeeded(&failed));
+    let success = usb_response(request_a.clone(), UsbResponsePayload::Ack);
+    assert!(usb_mutation_succeeded(&success));
+}
+
+#[test]
+fn oversized_usb_line_discards_the_suffix_until_newline() {
+    let mut line = heapless::String::<USB_CONTROL_LINE_CAPACITY>::new();
+    let mut overflowed = false;
+    for _ in 0..USB_CONTROL_LINE_CAPACITY {
+        append_usb_control_byte(&mut line, &mut overflowed, b'x');
+    }
+    append_usb_control_byte(&mut line, &mut overflowed, b'{');
+    append_usb_control_byte(&mut line, &mut overflowed, b'}');
+
+    assert!(overflowed);
+    assert!(line.is_empty());
+    match usb_line_too_long_response() {
+        UsbFrame::Error { error, .. } => assert_eq!(error.code.as_str(), "frame_too_large"),
+        other => panic!("unexpected oversized frame response: {other:?}"),
+    }
+}
+
+#[test]
 fn mutating_usb_requests_are_deduplicated_but_reads_are_not() {
     assert_eq!(
         usb_mutating_request_id(
@@ -10746,7 +10871,8 @@ fn runtime_control_input_is_bounded_before_the_next_pd_service() {
     assert!(normalized_source.contains("UsbResponsePumpOutcome::Fault"));
     assert!(normalized_source.contains("UsbResponsePumpOutcome::Idle"));
     assert!(normalized_source.contains("usb_transport_faulted=true"));
-    assert!(normalized_source.contains("usb_recover_transport"));
+    assert!(normalized_source.contains("usb_start_transport_recovery"));
+    assert!(normalized_source.contains("usb_pump_recovery_response"));
     assert!(
         !normalized_source.contains("ifusb_pump_response(&mutstate.transport.usb_serial,return")
     );

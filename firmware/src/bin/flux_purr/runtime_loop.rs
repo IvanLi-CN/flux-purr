@@ -150,7 +150,7 @@ pub(crate) async fn runtime_process_usb_snapshot_line(
 pub(crate) async fn runtime_process_usb_control_line(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
-) -> bool {
+) -> (bool, bool) {
     let pd_observation_for_control = state.last_pd_observation;
     let heater_duty_for_control = state.last_heater_duty;
     let (control_needs_redraw, response) = process_control_line(
@@ -201,6 +201,8 @@ pub(crate) async fn runtime_process_usb_control_line(
     )
     .await;
     let mut needs_redraw = control_needs_redraw;
+    let mutation_requested =
+        usb_mutating_request_id(state.transport.usb_rx_line.as_str()).is_some();
     needs_redraw |= disarm_pending_thermal_plant_output(ThermalPlantDisarmContext {
         calibration_runtime_state: &mut state.calibration_runtime_state,
         backend: &mut state.heater_power_backend,
@@ -220,7 +222,8 @@ pub(crate) async fn runtime_process_usb_control_line(
         Instant::now().as_millis(),
     );
     state.transport.usb_rx_line.clear();
-    needs_redraw
+    let mutation_succeeded = mutation_requested && usb_mutation_succeeded(&response);
+    (needs_redraw, mutation_succeeded)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -234,33 +237,36 @@ pub(crate) async fn runtime_process_usb_line(
     {
         return (false, true);
     }
-    if let Some(request_id) = usb_mutating_request_id(state.transport.usb_rx_line.as_str()) {
-        if state
-            .transport
-            .usb_last_mutating_request_id
-            .as_ref()
-            .is_some_and(|last_request_id| last_request_id == &request_id)
-        {
-            let response = usb_error_response(
-                request_id,
-                "request_replayed",
-                "The request may already have executed; reconcile device state and use a new requestId.",
-            );
-            let _ = usb_start_response_frame(
-                &mut state.transport.usb_response_writer,
-                &response,
-                state.transport.usb_tx_buf,
-                Instant::now().as_millis(),
-            );
-            state.transport.usb_rx_line.clear();
-            return (false, true);
-        }
-        state.transport.usb_last_mutating_request_id = Some(request_id);
+    let mut mutating_request_id = usb_mutating_request_id(state.transport.usb_rx_line.as_str());
+    if let Some(request_id) = mutating_request_id.as_ref()
+        && usb_mutating_request_id_is_recent(
+            &state.transport.usb_recent_mutating_request_ids,
+            request_id,
+        )
+    {
+        let response = usb_error_response(
+            request_id.clone(),
+            "request_replayed",
+            "The request may already have executed; reconcile device state and use a new requestId.",
+        );
+        let _ = usb_start_response_frame(
+            &mut state.transport.usb_response_writer,
+            &response,
+            state.transport.usb_tx_buf,
+            Instant::now().as_millis(),
+        );
+        state.transport.usb_rx_line.clear();
+        return (false, true);
     }
-    (
-        runtime_process_usb_control_line(state, elapsed_ms).await,
-        true,
-    )
+    let (needs_redraw, mutation_succeeded) =
+        runtime_process_usb_control_line(state, elapsed_ms).await;
+    if mutation_succeeded && let Some(request_id) = mutating_request_id.take() {
+        remember_mutating_request_id(
+            &mut state.transport.usb_recent_mutating_request_ids,
+            request_id,
+        );
+    }
+    (needs_redraw, true)
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -273,10 +279,26 @@ async fn runtime_drain_usb_input(state: &mut RuntimeLoopState, elapsed_ms: u64) 
         };
         usb_bytes_processed = usb_bytes_processed.saturating_add(1);
         if byte == b'\n' {
+            if state.transport.usb_rx_overflowed {
+                state.transport.usb_rx_overflowed = false;
+                state.transport.usb_rx_line.clear();
+                let response = usb_line_too_long_response();
+                let _ = usb_start_response_frame(
+                    &mut state.transport.usb_response_writer,
+                    &response,
+                    state.transport.usb_tx_buf,
+                    Instant::now().as_millis(),
+                );
+                return (false, true);
+            }
             return runtime_process_usb_line(state, elapsed_ms).await;
         }
-        if byte != b'\r' && state.transport.usb_rx_line.push(char::from(byte)).is_err() {
-            state.transport.usb_rx_line.clear();
+        if byte != b'\r' {
+            append_usb_control_byte(
+                &mut *state.transport.usb_rx_line,
+                &mut state.transport.usb_rx_overflowed,
+                byte,
+            );
         }
     }
     (false, false)
@@ -302,6 +324,8 @@ pub(crate) async fn runtime_process_usb_input(
     #[cfg(feature = "web_serial")]
     if matches!(usb_response_state, UsbResponsePumpOutcome::Fault) {
         state.transport.usb_transport_faulted = true;
+        state.transport.usb_recovery_marker_failed = false;
+        state.transport.usb_recovery_writer.abort();
         return RuntimeUsbInputOutcome {
             needs_redraw,
             control_command_processed,
@@ -309,7 +333,27 @@ pub(crate) async fn runtime_process_usb_input(
     }
     #[cfg(feature = "web_serial")]
     if state.transport.usb_transport_faulted {
-        if usb_recover_transport(&mut state.transport.usb_serial) {
+        if !state.transport.usb_recovery_marker_failed
+            && state.transport.usb_recovery_writer.is_complete()
+            && !usb_start_transport_recovery(
+                &mut state.transport.usb_recovery_writer,
+                state.transport.usb_tx_buf,
+                Instant::now().as_millis(),
+            )
+        {
+            state.transport.usb_recovery_marker_failed = true;
+        }
+        if !state.transport.usb_recovery_marker_failed
+            && matches!(
+                usb_pump_recovery_response(
+                    &mut state.transport.usb_serial,
+                    &mut state.transport.usb_recovery_writer,
+                    state.transport.usb_tx_buf,
+                    Instant::now().as_millis(),
+                ),
+                UsbResponsePumpOutcome::Idle
+            )
+        {
             state.transport.usb_transport_faulted = false;
         }
         return RuntimeUsbInputOutcome {

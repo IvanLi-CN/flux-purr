@@ -30,8 +30,16 @@ pub(crate) struct RuntimeTransportState {
     #[cfg(feature = "web_serial")]
     pub(crate) usb_transport_faulted: bool,
     #[cfg(feature = "web_serial")]
-    pub(crate) usb_last_mutating_request_id:
-        Option<heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>>,
+    pub(crate) usb_recovery_writer: UsbResponseWriter,
+    #[cfg(feature = "web_serial")]
+    pub(crate) usb_recovery_marker_failed: bool,
+    #[cfg(feature = "web_serial")]
+    pub(crate) usb_rx_overflowed: bool,
+    #[cfg(feature = "web_serial")]
+    pub(crate) usb_recent_mutating_request_ids: heapless::Deque<
+        heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+        USB_MUTATING_REQUEST_HISTORY_CAPACITY,
+    >,
     #[cfg(feature = "web_serial")]
     pub(crate) persistence_log_sink: DeferredPersistenceLogSink,
     #[cfg(feature = "web_serial")]
