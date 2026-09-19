@@ -2023,6 +2023,18 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
 }
 
 #[cfg(target_arch = "xtensa")]
+pub(crate) async fn runtime_process_pending_safety(
+    state: &mut RuntimeLoopState,
+    elapsed_ms: u64,
+) -> bool {
+    let active_thermal_settings = state.active_thermal_settings;
+    let mut needs_redraw = runtime_reconcile_persistence_and_cooling(state);
+    needs_redraw |= runtime_force_heater_safe_off(state, active_thermal_settings, elapsed_ms).await;
+    needs_redraw |= runtime_update_fan_and_ui(state, elapsed_ms);
+    needs_redraw
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn runtime_persist_and_update_safety(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
@@ -2145,7 +2157,7 @@ pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
             )
             .await;
             needs_redraw |= runtime_control_heater(&mut state, elapsed_ms).await;
-            needs_redraw |= runtime_persist_and_update_safety(&mut state, elapsed_ms).await;
+            needs_redraw |= runtime_process_pending_safety(&mut state, elapsed_ms).await;
             state.ui_refresh_pending |= needs_redraw;
             runtime_refresh_display(&mut state, elapsed_ms).await;
             continue;
