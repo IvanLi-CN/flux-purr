@@ -140,17 +140,12 @@ or supported by the production `flux-purr` firmware artifact.
   - `bash scripts/check-firmware-clippy.sh`
 - Cross-target style boundary check:
   - `bash scripts/check-rust-style.sh`
-- Xtensa lint for every supported PD request:
+- Xtensa lint for the product firmware:
   - `bash scripts/check-firmware-clippy-xtensa.sh`
 - Host release build:
   - `cargo build --manifest-path firmware/Cargo.toml --release`
 - Xtensa app runtime build:
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release`
-  - Equivalent explicit feature form: `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --features esp32s3,web_serial,net_http --bin flux-purr --release`
-- Xtensa app runtime compatibility build (`12 V` legacy request feature):
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-12v --bin flux-purr --release`
-- Xtensa app runtime compatibility build (`28 V` legacy request feature):
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-28v --bin flux-purr --release`
 
 ## Host preview workflow
 
@@ -178,7 +173,7 @@ or supported by the production `flux-purr` firmware artifact.
 - Typical diagnostic flow:
   - `source /Users/ivan/export-esp.sh`
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release` (FUSB302B production idle policy: `12 V` PPS + real control-plane transport)
-  - FUSB302B automatic idle policy is fixed at `12 V` PPS when the Source advertises a usable APDO; legacy Cargo request features exist for compatibility build coverage and do not change that policy
+  - FUSB302B automatic idle policy is fixed at `12 V` PPS when the Source advertises a usable APDO; voltage-specific Cargo build targets are not part of the product firmware
   - `mcu-agentd --non-interactive config validate`
   - `mcu-agentd --non-interactive selector get esp32s3_frontpanel`
   - if selector is missing, `mcu-agentd --non-interactive selector list esp32s3_frontpanel`

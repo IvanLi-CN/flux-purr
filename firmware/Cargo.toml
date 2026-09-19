@@ -29,7 +29,7 @@ path = "src/bin/status_light_preview.rs"
 required-features = ["host-preview"]
 
 [features]
-default = ["esp32s3", "web_serial", "net_http", "pd-request-12v", "buzzer-test"]
+default = ["esp32s3", "web_serial", "net_http", "buzzer-test"]
 esp32s3 = []
 esp32c3 = []
 host-preview = []
@@ -45,10 +45,6 @@ net_http = [
     "dep:embedded-io-async",
     "esp-rtos/esp-radio",
 ]
-pd-request-12v = []
-pd-request-20v = []
-pd-request-28v = []
-
 [dependencies]
 embassy-futures = "0.1.2"
 embedded-graphics = "0.8.1"
