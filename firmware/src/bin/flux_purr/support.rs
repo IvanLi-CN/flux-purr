@@ -875,7 +875,7 @@ pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize =
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const USB_CONTROL_TX_PACKET_LEN: usize = 64;
 #[cfg(target_arch = "xtensa")]
-pub(crate) const USB_CONTROL_TX_PACKET_BUDGET: usize = 4;
+pub(crate) const USB_CONTROL_TX_PACKET_BUDGET: usize = 128;
 #[cfg(target_arch = "xtensa")]
 // Runtime responses are emitted cooperatively, one USB packet per loop turn.
 // Keep the deadline bounded, but long enough for the largest response buffer
