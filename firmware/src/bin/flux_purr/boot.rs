@@ -26,6 +26,8 @@ pub(crate) struct RuntimeTransportState {
     #[cfg(feature = "web_serial")]
     pub(crate) usb_tx_buf: &'static mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     #[cfg(feature = "web_serial")]
+    pub(crate) usb_response_writer: UsbResponseWriter,
+    #[cfg(feature = "web_serial")]
     pub(crate) eeprom_snapshot_session: EepromSnapshotSession,
     #[cfg(not(feature = "web_serial"))]
     pub(crate) persistence_log_sink: NoopPersistenceLogSink,

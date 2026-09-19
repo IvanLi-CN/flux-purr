@@ -1471,7 +1471,7 @@ fn usb_response_writer_limits_an_always_ready_endpoint_to_one_operation_per_step
     let mut operations_before = tx.operation_count;
 
     while !writer.is_complete() {
-        let complete = writer.step(&mut tx).unwrap_or(false);
+        let complete = writer.step(&mut tx, &payload).unwrap_or(false);
         assert!(complete == writer.is_complete());
         assert!(tx.operation_count.saturating_sub(operations_before) <= 1);
         operations_before = tx.operation_count;
@@ -1480,6 +1480,11 @@ fn usb_response_writer_limits_an_always_ready_endpoint_to_one_operation_per_step
 
     assert_eq!(tx.sent, payload);
     assert!(tx.pending.is_empty());
+
+    writer.start(payload.len(), 10);
+    assert!(writer.is_expired(10));
+    writer.abort();
+    assert!(writer.is_complete());
 }
 
 #[test]
@@ -10642,7 +10647,7 @@ fn runtime_control_input_is_bounded_before_the_next_pd_service() {
 
     assert!(usb_input.contains("if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET"));
     let control_frame = normalized_source
-        .find("usb_write_response_frame(&mutstate.transport.usb_serial,&response,state.transport.usb_tx_buf,).await;")
+        .find("usb_start_response_frame(&mutstate.transport.usb_response_writer,&response,state.transport.usb_tx_buf,")
         .expect("USB control path must use the response writer");
     let control_frame_tail = &normalized_source[control_frame..];
     assert!(control_frame_tail.contains("usb_rx_line.clear();"));
@@ -10656,6 +10661,7 @@ fn runtime_control_input_is_bounded_before_the_next_pd_service() {
         !source
             .contains("while let Some(command) = flux_purr_firmware::net::try_receive_command()")
     );
+    assert!(normalized_source.contains("ifusb_pump_response(&mutstate.transport.usb_serial,"));
 }
 
 #[test]

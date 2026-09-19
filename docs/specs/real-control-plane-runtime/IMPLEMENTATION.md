@@ -121,3 +121,4 @@
 - `../../solutions/device-control/thermal-control-self-test.md`
 - `../../solutions/device-control/web-native-wifi-bridge-console.md`
 - `../web-control-plane-demo/SPEC.md`
+Runtime USB responses use a transport-owned, non-borrowing writer state machine. The Front Panel loop advances at most one non-blocking byte write or packet flush per pass, pauses request intake while a response is pending, and returns immediately to the normal runtime scheduling path between transport operations.

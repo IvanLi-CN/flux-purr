@@ -2558,6 +2558,26 @@ pub(crate) async fn usb_write_response_frame(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+pub(crate) fn usb_start_response_frame(
+    writer: &mut UsbResponseWriter,
+    frame: &UsbFrame,
+    tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
+    now_ms: u64,
+) -> bool {
+    if !writer.is_complete() {
+        return false;
+    }
+    let Ok(line) = write_usb_frame(frame, tx_buf) else {
+        return false;
+    };
+    writer.start(
+        line.len(),
+        now_ms.saturating_add(USB_CONTROL_RESPONSE_TIMEOUT_MS),
+    );
+    true
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 pub(crate) fn usb_write_frame_to<T: UsbControlTx>(
     tx: &mut T,
     frame: &UsbFrame,
@@ -2570,14 +2590,19 @@ pub(crate) fn usb_write_frame_to<T: UsbControlTx>(
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 pub(crate) async fn usb_write_response_bytes<T: UsbControlTx>(tx: &mut T, bytes: &[u8]) -> bool {
-    let deadline = Instant::now() + Duration::from_millis(USB_CONTROL_RESPONSE_TIMEOUT_MS);
     let mut writer = UsbResponseWriter::new(bytes);
+    writer.start(
+        bytes.len(),
+        Instant::now()
+            .as_millis()
+            .saturating_add(USB_CONTROL_RESPONSE_TIMEOUT_MS),
+    );
 
     while !writer.is_complete() {
-        if Instant::now() >= deadline {
+        if writer.is_expired(Instant::now().as_millis()) {
             return false;
         }
-        match writer.step(tx) {
+        match writer.step(tx, bytes) {
             Ok(true) => return true,
             Ok(false) | Err(UsbTxError::WouldBlock) => {
                 embassy_futures::yield_now().await;
@@ -2589,44 +2614,92 @@ pub(crate) async fn usb_write_response_bytes<T: UsbControlTx>(tx: &mut T, bytes:
     true
 }
 
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+pub(crate) fn usb_pump_response<T: UsbControlTx>(
+    tx: &mut T,
+    writer: &mut UsbResponseWriter,
+    tx_buf: &[u8; USB_CONTROL_TX_BUFFER_LEN],
+    now_ms: u64,
+) -> bool {
+    if writer.is_complete() {
+        return false;
+    }
+    if writer.is_expired(now_ms) {
+        writer.abort();
+        return true;
+    }
+    if matches!(writer.step(tx, tx_buf), Err(UsbTxError::Other)) {
+        writer.abort();
+    }
+    true
+}
+
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-pub(crate) struct UsbResponseWriter<'a> {
-    bytes: &'a [u8],
+#[derive(Default)]
+pub(crate) struct UsbResponseWriter {
+    response_len: usize,
+    deadline_ms: u64,
     offset: usize,
     packet_len: usize,
     flush_pending: bool,
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-impl<'a> UsbResponseWriter<'a> {
-    pub(crate) fn new(bytes: &'a [u8]) -> Self {
-        Self {
-            bytes,
-            offset: 0,
-            packet_len: 0,
-            flush_pending: false,
-        }
+impl UsbResponseWriter {
+    pub(crate) fn new(bytes: &[u8]) -> Self {
+        let mut writer = Self::default();
+        writer.start(bytes.len(), u64::MAX);
+        writer
+    }
+
+    pub(crate) fn start(&mut self, response_len: usize, deadline_ms: u64) {
+        self.response_len = response_len;
+        self.deadline_ms = deadline_ms;
+        self.offset = 0;
+        self.packet_len = 0;
+        self.flush_pending = false;
+    }
+
+    pub(crate) fn abort(&mut self) {
+        self.response_len = 0;
+        self.deadline_ms = 0;
+        self.offset = 0;
+        self.packet_len = 0;
+        self.flush_pending = false;
     }
 
     pub(crate) fn is_complete(&self) -> bool {
-        self.offset == self.bytes.len() && self.packet_len == 0 && !self.flush_pending
+        self.response_len == 0
+    }
+
+    pub(crate) fn is_expired(&self, now_ms: u64) -> bool {
+        !self.is_complete() && now_ms >= self.deadline_ms
     }
 
     /// Performs at most one non-blocking endpoint operation. The async caller
     /// yields after every step so an always-ready endpoint cannot monopolize
     /// the executor while a large response is in flight.
-    pub(crate) fn step<T: UsbControlTx>(&mut self, tx: &mut T) -> Result<bool, UsbTxError> {
+    pub(crate) fn step<T: UsbControlTx>(
+        &mut self,
+        tx: &mut T,
+        bytes: &[u8],
+    ) -> Result<bool, UsbTxError> {
+        if self.response_len > bytes.len() {
+            return Err(UsbTxError::Other);
+        }
         if self.flush_pending {
             match tx.flush_tx_nb() {
                 Ok(()) => {
+                    let complete = self.offset == self.response_len;
                     self.packet_len = 0;
                     self.flush_pending = false;
-                    Ok(self.is_complete())
+                    self.response_len = self.response_len.saturating_mul(usize::from(!complete));
+                    Ok(complete)
                 }
                 Err(error) => Err(error),
             }
-        } else if self.offset < self.bytes.len() {
-            match tx.write_byte_nb(self.bytes[self.offset]) {
+        } else if self.offset < self.response_len {
+            match tx.write_byte_nb(bytes[self.offset]) {
                 Ok(()) => {
                     self.offset += 1;
                     self.packet_len += 1;

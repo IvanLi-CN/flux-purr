@@ -136,12 +136,12 @@ pub(crate) async fn runtime_process_usb_snapshot_line(
             None,
         );
     }
-    write_eeprom_snapshot_response(
-        &mut state.transport.usb_serial,
+    start_eeprom_snapshot_response(
+        &mut state.transport.usb_response_writer,
         &response,
         state.transport.usb_tx_buf,
-    )
-    .await;
+        Instant::now().as_millis(),
+    );
     state.transport.usb_rx_line.clear();
     Some(storage_failed)
 }
@@ -213,12 +213,12 @@ pub(crate) async fn runtime_process_usb_control_line(
         measured_vin_mv: state.latest_vin_mv,
     })
     .await;
-    usb_write_response_frame(
-        &mut state.transport.usb_serial,
+    let _ = usb_start_response_frame(
+        &mut state.transport.usb_response_writer,
         &response,
         state.transport.usb_tx_buf,
-    )
-    .await;
+        Instant::now().as_millis(),
+    );
     state.transport.usb_rx_line.clear();
     needs_redraw
 }
@@ -247,6 +247,18 @@ pub(crate) async fn runtime_process_usb_input(
 ) -> RuntimeUsbInputOutcome {
     let mut needs_redraw = false;
     let mut control_command_processed = false;
+    #[cfg(feature = "web_serial")]
+    if usb_pump_response(
+        &mut state.transport.usb_serial,
+        &mut state.transport.usb_response_writer,
+        state.transport.usb_tx_buf,
+        Instant::now().as_millis(),
+    ) {
+        return RuntimeUsbInputOutcome {
+            needs_redraw,
+            control_command_processed,
+        };
+    }
     #[cfg(feature = "web_serial")]
     let mut usb_bytes_processed = 0_u16;
     #[cfg(feature = "web_serial")]
