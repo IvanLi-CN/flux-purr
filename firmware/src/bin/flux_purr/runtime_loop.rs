@@ -378,10 +378,7 @@ pub(crate) async fn runtime_process_usb_input(
     }
     #[cfg(feature = "web_serial")]
     if matches!(usb_response_state, UsbResponsePumpOutcome::Idle) {
-        persistence_log_pending = !state
-            .transport
-            .persistence_log_sink
-            .flush_one(&mut state.transport.usb_serial);
+        persistence_log_pending = runtime_flush_persistence_logs(state).await;
     }
     #[cfg(feature = "web_serial")]
     if matches!(usb_response_state, UsbResponsePumpOutcome::Idle) && !persistence_log_pending {
@@ -520,6 +517,23 @@ async fn runtime_pump_usb_response_budget(state: &mut RuntimeLoopState) -> UsbRe
         }
     }
     response_state
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn runtime_flush_persistence_logs(state: &mut RuntimeLoopState) -> bool {
+    for _ in 0..USB_CONTROL_TX_PACKET_BUDGET {
+        let flushed = state
+            .transport
+            .persistence_log_sink
+            .flush_one(&mut state.transport.usb_serial);
+        if !state.transport.persistence_log_sink.is_pending() {
+            break;
+        }
+        if !flushed {
+            embassy_futures::yield_now().await;
+        }
+    }
+    state.transport.persistence_log_sink.is_pending()
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]

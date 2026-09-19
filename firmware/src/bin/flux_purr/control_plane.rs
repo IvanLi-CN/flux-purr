@@ -2874,6 +2874,11 @@ pub(crate) struct DeferredPersistenceLogSink {
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 impl DeferredPersistenceLogSink {
+    #[cfg(target_arch = "xtensa")]
+    pub(crate) fn is_pending(&self) -> bool {
+        !self.lines.is_empty() || !self.writer.is_complete()
+    }
+
     pub(crate) fn flush_one<T: UsbControlTx>(&mut self, usb: &mut T) -> bool {
         let Some(line) = self.lines.front() else {
             return true;
