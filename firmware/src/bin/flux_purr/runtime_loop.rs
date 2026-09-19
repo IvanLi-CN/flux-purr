@@ -319,7 +319,16 @@ pub(crate) async fn runtime_process_usb_input(
     #[cfg(feature = "web_serial")]
     let mut persistence_log_pending = false;
     #[cfg(feature = "web_serial")]
+    let response_was_pending = !state.transport.usb_response_writer.is_complete();
+    #[cfg(feature = "web_serial")]
     let usb_response_state = runtime_pump_usb_response_budget(state).await;
+    #[cfg(feature = "web_serial")]
+    if response_was_pending
+        && matches!(usb_response_state, UsbResponsePumpOutcome::Idle)
+        && state.memory_commit_due_ms.is_some()
+    {
+        state.memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+    }
     #[cfg(feature = "web_serial")]
     if matches!(usb_response_state, UsbResponsePumpOutcome::Fault) {
         state.transport.usb_transport_faulted = true;
