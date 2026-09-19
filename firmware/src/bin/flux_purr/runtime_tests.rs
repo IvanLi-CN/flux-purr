@@ -105,6 +105,8 @@ fn runtime_usb_transport_uses_yielding_nonblocking_response_packets() {
     assert!(control_plane.contains("usb_mutating_request_id"));
     assert!(runtime_loop.contains("response_pending"));
     assert!(runtime_loop.contains("if usb_input.response_pending"));
+    assert!(runtime_loop.contains("persistence_log_pending"));
+    assert!(runtime_loop.contains("!persistence_log_pending"));
 }
 const FIRMWARE_ENTRYPOINT: &str = include_str!("../flux_purr.rs");
 

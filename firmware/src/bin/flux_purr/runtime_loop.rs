@@ -317,6 +317,8 @@ pub(crate) async fn runtime_process_usb_input(
     #[cfg(not(feature = "net_http"))]
     let control_command_processed = false;
     #[cfg(feature = "web_serial")]
+    let mut persistence_log_pending = false;
+    #[cfg(feature = "web_serial")]
     let usb_response_state = usb_pump_response(
         &mut state.transport.usb_serial,
         &mut state.transport.usb_response_writer,
@@ -377,13 +379,13 @@ pub(crate) async fn runtime_process_usb_input(
     }
     #[cfg(feature = "web_serial")]
     if matches!(usb_response_state, UsbResponsePumpOutcome::Idle) {
-        let _ = state
+        persistence_log_pending = !state
             .transport
             .persistence_log_sink
             .flush_one(&mut state.transport.usb_serial);
     }
     #[cfg(feature = "web_serial")]
-    if matches!(usb_response_state, UsbResponsePumpOutcome::Idle) {
+    if matches!(usb_response_state, UsbResponsePumpOutcome::Idle) && !persistence_log_pending {
         let (line_needs_redraw, _line_processed) = runtime_drain_usb_input(state, elapsed_ms).await;
         needs_redraw |= line_needs_redraw;
         #[cfg(feature = "net_http")]
@@ -396,7 +398,8 @@ pub(crate) async fn runtime_process_usb_input(
         needs_redraw,
         control_command_processed,
         #[cfg(feature = "web_serial")]
-        response_pending: !state.transport.usb_response_writer.is_complete(),
+        response_pending: !state.transport.usb_response_writer.is_complete()
+            || persistence_log_pending,
         #[cfg(not(feature = "web_serial"))]
         response_pending: false,
     }
