@@ -26,8 +26,6 @@ pub(crate) struct RuntimeTransportState {
     #[cfg(feature = "web_serial")]
     pub(crate) usb_tx_buf: &'static mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     #[cfg(feature = "web_serial")]
-    pub(crate) usb_response_tx: UsbResponseTxState,
-    #[cfg(feature = "web_serial")]
     pub(crate) eeprom_snapshot_session: EepromSnapshotSession,
     #[cfg(not(feature = "web_serial"))]
     pub(crate) persistence_log_sink: NoopPersistenceLogSink,
@@ -617,7 +615,8 @@ impl BootRuntimeState {
             &mut *self.system.usb_rx_line,
             self.system.usb_tx_buf,
             &self.memory.memory_config,
-        );
+        )
+        .await;
         self.last_pd_observation = self.system.initial_pd_observation;
         log_initial_pd_observation(self.last_pd_observation);
         self.active_thermal_settings = ThermalControlProfileSettings::from(
@@ -1872,7 +1871,8 @@ pub(crate) async fn initialize_boot_display(
         runtime.usb_rx_line,
         runtime.usb_tx_buf,
         runtime.usb_boot_memory_config,
-    );
+    )
+    .await;
     info!(
         "frontpanel runtime mode={=str}",
         runtime_mode_label(runtime_mode)

@@ -873,6 +873,8 @@ pub(crate) const USB_CONTROL_LINE_CAPACITY: usize =
 pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize = 4 * 1024;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const USB_CONTROL_TX_PACKET_LEN: usize = 64;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+pub(crate) const USB_CONTROL_RESPONSE_TIMEOUT_MS: u64 = 250;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const FAN_FULL_SPEED_PWM_PERMILLE: u16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]

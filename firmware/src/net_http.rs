@@ -4,6 +4,7 @@
 //! A transport can only enqueue a normalized command after it passes pairing,
 //! bearer-token, CORS/PNA, and LAN-lease checks.
 
+use alloc::boxed::Box;
 use core::fmt::Write as _;
 
 use heapless::String;
@@ -135,7 +136,7 @@ pub struct ControlMailboxCommand {
     pub expected_revision: Option<u32>,
     /// Cursor used by the read-only thermal-plant trace endpoint.
     pub after_sample: Option<u8>,
-    pub body: String<LAN_HTTP_BODY_MAX_LEN>,
+    pub body: Box<str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,11 +253,17 @@ pub enum HttpReadGate {
 /// it must never touch heater, PD, calibration, or EEPROM peripherals itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HttpGate {
-    Respond(HttpResponse),
+    Respond(Box<HttpResponse>),
     Dispatch {
         command: ControlMailboxCommand,
         allow_origin: Option<String<128>>,
     },
+}
+
+impl HttpGate {
+    fn respond(response: HttpResponse) -> Self {
+        Self::Respond(Box::new(response))
+    }
 }
 
 impl HttpResponse {
@@ -375,7 +382,7 @@ impl NetHttpState {
         mailbox: &mut M,
     ) -> HttpResponse {
         match self.gate(now_ms, request) {
-            HttpGate::Respond(response) => response,
+            HttpGate::Respond(response) => *response,
             HttpGate::Dispatch {
                 command,
                 allow_origin,
@@ -448,13 +455,13 @@ impl NetHttpState {
     /// command so an async transport can enqueue and await main-loop handling.
     pub fn gate(&mut self, now_ms: u64, request: HttpRequest<'_>) -> HttpGate {
         if request.method == HttpMethod::Options {
-            return HttpGate::Respond(self.with_cors(request.origin, self.preflight(request)));
+            return HttpGate::respond(self.with_cors(request.origin, self.preflight(request)));
         }
 
         let response = self.dispatch_gate(now_ms, request);
         match response {
             HttpGate::Respond(response) => {
-                HttpGate::Respond(self.with_cors(request.origin, response))
+                HttpGate::respond(self.with_cors(request.origin, *response))
             }
             HttpGate::Dispatch { command, .. } => HttpGate::Dispatch {
                 command,
@@ -545,38 +552,38 @@ impl NetHttpState {
 
     fn dispatch_gate(&mut self, now_ms: u64, request: HttpRequest<'_>) -> HttpGate {
         let Some(endpoint) = endpoint_for_path(request.path) else {
-            return HttpGate::Respond(HttpResponse::new(
+            return HttpGate::respond(HttpResponse::new(
                 404,
                 r#"{"error":{"code":"not_found","message":"Unknown API path."}}"#,
             ));
         };
         if !endpoint_allows_method(endpoint, request.method) {
-            return HttpGate::Respond(HttpResponse::new(405, r#"{"error":"method_not_allowed"}"#));
+            return HttpGate::respond(HttpResponse::new(405, r#"{"error":"method_not_allowed"}"#));
         }
         if endpoint == LanEndpoint::Health {
-            return HttpGate::Respond(self.public_health_response());
+            return HttpGate::respond(self.public_health_response());
         }
         if endpoint == LanEndpoint::Pairing && request.method == HttpMethod::Get {
-            return HttpGate::Respond(self.pairing_metadata_response());
+            return HttpGate::respond(self.pairing_metadata_response());
         }
         if endpoint == LanEndpoint::PairingClaim && request.method == HttpMethod::Post {
-            return HttpGate::Respond(self.claim_pairing(request));
+            return HttpGate::respond(self.claim_pairing(request));
         }
 
         if !self.authorized(request.authorization) {
-            return HttpGate::Respond(HttpResponse::new(
+            return HttpGate::respond(HttpResponse::new(
                 401,
                 r#"{"error":{"code":"unauthorized","message":"Bearer token required."}}"#,
             ));
         }
         if endpoint == LanEndpoint::Lease {
-            return HttpGate::Respond(self.lease_route(now_ms, request));
+            return HttpGate::respond(self.lease_route(now_ms, request));
         }
         let lease_id = if is_write(request.method) {
             match self.require_lease(now_ms, request.lease_id) {
                 Ok(id) => Some(id),
                 Err(_) => {
-                    return HttpGate::Respond(HttpResponse::new(
+                    return HttpGate::respond(HttpResponse::new(
                         409,
                         r#"{"error":{"code":"lease_required","message":"An active LAN lease is required for writes."}}"#,
                     ));
@@ -586,13 +593,11 @@ impl NetHttpState {
             None
         };
         if is_control_write(request.method, endpoint) && request.expected_revision.is_none() {
-            return HttpGate::Respond(HttpResponse::new(
+            return HttpGate::respond(HttpResponse::new(
                 428,
                 r#"{"error":{"code":"revision_required","message":"A current control revision is required for writes."}}"#,
             ));
         }
-        let mut body = String::new();
-        let _ = body.push_str(request.body);
         HttpGate::Dispatch {
             command: ControlMailboxCommand {
                 request_id: 0,
@@ -603,7 +608,7 @@ impl NetHttpState {
                 lease_id,
                 expected_revision: request.expected_revision,
                 after_sample: request.after_sample,
-                body,
+                body: Box::from(request.body),
             },
             allow_origin: None,
         }
@@ -903,6 +908,11 @@ fn pairing_claim_code(body: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_mailbox_command_fits_the_runtime_queue_budget() {
+        assert!(core::mem::size_of::<ControlMailboxCommand>() < 256);
+    }
 
     #[derive(Default)]
     struct TestMailbox {

@@ -1197,7 +1197,7 @@ pub(crate) fn lan_command_to_control_line(
     // operation itself. USB JSONL carries the same operation under runtime
     // config's `thermalControlProfile` field.
     if command.endpoint == LanEndpoint::ThermalProfile {
-        let body = command.body.as_str().trim();
+        let body = command.body.as_ref().trim();
         if !body.starts_with('{') || !body.ends_with('}') {
             return Err("LAN command body must be a JSON object");
         }
@@ -1218,7 +1218,7 @@ pub(crate) fn lan_command_to_control_line(
     };
     let fields = command
         .body
-        .as_str()
+        .as_ref()
         .trim()
         .strip_prefix('{')
         .and_then(|value| value.strip_suffix('}'))

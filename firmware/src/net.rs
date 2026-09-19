@@ -474,7 +474,10 @@ pub fn respond_to_command(
     } else {
         current_control_revision()
     };
-    CONTROL_RESPONSES[usize::from(response_slot)].signal(ControlMailboxResponse {
+    let Some(response_signal) = CONTROL_RESPONSES.get(usize::from(response_slot)) else {
+        return;
+    };
+    response_signal.signal(ControlMailboxResponse {
         request_id,
         status,
         body,
@@ -495,13 +498,11 @@ async fn await_control_response(
     response_slot: u8,
     request_id: u32,
 ) -> Option<ControlMailboxResponse> {
+    let response_signal = CONTROL_RESPONSES.get(usize::from(response_slot))?;
     loop {
-        let response = with_timeout(
-            Duration::from_secs(3),
-            CONTROL_RESPONSES[usize::from(response_slot)].wait(),
-        )
-        .await
-        .ok()?;
+        let response = with_timeout(Duration::from_secs(3), response_signal.wait())
+            .await
+            .ok()?;
         if response.request_id == request_id {
             return Some(response);
         }
@@ -1425,7 +1426,7 @@ fn stage_http_gate(
 ) -> Option<(u32, bool)> {
     match gate {
         HttpGate::Respond(response) => {
-            *response_slot = response;
+            *response_slot = *response;
             None
         }
         HttpGate::Dispatch {

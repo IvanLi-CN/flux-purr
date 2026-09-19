@@ -21,61 +21,6 @@ const RUNTIME_IMPLEMENTATION: &str = concat!(
 );
 
 #[test]
-fn runtime_usb_response_tx_preserves_a_large_frame_across_backpressure_turns() {
-    struct BackpressuredUsbTx {
-        ready: bool,
-        pending: std::vec::Vec<u8>,
-        sent: std::vec::Vec<u8>,
-    }
-
-    impl UsbControlTx for BackpressuredUsbTx {
-        fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
-            if !self.ready || self.pending.len() == USB_CONTROL_TX_PACKET_LEN {
-                return Err(UsbTxError::WouldBlock);
-            }
-            self.pending.push(byte);
-            Ok(())
-        }
-
-        fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
-            if !self.ready {
-                return Err(UsbTxError::WouldBlock);
-            }
-            self.sent.extend_from_slice(&self.pending);
-            self.pending.clear();
-            Ok(())
-        }
-    }
-
-    let payload = std::vec![b'x'; 2 * 1024];
-    let mut buffer = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
-    let mut response_tx = UsbResponseTxState::default();
-    let mut usb = BackpressuredUsbTx {
-        ready: false,
-        pending: std::vec::Vec::new(),
-        sent: std::vec::Vec::new(),
-    };
-
-    assert!(response_tx.queue_bytes(&payload, &mut buffer));
-    assert_eq!(
-        response_tx.pump(&mut usb, &buffer),
-        UsbResponseTxProgress::Pending
-    );
-    assert!(usb.sent.is_empty());
-    assert!(response_tx.is_pending());
-
-    usb.ready = true;
-    for _ in 0..(payload.len() * 3) {
-        if response_tx.pump(&mut usb, &buffer) == UsbResponseTxProgress::Complete {
-            break;
-        }
-    }
-
-    assert!(!response_tx.is_pending());
-    assert_eq!(usb.sent, payload);
-}
-
-#[test]
 fn watchdog_feed_gate_requires_both_runtime_and_pd_progress() {
     let mut gate = WatchdogFeedGate::default();
 
@@ -113,10 +58,15 @@ fn watchdog_configures_clock_derived_timeout_before_rtos_handoff() {
 }
 
 #[test]
-fn runtime_usb_transport_has_no_blocking_write_or_spin_retry() {
+fn runtime_usb_transport_uses_yielding_nonblocking_response_packets() {
     let support = include_str!("support.rs");
     let control_plane = include_str!("control_plane.rs");
 
+    assert!(support.contains("UsbSerialJtag<'static, Blocking>"));
+    assert!(control_plane.contains("async fn usb_write_response_bytes"));
+    assert!(control_plane.contains("embassy_futures::yield_now().await"));
+    assert!(control_plane.contains("USB_CONTROL_RESPONSE_TIMEOUT_MS"));
+    assert!(!support.contains("UsbSerialJtag::new(usb_device).into_async()"));
     assert!(!support.contains("self.inner.write(bytes)"));
     assert!(!control_plane.contains("USB_CONTROL_TX_RETRY_LIMIT"));
     assert!(!control_plane.contains("wait_for_tx_progress"));
@@ -1377,7 +1327,7 @@ fn usb_write_bytes_returns_without_retrying_a_busy_endpoint() {
 }
 
 #[test]
-fn usb_response_write_uses_default_bounded_chunks_for_host_requested_frames() {
+fn usb_response_write_defaults_to_bounded_chunks_for_host_requested_frames() {
     let payload = std::vec![b'x'; 180];
     let mut bounded_tx = FakeUsbTx::new(0);
     assert!(!usb_write_bytes_bounded(&mut bounded_tx, &payload));
@@ -10586,23 +10536,21 @@ fn runtime_loop_services_pd_before_control_plane_work() {
 }
 
 #[test]
-fn runtime_control_work_is_bounded_before_the_next_pd_service() {
+fn runtime_control_input_is_bounded_before_the_next_pd_service() {
     let source = RUNTIME_IMPLEMENTATION;
     let usb_input = source;
     let normalized_source: String = source.split_whitespace().collect();
 
     assert!(usb_input.contains("if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET"));
     let control_frame = normalized_source
-        .find("usb_queue_response_frame(&mutstate.transport.usb_response_tx,&response,state.transport.usb_tx_buf,);")
-        .expect("USB control path must queue a bounded response");
+        .find("usb_write_response_frame(&mutstate.transport.usb_serial,&response,state.transport.usb_tx_buf,).await;")
+        .expect("USB control path must use the response writer");
     let control_frame_tail = &normalized_source[control_frame..];
     assert!(control_frame_tail.contains("usb_rx_line.clear();"));
     assert!(control_frame_tail.contains("break;"));
     assert!(
-        normalized_source.contains(
-            "usb_response_tx.pump(&mutstate.transport.usb_serial,state.transport.usb_tx_buf);"
-        ),
-        "runtime must advance outbound USB one bounded turn at a time"
+        !normalized_source.contains("usb_response_tx"),
+        "runtime must not retain an undelivered USB response queue"
     );
     assert!(source.contains("let Some(command) = flux_purr_firmware::net::try_receive_command()"));
     assert!(
