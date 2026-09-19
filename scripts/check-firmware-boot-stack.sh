@@ -82,6 +82,14 @@ runtime_loop_symbol="$("$nm_bin" -Sn --demangle "$elf_path" | awk '
   }
 ')"
 if [[ -z "$runtime_loop_symbol" ]]; then
+  runtime_loop_symbol="$("$nm_bin" -Sn --demangle "$elf_path" | awk '
+    /flux_purr::runtime::boot::__run_frontpanel_runtime_task_task::.*>>::poll$/ {
+      print $1 " runtime_loop"
+      exit
+    }
+  ')"
+fi
+if [[ -z "$runtime_loop_symbol" ]]; then
   echo "failed to resolve front-panel runtime loop poll" >&2
   exit 1
 fi
