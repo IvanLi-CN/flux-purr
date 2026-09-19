@@ -868,7 +868,7 @@ pub(crate) const HEATING_FAN_PULSE_MAX_DUTY_PERCENT: u8 = 50;
 pub(crate) const DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const USB_CONTROL_LINE_CAPACITY: usize =
-    flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
+    flux_purr_firmware::control_plane::USB_LINE_CONTENT_MAX_LEN;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize =
     flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;

@@ -1554,6 +1554,8 @@ fn oversized_usb_line_discards_the_suffix_until_newline() {
     for _ in 0..USB_CONTROL_LINE_CAPACITY {
         append_usb_control_byte(&mut line, &mut overflowed, b'x');
     }
+    assert!(!overflowed);
+    assert_eq!(line.len(), USB_CONTROL_LINE_CAPACITY);
     append_usb_control_byte(&mut line, &mut overflowed, b'{');
     append_usb_control_byte(&mut line, &mut overflowed, b'}');
 
@@ -1593,6 +1595,28 @@ fn usb_tx_buffer_matches_the_eight_kibibyte_jsonl_contract() {
         USB_CONTROL_TX_BUFFER_LEN,
         flux_purr_firmware::control_plane::USB_LINE_MAX_LEN
     );
+    assert_eq!(
+        USB_CONTROL_LINE_CAPACITY,
+        flux_purr_firmware::control_plane::USB_LINE_MAX_LEN - 1
+    );
+}
+
+#[test]
+fn usb_response_pump_reports_idle_after_the_last_packet_is_accepted() {
+    let payload = [b'x'; 1];
+    let mut tx = FakeUsbTx::new(64);
+    let mut writer = UsbResponseWriter::new(&payload);
+    let tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+
+    assert_eq!(
+        usb_pump_response(&mut tx, &mut writer, &tx_buf, 0),
+        UsbResponsePumpOutcome::Pending
+    );
+    assert_eq!(
+        usb_pump_response(&mut tx, &mut writer, &tx_buf, 1),
+        UsbResponsePumpOutcome::Idle
+    );
+    assert!(writer.is_complete());
 }
 
 #[test]

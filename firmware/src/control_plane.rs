@@ -32,9 +32,10 @@ pub const GIT_SHA_MAX_LEN: usize = 40;
 pub const HOSTNAME_MAX_LEN: usize = 64;
 pub const CAPABILITY_MAX_LEN: usize = 24;
 pub const CAPABILITY_COUNT_MAX: usize = 13;
-// A fully materialized 9-point thermal profile save request is about 5 KiB.
-// Keep one shared bound for firmware and devd JSONL frames so it can persist.
+// The bound includes the terminating JSONL newline. Consumers that store only
+// frame content must use USB_LINE_CONTENT_MAX_LEN instead.
 pub const USB_LINE_MAX_LEN: usize = 8 * 1024;
+pub const USB_LINE_CONTENT_MAX_LEN: usize = USB_LINE_MAX_LEN - 1;
 pub const REQUEST_ID_MAX_LEN: usize = 48;
 pub const ERROR_CODE_MAX_LEN: usize = 48;
 pub const ERROR_MESSAGE_MAX_LEN: usize = 160;

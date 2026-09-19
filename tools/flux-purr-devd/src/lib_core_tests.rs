@@ -2850,7 +2850,16 @@ fn usb_response_decoder_extracts_a_matching_frame_appended_to_a_boot_log() {
 fn serial_line_reader_discards_an_overlong_frame_before_the_next_response() {
     let mut line = Vec::new();
     let mut discarding = false;
-    for _ in 0..=SERIAL_LINE_LIMIT {
+    for _ in 0..SERIAL_LINE_CONTENT_LIMIT {
+        assert!(!serial_line_finished(&mut line, &mut discarding, b'x'));
+    }
+    assert_eq!(line.len(), SERIAL_LINE_CONTENT_LIMIT);
+    assert!(serial_line_finished(&mut line, &mut discarding, b'\n'));
+    assert!(!discarding);
+    assert_eq!(line.len(), SERIAL_LINE_CONTENT_LIMIT);
+
+    line.clear();
+    for _ in 0..=SERIAL_LINE_CONTENT_LIMIT {
         assert!(!serial_line_finished(&mut line, &mut discarding, b'x'));
     }
     assert!(discarding);

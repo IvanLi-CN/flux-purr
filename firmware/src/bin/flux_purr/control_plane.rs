@@ -2568,14 +2568,50 @@ pub(crate) fn usb_start_response_frame(
     if !writer.is_complete() {
         return false;
     }
-    let Ok(line) = write_usb_frame(frame, tx_buf) else {
-        return false;
+    let line = if let Ok(line) = write_usb_frame(frame, tx_buf) {
+        line
+    } else {
+        let fallback = UsbFrame::Error {
+            request_id: usb_frame_request_id(frame),
+            error: ApiError::new(
+                "output_too_small",
+                "USB JSONL response exceeded the frame limit.",
+                false,
+            ),
+        };
+        let Ok(line) = write_usb_frame(&fallback, tx_buf) else {
+            return false;
+        };
+        line
     };
     writer.start(
         line.len(),
         now_ms.saturating_add(USB_CONTROL_RESPONSE_TIMEOUT_MS),
     );
     true
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_frame_request_id(
+    frame: &UsbFrame,
+) -> Option<heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>> {
+    match frame {
+        UsbFrame::Request { request_id, .. }
+        | UsbFrame::WifiConfig { request_id, .. }
+        | UsbFrame::RuntimeConfig { request_id, .. }
+        | UsbFrame::CalibrationConfig { request_id, .. }
+        | UsbFrame::CalibrationJob { request_id, .. }
+        | UsbFrame::ThermalPlantRun { request_id, .. }
+        | UsbFrame::HeaterCurveConfig { request_id, .. }
+        | UsbFrame::HeaterCurveSave { request_id }
+        | UsbFrame::EepromMaintenance { request_id, .. }
+        | UsbFrame::Response { request_id, .. } => Some(request_id.clone()),
+        #[cfg(feature = "buzzer-test")]
+        UsbFrame::BuzzerTest { request_id, .. }
+        | UsbFrame::BuzzerTestResponse { request_id, .. } => Some(request_id.clone()),
+        UsbFrame::Error { request_id, .. } => request_id.clone(),
+        UsbFrame::Hello { .. } | UsbFrame::Status { .. } | UsbFrame::Log { .. } => None,
+    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -2646,7 +2682,7 @@ pub(crate) fn usb_pump_response<T: UsbControlTx>(
         return UsbResponsePumpOutcome::Fault;
     }
     match writer.step(tx, tx_buf) {
-        Ok(true) => UsbResponsePumpOutcome::Pending,
+        Ok(true) => UsbResponsePumpOutcome::Idle,
         Err(UsbTxError::Other) => {
             writer.abort();
             UsbResponsePumpOutcome::Fault

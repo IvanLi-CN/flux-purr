@@ -2111,7 +2111,6 @@ pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
         #[cfg(feature = "web_serial")]
         embassy_futures::yield_now().await;
         record_runtime_heartbeat();
-        #[cfg(feature = "web_serial")]
         let elapsed_ms = Instant::now()
             .as_millis()
             .saturating_sub(state.runtime_started_ms);
