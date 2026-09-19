@@ -28,6 +28,13 @@ pub(crate) struct RuntimeTransportState {
     #[cfg(feature = "web_serial")]
     pub(crate) usb_response_writer: UsbResponseWriter,
     #[cfg(feature = "web_serial")]
+    pub(crate) usb_transport_faulted: bool,
+    #[cfg(feature = "web_serial")]
+    pub(crate) usb_last_mutating_request_id:
+        Option<heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>>,
+    #[cfg(feature = "web_serial")]
+    pub(crate) persistence_log_sink: DeferredPersistenceLogSink,
+    #[cfg(feature = "web_serial")]
     pub(crate) eeprom_snapshot_session: EepromSnapshotSession,
     #[cfg(not(feature = "web_serial"))]
     pub(crate) persistence_log_sink: NoopPersistenceLogSink,

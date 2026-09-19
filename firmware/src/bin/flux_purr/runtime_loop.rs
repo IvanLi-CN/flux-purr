@@ -195,7 +195,7 @@ pub(crate) async fn runtime_process_usb_control_line(
             latest_vin_mv: state.latest_vin_mv,
             last_heater_duty: heater_duty_for_control,
             heater_control_timing: state.heater_control_timing,
-            persistence_log_sink: &mut state.transport.usb_serial,
+            persistence_log_sink: &mut state.transport.persistence_log_sink,
             record_staging: state.eeprom_record_staging,
         },
     )
@@ -234,10 +234,52 @@ pub(crate) async fn runtime_process_usb_line(
     {
         return (false, true);
     }
+    if let Some(request_id) = usb_mutating_request_id(state.transport.usb_rx_line.as_str()) {
+        if state
+            .transport
+            .usb_last_mutating_request_id
+            .as_ref()
+            .is_some_and(|last_request_id| last_request_id == &request_id)
+        {
+            let response = usb_error_response(
+                request_id,
+                "request_replayed",
+                "The request may already have executed; reconcile device state and use a new requestId.",
+            );
+            let _ = usb_start_response_frame(
+                &mut state.transport.usb_response_writer,
+                &response,
+                state.transport.usb_tx_buf,
+                Instant::now().as_millis(),
+            );
+            state.transport.usb_rx_line.clear();
+            return (false, true);
+        }
+        state.transport.usb_last_mutating_request_id = Some(request_id);
+    }
     (
         runtime_process_usb_control_line(state, elapsed_ms).await,
         true,
     )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn runtime_drain_usb_input(state: &mut RuntimeLoopState, elapsed_ms: u64) -> (bool, bool) {
+    let mut usb_bytes_processed = 0_u16;
+    while usb_bytes_processed < PD_RUNTIME_USB_BYTE_BUDGET {
+        let byte = match state.transport.usb_serial.read_byte() {
+            Ok(byte) => byte,
+            Err(_) => return (false, false),
+        };
+        usb_bytes_processed = usb_bytes_processed.saturating_add(1);
+        if byte == b'\n' {
+            return runtime_process_usb_line(state, elapsed_ms).await;
+        }
+        if byte != b'\r' && state.transport.usb_rx_line.push(char::from(byte)).is_err() {
+            state.transport.usb_rx_line.clear();
+        }
+    }
+    (false, false)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -246,48 +288,49 @@ pub(crate) async fn runtime_process_usb_input(
     elapsed_ms: u64,
 ) -> RuntimeUsbInputOutcome {
     let mut needs_redraw = false;
+    #[cfg(feature = "net_http")]
     let mut control_command_processed = false;
+    #[cfg(not(feature = "net_http"))]
+    let control_command_processed = false;
     #[cfg(feature = "web_serial")]
-    if usb_pump_response(
+    let usb_response_state = usb_pump_response(
         &mut state.transport.usb_serial,
         &mut state.transport.usb_response_writer,
         state.transport.usb_tx_buf,
         Instant::now().as_millis(),
-    ) {
+    );
+    #[cfg(feature = "web_serial")]
+    if matches!(usb_response_state, UsbResponsePumpOutcome::Fault) {
+        state.transport.usb_transport_faulted = true;
         return RuntimeUsbInputOutcome {
             needs_redraw,
             control_command_processed,
         };
     }
     #[cfg(feature = "web_serial")]
-    let mut usb_bytes_processed = 0_u16;
-    #[cfg(feature = "web_serial")]
-    loop {
-        if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET {
-            break;
+    if state.transport.usb_transport_faulted {
+        if usb_recover_transport(&mut state.transport.usb_serial) {
+            state.transport.usb_transport_faulted = false;
         }
-        match state.transport.usb_serial.read_byte() {
-            Ok(b'\n') => {
-                let (line_needs_redraw, line_processed) =
-                    runtime_process_usb_line(state, elapsed_ms).await;
-                needs_redraw |= line_needs_redraw;
-                #[cfg(feature = "net_http")]
-                {
-                    control_command_processed |= line_processed;
-                }
-                break;
-            }
-            Ok(b'\r') => {
-                usb_bytes_processed = usb_bytes_processed.saturating_add(1);
-            }
-            Ok(byte) => {
-                usb_bytes_processed = usb_bytes_processed.saturating_add(1);
-                if state.transport.usb_rx_line.push(char::from(byte)).is_err() {
-                    state.transport.usb_rx_line.clear();
-                }
-            }
-            Err(nb::Error::WouldBlock) => break,
-            Err(_) => break,
+        return RuntimeUsbInputOutcome {
+            needs_redraw,
+            control_command_processed,
+        };
+    }
+    #[cfg(feature = "web_serial")]
+    if matches!(usb_response_state, UsbResponsePumpOutcome::Idle) {
+        let _ = state
+            .transport
+            .persistence_log_sink
+            .flush_one(&mut state.transport.usb_serial);
+    }
+    #[cfg(feature = "web_serial")]
+    if matches!(usb_response_state, UsbResponsePumpOutcome::Idle) {
+        let (line_needs_redraw, _line_processed) = runtime_drain_usb_input(state, elapsed_ms).await;
+        needs_redraw |= line_needs_redraw;
+        #[cfg(feature = "net_http")]
+        {
+            control_command_processed |= _line_processed;
         }
     }
 
@@ -365,7 +408,7 @@ pub(crate) async fn runtime_process_lan_control(
             latest_vin_mv: state.latest_vin_mv,
             last_heater_duty: heater_duty_for_control,
             heater_control_timing: state.heater_control_timing,
-            persistence_log_sink: &mut state.transport.usb_serial,
+            persistence_log_sink: &mut state.transport.persistence_log_sink,
             record_staging: state.eeprom_record_staging,
         },
     )
@@ -622,7 +665,7 @@ pub(crate) async fn runtime_retry_persistence_io(
     retry_blank_initialization: bool,
 ) -> Result<(), MemoryCommitFailure> {
     #[cfg(feature = "web_serial")]
-    let retry_log_sink = &mut state.transport.usb_serial as &mut dyn PersistenceLogSink;
+    let retry_log_sink = &mut state.transport.persistence_log_sink as &mut dyn PersistenceLogSink;
     #[cfg(not(feature = "web_serial"))]
     let retry_log_sink = &mut state.transport.persistence_log_sink as &mut dyn PersistenceLogSink;
     if state.prepared_layout_recovery_pending {
@@ -1452,7 +1495,7 @@ pub(crate) async fn runtime_persist_completed_thermal_plant(state: &mut RuntimeL
             memory_config: &state.memory_config,
             domains_to_write: PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
             #[cfg(feature = "web_serial")]
-            persistence_log_sink: &mut state.transport.usb_serial,
+            persistence_log_sink: &mut state.transport.persistence_log_sink,
             #[cfg(not(feature = "web_serial"))]
             persistence_log_sink: &mut state.transport.persistence_log_sink,
             record_staging: state.eeprom_record_staging,
@@ -1577,7 +1620,7 @@ pub(crate) async fn runtime_commit_deferred_memory(state: &mut RuntimeLoopState,
             memory_config: &state.memory_config,
             domains_to_write: commit_domains,
             #[cfg(feature = "web_serial")]
-            persistence_log_sink: &mut state.transport.usb_serial,
+            persistence_log_sink: &mut state.transport.persistence_log_sink,
             #[cfg(not(feature = "web_serial"))]
             persistence_log_sink: &mut state.transport.persistence_log_sink,
             record_staging: state.eeprom_record_staging,

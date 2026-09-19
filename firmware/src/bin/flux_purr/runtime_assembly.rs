@@ -132,6 +132,12 @@ macro_rules! build_runtime_loop_state {
             #[cfg(feature = "web_serial")]
             usb_response_writer: UsbResponseWriter::default(),
             #[cfg(feature = "web_serial")]
+            usb_transport_faulted: false,
+            #[cfg(feature = "web_serial")]
+            usb_last_mutating_request_id: None,
+            #[cfg(feature = "web_serial")]
+            persistence_log_sink: DeferredPersistenceLogSink::default(),
+            #[cfg(feature = "web_serial")]
             eeprom_snapshot_session,
             #[cfg(not(feature = "web_serial"))]
             persistence_log_sink,

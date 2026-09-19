@@ -99,6 +99,9 @@ fn runtime_usb_transport_uses_yielding_nonblocking_response_packets() {
         .expect("response writer state machine must remain present");
     assert!(writer.contains("at most one non-blocking USB packet per call"));
     assert!(control_plane.contains("Ok(false) | Err(UsbTxError::WouldBlock)"));
+    assert!(control_plane.contains("DeferredPersistenceLogSink"));
+    assert!(control_plane.contains("USB_TRANSPORT_FAULT_MARKER"));
+    assert!(control_plane.contains("usb_mutating_request_id"));
 }
 const FIRMWARE_ENTRYPOINT: &str = include_str!("../flux_purr.rs");
 
@@ -1408,6 +1411,63 @@ fn usb_write_bytes_returns_without_retrying_a_busy_endpoint() {
 
     assert!(!usb_write_bytes_bounded(&mut tx, b"response\\n"));
     assert_eq!(tx.write_attempts, 1);
+}
+
+#[test]
+fn usb_response_pump_promotes_hard_tx_failure_to_transport_fault() {
+    struct FailingUsbTx;
+
+    impl UsbControlTx for FailingUsbTx {
+        fn write_byte_nb(&mut self, _byte: u8) -> Result<(), UsbTxError> {
+            Err(UsbTxError::Other)
+        }
+
+        fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
+    }
+
+    let payload = [b'x'; 1];
+    let mut writer = UsbResponseWriter::new(&payload);
+    let mut tx = FailingUsbTx;
+    let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+    assert_eq!(
+        usb_pump_response(&mut tx, &mut writer, &tx_buf, 0),
+        UsbResponsePumpOutcome::Fault
+    );
+    assert!(writer.is_complete());
+    assert!(USB_TRANSPORT_FAULT_MARKER.starts_with(b"\n{"));
+    let _ = &mut tx_buf;
+}
+
+#[test]
+fn mutating_usb_requests_are_deduplicated_but_reads_are_not() {
+    assert_eq!(
+        usb_mutating_request_id(
+            r#"{"type":"runtime_config","requestId":"runtime-1","targetTempC":180}"#
+        )
+        .as_deref(),
+        Some("runtime-1")
+    );
+    assert!(
+        usb_mutating_request_id(r#"{"type":"request","requestId":"status-1","op":"get_status"}"#)
+            .is_none()
+    );
+    assert_eq!(
+        usb_mutating_request_id(
+            r#"{"type":"eeprom_maintenance","requestId":"erase-1","op":"erase"}"#
+        )
+        .as_deref(),
+        Some("erase-1")
+    );
+}
+
+#[test]
+fn usb_tx_buffer_matches_the_eight_kibibyte_jsonl_contract() {
+    assert_eq!(
+        USB_CONTROL_TX_BUFFER_LEN,
+        flux_purr_firmware::control_plane::USB_LINE_MAX_LEN
+    );
 }
 
 #[test]
@@ -10666,13 +10726,13 @@ fn runtime_control_input_is_bounded_before_the_next_pd_service() {
     let usb_input = source;
     let normalized_source: String = source.split_whitespace().collect();
 
-    assert!(usb_input.contains("if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET"));
+    assert!(usb_input.contains("while usb_bytes_processed < PD_RUNTIME_USB_BYTE_BUDGET"));
     let control_frame = normalized_source
         .find("usb_start_response_frame(&mutstate.transport.usb_response_writer,&response,state.transport.usb_tx_buf,")
         .expect("USB control path must use the response writer");
     let control_frame_tail = &normalized_source[control_frame..];
     assert!(control_frame_tail.contains("usb_rx_line.clear();"));
-    assert!(control_frame_tail.contains("break;"));
+    assert!(normalized_source.contains("returnruntime_process_usb_line(state,elapsed_ms).await;"));
     assert!(
         !normalized_source.contains("usb_response_tx"),
         "runtime must not retain an undelivered USB response queue"
@@ -10682,7 +10742,14 @@ fn runtime_control_input_is_bounded_before_the_next_pd_service() {
         !source
             .contains("while let Some(command) = flux_purr_firmware::net::try_receive_command()")
     );
-    assert!(normalized_source.contains("ifusb_pump_response(&mutstate.transport.usb_serial,"));
+    assert!(normalized_source.contains("letusb_response_state=usb_pump_response("));
+    assert!(normalized_source.contains("UsbResponsePumpOutcome::Fault"));
+    assert!(normalized_source.contains("UsbResponsePumpOutcome::Idle"));
+    assert!(normalized_source.contains("usb_transport_faulted=true"));
+    assert!(normalized_source.contains("usb_recover_transport"));
+    assert!(
+        !normalized_source.contains("ifusb_pump_response(&mutstate.transport.usb_serial,return")
+    );
 }
 
 #[test]

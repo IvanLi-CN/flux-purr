@@ -118,6 +118,8 @@ pub(crate) use flux_purr_firmware::buzzer_test::{
 pub(crate) use flux_purr_firmware::buzzer_test::{
     BuzzerTestSession, BuzzerTestSessionState, BuzzerTestStatus,
 };
+#[cfg(all(test, feature = "buzzer-test", not(target_arch = "xtensa")))]
+pub(crate) use flux_purr_firmware::control_plane::BuzzerTestOp;
 #[cfg(any(test, all(target_arch = "xtensa", feature = "web_serial")))]
 pub(crate) use flux_purr_firmware::control_plane::EepromMaintenanceOp;
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
@@ -497,7 +499,7 @@ pub(crate) fn init_runtime_heap() {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-#[unsafe(link_section = ".dram2_uninit")]
+#[unsafe(link_section = ".uninit")]
 pub(crate) static mut USB_CONTROL_RESPONSE_BUFFER: MaybeUninit<[u8; USB_CONTROL_TX_BUFFER_LEN]> =
     MaybeUninit::uninit();
 
@@ -868,9 +870,8 @@ pub(crate) const DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS: u64 = 1_000;
 pub(crate) const USB_CONTROL_LINE_CAPACITY: usize =
     flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-// Requests retain the full 8 KiB protocol bound; outbound responses currently
-// stay below 4 KiB, leaving the reclaimed DRAM2 for the runtime allocator.
-pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize = 4 * 1024;
+pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize =
+    flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const USB_CONTROL_TX_PACKET_LEN: usize = 64;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
