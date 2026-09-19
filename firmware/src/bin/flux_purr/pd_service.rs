@@ -87,6 +87,18 @@ pub(crate) fn source_supports_fusb302b_idle_pps(
     })
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_idle_contract_is_confirmed(
+    observation: PdStatusObservation,
+    capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+) -> bool {
+    (observation.contract.kind == ContractKind::Pps
+        && observation.contract.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV)
+        || (observation.contract.kind == ContractKind::Fixed
+            && observation.contract.voltage_mv <= FUSB302B_INITIAL_PPS_REQUEST_MV
+            && !capabilities.is_some_and(source_supports_fusb302b_idle_pps))
+}
+
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct PdServiceClient;
@@ -100,6 +112,7 @@ impl PdServiceClient {
     pub(crate) fn mark_starting_fusb302b() -> Self {
         PD_INTERLOCK_PENDING.store(0, Ordering::Release);
         PD_INTERLOCK_LATCHED.store(0, Ordering::Release);
+        PD_SERVICE_REQUIRED.store(1, Ordering::Release);
         PD_SERVICE_SNAPSHOT.lock(|snapshot| {
             *snapshot.borrow_mut() = PdServiceSnapshot {
                 controller: ControllerKind::Fusb302b,
@@ -114,6 +127,7 @@ impl PdServiceClient {
     pub(crate) fn mark_unavailable() -> Self {
         PD_INTERLOCK_PENDING.store(0, Ordering::Release);
         PD_INTERLOCK_LATCHED.store(0, Ordering::Release);
+        PD_SERVICE_REQUIRED.store(0, Ordering::Release);
         PD_SERVICE_SNAPSHOT.lock(|snapshot| {
             *snapshot.borrow_mut() = PdServiceSnapshot::unavailable();
         });
@@ -203,12 +217,7 @@ impl PdServiceClient {
             return PdContractRequestState::Failed;
         }
         if snapshot.observation.is_some_and(|observation| {
-            (observation.contract.kind == ContractKind::Pps
-                && observation.contract.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV)
-                || (observation.contract.kind == ContractKind::Fixed
-                    && !snapshot
-                        .capabilities
-                        .is_some_and(source_supports_fusb302b_idle_pps))
+            automatic_idle_contract_is_confirmed(observation, snapshot.capabilities)
         }) {
             return PdContractRequestState::Confirmed;
         }
@@ -322,7 +331,7 @@ async fn process_pd_command(
 #[embassy_executor::task]
 async fn pd_service_task(mut i2c: PdI2c<'static>, mut runtime: Box<Fusb302bRuntime>) {
     loop {
-        let observation = if i2c.try_acquire() {
+        if i2c.try_acquire() {
             if PD_INTERLOCK_PENDING.swap(0, Ordering::Acquire) != 0 {
                 runtime.interlock_after_stale_contract(PdTimestamp::now().as_millis());
                 PD_INTERLOCK_LATCHED.store(0, Ordering::Release);
@@ -343,13 +352,15 @@ async fn pd_service_task(mut i2c: PdI2c<'static>, mut runtime: Box<Fusb302bRunti
             // an EEPROM turn cannot leave a stale contract looking active.
             let observation = pd_status_observation(&runtime, &mut i2c).await;
             i2c.release();
-            observation
+            publish_pd_snapshot(&runtime, observation);
+            // A heartbeat represents a complete bus-acquired poll-and-publish
+            // turn. A skipped try-lock turn must not look like PD progress.
+            record_pd_heartbeat();
         } else {
-            // No current hardware observation means no heater authorization.
-            None
-        };
-        publish_pd_snapshot(&runtime, observation);
-        record_pd_heartbeat();
+            // Clear authorization immediately, but do not count this skipped
+            // turn as PD progress for the watchdog.
+            publish_pd_snapshot(&runtime, None);
+        }
         EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await;
     }
 }

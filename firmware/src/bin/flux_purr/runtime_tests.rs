@@ -24,12 +24,22 @@ const RUNTIME_IMPLEMENTATION: &str = concat!(
 fn watchdog_feed_gate_requires_both_runtime_and_pd_progress() {
     let mut gate = WatchdogFeedGate::default();
 
-    assert!(!gate.observe(0, 0));
-    assert!(gate.observe(1, 1));
-    assert!(!gate.observe(2, 1));
-    assert!(gate.observe(2, 2));
-    assert!(!gate.observe(3, 2));
-    assert!(!gate.observe(4, 2));
+    assert!(!gate.observe(0, 0, true));
+    assert!(gate.observe(1, 1, true));
+    assert!(!gate.observe(2, 1, true));
+    assert!(gate.observe(2, 2, true));
+    assert!(!gate.observe(3, 2, true));
+    assert!(!gate.observe(4, 2, true));
+}
+
+#[test]
+fn watchdog_feed_gate_uses_runtime_progress_when_pd_service_is_unavailable() {
+    let mut gate = WatchdogFeedGate::default();
+
+    assert!(!gate.observe(0, 0, false));
+    assert!(gate.observe(1, 0, false));
+    assert!(gate.observe(2, 0, false));
+    assert!(!gate.observe(2, 1, false));
 }
 
 #[test]
@@ -287,7 +297,12 @@ fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
 
     assert!(pd_service.contains("read_status().await.ok()?"));
     assert!(pd_task.contains("let observation = pd_status_observation(&runtime, &mut i2c).await"));
-    assert!(pd_task.contains("None\n        };\n        publish_pd_snapshot"));
+    assert!(pd_task.contains("publish_pd_snapshot(&runtime, observation)"));
+    assert!(pd_task.contains("publish_pd_snapshot(&runtime, None)"));
+    assert!(
+        pd_task.contains("publish_pd_snapshot(&runtime, observation);\n            // A heartbeat")
+    );
+    assert!(!pd_task.contains("publish_pd_snapshot(&runtime, None);\n        record_pd_heartbeat"));
 
     let permit_check = support
         .split("fn set_duty_cycle(&mut self, duty: u16)")
@@ -303,6 +318,21 @@ fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
         permit_check
             .find("HEATER_PWM_STORAGE.lock")
             .is_some_and(|lock| { permit_check[lock..].contains("PD_HEATER_PERMIT.load") })
+    );
+}
+
+#[test]
+fn watchdog_is_enabled_before_frontpanel_runtime_starts() {
+    let watchdog = include_str!("watchdog.rs");
+    let boot = include_str!("boot.rs");
+    let finalize = boot
+        .split("async fn run_boot_runtime_finalize_task")
+        .nth(1)
+        .expect("runtime finalize task must remain present");
+
+    assert!(watchdog.contains("WATCHDOG_ENABLED.store(1, Ordering::Release)"));
+    assert!(
+        finalize.find("arm_watchdog().await") < finalize.find("spawn(run_frontpanel_runtime_task")
     );
 }
 
@@ -820,6 +850,32 @@ fn fusb302b_idle_restore_requires_an_apdo_that_covers_twelve_volts() {
         max_ma: 3_000,
     });
     assert!(!source_supports_fusb302b_idle_pps(capabilities));
+}
+
+#[test]
+fn automatic_idle_restore_never_confirms_a_fixed_twenty_volt_contract() {
+    let observation = |voltage_mv| PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: Status::from_register(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 3_000,
+        contract_voltage_mv: Some(voltage_mv),
+        contract: Contract {
+            kind: ContractKind::Fixed,
+            object_position: 1,
+            voltage_mv,
+            current_ma: 3_000,
+        },
+    };
+
+    assert!(automatic_idle_contract_is_confirmed(
+        observation(12_000),
+        None
+    ));
+    assert!(!automatic_idle_contract_is_confirmed(
+        observation(20_000),
+        None
+    ));
 }
 
 #[test]

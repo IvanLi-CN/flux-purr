@@ -2630,10 +2630,10 @@ async fn run_boot_runtime_finalize_task(spawner: Spawner, state: Box<BootRuntime
     rom_boot_stage(b"runtime_ready");
     let runtime_loop_storage = Box::<RuntimeLoopState>::new_uninit();
     let state = state.into_runtime_loop(runtime_loop_storage);
+    arm_watchdog().await;
     spawner
         .spawn(run_frontpanel_runtime_task(state))
         .expect("failed to spawn front-panel runtime task");
-    arm_watchdog();
 }
 
 #[cfg(target_arch = "xtensa")]

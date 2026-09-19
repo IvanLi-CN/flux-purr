@@ -11,9 +11,14 @@ pub(crate) struct WatchdogFeedGate {
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl WatchdogFeedGate {
-    pub(crate) fn observe(&mut self, runtime_heartbeat: u32, pd_heartbeat: u32) -> bool {
+    pub(crate) fn observe(
+        &mut self,
+        runtime_heartbeat: u32,
+        pd_heartbeat: u32,
+        pd_service_required: bool,
+    ) -> bool {
         if !self.armed {
-            if runtime_heartbeat == 0 || pd_heartbeat == 0 {
+            if runtime_heartbeat == 0 || (pd_service_required && pd_heartbeat == 0) {
                 return false;
             }
             self.runtime_heartbeat = runtime_heartbeat;
@@ -22,7 +27,9 @@ impl WatchdogFeedGate {
             return true;
         }
 
-        if runtime_heartbeat == self.runtime_heartbeat || pd_heartbeat == self.pd_heartbeat {
+        if runtime_heartbeat == self.runtime_heartbeat
+            || (pd_service_required && pd_heartbeat == self.pd_heartbeat)
+        {
             return false;
         }
 
@@ -33,16 +40,20 @@ impl WatchdogFeedGate {
 }
 
 #[cfg(target_arch = "xtensa")]
-const WATCHDOG_SAMPLE_MS: u64 = 500;
+const WATCHDOG_SAMPLE_MS: u64 = 50;
 #[cfg(target_arch = "xtensa")]
 const WATCHDOG_TIMEOUT_MS: u64 = 5_000;
 
 #[cfg(target_arch = "xtensa")]
 static WATCHDOG_ARMED: AtomicU8 = AtomicU8::new(0);
 #[cfg(target_arch = "xtensa")]
+static WATCHDOG_ENABLED: AtomicU8 = AtomicU8::new(0);
+#[cfg(target_arch = "xtensa")]
 static RUNTIME_HEARTBEAT: AtomicU32 = AtomicU32::new(0);
 #[cfg(target_arch = "xtensa")]
 static PD_HEARTBEAT: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "xtensa")]
+pub(crate) static PD_SERVICE_REQUIRED: AtomicU8 = AtomicU8::new(0);
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn record_runtime_heartbeat() {
@@ -55,8 +66,11 @@ pub(crate) fn record_pd_heartbeat() {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) fn arm_watchdog() {
+pub(crate) async fn arm_watchdog() {
     WATCHDOG_ARMED.store(1, Ordering::Release);
+    while WATCHDOG_ENABLED.load(Ordering::Acquire) == 0 {
+        EmbassyTimer::after_millis(1).await;
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -85,14 +99,21 @@ pub(crate) async fn watchdog_task(
         if WATCHDOG_ARMED.load(Ordering::Acquire) != 0 && !watchdog_enabled {
             watchdog.enable();
             watchdog_enabled = true;
+            WATCHDOG_ENABLED.store(1, Ordering::Release);
             rom_boot_stage(b"watchdog_armed");
         }
 
         if watchdog_enabled {
             let runtime_heartbeat = RUNTIME_HEARTBEAT.load(Ordering::Acquire);
             let pd_heartbeat = PD_HEARTBEAT.load(Ordering::Acquire);
-            if gate.observe(runtime_heartbeat, pd_heartbeat) {
+            let pd_service_required = PD_SERVICE_REQUIRED.load(Ordering::Acquire) != 0;
+            if gate.observe(runtime_heartbeat, pd_heartbeat, pd_service_required) {
                 watchdog.feed();
+            }
+            if PD_HEATER_PERMIT.load(Ordering::Acquire) != 0
+                && !heater_permit_is_active(Instant::now().as_millis())
+            {
+                HeaterPwmGate::force_off();
             }
         }
 
