@@ -874,7 +874,10 @@ pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize = 4 * 1024;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const USB_CONTROL_TX_PACKET_LEN: usize = 64;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) const USB_CONTROL_RESPONSE_TIMEOUT_MS: u64 = 250;
+// Runtime responses are emitted cooperatively, one USB packet per loop turn.
+// Keep the deadline bounded, but long enough for the largest response buffer
+// to drain without aborting a valid JSONL frame.
+pub(crate) const USB_CONTROL_RESPONSE_TIMEOUT_MS: u64 = 10_000;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const FAN_FULL_SPEED_PWM_PERMILLE: u16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]

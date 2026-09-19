@@ -69,7 +69,7 @@
 
 - 所有 transport 暴露同一领域模型：`Identity`、`NetworkSummary`、`Status`、`FirmwareArtifact`、`ApiError`。
 - USB serial frame 使用 newline-delimited JSON；需要响应的 request 必须带 `request_id`。
-- USB JSONL 的完整响应必须保留到发送完成；运行态 response writer 状态必须驻留在 runtime transport 中，端点背压时每轮至多尝试一次非阻塞 byte write 或 packet flush，并在每次成功写入或 flush 后返回主循环，在当前响应完成或明确失败前停止接收下一条请求。USB 背压、诊断输出或客户端停止读取不得阻塞 Front Panel、LED、热控、PD service 或 executor。
+- USB JSONL 的完整响应必须保留到发送完成；运行态 response writer 状态必须驻留在 runtime transport 中，端点背压时每轮最多填充一个非阻塞 USB packet。ESP32-S3 USB Serial/JTAG FIFO 自动提交完整 64-byte packet，只有最终短 packet 显式尝试 flush；每次成功写入或 flush 后返回主循环，在当前响应完成或明确失败前停止接收下一条请求。USB 背压、诊断输出或客户端停止读取不得阻塞 Front Panel、LED、热控、PD service 或 executor。
 - `TIMG0` watchdog 在第一个异步启动阶段前由独立 supervisor 启用，启动期间使用 boot-stage heartbeat，进入 `runtime_ready` 后切换为 Front Panel runtime 与 PD service 的单调心跳门控。supervisor 只在相应阶段要求的心跳自上次 feed 后推进时喂狗；任一任务、正常 executor 或 supervisor 停滞都必须停止 feed 并在硬件超时后复位。watchdog reset reason 必须沿既有 USB/U0 reset diagnostics 暴露，且 heater permit 在复位前后保持 fail-closed。
 - `hello` 必须返回 protocol version、framing、identity 和 capabilities。
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。

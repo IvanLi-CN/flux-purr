@@ -2628,8 +2628,12 @@ pub(crate) fn usb_pump_response<T: UsbControlTx>(
         writer.abort();
         return true;
     }
-    if matches!(writer.step(tx, tx_buf), Err(UsbTxError::Other)) {
-        writer.abort();
+    match writer.step(tx, tx_buf) {
+        Ok(true) => {}
+        Err(UsbTxError::Other) => {
+            writer.abort();
+        }
+        Ok(false) | Err(UsbTxError::WouldBlock) => {}
     }
     true
 }
@@ -2676,9 +2680,9 @@ impl UsbResponseWriter {
         !self.is_complete() && now_ms >= self.deadline_ms
     }
 
-    /// Performs at most one non-blocking endpoint operation. The async caller
-    /// yields after every step so an always-ready endpoint cannot monopolize
-    /// the executor while a large response is in flight.
+    /// Performs at most one non-blocking USB packet per call. The packet bound
+    /// keeps the response cooperative while avoiding one-byte-per-runtime-turn
+    /// latency for ordinary JSONL responses.
     pub(crate) fn step<T: UsbControlTx>(
         &mut self,
         tx: &mut T,
@@ -2696,18 +2700,32 @@ impl UsbResponseWriter {
                     self.response_len = self.response_len.saturating_mul(usize::from(!complete));
                     Ok(complete)
                 }
+                Err(UsbTxError::WouldBlock) => Err(UsbTxError::WouldBlock),
                 Err(error) => Err(error),
             }
         } else if self.offset < self.response_len {
-            match tx.write_byte_nb(bytes[self.offset]) {
-                Ok(()) => {
-                    self.offset += 1;
-                    self.packet_len += 1;
-                    self.flush_pending = self.packet_len == USB_CONTROL_TX_PACKET_LEN;
-                    Ok(false)
-                }
-                Err(error) => Err(error),
+            while self.offset < self.response_len && self.packet_len < USB_CONTROL_TX_PACKET_LEN {
+                tx.write_byte_nb(bytes[self.offset])?;
+                self.offset += 1;
+                self.packet_len += 1;
             }
+            // The ESP32-S3 USB Serial/JTAG FIFO automatically submits a full
+            // 64-byte packet. Only a final short packet needs an explicit
+            // flush; a full packet must be allowed to become available again
+            // through write_byte_nb once the host consumes it.
+            match (
+                self.offset == self.response_len,
+                self.packet_len == USB_CONTROL_TX_PACKET_LEN,
+            ) {
+                (true, true) => {
+                    self.packet_len = 0;
+                    self.response_len = 0;
+                }
+                (false, true) => self.packet_len = 0,
+                (true, false) => self.flush_pending = self.packet_len != 0,
+                (false, false) => {}
+            }
+            Ok(self.is_complete())
         } else if self.packet_len != 0 {
             self.flush_pending = true;
             Ok(false)

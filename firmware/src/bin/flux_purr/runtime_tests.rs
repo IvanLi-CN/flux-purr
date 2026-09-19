@@ -97,7 +97,7 @@ fn runtime_usb_transport_uses_yielding_nonblocking_response_packets() {
         .split("struct UsbResponseWriter")
         .nth(1)
         .expect("response writer state machine must remain present");
-    assert!(writer.contains("at most one non-blocking endpoint operation"));
+    assert!(writer.contains("at most one non-blocking USB packet per call"));
     assert!(control_plane.contains("Ok(false) | Err(UsbTxError::WouldBlock)"));
 }
 const FIRMWARE_ENTRYPOINT: &str = include_str!("../flux_purr.rs");
@@ -1299,6 +1299,10 @@ impl UsbControlTx for FakeUsbTx {
             return Err(UsbTxError::WouldBlock);
         }
         self.pending.push(byte);
+        if self.pending.len() == self.capacity {
+            self.sent.extend_from_slice(&self.pending);
+            self.pending.clear();
+        }
         Ok(())
     }
 
@@ -1464,22 +1468,39 @@ fn usb_response_write_uses_nonblocking_transport_calls() {
 }
 
 #[test]
-fn usb_response_writer_limits_an_always_ready_endpoint_to_one_operation_per_step() {
+fn usb_response_writer_limits_an_always_ready_endpoint_to_one_packet_per_step() {
     let payload = std::vec![b'x'; 180];
     let mut tx = FakeUsbTx::new(64);
     let mut writer = UsbResponseWriter::new(&payload);
     let mut operations_before = tx.operation_count;
+    let mut steps = 0;
 
     while !writer.is_complete() {
         let complete = writer.step(&mut tx, &payload).unwrap_or(false);
         assert!(complete == writer.is_complete());
-        assert!(tx.operation_count.saturating_sub(operations_before) <= 1);
+        assert!(
+            tx.operation_count.saturating_sub(operations_before) <= USB_CONTROL_TX_PACKET_LEN + 1
+        );
         operations_before = tx.operation_count;
-        assert!(operations_before < 400);
+        steps += 1;
+        assert!(steps <= 10);
     }
 
     assert_eq!(tx.sent, payload);
     assert!(tx.pending.is_empty());
+    assert_eq!(tx.flush_count, 1);
+
+    let exact_packet = std::vec![b'y'; USB_CONTROL_TX_PACKET_LEN];
+    let mut exact_packet_tx = FakeUsbTx::new(USB_CONTROL_TX_PACKET_LEN);
+    let mut exact_packet_writer = UsbResponseWriter::new(&exact_packet);
+    assert!(
+        exact_packet_writer
+            .step(&mut exact_packet_tx, &exact_packet)
+            .expect("an exact packet completes without an explicit flush")
+    );
+    assert!(exact_packet_writer.is_complete());
+    assert_eq!(exact_packet_tx.sent, exact_packet);
+    assert_eq!(exact_packet_tx.flush_count, 0);
 
     writer.start(payload.len(), 10);
     assert!(writer.is_expired(10));
