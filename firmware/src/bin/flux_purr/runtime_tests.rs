@@ -10931,6 +10931,7 @@ fn runtime_control_input_is_bounded_before_the_next_pd_service() {
     assert!(normalized_source.contains("usb_start_transport_recovery"));
     assert!(normalized_source.contains("usb_pump_recovery_response"));
     assert!(normalized_source.contains("usb_recovery_marker_failed=true"));
+    assert!(normalized_source.contains("droppingtheboundedrecoveryframe"));
     assert!(
         !normalized_source.contains("ifusb_pump_response(&mutstate.transport.usb_serial,return")
     );

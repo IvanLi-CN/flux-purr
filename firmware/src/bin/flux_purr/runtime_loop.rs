@@ -362,11 +362,18 @@ pub(crate) async fn runtime_process_usb_input(
                 UsbResponsePumpOutcome::Pending => {}
             }
         }
-        return RuntimeUsbInputOutcome {
-            needs_redraw,
-            control_command_processed,
-            response_pending: true,
-        };
+        if state.transport.usb_recovery_marker_failed {
+            warn!("USB recovery marker failed; dropping the bounded recovery frame");
+            state.transport.usb_transport_faulted = false;
+            state.transport.usb_recovery_marker_failed = false;
+            state.transport.usb_recovery_writer.abort();
+        } else {
+            return RuntimeUsbInputOutcome {
+                needs_redraw,
+                control_command_processed,
+                response_pending: true,
+            };
+        }
     }
     #[cfg(feature = "web_serial")]
     if matches!(usb_response_state, UsbResponsePumpOutcome::Idle) {
@@ -2136,11 +2143,6 @@ pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
     loop {
         #[cfg(feature = "web_serial")]
         embassy_futures::yield_now().await;
-        #[cfg(feature = "web_serial")]
-        if !state.transport.usb_recovery_marker_failed {
-            record_runtime_heartbeat();
-        }
-        #[cfg(not(feature = "web_serial"))]
         record_runtime_heartbeat();
         let elapsed_ms = Instant::now()
             .as_millis()
