@@ -2870,21 +2870,51 @@ pub(crate) struct DeferredPersistenceLogSink {
         USB_PERSISTENCE_LOG_QUEUE_CAPACITY,
     >,
     writer: UsbResponseWriter,
+    transport_fault: bool,
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 impl DeferredPersistenceLogSink {
-    #[cfg(target_arch = "xtensa")]
+    #[cfg(any(target_arch = "xtensa", test))]
     pub(crate) fn is_pending(&self) -> bool {
-        !self.lines.is_empty() || !self.writer.is_complete()
+        !self.transport_fault && (!self.lines.is_empty() || !self.writer.is_complete())
+    }
+
+    #[cfg(any(target_arch = "xtensa", test))]
+    pub(crate) fn take_transport_fault(&mut self) -> bool {
+        let faulted = self.transport_fault;
+        self.transport_fault = false;
+        faulted
+    }
+
+    fn mark_transport_fault(&mut self) {
+        self.lines.clear();
+        self.writer.abort();
+        self.transport_fault = true;
     }
 
     pub(crate) fn flush_one<T: UsbControlTx>(&mut self, usb: &mut T) -> bool {
+        if self.transport_fault {
+            return false;
+        }
         let Some(line) = self.lines.front() else {
             return true;
         };
         if self.writer.is_complete() {
+            #[cfg(target_arch = "xtensa")]
+            self.writer.start(
+                line.len(),
+                Instant::now()
+                    .as_millis()
+                    .saturating_add(USB_CONTROL_RESPONSE_TIMEOUT_MS),
+            );
+            #[cfg(test)]
             self.writer.start(line.len(), u64::MAX);
+        }
+        #[cfg(target_arch = "xtensa")]
+        if self.writer.is_expired(Instant::now().as_millis()) {
+            self.mark_transport_fault();
+            return false;
         }
         match self.writer.step(usb, line.as_slice()) {
             Ok(true) => {
@@ -2892,7 +2922,11 @@ impl DeferredPersistenceLogSink {
                 self.writer.abort();
                 true
             }
-            Ok(false) | Err(UsbTxError::WouldBlock) | Err(UsbTxError::Other) => false,
+            Ok(false) | Err(UsbTxError::WouldBlock) => false,
+            Err(UsbTxError::Other) => {
+                self.mark_transport_fault();
+                false
+            }
         }
     }
 }

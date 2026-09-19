@@ -1528,7 +1528,7 @@ fn usb_recovery_writer_times_out_instead_of_renewing_forever() {
 }
 
 #[test]
-fn deferred_persistence_log_resumes_after_a_partial_hard_failure() {
+fn deferred_persistence_log_enters_recovery_after_a_partial_hard_failure() {
     struct PartialFailureTx {
         sent: std::vec::Vec<u8>,
         attempts: usize,
@@ -1561,8 +1561,32 @@ fn deferred_persistence_log_resumes_after_a_partial_hard_failure() {
     };
 
     assert!(!sink.flush_one(&mut tx));
-    while !sink.flush_one(&mut tx) {}
-    assert_eq!(tx.sent, line);
+    let sent_before_retry = tx.sent.clone();
+    assert!(!sink.flush_one(&mut tx));
+    assert_eq!(tx.sent, sent_before_retry);
+    assert!(sink.take_transport_fault());
+    assert!(!sink.is_pending());
+}
+
+#[test]
+fn deferred_persistence_log_hard_failure_enters_transport_recovery() {
+    struct FailingUsbTx;
+
+    impl UsbControlTx for FailingUsbTx {
+        fn write_byte_nb(&mut self, _byte: u8) -> Result<(), UsbTxError> {
+            Err(UsbTxError::Other)
+        }
+
+        fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
+    }
+
+    let mut sink = DeferredPersistenceLogSink::default();
+    sink.write_line(b"PERSISTENCE_COMMIT_FAILED code=test\n");
+    assert!(!sink.flush_one(&mut FailingUsbTx));
+    assert!(sink.take_transport_fault());
+    assert!(!sink.take_transport_fault());
 }
 
 #[test]

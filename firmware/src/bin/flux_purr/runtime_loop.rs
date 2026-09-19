@@ -331,9 +331,7 @@ pub(crate) async fn runtime_process_usb_input(
     }
     #[cfg(feature = "web_serial")]
     if matches!(usb_response_state, UsbResponsePumpOutcome::Fault) {
-        state.transport.usb_transport_faulted = true;
-        state.transport.usb_recovery_marker_failed = false;
-        state.transport.usb_recovery_writer.abort();
+        runtime_mark_usb_transport_fault(state);
         return RuntimeUsbInputOutcome {
             needs_redraw,
             control_command_processed,
@@ -390,7 +388,10 @@ pub(crate) async fn runtime_process_usb_input(
         persistence_log_pending = runtime_flush_persistence_logs(state).await;
     }
     #[cfg(feature = "web_serial")]
-    if matches!(usb_response_state, UsbResponsePumpOutcome::Idle) && !persistence_log_pending {
+    if matches!(usb_response_state, UsbResponsePumpOutcome::Idle)
+        && !persistence_log_pending
+        && !state.transport.usb_transport_faulted
+    {
         let (line_needs_redraw, _line_processed) = runtime_drain_usb_input(state, elapsed_ms).await;
         needs_redraw |= line_needs_redraw;
         #[cfg(feature = "net_http")]
@@ -404,7 +405,8 @@ pub(crate) async fn runtime_process_usb_input(
         control_command_processed,
         #[cfg(feature = "web_serial")]
         response_pending: !state.transport.usb_response_writer.is_complete()
-            || persistence_log_pending,
+            || persistence_log_pending
+            || state.transport.usb_transport_faulted,
         #[cfg(not(feature = "web_serial"))]
         response_pending: false,
     }
@@ -542,7 +544,17 @@ async fn runtime_flush_persistence_logs(state: &mut RuntimeLoopState) -> bool {
             embassy_futures::yield_now().await;
         }
     }
+    if state.transport.persistence_log_sink.take_transport_fault() {
+        runtime_mark_usb_transport_fault(state);
+    }
     state.transport.persistence_log_sink.is_pending()
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn runtime_mark_usb_transport_fault(state: &mut RuntimeLoopState) {
+    state.transport.usb_transport_faulted = true;
+    state.transport.usb_recovery_marker_failed = false;
+    state.transport.usb_recovery_writer.abort();
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]

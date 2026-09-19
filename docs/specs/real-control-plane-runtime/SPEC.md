@@ -198,7 +198,7 @@
 - `response`：回显 `request_id`，返回 result 或 error。
 - `status` / `log` / `error`：device-origin async frame。
 - USB JSONL 单帧上限为 `8 KiB`（包含换行）。firmware、native `devd` 与 Browser Web Serial 必须使用同一上限；该容量必须容纳完整 9 点、point-local 的 thermal profile preview/save 请求，超限请求必须在 transport 边界明确拒绝。`save` 必须保留所提供的每一个 `1..=10` point，不得按 profile bank 投影、插值重建或静默丢弃温度点。
-- firmware response 发送必须是非阻塞、可让出 executor 的 packet writer；response 未完成时不得读取下一条 USB request。EEPROM persistence diagnostics 必须延迟到当前 JSONL response 完整发送之后，禁止插入 response frame；诊断或 recovery marker 部分写入失败后必须从已写入 offset 继续，不能重复发送前缀。
+- firmware response 发送必须是非阻塞、可让出 executor 的 packet writer；response 未完成时不得读取下一条 USB request。EEPROM persistence diagnostics 必须延迟到当前 JSONL response 完整发送之后，禁止插入 response frame；诊断 writer 的 packet 发送必须有界，硬 TX 错误或 deadline 必须进入同一 transport recovery，不得无限重试或继续消费新的 request。诊断或 recovery marker 部分写入失败后必须从已写入 offset 继续，不能重复发送前缀。
 - response 发生硬 TX 错误或 bounded timeout 后，firmware 必须进入 transport fault/recovery 状态，停止消费新的 request；恢复时先使用可续传 writer 发送换行和明确的 `usb_transport_fault` error marker，完成 JSONL framing resync 后才恢复 request intake。接收端超过 `8 KiB` 的 JSONL 行必须丢弃到下一个换行并返回 `frame_too_large`，不得执行超长前缀后的合法 JSON 后缀。
 - 对可能改变设备状态的 USB request，firmware 必须保留最近已成功执行的、容量有界的 `request_id` 历史。只有 mutating response 成功后才记录 ID；同一 ID 在该历史中再次出现必须返回不可重试的 `request_replayed` error，不得再次执行 EEPROM write/erase、配置、校准或控制动作；设备重启后该内存去重记录可以清空。
 
