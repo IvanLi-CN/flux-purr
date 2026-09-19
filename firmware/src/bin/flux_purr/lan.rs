@@ -51,30 +51,13 @@ pub(crate) async fn process_control_line(
     line: &str,
     mut context: ControlLineContext<'_, '_, '_>,
 ) -> (bool, UsbFrame) {
-    let mut needs_redraw = refresh_control_network(&mut context).await;
     let active_profile = active_thermal_control_profile(
         context.memory_config,
         *context.thermal_control_profile_preview,
         context.manual_pps,
     );
-    let (handler_redraw, response) =
-        dispatch_control_frame(&mut context, line, active_profile).await;
-    needs_redraw |= handler_redraw;
+    let (needs_redraw, response) = dispatch_control_frame(&mut context, line, active_profile).await;
     (needs_redraw, response)
-}
-
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn refresh_control_network(context: &mut ControlLineContext<'_, '_, '_>) -> bool {
-    #[cfg(feature = "net_http")]
-    {
-        let summary = flux_purr_firmware::net::lan_network_summary().await;
-        context.ui_state.apply_network_summary(summary)
-    }
-    #[cfg(not(feature = "net_http"))]
-    {
-        let _ = context;
-        false
-    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
