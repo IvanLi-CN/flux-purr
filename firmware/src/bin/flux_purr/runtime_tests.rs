@@ -10947,7 +10947,6 @@ fn skipped_runtime_iterations_still_dispatch_the_sampled_frontpanel_input() {
     assert!(skip_branch.contains("runtime_process_frontpanel_input"));
     assert!(skip_branch.contains("input.sample"));
     assert!(skip_branch.contains("input.pairing_opened_by_usb"));
-    assert!(skip_branch.contains("runtime_refresh_display"));
     assert!(skip_branch.contains("runtime_control_heater"));
     assert!(skip_branch.contains("runtime_process_pending_safety"));
 }

@@ -2159,7 +2159,6 @@ pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
             needs_redraw |= runtime_control_heater(&mut state, elapsed_ms).await;
             needs_redraw |= runtime_process_pending_safety(&mut state, elapsed_ms).await;
             state.ui_refresh_pending |= needs_redraw;
-            runtime_refresh_display(&mut state, elapsed_ms).await;
             continue;
         }
         needs_redraw |= runtime_process_frontpanel_input(
