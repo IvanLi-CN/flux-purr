@@ -2791,21 +2791,13 @@ impl UsbResponseWriter {
                 self.offset += 1;
                 self.packet_len += 1;
             }
-            // The ESP32-S3 USB Serial/JTAG FIFO automatically submits a full
-            // 64-byte packet. Only a final short packet needs an explicit
-            // flush; a full packet must be allowed to become available again
-            // through write_byte_nb once the host consumes it.
-            match (
-                self.offset == self.response_len,
-                self.packet_len == USB_CONTROL_TX_PACKET_LEN,
-            ) {
-                (true, true) => {
-                    self.packet_len = 0;
-                    self.response_len = 0;
-                }
-                (false, true) => self.packet_len = 0,
-                (true, false) => self.flush_pending = self.packet_len != 0,
-                (false, false) => {}
+            // A full Serial/JTAG FIFO packet is not observable to the host
+            // until the peripheral accepts a submit. Defer that submit to the
+            // next runtime turn so one call still writes at most one packet.
+            if self.packet_len == USB_CONTROL_TX_PACKET_LEN
+                || (self.offset == self.response_len && self.packet_len != 0)
+            {
+                self.flush_pending = true;
             }
             Ok(self.is_complete())
         } else if self.packet_len != 0 {

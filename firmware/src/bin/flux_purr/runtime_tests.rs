@@ -1277,6 +1277,7 @@ fn protection_alarm_reuses_one_carrier_through_its_pulses_and_replay() {
 
 struct FakeUsbTx {
     capacity: usize,
+    auto_commits_full_packet: bool,
     pending: std::vec::Vec<u8>,
     sent: std::vec::Vec<u8>,
     flush_count: usize,
@@ -1287,10 +1288,18 @@ impl FakeUsbTx {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
+            auto_commits_full_packet: true,
             pending: std::vec::Vec::new(),
             sent: std::vec::Vec::new(),
             flush_count: 0,
             operation_count: 0,
+        }
+    }
+
+    fn requires_explicit_flush(capacity: usize) -> Self {
+        Self {
+            auto_commits_full_packet: false,
+            ..Self::new(capacity)
         }
     }
 }
@@ -1302,7 +1311,7 @@ impl UsbControlTx for FakeUsbTx {
             return Err(UsbTxError::WouldBlock);
         }
         self.pending.push(byte);
-        if self.pending.len() == self.capacity {
+        if self.auto_commits_full_packet && self.pending.len() == self.capacity {
             self.sent.extend_from_slice(&self.pending);
             self.pending.clear();
         }
@@ -1697,24 +1706,48 @@ fn usb_response_writer_limits_an_always_ready_endpoint_to_one_packet_per_step() 
 
     assert_eq!(tx.sent, payload);
     assert!(tx.pending.is_empty());
-    assert_eq!(tx.flush_count, 1);
+    assert_eq!(tx.flush_count, 3);
 
     let exact_packet = std::vec![b'y'; USB_CONTROL_TX_PACKET_LEN];
     let mut exact_packet_tx = FakeUsbTx::new(USB_CONTROL_TX_PACKET_LEN);
     let mut exact_packet_writer = UsbResponseWriter::new(&exact_packet);
     assert!(
+        !exact_packet_writer
+            .step(&mut exact_packet_tx, &exact_packet)
+            .expect("a full packet waits for a submit")
+    );
+    assert!(
         exact_packet_writer
             .step(&mut exact_packet_tx, &exact_packet)
-            .expect("an exact packet completes without an explicit flush")
+            .expect("an exact packet completes after its submit")
     );
     assert!(exact_packet_writer.is_complete());
     assert_eq!(exact_packet_tx.sent, exact_packet);
-    assert_eq!(exact_packet_tx.flush_count, 0);
+    assert_eq!(exact_packet_tx.flush_count, 1);
 
     writer.start(payload.len(), 10);
     assert!(writer.is_expired(10));
     writer.abort();
     assert!(writer.is_complete());
+}
+
+#[test]
+fn usb_response_writer_flushes_full_packets_for_flush_required_endpoint() {
+    let payload = std::vec![b'x'; 2 * USB_CONTROL_TX_PACKET_LEN];
+    let mut tx = FakeUsbTx::requires_explicit_flush(USB_CONTROL_TX_PACKET_LEN);
+    let mut writer = UsbResponseWriter::new(&payload);
+
+    for _ in 0..4 {
+        if writer.is_complete() {
+            break;
+        }
+        let _ = writer.step(&mut tx, &payload);
+    }
+
+    assert!(writer.is_complete());
+    assert_eq!(tx.sent, payload);
+    assert!(tx.pending.is_empty());
+    assert_eq!(tx.flush_count, 2);
 }
 
 #[test]
