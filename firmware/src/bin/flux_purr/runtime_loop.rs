@@ -319,12 +319,7 @@ pub(crate) async fn runtime_process_usb_input(
     #[cfg(feature = "web_serial")]
     let mut persistence_log_pending = false;
     #[cfg(feature = "web_serial")]
-    let usb_response_state = usb_pump_response(
-        &mut state.transport.usb_serial,
-        &mut state.transport.usb_response_writer,
-        state.transport.usb_tx_buf,
-        Instant::now().as_millis(),
-    );
+    let usb_response_state = runtime_pump_usb_response_budget(state).await;
     #[cfg(feature = "web_serial")]
     if matches!(usb_response_state, UsbResponsePumpOutcome::Fault) {
         state.transport.usb_transport_faulted = true;
@@ -500,6 +495,31 @@ pub(crate) async fn runtime_process_lan_control(
         control_needs_redraw,
         lan_frame_response(&response, network_summary),
     )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn runtime_pump_usb_response_budget(state: &mut RuntimeLoopState) -> UsbResponsePumpOutcome {
+    let mut response_state = usb_pump_response(
+        &mut state.transport.usb_serial,
+        &mut state.transport.usb_response_writer,
+        state.transport.usb_tx_buf,
+        Instant::now().as_millis(),
+    );
+    if matches!(response_state, UsbResponsePumpOutcome::Pending) {
+        for _ in 1..USB_CONTROL_TX_PACKET_BUDGET {
+            embassy_futures::yield_now().await;
+            response_state = usb_pump_response(
+                &mut state.transport.usb_serial,
+                &mut state.transport.usb_response_writer,
+                state.transport.usb_tx_buf,
+                Instant::now().as_millis(),
+            );
+            if !matches!(response_state, UsbResponsePumpOutcome::Pending) {
+                break;
+            }
+        }
+    }
+    response_state
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]

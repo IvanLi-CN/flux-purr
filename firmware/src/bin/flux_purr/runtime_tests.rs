@@ -90,6 +90,7 @@ fn runtime_usb_transport_uses_yielding_nonblocking_response_packets() {
     assert!(control_plane.contains("async fn usb_write_response_bytes"));
     assert!(control_plane.contains("embassy_futures::yield_now().await"));
     assert!(control_plane.contains("USB_CONTROL_RESPONSE_TIMEOUT_MS"));
+    assert!(support.contains("USB_CONTROL_TX_PACKET_BUDGET"));
     assert!(!support.contains("UsbSerialJtag::new(usb_device).into_async()"));
     assert!(!support.contains("self.inner.write(bytes)"));
     assert!(!control_plane.contains("USB_CONTROL_TX_RETRY_LIMIT"));
@@ -105,6 +106,7 @@ fn runtime_usb_transport_uses_yielding_nonblocking_response_packets() {
     assert!(control_plane.contains("usb_mutating_request_id"));
     assert!(runtime_loop.contains("response_pending"));
     assert!(runtime_loop.contains("if usb_input.response_pending"));
+    assert!(runtime_loop.contains("USB_CONTROL_TX_PACKET_BUDGET"));
     assert!(runtime_loop.contains("persistence_log_pending"));
     assert!(runtime_loop.contains("!persistence_log_pending"));
 }
@@ -10926,7 +10928,10 @@ fn runtime_control_input_is_bounded_before_the_next_pd_service() {
         !source
             .contains("while let Some(command) = flux_purr_firmware::net::try_receive_command()")
     );
-    assert!(normalized_source.contains("letusb_response_state=usb_pump_response("));
+    assert!(
+        normalized_source
+            .contains("letusb_response_state=runtime_pump_usb_response_budget(state).await;")
+    );
     assert!(normalized_source.contains("UsbResponsePumpOutcome::Fault"));
     assert!(normalized_source.contains("UsbResponsePumpOutcome::Idle"));
     assert!(normalized_source.contains("usb_transport_faulted=true"));
