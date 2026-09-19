@@ -1508,6 +1508,21 @@ fn usb_recovery_writer_resumes_after_a_partial_hard_failure() {
 }
 
 #[test]
+fn usb_recovery_writer_times_out_instead_of_renewing_forever() {
+    let payload = [b'r'; 96];
+    let mut writer = UsbResponseWriter::default();
+    writer.start(payload.len(), 10);
+    let mut tx = FakeUsbTx::new(64);
+    let tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+
+    assert_eq!(
+        usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, 10),
+        UsbResponsePumpOutcome::Fault
+    );
+    assert!(writer.is_complete());
+}
+
+#[test]
 fn deferred_persistence_log_resumes_after_a_partial_hard_failure() {
     struct PartialFailureTx {
         sent: std::vec::Vec<u8>,
@@ -10915,6 +10930,7 @@ fn runtime_control_input_is_bounded_before_the_next_pd_service() {
     assert!(normalized_source.contains("usb_transport_faulted=true"));
     assert!(normalized_source.contains("usb_start_transport_recovery"));
     assert!(normalized_source.contains("usb_pump_recovery_response"));
+    assert!(normalized_source.contains("usb_recovery_marker_failed=true"));
     assert!(
         !normalized_source.contains("ifusb_pump_response(&mutstate.transport.usb_serial,return")
     );
@@ -10932,6 +10948,21 @@ fn skipped_runtime_iterations_still_dispatch_the_sampled_frontpanel_input() {
     assert!(skip_branch.contains("input.sample"));
     assert!(skip_branch.contains("input.pairing_opened_by_usb"));
     assert!(skip_branch.contains("runtime_refresh_display"));
+    assert!(skip_branch.contains("runtime_control_heater"));
+    assert!(skip_branch.contains("runtime_persist_and_update_safety"));
+}
+
+#[test]
+fn early_usb_write_failures_enter_framing_recovery() {
+    let control_plane = include_str!("control_plane.rs");
+    let early_control = control_plane
+        .split("pub(crate) async fn poll_usb_early_control")
+        .nth(1)
+        .expect("early USB control poll must remain present");
+
+    assert!(early_control.contains("if !usb_write_response_frame"));
+    assert!(early_control.contains("USB_TRANSPORT_FAULT_MARKER"));
+    assert!(early_control.contains("run_usb_recovery_control_loop"));
 }
 
 #[test]

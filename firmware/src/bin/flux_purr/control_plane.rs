@@ -2552,10 +2552,11 @@ pub(crate) async fn usb_write_response_frame(
     frame: &UsbFrame,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     phase: UsbRecoveryPhase,
-) {
+) -> bool {
     if let Ok(line) = write_usb_frame(frame, tx_buf) {
-        let _ = usb_write_response_bytes(usb, line.as_bytes(), phase).await;
+        return usb_write_response_bytes(usb, line.as_bytes(), phase).await;
     }
+    false
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -2702,9 +2703,8 @@ pub(crate) fn usb_pump_recovery_response<T: UsbControlTx>(
         return UsbResponsePumpOutcome::Idle;
     }
     if writer.is_expired(now_ms) {
-        // Recovery owns the same writer across turns. Refresh only the
-        // deadline so a partial marker is resumed at its current offset.
-        writer.renew_deadline(now_ms.saturating_add(USB_CONTROL_RESPONSE_TIMEOUT_MS));
+        writer.abort();
+        return UsbResponsePumpOutcome::Fault;
     }
     match writer.step(tx, tx_buf) {
         Ok(true) => UsbResponsePumpOutcome::Idle,
@@ -2754,12 +2754,6 @@ impl UsbResponseWriter {
 
     pub(crate) fn is_expired(&self, now_ms: u64) -> bool {
         !self.is_complete() && now_ms >= self.deadline_ms
-    }
-
-    pub(crate) fn renew_deadline(&mut self, deadline_ms: u64) {
-        if !self.is_complete() {
-            self.deadline_ms = deadline_ms;
-        }
     }
 
     /// Performs at most one non-blocking USB packet per call. The packet bound
@@ -3292,13 +3286,30 @@ pub(crate) async fn poll_usb_early_control(
                 } else {
                     usb_early_response(rx_line.as_str(), memory_config)
                 };
-                usb_write_response_frame(
+                if !usb_write_response_frame(
                     usb,
                     &response,
                     tx_buf,
                     UsbRecoveryPhase::BeforePersistentState,
                 )
-                .await;
+                .await
+                {
+                    let _ = usb_write_response_bytes(
+                        usb,
+                        USB_TRANSPORT_FAULT_MARKER,
+                        UsbRecoveryPhase::BeforePersistentState,
+                    )
+                    .await;
+                    run_usb_recovery_control_loop(
+                        usb,
+                        rx_line,
+                        tx_buf,
+                        memory_config,
+                        StatusLightState::Booting,
+                        UsbRecoveryPhase::BeforePersistentState,
+                    )
+                    .await;
+                }
                 rx_line.clear();
                 rx_overflowed = false;
             }
@@ -3374,7 +3385,7 @@ pub(crate) async fn run_usb_recovery_control_loop(
                         elapsed_ms,
                         phase,
                     );
-                    usb_write_response_frame(usb, &response, tx_buf, phase).await;
+                    let _ = usb_write_response_frame(usb, &response, tx_buf, phase).await;
                     rx_line.clear();
                     rx_overflowed = false;
                 }

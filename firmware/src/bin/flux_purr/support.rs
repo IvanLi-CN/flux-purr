@@ -874,7 +874,7 @@ pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize =
     flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const USB_CONTROL_TX_PACKET_LEN: usize = 64;
-#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+#[cfg(target_arch = "xtensa")]
 // Runtime responses are emitted cooperatively, one USB packet per loop turn.
 // Keep the deadline bounded, but long enough for the largest response buffer
 // to drain without aborting a valid JSONL frame.

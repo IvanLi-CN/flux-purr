@@ -346,18 +346,21 @@ pub(crate) async fn runtime_process_usb_input(
         {
             state.transport.usb_recovery_marker_failed = true;
         }
-        if !state.transport.usb_recovery_marker_failed
-            && matches!(
-                usb_pump_recovery_response(
-                    &mut state.transport.usb_serial,
-                    &mut state.transport.usb_recovery_writer,
-                    state.transport.usb_tx_buf,
-                    Instant::now().as_millis(),
-                ),
-                UsbResponsePumpOutcome::Idle
-            )
-        {
-            state.transport.usb_transport_faulted = false;
+        if !state.transport.usb_recovery_marker_failed {
+            match usb_pump_recovery_response(
+                &mut state.transport.usb_serial,
+                &mut state.transport.usb_recovery_writer,
+                state.transport.usb_tx_buf,
+                Instant::now().as_millis(),
+            ) {
+                UsbResponsePumpOutcome::Idle => {
+                    state.transport.usb_transport_faulted = false;
+                }
+                UsbResponsePumpOutcome::Fault => {
+                    state.transport.usb_recovery_marker_failed = true;
+                }
+                UsbResponsePumpOutcome::Pending => {}
+            }
         }
         return RuntimeUsbInputOutcome {
             needs_redraw,
@@ -2121,6 +2124,11 @@ pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
     loop {
         #[cfg(feature = "web_serial")]
         embassy_futures::yield_now().await;
+        #[cfg(feature = "web_serial")]
+        if !state.transport.usb_recovery_marker_failed {
+            record_runtime_heartbeat();
+        }
+        #[cfg(not(feature = "web_serial"))]
         record_runtime_heartbeat();
         let elapsed_ms = Instant::now()
             .as_millis()
@@ -2136,6 +2144,8 @@ pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
                 input.pairing_opened_by_usb,
             )
             .await;
+            needs_redraw |= runtime_control_heater(&mut state, elapsed_ms).await;
+            needs_redraw |= runtime_persist_and_update_safety(&mut state, elapsed_ms).await;
             state.ui_refresh_pending |= needs_redraw;
             runtime_refresh_display(&mut state, elapsed_ms).await;
             continue;
