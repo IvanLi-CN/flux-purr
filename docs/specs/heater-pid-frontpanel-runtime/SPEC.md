@@ -362,7 +362,7 @@ None
 
 ## Related ADRs
 
-- None
+None
 
 ## 方案概述（Approach, high-level）
 
