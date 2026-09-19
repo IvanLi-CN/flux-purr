@@ -44,12 +44,13 @@ impl RuntimeInputOutcome {
     fn skip(
         sample: flux_purr_firmware::frontpanel::FrontPanelSampleResult,
         needs_redraw: bool,
+        pairing_opened_by_usb: bool,
     ) -> Self {
         Self {
             sample,
             needs_redraw,
             skip_iteration: true,
-            pairing_opened_by_usb: false,
+            pairing_opened_by_usb,
         }
     }
 }
@@ -636,20 +637,20 @@ pub(crate) async fn runtime_process_input(
     let route_before_usb_control = state.ui_state.route;
     let usb_input = runtime_process_usb_input(state, elapsed_ms).await;
     let mut needs_redraw = usb_input.needs_redraw;
-    if usb_input.response_pending {
-        return RuntimeInputOutcome::skip(sample, needs_redraw);
-    }
     let pairing_opened_by_usb = route_before_usb_control != FrontPanelRoute::WifiInfo
         && state.ui_state.route == FrontPanelRoute::WifiInfo;
     if pairing_opened_by_usb {
         state.suppress_pairing_input_until_released = true;
+    }
+    if usb_input.response_pending {
+        return RuntimeInputOutcome::skip(sample, needs_redraw, pairing_opened_by_usb);
     }
 
     let lan_input =
         runtime_process_lan(state, elapsed_ms, usb_input.control_command_processed).await;
     needs_redraw |= lan_input.needs_redraw;
     if lan_input.command_processed {
-        return RuntimeInputOutcome::skip(sample, needs_redraw);
+        return RuntimeInputOutcome::skip(sample, needs_redraw, pairing_opened_by_usb);
     }
     needs_redraw |= runtime_reconcile_network_state(state, elapsed_ms).await;
     RuntimeInputOutcome {
@@ -2128,6 +2129,15 @@ pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
         let input = runtime_process_input(&mut state, elapsed_ms).await;
         needs_redraw |= input.needs_redraw;
         if input.skip_iteration {
+            needs_redraw |= runtime_process_frontpanel_input(
+                &mut state,
+                input.sample,
+                elapsed_ms,
+                input.pairing_opened_by_usb,
+            )
+            .await;
+            state.ui_refresh_pending |= needs_redraw;
+            runtime_refresh_display(&mut state, elapsed_ms).await;
             continue;
         }
         needs_redraw |= runtime_process_frontpanel_input(

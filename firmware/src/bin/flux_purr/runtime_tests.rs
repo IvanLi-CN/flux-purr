@@ -10921,6 +10921,20 @@ fn runtime_control_input_is_bounded_before_the_next_pd_service() {
 }
 
 #[test]
+fn skipped_runtime_iterations_still_dispatch_the_sampled_frontpanel_input() {
+    let runtime_loop = RUNTIME_IMPLEMENTATION;
+    let skip_branch = runtime_loop
+        .split("if input.skip_iteration")
+        .nth(1)
+        .expect("runtime loop must retain the bounded skip path");
+
+    assert!(skip_branch.contains("runtime_process_frontpanel_input"));
+    assert!(skip_branch.contains("input.sample"));
+    assert!(skip_branch.contains("input.pairing_opened_by_usb"));
+    assert!(skip_branch.contains("runtime_refresh_display"));
+}
+
+#[test]
 fn network_awaits_do_not_own_or_wrap_pd_service() {
     let source = RUNTIME_IMPLEMENTATION;
     let lan = include_str!("lan.rs");
