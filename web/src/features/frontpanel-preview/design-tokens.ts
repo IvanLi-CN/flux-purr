@@ -19,6 +19,20 @@ export type FrontPanelPalette = {
   cyan: string
 }
 
+export type FrontPanelDashboardPalette = {
+  background: string
+  divider: string
+  text: string
+  muted: string
+  disabled: string
+  setpoint: string
+  success: string
+  warning: string
+  info: string
+  heaterTrack: string
+  heaterFill: string
+}
+
 function rgb565ToCss(red: number, green: number, blue: number) {
   const expand = (value: number, max: number) => Math.round((value * 255) / max)
   return `#${[expand(red, 31), expand(green, 63), expand(blue, 31)]
@@ -66,6 +80,36 @@ const lightFrontPanelPalette: FrontPanelPalette = {
 export const frontPanelThemePalettes: Record<FrontPanelTheme, FrontPanelPalette> = {
   dark: { ...frontPanelPalette, dashboardBg: frontPanelPalette.bg },
   light: lightFrontPanelPalette,
+}
+
+// These values mirror the firmware's DashboardTheme after RGB565 expansion.
+export const frontPanelDashboardPalettes: Record<FrontPanelTheme, FrontPanelDashboardPalette> = {
+  dark: {
+    background: rgb565ToCss(1, 5, 4),
+    divider: rgb565ToCss(6, 16, 11),
+    text: rgb565ToCss(28, 59, 30),
+    muted: rgb565ToCss(17, 40, 22),
+    disabled: rgb565ToCss(9, 23, 14),
+    setpoint: rgb565ToCss(31, 52, 12),
+    success: rgb565ToCss(13, 56, 22),
+    warning: rgb565ToCss(31, 28, 16),
+    info: rgb565ToCss(15, 52, 31),
+    heaterTrack: rgb565ToCss(4, 12, 9),
+    heaterFill: rgb565ToCss(30, 39, 1),
+  },
+  light: {
+    background: rgb565ToCss(31, 63, 31),
+    divider: rgb565ToCss(24, 49, 24),
+    text: rgb565ToCss(2, 8, 6),
+    muted: rgb565ToCss(10, 25, 15),
+    disabled: rgb565ToCss(18, 40, 21),
+    setpoint: rgb565ToCss(19, 23, 0),
+    success: rgb565ToCss(0, 30, 10),
+    warning: rgb565ToCss(22, 8, 3),
+    info: rgb565ToCss(0, 26, 20),
+    heaterTrack: rgb565ToCss(24, 49, 24),
+    heaterFill: rgb565ToCss(22, 20, 1),
+  },
 }
 
 // These values mirror the firmware's dashboard palettes after RGB565 expansion.

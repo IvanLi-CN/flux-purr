@@ -4,6 +4,7 @@ import { drawBitmapText, measureBitmapText } from '../bitmap-font'
 import type { FrontPanelPalette, FrontPanelTheme } from '../design-tokens'
 import {
   darkenRgb565Color,
+  frontPanelDashboardPalettes,
   frontPanelTemperatureColorsByTheme,
   frontPanelThemePalettes,
 } from '../design-tokens'
@@ -456,19 +457,22 @@ function drawDashboardScreen(
     temperatureColors
   )
   const valueParts = deciCToParts(screen.currentTempDeciC)
+  const dashboardPalette = frontPanelDashboardPalettes[theme]
   const digitsWidth = measureSevenSegmentNumber(valueParts.integer)
   const digitsRightEdge = 55
   const digitsX = digitsRightEdge - digitsWidth
   const fanColor =
     screen.fanDisplayState === 'run'
-      ? palette.success
+      ? dashboardPalette.success
       : screen.fanDisplayState === 'auto'
-        ? palette.cyan
-        : palette.disabled
+        ? dashboardPalette.info
+        : screen.fanDisplayState === 'safe'
+          ? dashboardPalette.warning
+          : dashboardPalette.disabled
 
-  fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.dashboardBg)
+  fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, dashboardPalette.background)
   drawBitmapText(ctx, 'TEMP', 4, 3, {
-    color: palette.muted,
+    color: dashboardPalette.muted,
     scale: 1,
     letterSpacing: 1,
   })
@@ -477,39 +481,57 @@ function drawDashboardScreen(
   }
   drawSevenSegmentNumber(ctx, valueParts.integer, digitsX, 11, valueColor)
   drawBitmapText(ctx, valueParts.fractional, 64, 11, {
-    color: palette.text,
+    color: dashboardPalette.text,
     scale: 2,
     letterSpacing: 1,
     align: 'center',
   })
-  fillRect(ctx, 58, 19, 2, 2, palette.text)
-  drawTempUnitIcon(ctx, 58, 27, palette.text)
+  fillRect(ctx, 58, 19, 2, 2, dashboardPalette.text)
+  drawTempUnitIcon(ctx, 58, 27, dashboardPalette.text)
 
-  fillRect(ctx, 78, 4, 1, 36, palette.border)
+  fillRect(ctx, 78, 4, 1, 36, dashboardPalette.divider)
   if (screen.heaterLockReason && screen.dashboardWarningVisible) {
-    drawStatusLine(ctx, 4, palette.warning, palette.warning, 'WARN', 'OTEMP')
+    drawStatusLine(ctx, 4, dashboardPalette.warning, dashboardPalette.warning, 'WARN', 'OTEMP')
   } else {
-    drawStatusLine(ctx, 4, palette.muted, palette.setpoint, 'SET', `${screen.targetTempC}`)
+    drawStatusLine(
+      ctx,
+      4,
+      dashboardPalette.muted,
+      dashboardPalette.setpoint,
+      'SET',
+      `${screen.targetTempC}`
+    )
   }
-  drawPpsStatusLine(ctx, 17, screen, palette)
-  drawStatusLine(ctx, 30, palette.muted, fanColor, 'FAN', screen.fanDisplayState.toUpperCase())
+  drawPpsStatusLine(ctx, 17, screen, {
+    ...palette,
+    muted: dashboardPalette.muted,
+    cyan: dashboardPalette.info,
+  })
+  drawStatusLine(
+    ctx,
+    30,
+    dashboardPalette.muted,
+    fanColor,
+    'FAN',
+    screen.fanDisplayState.toUpperCase()
+  )
 
-  fillRect(ctx, 4, 41, 152, 1, palette.border)
+  fillRect(ctx, 4, 41, 152, 1, dashboardPalette.divider)
   drawBitmapText(ctx, 'HEAT', 4, 43, {
-    color: palette.muted,
+    color: dashboardPalette.muted,
     scale: 1,
     letterSpacing: 1,
   })
   const outputPercent = Math.max(0, Math.min(100, Math.trunc(screen.heaterOutputPercent)))
   drawBitmapText(ctx, `${outputPercent}%`, 22, 43, {
-    color: outputPercent === 0 ? palette.muted : palette.heaterFill,
+    color: outputPercent === 0 ? dashboardPalette.muted : dashboardPalette.heaterFill,
     scale: 1,
     letterSpacing: 1,
   })
-  fillRect(ctx, 42, 44, 114, 2, palette.heaterTrack)
+  fillRect(ctx, 42, 44, 114, 2, dashboardPalette.heaterTrack)
   const heaterBarWidth = Math.floor((114 * outputPercent) / 100)
   if (heaterBarWidth > 0) {
-    fillRect(ctx, 42, 44, heaterBarWidth, 2, palette.heaterFill)
+    fillRect(ctx, 42, 44, heaterBarWidth, 2, dashboardPalette.heaterFill)
   }
 }
 
