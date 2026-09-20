@@ -77,3 +77,4 @@
 | web-firmware-install-recovery | active | `web-firmware-install-recovery/IMPLEMENTATION.md` | `web-firmware-install-recovery/SPEC.md` | - | Unified devd and Browser Web Serial firmware workbench |
 | worktree-bootstrap | active | `worktree-bootstrap/IMPLEMENTATION.md` | `worktree-bootstrap/SPEC.md` | - | Linked worktree bootstrap and shared Git hooks |
 | firmware-update-and-developer-flash | active | `firmware-update-and-developer-flash/IMPLEMENTATION.md` | `firmware-update-and-developer-flash/SPEC.md` | - | Explicit-port update, direct local ELF flash/recover, private raw Developer EEPROM backups, local CBOR control, and EEPROM-only persistence boundary |
+| firmware-runtime-modules | active | `firmware-runtime-modules/IMPLEMENTATION.md` | `firmware-runtime-modules/SPEC.md` | - | Source-backed firmware runtime module responsibilities, communication, safety, and physical-output ownership matrix |
