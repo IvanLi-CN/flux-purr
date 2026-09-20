@@ -525,6 +525,39 @@ pub(crate) enum DisplayGraphicsInitError {
 }
 
 #[cfg(target_arch = "xtensa")]
+fn validate_psram_mapping(start: *mut u8, size: usize) -> bool {
+    if size != PSRAM_SIZE_BYTES || (start as usize) % core::mem::align_of::<u32>() != 0 {
+        return false;
+    }
+
+    const OFFSETS: [usize; 3] = [0, PSRAM_SIZE_BYTES / 2, PSRAM_SIZE_BYTES - 4];
+    const PATTERNS: [u32; 3] = [0x1357_9BDF, 0x2468_ACF0, 0x5AA5_C33C];
+    let base = start.cast::<u32>();
+    let mut previous = [0_u32; OFFSETS.len()];
+
+    unsafe {
+        for (index, offset) in OFFSETS.iter().enumerate() {
+            let address = base.add(offset / core::mem::size_of::<u32>());
+            previous[index] = address.read_volatile();
+            address.write_volatile(PATTERNS[index]);
+        }
+
+        let valid = OFFSETS.iter().enumerate().all(|(index, offset)| {
+            base.add(offset / core::mem::size_of::<u32>())
+                .read_volatile()
+                == PATTERNS[index]
+        });
+
+        for (index, offset) in OFFSETS.iter().enumerate() {
+            base.add(offset / core::mem::size_of::<u32>())
+                .write_volatile(previous[index]);
+        }
+
+        valid
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) fn initialize_display_graphics(
     psram: &esp_hal::peripherals::PSRAM<'static>,
 ) -> Result<
@@ -532,7 +565,7 @@ pub(crate) fn initialize_display_graphics(
     DisplayGraphicsInitError,
 > {
     let (start, size) = esp_hal::psram::psram_raw_parts(psram);
-    if size != PSRAM_SIZE_BYTES {
+    if !validate_psram_mapping(start, size) {
         return Err(DisplayGraphicsInitError::PsramUnavailable);
     }
 

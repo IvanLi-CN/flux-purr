@@ -75,7 +75,7 @@
 - REQ-DISPLAY-015: host preview 必须复用同一套场景渲染代码并产出 `framebuffer.bin`；`fb_to_png.py` 将逻辑 framebuffer 可复现地转换为 `preview.png`，8x nearest-neighbor PNG 作为 owner-facing 证据。
 - REQ-DISPLAY-016: 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
 - REQ-DISPLAY-020: 背光 `GPIO13` 必须在启动早期配置为 active-low，并在任何可能阻塞的 PD/I2C 工作前驱动为开启态；显示控制器初始化和启动帧刷屏必须在该背光控制已经确定后进行。显示初始化或首帧刷屏失败时仍必须进入既有可诊断 recovery 路径，不得依赖背光切换来掩盖显示故障。
-- REQ-DISPLAY-021: `ESP32-S3FH4R2` 显示启动必须启用 `esp-hal` `psram` feature，并通过 `ESP_HAL_CONFIG_PSRAM_MODE=quad` 固定 Quad 模式；启动必须通过 HAL 芯片检测得到且严格校验 `2 MiB` 映射，不能把固定大小配置当作物理芯片存在性证明。GC9D01 驱动帧缓冲必须从独立的 PSRAM `EspHeap` 分配，大小为 `160×50×2 = 16 KiB`；逻辑 `DisplayCanvas` 与通用 runtime heap 必须继续位于内部 DRAM。
+- REQ-DISPLAY-021: `ESP32-S3FH4R2` 显示启动必须启用 `esp-hal` `psram` feature，并通过 `ESP_HAL_CONFIG_PSRAM_MODE=quad` 固定 Quad 模式；启动必须使用 HAL 映射结果并通过实际 2MiB sentinel/alias probe 严格校验可寻址容量，不能把固定大小配置当作物理芯片存在性证明。GC9D01 驱动帧缓冲必须从独立的 PSRAM `EspHeap` 分配，大小为 `160×50×2 = 16 KiB`；逻辑 `DisplayCanvas` 与通用 runtime heap 必须继续位于内部 DRAM。
 - REQ-DISPLAY-022: SPI2 必须保持 Mode 0 并固定 `Rate::from_hz(40_000_000)`；不提供 `10 MHz` 或其它降级频率。HAL 初始化返回后的 PSRAM 映射尺寸不足或驱动帧缓冲分配失败时，固件必须在 Front Panel 与 heater runtime 启动前进入 USB-readable recovery；无 USB recovery 能力时必须 fail closed，不得继续启动 heater。当前固定的 `esp-hal 1.0.0` 在 `esp_hal::init` 内部发生低层 MMU 映射 panic 时，USB 尚未建立，允许沿用 panic handler 的软件复位 fail-closed 行为；不得继续启动 heater。
 - REQ-DISPLAY-023: 运行期显示刷新必须保持 dirty-only 语义：只有 UI 状态发生变化时才允许发起 Dashboard framebuffer flush；dirty 状态下的最小刷新间隔固定为 `33ms`，允许最高约 `30fps`，不得改为无条件连续刷屏。该节流不改变 heater 控制周期或 SPI2 `40 MHz` 配置。
 
