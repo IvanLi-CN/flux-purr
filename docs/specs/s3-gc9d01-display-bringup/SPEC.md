@@ -52,7 +52,7 @@
 
 ## Related ADRs
 
-None
+- [`0010-frontpanel-psram-graphics-memory.md`](../../adr/0010-frontpanel-psram-graphics-memory.md)
 
 ## Requirements
 
@@ -75,6 +75,8 @@ None
 - REQ-DISPLAY-015: host preview 必须复用同一套场景渲染代码并产出 `framebuffer.bin`；`fb_to_png.py` 将逻辑 framebuffer 可复现地转换为 `preview.png`，8x nearest-neighbor PNG 作为 owner-facing 证据。
 - REQ-DISPLAY-016: 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
 - REQ-DISPLAY-020: 背光 `GPIO13` 必须在启动早期配置为 active-low，并在任何可能阻塞的 PD/I2C 工作前驱动为开启态；显示控制器初始化和启动帧刷屏必须在该背光控制已经确定后进行。显示初始化或首帧刷屏失败时仍必须进入既有可诊断 recovery 路径，不得依赖背光切换来掩盖显示故障。
+- REQ-DISPLAY-021: `ESP32-S3FH4R2` 显示启动必须启用 `esp-hal` `psram` feature，并通过 `ESP_HAL_CONFIG_PSRAM_MODE=quad` 固定 Quad 模式；启动配置固定映射 `2 MiB` `PsramConfig`。GC9D01 驱动帧缓冲必须从独立的 PSRAM `EspHeap` 分配，大小为 `160×50×2 = 16 KiB`；逻辑 `DisplayCanvas` 与通用 runtime heap 必须继续位于内部 DRAM。
+- REQ-DISPLAY-022: SPI2 必须保持 Mode 0 并固定 `Rate::from_hz(40_000_000)`；不提供 `10 MHz` 或其它降级频率。PSRAM 映射不足、映射失败或驱动帧缓冲分配失败时，固件必须在 Front Panel 与 heater runtime 启动前进入 USB-readable recovery；无 USB recovery 能力时必须 fail closed，不得继续启动 heater。
 
 ### SHOULD
 
@@ -95,6 +97,7 @@ None
 ### Edge cases / errors
 
 - 若 SPI / Embassy 初始化失败，固件应在日志中暴露初始化阶段与具体环节，而不是静默卡死。
+- 若 PSRAM 不可用或驱动帧缓冲无法分配，固件应输出明确的 `display_psram_unavailable` 或 `display_framebuffer_allocation_failed` 阶段信息，并保持 heater interlock；不得把失败转为内部 heap 分配或低速 SPI 运行。
 - 显示初始化、首次整屏写入和运行期刷新失败或超时后必须进入可诊断 recovery 状态；超时取消的 SPI 事务不得被复用。SPI 调用返回成功之前必须已经满足面板规定的时序延时。
 - 若 host preview 生成的 PNG 与设备实拍不一致，优先检查驱动 orientation / address window / offset，而不是在 PNG 转换阶段做掩盖式旋转。
 - 若 `mcu-agentd` 无 selector、无设备、资源忙或 artifact 缺失，必须按 `mcu-agentd` 机器人模式错误口径中止并回报证据。
@@ -116,7 +119,7 @@ None
 ## Verification
 
 - VER-DISPLAY-001 (covers: REQ-DISPLAY-005, REQ-DISPLAY-006, REQ-DISPLAY-007, REQ-DISPLAY-008, REQ-DISPLAY-009, REQ-DISPLAY-010, REQ-DISPLAY-011, REQ-DISPLAY-015, REQ-DISPLAY-017, REQ-DISPLAY-018): Given `display_preview` 与 `fb_to_png.py`，When 生成启动屏、校准屏与 demo 场景的 framebuffer 并转换为 PNG，Then 预览图能显示方向标识、RGB 色块、灰阶块和文字标签。
-- VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004, REQ-DISPLAY-020): Given `flux-purr` device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release` 成功，并通过启动顺序测试确认背光控制先于 PD，PD 启动服务先于显示初始化与启动帧。
+- VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004, REQ-DISPLAY-020, REQ-DISPLAY-021, REQ-DISPLAY-022): Given `flux-purr` device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release` 成功，并通过启动顺序测试确认背光控制先于 PD，PD 启动服务先于显示初始化与启动帧；编译配置和日志同时证明 Quad `2 MiB` PSRAM、PSRAM-only 驱动帧缓冲和 SPI2 `40 MHz` Mode 0。
 - VER-DISPLAY-003 (covers: REQ-DISPLAY-014): Given host 质量门，When 运行 `cargo test`、`cargo clippy --all-targets --all-features -D warnings`、`cargo build --release`，Then 全部通过。
 - VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 正常 App 路径先建立背光控制、完成有界 PD 启动服务，再显示 branded splash 并进入 Dashboard；Key Test 路径显示静态校准屏，并报告当前场景、方向配置与 profile。
 - VER-DISPLAY-005 (covers: REQ-DISPLAY-016): Given 主人提供实拍照片，When 对比 host preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。

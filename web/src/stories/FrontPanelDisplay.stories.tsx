@@ -28,6 +28,7 @@ const meta = {
   },
   args: {
     screen: frontPanelStoryStates.dashboard,
+    theme: 'light',
     scale: 6,
   },
 } satisfies Meta<typeof FrontPanelDisplay>
@@ -257,7 +258,44 @@ export const KeyTestLong: Story = {
 export const Dashboard: Story = {
   args: {
     screen: frontPanelStoryStates.dashboard,
+    theme: 'light',
   },
+  render: (args) => (
+    <div
+      data-visual-evidence-surface
+      style={{
+        display: 'inline-flex',
+        background: '#efefef',
+        padding: '32px',
+      }}
+    >
+      <div data-visual-evidence-target style={{ display: 'inline-flex' }}>
+        <FrontPanelDisplay {...args} showFrame={false} showMeta={false} />
+      </div>
+    </div>
+  ),
+}
+
+export const DashboardDark: Story = {
+  name: 'Dashboard / Dark Theme',
+  args: {
+    screen: frontPanelStoryStates.dashboard,
+    theme: 'dark',
+  },
+  render: (args) => (
+    <div
+      data-visual-evidence-surface
+      style={{
+        display: 'inline-flex',
+        background: '#08111f',
+        padding: '32px',
+      }}
+    >
+      <div data-visual-evidence-target style={{ display: 'inline-flex' }}>
+        <FrontPanelDisplay {...args} showFrame={false} showMeta={false} />
+      </div>
+    </div>
+  ),
 }
 
 export const DashboardManual: Story = {
@@ -334,6 +372,7 @@ export const ActiveCoolingEvidence: Story = {
       <div data-visual-evidence-target>
         <FrontPanelDisplay
           screen={frontPanelStoryStates.activeCooling}
+          theme="dark"
           scale={6}
           showFrame={false}
           showMeta={false}

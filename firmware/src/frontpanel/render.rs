@@ -1699,6 +1699,84 @@ mod tests {
         );
     }
 
+    #[allow(clippy::excessive_nesting)]
+    fn has_offset_color_pair(canvas: &DisplayCanvas, foreground: Rgb565, shadow: Rgb565) -> bool {
+        for y in 0..48 {
+            for x in 0..159 {
+                let foreground_index = y * 160 + x;
+                let shadow_index = (y + 1) * 160 + x + 1;
+                if canvas.pixels()[foreground_index] == foreground
+                    && canvas.pixels()[shadow_index] == shadow
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn light_dashboard_shadows_every_temperature_band_and_palette() {
+        let palette_ids = [
+            TemperaturePaletteId::Current,
+            TemperaturePaletteId::BalancedWhiteLow,
+            TemperaturePaletteId::GlacierWhiteLow,
+            TemperaturePaletteId::AuroraWhiteLow,
+            TemperaturePaletteId::MarineWhiteLow,
+            TemperaturePaletteId::IndustrialWhiteLow,
+            TemperaturePaletteId::EmberWhiteLow,
+        ];
+        let band_temperatures = [0, 40, 60, 100, 150, 200, 250, 300];
+
+        for palette_id in palette_ids {
+            let source_palette = temperature_palette(palette_id);
+            let light_palette =
+                dashboard_temperature_palette(DashboardThemeId::Light, source_palette);
+            for (band, temperature) in band_temperatures.into_iter().enumerate() {
+                let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+                // Keep the glyph shape stable while selecting each palette band.
+                state.current_temp_c = temperature;
+                state.current_temp_deci_c = 880;
+
+                let mut light_canvas = DisplayCanvas::new();
+                render_frontpanel_dashboard_with_theme(
+                    &mut light_canvas,
+                    &state,
+                    DashboardThemeId::Light,
+                    source_palette,
+                );
+
+                let foreground = light_palette.colors[band];
+                let shadow = seven_segment_shadow_color(foreground);
+                assert_eq!(shadow.r(), foreground.r().saturating_sub(4));
+                assert_eq!(shadow.g(), foreground.g().saturating_sub(4));
+                assert_eq!(shadow.b(), foreground.b().saturating_sub(4));
+                let mut dark_canvas = DisplayCanvas::new();
+                let dark_palette =
+                    dashboard_temperature_palette(DashboardThemeId::Dark, source_palette);
+                render_frontpanel_dashboard_with_theme(
+                    &mut dark_canvas,
+                    &state,
+                    DashboardThemeId::Dark,
+                    source_palette,
+                );
+                let has_offset_shadow = has_offset_color_pair(&light_canvas, foreground, shadow);
+                assert!(
+                    has_offset_shadow,
+                    "missing lower-right shadow for {palette_id:?} band {band}"
+                );
+
+                let dark_foreground = dark_palette.colors[band];
+                let dark_has_offset_shadow = has_offset_color_pair(
+                    &dark_canvas,
+                    dark_foreground,
+                    seven_segment_shadow_color(dark_foreground),
+                );
+                assert!(!dark_has_offset_shadow);
+            }
+        }
+    }
+
     #[test]
     fn light_theme_keeps_non_dashboard_content_on_white_panels() {
         for route in [

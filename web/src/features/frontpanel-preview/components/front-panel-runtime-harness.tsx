@@ -277,7 +277,12 @@ export function FrontPanelRuntimeHarness({
       <div className="frontpanel-crt-stage">
         <div className="frontpanel-marquee">FLUX PURR CRT BAY</div>
         <div className="frontpanel-crt-screen">
-          <FrontPanelDisplay screen={screen} scale={scale} className="frontpanel-crt-display" />
+          <FrontPanelDisplay
+            screen={screen}
+            theme="light"
+            scale={scale}
+            className="frontpanel-crt-display"
+          />
         </div>
         <div className="frontpanel-coin-slot" aria-hidden="true">
           INSERT COIN
