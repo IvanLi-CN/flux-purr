@@ -393,12 +393,17 @@ function drawStatusLine(
   label: string,
   value: string
 ) {
-  drawBitmapText(ctx, label, 80, y, {
+  const labelWidth = measureBitmapText(label, 1, 1)
+  const valueWidth = measureBitmapText(value, 2, 1)
+  const valueRight = labelWidth + valueWidth + 1 > 156 - 79 ? 159 : 156
+  const labelX = Math.max(79, Math.min(84, valueRight - valueWidth - labelWidth - 1))
+
+  drawBitmapText(ctx, label, labelX, y + 3, {
     color: labelColor,
-    scale: 2,
+    scale: 1,
     letterSpacing: 1,
   })
-  drawBitmapText(ctx, value, 154, y, {
+  drawBitmapText(ctx, value, valueRight, y, {
     color: valueColor,
     scale: 2,
     letterSpacing: 1,
@@ -412,25 +417,25 @@ function drawPpsStatusLine(
   screen: Extract<FrontPanelScreen, { kind: 'dashboard' }>,
   palette: FrontPanelPalette
 ) {
-  drawBitmapText(ctx, 'PPS', 80, y, {
+  const value = `${formatPdContractVolts(screen.pdContractMv)}V`
+  const labelWidth = measureBitmapText('PPS', 1, 1)
+  const valueWidth = measureBitmapText(value, 2, 1)
+  const valueRight = labelWidth + valueWidth + 1 > 156 - 79 ? 159 : 156
+  const labelX = Math.max(79, Math.min(84, valueRight - valueWidth - labelWidth - 1))
+
+  drawBitmapText(ctx, 'PPS', labelX, y + 3, {
     color: palette.muted,
-    scale: 2,
+    scale: 1,
     letterSpacing: 1,
   })
   if (screen.manualPpsEnabled) {
-    drawBitmapText(ctx, '*', 103, y - 3, {
+    drawBitmapText(ctx, '*', labelX + labelWidth + 1, y - 2, {
       color: palette.cyan,
       scale: 1,
       letterSpacing: 0,
     })
   }
-  drawBitmapText(ctx, formatPdContractVolts(screen.pdContractMv), 147, y, {
-    color: palette.cyan,
-    scale: 2,
-    letterSpacing: 1,
-    align: 'right',
-  })
-  drawBitmapText(ctx, 'V', 154, y, {
+  drawBitmapText(ctx, value, valueRight, y, {
     color: palette.cyan,
     scale: 2,
     letterSpacing: 1,
@@ -452,7 +457,7 @@ function drawDashboardScreen(
   )
   const valueParts = deciCToParts(screen.currentTempDeciC)
   const digitsWidth = measureSevenSegmentNumber(valueParts.integer)
-  const digitsRightEdge = 57
+  const digitsRightEdge = 55
   const digitsX = digitsRightEdge - digitsWidth
   const fanColor =
     screen.fanDisplayState === 'run'
@@ -468,25 +473,26 @@ function drawDashboardScreen(
     letterSpacing: 1,
   })
   if (theme === 'light') {
-    drawSevenSegmentNumber(ctx, valueParts.integer, digitsX + 1, 9, darkenRgb565Color(valueColor))
+    drawSevenSegmentNumber(ctx, valueParts.integer, digitsX + 1, 12, darkenRgb565Color(valueColor))
   }
-  drawSevenSegmentNumber(ctx, valueParts.integer, digitsX, 8, valueColor)
-  drawBitmapText(ctx, valueParts.fractional, 66, 8, {
+  drawSevenSegmentNumber(ctx, valueParts.integer, digitsX, 11, valueColor)
+  drawBitmapText(ctx, valueParts.fractional, 64, 11, {
     color: palette.text,
     scale: 2,
     letterSpacing: 1,
     align: 'center',
   })
-  drawTempUnitIcon(ctx, 60, 24, palette.text)
+  fillRect(ctx, 58, 19, 2, 2, palette.text)
+  drawTempUnitIcon(ctx, 58, 27, palette.text)
 
   fillRect(ctx, 78, 4, 1, 36, palette.border)
   if (screen.heaterLockReason && screen.dashboardWarningVisible) {
-    drawStatusLine(ctx, 7, palette.warning, palette.warning, 'WARN', 'OTEMP')
+    drawStatusLine(ctx, 4, palette.warning, palette.warning, 'WARN', 'OTEMP')
   } else {
-    drawStatusLine(ctx, 7, palette.muted, palette.warning, 'SET', `${screen.targetTempC}`)
+    drawStatusLine(ctx, 4, palette.muted, palette.setpoint, 'SET', `${screen.targetTempC}`)
   }
-  drawPpsStatusLine(ctx, 18, screen, palette)
-  drawStatusLine(ctx, 29, palette.muted, fanColor, 'FAN', screen.fanDisplayState.toUpperCase())
+  drawPpsStatusLine(ctx, 17, screen, palette)
+  drawStatusLine(ctx, 30, palette.muted, fanColor, 'FAN', screen.fanDisplayState.toUpperCase())
 
   fillRect(ctx, 4, 41, 152, 1, palette.border)
   drawBitmapText(ctx, 'HEAT', 4, 43, {
@@ -496,21 +502,14 @@ function drawDashboardScreen(
   })
   const outputPercent = Math.max(0, Math.min(100, Math.trunc(screen.heaterOutputPercent)))
   drawBitmapText(ctx, `${outputPercent}%`, 22, 43, {
-    color: outputPercent === 0 ? palette.muted : palette.accent,
+    color: outputPercent === 0 ? palette.muted : palette.heaterFill,
     scale: 1,
     letterSpacing: 1,
   })
-  fillRect(ctx, 42, 44, 114, 2, palette.border)
-  const heaterBarWidth = Math.round((114 * outputPercent) / 100)
+  fillRect(ctx, 42, 44, 114, 2, palette.heaterTrack)
+  const heaterBarWidth = Math.floor((114 * outputPercent) / 100)
   if (heaterBarWidth > 0) {
-    fillRect(
-      ctx,
-      42,
-      44,
-      heaterBarWidth,
-      2,
-      screen.heaterEnabled ? palette.accent : palette.disabled
-    )
+    fillRect(ctx, 42, 44, heaterBarWidth, 2, palette.heaterFill)
   }
 }
 

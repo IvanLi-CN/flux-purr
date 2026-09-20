@@ -11,6 +11,9 @@ export type FrontPanelPalette = {
   disabled: string
   accent: string
   accentSoft: string
+  setpoint: string
+  heaterTrack: string
+  heaterFill: string
   success: string
   warning: string
   cyan: string
@@ -33,6 +36,9 @@ export const frontPanelPalette = {
   disabled: '#5b6c88',
   accent: '#ff9a3c',
   accentSoft: '#4e2e18',
+  setpoint: rgb565ToCss(31, 52, 12),
+  heaterTrack: rgb565ToCss(4, 12, 9),
+  heaterFill: rgb565ToCss(30, 39, 1),
   success: '#40d9a1',
   warning: '#ffd166',
   cyan: '#63d8ff',
@@ -49,6 +55,9 @@ const lightFrontPanelPalette: FrontPanelPalette = {
   disabled: rgb565ToCss(14, 30, 19),
   accent: rgb565ToCss(20, 12, 0),
   accentSoft: rgb565ToCss(26, 44, 24),
+  setpoint: rgb565ToCss(19, 23, 0),
+  heaterTrack: rgb565ToCss(24, 49, 24),
+  heaterFill: rgb565ToCss(22, 20, 1),
   success: rgb565ToCss(0, 24, 8),
   warning: rgb565ToCss(20, 7, 2),
   cyan: rgb565ToCss(0, 18, 23),
