@@ -1699,17 +1699,16 @@ mod tests {
         );
     }
 
-    #[allow(clippy::excessive_nesting)]
     fn has_offset_color_pair(canvas: &DisplayCanvas, foreground: Rgb565, shadow: Rgb565) -> bool {
-        for y in 0..48 {
-            for x in 0..159 {
-                let foreground_index = y * 160 + x;
-                let shadow_index = (y + 1) * 160 + x + 1;
-                if canvas.pixels()[foreground_index] == foreground
-                    && canvas.pixels()[shadow_index] == shadow
-                {
-                    return true;
-                }
+        for foreground_index in 0..(48 * 160) {
+            if foreground_index % 160 == 159 {
+                continue;
+            }
+            let shadow_index = foreground_index + 161;
+            if canvas.pixels()[foreground_index] == foreground
+                && canvas.pixels()[shadow_index] == shadow
+            {
+                return true;
             }
         }
         false
