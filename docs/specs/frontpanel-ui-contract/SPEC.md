@@ -119,6 +119,7 @@ value widths and remains within `x=79..84`.
 - 阈值后续允许在设置界面调整，但颜色映射顺序固定不变。
 - Dashboard 温度颜色以固件 RGB565 调色板为真相源；亮色大温度数字先在右下一个逻辑像素以每个 RGB565 通道饱和减 `4` 的同色系暗色绘制阴影，再绘制原位前景，暗色主题不绘制阴影。
 - Web `FrontPanelDisplayProps` 必须显式提供 `theme: FrontPanelTheme`（`light | dark`）；Web Canvas 与固件 host preview 使用相同温度色表、阈值顺序和阴影规则。
+- Dashboard 的 `background`、`divider`、`muted`、`disabled`、`setpoint`、`success`、`warning`、`info`、`heaterTrack` 与 `heaterFill` 必须直接对齐固件 `DashboardTheme` 的 RGB565 色值；`SAFE` 风扇状态使用 warning 色，`OFF` 使用 disabled 色，`AUTO` 使用 info 色，`RUN` 使用 success 色。
 
 ### Core flows
 
