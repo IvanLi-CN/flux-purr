@@ -84,15 +84,15 @@ Dashboard 使用单一纯白仪表面，不以深浅色卡片切割温度区与�
 
 | Token | Dark | Light | Usage |
 | --- | --- | --- | --- |
-| `bg` | `#080F19` | `#EFEFEF` | 非 Dashboard 页面 panel 外的中性仪表底色 |
+| `bg` | `#081019` | `#EFEFEF` | 非 Dashboard 页面 panel 外的中性仪表底色 |
 | `panel` | `#102031` | `#FFFFFF` | 文字、图标与内容状态的 panel 背景 |
-| `divider` | `#31415A` | `#C5C6C5` | 温度区、状态栈与功率区分隔线 |
+| `divider` | `#293D5A` | `#C5C6C5` | 温度区、状态栈与功率区分隔线 |
 | `text` | `#F7FBFF` | `#102031` | 温度单位与主要文字 |
-| `muted` | `#8CA2B5` | `#52657B` | `TEMP`、`SET`、`PPS`、`FAN`、`HEAT` 标签 |
+| `muted` | `#8CA2CE` | `#52657B` | `TEMP`、`SET`、`PPS`、`FAN`、`HEAT` 标签 |
 | `setpoint` | `#FFD263` | `#9C5D00` | 正常设定温度 |
-| `info` | `#7BD2FF` | `#0069A5` | PPS 数值与 `AUTO` 风扇状态 |
-| `success` | `#6BE3B5` | `#007952` | `RUN` 风扇状态 |
-| `warning` | `#FF7184` | `#B52019` | `WARN`、`POWER/WAIT` 与安全状态 |
+| `info` | `#63DBFF` | `#0069A5` | PPS 数值与 `AUTO` 风扇状态 |
+| `success` | `#42DBA5` | `#007952` | `RUN` 风扇状态 |
+| `warning` | `#FFD25A` | `#B52019` | `WARN`、`POWER/WAIT` 与安全状态 |
 | `heater` | `#F79E08` | `#B55108` | heater 输出百分比与进度条 |
 
 ### Typography
