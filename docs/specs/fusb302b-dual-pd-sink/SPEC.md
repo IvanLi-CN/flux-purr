@@ -2,7 +2,11 @@
 
 ## Related ADRs
 
-None
+- [Power Coordinator Above PD Service](../../adr/0010-power-coordinator-above-pd-service.md)
+- [Exclusive Power Intent Ownership](../../adr/0011-exclusive-power-intent-ownership.md)
+- [Latest-Value Power-State Subscription](../../adr/0012-latest-value-power-state-subscription.md)
+- [Bounded Power Commands With Terminal Tickets](../../adr/0013-bounded-power-commands-with-terminal-tickets.md)
+- [No Contract Replay After PD Failure](../../adr/0014-no-contract-replay-after-pd-failure.md)
 
 ## Context and Scope
 
