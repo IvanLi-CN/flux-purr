@@ -14,7 +14,7 @@
 - Main firmware artifact name: `flux-purr`
 - Display bus: `SPI2` async, `Mode0`, fixed `40 MHz`
 - Display graphics memory: `ESP32-S3` Quad PSRAM (`ESP_HAL_CONFIG_PSRAM_MODE=quad`) with a detected mapping that must be exactly `2 MiB`; a dedicated PSRAM `EspHeap` owns only the GC9D01 `16 KiB` presentation framebuffer. The logical `DisplayCanvas` and general runtime heap remain in internal DRAM.
-- Display startup is fail-closed: PSRAM mapping or presentation framebuffer allocation failure enters USB recovery (or panics closed without USB) before Front Panel and heater runtime startup; there is no no-PSRAM or low-speed fallback.
+- Display startup is fail-closed: HAL-returned PSRAM mapping-size or presentation framebuffer allocation failure enters USB recovery before Front Panel and heater runtime startup; a low-level `esp-hal 1.0.0` MMU panic occurs before USB exists and follows the panic-handler software-reset boundary. There is no no-PSRAM or low-speed fallback.
 - Runtime Dashboard flushes are dirty-only and throttled to a `33ms` minimum interval while dirty, allowing up to approximately `30fps`; the heater control loop and SPI2 frequency are unchanged.
 - Locked panel profile:
   - `panel_160x50`

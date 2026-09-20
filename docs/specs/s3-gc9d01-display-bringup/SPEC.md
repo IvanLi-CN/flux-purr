@@ -76,7 +76,7 @@
 - REQ-DISPLAY-016: 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
 - REQ-DISPLAY-020: 背光 `GPIO13` 必须在启动早期配置为 active-low，并在任何可能阻塞的 PD/I2C 工作前驱动为开启态；显示控制器初始化和启动帧刷屏必须在该背光控制已经确定后进行。显示初始化或首帧刷屏失败时仍必须进入既有可诊断 recovery 路径，不得依赖背光切换来掩盖显示故障。
 - REQ-DISPLAY-021: `ESP32-S3FH4R2` 显示启动必须启用 `esp-hal` `psram` feature，并通过 `ESP_HAL_CONFIG_PSRAM_MODE=quad` 固定 Quad 模式；启动必须通过 HAL 芯片检测得到且严格校验 `2 MiB` 映射，不能把固定大小配置当作物理芯片存在性证明。GC9D01 驱动帧缓冲必须从独立的 PSRAM `EspHeap` 分配，大小为 `160×50×2 = 16 KiB`；逻辑 `DisplayCanvas` 与通用 runtime heap 必须继续位于内部 DRAM。
-- REQ-DISPLAY-022: SPI2 必须保持 Mode 0 并固定 `Rate::from_hz(40_000_000)`；不提供 `10 MHz` 或其它降级频率。PSRAM 映射不足、映射失败或驱动帧缓冲分配失败时，固件必须在 Front Panel 与 heater runtime 启动前进入 USB-readable recovery；无 USB recovery 能力时必须 fail closed，不得继续启动 heater。
+- REQ-DISPLAY-022: SPI2 必须保持 Mode 0 并固定 `Rate::from_hz(40_000_000)`；不提供 `10 MHz` 或其它降级频率。HAL 初始化返回后的 PSRAM 映射尺寸不足或驱动帧缓冲分配失败时，固件必须在 Front Panel 与 heater runtime 启动前进入 USB-readable recovery；无 USB recovery 能力时必须 fail closed，不得继续启动 heater。当前固定的 `esp-hal 1.0.0` 在 `esp_hal::init` 内部发生低层 MMU 映射 panic 时，USB 尚未建立，允许沿用 panic handler 的软件复位 fail-closed 行为；不得继续启动 heater。
 - REQ-DISPLAY-023: 运行期显示刷新必须保持 dirty-only 语义：只有 UI 状态发生变化时才允许发起 Dashboard framebuffer flush；dirty 状态下的最小刷新间隔固定为 `33ms`，允许最高约 `30fps`，不得改为无条件连续刷屏。该节流不改变 heater 控制周期或 SPI2 `40 MHz` 配置。
 
 ### SHOULD
@@ -98,7 +98,7 @@
 ### Edge cases / errors
 
 - 若 SPI / Embassy 初始化失败，固件应在日志中暴露初始化阶段与具体环节，而不是静默卡死。
-- 若 PSRAM 不可用或驱动帧缓冲无法分配，固件应输出明确的 `display_psram_unavailable` 或 `display_framebuffer_allocation_failed` 阶段信息，并保持 heater interlock；不得把失败转为内部 heap 分配或低速 SPI 运行。
+- 若 HAL 初始化返回 PSRAM 不可用或驱动帧缓冲无法分配，固件应输出明确的 `display_psram_unavailable` 或 `display_framebuffer_allocation_failed` 阶段信息，并保持 heater interlock；不得把失败转为内部 heap 分配或低速 SPI 运行。若低层 MMU 映射在 HAL 初始化内部直接 panic，则由 panic handler 软件复位并保持 fail-closed；该边界在升级 HAL 提供可恢复 Result 前不承诺 USB recovery。
 - 显示初始化、首次整屏写入和运行期刷新失败或超时后必须进入可诊断 recovery 状态；超时取消的 SPI 事务不得被复用。SPI 调用返回成功之前必须已经满足面板规定的时序延时。
 - 若 host preview 生成的 PNG 与设备实拍不一致，优先检查驱动 orientation / address window / offset，而不是在 PNG 转换阶段做掩盖式旋转。
 - 若 `mcu-agentd` 无 selector、无设备、资源忙或 artifact 缺失，必须按 `mcu-agentd` 机器人模式错误口径中止并回报证据。
@@ -124,6 +124,7 @@ None
 - VER-DISPLAY-003 (covers: REQ-DISPLAY-014): Given host 质量门，When 运行 `cargo test`、`cargo clippy --all-targets --all-features -D warnings`、`cargo build --release`，Then 全部通过。
 - VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 正常 App 路径先建立背光控制、完成有界 PD 启动服务，再显示 branded splash 并进入 Dashboard；Key Test 路径显示静态校准屏，并报告当前场景、方向配置与 profile。
 - VER-DISPLAY-005 (covers: REQ-DISPLAY-016): Given 主人提供实拍照片，When 对比 host preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
+- VER-DISPLAY-006 (covers: REQ-DISPLAY-023): Given dirty UI state changes, When runtime display refresh is scheduled, Then flushes remain pending-state gated and are spaced by at least `33ms`; clean state produces no display transfer, while heater control cadence and SPI2 frequency remain unchanged.
 - VER-DISPLAY-006: Given 后续运行态规格需要交互或 safe-off 约束，When 查询本仓库 spec，Then 以 `frontpanel-input-interaction` 为真相源，而不是回退到本 spec 的历史轮播描述。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
