@@ -526,7 +526,7 @@ pub(crate) enum DisplayGraphicsInitError {
 
 #[cfg(target_arch = "xtensa")]
 fn validate_psram_mapping(start: *mut u8, size: usize) -> bool {
-    if size != PSRAM_SIZE_BYTES || (start as usize) % core::mem::align_of::<u32>() != 0 {
+    if size != PSRAM_SIZE_BYTES || !(start as usize).is_multiple_of(core::mem::align_of::<u32>()) {
         return false;
     }
 
