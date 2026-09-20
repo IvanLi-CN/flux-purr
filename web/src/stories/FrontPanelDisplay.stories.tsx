@@ -168,7 +168,7 @@ export const DocsGallery: Story = {
               }}
             >
               {[
-                ['Theme', 'Dark embedded UI'],
+                ['Theme', 'Light embedded UI'],
                 ['Screen set', '13 preview states'],
                 ['Gestures', 'Short / Double / Long'],
               ].map(([label, value]) => (
