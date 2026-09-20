@@ -125,7 +125,7 @@ None
 - VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 正常 App 路径先建立背光控制、完成有界 PD 启动服务，再显示 branded splash 并进入 Dashboard；Key Test 路径显示静态校准屏，并报告当前场景、方向配置与 profile。
 - VER-DISPLAY-005 (covers: REQ-DISPLAY-016): Given 主人提供实拍照片，When 对比 host preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
 - VER-DISPLAY-006 (covers: REQ-DISPLAY-023): Given dirty UI state changes, When runtime display refresh is scheduled, Then flushes remain pending-state gated and are spaced by at least `33ms`; clean state produces no display transfer, while heater control cadence and SPI2 frequency remain unchanged.
-- VER-DISPLAY-006: Given 后续运行态规格需要交互或 safe-off 约束，When 查询本仓库 spec，Then 以 `frontpanel-input-interaction` 为真相源，而不是回退到本 spec 的历史轮播描述。
+- VER-DISPLAY-007: Given 后续运行态规格需要交互或 safe-off 约束，When 查询本仓库 spec，Then 以 `frontpanel-input-interaction` 为真相源，而不是回退到本 spec 的历史轮播描述。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
