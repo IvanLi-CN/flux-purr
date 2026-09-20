@@ -2,13 +2,13 @@
 
 ## Current Status
 
-- Implementation: source-backed runtime module inventory and cross-module control matrix are maintained in `contracts/module-control-matrix.md`.
+- Implementation: source-backed individual module documents are maintained in `modules/`; `contracts/module-control-matrix.md` is the cross-module index and ownership map.
 - Lifecycle: active.
 - Catalog note: This topic is the canonical internal ownership map; capability-specific behavior remains owned by the related topic specs.
 
 ## Implementation Coverage
 
-- `REQ-FRM-001` and `REQ-FRM-002`: the matrix records responsibility, read inputs, command inputs, published state, communication mechanism, authority, physical writer, safety behavior, and source references for the runtime boundaries.
+- `REQ-FRM-001` and `REQ-FRM-002`: each file in `modules/` records responsibility, read inputs, command inputs, published state, communication mechanism, authority, physical writer, safety behavior, and source references; the matrix links the complete module set and retains cross-boundary tables.
 - `REQ-FRM-003`: the runtime-loop section records the actual `run_runtime_loop` order and the mailbox/USB execution boundary.
 - `REQ-FRM-004`: the LAN/HTTP sections cover `NetHttpState`, `HttpGate`, `CONTROL_MAILBOX`, `CONTROL_RESPONSES`, lease and revision revalidation, and snapshot reads.
 - `REQ-FRM-005`: the PD section covers `PdServiceCommand`, `PD_SERVICE_COMMANDS`, `PD_SERVICE_SNAPSHOT`, `PdI2c`, `PD_HEATER_PERMIT`, and stale-contract shutdown.
@@ -37,7 +37,7 @@
 
 ## Coverage / rollout summary
 
-- The matrix is intended to be consulted before changing a task, mailbox, snapshot, interlock, or physical-output writer.
+- The module documents are intended to be consulted before changing a task, mailbox, snapshot, interlock, or physical-output writer; the matrix is the entry point for relationships spanning more than one module.
 - Existing capability specs remain authoritative for wire payload semantics, PD sink behavior, buzzer arbitration policy, EEPROM record layout, and the real control-plane transport contract.
 - The boot source currently carries a key-label naming discrepancy that is documented in the hardware ownership section. The documentation preserves both source facts and does not silently assign a behavior change.
 
@@ -50,4 +50,5 @@
 
 - [`./SPEC.md`](./SPEC.md)
 - [`./HISTORY.md`](./HISTORY.md)
+- [`./modules/`](./modules/)
 - [`./contracts/module-control-matrix.md`](./contracts/module-control-matrix.md)

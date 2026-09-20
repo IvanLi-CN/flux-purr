@@ -5,6 +5,29 @@ firmware runtime. It describes the current split between pure domain logic,
 async adapters, the front-panel executor, supervisors, and final physical
 output writers.
 
+This file is the cross-module index. The detailed contract for each module is
+in its own file under [`../modules/`](../modules/).
+
+## Module Documents
+
+| Module | Document |
+| --- | --- |
+| Boot and runtime assembly | [`boot-and-runtime-assembly.md`](../modules/boot-and-runtime-assembly.md) |
+| Runtime loop | [`runtime-loop.md`](../modules/runtime-loop.md) |
+| Control-plane adapter | [`control-plane-adapter.md`](../modules/control-plane-adapter.md) |
+| HTTP gate and LAN mailbox | [`http-gate-and-lan-mailbox.md`](../modules/http-gate-and-lan-mailbox.md) |
+| Wi-Fi adapter and LAN transport | [`wifi-adapter-and-lan-transport.md`](../modules/wifi-adapter-and-lan-transport.md) |
+| Wi-Fi provisioning state machine | [`wifi-provisioning-state-machine.md`](../modules/wifi-provisioning-state-machine.md) |
+| PD service | [`pd-service.md`](../modules/pd-service.md) |
+| Shared I2C bus and heater PWM gate | [`shared-i2c-and-heater-pwm-gate.md`](../modules/shared-i2c-and-heater-pwm-gate.md) |
+| EEPROM persistence | [`eeprom-persistence.md`](../modules/eeprom-persistence.md) |
+| ADC, thermal control, and fan policy | [`adc-thermal-control-and-fan-policy.md`](../modules/adc-thermal-control-and-fan-policy.md) |
+| Buzzer arbiter and realtime task | [`buzzer-arbiter-and-realtime-task.md`](../modules/buzzer-arbiter-and-realtime-task.md) |
+| Status-light state and task | [`status-light-state-and-task.md`](../modules/status-light-state-and-task.md) |
+| Watchdog supervisor | [`watchdog-supervisor.md`](../modules/watchdog-supervisor.md) |
+| Front-panel and display I/O | [`front-panel-and-display-io.md`](../modules/front-panel-and-display-io.md) |
+| Board profile and hardware I/O map | [`board-profile-and-hardware-io-map.md`](../modules/board-profile-and-hardware-io-map.md) |
+
 ## How to Read This Matrix
 
 | Term | Meaning in this document |

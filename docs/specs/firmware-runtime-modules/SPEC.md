@@ -19,8 +19,9 @@
 
 ### REQ-FRM-001
 
-- The repository MUST provide one discoverable, source-backed matrix for each documented firmware runtime boundary.
-- Each module entry MUST state responsibility, inputs/read sources, commands or mutations, published outputs, communication mechanism, control authority, physical-output ownership where applicable, safety behavior, and source references.
+- The repository MUST provide one discoverable, source-backed document for each documented firmware runtime module under `modules/`.
+- Each module document MUST state responsibility, inputs/read sources, commands or mutations, published outputs, communication mechanism, control authority, physical-output ownership where applicable, safety behavior, and source references.
+- `contracts/module-control-matrix.md` MUST remain a cross-module index and MUST link to every module document; it is not a substitute for the individual documents.
 
 ### REQ-FRM-002
 
@@ -100,6 +101,7 @@
 
 ## References
 
+- [`./modules/`](./modules/)
 - [`./IMPLEMENTATION.md`](./IMPLEMENTATION.md)
 - [`./HISTORY.md`](./HISTORY.md)
 - [`./contracts/module-control-matrix.md`](./contracts/module-control-matrix.md)
