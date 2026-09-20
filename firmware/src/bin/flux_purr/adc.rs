@@ -879,24 +879,24 @@ impl Fusb302bRuntime {
         self.request_rejected = false;
         self.request_timed_out = false;
         let now_ms = now.as_millis();
-        if self
+        let request_inflight = matches!(
+            self.policy.phase(),
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        );
+        if request_inflight {
+            if self.policy.pending_contract_matches(request) {
+                return PdContractRequestState::Pending;
+            }
+            self.policy.cancel_pending_request();
+        } else if self
             .policy
             .confirmed_active_contract()
             .is_some_and(|active| request_matches_active(request, Some(active)))
         {
             return PdContractRequestState::Confirmed;
         }
-        if matches!(
-            self.policy.phase(),
-            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-        ) {
-            if self.policy.pending_contract_matches(request) {
-                return PdContractRequestState::Pending;
-            }
-            self.policy.cancel_pending_request();
-        }
         if self.policy.active_contract().kind == ContractKind::Fixed
-            && request.mode == PdContractRequestMode::Pps
+            && request.mode() == PdContractRequestMode::Pps
         {
             if !self.policy.prepare_contract_refresh(request) {
                 return PdContractRequestState::Failed;
@@ -954,16 +954,19 @@ impl Fusb302bRuntime {
         self.request_rejected = false;
         self.request_timed_out = false;
         let now_ms = now.as_millis();
-        let active = self.policy.active_contract();
-        if active.kind == ContractKind::Pps && active.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
-        {
-            return PdContractRequestState::Confirmed;
-        }
         if matches!(
             self.policy.phase(),
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
         ) {
-            return PdContractRequestState::Pending;
+            if self.policy.pending_automatic_idle_contract_matches() {
+                return PdContractRequestState::Pending;
+            }
+            self.policy.cancel_pending_request();
+        }
+        let active = self.policy.active_contract();
+        if active.kind == ContractKind::Pps && active.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
+        {
+            return PdContractRequestState::Confirmed;
         }
         let Some(rdo) = self.policy.request_automatic_idle_contract() else {
             return PdContractRequestState::Failed;

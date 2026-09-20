@@ -149,9 +149,9 @@ pub enum PdContractRequestMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PdContractRequest {
-    pub mode: PdContractRequestMode,
-    pub voltage_mv: u16,
-    pub operating_current_ma: u16,
+    pub(crate) mode: PdContractRequestMode,
+    pub(crate) voltage_mv: u16,
+    pub(crate) operating_current_ma: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +165,29 @@ pub enum PdContractRequestError {
 }
 
 impl PdContractRequest {
+    pub const fn mode(self) -> PdContractRequestMode {
+        self.mode
+    }
+
+    pub const fn voltage_mv(self) -> u16 {
+        self.voltage_mv
+    }
+
+    pub const fn operating_current_ma(self) -> u16 {
+        self.operating_current_ma
+    }
+
+    pub fn is_well_formed(self) -> bool {
+        match self.mode {
+            PdContractRequestMode::Fixed => {
+                Self::fixed(self.voltage_mv, self.operating_current_ma).is_ok()
+            }
+            PdContractRequestMode::Pps => {
+                Self::pps(self.voltage_mv, self.operating_current_ma).is_ok()
+            }
+        }
+    }
+
     pub fn fixed(
         voltage_mv: u16,
         operating_current_ma: u16,
@@ -215,6 +238,7 @@ pub struct ConfirmedActiveContract {
     pub voltage_mv: u16,
     pub operating_current_ma: u16,
     pub pps_range: Option<PpsAdjustmentRange>,
+    pps_capability_index: Option<u8>,
 }
 
 impl ConfirmedActiveContract {
@@ -227,26 +251,49 @@ impl ConfirmedActiveContract {
             ContractKind::Pps => PdContractRequestMode::Pps,
             ContractKind::None => return None,
         };
-        let pps_range = if contract.kind == ContractKind::Pps {
-            capabilities
-                .pps
-                .into_iter()
-                .flatten()
-                .find(|apdo| apdo.object_position == contract.object_position)
-                .map(|apdo| PpsAdjustmentRange {
-                    min_mv: apdo.min_mv,
-                    max_mv: apdo.max_mv,
-                    max_current_ma: apdo.max_ma,
-                })
+        let pps_capability_index = if contract.kind == ContractKind::Pps {
+            capabilities.pps.iter().position(|apdo| {
+                apdo.is_some_and(|apdo| apdo.object_position == contract.object_position)
+            })
         } else {
             None
         };
+        let pps_range = pps_capability_index
+            .and_then(|index| capabilities.pps[index])
+            .map(|apdo| PpsAdjustmentRange {
+                min_mv: apdo.min_mv,
+                max_mv: apdo.max_mv,
+                max_current_ma: apdo.max_ma,
+            });
         Some(Self {
             mode,
             voltage_mv: contract.voltage_mv,
             operating_current_ma: contract.current_ma,
             pps_range,
+            pps_capability_index: pps_capability_index.map(|index| index as u8),
         })
+    }
+
+    pub fn request_keeps_same_pps_apdo(
+        self,
+        capabilities: SourceCapabilitiesView,
+        request: PdContractRequest,
+    ) -> bool {
+        if !request.is_well_formed()
+            || self.mode != PdContractRequestMode::Pps
+            || request.mode != PdContractRequestMode::Pps
+            || self.operating_current_ma != request.operating_current_ma
+        {
+            return false;
+        }
+        let selected_index = capabilities.pps.iter().position(|range| {
+            range.is_some_and(|range| {
+                range.min_mv <= request.voltage_mv
+                    && request.voltage_mv <= range.max_mv
+                    && request.operating_current_ma <= range.max_current_ma
+            })
+        });
+        selected_index.is_some_and(|index| self.pps_capability_index == Some(index as u8))
     }
 }
 
@@ -275,6 +322,9 @@ impl SourceCapabilities {
     /// Select only an exact public request. No clamping, rounding, fallback,
     /// or mode substitution is allowed at this boundary.
     pub fn select_exact_contract(self, request: PdContractRequest) -> Option<Contract> {
+        if !request.is_well_formed() {
+            return None;
+        }
         match request.mode {
             PdContractRequestMode::Fixed => self
                 .fixed
@@ -748,6 +798,16 @@ mod tests {
         assert_eq!(
             capabilities.select_exact_contract(PdContractRequest::fixed(19_950, 3_000).unwrap()),
             None
+        );
+        let malformed_internal_request = PdContractRequest {
+            mode: PdContractRequestMode::Pps,
+            voltage_mv: 20_020,
+            operating_current_ma: 3_000,
+        };
+        assert!(!malformed_internal_request.is_well_formed());
+        assert_eq!(
+            capabilities.select_exact_contract(malformed_internal_request),
+            None,
         );
     }
 

@@ -5,9 +5,6 @@ use super::*;
 pub(crate) const PD_SERVICE_TICK_MS: u64 = 5;
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) const PD_SERVICE_MAX_COMMANDS_PER_TICK: usize = 1;
-
-#[cfg(target_arch = "xtensa")]
 static PD_INTERLOCK_PENDING: AtomicU8 = AtomicU8::new(0);
 
 #[cfg(target_arch = "xtensa")]
@@ -185,6 +182,11 @@ impl PdServiceClient {
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
         }
+        if snapshot.pending_request == Some(request)
+            && let Some(ticket) = snapshot.pending_ticket
+        {
+            return PdRequestState::Pending(ticket);
+        }
         let active = snapshot.observation.and_then(|observation| {
             ConfirmedActiveContract::from_private_contract(
                 observation.contract,
@@ -194,13 +196,11 @@ impl PdServiceClient {
                     .unwrap_or_else(SourceCapabilities::empty),
             )
         });
-        if request_matches_active(request, active) {
-            return PdRequestState::Confirmed;
-        }
-        if snapshot.pending_request == Some(request)
-            && let Some(ticket) = snapshot.pending_ticket
+        if snapshot.pending_request.is_none()
+            && !snapshot.pending_idle
+            && request_matches_active(request, active)
         {
-            return PdRequestState::Pending(ticket);
+            return PdRequestState::Confirmed;
         }
         match PowerCoordinatorClient::new().request(PowerIntentOwner::AutomaticThermal, request) {
             Ok(ticket) => PdRequestState::Pending(ticket),
@@ -209,7 +209,7 @@ impl PdServiceClient {
     }
 
     pub(crate) fn request_fixed_contract(&self, request: PdContractRequest) -> PdRequestState {
-        if request.mode != PdContractRequestMode::Fixed {
+        if request.mode() != PdContractRequestMode::Fixed {
             return PdRequestState::Failed;
         }
         self.submit_request(request)
@@ -241,24 +241,27 @@ impl PdServiceClient {
         owner: PowerIntentOwner,
         request: PdContractRequest,
     ) -> PdRequestState {
-        if request.mode != PdContractRequestMode::Pps {
+        if request.mode() != PdContractRequestMode::Pps {
             return PdRequestState::Failed;
         }
         let snapshot = self.snapshot();
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
         }
-        if snapshot.observation.is_some_and(|observation| {
-            observation.contract.kind == ContractKind::Pps
-                && observation.contract.voltage_mv == request.voltage_mv
-                && observation.contract.current_ma == request.operating_current_ma
-        }) {
-            return PdRequestState::Confirmed;
-        }
         if snapshot.pending_request == Some(request)
             && let Some(ticket) = snapshot.pending_ticket
         {
             return PdRequestState::Pending(ticket);
+        }
+        if snapshot.pending_request.is_none()
+            && !snapshot.pending_idle
+            && snapshot.observation.is_some_and(|observation| {
+                observation.contract.kind == ContractKind::Pps
+                    && observation.contract.voltage_mv == request.voltage_mv()
+                    && observation.contract.current_ma == request.operating_current_ma()
+            })
+        {
+            return PdRequestState::Confirmed;
         }
         match PowerCoordinatorClient::new().request(owner, request) {
             Ok(ticket) => PdRequestState::Pending(ticket),
@@ -476,7 +479,7 @@ fn pending_terminal(
         }
         PendingPdOperation::Contract { request, .. }
             if runtime.source_capabilities().is_some_and(|capabilities| {
-                request.mode == PdContractRequestMode::Pps
+                request.mode() == PdContractRequestMode::Pps
                     && capabilities.select_exact_contract(request).is_none()
             }) =>
         {
@@ -560,7 +563,7 @@ async fn retry_deferred_contract_request(
         return None;
     }
     if runtime.source_capabilities().is_some_and(|capabilities| {
-        request.mode == PdContractRequestMode::Pps
+        request.mode() == PdContractRequestMode::Pps
             && capabilities.select_exact_contract(request).is_none()
     }) {
         return Some((ticket, TicketOutcome::Rejected));
@@ -574,6 +577,101 @@ async fn retry_deferred_contract_request(
     }
 }
 
+#[cfg(target_arch = "xtensa")]
+async fn process_pd_service_work(
+    runtime: &mut Fusb302bRuntime,
+    i2c: &mut PdI2c<'static>,
+    pending: &mut Option<(PowerTicket, PendingPdOperation)>,
+) -> Option<(PowerTicket, TicketOutcome)> {
+    let (pending_to_retry, command) =
+        select_pd_service_work(*pending, PD_SERVICE_COMMANDS.try_receive().ok());
+    match command {
+        Some(command) => {
+            *pending = None;
+            match process_pd_command(runtime, i2c, command).await {
+                PdCommandProgress::Pending(ticket, operation) => {
+                    *pending = Some((ticket, operation));
+                    None
+                }
+                PdCommandProgress::Done(ticket, outcome) => Some((ticket, outcome)),
+            }
+        }
+        None => {
+            if let Some(completion) =
+                retry_deferred_contract_request(runtime, i2c, pending_to_retry).await
+            {
+                *pending = None;
+                Some(completion)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn consume_pd_interlock(runtime: &mut Fusb302bRuntime) {
+    if PD_INTERLOCK_PENDING.swap(0, Ordering::Acquire) != 0 {
+        runtime.interlock_after_stale_contract(PdTimestamp::now().as_millis());
+        PD_INTERLOCK_LATCHED.store(0, Ordering::Release);
+        HeaterPwmGate::force_off();
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn publish_pd_service_turn(
+    runtime: &Fusb302bRuntime,
+    observation: Option<PdStatusObservation>,
+    pending: Option<(PowerTicket, PendingPdOperation)>,
+    terminal_override: Option<(PowerTicket, TicketOutcome)>,
+    record_heartbeat: bool,
+) -> Option<(PowerTicket, PendingPdOperation)> {
+    let (state, terminal) = publish_power_report(runtime, observation, pending, terminal_override);
+    publish_pd_snapshot(
+        runtime,
+        observation,
+        terminal.is_none().then_some(pending).flatten(),
+    );
+    publish_pd_service_state(state);
+    if record_heartbeat {
+        record_pd_heartbeat();
+    }
+    if let Some((ticket, outcome)) = terminal {
+        publish_pd_service_terminal(state, ticket, outcome).await;
+        None
+    } else {
+        pending
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn run_pd_service_turn(
+    i2c: &mut PdI2c<'static>,
+    runtime: &mut Fusb302bRuntime,
+    pending: &mut Option<(PowerTicket, PendingPdOperation)>,
+) {
+    consume_pd_interlock(runtime);
+    let terminal_override = process_pd_service_work(runtime, i2c, pending).await;
+    // A request flood must never turn the command mailbox into a second
+    // unbounded work queue. Poll once on every service turn regardless of
+    // how many commands are waiting.
+    let _ = runtime.poll(i2c, PdTimestamp::now()).await;
+    // The policy contract is only heater-authorizing after a fresh hardware
+    // status read; keep this read inside the same bus lease.
+    let observation = pd_status_observation(runtime, i2c).await;
+    i2c.release();
+    *pending =
+        publish_pd_service_turn(runtime, observation, *pending, terminal_override, true).await;
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn publish_busy_pd_service_turn(
+    runtime: &Fusb302bRuntime,
+    pending: &mut Option<(PowerTicket, PendingPdOperation)>,
+) {
+    *pending = publish_pd_service_turn(runtime, None, *pending, None, false).await;
+}
+
 /// The sole owner of FUSB302B policy state and physical PD I2C transactions.
 /// Every loop turn does bounded work, releases the shared bus, and then yields
 /// to its own cadence timer. This task deliberately stays out of interrupt
@@ -584,71 +682,11 @@ async fn pd_service_task(mut i2c: PdI2c<'static>, mut runtime: Box<Fusb302bRunti
     let mut pending: Option<(PowerTicket, PendingPdOperation)> = None;
     loop {
         if i2c.try_acquire() {
-            if PD_INTERLOCK_PENDING.swap(0, Ordering::Acquire) != 0 {
-                runtime.interlock_after_stale_contract(PdTimestamp::now().as_millis());
-                PD_INTERLOCK_LATCHED.store(0, Ordering::Release);
-                HeaterPwmGate::force_off();
-            }
-            let mut terminal_override = None;
-            if let Some(completion) =
-                retry_deferred_contract_request(&mut runtime, &mut i2c, pending).await
-            {
-                terminal_override = Some(completion);
-            }
-            for _ in 0..PD_SERVICE_MAX_COMMANDS_PER_TICK {
-                if !may_dispatch_pd_command(terminal_override.is_some()) {
-                    break;
-                }
-                let Ok(command) = PD_SERVICE_COMMANDS.try_receive() else {
-                    break;
-                };
-                match process_pd_command(&mut runtime, &mut i2c, command).await {
-                    PdCommandProgress::Pending(ticket, operation) => {
-                        pending = Some((ticket, operation));
-                    }
-                    PdCommandProgress::Done(ticket, outcome) => {
-                        terminal_override = Some((ticket, outcome));
-                    }
-                }
-            }
-            // A request flood must never turn the command mailbox into a second
-            // unbounded work queue. Poll once on every service turn regardless of
-            // how many commands are waiting.
-            let _ = runtime.poll(&mut i2c, PdTimestamp::now()).await;
-            // The policy contract is only heater-authorizing after a fresh
-            // hardware status read. Keep this read inside the same bus lease so
-            // an EEPROM turn cannot leave a stale contract looking active.
-            let observation = pd_status_observation(&runtime, &mut i2c).await;
-            i2c.release();
-            let (state, terminal) =
-                publish_power_report(&runtime, observation, pending, terminal_override);
-            publish_pd_snapshot(
-                &runtime,
-                observation,
-                terminal.is_none().then_some(pending).flatten(),
-            );
-            publish_pd_service_state(state);
-            // A heartbeat represents a complete bus-acquired poll-and-publish
-            // turn. A skipped try-lock turn must not look like PD progress.
-            record_pd_heartbeat();
-            if let Some((ticket, outcome)) = terminal {
-                publish_pd_service_terminal(state, ticket, outcome).await;
-                pending = None;
-            }
+            run_pd_service_turn(&mut i2c, &mut runtime, &mut pending).await;
         } else {
             // Clear authorization immediately, but do not count this skipped
             // turn as PD progress for the watchdog.
-            let (state, terminal) = publish_power_report(&runtime, None, pending, None);
-            publish_pd_snapshot(
-                &runtime,
-                None,
-                terminal.is_none().then_some(pending).flatten(),
-            );
-            publish_pd_service_state(state);
-            if let Some((ticket, outcome)) = terminal {
-                publish_pd_service_terminal(state, ticket, outcome).await;
-                pending = None;
-            }
+            publish_busy_pd_service_turn(&runtime, &mut pending).await;
         }
         EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await;
     }

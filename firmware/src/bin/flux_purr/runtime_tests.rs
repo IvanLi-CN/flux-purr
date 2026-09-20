@@ -184,8 +184,9 @@ fn pd_service_is_owned_by_an_independent_normal_task() {
         "the full PD protocol must not run in an interrupt executor"
     );
     assert!(
-        pd_service.contains("for _ in 0..PD_SERVICE_MAX_COMMANDS_PER_TICK")
-            && pd_service.contains("runtime.poll(&mut i2c, PdTimestamp::now()).await"),
+        pd_service
+            .contains("select_pd_service_work(*pending, PD_SERVICE_COMMANDS.try_receive().ok())")
+            && pd_service.contains("runtime.poll(i2c, PdTimestamp::now()).await"),
         "PD task must poll after a bounded command batch"
     );
     assert!(
@@ -333,17 +334,11 @@ fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
         .expect("PD task body must remain present");
 
     assert!(pd_service.contains("read_status().await.ok()?"));
-    assert!(pd_task.contains("let observation = pd_status_observation(&runtime, &mut i2c).await"));
-    assert!(
-        pd_task.contains(
-            "publish_pd_snapshot(\n                &runtime,\n                observation,"
-        )
-    );
-    assert!(
-        pd_task.contains("publish_pd_snapshot(\n                &runtime,\n                None,")
-    );
-    assert!(pd_task.contains("publish_pd_service_state(state);\n            // A heartbeat"));
-    assert!(!pd_task.contains("publish_pd_snapshot(&runtime, None);\n        record_pd_heartbeat"));
+    assert!(pd_service.contains("let observation = pd_status_observation(runtime, i2c).await"));
+    assert!(pd_service.contains("publish_pd_snapshot(\n        runtime,\n        observation,"));
+    assert!(pd_service.contains("publish_pd_service_turn(runtime, None, *pending, None, false)"));
+    assert!(pd_service.contains("if record_heartbeat"));
+    assert!(!pd_task.contains("record_pd_heartbeat"));
 
     let permit_check = support
         .split("fn set_duty_cycle(&mut self, duty: u16)")

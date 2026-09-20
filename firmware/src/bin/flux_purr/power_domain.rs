@@ -144,10 +144,13 @@ impl PowerState {
             )
         });
         let requested = requested.or_else(|| {
-            active.map(|active| PdContractRequest {
-                mode: active.mode,
-                voltage_mv: active.voltage_mv,
-                operating_current_ma: active.operating_current_ma,
+            active.and_then(|active| match active.mode {
+                PdContractRequestMode::Fixed => {
+                    PdContractRequest::fixed(active.voltage_mv, active.operating_current_ma).ok()
+                }
+                PdContractRequestMode::Pps => {
+                    PdContractRequest::pps(active.voltage_mv, active.operating_current_ma).ok()
+                }
             })
         });
         Self {
@@ -303,25 +306,19 @@ pub(crate) fn request_matches_active(
     active: Option<ConfirmedActiveContract>,
 ) -> bool {
     active.is_some_and(|active| {
-        active.mode == request.mode
-            && active.voltage_mv == request.voltage_mv
-            && active.operating_current_ma == request.operating_current_ma
+        active.mode == request.mode()
+            && active.voltage_mv == request.voltage_mv()
+            && active.operating_current_ma == request.operating_current_ma()
     })
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn pps_adjustment_is_continuous(state: PowerState, request: PdContractRequest) -> bool {
-    if !state.available || state.failure.is_some() || request.mode != PdContractRequestMode::Pps {
+    if !state.available || state.failure.is_some() || request.mode() != PdContractRequestMode::Pps {
         return false;
     }
     state.active.is_some_and(|active| {
-        active.mode == PdContractRequestMode::Pps
-            && active.operating_current_ma == request.operating_current_ma
-            && active.pps_range.is_some_and(|range| {
-                range.min_mv <= request.voltage_mv
-                    && request.voltage_mv <= range.max_mv
-                    && request.operating_current_ma <= range.max_current_ma
-            })
+        active.request_keeps_same_pps_apdo(state.source_capabilities, request)
     })
 }
 
@@ -361,8 +358,15 @@ fn active_owner_after_terminal(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn may_dispatch_pd_command(terminal_already_pending: bool) -> bool {
-    !terminal_already_pending
+pub(crate) fn select_pd_service_work<T: Copy, U>(
+    pending: Option<T>,
+    queued_command: Option<U>,
+) -> (Option<T>, Option<U>) {
+    if queued_command.is_some() {
+        (None, queued_command)
+    } else {
+        (pending, None)
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -833,12 +837,11 @@ mod tests {
     #[test]
     fn active_contract_match_requires_mode_voltage_and_current() {
         let request = PdContractRequest::pps(20_000, 3_000).unwrap();
-        let active = ConfirmedActiveContract {
-            mode: PdContractRequestMode::Pps,
-            voltage_mv: 20_000,
-            operating_current_ma: 3_000,
-            pps_range: None,
-        };
+        let capabilities =
+            SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+        let active_contract = capabilities.select_exact_contract(request).unwrap();
+        let active =
+            ConfirmedActiveContract::from_private_contract(active_contract, capabilities).unwrap();
         assert!(request_matches_active(request, Some(active)));
         assert!(!request_matches_active(
             PdContractRequest::fixed(20_000, 3_000).unwrap(),
@@ -930,30 +933,30 @@ mod tests {
 
     #[test]
     fn pending_terminal_prevents_dequeueing_a_new_pd_command() {
-        assert!(!may_dispatch_pd_command(true));
-        assert!(may_dispatch_pd_command(false));
+        assert_eq!(
+            select_pd_service_work(Some((1, 10)), Some((2, 20))),
+            (None, Some((2, 20))),
+        );
+        assert_eq!(
+            select_pd_service_work(Some((1, 10)), None::<(i32, i32)>),
+            (Some((1, 10)), None),
+        );
     }
 
     #[test]
     fn continuous_pps_adjustment_requires_the_confirmed_range_and_current() {
-        use flux_purr_firmware::adapters::pd::PpsAdjustmentRange;
-
-        let active = ConfirmedActiveContract {
-            mode: PdContractRequestMode::Pps,
-            voltage_mv: 17_500,
-            operating_current_ma: 3_000,
-            pps_range: Some(PpsAdjustmentRange {
-                min_mv: 5_500,
-                max_mv: 21_000,
-                max_current_ma: 3_000,
-            }),
-        };
+        let capabilities =
+            SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+        let active_request = PdContractRequest::pps(17_500, 3_000).unwrap();
+        let active_contract = capabilities.select_exact_contract(active_request).unwrap();
+        let active =
+            ConfirmedActiveContract::from_private_contract(active_contract, capabilities).unwrap();
         let state = PowerState {
             protocol: PowerProtocol::Ready,
             available: true,
             requested: None,
             active: Some(active),
-            source_capabilities: SourceCapabilities::empty().view(),
+            source_capabilities: capabilities.view(),
             failure: None,
         };
 
@@ -976,5 +979,41 @@ mod tests {
             },
             PdContractRequest::pps(18_000, 3_000).unwrap(),
         ));
+    }
+
+    #[test]
+    fn overlapping_apdo_selection_is_not_mistaken_for_same_contract() {
+        let capabilities = SourceCapabilities::from_pdos(&[
+            pps_source_capability(5_500, 20_000, 3_000),
+            pps_source_capability(17_000, 21_000, 3_000),
+        ]);
+        let active_request = PdContractRequest::pps(20_500, 3_000).unwrap();
+        let active_contract = capabilities.select_exact_contract(active_request).unwrap();
+        let active =
+            ConfirmedActiveContract::from_private_contract(active_contract, capabilities).unwrap();
+        let state = PowerState {
+            protocol: PowerProtocol::Ready,
+            available: true,
+            requested: None,
+            active: Some(active),
+            source_capabilities: capabilities.view(),
+            failure: None,
+        };
+
+        assert!(pps_adjustment_is_continuous(
+            state,
+            PdContractRequest::pps(20_600, 3_000).unwrap(),
+        ));
+        assert!(!pps_adjustment_is_continuous(
+            state,
+            PdContractRequest::pps(17_500, 3_000).unwrap(),
+        ));
+    }
+
+    fn pps_source_capability(min_mv: u16, max_mv: u16, max_ma: u16) -> u32 {
+        (0b11 << 30)
+            | (u32::from(max_mv / 100) << 17)
+            | (u32::from(min_mv / 100) << 8)
+            | u32::from(max_ma / 50)
     }
 }

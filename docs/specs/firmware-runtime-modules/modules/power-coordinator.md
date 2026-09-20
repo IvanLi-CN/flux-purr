@@ -21,7 +21,10 @@ and operating current; PPS requests require the adapter's 100 mV / 50 mA
 alignment. Each admitted command owns one `PowerTicket`. Admission returns
 `Busy` when the six command/ticket slots are occupied. Lower-priority work
 that arrives while a higher-priority owner is active resolves as
-`Superseded`; duplicate refreshes join one in-flight operation.
+`Superseded`; duplicate refreshes join one in-flight operation. Every admitted
+ticket receives one terminal outcome. A replacement command is delivered to
+`PdService` before it retries any deferred operation, so an operation already
+settled as `Superseded` cannot be retransmitted.
 
 ## Published Outputs
 

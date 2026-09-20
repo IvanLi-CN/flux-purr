@@ -152,6 +152,14 @@ impl SinkPolicy {
             .is_some_and(|contract| contract == self.pending_contract)
     }
 
+    pub fn pending_automatic_idle_contract_matches(&self) -> bool {
+        self.source_capabilities_received
+            && self
+                .source_capabilities
+                .select_fusb302b_contract(self.default_requested_mv, self.preferred_ma)
+                .is_some_and(|contract| contract == self.pending_contract)
+    }
+
     /// Retain an exact PPS request while a Fixed-to-PPS transition refreshes
     /// Source_Capabilities. The follow-up request is emitted by the service
     /// after the refreshed capabilities exchange completes.
@@ -647,6 +655,23 @@ mod tests {
         assert!(policy.request_automatic_idle_contract().is_some());
         assert_eq!(policy.pending_contract.kind, ContractKind::Pps);
         assert_eq!(policy.pending_contract.voltage_mv, 12_000);
+    }
+
+    #[test]
+    fn automatic_idle_replaces_a_superseded_pending_pps_contract() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        let _ = policy.request_pps_voltage(20_000);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+        assert_eq!(policy.pending_contract.voltage_mv, 20_000);
+        assert!(!policy.pending_automatic_idle_contract_matches());
+
+        assert!(policy.request_automatic_idle_contract().is_some());
+        assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+        assert_eq!(policy.pending_contract.voltage_mv, 12_000);
+        assert!(policy.pending_automatic_idle_contract_matches());
     }
 
     #[test]
