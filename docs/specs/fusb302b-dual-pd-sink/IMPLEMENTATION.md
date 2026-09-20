@@ -21,6 +21,7 @@
 - After the bounded VBUS-restore confirmation, `resynchronize_after_vbus_restore` resets only the PD protocol engine, flushes both FIFOs, reapplies the receiver PHY configuration and interrupt masks, and resets the local transmit message ID. It preserves CC pulls and does not restart Type-C toggling before bounded `Source_Capabilities` discovery.
 - `firmware/src/board/s3_frontpanel.rs` reserves `GPIO7` as `PIN_PD_INTERRUPT` and includes it in the active GPIO map.
 - Firmware status emits contract metadata separately from the legacy `currentMa` telemetry field. `pdContractCurrentMa` and `pdContractPowerMw` are contractual upper bounds, never a physical-current claim.
+- Contract callers retain and await accepted tickets, so reply slots are released after every terminal outcome. Coordinator arbitration retains the confirmed owner priority, rejects lower-priority replacement requests as `Superseded`, and treats `Idle` as an explicit release transition. A `Confirmed` ticket is emitted only after the current service turn has produced a fresh status observation; timeout and source rejection remain distinct terminal outcomes.
 
 ## Host And Console
 
