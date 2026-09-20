@@ -33,6 +33,6 @@
 
 ## Verification
 
-- Firmware adapter tests cover exact Fixed/PPS alignment and malformed request rejection, APDO selection across overlapping ranges, deferred-command supersession ordering, PPS/fixed-RDO framing, PPS renewal, `20V@3A=60W`, `20V@5A=100W`, lower-voltage degraded operation, `Accept`/`PS_RDY`, detach/reset, rejected contracts, and source-capability packet decoding. The upstream crate validates FUSB register access, device identification, PHY configuration, FIFO framing, and full-FIFO receive handling through its public API.
+- Firmware adapter tests cover exact Fixed/PPS alignment and malformed request rejection, APDO selection across overlapping ranges, deferred-command and failed-owner queue supersession ordering, PPS/fixed-RDO framing, PPS renewal, `20V@3A=60W`, `20V@5A=100W`, lower-voltage degraded operation, `Accept`/`PS_RDY`, detach/reset, rejected contracts, and source-capability packet decoding. The upstream crate validates FUSB register access, device identification, PHY configuration, FIFO framing, and full-FIFO receive handling through its public API.
 - Control-plane, devd, and Web verification run from repository-native test/build commands.
 - Host validation covers FUSB302B identity selection, unknown fail-closed behavior, non-blocking `runtime_ready`, contract-less heater interlock, Dashboard `POWER/WAIT`, EEPROM restore presentation, and PPS policy. Physical HIL remains separately authorized and is not part of this change.

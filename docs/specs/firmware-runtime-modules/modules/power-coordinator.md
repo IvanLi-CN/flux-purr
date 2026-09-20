@@ -24,7 +24,10 @@ that arrives while a higher-priority owner is active resolves as
 `Superseded`; duplicate refreshes join one in-flight operation. Every admitted
 ticket receives one terminal outcome. A replacement command is delivered to
 `PdService` before it retries any deferred operation, so an operation already
-settled as `Superseded` cannot be retransmitted.
+settled as `Superseded` cannot be retransmitted. If an in-flight contract
+fails, already-admitted same/lower-priority requests and queued capability
+refreshes settle as `Superseded`; higher-priority requests and explicit Idle
+remain eligible for ordered dispatch.
 
 ## Published Outputs
 

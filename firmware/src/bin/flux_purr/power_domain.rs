@@ -358,6 +358,28 @@ fn active_owner_after_terminal(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn failed_contract_owner_for_terminal(
+    inflight: Option<(PowerIntentOwner, PowerTicket)>,
+    ticket: PowerTicket,
+    was_refresh: bool,
+    was_idle: bool,
+    outcome: TicketOutcome,
+) -> Option<PowerIntentOwner> {
+    if was_refresh
+        || was_idle
+        || matches!(
+            outcome,
+            TicketOutcome::Confirmed(_) | TicketOutcome::CapabilitiesRefreshed
+        )
+        || !terminal_matches_inflight(inflight, ticket)
+    {
+        None
+    } else {
+        inflight.map(|(owner, _)| owner)
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn select_pd_service_work<T: Copy, U>(
     pending: Option<T>,
     queued_command: Option<U>,
@@ -589,7 +611,7 @@ fn signal_ticket(ticket: PowerTicket, outcome: TicketOutcome) {
     POWER_TICKET_RESULTS[ticket.result_slot].signal((ticket, outcome));
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 fn power_command_details(
     command: PowerCommand,
 ) -> (
@@ -705,6 +727,21 @@ fn owner_is_superseded(
     })
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn queued_command_is_preempted_by_failed_owner(
+    command: PowerCommand,
+    failed_owner: PowerIntentOwner,
+) -> bool {
+    let (_, owner, refresh, idle, _) = power_command_details(command);
+    if idle {
+        return false;
+    }
+    if refresh {
+        return true;
+    }
+    owner.is_some_and(|owner| owner.priority() <= failed_owner.priority())
+}
+
 #[cfg(target_arch = "xtensa")]
 fn dispatch_power_command(
     command: PowerCommand,
@@ -713,15 +750,15 @@ fn dispatch_power_command(
     inflight_idle: &mut bool,
     active_owner: Option<PowerIntentOwner>,
     joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
-) {
+) -> Option<PowerIntentOwner> {
     let Some((ticket, owner, refresh, idle, pd_command)) = power_pd_command(command) else {
         let (ticket, _, _, _, _) = power_command_details(command);
         signal_ticket(ticket, TicketOutcome::Rejected);
-        return;
+        return None;
     };
     if owner_is_superseded(owner, active_owner) {
         signal_ticket(ticket, TicketOutcome::Superseded);
-        return;
+        return None;
     }
     if supersede_or_join_power_command(
         ticket,
@@ -732,18 +769,84 @@ fn dispatch_power_command(
         inflight_refresh,
         joined_refresh,
     ) {
-        return;
+        return None;
     }
     if try_send_pd_service_command(pd_command).is_err() {
         signal_ticket(ticket, TicketOutcome::TransportFault);
+        owner
     } else if let Some(owner) = owner {
         *inflight = Some((owner, ticket));
         *inflight_refresh = false;
         *inflight_idle = false;
+        None
     } else {
         *inflight = Some((PowerIntentOwner::AutomaticThermal, ticket));
         *inflight_refresh = refresh;
         *inflight_idle = idle;
+        None
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+type FailedOwnerBacklog = (
+    heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
+    heapless::Vec<PowerCommand, POWER_COMMANDS_CAPACITY>,
+);
+
+#[cfg(target_arch = "xtensa")]
+fn collect_failed_owner_backlog(failed_owner: PowerIntentOwner) -> FailedOwnerBacklog {
+    let mut superseded = heapless::Vec::new();
+    let mut dispatchable = heapless::Vec::new();
+    for _ in 0..POWER_COMMANDS_CAPACITY {
+        let Ok(command) = POWER_COMMANDS.try_receive() else {
+            break;
+        };
+        let (ticket, _, _, _, _) = power_command_details(command);
+        if queued_command_is_preempted_by_failed_owner(command, failed_owner) {
+            if let Err(ticket) = superseded.push(ticket) {
+                signal_ticket(ticket, TicketOutcome::Superseded);
+            }
+        } else if let Err(command) = dispatchable.push(command) {
+            let (ticket, _, _, _, _) = power_command_details(command);
+            signal_ticket(ticket, TicketOutcome::Rejected);
+        }
+    }
+    (superseded, dispatchable)
+}
+
+#[cfg(target_arch = "xtensa")]
+fn settle_failed_owner_backlog(
+    failed_owner: PowerIntentOwner,
+    backlog: FailedOwnerBacklog,
+    inflight: &mut Option<(PowerIntentOwner, PowerTicket)>,
+    inflight_refresh: &mut bool,
+    inflight_idle: &mut bool,
+    active_owner: Option<PowerIntentOwner>,
+    joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
+) {
+    let (superseded, dispatchable) = backlog;
+    for ticket in superseded {
+        signal_ticket(ticket, TicketOutcome::Superseded);
+    }
+
+    let mut priority_floor = failed_owner;
+    for command in dispatchable {
+        if queued_command_is_preempted_by_failed_owner(command, priority_floor) {
+            let (ticket, _, _, _, _) = power_command_details(command);
+            signal_ticket(ticket, TicketOutcome::Superseded);
+            continue;
+        }
+        if let Some(next_floor) = dispatch_power_command(
+            command,
+            inflight,
+            inflight_refresh,
+            inflight_idle,
+            active_owner,
+            joined_refresh,
+        ) && next_floor.priority() > priority_floor.priority()
+        {
+            priority_floor = next_floor;
+        }
     }
 }
 
@@ -797,16 +900,35 @@ async fn power_coordinator_task() {
         .await
         {
             Either3::First(command) => {
-                dispatch_power_command(
+                if let Some(failed_owner) = dispatch_power_command(
                     command,
                     &mut inflight,
                     &mut inflight_refresh,
                     &mut inflight_idle,
                     active_owner,
                     &mut joined_refresh,
-                );
+                ) {
+                    let backlog = collect_failed_owner_backlog(failed_owner);
+                    settle_failed_owner_backlog(
+                        failed_owner,
+                        backlog,
+                        &mut inflight,
+                        &mut inflight_refresh,
+                        &mut inflight_idle,
+                        active_owner,
+                        &mut joined_refresh,
+                    );
+                }
             }
             Either3::Second((state, ticket, outcome)) => {
+                let failed_owner = failed_contract_owner_for_terminal(
+                    inflight,
+                    ticket,
+                    inflight_refresh,
+                    inflight_idle,
+                    outcome,
+                );
+                let failed_owner_backlog = failed_owner.map(collect_failed_owner_backlog);
                 publish_power_state(state);
                 dispatch_power_terminal(
                     ticket,
@@ -817,6 +939,17 @@ async fn power_coordinator_task() {
                     &mut active_owner,
                     &mut joined_refresh,
                 );
+                if let (Some(failed_owner), Some(backlog)) = (failed_owner, failed_owner_backlog) {
+                    settle_failed_owner_backlog(
+                        failed_owner,
+                        backlog,
+                        &mut inflight,
+                        &mut inflight_refresh,
+                        &mut inflight_idle,
+                        active_owner,
+                        &mut joined_refresh,
+                    );
+                }
             }
             Either3::Third(state) => publish_power_state(state),
         }
@@ -928,6 +1061,98 @@ mod tests {
                 TicketOutcome::Rejected,
             ),
             Some(owner),
+        );
+    }
+
+    #[test]
+    fn failed_owner_terminal_supersedes_queued_same_or_lower_priority_work() {
+        let owner = PowerIntentOwner::Calibration;
+        let ticket = PowerTicket {
+            owner: Some(owner),
+            sequence: 10,
+            result_slot: 0,
+        };
+        let low_priority_command = PowerCommand::Request {
+            owner: PowerIntentOwner::AutomaticThermal,
+            request: PdContractRequest::fixed(5_000, 3_000).unwrap(),
+            ticket: PowerTicket {
+                owner: Some(PowerIntentOwner::AutomaticThermal),
+                sequence: 11,
+                result_slot: 1,
+            },
+        };
+        let same_priority_command = PowerCommand::Request {
+            owner,
+            request: PdContractRequest::fixed(5_000, 3_000).unwrap(),
+            ticket: PowerTicket {
+                owner: Some(owner),
+                sequence: 15,
+                result_slot: 5,
+            },
+        };
+        let higher_priority_command = PowerCommand::Request {
+            owner: PowerIntentOwner::ThermalPlantAuto,
+            request: PdContractRequest::fixed(5_000, 3_000).unwrap(),
+            ticket: PowerTicket {
+                owner: Some(PowerIntentOwner::ThermalPlantAuto),
+                sequence: 12,
+                result_slot: 2,
+            },
+        };
+        let refresh = PowerCommand::RefreshCapabilities {
+            ticket: PowerTicket {
+                owner: None,
+                sequence: 13,
+                result_slot: 3,
+            },
+        };
+        let idle = PowerCommand::Idle {
+            ticket: PowerTicket {
+                owner: None,
+                sequence: 14,
+                result_slot: 4,
+            },
+        };
+        let capabilities =
+            SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+        let active_request = PdContractRequest::pps(17_500, 3_000).unwrap();
+        let active_contract = capabilities.select_exact_contract(active_request).unwrap();
+        let active =
+            ConfirmedActiveContract::from_private_contract(active_contract, capabilities).unwrap();
+
+        assert_eq!(
+            failed_contract_owner_for_terminal(
+                Some((owner, ticket)),
+                ticket,
+                false,
+                false,
+                TicketOutcome::Rejected,
+            ),
+            Some(owner),
+        );
+        assert!(queued_command_is_preempted_by_failed_owner(
+            low_priority_command,
+            owner,
+        ));
+        assert!(queued_command_is_preempted_by_failed_owner(
+            same_priority_command,
+            owner,
+        ));
+        assert!(!queued_command_is_preempted_by_failed_owner(
+            higher_priority_command,
+            owner,
+        ));
+        assert!(queued_command_is_preempted_by_failed_owner(refresh, owner));
+        assert!(!queued_command_is_preempted_by_failed_owner(idle, owner));
+        assert_eq!(
+            failed_contract_owner_for_terminal(
+                Some((owner, ticket)),
+                ticket,
+                false,
+                false,
+                TicketOutcome::Confirmed(active),
+            ),
+            None,
         );
     }
 
