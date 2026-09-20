@@ -13,7 +13,7 @@
 - Driver: [`IvanLi-CN/gc9d01-rs`](https://github.com/IvanLi-CN/gc9d01-rs) async API
 - Main firmware artifact name: `flux-purr`
 - Display bus: `SPI2` async, `Mode0`, fixed `40 MHz`
-- Display graphics memory: `ESP32-S3` Quad PSRAM (`ESP_HAL_CONFIG_PSRAM_MODE=quad`) with a fixed `2 MiB` mapping; a dedicated PSRAM `EspHeap` owns only the GC9D01 `16 KiB` presentation framebuffer. The logical `DisplayCanvas` and general runtime heap remain in internal DRAM.
+- Display graphics memory: `ESP32-S3` Quad PSRAM (`ESP_HAL_CONFIG_PSRAM_MODE=quad`) with a detected mapping that must be exactly `2 MiB`; a dedicated PSRAM `EspHeap` owns only the GC9D01 `16 KiB` presentation framebuffer. The logical `DisplayCanvas` and general runtime heap remain in internal DRAM.
 - Display startup is fail-closed: PSRAM mapping or presentation framebuffer allocation failure enters USB recovery (or panics closed without USB) before Front Panel and heater runtime startup; there is no no-PSRAM or low-speed fallback.
 - Locked panel profile:
   - `panel_160x50`

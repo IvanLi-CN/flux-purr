@@ -2679,7 +2679,6 @@ pub(crate) async fn run(spawner: Spawner) {
     let config = esp_hal::Config::default()
         .with_cpu_clock(esp_hal::clock::CpuClock::max())
         .with_psram(esp_hal::psram::PsramConfig {
-            size: esp_hal::psram::PsramSize::Size(PSRAM_SIZE_BYTES),
             ..Default::default()
         });
     rom_boot_stage(b"hal_init_configured");

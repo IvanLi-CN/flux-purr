@@ -532,7 +532,7 @@ pub(crate) fn initialize_display_graphics(
     DisplayGraphicsInitError,
 > {
     let (start, size) = esp_hal::psram::psram_raw_parts(psram);
-    if size < PSRAM_SIZE_BYTES {
+    if size != PSRAM_SIZE_BYTES {
         return Err(DisplayGraphicsInitError::PsramUnavailable);
     }
 

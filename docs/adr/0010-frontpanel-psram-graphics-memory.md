@@ -6,7 +6,8 @@ Accepted
 
 ## Decision
 
-The ESP32-S3 front panel uses Quad PSRAM, mapped as a fixed 2 MiB region, with
+The ESP32-S3 front panel uses Quad PSRAM, whose detected mapped region must be
+exactly 2 MiB, with
 a dedicated `EspHeap` that owns only the GC9D01 driver's 16 KiB RGB565
 presentation framebuffer. The logical `DisplayCanvas` and the general runtime
 heap remain in internal DRAM. SPI2 stays in Mode 0 at a fixed `40 MHz`; there
