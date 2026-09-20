@@ -547,7 +547,10 @@ pub(crate) fn initialize_display_graphics(
         ));
     }
 
-    let mut framebuffer = AllocBox::try_new_uninit_in(&DISPLAY_GRAPHICS_HEAP)
+    let mut framebuffer =
+        AllocBox::<[Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS], _>::try_new_uninit_in(
+            &DISPLAY_GRAPHICS_HEAP,
+        )
         .map_err(|_| DisplayGraphicsInitError::FramebufferAllocationFailed)?;
     // Initialize the PSRAM allocation in place. Constructing the 16 KiB array
     // as a function argument would materialize it on the guarded boot stack.
