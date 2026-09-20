@@ -9,10 +9,10 @@ use super::pd::{Contract, ContractKind, SourceCapabilities};
 const PD_HEADER_REQUEST: u16 = 2;
 const PD_HEADER_ACCEPT: u16 = 3;
 const PD_HEADER_GET_SOURCE_CAP: u16 = 7;
-// FUSB302B documents the `0b10` PD revision encoding as unsupported. Keep
-// automatic GoodCRC and all locally initiated packets on the PD 2.0 encoding
-// so a source can complete the initial contract exchange reliably.
-const PD_HEADER_SPEC_REV_20: u16 = 0b01 << 6;
+// The Flux Purr target uses the FUSB302BMPX-compatible PD 3.0 path so PPS
+// APDOs are advertised and accepted by the connected source. Keep all
+// locally initiated headers on the same revision as automatic GoodCRC.
+const PD_HEADER_SPEC_REV_30: u16 = 0b10 << 6;
 const PPS_RDO_VOLTAGE_STEP_MV: u16 = 20;
 const PPS_RDO_CURRENT_STEP_MA: u16 = 50;
 const PPS_KEEPALIVE_INTERVAL_MS: u64 = 5_000;
@@ -119,6 +119,57 @@ impl SinkPolicy {
     pub fn source_capabilities(self) -> Option<SourceCapabilities> {
         self.source_capabilities_received
             .then_some(self.source_capabilities)
+    }
+
+    /// Build a request from the public power-domain contract. The adapter is
+    /// the only layer allowed to resolve a private PDO/APDO object position.
+    /// Unsupported mode, voltage, or current is rejected without substitution.
+    pub fn request_contract(
+        &mut self,
+        request: crate::adapters::pd::PdContractRequest,
+    ) -> Option<[u8; 4]> {
+        if !self.source_capabilities_received {
+            return None;
+        }
+        let contract = self.source_capabilities.select_exact_contract(request)?;
+        let rdo = request_data_object(contract)?;
+        self.requested_mv = request.voltage_mv;
+        self.preferred_ma = request.operating_current_ma;
+        self.pending_contract = contract;
+        self.phase = SinkPhase::WaitingForAccept;
+        Some(rdo)
+    }
+
+    pub fn pending_contract_matches(
+        &self,
+        request: crate::adapters::pd::PdContractRequest,
+    ) -> bool {
+        self.source_capabilities
+            .select_exact_contract(request)
+            .is_some_and(|contract| contract == self.pending_contract)
+    }
+
+    /// Retain an exact PPS request while a Fixed-to-PPS transition refreshes
+    /// Source_Capabilities. The follow-up request is emitted by the service
+    /// after the refreshed capabilities exchange completes.
+    pub fn prepare_contract_refresh(
+        &mut self,
+        request: crate::adapters::pd::PdContractRequest,
+    ) -> bool {
+        self.source_capabilities_received
+            && request.mode == crate::adapters::pd::PdContractRequestMode::Pps
+            && {
+                self.requested_mv = request.voltage_mv;
+                self.preferred_ma = request.operating_current_ma;
+                true
+            }
+    }
+
+    pub fn confirmed_active_contract(self) -> Option<crate::adapters::pd::ConfirmedActiveContract> {
+        crate::adapters::pd::ConfirmedActiveContract::from_private_contract(
+            self.active_contract,
+            self.source_capabilities,
+        )
     }
 
     /// Select a PPS contract, with fixed PDO fallback, from source capabilities.
@@ -358,15 +409,15 @@ impl SinkPolicy {
 }
 
 pub const fn request_header(message_id: u8) -> u16 {
-    PD_HEADER_REQUEST | PD_HEADER_SPEC_REV_20 | (((message_id & 0x07) as u16) << 9) | (1 << 12)
+    PD_HEADER_REQUEST | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9) | (1 << 12)
 }
 
 pub const fn accept_header(message_id: u8) -> u16 {
-    PD_HEADER_ACCEPT | PD_HEADER_SPEC_REV_20 | (((message_id & 0x07) as u16) << 9)
+    PD_HEADER_ACCEPT | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9)
 }
 
 pub const fn get_source_capabilities_header(message_id: u8) -> u16 {
-    PD_HEADER_GET_SOURCE_CAP | PD_HEADER_SPEC_REV_20 | (((message_id & 0x07) as u16) << 9)
+    PD_HEADER_GET_SOURCE_CAP | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9)
 }
 
 pub fn request_data_object(contract: Contract) -> Option<[u8; 4]> {
@@ -375,14 +426,22 @@ pub fn request_data_object(contract: Contract) -> Option<[u8; 4]> {
     }
     let raw = match contract.kind {
         ContractKind::Pps => {
-            let voltage_units = u32::from(contract.voltage_mv.div_ceil(PPS_RDO_VOLTAGE_STEP_MV));
-            let current_units = u32::from(contract.current_ma.div_ceil(PPS_RDO_CURRENT_STEP_MA));
+            if !contract.voltage_mv.is_multiple_of(PPS_RDO_VOLTAGE_STEP_MV)
+                || !contract.current_ma.is_multiple_of(PPS_RDO_CURRENT_STEP_MA)
+            {
+                return None;
+            }
+            let voltage_units = u32::from(contract.voltage_mv / PPS_RDO_VOLTAGE_STEP_MV);
+            let current_units = u32::from(contract.current_ma / PPS_RDO_CURRENT_STEP_MA);
             ((contract.object_position as u32) << 28)
                 | (1 << 24)
                 | ((voltage_units & 0x0fff) << 9)
                 | (current_units & 0x7f)
         }
         ContractKind::Fixed => {
+            if !contract.current_ma.is_multiple_of(10) {
+                return None;
+            }
             let current_units = (contract.current_ma / 10) as u32;
             ((contract.object_position as u32) << 28)
                 | (1 << 24)
@@ -509,6 +568,21 @@ mod tests {
         assert_eq!(policy.phase(), SinkPhase::Ready);
         assert_eq!(policy.active_contract().kind, ContractKind::Pps);
         assert_eq!(policy.active_contract().voltage_mv, 12_000);
+    }
+
+    #[test]
+    fn fixed_only_discovery_allows_a_pps_capability_refresh() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        let fixed_only = [((5_000_u32 / 50) << 10) | (3_000_u32 / 10)];
+        let _ = policy.on_source_capabilities(&fixed_only);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert_eq!(policy.active_contract().kind, ContractKind::Fixed);
+
+        let request = crate::adapters::pd::PdContractRequest::pps(17_500, 3_000).unwrap();
+        assert!(policy.prepare_contract_refresh(request));
+        assert_eq!(policy.requested_mv, 17_500);
+        assert_eq!(policy.preferred_ma, 3_000);
     }
 
     #[test]
@@ -648,6 +722,24 @@ mod tests {
             request_data_object(contract),
             Some(0x2107_d064_u32.to_le_bytes())
         );
+    }
+
+    #[test]
+    fn rdo_encoding_rejects_unaligned_values_instead_of_rounding_up() {
+        let contract = Contract {
+            kind: ContractKind::Pps,
+            object_position: 1,
+            voltage_mv: 20_010,
+            current_ma: 3_000,
+        };
+        assert_eq!(request_data_object(contract), None);
+        let fixed = Contract {
+            kind: ContractKind::Fixed,
+            object_position: 1,
+            voltage_mv: 12_000,
+            current_ma: 3_005,
+        };
+        assert_eq!(request_data_object(fixed), None);
     }
 
     #[test]
@@ -841,9 +933,9 @@ mod tests {
     }
 
     #[test]
-    fn startup_headers_use_the_fusb302b_supported_pd20_revision() {
-        assert_eq!(request_header(5), 0x1a42);
-        assert_eq!(get_source_capabilities_header(5), 0x0a47);
-        assert_eq!(accept_header(0), 0x0043);
+    fn startup_headers_use_the_fusb302b_pps_pd30_revision() {
+        assert_eq!(request_header(5), 0x1a82);
+        assert_eq!(get_source_capabilities_header(5), 0x0a87);
+        assert_eq!(accept_header(0), 0x0083);
     }
 }

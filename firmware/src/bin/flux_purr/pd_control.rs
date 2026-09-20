@@ -276,6 +276,7 @@ impl HoldPpsGovernor {
 pub(crate) enum ManualPpsError {
     NoPpsCapability,
     InvalidVoltage,
+    InvalidCurrent,
     CalibrationInProgress,
     TerminalDisarmPending,
     ThermalPlantManagedByJob,
@@ -299,6 +300,7 @@ impl ManualPpsError {
         match self {
             Self::NoPpsCapability => "manual_pps_no_capability",
             Self::InvalidVoltage => "manual_pps_invalid_voltage",
+            Self::InvalidCurrent => "manual_pps_invalid_current",
             Self::CalibrationInProgress => "manual_pps_calibration_busy",
             Self::TerminalDisarmPending => "heater_disarm_pending",
             Self::ThermalPlantManagedByJob => "thermal_plant_managed_by_job",
@@ -314,6 +316,9 @@ impl ManualPpsError {
         match self {
             Self::NoPpsCapability => "PPS capability is unavailable.",
             Self::InvalidVoltage => {
+                "manualPpsMv/manualPpsMa must match PPS capability and APDO steps."
+            }
+            Self::InvalidCurrent => {
                 "manualPpsMv/manualPpsMa must match PPS capability and APDO steps."
             }
             Self::CalibrationInProgress => {
@@ -356,6 +361,7 @@ pub(crate) struct ManualPpsState {
     pub(crate) capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
     pub(crate) error: Option<ManualPpsError>,
     pub(crate) automatic_restore_pending: bool,
+    pub(crate) allow_pending_refresh: bool,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -375,6 +381,7 @@ impl Default for ManualPpsState {
             capability_apdos: [None; ch224q::MAX_PPS_APDOS],
             error: None,
             automatic_restore_pending: false,
+            allow_pending_refresh: false,
         }
     }
 }
@@ -1171,11 +1178,13 @@ impl ManualPpsState {
     pub(crate) fn from_fusb302b_capabilities(
         capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     ) -> Self {
-        Self::from_capabilities_with_request_bounds(
+        let mut state = Self::from_capabilities_with_request_bounds(
             capabilities,
             FUSB302B_PPS_MIN_MV,
             FUSB302B_PPS_MAX_MV,
-        )
+        );
+        state.allow_pending_refresh = true;
+        state
     }
 
     fn from_capabilities_with_request_bounds(
@@ -1393,6 +1402,48 @@ impl ManualPpsState {
         self.error = None;
         self.automatic_restore_pending = false;
         Ok(())
+    }
+
+    pub(crate) fn stage_pending_request(
+        &mut self,
+        owner: ManualPpsOwner,
+        target_mv: u16,
+        target_ma: u16,
+    ) -> Result<(), ManualPpsError> {
+        match PdContractRequest::pps(target_mv, target_ma) {
+            Ok(_) => {}
+            Err(
+                PdContractRequestError::ZeroCurrent | PdContractRequestError::PpsCurrentNotAligned,
+            ) => {
+                return Err(ManualPpsError::InvalidCurrent);
+            }
+            Err(_) => return Err(ManualPpsError::InvalidVoltage),
+        }
+        self.enabled = true;
+        self.owner = owner;
+        self.target_mv = Some(target_mv);
+        self.target_ma = Some(target_ma);
+        self.applied_mv = None;
+        self.error = None;
+        self.automatic_restore_pending = false;
+        Ok(())
+    }
+
+    pub(crate) fn refresh_fusb302b_capabilities_preserving_intent(
+        &mut self,
+        capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+    ) {
+        let previous = *self;
+        let mut refreshed = Self::from_fusb302b_capabilities(capabilities);
+        if previous.enabled {
+            refreshed.enabled = true;
+            refreshed.owner = previous.owner;
+            refreshed.target_mv = previous.target_mv;
+            refreshed.target_ma = previous.target_ma;
+            refreshed.applied_mv = None;
+            refreshed.automatic_restore_pending = previous.automatic_restore_pending;
+        }
+        *self = refreshed;
     }
 
     pub(crate) fn clear(&mut self) {

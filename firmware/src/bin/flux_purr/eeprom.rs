@@ -2191,12 +2191,34 @@ pub(crate) fn adjustable_mode_for_request(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(target_arch = "xtensa", allow(dead_code))]
 pub(crate) fn should_blank_heater_for_adjustable_request(
-    _current_request_mv: u16,
-    _next_request_mv: u16,
+    current_request_mv: u16,
+    next_request_mv: u16,
     mode_changed: bool,
 ) -> bool {
+    mode_changed || current_request_mv.abs_diff(next_request_mv) > HEATER_PPS_REQUEST_STEP_MV
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+pub(crate) fn should_blank_heater_for_pps_range_change(
+    current_request_mv: u16,
+    next_request_mv: u16,
+    mode_changed: bool,
+    pps_min_mv: u16,
+    pps_max_mv: u16,
+) -> bool {
     mode_changed
+        || !matches!(
+            (current_request_mv, next_request_mv),
+            (current, next)
+                if current >= pps_min_mv
+                    && current <= pps_max_mv
+                    && next >= pps_min_mv
+                    && next <= pps_max_mv
+                    && current.abs_diff(next) <= HEATER_PPS_REQUEST_STEP_MV
+        )
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

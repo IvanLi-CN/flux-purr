@@ -35,6 +35,8 @@ pub(crate) use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use embassy_sync::mutex::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 #[cfg(target_arch = "xtensa")]
+pub(crate) use embassy_sync::watch::Watch;
+#[cfg(target_arch = "xtensa")]
 pub(crate) use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
@@ -98,11 +100,13 @@ pub(crate) use flux_purr_firmware::adapters::fusb302b::SinkPhase;
 pub(crate) use flux_purr_firmware::adapters::pd::SourceCapabilities;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::adapters::pd::{
-    Contract, ContractKind, ControllerKind, FUSB302B_PPS_MAX_MV,
+    ConfirmedActiveContract, Contract, ContractKind, ControllerKind, FUSB302B_PPS_MAX_MV,
+    PdContractRequest, PdContractRequestError, PdContractRequestMode, SourceCapabilitiesView,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::adapters::pd::{
-    FUSB302B_PPS_MIN_MV, GUARANTEED_HEATER_MIN_MV, MAX_HEATER_CONTRACT_MA, MIN_HEATER_CONTRACT_MA,
+    FUSB302B_PPS_MIN_MV, GUARANTEED_HEATER_MIN_MV, MAX_HEATER_CONTRACT_MA, MAX_SOURCE_PDOS,
+    MIN_HEATER_CONTRACT_MA,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::board::s3_frontpanel;

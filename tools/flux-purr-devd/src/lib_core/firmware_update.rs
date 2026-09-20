@@ -7,6 +7,9 @@ pub(crate) fn validate_manual_pps_against_status(
 ) -> Result<(), HttpError> {
     validate_pps_voltage_against_status(millivolts, status)?;
     let Some(max_ma) = status.pps_capability_max_ma else {
+        if status.pd_controller.as_deref() == Some("fusb302b") && status.pd_state == "ready" {
+            return Ok(());
+        }
         return Err(HttpError::bad_request(
             "manual_pps_no_capability",
             "PPS capability is unavailable.",

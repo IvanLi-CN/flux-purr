@@ -61,9 +61,10 @@ where
         }
     };
     let target_ma = context.manual_pps.target_ma.unwrap_or(0);
-    if !context
-        .pd_observation
-        .is_some_and(|observation| observation.status.pd_active)
+    if context.pd_port.controller_kind() != ControllerKind::Fusb302b
+        && !context
+            .pd_observation
+            .is_some_and(|observation| observation.status.pd_active)
     {
         context.manual_pps.fail(ManualPpsError::PdNotReady);
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
@@ -77,7 +78,15 @@ where
     ) {
         return Some(false);
     }
-    match context.pd_port.request_pps_voltage(target_mv) {
+    let Ok(request) = PdContractRequest::pps(target_mv, target_ma) else {
+        context.manual_pps.fail(ManualPpsError::InvalidCurrent);
+        apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+        return Some(false);
+    };
+    match context
+        .pd_port
+        .request_pps_contract_for(PowerIntentOwner::ManualOperator, request)
+    {
         PdContractRequestState::Confirmed => {
             context.manual_pps.applied_mv = Some(target_mv);
             info!(
@@ -632,10 +641,18 @@ where
     else {
         return Some(false);
     };
-    match context.pd_port.request_pps_voltage(request.request_mv) {
+    let Ok(request_contract) = PdContractRequest::pps(request.request_mv, capability_max_ma) else {
+        return Some(fallback_from_adjustable_request(context).await);
+    };
+    match context
+        .pd_port
+        .request_pps_contract_for(PowerIntentOwner::AutomaticThermal, request_contract)
+    {
         PdContractRequestState::Confirmed => {}
         PdContractRequestState::Pending => {
-            apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+            if request.blank_heater {
+                apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+            }
             return Some(false);
         }
         PdContractRequestState::Failed => {
@@ -674,27 +691,14 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn apply_pps_voltage_request<PWM>(
+fn pps_request_mv_for_context<PWM>(
     context: &mut HeaterPowerOutputContext<'_, PWM>,
     manual_pps_active: bool,
-    safe_max_mv: u16,
-    source_request_ceiling_mv: u16,
+    current_request_mv: u16,
+    idle_request_mv: u16,
     control_floor_mv: u16,
-) -> bool
-where
-    PWM: SetDutyCycle,
-{
-    let HeaterPowerBackend::PpsMos {
-        idle_request_mv,
-        pps_max_mv,
-        current_mode,
-        current_request_mv,
-        next_request_at_ms,
-        ..
-    } = *context.backend
-    else {
-        return false;
-    };
+    source_request_ceiling_mv: u16,
+) -> u16 {
     let automatic_request_mv = heater_adjustable_request_mv(
         context.duty_percent,
         context.heater_enabled,
@@ -703,7 +707,7 @@ where
         control_floor_mv,
         source_request_ceiling_mv,
     );
-    let request_mv = if manual_pps_active {
+    if manual_pps_active {
         automatic_request_mv
     } else {
         context
@@ -719,7 +723,40 @@ where
                 now_ms: context.now_ms,
             })
             .unwrap_or(automatic_request_mv)
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) async fn apply_pps_voltage_request<PWM>(
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
+    manual_pps_active: bool,
+    safe_max_mv: u16,
+    source_request_ceiling_mv: u16,
+    control_floor_mv: u16,
+) -> bool
+where
+    PWM: SetDutyCycle,
+{
+    let HeaterPowerBackend::PpsMos {
+        pps_min_mv,
+        idle_request_mv,
+        pps_max_mv,
+        current_mode,
+        current_request_mv,
+        next_request_at_ms,
+        ..
+    } = *context.backend
+    else {
+        return false;
     };
+    let request_mv = pps_request_mv_for_context(
+        context,
+        manual_pps_active,
+        current_request_mv,
+        idle_request_mv,
+        control_floor_mv,
+        source_request_ceiling_mv,
+    );
     let request_mode = adjustable_mode_for_request(request_mv, pps_max_mv);
     let mode_changed = !manual_pps_active && current_mode != Some(request_mode);
     let voltage_changed = !manual_pps_active && current_request_mv != request_mv;
@@ -730,8 +767,13 @@ where
         current_request_mv,
         context.warmup_soft_start_percent,
     );
-    let blank_heater =
-        should_blank_heater_for_adjustable_request(current_request_mv, request_mv, mode_changed);
+    let blank_heater = should_blank_heater_for_pps_range_change(
+        current_request_mv,
+        request_mv,
+        mode_changed,
+        pps_min_mv,
+        pps_max_mv,
+    );
     if gate_duty_percent == 0 || blank_heater {
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
     }

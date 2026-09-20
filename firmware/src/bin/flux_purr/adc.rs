@@ -504,7 +504,7 @@ pub(crate) enum Fusb302bReceivedResetAction {
 #[cfg(target_arch = "xtensa")]
 pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {
     PhyConfig {
-        pd_revision: PdRevision::Rev20,
+        pd_revision: PdRevision::Rev30,
         power_role: PowerRole::Sink,
         data_role: DataRole::Ufp,
         auto_goodcrc,
@@ -636,7 +636,7 @@ impl Fusb302bRuntime {
         Self {
             policy: fusb302b::SinkPolicy::new(
                 FUSB302B_INITIAL_PPS_REQUEST_MV,
-                MAX_HEATER_CONTRACT_MA,
+                MIN_HEATER_CONTRACT_MA,
             ),
             polarity: None,
             next_message_id: 0,
@@ -854,6 +854,10 @@ impl Fusb302bRuntime {
         self.policy.active_contract()
     }
 
+    pub(crate) fn confirmed_active_contract(&self) -> Option<ConfirmedActiveContract> {
+        self.policy.confirmed_active_contract()
+    }
+
     pub(crate) fn source_capabilities(&self) -> Option<SourceCapabilities> {
         self.policy.source_capabilities()
     }
@@ -862,43 +866,38 @@ impl Fusb302bRuntime {
         !matches!(self.policy.phase(), SinkPhase::Fault)
     }
 
-    pub(crate) async fn request_pps_voltage(
+    pub(crate) async fn request_contract(
         &mut self,
         i2c: &mut PdI2c<'_>,
-        requested_mv: u16,
+        request: PdContractRequest,
         now: PdTimestamp,
     ) -> PdContractRequestState {
         let now_ms = now.as_millis();
-        let active = self.policy.active_contract();
-        if active.kind == ContractKind::Pps && active.voltage_mv == requested_mv {
+        if self
+            .policy
+            .confirmed_active_contract()
+            .is_some_and(|active| request_matches_active(request, Some(active)))
+        {
             return PdContractRequestState::Confirmed;
         }
         if matches!(
             self.policy.phase(),
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
         ) {
-            return PdContractRequestState::Pending;
-        }
-        if active.kind == ContractKind::Fixed {
-            if self.source_capabilities_refresh_pending {
+            if self.policy.pending_contract_matches(request) {
                 return PdContractRequestState::Pending;
             }
-            if !self.policy.prepare_pps_request(requested_mv) {
-                return PdContractRequestState::Failed;
-            }
-            let header = fusb302b::get_source_capabilities_header(self.next_message_id);
-            if let Err(fault) = self.transmit(i2c, header, &[]).await {
-                let _ = self
-                    .recover_transient_transport_fault(i2c, fault, now)
-                    .await;
-                return PdContractRequestState::Failed;
-            }
-            self.source_capabilities_refresh_pending = true;
-            self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
-            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
-            return PdContractRequestState::Pending;
+            self.policy.cancel_pending_request();
         }
-        let Some(rdo) = self.policy.request_pps_voltage(requested_mv) else {
+        if self.policy.active_contract().kind == ContractKind::Fixed
+            && request.mode == PdContractRequestMode::Pps
+        {
+            if !self.policy.prepare_contract_refresh(request) {
+                return PdContractRequestState::Failed;
+            }
+            return self.refresh_source_capabilities(i2c, now).await;
+        }
+        let Some(rdo) = self.policy.request_contract(request) else {
             return PdContractRequestState::Failed;
         };
         let header = fusb302b::request_header(self.next_message_id);
@@ -910,6 +909,32 @@ impl Fusb302bRuntime {
         }
         self.last_request_at_ms = Some(now_ms);
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
+        PdContractRequestState::Pending
+    }
+
+    pub(crate) async fn refresh_source_capabilities(
+        &mut self,
+        i2c: &mut PdI2c<'_>,
+        now: PdTimestamp,
+    ) -> PdContractRequestState {
+        if self.source_capabilities_refresh_pending {
+            return PdContractRequestState::Pending;
+        }
+        if self.policy.phase() == SinkPhase::Fault {
+            return PdContractRequestState::Failed;
+        }
+        let now_ms = now.as_millis();
+        let header = fusb302b::get_source_capabilities_header(self.next_message_id);
+        if let Err(fault) = self.transmit(i2c, header, &[]).await {
+            let _ = self
+                .recover_transient_transport_fault(i2c, fault, now)
+                .await;
+            return PdContractRequestState::Failed;
+        }
+        self.source_capabilities_refresh_pending = true;
+        self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
+        self.last_source_capabilities_request_at_ms = Some(now_ms);
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
         PdContractRequestState::Pending
     }
 
@@ -931,38 +956,6 @@ impl Fusb302bRuntime {
             return PdContractRequestState::Pending;
         }
         let Some(rdo) = self.policy.request_automatic_idle_contract() else {
-            return PdContractRequestState::Failed;
-        };
-        let header = fusb302b::request_header(self.next_message_id);
-        if let Err(fault) = self.transmit(i2c, header, &rdo).await {
-            let _ = self
-                .recover_transient_transport_fault(i2c, fault, now)
-                .await;
-            return PdContractRequestState::Failed;
-        }
-        self.last_request_at_ms = Some(now_ms);
-        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
-        PdContractRequestState::Pending
-    }
-
-    pub(crate) async fn request_fixed_voltage(
-        &mut self,
-        i2c: &mut PdI2c<'_>,
-        requested_mv: u16,
-        now: PdTimestamp,
-    ) -> PdContractRequestState {
-        let now_ms = now.as_millis();
-        let active = self.policy.active_contract();
-        if active.kind == ContractKind::Fixed && active.voltage_mv == requested_mv {
-            return PdContractRequestState::Confirmed;
-        }
-        if matches!(
-            self.policy.phase(),
-            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-        ) {
-            return PdContractRequestState::Pending;
-        }
-        let Some(rdo) = self.policy.request_fixed_voltage(requested_mv) else {
             return PdContractRequestState::Failed;
         };
         let header = fusb302b::request_header(self.next_message_id);

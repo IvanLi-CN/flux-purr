@@ -26,6 +26,8 @@ pub(crate) mod pd_protocol;
 pub(crate) mod pd_service;
 #[path = "power.rs"]
 pub(crate) mod power;
+#[path = "power_domain.rs"]
+pub(crate) mod power_domain;
 #[path = "runtime_loop.rs"]
 pub(crate) mod runtime_loop;
 #[path = "support.rs"]
@@ -63,6 +65,8 @@ pub(crate) use pd_protocol::*;
 pub(crate) use pd_service::*;
 #[allow(unused_imports)]
 pub(crate) use power::*;
+#[allow(unused_imports)]
+pub(crate) use power_domain::*;
 #[allow(unused_imports)]
 pub(crate) use runtime_loop::*;
 #[allow(unused_imports)]

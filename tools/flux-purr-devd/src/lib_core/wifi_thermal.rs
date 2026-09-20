@@ -1623,6 +1623,9 @@ pub(crate) fn validate_pps_voltage_against_status(
 ) -> Result<(), HttpError> {
     let (Some(min_mv), Some(max_mv)) = (status.pps_capability_min_mv, status.pps_capability_max_mv)
     else {
+        if status.pd_controller.as_deref() == Some("fusb302b") && status.pd_state == "ready" {
+            return Ok(());
+        }
         return Err(HttpError::bad_request(
             "manual_pps_no_capability",
             "PPS capability is unavailable.",
@@ -1656,6 +1659,7 @@ pub(crate) fn validate_manual_pps_request_against_status(
         .manual_pps_ma
         .or(status.manual_pps_ma)
         .or(status.pps_capability_max_ma)
+        .or_else(|| effective_pps_current_capability_ma(status))
         .ok_or_else(|| HttpError::bad_request("invalid_manual_pps", "manualPpsMa is required."))?;
     validate_manual_pps_against_status(manual_pps_mv, manual_pps_ma, status)
 }

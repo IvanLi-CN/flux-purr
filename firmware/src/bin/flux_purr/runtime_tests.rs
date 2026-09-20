@@ -456,11 +456,11 @@ fn fusb302b_received_resets_do_not_request_cc_reinitialization() {
 }
 
 #[test]
-fn fusb302b_phy_uses_pd20_for_automatic_goodcrc() {
+fn fusb302b_pps_transport_uses_pd30_revision() {
     assert!(RUNTIME_IMPLEMENTATION.contains(
-        "pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {\n    PhyConfig {\n        pd_revision: PdRevision::Rev20,"
+        "pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {\n    PhyConfig {\n        pd_revision: PdRevision::Rev30,"
     ));
-    assert!(!RUNTIME_IMPLEMENTATION.contains("pd_revision: PdRevision::Rev30"));
+    assert!(!RUNTIME_IMPLEMENTATION.contains("pd_revision: PdRevision::Rev20"));
 }
 
 #[test]
@@ -771,6 +771,42 @@ fn fusb302b_capability_bridge_preserves_each_usable_apdo() {
         adjustable_mode_for_request(24_000, 28_000),
         ch224q::AdjustableVoltageMode::Pps
     );
+}
+
+#[test]
+fn fusb302b_capability_refresh_preserves_manual_pps_intent() {
+    let capabilities = ch224q::AdjustablePowerCapabilities {
+        pps_min_mv: Some(5_500),
+        pps_max_mv: Some(21_000),
+        pps_max_ma: Some(5_000),
+        pps_covers_20v: true,
+        pps_apdos: [
+            Some(ch224q::PpsApdo {
+                min_mv: 5_500,
+                max_mv: 21_000,
+                max_ma: 5_000,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ],
+        ..ch224q::AdjustablePowerCapabilities::default()
+    };
+    let mut manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+    manual
+        .enable(ManualPpsOwner::Debug, 17_500, Some(3_000))
+        .unwrap();
+    manual.applied_mv = Some(17_500);
+
+    manual.refresh_fusb302b_capabilities_preserving_intent(Some(capabilities));
+
+    assert!(manual.enabled);
+    assert_eq!(manual.target_mv, Some(17_500));
+    assert_eq!(manual.target_ma, Some(3_000));
+    assert_eq!(manual.applied_mv, None);
 }
 
 #[test]

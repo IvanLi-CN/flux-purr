@@ -79,9 +79,41 @@ impl RuntimeLanInputOutcome {
 }
 
 #[cfg(target_arch = "xtensa")]
+fn power_state_observation(state: PowerState) -> Option<PdStatusObservation> {
+    if !state.available {
+        return None;
+    }
+    let active = state.active?;
+    let kind = match active.mode {
+        PdContractRequestMode::Fixed => ContractKind::Fixed,
+        PdContractRequestMode::Pps => ContractKind::Pps,
+    };
+    let status_raw = 1 << 3;
+    Some(PdStatusObservation {
+        status_raw,
+        status: Status::from_register(status_raw),
+        current_raw: 0,
+        current_ma: active.operating_current_ma,
+        contract_voltage_mv: Some(active.voltage_mv),
+        contract: Contract {
+            kind,
+            object_position: 0,
+            voltage_mv: active.voltage_mv,
+            current_ma: active.operating_current_ma,
+        },
+    })
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
     let mut needs_redraw = false;
-    let current_pd_observation = state.pd_port.observation();
+    let current_pd_observation = match state.power_state_subscription.try_changed() {
+        Some(power_state) => {
+            state.power_state = power_state;
+            power_state_observation(power_state)
+        }
+        None => state.last_pd_observation,
+    };
     if current_pd_observation.is_none() {
         HeaterPwmGate::force_off();
     }
@@ -1350,14 +1382,16 @@ pub(crate) fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) 
     if state.pd_port.controller_kind() != ControllerKind::Fusb302b {
         return false;
     }
-    let capabilities = state.pd_port.capabilities();
+    let capabilities = adjustable_capabilities_from_view(state.power_state.source_capabilities);
     if capabilities == state.last_fusb302b_power_capabilities {
         return false;
     }
     state.last_fusb302b_power_capabilities = capabilities;
     state.heater_power_backend =
         refresh_fusb302b_heater_power_backend(state.heater_power_backend, capabilities);
-    state.manual_pps_state = ManualPpsState::from_fusb302b_capabilities(capabilities);
+    state
+        .manual_pps_state
+        .refresh_fusb302b_capabilities_preserving_intent(capabilities);
     state.hold_pps_governor = HoldPpsGovernor::new();
     info!("fusb302b source capabilities changed; refreshed heater power bounds");
     true

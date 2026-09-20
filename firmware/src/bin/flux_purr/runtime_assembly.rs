@@ -117,6 +117,12 @@ macro_rules! build_runtime_loop_state {
         let rtd_adc_pin = rtd_adc_pin.expect("RTD ADC initialized before runtime");
         let adc_curve = Some(adc_curve.expect("ADC curve initialized before runtime"));
         let runtime_started_ms = pd_runtime_started_ms;
+        let mut power_state_subscription = pd_port
+            .subscribe_power_state()
+            .expect("power state receiver capacity is reserved for the runtime loop");
+        let power_state = power_state_subscription
+            .try_get()
+            .unwrap_or_else(PowerState::unavailable);
         let last_control_ms = 0;
         let next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
         let heater_control_timing = HeaterControlTiming::default();
@@ -156,6 +162,8 @@ macro_rules! build_runtime_loop_state {
             controller,
             eeprom_i2c,
             pd_port,
+            power_state_subscription,
+            power_state,
             fan_enable,
             fan_pwm,
             heater_pwm,

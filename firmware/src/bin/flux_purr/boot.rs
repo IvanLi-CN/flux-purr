@@ -57,6 +57,8 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) controller: FrontPanelInputController,
     pub(crate) eeprom_i2c: I2c<'static>,
     pub(crate) pd_port: PdPort,
+    pub(crate) power_state_subscription: PowerStateSubscription<'static>,
+    pub(crate) power_state: PowerState,
     pub(crate) fan_enable: Output<'static>,
     pub(crate) fan_pwm: RuntimePwm0,
     pub(crate) heater_pwm: RuntimePwm1,
