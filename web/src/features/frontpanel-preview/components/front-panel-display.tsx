@@ -460,7 +460,7 @@ function drawDashboardScreen(
         ? palette.cyan
         : palette.disabled
 
-  fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
+  fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.dashboardBg)
   fillRect(ctx, 4, 4, 72, 36, palette.panelStrong)
   if (theme === 'light') {
     drawSevenSegmentNumber(ctx, valueParts.integer, digitsX + 1, 9, darkenRgb565Color(valueColor))

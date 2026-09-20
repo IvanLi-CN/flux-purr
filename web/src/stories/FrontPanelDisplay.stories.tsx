@@ -234,24 +234,28 @@ export const DesignSpec: Story = {
 export const KeyTestIdle: Story = {
   args: {
     screen: frontPanelStoryStates.keyTestIdle,
+    theme: 'light',
   },
 }
 
 export const KeyTestShort: Story = {
   args: {
     screen: frontPanelStoryStates.keyTestShort,
+    theme: 'light',
   },
 }
 
 export const KeyTestDouble: Story = {
   args: {
     screen: frontPanelStoryStates.keyTestDouble,
+    theme: 'light',
   },
 }
 
 export const KeyTestLong: Story = {
   args: {
     screen: frontPanelStoryStates.keyTestLong,
+    theme: 'light',
   },
 }
 
@@ -301,60 +305,70 @@ export const DashboardDark: Story = {
 export const DashboardManual: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardManual,
+    theme: 'light',
   },
 }
 
 export const DashboardManualPps: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardManualPps,
+    theme: 'light',
   },
 }
 
 export const DashboardFanOff: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardFanOff,
+    theme: 'light',
   },
 }
 
 export const DashboardFanAuto: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardFanAuto,
+    theme: 'light',
   },
 }
 
 export const DashboardFanRun: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardFanRun,
+    theme: 'light',
   },
 }
 
 export const DashboardOvertempA: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardOvertempA,
+    theme: 'light',
   },
 }
 
 export const DashboardOvertempB: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardOvertempB,
+    theme: 'light',
   },
 }
 
 export const Menu: Story = {
   args: {
     screen: frontPanelStoryStates.menu,
+    theme: 'light',
   },
 }
 
 export const PresetTemp: Story = {
   args: {
     screen: frontPanelStoryStates.presetTemp,
+    theme: 'light',
   },
 }
 
 export const ActiveCooling: Story = {
   args: {
     screen: frontPanelStoryStates.activeCooling,
+    theme: 'light',
   },
 }
 
@@ -385,12 +399,14 @@ export const ActiveCoolingEvidence: Story = {
 export const WifiInfo: Story = {
   args: {
     screen: frontPanelStoryStates.wifiInfo,
+    theme: 'light',
   },
 }
 
 export const DeviceInfo: Story = {
   args: {
     screen: frontPanelStoryStates.deviceInfo,
+    theme: 'light',
   },
 }
 

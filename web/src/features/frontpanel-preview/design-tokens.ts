@@ -2,6 +2,7 @@ export type FrontPanelTheme = 'light' | 'dark'
 
 export type FrontPanelPalette = {
   bg: string
+  dashboardBg: string
   panel: string
   panelStrong: string
   border: string
@@ -39,6 +40,7 @@ export const frontPanelPalette = {
 
 const lightFrontPanelPalette: FrontPanelPalette = {
   bg: rgb565ToCss(29, 59, 29),
+  dashboardBg: '#ffffff',
   panel: '#ffffff',
   panelStrong: '#ffffff',
   border: rgb565ToCss(17, 35, 17),
@@ -53,7 +55,7 @@ const lightFrontPanelPalette: FrontPanelPalette = {
 }
 
 export const frontPanelThemePalettes: Record<FrontPanelTheme, FrontPanelPalette> = {
-  dark: frontPanelPalette,
+  dark: { ...frontPanelPalette, dashboardBg: frontPanelPalette.bg },
   light: lightFrontPanelPalette,
 }
 
