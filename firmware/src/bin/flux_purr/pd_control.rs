@@ -362,6 +362,8 @@ pub(crate) struct ManualPpsState {
     pub(crate) error: Option<ManualPpsError>,
     pub(crate) automatic_restore_pending: bool,
     pub(crate) allow_pending_refresh: bool,
+    pub(crate) pending_power_ticket: Option<PowerTicket>,
+    pub(crate) pending_power_request_mv: Option<u16>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -382,6 +384,8 @@ impl Default for ManualPpsState {
             error: None,
             automatic_restore_pending: false,
             allow_pending_refresh: false,
+            pending_power_ticket: None,
+            pending_power_request_mv: None,
         }
     }
 }
@@ -1435,6 +1439,8 @@ impl ManualPpsState {
     ) {
         let previous = *self;
         let mut refreshed = Self::from_fusb302b_capabilities(capabilities);
+        refreshed.pending_power_ticket = previous.pending_power_ticket;
+        refreshed.pending_power_request_mv = previous.pending_power_request_mv;
         if previous.enabled {
             refreshed.enabled = true;
             refreshed.owner = previous.owner;

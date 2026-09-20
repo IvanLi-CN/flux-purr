@@ -218,8 +218,17 @@ where
             },
         );
         for _ in 0..(20 / PD_SNAPSHOT_REFRESH_INTERVAL_MS) {
-            EmbassyTimer::after_millis(PD_SNAPSHOT_REFRESH_INTERVAL_MS).await;
-            *last_pd_observation = PowerCoordinatorClient::new().latest().observation();
+            match select(
+                power_state_subscription.changed(),
+                EmbassyTimer::after_millis(PD_SNAPSHOT_REFRESH_INTERVAL_MS),
+            )
+            .await
+            {
+                Either::First(power_state) => {
+                    *last_pd_observation = power_state.observation();
+                }
+                Either::Second(_) => {}
+            }
         }
         elapsed_ms = elapsed_ms.saturating_add(20);
 

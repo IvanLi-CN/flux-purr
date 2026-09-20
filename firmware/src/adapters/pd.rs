@@ -69,12 +69,21 @@ impl DegradedReason {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Contract {
     pub kind: ContractKind,
-    pub object_position: u8,
+    pub(crate) object_position: u8,
     pub voltage_mv: u16,
     pub current_ma: u16,
 }
 
 impl Contract {
+    pub const fn observed(kind: ContractKind, voltage_mv: u16, current_ma: u16) -> Self {
+        Self {
+            kind,
+            object_position: 0,
+            voltage_mv,
+            current_ma,
+        }
+    }
+
     pub const fn none() -> Self {
         Self {
             kind: ContractKind::None,
@@ -109,14 +118,14 @@ impl Contract {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FixedPdo {
-    pub object_position: u8,
+    pub(crate) object_position: u8,
     pub voltage_mv: u16,
     pub max_ma: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PpsApdo {
-    pub object_position: u8,
+    pub(crate) object_position: u8,
     pub min_mv: u16,
     pub max_mv: u16,
     pub max_ma: u16,

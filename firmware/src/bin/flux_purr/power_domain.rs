@@ -187,12 +187,7 @@ impl PowerState {
             current_raw: 0,
             current_ma: active.operating_current_ma,
             contract_voltage_mv: Some(active.voltage_mv),
-            contract: Contract {
-                kind,
-                object_position: 0,
-                voltage_mv: active.voltage_mv,
-                current_ma: active.operating_current_ma,
-            },
+            contract: Contract::observed(kind, active.voltage_mv, active.operating_current_ma),
         })
     }
 }
@@ -250,7 +245,7 @@ static PD_SERVICE_TERMINALS: Channel<
     POWER_COMMANDS_CAPACITY,
 > = Channel::new();
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const POWER_COMMANDS_CAPACITY: usize = 6;
 
 #[cfg(target_arch = "xtensa")]
@@ -265,8 +260,35 @@ static POWER_STATE: Watch<CriticalSectionRawMutex, PowerState, 5> =
 static POWER_STATE_LATEST: BlockingMutex<CriticalSectionRawMutex, RefCell<PowerState>> =
     BlockingMutex::new(RefCell::new(PowerState::unavailable()));
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const POWER_TICKET_SLOT_COUNT: usize = POWER_COMMANDS_CAPACITY;
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn reserve_ticket_slot(slots: &AtomicU8) -> Option<usize> {
+    let mask = (1u8 << POWER_TICKET_SLOT_COUNT) - 1;
+    let mut current = slots.load(Ordering::Acquire);
+    loop {
+        let free = (!current) & mask;
+        let slot = free.trailing_zeros() as usize;
+        if slot >= POWER_TICKET_SLOT_COUNT {
+            return None;
+        }
+        match slots.compare_exchange_weak(
+            current,
+            current | (1u8 << slot),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Some(slot),
+            Err(next) => current = next,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn release_ticket_slot(slots: &AtomicU8, slot: usize) {
+    slots.fetch_and(!(1u8 << slot), Ordering::Release);
+}
 
 #[cfg(target_arch = "xtensa")]
 static POWER_TICKET_RESULTS: [Signal<CriticalSectionRawMutex, (PowerTicket, TicketOutcome)>;
@@ -285,6 +307,62 @@ pub(crate) fn request_matches_active(
             && active.voltage_mv == request.voltage_mv
             && active.operating_current_ma == request.operating_current_ma
     })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn pps_adjustment_is_continuous(state: PowerState, request: PdContractRequest) -> bool {
+    if !state.available || state.failure.is_some() || request.mode != PdContractRequestMode::Pps {
+        return false;
+    }
+    state.active.is_some_and(|active| {
+        active.mode == PdContractRequestMode::Pps
+            && active.operating_current_ma == request.operating_current_ma
+            && active.pps_range.is_some_and(|range| {
+                range.min_mv <= request.voltage_mv
+                    && request.voltage_mv <= range.max_mv
+                    && request.operating_current_ma <= range.max_current_ma
+            })
+    })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn should_join_refresh(refresh: bool, inflight_refresh: bool) -> bool {
+    refresh && inflight_refresh
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn terminal_matches_inflight(
+    inflight: Option<(PowerIntentOwner, PowerTicket)>,
+    ticket: PowerTicket,
+) -> bool {
+    inflight.is_some_and(|(_, current)| current == ticket)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn active_owner_after_terminal(
+    current: Option<PowerIntentOwner>,
+    completed: Option<PowerIntentOwner>,
+    was_refresh: bool,
+    was_idle: bool,
+    outcome: TicketOutcome,
+) -> Option<PowerIntentOwner> {
+    if was_refresh
+        && !matches!(
+            outcome,
+            TicketOutcome::TimedOut | TicketOutcome::TransportFault | TicketOutcome::Detached
+        )
+    {
+        current
+    } else if matches!(outcome, TicketOutcome::Confirmed(_)) && !was_idle {
+        completed
+    } else {
+        None
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn may_dispatch_pd_command(terminal_already_pending: bool) -> bool {
+    !terminal_already_pending
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -375,25 +453,7 @@ impl PowerCoordinatorClient {
     }
 
     fn next_ticket(&self, owner: Option<PowerIntentOwner>) -> Option<PowerTicket> {
-        let mut slots = POWER_TICKET_SLOTS.load(Ordering::Acquire);
-        let mask = (1u8 << POWER_TICKET_SLOT_COUNT) - 1;
-        let slot = loop {
-            let free = (!slots) & mask;
-            let slot = free.trailing_zeros() as usize;
-            if slot >= POWER_TICKET_SLOT_COUNT {
-                return None;
-            }
-            let next = slots | (1u8 << slot);
-            match POWER_TICKET_SLOTS.compare_exchange_weak(
-                slots,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break slot,
-                Err(current) => slots = current,
-            }
-        };
+        let slot = reserve_ticket_slot(&POWER_TICKET_SLOTS)?;
         static NEXT_TICKET: AtomicU16 = AtomicU16::new(1);
         Some(PowerTicket {
             owner,
@@ -403,7 +463,7 @@ impl PowerCoordinatorClient {
     }
 
     fn release_ticket_slot(ticket: PowerTicket) {
-        POWER_TICKET_SLOTS.fetch_and(!(1u8 << ticket.result_slot), Ordering::Release);
+        release_ticket_slot(&POWER_TICKET_SLOTS, ticket.result_slot);
     }
 
     pub(crate) fn request(
@@ -596,7 +656,7 @@ fn supersede_or_join_power_command(
     inflight_refresh: &mut bool,
     joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
 ) -> bool {
-    if refresh && *inflight_refresh {
+    if should_join_refresh(refresh, *inflight_refresh) {
         if joined_refresh.push(ticket).is_err() {
             signal_ticket(ticket, TicketOutcome::Rejected);
         }
@@ -631,7 +691,7 @@ fn supersede_or_join_power_command(
     }
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 fn owner_is_superseded(
     owner: Option<PowerIntentOwner>,
     active_owner: Option<PowerIntentOwner>,
@@ -693,15 +753,17 @@ fn dispatch_power_terminal(
     active_owner: &mut Option<PowerIntentOwner>,
     joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
 ) {
-    if !inflight.is_some_and(|(_, current)| current == ticket) {
+    if !terminal_matches_inflight(*inflight, ticket) {
         return;
     }
     let completed_owner = inflight.map(|(owner, _)| owner);
-    *active_owner = if matches!(outcome, TicketOutcome::Confirmed(_)) && !*inflight_idle {
-        completed_owner
-    } else {
-        None
-    };
+    *active_owner = active_owner_after_terminal(
+        *active_owner,
+        completed_owner,
+        *inflight_refresh,
+        *inflight_idle,
+        outcome,
+    );
     signal_ticket(ticket, outcome);
     *inflight = None;
     *inflight_refresh = false;
@@ -799,5 +861,120 @@ mod tests {
         );
         assert_eq!(state.protocol, PowerProtocol::WaitingForAccept);
         assert_eq!(state.failure, None);
+    }
+
+    #[test]
+    fn six_ticket_slots_report_busy_until_a_terminal_is_consumed() {
+        let slots = AtomicU8::new(0);
+        let reserved = (0..POWER_TICKET_SLOT_COUNT)
+            .map(|_| reserve_ticket_slot(&slots).expect("slot available"))
+            .collect::<heapless::Vec<_, POWER_TICKET_SLOT_COUNT>>();
+
+        assert_eq!(reserved.len(), 6);
+        assert_eq!(reserve_ticket_slot(&slots), None);
+        release_ticket_slot(&slots, reserved[2]);
+        assert_eq!(reserve_ticket_slot(&slots), Some(reserved[2]));
+    }
+
+    #[test]
+    fn ticket_terminal_is_accepted_once_only_for_the_inflight_ticket() {
+        let owner = PowerIntentOwner::Calibration;
+        let ticket = PowerTicket {
+            owner: Some(owner),
+            sequence: 1,
+            result_slot: 0,
+        };
+        let other = PowerTicket {
+            sequence: 2,
+            ..ticket
+        };
+        let inflight = Some((owner, ticket));
+
+        assert!(terminal_matches_inflight(inflight, ticket));
+        assert!(!terminal_matches_inflight(inflight, other));
+        assert!(!terminal_matches_inflight(None, ticket));
+    }
+
+    #[test]
+    fn refresh_joins_and_retains_the_confirmed_intent_owner() {
+        let owner = PowerIntentOwner::Calibration;
+        assert!(should_join_refresh(true, true));
+        assert!(!should_join_refresh(false, true));
+        assert!(!should_join_refresh(true, false));
+        assert!(!owner_is_superseded(Some(owner), Some(owner)));
+        assert!(owner_is_superseded(
+            Some(PowerIntentOwner::AutomaticThermal),
+            Some(owner),
+        ));
+        assert_eq!(
+            active_owner_after_terminal(
+                Some(owner),
+                Some(PowerIntentOwner::AutomaticThermal),
+                true,
+                false,
+                TicketOutcome::CapabilitiesRefreshed,
+            ),
+            Some(owner),
+        );
+        assert_eq!(
+            active_owner_after_terminal(
+                Some(owner),
+                Some(PowerIntentOwner::AutomaticThermal),
+                true,
+                false,
+                TicketOutcome::Rejected,
+            ),
+            Some(owner),
+        );
+    }
+
+    #[test]
+    fn pending_terminal_prevents_dequeueing_a_new_pd_command() {
+        assert!(!may_dispatch_pd_command(true));
+        assert!(may_dispatch_pd_command(false));
+    }
+
+    #[test]
+    fn continuous_pps_adjustment_requires_the_confirmed_range_and_current() {
+        use flux_purr_firmware::adapters::pd::PpsAdjustmentRange;
+
+        let active = ConfirmedActiveContract {
+            mode: PdContractRequestMode::Pps,
+            voltage_mv: 17_500,
+            operating_current_ma: 3_000,
+            pps_range: Some(PpsAdjustmentRange {
+                min_mv: 5_500,
+                max_mv: 21_000,
+                max_current_ma: 3_000,
+            }),
+        };
+        let state = PowerState {
+            protocol: PowerProtocol::Ready,
+            available: true,
+            requested: None,
+            active: Some(active),
+            source_capabilities: SourceCapabilities::empty().view(),
+            failure: None,
+        };
+
+        assert!(pps_adjustment_is_continuous(
+            state,
+            PdContractRequest::pps(18_000, 3_000).unwrap(),
+        ));
+        assert!(!pps_adjustment_is_continuous(
+            state,
+            PdContractRequest::pps(21_100, 3_000).unwrap(),
+        ));
+        assert!(!pps_adjustment_is_continuous(
+            state,
+            PdContractRequest::pps(18_000, 2_950).unwrap(),
+        ));
+        assert!(!pps_adjustment_is_continuous(
+            PowerState {
+                failure: Some(PowerFailure::TransportFault),
+                ..state
+            },
+            PdContractRequest::pps(18_000, 3_000).unwrap(),
+        ));
     }
 }

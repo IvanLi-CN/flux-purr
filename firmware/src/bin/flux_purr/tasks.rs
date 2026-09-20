@@ -83,6 +83,32 @@ pub(crate) async fn prepare_manual_pps<PWM>(
 where
     PWM: SetDutyCycle,
 {
+    if let Some(ticket) = context.manual_pps.pending_power_ticket {
+        match context.pd_port.try_take_ticket(ticket) {
+            Some(outcome) => {
+                let confirmed_mv = context.manual_pps.pending_power_request_mv;
+                context.manual_pps.pending_power_ticket = None;
+                context.manual_pps.pending_power_request_mv = None;
+                if !context.manual_pps.enabled {
+                    return None;
+                }
+                if matches!(outcome, TicketOutcome::Confirmed(_)) {
+                    context.manual_pps.applied_mv = confirmed_mv;
+                    return None;
+                }
+                context.manual_pps.fail(ManualPpsError::WriteFailed);
+                apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+                if let PdRequestState::Pending(restore_ticket) =
+                    context.pd_port.restore_automatic_idle_contract()
+                {
+                    let _ = context.pd_port.wait_for_ticket(restore_ticket).await;
+                }
+                return None;
+            }
+            None if context.manual_pps.enabled => return None,
+            None => {}
+        }
+    }
     if !context.manual_pps.enabled {
         return Some(false);
     }
@@ -131,8 +157,12 @@ where
             );
             Some(true)
         }
-        PdRequestState::Pending(_) => {
-            apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+        PdRequestState::Pending(ticket) => {
+            context.manual_pps.pending_power_ticket = Some(ticket);
+            context.manual_pps.pending_power_request_mv = Some(target_mv);
+            if context.pd_port.pps_request_requires_heater_pause(request) {
+                apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+            }
             None
         }
         PdRequestState::Failed => {

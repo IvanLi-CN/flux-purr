@@ -95,6 +95,22 @@ pub(crate) fn automatic_idle_contract_is_confirmed(
             && !capabilities.is_some_and(source_supports_fusb302b_idle_pps))
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn refresh_terminal_outcome(
+    phase: SinkPhase,
+    refresh_pending: bool,
+    has_source_capabilities: bool,
+) -> Option<TicketOutcome> {
+    match phase {
+        SinkPhase::Detached => Some(TicketOutcome::Detached),
+        SinkPhase::Fault => Some(TicketOutcome::TransportFault),
+        _ if !refresh_pending && has_source_capabilities => {
+            Some(TicketOutcome::CapabilitiesRefreshed)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct PdServiceClient;
@@ -255,6 +271,10 @@ impl PdServiceClient {
         PowerCoordinatorClient::new().refresh_capabilities()
     }
 
+    pub(crate) fn pps_request_requires_heater_pause(&self, request: PdContractRequest) -> bool {
+        !pps_adjustment_is_continuous(PowerCoordinatorClient::new().latest(), request)
+    }
+
     pub(crate) fn subscribe_power_state(&self) -> Option<PowerStateSubscription<'static>> {
         PowerCoordinatorClient::new().subscribe()
     }
@@ -263,16 +283,22 @@ impl PdServiceClient {
     pub(crate) async fn wait_for_ticket(&self, ticket: PowerTicket) -> TicketOutcome {
         PowerCoordinatorClient::new().wait(ticket).await
     }
+
+    pub(crate) fn try_take_ticket(&self, ticket: PowerTicket) -> Option<TicketOutcome> {
+        PowerCoordinatorClient::new().try_take(ticket)
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn fusb302b_status_confirms_ready_contract(
+pub(crate) fn fusb302b_status_confirms_active_contract(
     phase: SinkPhase,
     contract: Contract,
     status0: u8,
 ) -> bool {
-    phase == SinkPhase::Ready
-        && contract != Contract::none()
+    matches!(
+        phase,
+        SinkPhase::Ready | SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+    ) && contract != Contract::none()
         && status0 & FUSB302B_STATUS0_VBUSOK != 0
 }
 
@@ -281,9 +307,12 @@ async fn pd_status_observation(
     runtime: &Fusb302bRuntime,
     i2c: &mut PdI2c<'_>,
 ) -> Option<PdStatusObservation> {
+    if !runtime.service_available() || runtime.request_timed_out {
+        return None;
+    }
     let contract = runtime.active_contract();
     let status = Fusb302::new(&mut *i2c).read_status().await.ok()?;
-    if !fusb302b_status_confirms_ready_contract(runtime.policy.phase(), contract, status.status0) {
+    if !fusb302b_status_confirms_active_contract(runtime.policy.phase(), contract, status.status0) {
         return None;
     }
 
@@ -312,7 +341,7 @@ fn publish_pd_snapshot(
         Some((ticket, PendingPdOperation::Contract { request })) => {
             (Some(request), false, Some(ticket))
         }
-        Some((ticket, PendingPdOperation::Idle { .. })) => (None, true, Some(ticket)),
+        Some((ticket, PendingPdOperation::Idle)) => (None, true, Some(ticket)),
         Some((ticket, PendingPdOperation::Refresh)) => (None, false, Some(ticket)),
         None => (None, false, None),
     };
@@ -350,16 +379,15 @@ async fn process_pd_command(
 ) -> PdCommandProgress {
     match command {
         PdServiceCommand::AutomaticIdle { ticket } => {
-            let previous = runtime.confirmed_active_contract();
             match runtime
                 .request_automatic_idle_contract(i2c, PdTimestamp::now())
                 .await
             {
                 PdContractRequestState::Confirmed => {
-                    PdCommandProgress::Pending(ticket, PendingPdOperation::Idle { previous })
+                    PdCommandProgress::Pending(ticket, PendingPdOperation::Idle)
                 }
                 PdContractRequestState::Pending => {
-                    PdCommandProgress::Pending(ticket, PendingPdOperation::Idle { previous })
+                    PdCommandProgress::Pending(ticket, PendingPdOperation::Idle)
                 }
                 PdContractRequestState::Failed => {
                     PdCommandProgress::Done(ticket, TicketOutcome::Rejected)
@@ -404,12 +432,8 @@ async fn process_pd_command(
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy)]
 enum PendingPdOperation {
-    Contract {
-        request: PdContractRequest,
-    },
-    Idle {
-        previous: Option<ConfirmedActiveContract>,
-    },
+    Contract { request: PdContractRequest },
+    Idle,
     Refresh,
 }
 
@@ -458,17 +482,24 @@ fn pending_terminal(
         {
             Some(TicketOutcome::Rejected)
         }
-        PendingPdOperation::Idle { previous } if active.is_some() && active != previous => {
+        PendingPdOperation::Idle
+            if observation.is_some_and(|observation| {
+                automatic_idle_contract_is_confirmed(
+                    observation,
+                    runtime
+                        .source_capabilities()
+                        .and_then(fusb302b_adjustable_power_capabilities),
+                )
+            }) =>
+        {
             active.map(TicketOutcome::Confirmed)
         }
-        PendingPdOperation::Refresh
-            if !runtime.source_capabilities_refresh_pending
-                && observation.is_some()
-                && runtime.policy.phase() == SinkPhase::Ready =>
-        {
-            Some(TicketOutcome::CapabilitiesRefreshed)
-        }
-        PendingPdOperation::Contract { .. } | PendingPdOperation::Idle { .. }
+        PendingPdOperation::Refresh => refresh_terminal_outcome(
+            runtime.policy.phase(),
+            runtime.source_capabilities_refresh_pending,
+            runtime.source_capabilities().is_some(),
+        ),
+        PendingPdOperation::Contract { .. } | PendingPdOperation::Idle
             if active.is_none()
                 && !matches!(
                     runtime.policy.phase(),
@@ -565,6 +596,9 @@ async fn pd_service_task(mut i2c: PdI2c<'static>, mut runtime: Box<Fusb302bRunti
                 terminal_override = Some(completion);
             }
             for _ in 0..PD_SERVICE_MAX_COMMANDS_PER_TICK {
+                if !may_dispatch_pd_command(terminal_override.is_some()) {
+                    break;
+                }
                 let Ok(command) = PD_SERVICE_COMMANDS.try_receive() else {
                     break;
                 };

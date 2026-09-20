@@ -40,8 +40,10 @@
 
 ### REQ-FRM-005
 
-- The PD service contract MUST document `PD_SERVICE_COMMANDS`, `PD_SERVICE_SNAPSHOT`, FUSB302B I2C ownership, bounded service cadence, fresh-observation publication, and the heater permit/interlock behavior.
+- The PD/power-domain contract MUST document `PowerCoordinator` admission and owner arbitration, the typed Fixed/PPS request and asynchronous ticket outcome, private `PD_SERVICE_COMMANDS` and `PD_SERVICE_SNAPSHOT` boundaries, FUSB302B I2C ownership, bounded service cadence, fresh-observation publication, and the heater permit/interlock behavior.
 - The documentation MUST distinguish a PD request command from a PD status snapshot and from the heater PWM interlock.
+- Shared power state MUST distinguish requested and confirmed active contracts, include protocol availability/phase and source capabilities, and describe replay plus event-driven updates without consumer polling.
+- Bounded cross-module transports MUST identify their capacities and loss semantics; ticket terminal results MUST not be coalesced with latest-value state.
 
 ### REQ-FRM-006
 

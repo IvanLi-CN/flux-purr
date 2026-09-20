@@ -11,7 +11,11 @@
 - `REQ-FRM-001` and `REQ-FRM-002`: each file in `modules/` records responsibility, read inputs, command inputs, published state, communication mechanism, authority, physical writer, safety behavior, and source references; the matrix links the complete module set and retains cross-boundary tables.
 - `REQ-FRM-003`: the runtime-loop section records the actual `run_runtime_loop` order and the mailbox/USB execution boundary.
 - `REQ-FRM-004`: the LAN/HTTP sections cover `NetHttpState`, `HttpGate`, `CONTROL_MAILBOX`, `CONTROL_RESPONSES`, lease and revision revalidation, and snapshot reads.
-- `REQ-FRM-005`: the PD section covers `PdServiceCommand`, `PD_SERVICE_COMMANDS`, `PD_SERVICE_SNAPSHOT`, `PdI2c`, `PD_HEATER_PERMIT`, and stale-contract shutdown.
+- `REQ-FRM-005`: the Power Coordinator and PD sections cover typed
+  `PowerCoordinatorClient` requests, `POWER_COMMANDS` capacity `6`, private
+  `PD_SERVICE_COMMANDS` capacity `1`, semantic state and terminal transports,
+  `PD_SERVICE_SNAPSHOT`, `PdI2c`, `PD_HEATER_PERMIT`, and stale-contract
+  shutdown.
 - `REQ-FRM-006`: the Wi-Fi sections separate `WifiProvisioningMachine` from `wifi_task_inner`, including the bounded saving/provisioning timeouts and retry terminal state.
 - `REQ-FRM-007`: the hardware ownership section distinguishes runtime requests, final output writers, and revocation paths for heater, fan, buzzer, status light, display, and watchdog resources.
 - `REQ-FRM-008`: the shared-bus and EEPROM sections cover `SharedI2cBus`, `I2c`, `PdI2c`, chunked M24C64 access, verified publication, and `EEPROM_REQUIRED`.
@@ -22,7 +26,7 @@
 - Runtime orchestration: `firmware/src/bin/flux_purr/{runtime.rs,runtime_assembly.rs,boot.rs,runtime_loop.rs}`.
 - LAN and HTTP: `firmware/src/{net.rs,net_http.rs,lan.rs}` and `firmware/src/bin/flux_purr/lan.rs`.
 - Wi-Fi state and adapter: `firmware/src/wifi_state.rs` and `firmware/src/net.rs`.
-- PD and shared hardware boundary: `firmware/src/bin/flux_purr/{pd_service.rs,pd_control.rs,pd_protocol.rs,support.rs,adc.rs}`.
+- PD and power-domain boundary: `firmware/src/bin/flux_purr/{power_domain.rs,pd_service.rs,pd_control.rs,pd_protocol.rs,support.rs,adc.rs}`.
 - Persistence: `firmware/src/bin/flux_purr/{eeprom.rs,eeprom_snapshot.rs}`.
 - Runtime control and output helpers: `firmware/src/bin/flux_purr/{control_plane.rs,thermal.rs,fan.rs,tasks.rs,display_io.rs,frontpanel.rs,watchdog.rs}` and `firmware/src/thermal_plant.rs`.
 - Pure output domains: `firmware/src/{buzzer.rs,status_light.rs}`.

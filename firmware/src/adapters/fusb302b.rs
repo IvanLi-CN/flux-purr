@@ -447,7 +447,7 @@ pub const fn get_source_capabilities_header(message_id: u8) -> u16 {
     PD_HEADER_GET_SOURCE_CAP | PD_HEADER_SPEC_REV_30 | (((message_id & 0x07) as u16) << 9)
 }
 
-pub fn request_data_object(contract: Contract) -> Option<[u8; 4]> {
+pub(crate) fn request_data_object(contract: Contract) -> Option<[u8; 4]> {
     if contract.object_position == 0 {
         return None;
     }

@@ -86,8 +86,7 @@ fn power_state_observation(state: PowerState) -> Option<PdStatusObservation> {
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
     let mut needs_redraw = false;
-    let power_state = PowerCoordinatorClient::new().latest();
-    state.power_state = power_state;
+    let power_state = state.power_state;
     let current_pd_observation = power_state_observation(power_state);
     if current_pd_observation.is_none() {
         HeaterPwmGate::force_off();
@@ -2212,8 +2211,15 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
     loop {
-        #[cfg(feature = "web_serial")]
-        embassy_futures::yield_now().await;
+        match select(
+            state.power_state_subscription.changed(),
+            EmbassyTimer::after_millis(5),
+        )
+        .await
+        {
+            Either::First(power_state) => state.power_state = power_state,
+            Either::Second(_) => {}
+        }
         record_runtime_heartbeat();
         let elapsed_ms = Instant::now()
             .as_millis()

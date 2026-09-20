@@ -18,6 +18,7 @@ in its own file under [`../modules/`](../modules/).
 | HTTP gate and LAN mailbox | [`http-gate-and-lan-mailbox.md`](../modules/http-gate-and-lan-mailbox.md) |
 | Wi-Fi adapter and LAN transport | [`wifi-adapter-and-lan-transport.md`](../modules/wifi-adapter-and-lan-transport.md) |
 | Wi-Fi provisioning state machine | [`wifi-provisioning-state-machine.md`](../modules/wifi-provisioning-state-machine.md) |
+| Power coordinator | [`power-coordinator.md`](../modules/power-coordinator.md) |
 | PD service | [`pd-service.md`](../modules/pd-service.md) |
 | Shared I2C bus and heater PWM gate | [`shared-i2c-and-heater-pwm-gate.md`](../modules/shared-i2c-and-heater-pwm-gate.md) |
 | EEPROM persistence | [`eeprom-persistence.md`](../modules/eeprom-persistence.md) |
@@ -69,8 +70,12 @@ task remain independent owners of their own service or physical boundary.
 | LAN HTTP control write | `HttpGate::Dispatch` -> bounded `CONTROL_MAILBOX` | `runtime_process_lan` -> `lan_command_to_control_line` -> runtime control adapter | The runtime loop rechecks lease and control revision before executing; the response returns through `CONTROL_RESPONSES`. |
 | LAN identity/network read | `HttpReadGate::Snapshot` and published `LAN_RUNTIME` state | `net::lan_identity` / `net::lan_network_summary` | Read-only JSON snapshot; it bypasses the mutation mailbox. |
 | USB JSONL runtime/config command | USB response pump -> `runtime_process_usb_control_line` | Runtime loop and the supplied `ControlLineContext` | Bounded USB response frame; direct product mutation stays in the front-panel executor. |
-| PD voltage request | `PD_SERVICE_COMMANDS` | `pd_service_task` | FUSB302B policy/I2C work; acceptance is reflected later in `PD_SERVICE_SNAPSHOT`. |
-| PD readiness | `PD_SERVICE_SNAPSHOT` | Runtime loop, heater backend, status-light selection | Read-only observation; a fresh ready contract can set `PD_HEATER_PERMIT`. |
+| Power-domain contract request | `PowerCoordinatorClient::request` -> `POWER_COMMANDS` | `power_coordinator_task` -> `pd_service_task` | Typed exact Fixed/PPS intent; admission returns `Busy`, and the ticket later resolves to one terminal outcome. |
+| Capability refresh | `PowerCoordinatorClient::refresh_capabilities` | `power_coordinator_task` -> `pd_service_task` | Explicit source-capability exchange; duplicate refreshes join the in-flight operation. |
+| PD service command | Private `PD_SERVICE_COMMANDS` capacity `1` | `pd_service_task` | FUSB302B policy/I2C work; PDO/APDO selection stays private to the service. |
+| PD semantic state | `PD_SERVICE_STATE` -> `POWER_STATE` Watch | `power_coordinator_task` | Loss-tolerant latest state projection; consumers await `PowerStateSubscription::changed()`. |
+| PD ticket completion | `PD_SERVICE_TERMINALS` capacity `6` | `power_coordinator_task` -> ticket waiter | Non-lossy terminal result for each admitted command. |
+| PD readiness | `PowerState` / `PD_SERVICE_SNAPSHOT` | Runtime loop, heater backend, status-light selection | Read-only observation; only a fresh confirmed ready contract can set `PD_HEATER_PERMIT`. |
 | Buzzer feedback | `BUZZER_COMMANDS` | `run_buzzer_task` and `BuzzerArbiter` | A bounded cue request subject to arbitration; it is not a raw PWM write. |
 | Buzzer safety | `BUZZER_SAFETY_COMMAND` | `run_buzzer_task` and `BuzzerArbiter` | Protection/attention state can preempt or suppress feedback. |
 | Status light state | `STATUS_LIGHT_STATE` atomic | `run_status_light_task` | A state selection is published by the runtime loop; the task owns the RGB GPIO writes. |
@@ -239,24 +244,48 @@ task remain independent owners of their own service or physical boundary.
   `30,000 ms`, and driver/association/IPv4 failures retry at most three
   attempts before publishing `NetworkState::Error`.
 
+### Power Coordinator
+
+- Source: `firmware/src/bin/flux_purr/power_domain.rs`; key symbols are
+  `PowerCoordinatorClient`, `PowerState`, `PowerTicket`, `TicketOutcome`,
+  `POWER_COMMANDS`, `POWER_STATE`, and `power_coordinator_task`.
+- Responsibility: own bounded power-domain admission, owner arbitration,
+  ticket lifecycle, semantic state projection, and the one-way adapter to
+  `PdService`.
+- Reads: typed `PowerCommand` values, `PD_SERVICE_STATE`, and
+  `PD_SERVICE_TERMINALS`.
+- Commands / mutations: exact Fixed/PPS `PdContractRequest`, explicit
+  capability refresh, and idle; accepted commands occupy one of six bounded
+  ticket slots and resolve once.
+- Publishes: capacity-5 `POWER_STATE` Watch plus a read-only latest projection
+  and terminal `TicketOutcome` values.
+- Communication: public facade over bounded Embassy transports; consumers do
+  not receive raw channels and do not poll another module for changes.
+- Control authority: arbitration and projection only; no FUSB302B I2C or
+  physical-output writes.
+- Safety: source failure and heater PWM revocation remain owned by
+  `PdService`/`HeaterPwmGate`; requested-but-unconfirmed power never authorizes
+  heating.
+
 ### PD Service
 
 - Source: `firmware/src/bin/flux_purr/{pd_service.rs,pd_control.rs,pd_protocol.rs,adc.rs}`;
-  key symbols are `PdServiceCommand`, `PdServiceClient`,
-  `PD_SERVICE_COMMANDS`, `PD_SERVICE_SNAPSHOT`, `pd_service_task`, and
-  `publish_pd_snapshot`.
+  key symbols are `PdServiceClient`, `PD_SERVICE_SNAPSHOT`,
+  `pd_service_task`, and `publish_pd_snapshot`.
 - Responsibility: sole owner of FUSB302B policy state, protocol transactions,
   source-capability reads, contract requests, and status observation.
-- Reads: `PdI2c`, FUSB302B status/policy state, source capabilities, and
-  `PD_SERVICE_COMMANDS`.
-- Commands / mutations: `AutomaticIdle`, `FixedVoltage(u16)`, and
-  `PpsVoltage(u16)` requests. Requests are non-blocking and return
-  `Pending`, `Confirmed`, or `Failed` to the runtime caller.
+- Reads: `PdI2c`, FUSB302B status/policy state, source capabilities, and the
+  private `PD_SERVICE_COMMANDS` adapter.
+- Commands / mutations: typed contract requests, `AutomaticIdle`, and
+  `RefreshCapabilities`; protocol-object selection and exact RDO encoding stay
+  private to this service.
 - Publishes: `PD_SERVICE_SNAPSHOT` containing observation, capabilities,
   controller kind, service availability, stale-VIN guard state, and publication
-  time; it also sets or clears `PD_HEATER_PERMIT`.
-- Communication: bounded command channel capacity `8`, at most one command per
-  `5 ms` service turn, and a mutex-protected read-only snapshot.
+  time; it also sets or clears `PD_HEATER_PERMIT` and reports terminal ticket
+  outcomes.
+- Communication: private command channel capacity `1`, at most one command per
+  `5 ms` service turn, a semantic state Watch, a terminal channel capacity `6`,
+  and a mutex-protected snapshot.
 - Control authority: owns FUSB302B I2C turns and PD policy. It does not own the
   normal heater-control loop or the product UI.
 - Physical-output ownership: no normal heater duty writes, but it can revoke
