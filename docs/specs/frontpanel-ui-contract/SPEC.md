@@ -104,6 +104,13 @@ Dashboard 使用单一纯白仪表面，不以深浅色卡片切割温度区与�
 | UI Labels | Existing screens retain their current bitmap glyphs; `FAN CTRL` uses `6×10` labels / `8×13` title | 菜单标题、状态标签、`M1~M10`；风扇策略编辑页使用高可读字号 |
 | Temp Unit | stacked bitmap `℃` icon | 所有温度主值单位 |
 
+Dashboard status geometry is fixed in logical pixels: the `SET`, `PPS`, and `FAN`
+rows use baselines `4`, `17`, and `30`; each label uses the native `3×5` small
+bitmap font at `y + 3`, while the value uses the existing `3×5` mid font at `2×`
+and is right-aligned to `x=156` (or `x=159` for the long `EEPROM / RESTORE`
+state). The short-state label anchor is derived from the measured label and
+value widths and remains within `x=79..84`.
+
 ### Temperature states
 
 - 深色主题温度颜色从冰白、蓝、青、绿、黄绿、金黄、橙到粉紫；亮色主题从深蓝、蓝、青、绿、橄榄、棕金、棕橙到紫。
