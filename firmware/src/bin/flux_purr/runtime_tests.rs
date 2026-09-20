@@ -4724,6 +4724,12 @@ fn display_framebuffer_boot_initialization_never_materializes_a_stack_sized_arra
 }
 
 #[test]
+fn dirty_dashboard_refresh_is_capped_at_thirty_frames_per_second() {
+    assert_eq!(DISPLAY_RUNTIME_MAX_FPS, 30);
+    assert_eq!(DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS, 33);
+}
+
+#[test]
 fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     let mut job = CalibrationThermalPlantAutoJob {
         run_id: 1,
