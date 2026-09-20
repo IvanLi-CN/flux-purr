@@ -632,6 +632,16 @@ fn supersede_or_join_power_command(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn owner_is_superseded(
+    owner: Option<PowerIntentOwner>,
+    active_owner: Option<PowerIntentOwner>,
+) -> bool {
+    owner.is_some_and(|owner| {
+        active_owner.is_some_and(|active| owner.priority() < active.priority())
+    })
+}
+
+#[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
 async fn power_coordinator_task() {
     let mut inflight: Option<(PowerIntentOwner, PowerTicket)> = None;
@@ -657,9 +667,7 @@ async fn power_coordinator_task() {
                     signal_ticket(ticket, TicketOutcome::Rejected);
                     continue;
                 };
-                if let Some(owner) = owner
-                    && active_owner.is_some_and(|active| owner.priority() < active.priority())
-                {
+                if owner_is_superseded(owner, active_owner) {
                     signal_ticket(ticket, TicketOutcome::Superseded);
                     continue;
                 }
