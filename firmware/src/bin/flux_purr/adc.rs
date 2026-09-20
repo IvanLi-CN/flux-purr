@@ -1,6 +1,9 @@
 #[allow(unused_imports)]
 use super::*;
 
+#[cfg(target_arch = "xtensa")]
+use embedded_hal_async::i2c::I2c as _;
+
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn vin_adc_mv_for_input_mv(input_mv: u32) -> u16 {
     let numerator = input_mv.saturating_mul(s3_frontpanel::VIN_DIVIDER_R_LOW_OHMS);
@@ -190,31 +193,7 @@ pub(crate) fn initialize_adc1(
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) struct PdAdcService<'a, 'i, PWM> {
-    pub(crate) i2c: &'a mut I2c<'i, esp_hal::Blocking>,
-    pub(crate) pd_port: &'a mut PdPort,
-    pub(crate) last_pd_observation: &'a mut Option<PdStatusObservation>,
-    pub(crate) heater_pwm: &'a mut PWM,
-    pub(crate) last_heater_duty: &'a mut u8,
-}
-
-#[cfg(target_arch = "xtensa")]
-pub(crate) async fn service_pd_for_adc<PWM>(service: &mut PdAdcService<'_, '_, PWM>)
-where
-    PWM: SetDutyCycle,
-{
-    let observation = read_pd_status(service.i2c, service.pd_port, PdTimestamp::now()).await;
-    *service.last_pd_observation = observation;
-    if !startup_pd_contract_ready(observation) {
-        // ADC acquisition can outlive a normal control turn. Cut the physical
-        // output at the same service boundary instead of waiting for sampling
-        // to finish before the main loop applies its state reconciliation.
-        apply_heater_duty(service.heater_pwm, 0, service.last_heater_duty);
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-pub(crate) async fn read_adc_sample_with_pd<PIN, PWM>(
+pub(crate) async fn read_adc_sample<PIN>(
     adc: &mut Adc1Driver,
     pin: &mut esp_hal::analog::adc::AdcPin<
         PIN,
@@ -222,12 +201,9 @@ pub(crate) async fn read_adc_sample_with_pd<PIN, PWM>(
         AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
     >,
     curve: &Adc1Curve,
-    service: &mut PdAdcService<'_, '_, PWM>,
-    last_pd_service_ms: &mut u64,
 ) -> Option<AdcConvertedSample>
 where
     PIN: AdcChannel,
-    PWM: SetDutyCycle,
 {
     loop {
         match adc.read_oneshot(pin) {
@@ -238,16 +214,7 @@ where
                     calibrated_mv: curve.adc_val(raw_code),
                 });
             }
-            Err(nb::Error::WouldBlock) => {
-                let elapsed_ms = Instant::now()
-                    .as_millis()
-                    .saturating_sub(*last_pd_service_ms);
-                if elapsed_ms >= PD_RUNTIME_SERVICE_INTERVAL_MS {
-                    service_pd_for_adc(service).await;
-                    *last_pd_service_ms = Instant::now().as_millis();
-                }
-                EmbassyTimer::after_micros(50).await;
-            }
+            Err(nb::Error::WouldBlock) => EmbassyTimer::after_micros(50).await,
             Err(_) => return None,
         }
     }
@@ -261,7 +228,7 @@ pub(crate) async fn wait_for_adc_phase_if_needed(should_wait: bool) {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn read_adc_batch_with_pd<PIN, PWM>(
+pub(crate) async fn read_adc_batch<PIN>(
     adc: &mut Adc1Driver,
     pin: &mut esp_hal::analog::adc::AdcPin<
         PIN,
@@ -269,11 +236,9 @@ pub(crate) async fn read_adc_batch_with_pd<PIN, PWM>(
         AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
     >,
     curve: &Adc1Curve,
-    service: &mut PdAdcService<'_, '_, PWM>,
 ) -> Option<RtdAdcBatch>
 where
     PIN: AdcChannel,
-    PWM: SetDutyCycle,
 {
     let samples_per_phase = RTD_SAMPLE_COUNT / RTD_SAMPLE_PWM_PHASE_COUNT;
     let total_samples = RTD_SAMPLE_COUNT.saturating_add(RTD_SETTLE_DISCARD_SAMPLE_COUNT);
@@ -285,26 +250,19 @@ where
     let mut max_raw_code = 0_u16;
     let mut valid_samples = 0_usize;
     let mut discarded_valid_samples = 0_usize;
-    let mut samples_since_pd = 0_usize;
-    let mut last_pd_service_ms = Instant::now().as_millis();
-
     // Keep the calibrated acquisition plan intact while yielding between
-    // conversions. The previous synchronous implementation could monopolize
-    // the executor across the whole discard and phase-averaging batch.
+    // conversions. The dedicated PD task runs independently while this batch
+    // is active.
     let settle_deadline = Instant::now().checked_add(Duration::from_micros(u64::from(
         RTD_CHANNEL_SWITCH_SETTLE_US,
     )))?;
     while Instant::now() < settle_deadline {
-        service_pd_for_adc(service).await;
-        last_pd_service_ms = Instant::now().as_millis();
         EmbassyTimer::after_millis(1).await;
     }
 
     for _ in 0..total_samples {
-        let sample =
-            read_adc_sample_with_pd(adc, pin, curve, service, &mut last_pd_service_ms).await;
+        let sample = read_adc_sample(adc, pin, curve).await;
 
-        samples_since_pd = samples_since_pd.saturating_add(1);
         if let Some(sample) = sample {
             if discarded_valid_samples < RTD_SETTLE_DISCARD_SAMPLE_COUNT {
                 discarded_valid_samples = discarded_valid_samples.saturating_add(1);
@@ -323,17 +281,6 @@ where
                 .await;
             }
         }
-
-        if samples_since_pd >= ADC_PD_SERVICE_MAX_SAMPLES
-            || Instant::now()
-                .as_millis()
-                .saturating_sub(last_pd_service_ms)
-                >= PD_RUNTIME_SERVICE_INTERVAL_MS
-        {
-            service_pd_for_adc(service).await;
-            samples_since_pd = 0;
-            last_pd_service_ms = Instant::now().as_millis();
-        }
     }
 
     rtd_fractional_mean_mv(sum_mv, valid_samples).map(|mean_mv| RtdAdcBatch {
@@ -347,15 +294,14 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn read_calibrated_vin_mv_with_pd<PWM: SetDutyCycle>(
+pub(crate) async fn read_calibrated_vin_mv(
     adc: &mut Adc1Driver,
     pin: &mut VinAdcPin,
     curve: Option<&Adc1Curve>,
     memory_config: &MemoryConfig,
-    service: &mut PdAdcService<'_, '_, PWM>,
 ) -> Option<(u16, u16, u16, u32)> {
     let curve = curve?;
-    let batch = read_adc_batch_with_pd(adc, pin, curve, service).await?;
+    let batch = read_adc_batch(adc, pin, curve).await?;
     let raw_code = batch.mean_raw_code;
     let raw_adc_mv = batch.mean_mv.round() as u16;
     #[cfg(feature = "web_serial")]
@@ -374,12 +320,11 @@ pub(crate) async fn read_calibrated_vin_mv_with_pd<PWM: SetDutyCycle>(
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn read_rtd_sample_with_pd<PWM: SetDutyCycle>(
+pub(crate) async fn read_rtd_sample(
     adc: &mut Adc1Driver,
     pin: &mut RtdAdcPin,
     curve: Option<&Adc1Curve>,
     memory_config: &MemoryConfig,
-    service: &mut PdAdcService<'_, '_, PWM>,
 ) -> RtdSample {
     let Some(curve) = curve else {
         return RtdSample::Fault {
@@ -387,7 +332,7 @@ pub(crate) async fn read_rtd_sample_with_pd<PWM: SetDutyCycle>(
             reason: HeaterFaultReason::AdcReadFailed,
         };
     };
-    let Some(batch) = read_adc_batch_with_pd(adc, pin, curve, service).await else {
+    let Some(batch) = read_adc_batch(adc, pin, curve).await else {
         return RtdSample::Fault {
             adc_mv: None,
             reason: HeaterFaultReason::AdcReadFailed,
@@ -559,7 +504,7 @@ pub(crate) enum Fusb302bReceivedResetAction {
 #[cfg(target_arch = "xtensa")]
 pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {
     PhyConfig {
-        pd_revision: PdRevision::Rev30,
+        pd_revision: PdRevision::Rev20,
         power_role: PowerRole::Sink,
         data_role: DataRole::Ufp,
         auto_goodcrc,
@@ -614,13 +559,14 @@ pub(crate) const fn fusb302b_retry_recovery_should_discard_frame(
 /// therefore updates only CONTROL1.RX_FLUSH and preserves the driver's
 /// receive-mask bits; transmit recovery uses the separate TX flush below.
 #[cfg(target_arch = "xtensa")]
-pub(crate) fn fusb302b_flush_receive_fifo(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+pub(crate) async fn fusb302b_flush_receive_fifo(i2c: &mut PdI2c<'_>) -> bool {
     let mut control1 = [0_u8];
     i2c.write_read(
         fusb302::DEFAULT_ADDRESS,
         &[FUSB302B_CONTROL1_REGISTER],
         &mut control1,
     )
+    .await
     .is_ok()
         && i2c
             .write(
@@ -630,17 +576,19 @@ pub(crate) fn fusb302b_flush_receive_fifo(i2c: &mut I2c<'_, esp_hal::Blocking>) 
                     fusb302b_receive_fifo_flush_value(control1[0]),
                 ],
             )
+            .await
             .is_ok()
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) fn fusb302b_flush_transmit_fifo(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+pub(crate) async fn fusb302b_flush_transmit_fifo(i2c: &mut PdI2c<'_>) -> bool {
     let mut control0 = [0_u8];
     i2c.write_read(
         fusb302::DEFAULT_ADDRESS,
         &[FUSB302B_CONTROL0_REGISTER],
         &mut control0,
     )
+    .await
     .is_ok()
         && i2c
             .write(
@@ -650,6 +598,7 @@ pub(crate) fn fusb302b_flush_transmit_fifo(i2c: &mut I2c<'_, esp_hal::Blocking>)
                     fusb302b_transmit_fifo_flush_value(control0[0]),
                 ],
             )
+            .await
             .is_ok()
 }
 
@@ -662,7 +611,6 @@ pub(crate) struct Fusb302bRuntime {
     pub(crate) last_source_capabilities_request_at_ms: Option<u64>,
     pub(crate) source_capabilities_refresh_pending: bool,
     pub(crate) source_capabilities_refresh_requested_at_ms: Option<u64>,
-    pub(crate) source_capabilities_refresh_kind: Option<SourceCapabilitiesRefreshKind>,
     pub(crate) last_request_at_ms: Option<u64>,
     pub(crate) source_capabilities_tx_confirmed: bool,
     pub(crate) source_capabilities_gcrc_seen: bool,
@@ -683,13 +631,6 @@ pub(crate) enum PdContractRequestState {
 }
 
 #[cfg(target_arch = "xtensa")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SourceCapabilitiesRefreshKind {
-    PpsTransition,
-    FixedContractLiveness,
-}
-
-#[cfg(target_arch = "xtensa")]
 impl Fusb302bRuntime {
     pub(crate) const fn new() -> Self {
         Self {
@@ -703,7 +644,6 @@ impl Fusb302bRuntime {
             last_source_capabilities_request_at_ms: None,
             source_capabilities_refresh_pending: false,
             source_capabilities_refresh_requested_at_ms: None,
-            source_capabilities_refresh_kind: None,
             last_request_at_ms: None,
             source_capabilities_tx_confirmed: false,
             source_capabilities_gcrc_seen: false,
@@ -727,7 +667,6 @@ impl Fusb302bRuntime {
         self.last_source_capabilities_request_at_ms = None;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_requested_at_ms = None;
-        self.source_capabilities_refresh_kind = None;
         self.last_request_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
@@ -764,8 +703,8 @@ impl Fusb302bRuntime {
         })
     }
 
-    pub(crate) async fn initialize(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
-        let mut phy = Fusb302::new(BlockingAsync::new(i2c));
+    pub(crate) async fn initialize(&mut self, i2c: &mut PdI2c<'_>) -> bool {
+        let mut phy = Fusb302::new(&mut *i2c);
         let initialized = phy.init().await.is_ok()
             && phy.pd_reset().await.is_ok()
             && phy.set_host_current_default().await.is_ok()
@@ -792,7 +731,7 @@ impl Fusb302bRuntime {
 
     async fn recover_after_received_reset(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         action: Fusb302bReceivedResetAction,
         now: PdTimestamp,
     ) -> bool {
@@ -803,14 +742,13 @@ impl Fusb302bRuntime {
         self.last_source_capabilities_request_at_ms = None;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_requested_at_ms = None;
-        self.source_capabilities_refresh_kind = None;
         self.last_request_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
         self.retry_fail_recovery_pending = false;
         self.clear_vbus_low_interlock();
-        if !fusb302b_flush_receive_fifo(i2c) {
+        if !fusb302b_flush_receive_fifo(i2c).await {
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
             return true;
         }
@@ -829,7 +767,7 @@ impl Fusb302bRuntime {
         true
     }
 
-    async fn recover_after_detach(&mut self, _i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+    async fn recover_after_detach(&mut self, _i2c: &mut PdI2c<'_>) -> bool {
         // `interlock_after_vbus_low` already discarded the contract and kept
         // the policy in bounded discovery. The VBUS transition does not prove
         // that CC detached, so preserve the selected CC/RX PHY session while
@@ -847,12 +785,9 @@ impl Fusb302bRuntime {
     /// Re-synchronize only the PD protocol engine after VBUS returns. The
     /// FUSB302B driver documents `pd_reset` as a protocol reset; keep the
     /// selected CC pin, Rd termination, and Type-C attachment intact.
-    async fn resynchronize_after_vbus_restore(
-        &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
-    ) -> bool {
+    async fn resynchronize_after_vbus_restore(&mut self, i2c: &mut PdI2c<'_>) -> bool {
         let configured = {
-            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+            let mut phy = Fusb302::new(&mut *i2c);
             phy.pd_reset().await.is_ok()
                 && phy.flush_fifos().await.is_ok()
                 && phy.configure_phy(fusb302b_phy_config(true)).await.is_ok()
@@ -876,7 +811,7 @@ impl Fusb302bRuntime {
     /// attachment.
     async fn recover_transient_transport_fault(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         fault: fusb302b::TransientTransportFault,
         now: PdTimestamp,
     ) -> bool {
@@ -892,7 +827,6 @@ impl Fusb302bRuntime {
                 self.last_source_capabilities_request_at_ms = Some(now_ms);
                 self.source_capabilities_refresh_pending = false;
                 self.source_capabilities_refresh_requested_at_ms = None;
-                self.source_capabilities_refresh_kind = None;
                 self.source_capabilities_tx_confirmed = false;
                 self.source_capabilities_gcrc_seen = false;
                 self.partial_rx_started_at_ms = None;
@@ -900,10 +834,10 @@ impl Fusb302bRuntime {
                     matches!(fault, fusb302b::TransientTransportFault::RetryFailed);
                 self.clear_vbus_low_interlock();
 
-                let receive_flushed = fusb302b_flush_receive_fifo(i2c);
+                let receive_flushed = fusb302b_flush_receive_fifo(i2c).await;
                 let transmit_flushed =
                     !matches!(fault, fusb302b::TransientTransportFault::TransmitIoError)
-                        || fusb302b_flush_transmit_fifo(i2c);
+                        || fusb302b_flush_transmit_fifo(i2c).await;
                 if !receive_flushed {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
                 }
@@ -924,9 +858,13 @@ impl Fusb302bRuntime {
         self.policy.source_capabilities()
     }
 
+    pub(crate) fn service_available(&self) -> bool {
+        !matches!(self.policy.phase(), SinkPhase::Fault)
+    }
+
     pub(crate) async fn request_pps_voltage(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         requested_mv: u16,
         now: PdTimestamp,
     ) -> PdContractRequestState {
@@ -957,8 +895,6 @@ impl Fusb302bRuntime {
             }
             self.source_capabilities_refresh_pending = true;
             self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
-            self.source_capabilities_refresh_kind =
-                Some(SourceCapabilitiesRefreshKind::PpsTransition);
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
             return PdContractRequestState::Pending;
         }
@@ -977,9 +913,41 @@ impl Fusb302bRuntime {
         PdContractRequestState::Pending
     }
 
+    pub(crate) async fn request_automatic_idle_contract(
+        &mut self,
+        i2c: &mut PdI2c<'_>,
+        now: PdTimestamp,
+    ) -> PdContractRequestState {
+        let now_ms = now.as_millis();
+        let active = self.policy.active_contract();
+        if active.kind == ContractKind::Pps && active.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
+        {
+            return PdContractRequestState::Confirmed;
+        }
+        if matches!(
+            self.policy.phase(),
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        ) {
+            return PdContractRequestState::Pending;
+        }
+        let Some(rdo) = self.policy.request_automatic_idle_contract() else {
+            return PdContractRequestState::Failed;
+        };
+        let header = fusb302b::request_header(self.next_message_id);
+        if let Err(fault) = self.transmit(i2c, header, &rdo).await {
+            let _ = self
+                .recover_transient_transport_fault(i2c, fault, now)
+                .await;
+            return PdContractRequestState::Failed;
+        }
+        self.last_request_at_ms = Some(now_ms);
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
+        PdContractRequestState::Pending
+    }
+
     pub(crate) async fn request_fixed_voltage(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         requested_mv: u16,
         now: PdTimestamp,
     ) -> PdContractRequestState {
@@ -1011,7 +979,7 @@ impl Fusb302bRuntime {
 
     async fn transmit(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         header: u16,
         data: &[u8],
     ) -> Result<(), fusb302b::TransientTransportFault> {
@@ -1019,7 +987,7 @@ impl Fusb302bRuntime {
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
             return Err(fusb302b::TransientTransportFault::TransmitIoError);
         };
-        let mut phy = Fusb302::new(BlockingAsync::new(i2c));
+        let mut phy = Fusb302::new(&mut *i2c);
         if phy.transmit(&packet).await.is_err() {
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
             return Err(fusb302b::TransientTransportFault::TransmitIoError);
@@ -1030,7 +998,7 @@ impl Fusb302bRuntime {
 
     async fn poll_vbus_restore(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
         now_ms: u64,
     ) -> Option<bool> {
@@ -1038,7 +1006,7 @@ impl Fusb302bRuntime {
             return None;
         }
         let vbus_restored = {
-            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+            let mut phy = Fusb302::new(&mut *i2c);
             match phy.read_status().await {
                 Ok(status) => status.status0 & FUSB302B_STATUS0_VBUSOK != 0,
                 Err(_) => {
@@ -1077,7 +1045,7 @@ impl Fusb302bRuntime {
 
     async fn poll_pending_request(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
         now_ms: u64,
     ) -> Option<bool> {
@@ -1101,12 +1069,7 @@ impl Fusb302bRuntime {
         )
     }
 
-    async fn poll_capability_refresh(
-        &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
-        now: PdTimestamp,
-        now_ms: u64,
-    ) -> Option<bool> {
+    fn poll_pps_transition_capability_refresh(&mut self, now_ms: u64) {
         let timed_out = self.source_capabilities_refresh_pending
             && self
                 .source_capabilities_refresh_requested_at_ms
@@ -1114,60 +1077,16 @@ impl Fusb302bRuntime {
                     now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS
                 });
         if !timed_out {
-            return None;
+            return;
         }
-        let refresh_kind = self.source_capabilities_refresh_kind;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_requested_at_ms = None;
-        self.source_capabilities_refresh_kind = None;
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
-        if refresh_kind == Some(SourceCapabilitiesRefreshKind::FixedContractLiveness) {
-            return Some(
-                self.recover_transient_transport_fault(
-                    i2c,
-                    fusb302b::TransientTransportFault::PendingRequestTimeout,
-                    now,
-                )
-                .await,
-            );
-        }
-        None
-    }
-
-    async fn poll_liveness_probe(
-        &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
-        now: PdTimestamp,
-        now_ms: u64,
-    ) -> Option<bool> {
-        if !fixed_contract_liveness_probe_due(
-            self.active_contract().kind,
-            self.policy.phase() == SinkPhase::Ready,
-            self.source_capabilities_refresh_pending,
-            self.last_source_capabilities_request_at_ms,
-            now_ms,
-        ) {
-            return None;
-        }
-        let header = fusb302b::get_source_capabilities_header(self.next_message_id);
-        if let Err(fault) = self.transmit(i2c, header, &[]).await {
-            return Some(
-                self.recover_transient_transport_fault(i2c, fault, now)
-                    .await,
-            );
-        }
-        self.source_capabilities_refresh_pending = true;
-        self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
-        self.source_capabilities_refresh_kind =
-            Some(SourceCapabilitiesRefreshKind::FixedContractLiveness);
-        self.last_source_capabilities_request_at_ms = Some(now_ms);
-        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
-        None
     }
 
     async fn poll_attachment(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
         now_ms: u64,
     ) -> Option<bool> {
@@ -1175,7 +1094,7 @@ impl Fusb302bRuntime {
             return None;
         }
         let polarity = {
-            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+            let mut phy = Fusb302::new(&mut *i2c);
             match phy.read_status().await {
                 Ok(status) => {
                     fusb302b_settled_sink_polarity(status.status1a).map(|pin| match pin {
@@ -1220,12 +1139,8 @@ impl Fusb302bRuntime {
         None
     }
 
-    async fn configure_attached_polarity(
-        &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
-        polarity: CcPin,
-    ) -> bool {
-        let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+    async fn configure_attached_polarity(&mut self, i2c: &mut PdI2c<'_>, polarity: CcPin) -> bool {
+        let mut phy = Fusb302::new(&mut *i2c);
         phy.flush_fifos().await.is_ok()
             && phy.stop_toggle().await.is_ok()
             && phy.set_cc_pull(CcPin::Cc1, CcPull::Down).await.is_ok()
@@ -1241,7 +1156,7 @@ impl Fusb302bRuntime {
 
     async fn handle_vbus_low_event(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         now_ms: u64,
         transition: bool,
     ) -> bool {
@@ -1259,7 +1174,7 @@ impl Fusb302bRuntime {
 
     async fn handle_empty_event(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
         now_ms: u64,
         tx_sent: bool,
@@ -1338,7 +1253,7 @@ impl Fusb302bRuntime {
 
     async fn handle_partial_event(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
         now_ms: u64,
         tx_sent: bool,
@@ -1366,7 +1281,7 @@ impl Fusb302bRuntime {
 
     async fn handle_message_event(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
         now_ms: u64,
         message: PdPacket,
@@ -1388,18 +1303,16 @@ impl Fusb302bRuntime {
 
     async fn handle_source_capabilities_message(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
         now_ms: u64,
         message: PdPacket,
         pdos: &[u32],
     ) -> bool {
-        let preserve_ready_contract = self.policy.phase() == SinkPhase::Ready
-            && self.source_capabilities_refresh_kind
-                != Some(SourceCapabilitiesRefreshKind::PpsTransition);
+        let preserve_ready_contract =
+            self.policy.phase() == SinkPhase::Ready && !self.source_capabilities_refresh_pending;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_requested_at_ms = None;
-        self.source_capabilities_refresh_kind = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.retry_fail_recovery_pending = false;
@@ -1454,7 +1367,7 @@ impl Fusb302bRuntime {
 
     async fn handle_received_reset(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
         action: Fusb302bReceivedResetAction,
     ) -> bool {
@@ -1463,11 +1376,7 @@ impl Fusb302bRuntime {
         self.recover_after_received_reset(i2c, action, now).await
     }
 
-    async fn handle_retry_failed(
-        &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
-        now: PdTimestamp,
-    ) -> bool {
+    async fn handle_retry_failed(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) -> bool {
         self.clear_vbus_low_interlock();
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
         self.recover_transient_transport_fault(
@@ -1485,11 +1394,7 @@ impl Fusb302bRuntime {
         false
     }
 
-    async fn handle_unsupported_sop(
-        &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
-        now: PdTimestamp,
-    ) -> bool {
+    async fn handle_unsupported_sop(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) -> bool {
         self.clear_vbus_low_interlock();
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_UNSUPPORTED_SOP, Ordering::Relaxed);
         self.recover_transient_transport_fault(
@@ -1500,14 +1405,11 @@ impl Fusb302bRuntime {
         .await
     }
 
-    /// Drain a bounded number of completed PD frames in one service turn. No
-    /// call awaits while I2C is borrowed, so EEPROM traffic remains independent
-    /// of the controller's PD timing.
-    pub(crate) async fn poll(
-        &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
-        now: PdTimestamp,
-    ) -> bool {
+    /// Drain a bounded number of completed PD frames in one service turn. The
+    /// service task has already acquired the bus with a non-blocking try-lock;
+    /// awaits below are bounded hardware transactions, not waits for EEPROM's
+    /// mutex ownership.
+    pub(crate) async fn poll(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) -> bool {
         let now_ms = now.as_millis();
         if self.policy.phase() == SinkPhase::Fault {
             return false;
@@ -1518,12 +1420,7 @@ impl Fusb302bRuntime {
         if let Some(result) = self.poll_pending_request(i2c, now, now_ms).await {
             return result;
         }
-        if let Some(result) = self.poll_capability_refresh(i2c, now, now_ms).await {
-            return result;
-        }
-        if let Some(result) = self.poll_liveness_probe(i2c, now, now_ms).await {
-            return result;
-        }
+        self.poll_pps_transition_capability_refresh(now_ms);
         if let Some(result) = self.poll_attachment(i2c, now, now_ms).await {
             return result;
         }
@@ -1532,7 +1429,7 @@ impl Fusb302bRuntime {
 
     async fn poll_receive_messages(
         &mut self,
-        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
         now_ms: u64,
     ) -> bool {

@@ -1120,7 +1120,7 @@ pub(crate) fn serial_line_finished(
         return true;
     }
     if !*discarding_overlong_line {
-        if line.len() < SERIAL_LINE_LIMIT {
+        if line.len() < SERIAL_LINE_CONTENT_LIMIT {
             line.push(byte);
         } else {
             line.clear();

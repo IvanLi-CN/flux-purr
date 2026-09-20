@@ -28,38 +28,35 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) fn probe_eeprom_address(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<u8> {
+pub(crate) async fn probe_eeprom_address(i2c: &mut I2c<'_>) -> Option<u8> {
     let mut eeprom = M24c64::with_address(i2c, M24C64_I2C_ADDRESS);
     let mut byte = [0u8; 1];
     eeprom
-        .read_bytes(0, &mut byte)
+        .read_bytes_async(0, &mut byte)
+        .await
         .ok()
         .map(|()| M24C64_I2C_ADDRESS)
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn read_eeprom_bytes_chunked_with_pd<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn read_eeprom_bytes_chunked(
+    i2c: &mut I2c<'_>,
     address: u8,
     offset: u16,
     bytes: &mut [u8],
-) -> Result<(), ()>
-where
-    PWM: SetDutyCycle,
-{
+) -> Result<(), ()> {
     let mut read = 0usize;
     while read < bytes.len() {
         let chunk_len = (bytes.len() - read).min(EEPROM_READ_CHUNK_MAX_BYTES);
         let chunk_offset = offset.checked_add(read as u16).ok_or(())?;
         let result = {
             let mut eeprom = M24c64::with_address(&mut *i2c, address);
-            eeprom.read_bytes(chunk_offset, &mut bytes[read..read + chunk_len])
+            eeprom
+                .read_bytes_async(chunk_offset, &mut bytes[read..read + chunk_len])
+                .await
         };
         result.map_err(|_| ())?;
         read += chunk_len;
-        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
         EmbassyTimer::after_millis(0).await;
     }
     Ok(())
@@ -71,20 +68,14 @@ pub(crate) fn eeprom_bytes_contain_data(bytes: &[u8]) -> bool {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn write_eeprom_bytes_verified<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn write_eeprom_bytes_verified(
+    i2c: &mut I2c<'_>,
     offset: u16,
     bytes: &[u8],
-) -> Result<(), MemoryCommitError>
-where
-    PWM: SetDutyCycle,
-{
-    let Some(address) = probe_eeprom_address(i2c) else {
+) -> Result<(), MemoryCommitError> {
+    let Some(address) = probe_eeprom_address(i2c).await else {
         return Err(MemoryCommitError::WriteAddressNoAck);
     };
-    let mut pd_service_schedule = EepromMaintenancePdServiceSchedule::new();
     let mut written = 0usize;
     while written < bytes.len() {
         let absolute_offset = usize::from(offset) + written;
@@ -93,14 +84,14 @@ where
             u16::try_from(absolute_offset).map_err(|_| MemoryCommitError::WriteFailed)?;
         let write_result = {
             let mut eeprom = M24c64::with_address(&mut *i2c, address);
-            eeprom.write_page(chunk_offset, &bytes[written..written + chunk_len])
+            eeprom
+                .write_page_async(chunk_offset, &bytes[written..written + chunk_len])
+                .await
         };
         write_result.map_err(memory_commit_error_from_eeprom)?;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
         written += chunk_len;
-        if pd_service_schedule.after_page_write() {
-            service_pd_during_eeprom_operation(i2c, pd_port, service).await;
-        }
+        EmbassyTimer::after_millis(0).await;
     }
     let mut verify = [0u8; flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX];
     let mut read = 0usize;
@@ -111,11 +102,13 @@ where
             .ok_or(MemoryCommitError::VerifyUnreadable)?;
         let read_result = {
             let mut eeprom = M24c64::with_address(&mut *i2c, address);
-            eeprom.read_bytes(chunk_offset, &mut verify[read..read + chunk_len])
+            eeprom
+                .read_bytes_async(chunk_offset, &mut verify[read..read + chunk_len])
+                .await
         };
         read_result.map_err(|_| MemoryCommitError::VerifyUnreadable)?;
         read += chunk_len;
-        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
+        EmbassyTimer::after_millis(0).await;
     }
     if verify[..bytes.len()] != *bytes {
         return Err(MemoryCommitError::VerifyMismatch);
@@ -131,33 +124,6 @@ pub(crate) fn eeprom_maintenance_write_chunk_len(
     let page_size = flux_purr_firmware::memory::M24C64_PAGE_SIZE;
     let page_room = page_size - (absolute_offset % page_size);
     remaining.min(page_room).min(EEPROM_WRITE_CHUNK_MAX_BYTES)
-}
-
-/// Raw EEPROM maintenance shares the PD I2C bus. A page write's five-millisecond
-/// program cycle is the longest maintenance interval, so service PD after every
-/// completed page instead of waiting for a command-sized batch to finish.
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) struct EepromMaintenancePdServiceSchedule {
-    page_writes_since_service: u8,
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-impl EepromMaintenancePdServiceSchedule {
-    pub(crate) const fn new() -> Self {
-        Self {
-            page_writes_since_service: 0,
-        }
-    }
-
-    pub(crate) fn after_page_write(&mut self) -> bool {
-        self.page_writes_since_service = self.page_writes_since_service.saturating_add(1);
-        if self.page_writes_since_service >= EEPROM_MAINTENANCE_PD_MAX_PAGE_WRITES_WITHOUT_SERVICE {
-            self.page_writes_since_service = 0;
-            true
-        } else {
-            false
-        }
-    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -274,17 +240,12 @@ pub(crate) fn discard_deferred_memory_commit_for_incompatible_eeprom(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn usb_eeprom_maintenance_response<PWM>(
+pub(crate) async fn usb_eeprom_maintenance_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: EepromMaintenanceCommand,
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+    i2c: &mut I2c<'_>,
     _elapsed_ms: u64,
-) -> UsbFrame
-where
-    PWM: SetDutyCycle,
-{
+) -> UsbFrame {
     match command.op {
         EepromMaintenanceOp::Read => {
             let (Some(offset), Some(length)) = (command.offset, command.length) else {
@@ -305,7 +266,7 @@ where
                     "EEPROM read range is invalid.",
                 );
             }
-            let Some(address) = probe_eeprom_address(i2c) else {
+            let Some(address) = probe_eeprom_address(i2c).await else {
                 return usb_error_response(
                     request_id,
                     "eeprom_unavailable",
@@ -314,16 +275,9 @@ where
             };
             let mut bytes = heapless::Vec::new();
             let _ = bytes.resize_default(length);
-            if read_eeprom_bytes_chunked_with_pd(
-                i2c,
-                pd_port,
-                service,
-                address,
-                offset,
-                bytes.as_mut_slice(),
-            )
-            .await
-            .is_err()
+            if read_eeprom_bytes_chunked(i2c, address, offset, bytes.as_mut_slice())
+                .await
+                .is_err()
             {
                 return usb_error_response(request_id, "eeprom_read_failed", "EEPROM read failed.");
             }
@@ -346,8 +300,7 @@ where
                     "EEPROM write range is invalid.",
                 );
             }
-            match write_eeprom_bytes_verified(i2c, pd_port, service, offset, bytes.as_slice()).await
-            {
+            match write_eeprom_bytes_verified(i2c, offset, bytes.as_slice()).await {
                 Ok(()) => usb_response(request_id, UsbResponsePayload::Ack),
                 Err(error) => usb_error_response(request_id, error.code(), error.message()),
             }
@@ -356,9 +309,7 @@ where
             let erased = [0xff; flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX];
             let mut offset = 0u16;
             while offset < M24C64_CAPACITY_BYTES {
-                if let Err(error) =
-                    write_eeprom_bytes_verified(i2c, pd_port, service, offset, &erased).await
-                {
+                if let Err(error) = write_eeprom_bytes_verified(i2c, offset, &erased).await {
                     return usb_error_response(request_id, error.code(), error.message());
                 }
                 offset = offset.saturating_add(erased.len() as u16);
@@ -385,30 +336,17 @@ pub(crate) fn memory_record_length_from_header(header: &[u8], slot_size: usize) 
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-pub(crate) async fn read_eeprom_persist_record<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn read_eeprom_persist_record(
+    i2c: &mut I2c<'_>,
     address: u8,
     offset: u16,
     slot_size: usize,
     staging: &mut [u8],
-) -> Result<Option<PersistRecord>, ()>
-where
-    PWM: SetDutyCycle,
-{
+) -> Result<Option<PersistRecord>, ()> {
     if slot_size < FPR2_HEADER_LEN || staging.len() < FPR2_HEADER_LEN {
         return Ok(None);
     }
-    read_eeprom_bytes_chunked_with_pd(
-        i2c,
-        pd_port,
-        service,
-        address,
-        offset,
-        &mut staging[..FPR2_HEADER_LEN],
-    )
-    .await?;
+    read_eeprom_bytes_chunked(i2c, address, offset, &mut staging[..FPR2_HEADER_LEN]).await?;
     if staging[..4] != *b"FPR2" {
         return Ok(None);
     }
@@ -419,10 +357,8 @@ where
     if record_len > slot_size || record_len > staging.len() {
         return Ok(None);
     }
-    read_eeprom_bytes_chunked_with_pd(
+    read_eeprom_bytes_chunked(
         i2c,
-        pd_port,
-        service,
         address,
         offset.saturating_add(FPR2_HEADER_LEN as u16),
         &mut staging[FPR2_HEADER_LEN..record_len],
@@ -433,25 +369,18 @@ where
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-pub(crate) async fn load_eeprom_memory_record<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn load_eeprom_memory_record(
+    i2c: &mut I2c<'_>,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> (Option<MemoryRecord>, bool, bool, bool)
-where
-    PWM: SetDutyCycle,
-{
-    let Some(address) = probe_eeprom_address(i2c) else {
+) -> (Option<MemoryRecord>, bool, bool, bool) {
+    let Some(address) = probe_eeprom_address(i2c).await else {
         info!("memory restore skipped: eeprom unavailable");
         return (None, false, true, false);
     };
 
     let mut marker_scan = scan_fpr2_layout_markers(
         i2c,
-        pd_port,
-        service,
         address,
         &mut SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]),
     )
@@ -461,7 +390,7 @@ where
     // keep reading legacy data so an interrupted migration can fall back
     // safely instead of treating PREPARED records as production state.
     if marker_scan.latest_active_marker.is_none() {
-        scan_legacy_slots(i2c, pd_port, service, address, scratch, &mut marker_scan).await;
+        scan_legacy_slots(i2c, address, scratch, &mut marker_scan).await;
     }
 
     let active_generation = marker_scan
@@ -474,15 +403,8 @@ where
             .map(|marker| marker.generation)
     });
     let mut staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
-    let (domains, domain_contains_data, domain_read_failed) = read_fpr2_domains(
-        i2c,
-        pd_port,
-        service,
-        address,
-        &mut staging,
-        read_generation,
-    )
-    .await;
+    let (domains, domain_contains_data, domain_read_failed) =
+        read_fpr2_domains(i2c, address, &mut staging, read_generation).await;
     marker_scan.contains_data |= domain_contains_data;
     marker_scan.read_failed |= domain_read_failed;
     let domains = domains;
@@ -541,16 +463,11 @@ pub(crate) struct EepromMarkerScan {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn scan_fpr2_layout_markers<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn scan_fpr2_layout_markers(
+    i2c: &mut I2c<'_>,
     address: u8,
     staging: &mut SensitiveEepromStaging<'_>,
-) -> EepromMarkerScan
-where
-    PWM: SetDutyCycle,
-{
+) -> EepromMarkerScan {
     let mut scan = EepromMarkerScan {
         contains_data: false,
         legacy_format_present: false,
@@ -560,16 +477,9 @@ where
     };
     for offset in [FPR2_LAYOUT_A_OFFSET, FPR2_LAYOUT_B_OFFSET] {
         staging.bytes.fill(0xff);
-        let candidate = read_eeprom_persist_record(
-            i2c,
-            pd_port,
-            service,
-            address,
-            offset,
-            FPR2_LAYOUT_SLOT_SIZE,
-            staging.bytes,
-        )
-        .await;
+        let candidate =
+            read_eeprom_persist_record(i2c, address, offset, FPR2_LAYOUT_SLOT_SIZE, staging.bytes)
+                .await;
         scan.contains_data |= eeprom_bytes_contain_data(&staging.bytes[..FPR2_HEADER_LEN]);
         let Some(candidate) = (match candidate {
             Ok(candidate) => candidate,
@@ -608,16 +518,12 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn scan_legacy_slots<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn scan_legacy_slots(
+    i2c: &mut I2c<'_>,
     address: u8,
     scratch: &mut MemoryIoScratch,
     scan: &mut EepromMarkerScan,
-) where
-    PWM: SetDutyCycle,
-{
+) {
     for offset in [
         PREVIOUS_MEMORY_SLOT_A_OFFSET,
         PREVIOUS_MEMORY_SLOT_B_OFFSET,
@@ -627,15 +533,7 @@ pub(crate) async fn scan_legacy_slots<PWM>(
         MEMORY_SLOT_B_OFFSET,
     ] {
         let probe_len = 4;
-        match read_eeprom_bytes_chunked_with_pd(
-            i2c,
-            pd_port,
-            service,
-            address,
-            offset,
-            &mut scratch.bytes[..probe_len],
-        )
-        .await
+        match read_eeprom_bytes_chunked(i2c, address, offset, &mut scratch.bytes[..probe_len]).await
         {
             Ok(()) => {
                 scan.contains_data |= eeprom_bytes_contain_data(&scratch.bytes[..probe_len]);
@@ -647,17 +545,12 @@ pub(crate) async fn scan_legacy_slots<PWM>(
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn read_fpr2_domains<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn read_fpr2_domains(
+    i2c: &mut I2c<'_>,
     address: u8,
     staging: &mut SensitiveEepromStaging<'_>,
     read_generation: Option<u32>,
-) -> ([Option<PersistRecord>; 6], bool, bool)
-where
-    PWM: SetDutyCycle,
-{
+) -> ([Option<PersistRecord>; 6], bool, bool) {
     let mut domains: [Option<PersistRecord>; 6] = [None, None, None, None, None, None];
     let mut contains_data = false;
     let mut read_failed = false;
@@ -698,16 +591,8 @@ where
             .take(usize::from(domain.slot_count()))
         {
             staging.bytes.fill(0xff);
-            let candidate = read_eeprom_persist_record(
-                i2c,
-                pd_port,
-                service,
-                address,
-                offset,
-                slot_size,
-                staging.bytes,
-            )
-            .await;
+            let candidate =
+                read_eeprom_persist_record(i2c, address, offset, slot_size, staging.bytes).await;
             contains_data |= eeprom_bytes_contain_data(&staging.bytes[..FPR2_HEADER_LEN]);
             let candidate = match candidate {
                 Ok(candidate) => candidate,
@@ -758,17 +643,12 @@ pub(crate) fn merge_persist_records(
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-pub(crate) async fn load_legacy_eeprom_memory_record<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn load_legacy_eeprom_memory_record(
+    i2c: &mut I2c<'_>,
     scratch: &mut MemoryIoScratch,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> (Option<MemoryRecord>, bool)
-where
-    PWM: SetDutyCycle,
-{
-    let Some(address) = probe_eeprom_address(i2c) else {
+) -> (Option<MemoryRecord>, bool) {
+    let Some(address) = probe_eeprom_address(i2c).await else {
         return (None, true);
     };
     let mut selected: Option<MemoryRecord> = None;
@@ -783,8 +663,6 @@ where
     ] {
         let candidate = read_legacy_record_stream(
             i2c,
-            pd_port,
-            service,
             LegacyRecordReadInput {
                 address,
                 offset,
@@ -820,15 +698,10 @@ pub(crate) struct LegacyRecordReadInput<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn read_legacy_record_stream<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn read_legacy_record_stream(
+    i2c: &mut I2c<'_>,
     input: LegacyRecordReadInput<'_>,
-) -> Result<MemoryRecord, ()>
-where
-    PWM: SetDutyCycle,
-{
+) -> Result<MemoryRecord, ()> {
     let LegacyRecordReadInput {
         address,
         offset,
@@ -837,7 +710,7 @@ where
         record_staging,
     } = input;
     let mut header = [0u8; MEMORY_RECORD_HEADER_LEN];
-    read_eeprom_bytes_chunked_with_pd(i2c, pd_port, service, address, offset, &mut header).await?;
+    read_eeprom_bytes_chunked(i2c, address, offset, &mut header).await?;
     let Some((payload_len, wide_tlv_lengths)) = legacy_record_shape(&header, slot_size) else {
         return Err(());
     };
@@ -857,15 +730,8 @@ where
             .checked_add(MEMORY_RECORD_HEADER_LEN as u16)
             .and_then(|base| base.checked_add(payload_cursor as u16))
             .ok_or(())?;
-        read_eeprom_bytes_chunked_with_pd(
-            i2c,
-            pd_port,
-            service,
-            address,
-            tlv_offset,
-            &mut scratch.bytes[..header_len],
-        )
-        .await?;
+        read_eeprom_bytes_chunked(i2c, address, tlv_offset, &mut scratch.bytes[..header_len])
+            .await?;
         crc = persistence_crc32_update(crc, &scratch.bytes[..header_len]);
         let tag = scratch.bytes[0];
         let value_len = if wide_tlv_lengths {
@@ -889,15 +755,8 @@ where
                 .and_then(|base| base.checked_add(payload_cursor as u16))
                 .and_then(|base| base.checked_add(value_read as u16))
                 .ok_or(())?;
-            read_eeprom_bytes_chunked_with_pd(
-                i2c,
-                pd_port,
-                service,
-                address,
-                value_offset,
-                &mut scratch.bytes[..chunk_len],
-            )
-            .await?;
+            read_eeprom_bytes_chunked(i2c, address, value_offset, &mut scratch.bytes[..chunk_len])
+                .await?;
             crc = persistence_crc32_update(crc, &scratch.bytes[..chunk_len]);
             if collect && value_read + chunk_len <= staging.bytes.len() {
                 staging.bytes[value_read..value_read + chunk_len]
@@ -1225,106 +1084,6 @@ pub(crate) fn memory_record_write_chunk_len(absolute_offset: usize, remaining: u
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) struct EepromPdServiceContext<'a, PWM> {
-    pub(crate) last_pd_observation: &'a mut Option<PdStatusObservation>,
-    pub(crate) heater_pwm: &'a mut PWM,
-    pub(crate) last_heater_duty: &'a mut u8,
-}
-
-#[cfg(target_arch = "xtensa")]
-impl<'a, PWM> EepromPdServiceContext<'a, PWM>
-where
-    PWM: SetDutyCycle,
-{
-    pub(crate) fn new(
-        last_pd_observation: &'a mut Option<PdStatusObservation>,
-        heater_pwm: &'a mut PWM,
-        last_heater_duty: &'a mut u8,
-    ) -> Self {
-        Self {
-            last_pd_observation,
-            heater_pwm,
-            last_heater_duty,
-        }
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-pub(crate) struct PdNetworkServiceContext<'a, 'b, PWM> {
-    pub(crate) eeprom: &'a mut EepromPdServiceContext<'b, PWM>,
-    pub(crate) pd_contract_ready: &'a mut bool,
-    pub(crate) ui_state: &'a mut FrontPanelUiState,
-    pub(crate) calibration_runtime_state: &'a mut CalibrationRuntimeState,
-    pub(crate) manual_pps: &'a mut ManualPpsState,
-}
-
-#[cfg(target_arch = "xtensa")]
-pub(crate) async fn service_pd_during_network_operation<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    context: &mut PdNetworkServiceContext<'_, '_, PWM>,
-) where
-    PWM: SetDutyCycle,
-{
-    let observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
-    *context.eeprom.last_pd_observation = observation;
-    apply_pd_contract_observation(
-        observation,
-        context.pd_contract_ready,
-        context.ui_state,
-        context.calibration_runtime_state,
-        context.manual_pps,
-        context.eeprom.heater_pwm,
-        context.eeprom.last_heater_duty,
-    );
-}
-
-/// Network control can wait on a background task for seconds. Keep that wait
-/// from starving the FUSB302B policy or leaving stale heater intent armed.
-#[cfg(target_arch = "xtensa")]
-pub(crate) async fn run_network_operation_with_pd<F, PWM>(
-    operation: F,
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    context: &mut PdNetworkServiceContext<'_, '_, PWM>,
-) -> F::Output
-where
-    F: Future,
-    PWM: SetDutyCycle,
-{
-    let mut pinned_operation = core::pin::pin!(operation);
-    loop {
-        match select(
-            pinned_operation.as_mut(),
-            EmbassyTimer::after_millis(PD_RUNTIME_SERVICE_INTERVAL_MS),
-        )
-        .await
-        {
-            Either::First(output) => return output,
-            Either::Second(_) => service_pd_during_network_operation(i2c, pd_port, context).await,
-        }
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-pub(crate) async fn service_pd_during_eeprom_operation<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
-) where
-    PWM: SetDutyCycle,
-{
-    let observation = read_pd_status(i2c, pd_port, PdTimestamp::now()).await;
-    *service.last_pd_observation = observation;
-    if !startup_pd_contract_ready(observation) {
-        // EEPROM and PD share I2C. A failed or contract-less service result
-        // must remove physical heater power before the caller resumes normal
-        // control work; the next explicit arm is required after recovery.
-        apply_heater_duty(service.heater_pwm, 0, service.last_heater_duty);
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
 pub(crate) struct PersistRecordWriteInput<'a> {
     sequence: u32,
     data: &'a PersistDomainData,
@@ -1334,15 +1093,10 @@ pub(crate) struct PersistRecordWriteInput<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn write_eeprom_persist_record<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn write_eeprom_persist_record(
+    i2c: &mut I2c<'_>,
     input: PersistRecordWriteInput<'_>,
-) -> Result<(), MemoryCommitError>
-where
-    PWM: SetDutyCycle,
-{
+) -> Result<(), MemoryCommitError> {
     let PersistRecordWriteInput {
         sequence,
         data,
@@ -1356,7 +1110,7 @@ where
         .map_err(|_| MemoryCommitError::EncodeFailed)?;
     let domain = data.domain();
     let base_offset = domain.offset(slot);
-    let Some(address) = probe_eeprom_address(i2c) else {
+    let Some(address) = probe_eeprom_address(i2c).await else {
         return Err(MemoryCommitError::WriteAddressNoAck);
     };
     let mut written = 0usize;
@@ -1368,12 +1122,14 @@ where
         scratch.bytes[..chunk_len].copy_from_slice(&staging.bytes[written..written + chunk_len]);
         let write_result = {
             let mut eeprom = M24c64::with_address(&mut *i2c, address);
-            eeprom.write_page(chunk_offset, &scratch.bytes[..chunk_len])
+            eeprom
+                .write_page_async(chunk_offset, &scratch.bytes[..chunk_len])
+                .await
         };
         write_result.map_err(memory_commit_error_from_eeprom)?;
         written += chunk_len;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
-        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
+        EmbassyTimer::after_millis(0).await;
     }
 
     let mut read = 0usize;
@@ -1384,14 +1140,16 @@ where
             .ok_or(MemoryCommitError::VerifyUnreadable)?;
         let read_result = {
             let mut eeprom = M24c64::with_address(&mut *i2c, address);
-            eeprom.read_bytes(chunk_offset, &mut scratch.bytes[..chunk_len])
+            eeprom
+                .read_bytes_async(chunk_offset, &mut scratch.bytes[..chunk_len])
+                .await
         };
         read_result.map_err(|_| MemoryCommitError::VerifyUnreadable)?;
         if scratch.bytes[..chunk_len] != staging.bytes[read..read + chunk_len] {
             return Err(MemoryCommitError::VerifyMismatch);
         }
         read += chunk_len;
-        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
+        EmbassyTimer::after_millis(0).await;
     }
     let verified = decode_persist_record(&staging.bytes[..record_len])
         .map_err(|_| MemoryCommitError::VerifyUnreadable)?;
@@ -1413,15 +1171,10 @@ pub(crate) struct LayoutMarkerWriteInput<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn write_layout_marker_record<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn write_layout_marker_record(
+    i2c: &mut I2c<'_>,
     input: LayoutMarkerWriteInput<'_>,
-) -> Result<(), MemoryCommitFailure>
-where
-    PWM: SetDutyCycle,
-{
+) -> Result<(), MemoryCommitFailure> {
     let LayoutMarkerWriteInput {
         generation,
         status,
@@ -1446,8 +1199,6 @@ where
         {
             write_eeprom_persist_record(
                 i2c,
-                pd_port,
-                service,
                 PersistRecordWriteInput {
                     sequence: generation,
                     data: &data,
@@ -1486,15 +1237,10 @@ pub(crate) struct PersistMemoryDomainsInput<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn persist_memory_domains<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn persist_memory_domains(
+    i2c: &mut I2c<'_>,
     input: PersistMemoryDomainsInput<'_>,
-) -> Result<(), MemoryCommitFailure>
-where
-    PWM: SetDutyCycle,
-{
+) -> Result<(), MemoryCommitFailure> {
     let PersistMemoryDomainsInput {
         sequence,
         expected_config,
@@ -1546,8 +1292,6 @@ where
         #[cfg(not(feature = "hil-eeprom-commit-fault"))]
         let result = write_eeprom_persist_record(
             i2c,
-            pd_port,
-            service,
             PersistRecordWriteInput {
                 sequence,
                 data,
@@ -1584,15 +1328,10 @@ pub(crate) struct CommitMemoryConfigInput<'a> {
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-pub(crate) async fn commit_memory_config_now<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn commit_memory_config_now(
+    i2c: &mut I2c<'_>,
     input: CommitMemoryConfigInput<'_>,
-) -> Result<(), MemoryCommitFailure>
-where
-    PWM: SetDutyCycle,
-{
+) -> Result<(), MemoryCommitFailure> {
     let CommitMemoryConfigInput {
         memory_sequence,
         memory_config,
@@ -1613,8 +1352,6 @@ where
     };
     write_layout_marker_record(
         i2c,
-        pd_port,
-        service,
         LayoutMarkerWriteInput {
             generation: next_sequence,
             status: LayoutMarkerStatus::Prepared,
@@ -1628,8 +1365,6 @@ where
     .await?;
     persist_memory_domains(
         i2c,
-        pd_port,
-        service,
         PersistMemoryDomainsInput {
             sequence: next_sequence,
             expected_config: &expected_config,
@@ -1643,8 +1378,6 @@ where
     .await?;
     persist_memory_domains(
         i2c,
-        pd_port,
-        service,
         PersistMemoryDomainsInput {
             sequence: next_sequence,
             expected_config: &expected_config,
@@ -1661,8 +1394,6 @@ where
     // completed their write/readback verification.
     write_layout_marker_record(
         i2c,
-        pd_port,
-        service,
         LayoutMarkerWriteInput {
             generation: next_sequence,
             status: LayoutMarkerStatus::Active,
@@ -1689,15 +1420,10 @@ pub(crate) struct CommitMemoryDomainsWithoutMarkerInput<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn commit_memory_config_domains_without_marker<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn commit_memory_config_domains_without_marker(
+    i2c: &mut I2c<'_>,
     input: CommitMemoryDomainsWithoutMarkerInput<'_>,
-) -> Result<(), MemoryCommitFailure>
-where
-    PWM: SetDutyCycle,
-{
+) -> Result<(), MemoryCommitFailure> {
     let CommitMemoryDomainsWithoutMarkerInput {
         sequence,
         memory_config,
@@ -1710,8 +1436,6 @@ where
     expected_config.sanitize();
     persist_memory_domains(
         i2c,
-        pd_port,
-        service,
         PersistMemoryDomainsInput {
             sequence,
             expected_config: &expected_config,
@@ -1725,8 +1449,6 @@ where
     .await?;
     persist_memory_domains(
         i2c,
-        pd_port,
-        service,
         PersistMemoryDomainsInput {
             sequence,
             expected_config: &expected_config,
@@ -1741,21 +1463,14 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn initialize_fpr2_defaults<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn initialize_fpr2_defaults(
+    i2c: &mut I2c<'_>,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Option<u32>
-where
-    PWM: SetDutyCycle,
-{
+) -> Option<u32> {
     let mut sequence = 0;
     if commit_memory_config_now(
         i2c,
-        pd_port,
-        service,
         CommitMemoryConfigInput {
             memory_sequence: &mut sequence,
             memory_config: &flux_purr_firmware::memory::MemoryConfig::default(),
@@ -1773,24 +1488,17 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn migrate_legacy_memory_config<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn migrate_legacy_memory_config(
+    i2c: &mut I2c<'_>,
     legacy_sequence: u32,
     config: &MemoryConfig,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<u32, MemoryCommitFailure>
-where
-    PWM: SetDutyCycle,
-{
+) -> Result<u32, MemoryCommitFailure> {
     let sequence = legacy_sequence.saturating_add(1);
     for slot in [PersistSlot::A, PersistSlot::B] {
         write_layout_marker_record(
             i2c,
-            pd_port,
-            service,
             LayoutMarkerWriteInput {
                 generation: sequence,
                 status: LayoutMarkerStatus::Prepared,
@@ -1805,8 +1513,6 @@ where
     }
     commit_memory_config_domains_without_marker(
         i2c,
-        pd_port,
-        service,
         CommitMemoryDomainsWithoutMarkerInput {
             sequence,
             memory_config: config,
@@ -1818,7 +1524,7 @@ where
     )
     .await?;
     let mut scratch = new_memory_io_scratch();
-    invalidate_legacy_v5_magic(i2c, pd_port, service, &mut scratch)
+    invalidate_legacy_v5_magic(i2c, &mut scratch)
         .await
         .map_err(|error| {
             let failure = MemoryCommitFailure {
@@ -1835,8 +1541,6 @@ where
     for slot in [PersistSlot::A, PersistSlot::B] {
         write_layout_marker_record(
             i2c,
-            pd_port,
-            service,
             LayoutMarkerWriteInput {
                 generation: sequence,
                 status: LayoutMarkerStatus::Active,
@@ -1862,17 +1566,12 @@ pub(crate) struct PreparedFpr2DomainSpec {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn read_prepared_fpr2_domain<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn read_prepared_fpr2_domain(
+    i2c: &mut I2c<'_>,
     address: u8,
     spec: PreparedFpr2DomainSpec,
     staging: &mut SensitiveEepromStaging<'_>,
-) -> (Option<PersistRecord>, bool)
-where
-    PWM: SetDutyCycle,
-{
+) -> (Option<PersistRecord>, bool) {
     let mut selected: Option<PersistRecord> = None;
     let mut read_failed = false;
     for offset in spec
@@ -1881,16 +1580,8 @@ where
         .take(usize::from(spec.domain.slot_count()))
     {
         staging.bytes.fill(0xff);
-        let candidate = read_eeprom_persist_record(
-            i2c,
-            pd_port,
-            service,
-            address,
-            offset,
-            spec.slot_size,
-            staging.bytes,
-        )
-        .await;
+        let candidate =
+            read_eeprom_persist_record(i2c, address, offset, spec.slot_size, staging.bytes).await;
         let candidate = match candidate {
             Ok(candidate) => candidate,
             Err(()) => {
@@ -1912,17 +1603,12 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn read_prepared_fpr2_domains<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn read_prepared_fpr2_domains(
+    i2c: &mut I2c<'_>,
     address: u8,
     sequence: u32,
     staging: &mut SensitiveEepromStaging<'_>,
-) -> ([Option<PersistRecord>; 6], bool)
-where
-    PWM: SetDutyCycle,
-{
+) -> ([Option<PersistRecord>; 6], bool) {
     let specs = [
         PreparedFpr2DomainSpec {
             domain: PersistDomain::SafetyCalibration,
@@ -1958,8 +1644,7 @@ where
     let mut domains = [None, None, None, None, None, None];
     let mut read_failed = false;
     for spec in specs {
-        let (selected, failed) =
-            read_prepared_fpr2_domain(i2c, pd_port, service, address, spec, staging).await;
+        let (selected, failed) = read_prepared_fpr2_domain(i2c, address, spec, staging).await;
         domains[spec.domain as usize - 1] = selected;
         read_failed |= failed;
     }
@@ -1967,17 +1652,12 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn write_recovered_active_markers<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn write_recovered_active_markers(
+    i2c: &mut I2c<'_>,
     sequence: u32,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<(), MemoryCommitFailure>
-where
-    PWM: SetDutyCycle,
-{
+) -> Result<(), MemoryCommitFailure> {
     let mut scratch = new_memory_io_scratch();
     let active = PersistDomainData::LayoutMarker(LayoutMarker {
         generation: sequence,
@@ -1987,8 +1667,6 @@ where
     for slot in [PersistSlot::A, PersistSlot::B] {
         if let Err(error) = write_eeprom_persist_record(
             i2c,
-            pd_port,
-            service,
             PersistRecordWriteInput {
                 sequence,
                 data: &active,
@@ -2015,18 +1693,13 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn recover_prepared_fpr2_layout<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn recover_prepared_fpr2_layout(
+    i2c: &mut I2c<'_>,
     sequence: u32,
     persistence_log_sink: &mut dyn PersistenceLogSink,
     record_staging: &mut [u8; EEPROM_RECORD_STAGING_BYTES],
-) -> Result<(), MemoryCommitFailure>
-where
-    PWM: SetDutyCycle,
-{
-    let Some(address) = probe_eeprom_address(i2c) else {
+) -> Result<(), MemoryCommitFailure> {
+    let Some(address) = probe_eeprom_address(i2c).await else {
         let failure = MemoryCommitFailure {
             error: MemoryCommitError::VerifyUnreadable,
             phase: "active-recovery",
@@ -2040,7 +1713,7 @@ where
     };
     let mut staging = SensitiveEepromStaging::new(&mut record_staging[..FPR2_MAX_RECORD_SIZE]);
     let (domains, read_failed) =
-        read_prepared_fpr2_domains(i2c, pd_port, service, address, sequence, &mut staging).await;
+        read_prepared_fpr2_domains(i2c, address, sequence, &mut staging).await;
     if read_failed || !fpr2_prepared_generation_is_complete(&domains, sequence) {
         let failure = MemoryCommitFailure {
             error: if read_failed {
@@ -2058,28 +1731,15 @@ where
         return Err(failure);
     }
     drop(staging);
-    write_recovered_active_markers(
-        i2c,
-        pd_port,
-        service,
-        sequence,
-        persistence_log_sink,
-        record_staging,
-    )
-    .await
+    write_recovered_active_markers(i2c, sequence, persistence_log_sink, record_staging).await
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn invalidate_legacy_v5_magic<PWM>(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    pd_port: &mut PdPort,
-    service: &mut EepromPdServiceContext<'_, PWM>,
+pub(crate) async fn invalidate_legacy_v5_magic(
+    i2c: &mut I2c<'_>,
     scratch: &mut MemoryIoScratch,
-) -> Result<(), MemoryCommitError>
-where
-    PWM: SetDutyCycle,
-{
-    let Some(address) = probe_eeprom_address(i2c) else {
+) -> Result<(), MemoryCommitError> {
+    let Some(address) = probe_eeprom_address(i2c).await else {
         return Err(MemoryCommitError::WriteAddressNoAck);
     };
     let invalid = [0xffu8; 4];
@@ -2087,11 +1747,13 @@ where
         let result = {
             let mut eeprom = M24c64::with_address(&mut *i2c, address);
             scratch.bytes[..invalid.len()].copy_from_slice(&invalid);
-            eeprom.write_page(offset, &scratch.bytes[..invalid.len()])
+            eeprom
+                .write_page_async(offset, &scratch.bytes[..invalid.len()])
+                .await
         };
         result.map_err(memory_commit_error_from_eeprom)?;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
-        service_pd_during_eeprom_operation(i2c, pd_port, service).await;
+        EmbassyTimer::after_millis(0).await;
     }
     Ok(())
 }
@@ -2724,7 +2386,7 @@ pub(crate) fn constrain_heater_backend_to_controller(
         ) => HeaterPowerBackend::FixedPdPwmFallback {
             reason: HeaterPowerBackendReason::NoPps20vCapability,
             fixed_request_confirmed: false,
-            fixed_request: ch224q::VoltageRequest::V20,
+            fixed_request: ch224q::VoltageRequest::V12,
             terminal_fixed_pd_disarmed,
         },
         (
@@ -2737,7 +2399,7 @@ pub(crate) fn constrain_heater_backend_to_controller(
         ) => HeaterPowerBackend::FixedPdPwmFallback {
             reason,
             fixed_request_confirmed: false,
-            fixed_request: ch224q::VoltageRequest::V20,
+            fixed_request: ch224q::VoltageRequest::V12,
             terminal_fixed_pd_disarmed,
         },
         (_, backend) => backend,
@@ -2752,7 +2414,7 @@ pub(crate) fn select_fusb302b_heater_power_backend(
         return HeaterPowerBackend::FixedPdPwmFallback {
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: false,
-            fixed_request: ch224q::VoltageRequest::V20,
+            fixed_request: ch224q::VoltageRequest::V12,
             terminal_fixed_pd_disarmed: false,
         };
     };
@@ -2785,25 +2447,29 @@ pub(crate) fn apply_heater_duty<PWM>(
 ) where
     PWM: SetDutyCycle,
 {
-    if duty_percent == *last_duty_percent {
+    let effective_duty_percent = if heater_permit_is_active(Instant::now().as_millis()) {
+        duty_percent
+    } else {
+        0
+    };
+    if effective_duty_percent == *last_duty_percent {
         return;
     }
 
-    let _ = heater_pwm.set_duty_cycle_percent(duty_percent);
+    let _ = heater_pwm.set_duty_cycle_percent(effective_duty_percent);
     info!(
         "heater output -> duty={=u8}% prev={=u8}%",
-        duty_percent, *last_duty_percent,
+        effective_duty_percent, *last_duty_percent,
     );
-    *last_duty_percent = duty_percent;
+    *last_duty_percent = effective_duty_percent;
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) struct ThermalPlantDisarmContext<'a, 'i, PWM> {
+pub(crate) struct ThermalPlantDisarmContext<'a, PWM> {
     pub(crate) calibration_runtime_state: &'a mut CalibrationRuntimeState,
     pub(crate) backend: &'a mut HeaterPowerBackend,
     pub(crate) manual_pps: &'a mut ManualPpsState,
-    pub(crate) i2c: &'a mut I2c<'i, esp_hal::Blocking>,
-    pub(crate) pd_port: &'a mut PdPort,
+    pub(crate) pd_port: &'a PdPort,
     pub(crate) heater_pwm: &'a mut PWM,
     pub(crate) hold_pps_governor: &'a mut HoldPpsGovernor,
     pub(crate) ui_state: &'a mut FrontPanelUiState,
@@ -2813,7 +2479,7 @@ pub(crate) struct ThermalPlantDisarmContext<'a, 'i, PWM> {
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn disarm_pending_thermal_plant_output<PWM>(
-    context: ThermalPlantDisarmContext<'_, '_, PWM>,
+    context: ThermalPlantDisarmContext<'_, PWM>,
 ) -> bool
 where
     PWM: SetDutyCycle,
@@ -2822,7 +2488,6 @@ where
         calibration_runtime_state,
         backend,
         manual_pps,
-        i2c,
         pd_port,
         heater_pwm,
         hold_pps_governor,
@@ -2840,17 +2505,17 @@ where
     ui_state.heater_output_percent = 0;
 
     if !matches!(
-        request_pd_fixed_voltage(i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST).await,
+        pd_port.restore_automatic_idle_contract(),
         PdContractRequestState::Confirmed
     ) {
-        // Keep both the disarm latch and the PPS backend lock so the next
-        // control period retries fixed PD without re-applying a PPS request.
+        // Keep both the disarm latch and the PPS backend lock until the
+        // independent PD task restores its automatic idle contract.
         return true;
     }
 
-    if !terminal_fixed_pd_voltage_confirmed(measured_vin_mv) {
-        // The CH224Q accepts the register write before the source has actually
-        // left PPS. Keep the terminal lock active until VIN proves fixed PD.
+    if !terminal_idle_voltage_confirmed(measured_vin_mv) {
+        // A source may acknowledge the request before VBUS reaches the idle
+        // voltage. Keep the terminal lock active until VIN confirms it.
         return true;
     }
 
@@ -2860,8 +2525,8 @@ where
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn terminal_fixed_pd_voltage_confirmed(measured_vin_mv: u32) -> bool {
-    measured_vin_mv.abs_diff(u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts())) <= 1_000
+pub(crate) fn terminal_idle_voltage_confirmed(measured_vin_mv: u32) -> bool {
+    measured_vin_mv.abs_diff(u32::from(FUSB302B_INITIAL_PPS_REQUEST_MV)) <= 1_000
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

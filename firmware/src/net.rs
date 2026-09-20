@@ -11,6 +11,21 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+use crate::{
+    control_plane::{Identity, NetworkState, NetworkSummary},
+    mdns::build_http_announcement,
+    memory::{MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig},
+    net_http::{
+        CommandOrigin, ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HttpGate, HttpMethod,
+        HttpReadGate, HttpRequest, HttpResponse, LAN_HTTP_BODY_MAX_LEN,
+        LAN_HTTP_LIGHT_BODY_MAX_LEN, LightHttpResponse, NetHttpState, device_names_from_mac,
+        format_http_response_headers, http_socket_slot_count, http_workspace_slot_count,
+        identity_from_device_names,
+    },
+    wifi_state::{
+        SAVING_TIMEOUT_MS, WifiEvent as ProvisioningEvent, WifiProvisioningMachine, WifiTransition,
+    },
+};
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_net::{
@@ -35,22 +50,6 @@ use esp_radio::{
 use heapless::{String, Vec};
 use serde::Serialize;
 use static_cell::StaticCell;
-
-use crate::{
-    control_plane::{Identity, NetworkState, NetworkSummary},
-    mdns::build_http_announcement,
-    memory::{MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig},
-    net_http::{
-        CommandOrigin, ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HttpGate, HttpMethod,
-        HttpReadGate, HttpRequest, HttpResponse, LAN_HTTP_BODY_MAX_LEN,
-        LAN_HTTP_LIGHT_BODY_MAX_LEN, LightHttpResponse, NetHttpState, device_names_from_mac,
-        format_http_response_headers, http_socket_slot_count, http_workspace_slot_count,
-        identity_from_device_names,
-    },
-    wifi_state::{
-        SAVING_TIMEOUT_MS, WifiEvent as ProvisioningEvent, WifiProvisioningMachine, WifiTransition,
-    },
-};
 
 // Three sockets at 1 KiB per direction use less static RAM than the previous
 // two-socket 2 KiB layout while still covering the largest HTTP header and
@@ -475,7 +474,10 @@ pub fn respond_to_command(
     } else {
         current_control_revision()
     };
-    CONTROL_RESPONSES[usize::from(response_slot)].signal(ControlMailboxResponse {
+    let Some(response_signal) = CONTROL_RESPONSES.get(usize::from(response_slot)) else {
+        return;
+    };
+    response_signal.signal(ControlMailboxResponse {
         request_id,
         status,
         body,
@@ -496,13 +498,11 @@ async fn await_control_response(
     response_slot: u8,
     request_id: u32,
 ) -> Option<ControlMailboxResponse> {
+    let response_signal = CONTROL_RESPONSES.get(usize::from(response_slot))?;
     loop {
-        let response = with_timeout(
-            Duration::from_secs(3),
-            CONTROL_RESPONSES[usize::from(response_slot)].wait(),
-        )
-        .await
-        .ok()?;
+        let response = with_timeout(Duration::from_secs(3), response_signal.wait())
+            .await
+            .ok()?;
         if response.request_id == request_id {
             return Some(response);
         }
@@ -1426,7 +1426,7 @@ fn stage_http_gate(
 ) -> Option<(u32, bool)> {
     match gate {
         HttpGate::Respond(response) => {
-            *response_slot = response;
+            *response_slot = *response;
             None
         }
         HttpGate::Dispatch {

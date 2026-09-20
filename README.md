@@ -11,7 +11,7 @@ Firmware operations have two user classes and two firmware sources:
 | User class | Command | Firmware source |
 | --- | --- | --- |
 | 一般用户 | `flux-purr update --port <serial-port> --bundle <local.fluxpurr-fw>` | 本地 `.fluxpurr-fw`，且必须命中随 host-tools/Web 发布的 SHA-256 完整性清单 |
-| 开发者 | `flux-purr flash --port <serial-port> [--elf <local-elf>]` | 本地 ELF；默认自动备份 EEPROM，直连串口，不连接 devd |
+| 开发者 | `flux-purr flash --port <serial-port> [--elf <local-elf>] [--keep-download-mode]` | 本地 ELF；默认自动备份 EEPROM，直连串口，不连接 devd；已手动进入下载模式时可保持下载模式 |
 | 开发者 | `flux-purr recover --port <serial-port> --elf <local-elf> --confirm ERASE` | 本地 ELF；擦除 MCU 内部 Flash，不读写 EEPROM |
 
 Every firmware operation requires the exact serial port. `update` starts a managed local devd when no `--devd <local-control-socket>` is supplied; it neither selects nor remembers a port. `flash` uses no devd, URL, HTTP, bundle, artifact ID, or manifest. It automatically creates an encrypted EEPROM archive before writing unless the Developer explicitly confirms the emergency bypass. `recover` is the explicit MCU-internal-Flash erase path and does not touch EEPROM. The complete contract is [Firmware Update And Developer Flash](docs/specs/firmware-update-and-developer-flash/SPEC.md); its [implementation status](docs/specs/firmware-update-and-developer-flash/IMPLEMENTATION.md) records the current local verification boundary.
@@ -113,23 +113,17 @@ Current firmware runtime baseline also assumes:
 - the FUSB302BMPX board uses read-only `0x9x` identity selection at its colliding `0x22` address, has `GPIO7` PD interrupt wiring, preserves each usable live PPS APDO (a currently observed source advertises `5V..21V`), and retains fixed PDO fallback
 - `>=20 V @ >=3 A` is the performance-guaranteed PD tier; lower accepted contracts are degraded operation and cannot run calibration
 - contractual `3 A`/`5 A` limits bound software heater power (`60 W`/`100 W` at `20 V`) but are not measured VBUS current or physical OCP
-- optional firmware variants can switch the boot PD request to `12 V` or `28 V` via Cargo features
+- FUSB302B production always restores a usable PPS APDO to the `12 V` idle request; the product firmware has one fixed PD idle policy and does not publish voltage-specific Cargo build targets
 - heater control uses the selected controller's supported path: CH224Q can use PPS/AVS, while FUSB302BMPX applies the absolute `5V..28V` PD guard before selecting its live PPS APDO, with fixed-PDO fallback and the `GPIO47` PWM backend
 - startup establishes the active-low backlight, runs the bounded FUSB302B Sink service window, initializes the display and flushes the startup frame, then initializes other outputs and control-plane hardware; an unavailable contract keeps the heater fail-closed while Dashboard startup continues
 - Dashboard center double toggles the active-cooling policy
 - Dashboard fan line renders `OFF / AUTO / RUN`, while the real output contract remains `fanEnabled + fanPwmPermille`
 
-PD request build variants:
+Product firmware build:
 
 ```bash
-# default runtime image (20 V)
+# product runtime image (FUSB302B idle PPS: 12 V)
 cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release
-
-# 12 V variant
-cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-12v --bin flux-purr --release
-
-# 28 V variant
-cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-28v --bin flux-purr --release
 ```
 
 Current hardware design notes and manufacturing support assets are frozen in:

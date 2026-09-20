@@ -1404,6 +1404,11 @@ pub(crate) struct FlashArgs {
         help = "Literal confirmation required by --skip-backup: NO_EEPROM_BACKUP"
     )]
     pub(crate) confirm: Option<String>,
+    #[arg(
+        long,
+        help = "Keep the device in its current ROM download mode by skipping reset before and after flash"
+    )]
+    pub(crate) keep_download_mode: bool,
 }
 
 #[derive(Debug, Args)]

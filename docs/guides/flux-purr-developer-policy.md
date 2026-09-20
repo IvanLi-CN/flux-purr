@@ -61,7 +61,7 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 
 - 非硬件验证先于任何真机/HIL 操作完成。
 - Rust 风格合同由 `cargo fmt --all -- --check`、`bun run check:rust:style`、
-  firmware/devd 的严格 Clippy 以及 12V/20V/28V 的 `cargo +esp clippy`
+  firmware/devd 的严格 Clippy 以及产品固件的 `cargo +esp clippy`
   共同执行。入口文件只负责装配，测试和领域实现必须位于命名模块中。
   `check:rust:style` 会运行 checker fixtures，并拒绝三项 structural lint
   的任何本地 `allow`/`expect`（包括嵌套 `cfg_attr`）。

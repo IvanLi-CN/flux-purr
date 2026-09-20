@@ -937,7 +937,7 @@ impl PdContractVinGuard {
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct PdContractVinContext<'a, PWM> {
-    pub(crate) pd_port: &'a mut PdPort,
+    pub(crate) pd_port: &'a PdPort,
     pub(crate) last_pd_observation: &'a mut Option<PdStatusObservation>,
     pub(crate) pd_contract_ready: &'a mut bool,
     pub(crate) ui_state: &'a mut FrontPanelUiState,

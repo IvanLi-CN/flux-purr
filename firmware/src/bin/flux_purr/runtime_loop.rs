@@ -44,12 +44,13 @@ impl RuntimeInputOutcome {
     fn skip(
         sample: flux_purr_firmware::frontpanel::FrontPanelSampleResult,
         needs_redraw: bool,
+        pairing_opened_by_usb: bool,
     ) -> Self {
         Self {
             sample,
             needs_redraw,
             skip_iteration: true,
-            pairing_opened_by_usb: false,
+            pairing_opened_by_usb,
         }
     }
 }
@@ -58,6 +59,7 @@ impl RuntimeInputOutcome {
 pub(crate) struct RuntimeUsbInputOutcome {
     needs_redraw: bool,
     control_command_processed: bool,
+    response_pending: bool,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -66,7 +68,7 @@ pub(crate) struct RuntimeLanInputOutcome {
     command_processed: bool,
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 impl RuntimeLanInputOutcome {
     fn processed(needs_redraw: bool) -> Self {
         Self {
@@ -77,42 +79,37 @@ impl RuntimeLanInputOutcome {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn runtime_service_pd(state: &mut RuntimeLoopState, pd_now: PdTimestamp) -> bool {
+pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
     let mut needs_redraw = false;
-
-    if pd_runtime_service_due(pd_now.as_millis(), state.next_pd_service_deadline_ms) {
-        state.next_pd_service_deadline_ms = next_pd_runtime_service_deadline_ms(
-            state.next_pd_service_deadline_ms,
-            pd_now.as_millis(),
-        );
-        let current_pd_observation =
-            read_pd_status(&mut state.pd_i2c, &mut state.pd_port, pd_now).await;
-        if pd_status_log_key(current_pd_observation) != state.last_pd_status_log_key {
-            match current_pd_observation {
-                Some(observation) => info!(
-                    "pd status update status=0x{=u8:02x} pd={=bool} epr={=bool} epr_exist={=bool} current_raw=0x{=u8:02x} current_ma={=u16}",
-                    observation.status_raw,
-                    observation.status.pd_active,
-                    observation.status.epr_active,
-                    observation.status.epr_exist,
-                    observation.current_raw,
-                    observation.current_ma,
-                ),
-                None => info!("pd status update read=failed"),
-            }
-            state.last_pd_status_log_key = pd_status_log_key(current_pd_observation);
-        }
-        state.last_pd_observation = current_pd_observation;
-        needs_redraw |= apply_pd_contract_observation(
-            current_pd_observation,
-            &mut state.pd_contract_ready,
-            &mut state.ui_state,
-            &mut state.calibration_runtime_state,
-            &mut state.manual_pps_state,
-            &mut state.heater_pwm,
-            &mut state.last_heater_duty,
-        );
+    let current_pd_observation = state.pd_port.observation();
+    if current_pd_observation.is_none() {
+        HeaterPwmGate::force_off();
     }
+    if pd_status_log_key(current_pd_observation) != state.last_pd_status_log_key {
+        match current_pd_observation {
+            Some(observation) => info!(
+                "pd status update status=0x{=u8:02x} pd={=bool} epr={=bool} epr_exist={=bool} current_raw=0x{=u8:02x} current_ma={=u16}",
+                observation.status_raw,
+                observation.status.pd_active,
+                observation.status.epr_active,
+                observation.status.epr_exist,
+                observation.current_raw,
+                observation.current_ma,
+            ),
+            None => info!("pd status update read=failed"),
+        }
+        state.last_pd_status_log_key = pd_status_log_key(current_pd_observation);
+    }
+    state.last_pd_observation = current_pd_observation;
+    needs_redraw |= apply_pd_contract_observation(
+        current_pd_observation,
+        &mut state.pd_contract_ready,
+        &mut state.ui_state,
+        &mut state.calibration_runtime_state,
+        &mut state.manual_pps_state,
+        &mut state.heater_pwm,
+        &mut state.last_heater_duty,
+    );
 
     needs_redraw
 }
@@ -122,19 +119,13 @@ pub(crate) async fn runtime_process_usb_snapshot_line(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
 ) -> Option<bool> {
-    let mut eeprom_pd_service = EepromPdServiceContext::new(
-        &mut state.last_pd_observation,
-        &mut state.heater_pwm,
-        &mut state.last_heater_duty,
-    );
     let response = process_eeprom_snapshot_line(
         state.transport.usb_rx_line.as_str(),
         &mut state.transport.eeprom_snapshot_session,
-        &mut state.pd_i2c,
-        &mut state.pd_port,
-        &mut eeprom_pd_service,
+        &mut state.eeprom_i2c,
         &mut state.memory_commit_due_ms,
         elapsed_ms,
+        state.last_heater_duty != 0,
     )
     .await?;
     let storage_failed = eeprom_snapshot_storage_failure(&response);
@@ -147,10 +138,11 @@ pub(crate) async fn runtime_process_usb_snapshot_line(
             None,
         );
     }
-    write_eeprom_snapshot_response(
-        &mut state.transport.usb_serial,
+    start_eeprom_snapshot_response(
+        &mut state.transport.usb_response_writer,
         &response,
         state.transport.usb_tx_buf,
+        Instant::now().as_millis(),
     );
     state.transport.usb_rx_line.clear();
     Some(storage_failed)
@@ -160,14 +152,9 @@ pub(crate) async fn runtime_process_usb_snapshot_line(
 pub(crate) async fn runtime_process_usb_control_line(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
-) -> bool {
+) -> (bool, bool) {
     let pd_observation_for_control = state.last_pd_observation;
     let heater_duty_for_control = state.last_heater_duty;
-    let mut eeprom_pd_service = EepromPdServiceContext::new(
-        &mut state.last_pd_observation,
-        &mut state.heater_pwm,
-        &mut state.last_heater_duty,
-    );
     let (control_needs_redraw, response) = process_control_line(
         state.transport.usb_rx_line.as_str(),
         ControlLineContext {
@@ -180,15 +167,13 @@ pub(crate) async fn runtime_process_usb_control_line(
             memory_sequence: &mut state.memory_sequence,
             persistence_source: state.persistence_source,
             persistence_record_state: state.persistence_record_state,
-            pd_i2c: &mut state.pd_i2c,
+            eeprom_i2c: &mut state.eeprom_i2c,
             pd_controller: state.pd_port.controller_kind(),
-            pd_port: &mut state.pd_port,
-            eeprom_pd_service: &mut eeprom_pd_service,
+            pd_port: &state.pd_port,
             calibration_runtime_state: &mut state.calibration_runtime_state,
             thermal_plant_workspace: state.thermal_plant_workspace,
             elapsed_ms,
             last_pd_observation: pd_observation_for_control,
-            pd_contract_ready: &mut state.pd_contract_ready,
             heater_power_backend: &mut state.heater_power_backend,
             heater_controller: &mut state.heater_controller,
             pid_snapshot: state.last_pid_snapshot,
@@ -212,18 +197,19 @@ pub(crate) async fn runtime_process_usb_control_line(
             latest_vin_mv: state.latest_vin_mv,
             last_heater_duty: heater_duty_for_control,
             heater_control_timing: state.heater_control_timing,
-            persistence_log_sink: &mut state.transport.usb_serial,
+            persistence_log_sink: &mut state.transport.persistence_log_sink,
             record_staging: state.eeprom_record_staging,
         },
     )
     .await;
     let mut needs_redraw = control_needs_redraw;
+    let mutation_requested =
+        usb_mutating_request_id(state.transport.usb_rx_line.as_str()).is_some();
     needs_redraw |= disarm_pending_thermal_plant_output(ThermalPlantDisarmContext {
         calibration_runtime_state: &mut state.calibration_runtime_state,
         backend: &mut state.heater_power_backend,
         manual_pps: &mut state.manual_pps_state,
-        i2c: &mut state.pd_i2c,
-        pd_port: &mut state.pd_port,
+        pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
         hold_pps_governor: &mut state.hold_pps_governor,
         ui_state: &mut state.ui_state,
@@ -231,13 +217,15 @@ pub(crate) async fn runtime_process_usb_control_line(
         measured_vin_mv: state.latest_vin_mv,
     })
     .await;
-    usb_write_response_frame(
-        &mut state.transport.usb_serial,
+    let _ = usb_start_response_frame(
+        &mut state.transport.usb_response_writer,
         &response,
         state.transport.usb_tx_buf,
+        Instant::now().as_millis(),
     );
     state.transport.usb_rx_line.clear();
-    needs_redraw
+    let mutation_succeeded = mutation_requested && usb_mutation_succeeded(&response);
+    (needs_redraw, mutation_succeeded)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -251,10 +239,71 @@ pub(crate) async fn runtime_process_usb_line(
     {
         return (false, true);
     }
-    (
-        runtime_process_usb_control_line(state, elapsed_ms).await,
-        true,
-    )
+    let mut mutating_request_id = usb_mutating_request_id(state.transport.usb_rx_line.as_str());
+    if let Some(request_id) = mutating_request_id.as_ref()
+        && usb_mutating_request_id_is_recent(
+            &state.transport.usb_recent_mutating_request_ids,
+            request_id,
+        )
+    {
+        let response = usb_error_response(
+            request_id.clone(),
+            "request_replayed",
+            "The request may already have executed; reconcile device state and use a new requestId.",
+        );
+        let _ = usb_start_response_frame(
+            &mut state.transport.usb_response_writer,
+            &response,
+            state.transport.usb_tx_buf,
+            Instant::now().as_millis(),
+        );
+        state.transport.usb_rx_line.clear();
+        return (false, true);
+    }
+    let (needs_redraw, mutation_succeeded) =
+        runtime_process_usb_control_line(state, elapsed_ms).await;
+    if mutation_succeeded && let Some(request_id) = mutating_request_id.take() {
+        remember_mutating_request_id(
+            &mut state.transport.usb_recent_mutating_request_ids,
+            request_id,
+        );
+    }
+    (needs_redraw, true)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn runtime_drain_usb_input(state: &mut RuntimeLoopState, elapsed_ms: u64) -> (bool, bool) {
+    let mut usb_bytes_processed = 0_u16;
+    while usb_bytes_processed < PD_RUNTIME_USB_BYTE_BUDGET {
+        let byte = match state.transport.usb_serial.read_byte() {
+            Ok(byte) => byte,
+            Err(_) => return (false, false),
+        };
+        usb_bytes_processed = usb_bytes_processed.saturating_add(1);
+        if byte == b'\n' {
+            if state.transport.usb_rx_overflowed {
+                state.transport.usb_rx_overflowed = false;
+                state.transport.usb_rx_line.clear();
+                let response = usb_line_too_long_response();
+                let _ = usb_start_response_frame(
+                    &mut state.transport.usb_response_writer,
+                    &response,
+                    state.transport.usb_tx_buf,
+                    Instant::now().as_millis(),
+                );
+                return (false, true);
+            }
+            return runtime_process_usb_line(state, elapsed_ms).await;
+        }
+        if byte != b'\r' {
+            append_usb_control_byte(
+                &mut *state.transport.usb_rx_line,
+                &mut state.transport.usb_rx_overflowed,
+                byte,
+            );
+        }
+    }
+    (false, false)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -263,100 +312,125 @@ pub(crate) async fn runtime_process_usb_input(
     elapsed_ms: u64,
 ) -> RuntimeUsbInputOutcome {
     let mut needs_redraw = false;
+    #[cfg(feature = "net_http")]
     let mut control_command_processed = false;
+    #[cfg(not(feature = "net_http"))]
+    let control_command_processed = false;
     #[cfg(feature = "web_serial")]
-    let mut usb_bytes_processed = 0_u16;
+    let mut persistence_log_pending = false;
     #[cfg(feature = "web_serial")]
-    loop {
-        if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET {
-            break;
+    let response_was_pending = !state.transport.usb_response_writer.is_complete();
+    #[cfg(feature = "web_serial")]
+    let usb_response_state = runtime_pump_usb_response_budget(state).await;
+    #[cfg(feature = "web_serial")]
+    if response_was_pending
+        && matches!(usb_response_state, UsbResponsePumpOutcome::Idle)
+        && state.memory_commit_due_ms.is_some()
+    {
+        state.memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+    }
+    #[cfg(feature = "web_serial")]
+    if matches!(usb_response_state, UsbResponsePumpOutcome::Fault) {
+        runtime_mark_usb_transport_fault(state);
+        return RuntimeUsbInputOutcome {
+            needs_redraw,
+            control_command_processed,
+            response_pending: true,
+        };
+    }
+    #[cfg(feature = "web_serial")]
+    if state.transport.usb_transport_faulted {
+        if state.transport.usb_recovery_marker_failed {
+            return RuntimeUsbInputOutcome {
+                needs_redraw,
+                control_command_processed,
+                response_pending: true,
+            };
         }
-        match state.transport.usb_serial.read_byte() {
-            Ok(b'\n') => {
-                let (line_needs_redraw, line_processed) =
-                    runtime_process_usb_line(state, elapsed_ms).await;
-                needs_redraw |= line_needs_redraw;
-                #[cfg(feature = "net_http")]
-                {
-                    control_command_processed |= line_processed;
+        if !state.transport.usb_recovery_marker_failed
+            && state.transport.usb_recovery_writer.is_complete()
+            && !usb_start_transport_recovery(
+                &mut state.transport.usb_recovery_writer,
+                state.transport.usb_tx_buf,
+                Instant::now().as_millis(),
+            )
+        {
+            state.transport.usb_recovery_marker_failed = true;
+        }
+        if !state.transport.usb_recovery_marker_failed {
+            match usb_pump_recovery_response(
+                &mut state.transport.usb_serial,
+                &mut state.transport.usb_recovery_writer,
+                state.transport.usb_tx_buf,
+                Instant::now().as_millis(),
+            ) {
+                UsbResponsePumpOutcome::Idle => {
+                    state.transport.usb_transport_faulted = false;
                 }
-                break;
-            }
-            Ok(b'\r') => {
-                usb_bytes_processed = usb_bytes_processed.saturating_add(1);
-            }
-            Ok(byte) => {
-                usb_bytes_processed = usb_bytes_processed.saturating_add(1);
-                if state.transport.usb_rx_line.push(char::from(byte)).is_err() {
-                    state.transport.usb_rx_line.clear();
+                UsbResponsePumpOutcome::Fault => {
+                    state.transport.usb_recovery_marker_failed = true;
                 }
+                UsbResponsePumpOutcome::Pending => {}
             }
-            Err(nb::Error::WouldBlock) => break,
-            Err(_) => break,
+        }
+        if state.transport.usb_recovery_marker_failed {
+            warn!("USB recovery marker failed; retaining terminal transport fault");
+            state.transport.usb_recovery_writer.abort();
+        }
+        return RuntimeUsbInputOutcome {
+            needs_redraw,
+            control_command_processed,
+            response_pending: true,
+        };
+    }
+    #[cfg(feature = "web_serial")]
+    if matches!(usb_response_state, UsbResponsePumpOutcome::Idle) {
+        persistence_log_pending = runtime_flush_persistence_logs(state).await;
+    }
+    #[cfg(feature = "web_serial")]
+    if matches!(usb_response_state, UsbResponsePumpOutcome::Idle)
+        && !persistence_log_pending
+        && !state.transport.usb_transport_faulted
+    {
+        let (line_needs_redraw, _line_processed) = runtime_drain_usb_input(state, elapsed_ms).await;
+        needs_redraw |= line_needs_redraw;
+        #[cfg(feature = "net_http")]
+        {
+            control_command_processed |= _line_processed;
         }
     }
 
     RuntimeUsbInputOutcome {
         needs_redraw,
         control_command_processed,
+        #[cfg(feature = "web_serial")]
+        response_pending: !state.transport.usb_response_writer.is_complete()
+            || persistence_log_pending
+            || state.transport.usb_transport_faulted,
+        #[cfg(not(feature = "web_serial"))]
+        response_pending: false,
     }
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 pub(crate) async fn runtime_lan_direct_response(
-    state: &mut RuntimeLoopState,
+    _state: &mut RuntimeLoopState,
     command: &flux_purr_firmware::net_http::ControlMailboxCommand,
 ) -> Option<(u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>)> {
     match (command.endpoint, command.method) {
         (LanEndpoint::Identity, HttpMethod::Get) => {
-            let mut eeprom_pd_service = EepromPdServiceContext::new(
-                &mut state.last_pd_observation,
-                &mut state.heater_pwm,
-                &mut state.last_heater_duty,
-            );
-            let mut pd_network_service = PdNetworkServiceContext {
-                eeprom: &mut eeprom_pd_service,
-                pd_contract_ready: &mut state.pd_contract_ready,
-                ui_state: &mut state.ui_state,
-                calibration_runtime_state: &mut state.calibration_runtime_state,
-                manual_pps: &mut state.manual_pps_state,
-            };
-            let identity = run_network_operation_with_pd(
-                flux_purr_firmware::net::lan_identity(),
-                &mut state.pd_i2c,
-                &mut state.pd_port,
-                &mut pd_network_service,
-            )
-            .await;
+            let identity = flux_purr_firmware::net::lan_identity().await;
             Some(lan_json_response(&identity))
         }
         (LanEndpoint::Network, HttpMethod::Get) => {
-            let mut eeprom_pd_service = EepromPdServiceContext::new(
-                &mut state.last_pd_observation,
-                &mut state.heater_pwm,
-                &mut state.last_heater_duty,
-            );
-            let mut pd_network_service = PdNetworkServiceContext {
-                eeprom: &mut eeprom_pd_service,
-                pd_contract_ready: &mut state.pd_contract_ready,
-                ui_state: &mut state.ui_state,
-                calibration_runtime_state: &mut state.calibration_runtime_state,
-                manual_pps: &mut state.manual_pps_state,
-            };
-            let network = run_network_operation_with_pd(
-                flux_purr_firmware::net::lan_network_summary(),
-                &mut state.pd_i2c,
-                &mut state.pd_port,
-                &mut pd_network_service,
-            )
-            .await;
+            let network = flux_purr_firmware::net::lan_network_summary().await;
             Some(lan_json_response(&network))
         }
         _ => None,
     }
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 pub(crate) async fn runtime_process_lan_control(
     state: &mut RuntimeLoopState,
     line: &str,
@@ -364,11 +438,6 @@ pub(crate) async fn runtime_process_lan_control(
 ) -> (bool, (u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>)) {
     let pd_observation_for_control = state.last_pd_observation;
     let heater_duty_for_control = state.last_heater_duty;
-    let mut eeprom_pd_service = EepromPdServiceContext::new(
-        &mut state.last_pd_observation,
-        &mut state.heater_pwm,
-        &mut state.last_heater_duty,
-    );
     let result = process_control_line(
         line,
         ControlLineContext {
@@ -381,15 +450,13 @@ pub(crate) async fn runtime_process_lan_control(
             memory_sequence: &mut state.memory_sequence,
             persistence_source: state.persistence_source,
             persistence_record_state: state.persistence_record_state,
-            pd_i2c: &mut state.pd_i2c,
+            eeprom_i2c: &mut state.eeprom_i2c,
             pd_controller: state.pd_port.controller_kind(),
-            pd_port: &mut state.pd_port,
-            eeprom_pd_service: &mut eeprom_pd_service,
+            pd_port: &state.pd_port,
             calibration_runtime_state: &mut state.calibration_runtime_state,
             thermal_plant_workspace: state.thermal_plant_workspace,
             elapsed_ms,
             last_pd_observation: pd_observation_for_control,
-            pd_contract_ready: &mut state.pd_contract_ready,
             heater_power_backend: &mut state.heater_power_backend,
             heater_controller: &mut state.heater_controller,
             pid_snapshot: state.last_pid_snapshot,
@@ -413,7 +480,7 @@ pub(crate) async fn runtime_process_lan_control(
             latest_vin_mv: state.latest_vin_mv,
             last_heater_duty: heater_duty_for_control,
             heater_control_timing: state.heater_control_timing,
-            persistence_log_sink: &mut state.transport.usb_serial,
+            persistence_log_sink: &mut state.transport.persistence_log_sink,
             record_staging: state.eeprom_record_staging,
         },
     )
@@ -422,8 +489,7 @@ pub(crate) async fn runtime_process_lan_control(
         calibration_runtime_state: &mut state.calibration_runtime_state,
         backend: &mut state.heater_power_backend,
         manual_pps: &mut state.manual_pps_state,
-        i2c: &mut state.pd_i2c,
-        pd_port: &mut state.pd_port,
+        pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
         hold_pps_governor: &mut state.hold_pps_governor,
         ui_state: &mut state.ui_state,
@@ -431,27 +497,7 @@ pub(crate) async fn runtime_process_lan_control(
         measured_vin_mv: state.latest_vin_mv,
     })
     .await;
-    let network_summary = {
-        let mut eeprom_pd_service = EepromPdServiceContext::new(
-            &mut state.last_pd_observation,
-            &mut state.heater_pwm,
-            &mut state.last_heater_duty,
-        );
-        let mut pd_network_service = PdNetworkServiceContext {
-            eeprom: &mut eeprom_pd_service,
-            pd_contract_ready: &mut state.pd_contract_ready,
-            ui_state: &mut state.ui_state,
-            calibration_runtime_state: &mut state.calibration_runtime_state,
-            manual_pps: &mut state.manual_pps_state,
-        };
-        run_network_operation_with_pd(
-            flux_purr_firmware::net::lan_network_summary(),
-            &mut state.pd_i2c,
-            &mut state.pd_port,
-            &mut pd_network_service,
-        )
-        .await
-    };
+    let network_summary = flux_purr_firmware::net::lan_network_summary().await;
     let (control_needs_redraw, response) = result;
     (
         control_needs_redraw,
@@ -459,7 +505,59 @@ pub(crate) async fn runtime_process_lan_control(
     )
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn runtime_pump_usb_response_budget(state: &mut RuntimeLoopState) -> UsbResponsePumpOutcome {
+    let mut response_state = usb_pump_response(
+        &mut state.transport.usb_serial,
+        &mut state.transport.usb_response_writer,
+        state.transport.usb_tx_buf,
+        Instant::now().as_millis(),
+    );
+    if matches!(response_state, UsbResponsePumpOutcome::Pending) {
+        for _ in 1..USB_CONTROL_TX_PACKET_BUDGET {
+            embassy_futures::yield_now().await;
+            response_state = usb_pump_response(
+                &mut state.transport.usb_serial,
+                &mut state.transport.usb_response_writer,
+                state.transport.usb_tx_buf,
+                Instant::now().as_millis(),
+            );
+            if !matches!(response_state, UsbResponsePumpOutcome::Pending) {
+                break;
+            }
+        }
+    }
+    response_state
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn runtime_flush_persistence_logs(state: &mut RuntimeLoopState) -> bool {
+    for _ in 0..USB_CONTROL_TX_PACKET_BUDGET {
+        let flushed = state
+            .transport
+            .persistence_log_sink
+            .flush_one(&mut state.transport.usb_serial);
+        if !state.transport.persistence_log_sink.is_pending() {
+            break;
+        }
+        if !flushed {
+            embassy_futures::yield_now().await;
+        }
+    }
+    if state.transport.persistence_log_sink.take_transport_fault() {
+        runtime_mark_usb_transport_fault(state);
+    }
+    state.transport.persistence_log_sink.is_pending()
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn runtime_mark_usb_transport_fault(state: &mut RuntimeLoopState) {
+    state.transport.usb_transport_faulted = true;
+    state.transport.usb_recovery_marker_failed = false;
+    state.transport.usb_recovery_writer.abort();
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 pub(crate) fn runtime_reject_lan_command(
     response_slot: u8,
     request_id: u32,
@@ -493,27 +591,7 @@ pub(crate) async fn runtime_process_lan(
             command.method,
             HttpMethod::Post | HttpMethod::Put | HttpMethod::Delete
         );
-        let lease_active = {
-            let mut eeprom_pd_service = EepromPdServiceContext::new(
-                &mut state.last_pd_observation,
-                &mut state.heater_pwm,
-                &mut state.last_heater_duty,
-            );
-            let mut pd_network_service = PdNetworkServiceContext {
-                eeprom: &mut eeprom_pd_service,
-                pd_contract_ready: &mut state.pd_contract_ready,
-                ui_state: &mut state.ui_state,
-                calibration_runtime_state: &mut state.calibration_runtime_state,
-                manual_pps: &mut state.manual_pps_state,
-            };
-            run_network_operation_with_pd(
-                flux_purr_firmware::net::command_lease_is_active(&command),
-                &mut state.pd_i2c,
-                &mut state.pd_port,
-                &mut pd_network_service,
-            )
-            .await
-        };
+        let lease_active = flux_purr_firmware::net::command_lease_is_active(&command).await;
         if is_mutation && !lease_active {
             return runtime_reject_lan_command(
                 response_slot,
@@ -585,37 +663,13 @@ pub(crate) async fn runtime_reconcile_network_state(
 ) -> bool {
     let mut needs_redraw = false;
     #[cfg(feature = "net_http")]
-    let persisted_token_change = {
-        let mut eeprom_pd_service = EepromPdServiceContext::new(
-            &mut state.last_pd_observation,
-            &mut state.heater_pwm,
-            &mut state.last_heater_duty,
-        );
-        let mut pd_network_service = PdNetworkServiceContext {
-            eeprom: &mut eeprom_pd_service,
-            pd_contract_ready: &mut state.pd_contract_ready,
-            ui_state: &mut state.ui_state,
-            calibration_runtime_state: &mut state.calibration_runtime_state,
-            manual_pps: &mut state.manual_pps_state,
-        };
-        run_network_operation_with_pd(
-            flux_purr_firmware::net::take_persisted_token_change(),
-            &mut state.pd_i2c,
-            &mut state.pd_port,
-            &mut pd_network_service,
-        )
-        .await
-    };
+    let persisted_token_change = flux_purr_firmware::net::take_persisted_token_change().await;
     #[cfg(feature = "net_http")]
     if let Some(token) = persisted_token_change {
         state.memory_config.lan_pairing_token = token;
         state.memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
     }
 
-    // EEPROM/display work may have serviced PD while the normal deadline
-    // gate was suspended. Reconcile that observation before any thermal,
-    // UI, or LAN state is consumed so a failed read cannot authorize stale
-    // heater intent.
     needs_redraw |= apply_pd_contract_observation(
         state.last_pd_observation,
         &mut state.pd_contract_ready,
@@ -630,8 +684,7 @@ pub(crate) async fn runtime_reconcile_network_state(
         calibration_runtime_state: &mut state.calibration_runtime_state,
         backend: &mut state.heater_power_backend,
         manual_pps: &mut state.manual_pps_state,
-        i2c: &mut state.pd_i2c,
-        pd_port: &mut state.pd_port,
+        pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
         hold_pps_governor: &mut state.hold_pps_governor,
         ui_state: &mut state.ui_state,
@@ -661,12 +714,15 @@ pub(crate) async fn runtime_process_input(
     if pairing_opened_by_usb {
         state.suppress_pairing_input_until_released = true;
     }
+    if usb_input.response_pending {
+        return RuntimeInputOutcome::skip(sample, needs_redraw, pairing_opened_by_usb);
+    }
 
     let lan_input =
         runtime_process_lan(state, elapsed_ms, usb_input.control_command_processed).await;
     needs_redraw |= lan_input.needs_redraw;
     if lan_input.command_processed {
-        return RuntimeInputOutcome::skip(sample, needs_redraw);
+        return RuntimeInputOutcome::skip(sample, needs_redraw, pairing_opened_by_usb);
     }
     needs_redraw |= runtime_reconcile_network_state(state, elapsed_ms).await;
     RuntimeInputOutcome {
@@ -735,20 +791,13 @@ pub(crate) async fn runtime_retry_persistence_io(
     retry_domains: PersistDomainMask,
     retry_blank_initialization: bool,
 ) -> Result<(), MemoryCommitFailure> {
-    let mut eeprom_pd_service = EepromPdServiceContext::new(
-        &mut state.last_pd_observation,
-        &mut state.heater_pwm,
-        &mut state.last_heater_duty,
-    );
     #[cfg(feature = "web_serial")]
-    let retry_log_sink = &mut state.transport.usb_serial as &mut dyn PersistenceLogSink;
+    let retry_log_sink = &mut state.transport.persistence_log_sink as &mut dyn PersistenceLogSink;
     #[cfg(not(feature = "web_serial"))]
     let retry_log_sink = &mut state.transport.persistence_log_sink as &mut dyn PersistenceLogSink;
     if state.prepared_layout_recovery_pending {
         return recover_prepared_fpr2_layout(
-            &mut state.pd_i2c,
-            &mut state.pd_port,
-            &mut eeprom_pd_service,
+            &mut state.eeprom_i2c,
             state.memory_sequence,
             retry_log_sink,
             state.eeprom_record_staging,
@@ -758,9 +807,7 @@ pub(crate) async fn runtime_retry_persistence_io(
     if state.eeprom_data_incompatible {
         let mut scratch = new_memory_io_scratch();
         let (legacy_record, read_failed) = load_legacy_eeprom_memory_record(
-            &mut state.pd_i2c,
-            &mut state.pd_port,
-            &mut eeprom_pd_service,
+            &mut state.eeprom_i2c,
             &mut scratch,
             state.eeprom_record_staging,
         )
@@ -769,9 +816,7 @@ pub(crate) async fn runtime_retry_persistence_io(
             state.memory_sequence = record.sequence;
             state.memory_config = record.config;
             return migrate_legacy_memory_config(
-                &mut state.pd_i2c,
-                &mut state.pd_port,
-                &mut eeprom_pd_service,
+                &mut state.eeprom_i2c,
                 state.memory_sequence,
                 &state.memory_config,
                 retry_log_sink,
@@ -797,9 +842,7 @@ pub(crate) async fn runtime_retry_persistence_io(
     }
     if retry_blank_initialization {
         return match initialize_fpr2_defaults(
-            &mut state.pd_i2c,
-            &mut state.pd_port,
-            &mut eeprom_pd_service,
+            &mut state.eeprom_i2c,
             retry_log_sink,
             state.eeprom_record_staging,
         )
@@ -820,9 +863,7 @@ pub(crate) async fn runtime_retry_persistence_io(
         };
     }
     commit_memory_config_now(
-        &mut state.pd_i2c,
-        &mut state.pd_port,
-        &mut eeprom_pd_service,
+        &mut state.eeprom_i2c,
         CommitMemoryConfigInput {
             memory_sequence: &mut state.memory_sequence,
             memory_config: &state.memory_config,
@@ -910,25 +951,7 @@ pub(crate) async fn runtime_reconcile_frontpanel_pairing(
     {
         #[cfg(feature = "net_http")]
         {
-            let mut eeprom_pd_service = EepromPdServiceContext::new(
-                &mut state.last_pd_observation,
-                &mut state.heater_pwm,
-                &mut state.last_heater_duty,
-            );
-            let mut pd_network_service = PdNetworkServiceContext {
-                eeprom: &mut eeprom_pd_service,
-                pd_contract_ready: &mut state.pd_contract_ready,
-                ui_state: &mut state.ui_state,
-                calibration_runtime_state: &mut state.calibration_runtime_state,
-                manual_pps: &mut state.manual_pps_state,
-            };
-            let code = run_network_operation_with_pd(
-                flux_purr_firmware::net::enter_pairing(),
-                &mut state.pd_i2c,
-                &mut state.pd_port,
-                &mut pd_network_service,
-            )
-            .await;
+            let code = flux_purr_firmware::net::enter_pairing().await;
             state.ui_state.enter_wifi_pairing(code);
             info!("LAN pairing window opened from WiFi Info page");
         }
@@ -939,25 +962,7 @@ pub(crate) async fn runtime_reconcile_frontpanel_pairing(
     {
         #[cfg(feature = "net_http")]
         {
-            let mut eeprom_pd_service = EepromPdServiceContext::new(
-                &mut state.last_pd_observation,
-                &mut state.heater_pwm,
-                &mut state.last_heater_duty,
-            );
-            let mut pd_network_service = PdNetworkServiceContext {
-                eeprom: &mut eeprom_pd_service,
-                pd_contract_ready: &mut state.pd_contract_ready,
-                ui_state: &mut state.ui_state,
-                calibration_runtime_state: &mut state.calibration_runtime_state,
-                manual_pps: &mut state.manual_pps_state,
-            };
-            run_network_operation_with_pd(
-                flux_purr_firmware::net::leave_pairing(),
-                &mut state.pd_i2c,
-                &mut state.pd_port,
-                &mut pd_network_service,
-            )
-            .await;
+            flux_purr_firmware::net::leave_pairing().await;
             state.ui_state.leave_wifi_pairing();
             info!("LAN pairing window closed after leaving WiFi Info page");
         }
@@ -1082,32 +1087,18 @@ pub(crate) async fn runtime_read_heater_sensors(
 ) -> (RtdSample, bool) {
     let mut needs_redraw = false;
     let previous_vin_raw_adc_mv = state.latest_vin_raw_adc_mv;
-    let mut rtd_sample = read_rtd_sample_with_pd(
+    let mut rtd_sample = read_rtd_sample(
         &mut state.adc1,
         &mut state.rtd_adc_pin,
         state.adc_curve.as_ref(),
         &state.memory_config,
-        &mut PdAdcService {
-            i2c: &mut state.pd_i2c,
-            pd_port: &mut state.pd_port,
-            last_pd_observation: &mut state.last_pd_observation,
-            heater_pwm: &mut state.heater_pwm,
-            last_heater_duty: &mut state.last_heater_duty,
-        },
     )
     .await;
-    if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) = read_calibrated_vin_mv_with_pd(
+    if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) = read_calibrated_vin_mv(
         &mut state.adc1,
         &mut state.vin_adc_pin,
         state.adc_curve.as_ref(),
         &state.memory_config,
-        &mut PdAdcService {
-            i2c: &mut state.pd_i2c,
-            pd_port: &mut state.pd_port,
-            last_pd_observation: &mut state.last_pd_observation,
-            heater_pwm: &mut state.heater_pwm,
-            last_heater_duty: &mut state.last_heater_duty,
-        },
     )
     .await
     {
@@ -1128,7 +1119,7 @@ pub(crate) async fn runtime_read_heater_sensors(
             Some(vin_mv),
             PdTimestamp::now().as_millis(),
             PdContractVinContext {
-                pd_port: &mut state.pd_port,
+                pd_port: &state.pd_port,
                 last_pd_observation: &mut state.last_pd_observation,
                 pd_contract_ready: &mut state.pd_contract_ready,
                 ui_state: &mut state.ui_state,
@@ -1143,18 +1134,11 @@ pub(crate) async fn runtime_read_heater_sensors(
             raw_code, raw_adc_mv, corrected_adc_mv, vin_mv,
         );
         if retry_rtd_after_power_step {
-            rtd_sample = read_rtd_sample_with_pd(
+            rtd_sample = read_rtd_sample(
                 &mut state.adc1,
                 &mut state.rtd_adc_pin,
                 state.adc_curve.as_ref(),
                 &state.memory_config,
-                &mut PdAdcService {
-                    i2c: &mut state.pd_i2c,
-                    pd_port: &mut state.pd_port,
-                    last_pd_observation: &mut state.last_pd_observation,
-                    heater_pwm: &mut state.heater_pwm,
-                    last_heater_duty: &mut state.last_heater_duty,
-                },
             )
             .await;
         }
@@ -1366,7 +1350,7 @@ pub(crate) fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) 
     if state.pd_port.controller_kind() != ControllerKind::Fusb302b {
         return false;
     }
-    let capabilities = read_pd_power_capabilities(&mut state.pd_i2c, &mut state.pd_port);
+    let capabilities = state.pd_port.capabilities();
     if capabilities == state.last_fusb302b_power_capabilities {
         return false;
     }
@@ -1449,8 +1433,7 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         calibration_runtime_state: &mut state.calibration_runtime_state,
         backend: &mut state.heater_power_backend,
         manual_pps: &mut state.manual_pps_state,
-        i2c: &mut state.pd_i2c,
-        pd_port: &mut state.pd_port,
+        pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
         hold_pps_governor: &mut state.hold_pps_governor,
         ui_state: &mut state.ui_state,
@@ -1595,8 +1578,7 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         elapsed_ms,
     } = context;
     let output_changed = apply_heater_power_output(HeaterPowerOutputContext {
-        i2c: &mut state.pd_i2c,
-        pd_port: &mut state.pd_port,
+        pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
         backend: &mut state.heater_power_backend,
         hold_pps_governor: &mut state.hold_pps_governor,
@@ -1633,21 +1615,14 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn runtime_persist_completed_thermal_plant(state: &mut RuntimeLoopState) {
-    let mut eeprom_pd_service = EepromPdServiceContext::new(
-        &mut state.last_pd_observation,
-        &mut state.heater_pwm,
-        &mut state.last_heater_duty,
-    );
     let commit_result = commit_memory_config_now(
-        &mut state.pd_i2c,
-        &mut state.pd_port,
-        &mut eeprom_pd_service,
+        &mut state.eeprom_i2c,
         CommitMemoryConfigInput {
             memory_sequence: &mut state.memory_sequence,
             memory_config: &state.memory_config,
             domains_to_write: PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
             #[cfg(feature = "web_serial")]
-            persistence_log_sink: &mut state.transport.usb_serial,
+            persistence_log_sink: &mut state.transport.persistence_log_sink,
             #[cfg(not(feature = "web_serial"))]
             persistence_log_sink: &mut state.transport.persistence_log_sink,
             record_staging: state.eeprom_record_staging,
@@ -1765,21 +1740,14 @@ pub(crate) async fn runtime_commit_deferred_memory(state: &mut RuntimeLoopState,
     state.memory_commit_due_ms = None;
     let commit_domains =
         persist_domain_mask_between(&state.memory_config, &state.last_persisted_memory_config);
-    let mut eeprom_pd_service = EepromPdServiceContext::new(
-        &mut state.last_pd_observation,
-        &mut state.heater_pwm,
-        &mut state.last_heater_duty,
-    );
     let commit_result = commit_memory_config_now(
-        &mut state.pd_i2c,
-        &mut state.pd_port,
-        &mut eeprom_pd_service,
+        &mut state.eeprom_i2c,
         CommitMemoryConfigInput {
             memory_sequence: &mut state.memory_sequence,
             memory_config: &state.memory_config,
             domains_to_write: commit_domains,
             #[cfg(feature = "web_serial")]
-            persistence_log_sink: &mut state.transport.usb_serial,
+            persistence_log_sink: &mut state.transport.persistence_log_sink,
             #[cfg(not(feature = "web_serial"))]
             persistence_log_sink: &mut state.transport.persistence_log_sink,
             record_staging: state.eeprom_record_staging,
@@ -1871,8 +1839,7 @@ pub(crate) async fn runtime_force_heater_safe_off(
     }
     state.ui_state.heater_output_percent = 0;
     let _ = apply_heater_power_output(HeaterPowerOutputContext {
-        i2c: &mut state.pd_i2c,
-        pd_port: &mut state.pd_port,
+        pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
         backend: &mut state.heater_power_backend,
         hold_pps_governor: &mut state.hold_pps_governor,
@@ -1979,27 +1946,7 @@ pub(crate) async fn runtime_reconcile_network_and_status(
 ) -> bool {
     let mut needs_redraw = false;
     #[cfg(feature = "net_http")]
-    let runtime_network_summary = {
-        let mut eeprom_pd_service = EepromPdServiceContext::new(
-            &mut state.last_pd_observation,
-            &mut state.heater_pwm,
-            &mut state.last_heater_duty,
-        );
-        let mut pd_network_service = PdNetworkServiceContext {
-            eeprom: &mut eeprom_pd_service,
-            pd_contract_ready: &mut state.pd_contract_ready,
-            ui_state: &mut state.ui_state,
-            calibration_runtime_state: &mut state.calibration_runtime_state,
-            manual_pps: &mut state.manual_pps_state,
-        };
-        run_network_operation_with_pd(
-            flux_purr_firmware::net::lan_network_summary(),
-            &mut state.pd_i2c,
-            &mut state.pd_port,
-            &mut pd_network_service,
-        )
-        .await
-    };
+    let runtime_network_summary = flux_purr_firmware::net::lan_network_summary().await;
     #[cfg(feature = "net_http")]
     if state
         .ui_state
@@ -2145,6 +2092,18 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
 }
 
 #[cfg(target_arch = "xtensa")]
+pub(crate) async fn runtime_process_pending_safety(
+    state: &mut RuntimeLoopState,
+    elapsed_ms: u64,
+) -> bool {
+    let active_thermal_settings = state.active_thermal_settings;
+    let mut needs_redraw = runtime_reconcile_persistence_and_cooling(state);
+    needs_redraw |= runtime_force_heater_safe_off(state, active_thermal_settings, elapsed_ms).await;
+    needs_redraw |= runtime_update_fan_and_ui(state, elapsed_ms);
+    needs_redraw
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn runtime_persist_and_update_safety(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
@@ -2167,10 +2126,9 @@ pub(crate) async fn runtime_persist_and_update_safety(
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapsed_ms: u64) {
     if state.ui_refresh_pending && elapsed_ms >= state.next_ui_refresh_ms {
-        let display_flush_result = run_display_operation_with_pd_and_heater(
+        let display_flush_result = run_display_operation_with_snapshot_and_heater(
             flush_ui(&mut state.display, state.canvas, &state.ui_state),
-            &mut state.pd_i2c,
-            &mut state.pd_port,
+            &state.pd_port,
             &mut state.last_pd_observation,
             &mut state.heater_pwm,
             &mut state.last_heater_duty,
@@ -2208,8 +2166,7 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
                     calibration_runtime_state: &mut state.calibration_runtime_state,
                     backend: &mut state.heater_power_backend,
                     manual_pps: &mut state.manual_pps_state,
-                    i2c: &mut state.pd_i2c,
-                    pd_port: &mut state.pd_port,
+                    pd_port: &state.pd_port,
                     heater_pwm: &mut state.heater_pwm,
                     hold_pps_governor: &mut state.hold_pps_governor,
                     ui_state: &mut state.ui_state,
@@ -2226,7 +2183,7 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
                 #[cfg(feature = "web_serial")]
                 run_usb_recovery_control_loop(
                     &mut state.transport.usb_serial,
-                    &mut state.transport.usb_rx_line,
+                    &mut *state.transport.usb_rx_line,
                     state.transport.usb_tx_buf,
                     &state.memory_config,
                     StatusLightState::HeaterInterlocked,
@@ -2244,19 +2201,28 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn run_runtime_loop(mut state: RuntimeLoopState) -> ! {
+pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
     loop {
         #[cfg(feature = "web_serial")]
         embassy_futures::yield_now().await;
-        #[cfg(feature = "web_serial")]
+        record_runtime_heartbeat();
         let elapsed_ms = Instant::now()
             .as_millis()
             .saturating_sub(state.runtime_started_ms);
-        let pd_now = PdTimestamp::now();
-        let mut needs_redraw = runtime_service_pd(&mut state, pd_now).await;
+        let mut needs_redraw = runtime_apply_pd_snapshot(&mut state);
         let input = runtime_process_input(&mut state, elapsed_ms).await;
         needs_redraw |= input.needs_redraw;
         if input.skip_iteration {
+            needs_redraw |= runtime_process_frontpanel_input(
+                &mut state,
+                input.sample,
+                elapsed_ms,
+                input.pairing_opened_by_usb,
+            )
+            .await;
+            needs_redraw |= runtime_control_heater(&mut state, elapsed_ms).await;
+            needs_redraw |= runtime_process_pending_safety(&mut state, elapsed_ms).await;
+            state.ui_refresh_pending |= needs_redraw;
             continue;
         }
         needs_redraw |= runtime_process_frontpanel_input(

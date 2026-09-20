@@ -11,12 +11,107 @@ const RUNTIME_IMPLEMENTATION: &str = concat!(
     include_str!("eeprom.rs"),
     include_str!("power.rs"),
     include_str!("tasks.rs"),
+    include_str!("watchdog.rs"),
     include_str!("control_plane.rs"),
     include_str!("lan.rs"),
     include_str!("display_io.rs"),
+    include_str!("pd_service.rs"),
     include_str!("boot.rs"),
     include_str!("runtime_loop.rs"),
 );
+
+#[test]
+fn watchdog_feed_gate_requires_both_runtime_and_pd_progress() {
+    let mut gate = WatchdogFeedGate::default();
+
+    assert!(gate.observe(1, 0, 0, true));
+    assert!(!gate.observe(1, 0, 0, true));
+    assert!(gate.observe(1, 1, 1, true));
+    assert!(!gate.observe(1, 2, 1, true));
+    assert!(gate.observe(1, 2, 2, true));
+    assert!(!gate.observe(1, 3, 2, true));
+    assert!(!gate.observe(1, 4, 2, true));
+}
+
+#[test]
+fn watchdog_feed_gate_uses_runtime_progress_when_pd_service_is_unavailable() {
+    let mut gate = WatchdogFeedGate::default();
+
+    assert!(gate.observe(1, 0, 0, false));
+    assert!(gate.observe(1, 1, 0, false));
+    assert!(gate.observe(1, 2, 0, false));
+    assert!(!gate.observe(1, 2, 1, false));
+}
+
+#[test]
+fn watchdog_feed_gate_uses_boot_progress_until_runtime_starts() {
+    let mut gate = WatchdogFeedGate::default();
+
+    assert!(!gate.observe(0, 0, 0, true));
+    assert!(gate.observe(1, 0, 0, true));
+    assert!(!gate.observe(1, 0, 0, true));
+    assert!(gate.observe(2, 0, 0, true));
+    assert!(!gate.observe(2, 1, 0, true));
+    assert!(gate.observe(2, 1, 1, true));
+}
+
+#[test]
+fn watchdog_configures_clock_derived_timeout_before_rtos_handoff() {
+    let watchdog = include_str!("watchdog.rs");
+    let boot = include_str!("boot.rs");
+    let configure = watchdog
+        .split("pub(crate) fn configure_watchdog_before_rtos")
+        .nth(1)
+        .expect("watchdog timeout configuration must remain explicit");
+    let task = watchdog
+        .split("pub(crate) async fn watchdog_task")
+        .nth(1)
+        .expect("watchdog supervisor task must remain present");
+    let start_rtos = boot
+        .split("pub(crate) fn start_rtos")
+        .nth(1)
+        .expect("RTOS startup must remain present");
+
+    assert!(configure.contains("watchdog.set_timeout("));
+    assert!(!task.contains("set_timeout("));
+    assert!(
+        start_rtos.find("configure_watchdog_before_rtos(timg0.wdt)")
+            < start_rtos.find("esp_rtos::start(timg0.timer0)")
+    );
+}
+
+#[test]
+fn runtime_usb_transport_uses_yielding_nonblocking_response_packets() {
+    let support = include_str!("support.rs");
+    let control_plane = include_str!("control_plane.rs");
+    let runtime_loop = include_str!("runtime_loop.rs");
+
+    assert!(support.contains("UsbSerialJtag<'static, Blocking>"));
+    assert!(control_plane.contains("async fn usb_write_response_bytes"));
+    assert!(control_plane.contains("embassy_futures::yield_now().await"));
+    assert!(control_plane.contains("USB_CONTROL_RESPONSE_TIMEOUT_MS"));
+    assert!(support.contains("USB_CONTROL_TX_PACKET_BUDGET"));
+    assert!(!support.contains("UsbSerialJtag::new(usb_device).into_async()"));
+    assert!(!support.contains("self.inner.write(bytes)"));
+    assert!(!control_plane.contains("USB_CONTROL_TX_RETRY_LIMIT"));
+    assert!(!control_plane.contains("wait_for_tx_progress"));
+    let writer = control_plane
+        .split("struct UsbResponseWriter")
+        .nth(1)
+        .expect("response writer state machine must remain present");
+    assert!(writer.contains("at most one non-blocking USB packet per call"));
+    assert!(control_plane.contains("Ok(false) | Err(UsbTxError::WouldBlock)"));
+    assert!(control_plane.contains("DeferredPersistenceLogSink"));
+    assert!(control_plane.contains("USB_TRANSPORT_FAULT_MARKER"));
+    assert!(control_plane.contains("usb_mutating_request_id"));
+    assert!(runtime_loop.contains("response_pending"));
+    assert!(runtime_loop.contains("if usb_input.response_pending"));
+    assert!(runtime_loop.contains("USB_CONTROL_TX_PACKET_BUDGET"));
+    assert!(runtime_loop.contains("persistence_log_pending"));
+    assert!(runtime_loop.contains("!persistence_log_pending"));
+    assert!(control_plane.contains("fn is_pending(&self) -> bool"));
+}
+const FIRMWARE_ENTRYPOINT: &str = include_str!("../flux_purr.rs");
 
 #[test]
 fn pd_startup_and_runtime_share_one_timestamp_epoch() {
@@ -30,7 +125,6 @@ fn pd_startup_and_runtime_share_one_timestamp_epoch() {
 
     let protocol_now = PdTimestamp::from_millis(42_400);
     assert_eq!(protocol_now.as_millis(), 42_400);
-    assert!(pd_runtime_service_due(protocol_now.as_millis(), 42_395));
 }
 
 #[test]
@@ -60,8 +154,291 @@ fn pd_service_does_not_feed_control_elapsed_time_into_protocol_deadlines() {
         .expect("implementation must precede tests");
 
     assert!(
-        !implementation.contains("read_pd_status(&mut pd_i2c, &mut pd_port, elapsed_ms)"),
+        !implementation.contains("read_pd_snapshot(&mut pd_i2c, &mut pd_port, elapsed_ms)"),
         "PD protocol deadlines must not receive the relative control-loop clock"
+    );
+}
+
+#[test]
+fn pd_service_is_owned_by_an_independent_normal_task() {
+    let source = RUNTIME_IMPLEMENTATION;
+    let support = include_str!("support.rs");
+    let pd_service = include_str!("pd_service.rs");
+    let runtime_loop = include_str!("runtime_loop.rs");
+
+    assert!(
+        pd_service.contains("#[embassy_executor::task]\nasync fn pd_service_task"),
+        "PD policy must have a dedicated Embassy task"
+    );
+    assert!(
+        !source.contains("PD_REALTIME_EXECUTOR")
+            && !source.contains("software_interrupt2")
+            && !source.contains("Priority::Priority3"),
+        "the full PD protocol must not run in an interrupt executor"
+    );
+    assert!(
+        pd_service.contains("for _ in 0..PD_SERVICE_MAX_COMMANDS_PER_TICK")
+            && pd_service.contains("runtime.poll(&mut i2c, PdTimestamp::now()).await"),
+        "PD task must poll after a bounded command batch"
+    );
+    assert!(
+        !pd_service.contains("PD_SERVICE_TICK_SIGNAL")
+            && !pd_service.contains("async fn run_pd_service_tick")
+            && pd_service.contains("EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await"),
+        "the PD task must own its normal-executor cadence timer"
+    );
+    let pd_task = pd_service
+        .split("async fn pd_service_task")
+        .nth(1)
+        .and_then(|source| source.split("pub(crate) fn spawn_pd_service").next())
+        .expect("PD task body must remain present");
+    assert!(
+        pd_task.contains("EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await"),
+        "the normal PD task must yield between bounded service turns"
+    );
+    assert!(
+        !source.contains("Spawner::for_current_executor")
+            && include_str!("boot.rs").contains("initialize_boot_pd(")
+            && include_str!("boot.rs").contains("boot system is available for PD initialization")
+            && FIRMWARE_ENTRYPOINT.contains("runtime::run(spawner).await"),
+        "the main task must start PD during direct boot"
+    );
+    let boot = include_str!("boot.rs");
+    let pd_service = include_str!("pd_service.rs");
+    assert!(
+        !boot.contains("PD_REALTIME_EXECUTOR_STORAGE")
+            && !boot.contains("software_interrupt2")
+            && boot.contains("pub(crate) async fn initialize_boot_pd(")
+            && boot.contains("spawner: Spawner,")
+            && !pd_service.contains("PD_REALTIME_EXECUTOR_REF")
+            && !pd_service.contains("pd_realtime_spawner()"),
+        "PD service startup must use the normal executor spawner"
+    );
+    assert!(
+        !runtime_loop.contains("runtime_service_pd")
+            && !runtime_loop.contains("runtime.poll(")
+            && runtime_loop.contains("runtime_apply_pd_snapshot"),
+        "the front-panel loop must not own PD polling"
+    );
+    assert!(
+        support.contains("pub(crate) type I2c<'a> =")
+            && support
+                .contains("SharedI2cDevice<'a, CriticalSectionRawMutex, HalI2c<'static, Async>>")
+            && support.contains("AsyncMutex<CriticalSectionRawMutex, HalI2c<'static, Async>>")
+            && support.contains("AsyncMutex<CriticalSectionRawMutex")
+            && source.contains(".with_scl(tokens.pd_scl)")
+            && source.contains(".into_async()")
+            && support.contains("pub(crate) struct PdI2c<'a>")
+            && source.contains("let pd_task_i2c = PdI2c::new(i2c_bus)"),
+        "EEPROM and PD must share the native async I2C driver"
+    );
+    assert!(
+        !support.contains("BlockingAsync")
+            && !support.contains("type I2c<'a, MODE = Blocking>")
+            && !support.contains("BlockingMutex<CriticalSectionRawMutex, HalI2c"),
+        "shared I2C access must not wrap the bus in a blocking async adapter"
+    );
+}
+
+#[test]
+fn startup_pd_wait_uses_a_normal_executor_timer() {
+    let boot = include_str!("boot.rs");
+    let pd_service = include_str!("pd_service.rs");
+
+    assert!(
+        boot.contains("EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await"),
+        "boot must use a normal-executor timer for bounded startup progress"
+    );
+    assert!(
+        !boot.contains("PD_STARTUP_TICK_SIGNAL") && !pd_service.contains("PD_STARTUP_TICK_SIGNAL"),
+        "startup progress must not depend on a resettable Signal wait queue"
+    );
+    assert!(
+        !pd_service.contains("PD_SERVICE_TICK_SIGNAL"),
+        "the dedicated PD task must not depend on cross-executor signaling"
+    );
+}
+
+#[test]
+fn pd_service_never_waits_for_the_shared_i2c_bus() {
+    let pd_service = include_str!("pd_service.rs");
+    let support = include_str!("support.rs");
+
+    assert!(
+        support.contains("pub(crate) fn try_acquire(&mut self) -> bool"),
+        "PD bus acquisition must be an immediate try-lock"
+    );
+    assert!(
+        pd_service.contains("if i2c.try_acquire()") && pd_service.contains("i2c.release()"),
+        "a busy EEPROM transaction must make PD skip this turn and retry later"
+    );
+    assert!(
+        !pd_service.contains("i2c.lock().await") && !support.contains("self.bus.lock().await"),
+        "the PD path must not await the shared I2C mutex"
+    );
+}
+
+#[test]
+fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
+    let contract = Contract {
+        kind: ContractKind::Pps,
+        object_position: 1,
+        voltage_mv: 20_000,
+        current_ma: 3_000,
+    };
+
+    assert!(fusb302b_status_confirms_ready_contract(
+        SinkPhase::Ready,
+        contract,
+        FUSB302B_STATUS0_VBUSOK,
+    ));
+    assert!(!fusb302b_status_confirms_ready_contract(
+        SinkPhase::WaitingForPsRdy,
+        contract,
+        FUSB302B_STATUS0_VBUSOK,
+    ));
+    assert!(!fusb302b_status_confirms_ready_contract(
+        SinkPhase::Ready,
+        Contract::none(),
+        FUSB302B_STATUS0_VBUSOK,
+    ));
+    assert!(!fusb302b_status_confirms_ready_contract(
+        SinkPhase::Ready,
+        contract,
+        0,
+    ));
+}
+
+#[test]
+fn pd_snapshot_authorization_expires_after_the_service_heartbeat_window() {
+    assert!(pd_snapshot_is_fresh(1_000, 1_000 + PD_SNAPSHOT_MAX_AGE_MS));
+    assert!(!pd_snapshot_is_fresh(1_000, 1_001 + PD_SNAPSHOT_MAX_AGE_MS));
+}
+
+#[test]
+fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
+    let pd_service = include_str!("pd_service.rs");
+    let support = include_str!("support.rs");
+    let pd_task = pd_service
+        .split("async fn pd_service_task")
+        .nth(1)
+        .and_then(|source| source.split("pub(crate) fn spawn_pd_service").next())
+        .expect("PD task body must remain present");
+
+    assert!(pd_service.contains("read_status().await.ok()?"));
+    assert!(pd_task.contains("let observation = pd_status_observation(&runtime, &mut i2c).await"));
+    assert!(pd_task.contains("publish_pd_snapshot(&runtime, observation)"));
+    assert!(pd_task.contains("publish_pd_snapshot(&runtime, None)"));
+    assert!(
+        pd_task.contains("publish_pd_snapshot(&runtime, observation);\n            // A heartbeat")
+    );
+    assert!(!pd_task.contains("publish_pd_snapshot(&runtime, None);\n        record_pd_heartbeat"));
+
+    let permit_check = support
+        .split("fn set_duty_cycle(&mut self, duty: u16)")
+        .nth(1)
+        .and_then(|source| source.split("fn max_duty_cycle").next())
+        .unwrap_or_else(|| {
+            support
+                .split("fn set_duty_cycle(&mut self, duty: u16)")
+                .nth(1)
+                .expect("heater PWM gate must remain present")
+        });
+    assert!(
+        permit_check
+            .find("HEATER_PWM_STORAGE.lock")
+            .is_some_and(|lock| { permit_check[lock..].contains("PD_HEATER_PERMIT.load") })
+    );
+}
+
+#[test]
+fn watchdog_is_enabled_before_frontpanel_runtime_starts() {
+    let watchdog = include_str!("watchdog.rs");
+    let boot = include_str!("boot.rs");
+    let run = boot
+        .split("pub(crate) async fn run(spawner: Spawner)")
+        .nth(1)
+        .expect("runtime entrypoint must remain present");
+
+    assert!(watchdog.contains("WATCHDOG_ENABLED.store(1, Ordering::Release)"));
+    assert!(run.find("spawn_watchdog(spawner, watchdog)") < run.find("arm_watchdog().await"));
+    assert!(run.find("arm_watchdog().await") < run.find("init_runtime_heap()"));
+    assert_eq!(boot.matches("arm_watchdog().await").count(), 1);
+    assert!(boot.contains("record_boot_heartbeat();"));
+}
+
+#[test]
+fn buzzer_cadence_stays_with_the_realtime_owner() {
+    let tasks = include_str!("tasks.rs");
+    let boot = include_str!("boot.rs");
+    let buzzer_wait = tasks
+        .split("pub(crate) async fn wait_for_buzzer_wake")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("#[embassy_executor::task]\npub(crate) async fn run_buzzer_task")
+                .next()
+        })
+        .expect("buzzer wake function must remain present");
+    assert!(
+        !tasks.contains("run_buzzer_tick_task")
+            && !tasks.contains("BUZZER_TICK_SIGNAL")
+            && buzzer_wait.contains("EmbassyTimer::after_millis(delay_ms)"),
+        "buzzer cadence must not add a normal-executor timer task"
+    );
+    assert!(!boot.contains("run_buzzer_tick_task"));
+}
+
+#[test]
+fn boot_initialization_does_not_block_the_normal_executor() {
+    let boot = include_str!("boot.rs");
+    assert!(
+        !boot.contains("embassy_futures::block_on"),
+        "boot must not block the normal executor while PD service tasks are running"
+    );
+    let normalized_entrypoint: String = FIRMWARE_ENTRYPOINT.split_whitespace().collect();
+    assert!(
+        normalized_entrypoint.contains("runtime::run(spawner).await;")
+            && boot.contains("pub(crate) async fn run(spawner: Spawner)"),
+        "the main task must own the direct boot sequence"
+    );
+}
+
+#[test]
+fn front_panel_cannot_service_pd_or_borrow_the_pd_bus() {
+    let source = RUNTIME_IMPLEMENTATION;
+    let runtime_loop = include_str!("runtime_loop.rs");
+    let display_io = include_str!("display_io.rs");
+    let eeprom = include_str!("eeprom.rs");
+
+    for legacy_api in [
+        "read_pd_snapshot(",
+        "read_pd_capabilities_snapshot(",
+        "submit_pd_fixed_voltage(",
+        "submit_pd_adjustable_voltage(",
+        "run_network_operation_with_snapshot(",
+        "PdSnapshotAdcContext",
+        "apply_pd_snapshot_during_",
+    ] {
+        assert!(
+            !source.contains(legacy_api),
+            "front-panel PD boundary must not retain legacy API: {legacy_api}"
+        );
+    }
+
+    assert_eq!(
+        source.matches("runtime.poll(").count(),
+        1,
+        "only the dedicated PD task may poll the FUSB302B runtime"
+    );
+    assert!(
+        !runtime_loop.contains("I2c<'")
+            && !runtime_loop.contains("Fusb302::new")
+            && !display_io.contains("I2c<'")
+            && !display_io.contains("Fusb302::new")
+            && !eeprom.contains("Fusb302::new")
+            && !eeprom.contains("pd_port: &mut PdPort"),
+        "front-panel modules must not expose FUSB register access or mutable PD ownership"
     );
 }
 
@@ -76,6 +453,14 @@ fn fusb302b_received_resets_do_not_request_cc_reinitialization() {
         Some(Fusb302bReceivedResetAction::WaitForSourceCapabilities)
     );
     assert_eq!(fusb302b_received_reset_action(0), None);
+}
+
+#[test]
+fn fusb302b_phy_uses_pd20_for_automatic_goodcrc() {
+    assert!(RUNTIME_IMPLEMENTATION.contains(
+        "pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {\n    PhyConfig {\n        pd_revision: PdRevision::Rev20,"
+    ));
+    assert!(!RUNTIME_IMPLEMENTATION.contains("pd_revision: PdRevision::Rev30"));
 }
 
 #[test]
@@ -468,6 +853,63 @@ fn fusb302b_capability_bridge_retains_degraded_pps_apdo() {
 }
 
 #[test]
+fn fusb302b_missing_capabilities_never_restores_the_legacy_twenty_volt_default() {
+    let backend = select_fusb302b_heater_power_backend(None);
+
+    assert!(matches!(
+        backend,
+        HeaterPowerBackend::FixedPdPwmFallback {
+            fixed_request: ch224q::VoltageRequest::V12,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn fusb302b_idle_restore_requires_an_apdo_that_covers_twelve_volts() {
+    let mut capabilities = ch224q::AdjustablePowerCapabilities::default();
+    capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 5_000,
+        max_mv: 21_000,
+        max_ma: 3_000,
+    });
+    assert!(source_supports_fusb302b_idle_pps(capabilities));
+
+    capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 15_000,
+        max_mv: 21_000,
+        max_ma: 3_000,
+    });
+    assert!(!source_supports_fusb302b_idle_pps(capabilities));
+}
+
+#[test]
+fn automatic_idle_restore_never_confirms_a_fixed_twenty_volt_contract() {
+    let observation = |voltage_mv| PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: Status::from_register(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 3_000,
+        contract_voltage_mv: Some(voltage_mv),
+        contract: Contract {
+            kind: ContractKind::Fixed,
+            object_position: 1,
+            voltage_mv,
+            current_ma: 3_000,
+        },
+    };
+
+    assert!(automatic_idle_contract_is_confirmed(
+        observation(12_000),
+        None
+    ));
+    assert!(!automatic_idle_contract_is_confirmed(
+        observation(20_000),
+        None
+    ));
+}
+
+#[test]
 fn automatic_heating_does_not_join_disjoint_pps_apdos() {
     let mut source = SourceCapabilities::empty();
     source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
@@ -843,33 +1285,55 @@ fn protection_alarm_reuses_one_carrier_through_its_pulses_and_replay() {
 
 struct FakeUsbTx {
     capacity: usize,
+    auto_commits_full_packet: bool,
+    rejects_empty_flush: bool,
     pending: std::vec::Vec<u8>,
     sent: std::vec::Vec<u8>,
     flush_count: usize,
+    operation_count: usize,
 }
 
 impl FakeUsbTx {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
+            auto_commits_full_packet: true,
+            rejects_empty_flush: false,
             pending: std::vec::Vec::new(),
             sent: std::vec::Vec::new(),
             flush_count: 0,
+            operation_count: 0,
+        }
+    }
+
+    fn auto_commit_rejecting_empty_flush(capacity: usize) -> Self {
+        Self {
+            rejects_empty_flush: true,
+            ..Self::new(capacity)
         }
     }
 }
 
 impl UsbControlTx for FakeUsbTx {
     fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
+        self.operation_count += 1;
         if self.pending.len() >= self.capacity {
             return Err(UsbTxError::WouldBlock);
         }
         self.pending.push(byte);
+        if self.auto_commits_full_packet && self.pending.len() == self.capacity {
+            self.sent.extend_from_slice(&self.pending);
+            self.pending.clear();
+        }
         Ok(())
     }
 
     fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+        self.operation_count += 1;
         self.flush_count += 1;
+        if self.rejects_empty_flush && self.pending.is_empty() {
+            return Err(UsbTxError::WouldBlock);
+        }
         self.sent.extend_from_slice(&self.pending);
         self.pending.clear();
         Ok(())
@@ -949,51 +1413,275 @@ fn usb_write_bytes_stops_on_hard_tx_error() {
 }
 
 #[test]
-fn usb_write_bytes_waits_for_a_busy_endpoint_before_replying() {
+fn usb_write_bytes_returns_without_retrying_a_busy_endpoint() {
     struct DelayedUsbTx {
-        waits_before_ready: usize,
-        waits: usize,
-        pending: std::vec::Vec<u8>,
-        sent: std::vec::Vec<u8>,
+        write_attempts: usize,
     }
 
     impl UsbControlTx for DelayedUsbTx {
+        fn write_byte_nb(&mut self, _byte: u8) -> Result<(), UsbTxError> {
+            self.write_attempts += 1;
+            Err(UsbTxError::WouldBlock)
+        }
+
+        fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Err(UsbTxError::WouldBlock)
+        }
+    }
+
+    let mut tx = DelayedUsbTx { write_attempts: 0 };
+
+    assert!(!usb_write_bytes_bounded(&mut tx, b"response\\n"));
+    assert_eq!(tx.write_attempts, 1);
+}
+
+#[test]
+fn usb_response_pump_promotes_hard_tx_failure_to_transport_fault() {
+    struct FailingUsbTx;
+
+    impl UsbControlTx for FailingUsbTx {
+        fn write_byte_nb(&mut self, _byte: u8) -> Result<(), UsbTxError> {
+            Err(UsbTxError::Other)
+        }
+
+        fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
+    }
+
+    let payload = [b'x'; 1];
+    let mut writer = UsbResponseWriter::new(&payload);
+    let mut tx = FailingUsbTx;
+    let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+    assert_eq!(
+        usb_pump_response(&mut tx, &mut writer, &tx_buf, 0),
+        UsbResponsePumpOutcome::Fault
+    );
+    assert!(writer.is_complete());
+    assert!(USB_TRANSPORT_FAULT_MARKER.starts_with(b"\n{"));
+    let _ = &mut tx_buf;
+}
+
+#[test]
+fn usb_recovery_writer_resumes_after_a_partial_hard_failure() {
+    struct PartialFailureTx {
+        sent: std::vec::Vec<u8>,
+        attempts: usize,
+        fail_at: usize,
+    }
+
+    impl UsbControlTx for PartialFailureTx {
         fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
-            if self.waits < self.waits_before_ready {
-                return Err(UsbTxError::WouldBlock);
+            if self.attempts == self.fail_at {
+                self.attempts += 1;
+                return Err(UsbTxError::Other);
             }
-            self.pending.push(byte);
+            self.attempts += 1;
+            self.sent.push(byte);
             Ok(())
         }
 
         fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
-            if self.waits < self.waits_before_ready {
-                return Err(UsbTxError::WouldBlock);
-            }
-            self.sent.extend_from_slice(&self.pending);
-            self.pending.clear();
             Ok(())
-        }
-
-        fn wait_for_tx_progress(&mut self) {
-            self.waits += 1;
         }
     }
 
-    let mut tx = DelayedUsbTx {
-        waits_before_ready: 3,
-        waits: 0,
-        pending: std::vec::Vec::new(),
+    let payload = [b'r'; 96];
+    let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+    tx_buf[..payload.len()].copy_from_slice(&payload);
+    let mut writer = UsbResponseWriter::new(&payload);
+    let mut tx = PartialFailureTx {
         sent: std::vec::Vec::new(),
+        attempts: 0,
+        fail_at: 7,
     };
 
-    assert!(usb_write_bytes_bounded(&mut tx, b"response\\n"));
-    assert_eq!(tx.waits, 3);
-    assert_eq!(tx.sent, b"response\\n");
+    assert_eq!(
+        usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, 0),
+        UsbResponsePumpOutcome::Pending
+    );
+    for now_ms in [1, 2, 3, 4] {
+        if usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, now_ms)
+            == UsbResponsePumpOutcome::Idle
+        {
+            break;
+        }
+    }
+
+    assert!(writer.is_complete());
+    assert_eq!(tx.sent, payload);
 }
 
 #[test]
-fn usb_response_write_uses_default_bounded_chunks_for_host_requested_frames() {
+fn usb_recovery_writer_times_out_instead_of_renewing_forever() {
+    let payload = [b'r'; 96];
+    let mut writer = UsbResponseWriter::default();
+    writer.start(payload.len(), 10);
+    let mut tx = FakeUsbTx::new(64);
+    let tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+
+    assert_eq!(
+        usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, 10),
+        UsbResponsePumpOutcome::Fault
+    );
+    assert!(writer.is_complete());
+}
+
+#[test]
+fn deferred_persistence_log_enters_recovery_after_a_partial_hard_failure() {
+    struct PartialFailureTx {
+        sent: std::vec::Vec<u8>,
+        attempts: usize,
+        fail_at: usize,
+    }
+
+    impl UsbControlTx for PartialFailureTx {
+        fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
+            if self.attempts == self.fail_at {
+                self.attempts += 1;
+                return Err(UsbTxError::Other);
+            }
+            self.attempts += 1;
+            self.sent.push(byte);
+            Ok(())
+        }
+
+        fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
+    }
+
+    let line = b"PERSISTENCE_COMMIT_FAILED code=test phase=runtime attempt=1\n";
+    let mut sink = DeferredPersistenceLogSink::default();
+    sink.write_line(line);
+    let mut tx = PartialFailureTx {
+        sent: std::vec::Vec::new(),
+        attempts: 0,
+        fail_at: 5,
+    };
+
+    assert!(!sink.flush_one(&mut tx));
+    let sent_before_retry = tx.sent.clone();
+    assert!(!sink.flush_one(&mut tx));
+    assert_eq!(tx.sent, sent_before_retry);
+    assert!(sink.take_transport_fault());
+    assert!(!sink.is_pending());
+}
+
+#[test]
+fn deferred_persistence_log_hard_failure_enters_transport_recovery() {
+    struct FailingUsbTx;
+
+    impl UsbControlTx for FailingUsbTx {
+        fn write_byte_nb(&mut self, _byte: u8) -> Result<(), UsbTxError> {
+            Err(UsbTxError::Other)
+        }
+
+        fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
+    }
+
+    let mut sink = DeferredPersistenceLogSink::default();
+    sink.write_line(b"PERSISTENCE_COMMIT_FAILED code=test\n");
+    assert!(!sink.flush_one(&mut FailingUsbTx));
+    assert!(sink.take_transport_fault());
+    assert!(!sink.take_transport_fault());
+}
+
+#[test]
+fn mutating_request_history_rejects_a_b_a_and_keeps_failed_mutations_out() {
+    let mut history = heapless::Deque::new();
+    let mut request_a = heapless::String::new();
+    request_a.push_str("request-a").unwrap();
+    let mut request_b = heapless::String::new();
+    request_b.push_str("request-b").unwrap();
+
+    assert!(!usb_mutating_request_id_is_recent(&history, &request_a));
+    remember_mutating_request_id(&mut history, request_a.clone());
+    remember_mutating_request_id(&mut history, request_b);
+    assert!(usb_mutating_request_id_is_recent(&history, &request_a));
+
+    let failed = usb_error_response(request_a.clone(), "memory_commit_failed", "failed");
+    assert!(!usb_mutation_succeeded(&failed));
+    let success = usb_response(request_a.clone(), UsbResponsePayload::Ack);
+    assert!(usb_mutation_succeeded(&success));
+}
+
+#[test]
+fn oversized_usb_line_discards_the_suffix_until_newline() {
+    let mut line = heapless::String::<USB_CONTROL_LINE_CAPACITY>::new();
+    let mut overflowed = false;
+    for _ in 0..USB_CONTROL_LINE_CAPACITY {
+        append_usb_control_byte(&mut line, &mut overflowed, b'x');
+    }
+    assert!(!overflowed);
+    assert_eq!(line.len(), USB_CONTROL_LINE_CAPACITY);
+    append_usb_control_byte(&mut line, &mut overflowed, b'{');
+    append_usb_control_byte(&mut line, &mut overflowed, b'}');
+
+    assert!(overflowed);
+    assert!(line.is_empty());
+    match usb_line_too_long_response() {
+        UsbFrame::Error { error, .. } => assert_eq!(error.code.as_str(), "frame_too_large"),
+        other => panic!("unexpected oversized frame response: {other:?}"),
+    }
+}
+
+#[test]
+fn mutating_usb_requests_are_deduplicated_but_reads_are_not() {
+    assert_eq!(
+        usb_mutating_request_id(
+            r#"{"type":"runtime_config","requestId":"runtime-1","targetTempC":180}"#
+        )
+        .as_deref(),
+        Some("runtime-1")
+    );
+    assert!(
+        usb_mutating_request_id(r#"{"type":"request","requestId":"status-1","op":"get_status"}"#)
+            .is_none()
+    );
+    assert_eq!(
+        usb_mutating_request_id(
+            r#"{"type":"eeprom_maintenance","requestId":"erase-1","op":"erase"}"#
+        )
+        .as_deref(),
+        Some("erase-1")
+    );
+}
+
+#[test]
+fn usb_tx_buffer_matches_the_eight_kibibyte_jsonl_contract() {
+    assert_eq!(
+        USB_CONTROL_TX_BUFFER_LEN,
+        flux_purr_firmware::control_plane::USB_LINE_MAX_LEN
+    );
+    assert_eq!(
+        USB_CONTROL_LINE_CAPACITY,
+        flux_purr_firmware::control_plane::USB_LINE_MAX_LEN - 1
+    );
+}
+
+#[test]
+fn usb_response_pump_reports_idle_after_the_last_packet_is_accepted() {
+    let payload = [b'x'; 1];
+    let mut tx = FakeUsbTx::new(64);
+    let mut writer = UsbResponseWriter::new(&payload);
+    let tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+
+    assert_eq!(
+        usb_pump_response(&mut tx, &mut writer, &tx_buf, 0),
+        UsbResponsePumpOutcome::Pending
+    );
+    assert_eq!(
+        usb_pump_response(&mut tx, &mut writer, &tx_buf, 1),
+        UsbResponsePumpOutcome::Idle
+    );
+    assert!(writer.is_complete());
+}
+
+#[test]
+fn usb_response_write_defaults_to_bounded_chunks_for_host_requested_frames() {
     let payload = std::vec![b'x'; 180];
     let mut bounded_tx = FakeUsbTx::new(0);
     assert!(!usb_write_bytes_bounded(&mut bounded_tx, &payload));
@@ -1016,25 +1704,19 @@ fn usb_response_write_uses_default_bounded_chunks_for_host_requested_frames() {
 }
 
 #[test]
-fn usb_response_write_allows_the_runtime_transport_to_confirm_delivery() {
-    struct ConfirmingUsbTx {
-        response: std::vec::Vec<u8>,
-        fallback_write_attempts: usize,
+fn usb_response_write_uses_nonblocking_transport_calls() {
+    struct NonblockingUsbTx {
+        sent: std::vec::Vec<u8>,
     }
 
-    impl UsbControlTx for ConfirmingUsbTx {
-        fn write_byte_nb(&mut self, _byte: u8) -> Result<(), UsbTxError> {
-            self.fallback_write_attempts += 1;
-            Err(UsbTxError::Other)
+    impl UsbControlTx for NonblockingUsbTx {
+        fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
+            self.sent.push(byte);
+            Ok(())
         }
 
         fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
             Ok(())
-        }
-
-        fn write_response_bytes(&mut self, bytes: &[u8]) -> bool {
-            self.response.extend_from_slice(bytes);
-            true
         }
     }
 
@@ -1044,17 +1726,57 @@ fn usb_response_write_allows_the_runtime_transport_to_confirm_delivery() {
         request_id,
         UsbResponsePayload::Identity(Box::new(Identity::firmware_default())),
     );
-    let mut tx = ConfirmingUsbTx {
-        response: std::vec::Vec::new(),
-        fallback_write_attempts: 0,
+    let mut tx = NonblockingUsbTx {
+        sent: std::vec::Vec::new(),
     };
     let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
 
     usb_write_response_frame_to(&mut tx, &response, &mut tx_buf);
 
-    let line = core::str::from_utf8(&tx.response).expect("response is utf8");
+    let line = core::str::from_utf8(&tx.sent).expect("response is utf8");
     assert!(line.contains(r#""requestId":"confirmed-response""#));
-    assert_eq!(tx.fallback_write_attempts, 0);
+}
+
+#[test]
+fn usb_response_writer_limits_an_always_ready_endpoint_to_one_packet_per_step() {
+    let payload = std::vec![b'x'; 180];
+    let mut tx = FakeUsbTx::new(64);
+    let mut writer = UsbResponseWriter::new(&payload);
+    let mut operations_before = tx.operation_count;
+    let mut steps = 0;
+
+    while !writer.is_complete() {
+        let complete = writer.step(&mut tx, &payload).unwrap_or(false);
+        assert!(complete == writer.is_complete());
+        assert!(
+            tx.operation_count.saturating_sub(operations_before) <= USB_CONTROL_TX_PACKET_LEN + 1
+        );
+        operations_before = tx.operation_count;
+        steps += 1;
+        assert!(steps <= 10);
+    }
+
+    assert_eq!(tx.sent, payload);
+    assert!(tx.pending.is_empty());
+    assert_eq!(tx.flush_count, 1);
+
+    let exact_packet = std::vec![b'y'; USB_CONTROL_TX_PACKET_LEN];
+    let mut exact_packet_tx =
+        FakeUsbTx::auto_commit_rejecting_empty_flush(USB_CONTROL_TX_PACKET_LEN);
+    let mut exact_packet_writer = UsbResponseWriter::new(&exact_packet);
+    assert!(
+        exact_packet_writer
+            .step(&mut exact_packet_tx, &exact_packet)
+            .expect("an auto-committed full packet completes without a flush")
+    );
+    assert!(exact_packet_writer.is_complete());
+    assert_eq!(exact_packet_tx.sent, exact_packet);
+    assert_eq!(exact_packet_tx.flush_count, 0);
+
+    writer.start(payload.len(), 10);
+    assert!(writer.is_expired(10));
+    writer.abort();
+    assert!(writer.is_complete());
 }
 
 #[test]
@@ -3652,6 +4374,351 @@ fn runtime_ready_boot_stage_matches_post_flash_contract() {
 }
 
 #[test]
+fn runtime_ready_boot_stage_is_emitted_after_the_first_ui_and_before_runtime_loop() {
+    let source = RUNTIME_IMPLEMENTATION;
+    let normalized_source: String = source.split_whitespace().collect();
+    let runtime_state_flow = normalized_source
+        .split(
+            "pub(crate)asyncfninitialize_runtime_state_from_ready(spawner:Spawner,ready:Box<BootMemoryReady>,)->Box<BootRuntimeState>",
+        )
+        .nth(1)
+        .expect("runtime-state initialization must remain present");
+    let first_ui = runtime_state_flow
+        .find("runtime.present_initial_ui().await;")
+        .expect("boot must render the first UI before becoming ready");
+    let ready_marker = runtime_state_flow
+        .find(
+            "let_=usb_write_bytes_bounded(&mutruntime.system.usb_serial,RUNTIME_READY_BOOT_STAGE_LINE,",
+        )
+        .expect("boot must emit the runtime-ready marker on USB");
+    let runtime_entry = runtime_state_flow
+        .rfind("runtime}")
+        .expect("boot must retain the prepared runtime state after becoming ready");
+    assert!(first_ui < ready_marker);
+    assert!(ready_marker < runtime_entry);
+
+    let boot = include_str!("boot.rs");
+    let runtime_loop = include_str!("runtime_loop.rs");
+    let normalized_entrypoint: String = FIRMWARE_ENTRYPOINT.split_whitespace().collect();
+    assert!(
+        normalized_entrypoint.contains("runtime::run(spawner).await;")
+            && boot.contains("initialize_runtime_state_from_ready(spawner, ready).await")
+            && boot.contains(".spawn(run_boot_runtime_finalize_task(spawner, state))")
+            && boot.contains(
+                "async fn run_boot_runtime_finalize_task(spawner: Spawner, state: Box<BootRuntimeState>)"
+            )
+            && boot.contains(".spawn(run_frontpanel_runtime_task(state))")
+            && runtime_loop.contains("async fn run_runtime_loop(mut state: Box<RuntimeLoopState>)")
+    );
+}
+
+#[test]
+fn runtime_loop_storage_is_reserved_before_network_startup() {
+    let source = RUNTIME_IMPLEMENTATION;
+    let state_initialization = source
+        .split("pub(crate) async fn initialize_runtime_state_from_ready")
+        .nth(1)
+        .expect("runtime-state initialization must remain present");
+    let reserve = state_initialization
+        .find("Box::<BootRuntimeState>::new_uninit()")
+        .expect("the boot runtime state must be reserved before startup work");
+    let network = state_initialization
+        .find("runtime.start_network(&spawner).await;")
+        .expect("network startup must remain in the runtime initialization path");
+    let handoff = state_initialization
+        .rfind("runtime\n}")
+        .expect("the prepared boot state must remain after startup work");
+
+    assert!(reserve < network);
+    assert!(network < handoff);
+}
+
+#[test]
+fn adc_boot_tokens_are_consumed_before_runtime_assembly() {
+    let boot = include_str!("boot.rs");
+    let runtime_assembly = include_str!("runtime_assembly.rs");
+    let initialize_adc = boot
+        .split("async fn initialize_adc(&mut self)")
+        .nth(1)
+        .and_then(|source| source.split("async fn initialize_initial_rtd").next())
+        .expect("ADC initialization must remain present");
+
+    assert!(
+        initialize_adc.contains("self\n            .tokens\n            .take()"),
+        "ADC initialization must consume its one-time boot tokens"
+    );
+    assert!(
+        runtime_assembly.contains("tokens.is_none()")
+            && !runtime_assembly.contains("tokens.is_some()"),
+        "runtime assembly must receive consumed boot tokens after ADC initialization"
+    );
+}
+
+#[test]
+fn usb_control_rx_line_uses_bss_instead_of_the_runtime_heap() {
+    let boot = include_str!("boot.rs");
+    let support = include_str!("support.rs");
+
+    assert!(
+        boot.contains("usb_rx_line: &'static mut heapless::String<USB_CONTROL_LINE_CAPACITY>")
+            && boot.contains("let usb_rx_line = initialize_usb_control_rx_line();"),
+        "boot must borrow the static USB receive line"
+    );
+    assert!(
+        support.contains(
+            "static mut USB_CONTROL_RX_LINE: heapless::String<USB_CONTROL_LINE_CAPACITY>"
+        ) && support.contains("pub(crate) fn initialize_usb_control_rx_line()")
+            && support.contains("line.clear();"),
+        "the USB receive line must be reset in BSS before each boot"
+    );
+    assert!(
+        !support.contains("Box::<heapless::String<USB_CONTROL_LINE_CAPACITY>>::new_uninit()"),
+        "the USB receive line must not consume the internal runtime heap"
+    );
+}
+
+#[test]
+fn runtime_heap_keeps_boot_handoff_capacity_without_networking() {
+    assert_eq!(
+        RUNTIME_HEAP_SIZE,
+        52 * 1024,
+        "the diagnostic build must retain enough heap for complete boot states"
+    );
+}
+
+#[test]
+fn boot_stages_handoff_the_heap_pipeline_between_normal_executor_tasks() {
+    let boot = include_str!("boot.rs");
+    let support = include_str!("support.rs");
+
+    assert!(
+        boot.contains("pub(crate) async fn run(spawner: Spawner)")
+            && boot.contains("init_runtime_heap();")
+            && boot.contains("let pipeline_storage = Box::<BootPipeline>::new_uninit();")
+            && boot.contains("BootPipeline::new(system_tokens, device_tokens)")
+            && boot.contains(".spawn(run_boot_system_stage_task(spawner, pipeline))")
+            && boot.contains("#[embassy_executor::task]\nasync fn run_boot_system_stage_task")
+            && boot.contains("let system_storage = Box::<BootSystem>::new_uninit();")
+            && boot.contains(
+                "pipeline.system = Some(initialize_boot_system(\n        spawner,\n        system_tokens,\n        system_storage,\n    ));"
+            )
+            && boot.contains(".spawn(run_boot_pd_stage_task(spawner, pipeline))")
+            && boot.contains("#[embassy_executor::task]\nasync fn run_boot_pd_stage_task")
+            && boot.contains(".spawn(run_boot_display_stage_task(spawner, pipeline))")
+            && boot.contains("#[embassy_executor::task]\nasync fn run_boot_display_stage_task")
+            && boot.contains(".spawn(run_boot_memory_stage_task(spawner, pipeline))")
+            && boot.contains("#[embassy_executor::task]\nasync fn run_boot_memory_stage_task")
+            && boot.contains(".spawn(run_boot_runtime_stage_task(spawner, pipeline))")
+            && boot.contains("#[embassy_executor::task]\nasync fn run_boot_runtime_stage_task")
+            && boot.contains(".spawn(run_boot_runtime_finalize_task(spawner, state))")
+            && boot.contains("#[embassy_executor::task]\nasync fn run_boot_runtime_finalize_task")
+            && boot.contains(".spawn(run_frontpanel_runtime_task(state))"),
+        "each ordered boot stage must hand the heap pipeline to the next task"
+    );
+    assert!(
+        !boot.contains("BootHandoff")
+            && !boot.contains("BootStageStorage")
+            && !boot.contains("run_after_boot_system")
+            && !support.contains("BOOT_PIPELINE_FUTURE_HEAP_STORAGE")
+            && !support.contains("init_boot_pipeline_future_heap()"),
+        "the boot path must not retain an aggregate coordinator future"
+    );
+    assert!(
+        boot.contains("system: Option<Box<BootSystem>>")
+            && boot.contains("pub(crate) struct BootDisplay {\n    system: Box<BootSystem>,")
+            && boot.contains("display: Option<Box<BootDisplay>>")
+            && boot.contains("memory_ready: Option<Box<BootMemoryReady>>")
+            && boot.contains("Box::<BootSystem>::new_uninit()")
+            && boot.contains("Box::<BootDisplay>::new_uninit()")
+            && boot.contains("Box::<BootMemoryReady>::new_uninit()")
+            && boot.contains("Box::<BootRuntimeState>::new_uninit()"),
+        "full boot states must cross stage boundaries only through heap allocations"
+    );
+}
+
+#[test]
+fn boot_output_initialization_stays_in_one_boot_container() {
+    let boot = include_str!("boot.rs");
+
+    assert!(
+        boot.contains("pub(crate) fn initialize_boot_outputs_stage(boot: &mut BootDisplay)")
+            && boot.contains(".output_tokens\n        .take()")
+            && boot.contains("boot.output_state = Some(BootOutputState")
+            && boot.contains("let display_storage = Box::<BootDisplay>::new_uninit();")
+            && boot.contains(
+                "initialize_boot_display_from_parts(system, device_tokens, display_storage).await"
+            )
+            && boot.contains("initialize_boot_outputs_stage(")
+            && !boot.contains("pub(crate) struct BootOutput {"),
+        "boot output initialization must not return another full boot container through the startup future"
+    );
+}
+
+#[test]
+fn boot_memory_future_is_heap_pinned_before_eeprom_initialization() {
+    let boot = include_str!("boot.rs");
+    let normalized_boot: String = boot.split_whitespace().collect();
+
+    assert!(
+        normalized_boot.contains(
+            "Box::pin(initialize_boot_memory(memory_context,eeprom_record_staging,)).await"
+        ),
+        "the EEPROM startup future must not be nested on the guarded boot stack"
+    );
+}
+
+#[test]
+fn runtime_synchronization_uses_normal_static_storage() {
+    let support = include_str!("support.rs");
+    let pd_service = include_str!("pd_service.rs");
+    let tasks = include_str!("tasks.rs");
+    let network = include_str!("../../net.rs");
+
+    assert!(
+        !support.contains("ResettableStatic")
+            && !pd_service.contains("reset_pd_service_state")
+            && !tasks.contains("reset_buzzer_runtime_state"),
+        "runtime synchronization must not overwrite storage that the executor can retain"
+    );
+    assert!(
+        network.contains("use static_cell::StaticCell;")
+            && network.contains("static NET_RESOURCES: StaticCell<StackResources<8>>")
+            && network.contains("static WIFI_CONTROLLER: StaticCell<WifiController<'static>>")
+            && !network.contains("ResettableStatic")
+            && !network.contains("initialize_after_software_reset")
+            && !network.contains("reset_runtime_sync_state"),
+        "network runtime storage must remain one-time initialized because spawned WiFi tasks retain those references"
+    );
+}
+
+#[test]
+fn boot_emits_rom_markers_around_hal_initialization() {
+    let boot = include_str!("boot.rs");
+    let run = boot
+        .split("pub(crate) async fn run(spawner: Spawner)")
+        .nth(1)
+        .expect("boot run entrypoint must remain present");
+    let init_enter = run
+        .find("rom_boot_stage(b\"hal_init_enter\")")
+        .expect("boot must mark entry before HAL initialization");
+    let hal_init = run
+        .find("let peripherals = esp_hal::init(config);")
+        .expect("boot must initialize the HAL");
+    let init_complete = run
+        .find("rom_boot_stage(b\"hal_init_complete\")")
+        .expect("boot must mark successful HAL initialization");
+    assert!(init_enter < hal_init);
+    assert!(hal_init < init_complete);
+    for marker in [
+        "pd_stage_enter",
+        "pd_i2c_taken",
+        "pd_i2c_locked",
+        "pd_detect_done",
+        "pd_phy_init_enter",
+        "pd_phy_init_done",
+        "pd_service_spawned",
+        "pd_startup_window_done",
+    ] {
+        assert!(
+            boot.contains(&format!("rom_boot_stage(b\"{marker}\")")),
+            "PD boot diagnostics must retain the {marker} stage marker"
+        );
+    }
+}
+
+#[test]
+fn entrypoint_awaits_the_direct_boot_path_without_fault_probes() {
+    assert!(
+        FIRMWARE_ENTRYPOINT.contains("runtime::run(spawner).await")
+            && !RUNTIME_IMPLEMENTATION.contains("initialize_boot_memory_ready")
+            && !RUNTIME_IMPLEMENTATION.contains("[DEBUG-")
+            && !RUNTIME_IMPLEMENTATION.contains("if false"),
+        "the Embassy entry task must await direct boot without diagnostic bypasses"
+    );
+}
+
+#[test]
+fn post_system_boot_handoff_starts_after_the_allocator_is_ready() {
+    let boot = include_str!("boot.rs");
+    let normalized_boot: String = boot.split_whitespace().collect();
+
+    assert!(
+        normalized_boot.contains("init_runtime_heap();")
+            && normalized_boot.contains("letpipeline_storage=Box::<BootPipeline>::new_uninit();")
+            && normalized_boot.contains("BootPipeline::new(system_tokens,device_tokens)")
+            && normalized_boot.contains("asyncfnrun_boot_system_stage_task(spawner:Spawner,mutpipeline:Box<BootPipeline>)")
+            && normalized_boot.contains("letsystem_storage=Box::<BootSystem>::new_uninit();")
+            && normalized_boot
+                .contains("pipeline.system=Some(initialize_boot_system(spawner,system_tokens,system_storage,));"),
+        "the root task must heap-pin the system stage before asynchronous boot work"
+    );
+    assert!(
+        normalized_boot.contains(".spawn(run_boot_system_stage_task(spawner,pipeline))")
+            && normalized_boot.contains(".spawn(run_boot_pd_stage_task(spawner,pipeline))"),
+        "the post-system boot pipeline must move to its first task after heap initialization"
+    );
+    assert!(
+        normalized_boot.contains(
+            "asyncfnrun_boot_system_stage_task(spawner:Spawner,mutpipeline:Box<BootPipeline>)"
+        ) && normalized_boot.contains(
+            "asyncfnrun_boot_pd_stage_task(spawner:Spawner,mutpipeline:Box<BootPipeline>)"
+        ) && normalized_boot.contains(
+            "asyncfnrun_boot_display_stage_task(spawner:Spawner,mutpipeline:Box<BootPipeline>)"
+        ) && normalized_boot.contains(
+            "asyncfnrun_boot_memory_stage_task(spawner:Spawner,mutpipeline:Box<BootPipeline>)"
+        ) && normalized_boot.contains(
+            "asyncfnrun_boot_runtime_stage_task(spawner:Spawner,mutpipeline:Box<BootPipeline>)"
+        ) && normalized_boot.contains(
+            "asyncfnrun_boot_runtime_finalize_task(spawner:Spawner,state:Box<BootRuntimeState>)"
+        ) && !normalized_boot.contains("dynFuture<Output=()>")
+            && !normalized_boot.contains("Future<Output=BootDisplay>")
+            && !normalized_boot.contains("Future<Output=BootMemoryReady>")
+            && !normalized_boot.contains("Future<Output=Box<RuntimeLoopState>>"),
+        "each stage must retain full state in the heap pipeline without a nested coordinator future"
+    );
+}
+
+#[test]
+fn display_timeout_path_uses_the_native_async_spi_device() {
+    let source = RUNTIME_IMPLEMENTATION;
+    let display_bus = source
+        .split("pub(crate) type RuntimeDisplayBus =")
+        .nth(1)
+        .and_then(|value| value.split(';').next())
+        .expect("runtime display bus alias must remain present");
+    assert!(display_bus.contains("ExclusiveDevice"));
+    assert!(display_bus.contains("Spi<'static, esp_hal::Async>"));
+    assert!(!display_bus.contains("BlockingAsync"));
+
+    let frontpanel = include_str!("frontpanel.rs");
+    assert!(frontpanel.contains("const DISPLAY_DELAY_YIELD_QUANTUM_US: u32 = 1_000"));
+    assert!(frontpanel.contains("embassy_futures::yield_now().await"));
+    assert!(!frontpanel.contains("EmbassyTimer::after_millis"));
+
+    let display_setup = source
+        .split("pub(crate) fn initialize_display_driver(")
+        .nth(1)
+        .expect("display initialization must remain present");
+    assert!(display_setup.contains("ExclusiveDevice::new_no_delay(spi.into_async(), cs)"));
+    assert!(!source.contains("pub(crate) struct CancellationSafeSpiDevice"));
+}
+
+#[test]
+fn display_framebuffer_boot_initialization_never_materializes_a_stack_sized_array() {
+    let boot = include_str!("boot.rs");
+    let display_setup = boot
+        .split("pub(crate) fn initialize_display_driver(")
+        .nth(1)
+        .expect("display initialization must remain present");
+
+    assert!(display_setup.contains("initialize_display_framebuffer()"));
+    assert!(
+        !display_setup.contains("initialize_after_software_reset("),
+        "the display framebuffer must not be passed by value through the boot task stack"
+    );
+}
+
+#[test]
 fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     let mut job = CalibrationThermalPlantAutoJob {
         run_id: 1,
@@ -4124,12 +5191,12 @@ fn raw_eeprom_writes_split_at_page_boundaries_from_any_offset() {
 }
 
 #[test]
-fn raw_eeprom_maintenance_services_pd_after_every_page_write() {
-    let mut schedule = EepromMaintenancePdServiceSchedule::new();
+fn raw_eeprom_maintenance_yields_between_bounded_transactions() {
+    let source = include_str!("eeprom.rs");
 
-    assert_eq!(EEPROM_MAINTENANCE_PD_MAX_PAGE_WRITES_WITHOUT_SERVICE, 1);
-    assert!(schedule.after_page_write());
-    assert!(schedule.after_page_write());
+    assert!(!source.contains("service_pd_during_eeprom_operation"));
+    assert!(!source.contains("EepromMaintenancePdServiceSchedule"));
+    assert!(source.contains("EmbassyTimer::after_millis(0).await;"));
 }
 
 #[test]
@@ -9257,7 +10324,7 @@ fn fixed_pd_settle_requires_an_observed_fixed_contract() {
 }
 
 #[test]
-fn fusb302b_backend_never_inherits_a_ch224q_28v_default() {
+fn fusb302b_backend_never_inherits_a_ch224q_fixed_voltage_default() {
     let legacy = HeaterPowerBackend::FixedPdPwmFallback {
         reason: HeaterPowerBackendReason::CapabilityReadFailed,
         fixed_request_confirmed: true,
@@ -9266,7 +10333,7 @@ fn fusb302b_backend_never_inherits_a_ch224q_28v_default() {
     };
 
     let fusb = constrain_heater_backend_to_controller(ControllerKind::Fusb302b, legacy);
-    assert_eq!(fusb.pd_request_mv(), 20_000);
+    assert_eq!(fusb.pd_request_mv(), 12_000);
     let HeaterPowerBackend::FixedPdPwmFallback {
         fixed_request_confirmed,
         ..
@@ -9855,8 +10922,8 @@ fn runtime_loop_services_pd_before_control_plane_work() {
         .nth(1)
         .expect("runtime loop marker must remain present");
     let pd_service = runtime_loop
-        .find("runtime_service_pd")
-        .expect("runtime loop must have an independent PD service gate");
+        .find("runtime_apply_pd_snapshot")
+        .expect("runtime loop must apply the independent PD snapshot");
     let control_plane = runtime_loop
         .find("runtime_process_input")
         .expect("runtime loop must retain control-plane handling");
@@ -9865,137 +10932,159 @@ fn runtime_loop_services_pd_before_control_plane_work() {
 }
 
 #[test]
-fn runtime_control_work_is_bounded_before_the_next_pd_service() {
+fn runtime_control_input_is_bounded_before_the_next_pd_service() {
     let source = RUNTIME_IMPLEMENTATION;
     let usb_input = source;
     let normalized_source: String = source.split_whitespace().collect();
 
-    assert!(usb_input.contains("if usb_bytes_processed >= PD_RUNTIME_USB_BYTE_BUDGET"));
+    assert!(usb_input.contains("while usb_bytes_processed < PD_RUNTIME_USB_BYTE_BUDGET"));
     let control_frame = normalized_source
-        .find("usb_write_response_frame(&mutstate.transport.usb_serial,&response,state.transport.usb_tx_buf,);")
-        .expect("USB control path must write a bounded response");
+        .find("usb_start_response_frame(&mutstate.transport.usb_response_writer,&response,state.transport.usb_tx_buf,")
+        .expect("USB control path must use the response writer");
     let control_frame_tail = &normalized_source[control_frame..];
     assert!(control_frame_tail.contains("usb_rx_line.clear();"));
-    assert!(control_frame_tail.contains("break;"));
+    assert!(normalized_source.contains("returnruntime_process_usb_line(state,elapsed_ms).await;"));
+    assert!(
+        !normalized_source.contains("usb_response_tx"),
+        "runtime must not retain an undelivered USB response queue"
+    );
     assert!(source.contains("let Some(command) = flux_purr_firmware::net::try_receive_command()"));
     assert!(
         !source
             .contains("while let Some(command) = flux_purr_firmware::net::try_receive_command()")
     );
+    assert!(
+        normalized_source
+            .contains("letusb_response_state=runtime_pump_usb_response_budget(state).await;")
+    );
+    assert!(normalized_source.contains("UsbResponsePumpOutcome::Fault"));
+    assert!(normalized_source.contains("UsbResponsePumpOutcome::Idle"));
+    assert!(normalized_source.contains("usb_transport_faulted=true"));
+    assert!(normalized_source.contains("usb_start_transport_recovery"));
+    assert!(normalized_source.contains("usb_pump_recovery_response"));
+    assert!(normalized_source.contains("usb_recovery_marker_failed=true"));
+    assert!(normalized_source.contains("retainingterminaltransportfault"));
+    assert!(
+        !normalized_source.contains("ifusb_pump_response(&mutstate.transport.usb_serial,return")
+    );
 }
 
 #[test]
-fn every_network_await_is_wrapped_by_the_pd_service_window() {
+fn skipped_runtime_iterations_still_dispatch_the_sampled_frontpanel_input() {
+    let runtime_loop = RUNTIME_IMPLEMENTATION;
+    let skip_branch = runtime_loop
+        .split("if input.skip_iteration")
+        .nth(1)
+        .expect("runtime loop must retain the bounded skip path");
+
+    assert!(skip_branch.contains("runtime_process_frontpanel_input"));
+    assert!(skip_branch.contains("input.sample"));
+    assert!(skip_branch.contains("input.pairing_opened_by_usb"));
+    assert!(skip_branch.contains("runtime_control_heater"));
+    assert!(skip_branch.contains("runtime_process_pending_safety"));
+}
+
+#[test]
+fn early_usb_write_failures_enter_framing_recovery() {
+    let control_plane = include_str!("control_plane.rs");
+    let early_control = control_plane
+        .split("pub(crate) async fn poll_usb_early_control")
+        .nth(1)
+        .expect("early USB control poll must remain present");
+
+    assert!(early_control.contains("if !usb_write_response_frame"));
+    assert!(early_control.contains("USB_TRANSPORT_FAULT_MARKER"));
+    assert!(early_control.contains("run_usb_recovery_control_loop"));
+}
+
+#[test]
+fn network_awaits_do_not_own_or_wrap_pd_service() {
     let source = RUNTIME_IMPLEMENTATION;
-    let process_control = source;
+    let lan = include_str!("lan.rs");
+    let runtime_loop = include_str!("runtime_loop.rs");
+    assert!(!source.contains("run_network_operation_with_snapshot("));
+    assert!(!source.contains("run_network_operation_with_pd("));
     for call in [
-        "flux_purr_firmware::net::lan_network_summary()",
-        "flux_purr_firmware::net::enter_pairing()",
-        "flux_purr_firmware::net::leave_pairing()",
-        "flux_purr_firmware::net::clear_token_from_usb()",
-        "flux_purr_firmware::net::cancel_wifi_connection()",
-        "flux_purr_firmware::net::apply_wifi_config(context.memory_config)",
+        "flux_purr_firmware::net::lan_network_summary().await",
+        "flux_purr_firmware::net::enter_pairing().await",
+        "flux_purr_firmware::net::leave_pairing().await",
+        "flux_purr_firmware::net::clear_token_from_usb().await",
+        "flux_purr_firmware::net::cancel_wifi_connection().await",
+        "flux_purr_firmware::net::apply_wifi_config(context.memory_config).await",
     ] {
-        let call_start = process_control
-            .find(call)
-            .expect("expected network operation in control-line implementation");
-        let wrapper_start = process_control[..call_start]
-            .rfind("run_network_operation_with_pd(")
-            .expect("network await must use the PD service window");
+        assert!(lan.contains(call), "expected direct network await: {call}");
+    }
+    for call in [
+        "flux_purr_firmware::net::command_lease_is_active(&command).await",
+        "flux_purr_firmware::net::lan_identity().await",
+        "flux_purr_firmware::net::lan_network_summary().await",
+        "flux_purr_firmware::net::take_persisted_token_change().await",
+    ] {
         assert!(
-            !process_control[wrapper_start..call_start].contains(';'),
-            "network await must be inside the PD service window: {call}"
+            runtime_loop.contains(call),
+            "expected direct runtime network await: {call}"
         );
     }
-
-    let runtime_loop = source;
-    for call in [
-        "flux_purr_firmware::net::command_lease_is_active(&command)",
-        "flux_purr_firmware::net::lan_identity()",
-        "flux_purr_firmware::net::lan_network_summary()",
-        "flux_purr_firmware::net::take_persisted_token_change()",
-    ] {
-        let call_start = runtime_loop
-            .find(call)
-            .expect("expected network operation in runtime loop");
-        let wrapper_start = runtime_loop[..call_start]
-            .rfind("run_network_operation_with_pd(")
-            .expect("runtime network await must use the PD service window");
-        assert!(
-            !runtime_loop[wrapper_start..call_start].contains(';'),
-            "runtime network await must be inside the PD service window: {call}"
-        );
-    }
-
     assert!(source.contains("async fn initialize_network_control_state"));
     assert!(source.contains("async fn spawn_network"));
-    assert!(source.contains("run_network_operation_with_pd("));
     assert!(source.contains("flux_purr_firmware::net::spawn("));
 }
 
 #[test]
-fn pd_runtime_service_deadline_preserves_cadence_after_a_long_control_turn() {
-    assert!(pd_runtime_service_due(0, 0));
-    assert!(!pd_runtime_service_due(4, 5));
-    assert!(pd_runtime_service_due(5, 5));
-    assert_eq!(next_pd_runtime_service_deadline_ms(0, 0), 5);
-    assert_eq!(next_pd_runtime_service_deadline_ms(5, 5), 10);
-    assert_eq!(next_pd_runtime_service_deadline_ms(5, 27), 30);
+fn lan_runtime_helpers_are_excluded_without_net_http() {
+    let runtime_loop = include_str!("runtime_loop.rs");
+    for helper in [
+        "impl RuntimeLanInputOutcome",
+        "async fn runtime_lan_direct_response",
+        "async fn runtime_process_lan_control",
+        "fn runtime_reject_lan_command",
+    ] {
+        let feature_gate = format!(
+            "#[cfg(all(target_arch = \"xtensa\", feature = \"net_http\"))]\npub(crate) {helper}"
+        );
+        let impl_feature_gate =
+            format!("#[cfg(all(target_arch = \"xtensa\", feature = \"net_http\"))]\n{helper}");
+        assert!(
+            runtime_loop.contains(&feature_gate) || runtime_loop.contains(&impl_feature_gate),
+            "{helper} must stay out of the no-network firmware image"
+        );
+    }
 }
 
 #[test]
-fn fixed_contract_liveness_probe_waits_for_the_bounded_interval() {
-    assert!(!fixed_contract_liveness_probe_due(
-        ContractKind::Fixed,
-        true,
-        false,
-        Some(1_000),
-        5_999,
-    ));
-    assert!(fixed_contract_liveness_probe_due(
-        ContractKind::Fixed,
-        true,
-        false,
-        Some(1_000),
-        6_000,
-    ));
-    assert!(!fixed_contract_liveness_probe_due(
-        ContractKind::Fixed,
-        true,
-        true,
-        Some(6_000),
-        11_000,
-    ));
-    assert!(!fixed_contract_liveness_probe_due(
-        ContractKind::Pps,
-        true,
-        false,
-        Some(1_000),
-        6_000,
-    ));
+fn fixed_contract_does_not_emit_liveness_probes() {
+    let adc = include_str!("adc.rs");
+    let poll = adc
+        .split("pub(crate) async fn poll")
+        .nth(1)
+        .and_then(|source| source.split("async fn poll_receive_messages").next())
+        .expect("PD poll must remain adjacent to message processing");
+
+    assert!(
+        !adc.contains("async fn poll_liveness_probe")
+            && !poll.contains("poll_liveness_probe")
+            && !adc.contains("FixedContractLiveness"),
+        "fixed PDOs must not send unsolicited Get_Source_Capabilities probes"
+    );
 }
 
 #[test]
 fn runtime_pd_service_interlocks_stale_heater_output_in_the_high_priority_path() {
     let source = RUNTIME_IMPLEMENTATION;
-    let runtime_service = source
-        .split("async fn runtime_service_pd")
-        .nth(1)
-        .and_then(|value| value.split("async fn runtime_process_usb").next())
-        .expect("runtime loop must service PD independently");
-    let interlock = runtime_service
-        .find("apply_pd_contract_observation(")
-        .expect("PD service must apply the contract interlock");
     let pd_service = source
-        .find("async fn runtime_service_pd")
-        .expect("runtime loop must service PD independently");
+        .find("async fn pd_service_task")
+        .expect("PD task must own protocol polling");
     let control_tick = source
         .find("async fn runtime_control_heater")
         .expect("runtime loop must retain thermal control scheduling");
 
-    assert!(interlock < runtime_service.len());
+    assert!(
+        source.contains("PD_INTERLOCK_LATCHED")
+            && source.contains("PD_INTERLOCK_PENDING")
+            && source.contains("PD_INTERLOCK_PENDING.swap")
+    );
     assert!(pd_service < control_tick);
-    assert!(source.contains("PD contract interlock -> heater output zero"));
+    assert!(source.contains("PD_HEATER_PERMIT"));
 }
 
 #[test]
@@ -10340,15 +11429,15 @@ fn fusb302b_retries_manual_pps_when_the_active_contract_is_fixed() {
 }
 
 #[test]
-fn terminal_disarm_waits_for_measured_fixed_pd_voltage() {
-    let fixed_mv = u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts());
-    assert!(!terminal_fixed_pd_voltage_confirmed(
+fn terminal_disarm_waits_for_measured_idle_voltage() {
+    let fixed_mv = u32::from(FUSB302B_INITIAL_PPS_REQUEST_MV);
+    assert!(!terminal_idle_voltage_confirmed(
         fixed_mv.saturating_add(9_000)
     ));
-    assert!(!terminal_fixed_pd_voltage_confirmed(
+    assert!(!terminal_idle_voltage_confirmed(
         fixed_mv.saturating_add(3_000)
     ));
-    assert!(terminal_fixed_pd_voltage_confirmed(
+    assert!(terminal_idle_voltage_confirmed(
         fixed_mv.saturating_add(450)
     ));
 }

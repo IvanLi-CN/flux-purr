@@ -3,7 +3,7 @@ use super::*;
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_heater_power_output<PWM>(
-    mut context: HeaterPowerOutputContext<'_, '_, PWM>,
+    mut context: HeaterPowerOutputContext<'_, PWM>,
 ) -> bool
 where
     PWM: SetDutyCycle,
@@ -44,7 +44,7 @@ where
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn prepare_manual_pps<PWM>(
-    context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
 ) -> Option<bool>
 where
     PWM: SetDutyCycle,
@@ -67,8 +67,7 @@ where
     {
         context.manual_pps.fail(ManualPpsError::PdNotReady);
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-        let _ = request_pd_fixed_voltage(context.i2c, context.pd_port, DEFAULT_PD_VOLTAGE_REQUEST)
-            .await;
+        let _ = context.pd_port.restore_automatic_idle_contract();
         return Some(false);
     }
     if !manual_pps_request_required(
@@ -78,15 +77,7 @@ where
     ) {
         return Some(false);
     }
-    match request_pd_adjustable_voltage(
-        context.i2c,
-        context.pd_port,
-        target_mv,
-        ch224q::AdjustableVoltageMode::Pps,
-        true,
-    )
-    .await
-    {
+    match context.pd_port.request_pps_voltage(target_mv) {
         PdContractRequestState::Confirmed => {
             context.manual_pps.applied_mv = Some(target_mv);
             info!(
@@ -102,9 +93,7 @@ where
         PdContractRequestState::Failed => {
             context.manual_pps.fail(ManualPpsError::WriteFailed);
             apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-            let _ =
-                request_pd_fixed_voltage(context.i2c, context.pd_port, DEFAULT_PD_VOLTAGE_REQUEST)
-                    .await;
+            let _ = context.pd_port.restore_automatic_idle_contract();
             info!(
                 "manual pps override cleared reason={=str}",
                 ManualPpsError::WriteFailed.code()
@@ -127,7 +116,7 @@ pub(crate) fn require_manual_pps_target(
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn reset_backend_after_manual_pps_restore<PWM>(
-    context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
 ) where
     PWM: SetDutyCycle,
 {
@@ -176,7 +165,7 @@ pub(crate) fn reset_backend_after_manual_pps_restore<PWM>(
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_fixed_pd_backend<PWM>(
-    context: HeaterPowerOutputContext<'_, '_, PWM>,
+    context: HeaterPowerOutputContext<'_, PWM>,
     manual_pps_active: bool,
 ) -> bool
 where
@@ -193,14 +182,13 @@ where
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_fixed_pd_fallback<PWM>(
-    context: HeaterPowerOutputContext<'_, '_, PWM>,
+    context: HeaterPowerOutputContext<'_, PWM>,
     manual_pps_active: bool,
 ) -> bool
 where
     PWM: SetDutyCycle,
 {
     let HeaterPowerOutputContext {
-        i2c,
         pd_port,
         heater_pwm,
         backend,
@@ -229,7 +217,7 @@ where
             terminal_fixed_pd_disarmed,
         } => {
             if !fixed_request_confirmed && !manual_pps_active {
-                match request_pd_fixed_voltage(i2c, pd_port, fixed_request).await {
+                match pd_port.restore_automatic_idle_contract() {
                     PdContractRequestState::Confirmed => {
                         *backend = HeaterPowerBackend::FixedPdPwmFallback {
                             reason,
@@ -294,7 +282,7 @@ pub(crate) struct PpsOperatingLimits {
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn pps_operating_limits<PWM>(
-    context: &HeaterPowerOutputContext<'_, '_, PWM>,
+    context: &HeaterPowerOutputContext<'_, PWM>,
 ) -> Option<PpsOperatingLimits>
 where
     PWM: SetDutyCycle,
@@ -359,7 +347,7 @@ pub(crate) enum CurrentLimitContractResult {
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn ensure_current_limit_contract<PWM>(
-    context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
     confirmed: bool,
     settle_until_ms: Option<u64>,
 ) -> CurrentLimitContractResult
@@ -387,12 +375,9 @@ where
             return CurrentLimitContractResult::Ready;
         }
     }
-    match request_pd_fixed_voltage(
-        context.i2c,
-        context.pd_port,
-        HEATER_CURRENT_LIMIT_FALLBACK_REQUEST,
-    )
-    .await
+    match context
+        .pd_port
+        .request_fixed_voltage(HEATER_CURRENT_LIMIT_FALLBACK_REQUEST)
     {
         PdContractRequestState::Confirmed => {
             set_pps_current_limit_backend(
@@ -430,7 +415,7 @@ where
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_pps_current_limit_fallback<PWM>(
-    context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
     manual_pps_active: bool,
     safe_max_mv: u16,
     control_floor_mv: u16,
@@ -507,7 +492,7 @@ where
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn handle_pps_settle_period<PWM>(
-    context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
     source_request_ceiling_mv: u16,
 ) -> Option<bool>
 where
@@ -577,20 +562,20 @@ pub(crate) struct PpsVoltageTransition {
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn fallback_from_adjustable_request<PWM>(
-    context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
 ) -> bool
 where
     PWM: SetDutyCycle,
 {
     apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
     let fixed_request_confirmed = matches!(
-        request_pd_fixed_voltage(context.i2c, context.pd_port, DEFAULT_PD_VOLTAGE_REQUEST,).await,
+        context.pd_port.restore_automatic_idle_contract(),
         PdContractRequestState::Confirmed
     );
     *context.backend = HeaterPowerBackend::FixedPdPwmFallback {
         reason: HeaterPowerBackendReason::AdjustableRequestFailed,
         fixed_request_confirmed,
-        fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+        fixed_request: ch224q::VoltageRequest::V12,
         terminal_fixed_pd_disarmed: false,
     };
     if fixed_request_confirmed {
@@ -605,7 +590,7 @@ where
             context
                 .pd_observation
                 .and_then(|observation| observation.contract_voltage_mv)
-                .unwrap_or_else(|| DEFAULT_PD_VOLTAGE_REQUEST.millivolts()),
+                .unwrap_or(FUSB302B_INITIAL_PPS_REQUEST_MV),
             negotiated_current_ma,
             context.active_thermal_settings.heater_current_reserve_ma,
             context.preview_heater_curve,
@@ -627,7 +612,7 @@ where
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_pps_voltage_transition<PWM>(
-    context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
     request: PpsVoltageTransition,
 ) -> Option<bool>
 where
@@ -647,15 +632,7 @@ where
     else {
         return Some(false);
     };
-    match request_pd_adjustable_voltage(
-        context.i2c,
-        context.pd_port,
-        request.request_mv,
-        request.request_mode,
-        request.mode_changed,
-    )
-    .await
-    {
+    match context.pd_port.request_pps_voltage(request.request_mv) {
         PdContractRequestState::Confirmed => {}
         PdContractRequestState::Pending => {
             apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
@@ -698,7 +675,7 @@ where
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_pps_voltage_request<PWM>(
-    context: &mut HeaterPowerOutputContext<'_, '_, PWM>,
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
     manual_pps_active: bool,
     safe_max_mv: u16,
     source_request_ceiling_mv: u16,
@@ -805,7 +782,7 @@ where
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_pps_backend<PWM>(
-    context: HeaterPowerOutputContext<'_, '_, PWM>,
+    context: HeaterPowerOutputContext<'_, PWM>,
     manual_pps_active: bool,
 ) -> bool
 where
@@ -987,7 +964,22 @@ pub(crate) static BUZZER_SAFETY_COMMAND: Signal<CriticalSectionRawMutex, BuzzerS
 // thread-mode executor, where display or control work can otherwise defer a cue
 // transition until the next cooperative poll.
 #[cfg(target_arch = "xtensa")]
-pub(crate) static BUZZER_REALTIME_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
+pub(crate) static mut BUZZER_REALTIME_EXECUTOR_STORAGE: MaybeUninit<InterruptExecutor<1>> =
+    MaybeUninit::uninit();
+
+#[cfg(target_arch = "xtensa")]
+const fn initial_buzzer_test_status() -> BuzzerTestStatus {
+    BuzzerTestStatus {
+        state: BuzzerTestSessionState::Idle,
+        scenario: None,
+        cue: None,
+        repeat: false,
+        active_cue: None,
+        trace: heapless::Vec::new(),
+        #[cfg(feature = "buzzer-observe")]
+        output_trace: heapless::Vec::new(),
+    }
+}
 
 /// Runtime callers submit cue requests. The dedicated task owns arbitration,
 /// cue progression, and every GPIO48 PWM write.
@@ -1046,16 +1038,7 @@ pub(crate) type BuzzerTestStatusMutex =
 
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
 pub(crate) static BUZZER_TEST_STATUS: BuzzerTestStatusMutex =
-    BlockingMutex::new(RefCell::new(BuzzerTestStatus {
-        state: BuzzerTestSessionState::Idle,
-        scenario: None,
-        cue: None,
-        repeat: false,
-        active_cue: None,
-        trace: heapless::Vec::new(),
-        #[cfg(feature = "buzzer-observe")]
-        output_trace: heapless::Vec::new(),
-    }));
+    BlockingMutex::new(RefCell::new(initial_buzzer_test_status()));
 
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
 pub(crate) fn buzzer_test_status() -> BuzzerTestStatus {

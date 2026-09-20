@@ -29,7 +29,10 @@ import type { DeviceTarget } from './types'
 const WEB_SERIAL_BAUD_RATE = 115_200
 const WEB_SERIAL_RPC_TIMEOUT_MS = 12_000
 const WEB_SERIAL_DEVICE_BASE_URL = 'webserial://selected'
+// The limit includes the JSONL newline, matching the firmware and devd
+// transport contract.
 const WEB_SERIAL_LINE_LIMIT = 8 * 1024
+const WEB_SERIAL_CONTENT_LIMIT = WEB_SERIAL_LINE_LIMIT - 1
 export const WEB_SERIAL_INITIALIZATION_TIMEOUT_MS = 8_000
 const WEB_SERIAL_INITIAL_REQUEST_TIMEOUT_MS = 2_000
 const WEB_SERIAL_CLOSE_TIMEOUT_MS = 4_000
@@ -240,6 +243,7 @@ export class WebSerialControlPlaneClient {
   private port: BrowserSerialPort | null = null
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null
   private lineBuffer = ''
+  private lineOverflowed = false
   private readPump: Promise<void> | null = null
   private writeChain = Promise.resolve()
   private connectionAttempt = 0
@@ -280,6 +284,7 @@ export class WebSerialControlPlaneClient {
     const attempt = ++this.connectionAttempt
     this.runtimeReadyObserved = false
     this.lineBuffer = ''
+    this.lineOverflowed = false
     let port: BrowserSerialPort
     try {
       port = await selectBrowserSerialPort(
@@ -652,17 +657,24 @@ export class WebSerialControlPlaneClient {
   }
 
   private consumeSerialText(text: string) {
-    this.lineBuffer += text
-    if (this.lineBuffer.length > WEB_SERIAL_LINE_LIMIT) {
-      this.lineBuffer = ''
-    }
-
-    let newlineIndex = this.lineBuffer.indexOf('\n')
-    while (newlineIndex >= 0) {
-      const line = this.lineBuffer.slice(0, newlineIndex).trim()
-      this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1)
-      this.decodeResponseLine(line)
-      newlineIndex = this.lineBuffer.indexOf('\n')
+    for (const character of text) {
+      if (character === '\n') {
+        if (!this.lineOverflowed) {
+          this.decodeResponseLine(this.lineBuffer.trim())
+        }
+        this.lineBuffer = ''
+        this.lineOverflowed = false
+        continue
+      }
+      if (this.lineOverflowed) {
+        continue
+      }
+      if (this.lineBuffer.length >= WEB_SERIAL_CONTENT_LIMIT) {
+        this.lineBuffer = ''
+        this.lineOverflowed = true
+        continue
+      }
+      this.lineBuffer += character
     }
   }
 
