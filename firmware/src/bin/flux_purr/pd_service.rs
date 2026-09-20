@@ -251,7 +251,7 @@ impl PdServiceClient {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn refresh_capabilities(&self) -> Result<PowerTicket, ()> {
+    pub(crate) fn refresh_capabilities(&self) -> Result<PowerTicket, PowerAdmissionError> {
         PowerCoordinatorClient::new().refresh_capabilities()
     }
 
@@ -355,15 +355,9 @@ async fn process_pd_command(
                 .request_automatic_idle_contract(i2c, PdTimestamp::now())
                 .await
             {
-                PdContractRequestState::Confirmed => PdCommandProgress::Done(
-                    ticket,
-                    TicketOutcome::Confirmed(
-                        runtime
-                            .confirmed_active_contract()
-                            .or(previous)
-                            .expect("confirmed idle contract must be present"),
-                    ),
-                ),
+                PdContractRequestState::Confirmed => {
+                    PdCommandProgress::Pending(ticket, PendingPdOperation::Idle { previous })
+                }
                 PdContractRequestState::Pending => {
                     PdCommandProgress::Pending(ticket, PendingPdOperation::Idle { previous })
                 }
@@ -373,20 +367,13 @@ async fn process_pd_command(
             }
         }
         PdServiceCommand::Contract { request, ticket } => {
-            let previous = runtime.confirmed_active_contract();
             match runtime
                 .request_contract(i2c, request, PdTimestamp::now())
                 .await
             {
-                PdContractRequestState::Confirmed => PdCommandProgress::Done(
-                    ticket,
-                    TicketOutcome::Confirmed(
-                        runtime
-                            .confirmed_active_contract()
-                            .or(previous)
-                            .expect("confirmed contract must be present"),
-                    ),
-                ),
+                PdContractRequestState::Confirmed => {
+                    PdCommandProgress::Pending(ticket, PendingPdOperation::Contract { request })
+                }
                 PdContractRequestState::Pending => {
                     PdCommandProgress::Pending(ticket, PendingPdOperation::Contract { request })
                 }
@@ -401,7 +388,7 @@ async fn process_pd_command(
                 .await
             {
                 PdContractRequestState::Confirmed => {
-                    PdCommandProgress::Done(ticket, TicketOutcome::CapabilitiesRefreshed)
+                    PdCommandProgress::Pending(ticket, PendingPdOperation::Refresh)
                 }
                 PdContractRequestState::Pending => {
                     PdCommandProgress::Pending(ticket, PendingPdOperation::Refresh)
@@ -447,6 +434,12 @@ fn pending_terminal(
                 .unwrap_or_else(SourceCapabilities::empty),
         )
     });
+    if runtime.request_timed_out {
+        return Some(TicketOutcome::TimedOut);
+    }
+    if runtime.request_rejected {
+        return Some(TicketOutcome::Rejected);
+    }
     if runtime.policy.phase() == SinkPhase::Fault {
         return Some(TicketOutcome::TransportFault);
     }
@@ -468,7 +461,11 @@ fn pending_terminal(
         PendingPdOperation::Idle { previous } if active.is_some() && active != previous => {
             active.map(TicketOutcome::Confirmed)
         }
-        PendingPdOperation::Refresh if !runtime.source_capabilities_refresh_pending => {
+        PendingPdOperation::Refresh
+            if !runtime.source_capabilities_refresh_pending
+                && observation.is_some()
+                && runtime.policy.phase() == SinkPhase::Ready =>
+        {
             Some(TicketOutcome::CapabilitiesRefreshed)
         }
         PendingPdOperation::Contract { .. } | PendingPdOperation::Idle { .. }
@@ -491,9 +488,18 @@ fn publish_power_report(
     pending: Option<(PowerTicket, PendingPdOperation)>,
     terminal_override: Option<(PowerTicket, TicketOutcome)>,
 ) -> (PowerState, Option<(PowerTicket, TicketOutcome)>) {
-    let requested = match pending.map(|(_, operation)| operation) {
-        Some(PendingPdOperation::Contract { request, .. }) => Some(request),
-        _ => None,
+    let terminal = terminal_override.or_else(|| {
+        pending.and_then(|(ticket, operation)| {
+            pending_terminal(runtime, observation, operation).map(|outcome| (ticket, outcome))
+        })
+    });
+    let requested = if terminal.is_some() {
+        None
+    } else {
+        match pending.map(|(_, operation)| operation) {
+            Some(PendingPdOperation::Contract { request, .. }) => Some(request),
+            _ => None,
+        }
     };
     let state = PowerState::from_observation(
         runtime.policy.phase(),
@@ -502,11 +508,6 @@ fn publish_power_report(
         runtime.service_available(),
         requested,
     );
-    let terminal = terminal_override.or_else(|| {
-        pending.and_then(|(ticket, operation)| {
-            pending_terminal(runtime, observation, operation).map(|outcome| (ticket, outcome))
-        })
-    });
     (state, terminal)
 }
 

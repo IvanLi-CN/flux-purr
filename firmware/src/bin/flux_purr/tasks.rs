@@ -2,6 +2,40 @@
 use super::*;
 
 #[cfg(target_arch = "xtensa")]
+async fn ticket_confirmed(pd_port: &PdPort, ticket: PowerTicket) -> bool {
+    matches!(
+        pd_port.wait_for_ticket(ticket).await,
+        TicketOutcome::Confirmed(_)
+    )
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn fixed_ticket_confirmed(
+    pd_port: &PdPort,
+    ticket: PowerTicket,
+    reason: HeaterPowerBackendReason,
+) -> bool {
+    if ticket_confirmed(pd_port, ticket).await {
+        true
+    } else {
+        info!(
+            "heater backend fallback fixed-pd request failed reason={=str}",
+            reason.label(),
+        );
+        false
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn await_idle_restore(pd_port: &PdPort, reason: HeaterPowerBackendReason) -> bool {
+    match pd_port.restore_automatic_idle_contract() {
+        PdRequestState::Confirmed => true,
+        PdRequestState::Pending(ticket) => fixed_ticket_confirmed(pd_port, ticket, reason).await,
+        PdRequestState::Failed => false,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_heater_power_output<PWM>(
     mut context: HeaterPowerOutputContext<'_, PWM>,
 ) -> bool
@@ -68,7 +102,9 @@ where
     {
         context.manual_pps.fail(ManualPpsError::PdNotReady);
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-        let _ = context.pd_port.restore_automatic_idle_contract();
+        if let PdRequestState::Pending(ticket) = context.pd_port.restore_automatic_idle_contract() {
+            let _ = context.pd_port.wait_for_ticket(ticket).await;
+        }
         return Some(false);
     }
     if !manual_pps_request_required(
@@ -102,7 +138,11 @@ where
         PdRequestState::Failed => {
             context.manual_pps.fail(ManualPpsError::WriteFailed);
             apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-            let _ = context.pd_port.restore_automatic_idle_contract();
+            if let PdRequestState::Pending(ticket) =
+                context.pd_port.restore_automatic_idle_contract()
+            {
+                let _ = context.pd_port.wait_for_ticket(ticket).await;
+            }
             info!(
                 "manual pps override cleared reason={=str}",
                 ManualPpsError::WriteFailed.code()
@@ -226,33 +266,17 @@ where
             terminal_fixed_pd_disarmed,
         } => {
             if !fixed_request_confirmed && !manual_pps_active {
-                match pd_port.restore_automatic_idle_contract() {
-                    PdRequestState::Confirmed => {
-                        *backend = HeaterPowerBackend::FixedPdPwmFallback {
-                            reason,
-                            fixed_request_confirmed: true,
-                            fixed_request,
-                            terminal_fixed_pd_disarmed,
-                        };
-                        info!("heater backend fallback fixed-pd contract confirmed");
-                    }
-                    PdRequestState::Pending(_) => {
-                        apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
-                        info!(
-                            "heater backend fallback waiting for fixed-pd contract reason={=str}",
-                            reason.label(),
-                        );
-                        return false;
-                    }
-                    PdRequestState::Failed => {
-                        apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
-                        info!(
-                            "heater backend fallback fixed-pd request failed reason={=str}",
-                            reason.label(),
-                        );
-                        return false;
-                    }
+                apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+                if !await_idle_restore(pd_port, reason).await {
+                    return false;
                 }
+                *backend = HeaterPowerBackend::FixedPdPwmFallback {
+                    reason,
+                    fixed_request_confirmed: true,
+                    fixed_request,
+                    terminal_fixed_pd_disarmed,
+                };
+                info!("heater backend fallback fixed-pd contract confirmed");
             }
             let negotiated_current_ma = pd_observation
                 .filter(|observation| observation.status.pd_active)
@@ -400,18 +424,21 @@ where
             );
             CurrentLimitContractResult::Ready
         }
-        PdRequestState::Pending(_) => {
-            set_pps_current_limit_backend(
-                context.backend,
-                HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
-                Some(
-                    context
-                        .now_ms
-                        .saturating_add(HEATER_PPS_LARGE_TRANSITION_MS),
-                ),
-                false,
-            );
-            CurrentLimitContractResult::Pending
+        PdRequestState::Pending(ticket) => {
+            if matches!(
+                context.pd_port.wait_for_ticket(ticket).await,
+                TicketOutcome::Confirmed(_)
+            ) {
+                set_pps_current_limit_backend(
+                    context.backend,
+                    HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
+                    None,
+                    true,
+                );
+                CurrentLimitContractResult::Ready
+            } else {
+                CurrentLimitContractResult::Failed
+            }
         }
         PdRequestState::Failed => {
             set_pps_current_limit_backend(
@@ -580,10 +607,11 @@ where
     PWM: SetDutyCycle,
 {
     apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-    let fixed_request_confirmed = matches!(
-        context.pd_port.restore_automatic_idle_contract(),
-        PdRequestState::Confirmed
-    );
+    let fixed_request_confirmed = match context.pd_port.restore_automatic_idle_contract() {
+        PdRequestState::Confirmed => true,
+        PdRequestState::Pending(ticket) => ticket_confirmed(context.pd_port, ticket).await,
+        PdRequestState::Failed => false,
+    };
     *context.backend = HeaterPowerBackend::FixedPdPwmFallback {
         reason: HeaterPowerBackendReason::AdjustableRequestFailed,
         fixed_request_confirmed,
@@ -652,11 +680,16 @@ where
         .request_pps_contract_for(PowerIntentOwner::AutomaticThermal, request_contract)
     {
         PdRequestState::Confirmed => {}
-        PdRequestState::Pending(_) => {
+        PdRequestState::Pending(ticket) => {
             if request.blank_heater {
                 apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
             }
-            return Some(false);
+            if !matches!(
+                context.pd_port.wait_for_ticket(ticket).await,
+                TicketOutcome::Confirmed(_)
+            ) {
+                return Some(fallback_from_adjustable_request(context).await);
+            }
         }
         PdRequestState::Failed => {
             return Some(fallback_from_adjustable_request(context).await);

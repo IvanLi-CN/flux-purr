@@ -2526,10 +2526,15 @@ where
     ui_state.heater_enabled = false;
     ui_state.heater_output_percent = 0;
 
-    if !matches!(
-        pd_port.restore_automatic_idle_contract(),
-        PdRequestState::Confirmed
-    ) {
+    let idle_confirmed = match pd_port.restore_automatic_idle_contract() {
+        PdRequestState::Confirmed => true,
+        PdRequestState::Pending(ticket) => matches!(
+            pd_port.wait_for_ticket(ticket).await,
+            TicketOutcome::Confirmed(_)
+        ),
+        PdRequestState::Failed => false,
+    };
+    if !idle_confirmed {
         // Keep both the disarm latch and the PPS backend lock until the
         // independent PD task restores its automatic idle contract.
         return true;

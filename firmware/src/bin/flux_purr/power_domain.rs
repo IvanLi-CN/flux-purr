@@ -71,6 +71,13 @@ pub(crate) struct PowerTicket {
 #[cfg(any(target_arch = "xtensa", test))]
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PowerAdmissionError {
+    Busy,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TicketOutcome {
     Confirmed(ConfirmedActiveContract),
     CapabilitiesRefreshed,
@@ -135,6 +142,13 @@ impl PowerState {
                 observation.contract,
                 capabilities.unwrap_or_else(SourceCapabilities::empty),
             )
+        });
+        let requested = requested.or_else(|| {
+            active.map(|active| PdContractRequest {
+                mode: active.mode,
+                voltage_mv: active.voltage_mv,
+                operating_current_ma: active.operating_current_ma,
+            })
         });
         Self {
             protocol,
@@ -248,6 +262,10 @@ static POWER_STATE: Watch<CriticalSectionRawMutex, PowerState, 5> =
     Watch::new_with(PowerState::unavailable());
 
 #[cfg(target_arch = "xtensa")]
+static POWER_STATE_LATEST: BlockingMutex<CriticalSectionRawMutex, RefCell<PowerState>> =
+    BlockingMutex::new(RefCell::new(PowerState::unavailable()));
+
+#[cfg(target_arch = "xtensa")]
 const POWER_TICKET_SLOT_COUNT: usize = POWER_COMMANDS_CAPACITY;
 
 #[cfg(target_arch = "xtensa")]
@@ -325,10 +343,6 @@ impl PowerStateSubscription<'_> {
         self.receiver.try_get()
     }
 
-    pub(crate) fn try_changed(&mut self) -> Option<PowerState> {
-        self.receiver.try_changed()
-    }
-
     pub(crate) async fn get(&mut self) -> PowerState {
         self.receiver.get().await
     }
@@ -354,6 +368,10 @@ impl PowerCoordinatorClient {
         POWER_STATE
             .receiver()
             .map(|receiver| PowerStateSubscription { receiver })
+    }
+
+    pub(crate) fn latest(&self) -> PowerState {
+        POWER_STATE_LATEST.lock(|state| *state.borrow())
     }
 
     fn next_ticket(&self, owner: Option<PowerIntentOwner>) -> Option<PowerTicket> {
@@ -392,9 +410,9 @@ impl PowerCoordinatorClient {
         &self,
         owner: PowerIntentOwner,
         request: PdContractRequest,
-    ) -> Result<PowerTicket, ()> {
+    ) -> Result<PowerTicket, PowerAdmissionError> {
         let Some(ticket) = self.next_ticket(Some(owner)) else {
-            return Err(());
+            return Err(PowerAdmissionError::Busy);
         };
         POWER_COMMANDS
             .try_send(PowerCommand::Request {
@@ -405,30 +423,33 @@ impl PowerCoordinatorClient {
             .map(|()| ticket)
             .map_err(|_| {
                 Self::release_ticket_slot(ticket);
+                PowerAdmissionError::Busy
             })
     }
 
-    pub(crate) fn refresh_capabilities(&self) -> Result<PowerTicket, ()> {
+    pub(crate) fn refresh_capabilities(&self) -> Result<PowerTicket, PowerAdmissionError> {
         let Some(ticket) = self.next_ticket(None) else {
-            return Err(());
+            return Err(PowerAdmissionError::Busy);
         };
         POWER_COMMANDS
             .try_send(PowerCommand::RefreshCapabilities { ticket })
             .map(|()| ticket)
             .map_err(|_| {
                 Self::release_ticket_slot(ticket);
+                PowerAdmissionError::Busy
             })
     }
 
-    pub(crate) fn idle(&self) -> Result<PowerTicket, ()> {
+    pub(crate) fn idle(&self) -> Result<PowerTicket, PowerAdmissionError> {
         let Some(ticket) = self.next_ticket(None) else {
-            return Err(());
+            return Err(PowerAdmissionError::Busy);
         };
         POWER_COMMANDS
             .try_send(PowerCommand::Idle { ticket })
             .map(|()| ticket)
             .map_err(|_| {
                 Self::release_ticket_slot(ticket);
+                PowerAdmissionError::Busy
             })
     }
 
@@ -487,6 +508,7 @@ pub(crate) fn try_send_pd_service_command(command: PdServiceCommand) -> Result<(
 
 #[cfg(target_arch = "xtensa")]
 fn publish_power_state(state: PowerState) {
+    POWER_STATE_LATEST.lock(|current| *current.borrow_mut() = state);
     POWER_STATE
         .sender()
         .send_if_modified(|current| match current {
@@ -614,6 +636,8 @@ fn supersede_or_join_power_command(
 async fn power_coordinator_task() {
     let mut inflight: Option<(PowerIntentOwner, PowerTicket)> = None;
     let mut inflight_refresh = false;
+    let mut inflight_idle = false;
+    let mut active_owner: Option<PowerIntentOwner> = None;
     let mut joined_refresh = heapless::Vec::<PowerTicket, POWER_COMMANDS_CAPACITY>::new();
     let mut pd_state = PD_SERVICE_STATE
         .receiver()
@@ -633,6 +657,12 @@ async fn power_coordinator_task() {
                     signal_ticket(ticket, TicketOutcome::Rejected);
                     continue;
                 };
+                if let Some(owner) = owner
+                    && active_owner.is_some_and(|active| owner.priority() < active.priority())
+                {
+                    signal_ticket(ticket, TicketOutcome::Superseded);
+                    continue;
+                }
                 if supersede_or_join_power_command(
                     ticket,
                     owner,
@@ -649,17 +679,26 @@ async fn power_coordinator_task() {
                 } else if let Some(owner) = owner {
                     inflight = Some((owner, ticket));
                     inflight_refresh = false;
+                    inflight_idle = false;
                 } else {
                     inflight = Some((PowerIntentOwner::AutomaticThermal, ticket));
                     inflight_refresh = refresh;
+                    inflight_idle = idle;
                 }
             }
             Either3::Second((state, ticket, outcome)) => {
                 publish_power_state(state);
                 if inflight.is_some_and(|(_, current)| current == ticket) {
+                    let completed_owner = inflight.map(|(owner, _)| owner);
+                    if matches!(outcome, TicketOutcome::Confirmed(_)) {
+                        active_owner = if inflight_idle { None } else { completed_owner };
+                    } else {
+                        active_owner = None;
+                    }
                     signal_ticket(ticket, outcome);
                     inflight = None;
                     inflight_refresh = false;
+                    inflight_idle = false;
                     while let Some(joined) = joined_refresh.pop() {
                         signal_ticket(joined, outcome);
                     }

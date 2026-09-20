@@ -347,6 +347,7 @@ impl SinkPolicy {
         self.active_contract = Contract::none();
         self.source_message_id = None;
         self.requested_mv = self.default_requested_mv;
+        self.requested_mode = None;
         self.source_capabilities = SourceCapabilities::empty();
         self.source_capabilities_received = false;
         self.phase = SinkPhase::WaitingForSourceCapabilities;
@@ -411,6 +412,7 @@ impl SinkPolicy {
         self.active_contract = Contract::none();
         self.source_message_id = None;
         self.requested_mv = self.default_requested_mv;
+        self.requested_mode = None;
         self.source_capabilities = SourceCapabilities::empty();
         self.source_capabilities_received = false;
         self.phase = SinkPhase::Detached;

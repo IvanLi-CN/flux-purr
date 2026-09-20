@@ -620,6 +620,8 @@ pub(crate) struct Fusb302bRuntime {
     pub(crate) vbus_low_interlocked: bool,
     pub(crate) vbus_restore_candidate_since_ms: Option<u64>,
     pub(crate) awaiting_vbus_restore: bool,
+    pub(crate) request_rejected: bool,
+    pub(crate) request_timed_out: bool,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -653,6 +655,8 @@ impl Fusb302bRuntime {
             vbus_low_interlocked: false,
             vbus_restore_candidate_since_ms: None,
             awaiting_vbus_restore: false,
+            request_rejected: false,
+            request_timed_out: false,
         }
     }
 
@@ -872,6 +876,8 @@ impl Fusb302bRuntime {
         request: PdContractRequest,
         now: PdTimestamp,
     ) -> PdContractRequestState {
+        self.request_rejected = false;
+        self.request_timed_out = false;
         let now_ms = now.as_millis();
         if self
             .policy
@@ -917,6 +923,8 @@ impl Fusb302bRuntime {
         i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
     ) -> PdContractRequestState {
+        self.request_rejected = false;
+        self.request_timed_out = false;
         if self.source_capabilities_refresh_pending {
             return PdContractRequestState::Pending;
         }
@@ -943,6 +951,8 @@ impl Fusb302bRuntime {
         i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
     ) -> PdContractRequestState {
+        self.request_rejected = false;
+        self.request_timed_out = false;
         let now_ms = now.as_millis();
         let active = self.policy.active_contract();
         if active.kind == ContractKind::Pps && active.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
@@ -1052,6 +1062,7 @@ impl Fusb302bRuntime {
             return None;
         }
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
+        self.request_timed_out = true;
         Some(
             self.recover_transient_transport_fault(
                 i2c,
@@ -1340,8 +1351,14 @@ impl Fusb302bRuntime {
 
     fn handle_control_message(&mut self, message: PdPacket, now_ms: u64) {
         let was_waiting_for_ps_rdy = self.policy.phase() == SinkPhase::WaitingForPsRdy;
+        let message_type = (message.header() & 0x1f) as u8;
+        self.request_rejected = matches!(message_type, 4 | 12)
+            && matches!(
+                self.policy.phase(),
+                SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+            );
         self.policy.on_control_message_with_message_id(
-            (message.header() & 0x1f) as u8,
+            message_type,
             Some((message.header() >> 9) as u8 & 0x07),
             now_ms,
         );

@@ -219,9 +219,7 @@ where
         );
         for _ in 0..(20 / PD_SNAPSHOT_REFRESH_INTERVAL_MS) {
             EmbassyTimer::after_millis(PD_SNAPSHOT_REFRESH_INTERVAL_MS).await;
-            if let Some(state) = power_state_subscription.try_changed() {
-                *last_pd_observation = state.observation();
-            }
+            *last_pd_observation = PowerCoordinatorClient::new().latest().observation();
         }
         elapsed_ms = elapsed_ms.saturating_add(20);
 
