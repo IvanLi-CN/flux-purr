@@ -10,7 +10,7 @@ Flux Purr must expose one read-only power projection to thermal control, display
 
 ## Decision
 
-Place `PowerCoordinator` in the application-layer power domain above `PdService`. It exclusively arbitrates PD contract intent and writes `PowerState`. `PdService` continues to own PD protocol state, source-capability observation, contract confirmation, physical I2C, and safety revocation through `HeaterPwmGate`; it has no dependencies on UI, heater policy, or fan policy. Module dependencies run from policy clients through `PowerCoordinator` to `PdService` and the PD driver, while PD observations flow upward into the coordinator's read-only projection.
+Place `PowerCoordinator` in the application-layer power domain above `PdService`. It exclusively arbitrates PD contract intent and writes `PowerState`. `PdService` continues to own PD protocol state, source-capability observation, contract confirmation, physical I2C, and safety revocation through `HeaterPwmGate`; it has no dependencies on UI, heater policy, or fan policy. The power-domain module owns the private command, state-watch, and terminal-report transports; `PdService` depends on their typed data/report adapters but never constructs coordinator commands. Module dependencies run from policy clients through `PowerCoordinator` to `PdService` and the PD driver, while PD observations flow upward into the coordinator's read-only projection.
 
 ## Consequences
 

@@ -1081,7 +1081,7 @@ pub(crate) async fn process_eeprom_maintenance_frame(
         );
         if !matches!(
             context.pd_port.restore_automatic_idle_contract(),
-            PdContractRequestState::Confirmed
+            PdRequestState::Confirmed
         ) {
             return (
                 false,

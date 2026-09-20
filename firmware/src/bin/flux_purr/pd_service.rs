@@ -5,9 +5,6 @@ use super::*;
 pub(crate) const PD_SERVICE_TICK_MS: u64 = 5;
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) const PD_SERVICE_COMMAND_CAPACITY: usize = 1;
-
-#[cfg(target_arch = "xtensa")]
 pub(crate) const PD_SERVICE_MAX_COMMANDS_PER_TICK: usize = 1;
 
 #[cfg(target_arch = "xtensa")]
@@ -18,21 +15,6 @@ static PD_INTERLOCK_LATCHED: AtomicU8 = AtomicU8::new(0);
 
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy)]
-pub(crate) enum PdServiceCommand {
-    AutomaticIdle {
-        ticket: PowerTicket,
-    },
-    Contract {
-        request: PdContractRequest,
-        ticket: PowerTicket,
-    },
-    RefreshCapabilities {
-        ticket: PowerTicket,
-    },
-}
-
-#[cfg(target_arch = "xtensa")]
-#[derive(Clone, Copy)]
 pub(crate) struct PdServiceSnapshot {
     pub(crate) observation: Option<PdStatusObservation>,
     pub(crate) capabilities: Option<ch224q::AdjustablePowerCapabilities>,
@@ -40,6 +22,17 @@ pub(crate) struct PdServiceSnapshot {
     pub(crate) service_available: bool,
     pub(crate) stale_contract_vin_guard_suspended: bool,
     pub(crate) published_at_ms: u64,
+    pub(crate) pending_request: Option<PdContractRequest>,
+    pub(crate) pending_ticket: Option<PowerTicket>,
+    pub(crate) pending_idle: bool,
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PdRequestState {
+    Confirmed,
+    Pending(PowerTicket),
+    Failed,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -52,6 +45,9 @@ impl PdServiceSnapshot {
             service_available: false,
             stale_contract_vin_guard_suspended: false,
             published_at_ms: 0,
+            pending_request: None,
+            pending_ticket: None,
+            pending_idle: false,
         }
     }
 
@@ -69,13 +65,6 @@ impl PdServiceSnapshot {
         }
     }
 }
-
-#[cfg(target_arch = "xtensa")]
-pub(crate) static PD_SERVICE_COMMANDS: Channel<
-    CriticalSectionRawMutex,
-    PdServiceCommand,
-    PD_SERVICE_COMMAND_CAPACITY,
-> = Channel::new();
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) static PD_SERVICE_SNAPSHOT: BlockingMutex<
@@ -139,10 +128,7 @@ impl PdServiceClient {
             *snapshot.borrow_mut() = PdServiceSnapshot::unavailable();
         });
         HeaterPwmGate::force_off();
-        publish_pd_service_report(PdServiceReport {
-            state: PowerState::unavailable(),
-            terminal: None,
-        });
+        publish_pd_service_state(PowerState::unavailable());
         Self::new()
     }
 
@@ -152,20 +138,12 @@ impl PdServiceClient {
             .with_fresh_observation(PdTimestamp::now().as_millis())
     }
 
-    pub(crate) fn observation(&self) -> Option<PdStatusObservation> {
-        self.snapshot().observation
-    }
-
     pub(crate) fn capabilities(&self) -> Option<ch224q::AdjustablePowerCapabilities> {
         self.snapshot().capabilities
     }
 
     pub(crate) fn controller_kind(&self) -> ControllerKind {
         self.snapshot().controller
-    }
-
-    pub(crate) fn service_available(&self) -> bool {
-        self.snapshot().service_available
     }
 
     pub(crate) fn stale_contract_vin_guard_suspended(&self, _now_ms: u64) -> bool {
@@ -186,10 +164,10 @@ impl PdServiceClient {
         HeaterPwmGate::force_off();
     }
 
-    fn submit_request(&self, request: PdContractRequest) -> PdContractRequestState {
+    fn submit_request(&self, request: PdContractRequest) -> PdRequestState {
         let snapshot = self.snapshot();
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
-            return PdContractRequestState::Failed;
+            return PdRequestState::Failed;
         }
         let active = snapshot.observation.and_then(|observation| {
             ConfirmedActiveContract::from_private_contract(
@@ -201,38 +179,44 @@ impl PdServiceClient {
             )
         });
         if request_matches_active(request, active) {
-            return PdContractRequestState::Confirmed;
+            return PdRequestState::Confirmed;
+        }
+        if snapshot.pending_request == Some(request)
+            && let Some(ticket) = snapshot.pending_ticket
+        {
+            return PdRequestState::Pending(ticket);
         }
         match PowerCoordinatorClient::new().request(PowerIntentOwner::AutomaticThermal, request) {
-            Ok(_) => PdContractRequestState::Pending,
-            Err(_) => PdContractRequestState::Failed,
+            Ok(ticket) => PdRequestState::Pending(ticket),
+            Err(_) => PdRequestState::Failed,
         }
     }
 
-    pub(crate) fn request_fixed_voltage(
-        &self,
-        request: ch224q::VoltageRequest,
-    ) -> PdContractRequestState {
-        let Ok(request) = PdContractRequest::fixed(request.millivolts(), MIN_HEATER_CONTRACT_MA)
-        else {
-            return PdContractRequestState::Failed;
-        };
+    pub(crate) fn request_fixed_contract(&self, request: PdContractRequest) -> PdRequestState {
+        if request.mode != PdContractRequestMode::Fixed {
+            return PdRequestState::Failed;
+        }
         self.submit_request(request)
     }
 
-    pub(crate) fn restore_automatic_idle_contract(&self) -> PdContractRequestState {
+    pub(crate) fn restore_automatic_idle_contract(&self) -> PdRequestState {
         let snapshot = self.snapshot();
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
-            return PdContractRequestState::Failed;
+            return PdRequestState::Failed;
         }
         if snapshot.observation.is_some_and(|observation| {
             automatic_idle_contract_is_confirmed(observation, snapshot.capabilities)
         }) {
-            return PdContractRequestState::Confirmed;
+            return PdRequestState::Confirmed;
+        }
+        if snapshot.pending_idle
+            && let Some(ticket) = snapshot.pending_ticket
+        {
+            return PdRequestState::Pending(ticket);
         }
         match PowerCoordinatorClient::new().idle() {
-            Ok(_) => PdContractRequestState::Pending,
-            Err(_) => PdContractRequestState::Failed,
+            Ok(ticket) => PdRequestState::Pending(ticket),
+            Err(_) => PdRequestState::Failed,
         }
     }
 
@@ -240,24 +224,29 @@ impl PdServiceClient {
         &self,
         owner: PowerIntentOwner,
         request: PdContractRequest,
-    ) -> PdContractRequestState {
+    ) -> PdRequestState {
         if request.mode != PdContractRequestMode::Pps {
-            return PdContractRequestState::Failed;
+            return PdRequestState::Failed;
         }
         let snapshot = self.snapshot();
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
-            return PdContractRequestState::Failed;
+            return PdRequestState::Failed;
         }
         if snapshot.observation.is_some_and(|observation| {
             observation.contract.kind == ContractKind::Pps
                 && observation.contract.voltage_mv == request.voltage_mv
                 && observation.contract.current_ma == request.operating_current_ma
         }) {
-            return PdContractRequestState::Confirmed;
+            return PdRequestState::Confirmed;
+        }
+        if snapshot.pending_request == Some(request)
+            && let Some(ticket) = snapshot.pending_ticket
+        {
+            return PdRequestState::Pending(ticket);
         }
         match PowerCoordinatorClient::new().request(owner, request) {
-            Ok(_) => PdContractRequestState::Pending,
-            Err(_) => PdContractRequestState::Failed,
+            Ok(ticket) => PdRequestState::Pending(ticket),
+            Err(_) => PdRequestState::Failed,
         }
     }
 
@@ -269,11 +258,11 @@ impl PdServiceClient {
     pub(crate) fn subscribe_power_state(&self) -> Option<PowerStateSubscription<'static>> {
         PowerCoordinatorClient::new().subscribe()
     }
-}
 
-#[cfg(target_arch = "xtensa")]
-pub(crate) fn try_send_pd_service_command(command: PdServiceCommand) -> Result<(), ()> {
-    PD_SERVICE_COMMANDS.try_send(command).map_err(|_| ())
+    #[allow(dead_code)]
+    pub(crate) async fn wait_for_ticket(&self, ticket: PowerTicket) -> TicketOutcome {
+        PowerCoordinatorClient::new().wait(ticket).await
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -310,11 +299,23 @@ async fn pd_status_observation(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn publish_pd_snapshot(runtime: &Fusb302bRuntime, observation: Option<PdStatusObservation>) {
+fn publish_pd_snapshot(
+    runtime: &Fusb302bRuntime,
+    observation: Option<PdStatusObservation>,
+    pending: Option<(PowerTicket, PendingPdOperation)>,
+) {
     let now_ms = PdTimestamp::now().as_millis();
     let interlock_latched = PD_INTERLOCK_LATCHED.load(Ordering::Acquire) != 0;
     let observation = (!interlock_latched).then_some(observation).flatten();
     let ready = startup_pd_contract_ready(observation);
+    let (pending_request, pending_idle, pending_ticket) = match pending {
+        Some((ticket, PendingPdOperation::Contract { request })) => {
+            (Some(request), false, Some(ticket))
+        }
+        Some((ticket, PendingPdOperation::Idle { .. })) => (None, true, Some(ticket)),
+        Some((ticket, PendingPdOperation::Refresh)) => (None, false, Some(ticket)),
+        None => (None, false, None),
+    };
     PD_SERVICE_SNAPSHOT.lock(|snapshot| {
         *snapshot.borrow_mut() = PdServiceSnapshot {
             observation,
@@ -325,6 +326,9 @@ fn publish_pd_snapshot(runtime: &Fusb302bRuntime, observation: Option<PdStatusOb
             service_available: runtime.service_available(),
             stale_contract_vin_guard_suspended: runtime.stale_contract_vin_guard_suspended(now_ms),
             published_at_ms: now_ms,
+            pending_request,
+            pending_ticket,
+            pending_idle,
         };
     });
     if ready {
@@ -453,6 +457,14 @@ fn pending_terminal(
         PendingPdOperation::Contract { request, .. } if request_matches_active(request, active) => {
             active.map(TicketOutcome::Confirmed)
         }
+        PendingPdOperation::Contract { request, .. }
+            if runtime.source_capabilities().is_some_and(|capabilities| {
+                request.mode == PdContractRequestMode::Pps
+                    && capabilities.select_exact_contract(request).is_none()
+            }) =>
+        {
+            Some(TicketOutcome::Rejected)
+        }
         PendingPdOperation::Idle { previous } if active.is_some() && active != previous => {
             active.map(TicketOutcome::Confirmed)
         }
@@ -478,12 +490,13 @@ fn publish_power_report(
     observation: Option<PdStatusObservation>,
     pending: Option<(PowerTicket, PendingPdOperation)>,
     terminal_override: Option<(PowerTicket, TicketOutcome)>,
-) -> bool {
+) -> (PowerState, Option<(PowerTicket, TicketOutcome)>) {
     let requested = match pending.map(|(_, operation)| operation) {
         Some(PendingPdOperation::Contract { request, .. }) => Some(request),
         _ => None,
     };
     let state = PowerState::from_observation(
+        runtime.policy.phase(),
         observation,
         runtime.source_capabilities(),
         runtime.service_available(),
@@ -494,8 +507,7 @@ fn publish_power_report(
             pending_terminal(runtime, observation, operation).map(|outcome| (ticket, outcome))
         })
     });
-    publish_pd_service_report(PdServiceReport { state, terminal });
-    terminal.is_some()
+    (state, terminal)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -514,6 +526,12 @@ async fn retry_deferred_contract_request(
             .is_some_and(|active| request_matches_active(request, Some(active)))
     {
         return None;
+    }
+    if runtime.source_capabilities().is_some_and(|capabilities| {
+        request.mode == PdContractRequestMode::Pps
+            && capabilities.select_exact_contract(request).is_none()
+    }) {
+        return Some((ticket, TicketOutcome::Rejected));
     }
     match runtime
         .request_contract(i2c, request, PdTimestamp::now())
@@ -567,18 +585,33 @@ async fn pd_service_task(mut i2c: PdI2c<'static>, mut runtime: Box<Fusb302bRunti
             // an EEPROM turn cannot leave a stale contract looking active.
             let observation = pd_status_observation(&runtime, &mut i2c).await;
             i2c.release();
-            publish_pd_snapshot(&runtime, observation);
+            let (state, terminal) =
+                publish_power_report(&runtime, observation, pending, terminal_override);
+            publish_pd_snapshot(
+                &runtime,
+                observation,
+                terminal.is_none().then_some(pending).flatten(),
+            );
+            publish_pd_service_state(state);
             // A heartbeat represents a complete bus-acquired poll-and-publish
             // turn. A skipped try-lock turn must not look like PD progress.
             record_pd_heartbeat();
-            if publish_power_report(&runtime, observation, pending, terminal_override) {
+            if let Some((ticket, outcome)) = terminal {
+                publish_pd_service_terminal(state, ticket, outcome).await;
                 pending = None;
             }
         } else {
             // Clear authorization immediately, but do not count this skipped
             // turn as PD progress for the watchdog.
-            publish_pd_snapshot(&runtime, None);
-            if publish_power_report(&runtime, None, pending, None) {
+            let (state, terminal) = publish_power_report(&runtime, None, pending, None);
+            publish_pd_snapshot(
+                &runtime,
+                None,
+                terminal.is_none().then_some(pending).flatten(),
+            );
+            publish_pd_service_state(state);
+            if let Some((ticket, outcome)) = terminal {
+                publish_pd_service_terminal(state, ticket, outcome).await;
                 pending = None;
             }
         }

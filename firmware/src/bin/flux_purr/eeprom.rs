@@ -2528,7 +2528,7 @@ where
 
     if !matches!(
         pd_port.restore_automatic_idle_contract(),
-        PdContractRequestState::Confirmed
+        PdRequestState::Confirmed
     ) {
         // Keep both the disarm latch and the PPS backend lock until the
         // independent PD task restores its automatic idle contract.

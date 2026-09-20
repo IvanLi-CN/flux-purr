@@ -246,7 +246,7 @@ fn startup_pd_wait_uses_a_normal_executor_timer() {
     let pd_service = include_str!("pd_service.rs");
 
     assert!(
-        boot.contains("EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await"),
+        boot.contains("EmbassyTimer::after_millis(PD_SERVICE_TICK_MS)"),
         "boot must use a normal-executor timer for bounded startup progress"
     );
     assert!(
@@ -327,11 +327,15 @@ fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
 
     assert!(pd_service.contains("read_status().await.ok()?"));
     assert!(pd_task.contains("let observation = pd_status_observation(&runtime, &mut i2c).await"));
-    assert!(pd_task.contains("publish_pd_snapshot(&runtime, observation)"));
-    assert!(pd_task.contains("publish_pd_snapshot(&runtime, None)"));
     assert!(
-        pd_task.contains("publish_pd_snapshot(&runtime, observation);\n            // A heartbeat")
+        pd_task.contains(
+            "publish_pd_snapshot(\n                &runtime,\n                observation,"
+        )
     );
+    assert!(
+        pd_task.contains("publish_pd_snapshot(\n                &runtime,\n                None,")
+    );
+    assert!(pd_task.contains("publish_pd_service_state(state);\n            // A heartbeat"));
     assert!(!pd_task.contains("publish_pd_snapshot(&runtime, None);\n        record_pd_heartbeat"));
 
     let permit_check = support

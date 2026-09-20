@@ -80,28 +80,7 @@ impl RuntimeLanInputOutcome {
 
 #[cfg(target_arch = "xtensa")]
 fn power_state_observation(state: PowerState) -> Option<PdStatusObservation> {
-    if !state.available {
-        return None;
-    }
-    let active = state.active?;
-    let kind = match active.mode {
-        PdContractRequestMode::Fixed => ContractKind::Fixed,
-        PdContractRequestMode::Pps => ContractKind::Pps,
-    };
-    let status_raw = 1 << 3;
-    Some(PdStatusObservation {
-        status_raw,
-        status: Status::from_register(status_raw),
-        current_raw: 0,
-        current_ma: active.operating_current_ma,
-        contract_voltage_mv: Some(active.voltage_mv),
-        contract: Contract {
-            kind,
-            object_position: 0,
-            voltage_mv: active.voltage_mv,
-            current_ma: active.operating_current_ma,
-        },
-    })
+    state.observation()
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2162,7 +2141,7 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
     if state.ui_refresh_pending && elapsed_ms >= state.next_ui_refresh_ms {
         let display_flush_result = run_display_operation_with_snapshot_and_heater(
             flush_ui(&mut state.display, state.canvas, &state.ui_state),
-            &state.pd_port,
+            &mut state.power_state_subscription,
             &mut state.last_pd_observation,
             &mut state.heater_pwm,
             &mut state.last_heater_duty,

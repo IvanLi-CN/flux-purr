@@ -50,7 +50,7 @@ where
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct InitialFrontpanelContext<'a, PWM> {
     pub(crate) state: &'a FrontPanelUiState,
-    pub(crate) pd_port: &'a PdPort,
+    pub(crate) power_state_subscription: &'a mut PowerStateSubscription<'static>,
     pub(crate) last_pd_observation: &'a mut Option<PdStatusObservation>,
     pub(crate) heater_pwm: &'a mut PWM,
     pub(crate) last_heater_duty: &'a mut u8,
@@ -72,7 +72,7 @@ where
 {
     let InitialFrontpanelContext {
         state,
-        pd_port,
+        power_state_subscription,
         last_pd_observation,
         heater_pwm,
         last_heater_duty,
@@ -80,7 +80,7 @@ where
     if !matches!(
         run_display_operation_with_snapshot_and_heater(
             flush_ui(display, canvas, state),
-            pd_port,
+            power_state_subscription,
             last_pd_observation,
             heater_pwm,
             last_heater_duty,
@@ -102,28 +102,28 @@ where
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn run_display_operation_with_snapshot<F>(
     operation: F,
-    pd_port: &PdPort,
+    power_state_subscription: &mut PowerStateSubscription<'static>,
     last_pd_observation: &mut Option<PdStatusObservation>,
 ) -> Option<F::Output>
 where
     F: Future,
 {
     let mut pinned_operation = core::pin::pin!(operation);
-    let started_at = Instant::now();
+    let mut timeout = core::pin::pin!(EmbassyTimer::after(DISPLAY_IO_TIMEOUT));
+    *last_pd_observation = power_state_subscription
+        .try_get()
+        .and_then(PowerState::observation);
     loop {
-        match select(
+        match select3(
             pinned_operation.as_mut(),
-            EmbassyTimer::after_millis(PD_SNAPSHOT_REFRESH_INTERVAL_MS),
+            power_state_subscription.changed(),
+            timeout.as_mut(),
         )
         .await
         {
-            Either::First(output) => return Some(output),
-            Either::Second(_) => {
-                *last_pd_observation = pd_port.observation();
-                if Instant::now().saturating_duration_since(started_at) >= DISPLAY_IO_TIMEOUT {
-                    return None;
-                }
-            }
+            Either3::First(output) => return Some(output),
+            Either3::Second(state) => *last_pd_observation = state.observation(),
+            Either3::Third(_) => return None,
         }
     }
 }
@@ -131,7 +131,7 @@ where
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn run_display_operation_with_snapshot_and_heater<F, PWM>(
     operation: F,
-    pd_port: &PdPort,
+    power_state_subscription: &mut PowerStateSubscription<'static>,
     last_pd_observation: &mut Option<PdStatusObservation>,
     heater_pwm: &mut PWM,
     last_heater_duty: &mut u8,
@@ -141,28 +141,27 @@ where
     PWM: SetDutyCycle,
 {
     let mut pinned_operation = core::pin::pin!(operation);
-    let started_at = Instant::now();
+    let mut timeout = core::pin::pin!(EmbassyTimer::after(DISPLAY_IO_TIMEOUT));
+    *last_pd_observation = power_state_subscription
+        .try_get()
+        .and_then(PowerState::observation);
     loop {
-        match select(
+        match select3(
             pinned_operation.as_mut(),
-            EmbassyTimer::after_millis(PD_SNAPSHOT_REFRESH_INTERVAL_MS),
+            power_state_subscription.changed(),
+            timeout.as_mut(),
         )
         .await
         {
-            Either::First(output) => return Some(output),
-            Either::Second(_) => {
-                let observation = pd_port.observation();
+            Either3::First(output) => return Some(output),
+            Either3::Second(state) => {
+                let observation = state.observation();
                 *last_pd_observation = observation;
                 if !startup_pd_contract_ready(observation) {
-                    // A failed status read is not proof of a detach, but it is
-                    // never authorization to keep driving the heater while a
-                    // display transfer is still in flight.
                     apply_heater_duty(heater_pwm, 0, last_heater_duty);
                 }
-                if Instant::now().saturating_duration_since(started_at) >= DISPLAY_IO_TIMEOUT {
-                    return None;
-                }
             }
+            Either3::Third(_) => return None,
         }
     }
 }
@@ -176,7 +175,7 @@ pub(crate) async fn run_key_test_runtime<'a, BUS, DC, RST>(
     canvas: &mut DisplayCanvas,
     inputs: FrontPanelInputs<'a>,
     status_light_started_ms: u64,
-    pd_port: &PdPort,
+    power_state_subscription: &mut PowerStateSubscription<'static>,
     last_pd_observation: &mut Option<PdStatusObservation>,
 ) -> Result<(), ()>
 where
@@ -195,7 +194,7 @@ where
     ui_state.set_raw_state(last_raw_state);
     let initial_flush_result = run_display_operation_with_snapshot(
         flush_ui(display, canvas, &ui_state),
-        pd_port,
+        power_state_subscription,
         last_pd_observation,
     )
     .await;
@@ -220,7 +219,9 @@ where
         );
         for _ in 0..(20 / PD_SNAPSHOT_REFRESH_INTERVAL_MS) {
             EmbassyTimer::after_millis(PD_SNAPSHOT_REFRESH_INTERVAL_MS).await;
-            *last_pd_observation = pd_port.observation();
+            if let Some(state) = power_state_subscription.try_changed() {
+                *last_pd_observation = state.observation();
+            }
         }
         elapsed_ms = elapsed_ms.saturating_add(20);
 
@@ -255,7 +256,7 @@ where
         if needs_redraw {
             let flush_result = run_display_operation_with_snapshot(
                 flush_ui(display, canvas, &ui_state),
-                pd_port,
+                power_state_subscription,
                 last_pd_observation,
             )
             .await;

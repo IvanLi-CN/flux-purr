@@ -86,6 +86,7 @@ pub struct SinkPolicy {
     default_requested_mv: u16,
     requested_mv: u16,
     preferred_ma: u16,
+    requested_mode: Option<crate::adapters::pd::PdContractRequestMode>,
     pending_contract: Contract,
     active_contract: Contract,
     source_capabilities: SourceCapabilities,
@@ -100,6 +101,7 @@ impl SinkPolicy {
             default_requested_mv: requested_mv,
             requested_mv,
             preferred_ma,
+            requested_mode: None,
             pending_contract: Contract::none(),
             active_contract: Contract::none(),
             source_capabilities: SourceCapabilities::empty(),
@@ -135,6 +137,7 @@ impl SinkPolicy {
         let rdo = request_data_object(contract)?;
         self.requested_mv = request.voltage_mv;
         self.preferred_ma = request.operating_current_ma;
+        self.requested_mode = Some(request.mode);
         self.pending_contract = contract;
         self.phase = SinkPhase::WaitingForAccept;
         Some(rdo)
@@ -161,6 +164,7 @@ impl SinkPolicy {
             && {
                 self.requested_mv = request.voltage_mv;
                 self.preferred_ma = request.operating_current_ma;
+                self.requested_mode = Some(request.mode);
                 true
             }
     }
@@ -221,8 +225,25 @@ impl SinkPolicy {
     }
 
     fn begin_request(&mut self, capabilities: SourceCapabilities) -> Option<[u8; 4]> {
-        let contract =
-            capabilities.select_fusb302b_contract(self.requested_mv, self.preferred_ma)?;
+        let contract = match self.requested_mode {
+            Some(crate::adapters::pd::PdContractRequestMode::Pps) => {
+                let request = crate::adapters::pd::PdContractRequest::pps(
+                    self.requested_mv,
+                    self.preferred_ma,
+                )
+                .ok()?;
+                capabilities.select_exact_contract(request)?
+            }
+            Some(crate::adapters::pd::PdContractRequestMode::Fixed) => {
+                let request = crate::adapters::pd::PdContractRequest::fixed(
+                    self.requested_mv,
+                    self.preferred_ma,
+                )
+                .ok()?;
+                capabilities.select_exact_contract(request)?
+            }
+            None => capabilities.select_fusb302b_contract(self.requested_mv, self.preferred_ma)?,
+        };
         let rdo = request_data_object(contract)?;
         self.pending_contract = contract;
         self.phase = SinkPhase::WaitingForAccept;
@@ -247,12 +268,14 @@ impl SinkPolicy {
             return false;
         }
         self.requested_mv = requested_mv;
+        self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Pps);
         true
     }
 
     pub fn request_pps_voltage(&mut self, requested_mv: u16) -> Option<[u8; 4]> {
         let contract = self.select_pps_contract(requested_mv)?;
         self.requested_mv = requested_mv;
+        self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Pps);
         let rdo = request_data_object(contract)?;
         self.pending_contract = contract;
         self.phase = SinkPhase::WaitingForAccept;
@@ -267,6 +290,7 @@ impl SinkPolicy {
             return None;
         }
         self.requested_mv = self.default_requested_mv;
+        self.requested_mode = None;
         self.begin_request(self.source_capabilities)
     }
 
@@ -282,6 +306,7 @@ impl SinkPolicy {
             .select_fusb302b_fixed_contract(requested_mv, self.preferred_ma)?;
         let rdo = request_data_object(contract)?;
         self.pending_contract = contract;
+        self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Fixed);
         self.phase = SinkPhase::WaitingForAccept;
         Some(rdo)
     }
@@ -583,6 +608,21 @@ mod tests {
         assert!(policy.prepare_contract_refresh(request));
         assert_eq!(policy.requested_mv, 17_500);
         assert_eq!(policy.preferred_ma, 3_000);
+    }
+
+    #[test]
+    fn explicit_pps_refresh_never_falls_back_to_fixed() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        let fixed_only = [((5_000_u32 / 50) << 10) | (3_000_u32 / 10)];
+        let _ = policy.on_source_capabilities(&fixed_only);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        let request = crate::adapters::pd::PdContractRequest::pps(17_500, 3_000).unwrap();
+        assert!(policy.prepare_contract_refresh(request));
+
+        assert_eq!(policy.on_source_capabilities(&fixed_only), None);
+        assert_eq!(policy.active_contract().kind, ContractKind::Fixed);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
     }
 
     #[test]
