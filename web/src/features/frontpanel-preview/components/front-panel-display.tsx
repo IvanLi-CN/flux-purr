@@ -388,17 +388,18 @@ function drawMenuIcon(
 function drawStatusLine(
   ctx: CanvasRenderingContext2D,
   y: number,
-  color: string,
+  labelColor: string,
+  valueColor: string,
   label: string,
   value: string
 ) {
   drawBitmapText(ctx, label, 80, y, {
-    color,
+    color: labelColor,
     scale: 2,
     letterSpacing: 1,
   })
   drawBitmapText(ctx, value, 154, y, {
-    color,
+    color: valueColor,
     scale: 2,
     letterSpacing: 1,
     align: 'right',
@@ -412,7 +413,7 @@ function drawPpsStatusLine(
   palette: FrontPanelPalette
 ) {
   drawBitmapText(ctx, 'PPS', 80, y, {
-    color: palette.cyan,
+    color: palette.muted,
     scale: 2,
     letterSpacing: 1,
   })
@@ -461,7 +462,11 @@ function drawDashboardScreen(
         : palette.disabled
 
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.dashboardBg)
-  fillRect(ctx, 4, 4, 72, 36, palette.panelStrong)
+  drawBitmapText(ctx, 'TEMP', 4, 3, {
+    color: palette.muted,
+    scale: 1,
+    letterSpacing: 1,
+  })
   if (theme === 'light') {
     drawSevenSegmentNumber(ctx, valueParts.integer, digitsX + 1, 9, darkenRgb565Color(valueColor))
   }
@@ -474,27 +479,36 @@ function drawDashboardScreen(
   })
   drawTempUnitIcon(ctx, 60, 24, palette.text)
 
-  fillRect(ctx, 78, 4, 78, 36, palette.panel)
+  fillRect(ctx, 78, 4, 1, 36, palette.border)
   if (screen.heaterLockReason && screen.dashboardWarningVisible) {
-    drawStatusLine(ctx, 7, palette.warning, 'WARN', 'OTEMP')
+    drawStatusLine(ctx, 7, palette.warning, palette.warning, 'WARN', 'OTEMP')
   } else {
-    drawStatusLine(ctx, 7, palette.warning, 'SET', `${screen.targetTempC}`)
+    drawStatusLine(ctx, 7, palette.muted, palette.warning, 'SET', `${screen.targetTempC}`)
   }
   drawPpsStatusLine(ctx, 18, screen, palette)
-  drawStatusLine(ctx, 29, fanColor, 'FAN', screen.fanDisplayState.toUpperCase())
+  drawStatusLine(ctx, 29, palette.muted, fanColor, 'FAN', screen.fanDisplayState.toUpperCase())
 
-  fillRect(ctx, 4, 42, 152, 5, palette.panel)
-  const heaterBarWidth = Math.max(
-    0,
-    Math.min(148, Math.round((148 * screen.heaterOutputPercent) / 100))
-  )
+  fillRect(ctx, 4, 41, 152, 1, palette.border)
+  drawBitmapText(ctx, 'HEAT', 4, 43, {
+    color: palette.muted,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  const outputPercent = Math.max(0, Math.min(100, Math.trunc(screen.heaterOutputPercent)))
+  drawBitmapText(ctx, `${outputPercent}%`, 22, 43, {
+    color: outputPercent === 0 ? palette.muted : palette.accent,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  fillRect(ctx, 42, 44, 114, 2, palette.border)
+  const heaterBarWidth = Math.round((114 * outputPercent) / 100)
   if (heaterBarWidth > 0) {
     fillRect(
       ctx,
-      6,
-      43,
+      42,
+      44,
       heaterBarWidth,
-      3,
+      2,
       screen.heaterEnabled ? palette.accent : palette.disabled
     )
   }
