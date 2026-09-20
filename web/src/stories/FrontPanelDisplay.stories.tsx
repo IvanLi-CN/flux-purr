@@ -458,6 +458,7 @@ export const KeyTestInteractions: Story = {
       await wait(FIRST_REPEAT_SETTLE_MS)
       fireEvent.pointerUp(button, { pointerId: 2 })
       await expect(debug).toHaveTextContent('keyTest: U / U / REPEAT')
+      await wait(SHORT_PRESS_SETTLE_MS)
     })
 
     await step('keyboard mapping mirrors the five-way switch', async () => {

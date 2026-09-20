@@ -84,10 +84,10 @@ Dashboard 使用单一纯白仪表面，不以深浅色卡片切割温度区与�
 
 | Token | Dark | Light | Usage |
 | --- | --- | --- | --- |
-| `bg` | `#081421` | `#EFEFEF` | 非 Dashboard 页面 panel 外的中性仪表底色 |
+| `bg` | `#080F19` | `#EFEFEF` | 非 Dashboard 页面 panel 外的中性仪表底色 |
 | `panel` | `#102031` | `#FFFFFF` | 文字、图标与内容状态的 panel 背景 |
 | `divider` | `#31415A` | `#C5C6C5` | 温度区、状态栈与功率区分隔线 |
-| `text` | `#E6EFF7` | `#102031` | 温度单位与主要文字 |
+| `text` | `#F7FBFF` | `#102031` | 温度单位与主要文字 |
 | `muted` | `#8CA2B5` | `#52657B` | `TEMP`、`SET`、`PPS`、`FAN`、`HEAT` 标签 |
 | `setpoint` | `#FFD263` | `#9C5D00` | 正常设定温度 |
 | `info` | `#7BD2FF` | `#0069A5` | PPS 数值与 `AUTO` 风扇状态 |

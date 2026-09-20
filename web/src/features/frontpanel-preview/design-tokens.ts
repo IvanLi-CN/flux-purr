@@ -41,21 +41,21 @@ function rgb565ToCss(red: number, green: number, blue: number) {
 }
 
 export const frontPanelPalette = {
-  bg: '#08111f',
-  panel: '#122036',
-  panelStrong: '#1b2a43',
-  border: '#2a3d5d',
-  text: '#f7fbff',
-  muted: '#8ea3c6',
-  disabled: '#5b6c88',
-  accent: '#ff9a3c',
+  bg: rgb565ToCss(1, 4, 3),
+  panel: rgb565ToCss(2, 8, 6),
+  panelStrong: rgb565ToCss(3, 10, 8),
+  border: rgb565ToCss(5, 15, 11),
+  text: rgb565ToCss(30, 62, 31),
+  muted: rgb565ToCss(17, 40, 25),
+  disabled: rgb565ToCss(11, 27, 17),
+  accent: rgb565ToCss(31, 38, 7),
   accentSoft: '#4e2e18',
   setpoint: rgb565ToCss(31, 52, 12),
   heaterTrack: rgb565ToCss(4, 12, 9),
   heaterFill: rgb565ToCss(30, 39, 1),
-  success: '#40d9a1',
-  warning: '#ffd166',
-  cyan: '#63d8ff',
+  success: rgb565ToCss(8, 54, 20),
+  warning: rgb565ToCss(31, 52, 11),
+  cyan: rgb565ToCss(12, 54, 31),
 } as const
 
 const lightFrontPanelPalette: FrontPanelPalette = {
