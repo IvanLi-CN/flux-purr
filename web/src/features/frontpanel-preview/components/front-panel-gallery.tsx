@@ -89,6 +89,7 @@ export function FrontPanelGallery({ screens }: FrontPanelGalleryProps) {
 
             <FrontPanelDisplay
               screen={screen}
+              theme="light"
               scale={4}
               showFrame={false}
               showMeta={false}

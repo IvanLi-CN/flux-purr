@@ -4711,11 +4711,22 @@ fn display_framebuffer_boot_initialization_never_materializes_a_stack_sized_arra
         .nth(1)
         .expect("display initialization must remain present");
 
-    assert!(display_setup.contains("initialize_display_framebuffer()"));
+    assert!(display_setup.contains("initialize_display_graphics(&psram)"));
+    let support = include_str!("support.rs");
+    assert!(
+        support.contains("try_new_uninit_in") || support.contains("new_uninit_in"),
+        "the PSRAM framebuffer must be initialized in place"
+    );
     assert!(
         !display_setup.contains("initialize_after_software_reset("),
         "the display framebuffer must not be passed by value through the boot task stack"
     );
+}
+
+#[test]
+fn dirty_dashboard_refresh_is_capped_at_thirty_frames_per_second() {
+    assert_eq!(DISPLAY_RUNTIME_MAX_FPS, 30);
+    assert_eq!(DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS, 33);
 }
 
 #[test]

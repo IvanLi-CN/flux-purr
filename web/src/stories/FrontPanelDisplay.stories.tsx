@@ -28,6 +28,7 @@ const meta = {
   },
   args: {
     screen: frontPanelStoryStates.dashboard,
+    theme: 'light',
     scale: 6,
   },
 } satisfies Meta<typeof FrontPanelDisplay>
@@ -167,7 +168,7 @@ export const DocsGallery: Story = {
               }}
             >
               {[
-                ['Theme', 'Dark embedded UI'],
+                ['Theme', 'Light embedded UI'],
                 ['Screen set', '13 preview states'],
                 ['Gestures', 'Short / Double / Long'],
               ].map(([label, value]) => (
@@ -233,90 +234,141 @@ export const DesignSpec: Story = {
 export const KeyTestIdle: Story = {
   args: {
     screen: frontPanelStoryStates.keyTestIdle,
+    theme: 'light',
   },
 }
 
 export const KeyTestShort: Story = {
   args: {
     screen: frontPanelStoryStates.keyTestShort,
+    theme: 'light',
   },
 }
 
 export const KeyTestDouble: Story = {
   args: {
     screen: frontPanelStoryStates.keyTestDouble,
+    theme: 'light',
   },
 }
 
 export const KeyTestLong: Story = {
   args: {
     screen: frontPanelStoryStates.keyTestLong,
+    theme: 'light',
   },
 }
 
 export const Dashboard: Story = {
   args: {
     screen: frontPanelStoryStates.dashboard,
+    theme: 'light',
   },
+  render: (args) => (
+    <div
+      data-visual-evidence-surface
+      style={{
+        display: 'inline-flex',
+        background: '#efefef',
+        padding: '32px',
+      }}
+    >
+      <div data-visual-evidence-target style={{ display: 'inline-flex' }}>
+        <FrontPanelDisplay {...args} showFrame={false} showMeta={false} />
+      </div>
+    </div>
+  ),
+}
+
+export const DashboardDark: Story = {
+  name: 'Dashboard / Dark Theme',
+  args: {
+    screen: frontPanelStoryStates.dashboard,
+    theme: 'dark',
+  },
+  render: (args) => (
+    <div
+      data-visual-evidence-surface
+      style={{
+        display: 'inline-flex',
+        background: '#08111f',
+        padding: '32px',
+      }}
+    >
+      <div data-visual-evidence-target style={{ display: 'inline-flex' }}>
+        <FrontPanelDisplay {...args} showFrame={false} showMeta={false} />
+      </div>
+    </div>
+  ),
 }
 
 export const DashboardManual: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardManual,
+    theme: 'light',
   },
 }
 
 export const DashboardManualPps: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardManualPps,
+    theme: 'light',
   },
 }
 
 export const DashboardFanOff: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardFanOff,
+    theme: 'light',
   },
 }
 
 export const DashboardFanAuto: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardFanAuto,
+    theme: 'light',
   },
 }
 
 export const DashboardFanRun: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardFanRun,
+    theme: 'light',
   },
 }
 
 export const DashboardOvertempA: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardOvertempA,
+    theme: 'light',
   },
 }
 
 export const DashboardOvertempB: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardOvertempB,
+    theme: 'light',
   },
 }
 
 export const Menu: Story = {
   args: {
     screen: frontPanelStoryStates.menu,
+    theme: 'light',
   },
 }
 
 export const PresetTemp: Story = {
   args: {
     screen: frontPanelStoryStates.presetTemp,
+    theme: 'light',
   },
 }
 
 export const ActiveCooling: Story = {
   args: {
     screen: frontPanelStoryStates.activeCooling,
+    theme: 'light',
   },
 }
 
@@ -334,6 +386,7 @@ export const ActiveCoolingEvidence: Story = {
       <div data-visual-evidence-target>
         <FrontPanelDisplay
           screen={frontPanelStoryStates.activeCooling}
+          theme="dark"
           scale={6}
           showFrame={false}
           showMeta={false}
@@ -346,12 +399,14 @@ export const ActiveCoolingEvidence: Story = {
 export const WifiInfo: Story = {
   args: {
     screen: frontPanelStoryStates.wifiInfo,
+    theme: 'light',
   },
 }
 
 export const DeviceInfo: Story = {
   args: {
     screen: frontPanelStoryStates.deviceInfo,
+    theme: 'light',
   },
 }
 
@@ -403,6 +458,7 @@ export const KeyTestInteractions: Story = {
       await wait(FIRST_REPEAT_SETTLE_MS)
       fireEvent.pointerUp(button, { pointerId: 2 })
       await expect(debug).toHaveTextContent('keyTest: U / U / REPEAT')
+      await wait(SHORT_PRESS_SETTLE_MS)
     })
 
     await step('keyboard mapping mirrors the five-way switch', async () => {

@@ -58,6 +58,7 @@ serde-json-core = "0.6.0"
 sha2 = { version = "0.10.9", default-features = false }
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
+allocator-api2 = { version = "0.3.1", default-features = false }
 defmt = "1.0.1"
 embassy-executor = "0.9.0"
 embassy-embedded-hal = "0.5.0"
@@ -66,7 +67,7 @@ embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"] }
 embedded-io-async = { version = "0.6.1", optional = true }
 embedded-storage = "0.3.1"
-esp-hal = { version = "1.0.0", features = ["esp32s3", "unstable"] }
+esp-hal = { version = "1.0.0", features = ["esp32s3", "psram", "unstable"] }
 esp-rtos = { version = "0.2.0", features = ["embassy", "esp32s3", "esp-alloc"] }
 esp-bootloader-esp-idf = { version = "0.2.0", features = ["esp32s3"] }
 esp-storage = { version = "0.7.0", features = ["esp32s3"] }

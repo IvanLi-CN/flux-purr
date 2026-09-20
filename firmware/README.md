@@ -12,7 +12,10 @@
 
 - Driver: [`IvanLi-CN/gc9d01-rs`](https://github.com/IvanLi-CN/gc9d01-rs) async API
 - Main firmware artifact name: `flux-purr`
-- Display bus: `SPI2` async, `Mode0`, `10 MHz`
+- Display bus: `SPI2` async, `Mode0`, fixed `40 MHz`
+- Display graphics memory: `ESP32-S3` Quad PSRAM (`ESP_HAL_CONFIG_PSRAM_MODE=quad`) with a detected mapping that must be exactly `2 MiB`; a dedicated PSRAM `EspHeap` owns only the GC9D01 `16 KiB` presentation framebuffer. The logical `DisplayCanvas` and general runtime heap remain in internal DRAM.
+- Display startup is fail-closed: HAL-returned PSRAM mapping-size or presentation framebuffer allocation failure enters USB recovery before Front Panel and heater runtime startup; a low-level `esp-hal 1.0.0` MMU panic occurs before USB exists and follows the panic-handler software-reset boundary. There is no no-PSRAM or low-speed fallback.
+- Runtime Dashboard flushes are dirty-only and throttled to a `33ms` minimum interval while dirty, allowing up to approximately `30fps`; the heater control loop and SPI2 frequency are unchanged.
 - Locked panel profile:
   - `panel_160x50`
   - `width = 160`
@@ -67,6 +70,7 @@
   - `FAN_TACH = GPIO34` (reserved only in this round)
 - Runtime truth source:
   - `current_temp_c` is the live PT1000-derived temperature sample from `GPIO2 / ADC1`
+  - Light Dashboard temperature digits use a one-logical-pixel lower-right shadow derived by saturating each RGB565 channel by `4` before the foreground pass; dark Dashboard omits the shadow. Host preview and Web Canvas use the same explicit `light` / `dark` theme contract.
   - when RTD enters fault, the front panel keeps the last valid displayed temperature instead of synthesizing `0°C`
   - `target_temp_c` is clamped to `0..=400°C`
   - Dashboard and `Preset Temp` up/down short-presses adjust by `1°C`; holding up/down repeats after the `500ms` long-press threshold, first about every `120ms` and then about every `60ms`

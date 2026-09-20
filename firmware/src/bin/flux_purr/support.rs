@@ -11,6 +11,8 @@ extern crate alloc;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use alloc::boxed::Box;
 #[cfg(target_arch = "xtensa")]
+pub(crate) use allocator_api2::boxed::Box as AllocBox;
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
 pub(crate) use core::cell::RefCell;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use core::future::Future;
@@ -39,6 +41,8 @@ pub(crate) use embassy_sync::{
 #[cfg(target_arch = "xtensa")]
 pub(crate) use embassy_time::{Duration, Instant, Timer as EmbassyTimer};
 #[cfg(target_arch = "xtensa")]
+pub(crate) use embedded_graphics::pixelcolor::Rgb565;
+#[cfg(target_arch = "xtensa")]
 pub(crate) use embedded_graphics::prelude::RgbColor;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use embedded_hal::pwm::SetDutyCycle;
@@ -46,6 +50,8 @@ pub(crate) use embedded_hal::pwm::SetDutyCycle;
 pub(crate) use embedded_hal_async::i2c::I2c as AsyncI2c;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use embedded_hal_bus::spi::ExclusiveDevice;
+#[cfg(target_arch = "xtensa")]
+pub(crate) use esp_alloc::EspHeap;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
@@ -498,6 +504,103 @@ pub(crate) fn init_runtime_heap() {
     }
 }
 
+#[cfg(target_arch = "xtensa")]
+pub(crate) const PSRAM_SIZE_BYTES: usize = 2 * 1024 * 1024;
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) static DISPLAY_GRAPHICS_HEAP: EspHeap = EspHeap::empty();
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) const DISPLAY_FRAMEBUFFER_BYTES: usize =
+    flux_purr_firmware::display::DISPLAY_PIXELS * core::mem::size_of::<Rgb565>();
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) const DISPLAY_SPI_FREQUENCY_HZ: u32 = 40_000_000;
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DisplayGraphicsInitError {
+    PsramUnavailable,
+    FramebufferAllocationFailed,
+}
+
+#[cfg(target_arch = "xtensa")]
+fn validate_psram_mapping(start: *mut u8, size: usize) -> bool {
+    if size != PSRAM_SIZE_BYTES || !(start as usize).is_multiple_of(core::mem::align_of::<u32>()) {
+        return false;
+    }
+
+    const OFFSETS: [usize; 3] = [0, PSRAM_SIZE_BYTES / 2, PSRAM_SIZE_BYTES - 4];
+    const PATTERNS: [u32; 3] = [0x1357_9BDF, 0x2468_ACF0, 0x5AA5_C33C];
+    let base = start.cast::<u32>();
+    let mut previous = [0_u32; OFFSETS.len()];
+
+    unsafe {
+        for (index, offset) in OFFSETS.iter().enumerate() {
+            let address = base.add(offset / core::mem::size_of::<u32>());
+            previous[index] = address.read_volatile();
+            address.write_volatile(PATTERNS[index]);
+        }
+
+        let valid = OFFSETS.iter().enumerate().all(|(index, offset)| {
+            base.add(offset / core::mem::size_of::<u32>())
+                .read_volatile()
+                == PATTERNS[index]
+        });
+
+        for (index, offset) in OFFSETS.iter().enumerate() {
+            base.add(offset / core::mem::size_of::<u32>())
+                .write_volatile(previous[index]);
+        }
+
+        valid
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn initialize_display_graphics(
+    psram: &esp_hal::peripherals::PSRAM<'static>,
+) -> Result<
+    &'static mut [Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS],
+    DisplayGraphicsInitError,
+> {
+    let (start, size) = esp_hal::psram::psram_raw_parts(psram);
+    if !validate_psram_mapping(start, size) {
+        return Err(DisplayGraphicsInitError::PsramUnavailable);
+    }
+
+    // The graphics heap owns the mapped PSRAM region exclusively. It is
+    // intentionally separate from esp_alloc::HEAP so control-plane objects
+    // remain in the internal runtime heap.
+    unsafe {
+        DISPLAY_GRAPHICS_HEAP.add_region(esp_alloc::HeapRegion::new(
+            start,
+            size,
+            esp_alloc::MemoryCapability::External.into(),
+        ));
+    }
+
+    let mut framebuffer =
+        AllocBox::<[Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS], _>::try_new_uninit_in(
+            &DISPLAY_GRAPHICS_HEAP,
+        )
+        .map_err(|_| DisplayGraphicsInitError::FramebufferAllocationFailed)?;
+    // Initialize the PSRAM allocation in place. Constructing the 16 KiB array
+    // as a function argument would materialize it on the guarded boot stack.
+    unsafe {
+        let pixels = framebuffer.as_mut_ptr().cast::<Rgb565>();
+        for index in 0..flux_purr_firmware::display::DISPLAY_PIXELS {
+            pixels.add(index).write(Rgb565::BLACK);
+        }
+    }
+    let framebuffer = unsafe { framebuffer.assume_init() };
+    info!(
+        "display graphics memory=psram bytes={=u32} framebuffer_bytes={=u32}",
+        size as u32, DISPLAY_FRAMEBUFFER_BYTES as u32,
+    );
+    Ok(AllocBox::leak(framebuffer))
+}
+
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 #[unsafe(link_section = ".uninit")]
 pub(crate) static mut USB_CONTROL_RESPONSE_BUFFER: MaybeUninit<[u8; USB_CONTROL_TX_BUFFER_LEN]> =
@@ -864,8 +967,10 @@ pub(crate) const FAN_PULSE_PERIOD_MS: u64 = 5_000;
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg(test)]
 pub(crate) const HEATING_FAN_PULSE_MAX_DUTY_PERCENT: u8 = 50;
-#[cfg(target_arch = "xtensa")]
-pub(crate) const DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS: u64 = 1_000;
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const DISPLAY_RUNTIME_MAX_FPS: u64 = 30;
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS: u64 = 1_000 / DISPLAY_RUNTIME_MAX_FPS;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const USB_CONTROL_LINE_CAPACITY: usize =
     flux_purr_firmware::control_plane::USB_LINE_CONTENT_MAX_LEN;

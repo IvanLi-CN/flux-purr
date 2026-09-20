@@ -179,6 +179,7 @@ export function FrontPanelDesignBoard() {
                 </p>
                 <FrontPanelDisplay
                   screen={frontPanelStoryStates.dashboard}
+                  theme="light"
                   scale={5}
                   showFrame={false}
                   showMeta={false}

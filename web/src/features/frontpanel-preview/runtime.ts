@@ -88,7 +88,7 @@ function resolveDefaultPdContractMv() {
   if (parsed === 12_000 || parsed === 20_000 || parsed === 28_000) {
     return parsed
   }
-  return 20_000
+  return 12_000
 }
 
 const DEFAULT_PD_CONTRACT_MV = resolveDefaultPdContractMv()

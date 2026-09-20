@@ -7,6 +7,7 @@ rustflags = [
 [env]
 ESP_TARGET = "esp32s3"
 DEFMT_LOG = "info"
+ESP_HAL_CONFIG_PSRAM_MODE = "quad"
 
 [unstable]
 build-std = ["core", "alloc"]

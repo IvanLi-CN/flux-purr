@@ -24,6 +24,14 @@ _Avoid_: General User, bundle updater
 The local display and keys on the Device.
 _Avoid_: Dashboard, Web UI
 
+**Front Panel Render Canvas**:
+The logical image assembled from Front Panel visual rules before presentation.
+_Avoid_: Front Panel Graphics Memory, panel image, Web preview canvas
+
+**Front Panel Graphics Memory**:
+The dedicated mutable frame storage used to present a Front Panel image.
+_Avoid_: VRAM, general runtime heap, Front Panel Render Canvas
+
 **Control Console**:
 The Web application that observes and controls a Device.
 _Avoid_: Dashboard when the complete application is meant

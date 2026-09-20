@@ -161,6 +161,7 @@ pub(crate) struct BootSystemTokens {
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct BootDeviceTokens {
+    psram: esp_hal::peripherals::PSRAM<'static>,
     spi2: esp_hal::peripherals::SPI2<'static>,
     display_sck: esp_hal::peripherals::GPIO12<'static>,
     display_mosi: esp_hal::peripherals::GPIO11<'static>,
@@ -1326,6 +1327,7 @@ pub(crate) fn split_boot_tokens(
             pd_scl: peripherals.GPIO9,
         },
         BootDeviceTokens {
+            psram: peripherals.PSRAM,
             spi2: peripherals.SPI2,
             display_sck: peripherals.GPIO12,
             display_mosi: peripherals.GPIO11,
@@ -1591,6 +1593,7 @@ async fn wait_for_initial_pd_contract(
 pub(crate) struct BootDisplayContext<'a> {
     runtime_mode: FrontPanelRuntimeMode,
     runtime: BootDisplayRuntimeContext<'a>,
+    psram: esp_hal::peripherals::PSRAM<'static>,
     spi2: esp_hal::peripherals::SPI2<'static>,
     display_sck: esp_hal::peripherals::GPIO12<'static>,
     display_mosi: esp_hal::peripherals::GPIO11<'static>,
@@ -1621,44 +1624,20 @@ pub(crate) struct BootDisplayRuntimeContext<'a> {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn initialize_display_framebuffer()
--> &'static mut [embedded_graphics::pixelcolor::Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS]
-{
-    static mut DRIVER_FB_STORAGE: MaybeUninit<
-        [embedded_graphics::pixelcolor::Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS],
-    > = MaybeUninit::uninit();
-
-    // Rebuild retained storage in place. Passing this 16 KiB array by value
-    // would materialize it on the guarded startup task stack.
-    unsafe {
-        let pixels = core::ptr::addr_of_mut!(DRIVER_FB_STORAGE)
-            .cast::<embedded_graphics::pixelcolor::Rgb565>();
-        for index in 0..flux_purr_firmware::display::DISPLAY_PIXELS {
-            core::ptr::write(
-                pixels.add(index),
-                embedded_graphics::pixelcolor::Rgb565::BLACK,
-            );
-        }
-        &mut *core::ptr::addr_of_mut!(DRIVER_FB_STORAGE).cast::<[
-            embedded_graphics::pixelcolor::Rgb565;
-            flux_purr_firmware::display::DISPLAY_PIXELS
-        ]>()
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
 pub(crate) fn initialize_display_driver(
+    psram: esp_hal::peripherals::PSRAM<'static>,
     spi2: esp_hal::peripherals::SPI2<'static>,
     display_sck: esp_hal::peripherals::GPIO12<'static>,
     display_mosi: esp_hal::peripherals::GPIO11<'static>,
     display_cs: esp_hal::peripherals::GPIO15<'static>,
     display_dc: esp_hal::peripherals::GPIO10<'static>,
     display_rst: esp_hal::peripherals::GPIO14<'static>,
-) -> (RuntimeDisplay, &'static mut DisplayCanvas) {
+) -> Result<(RuntimeDisplay, &'static mut DisplayCanvas), DisplayGraphicsInitError> {
+    let driver_framebuffer = initialize_display_graphics(&psram)?;
     let spi = Spi::new(
         spi2,
         SpiConfig::default()
-            .with_frequency(Rate::from_hz(10_000_000))
+            .with_frequency(Rate::from_hz(DISPLAY_SPI_FREQUENCY_HZ))
             .with_mode(SpiMode::_0),
     )
     .expect("failed to create SPI2")
@@ -1669,7 +1648,6 @@ pub(crate) fn initialize_display_driver(
     let rst = Output::new(display_rst, Level::High, OutputConfig::default());
     let spi_device = ExclusiveDevice::new_no_delay(spi.into_async(), cs)
         .expect("failed to wrap async SPI bus as ExclusiveDevice");
-    let driver_framebuffer = initialize_display_framebuffer();
     let canvas = initialize_display_canvas();
     let display = GC9D01::new(
         DISPLAY_PANEL_CONFIG,
@@ -1678,7 +1656,11 @@ pub(crate) fn initialize_display_driver(
         rst,
         driver_framebuffer,
     );
-    (display, canvas)
+    info!(
+        "display spi bus=SPI2 mode={=u8} frequency_hz={=u32}",
+        0, DISPLAY_SPI_FREQUENCY_HZ,
+    );
+    Ok((display, canvas))
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1838,6 +1820,7 @@ pub(crate) async fn initialize_boot_display(
     let BootDisplayContext {
         runtime_mode,
         mut runtime,
+        psram,
         spi2,
         display_sck,
         display_mosi,
@@ -1869,14 +1852,42 @@ pub(crate) async fn initialize_boot_display(
         s3_frontpanel::PIN_KEY_LEFT,
         s3_frontpanel::PIN_KEY_UP,
     );
-    let (mut display, canvas) = initialize_display_driver(
+    let (mut display, canvas) = match initialize_display_driver(
+        psram,
         spi2,
         display_sck,
         display_mosi,
         display_cs,
         display_dc,
         display_rst,
-    );
+    ) {
+        Ok(display) => display,
+        Err(error) => {
+            #[cfg(feature = "web_serial")]
+            {
+                let stage: &[u8] = match error {
+                    DisplayGraphicsInitError::PsramUnavailable => {
+                        b"boot_stage=display_psram_unavailable\n"
+                    }
+                    DisplayGraphicsInitError::FramebufferAllocationFailed => {
+                        b"boot_stage=display_framebuffer_allocation_failed\n"
+                    }
+                };
+                let _ = usb_write_bytes_bounded(runtime.usb_serial, stage);
+                run_usb_recovery_control_loop(
+                    runtime.usb_serial,
+                    runtime.usb_rx_line,
+                    runtime.usb_tx_buf,
+                    runtime.usb_boot_memory_config,
+                    StatusLightState::HeaterInterlocked,
+                    UsbRecoveryPhase::BeforePersistentState,
+                )
+                .await;
+            }
+            #[cfg(not(feature = "web_serial"))]
+            panic!("display graphics memory unavailable: {error:?}");
+        }
+    };
     rom_boot_stage(b"display_driver_ready");
     initialize_display_panel(&mut runtime, &mut display).await;
     let canvas = present_startup_display(&mut runtime, &mut display, canvas, runtime_mode).await;
@@ -2310,6 +2321,7 @@ pub(crate) async fn initialize_boot_display_from_parts(
     storage: Box<MaybeUninit<BootDisplay>>,
 ) -> Box<BootDisplay> {
     let BootDeviceTokens {
+        psram,
         spi2,
         display_sck,
         display_mosi,
@@ -2350,6 +2362,7 @@ pub(crate) async fn initialize_boot_display_from_parts(
             #[cfg(feature = "web_serial")]
             usb_boot_memory_config: &system.usb_boot_memory_config,
         },
+        psram,
         spi2,
         display_sck,
         display_mosi,
@@ -2663,7 +2676,11 @@ pub(crate) async fn run(spawner: Spawner) {
     // These ROM-only markers remain available before the HAL clock singleton
     // exists, so a startup panic can be placed on either side of `init`.
     rom_boot_stage(b"hal_init_enter");
-    let config = esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max());
+    let config = esp_hal::Config::default()
+        .with_cpu_clock(esp_hal::clock::CpuClock::max())
+        .with_psram(esp_hal::psram::PsramConfig {
+            ..Default::default()
+        });
     rom_boot_stage(b"hal_init_configured");
     let peripherals = esp_hal::init(config);
     rom_boot_stage(b"hal_init_complete");

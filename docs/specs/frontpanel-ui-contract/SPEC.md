@@ -84,15 +84,15 @@ Dashboard 使用单一纯白仪表面，不以深浅色卡片切割温度区与�
 
 | Token | Dark | Light | Usage |
 | --- | --- | --- | --- |
-| `bg` | `#081421` | `#EFEFEF` | 非 Dashboard 页面 panel 外的中性仪表底色 |
+| `bg` | `#081019` | `#EFEFEF` | 非 Dashboard 页面 panel 外的中性仪表底色 |
 | `panel` | `#102031` | `#FFFFFF` | 文字、图标与内容状态的 panel 背景 |
-| `divider` | `#31415A` | `#C5C6C5` | 温度区、状态栈与功率区分隔线 |
-| `text` | `#E6EFF7` | `#102031` | 温度单位与主要文字 |
-| `muted` | `#8CA2B5` | `#52657B` | `TEMP`、`SET`、`PPS`、`FAN`、`HEAT` 标签 |
+| `divider` | `#293D5A` | `#C5C6C5` | 温度区、状态栈与功率区分隔线 |
+| `text` | `#F7FBFF` | `#102031` | 温度单位与主要文字 |
+| `muted` | `#8CA2CE` | `#52657B` | `TEMP`、`SET`、`PPS`、`FAN`、`HEAT` 标签 |
 | `setpoint` | `#FFD263` | `#9C5D00` | 正常设定温度 |
-| `info` | `#7BD2FF` | `#0069A5` | PPS 数值与 `AUTO` 风扇状态 |
-| `success` | `#6BE3B5` | `#007952` | `RUN` 风扇状态 |
-| `warning` | `#FF7184` | `#B52019` | `WARN`、`POWER/WAIT` 与安全状态 |
+| `info` | `#63DBFF` | `#0069A5` | PPS 数值与 `AUTO` 风扇状态 |
+| `success` | `#42DBA5` | `#007952` | `RUN` 风扇状态 |
+| `warning` | `#FFD25A` | `#B52019` | `WARN`、`POWER/WAIT` 与安全状态 |
 | `heater` | `#F79E08` | `#B55108` | heater 输出百分比与进度条 |
 
 ### Typography
@@ -104,12 +104,23 @@ Dashboard 使用单一纯白仪表面，不以深浅色卡片切割温度区与�
 | UI Labels | Existing screens retain their current bitmap glyphs; `FAN CTRL` uses `6×10` labels / `8×13` title | 菜单标题、状态标签、`M1~M10`；风扇策略编辑页使用高可读字号 |
 | Temp Unit | stacked bitmap `℃` icon | 所有温度主值单位 |
 
+Dashboard status geometry is fixed in logical pixels: the `SET`, `PPS`, and `FAN`
+rows use baselines `4`, `17`, and `30`; each label uses the native `3×5` small
+bitmap font at `y + 3`, while the value uses the existing `3×5` mid font at `2×`
+and is right-aligned to `x=156` (or `x=159` for the long `EEPROM / RESTORE`
+state). The short-state label anchor is derived from the measured label and
+value widths and remains within `x=79..84`.
+
 ### Temperature states
 
 - 深色主题温度颜色从冰白、蓝、青、绿、黄绿、金黄、橙到粉紫；亮色主题从深蓝、蓝、青、绿、橄榄、棕金、棕橙到紫。
 - 默认 8 个阈值变量：`[0, 40, 60, 100, 150, 200, 250, 300]`
 - 默认分段语义：`<40 冷`、`40–59 蓝`、`60–99 青`、`100–149 绿`、`150–199 黄绿`、`200–249 金黄`、`250–299 橙`、`300+ 过温紫`。
 - 阈值后续允许在设置界面调整，但颜色映射顺序固定不变。
+- Dashboard 温度颜色以固件 RGB565 调色板为真相源；亮色大温度数字先在右下一个逻辑像素以每个 RGB565 通道饱和减 `4` 的同色系暗色绘制阴影，再绘制原位前景，暗色主题不绘制阴影。
+- Web `FrontPanelDisplayProps` 必须显式提供 `theme: FrontPanelTheme`（`light | dark`）；Web Canvas 与固件 host preview 使用相同温度色表、阈值顺序和阴影规则。
+- Dashboard 的 `background`、`divider`、`muted`、`disabled`、`setpoint`、`success`、`warning`、`info`、`heaterTrack` 与 `heaterFill` 必须直接对齐固件 `DashboardTheme` 的 RGB565 色值；`SAFE` 风扇状态使用 warning 色，`OFF` 使用 disabled 色，`AUTO` 使用 info 色，`RUN` 使用 success 色。
+- Web preview 在未设置 `VITE_FRONTPANEL_PD_CONTRACT_MV` 时必须使用固件相同的默认 `12_000mV` PPS 合同；仅显式配置的 `12_000`、`20_000` 或 `28_000mV` 可覆盖该预览值。
 
 ### Core flows
 
@@ -218,16 +229,19 @@ None
 - `REQ-FP-002`: 前面板 MUST 提供亮色和深色两套主题；亮色主题 MUST 是设备默认主题，深色主题 MUST 可通过显式主题参数渲染。
 - `REQ-FP-003`: Dashboard MUST 保持单一主温度值、`SET`/`PPS`/`FAN` 状态栈和 heater 输出语义层级。
 - `REQ-FP-004`: 所有已实现非 Dashboard 页面 MUST 在两套主题下保持相同布局、字体和状态文案，并维持白底文字可读性。
+- `REQ-FP-005`: 亮色 Dashboard 的大温度数字 MUST 在原位前景之前绘制右下 `1px` 阴影；阴影颜色 MUST 对前景 RGB565 各通道执行饱和减 `4`，且前景绘制必须覆盖重叠像素。暗色 Dashboard MUST 不绘制该阴影。
+- `REQ-FP-006`: `FrontPanelDisplayProps.theme` MUST 是必填的 `FrontPanelTheme`，所有 Web 调用点与 Storybook 状态 MUST 明确传入 `light` 或 `dark`；不得依赖隐式默认主题。
 
 ## Verification
 
 - `VER-FP-001`: 固件单元测试与 preview 工具测试通过，covers: REQ-FP-001, REQ-FP-003。
 - `VER-FP-002`: 默认 framebuffer 与显式 `--theme light` framebuffer 像素完全一致，显式 `--theme dark` 输出不同，covers: REQ-FP-002。
 - `VER-FP-003`: `frontpanel_preview` 的 host tests 为全部已实现页面验证两套逻辑/面板 RGB565 帧；owner-facing PNG 是由同一 renderer 生成并经视觉证据门禁人工复核的跟踪资产，covers: REQ-FP-004。
+- `VER-FP-004`: 固件渲染测试覆盖全部温度调色板与温度带，验证 RGB565 饱和减 `4`、亮色右下 `1px` 阴影、前景覆盖顺序和暗色无阴影；Web 类型检查与 Storybook 状态验证每个调用点显式传入 `theme`，covers: REQ-FP-005, REQ-FP-006。
 
 ## Related ADRs
 
-None
+- [`0010-frontpanel-psram-graphics-memory.md`](../../adr/0010-frontpanel-psram-graphics-memory.md)
 
 ## Visual Evidence
 

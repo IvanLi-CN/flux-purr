@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { cn } from '@/lib/utils'
 import { drawBitmapText, measureBitmapText } from '../bitmap-font'
-import { frontPanelPalette, frontPanelTemperatureColors } from '../design-tokens'
+import type { FrontPanelPalette, FrontPanelTheme } from '../design-tokens'
+import {
+  darkenRgb565Color,
+  frontPanelDashboardPalettes,
+  frontPanelTemperatureColorsByTheme,
+  frontPanelThemePalettes,
+} from '../design-tokens'
 import type {
   FrontPanelCoolingScreen,
   FrontPanelKeyId,
@@ -11,9 +17,6 @@ import type {
 
 const LOGICAL_WIDTH = 160
 const LOGICAL_HEIGHT = 50
-
-const palette = frontPanelPalette
-const temperatureColors = frontPanelTemperatureColors
 
 type MenuIconId = Extract<FrontPanelScreen, { kind: 'menu' }>['items'][number]['id']
 
@@ -137,7 +140,11 @@ function fillPixelRoundedRect(
   fillRect(ctx, x + 1, y + height - 1, width - 2, 1, color)
 }
 
-function temperatureColor(value: number, thresholds: readonly number[]) {
+function temperatureColor(
+  value: number,
+  thresholds: readonly number[],
+  temperatureColors: readonly string[]
+) {
   for (let index = 0; index < thresholds.length - 1; index += 1) {
     if (value < thresholds[index + 1]) {
       return temperatureColors[Math.min(index, temperatureColors.length - 1)]
@@ -252,20 +259,19 @@ function deciCToParts(valueDeciC: number) {
   }
 }
 
-const keyMaskColors: Record<KeyGestureId, string> = {
-  short: palette.success,
-  double: palette.accent,
-  long: palette.cyan,
-  repeat: palette.cyan,
-}
-
 function activeKeyColor(
   activeKey: FrontPanelKeyId | null,
   target: FrontPanelKeyId,
-  gesture: KeyGestureId | null
+  gesture: KeyGestureId | null,
+  palette: FrontPanelPalette
 ) {
   if (activeKey !== target || !gesture) return palette.text
-  return keyMaskColors[gesture]
+  return {
+    short: palette.success,
+    double: palette.accent,
+    long: palette.cyan,
+    repeat: palette.cyan,
+  }[gesture]
 }
 
 function drawKeyShape(ctx: CanvasRenderingContext2D, key: FrontPanelKeyId, color: string) {
@@ -298,7 +304,8 @@ function drawKeyShape(ctx: CanvasRenderingContext2D, key: FrontPanelKeyId, color
 
 function drawKeyTestScreen(
   ctx: CanvasRenderingContext2D,
-  screen: Extract<FrontPanelScreen, { kind: 'key-test' }>
+  screen: Extract<FrontPanelScreen, { kind: 'key-test' }>,
+  palette: FrontPanelPalette
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
   fillRect(ctx, 4, 4, 152, 42, palette.panelStrong)
@@ -324,7 +331,7 @@ function drawKeyTestScreen(
   })
 
   ;(['up', 'left', 'center', 'right', 'down'] as const).forEach((key) => {
-    drawKeyShape(ctx, key, activeKeyColor(screen.activeKey, key, screen.activeGesture))
+    drawKeyShape(ctx, key, activeKeyColor(screen.activeKey, key, screen.activeGesture, palette))
   })
 
   drawBitmapText(ctx, 'U', 39, 15, { color: palette.bg, scale: 1, letterSpacing: 1 })
@@ -344,7 +351,14 @@ function drawKeyTestScreen(
     letterSpacing: 1,
   })
   drawBitmapText(ctx, screen.gestureLabel, 134, 32, {
-    color: screen.activeGesture ? keyMaskColors[screen.activeGesture] : palette.text,
+    color: screen.activeGesture
+      ? {
+          short: palette.success,
+          double: palette.accent,
+          long: palette.cyan,
+          repeat: palette.cyan,
+        }[screen.activeGesture]
+      : palette.text,
     scale: 1,
     letterSpacing: 1,
   })
@@ -375,17 +389,23 @@ function drawMenuIcon(
 function drawStatusLine(
   ctx: CanvasRenderingContext2D,
   y: number,
-  color: string,
+  labelColor: string,
+  valueColor: string,
   label: string,
   value: string
 ) {
-  drawBitmapText(ctx, label, 80, y, {
-    color,
-    scale: 2,
+  const labelWidth = measureBitmapText(label, 1, 1)
+  const valueWidth = measureBitmapText(value, 2, 1)
+  const valueRight = labelWidth + valueWidth + 1 > 156 - 79 ? 159 : 156
+  const labelX = Math.max(79, Math.min(84, valueRight - valueWidth - labelWidth - 1))
+
+  drawBitmapText(ctx, label, labelX, y + 3, {
+    color: labelColor,
+    scale: 1,
     letterSpacing: 1,
   })
-  drawBitmapText(ctx, value, 154, y, {
-    color,
+  drawBitmapText(ctx, value, valueRight, y, {
+    color: valueColor,
     scale: 2,
     letterSpacing: 1,
     align: 'right',
@@ -395,27 +415,28 @@ function drawStatusLine(
 function drawPpsStatusLine(
   ctx: CanvasRenderingContext2D,
   y: number,
-  screen: Extract<FrontPanelScreen, { kind: 'dashboard' }>
+  screen: Extract<FrontPanelScreen, { kind: 'dashboard' }>,
+  palette: FrontPanelPalette
 ) {
-  drawBitmapText(ctx, 'PPS', 80, y, {
-    color: palette.cyan,
-    scale: 2,
+  const value = `${formatPdContractVolts(screen.pdContractMv)}V`
+  const labelWidth = measureBitmapText('PPS', 1, 1)
+  const valueWidth = measureBitmapText(value, 2, 1)
+  const valueRight = labelWidth + valueWidth + 1 > 156 - 79 ? 159 : 156
+  const labelX = Math.max(79, Math.min(84, valueRight - valueWidth - labelWidth - 1))
+
+  drawBitmapText(ctx, 'PPS', labelX, y + 3, {
+    color: palette.muted,
+    scale: 1,
     letterSpacing: 1,
   })
   if (screen.manualPpsEnabled) {
-    drawBitmapText(ctx, '*', 103, y - 3, {
+    drawBitmapText(ctx, '*', labelX + labelWidth + 1, y - 2, {
       color: palette.cyan,
       scale: 1,
       letterSpacing: 0,
     })
   }
-  drawBitmapText(ctx, formatPdContractVolts(screen.pdContractMv), 147, y, {
-    color: palette.cyan,
-    scale: 2,
-    letterSpacing: 1,
-    align: 'right',
-  })
-  drawBitmapText(ctx, 'V', 154, y, {
+  drawBitmapText(ctx, value, valueRight, y, {
     color: palette.cyan,
     scale: 2,
     letterSpacing: 1,
@@ -425,54 +446,92 @@ function drawPpsStatusLine(
 
 function drawDashboardScreen(
   ctx: CanvasRenderingContext2D,
-  screen: Extract<FrontPanelScreen, { kind: 'dashboard' }>
+  screen: Extract<FrontPanelScreen, { kind: 'dashboard' }>,
+  theme: FrontPanelTheme,
+  palette: FrontPanelPalette,
+  temperatureColors: readonly string[]
 ) {
-  const valueColor = temperatureColor(screen.currentTempC, screen.temperatureThresholdsC)
+  const valueColor = temperatureColor(
+    screen.currentTempC,
+    screen.temperatureThresholdsC,
+    temperatureColors
+  )
   const valueParts = deciCToParts(screen.currentTempDeciC)
+  const dashboardPalette = frontPanelDashboardPalettes[theme]
   const digitsWidth = measureSevenSegmentNumber(valueParts.integer)
-  const digitsRightEdge = 57
+  const digitsRightEdge = 55
   const digitsX = digitsRightEdge - digitsWidth
   const fanColor =
     screen.fanDisplayState === 'run'
-      ? palette.success
+      ? dashboardPalette.success
       : screen.fanDisplayState === 'auto'
-        ? palette.cyan
-        : palette.disabled
+        ? dashboardPalette.info
+        : screen.fanDisplayState === 'safe'
+          ? dashboardPalette.warning
+          : dashboardPalette.disabled
 
-  fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
-  fillRect(ctx, 4, 4, 72, 36, palette.panelStrong)
-  drawSevenSegmentNumber(ctx, valueParts.integer, digitsX, 8, valueColor)
-  drawBitmapText(ctx, valueParts.fractional, 66, 8, {
-    color: palette.text,
+  fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, dashboardPalette.background)
+  drawBitmapText(ctx, 'TEMP', 4, 3, {
+    color: dashboardPalette.muted,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  if (theme === 'light') {
+    drawSevenSegmentNumber(ctx, valueParts.integer, digitsX + 1, 12, darkenRgb565Color(valueColor))
+  }
+  drawSevenSegmentNumber(ctx, valueParts.integer, digitsX, 11, valueColor)
+  drawBitmapText(ctx, valueParts.fractional, 64, 11, {
+    color: dashboardPalette.text,
     scale: 2,
     letterSpacing: 1,
     align: 'center',
   })
-  drawTempUnitIcon(ctx, 60, 24, palette.text)
+  fillRect(ctx, 58, 19, 2, 2, dashboardPalette.text)
+  drawTempUnitIcon(ctx, 58, 27, dashboardPalette.text)
 
-  fillRect(ctx, 78, 4, 78, 36, palette.panel)
+  fillRect(ctx, 78, 4, 1, 36, dashboardPalette.divider)
   if (screen.heaterLockReason && screen.dashboardWarningVisible) {
-    drawStatusLine(ctx, 7, palette.warning, 'WARN', 'OTEMP')
+    drawStatusLine(ctx, 4, dashboardPalette.warning, dashboardPalette.warning, 'WARN', 'OTEMP')
   } else {
-    drawStatusLine(ctx, 7, palette.warning, 'SET', `${screen.targetTempC}`)
-  }
-  drawPpsStatusLine(ctx, 18, screen)
-  drawStatusLine(ctx, 29, fanColor, 'FAN', screen.fanDisplayState.toUpperCase())
-
-  fillRect(ctx, 4, 42, 152, 5, palette.panel)
-  const heaterBarWidth = Math.max(
-    0,
-    Math.min(148, Math.round((148 * screen.heaterOutputPercent) / 100))
-  )
-  if (heaterBarWidth > 0) {
-    fillRect(
+    drawStatusLine(
       ctx,
-      6,
-      43,
-      heaterBarWidth,
-      3,
-      screen.heaterEnabled ? palette.accent : palette.disabled
+      4,
+      dashboardPalette.muted,
+      dashboardPalette.setpoint,
+      'SET',
+      `${screen.targetTempC}`
     )
+  }
+  drawPpsStatusLine(ctx, 17, screen, {
+    ...palette,
+    muted: dashboardPalette.muted,
+    cyan: dashboardPalette.info,
+  })
+  drawStatusLine(
+    ctx,
+    30,
+    dashboardPalette.muted,
+    fanColor,
+    'FAN',
+    screen.fanDisplayState.toUpperCase()
+  )
+
+  fillRect(ctx, 4, 41, 152, 1, dashboardPalette.divider)
+  drawBitmapText(ctx, 'HEAT', 4, 43, {
+    color: dashboardPalette.muted,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  const outputPercent = Math.max(0, Math.min(100, Math.trunc(screen.heaterOutputPercent)))
+  drawBitmapText(ctx, `${outputPercent}%`, 22, 43, {
+    color: outputPercent === 0 ? dashboardPalette.muted : dashboardPalette.heaterFill,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  fillRect(ctx, 42, 44, 114, 2, dashboardPalette.heaterTrack)
+  const heaterBarWidth = Math.floor((114 * outputPercent) / 100)
+  if (heaterBarWidth > 0) {
+    fillRect(ctx, 42, 44, heaterBarWidth, 2, dashboardPalette.heaterFill)
   }
 }
 
@@ -487,7 +546,8 @@ function formatPdContractVolts(millivolts: number) {
 
 function drawMenuScreen(
   ctx: CanvasRenderingContext2D,
-  screen: Extract<FrontPanelScreen, { kind: 'menu' }>
+  screen: Extract<FrontPanelScreen, { kind: 'menu' }>,
+  palette: FrontPanelPalette
 ) {
   const selectedItem =
     screen.items.find((item) => item.id === screen.selectedItem) ?? screen.items[0]
@@ -539,7 +599,9 @@ function drawPresetSlotLabel(
 
 function drawPresetTempScreen(
   ctx: CanvasRenderingContext2D,
-  screen: Extract<FrontPanelScreen, { kind: 'preset-temp' }>
+  screen: Extract<FrontPanelScreen, { kind: 'preset-temp' }>,
+  palette: FrontPanelPalette,
+  temperatureColors: readonly string[]
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
 
@@ -548,7 +610,7 @@ function drawPresetTempScreen(
   const valueColor =
     selectedPreset == null
       ? palette.disabled
-      : temperatureColor(selectedPreset, screen.temperatureThresholdsC)
+      : temperatureColor(selectedPreset, screen.temperatureThresholdsC, temperatureColors)
   const unitColor = selectedPreset == null ? palette.disabled : palette.text
 
   for (let index = 0; index < Math.min(screen.presetsC.length, 10); index += 1) {
@@ -575,7 +637,8 @@ function drawPresetTempScreen(
 
 function drawActiveCoolingScreen(
   ctx: CanvasRenderingContext2D,
-  screen: Extract<FrontPanelScreen, { kind: 'active-cooling' }>
+  screen: Extract<FrontPanelScreen, { kind: 'active-cooling' }>,
+  palette: FrontPanelPalette
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
   fillRect(ctx, 4, 15, 152, 1, palette.border)
@@ -670,7 +733,8 @@ function fitBitmapText(
 
 function drawWifiInfoScreen(
   ctx: CanvasRenderingContext2D,
-  screen: Extract<FrontPanelScreen, { kind: 'wifi-info' }>
+  screen: Extract<FrontPanelScreen, { kind: 'wifi-info' }>,
+  palette: FrontPanelPalette
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
   drawBitmapText(ctx, fitBitmapText(`SSID ${screen.ssid}`, 144, 2, 1), 8, 6, {
@@ -692,7 +756,8 @@ function drawWifiInfoScreen(
 
 function drawDeviceInfoScreen(
   ctx: CanvasRenderingContext2D,
-  screen: Extract<FrontPanelScreen, { kind: 'device-info' }>
+  screen: Extract<FrontPanelScreen, { kind: 'device-info' }>,
+  palette: FrontPanelPalette
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
   drawBitmapText(ctx, `BOARD ${screen.board}`, 8, 6, {
@@ -712,31 +777,37 @@ function drawDeviceInfoScreen(
   })
 }
 
-function drawFrontPanel(ctx: CanvasRenderingContext2D, screen: FrontPanelScreen) {
+function drawFrontPanel(
+  ctx: CanvasRenderingContext2D,
+  screen: FrontPanelScreen,
+  theme: FrontPanelTheme
+) {
   ctx.clearRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT)
   ctx.imageSmoothingEnabled = false
+  const palette = frontPanelThemePalettes[theme]
+  const temperatureColors = frontPanelTemperatureColorsByTheme[theme]
 
   switch (screen.kind) {
     case 'key-test':
-      drawKeyTestScreen(ctx, screen)
+      drawKeyTestScreen(ctx, screen, palette)
       return
     case 'dashboard':
-      drawDashboardScreen(ctx, screen)
+      drawDashboardScreen(ctx, screen, theme, palette, temperatureColors)
       return
     case 'menu':
-      drawMenuScreen(ctx, screen)
+      drawMenuScreen(ctx, screen, palette)
       return
     case 'preset-temp':
-      drawPresetTempScreen(ctx, screen)
+      drawPresetTempScreen(ctx, screen, palette, temperatureColors)
       return
     case 'active-cooling':
-      drawActiveCoolingScreen(ctx, screen)
+      drawActiveCoolingScreen(ctx, screen, palette)
       return
     case 'wifi-info':
-      drawWifiInfoScreen(ctx, screen)
+      drawWifiInfoScreen(ctx, screen, palette)
       return
     case 'device-info':
-      drawDeviceInfoScreen(ctx, screen)
+      drawDeviceInfoScreen(ctx, screen, palette)
       return
   }
 }
@@ -768,6 +839,7 @@ function ariaLabel(screen: FrontPanelScreen) {
 
 export interface FrontPanelDisplayProps {
   screen: FrontPanelScreen
+  theme: FrontPanelTheme
   scale?: number
   className?: string
   frameClassName?: string
@@ -777,6 +849,7 @@ export interface FrontPanelDisplayProps {
 
 export function FrontPanelDisplay({
   screen,
+  theme,
   scale = 6,
   className,
   frameClassName,
@@ -795,8 +868,8 @@ export function FrontPanelDisplay({
     const context = canvas.getContext('2d')
     if (!context) return
     context.imageSmoothingEnabled = false
-    drawFrontPanel(context, screen)
-  }, [screen])
+    drawFrontPanel(context, screen, theme)
+  }, [screen, theme])
 
   return (
     <div data-testid="front-panel-display" className={cn('inline-flex flex-col gap-3', className)}>
@@ -815,6 +888,7 @@ export function FrontPanelDisplay({
           role="img"
           aria-label={label}
           data-screen-kind={screen.kind}
+          data-theme={theme}
           className="block bg-[#08111f]"
           style={{
             width: `${LOGICAL_WIDTH * renderScale}px`,

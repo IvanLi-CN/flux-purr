@@ -1852,6 +1852,7 @@ dependencies = [
 name = "flux-purr-firmware"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "defmt",
  "embassy-embedded-hal",
  "embassy-executor",
