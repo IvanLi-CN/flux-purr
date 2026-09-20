@@ -642,6 +642,76 @@ fn owner_is_superseded(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn dispatch_power_command(
+    command: PowerCommand,
+    inflight: &mut Option<(PowerIntentOwner, PowerTicket)>,
+    inflight_refresh: &mut bool,
+    inflight_idle: &mut bool,
+    active_owner: Option<PowerIntentOwner>,
+    joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
+) {
+    let Some((ticket, owner, refresh, idle, pd_command)) = power_pd_command(command) else {
+        let (ticket, _, _, _, _) = power_command_details(command);
+        signal_ticket(ticket, TicketOutcome::Rejected);
+        return;
+    };
+    if owner_is_superseded(owner, active_owner) {
+        signal_ticket(ticket, TicketOutcome::Superseded);
+        return;
+    }
+    if supersede_or_join_power_command(
+        ticket,
+        owner,
+        refresh,
+        idle,
+        inflight,
+        inflight_refresh,
+        joined_refresh,
+    ) {
+        return;
+    }
+    if try_send_pd_service_command(pd_command).is_err() {
+        signal_ticket(ticket, TicketOutcome::TransportFault);
+    } else if let Some(owner) = owner {
+        *inflight = Some((owner, ticket));
+        *inflight_refresh = false;
+        *inflight_idle = false;
+    } else {
+        *inflight = Some((PowerIntentOwner::AutomaticThermal, ticket));
+        *inflight_refresh = refresh;
+        *inflight_idle = idle;
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn dispatch_power_terminal(
+    ticket: PowerTicket,
+    outcome: TicketOutcome,
+    inflight: &mut Option<(PowerIntentOwner, PowerTicket)>,
+    inflight_refresh: &mut bool,
+    inflight_idle: &mut bool,
+    active_owner: &mut Option<PowerIntentOwner>,
+    joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
+) {
+    if !inflight.is_some_and(|(_, current)| current == ticket) {
+        return;
+    }
+    let completed_owner = inflight.map(|(owner, _)| owner);
+    *active_owner = if matches!(outcome, TicketOutcome::Confirmed(_)) && !*inflight_idle {
+        completed_owner
+    } else {
+        None
+    };
+    signal_ticket(ticket, outcome);
+    *inflight = None;
+    *inflight_refresh = false;
+    *inflight_idle = false;
+    while let Some(joined) = joined_refresh.pop() {
+        signal_ticket(joined, outcome);
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
 async fn power_coordinator_task() {
     let mut inflight: Option<(PowerIntentOwner, PowerTicket)> = None;
@@ -661,56 +731,26 @@ async fn power_coordinator_task() {
         .await
         {
             Either3::First(command) => {
-                let Some((ticket, owner, refresh, idle, pd_command)) = power_pd_command(command)
-                else {
-                    let (ticket, _, _, _, _) = power_command_details(command);
-                    signal_ticket(ticket, TicketOutcome::Rejected);
-                    continue;
-                };
-                if owner_is_superseded(owner, active_owner) {
-                    signal_ticket(ticket, TicketOutcome::Superseded);
-                    continue;
-                }
-                if supersede_or_join_power_command(
-                    ticket,
-                    owner,
-                    refresh,
-                    idle,
+                dispatch_power_command(
+                    command,
                     &mut inflight,
                     &mut inflight_refresh,
+                    &mut inflight_idle,
+                    active_owner,
                     &mut joined_refresh,
-                ) {
-                    continue;
-                }
-                if try_send_pd_service_command(pd_command).is_err() {
-                    signal_ticket(ticket, TicketOutcome::TransportFault);
-                } else if let Some(owner) = owner {
-                    inflight = Some((owner, ticket));
-                    inflight_refresh = false;
-                    inflight_idle = false;
-                } else {
-                    inflight = Some((PowerIntentOwner::AutomaticThermal, ticket));
-                    inflight_refresh = refresh;
-                    inflight_idle = idle;
-                }
+                );
             }
             Either3::Second((state, ticket, outcome)) => {
                 publish_power_state(state);
-                if inflight.is_some_and(|(_, current)| current == ticket) {
-                    let completed_owner = inflight.map(|(owner, _)| owner);
-                    if matches!(outcome, TicketOutcome::Confirmed(_)) {
-                        active_owner = if inflight_idle { None } else { completed_owner };
-                    } else {
-                        active_owner = None;
-                    }
-                    signal_ticket(ticket, outcome);
-                    inflight = None;
-                    inflight_refresh = false;
-                    inflight_idle = false;
-                    while let Some(joined) = joined_refresh.pop() {
-                        signal_ticket(joined, outcome);
-                    }
-                }
+                dispatch_power_terminal(
+                    ticket,
+                    outcome,
+                    &mut inflight,
+                    &mut inflight_refresh,
+                    &mut inflight_idle,
+                    &mut active_owner,
+                    &mut joined_refresh,
+                );
             }
             Either3::Third(state) => publish_power_state(state),
         }
