@@ -29,6 +29,7 @@
 - Coordinator cancellation fences a superseded mailbox command before it reaches FUSB policy; a replacement is retained for bounded retry after the private mailbox drains, and stale terminal state is not projected.
 - Deferred replacement storage is single-slot and lossless for accepted tickets: a second mailbox admission receives a terminal transport failure without overwriting the already-deferred command.
 - Idle restoration requests do not reuse a one-shot pending ticket; each caller enters Coordinator admission or observes an already-confirmed idle state.
+- A newly admitted command supersedes a deferred replacement according to owner priority, settling the displaced deferred ticket instead of replaying an older intent after the mailbox drains.
 
 ## Host And Console
 

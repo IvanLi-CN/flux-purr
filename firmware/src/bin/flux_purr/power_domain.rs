@@ -806,6 +806,20 @@ fn dispatch_power_command(
     command: PowerCommand,
     coordinator: &mut PowerCoordinatorState,
 ) -> Option<PowerIntentOwner> {
+    let (_, new_owner, new_refresh, new_idle, _) = power_command_details(command);
+    if let Some(deferred) = coordinator.deferred {
+        let (deferred_ticket, deferred_owner, _, _, _) = power_command_details(deferred);
+        let new_priority = new_owner.map_or(0, PowerIntentOwner::priority);
+        let deferred_priority = deferred_owner.map_or(0, PowerIntentOwner::priority);
+        if new_idle || new_refresh || new_priority >= deferred_priority {
+            coordinator.deferred = None;
+            signal_ticket(deferred_ticket, TicketOutcome::Superseded);
+        } else {
+            let (ticket, _, _, _, _) = power_command_details(command);
+            signal_ticket(ticket, TicketOutcome::Superseded);
+            return None;
+        }
+    }
     let Some((ticket, owner, refresh, idle, pd_command)) = power_pd_command(command) else {
         let (ticket, _, _, _, _) = power_command_details(command);
         signal_ticket(ticket, TicketOutcome::Rejected);
