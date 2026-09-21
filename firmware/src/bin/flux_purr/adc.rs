@@ -1140,6 +1140,10 @@ impl Fusb302bRuntime {
         if !timed_out {
             return;
         }
+        // Cached capabilities and the previously confirmed contract no longer
+        // have a fresh source observation. Fail closed before settling the
+        // refresh ticket so the next request cannot reuse stale power state.
+        self.clear_contract_authorization(now_ms);
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
