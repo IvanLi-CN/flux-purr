@@ -827,8 +827,10 @@ fn dispatch_power_command(
         return None;
     }
     if try_send_pd_service_command(pd_command).is_err() {
-        if coordinator.deferred.replace(command).is_some() {
+        if coordinator.deferred.is_some() {
             signal_ticket(ticket, TicketOutcome::TransportFault);
+        } else {
+            coordinator.deferred = Some(command);
         }
         owner
     } else if let Some(owner) = owner {
@@ -959,7 +961,6 @@ async fn power_coordinator_task() {
                     let backlog = collect_failed_owner_backlog(failed_owner);
                     settle_failed_owner_backlog(failed_owner, backlog, &mut coordinator);
                 }
-                retry_deferred_power_command(&mut coordinator);
             }
             Either3::Second((state, ticket, outcome)) => {
                 let failed_owner = failed_contract_owner_for_terminal(
@@ -989,7 +990,6 @@ async fn power_coordinator_task() {
             }
             Either3::Third(state) => {
                 publish_power_state(state);
-                retry_deferred_power_command(&mut coordinator);
             }
         }
     }

@@ -27,6 +27,7 @@
 - A replacement Contract, Idle, or Refresh command uses a fresh Source_Capabilities transaction after clearing the old receive FIFO and refresh markers. `Accept`/`PS_RDY` responses from the abandoned transaction are ignored before the new capability message starts the replacement request. `PdServiceClient` always submits owner requests through `PowerCoordinator`; it does not reuse a snapshot ticket or report an active contract as a newly acquired owner intent.
 - Explicit refresh completion is gated on the post-capability policy phase: a refresh remains pending through `WaitingForAccept`/`WaitingForPsRdy`, while a valid active contract uses the cache-preserving refresh path without a duplicate RDO. Refresh timeout clears the active contract and cached capabilities, then records `TimedOut` before any subsequent request can reuse stale power state.
 - Coordinator cancellation fences a superseded mailbox command before it reaches FUSB policy; a replacement is retained for bounded retry after the private mailbox drains, and stale terminal state is not projected.
+- Deferred replacement storage is single-slot and lossless for accepted tickets: a second mailbox admission receives a terminal transport failure without overwriting the already-deferred command.
 
 ## Host And Console
 
