@@ -124,6 +124,12 @@ impl PowerState {
         service_available: bool,
         requested: Option<PdContractRequest>,
     ) -> Self {
+        let active = observation.and_then(|observation| {
+            ConfirmedActiveContract::from_private_contract(
+                observation.contract,
+                capabilities.unwrap_or_else(SourceCapabilities::empty),
+            )
+        });
         let protocol = if !service_available {
             PowerProtocol::Unknown
         } else {
@@ -132,17 +138,11 @@ impl PowerState {
                 SinkPhase::WaitingForSourceCapabilities => PowerProtocol::Discovering,
                 SinkPhase::WaitingForAccept => PowerProtocol::WaitingForAccept,
                 SinkPhase::WaitingForPsRdy => PowerProtocol::WaitingForPsRdy,
-                SinkPhase::Ready if observation.is_some() => PowerProtocol::Ready,
+                SinkPhase::Ready if active.is_some() => PowerProtocol::Ready,
                 SinkPhase::Ready => PowerProtocol::Fault,
                 SinkPhase::Fault => PowerProtocol::Fault,
             }
         };
-        let active = observation.and_then(|observation| {
-            ConfirmedActiveContract::from_private_contract(
-                observation.contract,
-                capabilities.unwrap_or_else(SourceCapabilities::empty),
-            )
-        });
         let requested = requested.or_else(|| {
             active.and_then(|active| match active.mode {
                 PdContractRequestMode::Fixed => {
@@ -168,6 +168,9 @@ impl PowerState {
                     SinkPhase::Detached => Some(PowerFailure::Detached),
                     SinkPhase::Fault | SinkPhase::Ready if observation.is_none() => {
                         Some(PowerFailure::TransportFault)
+                    }
+                    _ if observation.is_some() && active.is_none() => {
+                        Some(PowerFailure::CapabilityInvalidated)
                     }
                     _ => None,
                 }
@@ -1050,6 +1053,34 @@ mod tests {
         );
         assert_eq!(state.protocol, PowerProtocol::WaitingForAccept);
         assert_eq!(state.failure, None);
+    }
+
+    #[test]
+    fn invalidated_capabilities_project_as_a_fault_not_ready() {
+        let capabilities =
+            SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+        let contract = capabilities
+            .select_exact_contract(PdContractRequest::pps(17_500, 3_000).unwrap())
+            .unwrap();
+        let observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: contract.current_ma,
+            contract_voltage_mv: Some(contract.voltage_mv),
+            contract,
+        };
+        let state = PowerState::from_observation(
+            SinkPhase::Ready,
+            Some(observation),
+            Some(SourceCapabilities::empty()),
+            true,
+            None,
+        );
+
+        assert_eq!(state.protocol, PowerProtocol::Fault);
+        assert_eq!(state.active, None);
+        assert_eq!(state.failure, Some(PowerFailure::CapabilityInvalidated));
     }
 
     #[test]
