@@ -41,7 +41,9 @@ confirmation and a fresh status observation.
   from being retransmitted. When a replacement is present, the service cancels
   the old local operation, flushes the receive FIFO, and refreshes
   `Source_Capabilities` before sending a new RDO; stale `Accept`/`PS_RDY`
-  messages cannot complete the replacement ticket.
+  messages cannot complete the replacement ticket. An explicit refresh reports
+  `CapabilitiesRefreshed` only after the protocol phase is settled;
+  `WaitingForAccept` and `WaitingForPsRdy` remain pending.
 - Mutex-protected read-only snapshot.
 - Sole FUSB302B protocol/I2C service.
 

@@ -610,6 +610,7 @@ pub(crate) struct Fusb302bRuntime {
     pub(crate) attached_at_ms: Option<u64>,
     pub(crate) last_source_capabilities_request_at_ms: Option<u64>,
     pub(crate) source_capabilities_refresh_pending: bool,
+    pub(crate) source_capabilities_refresh_for_contract: bool,
     pub(crate) source_capabilities_refresh_requested_at_ms: Option<u64>,
     pub(crate) last_request_at_ms: Option<u64>,
     pub(crate) source_capabilities_tx_confirmed: bool,
@@ -645,6 +646,7 @@ impl Fusb302bRuntime {
             attached_at_ms: None,
             last_source_capabilities_request_at_ms: None,
             source_capabilities_refresh_pending: false,
+            source_capabilities_refresh_for_contract: false,
             source_capabilities_refresh_requested_at_ms: None,
             last_request_at_ms: None,
             source_capabilities_tx_confirmed: false,
@@ -670,6 +672,7 @@ impl Fusb302bRuntime {
         self.attached_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = None;
         self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
         self.last_request_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
@@ -745,6 +748,7 @@ impl Fusb302bRuntime {
         self.attached_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = None;
         self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
         self.last_request_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
@@ -830,6 +834,7 @@ impl Fusb302bRuntime {
                 // until this bounded re-query is sent.
                 self.last_source_capabilities_request_at_ms = Some(now_ms);
                 self.source_capabilities_refresh_pending = false;
+                self.source_capabilities_refresh_for_contract = false;
                 self.source_capabilities_refresh_requested_at_ms = None;
                 self.source_capabilities_tx_confirmed = false;
                 self.source_capabilities_gcrc_seen = false;
@@ -889,7 +894,7 @@ impl Fusb302bRuntime {
             if !self.policy.prepare_contract_refresh(request) {
                 return PdContractRequestState::Failed;
             }
-            return self.refresh_source_capabilities(i2c, now, true).await;
+            return self.refresh_source_capabilities(i2c, now, true, true).await;
         }
         if request_inflight {
             if self.policy.pending_contract_matches(request) {
@@ -908,7 +913,7 @@ impl Fusb302bRuntime {
                 .await;
                 return PdContractRequestState::Failed;
             }
-            return self.refresh_source_capabilities(i2c, now, true).await;
+            return self.refresh_source_capabilities(i2c, now, true, true).await;
         } else if self
             .policy
             .confirmed_active_contract()
@@ -922,7 +927,9 @@ impl Fusb302bRuntime {
             if !self.policy.prepare_contract_refresh(request) {
                 return PdContractRequestState::Failed;
             }
-            return self.refresh_source_capabilities(i2c, now, false).await;
+            return self
+                .refresh_source_capabilities(i2c, now, false, true)
+                .await;
         }
         let Some(rdo) = self.policy.request_contract(request) else {
             return PdContractRequestState::Failed;
@@ -944,11 +951,13 @@ impl Fusb302bRuntime {
         i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
         replace_pending: bool,
+        request_contract: bool,
     ) -> PdContractRequestState {
         self.request_rejected = false;
         self.request_timed_out = false;
         if replace_pending {
             self.source_capabilities_refresh_pending = false;
+            self.source_capabilities_refresh_for_contract = false;
             self.source_capabilities_refresh_requested_at_ms = None;
             self.last_source_capabilities_request_at_ms = None;
             self.source_capabilities_tx_confirmed = false;
@@ -978,6 +987,7 @@ impl Fusb302bRuntime {
             return PdContractRequestState::Failed;
         }
         self.source_capabilities_refresh_pending = true;
+        self.source_capabilities_refresh_for_contract = request_contract;
         self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = Some(now_ms);
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
@@ -996,7 +1006,7 @@ impl Fusb302bRuntime {
         if replace_pending {
             self.policy.cancel_pending_request();
             self.policy.prepare_automatic_idle_refresh();
-            return self.refresh_source_capabilities(i2c, now, true).await;
+            return self.refresh_source_capabilities(i2c, now, true, true).await;
         }
         if matches!(
             self.policy.phase(),
@@ -1131,6 +1141,7 @@ impl Fusb302bRuntime {
             return;
         }
         self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
     }
@@ -1360,9 +1371,11 @@ impl Fusb302bRuntime {
         message: PdPacket,
         pdos: &[u32],
     ) -> bool {
+        let refresh_for_contract = self.source_capabilities_refresh_for_contract;
         let preserve_ready_contract =
-            self.policy.phase() == SinkPhase::Ready && !self.source_capabilities_refresh_pending;
+            self.policy.phase() == SinkPhase::Ready && !refresh_for_contract;
         self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;

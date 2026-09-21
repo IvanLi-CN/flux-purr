@@ -913,6 +913,10 @@ fn capability_refresh_ticket_always_settles_when_detached_or_faulted() {
         None,
     );
     assert_eq!(
+        refresh_terminal_outcome(SinkPhase::WaitingForPsRdy, false, true),
+        None,
+    );
+    assert_eq!(
         refresh_terminal_outcome(SinkPhase::Ready, false, true),
         Some(TicketOutcome::CapabilitiesRefreshed),
     );

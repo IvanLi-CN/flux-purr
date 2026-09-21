@@ -99,7 +99,13 @@ pub(crate) fn refresh_terminal_outcome(
     match phase {
         SinkPhase::Detached => Some(TicketOutcome::Detached),
         SinkPhase::Fault => Some(TicketOutcome::TransportFault),
-        _ if !refresh_pending && has_source_capabilities => {
+        _ if !refresh_pending
+            && has_source_capabilities
+            && !matches!(
+                phase,
+                SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+            ) =>
+        {
             Some(TicketOutcome::CapabilitiesRefreshed)
         }
         _ => None,
@@ -376,7 +382,7 @@ async fn process_pd_command(
         }
         PdServiceCommand::RefreshCapabilities { ticket } => {
             match runtime
-                .refresh_source_capabilities(i2c, PdTimestamp::now(), replacing_pending)
+                .refresh_source_capabilities(i2c, PdTimestamp::now(), replacing_pending, false)
                 .await
             {
                 PdContractRequestState::Confirmed => {
