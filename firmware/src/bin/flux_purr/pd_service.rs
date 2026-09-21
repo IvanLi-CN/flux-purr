@@ -94,11 +94,13 @@ pub(crate) fn automatic_idle_contract_is_confirmed(
 pub(crate) fn refresh_terminal_outcome(
     phase: SinkPhase,
     refresh_pending: bool,
+    refresh_timed_out: bool,
     has_source_capabilities: bool,
 ) -> Option<TicketOutcome> {
     match phase {
         SinkPhase::Detached => Some(TicketOutcome::Detached),
         SinkPhase::Fault => Some(TicketOutcome::TransportFault),
+        _ if refresh_timed_out => Some(TicketOutcome::TimedOut),
         _ if !refresh_pending
             && has_source_capabilities
             && !matches!(
@@ -467,6 +469,7 @@ fn pending_terminal(
         PendingPdOperation::Refresh => refresh_terminal_outcome(
             runtime.policy.phase(),
             runtime.source_capabilities_refresh_pending,
+            runtime.request_timed_out,
             runtime.source_capabilities().is_some(),
         ),
         PendingPdOperation::Contract { .. } | PendingPdOperation::Idle

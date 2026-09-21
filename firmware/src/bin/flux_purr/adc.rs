@@ -1143,6 +1143,7 @@ impl Fusb302bRuntime {
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
+        self.request_timed_out = true;
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
     }
 

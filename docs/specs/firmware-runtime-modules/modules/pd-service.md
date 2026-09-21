@@ -43,7 +43,8 @@ confirmation and a fresh status observation.
   `Source_Capabilities` before sending a new RDO; stale `Accept`/`PS_RDY`
   messages cannot complete the replacement ticket. An explicit refresh reports
   `CapabilitiesRefreshed` only after the protocol phase is settled;
-  `WaitingForAccept` and `WaitingForPsRdy` remain pending.
+  `WaitingForAccept` and `WaitingForPsRdy` remain pending. A refresh timeout
+  reports `TimedOut` rather than using cached capabilities as success.
 - Mutex-protected read-only snapshot.
 - Sole FUSB302B protocol/I2C service.
 

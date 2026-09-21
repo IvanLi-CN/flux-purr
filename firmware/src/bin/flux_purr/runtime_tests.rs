@@ -901,24 +901,28 @@ fn automatic_idle_restore_never_confirms_a_fixed_twenty_volt_contract() {
 #[test]
 fn capability_refresh_ticket_always_settles_when_detached_or_faulted() {
     assert_eq!(
-        refresh_terminal_outcome(SinkPhase::Detached, true, false),
+        refresh_terminal_outcome(SinkPhase::Detached, true, false, false),
         Some(TicketOutcome::Detached),
     );
     assert_eq!(
-        refresh_terminal_outcome(SinkPhase::Fault, true, false),
+        refresh_terminal_outcome(SinkPhase::Fault, true, false, false),
         Some(TicketOutcome::TransportFault),
     );
     assert_eq!(
-        refresh_terminal_outcome(SinkPhase::WaitingForAccept, true, false),
+        refresh_terminal_outcome(SinkPhase::WaitingForAccept, true, false, false),
         None,
     );
     assert_eq!(
-        refresh_terminal_outcome(SinkPhase::WaitingForPsRdy, false, true),
+        refresh_terminal_outcome(SinkPhase::WaitingForPsRdy, false, false, true),
         None,
     );
     assert_eq!(
-        refresh_terminal_outcome(SinkPhase::Ready, false, true),
+        refresh_terminal_outcome(SinkPhase::Ready, false, false, true),
         Some(TicketOutcome::CapabilitiesRefreshed),
+    );
+    assert_eq!(
+        refresh_terminal_outcome(SinkPhase::Ready, false, true, true),
+        Some(TicketOutcome::TimedOut),
     );
 }
 
