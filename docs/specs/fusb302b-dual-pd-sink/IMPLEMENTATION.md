@@ -28,6 +28,7 @@
 - Explicit refresh completion is gated on the post-capability policy phase: a refresh remains pending through `WaitingForAccept`/`WaitingForPsRdy`, while a valid active contract uses the cache-preserving refresh path without a duplicate RDO. Refresh timeout clears the active contract and cached capabilities, then records `TimedOut` before any subsequent request can reuse stale power state.
 - Coordinator cancellation fences a superseded mailbox command before it reaches FUSB policy; a replacement is retained for bounded retry after the private mailbox drains, and stale terminal state is not projected.
 - Deferred replacement storage is single-slot and lossless for accepted tickets: a second mailbox admission receives a terminal transport failure without overwriting the already-deferred command.
+- Idle restoration requests do not reuse a one-shot pending ticket; each caller enters Coordinator admission or observes an already-confirmed idle state.
 
 ## Host And Console
 

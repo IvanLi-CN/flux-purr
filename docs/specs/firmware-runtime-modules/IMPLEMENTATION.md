@@ -24,7 +24,8 @@
   coordinator's private cancellation fence discards superseded mailbox work,
   retries a replacement after the bounded mailbox drains, and suppresses stale
   terminal projections. A second deferred admission cannot overwrite the first
-  deferred command without settling its own ticket.
+  deferred command without settling its own ticket. Idle restoration does not
+  return a shared one-shot pending ticket to multiple callers.
 - `REQ-FRM-006`: the Wi-Fi sections separate `WifiProvisioningMachine` from `wifi_task_inner`, including the bounded saving/provisioning timeouts and retry terminal state.
 - `REQ-FRM-007`: the hardware ownership section distinguishes runtime requests, final output writers, and revocation paths for heater, fan, buzzer, status light, display, and watchdog resources.
 - `REQ-FRM-008`: the shared-bus and EEPROM sections cover `SharedI2cBus`, `I2c`, `PdI2c`, chunked M24C64 access, verified publication, and `EEPROM_REQUIRED`.

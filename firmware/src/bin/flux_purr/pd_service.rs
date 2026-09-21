@@ -19,8 +19,6 @@ pub(crate) struct PdServiceSnapshot {
     pub(crate) service_available: bool,
     pub(crate) stale_contract_vin_guard_suspended: bool,
     pub(crate) published_at_ms: u64,
-    pub(crate) pending_ticket: Option<PowerTicket>,
-    pub(crate) pending_idle: bool,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -41,8 +39,6 @@ impl PdServiceSnapshot {
             service_available: false,
             stale_contract_vin_guard_suspended: false,
             published_at_ms: 0,
-            pending_ticket: None,
-            pending_idle: false,
         }
     }
 
@@ -211,11 +207,6 @@ impl PdServiceClient {
         }) {
             return PdRequestState::Confirmed;
         }
-        if snapshot.pending_idle
-            && let Some(ticket) = snapshot.pending_ticket
-        {
-            return PdRequestState::Pending(ticket);
-        }
         match PowerCoordinatorClient::new().idle() {
             Ok(ticket) => PdRequestState::Pending(ticket),
             Err(_) => PdRequestState::Failed,
@@ -302,21 +293,11 @@ async fn pd_status_observation(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn publish_pd_snapshot(
-    runtime: &Fusb302bRuntime,
-    observation: Option<PdStatusObservation>,
-    pending: Option<(PowerTicket, PendingPdOperation)>,
-) {
+fn publish_pd_snapshot(runtime: &Fusb302bRuntime, observation: Option<PdStatusObservation>) {
     let now_ms = PdTimestamp::now().as_millis();
     let interlock_latched = PD_INTERLOCK_LATCHED.load(Ordering::Acquire) != 0;
     let observation = (!interlock_latched).then_some(observation).flatten();
     let ready = startup_pd_contract_ready(observation);
-    let (pending_idle, pending_ticket) = match pending {
-        Some((ticket, PendingPdOperation::Contract { .. })) => (false, Some(ticket)),
-        Some((ticket, PendingPdOperation::Idle)) => (true, Some(ticket)),
-        Some((ticket, PendingPdOperation::Refresh)) => (false, Some(ticket)),
-        None => (false, None),
-    };
     PD_SERVICE_SNAPSHOT.lock(|snapshot| {
         *snapshot.borrow_mut() = PdServiceSnapshot {
             observation,
@@ -327,8 +308,6 @@ fn publish_pd_snapshot(
             service_available: runtime.service_available(),
             stale_contract_vin_guard_suspended: runtime.stale_contract_vin_guard_suspended(now_ms),
             published_at_ms: now_ms,
-            pending_ticket,
-            pending_idle,
         };
     });
     if ready {
@@ -602,11 +581,7 @@ async fn publish_pd_service_turn(
     record_heartbeat: bool,
 ) -> Option<(PowerTicket, PendingPdOperation)> {
     let (state, terminal) = publish_power_report(runtime, observation, pending, terminal_override);
-    publish_pd_snapshot(
-        runtime,
-        observation,
-        terminal.is_none().then_some(pending).flatten(),
-    );
+    publish_pd_snapshot(runtime, observation);
     publish_pd_service_state(state);
     if record_heartbeat {
         record_pd_heartbeat();
