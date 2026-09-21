@@ -1248,7 +1248,7 @@ mod tests {
         ));
         assert!(!pps_adjustment_is_continuous(
             state,
-            PdContractRequest::pps(18_000, 2_950).unwrap(),
+            PdContractRequest::pps(18_000, 3_050).unwrap(),
         ));
         assert!(!pps_adjustment_is_continuous(
             PowerState {

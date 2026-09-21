@@ -1381,13 +1381,17 @@ impl Fusb302bRuntime {
         let refresh_for_contract = self.source_capabilities_refresh_for_contract;
         let preserve_ready_contract =
             self.policy.phase() == SinkPhase::Ready && !refresh_for_contract;
+        let message_id = Some((message.header() >> 9) as u8 & 0x07);
+        if !self.policy.source_capabilities_message_is_fresh(message_id) {
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
+            return true;
+        }
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.retry_fail_recovery_pending = false;
-        let message_id = Some((message.header() >> 9) as u8 & 0x07);
         let rdo = if preserve_ready_contract {
             self.policy
                 .refresh_source_capabilities_with_message_id(pdos, message_id)

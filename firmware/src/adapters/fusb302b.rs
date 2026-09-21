@@ -194,9 +194,13 @@ impl SinkPolicy {
         pdos: &[u32],
         source_message_id: Option<u8>,
     ) -> Option<[u8; 4]> {
+        let source_message_id = source_message_id.map(|value| value & 0x07);
+        if !self.source_capabilities_message_is_fresh(source_message_id) {
+            return None;
+        }
         self.source_capabilities = SourceCapabilities::from_pdos(pdos);
         self.source_capabilities_received = true;
-        self.source_message_id = source_message_id.map(|value| value & 0x07);
+        self.source_message_id = source_message_id;
         self.begin_request(self.source_capabilities)
     }
 
@@ -208,9 +212,13 @@ impl SinkPolicy {
         pdos: &[u32],
         source_message_id: Option<u8>,
     ) -> Option<[u8; 4]> {
+        let source_message_id = source_message_id.map(|value| value & 0x07);
+        if !self.source_capabilities_message_is_fresh(source_message_id) {
+            return None;
+        }
         self.source_capabilities = SourceCapabilities::from_pdos(pdos);
         self.source_capabilities_received = true;
-        self.source_message_id = source_message_id.map(|value| value & 0x07);
+        self.source_message_id = source_message_id;
 
         if self.phase == SinkPhase::Ready && self.active_contract != Contract::none() {
             if self
@@ -226,6 +234,13 @@ impl SinkPolicy {
         }
 
         self.begin_request(self.source_capabilities)
+    }
+
+    pub fn source_capabilities_message_is_fresh(&self, source_message_id: Option<u8>) -> bool {
+        source_message_id.is_none_or(|current| {
+            self.source_message_id
+                .is_none_or(|last| source_message_id_is_newer(last, current))
+        })
     }
 
     fn begin_request(&mut self, capabilities: SourceCapabilities) -> Option<[u8; 4]> {
@@ -993,6 +1008,30 @@ mod tests {
         assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
         policy.on_control_message_with_message_id(6, Some(2), 2);
         assert_eq!(policy.phase(), SinkPhase::Ready);
+    }
+
+    #[test]
+    fn stale_source_capabilities_do_not_replace_the_cached_generation() {
+        let mut policy = SinkPolicy::new(12_000, 3_000);
+        let pps = [PPS_APDO_5V_TO_21V_5A];
+        let fixed = [((5_000_u32 / 50) << 10) | (3_000_u32 / 10)];
+
+        let _ = policy.on_source_capabilities_with_message_id(&pps, Some(3));
+        assert_eq!(
+            policy.on_source_capabilities_with_message_id(&fixed, Some(3)),
+            None
+        );
+        assert!(
+            policy
+                .source_capabilities()
+                .is_some_and(|capabilities| { capabilities.pps.iter().flatten().next().is_some() })
+        );
+        let _ = policy.on_source_capabilities_with_message_id(&fixed, Some(4));
+        assert!(
+            policy.source_capabilities().is_some_and(|capabilities| {
+                capabilities.fixed.iter().flatten().next().is_some()
+            })
+        );
     }
 
     #[test]

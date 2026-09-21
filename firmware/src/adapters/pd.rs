@@ -160,8 +160,12 @@ pub enum PdContractRequestError {
     ZeroCurrent,
     FixedVoltageNotAligned,
     FixedCurrentNotAligned,
+    FixedVoltageOutOfRange,
+    FixedCurrentOutOfRange,
     PpsVoltageNotAligned,
     PpsCurrentNotAligned,
+    PpsVoltageOutOfRange,
+    PpsCurrentOutOfRange,
 }
 
 impl PdContractRequest {
@@ -198,6 +202,12 @@ impl PdContractRequest {
         if operating_current_ma == 0 {
             return Err(PdContractRequestError::ZeroCurrent);
         }
+        if !(FUSB302B_PD_ABSOLUTE_MIN_MV..=FUSB302B_FIXED_MAX_MV).contains(&voltage_mv) {
+            return Err(PdContractRequestError::FixedVoltageOutOfRange);
+        }
+        if !(MIN_HEATER_CONTRACT_MA..=MAX_HEATER_CONTRACT_MA).contains(&operating_current_ma) {
+            return Err(PdContractRequestError::FixedCurrentOutOfRange);
+        }
         if !voltage_mv.is_multiple_of(PD_FIXED_VOLTAGE_STEP_MV) {
             return Err(PdContractRequestError::FixedVoltageNotAligned);
         }
@@ -217,6 +227,12 @@ impl PdContractRequest {
         }
         if operating_current_ma == 0 {
             return Err(PdContractRequestError::ZeroCurrent);
+        }
+        if !(FUSB302B_PD_ABSOLUTE_MIN_MV..=FUSB302B_PD_ABSOLUTE_MAX_MV).contains(&voltage_mv) {
+            return Err(PdContractRequestError::PpsVoltageOutOfRange);
+        }
+        if !(MIN_HEATER_CONTRACT_MA..=MAX_HEATER_CONTRACT_MA).contains(&operating_current_ma) {
+            return Err(PdContractRequestError::PpsCurrentOutOfRange);
         }
         if !voltage_mv.is_multiple_of(PD_PPS_VOLTAGE_STEP_MV) {
             return Err(PdContractRequestError::PpsVoltageNotAligned);
@@ -827,6 +843,42 @@ mod tests {
         assert_eq!(
             PdContractRequest::fixed(20_000, 3_005),
             Err(PdContractRequestError::FixedCurrentNotAligned)
+        );
+    }
+
+    #[test]
+    fn public_request_bounds_reject_out_of_range_contracts() {
+        assert_eq!(
+            PdContractRequest::fixed(20_050, 3_000),
+            Err(PdContractRequestError::FixedVoltageOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::fixed(19_975, 3_000),
+            Err(PdContractRequestError::FixedVoltageNotAligned)
+        );
+        assert_eq!(
+            PdContractRequest::fixed(19_500, 2_990),
+            Err(PdContractRequestError::FixedCurrentOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::fixed(19_500, 5_010),
+            Err(PdContractRequestError::FixedCurrentOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::fixed(19_500, 3_000),
+            Ok(PdContractRequest::fixed(19_500, 3_000).unwrap())
+        );
+        assert_eq!(
+            PdContractRequest::pps(28_100, 3_000),
+            Err(PdContractRequestError::PpsVoltageOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::pps(20_000, 2_950),
+            Err(PdContractRequestError::PpsCurrentOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::pps(20_000, 5_050),
+            Err(PdContractRequestError::PpsCurrentOutOfRange)
         );
     }
 
