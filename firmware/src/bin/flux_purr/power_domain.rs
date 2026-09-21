@@ -64,7 +64,7 @@ impl PowerIntentOwner {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PowerTicket {
     owner: Option<PowerIntentOwner>,
-    sequence: u16,
+    sequence: u32,
     result_slot: usize,
 }
 
@@ -483,7 +483,7 @@ impl PowerCoordinatorClient {
 
     fn next_ticket(&self, owner: Option<PowerIntentOwner>) -> Option<PowerTicket> {
         let slot = reserve_ticket_slot(&POWER_TICKET_SLOTS)?;
-        static NEXT_TICKET: AtomicU16 = AtomicU16::new(1);
+        static NEXT_TICKET: AtomicU32 = AtomicU32::new(1);
         Some(PowerTicket {
             owner,
             sequence: NEXT_TICKET.fetch_add(1, Ordering::Relaxed),
@@ -616,7 +616,7 @@ fn signal_ticket(ticket: PowerTicket, outcome: TicketOutcome) {
 
 #[cfg(target_arch = "xtensa")]
 fn ticket_key(ticket: PowerTicket) -> u32 {
-    (u32::from(ticket.sequence) << 3) | ticket.result_slot as u32
+    ticket.sequence
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -625,13 +625,24 @@ fn cancel_pd_service_ticket(ticket: PowerTicket) {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) fn pd_service_command_cancelled(command: PdServiceCommand) -> bool {
-    let ticket = match command {
+pub(crate) fn take_pd_service_command_cancelled(command: PdServiceCommand) -> bool {
+    PD_SERVICE_CANCELLED_TICKET
+        .compare_exchange(
+            ticket_key(pd_service_command_ticket(command)),
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn pd_service_command_ticket(command: PdServiceCommand) -> PowerTicket {
+    match command {
         PdServiceCommand::AutomaticIdle { ticket }
         | PdServiceCommand::Contract { ticket, .. }
         | PdServiceCommand::RefreshCapabilities { ticket } => ticket,
-    };
-    PD_SERVICE_CANCELLED_TICKET.load(Ordering::Acquire) == ticket_key(ticket)
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -767,20 +778,40 @@ fn queued_command_is_preempted_by_failed_owner(
 }
 
 #[cfg(target_arch = "xtensa")]
+struct PowerCoordinatorState {
+    inflight: Option<(PowerIntentOwner, PowerTicket)>,
+    inflight_refresh: bool,
+    inflight_idle: bool,
+    active_owner: Option<PowerIntentOwner>,
+    joined_refresh: heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
+    deferred: Option<PowerCommand>,
+}
+
+#[cfg(target_arch = "xtensa")]
+impl PowerCoordinatorState {
+    fn new() -> Self {
+        Self {
+            inflight: None,
+            inflight_refresh: false,
+            inflight_idle: false,
+            active_owner: None,
+            joined_refresh: heapless::Vec::new(),
+            deferred: None,
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 fn dispatch_power_command(
     command: PowerCommand,
-    inflight: &mut Option<(PowerIntentOwner, PowerTicket)>,
-    inflight_refresh: &mut bool,
-    inflight_idle: &mut bool,
-    active_owner: Option<PowerIntentOwner>,
-    joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
+    coordinator: &mut PowerCoordinatorState,
 ) -> Option<PowerIntentOwner> {
     let Some((ticket, owner, refresh, idle, pd_command)) = power_pd_command(command) else {
         let (ticket, _, _, _, _) = power_command_details(command);
         signal_ticket(ticket, TicketOutcome::Rejected);
         return None;
     };
-    if owner_is_superseded(owner, active_owner) {
+    if owner_is_superseded(owner, coordinator.active_owner) {
         signal_ticket(ticket, TicketOutcome::Superseded);
         return None;
     }
@@ -789,24 +820,26 @@ fn dispatch_power_command(
         owner,
         refresh,
         idle,
-        inflight,
-        inflight_refresh,
-        joined_refresh,
+        &mut coordinator.inflight,
+        &mut coordinator.inflight_refresh,
+        &mut coordinator.joined_refresh,
     ) {
         return None;
     }
     if try_send_pd_service_command(pd_command).is_err() {
-        signal_ticket(ticket, TicketOutcome::TransportFault);
+        if coordinator.deferred.replace(command).is_some() {
+            signal_ticket(ticket, TicketOutcome::TransportFault);
+        }
         owner
     } else if let Some(owner) = owner {
-        *inflight = Some((owner, ticket));
-        *inflight_refresh = false;
-        *inflight_idle = false;
+        coordinator.inflight = Some((owner, ticket));
+        coordinator.inflight_refresh = false;
+        coordinator.inflight_idle = false;
         None
     } else {
-        *inflight = Some((PowerIntentOwner::AutomaticThermal, ticket));
-        *inflight_refresh = refresh;
-        *inflight_idle = idle;
+        coordinator.inflight = Some((PowerIntentOwner::AutomaticThermal, ticket));
+        coordinator.inflight_refresh = refresh;
+        coordinator.inflight_idle = idle;
         None
     }
 }
@@ -842,11 +875,7 @@ fn collect_failed_owner_backlog(failed_owner: PowerIntentOwner) -> FailedOwnerBa
 fn settle_failed_owner_backlog(
     failed_owner: PowerIntentOwner,
     backlog: FailedOwnerBacklog,
-    inflight: &mut Option<(PowerIntentOwner, PowerTicket)>,
-    inflight_refresh: &mut bool,
-    inflight_idle: &mut bool,
-    active_owner: Option<PowerIntentOwner>,
-    joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
+    coordinator: &mut PowerCoordinatorState,
 ) {
     let (superseded, dispatchable) = backlog;
     for ticket in superseded {
@@ -860,17 +889,22 @@ fn settle_failed_owner_backlog(
             signal_ticket(ticket, TicketOutcome::Superseded);
             continue;
         }
-        if let Some(next_floor) = dispatch_power_command(
-            command,
-            inflight,
-            inflight_refresh,
-            inflight_idle,
-            active_owner,
-            joined_refresh,
-        ) && next_floor.priority() > priority_floor.priority()
+        if let Some(next_floor) = dispatch_power_command(command, coordinator)
+            && next_floor.priority() > priority_floor.priority()
         {
             priority_floor = next_floor;
         }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn retry_deferred_power_command(coordinator: &mut PowerCoordinatorState) {
+    let Some(command) = coordinator.deferred.take() else {
+        return;
+    };
+    if let Some(failed_owner) = dispatch_power_command(command, coordinator) {
+        let backlog = collect_failed_owner_backlog(failed_owner);
+        settle_failed_owner_backlog(failed_owner, backlog, coordinator);
     }
 }
 
@@ -908,11 +942,7 @@ fn dispatch_power_terminal(
 #[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
 async fn power_coordinator_task() {
-    let mut inflight: Option<(PowerIntentOwner, PowerTicket)> = None;
-    let mut inflight_refresh = false;
-    let mut inflight_idle = false;
-    let mut active_owner: Option<PowerIntentOwner> = None;
-    let mut joined_refresh = heapless::Vec::<PowerTicket, POWER_COMMANDS_CAPACITY>::new();
+    let mut coordinator = PowerCoordinatorState::new();
     let mut pd_state = PD_SERVICE_STATE
         .receiver()
         .expect("power coordinator state receiver capacity is reserved");
@@ -925,60 +955,42 @@ async fn power_coordinator_task() {
         .await
         {
             Either3::First(command) => {
-                if let Some(failed_owner) = dispatch_power_command(
-                    command,
-                    &mut inflight,
-                    &mut inflight_refresh,
-                    &mut inflight_idle,
-                    active_owner,
-                    &mut joined_refresh,
-                ) {
+                if let Some(failed_owner) = dispatch_power_command(command, &mut coordinator) {
                     let backlog = collect_failed_owner_backlog(failed_owner);
-                    settle_failed_owner_backlog(
-                        failed_owner,
-                        backlog,
-                        &mut inflight,
-                        &mut inflight_refresh,
-                        &mut inflight_idle,
-                        active_owner,
-                        &mut joined_refresh,
-                    );
+                    settle_failed_owner_backlog(failed_owner, backlog, &mut coordinator);
                 }
+                retry_deferred_power_command(&mut coordinator);
             }
             Either3::Second((state, ticket, outcome)) => {
                 let failed_owner = failed_contract_owner_for_terminal(
-                    inflight,
+                    coordinator.inflight,
                     ticket,
-                    inflight_refresh,
-                    inflight_idle,
+                    coordinator.inflight_refresh,
+                    coordinator.inflight_idle,
                     outcome,
                 );
                 let failed_owner_backlog = failed_owner.map(collect_failed_owner_backlog);
                 let terminal_accepted = dispatch_power_terminal(
                     ticket,
                     outcome,
-                    &mut inflight,
-                    &mut inflight_refresh,
-                    &mut inflight_idle,
-                    &mut active_owner,
-                    &mut joined_refresh,
+                    &mut coordinator.inflight,
+                    &mut coordinator.inflight_refresh,
+                    &mut coordinator.inflight_idle,
+                    &mut coordinator.active_owner,
+                    &mut coordinator.joined_refresh,
                 );
                 if terminal_accepted {
                     publish_power_state(state);
                 }
                 if let (Some(failed_owner), Some(backlog)) = (failed_owner, failed_owner_backlog) {
-                    settle_failed_owner_backlog(
-                        failed_owner,
-                        backlog,
-                        &mut inflight,
-                        &mut inflight_refresh,
-                        &mut inflight_idle,
-                        active_owner,
-                        &mut joined_refresh,
-                    );
+                    settle_failed_owner_backlog(failed_owner, backlog, &mut coordinator);
                 }
+                retry_deferred_power_command(&mut coordinator);
             }
-            Either3::Third(state) => publish_power_state(state),
+            Either3::Third(state) => {
+                publish_power_state(state);
+                retry_deferred_power_command(&mut coordinator);
+            }
         }
     }
 }

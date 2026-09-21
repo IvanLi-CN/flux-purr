@@ -559,8 +559,9 @@ async fn process_pd_service_work(
     match command {
         Some(command) => {
             *pending = None;
-            if pd_service_command_cancelled(command) {
-                return None;
+            if take_pd_service_command_cancelled(command) {
+                let ticket = pd_service_command_ticket(command);
+                return Some((ticket, TicketOutcome::Superseded));
             }
             match process_pd_command(runtime, i2c, command, replacing_pending).await {
                 PdCommandProgress::Pending(ticket, operation) => {
