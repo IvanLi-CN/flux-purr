@@ -80,9 +80,11 @@ pub(crate) fn automatic_idle_contract_is_confirmed(
     capabilities: Option<ch224q::AdjustablePowerCapabilities>,
 ) -> bool {
     (observation.contract.kind == ContractKind::Pps
-        && observation.contract.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV)
+        && observation.contract.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
+        && observation.contract.current_ma >= MIN_HEATER_CONTRACT_MA)
         || (observation.contract.kind == ContractKind::Fixed
             && observation.contract.voltage_mv <= FUSB302B_INITIAL_PPS_REQUEST_MV
+            && observation.contract.current_ma >= MIN_HEATER_CONTRACT_MA
             && !capabilities.is_some_and(source_supports_fusb302b_idle_pps))
 }
 

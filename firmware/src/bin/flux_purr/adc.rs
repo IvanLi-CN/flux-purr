@@ -1018,7 +1018,9 @@ impl Fusb302bRuntime {
             self.policy.cancel_pending_request();
         }
         let active = self.policy.active_contract();
-        if active.kind == ContractKind::Pps && active.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
+        if active.kind == ContractKind::Pps
+            && active.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
+            && active.current_ma >= MIN_HEATER_CONTRACT_MA
         {
             return PdContractRequestState::Confirmed;
         }

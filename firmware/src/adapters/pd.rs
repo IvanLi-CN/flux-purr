@@ -246,6 +246,9 @@ impl ConfirmedActiveContract {
         contract: Contract,
         capabilities: SourceCapabilities,
     ) -> Option<Self> {
+        if !capabilities.supports_contract(contract) {
+            return None;
+        }
         let mode = match contract.kind {
             ContractKind::Fixed => PdContractRequestMode::Fixed,
             ContractKind::Pps => PdContractRequestMode::Pps,
@@ -842,6 +845,30 @@ mod tests {
                 max_mv: 21_000,
                 max_current_ma: 5_000,
             })
+        );
+    }
+
+    #[test]
+    fn confirmed_contract_requires_current_source_capability() {
+        let capabilities = SourceCapabilities::from_pdos(&[pps_pdo(5_000, 21_000, 5_000)]);
+        let private = capabilities
+            .select_exact_contract(PdContractRequest::pps(20_000, 3_000).unwrap())
+            .unwrap();
+
+        assert!(
+            ConfirmedActiveContract::from_private_contract(private, SourceCapabilities::empty(),)
+                .is_none()
+        );
+        assert!(
+            ConfirmedActiveContract::from_private_contract(
+                Contract {
+                    object_position: private.object_position,
+                    voltage_mv: 22_000,
+                    ..private
+                },
+                capabilities,
+            )
+            .is_none()
         );
     }
 }

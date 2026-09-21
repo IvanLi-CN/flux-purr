@@ -899,6 +899,27 @@ fn automatic_idle_restore_never_confirms_a_fixed_twenty_volt_contract() {
 }
 
 #[test]
+fn automatic_idle_restore_rejects_a_low_current_twelve_volt_contract() {
+    let observation = |kind| PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: Status::from_register(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 50,
+        contract_voltage_mv: Some(12_000),
+        contract: Contract::observed(kind, 12_000, 50),
+    };
+
+    assert!(!automatic_idle_contract_is_confirmed(
+        observation(ContractKind::Pps),
+        None
+    ));
+    assert!(!automatic_idle_contract_is_confirmed(
+        observation(ContractKind::Fixed),
+        None
+    ));
+}
+
+#[test]
 fn capability_refresh_ticket_always_settles_when_detached_or_faulted() {
     assert_eq!(
         refresh_terminal_outcome(SinkPhase::Detached, true, false, false),
