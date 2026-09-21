@@ -228,7 +228,7 @@ impl PdContractRequest {
         if operating_current_ma == 0 {
             return Err(PdContractRequestError::ZeroCurrent);
         }
-        if !(FUSB302B_PD_ABSOLUTE_MIN_MV..=FUSB302B_PD_ABSOLUTE_MAX_MV).contains(&voltage_mv) {
+        if !(FUSB302B_PPS_MIN_MV..=FUSB302B_PD_ABSOLUTE_MAX_MV).contains(&voltage_mv) {
             return Err(PdContractRequestError::PpsVoltageOutOfRange);
         }
         if !(MIN_HEATER_CONTRACT_MA..=MAX_HEATER_CONTRACT_MA).contains(&operating_current_ma) {
@@ -870,6 +870,10 @@ mod tests {
         );
         assert_eq!(
             PdContractRequest::pps(28_100, 3_000),
+            Err(PdContractRequestError::PpsVoltageOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::pps(5_000, 3_000),
             Err(PdContractRequestError::PpsVoltageOutOfRange)
         );
         assert_eq!(

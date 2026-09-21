@@ -24,7 +24,6 @@ pub(crate) struct PdServiceSnapshot {
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PdRequestState {
-    Confirmed,
     Pending(PowerTicket),
     Failed,
 }
@@ -203,11 +202,6 @@ impl PdServiceClient {
         let snapshot = self.snapshot();
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
-        }
-        if snapshot.observation.is_some_and(|observation| {
-            automatic_idle_contract_is_confirmed(observation, snapshot.capabilities)
-        }) {
-            return PdRequestState::Confirmed;
         }
         match PowerCoordinatorClient::new().idle() {
             Ok(ticket) => PdRequestState::Pending(ticket),

@@ -29,7 +29,6 @@ async fn fixed_ticket_confirmed(
 #[cfg(target_arch = "xtensa")]
 async fn await_idle_restore(pd_port: &PdPort, reason: HeaterPowerBackendReason) -> bool {
     match pd_port.restore_automatic_idle_contract() {
-        PdRequestState::Confirmed => true,
         PdRequestState::Pending(ticket) => fixed_ticket_confirmed(pd_port, ticket, reason).await,
         PdRequestState::Failed => false,
     }
@@ -149,14 +148,6 @@ where
         .pd_port
         .request_pps_contract_for(PowerIntentOwner::ManualOperator, request)
     {
-        PdRequestState::Confirmed => {
-            context.manual_pps.applied_mv = Some(target_mv);
-            info!(
-                "manual pps override applied mv={=u16} ma={=u16}",
-                target_mv, target_ma
-            );
-            Some(true)
-        }
         PdRequestState::Pending(ticket) => {
             context.manual_pps.pending_power_ticket = Some(ticket);
             context.manual_pps.pending_power_request_mv = Some(target_mv);
@@ -445,15 +436,6 @@ where
         return CurrentLimitContractResult::Failed;
     };
     match context.pd_port.request_fixed_contract(fixed_request) {
-        PdRequestState::Confirmed => {
-            set_pps_current_limit_backend(
-                context.backend,
-                HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
-                None,
-                true,
-            );
-            CurrentLimitContractResult::Ready
-        }
         PdRequestState::Pending(ticket) => {
             if matches!(
                 context.pd_port.wait_for_ticket(ticket).await,
@@ -638,7 +620,6 @@ where
 {
     apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
     let fixed_request_confirmed = match context.pd_port.restore_automatic_idle_contract() {
-        PdRequestState::Confirmed => true,
         PdRequestState::Pending(ticket) => ticket_confirmed(context.pd_port, ticket).await,
         PdRequestState::Failed => false,
     };
@@ -709,7 +690,6 @@ where
         .pd_port
         .request_pps_contract_for(PowerIntentOwner::AutomaticThermal, request_contract)
     {
-        PdRequestState::Confirmed => {}
         PdRequestState::Pending(ticket) => {
             if request.blank_heater {
                 apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);

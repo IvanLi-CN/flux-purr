@@ -2527,7 +2527,6 @@ where
     ui_state.heater_output_percent = 0;
 
     let idle_confirmed = match pd_port.restore_automatic_idle_contract() {
-        PdRequestState::Confirmed => true,
         PdRequestState::Pending(ticket) => matches!(
             pd_port.wait_for_ticket(ticket).await,
             TicketOutcome::Confirmed(_)
