@@ -559,6 +559,9 @@ async fn process_pd_service_work(
     match command {
         Some(command) => {
             *pending = None;
+            if pd_service_command_cancelled(command) {
+                return None;
+            }
             match process_pd_command(runtime, i2c, command, replacing_pending).await {
                 PdCommandProgress::Pending(ticket, operation) => {
                     *pending = Some((ticket, operation));

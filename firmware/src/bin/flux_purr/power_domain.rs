@@ -238,6 +238,9 @@ pub(crate) static PD_SERVICE_COMMANDS: Channel<
 > = Channel::new();
 
 #[cfg(target_arch = "xtensa")]
+static PD_SERVICE_CANCELLED_TICKET: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_arch = "xtensa")]
 static PD_SERVICE_STATE: Watch<CriticalSectionRawMutex, PowerState, 1> =
     Watch::new_with(PowerState::unavailable());
 
@@ -611,6 +614,26 @@ fn signal_ticket(ticket: PowerTicket, outcome: TicketOutcome) {
     POWER_TICKET_RESULTS[ticket.result_slot].signal((ticket, outcome));
 }
 
+#[cfg(target_arch = "xtensa")]
+fn ticket_key(ticket: PowerTicket) -> u32 {
+    (u32::from(ticket.sequence) << 3) | ticket.result_slot as u32
+}
+
+#[cfg(target_arch = "xtensa")]
+fn cancel_pd_service_ticket(ticket: PowerTicket) {
+    PD_SERVICE_CANCELLED_TICKET.store(ticket_key(ticket), Ordering::Release);
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn pd_service_command_cancelled(command: PdServiceCommand) -> bool {
+    let ticket = match command {
+        PdServiceCommand::AutomaticIdle { ticket }
+        | PdServiceCommand::Contract { ticket, .. }
+        | PdServiceCommand::RefreshCapabilities { ticket } => ticket,
+    };
+    PD_SERVICE_CANCELLED_TICKET.load(Ordering::Acquire) == ticket_key(ticket)
+}
+
 #[cfg(any(target_arch = "xtensa", test))]
 fn power_command_details(
     command: PowerCommand,
@@ -664,6 +687,7 @@ fn settle_inflight(
     outcome: TicketOutcome,
 ) {
     if let Some((_, ticket)) = inflight.take() {
+        cancel_pd_service_ticket(ticket);
         signal_ticket(ticket, outcome);
     }
     *inflight_refresh = false;
@@ -859,9 +883,9 @@ fn dispatch_power_terminal(
     inflight_idle: &mut bool,
     active_owner: &mut Option<PowerIntentOwner>,
     joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
-) {
+) -> bool {
     if !terminal_matches_inflight(*inflight, ticket) {
-        return;
+        return false;
     }
     let completed_owner = inflight.map(|(owner, _)| owner);
     *active_owner = active_owner_after_terminal(
@@ -878,6 +902,7 @@ fn dispatch_power_terminal(
     while let Some(joined) = joined_refresh.pop() {
         signal_ticket(joined, outcome);
     }
+    true
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -929,8 +954,7 @@ async fn power_coordinator_task() {
                     outcome,
                 );
                 let failed_owner_backlog = failed_owner.map(collect_failed_owner_backlog);
-                publish_power_state(state);
-                dispatch_power_terminal(
+                let terminal_accepted = dispatch_power_terminal(
                     ticket,
                     outcome,
                     &mut inflight,
@@ -939,6 +963,9 @@ async fn power_coordinator_task() {
                     &mut active_owner,
                     &mut joined_refresh,
                 );
+                if terminal_accepted {
+                    publish_power_state(state);
+                }
                 if let (Some(failed_owner), Some(backlog)) = (failed_owner, failed_owner_backlog) {
                     settle_failed_owner_backlog(
                         failed_owner,

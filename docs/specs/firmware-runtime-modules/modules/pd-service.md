@@ -44,7 +44,9 @@ confirmation and a fresh status observation.
   messages cannot complete the replacement ticket. An explicit refresh reports
   `CapabilitiesRefreshed` only after the protocol phase is settled;
   `WaitingForAccept` and `WaitingForPsRdy` remain pending. A refresh timeout
-  reports `TimedOut` rather than using cached capabilities as success.
+  reports `TimedOut` rather than using cached capabilities as success. A
+  superseded command still present in the mailbox is discarded before any
+  policy or hardware operation.
 - Mutex-protected read-only snapshot.
 - Sole FUSB302B protocol/I2C service.
 
