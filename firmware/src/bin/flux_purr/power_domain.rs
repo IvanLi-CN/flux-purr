@@ -143,16 +143,6 @@ impl PowerState {
                 SinkPhase::Fault => PowerProtocol::Fault,
             }
         };
-        let requested = requested.or_else(|| {
-            active.and_then(|active| match active.mode {
-                PdContractRequestMode::Fixed => {
-                    PdContractRequest::fixed(active.voltage_mv, active.operating_current_ma).ok()
-                }
-                PdContractRequestMode::Pps => {
-                    PdContractRequest::pps(active.voltage_mv, active.operating_current_ma).ok()
-                }
-            })
-        });
         Self {
             protocol,
             available: service_available,
@@ -1081,6 +1071,34 @@ mod tests {
         assert_eq!(state.protocol, PowerProtocol::Fault);
         assert_eq!(state.active, None);
         assert_eq!(state.failure, Some(PowerFailure::CapabilityInvalidated));
+    }
+
+    #[test]
+    fn confirmed_active_contract_is_not_republished_as_requested() {
+        let capabilities =
+            SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+        let contract = capabilities
+            .select_exact_contract(PdContractRequest::pps(17_500, 3_000).unwrap())
+            .unwrap();
+        let observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: contract.current_ma,
+            contract_voltage_mv: Some(contract.voltage_mv),
+            contract,
+        };
+
+        let state = PowerState::from_observation(
+            SinkPhase::Ready,
+            Some(observation),
+            Some(capabilities),
+            true,
+            None,
+        );
+
+        assert!(state.active.is_some());
+        assert_eq!(state.requested, None);
     }
 
     #[test]

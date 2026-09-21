@@ -466,12 +466,17 @@ fn publish_power_report(
     observation: Option<PdStatusObservation>,
     pending: Option<(PowerTicket, PendingPdOperation)>,
     terminal_override: Option<(PowerTicket, TicketOutcome)>,
+    settle_pending: bool,
 ) -> (PowerState, Option<(PowerTicket, TicketOutcome)>) {
-    let terminal = terminal_override.or_else(|| {
+    let terminal = if terminal_override.is_some() {
+        terminal_override
+    } else if settle_pending {
         pending.and_then(|(ticket, operation)| {
             pending_terminal(runtime, observation, operation).map(|outcome| (ticket, outcome))
         })
-    });
+    } else {
+        None
+    };
     let requested = if terminal.is_some() {
         None
     } else {
@@ -580,9 +585,16 @@ async fn publish_pd_service_turn(
     observation: Option<PdStatusObservation>,
     pending: Option<(PowerTicket, PendingPdOperation)>,
     terminal_override: Option<(PowerTicket, TicketOutcome)>,
+    settle_pending: bool,
     record_heartbeat: bool,
 ) -> Option<(PowerTicket, PendingPdOperation)> {
-    let (state, terminal) = publish_power_report(runtime, observation, pending, terminal_override);
+    let (state, terminal) = publish_power_report(
+        runtime,
+        observation,
+        pending,
+        terminal_override,
+        settle_pending,
+    );
     publish_pd_snapshot(runtime, observation);
     publish_pd_service_state(state);
     if record_heartbeat {
@@ -612,8 +624,15 @@ async fn run_pd_service_turn(
     // status read; keep this read inside the same bus lease.
     let observation = pd_status_observation(runtime, i2c).await;
     i2c.release();
-    *pending =
-        publish_pd_service_turn(runtime, observation, *pending, terminal_override, true).await;
+    *pending = publish_pd_service_turn(
+        runtime,
+        observation,
+        *pending,
+        terminal_override,
+        true,
+        true,
+    )
+    .await;
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -621,7 +640,7 @@ async fn publish_busy_pd_service_turn(
     runtime: &Fusb302bRuntime,
     pending: &mut Option<(PowerTicket, PendingPdOperation)>,
 ) {
-    *pending = publish_pd_service_turn(runtime, None, *pending, None, false).await;
+    *pending = publish_pd_service_turn(runtime, None, *pending, None, false, false).await;
 }
 
 /// The sole owner of FUSB302B policy state and physical PD I2C transactions.

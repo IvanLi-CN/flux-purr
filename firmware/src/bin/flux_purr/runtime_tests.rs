@@ -336,7 +336,9 @@ fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
     assert!(pd_service.contains("read_status().await.ok()?"));
     assert!(pd_service.contains("let observation = pd_status_observation(runtime, i2c).await"));
     assert!(pd_service.contains("publish_pd_snapshot(runtime, observation)"));
-    assert!(pd_service.contains("publish_pd_service_turn(runtime, None, *pending, None, false)"));
+    assert!(
+        pd_service.contains("publish_pd_service_turn(runtime, None, *pending, None, false, false)")
+    );
     assert!(pd_service.contains("if record_heartbeat"));
     assert!(!pd_task.contains("record_pd_heartbeat"));
 
