@@ -38,7 +38,10 @@ confirmation and a fresh status observation.
   capacity-6 public admission queue and ticket-result slots.
 - At most one command per `5 ms` service turn. A queued replacement command is
   handled before retrying deferred work, preventing stale superseded requests
-  from being retransmitted.
+  from being retransmitted. When a replacement is present, the service cancels
+  the old local operation, flushes the receive FIFO, and refreshes
+  `Source_Capabilities` before sending a new RDO; stale `Accept`/`PS_RDY`
+  messages cannot complete the replacement ticket.
 - Mutex-protected read-only snapshot.
 - Sole FUSB302B protocol/I2C service.
 

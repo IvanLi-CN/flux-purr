@@ -27,7 +27,9 @@ ticket receives one terminal outcome. A replacement command is delivered to
 settled as `Superseded` cannot be retransmitted. If an in-flight contract
 fails, already-admitted same/lower-priority requests and queued capability
 refreshes settle as `Superseded`; higher-priority requests and explicit Idle
-remain eligible for ordered dispatch.
+remain eligible for ordered dispatch. Application facades do not reuse a
+snapshot ticket or report an already-active contract as a newly acquired owner
+intent; every owner request enters this arbitration boundary.
 
 ## Published Outputs
 

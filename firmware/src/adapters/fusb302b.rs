@@ -167,14 +167,10 @@ impl SinkPolicy {
         &mut self,
         request: crate::adapters::pd::PdContractRequest,
     ) -> bool {
-        self.source_capabilities_received
-            && request.mode == crate::adapters::pd::PdContractRequestMode::Pps
-            && {
-                self.requested_mv = request.voltage_mv;
-                self.preferred_ma = request.operating_current_ma;
-                self.requested_mode = Some(request.mode);
-                true
-            }
+        self.requested_mv = request.voltage_mv;
+        self.preferred_ma = request.operating_current_ma;
+        self.requested_mode = Some(request.mode);
+        true
     }
 
     pub fn confirmed_active_contract(self) -> Option<crate::adapters::pd::ConfirmedActiveContract> {
@@ -300,6 +296,11 @@ impl SinkPolicy {
         self.requested_mv = self.default_requested_mv;
         self.requested_mode = None;
         self.begin_request(self.source_capabilities)
+    }
+
+    pub fn prepare_automatic_idle_refresh(&mut self) {
+        self.requested_mv = self.default_requested_mv;
+        self.requested_mode = None;
     }
 
     /// Move a PPS session to an exact fixed PDO before releasing a terminal
@@ -709,6 +710,32 @@ mod tests {
         assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
         assert_eq!(policy.active_contract(), Contract::none());
         assert_eq!(policy.source_capabilities(), None);
+    }
+
+    #[test]
+    fn cancelled_request_responses_cannot_confirm_the_replacement_contract() {
+        let mut policy = SinkPolicy::new(12_000, 3_000);
+        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        let old_request = crate::adapters::pd::PdContractRequest::pps(12_000, 3_000).unwrap();
+        let new_request = crate::adapters::pd::PdContractRequest::pps(17_500, 3_000).unwrap();
+
+        assert!(policy.request_contract(old_request).is_some());
+        policy.cancel_pending_request();
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert_eq!(policy.active_contract(), Contract::none());
+
+        assert!(policy.prepare_contract_refresh(new_request));
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+        policy.on_control_message(3, 1);
+        policy.on_control_message(6, 1);
+        assert_eq!(policy.active_contract().voltage_mv, 17_500);
     }
 
     #[test]

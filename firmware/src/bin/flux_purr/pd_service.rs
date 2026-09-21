@@ -19,7 +19,6 @@ pub(crate) struct PdServiceSnapshot {
     pub(crate) service_available: bool,
     pub(crate) stale_contract_vin_guard_suspended: bool,
     pub(crate) published_at_ms: u64,
-    pub(crate) pending_request: Option<PdContractRequest>,
     pub(crate) pending_ticket: Option<PowerTicket>,
     pub(crate) pending_idle: bool,
 }
@@ -42,7 +41,6 @@ impl PdServiceSnapshot {
             service_available: false,
             stale_contract_vin_guard_suspended: false,
             published_at_ms: 0,
-            pending_request: None,
             pending_ticket: None,
             pending_idle: false,
         }
@@ -182,26 +180,6 @@ impl PdServiceClient {
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
         }
-        if snapshot.pending_request == Some(request)
-            && let Some(ticket) = snapshot.pending_ticket
-        {
-            return PdRequestState::Pending(ticket);
-        }
-        let active = snapshot.observation.and_then(|observation| {
-            ConfirmedActiveContract::from_private_contract(
-                observation.contract,
-                snapshot
-                    .capabilities
-                    .map(|_| SourceCapabilities::empty())
-                    .unwrap_or_else(SourceCapabilities::empty),
-            )
-        });
-        if snapshot.pending_request.is_none()
-            && !snapshot.pending_idle
-            && request_matches_active(request, active)
-        {
-            return PdRequestState::Confirmed;
-        }
         match PowerCoordinatorClient::new().request(PowerIntentOwner::AutomaticThermal, request) {
             Ok(ticket) => PdRequestState::Pending(ticket),
             Err(_) => PdRequestState::Failed,
@@ -247,21 +225,6 @@ impl PdServiceClient {
         let snapshot = self.snapshot();
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
-        }
-        if snapshot.pending_request == Some(request)
-            && let Some(ticket) = snapshot.pending_ticket
-        {
-            return PdRequestState::Pending(ticket);
-        }
-        if snapshot.pending_request.is_none()
-            && !snapshot.pending_idle
-            && snapshot.observation.is_some_and(|observation| {
-                observation.contract.kind == ContractKind::Pps
-                    && observation.contract.voltage_mv == request.voltage_mv()
-                    && observation.contract.current_ma == request.operating_current_ma()
-            })
-        {
-            return PdRequestState::Confirmed;
         }
         match PowerCoordinatorClient::new().request(owner, request) {
             Ok(ticket) => PdRequestState::Pending(ticket),
@@ -340,13 +303,11 @@ fn publish_pd_snapshot(
     let interlock_latched = PD_INTERLOCK_LATCHED.load(Ordering::Acquire) != 0;
     let observation = (!interlock_latched).then_some(observation).flatten();
     let ready = startup_pd_contract_ready(observation);
-    let (pending_request, pending_idle, pending_ticket) = match pending {
-        Some((ticket, PendingPdOperation::Contract { request })) => {
-            (Some(request), false, Some(ticket))
-        }
-        Some((ticket, PendingPdOperation::Idle)) => (None, true, Some(ticket)),
-        Some((ticket, PendingPdOperation::Refresh)) => (None, false, Some(ticket)),
-        None => (None, false, None),
+    let (pending_idle, pending_ticket) = match pending {
+        Some((ticket, PendingPdOperation::Contract { .. })) => (false, Some(ticket)),
+        Some((ticket, PendingPdOperation::Idle)) => (true, Some(ticket)),
+        Some((ticket, PendingPdOperation::Refresh)) => (false, Some(ticket)),
+        None => (false, None),
     };
     PD_SERVICE_SNAPSHOT.lock(|snapshot| {
         *snapshot.borrow_mut() = PdServiceSnapshot {
@@ -358,7 +319,6 @@ fn publish_pd_snapshot(
             service_available: runtime.service_available(),
             stale_contract_vin_guard_suspended: runtime.stale_contract_vin_guard_suspended(now_ms),
             published_at_ms: now_ms,
-            pending_request,
             pending_ticket,
             pending_idle,
         };
@@ -379,11 +339,12 @@ async fn process_pd_command(
     runtime: &mut Fusb302bRuntime,
     i2c: &mut PdI2c<'static>,
     command: PdServiceCommand,
+    replacing_pending: bool,
 ) -> PdCommandProgress {
     match command {
         PdServiceCommand::AutomaticIdle { ticket } => {
             match runtime
-                .request_automatic_idle_contract(i2c, PdTimestamp::now())
+                .request_automatic_idle_contract(i2c, PdTimestamp::now(), replacing_pending)
                 .await
             {
                 PdContractRequestState::Confirmed => {
@@ -399,7 +360,7 @@ async fn process_pd_command(
         }
         PdServiceCommand::Contract { request, ticket } => {
             match runtime
-                .request_contract(i2c, request, PdTimestamp::now())
+                .request_contract(i2c, request, PdTimestamp::now(), replacing_pending)
                 .await
             {
                 PdContractRequestState::Confirmed => {
@@ -415,7 +376,7 @@ async fn process_pd_command(
         }
         PdServiceCommand::RefreshCapabilities { ticket } => {
             match runtime
-                .refresh_source_capabilities(i2c, PdTimestamp::now())
+                .refresh_source_capabilities(i2c, PdTimestamp::now(), replacing_pending)
                 .await
             {
                 PdContractRequestState::Confirmed => {
@@ -569,7 +530,7 @@ async fn retry_deferred_contract_request(
         return Some((ticket, TicketOutcome::Rejected));
     }
     match runtime
-        .request_contract(i2c, request, PdTimestamp::now())
+        .request_contract(i2c, request, PdTimestamp::now(), false)
         .await
     {
         PdContractRequestState::Failed => Some((ticket, TicketOutcome::Rejected)),
@@ -583,12 +544,13 @@ async fn process_pd_service_work(
     i2c: &mut PdI2c<'static>,
     pending: &mut Option<(PowerTicket, PendingPdOperation)>,
 ) -> Option<(PowerTicket, TicketOutcome)> {
+    let replacing_pending = pending.is_some();
     let (pending_to_retry, command) =
         select_pd_service_work(*pending, PD_SERVICE_COMMANDS.try_receive().ok());
     match command {
         Some(command) => {
             *pending = None;
-            match process_pd_command(runtime, i2c, command).await {
+            match process_pd_command(runtime, i2c, command, replacing_pending).await {
                 PdCommandProgress::Pending(ticket, operation) => {
                     *pending = Some((ticket, operation));
                     None

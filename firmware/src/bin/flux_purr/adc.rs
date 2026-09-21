@@ -875,6 +875,7 @@ impl Fusb302bRuntime {
         i2c: &mut PdI2c<'_>,
         request: PdContractRequest,
         now: PdTimestamp,
+        replace_pending: bool,
     ) -> PdContractRequestState {
         self.request_rejected = false;
         self.request_timed_out = false;
@@ -883,11 +884,31 @@ impl Fusb302bRuntime {
             self.policy.phase(),
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
         );
+        if replace_pending {
+            self.policy.cancel_pending_request();
+            if !self.policy.prepare_contract_refresh(request) {
+                return PdContractRequestState::Failed;
+            }
+            return self.refresh_source_capabilities(i2c, now, true).await;
+        }
         if request_inflight {
             if self.policy.pending_contract_matches(request) {
                 return PdContractRequestState::Pending;
             }
             self.policy.cancel_pending_request();
+            if !self.policy.prepare_contract_refresh(request) {
+                return PdContractRequestState::Failed;
+            }
+            if !fusb302b_flush_receive_fifo(i2c).await {
+                self.recover_transient_transport_fault(
+                    i2c,
+                    fusb302b::TransientTransportFault::ReceiveIoError,
+                    now,
+                )
+                .await;
+                return PdContractRequestState::Failed;
+            }
+            return self.refresh_source_capabilities(i2c, now, true).await;
         } else if self
             .policy
             .confirmed_active_contract()
@@ -901,7 +922,7 @@ impl Fusb302bRuntime {
             if !self.policy.prepare_contract_refresh(request) {
                 return PdContractRequestState::Failed;
             }
-            return self.refresh_source_capabilities(i2c, now).await;
+            return self.refresh_source_capabilities(i2c, now, false).await;
         }
         let Some(rdo) = self.policy.request_contract(request) else {
             return PdContractRequestState::Failed;
@@ -922,10 +943,27 @@ impl Fusb302bRuntime {
         &mut self,
         i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
+        replace_pending: bool,
     ) -> PdContractRequestState {
         self.request_rejected = false;
         self.request_timed_out = false;
-        if self.source_capabilities_refresh_pending {
+        if replace_pending {
+            self.source_capabilities_refresh_pending = false;
+            self.source_capabilities_refresh_requested_at_ms = None;
+            self.last_source_capabilities_request_at_ms = None;
+            self.source_capabilities_tx_confirmed = false;
+            self.source_capabilities_gcrc_seen = false;
+            self.partial_rx_started_at_ms = None;
+            if !fusb302b_flush_receive_fifo(i2c).await {
+                self.recover_transient_transport_fault(
+                    i2c,
+                    fusb302b::TransientTransportFault::ReceiveIoError,
+                    now,
+                )
+                .await;
+                return PdContractRequestState::Failed;
+            }
+        } else if self.source_capabilities_refresh_pending {
             return PdContractRequestState::Pending;
         }
         if self.policy.phase() == SinkPhase::Fault {
@@ -950,10 +988,16 @@ impl Fusb302bRuntime {
         &mut self,
         i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
+        replace_pending: bool,
     ) -> PdContractRequestState {
         self.request_rejected = false;
         self.request_timed_out = false;
         let now_ms = now.as_millis();
+        if replace_pending {
+            self.policy.cancel_pending_request();
+            self.policy.prepare_automatic_idle_refresh();
+            return self.refresh_source_capabilities(i2c, now, true).await;
+        }
         if matches!(
             self.policy.phase(),
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
