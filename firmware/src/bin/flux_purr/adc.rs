@@ -946,6 +946,27 @@ impl Fusb302bRuntime {
         PdContractRequestState::Pending
     }
 
+    pub(crate) async fn abort_pending_operation(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) {
+        self.policy.cancel_pending_request();
+        self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_for_contract = false;
+        self.source_capabilities_refresh_requested_at_ms = None;
+        self.source_capabilities_tx_confirmed = false;
+        self.source_capabilities_gcrc_seen = false;
+        self.partial_rx_started_at_ms = None;
+        self.request_rejected = false;
+        self.request_timed_out = false;
+        if !fusb302b_flush_receive_fifo(i2c).await {
+            let _ = self
+                .recover_transient_transport_fault(
+                    i2c,
+                    fusb302b::TransientTransportFault::ReceiveIoError,
+                    now,
+                )
+                .await;
+        }
+    }
+
     pub(crate) async fn refresh_source_capabilities(
         &mut self,
         i2c: &mut PdI2c<'_>,

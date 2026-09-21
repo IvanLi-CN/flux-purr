@@ -539,11 +539,17 @@ async fn process_pd_service_work(
         select_pd_service_work(*pending, PD_SERVICE_COMMANDS.try_receive().ok());
     match command {
         Some(command) => {
-            *pending = None;
             if take_pd_service_command_cancelled(command) {
                 let ticket = pd_service_command_ticket(command);
+                if pending.is_some() {
+                    runtime
+                        .abort_pending_operation(i2c, PdTimestamp::now())
+                        .await;
+                    *pending = None;
+                }
                 return Some((ticket, TicketOutcome::Superseded));
             }
+            *pending = None;
             match process_pd_command(runtime, i2c, command, replacing_pending).await {
                 PdCommandProgress::Pending(ticket, operation) => {
                     *pending = Some((ticket, operation));

@@ -22,7 +22,7 @@ pub const SOURCE_CAPS_RETRY_INTERVAL_MS: u64 = 5_000;
 
 fn source_message_id_is_newer(last: u8, current: u8) -> bool {
     let distance = current.wrapping_sub(last) & 0x07;
-    (1..=4).contains(&distance)
+    (1..=3).contains(&distance)
 }
 
 /// The only recovery actions available after a Source_Capabilities timeout.
@@ -1008,6 +1008,12 @@ mod tests {
         assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
         policy.on_control_message_with_message_id(6, Some(2), 2);
         assert_eq!(policy.phase(), SinkPhase::Ready);
+    }
+
+    #[test]
+    fn source_message_id_half_range_is_treated_as_ambiguous() {
+        assert!(!source_message_id_is_newer(1, 5));
+        assert!(!source_message_id_is_newer(5, 1));
     }
 
     #[test]
