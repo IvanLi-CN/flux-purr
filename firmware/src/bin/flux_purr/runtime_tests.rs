@@ -10439,6 +10439,14 @@ fn fusb302b_pending_contract_is_not_reported_as_ready() {
 }
 
 #[test]
+fn pps_keepalive_without_a_response_expires_the_authorization_window() {
+    assert!(!pps_keepalive_response_timeout_due(None, 10_000));
+    assert!(!pps_keepalive_response_timeout_due(Some(10_000), 11_499));
+    assert!(pps_keepalive_response_timeout_due(Some(10_000), 11_500));
+    assert!(pps_keepalive_response_timeout_due(Some(0), u64::MAX));
+}
+
+#[test]
 fn fusb302b_protocol_fault_snapshot_codes_map_faults() {
     assert_eq!(
         fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_RETRY_FAILED),

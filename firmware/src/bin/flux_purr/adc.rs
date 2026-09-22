@@ -630,6 +630,7 @@ pub(crate) struct Fusb302bRuntime {
     pub(crate) source_capabilities_refresh_for_contract: bool,
     pub(crate) source_capabilities_refresh_requested_at_ms: Option<u64>,
     pub(crate) last_request_at_ms: Option<u64>,
+    pub(crate) pps_keepalive_pending_at_ms: Option<u64>,
     pub(crate) source_capabilities_tx_confirmed: bool,
     pub(crate) source_capabilities_gcrc_seen: bool,
     pub(crate) partial_rx_started_at_ms: Option<u64>,
@@ -648,6 +649,19 @@ pub(crate) struct Fusb302bRuntime {
     // power observation must never trigger a second status-bank transaction.
     pub(crate) vbus_status_observed: bool,
     pub(crate) vbus_status_raw: u8,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const fn pps_keepalive_response_timeout_due(
+    pending_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    match pending_at_ms {
+        Some(pending_at_ms) => {
+            now_ms.saturating_sub(pending_at_ms) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS
+        }
+        None => false,
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -674,6 +688,7 @@ impl Fusb302bRuntime {
             source_capabilities_refresh_for_contract: false,
             source_capabilities_refresh_requested_at_ms: None,
             last_request_at_ms: None,
+            pps_keepalive_pending_at_ms: None,
             source_capabilities_tx_confirmed: false,
             source_capabilities_gcrc_seen: false,
             partial_rx_started_at_ms: None,
@@ -703,6 +718,7 @@ impl Fusb302bRuntime {
         self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
         self.last_request_at_ms = None;
+        self.pps_keepalive_pending_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
@@ -791,6 +807,7 @@ impl Fusb302bRuntime {
         self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
         self.last_request_at_ms = None;
+        self.pps_keepalive_pending_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
@@ -886,6 +903,7 @@ impl Fusb302bRuntime {
             fusb302b::TransientTransportRecovery::FlushReceiveAndRequery => {
                 self.policy.interlock_after_transient_transport_fault();
                 self.last_request_at_ms = None;
+                self.pps_keepalive_pending_at_ms = None;
                 // Preserve the normal discovery retry interval after a local
                 // fault. RetryFail remains asserted until the next START_TX,
                 // so the polling path consumes that already-handled status
@@ -948,6 +966,7 @@ impl Fusb302bRuntime {
         now: PdTimestamp,
         replace_pending: bool,
     ) -> PdContractRequestState {
+        self.pps_keepalive_pending_at_ms = None;
         self.request_rejected = false;
         self.request_timed_out = false;
         let now_ms = now.as_millis();
@@ -1014,6 +1033,7 @@ impl Fusb302bRuntime {
 
     pub(crate) async fn abort_pending_operation(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) {
         self.policy.cancel_pending_request();
+        self.pps_keepalive_pending_at_ms = None;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
@@ -1040,6 +1060,7 @@ impl Fusb302bRuntime {
         replace_pending: bool,
         request_contract: bool,
     ) -> PdContractRequestState {
+        self.pps_keepalive_pending_at_ms = None;
         self.request_rejected = false;
         self.request_timed_out = false;
         if replace_pending {
@@ -1087,6 +1108,7 @@ impl Fusb302bRuntime {
         now: PdTimestamp,
         replace_pending: bool,
     ) -> PdContractRequestState {
+        self.pps_keepalive_pending_at_ms = None;
         self.request_rejected = false;
         self.request_timed_out = false;
         let now_ms = now.as_millis();
@@ -1200,15 +1222,18 @@ impl Fusb302bRuntime {
         now: PdTimestamp,
         now_ms: u64,
     ) -> Option<bool> {
+        let keepalive_pending =
+            pps_keepalive_response_timeout_due(self.pps_keepalive_pending_at_ms, now_ms);
         let pending = matches!(
             self.policy.phase(),
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
         ) && self.last_request_at_ms.is_some_and(|last| {
             now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS
         });
-        if !pending {
+        if !pending && !keepalive_pending {
             return None;
         }
+        self.pps_keepalive_pending_at_ms = None;
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
         self.request_timed_out = true;
         Some(
@@ -1376,6 +1401,7 @@ impl Fusb302bRuntime {
                     .await;
             }
             self.last_request_at_ms = Some(now_ms);
+            self.pps_keepalive_pending_at_ms = Some(now_ms);
         }
         true
     }
@@ -1447,6 +1473,7 @@ impl Fusb302bRuntime {
     ) -> bool {
         self.clear_vbus_low_interlock();
         self.partial_rx_started_at_ms = None;
+        self.pps_keepalive_pending_at_ms = None;
         if let Some((pdos, count)) =
             fusb302b::source_capabilities_from_message(message.header(), message.payload())
         {
@@ -1513,6 +1540,7 @@ impl Fusb302bRuntime {
     fn handle_control_message(&mut self, message: PdPacket, now_ms: u64) {
         let was_waiting_for_ps_rdy = self.policy.phase() == SinkPhase::WaitingForPsRdy;
         let message_type = (message.header() & 0x1f) as u8;
+        self.pps_keepalive_pending_at_ms = None;
         self.request_rejected = matches!(message_type, 4 | 12)
             && matches!(
                 self.policy.phase(),
