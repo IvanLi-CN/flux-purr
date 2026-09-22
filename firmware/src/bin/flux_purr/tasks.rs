@@ -2,6 +2,13 @@
 use super::*;
 
 #[cfg(target_arch = "xtensa")]
+fn request_idle_restore_fire_and_forget(pd_port: &PdPort) {
+    if let PdRequestState::Pending(ticket) = pd_port.restore_automatic_idle_contract() {
+        pd_port.discard_ticket(ticket);
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 fn await_idle_restore(pd_port: &PdPort) -> bool {
     match pd_port.restore_automatic_idle_contract() {
         PdRequestState::Confirmed => true,
@@ -76,7 +83,7 @@ where
                 }
                 context.manual_pps.fail(ManualPpsError::WriteFailed);
                 apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-                let _ = context.pd_port.restore_automatic_idle_contract();
+                request_idle_restore_fire_and_forget(context.pd_port);
                 return None;
             }
             None if context.manual_pps.enabled => return None,
@@ -102,7 +109,7 @@ where
     {
         context.manual_pps.fail(ManualPpsError::PdNotReady);
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-        let _ = context.pd_port.restore_automatic_idle_contract();
+        request_idle_restore_fire_and_forget(context.pd_port);
         return Some(false);
     }
     if !manual_pps_request_required(
@@ -136,7 +143,7 @@ where
         PdRequestState::Failed => {
             context.manual_pps.fail(ManualPpsError::WriteFailed);
             apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-            let _ = context.pd_port.restore_automatic_idle_contract();
+            request_idle_restore_fire_and_forget(context.pd_port);
             info!(
                 "manual pps override cleared reason={=str}",
                 ManualPpsError::WriteFailed.code()
