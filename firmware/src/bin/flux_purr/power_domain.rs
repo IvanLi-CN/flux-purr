@@ -1103,6 +1103,122 @@ pub(crate) fn spawn_power_coordinator(spawner: Spawner) {
 mod tests {
     use super::*;
 
+    struct CoordinatorHarness {
+        service_available: bool,
+        inflight: Option<(PowerIntentOwner, PowerTicket)>,
+        inflight_refresh: bool,
+        inflight_idle: bool,
+        active_owner: Option<PowerIntentOwner>,
+        joined_refresh: heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
+        deferred: Option<PowerCommand>,
+        terminals: heapless::Vec<(PowerTicket, TicketOutcome), POWER_COMMANDS_CAPACITY>,
+    }
+
+    impl CoordinatorHarness {
+        fn new(service_available: bool) -> Self {
+            Self {
+                service_available,
+                inflight: None,
+                inflight_refresh: false,
+                inflight_idle: false,
+                active_owner: None,
+                joined_refresh: heapless::Vec::new(),
+                deferred: None,
+                terminals: heapless::Vec::new(),
+            }
+        }
+
+        fn signal(&mut self, ticket: PowerTicket, outcome: TicketOutcome) {
+            self.terminals
+                .push((ticket, outcome))
+                .expect("harness terminal capacity");
+        }
+
+        fn dispatch(&mut self, command: PowerCommand) -> Option<PowerIntentOwner> {
+            let (_, new_owner, new_refresh, new_idle, _) = power_command_details(command);
+            if let Some(deferred) = self.deferred {
+                let (deferred_ticket, deferred_owner, _, _, _) = power_command_details(deferred);
+                if deferred_command_is_replaced(new_owner, new_refresh, new_idle, deferred_owner) {
+                    self.deferred = None;
+                    self.signal(deferred_ticket, TicketOutcome::Superseded);
+                } else {
+                    let (ticket, _, _, _, _) = power_command_details(command);
+                    self.signal(ticket, TicketOutcome::Superseded);
+                    return None;
+                }
+            }
+            let (ticket, owner, refresh, idle, _) = power_command_details(command);
+            if owner_is_superseded(owner, self.active_owner) {
+                self.signal(ticket, TicketOutcome::Superseded);
+                return None;
+            }
+            match power_command_admission_decision(
+                owner,
+                refresh,
+                idle,
+                self.inflight.map(|(active_owner, _)| active_owner),
+                self.inflight_refresh,
+            ) {
+                PowerCommandAdmissionDecision::JoinRefresh => {
+                    if self.joined_refresh.push(ticket).is_err() {
+                        self.signal(ticket, TicketOutcome::Rejected);
+                    }
+                    return None;
+                }
+                PowerCommandAdmissionDecision::SupersedeInflight => {
+                    if let Some((_, old_ticket)) = self.inflight.take() {
+                        self.signal(old_ticket, TicketOutcome::Superseded);
+                    }
+                    self.inflight_refresh = false;
+                    self.inflight_idle = false;
+                    while let Some(joined) = self.joined_refresh.pop() {
+                        self.signal(joined, TicketOutcome::Superseded);
+                    }
+                }
+                PowerCommandAdmissionDecision::SupersedeIncoming => {
+                    self.signal(ticket, TicketOutcome::Superseded);
+                    return None;
+                }
+                PowerCommandAdmissionDecision::Dispatch => {}
+            }
+            let inflight_owner = owner.unwrap_or(PowerIntentOwner::AutomaticThermal);
+            if !self.service_available {
+                if self.deferred.is_some() {
+                    self.signal(ticket, TicketOutcome::TransportFault);
+                } else {
+                    self.deferred = Some(command);
+                }
+                return owner;
+            }
+            self.inflight = Some((inflight_owner, ticket));
+            self.inflight_refresh = refresh;
+            self.inflight_idle = idle;
+            None
+        }
+
+        fn settle(&mut self, ticket: PowerTicket, outcome: TicketOutcome) -> bool {
+            if !terminal_matches_inflight(self.inflight, ticket) {
+                return false;
+            }
+            let completed_owner = self.inflight.map(|(owner, _)| owner);
+            self.active_owner = active_owner_after_terminal(
+                self.active_owner,
+                completed_owner,
+                self.inflight_refresh,
+                self.inflight_idle,
+                outcome,
+            );
+            self.signal(ticket, outcome);
+            self.inflight = None;
+            self.inflight_refresh = false;
+            self.inflight_idle = false;
+            while let Some(joined) = self.joined_refresh.pop() {
+                self.signal(joined, outcome);
+            }
+            true
+        }
+    }
+
     #[test]
     fn active_contract_match_requires_mode_voltage_and_current() {
         let request = PdContractRequest::pps(20_000, 3_000).unwrap();
@@ -1320,6 +1436,78 @@ mod tests {
             false,
             calibration,
         ));
+    }
+
+    #[test]
+    fn coordinator_harness_covers_defer_supersession_and_stale_terminals() {
+        let calibration = PowerIntentOwner::Calibration;
+        let automatic = PowerIntentOwner::AutomaticThermal;
+        let first = PowerTicket {
+            owner: Some(calibration),
+            sequence: 1,
+            result_slot: 0,
+        };
+        let lower = PowerTicket {
+            owner: Some(automatic),
+            sequence: 2,
+            result_slot: 1,
+        };
+        let higher = PowerTicket {
+            owner: Some(PowerIntentOwner::ThermalPlantAuto),
+            sequence: 3,
+            result_slot: 2,
+        };
+        let request = PdContractRequest::pps(17_500, 3_000).unwrap();
+        let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+        let active = ConfirmedActiveContract::from_private_contract(
+            source.select_exact_contract(request).unwrap(),
+            source,
+        )
+        .unwrap();
+        let mut harness = CoordinatorHarness::new(false);
+
+        assert_eq!(
+            harness.dispatch(PowerCommand::Request {
+                owner: calibration,
+                request,
+                ticket: first,
+            }),
+            Some(calibration)
+        );
+        assert!(harness.deferred.is_some());
+        assert_eq!(
+            harness.dispatch(PowerCommand::Request {
+                owner: automatic,
+                request,
+                ticket: lower,
+            }),
+            None
+        );
+        assert!(matches!(
+            harness.terminals.last(),
+            Some((ticket, TicketOutcome::Superseded)) if *ticket == lower
+        ));
+
+        harness.service_available = true;
+        let deferred = harness.deferred.take().expect("deferred command");
+        assert_eq!(harness.dispatch(deferred), None);
+        let inflight = harness.inflight.expect("inflight command").1;
+        assert!(!harness.settle(lower, TicketOutcome::Superseded));
+        assert!(harness.settle(inflight, TicketOutcome::Confirmed(active)));
+        assert_eq!(harness.active_owner, Some(calibration));
+
+        assert_eq!(
+            harness.dispatch(PowerCommand::Request {
+                owner: PowerIntentOwner::ThermalPlantAuto,
+                request,
+                ticket: higher,
+            }),
+            None
+        );
+        assert_eq!(
+            harness.inflight,
+            Some((PowerIntentOwner::ThermalPlantAuto, higher))
+        );
     }
 
     #[test]
