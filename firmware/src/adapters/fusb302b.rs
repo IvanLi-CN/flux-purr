@@ -347,9 +347,11 @@ impl SinkPolicy {
         if self.active_contract.kind != ContractKind::Pps {
             return None;
         }
-        self.pending_contract = self.active_contract;
-        self.phase = SinkPhase::WaitingForAccept;
-        request_data_object(self.pending_contract)
+
+        // A PPS keepalive repeats the already confirmed RDO. It is not a
+        // contract transition, so a source that does not answer an identical
+        // request must not make the existing active contract disappear.
+        request_data_object(self.active_contract)
     }
 
     /// Abandon a request that did not reach `PS_RDY` without discarding a
@@ -618,6 +620,25 @@ mod tests {
         assert_eq!(policy.phase(), SinkPhase::Ready);
         assert_eq!(policy.active_contract().kind, ContractKind::Pps);
         assert_eq!(policy.active_contract().voltage_mv, 12_000);
+    }
+
+    #[test]
+    fn pps_keepalive_preserves_the_confirmed_contract_until_a_real_failure() {
+        let mut policy = SinkPolicy::new(17_500, 3_000);
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        let active = policy.active_contract();
+
+        assert!(policy.refresh_active_pps().is_some());
+
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract(), active);
+        assert_eq!(policy.pending_contract, Contract::none());
     }
 
     #[test]
