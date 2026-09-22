@@ -289,7 +289,6 @@ fn pd_service_never_waits_for_the_shared_i2c_bus() {
 #[test]
 fn pd_i2c_timeout_stays_short_while_transport_recovery_is_rate_limited() {
     assert_eq!(I2C_TRANSACTION_TIMEOUT_MS, 10);
-    assert!(I2C_TRANSACTION_TIMEOUT_MS < 25);
     assert_eq!(FUSB302B_TRANSPORT_RECOVERY_BACKOFF_MS, 50);
     assert!(fusb302b_transport_retry_due(None, 1_000));
     assert!(!fusb302b_transport_retry_due(Some(1_050), 1_049));
@@ -349,7 +348,7 @@ fn pending_pd_terminal_model_covers_confirmation_failure_and_transition_waits() 
         current_raw: 0,
         current_ma: active.operating_current_ma,
         contract_voltage_mv: Some(active.voltage_mv),
-        contract: contract,
+        contract,
     };
     let context = |phase, observation, source_capabilities| PdServiceTerminalContext {
         phase,

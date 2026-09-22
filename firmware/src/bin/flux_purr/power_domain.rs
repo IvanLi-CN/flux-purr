@@ -1157,18 +1157,38 @@ mod tests {
                 .expect("harness terminal capacity");
         }
 
+        fn accept_over_deferred(&mut self, command: PowerCommand) -> bool {
+            let Some(deferred) = self.deferred else {
+                return true;
+            };
+            let (new_ticket, new_owner, new_refresh, new_idle, _) = power_command_details(command);
+            let (deferred_ticket, deferred_owner, _, _, _) = power_command_details(deferred);
+            if !deferred_command_is_replaced(new_owner, new_refresh, new_idle, deferred_owner) {
+                self.signal(new_ticket, TicketOutcome::Superseded);
+                return false;
+            }
+            self.deferred = None;
+            self.signal(deferred_ticket, TicketOutcome::Superseded);
+            true
+        }
+
+        fn defer_or_fault(
+            &mut self,
+            command: PowerCommand,
+            ticket: PowerTicket,
+            owner: Option<PowerIntentOwner>,
+        ) -> Option<PowerIntentOwner> {
+            if self.deferred.is_some() {
+                self.signal(ticket, TicketOutcome::TransportFault);
+            } else {
+                self.deferred = Some(command);
+            }
+            owner
+        }
+
         fn dispatch(&mut self, command: PowerCommand) -> Option<PowerIntentOwner> {
-            let (_, new_owner, new_refresh, new_idle, _) = power_command_details(command);
-            if let Some(deferred) = self.deferred {
-                let (deferred_ticket, deferred_owner, _, _, _) = power_command_details(deferred);
-                if deferred_command_is_replaced(new_owner, new_refresh, new_idle, deferred_owner) {
-                    self.deferred = None;
-                    self.signal(deferred_ticket, TicketOutcome::Superseded);
-                } else {
-                    let (ticket, _, _, _, _) = power_command_details(command);
-                    self.signal(ticket, TicketOutcome::Superseded);
-                    return None;
-                }
+            if !self.accept_over_deferred(command) {
+                return None;
             }
             let (ticket, owner, refresh, idle, _) = power_command_details(command);
             if owner_is_superseded(owner, self.active_owner) {
@@ -1205,12 +1225,7 @@ mod tests {
             }
             let inflight_owner = owner.unwrap_or(PowerIntentOwner::AutomaticThermal);
             if !self.service_available {
-                if self.deferred.is_some() {
-                    self.signal(ticket, TicketOutcome::TransportFault);
-                } else {
-                    self.deferred = Some(command);
-                }
-                return owner;
+                return self.defer_or_fault(command, ticket, owner);
             }
             self.inflight = Some((inflight_owner, ticket));
             self.inflight_refresh = refresh;
