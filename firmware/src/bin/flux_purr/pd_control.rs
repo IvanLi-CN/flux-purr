@@ -124,6 +124,24 @@ pub(crate) struct PdStatusObservation {
     pub(crate) contract: Contract,
 }
 
+/// Convert the FUSB302B STATUS0 sample into the legacy status projection.
+///
+/// STATUS0 is a FUSB302B register and its VBUSOK bit is not the same bit used
+/// by the CH224Q status register for `pd_active`. Keep the sampled byte intact
+/// for diagnostics, and derive the cross-controller semantic field explicitly.
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const fn fusb302b_status_projection(status0: u8) -> Status {
+    Status {
+        bc_active: false,
+        qc2_active: false,
+        qc3_active: false,
+        pd_active: status0 & FUSB302B_STATUS0_VBUSOK != 0,
+        epr_active: false,
+        epr_exist: false,
+        avs_exist: false,
+    }
+}
+
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PdStatusLogKey {

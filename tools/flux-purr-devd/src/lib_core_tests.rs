@@ -88,6 +88,32 @@ fn dev_cors_origin_guard_allows_only_local_development_origins() {
 }
 
 #[test]
+fn manual_pps_rejects_ready_fusb302b_without_advertised_voltage_capability() {
+    let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
+    status.pd_controller = Some("fusb302b".to_string());
+    status.pd_state = "ready".to_string();
+    status.pps_capability_min_mv = None;
+    status.pps_capability_max_mv = None;
+    status.pps_capability_max_ma = Some(5_000);
+
+    let error = validate_pps_voltage_against_status(17_500, &status).unwrap_err();
+    assert_eq!(error.error.code, "manual_pps_no_capability");
+}
+
+#[test]
+fn manual_pps_rejects_ready_fusb302b_without_advertised_current_capability() {
+    let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
+    status.pd_controller = Some("fusb302b".to_string());
+    status.pd_state = "ready".to_string();
+    status.pps_capability_min_mv = Some(5_500);
+    status.pps_capability_max_mv = Some(21_000);
+    status.pps_capability_max_ma = None;
+
+    let error = validate_manual_pps_against_status(17_500, 3_000, &status).unwrap_err();
+    assert_eq!(error.error.code, "manual_pps_no_capability");
+}
+
+#[test]
 fn lease_conflict_and_expiry_are_enforced() {
     let state = AppState::test();
     let lease = state.lease_device("mock-fp-lab-01").unwrap();

@@ -22,6 +22,7 @@ pub(crate) struct PdServiceSnapshot {
 }
 
 #[cfg(target_arch = "xtensa")]
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PdRequestState {
     Confirmed,
@@ -186,17 +187,6 @@ impl PdServiceClient {
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
         }
-        if snapshot.observation.is_some_and(|observation| {
-            let mode_matches = match request.mode() {
-                PdContractRequestMode::Fixed => observation.contract.kind == ContractKind::Fixed,
-                PdContractRequestMode::Pps => observation.contract.kind == ContractKind::Pps,
-            };
-            mode_matches
-                && observation.contract.voltage_mv == request.voltage_mv()
-                && observation.contract.current_ma >= request.operating_current_ma()
-        }) {
-            return PdRequestState::Confirmed;
-        }
         match PowerCoordinatorClient::new().request(PowerIntentOwner::AutomaticThermal, request) {
             Ok(ticket) => PdRequestState::Pending(ticket),
             Err(_) => PdRequestState::Failed,
@@ -215,11 +205,6 @@ impl PdServiceClient {
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
         }
-        if snapshot.observation.is_some_and(|observation| {
-            automatic_idle_contract_is_confirmed(observation, snapshot.capabilities)
-        }) {
-            return PdRequestState::Confirmed;
-        }
         match PowerCoordinatorClient::new().idle() {
             Ok(ticket) => PdRequestState::Pending(ticket),
             Err(_) => PdRequestState::Failed,
@@ -237,13 +222,6 @@ impl PdServiceClient {
         let snapshot = self.snapshot();
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
-        }
-        if snapshot.observation.is_some_and(|observation| {
-            observation.contract.kind == ContractKind::Pps
-                && observation.contract.voltage_mv == request.voltage_mv()
-                && observation.contract.current_ma >= request.operating_current_ma()
-        }) {
-            return PdRequestState::Confirmed;
         }
         match PowerCoordinatorClient::new().request(owner, request) {
             Ok(ticket) => PdRequestState::Pending(ticket),
@@ -280,10 +258,8 @@ pub(crate) fn fusb302b_status_confirms_active_contract(
     contract: Contract,
     status0: u8,
 ) -> bool {
-    matches!(
-        phase,
-        SinkPhase::Ready | SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-    ) && contract != Contract::none()
+    phase == SinkPhase::Ready
+        && contract != Contract::none()
         && status0 & FUSB302B_STATUS0_VBUSOK != 0
 }
 
@@ -297,15 +273,15 @@ fn pd_status_observation(runtime: &Fusb302bRuntime) -> Option<PdStatusObservatio
     if !fusb302b_status_confirms_active_contract(
         runtime.policy.phase(),
         contract,
-        FUSB302B_STATUS0_VBUSOK,
+        runtime.vbus_status_raw(),
     ) {
         return None;
     }
 
-    let status_raw = 1 << 3;
+    let status_raw = runtime.vbus_status_raw();
     Some(PdStatusObservation {
         status_raw,
-        status: Status::from_register(status_raw),
+        status: fusb302b_status_projection(status_raw),
         current_raw: 0,
         current_ma: contract.current_ma,
         contract_voltage_mv: Some(contract.voltage_mv),
@@ -401,12 +377,24 @@ async fn process_pd_command(
     }
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy)]
-enum PendingPdOperation {
+pub(crate) enum PendingPdOperation {
     Contract { request: PdContractRequest },
     Idle,
     Refresh,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy)]
+pub(crate) struct PdServiceTerminalContext {
+    pub(crate) phase: SinkPhase,
+    pub(crate) request_timed_out: bool,
+    pub(crate) request_rejected: bool,
+    pub(crate) diagnostic_request_timed_out: bool,
+    pub(crate) refresh_pending: bool,
+    pub(crate) observation: Option<PdStatusObservation>,
+    pub(crate) source_capabilities: Option<SourceCapabilities>,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -416,38 +404,39 @@ enum PdCommandProgress {
     Done(PowerTicket, TicketOutcome),
 }
 
-#[cfg(target_arch = "xtensa")]
-fn pending_terminal(
-    runtime: &Fusb302bRuntime,
-    observation: Option<PdStatusObservation>,
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn pending_terminal_outcome(
+    context: PdServiceTerminalContext,
     pending: PendingPdOperation,
 ) -> Option<TicketOutcome> {
-    let active = observation.and_then(|observation| {
+    let active = context.observation.and_then(|observation| {
         ConfirmedActiveContract::from_private_contract(
             observation.contract,
-            runtime
-                .source_capabilities()
+            context
+                .source_capabilities
                 .unwrap_or_else(SourceCapabilities::empty),
         )
     });
-    if runtime.request_timed_out {
+    if context.request_timed_out {
         return Some(TicketOutcome::TimedOut);
     }
-    if runtime.request_rejected {
+    if context.request_rejected {
         return Some(TicketOutcome::Rejected);
     }
-    if runtime.policy.phase() == SinkPhase::Fault {
+    if context.phase == SinkPhase::Fault {
         return Some(TicketOutcome::TransportFault);
     }
-    if FUSB302B_DIAGNOSTIC.load(Ordering::Acquire) == FUSB302B_DIAG_REQUEST_TIMEOUT {
+    if context.diagnostic_request_timed_out {
         return Some(TicketOutcome::TimedOut);
     }
     match pending {
-        PendingPdOperation::Contract { request, .. } if request_matches_active(request, active) => {
+        PendingPdOperation::Contract { request }
+            if context.phase == SinkPhase::Ready && request_matches_active(request, active) =>
+        {
             active.map(TicketOutcome::Confirmed)
         }
-        PendingPdOperation::Contract { request, .. }
-            if runtime.source_capabilities().is_some_and(|capabilities| {
+        PendingPdOperation::Contract { request }
+            if context.source_capabilities.is_some_and(|capabilities| {
                 request.mode() == PdContractRequestMode::Pps
                     && capabilities.select_exact_contract(request).is_none()
             }) =>
@@ -455,27 +444,28 @@ fn pending_terminal(
             Some(TicketOutcome::Rejected)
         }
         PendingPdOperation::Idle
-            if observation.is_some_and(|observation| {
-                automatic_idle_contract_is_confirmed(
-                    observation,
-                    runtime
-                        .source_capabilities()
-                        .and_then(fusb302b_adjustable_power_capabilities),
-                )
-            }) =>
+            if context.phase == SinkPhase::Ready
+                && context.observation.is_some_and(|observation| {
+                    automatic_idle_contract_is_confirmed(
+                        observation,
+                        context
+                            .source_capabilities
+                            .and_then(fusb302b_adjustable_power_capabilities),
+                    )
+                }) =>
         {
             active.map(TicketOutcome::Confirmed)
         }
         PendingPdOperation::Refresh => refresh_terminal_outcome(
-            runtime.policy.phase(),
-            runtime.source_capabilities_refresh_pending,
-            runtime.request_timed_out,
-            runtime.source_capabilities().is_some(),
+            context.phase,
+            context.refresh_pending,
+            context.request_timed_out,
+            context.source_capabilities.is_some(),
         ),
         PendingPdOperation::Contract { .. } | PendingPdOperation::Idle
             if active.is_none()
                 && !matches!(
-                    runtime.policy.phase(),
+                    context.phase,
                     SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
                 ) =>
         {
@@ -483,6 +473,27 @@ fn pending_terminal(
         }
         _ => None,
     }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn pending_terminal(
+    runtime: &Fusb302bRuntime,
+    observation: Option<PdStatusObservation>,
+    pending: PendingPdOperation,
+) -> Option<TicketOutcome> {
+    pending_terminal_outcome(
+        PdServiceTerminalContext {
+            phase: runtime.policy.phase(),
+            request_timed_out: runtime.request_timed_out,
+            request_rejected: runtime.request_rejected,
+            diagnostic_request_timed_out: FUSB302B_DIAGNOSTIC.load(Ordering::Acquire)
+                == FUSB302B_DIAG_REQUEST_TIMEOUT,
+            refresh_pending: runtime.source_capabilities_refresh_pending,
+            observation,
+            source_capabilities: runtime.source_capabilities(),
+        },
+        pending,
+    )
 }
 
 #[cfg(target_arch = "xtensa")]

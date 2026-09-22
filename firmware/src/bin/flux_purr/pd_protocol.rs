@@ -31,7 +31,7 @@ const fn fusb302b_i2c_error_kind(error: fusb302::Error<PdI2cError>) -> u8 {
 pub(crate) async fn fusb302b_receive_event(
     i2c: &mut PdI2c<'_>,
     retry_fail_recovery_pending: bool,
-) -> Result<Fusb302bReceiveEvent, Fusb302bReceiveFault> {
+) -> Result<(Fusb302bReceiveEvent, u8), Fusb302bReceiveFault> {
     let mut phy = Fusb302::new(&mut *i2c);
     // Clear transition latches first, then sample the non-destructive status
     // bank. This pairs a VBUSOK detach transition with its current low level
@@ -48,45 +48,62 @@ pub(crate) async fn fusb302b_receive_event(
     let gcrc_sent = interrupts.interrupt_b & FUSB302B_INTERRUPTB_GCRC_SENT != 0;
 
     if status.status0 & FUSB302B_STATUS0_VBUSOK == 0 {
-        return Ok(Fusb302bReceiveEvent::VbusLow {
-            transition: fusb302b_vbus_detach_was_reported(interrupts.interrupt, status.status0),
-        });
+        return Ok((
+            Fusb302bReceiveEvent::VbusLow {
+                transition: fusb302b_vbus_detach_was_reported(interrupts.interrupt, status.status0),
+            },
+            status.status0,
+        ));
     }
     if let Some(action) = fusb302b_received_reset_action(interrupts.interrupt_a) {
-        return Ok(Fusb302bReceiveEvent::ReceivedReset(action));
+        return Ok((Fusb302bReceiveEvent::ReceivedReset(action), status.status0));
     }
     if fusb302b_retry_failure_requires_recovery(
         status.status0a,
         status.status1,
         retry_fail_recovery_pending,
     ) {
-        return Ok(Fusb302bReceiveEvent::RetryFailed);
+        return Ok((Fusb302bReceiveEvent::RetryFailed, status.status0));
     }
     if status.status1 & (FUSB302B_STATUS1_OVERTEMP | FUSB302B_STATUS1_VCONN_OCP) != 0 {
-        return Ok(Fusb302bReceiveEvent::Protection);
+        return Ok((Fusb302bReceiveEvent::Protection, status.status0));
     }
     if fusb302b_retry_recovery_should_discard_frame(status.status1, retry_fail_recovery_pending) {
         if !fusb302b_flush_receive_fifo(i2c).await {
             return Err(Fusb302bReceiveFault::ReceiveFifoFlush);
         }
-        return Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent });
+        return Ok((
+            Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent },
+            status.status0,
+        ));
     }
     if status.status1 & FUSB302B_STATUS1_RX_EMPTY != 0 {
-        return Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent });
+        return Ok((
+            Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent },
+            status.status0,
+        ));
     }
     if status.status0 & FUSB302B_STATUS0_CRC_CHECK == 0
         || status.status1a & FUSB302B_STATUS1A_RXSOP == 0
     {
-        return Ok(Fusb302bReceiveEvent::Partial { tx_sent, gcrc_sent });
+        return Ok((
+            Fusb302bReceiveEvent::Partial { tx_sent, gcrc_sent },
+            status.status0,
+        ));
     }
 
     match phy.receive().await {
-        Ok(None) => Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent }),
+        Ok(None) => Ok((
+            Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent },
+            status.status0,
+        )),
         Ok(Some(packet)) if packet.sop() == SopType::Sop => {
-            Ok(Fusb302bReceiveEvent::Message(packet))
+            Ok((Fusb302bReceiveEvent::Message(packet), status.status0))
         }
-        Ok(Some(_)) => Ok(Fusb302bReceiveEvent::UnsupportedSop),
-        Err(fusb302::Error::Receive(_)) => Ok(Fusb302bReceiveEvent::UnsupportedSop),
+        Ok(Some(_)) => Ok((Fusb302bReceiveEvent::UnsupportedSop, status.status0)),
+        Err(fusb302::Error::Receive(_)) => {
+            Ok((Fusb302bReceiveEvent::UnsupportedSop, status.status0))
+        }
         Err(error) => Err(Fusb302bReceiveFault::PacketReceive(
             fusb302b_i2c_error_kind(error),
         )),

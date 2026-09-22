@@ -143,28 +143,21 @@ impl PowerState {
                 SinkPhase::Fault => PowerProtocol::Fault,
             }
         };
+        let failure = power_state_failure(phase, observation, active, service_available);
+        let source_capabilities = if failure.is_some() {
+            SourceCapabilities::empty().view()
+        } else {
+            capabilities
+                .unwrap_or_else(SourceCapabilities::empty)
+                .view()
+        };
         Self {
             protocol,
             available: service_available,
             requested,
             active,
-            source_capabilities: capabilities
-                .unwrap_or_else(SourceCapabilities::empty)
-                .view(),
-            failure: if !service_available {
-                Some(PowerFailure::Unavailable)
-            } else {
-                match phase {
-                    SinkPhase::Detached => Some(PowerFailure::Detached),
-                    SinkPhase::Fault | SinkPhase::Ready if observation.is_none() => {
-                        Some(PowerFailure::TransportFault)
-                    }
-                    _ if observation.is_some() && active.is_none() => {
-                        Some(PowerFailure::CapabilityInvalidated)
-                    }
-                    _ => None,
-                }
-            },
+            source_capabilities,
+            failure,
         }
     }
 
@@ -177,14 +170,37 @@ impl PowerState {
             PdContractRequestMode::Fixed => ContractKind::Fixed,
             PdContractRequestMode::Pps => ContractKind::Pps,
         };
+        let status_raw = FUSB302B_STATUS0_VBUSOK;
         Some(PdStatusObservation {
-            status_raw: 1 << 3,
-            status: Status::from_register(1 << 3),
+            status_raw,
+            status: fusb302b_status_projection(status_raw),
             current_raw: 0,
             current_ma: active.operating_current_ma,
             contract_voltage_mv: Some(active.voltage_mv),
             contract: Contract::observed(kind, active.voltage_mv, active.operating_current_ma),
         })
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn power_state_failure(
+    phase: SinkPhase,
+    observation: Option<PdStatusObservation>,
+    active: Option<ConfirmedActiveContract>,
+    service_available: bool,
+) -> Option<PowerFailure> {
+    if !service_available {
+        Some(PowerFailure::Unavailable)
+    } else {
+        match phase {
+            SinkPhase::Detached => Some(PowerFailure::Detached),
+            SinkPhase::Fault => Some(PowerFailure::TransportFault),
+            SinkPhase::Ready if observation.is_none() => Some(PowerFailure::TransportFault),
+            _ if observation.is_some() && active.is_none() => {
+                Some(PowerFailure::CapabilityInvalidated)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1043,6 +1059,45 @@ mod tests {
         );
         assert_eq!(state.protocol, PowerProtocol::WaitingForAccept);
         assert_eq!(state.failure, None);
+    }
+
+    #[test]
+    fn fault_projection_withholds_source_capabilities() {
+        let capabilities =
+            SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+        let state =
+            PowerState::from_observation(SinkPhase::Fault, None, Some(capabilities), true, None);
+
+        assert_eq!(state.failure, Some(PowerFailure::TransportFault));
+        assert!(state.source_capabilities.pps.iter().all(Option::is_none));
+        assert!(state.source_capabilities.fixed.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn power_state_observation_keeps_fusb_status_raw_and_pd_projection() {
+        let capabilities =
+            SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+        let request = PdContractRequest::pps(17_500, 3_000).unwrap();
+        let contract = capabilities.select_exact_contract(request).unwrap();
+        let observation = PdStatusObservation {
+            status_raw: FUSB302B_STATUS0_VBUSOK,
+            status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+            current_raw: 0,
+            current_ma: contract.current_ma,
+            contract_voltage_mv: Some(contract.voltage_mv),
+            contract,
+        };
+        let state = PowerState::from_observation(
+            SinkPhase::Ready,
+            Some(observation),
+            Some(capabilities),
+            true,
+            None,
+        );
+
+        let projected = state.observation().expect("active contract is observable");
+        assert_eq!(projected.status_raw, FUSB302B_STATUS0_VBUSOK);
+        assert!(projected.status.pd_active);
     }
 
     #[test]

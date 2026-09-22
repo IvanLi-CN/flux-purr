@@ -305,12 +305,12 @@ fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
         contract,
         FUSB302B_STATUS0_VBUSOK,
     ));
-    assert!(fusb302b_status_confirms_active_contract(
+    assert!(!fusb302b_status_confirms_active_contract(
         SinkPhase::WaitingForPsRdy,
         contract,
         FUSB302B_STATUS0_VBUSOK,
     ));
-    assert!(fusb302b_status_confirms_active_contract(
+    assert!(!fusb302b_status_confirms_active_contract(
         SinkPhase::WaitingForAccept,
         contract,
         FUSB302B_STATUS0_VBUSOK,
@@ -325,6 +325,84 @@ fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
         contract,
         0,
     ));
+}
+
+#[test]
+fn fusb302b_observation_keeps_the_physical_status_byte_and_projects_pd_active() {
+    let status0 = FUSB302B_STATUS0_VBUSOK;
+    let projected = fusb302b_status_projection(status0);
+
+    assert_eq!(status0, 1 << 7);
+    assert!(!Status::from_register(status0).pd_active);
+    assert!(projected.pd_active);
+}
+
+#[test]
+fn pending_pd_terminal_model_covers_confirmation_failure_and_transition_waits() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+    let request = PdContractRequest::pps(17_500, 3_000).unwrap();
+    let contract = source.select_exact_contract(request).unwrap();
+    let active = ConfirmedActiveContract::from_private_contract(contract, source).unwrap();
+    let observation = PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: active.operating_current_ma,
+        contract_voltage_mv: Some(active.voltage_mv),
+        contract: contract,
+    };
+    let context = |phase, observation, source_capabilities| PdServiceTerminalContext {
+        phase,
+        request_timed_out: false,
+        request_rejected: false,
+        diagnostic_request_timed_out: false,
+        refresh_pending: false,
+        observation,
+        source_capabilities,
+    };
+
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::Ready, Some(observation), Some(source)),
+            PendingPdOperation::Contract { request },
+        ),
+        Some(TicketOutcome::Confirmed(active)),
+    );
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::WaitingForPsRdy, Some(observation), Some(source)),
+            PendingPdOperation::Contract { request },
+        ),
+        None,
+    );
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::Fault, None, Some(source)),
+            PendingPdOperation::Contract { request },
+        ),
+        Some(TicketOutcome::TransportFault),
+    );
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::Ready, None, Some(SourceCapabilities::empty())),
+            PendingPdOperation::Contract { request },
+        ),
+        Some(TicketOutcome::Rejected),
+    );
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::Ready, Some(observation), Some(source)),
+            PendingPdOperation::Idle,
+        ),
+        None,
+    );
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::Ready, None, Some(source)),
+            PendingPdOperation::Refresh,
+        ),
+        Some(TicketOutcome::CapabilitiesRefreshed),
+    );
 }
 
 #[test]
