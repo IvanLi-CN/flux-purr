@@ -305,12 +305,25 @@ fn release_ticket_slot(slots: &AtomicU8, slot: usize) {
     slots.fetch_and(!(1u8 << slot), Ordering::Release);
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn release_discarded_ticket_slot(discarded: &AtomicU8, slots: &AtomicU8, slot: usize) -> bool {
+    let mask = 1u8 << slot;
+    if discarded.fetch_and(!mask, Ordering::AcqRel) & mask == 0 {
+        return false;
+    }
+    release_ticket_slot(slots, slot);
+    true
+}
+
 #[cfg(target_arch = "xtensa")]
 static POWER_TICKET_RESULTS: [Signal<CriticalSectionRawMutex, (PowerTicket, TicketOutcome)>;
     POWER_TICKET_SLOT_COUNT] = [const { Signal::new() }; POWER_TICKET_SLOT_COUNT];
 
 #[cfg(target_arch = "xtensa")]
 static POWER_TICKET_SLOTS: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(target_arch = "xtensa")]
+static POWER_TICKET_DISCARDED: AtomicU8 = AtomicU8::new(0);
 
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn request_matches_active(
@@ -504,6 +517,26 @@ impl PowerCoordinatorClient {
         release_ticket_slot(&POWER_TICKET_SLOTS, ticket.result_slot);
     }
 
+    pub(crate) fn discard(&self, ticket: PowerTicket) {
+        let mask = 1u8 << ticket.result_slot;
+        if let Some(result) = POWER_TICKET_RESULTS[ticket.result_slot].try_take() {
+            if result.0 == ticket {
+                Self::release_ticket_slot(ticket);
+                return;
+            }
+            POWER_TICKET_RESULTS[ticket.result_slot].signal(result);
+        }
+        POWER_TICKET_DISCARDED.fetch_or(mask, Ordering::AcqRel);
+        if let Some(result) = POWER_TICKET_RESULTS[ticket.result_slot].try_take() {
+            POWER_TICKET_DISCARDED.fetch_and(!mask, Ordering::Release);
+            if result.0 == ticket {
+                Self::release_ticket_slot(ticket);
+            } else {
+                POWER_TICKET_RESULTS[ticket.result_slot].signal(result);
+            }
+        }
+    }
+
     pub(crate) fn request(
         &self,
         owner: PowerIntentOwner,
@@ -620,7 +653,13 @@ fn publish_power_state(state: PowerState) {
 
 #[cfg(target_arch = "xtensa")]
 fn signal_ticket(ticket: PowerTicket, outcome: TicketOutcome) {
-    POWER_TICKET_RESULTS[ticket.result_slot].signal((ticket, outcome));
+    if !release_discarded_ticket_slot(
+        &POWER_TICKET_DISCARDED,
+        &POWER_TICKET_SLOTS,
+        ticket.result_slot,
+    ) {
+        POWER_TICKET_RESULTS[ticket.result_slot].signal((ticket, outcome));
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1167,6 +1206,18 @@ mod tests {
         assert_eq!(reserve_ticket_slot(&slots), None);
         release_ticket_slot(&slots, reserved[2]);
         assert_eq!(reserve_ticket_slot(&slots), Some(reserved[2]));
+    }
+
+    #[test]
+    fn discarded_ticket_releases_its_slot_when_the_terminal_arrives() {
+        let slots = AtomicU8::new(0);
+        let discarded = AtomicU8::new(0);
+        let slot = reserve_ticket_slot(&slots).expect("slot available");
+        discarded.fetch_or(1u8 << slot, Ordering::Release);
+
+        assert!(release_discarded_ticket_slot(&discarded, &slots, slot));
+        assert_eq!(reserve_ticket_slot(&slots), Some(slot));
+        assert!(!release_discarded_ticket_slot(&discarded, &slots, slot));
     }
 
     #[test]

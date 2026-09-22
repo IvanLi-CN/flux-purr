@@ -1081,10 +1081,16 @@ pub(crate) async fn process_eeprom_maintenance_frame(
         );
         let idle_confirmed = match context.pd_port.restore_automatic_idle_contract() {
             PdRequestState::Confirmed => true,
-            PdRequestState::Pending(ticket) => matches!(
-                context.pd_port.try_take_ticket(ticket),
-                Some(TicketOutcome::Confirmed(_))
-            ),
+            PdRequestState::Pending(ticket) => {
+                let confirmed = matches!(
+                    context.pd_port.try_take_ticket(ticket),
+                    Some(TicketOutcome::Confirmed(_))
+                );
+                if !confirmed {
+                    context.pd_port.discard_ticket(ticket);
+                }
+                confirmed
+            }
             PdRequestState::Failed => false,
         };
         if !idle_confirmed {

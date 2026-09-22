@@ -250,6 +250,10 @@ impl PdServiceClient {
     pub(crate) fn try_take_ticket(&self, ticket: PowerTicket) -> Option<TicketOutcome> {
         PowerCoordinatorClient::new().try_take(ticket)
     }
+
+    pub(crate) fn discard_ticket(&self, ticket: PowerTicket) {
+        PowerCoordinatorClient::new().discard(ticket);
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
