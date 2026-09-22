@@ -85,7 +85,7 @@ pub(crate) const LEASE_REAPER_INTERVAL: Duration = Duration::from_secs(1);
 // front-panel startup, and PD bring-up so the first native CLI query is usable.
 // Opening USB Serial/JTAG can reset the MCU. Allow a full cold boot plus
 // hardware discovery before declaring a read-only request unavailable.
-pub(crate) const SERIAL_READ_ONLY_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const SERIAL_READ_ONLY_RPC_TIMEOUT: Duration = Duration::from_secs(45);
 pub(crate) const POST_FLASH_BOOT_TIMEOUT: Duration = Duration::from_secs(90);
 pub(crate) const RUNTIME_READY_BOOT_STAGE: &str = "boot_stage=runtime_ready";
 pub(crate) const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
@@ -667,6 +667,8 @@ pub(crate) fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
         pd_contract_power_mw: Some(60_000),
         pd_performance_guaranteed: Some(true),
         pd_degraded_reason: None,
+        pd_last_protocol_fault: None,
+        pd_last_i2c_error: None,
         manual_pps_enabled: false,
         manual_pps_mv: None,
         manual_pps_ma: None,
@@ -756,6 +758,8 @@ pub(crate) fn native_placeholder_status(network: &NetworkSummary) -> ControlPlan
         pd_contract_power_mw: None,
         pd_performance_guaranteed: Some(false),
         pd_degraded_reason: Some("pd_contract_unavailable".to_string()),
+        pd_last_protocol_fault: None,
+        pd_last_i2c_error: None,
         manual_pps_enabled: false,
         manual_pps_mv: None,
         manual_pps_ma: None,
@@ -1089,6 +1093,10 @@ pub struct ControlPlaneStatus {
     pub pd_performance_guaranteed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pd_degraded_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_last_protocol_fault: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_last_i2c_error: Option<String>,
     #[serde(default)]
     pub manual_pps_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

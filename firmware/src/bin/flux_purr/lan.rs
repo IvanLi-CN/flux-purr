@@ -1080,9 +1080,10 @@ pub(crate) async fn process_eeprom_maintenance_frame(
             context.memory_commit_due_ms,
         );
         let idle_confirmed = match context.pd_port.restore_automatic_idle_contract() {
+            PdRequestState::Confirmed => true,
             PdRequestState::Pending(ticket) => matches!(
-                context.pd_port.wait_for_ticket(ticket).await,
-                TicketOutcome::Confirmed(_)
+                context.pd_port.try_take_ticket(ticket),
+                Some(TicketOutcome::Confirmed(_))
             ),
             PdRequestState::Failed => false,
         };

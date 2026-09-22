@@ -2,10 +2,36 @@
 use super::*;
 
 #[cfg(target_arch = "xtensa")]
+const fn fusb302b_i2c_error_kind(error: fusb302::Error<PdI2cError>) -> u8 {
+    use esp_hal::i2c::master::{AcknowledgeCheckFailedReason, Error as HalI2cError};
+
+    match error {
+        fusb302::Error::I2c(PdI2cError::BusBusy) => FUSB302B_I2C_ERROR_BUS_BUSY,
+        fusb302::Error::I2c(PdI2cError::I2c(HalI2cError::AcknowledgeCheckFailed(
+            AcknowledgeCheckFailedReason::Address,
+        ))) => FUSB302B_I2C_ERROR_ACK_ADDRESS,
+        fusb302::Error::I2c(PdI2cError::I2c(HalI2cError::AcknowledgeCheckFailed(
+            AcknowledgeCheckFailedReason::Data,
+        ))) => FUSB302B_I2C_ERROR_ACK_DATA,
+        fusb302::Error::I2c(PdI2cError::I2c(HalI2cError::AcknowledgeCheckFailed(
+            AcknowledgeCheckFailedReason::Unknown,
+        ))) => FUSB302B_I2C_ERROR_ACK_UNKNOWN,
+        fusb302::Error::I2c(PdI2cError::I2c(HalI2cError::Timeout)) => FUSB302B_I2C_ERROR_TIMEOUT,
+        fusb302::Error::I2c(PdI2cError::I2c(HalI2cError::ArbitrationLost)) => {
+            FUSB302B_I2C_ERROR_ARBITRATION_LOST
+        }
+        fusb302::Error::I2c(PdI2cError::I2c(HalI2cError::ExecutionIncomplete)) => {
+            FUSB302B_I2C_ERROR_EXECUTION_INCOMPLETE
+        }
+        _ => FUSB302B_I2C_ERROR_OTHER,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn fusb302b_receive_event(
     i2c: &mut PdI2c<'_>,
     retry_fail_recovery_pending: bool,
-) -> Result<Fusb302bReceiveEvent, fusb302b::TransientTransportFault> {
+) -> Result<Fusb302bReceiveEvent, Fusb302bReceiveFault> {
     let mut phy = Fusb302::new(&mut *i2c);
     // Clear transition latches first, then sample the non-destructive status
     // bank. This pairs a VBUSOK detach transition with its current low level
@@ -13,11 +39,11 @@ pub(crate) async fn fusb302b_receive_event(
     let interrupts = phy
         .read_interrupts()
         .await
-        .map_err(|_| fusb302b::TransientTransportFault::ReceiveIoError)?;
+        .map_err(|error| Fusb302bReceiveFault::InterruptRead(fusb302b_i2c_error_kind(error)))?;
     let status = phy
         .read_status()
         .await
-        .map_err(|_| fusb302b::TransientTransportFault::ReceiveIoError)?;
+        .map_err(|error| Fusb302bReceiveFault::StatusRead(fusb302b_i2c_error_kind(error)))?;
     let tx_sent = interrupts.interrupt_a & FUSB302B_INTERRUPTA_TX_SENT != 0;
     let gcrc_sent = interrupts.interrupt_b & FUSB302B_INTERRUPTB_GCRC_SENT != 0;
 
@@ -41,7 +67,7 @@ pub(crate) async fn fusb302b_receive_event(
     }
     if fusb302b_retry_recovery_should_discard_frame(status.status1, retry_fail_recovery_pending) {
         if !fusb302b_flush_receive_fifo(i2c).await {
-            return Err(fusb302b::TransientTransportFault::ReceiveIoError);
+            return Err(Fusb302bReceiveFault::ReceiveFifoFlush);
         }
         return Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent });
     }
@@ -61,7 +87,9 @@ pub(crate) async fn fusb302b_receive_event(
         }
         Ok(Some(_)) => Ok(Fusb302bReceiveEvent::UnsupportedSop),
         Err(fusb302::Error::Receive(_)) => Ok(Fusb302bReceiveEvent::UnsupportedSop),
-        Err(_) => Err(fusb302b::TransientTransportFault::ReceiveIoError),
+        Err(error) => Err(Fusb302bReceiveFault::PacketReceive(
+            fusb302b_i2c_error_kind(error),
+        )),
     }
 }
 

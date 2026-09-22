@@ -27,6 +27,59 @@ pub(crate) fn fusb302b_degraded_reason() -> &'static str {
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) const fn fusb302b_protocol_fault_code(fault: u8) -> Option<&'static str> {
+    match fault {
+        FUSB302B_PROTOCOL_FAULT_VBUS_LOW => Some("pd_fusb_vbus_low"),
+        FUSB302B_PROTOCOL_FAULT_RECEIVED_RESET => Some("pd_fusb_received_reset"),
+        FUSB302B_PROTOCOL_FAULT_RETRY_FAILED => Some("pd_fusb_retry_failed"),
+        FUSB302B_PROTOCOL_FAULT_PENDING_REQUEST_TIMEOUT => Some("pd_fusb_pending_request_timeout"),
+        FUSB302B_PROTOCOL_FAULT_SOURCE_CAPABILITIES_TIMEOUT => {
+            Some("pd_fusb_source_capabilities_timeout")
+        }
+        FUSB302B_PROTOCOL_FAULT_PARTIAL_RECEIVE_TIMEOUT => Some("pd_fusb_partial_receive_timeout"),
+        FUSB302B_PROTOCOL_FAULT_RECEIVE_IO => Some("pd_fusb_receive_io_error"),
+        FUSB302B_PROTOCOL_FAULT_TRANSMIT_IO => Some("pd_fusb_transmit_io_error"),
+        FUSB302B_PROTOCOL_FAULT_CONFIGURATION_IO => Some("pd_fusb_configuration_io_error"),
+        FUSB302B_PROTOCOL_FAULT_PROTECTION => Some("pd_fusb_protection"),
+        FUSB302B_PROTOCOL_FAULT_STALE_CONTRACT_VIN => Some("pd_fusb_stale_contract_vin"),
+        FUSB302B_PROTOCOL_FAULT_READ_INTERRUPTS_IO => Some("pd_fusb_read_interrupts_io_error"),
+        FUSB302B_PROTOCOL_FAULT_READ_STATUS_IO => Some("pd_fusb_read_status_io_error"),
+        FUSB302B_PROTOCOL_FAULT_RX_FIFO_FLUSH_IO => Some("pd_fusb_rx_fifo_flush_io_error"),
+        FUSB302B_PROTOCOL_FAULT_RECEIVE_PACKET_IO => Some("pd_fusb_receive_packet_io_error"),
+        FUSB302B_PROTOCOL_FAULT_UNSUPPORTED_SOP => Some("pd_fusb_unsupported_sop"),
+        _ => None,
+    }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) const fn fusb302b_i2c_error_code(error: u8) -> Option<&'static str> {
+    match error {
+        FUSB302B_I2C_ERROR_BUS_BUSY => Some("pd_i2c_bus_busy"),
+        FUSB302B_I2C_ERROR_ACK_ADDRESS => Some("pd_i2c_ack_address"),
+        FUSB302B_I2C_ERROR_ACK_DATA => Some("pd_i2c_ack_data"),
+        FUSB302B_I2C_ERROR_ACK_UNKNOWN => Some("pd_i2c_ack_unknown"),
+        FUSB302B_I2C_ERROR_TIMEOUT => Some("pd_i2c_timeout"),
+        FUSB302B_I2C_ERROR_ARBITRATION_LOST => Some("pd_i2c_arbitration_lost"),
+        FUSB302B_I2C_ERROR_EXECUTION_INCOMPLETE => Some("pd_i2c_execution_incomplete"),
+        FUSB302B_I2C_ERROR_OTHER => Some("pd_i2c_other"),
+        _ => None,
+    }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn fusb302b_last_protocol_fault()
+-> Option<heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }>> {
+    fusb302b_protocol_fault_code(FUSB302B_LAST_PROTOCOL_FAULT.load(Ordering::Acquire))
+        .map(error_code_string)
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn fusb302b_last_i2c_error()
+-> Option<heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }>> {
+    fusb302b_i2c_error_code(FUSB302B_LAST_I2C_ERROR.load(Ordering::Acquire)).map(error_code_string)
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn adc_diagnostics_wire() -> AdcDiagnosticsWire {
     let optional_code = |value: u16| (value != u16::MAX).then_some(value);
     let raw_min = RTD_RAW_CODE_MIN.load(Ordering::Relaxed);

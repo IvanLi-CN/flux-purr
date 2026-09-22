@@ -221,8 +221,7 @@ pub(crate) async fn runtime_process_usb_control_line(
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
         measured_vin_mv: state.latest_vin_mv,
-    })
-    .await;
+    });
     let _ = usb_start_response_frame(
         &mut state.transport.usb_response_writer,
         &response,
@@ -501,8 +500,7 @@ pub(crate) async fn runtime_process_lan_control(
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
         measured_vin_mv: state.latest_vin_mv,
-    })
-    .await;
+    });
     let network_summary = flux_purr_firmware::net::lan_network_summary().await;
     let (control_needs_redraw, response) = result;
     (
@@ -696,8 +694,7 @@ pub(crate) async fn runtime_reconcile_network_state(
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
         measured_vin_mv: state.latest_vin_mv,
-    })
-    .await;
+    });
     needs_redraw
 }
 
@@ -1447,8 +1444,7 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
         measured_vin_mv: state.latest_vin_mv,
-    })
-    .await;
+    });
     if state.calibration_runtime_state.mode != CalibrationMode::Off
         && state.calibration_runtime_state.heater_enabled
         && state.current_rtd_fault.is_none()
@@ -2180,8 +2176,7 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
                     ui_state: &mut state.ui_state,
                     last_heater_duty: &mut state.last_heater_duty,
                     measured_vin_mv: state.latest_vin_mv,
-                })
-                .await;
+                });
                 apply_fan_output(
                     &mut state.fan_enable,
                     &mut state.fan_pwm,

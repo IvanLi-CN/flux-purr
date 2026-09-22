@@ -287,6 +287,16 @@ fn pd_service_never_waits_for_the_shared_i2c_bus() {
 }
 
 #[test]
+fn pd_i2c_timeout_stays_short_while_transport_recovery_is_rate_limited() {
+    assert_eq!(I2C_TRANSACTION_TIMEOUT_MS, 10);
+    assert!(I2C_TRANSACTION_TIMEOUT_MS < 25);
+    assert_eq!(FUSB302B_TRANSPORT_RECOVERY_BACKOFF_MS, 50);
+    assert!(fusb302b_transport_retry_due(None, 1_000));
+    assert!(!fusb302b_transport_retry_due(Some(1_050), 1_049));
+    assert!(fusb302b_transport_retry_due(Some(1_050), 1_050));
+}
+
+#[test]
 fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
     let contract = Contract::observed(ContractKind::Pps, 20_000, 3_000);
 
@@ -333,8 +343,12 @@ fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
         .and_then(|source| source.split("pub(crate) fn spawn_pd_service").next())
         .expect("PD task body must remain present");
 
-    assert!(pd_service.contains("read_status().await.ok()?"));
-    assert!(pd_service.contains("let observation = pd_status_observation(runtime, i2c).await"));
+    assert!(pd_service.contains("runtime.vbus_status_observed()"));
+    assert!(pd_service.contains("let observation = pd_status_observation(runtime);"));
+    assert!(
+        !pd_service.contains("read_status().await.ok()?"),
+        "the published observation must reuse the current poll's VBUS sample"
+    );
     assert!(pd_service.contains("publish_pd_snapshot(runtime, observation)"));
     assert!(
         pd_service.contains("publish_pd_service_turn(runtime, None, *pending, None, false, false)")
@@ -356,6 +370,34 @@ fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
         permit_check
             .find("HEATER_PWM_STORAGE.lock")
             .is_some_and(|lock| { permit_check[lock..].contains("PD_HEATER_PERMIT.load") })
+    );
+}
+
+#[test]
+fn terminal_disarm_does_not_block_runtime_on_a_pd_ticket() {
+    let eeprom = include_str!("eeprom.rs");
+    let tasks = include_str!("tasks.rs");
+    let disarm = eeprom
+        .split("pub(crate) fn disarm_pending_thermal_plant_output")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("pub(crate) fn terminal_idle_voltage_confirmed")
+                .next()
+        })
+        .expect("terminal disarm helper must remain present");
+
+    assert!(
+        !disarm.contains("wait_for_ticket"),
+        "runtime-loop disarm must poll ticket completion instead of awaiting the PD actor"
+    );
+    assert!(
+        disarm.contains("try_take_ticket"),
+        "runtime-loop disarm must use the non-blocking ticket facade"
+    );
+    assert!(
+        !tasks.contains("wait_for_ticket"),
+        "runtime heater control must never await the PD actor"
     );
 }
 
@@ -4747,6 +4789,12 @@ fn display_framebuffer_boot_initialization_never_materializes_a_stack_sized_arra
     assert!(
         support.contains("try_new_uninit_in") || support.contains("new_uninit_in"),
         "the PSRAM framebuffer must be initialized in place"
+    );
+    assert!(
+        support.contains("DISPLAY_GRAPHICS_HEAP_GUARD_BYTES")
+            && support.contains("esp_alloc::HEAP.add_region")
+            && support.contains("runtime_heap_start"),
+        "unused PSRAM must remain available as a global runtime allocation fallback"
     );
     assert!(
         !display_setup.contains("initialize_after_software_reset("),
@@ -10311,6 +10359,59 @@ fn fusb302b_pending_contract_is_not_reported_as_ready() {
         status.pd_degraded_reason.as_deref(),
         Some("pd_contract_unavailable")
     );
+}
+
+#[test]
+fn fusb302b_protocol_fault_snapshot_codes_map_faults() {
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_RETRY_FAILED),
+        Some("pd_fusb_retry_failed")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_PENDING_REQUEST_TIMEOUT),
+        Some("pd_fusb_pending_request_timeout")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_STALE_CONTRACT_VIN),
+        Some("pd_fusb_stale_contract_vin")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_READ_INTERRUPTS_IO),
+        Some("pd_fusb_read_interrupts_io_error")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_READ_STATUS_IO),
+        Some("pd_fusb_read_status_io_error")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_RX_FIFO_FLUSH_IO),
+        Some("pd_fusb_rx_fifo_flush_io_error")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_RECEIVE_PACKET_IO),
+        Some("pd_fusb_receive_packet_io_error")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_NONE),
+        None
+    );
+}
+
+#[test]
+fn fusb302b_i2c_error_snapshot_codes_map_errors() {
+    assert_eq!(
+        fusb302b_i2c_error_code(FUSB302B_I2C_ERROR_ACK_ADDRESS),
+        Some("pd_i2c_ack_address")
+    );
+    assert_eq!(
+        fusb302b_i2c_error_code(FUSB302B_I2C_ERROR_TIMEOUT),
+        Some("pd_i2c_timeout")
+    );
+    assert_eq!(
+        fusb302b_i2c_error_code(FUSB302B_I2C_ERROR_EXECUTION_INCOMPLETE),
+        Some("pd_i2c_execution_incomplete")
+    );
+    assert_eq!(fusb302b_i2c_error_code(FUSB302B_I2C_ERROR_NONE), None);
 }
 
 #[test]

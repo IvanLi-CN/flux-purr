@@ -149,6 +149,12 @@ pub(crate) fn populate_status_contract(
         } else {
             None
         };
+    status.pd_last_protocol_fault = (context.pd_controller == ControllerKind::Fusb302b)
+        .then(fusb302b_last_protocol_fault)
+        .flatten();
+    status.pd_last_i2c_error = (context.pd_controller == ControllerKind::Fusb302b)
+        .then(fusb302b_last_i2c_error)
+        .flatten();
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]

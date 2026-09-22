@@ -9,9 +9,8 @@ use super::pd::{Contract, ContractKind, SourceCapabilities};
 const PD_HEADER_REQUEST: u16 = 2;
 const PD_HEADER_ACCEPT: u16 = 3;
 const PD_HEADER_GET_SOURCE_CAP: u16 = 7;
-// The Flux Purr target uses the FUSB302BMPX-compatible PD 3.0 path so PPS
-// APDOs are advertised and accepted by the connected source. Keep all
-// locally initiated headers on the same revision as automatic GoodCRC.
+// The FUSB302BMPX-compatible PPS path uses the PD 3.0 header encoding. Keep
+// all locally initiated headers on the same revision as automatic GoodCRC.
 const PD_HEADER_SPEC_REV_30: u16 = 0b10 << 6;
 const PPS_RDO_VOLTAGE_STEP_MV: u16 = 20;
 const PPS_RDO_CURRENT_STEP_MA: u16 = 50;
@@ -22,7 +21,7 @@ pub const SOURCE_CAPS_RETRY_INTERVAL_MS: u64 = 5_000;
 
 fn source_message_id_is_newer(last: u8, current: u8) -> bool {
     let distance = current.wrapping_sub(last) & 0x07;
-    (1..=3).contains(&distance)
+    (1..=4).contains(&distance)
 }
 
 /// The only recovery actions available after a Source_Capabilities timeout.
@@ -185,22 +184,18 @@ impl SinkPolicy {
         self.on_source_capabilities_with_message_id(pdos, None)
     }
 
-    /// Select a contract and retain the latest Source message ID. The runtime
-    /// uses it to ignore duplicate responses from an abandoned exchange while
-    /// allowing legitimate intervening Source messages to advance the ID by
-    /// more than one.
+    /// Select a contract after accepting a fresh Source message in sequence.
     pub fn on_source_capabilities_with_message_id(
         &mut self,
         pdos: &[u32],
         source_message_id: Option<u8>,
     ) -> Option<[u8; 4]> {
         let source_message_id = source_message_id.map(|value| value & 0x07);
-        if !self.source_capabilities_message_is_fresh(source_message_id) {
+        if !self.observe_source_message_id(source_message_id) {
             return None;
         }
         self.source_capabilities = SourceCapabilities::from_pdos(pdos);
         self.source_capabilities_received = true;
-        self.source_message_id = source_message_id;
         self.begin_request(self.source_capabilities)
     }
 
@@ -213,12 +208,11 @@ impl SinkPolicy {
         source_message_id: Option<u8>,
     ) -> Option<[u8; 4]> {
         let source_message_id = source_message_id.map(|value| value & 0x07);
-        if !self.source_capabilities_message_is_fresh(source_message_id) {
+        if !self.observe_source_message_id(source_message_id) {
             return None;
         }
         self.source_capabilities = SourceCapabilities::from_pdos(pdos);
         self.source_capabilities_received = true;
-        self.source_message_id = source_message_id;
 
         if self.phase == SinkPhase::Ready && self.active_contract != Contract::none() {
             if self
@@ -241,6 +235,20 @@ impl SinkPolicy {
             self.source_message_id
                 .is_none_or(|last| source_message_id_is_newer(last, current))
         })
+    }
+
+    /// Record every received SOP Source message, including messages that do
+    /// not affect the current policy phase. A small forward distance is a
+    /// fresh message; equal and half-range/old values remain duplicates.
+    pub fn observe_source_message_id(&mut self, source_message_id: Option<u8>) -> bool {
+        let Some(source_message_id) = source_message_id.map(|value| value & 0x07) else {
+            return true;
+        };
+        if !self.source_capabilities_message_is_fresh(Some(source_message_id)) {
+            return false;
+        }
+        self.source_message_id = Some(source_message_id);
+        true
     }
 
     fn begin_request(&mut self, capabilities: SourceCapabilities) -> Option<[u8; 4]> {
@@ -382,10 +390,7 @@ impl SinkPolicy {
         self.on_control_message_with_message_id(message_type, None, now_ms);
     }
 
-    /// Process a control response and reject only a duplicate Source message.
-    /// Source message IDs are monotonic modulo eight, but a Source may emit
-    /// other valid messages between the capability advertisement and its
-    /// response, so requiring an exact +1 ID loses valid negotiations.
+    /// Process a control response only after accepting its Source message ID.
     pub fn on_control_message_with_message_id(
         &mut self,
         message_type: u8,
@@ -397,20 +402,14 @@ impl SinkPolicy {
         const REJECT: u8 = 4;
         const WAIT: u8 = 12;
 
-        let message_id = message_id.map(|value| value & 0x07);
-        let response_id_is_fresh = message_id.is_none_or(|current| {
-            self.source_message_id
-                .is_none_or(|last| source_message_id_is_newer(last, current))
-        });
-
-        if !response_id_is_fresh {
+        if !self.source_capabilities_message_is_fresh(message_id) {
             return;
         }
 
         match (self.phase, message_type) {
             (SinkPhase::WaitingForAccept, ACCEPT) => {
                 if let Some(message_id) = message_id {
-                    self.source_message_id = Some(message_id);
+                    self.source_message_id = Some(message_id & 0x07);
                 }
                 self.phase = SinkPhase::WaitingForPsRdy;
             }
@@ -418,7 +417,7 @@ impl SinkPolicy {
                 self.active_contract = self.pending_contract;
                 self.pending_contract = Contract::none();
                 if let Some(message_id) = message_id {
-                    self.source_message_id = Some(message_id);
+                    self.source_message_id = Some(message_id & 0x07);
                 }
                 self.phase = SinkPhase::Ready;
                 let _ = now_ms;
@@ -980,20 +979,36 @@ mod tests {
         policy.on_control_message_with_message_id(3, Some(2), 0);
         assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
 
-        // The Source may send another valid message before Accept; an exact
-        // +1 requirement would incorrectly discard this response.
-        policy.on_control_message_with_message_id(3, Some(4), 1);
+        // An unrelated Source message advances duplicate tracking but cannot
+        // change the contract phase. The following Accept is then the next
+        // valid Source message.
+        assert!(policy.observe_source_message_id(Some(4)));
+        policy.on_control_message_with_message_id(3, Some(5), 1);
         assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
 
         // A duplicate Accept ID is stale for the PS_RDY phase.
-        policy.on_control_message_with_message_id(6, Some(4), 2);
+        policy.on_control_message_with_message_id(6, Some(5), 2);
         assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
         assert_eq!(policy.active_contract(), Contract::none());
 
-        // PS_RDY may also skip an intervening Source message ID.
-        policy.on_control_message_with_message_id(6, Some(6), 3);
+        assert!(policy.observe_source_message_id(Some(6)));
+        policy.on_control_message_with_message_id(6, Some(7), 3);
         assert_eq!(policy.phase(), SinkPhase::Ready);
         assert_eq!(policy.active_contract().kind, ContractKind::Pps);
+    }
+
+    #[test]
+    fn unrelated_control_does_not_advance_source_message_tracking() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        let _ = policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(3));
+
+        policy.on_control_message_with_message_id(1, Some(4), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+
+        policy.on_control_message_with_message_id(3, Some(4), 1);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        policy.on_control_message_with_message_id(6, Some(5), 2);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
     }
 
     #[test]
@@ -1006,14 +1021,17 @@ mod tests {
 
         policy.on_control_message_with_message_id(6, Some(7), 1);
         assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
-        policy.on_control_message_with_message_id(6, Some(2), 2);
+        policy.on_control_message_with_message_id(6, Some(1), 2);
         assert_eq!(policy.phase(), SinkPhase::Ready);
     }
 
     #[test]
-    fn source_message_id_half_range_is_treated_as_ambiguous() {
-        assert!(!source_message_id_is_newer(1, 5));
-        assert!(!source_message_id_is_newer(5, 1));
+    fn source_message_id_accepts_small_forward_sequence_distances() {
+        assert!(source_message_id_is_newer(7, 0));
+        assert!(source_message_id_is_newer(1, 3));
+        assert!(source_message_id_is_newer(1, 5));
+        assert!(!source_message_id_is_newer(1, 6));
+        assert!(!source_message_id_is_newer(5, 2));
     }
 
     #[test]

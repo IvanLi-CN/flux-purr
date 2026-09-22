@@ -2500,7 +2500,32 @@ pub(crate) struct ThermalPlantDisarmContext<'a, PWM> {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn disarm_pending_thermal_plant_output<PWM>(
+static TERMINAL_DISARM_POWER_TICKET: BlockingMutex<
+    CriticalSectionRawMutex,
+    RefCell<Option<PowerTicket>>,
+> = BlockingMutex::new(RefCell::new(None));
+
+#[cfg(target_arch = "xtensa")]
+fn take_terminal_disarm_power_ticket() -> Option<PowerTicket> {
+    TERMINAL_DISARM_POWER_TICKET.lock(|ticket| ticket.borrow_mut().take())
+}
+
+#[cfg(target_arch = "xtensa")]
+fn store_terminal_disarm_power_ticket(ticket: PowerTicket) {
+    TERMINAL_DISARM_POWER_TICKET.lock(|current| {
+        *current.borrow_mut() = Some(ticket);
+    });
+}
+
+#[cfg(target_arch = "xtensa")]
+fn clear_terminal_disarm_power_ticket() {
+    TERMINAL_DISARM_POWER_TICKET.lock(|ticket| {
+        *ticket.borrow_mut() = None;
+    });
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn disarm_pending_thermal_plant_output<PWM>(
     context: ThermalPlantDisarmContext<'_, PWM>,
 ) -> bool
 where
@@ -2518,6 +2543,7 @@ where
         measured_vin_mv,
     } = context;
     if !latch_terminal_fixed_pd_disarm(calibration_runtime_state, backend) {
+        clear_terminal_disarm_power_ticket();
         return false;
     }
 
@@ -2526,12 +2552,23 @@ where
     ui_state.heater_enabled = false;
     ui_state.heater_output_percent = 0;
 
-    let idle_confirmed = match pd_port.restore_automatic_idle_contract() {
-        PdRequestState::Pending(ticket) => matches!(
-            pd_port.wait_for_ticket(ticket).await,
-            TicketOutcome::Confirmed(_)
-        ),
-        PdRequestState::Failed => false,
+    let idle_confirmed = match take_terminal_disarm_power_ticket() {
+        Some(ticket) => match pd_port.try_take_ticket(ticket) {
+            Some(TicketOutcome::Confirmed(_)) => true,
+            Some(_) => false,
+            None => {
+                store_terminal_disarm_power_ticket(ticket);
+                false
+            }
+        },
+        None => match pd_port.restore_automatic_idle_contract() {
+            PdRequestState::Confirmed => true,
+            PdRequestState::Pending(ticket) => {
+                store_terminal_disarm_power_ticket(ticket);
+                false
+            }
+            PdRequestState::Failed => false,
+        },
     };
     if !idle_confirmed {
         // Keep both the disarm latch and the PPS backend lock until the

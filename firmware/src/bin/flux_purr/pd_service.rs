@@ -24,6 +24,7 @@ pub(crate) struct PdServiceSnapshot {
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PdRequestState {
+    Confirmed,
     Pending(PowerTicket),
     Failed,
 }
@@ -185,6 +186,17 @@ impl PdServiceClient {
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
         }
+        if snapshot.observation.is_some_and(|observation| {
+            let mode_matches = match request.mode() {
+                PdContractRequestMode::Fixed => observation.contract.kind == ContractKind::Fixed,
+                PdContractRequestMode::Pps => observation.contract.kind == ContractKind::Pps,
+            };
+            mode_matches
+                && observation.contract.voltage_mv == request.voltage_mv()
+                && observation.contract.current_ma >= request.operating_current_ma()
+        }) {
+            return PdRequestState::Confirmed;
+        }
         match PowerCoordinatorClient::new().request(PowerIntentOwner::AutomaticThermal, request) {
             Ok(ticket) => PdRequestState::Pending(ticket),
             Err(_) => PdRequestState::Failed,
@@ -203,6 +215,11 @@ impl PdServiceClient {
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
         }
+        if snapshot.observation.is_some_and(|observation| {
+            automatic_idle_contract_is_confirmed(observation, snapshot.capabilities)
+        }) {
+            return PdRequestState::Confirmed;
+        }
         match PowerCoordinatorClient::new().idle() {
             Ok(ticket) => PdRequestState::Pending(ticket),
             Err(_) => PdRequestState::Failed,
@@ -220,6 +237,13 @@ impl PdServiceClient {
         let snapshot = self.snapshot();
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
+        }
+        if snapshot.observation.is_some_and(|observation| {
+            observation.contract.kind == ContractKind::Pps
+                && observation.contract.voltage_mv == request.voltage_mv()
+                && observation.contract.current_ma >= request.operating_current_ma()
+        }) {
+            return PdRequestState::Confirmed;
         }
         match PowerCoordinatorClient::new().request(owner, request) {
             Ok(ticket) => PdRequestState::Pending(ticket),
@@ -264,16 +288,17 @@ pub(crate) fn fusb302b_status_confirms_active_contract(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn pd_status_observation(
-    runtime: &Fusb302bRuntime,
-    i2c: &mut PdI2c<'_>,
-) -> Option<PdStatusObservation> {
-    if !runtime.service_available() || runtime.request_timed_out {
+fn pd_status_observation(runtime: &Fusb302bRuntime) -> Option<PdStatusObservation> {
+    if !runtime.service_available() || runtime.request_timed_out || !runtime.vbus_status_observed()
+    {
         return None;
     }
     let contract = runtime.active_contract();
-    let status = Fusb302::new(&mut *i2c).read_status().await.ok()?;
-    if !fusb302b_status_confirms_active_contract(runtime.policy.phase(), contract, status.status0) {
+    if !fusb302b_status_confirms_active_contract(
+        runtime.policy.phase(),
+        contract,
+        FUSB302B_STATUS0_VBUSOK,
+    ) {
         return None;
     }
 
@@ -620,9 +645,10 @@ async fn run_pd_service_turn(
     // unbounded work queue. Poll once on every service turn regardless of
     // how many commands are waiting.
     let _ = runtime.poll(i2c, PdTimestamp::now()).await;
-    // The policy contract is only heater-authorizing after a fresh hardware
-    // status read; keep this read inside the same bus lease.
-    let observation = pd_status_observation(runtime, i2c).await;
+    // `runtime.poll` has just sampled the FUSB302B status bank. Reuse only
+    // that same-turn VBUSOK result so authorization remains fresh without
+    // duplicating the four-register I2C status read.
+    let observation = pd_status_observation(runtime);
     i2c.release();
     *pending = publish_pd_service_turn(
         runtime,

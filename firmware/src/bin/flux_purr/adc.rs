@@ -492,6 +492,23 @@ pub(crate) enum Fusb302bReceiveEvent {
     UnsupportedSop,
 }
 
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fusb302bReceiveFault {
+    InterruptRead(u8),
+    StatusRead(u8),
+    ReceiveFifoFlush,
+    PacketReceive(u8),
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const FUSB302B_TRANSPORT_RECOVERY_BACKOFF_MS: u64 = 50;
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const fn fusb302b_transport_retry_due(not_before_ms: Option<u64>, now_ms: u64) -> bool {
+    !matches!(not_before_ms, Some(not_before_ms) if now_ms < not_before_ms)
+}
+
 /// The FUSB302B reports received PD resets independently of Type-C CC state.
 /// Neither event is evidence that the attached source has detached.
 #[cfg(any(target_arch = "xtensa", test))]
@@ -623,6 +640,13 @@ pub(crate) struct Fusb302bRuntime {
     pub(crate) awaiting_vbus_restore: bool,
     pub(crate) request_rejected: bool,
     pub(crate) request_timed_out: bool,
+    // A local I2C fault has already withdrawn authorization. Avoid immediately
+    // repeating a multi-transfer recovery on every 5ms service turn.
+    pub(crate) transport_recovery_not_before_ms: Option<u64>,
+    // `poll_receive_messages` reads Status0 on every completed service turn.
+    // Retain only whether that same-turn read confirmed VBUSOK; the published
+    // power observation must never trigger a second status-bank transaction.
+    pub(crate) vbus_status_observed: bool,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -639,7 +663,7 @@ impl Fusb302bRuntime {
         Self {
             policy: fusb302b::SinkPolicy::new(
                 FUSB302B_INITIAL_PPS_REQUEST_MV,
-                MIN_HEATER_CONTRACT_MA,
+                MAX_HEATER_CONTRACT_MA,
             ),
             polarity: None,
             next_message_id: 0,
@@ -659,6 +683,8 @@ impl Fusb302bRuntime {
             awaiting_vbus_restore: false,
             request_rejected: false,
             request_timed_out: false,
+            transport_recovery_not_before_ms: None,
+            vbus_status_observed: false,
         }
     }
 
@@ -679,6 +705,7 @@ impl Fusb302bRuntime {
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
         self.retry_fail_recovery_pending = false;
+        self.vbus_status_observed = false;
     }
 
     fn interlock_after_vbus_low(&mut self, now_ms: u64) {
@@ -690,15 +717,25 @@ impl Fusb302bRuntime {
         // but a static level is not sufficient evidence to withdraw Rd. Keep
         // the physical CC session intact until a transition is confirmed.
         self.clear_contract_authorization(now_ms);
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_VBUS_LOW);
         self.vbus_low_candidate_since_ms = None;
         self.vbus_low_interlocked = true;
     }
 
     pub(crate) fn interlock_after_stale_contract(&mut self, now_ms: u64) {
         self.clear_contract_authorization(now_ms);
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_STALE_CONTRACT_VIN);
         self.clear_vbus_low_interlock();
         self.awaiting_vbus_restore = false;
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+    }
+
+    fn record_protocol_fault(&self, fault: u8) {
+        FUSB302B_LAST_PROTOCOL_FAULT.store(fault, Ordering::Release);
+    }
+
+    fn record_i2c_error(&self, error: u8) {
+        FUSB302B_LAST_I2C_ERROR.store(error, Ordering::Release);
     }
 
     pub(crate) fn stale_contract_vin_guard_suspended(&self, now_ms: u64) -> bool {
@@ -824,6 +861,24 @@ impl Fusb302bRuntime {
         now: PdTimestamp,
     ) -> bool {
         let now_ms = now.as_millis();
+        self.transport_recovery_not_before_ms =
+            Some(now_ms.saturating_add(FUSB302B_TRANSPORT_RECOVERY_BACKOFF_MS));
+        self.record_protocol_fault(match fault {
+            fusb302b::TransientTransportFault::RetryFailed => FUSB302B_PROTOCOL_FAULT_RETRY_FAILED,
+            fusb302b::TransientTransportFault::PendingRequestTimeout => {
+                FUSB302B_PROTOCOL_FAULT_PENDING_REQUEST_TIMEOUT
+            }
+            fusb302b::TransientTransportFault::PartialReceiveTimeout => {
+                FUSB302B_PROTOCOL_FAULT_PARTIAL_RECEIVE_TIMEOUT
+            }
+            fusb302b::TransientTransportFault::ReceiveIoError => FUSB302B_PROTOCOL_FAULT_RECEIVE_IO,
+            fusb302b::TransientTransportFault::TransmitIoError => {
+                FUSB302B_PROTOCOL_FAULT_TRANSMIT_IO
+            }
+            fusb302b::TransientTransportFault::ConfigurationIoError => {
+                FUSB302B_PROTOCOL_FAULT_CONFIGURATION_IO
+            }
+        });
         match fusb302b::transient_transport_fault_recovery(fault) {
             fusb302b::TransientTransportRecovery::FlushReceiveAndRequery => {
                 self.policy.interlock_after_transient_transport_fault();
@@ -873,6 +928,10 @@ impl Fusb302bRuntime {
 
     pub(crate) fn service_available(&self) -> bool {
         !matches!(self.policy.phase(), SinkPhase::Fault)
+    }
+
+    pub(crate) const fn vbus_status_observed(&self) -> bool {
+        self.vbus_status_observed
     }
 
     pub(crate) async fn request_contract(
@@ -1171,6 +1230,7 @@ impl Fusb302bRuntime {
         self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
         self.request_timed_out = true;
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_SOURCE_CAPABILITIES_TIMEOUT);
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
     }
 
@@ -1474,6 +1534,7 @@ impl Fusb302bRuntime {
         action: Fusb302bReceivedResetAction,
     ) -> bool {
         self.clear_vbus_low_interlock();
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_RECEIVED_RESET);
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
         self.recover_after_received_reset(i2c, action, now).await
     }
@@ -1491,6 +1552,7 @@ impl Fusb302bRuntime {
 
     fn handle_protection_event(&mut self) -> bool {
         self.clear_vbus_low_interlock();
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_PROTECTION);
         self.policy.mark_fault();
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_PROTECTION, Ordering::Relaxed);
         false
@@ -1498,6 +1560,7 @@ impl Fusb302bRuntime {
 
     async fn handle_unsupported_sop(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) -> bool {
         self.clear_vbus_low_interlock();
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_UNSUPPORTED_SOP);
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_UNSUPPORTED_SOP, Ordering::Relaxed);
         self.recover_transient_transport_fault(
             i2c,
@@ -1512,7 +1575,15 @@ impl Fusb302bRuntime {
     /// awaits below are bounded hardware transactions, not waits for EEPROM's
     /// mutex ownership.
     pub(crate) async fn poll(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) -> bool {
+        // A published observation is valid only when this exact service turn
+        // successfully samples VBUSOK. Any early return or transport error
+        // leaves the value false and therefore withdraws heater permission.
+        self.vbus_status_observed = false;
         let now_ms = now.as_millis();
+        if !fusb302b_transport_retry_due(self.transport_recovery_not_before_ms, now_ms) {
+            return false;
+        }
+        self.transport_recovery_not_before_ms = None;
         if self.policy.phase() == SinkPhase::Fault {
             return false;
         }
@@ -1538,12 +1609,36 @@ impl Fusb302bRuntime {
         let event = match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending).await {
             Ok(event) => event,
             Err(fault) => {
+                let protocol_fault = match fault {
+                    Fusb302bReceiveFault::InterruptRead(i2c_error) => {
+                        self.record_i2c_error(i2c_error);
+                        FUSB302B_PROTOCOL_FAULT_READ_INTERRUPTS_IO
+                    }
+                    Fusb302bReceiveFault::StatusRead(i2c_error) => {
+                        self.record_i2c_error(i2c_error);
+                        FUSB302B_PROTOCOL_FAULT_READ_STATUS_IO
+                    }
+                    Fusb302bReceiveFault::ReceiveFifoFlush => {
+                        FUSB302B_PROTOCOL_FAULT_RX_FIFO_FLUSH_IO
+                    }
+                    Fusb302bReceiveFault::PacketReceive(i2c_error) => {
+                        self.record_i2c_error(i2c_error);
+                        FUSB302B_PROTOCOL_FAULT_RECEIVE_PACKET_IO
+                    }
+                };
                 FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
-                return self
-                    .recover_transient_transport_fault(i2c, fault, now)
+                let recovered = self
+                    .recover_transient_transport_fault(
+                        i2c,
+                        fusb302b::TransientTransportFault::ReceiveIoError,
+                        now,
+                    )
                     .await;
+                self.record_protocol_fault(protocol_fault);
+                return recovered;
             }
         };
+        self.vbus_status_observed = !matches!(event, Fusb302bReceiveEvent::VbusLow { .. });
         match event {
             Fusb302bReceiveEvent::VbusLow { transition } => {
                 self.handle_vbus_low_event(i2c, now_ms, transition).await
