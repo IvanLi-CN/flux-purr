@@ -10439,11 +10439,69 @@ fn fusb302b_pending_contract_is_not_reported_as_ready() {
 }
 
 #[test]
-fn pps_keepalive_without_a_response_expires_the_authorization_window() {
+fn pps_keepalive_without_a_response_expires_only_the_probe_window() {
     assert!(!pps_keepalive_response_timeout_due(None, 10_000));
     assert!(!pps_keepalive_response_timeout_due(Some(10_000), 11_499));
     assert!(pps_keepalive_response_timeout_due(Some(10_000), 11_500));
     assert!(pps_keepalive_response_timeout_due(Some(0), u64::MAX));
+}
+
+#[test]
+fn pps_keepalive_deadline_requires_a_fresh_expected_control_response() {
+    assert!(pps_keepalive_response_is_valid(
+        SinkPhase::Ready,
+        true,
+        3,
+        true
+    ));
+    assert!(pps_keepalive_response_is_valid(
+        SinkPhase::Ready,
+        true,
+        6,
+        true
+    ));
+    assert!(!pps_keepalive_response_is_valid(
+        SinkPhase::Ready,
+        true,
+        1,
+        true
+    ));
+    assert!(!pps_keepalive_response_is_valid(
+        SinkPhase::Ready,
+        true,
+        3,
+        false
+    ));
+    assert!(!pps_keepalive_response_is_valid(
+        SinkPhase::WaitingForPsRdy,
+        true,
+        6,
+        true
+    ));
+}
+
+#[test]
+fn successful_contract_confirmation_clears_a_previous_timeout_marker() {
+    assert!(successful_contract_confirmation_clears_timeout(
+        true,
+        SinkPhase::Ready
+    ));
+    assert!(!successful_contract_confirmation_clears_timeout(
+        true,
+        SinkPhase::WaitingForPsRdy
+    ));
+    assert!(!successful_contract_confirmation_clears_timeout(
+        false,
+        SinkPhase::Ready
+    ));
+}
+
+#[test]
+fn contract_request_response_timeout_uses_the_slow_transition_window() {
+    assert!(!contract_request_response_timeout_due(None, 10_000));
+    assert!(!contract_request_response_timeout_due(Some(10_000), 14_999));
+    assert!(contract_request_response_timeout_due(Some(10_000), 15_000));
+    assert!(contract_request_response_timeout_due(Some(0), u64::MAX));
 }
 
 #[test]

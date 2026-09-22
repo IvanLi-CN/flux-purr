@@ -664,6 +664,36 @@ pub(crate) const fn pps_keepalive_response_timeout_due(
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn pps_keepalive_response_is_valid(
+    phase: SinkPhase,
+    keepalive_pending: bool,
+    message_type: u8,
+    message_id_is_fresh: bool,
+) -> bool {
+    keepalive_pending
+        && phase == SinkPhase::Ready
+        && message_id_is_fresh
+        && matches!(message_type, 3 | 4 | 6 | 12)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn successful_contract_confirmation_clears_timeout(
+    was_waiting_for_ps_rdy: bool,
+    phase: SinkPhase,
+) -> bool {
+    was_waiting_for_ps_rdy && phase == SinkPhase::Ready
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn contract_request_response_timeout_due(
+    last_request_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    last_request_at_ms
+        .is_some_and(|last| now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS)
+}
+
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PdContractRequestState {
@@ -1227,13 +1257,20 @@ impl Fusb302bRuntime {
         let pending = matches!(
             self.policy.phase(),
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-        ) && self.last_request_at_ms.is_some_and(|last| {
-            now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS
-        });
-        if !pending && !keepalive_pending {
+        ) && contract_request_response_timeout_due(self.last_request_at_ms, now_ms);
+        if keepalive_pending {
+            // An unchanged PPS RDO is a liveness probe, not a contract
+            // transition. Some valid sources keep VBUS at the confirmed level
+            // without sending Accept/PS_RDY for the identical request. Bound
+            // the probe state, but leave the confirmed contract authoritative;
+            // VBUS/ADC loss and transport faults still revoke it fail-closed.
+            self.pps_keepalive_pending_at_ms = None;
+            self.last_request_at_ms = Some(now_ms);
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_IDLE, Ordering::Relaxed);
+        }
+        if !pending {
             return None;
         }
-        self.pps_keepalive_pending_at_ms = None;
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
         self.request_timed_out = true;
         Some(
@@ -1248,11 +1285,10 @@ impl Fusb302bRuntime {
 
     fn poll_pps_transition_capability_refresh(&mut self, now_ms: u64) {
         let timed_out = self.source_capabilities_refresh_pending
-            && self
-                .source_capabilities_refresh_requested_at_ms
-                .is_some_and(|last| {
-                    now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS
-                });
+            && contract_request_response_timeout_due(
+                self.source_capabilities_refresh_requested_at_ms,
+                now_ms,
+            );
         if !timed_out {
             return;
         }
@@ -1473,7 +1509,6 @@ impl Fusb302bRuntime {
     ) -> bool {
         self.clear_vbus_low_interlock();
         self.partial_rx_started_at_ms = None;
-        self.pps_keepalive_pending_at_ms = None;
         if let Some((pdos, count)) =
             fusb302b::source_capabilities_from_message(message.header(), message.payload())
         {
@@ -1540,19 +1575,31 @@ impl Fusb302bRuntime {
     fn handle_control_message(&mut self, message: PdPacket, now_ms: u64) {
         let was_waiting_for_ps_rdy = self.policy.phase() == SinkPhase::WaitingForPsRdy;
         let message_type = (message.header() & 0x1f) as u8;
-        self.pps_keepalive_pending_at_ms = None;
+        let message_id = Some((message.header() >> 9) as u8 & 0x07);
+        let keepalive_response_is_valid = pps_keepalive_response_is_valid(
+            self.policy.phase(),
+            self.pps_keepalive_pending_at_ms.is_some(),
+            message_type,
+            self.policy.source_capabilities_message_is_fresh(message_id),
+        );
         self.request_rejected = matches!(message_type, 4 | 12)
             && matches!(
                 self.policy.phase(),
                 SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
             );
-        self.policy.on_control_message_with_message_id(
-            message_type,
-            Some((message.header() >> 9) as u8 & 0x07),
-            now_ms,
-        );
+        self.policy
+            .on_control_message_with_message_id(message_type, message_id, now_ms);
+        if keepalive_response_is_valid {
+            self.pps_keepalive_pending_at_ms = None;
+        }
         if was_waiting_for_ps_rdy && self.policy.phase() == SinkPhase::Ready {
             self.last_source_capabilities_request_at_ms = Some(now_ms);
+            if successful_contract_confirmation_clears_timeout(
+                was_waiting_for_ps_rdy,
+                self.policy.phase(),
+            ) {
+                self.request_timed_out = false;
+            }
         }
         FUSB302B_DIAGNOSTIC.store(
             if self.policy.phase() == SinkPhase::Ready {
