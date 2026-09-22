@@ -780,57 +780,68 @@ fn power_pd_command(
     Some((ticket, owner, refresh, idle, pd_command))
 }
 
-#[cfg(target_arch = "xtensa")]
-fn settle_inflight(
-    inflight: &mut Option<(PowerIntentOwner, PowerTicket)>,
-    inflight_refresh: &mut bool,
-    joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
+#[cfg(any(target_arch = "xtensa", test))]
+struct PowerCoordinatorTransition<'a> {
+    inflight: &'a mut Option<(PowerIntentOwner, PowerTicket)>,
+    inflight_refresh: &'a mut bool,
+    inflight_idle: &'a mut bool,
+    active_owner: &'a mut Option<PowerIntentOwner>,
+    joined_refresh: &'a mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn settle_inflight<S, C>(
+    transition: &mut PowerCoordinatorTransition<'_>,
     outcome: TicketOutcome,
-) {
-    if let Some((_, ticket)) = inflight.take() {
-        cancel_pd_service_ticket(ticket);
-        signal_ticket(ticket, outcome);
+    signal: &mut S,
+    cancel: &mut C,
+) where
+    S: FnMut(PowerTicket, TicketOutcome),
+    C: FnMut(PowerTicket),
+{
+    if let Some((_, ticket)) = transition.inflight.take() {
+        cancel(ticket);
+        signal(ticket, outcome);
     }
-    *inflight_refresh = false;
-    while let Some(ticket) = joined_refresh.pop() {
-        signal_ticket(ticket, outcome);
+    *transition.inflight_refresh = false;
+    while let Some(ticket) = transition.joined_refresh.pop() {
+        signal(ticket, outcome);
     }
 }
 
-#[cfg(target_arch = "xtensa")]
-fn supersede_or_join_power_command(
+#[cfg(any(target_arch = "xtensa", test))]
+fn supersede_or_join_power_command<S, C>(
     ticket: PowerTicket,
     owner: Option<PowerIntentOwner>,
     refresh: bool,
     idle: bool,
-    inflight: &mut Option<(PowerIntentOwner, PowerTicket)>,
-    inflight_refresh: &mut bool,
-    joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
-) -> bool {
+    transition: &mut PowerCoordinatorTransition<'_>,
+    signal: &mut S,
+    cancel: &mut C,
+) -> bool
+where
+    S: FnMut(PowerTicket, TicketOutcome),
+    C: FnMut(PowerTicket),
+{
     match power_command_admission_decision(
         owner,
         refresh,
         idle,
-        inflight.map(|(active_owner, _)| active_owner),
-        *inflight_refresh,
+        transition.inflight.map(|(active_owner, _)| active_owner),
+        *transition.inflight_refresh,
     ) {
         PowerCommandAdmissionDecision::JoinRefresh => {
-            if joined_refresh.push(ticket).is_err() {
-                signal_ticket(ticket, TicketOutcome::Rejected);
+            if transition.joined_refresh.push(ticket).is_err() {
+                signal(ticket, TicketOutcome::Rejected);
             }
             true
         }
         PowerCommandAdmissionDecision::SupersedeInflight => {
-            settle_inflight(
-                inflight,
-                inflight_refresh,
-                joined_refresh,
-                TicketOutcome::Superseded,
-            );
+            settle_inflight(transition, TicketOutcome::Superseded, signal, cancel);
             false
         }
         PowerCommandAdmissionDecision::SupersedeIncoming => {
-            signal_ticket(ticket, TicketOutcome::Superseded);
+            signal(ticket, TicketOutcome::Superseded);
             true
         }
         PowerCommandAdmissionDecision::Dispatch => false,
@@ -912,14 +923,23 @@ fn dispatch_power_command(
         signal_ticket(ticket, TicketOutcome::Superseded);
         return None;
     }
+    let mut signal = |ticket, outcome| signal_ticket(ticket, outcome);
+    let mut cancel = |ticket| cancel_pd_service_ticket(ticket);
+    let mut transition = PowerCoordinatorTransition {
+        inflight: &mut coordinator.inflight,
+        inflight_refresh: &mut coordinator.inflight_refresh,
+        inflight_idle: &mut coordinator.inflight_idle,
+        active_owner: &mut coordinator.active_owner,
+        joined_refresh: &mut coordinator.joined_refresh,
+    };
     if supersede_or_join_power_command(
         ticket,
         owner,
         refresh,
         idle,
-        &mut coordinator.inflight,
-        &mut coordinator.inflight_refresh,
-        &mut coordinator.joined_refresh,
+        &mut transition,
+        &mut signal,
+        &mut cancel,
     ) {
         return None;
     }
@@ -1007,33 +1027,33 @@ fn retry_deferred_power_command(coordinator: &mut PowerCoordinatorState) {
     }
 }
 
-#[cfg(target_arch = "xtensa")]
-fn dispatch_power_terminal(
+#[cfg(any(target_arch = "xtensa", test))]
+fn dispatch_power_terminal<S>(
     ticket: PowerTicket,
     outcome: TicketOutcome,
-    inflight: &mut Option<(PowerIntentOwner, PowerTicket)>,
-    inflight_refresh: &mut bool,
-    inflight_idle: &mut bool,
-    active_owner: &mut Option<PowerIntentOwner>,
-    joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
-) -> bool {
-    if !terminal_matches_inflight(*inflight, ticket) {
+    transition: &mut PowerCoordinatorTransition<'_>,
+    signal: &mut S,
+) -> bool
+where
+    S: FnMut(PowerTicket, TicketOutcome),
+{
+    if !terminal_matches_inflight(*transition.inflight, ticket) {
         return false;
     }
-    let completed_owner = inflight.map(|(owner, _)| owner);
-    *active_owner = active_owner_after_terminal(
-        *active_owner,
+    let completed_owner = transition.inflight.map(|(owner, _)| owner);
+    *transition.active_owner = active_owner_after_terminal(
+        *transition.active_owner,
         completed_owner,
-        *inflight_refresh,
-        *inflight_idle,
+        *transition.inflight_refresh,
+        *transition.inflight_idle,
         outcome,
     );
-    signal_ticket(ticket, outcome);
-    *inflight = None;
-    *inflight_refresh = false;
-    *inflight_idle = false;
-    while let Some(joined) = joined_refresh.pop() {
-        signal_ticket(joined, outcome);
+    signal(ticket, outcome);
+    *transition.inflight = None;
+    *transition.inflight_refresh = false;
+    *transition.inflight_idle = false;
+    while let Some(joined) = transition.joined_refresh.pop() {
+        signal(joined, outcome);
     }
     true
 }
@@ -1068,15 +1088,16 @@ async fn power_coordinator_task() {
                     outcome,
                 );
                 let failed_owner_backlog = failed_owner.map(collect_failed_owner_backlog);
-                let terminal_accepted = dispatch_power_terminal(
-                    ticket,
-                    outcome,
-                    &mut coordinator.inflight,
-                    &mut coordinator.inflight_refresh,
-                    &mut coordinator.inflight_idle,
-                    &mut coordinator.active_owner,
-                    &mut coordinator.joined_refresh,
-                );
+                let mut signal = |ticket, outcome| signal_ticket(ticket, outcome);
+                let mut transition = PowerCoordinatorTransition {
+                    inflight: &mut coordinator.inflight,
+                    inflight_refresh: &mut coordinator.inflight_refresh,
+                    inflight_idle: &mut coordinator.inflight_idle,
+                    active_owner: &mut coordinator.active_owner,
+                    joined_refresh: &mut coordinator.joined_refresh,
+                };
+                let terminal_accepted =
+                    dispatch_power_terminal(ticket, outcome, &mut transition, &mut signal);
                 if terminal_accepted {
                     publish_power_state(state);
                 }
@@ -1112,6 +1133,7 @@ mod tests {
         joined_refresh: heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
         deferred: Option<PowerCommand>,
         terminals: heapless::Vec<(PowerTicket, TicketOutcome), POWER_COMMANDS_CAPACITY>,
+        cancelled: heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
     }
 
     impl CoordinatorHarness {
@@ -1125,6 +1147,7 @@ mod tests {
                 joined_refresh: heapless::Vec::new(),
                 deferred: None,
                 terminals: heapless::Vec::new(),
+                cancelled: heapless::Vec::new(),
             }
         }
 
@@ -1152,34 +1175,33 @@ mod tests {
                 self.signal(ticket, TicketOutcome::Superseded);
                 return None;
             }
-            match power_command_admission_decision(
+            let terminals = &mut self.terminals;
+            let cancelled = &mut self.cancelled;
+            let mut transition = PowerCoordinatorTransition {
+                inflight: &mut self.inflight,
+                inflight_refresh: &mut self.inflight_refresh,
+                inflight_idle: &mut self.inflight_idle,
+                active_owner: &mut self.active_owner,
+                joined_refresh: &mut self.joined_refresh,
+            };
+            let mut signal = |ticket, outcome| {
+                terminals
+                    .push((ticket, outcome))
+                    .expect("harness terminal capacity");
+            };
+            let mut cancel = |ticket| {
+                cancelled.push(ticket).expect("harness cancel capacity");
+            };
+            if supersede_or_join_power_command(
+                ticket,
                 owner,
                 refresh,
                 idle,
-                self.inflight.map(|(active_owner, _)| active_owner),
-                self.inflight_refresh,
+                &mut transition,
+                &mut signal,
+                &mut cancel,
             ) {
-                PowerCommandAdmissionDecision::JoinRefresh => {
-                    if self.joined_refresh.push(ticket).is_err() {
-                        self.signal(ticket, TicketOutcome::Rejected);
-                    }
-                    return None;
-                }
-                PowerCommandAdmissionDecision::SupersedeInflight => {
-                    if let Some((_, old_ticket)) = self.inflight.take() {
-                        self.signal(old_ticket, TicketOutcome::Superseded);
-                    }
-                    self.inflight_refresh = false;
-                    self.inflight_idle = false;
-                    while let Some(joined) = self.joined_refresh.pop() {
-                        self.signal(joined, TicketOutcome::Superseded);
-                    }
-                }
-                PowerCommandAdmissionDecision::SupersedeIncoming => {
-                    self.signal(ticket, TicketOutcome::Superseded);
-                    return None;
-                }
-                PowerCommandAdmissionDecision::Dispatch => {}
+                return None;
             }
             let inflight_owner = owner.unwrap_or(PowerIntentOwner::AutomaticThermal);
             if !self.service_available {
@@ -1197,25 +1219,20 @@ mod tests {
         }
 
         fn settle(&mut self, ticket: PowerTicket, outcome: TicketOutcome) -> bool {
-            if !terminal_matches_inflight(self.inflight, ticket) {
-                return false;
-            }
-            let completed_owner = self.inflight.map(|(owner, _)| owner);
-            self.active_owner = active_owner_after_terminal(
-                self.active_owner,
-                completed_owner,
-                self.inflight_refresh,
-                self.inflight_idle,
-                outcome,
-            );
-            self.signal(ticket, outcome);
-            self.inflight = None;
-            self.inflight_refresh = false;
-            self.inflight_idle = false;
-            while let Some(joined) = self.joined_refresh.pop() {
-                self.signal(joined, outcome);
-            }
-            true
+            let terminals = &mut self.terminals;
+            let mut transition = PowerCoordinatorTransition {
+                inflight: &mut self.inflight,
+                inflight_refresh: &mut self.inflight_refresh,
+                inflight_idle: &mut self.inflight_idle,
+                active_owner: &mut self.active_owner,
+                joined_refresh: &mut self.joined_refresh,
+            };
+            let mut signal = |ticket, outcome| {
+                terminals
+                    .push((ticket, outcome))
+                    .expect("harness terminal capacity");
+            };
+            dispatch_power_terminal(ticket, outcome, &mut transition, &mut signal)
         }
     }
 
