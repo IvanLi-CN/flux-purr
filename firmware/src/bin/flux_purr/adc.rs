@@ -658,7 +658,7 @@ pub(crate) const fn pps_keepalive_response_timeout_due(
 ) -> bool {
     match pending_at_ms {
         Some(pending_at_ms) => {
-            now_ms.saturating_sub(pending_at_ms) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS
+            now_ms.saturating_sub(pending_at_ms) >= FUSB302B_PPS_KEEPALIVE_RESPONSE_TIMEOUT_MS
         }
         None => false,
     }
