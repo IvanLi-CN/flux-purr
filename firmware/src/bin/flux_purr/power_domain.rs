@@ -353,6 +353,48 @@ fn should_join_refresh(refresh: bool, inflight_refresh: bool) -> bool {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PowerCommandAdmissionDecision {
+    Dispatch,
+    JoinRefresh,
+    SupersedeInflight,
+    SupersedeIncoming,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn power_command_admission_decision(
+    owner: Option<PowerIntentOwner>,
+    refresh: bool,
+    idle: bool,
+    active_owner: Option<PowerIntentOwner>,
+    inflight_refresh: bool,
+) -> PowerCommandAdmissionDecision {
+    if should_join_refresh(refresh, inflight_refresh) {
+        return PowerCommandAdmissionDecision::JoinRefresh;
+    }
+    let Some(active_owner) = active_owner else {
+        return PowerCommandAdmissionDecision::Dispatch;
+    };
+    if idle || owner.is_some_and(|owner| owner.priority() > active_owner.priority()) {
+        PowerCommandAdmissionDecision::SupersedeInflight
+    } else {
+        PowerCommandAdmissionDecision::SupersedeIncoming
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn deferred_command_is_replaced(
+    owner: Option<PowerIntentOwner>,
+    refresh: bool,
+    idle: bool,
+    deferred_owner: Option<PowerIntentOwner>,
+) -> bool {
+    idle || refresh
+        || owner.map_or(0, PowerIntentOwner::priority)
+            >= deferred_owner.map_or(0, PowerIntentOwner::priority)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn terminal_matches_inflight(
     inflight: Option<(PowerIntentOwner, PowerTicket)>,
     ticket: PowerTicket,
@@ -765,17 +807,20 @@ fn supersede_or_join_power_command(
     inflight_refresh: &mut bool,
     joined_refresh: &mut heapless::Vec<PowerTicket, POWER_COMMANDS_CAPACITY>,
 ) -> bool {
-    if should_join_refresh(refresh, *inflight_refresh) {
-        if joined_refresh.push(ticket).is_err() {
-            signal_ticket(ticket, TicketOutcome::Rejected);
+    match power_command_admission_decision(
+        owner,
+        refresh,
+        idle,
+        inflight.map(|(active_owner, _)| active_owner),
+        *inflight_refresh,
+    ) {
+        PowerCommandAdmissionDecision::JoinRefresh => {
+            if joined_refresh.push(ticket).is_err() {
+                signal_ticket(ticket, TicketOutcome::Rejected);
+            }
+            true
         }
-        return true;
-    }
-    let Some((active_owner, _old_ticket)) = *inflight else {
-        return false;
-    };
-    match owner {
-        _ if idle => {
+        PowerCommandAdmissionDecision::SupersedeInflight => {
             settle_inflight(
                 inflight,
                 inflight_refresh,
@@ -784,19 +829,11 @@ fn supersede_or_join_power_command(
             );
             false
         }
-        Some(owner) if owner.priority() > active_owner.priority() => {
-            settle_inflight(
-                inflight,
-                inflight_refresh,
-                joined_refresh,
-                TicketOutcome::Superseded,
-            );
-            false
-        }
-        _ => {
+        PowerCommandAdmissionDecision::SupersedeIncoming => {
             signal_ticket(ticket, TicketOutcome::Superseded);
             true
         }
+        PowerCommandAdmissionDecision::Dispatch => false,
     }
 }
 
@@ -857,9 +894,7 @@ fn dispatch_power_command(
     let (_, new_owner, new_refresh, new_idle, _) = power_command_details(command);
     if let Some(deferred) = coordinator.deferred {
         let (deferred_ticket, deferred_owner, _, _, _) = power_command_details(deferred);
-        let new_priority = new_owner.map_or(0, PowerIntentOwner::priority);
-        let deferred_priority = deferred_owner.map_or(0, PowerIntentOwner::priority);
-        if new_idle || new_refresh || new_priority >= deferred_priority {
+        if deferred_command_is_replaced(new_owner, new_refresh, new_idle, deferred_owner) {
             coordinator.deferred = None;
             signal_ticket(deferred_ticket, TicketOutcome::Superseded);
         } else {
@@ -1212,12 +1247,79 @@ mod tests {
     fn discarded_ticket_releases_its_slot_when_the_terminal_arrives() {
         let slots = AtomicU8::new(0);
         let discarded = AtomicU8::new(0);
-        let slot = reserve_ticket_slot(&slots).expect("slot available");
-        discarded.fetch_or(1u8 << slot, Ordering::Release);
+        let slots_reserved = (0..POWER_TICKET_SLOT_COUNT)
+            .map(|_| reserve_ticket_slot(&slots).expect("slot available"))
+            .collect::<heapless::Vec<_, POWER_TICKET_SLOT_COUNT>>();
+        assert_eq!(reserve_ticket_slot(&slots), None);
+        for slot in slots_reserved.iter().copied() {
+            discarded.fetch_or(1u8 << slot, Ordering::Release);
+        }
 
-        assert!(release_discarded_ticket_slot(&discarded, &slots, slot));
-        assert_eq!(reserve_ticket_slot(&slots), Some(slot));
-        assert!(!release_discarded_ticket_slot(&discarded, &slots, slot));
+        for slot in slots_reserved.iter().copied() {
+            assert!(release_discarded_ticket_slot(&discarded, &slots, slot));
+        }
+        assert_eq!(
+            (0..POWER_TICKET_SLOT_COUNT)
+                .filter_map(|_| reserve_ticket_slot(&slots))
+                .count(),
+            POWER_TICKET_SLOT_COUNT
+        );
+        assert!(!release_discarded_ticket_slot(
+            &discarded,
+            &slots,
+            slots_reserved[0]
+        ));
+    }
+
+    #[test]
+    fn coordinator_admission_model_covers_priority_idle_and_refresh_paths() {
+        let calibration = Some(PowerIntentOwner::Calibration);
+        let automatic = Some(PowerIntentOwner::AutomaticThermal);
+
+        assert_eq!(
+            power_command_admission_decision(None, true, false, calibration, true),
+            PowerCommandAdmissionDecision::JoinRefresh,
+        );
+        assert_eq!(
+            power_command_admission_decision(None, false, true, calibration, false),
+            PowerCommandAdmissionDecision::SupersedeInflight,
+        );
+        assert_eq!(
+            power_command_admission_decision(
+                Some(PowerIntentOwner::ThermalPlantAuto),
+                false,
+                false,
+                automatic,
+                false,
+            ),
+            PowerCommandAdmissionDecision::SupersedeInflight,
+        );
+        assert_eq!(
+            power_command_admission_decision(
+                Some(PowerIntentOwner::AutomaticThermal),
+                false,
+                false,
+                calibration,
+                false,
+            ),
+            PowerCommandAdmissionDecision::SupersedeIncoming,
+        );
+        assert_eq!(
+            power_command_admission_decision(None, false, false, None, false),
+            PowerCommandAdmissionDecision::Dispatch,
+        );
+        assert!(deferred_command_is_replaced(
+            Some(PowerIntentOwner::Calibration),
+            false,
+            false,
+            automatic,
+        ));
+        assert!(!deferred_command_is_replaced(
+            Some(PowerIntentOwner::AutomaticThermal),
+            false,
+            false,
+            calibration,
+        ));
     }
 
     #[test]
