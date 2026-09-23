@@ -57,6 +57,8 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) controller: FrontPanelInputController,
     pub(crate) eeprom_i2c: I2c<'static>,
     pub(crate) pd_port: PdPort,
+    pub(crate) power_state_subscription: PowerStateSubscription<'static>,
+    pub(crate) power_state: PowerState,
     pub(crate) fan_enable: Output<'static>,
     pub(crate) fan_pwm: RuntimePwm0,
     pub(crate) heater_pwm: RuntimePwm1,
@@ -199,6 +201,7 @@ pub(crate) struct BootSystem {
     eeprom_i2c: I2c<'static>,
     pd_task_i2c: Option<PdI2c<'static>>,
     pd_port: PdPort,
+    power_state_subscription: PowerStateSubscription<'static>,
     initial_pd_observation: Option<PdStatusObservation>,
     eeprom_record_staging: &'static mut [u8; EEPROM_RECORD_STAGING_BYTES],
     #[cfg(feature = "web_serial")]
@@ -274,7 +277,7 @@ pub(crate) struct BootKeyTestContext<'a> {
     canvas: &'a mut DisplayCanvas,
     inputs: FrontPanelInputs<'static>,
     status_light_started_ms: u64,
-    pd_port: &'a PdPort,
+    power_state_subscription: &'a mut PowerStateSubscription<'static>,
     initial_pd_observation: &'a mut Option<PdStatusObservation>,
     #[cfg(feature = "web_serial")]
     usb_serial: &'a mut RawUsbSerialJtag,
@@ -978,7 +981,7 @@ impl BootRuntimeState {
             self.canvas,
             InitialFrontpanelContext {
                 state: &self.ui_state,
-                pd_port: &self.system.pd_port,
+                power_state_subscription: &mut self.system.power_state_subscription,
                 last_pd_observation: &mut self.last_pd_observation,
                 heater_pwm: &mut self.heater_pwm,
                 last_heater_duty: &mut self.last_heater_duty,
@@ -1458,6 +1461,9 @@ pub(crate) fn initialize_boot_system(
             eeprom_i2c,
             pd_task_i2c: Some(pd_task_i2c),
             pd_port: PdServiceClient::new(),
+            power_state_subscription: PdServiceClient::new()
+                .subscribe_power_state()
+                .expect("boot power state receiver capacity is reserved"),
             initial_pd_observation: None,
             eeprom_record_staging,
             #[cfg(feature = "web_serial")]
@@ -1572,19 +1578,33 @@ pub(crate) async fn initialize_boot_pd(spawner: Spawner, system: &mut BootSystem
 
 #[cfg(target_arch = "xtensa")]
 async fn wait_for_initial_pd_contract(
-    system: &BootSystem,
+    system: &mut BootSystem,
     pd_runtime_started_ms: u64,
     fusb302b_present: bool,
 ) -> Option<PdStatusObservation> {
-    let mut observation = system.pd_port.observation();
+    let subscription = &mut system.power_state_subscription;
+    let mut power_state = subscription
+        .try_get()
+        .unwrap_or_else(PowerState::unavailable);
+    let mut observation = power_state.observation();
     while startup_pd_service_should_continue(
         fusb302b_present,
         startup_pd_contract_ready(observation),
-        system.pd_port.service_available(),
+        power_state.available,
         pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
     ) {
-        EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await;
-        observation = system.pd_port.observation();
+        match select(
+            subscription.changed(),
+            EmbassyTimer::after_millis(PD_SERVICE_TICK_MS),
+        )
+        .await
+        {
+            Either::First(state) => {
+                power_state = state;
+                observation = power_state.observation();
+            }
+            Either::Second(_) => {}
+        }
     }
     observation
 }
@@ -1610,7 +1630,7 @@ pub(crate) struct BootDisplayContext<'a> {
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct BootDisplayRuntimeContext<'a> {
     startup_sequence: &'a mut StartupSequence,
-    pd_port: &'a PdPort,
+    power_state_subscription: &'a mut PowerStateSubscription<'static>,
     initial_pd_observation: &'a mut Option<PdStatusObservation>,
     status_light: StatusLightState,
     #[cfg(feature = "web_serial")]
@@ -1681,7 +1701,7 @@ pub(crate) async fn initialize_display_panel(
     let _ = usb_write_bytes_bounded(context.usb_serial, b"boot_stage=display_init_start\n");
     let result = run_display_operation_with_snapshot(
         display.init(),
-        context.pd_port,
+        context.power_state_subscription,
         context.initial_pd_observation,
     )
     .await;
@@ -1740,7 +1760,7 @@ pub(crate) async fn present_startup_display(
     let _ = usb_write_bytes_bounded(context.usb_serial, b"boot_stage=display_flush_start\n");
     let ready = match run_display_operation_with_snapshot(
         display.flush(),
-        context.pd_port,
+        context.power_state_subscription,
         context.initial_pd_observation,
     )
     .await
@@ -2273,7 +2293,7 @@ pub(crate) async fn run_key_test_boot(context: BootKeyTestContext<'_>) -> ! {
         canvas,
         inputs,
         status_light_started_ms,
-        pd_port,
+        power_state_subscription,
         initial_pd_observation,
         #[cfg(feature = "web_serial")]
         usb_serial,
@@ -2289,7 +2309,7 @@ pub(crate) async fn run_key_test_boot(context: BootKeyTestContext<'_>) -> ! {
         canvas,
         inputs,
         status_light_started_ms,
-        pd_port,
+        power_state_subscription,
         initial_pd_observation,
     )
     .await
@@ -2350,7 +2370,7 @@ pub(crate) async fn initialize_boot_display_from_parts(
         runtime_mode: system.runtime_mode,
         runtime: BootDisplayRuntimeContext {
             startup_sequence: &mut system.startup_sequence,
-            pd_port: &system.pd_port,
+            power_state_subscription: &mut system.power_state_subscription,
             initial_pd_observation: &mut system.initial_pd_observation,
             status_light: StatusLightState::Booting,
             #[cfg(feature = "web_serial")]
@@ -2382,7 +2402,7 @@ pub(crate) async fn initialize_boot_display_from_parts(
             canvas,
             inputs,
             status_light_started_ms: system.status_light_started_ms,
-            pd_port: &system.pd_port,
+            power_state_subscription: &mut system.power_state_subscription,
             initial_pd_observation: &mut system.initial_pd_observation,
             #[cfg(feature = "web_serial")]
             usb_serial: &mut system.usb_serial,

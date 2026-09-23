@@ -27,6 +27,59 @@ pub(crate) fn fusb302b_degraded_reason() -> &'static str {
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) const fn fusb302b_protocol_fault_code(fault: u8) -> Option<&'static str> {
+    match fault {
+        FUSB302B_PROTOCOL_FAULT_VBUS_LOW => Some("pd_fusb_vbus_low"),
+        FUSB302B_PROTOCOL_FAULT_RECEIVED_RESET => Some("pd_fusb_received_reset"),
+        FUSB302B_PROTOCOL_FAULT_RETRY_FAILED => Some("pd_fusb_retry_failed"),
+        FUSB302B_PROTOCOL_FAULT_PENDING_REQUEST_TIMEOUT => Some("pd_fusb_pending_request_timeout"),
+        FUSB302B_PROTOCOL_FAULT_SOURCE_CAPABILITIES_TIMEOUT => {
+            Some("pd_fusb_source_capabilities_timeout")
+        }
+        FUSB302B_PROTOCOL_FAULT_PARTIAL_RECEIVE_TIMEOUT => Some("pd_fusb_partial_receive_timeout"),
+        FUSB302B_PROTOCOL_FAULT_RECEIVE_IO => Some("pd_fusb_receive_io_error"),
+        FUSB302B_PROTOCOL_FAULT_TRANSMIT_IO => Some("pd_fusb_transmit_io_error"),
+        FUSB302B_PROTOCOL_FAULT_CONFIGURATION_IO => Some("pd_fusb_configuration_io_error"),
+        FUSB302B_PROTOCOL_FAULT_PROTECTION => Some("pd_fusb_protection"),
+        FUSB302B_PROTOCOL_FAULT_STALE_CONTRACT_VIN => Some("pd_fusb_stale_contract_vin"),
+        FUSB302B_PROTOCOL_FAULT_READ_INTERRUPTS_IO => Some("pd_fusb_read_interrupts_io_error"),
+        FUSB302B_PROTOCOL_FAULT_READ_STATUS_IO => Some("pd_fusb_read_status_io_error"),
+        FUSB302B_PROTOCOL_FAULT_RX_FIFO_FLUSH_IO => Some("pd_fusb_rx_fifo_flush_io_error"),
+        FUSB302B_PROTOCOL_FAULT_RECEIVE_PACKET_IO => Some("pd_fusb_receive_packet_io_error"),
+        FUSB302B_PROTOCOL_FAULT_UNSUPPORTED_SOP => Some("pd_fusb_unsupported_sop"),
+        _ => None,
+    }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) const fn fusb302b_i2c_error_code(error: u8) -> Option<&'static str> {
+    match error {
+        FUSB302B_I2C_ERROR_BUS_BUSY => Some("pd_i2c_bus_busy"),
+        FUSB302B_I2C_ERROR_ACK_ADDRESS => Some("pd_i2c_ack_address"),
+        FUSB302B_I2C_ERROR_ACK_DATA => Some("pd_i2c_ack_data"),
+        FUSB302B_I2C_ERROR_ACK_UNKNOWN => Some("pd_i2c_ack_unknown"),
+        FUSB302B_I2C_ERROR_TIMEOUT => Some("pd_i2c_timeout"),
+        FUSB302B_I2C_ERROR_ARBITRATION_LOST => Some("pd_i2c_arbitration_lost"),
+        FUSB302B_I2C_ERROR_EXECUTION_INCOMPLETE => Some("pd_i2c_execution_incomplete"),
+        FUSB302B_I2C_ERROR_OTHER => Some("pd_i2c_other"),
+        _ => None,
+    }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn fusb302b_last_protocol_fault()
+-> Option<heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }>> {
+    fusb302b_protocol_fault_code(FUSB302B_LAST_PROTOCOL_FAULT.load(Ordering::Acquire))
+        .map(error_code_string)
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn fusb302b_last_i2c_error()
+-> Option<heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }>> {
+    fusb302b_i2c_error_code(FUSB302B_LAST_I2C_ERROR.load(Ordering::Acquire)).map(error_code_string)
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn adc_diagnostics_wire() -> AdcDiagnosticsWire {
     let optional_code = |value: u16| (value != u16::MAX).then_some(value);
     let raw_min = RTD_RAW_CODE_MIN.load(Ordering::Relaxed);
@@ -69,6 +122,24 @@ pub(crate) struct PdStatusObservation {
     pub(crate) current_ma: u16,
     pub(crate) contract_voltage_mv: Option<u16>,
     pub(crate) contract: Contract,
+}
+
+/// Convert the FUSB302B STATUS0 sample into the legacy status projection.
+///
+/// STATUS0 is a FUSB302B register and its VBUSOK bit is not the same bit used
+/// by the CH224Q status register for `pd_active`. Keep the sampled byte intact
+/// for diagnostics, and derive the cross-controller semantic field explicitly.
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const fn fusb302b_status_projection(status0: u8) -> Status {
+    Status {
+        bc_active: false,
+        qc2_active: false,
+        qc3_active: false,
+        pd_active: status0 & FUSB302B_STATUS0_VBUSOK != 0,
+        epr_active: false,
+        epr_exist: false,
+        avs_exist: false,
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -276,6 +347,7 @@ impl HoldPpsGovernor {
 pub(crate) enum ManualPpsError {
     NoPpsCapability,
     InvalidVoltage,
+    InvalidCurrent,
     CalibrationInProgress,
     TerminalDisarmPending,
     ThermalPlantManagedByJob,
@@ -299,6 +371,7 @@ impl ManualPpsError {
         match self {
             Self::NoPpsCapability => "manual_pps_no_capability",
             Self::InvalidVoltage => "manual_pps_invalid_voltage",
+            Self::InvalidCurrent => "manual_pps_invalid_current",
             Self::CalibrationInProgress => "manual_pps_calibration_busy",
             Self::TerminalDisarmPending => "heater_disarm_pending",
             Self::ThermalPlantManagedByJob => "thermal_plant_managed_by_job",
@@ -314,6 +387,9 @@ impl ManualPpsError {
         match self {
             Self::NoPpsCapability => "PPS capability is unavailable.",
             Self::InvalidVoltage => {
+                "manualPpsMv/manualPpsMa must match PPS capability and APDO steps."
+            }
+            Self::InvalidCurrent => {
                 "manualPpsMv/manualPpsMa must match PPS capability and APDO steps."
             }
             Self::CalibrationInProgress => {
@@ -356,6 +432,9 @@ pub(crate) struct ManualPpsState {
     pub(crate) capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
     pub(crate) error: Option<ManualPpsError>,
     pub(crate) automatic_restore_pending: bool,
+    pub(crate) allow_pending_refresh: bool,
+    pub(crate) pending_power_ticket: Option<PowerTicket>,
+    pub(crate) pending_power_request_mv: Option<u16>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -375,6 +454,9 @@ impl Default for ManualPpsState {
             capability_apdos: [None; ch224q::MAX_PPS_APDOS],
             error: None,
             automatic_restore_pending: false,
+            allow_pending_refresh: false,
+            pending_power_ticket: None,
+            pending_power_request_mv: None,
         }
     }
 }
@@ -1171,11 +1253,13 @@ impl ManualPpsState {
     pub(crate) fn from_fusb302b_capabilities(
         capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     ) -> Self {
-        Self::from_capabilities_with_request_bounds(
+        let mut state = Self::from_capabilities_with_request_bounds(
             capabilities,
             FUSB302B_PPS_MIN_MV,
             FUSB302B_PPS_MAX_MV,
-        )
+        );
+        state.allow_pending_refresh = true;
+        state
     }
 
     fn from_capabilities_with_request_bounds(
@@ -1393,6 +1477,50 @@ impl ManualPpsState {
         self.error = None;
         self.automatic_restore_pending = false;
         Ok(())
+    }
+
+    pub(crate) fn stage_pending_request(
+        &mut self,
+        owner: ManualPpsOwner,
+        target_mv: u16,
+        target_ma: u16,
+    ) -> Result<(), ManualPpsError> {
+        match PdContractRequest::pps(target_mv, target_ma) {
+            Ok(_) => {}
+            Err(
+                PdContractRequestError::ZeroCurrent | PdContractRequestError::PpsCurrentNotAligned,
+            ) => {
+                return Err(ManualPpsError::InvalidCurrent);
+            }
+            Err(_) => return Err(ManualPpsError::InvalidVoltage),
+        }
+        self.enabled = true;
+        self.owner = owner;
+        self.target_mv = Some(target_mv);
+        self.target_ma = Some(target_ma);
+        self.applied_mv = None;
+        self.error = None;
+        self.automatic_restore_pending = false;
+        Ok(())
+    }
+
+    pub(crate) fn refresh_fusb302b_capabilities_preserving_intent(
+        &mut self,
+        capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+    ) {
+        let previous = *self;
+        let mut refreshed = Self::from_fusb302b_capabilities(capabilities);
+        refreshed.pending_power_ticket = previous.pending_power_ticket;
+        refreshed.pending_power_request_mv = previous.pending_power_request_mv;
+        if previous.enabled {
+            refreshed.enabled = true;
+            refreshed.owner = previous.owner;
+            refreshed.target_mv = previous.target_mv;
+            refreshed.target_ma = previous.target_ma;
+            refreshed.applied_mv = None;
+            refreshed.automatic_restore_pending = previous.automatic_restore_pending;
+        }
+        *self = refreshed;
     }
 
     pub(crate) fn clear(&mut self) {

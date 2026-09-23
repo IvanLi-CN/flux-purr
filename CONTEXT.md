@@ -259,12 +259,40 @@ _Avoid_: Retagging, channel override, direct main write
 ## Power And Communication
 
 **PD Request**:
-The input voltage that the Device asks a USB-C power source to provide.
-_Avoid_: PD Contract, VIN Reading
+An atomic USB-C power request with an explicit contract mode, voltage, and operating current. It is not confirmed until the source has established that exact protocol-valid contract; an unsupported, mode-mismatched, or unrepresentable request is rejected rather than silently clamped, downgraded, or substituted.
+_Avoid_: PD Contract, VIN Reading, required power
 
 **PD Contract**:
 The USB-C power agreement reported by the Device.
 _Avoid_: PD Request, VIN Reading
+
+**Requested Contract**:
+The exact PD Request currently accepted as the Device's intended USB-C contract. It is not a legal heater supply envelope until it becomes a Confirmed Active Contract.
+_Avoid_: PD Contract, VIN Reading, required power
+
+**Confirmed Active Contract**:
+The protocol-valid PD Contract most recently confirmed by the source and the Device. It is the contractual supply envelope available to power policy; physical validation remains separate.
+_Avoid_: Requested Contract, VIN Reading, measured load current
+
+**PPS Adjustment Range**:
+The minimum voltage, maximum voltage, and maximum current of the private PPS APDO that backs a Confirmed Active Contract. It is exposed to power policy so it can distinguish a continuous PPS adjustment from a request outside the current range; it does not expose the APDO object position.
+_Avoid_: APDO object position, Source Capabilities, requested voltage
+
+**Source Capabilities**:
+The Fixed PDOs and PPS APDOs most recently observed from the connected USB-C source. They describe what may be requested, not an established PD Contract.
+_Avoid_: PD Contract, source rating, requested contract
+
+**Power Coordinator**:
+The application-layer actor that exclusively arbitrates PD contract intent and writes the read-only Power State. It is above the PD Service and does not own PD protocol or physical outputs.
+_Avoid_: PD Service, heater controller, global runtime loop
+
+**Power State**:
+The read-only Device projection of requested and confirmed active contracts, source capabilities, and their availability. The Power Coordinator is its only writer.
+_Avoid_: PD Service state, UI state, requested contract
+
+**Power Intent Owner**:
+The one product-policy role currently entitled to submit a PD Request: `ThermalPlantAuto`, `Calibration`, `ManualOperator`, `AutomaticThermal`, or `Idle`. Ownership is exclusive and prioritized in that order.
+_Avoid_: PD Service, last writer, physical-output owner
 
 **PD Controller Variant**:
 The uniquely read-only-identified USB-C PD controller on a Device board: `CH224Q`, `FUSB302B`, or `unknown` when it is unsafe to select either driver.

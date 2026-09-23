@@ -2191,12 +2191,34 @@ pub(crate) fn adjustable_mode_for_request(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(target_arch = "xtensa", allow(dead_code))]
 pub(crate) fn should_blank_heater_for_adjustable_request(
-    _current_request_mv: u16,
-    _next_request_mv: u16,
+    current_request_mv: u16,
+    next_request_mv: u16,
     mode_changed: bool,
 ) -> bool {
+    mode_changed || current_request_mv.abs_diff(next_request_mv) > HEATER_PPS_REQUEST_STEP_MV
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+pub(crate) fn should_blank_heater_for_pps_range_change(
+    current_request_mv: u16,
+    next_request_mv: u16,
+    mode_changed: bool,
+    pps_min_mv: u16,
+    pps_max_mv: u16,
+) -> bool {
     mode_changed
+        || !matches!(
+            (current_request_mv, next_request_mv),
+            (current, next)
+                if current >= pps_min_mv
+                    && current <= pps_max_mv
+                    && next >= pps_min_mv
+                    && next <= pps_max_mv
+                    && current.abs_diff(next) <= HEATER_PPS_REQUEST_STEP_MV
+        )
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2478,7 +2500,32 @@ pub(crate) struct ThermalPlantDisarmContext<'a, PWM> {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn disarm_pending_thermal_plant_output<PWM>(
+static TERMINAL_DISARM_POWER_TICKET: BlockingMutex<
+    CriticalSectionRawMutex,
+    RefCell<Option<PowerTicket>>,
+> = BlockingMutex::new(RefCell::new(None));
+
+#[cfg(target_arch = "xtensa")]
+fn take_terminal_disarm_power_ticket() -> Option<PowerTicket> {
+    TERMINAL_DISARM_POWER_TICKET.lock(|ticket| ticket.borrow_mut().take())
+}
+
+#[cfg(target_arch = "xtensa")]
+fn store_terminal_disarm_power_ticket(ticket: PowerTicket) {
+    TERMINAL_DISARM_POWER_TICKET.lock(|current| {
+        *current.borrow_mut() = Some(ticket);
+    });
+}
+
+#[cfg(target_arch = "xtensa")]
+fn clear_terminal_disarm_power_ticket() {
+    TERMINAL_DISARM_POWER_TICKET.lock(|ticket| {
+        *ticket.borrow_mut() = None;
+    });
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn disarm_pending_thermal_plant_output<PWM>(
     context: ThermalPlantDisarmContext<'_, PWM>,
 ) -> bool
 where
@@ -2496,6 +2543,7 @@ where
         measured_vin_mv,
     } = context;
     if !latch_terminal_fixed_pd_disarm(calibration_runtime_state, backend) {
+        clear_terminal_disarm_power_ticket();
         return false;
     }
 
@@ -2504,10 +2552,25 @@ where
     ui_state.heater_enabled = false;
     ui_state.heater_output_percent = 0;
 
-    if !matches!(
-        pd_port.restore_automatic_idle_contract(),
-        PdContractRequestState::Confirmed
-    ) {
+    let idle_confirmed = match take_terminal_disarm_power_ticket() {
+        Some(ticket) => match pd_port.try_take_ticket(ticket) {
+            Some(TicketOutcome::Confirmed(_)) => true,
+            Some(_) => false,
+            None => {
+                store_terminal_disarm_power_ticket(ticket);
+                false
+            }
+        },
+        None => match pd_port.restore_automatic_idle_contract() {
+            PdRequestState::Confirmed => true,
+            PdRequestState::Pending(ticket) => {
+                store_terminal_disarm_power_ticket(ticket);
+                false
+            }
+            PdRequestState::Failed => false,
+        },
+    };
+    if !idle_confirmed {
         // Keep both the disarm latch and the PPS backend lock until the
         // independent PD task restores its automatic idle contract.
         return true;

@@ -10,6 +10,10 @@ pub const GUARANTEED_HEATER_MIN_MV: u16 = 20_000;
 pub const MIN_HEATER_CONTRACT_MA: u16 = 3_000;
 pub const MAX_HEATER_CONTRACT_MA: u16 = 5_000;
 pub const MAX_SOURCE_PDOS: usize = 7;
+pub const PD_FIXED_VOLTAGE_STEP_MV: u16 = 50;
+pub const PD_FIXED_CURRENT_STEP_MA: u16 = 10;
+pub const PD_PPS_VOLTAGE_STEP_MV: u16 = 100;
+pub const PD_PPS_CURRENT_STEP_MA: u16 = 50;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ControllerKind {
@@ -65,12 +69,21 @@ impl DegradedReason {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Contract {
     pub kind: ContractKind,
-    pub object_position: u8,
+    pub(crate) object_position: u8,
     pub voltage_mv: u16,
     pub current_ma: u16,
 }
 
 impl Contract {
+    pub const fn observed(kind: ContractKind, voltage_mv: u16, current_ma: u16) -> Self {
+        Self {
+            kind,
+            object_position: 0,
+            voltage_mv,
+            current_ma,
+        }
+    }
+
     pub const fn none() -> Self {
         Self {
             kind: ContractKind::None,
@@ -105,17 +118,264 @@ impl Contract {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FixedPdo {
-    pub object_position: u8,
+    pub(crate) object_position: u8,
     pub voltage_mv: u16,
     pub max_ma: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PpsApdo {
-    pub object_position: u8,
+    pub(crate) object_position: u8,
     pub min_mv: u16,
     pub max_mv: u16,
     pub max_ma: u16,
+}
+
+/// The semantic part of the APDO that callers need in order to decide
+/// whether a later PPS adjustment is continuous. The protocol object position
+/// remains private to the PD adapter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PpsAdjustmentRange {
+    pub min_mv: u16,
+    pub max_mv: u16,
+    pub max_current_ma: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdContractRequestMode {
+    Fixed,
+    Pps,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PdContractRequest {
+    pub(crate) mode: PdContractRequestMode,
+    pub(crate) voltage_mv: u16,
+    pub(crate) operating_current_ma: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdContractRequestError {
+    ZeroVoltage,
+    ZeroCurrent,
+    FixedVoltageNotAligned,
+    FixedCurrentNotAligned,
+    FixedVoltageOutOfRange,
+    FixedCurrentOutOfRange,
+    PpsVoltageNotAligned,
+    PpsCurrentNotAligned,
+    PpsVoltageOutOfRange,
+    PpsCurrentOutOfRange,
+}
+
+impl PdContractRequest {
+    pub const fn mode(self) -> PdContractRequestMode {
+        self.mode
+    }
+
+    pub const fn voltage_mv(self) -> u16 {
+        self.voltage_mv
+    }
+
+    pub const fn operating_current_ma(self) -> u16 {
+        self.operating_current_ma
+    }
+
+    pub fn is_well_formed(self) -> bool {
+        match self.mode {
+            PdContractRequestMode::Fixed => {
+                Self::fixed(self.voltage_mv, self.operating_current_ma).is_ok()
+            }
+            PdContractRequestMode::Pps => {
+                Self::pps(self.voltage_mv, self.operating_current_ma).is_ok()
+            }
+        }
+    }
+
+    pub fn fixed(
+        voltage_mv: u16,
+        operating_current_ma: u16,
+    ) -> Result<Self, PdContractRequestError> {
+        if voltage_mv == 0 {
+            return Err(PdContractRequestError::ZeroVoltage);
+        }
+        if operating_current_ma == 0 {
+            return Err(PdContractRequestError::ZeroCurrent);
+        }
+        if !(FUSB302B_PD_ABSOLUTE_MIN_MV..=FUSB302B_FIXED_MAX_MV).contains(&voltage_mv) {
+            return Err(PdContractRequestError::FixedVoltageOutOfRange);
+        }
+        if !(MIN_HEATER_CONTRACT_MA..=MAX_HEATER_CONTRACT_MA).contains(&operating_current_ma) {
+            return Err(PdContractRequestError::FixedCurrentOutOfRange);
+        }
+        if !voltage_mv.is_multiple_of(PD_FIXED_VOLTAGE_STEP_MV) {
+            return Err(PdContractRequestError::FixedVoltageNotAligned);
+        }
+        if !operating_current_ma.is_multiple_of(PD_FIXED_CURRENT_STEP_MA) {
+            return Err(PdContractRequestError::FixedCurrentNotAligned);
+        }
+        Ok(Self {
+            mode: PdContractRequestMode::Fixed,
+            voltage_mv,
+            operating_current_ma,
+        })
+    }
+
+    pub fn pps(voltage_mv: u16, operating_current_ma: u16) -> Result<Self, PdContractRequestError> {
+        if voltage_mv == 0 {
+            return Err(PdContractRequestError::ZeroVoltage);
+        }
+        if operating_current_ma == 0 {
+            return Err(PdContractRequestError::ZeroCurrent);
+        }
+        if !(FUSB302B_PPS_MIN_MV..=FUSB302B_PD_ABSOLUTE_MAX_MV).contains(&voltage_mv) {
+            return Err(PdContractRequestError::PpsVoltageOutOfRange);
+        }
+        if !(MIN_HEATER_CONTRACT_MA..=MAX_HEATER_CONTRACT_MA).contains(&operating_current_ma) {
+            return Err(PdContractRequestError::PpsCurrentOutOfRange);
+        }
+        if !voltage_mv.is_multiple_of(PD_PPS_VOLTAGE_STEP_MV) {
+            return Err(PdContractRequestError::PpsVoltageNotAligned);
+        }
+        if !operating_current_ma.is_multiple_of(PD_PPS_CURRENT_STEP_MA) {
+            return Err(PdContractRequestError::PpsCurrentNotAligned);
+        }
+        Ok(Self {
+            mode: PdContractRequestMode::Pps,
+            voltage_mv,
+            operating_current_ma,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConfirmedActiveContract {
+    pub mode: PdContractRequestMode,
+    pub voltage_mv: u16,
+    pub operating_current_ma: u16,
+    pub pps_range: Option<PpsAdjustmentRange>,
+    pps_capability_index: Option<u8>,
+}
+
+impl ConfirmedActiveContract {
+    pub fn from_private_contract(
+        contract: Contract,
+        capabilities: SourceCapabilities,
+    ) -> Option<Self> {
+        if !capabilities.supports_contract(contract) {
+            return None;
+        }
+        let mode = match contract.kind {
+            ContractKind::Fixed => PdContractRequestMode::Fixed,
+            ContractKind::Pps => PdContractRequestMode::Pps,
+            ContractKind::None => return None,
+        };
+        let pps_capability_index = if contract.kind == ContractKind::Pps {
+            capabilities.pps.iter().position(|apdo| {
+                apdo.is_some_and(|apdo| apdo.object_position == contract.object_position)
+            })
+        } else {
+            None
+        };
+        let pps_range = pps_capability_index
+            .and_then(|index| capabilities.pps[index])
+            .map(|apdo| PpsAdjustmentRange {
+                min_mv: apdo.min_mv,
+                max_mv: apdo.max_mv,
+                max_current_ma: apdo.max_ma,
+            });
+        Some(Self {
+            mode,
+            voltage_mv: contract.voltage_mv,
+            operating_current_ma: contract.current_ma,
+            pps_range,
+            pps_capability_index: pps_capability_index.map(|index| index as u8),
+        })
+    }
+
+    pub fn request_keeps_same_pps_apdo(
+        self,
+        capabilities: SourceCapabilitiesView,
+        request: PdContractRequest,
+    ) -> bool {
+        if !request.is_well_formed()
+            || self.mode != PdContractRequestMode::Pps
+            || request.mode != PdContractRequestMode::Pps
+            || self.operating_current_ma != request.operating_current_ma
+        {
+            return false;
+        }
+        let selected_index = capabilities.pps.iter().position(|range| {
+            range.is_some_and(|range| {
+                range.min_mv <= request.voltage_mv
+                    && request.voltage_mv <= range.max_mv
+                    && request.operating_current_ma <= range.max_current_ma
+            })
+        });
+        selected_index.is_some_and(|index| self.pps_capability_index == Some(index as u8))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SourceCapabilitiesView {
+    pub fixed: [Option<(u16, u16)>; MAX_SOURCE_PDOS],
+    pub pps: [Option<PpsAdjustmentRange>; MAX_SOURCE_PDOS],
+}
+
+impl SourceCapabilities {
+    pub fn view(self) -> SourceCapabilitiesView {
+        let mut view = SourceCapabilitiesView::default();
+        for (slot, pdo) in view.fixed.iter_mut().zip(self.fixed) {
+            *slot = pdo.map(|pdo| (pdo.voltage_mv, pdo.max_ma));
+        }
+        for (slot, apdo) in view.pps.iter_mut().zip(self.pps) {
+            *slot = apdo.map(|apdo| PpsAdjustmentRange {
+                min_mv: apdo.min_mv,
+                max_mv: apdo.max_mv,
+                max_current_ma: apdo.max_ma,
+            });
+        }
+        view
+    }
+
+    /// Select only an exact public request. No clamping, rounding, fallback,
+    /// or mode substitution is allowed at this boundary.
+    pub fn select_exact_contract(self, request: PdContractRequest) -> Option<Contract> {
+        if !request.is_well_formed() {
+            return None;
+        }
+        match request.mode {
+            PdContractRequestMode::Fixed => self
+                .fixed
+                .into_iter()
+                .flatten()
+                .find(|pdo| {
+                    pdo.voltage_mv == request.voltage_mv
+                        && pdo.max_ma >= request.operating_current_ma
+                })
+                .map(|pdo| Contract {
+                    kind: ContractKind::Fixed,
+                    object_position: pdo.object_position,
+                    voltage_mv: pdo.voltage_mv,
+                    current_ma: request.operating_current_ma,
+                }),
+            PdContractRequestMode::Pps => self
+                .pps
+                .into_iter()
+                .flatten()
+                .find(|apdo| {
+                    apdo.min_mv <= request.voltage_mv
+                        && apdo.max_mv >= request.voltage_mv
+                        && apdo.max_ma >= request.operating_current_ma
+                })
+                .map(|apdo| Contract {
+                    kind: ContractKind::Pps,
+                    object_position: apdo.object_position,
+                    voltage_mv: request.voltage_mv,
+                    current_ma: request.operating_current_ma,
+                }),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -536,5 +796,135 @@ mod tests {
         assert_eq!(capability.min_mv, 5_000);
         assert_eq!(capability.max_mv, 21_000);
         assert_eq!(capability.max_ma, 3_000);
+    }
+
+    #[test]
+    fn exact_requests_never_clamp_or_change_mode() {
+        let capabilities = SourceCapabilities::from_pdos(&[
+            fixed_pdo(20_000, 5_000),
+            pps_pdo(5_000, 21_000, 5_000),
+        ]);
+        let pps = PdContractRequest::pps(20_000, 3_000).unwrap();
+        let fixed = PdContractRequest::fixed(20_000, 3_000).unwrap();
+        assert_eq!(
+            capabilities.select_exact_contract(pps).unwrap().kind,
+            ContractKind::Pps
+        );
+        assert_eq!(
+            capabilities.select_exact_contract(fixed).unwrap().kind,
+            ContractKind::Fixed
+        );
+        assert_eq!(
+            capabilities.select_exact_contract(PdContractRequest::fixed(19_950, 3_000).unwrap()),
+            None
+        );
+        let malformed_internal_request = PdContractRequest {
+            mode: PdContractRequestMode::Pps,
+            voltage_mv: 20_020,
+            operating_current_ma: 3_000,
+        };
+        assert!(!malformed_internal_request.is_well_formed());
+        assert_eq!(
+            capabilities.select_exact_contract(malformed_internal_request),
+            None,
+        );
+    }
+
+    #[test]
+    fn public_request_alignment_rejects_values_that_would_be_rounded() {
+        assert_eq!(
+            PdContractRequest::pps(20_020, 3_000),
+            Err(PdContractRequestError::PpsVoltageNotAligned)
+        );
+        assert_eq!(
+            PdContractRequest::pps(20_000, 3_025),
+            Err(PdContractRequestError::PpsCurrentNotAligned)
+        );
+        assert_eq!(
+            PdContractRequest::fixed(20_000, 3_005),
+            Err(PdContractRequestError::FixedCurrentNotAligned)
+        );
+    }
+
+    #[test]
+    fn public_request_bounds_reject_out_of_range_contracts() {
+        assert_eq!(
+            PdContractRequest::fixed(20_050, 3_000),
+            Err(PdContractRequestError::FixedVoltageOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::fixed(19_975, 3_000),
+            Err(PdContractRequestError::FixedVoltageNotAligned)
+        );
+        assert_eq!(
+            PdContractRequest::fixed(19_500, 2_990),
+            Err(PdContractRequestError::FixedCurrentOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::fixed(19_500, 5_010),
+            Err(PdContractRequestError::FixedCurrentOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::fixed(19_500, 3_000),
+            Ok(PdContractRequest::fixed(19_500, 3_000).unwrap())
+        );
+        assert_eq!(
+            PdContractRequest::pps(28_100, 3_000),
+            Err(PdContractRequestError::PpsVoltageOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::pps(5_000, 3_000),
+            Err(PdContractRequestError::PpsVoltageOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::pps(20_000, 2_950),
+            Err(PdContractRequestError::PpsCurrentOutOfRange)
+        );
+        assert_eq!(
+            PdContractRequest::pps(20_000, 5_050),
+            Err(PdContractRequestError::PpsCurrentOutOfRange)
+        );
+    }
+
+    #[test]
+    fn confirmed_pps_contract_exposes_range_without_object_position() {
+        let capabilities = SourceCapabilities::from_pdos(&[pps_pdo(5_000, 21_000, 5_000)]);
+        let private = capabilities
+            .select_exact_contract(PdContractRequest::pps(20_000, 3_000).unwrap())
+            .unwrap();
+        let confirmed =
+            ConfirmedActiveContract::from_private_contract(private, capabilities).unwrap();
+        assert_eq!(
+            confirmed.pps_range,
+            Some(PpsAdjustmentRange {
+                min_mv: 5_000,
+                max_mv: 21_000,
+                max_current_ma: 5_000,
+            })
+        );
+    }
+
+    #[test]
+    fn confirmed_contract_requires_current_source_capability() {
+        let capabilities = SourceCapabilities::from_pdos(&[pps_pdo(5_000, 21_000, 5_000)]);
+        let private = capabilities
+            .select_exact_contract(PdContractRequest::pps(20_000, 3_000).unwrap())
+            .unwrap();
+
+        assert!(
+            ConfirmedActiveContract::from_private_contract(private, SourceCapabilities::empty(),)
+                .is_none()
+        );
+        assert!(
+            ConfirmedActiveContract::from_private_contract(
+                Contract {
+                    object_position: private.object_position,
+                    voltage_mv: 22_000,
+                    ..private
+                },
+                capabilities,
+            )
+            .is_none()
+        );
     }
 }

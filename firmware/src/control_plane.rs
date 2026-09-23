@@ -267,6 +267,10 @@ pub struct ControlPlaneStatus {
     pub pd_performance_guaranteed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pd_degraded_reason: Option<String<ERROR_CODE_MAX_LEN>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_last_protocol_fault: Option<String<ERROR_CODE_MAX_LEN>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_last_i2c_error: Option<String<ERROR_CODE_MAX_LEN>>,
     pub manual_pps_enabled: bool,
     pub manual_pps_mv: Option<u16>,
     pub manual_pps_ma: Option<u16>,
@@ -558,6 +562,8 @@ impl ControlPlaneStatus {
                 pd_contract_power_mw: 0,
                 pd_performance_guaranteed: false,
                 pd_degraded_reason: Some(default_pd_degraded_reason_wire()),
+                pd_last_protocol_fault: None,
+                pd_last_i2c_error: None,
                 manual_pps_enabled: false,
                 manual_pps_mv: None,
                 manual_pps_ma: None,

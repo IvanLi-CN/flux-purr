@@ -79,9 +79,15 @@ impl RuntimeLanInputOutcome {
 }
 
 #[cfg(target_arch = "xtensa")]
+fn power_state_observation(state: PowerState) -> Option<PdStatusObservation> {
+    state.observation()
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
     let mut needs_redraw = false;
-    let current_pd_observation = state.pd_port.observation();
+    let power_state = state.power_state;
+    let current_pd_observation = power_state_observation(power_state);
     if current_pd_observation.is_none() {
         HeaterPwmGate::force_off();
     }
@@ -215,8 +221,7 @@ pub(crate) async fn runtime_process_usb_control_line(
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
         measured_vin_mv: state.latest_vin_mv,
-    })
-    .await;
+    });
     let _ = usb_start_response_frame(
         &mut state.transport.usb_response_writer,
         &response,
@@ -495,8 +500,7 @@ pub(crate) async fn runtime_process_lan_control(
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
         measured_vin_mv: state.latest_vin_mv,
-    })
-    .await;
+    });
     let network_summary = flux_purr_firmware::net::lan_network_summary().await;
     let (control_needs_redraw, response) = result;
     (
@@ -690,8 +694,7 @@ pub(crate) async fn runtime_reconcile_network_state(
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
         measured_vin_mv: state.latest_vin_mv,
-    })
-    .await;
+    });
     needs_redraw
 }
 
@@ -1350,14 +1353,16 @@ pub(crate) fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) 
     if state.pd_port.controller_kind() != ControllerKind::Fusb302b {
         return false;
     }
-    let capabilities = state.pd_port.capabilities();
+    let capabilities = adjustable_capabilities_from_view(state.power_state.source_capabilities);
     if capabilities == state.last_fusb302b_power_capabilities {
         return false;
     }
     state.last_fusb302b_power_capabilities = capabilities;
     state.heater_power_backend =
         refresh_fusb302b_heater_power_backend(state.heater_power_backend, capabilities);
-    state.manual_pps_state = ManualPpsState::from_fusb302b_capabilities(capabilities);
+    state
+        .manual_pps_state
+        .refresh_fusb302b_capabilities_preserving_intent(capabilities);
     state.hold_pps_governor = HoldPpsGovernor::new();
     info!("fusb302b source capabilities changed; refreshed heater power bounds");
     true
@@ -1439,8 +1444,7 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
         measured_vin_mv: state.latest_vin_mv,
-    })
-    .await;
+    });
     if state.calibration_runtime_state.mode != CalibrationMode::Off
         && state.calibration_runtime_state.heater_enabled
         && state.current_rtd_fault.is_none()
@@ -2128,7 +2132,7 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
     if state.ui_refresh_pending && elapsed_ms >= state.next_ui_refresh_ms {
         let display_flush_result = run_display_operation_with_snapshot_and_heater(
             flush_ui(&mut state.display, state.canvas, &state.ui_state),
-            &state.pd_port,
+            &mut state.power_state_subscription,
             &mut state.last_pd_observation,
             &mut state.heater_pwm,
             &mut state.last_heater_duty,
@@ -2172,8 +2176,7 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
                     ui_state: &mut state.ui_state,
                     last_heater_duty: &mut state.last_heater_duty,
                     measured_vin_mv: state.latest_vin_mv,
-                })
-                .await;
+                });
                 apply_fan_output(
                     &mut state.fan_enable,
                     &mut state.fan_pwm,
@@ -2203,8 +2206,15 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
     loop {
-        #[cfg(feature = "web_serial")]
-        embassy_futures::yield_now().await;
+        match select(
+            state.power_state_subscription.changed(),
+            EmbassyTimer::after_millis(5),
+        )
+        .await
+        {
+            Either::First(power_state) => state.power_state = power_state,
+            Either::Second(_) => {}
+        }
         record_runtime_heartbeat();
         let elapsed_ms = Instant::now()
             .as_millis()

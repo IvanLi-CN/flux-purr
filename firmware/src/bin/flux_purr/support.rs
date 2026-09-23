@@ -35,6 +35,8 @@ pub(crate) use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 #[cfg(target_arch = "xtensa")]
 pub(crate) use embassy_sync::mutex::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 #[cfg(target_arch = "xtensa")]
+pub(crate) use embassy_sync::watch::Watch;
+#[cfg(target_arch = "xtensa")]
 pub(crate) use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
@@ -98,11 +100,13 @@ pub(crate) use flux_purr_firmware::adapters::fusb302b::SinkPhase;
 pub(crate) use flux_purr_firmware::adapters::pd::SourceCapabilities;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::adapters::pd::{
-    Contract, ContractKind, ControllerKind, FUSB302B_PPS_MAX_MV,
+    ConfirmedActiveContract, Contract, ContractKind, ControllerKind, FUSB302B_PPS_MAX_MV,
+    PdContractRequest, PdContractRequestError, PdContractRequestMode, SourceCapabilitiesView,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::adapters::pd::{
-    FUSB302B_PPS_MIN_MV, GUARANTEED_HEATER_MIN_MV, MAX_HEATER_CONTRACT_MA, MIN_HEATER_CONTRACT_MA,
+    FUSB302B_PPS_MIN_MV, GUARANTEED_HEATER_MIN_MV, MAX_HEATER_CONTRACT_MA, MAX_SOURCE_PDOS,
+    MIN_HEATER_CONTRACT_MA,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::board::s3_frontpanel;
@@ -515,6 +519,13 @@ pub(crate) const DISPLAY_FRAMEBUFFER_BYTES: usize =
     flux_purr_firmware::display::DISPLAY_PIXELS * core::mem::size_of::<Rgb565>();
 
 #[cfg(target_arch = "xtensa")]
+const DISPLAY_GRAPHICS_HEAP_GUARD_BYTES: usize = 1024;
+
+#[cfg(target_arch = "xtensa")]
+const DISPLAY_GRAPHICS_HEAP_BYTES: usize =
+    DISPLAY_FRAMEBUFFER_BYTES + DISPLAY_GRAPHICS_HEAP_GUARD_BYTES;
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) const DISPLAY_SPI_FREQUENCY_HZ: u32 = 40_000_000;
 
 #[cfg(target_arch = "xtensa")]
@@ -569,13 +580,20 @@ pub(crate) fn initialize_display_graphics(
         return Err(DisplayGraphicsInitError::PsramUnavailable);
     }
 
-    // The graphics heap owns the mapped PSRAM region exclusively. It is
-    // intentionally separate from esp_alloc::HEAP so control-plane objects
-    // remain in the internal runtime heap.
+    // Keep the framebuffer in its own heap, but return the unused PSRAM to
+    // the global allocator. Large control-plane snapshots must have an
+    // external-memory fallback once the internal runtime heap is fragmented.
+    let graphics_heap_bytes = DISPLAY_GRAPHICS_HEAP_BYTES.min(size);
     unsafe {
         DISPLAY_GRAPHICS_HEAP.add_region(esp_alloc::HeapRegion::new(
             start,
-            size,
+            graphics_heap_bytes,
+            esp_alloc::MemoryCapability::External.into(),
+        ));
+        let runtime_heap_start = start.add(graphics_heap_bytes);
+        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
+            runtime_heap_start,
+            size - graphics_heap_bytes,
             esp_alloc::MemoryCapability::External.into(),
         ));
     }
@@ -595,8 +613,10 @@ pub(crate) fn initialize_display_graphics(
     }
     let framebuffer = unsafe { framebuffer.assume_init() };
     info!(
-        "display graphics memory=psram bytes={=u32} framebuffer_bytes={=u32}",
-        size as u32, DISPLAY_FRAMEBUFFER_BYTES as u32,
+        "display graphics memory=psram bytes={=u32} runtime_external_bytes={=u32} framebuffer_bytes={=u32}",
+        graphics_heap_bytes as u32,
+        (size - graphics_heap_bytes) as u32,
+        DISPLAY_FRAMEBUFFER_BYTES as u32,
     );
     Ok(AllocBox::leak(framebuffer))
 }
@@ -1101,11 +1121,10 @@ pub(crate) const RTD_TEMP_MIN_C: f32 = -50.0;
 pub(crate) const RTD_TEMP_MAX_C: f32 = 500.0;
 #[cfg(target_arch = "xtensa")]
 pub(crate) const FUSB302B_I2C_FREQUENCY_HZ: u32 = 400_000;
-#[cfg(target_arch = "xtensa")]
-// FUSB302B and M24C64 both support fast-mode I2C. Keep each shared-bus
-// transaction at the PD service interval so a stalled peripheral cannot
-// monopolize the protocol service for the old 25ms timeout.
-pub(crate) const I2C_TRANSACTION_TIMEOUT_MS: u64 = 5;
+#[cfg(any(target_arch = "xtensa", test))]
+// FUSB302B and M24C64 both support fast-mode I2C. Keep a bounded transaction
+// timeout while leaving enough time for a complete FUSB register/FIFO exchange.
+pub(crate) const I2C_TRANSACTION_TIMEOUT_MS: u64 = 10;
 #[cfg(target_arch = "xtensa")]
 pub(crate) const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 #[cfg(any(target_arch = "xtensa", test))]

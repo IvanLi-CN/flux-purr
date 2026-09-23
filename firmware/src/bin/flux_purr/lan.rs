@@ -1079,10 +1079,21 @@ pub(crate) async fn process_eeprom_maintenance_frame(
             context.manual_pps,
             context.memory_commit_due_ms,
         );
-        if !matches!(
-            context.pd_port.restore_automatic_idle_contract(),
-            PdContractRequestState::Confirmed
-        ) {
+        let idle_confirmed = match context.pd_port.restore_automatic_idle_contract() {
+            PdRequestState::Confirmed => true,
+            PdRequestState::Pending(ticket) => {
+                let confirmed = matches!(
+                    context.pd_port.try_take_ticket(ticket),
+                    Some(TicketOutcome::Confirmed(_))
+                );
+                if !confirmed {
+                    context.pd_port.discard_ticket(ticket);
+                }
+                confirmed
+            }
+            PdRequestState::Failed => false,
+        };
+        if !idle_confirmed {
             return (
                 false,
                 usb_error_response(

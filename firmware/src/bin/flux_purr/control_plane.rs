@@ -149,6 +149,12 @@ pub(crate) fn populate_status_contract(
         } else {
             None
         };
+    status.pd_last_protocol_fault = (context.pd_controller == ControllerKind::Fusb302b)
+        .then(fusb302b_last_protocol_fault)
+        .flatten();
+    status.pd_last_i2c_error = (context.pd_controller == ControllerKind::Fusb302b)
+        .then(fusb302b_last_i2c_error)
+        .flatten();
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -554,7 +560,15 @@ pub(crate) fn apply_manual_pps_config(
             .or(manual_pps.target_mv)
             .ok_or(ManualPpsError::InvalidVoltage)?;
         let target_ma = config.manual_pps_ma.or(manual_pps.target_ma);
-        manual_pps.enable(ManualPpsOwner::Debug, target_mv, target_ma)?;
+        if manual_pps.allow_pending_refresh && manual_pps.capability_min_mv.is_none() {
+            manual_pps.stage_pending_request(
+                ManualPpsOwner::Debug,
+                target_mv,
+                target_ma.ok_or(ManualPpsError::InvalidCurrent)?,
+            )?;
+        } else {
+            manual_pps.enable(ManualPpsOwner::Debug, target_mv, target_ma)?;
+        }
     }
 
     Ok(())

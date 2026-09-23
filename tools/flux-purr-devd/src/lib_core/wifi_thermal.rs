@@ -1656,6 +1656,7 @@ pub(crate) fn validate_manual_pps_request_against_status(
         .manual_pps_ma
         .or(status.manual_pps_ma)
         .or(status.pps_capability_max_ma)
+        .or_else(|| effective_pps_current_capability_ma(status))
         .ok_or_else(|| HttpError::bad_request("invalid_manual_pps", "manualPpsMa is required."))?;
     validate_manual_pps_against_status(manual_pps_mv, manual_pps_ma, status)
 }

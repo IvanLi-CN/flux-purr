@@ -1,4 +1,11 @@
 use super::*;
+
+fn pps_source_capability(min_mv: u16, max_mv: u16, max_ma: u16) -> u32 {
+    (0b11 << 30)
+        | (u32::from(max_mv / 100) << 17)
+        | (u32::from(min_mv / 100) << 8)
+        | u32::from(max_ma / 50)
+}
 const RUNTIME_IMPLEMENTATION: &str = concat!(
     include_str!("support.rs"),
     include_str!("eeprom_snapshot.rs"),
@@ -177,8 +184,9 @@ fn pd_service_is_owned_by_an_independent_normal_task() {
         "the full PD protocol must not run in an interrupt executor"
     );
     assert!(
-        pd_service.contains("for _ in 0..PD_SERVICE_MAX_COMMANDS_PER_TICK")
-            && pd_service.contains("runtime.poll(&mut i2c, PdTimestamp::now()).await"),
+        pd_service
+            .contains("select_pd_service_work(*pending, PD_SERVICE_COMMANDS.try_receive().ok())")
+            && pd_service.contains("runtime.poll(i2c, PdTimestamp::now()).await"),
         "PD task must poll after a bounded command batch"
     );
     assert!(
@@ -246,7 +254,7 @@ fn startup_pd_wait_uses_a_normal_executor_timer() {
     let pd_service = include_str!("pd_service.rs");
 
     assert!(
-        boot.contains("EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await"),
+        boot.contains("EmbassyTimer::after_millis(PD_SERVICE_TICK_MS)"),
         "boot must use a normal-executor timer for bounded startup progress"
     );
     assert!(
@@ -279,34 +287,121 @@ fn pd_service_never_waits_for_the_shared_i2c_bus() {
 }
 
 #[test]
-fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
-    let contract = Contract {
-        kind: ContractKind::Pps,
-        object_position: 1,
-        voltage_mv: 20_000,
-        current_ma: 3_000,
-    };
+fn pd_i2c_timeout_stays_short_while_transport_recovery_is_rate_limited() {
+    assert_eq!(I2C_TRANSACTION_TIMEOUT_MS, 10);
+    assert_eq!(FUSB302B_TRANSPORT_RECOVERY_BACKOFF_MS, 50);
+    assert!(fusb302b_transport_retry_due(None, 1_000));
+    assert!(!fusb302b_transport_retry_due(Some(1_050), 1_049));
+    assert!(fusb302b_transport_retry_due(Some(1_050), 1_050));
+}
 
-    assert!(fusb302b_status_confirms_ready_contract(
+#[test]
+fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
+    let contract = Contract::observed(ContractKind::Pps, 20_000, 3_000);
+
+    assert!(fusb302b_status_confirms_active_contract(
         SinkPhase::Ready,
         contract,
         FUSB302B_STATUS0_VBUSOK,
     ));
-    assert!(!fusb302b_status_confirms_ready_contract(
+    assert!(!fusb302b_status_confirms_active_contract(
         SinkPhase::WaitingForPsRdy,
         contract,
         FUSB302B_STATUS0_VBUSOK,
     ));
-    assert!(!fusb302b_status_confirms_ready_contract(
+    assert!(!fusb302b_status_confirms_active_contract(
+        SinkPhase::WaitingForAccept,
+        contract,
+        FUSB302B_STATUS0_VBUSOK,
+    ));
+    assert!(!fusb302b_status_confirms_active_contract(
         SinkPhase::Ready,
         Contract::none(),
         FUSB302B_STATUS0_VBUSOK,
     ));
-    assert!(!fusb302b_status_confirms_ready_contract(
+    assert!(!fusb302b_status_confirms_active_contract(
         SinkPhase::Ready,
         contract,
         0,
     ));
+}
+
+#[test]
+fn fusb302b_observation_keeps_the_physical_status_byte_and_projects_pd_active() {
+    let status0 = FUSB302B_STATUS0_VBUSOK;
+    let projected = fusb302b_status_projection(status0);
+
+    assert_eq!(status0, 1 << 7);
+    assert!(!Status::from_register(status0).pd_active);
+    assert!(projected.pd_active);
+}
+
+#[test]
+fn pending_pd_terminal_model_covers_confirmation_failure_and_transition_waits() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+    let request = PdContractRequest::pps(17_500, 3_000).unwrap();
+    let contract = source.select_exact_contract(request).unwrap();
+    let active = ConfirmedActiveContract::from_private_contract(contract, source).unwrap();
+    let observation = PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: active.operating_current_ma,
+        contract_voltage_mv: Some(active.voltage_mv),
+        contract,
+    };
+    let context = |phase, observation, source_capabilities| PdServiceTerminalContext {
+        phase,
+        request_timed_out: false,
+        request_rejected: false,
+        diagnostic_request_timed_out: false,
+        refresh_pending: false,
+        observation,
+        source_capabilities,
+    };
+
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::Ready, Some(observation), Some(source)),
+            PendingPdOperation::Contract { request },
+        ),
+        Some(TicketOutcome::Confirmed(active)),
+    );
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::WaitingForPsRdy, Some(observation), Some(source)),
+            PendingPdOperation::Contract { request },
+        ),
+        None,
+    );
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::Fault, None, Some(source)),
+            PendingPdOperation::Contract { request },
+        ),
+        Some(TicketOutcome::TransportFault),
+    );
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::Ready, None, Some(SourceCapabilities::empty())),
+            PendingPdOperation::Contract { request },
+        ),
+        Some(TicketOutcome::Rejected),
+    );
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::Ready, Some(observation), Some(source)),
+            PendingPdOperation::Idle,
+        ),
+        None,
+    );
+    assert_eq!(
+        pending_terminal_outcome(
+            context(SinkPhase::Ready, None, Some(source)),
+            PendingPdOperation::Refresh,
+        ),
+        Some(TicketOutcome::CapabilitiesRefreshed),
+    );
 }
 
 #[test]
@@ -325,14 +420,18 @@ fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
         .and_then(|source| source.split("pub(crate) fn spawn_pd_service").next())
         .expect("PD task body must remain present");
 
-    assert!(pd_service.contains("read_status().await.ok()?"));
-    assert!(pd_task.contains("let observation = pd_status_observation(&runtime, &mut i2c).await"));
-    assert!(pd_task.contains("publish_pd_snapshot(&runtime, observation)"));
-    assert!(pd_task.contains("publish_pd_snapshot(&runtime, None)"));
+    assert!(pd_service.contains("runtime.vbus_status_observed()"));
+    assert!(pd_service.contains("let observation = pd_status_observation(runtime);"));
     assert!(
-        pd_task.contains("publish_pd_snapshot(&runtime, observation);\n            // A heartbeat")
+        !pd_service.contains("read_status().await.ok()?"),
+        "the published observation must reuse the current poll's VBUS sample"
     );
-    assert!(!pd_task.contains("publish_pd_snapshot(&runtime, None);\n        record_pd_heartbeat"));
+    assert!(pd_service.contains("publish_pd_snapshot(runtime, observation)"));
+    assert!(
+        pd_service.contains("publish_pd_service_turn(runtime, None, *pending, None, false, false)")
+    );
+    assert!(pd_service.contains("if record_heartbeat"));
+    assert!(!pd_task.contains("record_pd_heartbeat"));
 
     let permit_check = support
         .split("fn set_duty_cycle(&mut self, duty: u16)")
@@ -348,6 +447,34 @@ fn pd_snapshot_and_pwm_paths_fail_closed_without_fresh_status() {
         permit_check
             .find("HEATER_PWM_STORAGE.lock")
             .is_some_and(|lock| { permit_check[lock..].contains("PD_HEATER_PERMIT.load") })
+    );
+}
+
+#[test]
+fn terminal_disarm_does_not_block_runtime_on_a_pd_ticket() {
+    let eeprom = include_str!("eeprom.rs");
+    let tasks = include_str!("tasks.rs");
+    let disarm = eeprom
+        .split("pub(crate) fn disarm_pending_thermal_plant_output")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("pub(crate) fn terminal_idle_voltage_confirmed")
+                .next()
+        })
+        .expect("terminal disarm helper must remain present");
+
+    assert!(
+        !disarm.contains("wait_for_ticket"),
+        "runtime-loop disarm must poll ticket completion instead of awaiting the PD actor"
+    );
+    assert!(
+        disarm.contains("try_take_ticket"),
+        "runtime-loop disarm must use the non-blocking ticket facade"
+    );
+    assert!(
+        !tasks.contains("wait_for_ticket"),
+        "runtime heater control must never await the PD actor"
     );
 }
 
@@ -456,11 +583,11 @@ fn fusb302b_received_resets_do_not_request_cc_reinitialization() {
 }
 
 #[test]
-fn fusb302b_phy_uses_pd20_for_automatic_goodcrc() {
+fn fusb302b_pps_transport_uses_pd30_revision() {
     assert!(RUNTIME_IMPLEMENTATION.contains(
-        "pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {\n    PhyConfig {\n        pd_revision: PdRevision::Rev20,"
+        "pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {\n    PhyConfig {\n        pd_revision: PdRevision::Rev30,"
     ));
-    assert!(!RUNTIME_IMPLEMENTATION.contains("pd_revision: PdRevision::Rev30"));
+    assert!(!RUNTIME_IMPLEMENTATION.contains("pd_revision: PdRevision::Rev20"));
 }
 
 #[test]
@@ -525,12 +652,7 @@ fn fusb302b_vbus_restore_requires_a_bounded_confirmation_window() {
 
 #[test]
 fn stale_pd_contract_requires_continuous_measured_vin_deficit() {
-    let contract = Contract {
-        kind: ContractKind::Pps,
-        object_position: 1,
-        voltage_mv: 12_000,
-        current_ma: 5_000,
-    };
+    let contract = Contract::observed(ContractKind::Pps, 12_000, 5_000);
     let observation = PdStatusObservation {
         status_raw: 1 << 3,
         status: Status::from_register(1 << 3),
@@ -551,12 +673,7 @@ fn stale_pd_contract_requires_continuous_measured_vin_deficit() {
 
 #[test]
 fn stale_pd_contract_does_not_infer_loss_without_a_vin_sample() {
-    let contract = Contract {
-        kind: ContractKind::Fixed,
-        object_position: 1,
-        voltage_mv: 20_000,
-        current_ma: 3_000,
-    };
+    let contract = Contract::observed(ContractKind::Fixed, 20_000, 3_000);
     let observation = PdStatusObservation {
         status_raw: 1 << 3,
         status: Status::from_register(1 << 3),
@@ -574,12 +691,7 @@ fn stale_pd_contract_does_not_infer_loss_without_a_vin_sample() {
 
 #[test]
 fn stale_pd_contract_guard_waits_out_pd_request_settling() {
-    let contract = Contract {
-        kind: ContractKind::Pps,
-        object_position: 1,
-        voltage_mv: 20_000,
-        current_ma: 3_000,
-    };
+    let contract = Contract::observed(ContractKind::Pps, 20_000, 3_000);
     let observation = PdStatusObservation {
         status_raw: 1 << 3,
         status: Status::from_register(1 << 3),
@@ -739,19 +851,10 @@ fn fusb302b_retry_failure_is_consumed_until_the_bounded_requery() {
 
 #[test]
 fn fusb302b_capability_bridge_preserves_each_usable_apdo() {
-    let mut source = SourceCapabilities::empty();
-    source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
-        object_position: 1,
-        min_mv: 5_000,
-        max_mv: 21_000,
-        max_ma: 5_000,
-    });
-    source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
-        object_position: 2,
-        min_mv: 5_000,
-        max_mv: 28_000,
-        max_ma: 3_000,
-    });
+    let source = SourceCapabilities::from_pdos(&[
+        pps_source_capability(5_000, 21_000, 5_000),
+        pps_source_capability(5_000, 25_500, 3_000),
+    ]);
 
     let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
     let mut manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
@@ -774,62 +877,74 @@ fn fusb302b_capability_bridge_preserves_each_usable_apdo() {
 }
 
 #[test]
+fn fusb302b_capability_refresh_preserves_manual_pps_intent() {
+    let capabilities = ch224q::AdjustablePowerCapabilities {
+        pps_min_mv: Some(5_500),
+        pps_max_mv: Some(21_000),
+        pps_max_ma: Some(5_000),
+        pps_covers_20v: true,
+        pps_apdos: [
+            Some(ch224q::PpsApdo {
+                min_mv: 5_500,
+                max_mv: 21_000,
+                max_ma: 5_000,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ],
+        ..ch224q::AdjustablePowerCapabilities::default()
+    };
+    let mut manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+    manual
+        .enable(ManualPpsOwner::Debug, 17_500, Some(3_000))
+        .unwrap();
+    manual.applied_mv = Some(17_500);
+
+    manual.refresh_fusb302b_capabilities_preserving_intent(Some(capabilities));
+
+    assert!(manual.enabled);
+    assert_eq!(manual.target_mv, Some(17_500));
+    assert_eq!(manual.target_ma, Some(3_000));
+    assert_eq!(manual.applied_mv, None);
+}
+
+#[test]
 fn automatic_heating_uses_a_current_ceiling_valid_across_the_pps_range() {
-    let mut source = SourceCapabilities::empty();
-    source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
-        object_position: 1,
-        min_mv: 5_000,
-        max_mv: 24_000,
-        max_ma: 3_000,
-    });
-    source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
-        object_position: 2,
-        min_mv: 24_000,
-        max_mv: 28_000,
-        max_ma: 5_000,
-    });
+    let source = SourceCapabilities::from_pdos(&[
+        pps_source_capability(5_000, 24_000, 3_000),
+        pps_source_capability(24_000, 25_500, 5_000),
+    ]);
 
     let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
     let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
 
-    assert_eq!(manual.heater_source_limits(), Some((5_500, 28_000, 3_000)));
+    assert_eq!(manual.heater_source_limits(), Some((5_500, 25_500, 3_000)));
 }
 
 #[test]
 fn thermal_plant_uses_one_apdo_covering_the_twenty_volt_anchor() {
-    let mut source = SourceCapabilities::empty();
-    source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
-        object_position: 1,
-        min_mv: 5_000,
-        max_mv: 24_000,
-        max_ma: 3_000,
-    });
-    source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
-        object_position: 2,
-        min_mv: 20_000,
-        max_mv: 28_000,
-        max_ma: 5_000,
-    });
+    let source = SourceCapabilities::from_pdos(&[
+        pps_source_capability(5_000, 24_000, 3_000),
+        pps_source_capability(20_000, 25_500, 5_000),
+    ]);
 
     let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
     let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
 
     assert_eq!(
         manual.thermal_plant_source_limits(),
-        Some((20_000, 28_000, 5_000))
+        Some((20_000, 25_500, 5_000))
     );
-    assert_eq!(manual.heater_source_limits(), Some((5_500, 28_000, 3_000)));
+    assert_eq!(manual.heater_source_limits(), Some((5_500, 25_500, 3_000)));
 }
 
 #[test]
 fn fusb302b_capability_bridge_retains_degraded_pps_apdo() {
-    let mut source = SourceCapabilities::empty();
-    source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
-        object_position: 1,
-        min_mv: 5_000,
-        max_mv: 19_000,
-        max_ma: 3_000,
-    });
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_000, 19_000, 3_000)]);
 
     let capabilities = fusb302b_adjustable_power_capabilities(source)
         .expect("a usable lower-voltage APDO remains visible to the PPS bridge");
@@ -891,12 +1006,7 @@ fn automatic_idle_restore_never_confirms_a_fixed_twenty_volt_contract() {
         current_raw: 0,
         current_ma: 3_000,
         contract_voltage_mv: Some(voltage_mv),
-        contract: Contract {
-            kind: ContractKind::Fixed,
-            object_position: 1,
-            voltage_mv,
-            current_ma: 3_000,
-        },
+        contract: Contract::observed(ContractKind::Fixed, voltage_mv, 3_000),
     };
 
     assert!(automatic_idle_contract_is_confirmed(
@@ -910,20 +1020,60 @@ fn automatic_idle_restore_never_confirms_a_fixed_twenty_volt_contract() {
 }
 
 #[test]
+fn automatic_idle_restore_rejects_a_low_current_twelve_volt_contract() {
+    let observation = |kind| PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: Status::from_register(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 50,
+        contract_voltage_mv: Some(12_000),
+        contract: Contract::observed(kind, 12_000, 50),
+    };
+
+    assert!(!automatic_idle_contract_is_confirmed(
+        observation(ContractKind::Pps),
+        None
+    ));
+    assert!(!automatic_idle_contract_is_confirmed(
+        observation(ContractKind::Fixed),
+        None
+    ));
+}
+
+#[test]
+fn capability_refresh_ticket_always_settles_when_detached_or_faulted() {
+    assert_eq!(
+        refresh_terminal_outcome(SinkPhase::Detached, true, false, false),
+        Some(TicketOutcome::Detached),
+    );
+    assert_eq!(
+        refresh_terminal_outcome(SinkPhase::Fault, true, false, false),
+        Some(TicketOutcome::TransportFault),
+    );
+    assert_eq!(
+        refresh_terminal_outcome(SinkPhase::WaitingForAccept, true, false, false),
+        None,
+    );
+    assert_eq!(
+        refresh_terminal_outcome(SinkPhase::WaitingForPsRdy, false, false, true),
+        None,
+    );
+    assert_eq!(
+        refresh_terminal_outcome(SinkPhase::Ready, false, false, true),
+        Some(TicketOutcome::CapabilitiesRefreshed),
+    );
+    assert_eq!(
+        refresh_terminal_outcome(SinkPhase::Ready, false, true, true),
+        Some(TicketOutcome::TimedOut),
+    );
+}
+
+#[test]
 fn automatic_heating_does_not_join_disjoint_pps_apdos() {
-    let mut source = SourceCapabilities::empty();
-    source.pps[0] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
-        object_position: 1,
-        min_mv: 5_000,
-        max_mv: 11_000,
-        max_ma: 3_000,
-    });
-    source.pps[1] = Some(flux_purr_firmware::adapters::pd::PpsApdo {
-        object_position: 2,
-        min_mv: 12_000,
-        max_mv: 19_000,
-        max_ma: 3_000,
-    });
+    let source = SourceCapabilities::from_pdos(&[
+        pps_source_capability(5_000, 11_000, 3_000),
+        pps_source_capability(12_000, 19_000, 3_000),
+    ]);
 
     let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
     let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
@@ -4718,6 +4868,12 @@ fn display_framebuffer_boot_initialization_never_materializes_a_stack_sized_arra
         "the PSRAM framebuffer must be initialized in place"
     );
     assert!(
+        support.contains("DISPLAY_GRAPHICS_HEAP_GUARD_BYTES")
+            && support.contains("esp_alloc::HEAP.add_region")
+            && support.contains("runtime_heap_start"),
+        "unused PSRAM must remain available as a global runtime allocation fallback"
+    );
+    assert!(
         !display_setup.contains("initialize_after_software_reset("),
         "the display framebuffer must not be passed by value through the boot task stack"
     );
@@ -8450,12 +8606,7 @@ fn effective_pps_current_limit_uses_contract_not_instantaneous_draw() {
             current_raw: 0,
             current_ma: 3_000,
             contract_voltage_mv: Some(24_000),
-            contract: Contract {
-                kind: ContractKind::Pps,
-                voltage_mv: 24_000,
-                current_ma: 3_000,
-                object_position: 2,
-            },
+            contract: Contract::observed(ContractKind::Pps, 24_000, 3_000),
         }),
     );
     assert_eq!(refreshed_pps_contract_limits_the_budget, 3_000);
@@ -9996,12 +10147,7 @@ fn pd_status_log_key_ignores_current_limit_churn() {
 
 #[test]
 fn fusb302b_fixed_contract_status_is_explicit_and_blocks_calibration() {
-    let contract = Contract {
-        kind: ContractKind::Fixed,
-        object_position: 3,
-        voltage_mv: 20_000,
-        current_ma: 5_000,
-    };
+    let contract = Contract::observed(ContractKind::Fixed, 20_000, 5_000);
     let observation = PdStatusObservation {
         status_raw: 1 << 3,
         status: Status::from_register(1 << 3),
@@ -10034,11 +10180,7 @@ fn fusb302b_fixed_contract_status_is_explicit_and_blocks_calibration() {
     ));
 
     let low_voltage = PdStatusObservation {
-        contract: Contract {
-            voltage_mv: 15_000,
-            current_ma: 3_000,
-            ..contract
-        },
+        contract: Contract::observed(ContractKind::Fixed, 15_000, 3_000),
         contract_voltage_mv: Some(15_000),
         current_ma: 3_000,
         ..observation
@@ -10062,12 +10204,7 @@ fn fusb302b_fixed_contract_status_is_explicit_and_blocks_calibration() {
 
 #[test]
 fn fusb302b_pps_contract_enables_calibration_and_keeps_the_absolute_guard() {
-    let contract = Contract {
-        kind: ContractKind::Pps,
-        object_position: 2,
-        voltage_mv: 20_000,
-        current_ma: 5_000,
-    };
+    let contract = Contract::observed(ContractKind::Pps, 20_000, 5_000);
     let observation = PdStatusObservation {
         status_raw: 1 << 3,
         status: Status::from_register(1 << 3),
@@ -10302,6 +10439,125 @@ fn fusb302b_pending_contract_is_not_reported_as_ready() {
 }
 
 #[test]
+fn pps_keepalive_without_a_response_expires_only_the_probe_window() {
+    assert!(!pps_keepalive_response_timeout_due(None, 10_000));
+    assert!(!pps_keepalive_response_timeout_due(Some(10_000), 11_499));
+    assert!(pps_keepalive_response_timeout_due(Some(10_000), 11_500));
+    assert!(pps_keepalive_response_timeout_due(Some(0), u64::MAX));
+}
+
+#[test]
+fn pps_keepalive_deadline_requires_a_fresh_expected_control_response() {
+    assert!(pps_keepalive_response_is_valid(
+        SinkPhase::Ready,
+        true,
+        3,
+        true
+    ));
+    assert!(pps_keepalive_response_is_valid(
+        SinkPhase::Ready,
+        true,
+        6,
+        true
+    ));
+    assert!(!pps_keepalive_response_is_valid(
+        SinkPhase::Ready,
+        true,
+        1,
+        true
+    ));
+    assert!(!pps_keepalive_response_is_valid(
+        SinkPhase::Ready,
+        true,
+        3,
+        false
+    ));
+    assert!(!pps_keepalive_response_is_valid(
+        SinkPhase::WaitingForPsRdy,
+        true,
+        6,
+        true
+    ));
+}
+
+#[test]
+fn successful_contract_confirmation_clears_a_previous_timeout_marker() {
+    assert!(successful_contract_confirmation_clears_timeout(
+        true,
+        SinkPhase::Ready
+    ));
+    assert!(!successful_contract_confirmation_clears_timeout(
+        true,
+        SinkPhase::WaitingForPsRdy
+    ));
+    assert!(!successful_contract_confirmation_clears_timeout(
+        false,
+        SinkPhase::Ready
+    ));
+}
+
+#[test]
+fn contract_request_response_timeout_uses_the_slow_transition_window() {
+    assert!(!contract_request_response_timeout_due(None, 10_000));
+    assert!(!contract_request_response_timeout_due(Some(10_000), 14_999));
+    assert!(contract_request_response_timeout_due(Some(10_000), 15_000));
+    assert!(contract_request_response_timeout_due(Some(0), u64::MAX));
+}
+
+#[test]
+fn fusb302b_protocol_fault_snapshot_codes_map_faults() {
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_RETRY_FAILED),
+        Some("pd_fusb_retry_failed")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_PENDING_REQUEST_TIMEOUT),
+        Some("pd_fusb_pending_request_timeout")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_STALE_CONTRACT_VIN),
+        Some("pd_fusb_stale_contract_vin")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_READ_INTERRUPTS_IO),
+        Some("pd_fusb_read_interrupts_io_error")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_READ_STATUS_IO),
+        Some("pd_fusb_read_status_io_error")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_RX_FIFO_FLUSH_IO),
+        Some("pd_fusb_rx_fifo_flush_io_error")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_RECEIVE_PACKET_IO),
+        Some("pd_fusb_receive_packet_io_error")
+    );
+    assert_eq!(
+        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_NONE),
+        None
+    );
+}
+
+#[test]
+fn fusb302b_i2c_error_snapshot_codes_map_errors() {
+    assert_eq!(
+        fusb302b_i2c_error_code(FUSB302B_I2C_ERROR_ACK_ADDRESS),
+        Some("pd_i2c_ack_address")
+    );
+    assert_eq!(
+        fusb302b_i2c_error_code(FUSB302B_I2C_ERROR_TIMEOUT),
+        Some("pd_i2c_timeout")
+    );
+    assert_eq!(
+        fusb302b_i2c_error_code(FUSB302B_I2C_ERROR_EXECUTION_INCOMPLETE),
+        Some("pd_i2c_execution_incomplete")
+    );
+    assert_eq!(fusb302b_i2c_error_code(FUSB302B_I2C_ERROR_NONE), None);
+}
+
+#[test]
 fn fixed_pd_settle_requires_an_observed_fixed_contract() {
     let fixed_observation = PdStatusObservation {
         status_raw: 1 << 3,
@@ -10309,12 +10565,7 @@ fn fixed_pd_settle_requires_an_observed_fixed_contract() {
         current_raw: 0,
         current_ma: 3_000,
         contract_voltage_mv: Some(20_000),
-        contract: Contract {
-            kind: ContractKind::Fixed,
-            object_position: 1,
-            voltage_mv: 20_000,
-            current_ma: 3_000,
-        },
+        contract: Contract::observed(ContractKind::Fixed, 20_000, 3_000),
     };
 
     assert!(pd_observation_confirms_fixed_contract(
@@ -10323,10 +10574,7 @@ fn fixed_pd_settle_requires_an_observed_fixed_contract() {
     ));
     assert!(!pd_observation_confirms_fixed_contract(
         Some(PdStatusObservation {
-            contract: Contract {
-                kind: ContractKind::Pps,
-                ..fixed_observation.contract
-            },
+            contract: Contract::observed(ContractKind::Pps, 20_000, 3_000),
             ..fixed_observation
         }),
         20_000
@@ -11407,18 +11655,10 @@ fn fusb302b_retries_manual_pps_when_the_active_contract_is_fixed() {
         current_raw: 0,
         current_ma: 5_000,
         contract_voltage_mv: Some(20_000),
-        contract: Contract {
-            kind: ContractKind::Fixed,
-            object_position: 1,
-            voltage_mv: 20_000,
-            current_ma: 5_000,
-        },
+        contract: Contract::observed(ContractKind::Fixed, 20_000, 5_000),
     };
     let pps = PdStatusObservation {
-        contract: Contract {
-            kind: ContractKind::Pps,
-            ..fixed.contract
-        },
+        contract: Contract::observed(ContractKind::Pps, 20_000, 5_000),
         ..fixed
     };
 

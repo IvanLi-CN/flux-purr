@@ -492,6 +492,23 @@ pub(crate) enum Fusb302bReceiveEvent {
     UnsupportedSop,
 }
 
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fusb302bReceiveFault {
+    InterruptRead(u8),
+    StatusRead(u8),
+    ReceiveFifoFlush,
+    PacketReceive(u8),
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const FUSB302B_TRANSPORT_RECOVERY_BACKOFF_MS: u64 = 50;
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const fn fusb302b_transport_retry_due(not_before_ms: Option<u64>, now_ms: u64) -> bool {
+    !matches!(not_before_ms, Some(not_before_ms) if now_ms < not_before_ms)
+}
+
 /// The FUSB302B reports received PD resets independently of Type-C CC state.
 /// Neither event is evidence that the attached source has detached.
 #[cfg(any(target_arch = "xtensa", test))]
@@ -504,7 +521,7 @@ pub(crate) enum Fusb302bReceivedResetAction {
 #[cfg(target_arch = "xtensa")]
 pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {
     PhyConfig {
-        pd_revision: PdRevision::Rev20,
+        pd_revision: PdRevision::Rev30,
         power_role: PowerRole::Sink,
         data_role: DataRole::Ufp,
         auto_goodcrc,
@@ -610,8 +627,10 @@ pub(crate) struct Fusb302bRuntime {
     pub(crate) attached_at_ms: Option<u64>,
     pub(crate) last_source_capabilities_request_at_ms: Option<u64>,
     pub(crate) source_capabilities_refresh_pending: bool,
+    pub(crate) source_capabilities_refresh_for_contract: bool,
     pub(crate) source_capabilities_refresh_requested_at_ms: Option<u64>,
     pub(crate) last_request_at_ms: Option<u64>,
+    pub(crate) pps_keepalive_pending_at_ms: Option<u64>,
     pub(crate) source_capabilities_tx_confirmed: bool,
     pub(crate) source_capabilities_gcrc_seen: bool,
     pub(crate) partial_rx_started_at_ms: Option<u64>,
@@ -620,6 +639,59 @@ pub(crate) struct Fusb302bRuntime {
     pub(crate) vbus_low_interlocked: bool,
     pub(crate) vbus_restore_candidate_since_ms: Option<u64>,
     pub(crate) awaiting_vbus_restore: bool,
+    pub(crate) request_rejected: bool,
+    pub(crate) request_timed_out: bool,
+    // A local I2C fault has already withdrawn authorization. Avoid immediately
+    // repeating a multi-transfer recovery on every 5ms service turn.
+    pub(crate) transport_recovery_not_before_ms: Option<u64>,
+    // `poll_receive_messages` reads Status0 on every completed service turn.
+    // Retain only whether that same-turn read confirmed VBUSOK; the published
+    // power observation must never trigger a second status-bank transaction.
+    pub(crate) vbus_status_observed: bool,
+    pub(crate) vbus_status_raw: u8,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const fn pps_keepalive_response_timeout_due(
+    pending_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    match pending_at_ms {
+        Some(pending_at_ms) => {
+            now_ms.saturating_sub(pending_at_ms) >= FUSB302B_PPS_KEEPALIVE_RESPONSE_TIMEOUT_MS
+        }
+        None => false,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn pps_keepalive_response_is_valid(
+    phase: SinkPhase,
+    keepalive_pending: bool,
+    message_type: u8,
+    message_id_is_fresh: bool,
+) -> bool {
+    keepalive_pending
+        && phase == SinkPhase::Ready
+        && message_id_is_fresh
+        && matches!(message_type, 3 | 4 | 6 | 12)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn successful_contract_confirmation_clears_timeout(
+    was_waiting_for_ps_rdy: bool,
+    phase: SinkPhase,
+) -> bool {
+    was_waiting_for_ps_rdy && phase == SinkPhase::Ready
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn contract_request_response_timeout_due(
+    last_request_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    last_request_at_ms
+        .is_some_and(|last| now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -643,8 +715,10 @@ impl Fusb302bRuntime {
             attached_at_ms: None,
             last_source_capabilities_request_at_ms: None,
             source_capabilities_refresh_pending: false,
+            source_capabilities_refresh_for_contract: false,
             source_capabilities_refresh_requested_at_ms: None,
             last_request_at_ms: None,
+            pps_keepalive_pending_at_ms: None,
             source_capabilities_tx_confirmed: false,
             source_capabilities_gcrc_seen: false,
             partial_rx_started_at_ms: None,
@@ -653,6 +727,11 @@ impl Fusb302bRuntime {
             vbus_low_interlocked: false,
             vbus_restore_candidate_since_ms: None,
             awaiting_vbus_restore: false,
+            request_rejected: false,
+            request_timed_out: false,
+            transport_recovery_not_before_ms: None,
+            vbus_status_observed: false,
+            vbus_status_raw: 0,
         }
     }
 
@@ -666,12 +745,16 @@ impl Fusb302bRuntime {
         self.attached_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = None;
         self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
         self.last_request_at_ms = None;
+        self.pps_keepalive_pending_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
         self.retry_fail_recovery_pending = false;
+        self.vbus_status_observed = false;
+        self.vbus_status_raw = 0;
     }
 
     fn interlock_after_vbus_low(&mut self, now_ms: u64) {
@@ -683,15 +766,25 @@ impl Fusb302bRuntime {
         // but a static level is not sufficient evidence to withdraw Rd. Keep
         // the physical CC session intact until a transition is confirmed.
         self.clear_contract_authorization(now_ms);
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_VBUS_LOW);
         self.vbus_low_candidate_since_ms = None;
         self.vbus_low_interlocked = true;
     }
 
     pub(crate) fn interlock_after_stale_contract(&mut self, now_ms: u64) {
         self.clear_contract_authorization(now_ms);
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_STALE_CONTRACT_VIN);
         self.clear_vbus_low_interlock();
         self.awaiting_vbus_restore = false;
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+    }
+
+    fn record_protocol_fault(&self, fault: u8) {
+        FUSB302B_LAST_PROTOCOL_FAULT.store(fault, Ordering::Release);
+    }
+
+    fn record_i2c_error(&self, error: u8) {
+        FUSB302B_LAST_I2C_ERROR.store(error, Ordering::Release);
     }
 
     pub(crate) fn stale_contract_vin_guard_suspended(&self, now_ms: u64) -> bool {
@@ -741,8 +834,10 @@ impl Fusb302bRuntime {
         self.attached_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = None;
         self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
         self.last_request_at_ms = None;
+        self.pps_keepalive_pending_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
@@ -816,16 +911,36 @@ impl Fusb302bRuntime {
         now: PdTimestamp,
     ) -> bool {
         let now_ms = now.as_millis();
+        self.transport_recovery_not_before_ms =
+            Some(now_ms.saturating_add(FUSB302B_TRANSPORT_RECOVERY_BACKOFF_MS));
+        self.record_protocol_fault(match fault {
+            fusb302b::TransientTransportFault::RetryFailed => FUSB302B_PROTOCOL_FAULT_RETRY_FAILED,
+            fusb302b::TransientTransportFault::PendingRequestTimeout => {
+                FUSB302B_PROTOCOL_FAULT_PENDING_REQUEST_TIMEOUT
+            }
+            fusb302b::TransientTransportFault::PartialReceiveTimeout => {
+                FUSB302B_PROTOCOL_FAULT_PARTIAL_RECEIVE_TIMEOUT
+            }
+            fusb302b::TransientTransportFault::ReceiveIoError => FUSB302B_PROTOCOL_FAULT_RECEIVE_IO,
+            fusb302b::TransientTransportFault::TransmitIoError => {
+                FUSB302B_PROTOCOL_FAULT_TRANSMIT_IO
+            }
+            fusb302b::TransientTransportFault::ConfigurationIoError => {
+                FUSB302B_PROTOCOL_FAULT_CONFIGURATION_IO
+            }
+        });
         match fusb302b::transient_transport_fault_recovery(fault) {
             fusb302b::TransientTransportRecovery::FlushReceiveAndRequery => {
                 self.policy.interlock_after_transient_transport_fault();
                 self.last_request_at_ms = None;
+                self.pps_keepalive_pending_at_ms = None;
                 // Preserve the normal discovery retry interval after a local
                 // fault. RetryFail remains asserted until the next START_TX,
                 // so the polling path consumes that already-handled status
                 // until this bounded re-query is sent.
                 self.last_source_capabilities_request_at_ms = Some(now_ms);
                 self.source_capabilities_refresh_pending = false;
+                self.source_capabilities_refresh_for_contract = false;
                 self.source_capabilities_refresh_requested_at_ms = None;
                 self.source_capabilities_tx_confirmed = false;
                 self.source_capabilities_gcrc_seen = false;
@@ -854,6 +969,10 @@ impl Fusb302bRuntime {
         self.policy.active_contract()
     }
 
+    pub(crate) fn confirmed_active_contract(&self) -> Option<ConfirmedActiveContract> {
+        self.policy.confirmed_active_contract()
+    }
+
     pub(crate) fn source_capabilities(&self) -> Option<SourceCapabilities> {
         self.policy.source_capabilities()
     }
@@ -862,43 +981,72 @@ impl Fusb302bRuntime {
         !matches!(self.policy.phase(), SinkPhase::Fault)
     }
 
-    pub(crate) async fn request_pps_voltage(
+    pub(crate) const fn vbus_status_observed(&self) -> bool {
+        self.vbus_status_observed
+    }
+
+    pub(crate) const fn vbus_status_raw(&self) -> u8 {
+        self.vbus_status_raw
+    }
+
+    pub(crate) async fn request_contract(
         &mut self,
         i2c: &mut PdI2c<'_>,
-        requested_mv: u16,
+        request: PdContractRequest,
         now: PdTimestamp,
+        replace_pending: bool,
     ) -> PdContractRequestState {
+        self.pps_keepalive_pending_at_ms = None;
+        self.request_rejected = false;
+        self.request_timed_out = false;
         let now_ms = now.as_millis();
-        let active = self.policy.active_contract();
-        if active.kind == ContractKind::Pps && active.voltage_mv == requested_mv {
-            return PdContractRequestState::Confirmed;
-        }
-        if matches!(
+        let request_inflight = matches!(
             self.policy.phase(),
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-        ) {
-            return PdContractRequestState::Pending;
+        );
+        if replace_pending {
+            self.policy.cancel_pending_request();
+            if !self.policy.prepare_contract_refresh(request) {
+                return PdContractRequestState::Failed;
+            }
+            return self.refresh_source_capabilities(i2c, now, true, true).await;
         }
-        if active.kind == ContractKind::Fixed {
-            if self.source_capabilities_refresh_pending {
+        if request_inflight {
+            if self.policy.pending_contract_matches(request) {
                 return PdContractRequestState::Pending;
             }
-            if !self.policy.prepare_pps_request(requested_mv) {
+            self.policy.cancel_pending_request();
+            if !self.policy.prepare_contract_refresh(request) {
                 return PdContractRequestState::Failed;
             }
-            let header = fusb302b::get_source_capabilities_header(self.next_message_id);
-            if let Err(fault) = self.transmit(i2c, header, &[]).await {
-                let _ = self
-                    .recover_transient_transport_fault(i2c, fault, now)
-                    .await;
+            if !fusb302b_flush_receive_fifo(i2c).await {
+                self.recover_transient_transport_fault(
+                    i2c,
+                    fusb302b::TransientTransportFault::ReceiveIoError,
+                    now,
+                )
+                .await;
                 return PdContractRequestState::Failed;
             }
-            self.source_capabilities_refresh_pending = true;
-            self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
-            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
-            return PdContractRequestState::Pending;
+            return self.refresh_source_capabilities(i2c, now, true, true).await;
+        } else if self
+            .policy
+            .confirmed_active_contract()
+            .is_some_and(|active| request_matches_active(request, Some(active)))
+        {
+            return PdContractRequestState::Confirmed;
         }
-        let Some(rdo) = self.policy.request_pps_voltage(requested_mv) else {
+        if self.policy.active_contract().kind == ContractKind::Fixed
+            && request.mode() == PdContractRequestMode::Pps
+        {
+            if !self.policy.prepare_contract_refresh(request) {
+                return PdContractRequestState::Failed;
+            }
+            return self
+                .refresh_source_capabilities(i2c, now, false, true)
+                .await;
+        }
+        let Some(rdo) = self.policy.request_contract(request) else {
             return PdContractRequestState::Failed;
         };
         let header = fusb302b::request_header(self.next_message_id);
@@ -910,6 +1058,77 @@ impl Fusb302bRuntime {
         }
         self.last_request_at_ms = Some(now_ms);
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
+        PdContractRequestState::Pending
+    }
+
+    pub(crate) async fn abort_pending_operation(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) {
+        self.policy.cancel_pending_request();
+        self.pps_keepalive_pending_at_ms = None;
+        self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_for_contract = false;
+        self.source_capabilities_refresh_requested_at_ms = None;
+        self.source_capabilities_tx_confirmed = false;
+        self.source_capabilities_gcrc_seen = false;
+        self.partial_rx_started_at_ms = None;
+        self.request_rejected = false;
+        self.request_timed_out = false;
+        if !fusb302b_flush_receive_fifo(i2c).await {
+            let _ = self
+                .recover_transient_transport_fault(
+                    i2c,
+                    fusb302b::TransientTransportFault::ReceiveIoError,
+                    now,
+                )
+                .await;
+        }
+    }
+
+    pub(crate) async fn refresh_source_capabilities(
+        &mut self,
+        i2c: &mut PdI2c<'_>,
+        now: PdTimestamp,
+        replace_pending: bool,
+        request_contract: bool,
+    ) -> PdContractRequestState {
+        self.pps_keepalive_pending_at_ms = None;
+        self.request_rejected = false;
+        self.request_timed_out = false;
+        if replace_pending {
+            self.source_capabilities_refresh_pending = false;
+            self.source_capabilities_refresh_for_contract = false;
+            self.source_capabilities_refresh_requested_at_ms = None;
+            self.last_source_capabilities_request_at_ms = None;
+            self.source_capabilities_tx_confirmed = false;
+            self.source_capabilities_gcrc_seen = false;
+            self.partial_rx_started_at_ms = None;
+            if !fusb302b_flush_receive_fifo(i2c).await {
+                self.recover_transient_transport_fault(
+                    i2c,
+                    fusb302b::TransientTransportFault::ReceiveIoError,
+                    now,
+                )
+                .await;
+                return PdContractRequestState::Failed;
+            }
+        } else if self.source_capabilities_refresh_pending {
+            return PdContractRequestState::Pending;
+        }
+        if self.policy.phase() == SinkPhase::Fault {
+            return PdContractRequestState::Failed;
+        }
+        let now_ms = now.as_millis();
+        let header = fusb302b::get_source_capabilities_header(self.next_message_id);
+        if let Err(fault) = self.transmit(i2c, header, &[]).await {
+            let _ = self
+                .recover_transient_transport_fault(i2c, fault, now)
+                .await;
+            return PdContractRequestState::Failed;
+        }
+        self.source_capabilities_refresh_pending = true;
+        self.source_capabilities_refresh_for_contract = request_contract;
+        self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
+        self.last_source_capabilities_request_at_ms = Some(now_ms);
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
         PdContractRequestState::Pending
     }
 
@@ -917,52 +1136,34 @@ impl Fusb302bRuntime {
         &mut self,
         i2c: &mut PdI2c<'_>,
         now: PdTimestamp,
+        replace_pending: bool,
     ) -> PdContractRequestState {
+        self.pps_keepalive_pending_at_ms = None;
+        self.request_rejected = false;
+        self.request_timed_out = false;
         let now_ms = now.as_millis();
+        if replace_pending {
+            self.policy.cancel_pending_request();
+            self.policy.prepare_automatic_idle_refresh();
+            return self.refresh_source_capabilities(i2c, now, true, true).await;
+        }
+        if matches!(
+            self.policy.phase(),
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        ) {
+            if self.policy.pending_automatic_idle_contract_matches() {
+                return PdContractRequestState::Pending;
+            }
+            self.policy.cancel_pending_request();
+        }
         let active = self.policy.active_contract();
-        if active.kind == ContractKind::Pps && active.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
+        if active.kind == ContractKind::Pps
+            && active.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
+            && active.current_ma >= MIN_HEATER_CONTRACT_MA
         {
             return PdContractRequestState::Confirmed;
         }
-        if matches!(
-            self.policy.phase(),
-            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-        ) {
-            return PdContractRequestState::Pending;
-        }
         let Some(rdo) = self.policy.request_automatic_idle_contract() else {
-            return PdContractRequestState::Failed;
-        };
-        let header = fusb302b::request_header(self.next_message_id);
-        if let Err(fault) = self.transmit(i2c, header, &rdo).await {
-            let _ = self
-                .recover_transient_transport_fault(i2c, fault, now)
-                .await;
-            return PdContractRequestState::Failed;
-        }
-        self.last_request_at_ms = Some(now_ms);
-        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
-        PdContractRequestState::Pending
-    }
-
-    pub(crate) async fn request_fixed_voltage(
-        &mut self,
-        i2c: &mut PdI2c<'_>,
-        requested_mv: u16,
-        now: PdTimestamp,
-    ) -> PdContractRequestState {
-        let now_ms = now.as_millis();
-        let active = self.policy.active_contract();
-        if active.kind == ContractKind::Fixed && active.voltage_mv == requested_mv {
-            return PdContractRequestState::Confirmed;
-        }
-        if matches!(
-            self.policy.phase(),
-            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-        ) {
-            return PdContractRequestState::Pending;
-        }
-        let Some(rdo) = self.policy.request_fixed_voltage(requested_mv) else {
             return PdContractRequestState::Failed;
         };
         let header = fusb302b::request_header(self.next_message_id);
@@ -1005,10 +1206,10 @@ impl Fusb302bRuntime {
         if !self.awaiting_vbus_restore {
             return None;
         }
-        let vbus_restored = {
+        let status0 = {
             let mut phy = Fusb302::new(&mut *i2c);
             match phy.read_status().await {
-                Ok(status) => status.status0 & FUSB302B_STATUS0_VBUSOK != 0,
+                Ok(status) => status.status0,
                 Err(_) => {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
                     return Some(
@@ -1022,6 +1223,8 @@ impl Fusb302bRuntime {
                 }
             }
         };
+        self.vbus_status_raw = status0;
+        let vbus_restored = status0 & FUSB302B_STATUS0_VBUSOK != 0;
         if !vbus_restored {
             self.vbus_restore_candidate_since_ms = None;
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_CC_ATTACH, Ordering::Relaxed);
@@ -1049,16 +1252,27 @@ impl Fusb302bRuntime {
         now: PdTimestamp,
         now_ms: u64,
     ) -> Option<bool> {
+        let keepalive_pending =
+            pps_keepalive_response_timeout_due(self.pps_keepalive_pending_at_ms, now_ms);
         let pending = matches!(
             self.policy.phase(),
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-        ) && self.last_request_at_ms.is_some_and(|last| {
-            now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS
-        });
+        ) && contract_request_response_timeout_due(self.last_request_at_ms, now_ms);
+        if keepalive_pending {
+            // An unchanged PPS RDO is a liveness probe, not a contract
+            // transition. Some valid sources keep VBUS at the confirmed level
+            // without sending Accept/PS_RDY for the identical request. Bound
+            // the probe state, but leave the confirmed contract authoritative;
+            // VBUS/ADC loss and transport faults still revoke it fail-closed.
+            self.pps_keepalive_pending_at_ms = None;
+            self.last_request_at_ms = Some(now_ms);
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_IDLE, Ordering::Relaxed);
+        }
         if !pending {
             return None;
         }
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
+        self.request_timed_out = true;
         Some(
             self.recover_transient_transport_fault(
                 i2c,
@@ -1071,16 +1285,22 @@ impl Fusb302bRuntime {
 
     fn poll_pps_transition_capability_refresh(&mut self, now_ms: u64) {
         let timed_out = self.source_capabilities_refresh_pending
-            && self
-                .source_capabilities_refresh_requested_at_ms
-                .is_some_and(|last| {
-                    now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS
-                });
+            && contract_request_response_timeout_due(
+                self.source_capabilities_refresh_requested_at_ms,
+                now_ms,
+            );
         if !timed_out {
             return;
         }
+        // Cached capabilities and the previously confirmed contract no longer
+        // have a fresh source observation. Fail closed before settling the
+        // refresh ticket so the next request cannot reuse stale power state.
+        self.clear_contract_authorization(now_ms);
         self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
+        self.request_timed_out = true;
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_SOURCE_CAPABILITIES_TIMEOUT);
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
     }
 
@@ -1217,6 +1437,7 @@ impl Fusb302bRuntime {
                     .await;
             }
             self.last_request_at_ms = Some(now_ms);
+            self.pps_keepalive_pending_at_ms = Some(now_ms);
         }
         true
     }
@@ -1309,14 +1530,20 @@ impl Fusb302bRuntime {
         message: PdPacket,
         pdos: &[u32],
     ) -> bool {
+        let refresh_for_contract = self.source_capabilities_refresh_for_contract;
         let preserve_ready_contract =
-            self.policy.phase() == SinkPhase::Ready && !self.source_capabilities_refresh_pending;
+            self.policy.phase() == SinkPhase::Ready && !refresh_for_contract;
+        let message_id = Some((message.header() >> 9) as u8 & 0x07);
+        if !self.policy.source_capabilities_message_is_fresh(message_id) {
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
+            return true;
+        }
         self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.retry_fail_recovery_pending = false;
-        let message_id = Some((message.header() >> 9) as u8 & 0x07);
         let rdo = if preserve_ready_contract {
             self.policy
                 .refresh_source_capabilities_with_message_id(pdos, message_id)
@@ -1347,13 +1574,32 @@ impl Fusb302bRuntime {
 
     fn handle_control_message(&mut self, message: PdPacket, now_ms: u64) {
         let was_waiting_for_ps_rdy = self.policy.phase() == SinkPhase::WaitingForPsRdy;
-        self.policy.on_control_message_with_message_id(
-            (message.header() & 0x1f) as u8,
-            Some((message.header() >> 9) as u8 & 0x07),
-            now_ms,
+        let message_type = (message.header() & 0x1f) as u8;
+        let message_id = Some((message.header() >> 9) as u8 & 0x07);
+        let keepalive_response_is_valid = pps_keepalive_response_is_valid(
+            self.policy.phase(),
+            self.pps_keepalive_pending_at_ms.is_some(),
+            message_type,
+            self.policy.source_capabilities_message_is_fresh(message_id),
         );
+        self.request_rejected = matches!(message_type, 4 | 12)
+            && matches!(
+                self.policy.phase(),
+                SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+            );
+        self.policy
+            .on_control_message_with_message_id(message_type, message_id, now_ms);
+        if keepalive_response_is_valid {
+            self.pps_keepalive_pending_at_ms = None;
+        }
         if was_waiting_for_ps_rdy && self.policy.phase() == SinkPhase::Ready {
             self.last_source_capabilities_request_at_ms = Some(now_ms);
+            if successful_contract_confirmation_clears_timeout(
+                was_waiting_for_ps_rdy,
+                self.policy.phase(),
+            ) {
+                self.request_timed_out = false;
+            }
         }
         FUSB302B_DIAGNOSTIC.store(
             if self.policy.phase() == SinkPhase::Ready {
@@ -1372,6 +1618,7 @@ impl Fusb302bRuntime {
         action: Fusb302bReceivedResetAction,
     ) -> bool {
         self.clear_vbus_low_interlock();
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_RECEIVED_RESET);
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
         self.recover_after_received_reset(i2c, action, now).await
     }
@@ -1389,6 +1636,7 @@ impl Fusb302bRuntime {
 
     fn handle_protection_event(&mut self) -> bool {
         self.clear_vbus_low_interlock();
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_PROTECTION);
         self.policy.mark_fault();
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_PROTECTION, Ordering::Relaxed);
         false
@@ -1396,6 +1644,7 @@ impl Fusb302bRuntime {
 
     async fn handle_unsupported_sop(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) -> bool {
         self.clear_vbus_low_interlock();
+        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_UNSUPPORTED_SOP);
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_UNSUPPORTED_SOP, Ordering::Relaxed);
         self.recover_transient_transport_fault(
             i2c,
@@ -1410,7 +1659,16 @@ impl Fusb302bRuntime {
     /// awaits below are bounded hardware transactions, not waits for EEPROM's
     /// mutex ownership.
     pub(crate) async fn poll(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) -> bool {
+        // A published observation is valid only when this exact service turn
+        // successfully samples VBUSOK. Any early return or transport error
+        // leaves the value false and therefore withdraws heater permission.
+        self.vbus_status_observed = false;
+        self.vbus_status_raw = 0;
         let now_ms = now.as_millis();
+        if !fusb302b_transport_retry_due(self.transport_recovery_not_before_ms, now_ms) {
+            return false;
+        }
+        self.transport_recovery_not_before_ms = None;
         if self.policy.phase() == SinkPhase::Fault {
             return false;
         }
@@ -1433,15 +1691,41 @@ impl Fusb302bRuntime {
         now: PdTimestamp,
         now_ms: u64,
     ) -> bool {
-        let event = match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending).await {
-            Ok(event) => event,
-            Err(fault) => {
-                FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
-                return self
-                    .recover_transient_transport_fault(i2c, fault, now)
-                    .await;
-            }
-        };
+        let (event, status0) =
+            match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending).await {
+                Ok(observation) => observation,
+                Err(fault) => {
+                    let protocol_fault = match fault {
+                        Fusb302bReceiveFault::InterruptRead(i2c_error) => {
+                            self.record_i2c_error(i2c_error);
+                            FUSB302B_PROTOCOL_FAULT_READ_INTERRUPTS_IO
+                        }
+                        Fusb302bReceiveFault::StatusRead(i2c_error) => {
+                            self.record_i2c_error(i2c_error);
+                            FUSB302B_PROTOCOL_FAULT_READ_STATUS_IO
+                        }
+                        Fusb302bReceiveFault::ReceiveFifoFlush => {
+                            FUSB302B_PROTOCOL_FAULT_RX_FIFO_FLUSH_IO
+                        }
+                        Fusb302bReceiveFault::PacketReceive(i2c_error) => {
+                            self.record_i2c_error(i2c_error);
+                            FUSB302B_PROTOCOL_FAULT_RECEIVE_PACKET_IO
+                        }
+                    };
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                    let recovered = self
+                        .recover_transient_transport_fault(
+                            i2c,
+                            fusb302b::TransientTransportFault::ReceiveIoError,
+                            now,
+                        )
+                        .await;
+                    self.record_protocol_fault(protocol_fault);
+                    return recovered;
+                }
+            };
+        self.vbus_status_raw = status0;
+        self.vbus_status_observed = !matches!(event, Fusb302bReceiveEvent::VbusLow { .. });
         match event {
             Fusb302bReceiveEvent::VbusLow { transition } => {
                 self.handle_vbus_low_event(i2c, now_ms, transition).await
