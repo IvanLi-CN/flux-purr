@@ -20,8 +20,8 @@ fi
 
 # These are the only address windows accepted by the RAM loader.  They match
 # ram-memory.x and intentionally exclude the ESP32-S3 flash mappings.
-iram_start=$((16#40370000))
-iram_end=$((16#403CD800))
+iram_start=$((16#40378000))
+iram_end=$((16#403E0000))
 dram_start=$((16#3FC88000))
 dram_end=$((16#3FD00000))
 rtc_fast_start=$((16#600FE000))

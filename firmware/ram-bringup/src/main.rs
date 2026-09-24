@@ -59,6 +59,9 @@ use heapless::String;
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_arch = "xtensa")]
+esp_bootloader_esp_idf::esp_app_desc!();
+
+#[cfg(target_arch = "xtensa")]
 const RESPONSE_CAPACITY: usize = 4096;
 #[cfg(target_arch = "xtensa")]
 const MCPWM_PERIPHERAL_CLOCK_HZ: u32 = 40_000_000;
