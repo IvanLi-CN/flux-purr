@@ -969,6 +969,11 @@ pub(crate) enum ThermalReportCommand {
         about = "Rerender a legacy preliminary thermal review bundle into the canonical compliant HTML bundle."
     )]
     RerenderLegacy(ThermalLegacyReportArgs),
+    #[command(
+        name = "render-v2",
+        about = "Generate the canonical five-file thermal-tuning-v2 HTML report from samples and result data."
+    )]
+    RenderV2(ThermalTuningV2ReportArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1254,6 +1259,20 @@ pub(crate) struct ThermalLegacyReportArgs {
     #[arg(
         long = "output-dir",
         help = "Output directory for the rerendered compliant bundle. Defaults to <legacy-bundle-dir>-rerendered."
+    )]
+    pub(crate) output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct ThermalTuningV2ReportArgs {
+    #[arg(
+        long = "input-dir",
+        help = "Directory containing run.bundle.json, samples.ndjson, thermal-profile.candidate.json and decision-ledger.ndjson."
+    )]
+    pub(crate) input_dir: PathBuf,
+    #[arg(
+        long = "output-dir",
+        help = "Output directory for the generated five-file thermal-tuning-v2 bundle. Defaults to <input-dir>/rendered."
     )]
     pub(crate) output_dir: Option<PathBuf>,
 }

@@ -3103,6 +3103,37 @@ fn parses_thermal_report_rerender_legacy_command() {
 }
 
 #[test]
+fn parses_thermal_report_render_v2_command() {
+    let cli = Cli::try_parse_from([
+        "flux-purr",
+        "thermal",
+        "report",
+        "render-v2",
+        "--input-dir",
+        "/tmp/thermal-v2-input",
+        "--output-dir",
+        "/tmp/thermal-v2-output",
+    ])
+    .expect("parse thermal v2 report command");
+
+    let Command::Thermal {
+        command: ThermalCommand::Report { command },
+    } = cli.command
+    else {
+        panic!("expected thermal report command");
+    };
+    let ThermalReportCommand::RenderV2(args) = command else {
+        panic!("expected v2 report command");
+    };
+
+    assert_eq!(args.input_dir, PathBuf::from("/tmp/thermal-v2-input"));
+    assert_eq!(
+        args.output_dir,
+        Some(PathBuf::from("/tmp/thermal-v2-output"))
+    );
+}
+
+#[test]
 fn parses_thermal_report_render_self_test_command() {
     let cli = Cli::try_parse_from([
         "flux-purr",

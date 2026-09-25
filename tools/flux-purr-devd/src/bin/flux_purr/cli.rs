@@ -45,6 +45,8 @@ mod thermal_flagship;
 mod thermal_report;
 #[path = "thermal_retune.rs"]
 mod thermal_retune;
+#[path = "thermal_tuning_v2_report.rs"]
+mod thermal_tuning_v2_report;
 
 #[path = "cli/args.rs"]
 pub(crate) mod args;

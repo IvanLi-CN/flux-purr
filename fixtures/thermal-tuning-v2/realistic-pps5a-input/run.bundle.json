@@ -1,0 +1,1257 @@
+{
+  "schema": "thermal-tuning-v2",
+  "runId": "mock-firmware-v2-realistic-pps5a-20260925",
+  "engine": "firmware",
+  "device": {
+    "id": "mock-device-pps5a-thermal-bench-01",
+    "transport": "mock-local-recorder"
+  },
+  "firmware": {
+    "version": "mock-firmware-v2.0.0+thermal",
+    "build": "realistic-mock"
+  },
+  "powerClass": "pps5a",
+  "sourceClass": "device-local",
+  "ppsControlPolicyVersion": "pps-policy-v2",
+  "ppsVoltageBounds": {
+    "absoluteMinMv": 5000,
+    "absoluteMaxMv": 28000,
+    "policyFloorMv": 12000,
+    "apdoMinMv": 5000,
+    "apdoMaxMv": 28000
+  },
+  "targetSet": {
+    "physicalC": [
+      60,
+      80,
+      100,
+      120,
+      140,
+      160,
+      180,
+      220,
+      240
+    ],
+    "selectedC": [
+      60,
+      80,
+      100,
+      120,
+      140,
+      160,
+      180,
+      220,
+      240
+    ],
+    "executionOrderC": [
+      60,
+      240,
+      140,
+      100,
+      80,
+      120,
+      180,
+      160,
+      220
+    ]
+  },
+  "qualificationScope": {
+    "kind": "default-pps5a-full-batch",
+    "targetCount": 9,
+    "diagnosticOnly": false
+  },
+  "terminalDisposition": "completed",
+  "reviewDisposition": "passed",
+  "generatedAt": "2026-09-25T08:00:00Z",
+  "candidate": {
+    "candidateId": "mock-pps5a-candidate-realistic-v1",
+    "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+    "powerClass": "pps5a",
+    "promotionState": "sealed"
+  },
+  "referenceComparison": {
+    "fixture": "external-5a-conformance-v1",
+    "status": "matched",
+    "algorithmCopied": false
+  },
+  "capability": {
+    "localEvidence": {
+      "vin": "available",
+      "ppsContract": "available",
+      "externalVbus": "unavailable",
+      "physicalPower": "unavailable"
+    }
+  },
+  "reportRuns": [
+    {
+      "targetC": 60,
+      "reviewOutcome": "passed",
+      "reviewPassed": true,
+      "adoptedTrialIndex": 1,
+      "trialCount": 2,
+      "metrics": {
+        "warmupRequestedOutputPermille": 1000,
+        "phasePath": "warmup -> approach -> hold",
+        "maxOvershootC": 1.0,
+        "holdPeakToPeakC": 1.37,
+        "holdConfirmSeconds": 60,
+        "fullSpeedToStable": {
+          "settleTimeMs": 5600,
+          "limitMs": 10000
+        }
+      },
+      "trials": [
+        {
+          "trialIndex": 0,
+          "candidateId": "mock-pps5a-60c-trial-0-rejected",
+          "candidateHash": "sha256:58a521b8367ea6fabe35eb23db242dbe1d5c128810c8bf5945c21aa9b131259a",
+          "disposition": "rejected",
+          "reviewOutcome": "failed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 5.34,
+          "holdPeakToPeakC": 0.29,
+          "fullSpeedToStable": {
+            "settleTimeMs": 10800,
+            "limitMs": 10000
+          },
+          "firstSequence": 0,
+          "lastSequence": 12,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 40000,
+          "bounds": {
+            "lowerTargetC": 40,
+            "upperTargetC": 80
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 40,
+            "upperTargetC": 80
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-60c-trial-0-rejected",
+            "candidateHash": "sha256:58a521b8367ea6fabe35eb23db242dbe1d5c128810c8bf5945c21aa9b131259a",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 60,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 920,
+              "brakeDistanceCentiC": 572,
+              "approachPowerPermille": 578,
+              "approachFloorPowerPermille": 235,
+              "approachDampingExponentPermille": 820,
+              "approachTailWindowCentiC": 70,
+              "holdPowerPermille": 182,
+              "holdReheatPowerPermille": 237,
+              "holdEntryCentiC": 95,
+              "holdExitCentiC": 55,
+              "holdOnCentiC": 9,
+              "holdOffCentiC": 105,
+              "overshootCutoffCentiC": 135,
+              "holdKpPermillePerC": 20,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 2,
+              "approachLeadTicks": 3,
+              "holdLeadTicks": 1
+            }
+          },
+          "stopReason": "overshoot hard gate exceeded"
+        },
+        {
+          "trialIndex": 1,
+          "candidateId": "mock-pps5a-candidate-realistic-v1",
+          "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+          "disposition": "adopted",
+          "reviewOutcome": "passed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 1.0,
+          "holdPeakToPeakC": 1.37,
+          "fullSpeedToStable": {
+            "settleTimeMs": 5600,
+            "limitMs": 10000
+          },
+          "firstSequence": 13,
+          "lastSequence": 44,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 106000,
+          "bounds": {
+            "lowerTargetC": 40,
+            "upperTargetC": 80
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 40,
+            "upperTargetC": 80
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-candidate-realistic-v1",
+            "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 60,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 920,
+              "brakeDistanceCentiC": 560,
+              "approachPowerPermille": 590,
+              "approachFloorPowerPermille": 235,
+              "approachDampingExponentPermille": 820,
+              "approachTailWindowCentiC": 70,
+              "holdPowerPermille": 170,
+              "holdReheatPowerPermille": 225,
+              "holdEntryCentiC": 95,
+              "holdExitCentiC": 55,
+              "holdOnCentiC": 9,
+              "holdOffCentiC": 105,
+              "overshootCutoffCentiC": 135,
+              "holdKpPermillePerC": 20,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 2,
+              "approachLeadTicks": 3,
+              "holdLeadTicks": 1
+            }
+          },
+          "stopReason": "candidate passed hard gates and 60s hold confirm"
+        }
+      ]
+    },
+    {
+      "targetC": 80,
+      "reviewOutcome": "passed",
+      "reviewPassed": true,
+      "adoptedTrialIndex": 1,
+      "trialCount": 2,
+      "metrics": {
+        "warmupRequestedOutputPermille": 1000,
+        "phasePath": "warmup -> approach -> hold",
+        "maxOvershootC": 1.02,
+        "holdPeakToPeakC": 1.44,
+        "holdConfirmSeconds": 60,
+        "fullSpeedToStable": {
+          "settleTimeMs": 6588,
+          "limitMs": 10000
+        }
+      },
+      "trials": [
+        {
+          "trialIndex": 0,
+          "candidateId": "mock-pps5a-80c-trial-0-rejected",
+          "candidateHash": "sha256:12689229aa808802a80581ede6694cc190710d8dc446b46031aa861c0bc6c965",
+          "disposition": "rejected",
+          "reviewOutcome": "failed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 1.0,
+          "holdPeakToPeakC": 0.21,
+          "fullSpeedToStable": {
+            "settleTimeMs": 10800,
+            "limitMs": 10000
+          },
+          "firstSequence": 45,
+          "lastSequence": 57,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 42000,
+          "bounds": {
+            "lowerTargetC": 60,
+            "upperTargetC": 100
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 60,
+            "upperTargetC": 100
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-80c-trial-0-rejected",
+            "candidateHash": "sha256:12689229aa808802a80581ede6694cc190710d8dc446b46031aa861c0bc6c965",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 80,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 938,
+              "brakeDistanceCentiC": 600,
+              "approachPowerPermille": 561,
+              "approachFloorPowerPermille": 248,
+              "approachDampingExponentPermille": 833,
+              "approachTailWindowCentiC": 76,
+              "holdPowerPermille": 195,
+              "holdReheatPowerPermille": 253,
+              "holdEntryCentiC": 102,
+              "holdExitCentiC": 60,
+              "holdOnCentiC": 9,
+              "holdOffCentiC": 114,
+              "overshootCutoffCentiC": 149,
+              "holdKpPermillePerC": 21,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 2,
+              "approachLeadTicks": 3,
+              "holdLeadTicks": 1
+            }
+          },
+          "stopReason": "full-speed-to-stable budget exhausted"
+        },
+        {
+          "trialIndex": 1,
+          "candidateId": "mock-pps5a-candidate-realistic-v1",
+          "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+          "disposition": "adopted",
+          "reviewOutcome": "passed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 1.02,
+          "holdPeakToPeakC": 1.44,
+          "fullSpeedToStable": {
+            "settleTimeMs": 6588,
+            "limitMs": 10000
+          },
+          "firstSequence": 58,
+          "lastSequence": 90,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 110000,
+          "bounds": {
+            "lowerTargetC": 60,
+            "upperTargetC": 100
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 60,
+            "upperTargetC": 100
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-candidate-realistic-v1",
+            "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 80,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 938,
+              "brakeDistanceCentiC": 588,
+              "approachPowerPermille": 573,
+              "approachFloorPowerPermille": 248,
+              "approachDampingExponentPermille": 833,
+              "approachTailWindowCentiC": 76,
+              "holdPowerPermille": 183,
+              "holdReheatPowerPermille": 241,
+              "holdEntryCentiC": 102,
+              "holdExitCentiC": 60,
+              "holdOnCentiC": 9,
+              "holdOffCentiC": 114,
+              "overshootCutoffCentiC": 149,
+              "holdKpPermillePerC": 21,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 2,
+              "approachLeadTicks": 3,
+              "holdLeadTicks": 1
+            }
+          },
+          "stopReason": "candidate passed hard gates and 60s hold confirm"
+        }
+      ]
+    },
+    {
+      "targetC": 100,
+      "reviewOutcome": "passed",
+      "reviewPassed": true,
+      "adoptedTrialIndex": 1,
+      "trialCount": 2,
+      "metrics": {
+        "warmupRequestedOutputPermille": 1000,
+        "phasePath": "warmup -> approach -> hold",
+        "maxOvershootC": 1.06,
+        "holdPeakToPeakC": 1.52,
+        "holdConfirmSeconds": 60,
+        "fullSpeedToStable": {
+          "settleTimeMs": 6527,
+          "limitMs": 10000
+        }
+      },
+      "trials": [
+        {
+          "trialIndex": 0,
+          "candidateId": "mock-pps5a-100c-trial-0-rejected",
+          "candidateHash": "sha256:252683098a88606334a52adaeb5ccc91aef8f7a2848e2235fa16a2bea0da77e9",
+          "disposition": "rejected",
+          "reviewOutcome": "failed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 3.11,
+          "holdPeakToPeakC": 4.64,
+          "fullSpeedToStable": {
+            "settleTimeMs": 10800,
+            "limitMs": 10000
+          },
+          "firstSequence": 91,
+          "lastSequence": 104,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 44000,
+          "bounds": {
+            "lowerTargetC": 80,
+            "upperTargetC": 120
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 80,
+            "upperTargetC": 120
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-100c-trial-0-rejected",
+            "candidateHash": "sha256:252683098a88606334a52adaeb5ccc91aef8f7a2848e2235fa16a2bea0da77e9",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 100,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 957,
+              "brakeDistanceCentiC": 629,
+              "approachPowerPermille": 544,
+              "approachFloorPowerPermille": 261,
+              "approachDampingExponentPermille": 846,
+              "approachTailWindowCentiC": 83,
+              "holdPowerPermille": 208,
+              "holdReheatPowerPermille": 270,
+              "holdEntryCentiC": 109,
+              "holdExitCentiC": 65,
+              "holdOnCentiC": 10,
+              "holdOffCentiC": 123,
+              "overshootCutoffCentiC": 163,
+              "holdKpPermillePerC": 22,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 2,
+              "approachLeadTicks": 3,
+              "holdLeadTicks": 1
+            }
+          },
+          "stopReason": "hold peak-to-peak hard gate exceeded"
+        },
+        {
+          "trialIndex": 1,
+          "candidateId": "mock-pps5a-candidate-realistic-v1",
+          "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+          "disposition": "adopted",
+          "reviewOutcome": "passed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 1.06,
+          "holdPeakToPeakC": 1.52,
+          "fullSpeedToStable": {
+            "settleTimeMs": 6527,
+            "limitMs": 10000
+          },
+          "firstSequence": 105,
+          "lastSequence": 137,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 112000,
+          "bounds": {
+            "lowerTargetC": 80,
+            "upperTargetC": 120
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 80,
+            "upperTargetC": 120
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-candidate-realistic-v1",
+            "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 100,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 957,
+              "brakeDistanceCentiC": 617,
+              "approachPowerPermille": 556,
+              "approachFloorPowerPermille": 261,
+              "approachDampingExponentPermille": 846,
+              "approachTailWindowCentiC": 83,
+              "holdPowerPermille": 196,
+              "holdReheatPowerPermille": 258,
+              "holdEntryCentiC": 109,
+              "holdExitCentiC": 65,
+              "holdOnCentiC": 10,
+              "holdOffCentiC": 123,
+              "overshootCutoffCentiC": 163,
+              "holdKpPermillePerC": 22,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 2,
+              "approachLeadTicks": 3,
+              "holdLeadTicks": 1
+            }
+          },
+          "stopReason": "candidate passed hard gates and 60s hold confirm"
+        }
+      ]
+    },
+    {
+      "targetC": 120,
+      "reviewOutcome": "passed",
+      "reviewPassed": true,
+      "adoptedTrialIndex": 1,
+      "trialCount": 2,
+      "metrics": {
+        "warmupRequestedOutputPermille": 1000,
+        "phasePath": "warmup -> approach -> hold",
+        "maxOvershootC": 1.1,
+        "holdPeakToPeakC": 1.58,
+        "holdConfirmSeconds": 60,
+        "fullSpeedToStable": {
+          "settleTimeMs": 6466,
+          "limitMs": 10000
+        }
+      },
+      "trials": [
+        {
+          "trialIndex": 0,
+          "candidateId": "mock-pps5a-120c-trial-0-rejected",
+          "candidateHash": "sha256:59874cba10d52a832fe082d746b9eac5f7f14fbc3ac988b9ff081dbe23382847",
+          "disposition": "rejected",
+          "reviewOutcome": "failed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 5.36,
+          "holdPeakToPeakC": 0.22,
+          "fullSpeedToStable": {
+            "settleTimeMs": 10800,
+            "limitMs": 10000
+          },
+          "firstSequence": 138,
+          "lastSequence": 152,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 48000,
+          "bounds": {
+            "lowerTargetC": 100,
+            "upperTargetC": 140
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 100,
+            "upperTargetC": 140
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-120c-trial-0-rejected",
+            "candidateHash": "sha256:59874cba10d52a832fe082d746b9eac5f7f14fbc3ac988b9ff081dbe23382847",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 120,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 976,
+              "brakeDistanceCentiC": 658,
+              "approachPowerPermille": 528,
+              "approachFloorPowerPermille": 275,
+              "approachDampingExponentPermille": 860,
+              "approachTailWindowCentiC": 90,
+              "holdPowerPermille": 222,
+              "holdReheatPowerPermille": 287,
+              "holdEntryCentiC": 116,
+              "holdExitCentiC": 70,
+              "holdOnCentiC": 11,
+              "holdOffCentiC": 133,
+              "overshootCutoffCentiC": 178,
+              "holdKpPermillePerC": 23,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 3,
+              "approachLeadTicks": 4,
+              "holdLeadTicks": 2
+            }
+          },
+          "stopReason": "overshoot hard gate exceeded"
+        },
+        {
+          "trialIndex": 1,
+          "candidateId": "mock-pps5a-candidate-realistic-v1",
+          "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+          "disposition": "adopted",
+          "reviewOutcome": "passed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 1.1,
+          "holdPeakToPeakC": 1.58,
+          "fullSpeedToStable": {
+            "settleTimeMs": 6466,
+            "limitMs": 10000
+          },
+          "firstSequence": 153,
+          "lastSequence": 188,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 120000,
+          "bounds": {
+            "lowerTargetC": 100,
+            "upperTargetC": 140
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 100,
+            "upperTargetC": 140
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-candidate-realistic-v1",
+            "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 120,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 976,
+              "brakeDistanceCentiC": 646,
+              "approachPowerPermille": 540,
+              "approachFloorPowerPermille": 275,
+              "approachDampingExponentPermille": 860,
+              "approachTailWindowCentiC": 90,
+              "holdPowerPermille": 210,
+              "holdReheatPowerPermille": 275,
+              "holdEntryCentiC": 116,
+              "holdExitCentiC": 70,
+              "holdOnCentiC": 11,
+              "holdOffCentiC": 133,
+              "overshootCutoffCentiC": 178,
+              "holdKpPermillePerC": 23,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 3,
+              "approachLeadTicks": 4,
+              "holdLeadTicks": 2
+            }
+          },
+          "stopReason": "candidate passed hard gates and 60s hold confirm"
+        }
+      ]
+    },
+    {
+      "targetC": 140,
+      "reviewOutcome": "passed",
+      "reviewPassed": true,
+      "adoptedTrialIndex": 1,
+      "trialCount": 2,
+      "metrics": {
+        "warmupRequestedOutputPermille": 1000,
+        "phasePath": "warmup -> approach -> hold",
+        "maxOvershootC": 1.14,
+        "holdPeakToPeakC": 1.66,
+        "holdConfirmSeconds": 60,
+        "fullSpeedToStable": {
+          "settleTimeMs": 7455,
+          "limitMs": 10000
+        }
+      },
+      "trials": [
+        {
+          "trialIndex": 0,
+          "candidateId": "mock-pps5a-140c-trial-0-rejected",
+          "candidateHash": "sha256:38ba1fe94234a8afabeeb3e4da0fffb54b325f2771070a2bde94d1207fba27cd",
+          "disposition": "rejected",
+          "reviewOutcome": "failed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 1.12,
+          "holdPeakToPeakC": 0.21,
+          "fullSpeedToStable": {
+            "settleTimeMs": 10800,
+            "limitMs": 10000
+          },
+          "firstSequence": 189,
+          "lastSequence": 203,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 48000,
+          "bounds": {
+            "lowerTargetC": 120,
+            "upperTargetC": 160
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 120,
+            "upperTargetC": 160
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-140c-trial-0-rejected",
+            "candidateHash": "sha256:38ba1fe94234a8afabeeb3e4da0fffb54b325f2771070a2bde94d1207fba27cd",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 140,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 995,
+              "brakeDistanceCentiC": 687,
+              "approachPowerPermille": 511,
+              "approachFloorPowerPermille": 288,
+              "approachDampingExponentPermille": 873,
+              "approachTailWindowCentiC": 96,
+              "holdPowerPermille": 235,
+              "holdReheatPowerPermille": 303,
+              "holdEntryCentiC": 123,
+              "holdExitCentiC": 75,
+              "holdOnCentiC": 11,
+              "holdOffCentiC": 142,
+              "overshootCutoffCentiC": 192,
+              "holdKpPermillePerC": 24,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 3,
+              "approachLeadTicks": 4,
+              "holdLeadTicks": 2
+            }
+          },
+          "stopReason": "full-speed-to-stable budget exhausted"
+        },
+        {
+          "trialIndex": 1,
+          "candidateId": "mock-pps5a-candidate-realistic-v1",
+          "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+          "disposition": "adopted",
+          "reviewOutcome": "passed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 1.14,
+          "holdPeakToPeakC": 1.66,
+          "fullSpeedToStable": {
+            "settleTimeMs": 7455,
+            "limitMs": 10000
+          },
+          "firstSequence": 204,
+          "lastSequence": 240,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 126000,
+          "bounds": {
+            "lowerTargetC": 120,
+            "upperTargetC": 160
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 120,
+            "upperTargetC": 160
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-candidate-realistic-v1",
+            "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 140,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 995,
+              "brakeDistanceCentiC": 675,
+              "approachPowerPermille": 523,
+              "approachFloorPowerPermille": 288,
+              "approachDampingExponentPermille": 873,
+              "approachTailWindowCentiC": 96,
+              "holdPowerPermille": 223,
+              "holdReheatPowerPermille": 291,
+              "holdEntryCentiC": 123,
+              "holdExitCentiC": 75,
+              "holdOnCentiC": 11,
+              "holdOffCentiC": 142,
+              "overshootCutoffCentiC": 192,
+              "holdKpPermillePerC": 24,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 3,
+              "approachLeadTicks": 4,
+              "holdLeadTicks": 2
+            }
+          },
+          "stopReason": "candidate passed hard gates and 60s hold confirm"
+        }
+      ]
+    },
+    {
+      "targetC": 160,
+      "reviewOutcome": "passed",
+      "reviewPassed": true,
+      "adoptedTrialIndex": 1,
+      "trialCount": 2,
+      "metrics": {
+        "warmupRequestedOutputPermille": 1000,
+        "phasePath": "warmup -> approach -> hold",
+        "maxOvershootC": 1.16,
+        "holdPeakToPeakC": 1.73,
+        "holdConfirmSeconds": 60,
+        "fullSpeedToStable": {
+          "settleTimeMs": 4224,
+          "limitMs": 5000
+        }
+      },
+      "trials": [
+        {
+          "trialIndex": 0,
+          "candidateId": "mock-pps5a-160c-trial-0-rejected",
+          "candidateHash": "sha256:7c21ea00be447d3ed6d919a99b73252ec05f6c5d7b580424ddc6c387b8bb6e51",
+          "disposition": "rejected",
+          "reviewOutcome": "failed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 3.46,
+          "holdPeakToPeakC": 4.17,
+          "fullSpeedToStable": {
+            "settleTimeMs": 10800,
+            "limitMs": 5000
+          },
+          "firstSequence": 241,
+          "lastSequence": 256,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 52000,
+          "bounds": {
+            "lowerTargetC": 140,
+            "upperTargetC": 180
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 140,
+            "upperTargetC": 180
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-160c-trial-0-rejected",
+            "candidateHash": "sha256:7c21ea00be447d3ed6d919a99b73252ec05f6c5d7b580424ddc6c387b8bb6e51",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 160,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 1014,
+              "brakeDistanceCentiC": 716,
+              "approachPowerPermille": 494,
+              "approachFloorPowerPermille": 301,
+              "approachDampingExponentPermille": 886,
+              "approachTailWindowCentiC": 103,
+              "holdPowerPermille": 248,
+              "holdReheatPowerPermille": 320,
+              "holdEntryCentiC": 131,
+              "holdExitCentiC": 80,
+              "holdOnCentiC": 12,
+              "holdOffCentiC": 152,
+              "overshootCutoffCentiC": 207,
+              "holdKpPermillePerC": 25,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 3,
+              "approachLeadTicks": 4,
+              "holdLeadTicks": 2
+            }
+          },
+          "stopReason": "hold peak-to-peak hard gate exceeded"
+        },
+        {
+          "trialIndex": 1,
+          "candidateId": "mock-pps5a-candidate-realistic-v1",
+          "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+          "disposition": "adopted",
+          "reviewOutcome": "passed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 1.16,
+          "holdPeakToPeakC": 1.73,
+          "fullSpeedToStable": {
+            "settleTimeMs": 4224,
+            "limitMs": 5000
+          },
+          "firstSequence": 257,
+          "lastSequence": 295,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 132000,
+          "bounds": {
+            "lowerTargetC": 140,
+            "upperTargetC": 180
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 140,
+            "upperTargetC": 180
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-candidate-realistic-v1",
+            "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 160,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 1014,
+              "brakeDistanceCentiC": 704,
+              "approachPowerPermille": 506,
+              "approachFloorPowerPermille": 301,
+              "approachDampingExponentPermille": 886,
+              "approachTailWindowCentiC": 103,
+              "holdPowerPermille": 236,
+              "holdReheatPowerPermille": 308,
+              "holdEntryCentiC": 131,
+              "holdExitCentiC": 80,
+              "holdOnCentiC": 12,
+              "holdOffCentiC": 152,
+              "overshootCutoffCentiC": 207,
+              "holdKpPermillePerC": 25,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 3,
+              "approachLeadTicks": 4,
+              "holdLeadTicks": 2
+            }
+          },
+          "stopReason": "candidate passed hard gates and 60s hold confirm"
+        }
+      ]
+    },
+    {
+      "targetC": 180,
+      "reviewOutcome": "passed",
+      "reviewPassed": true,
+      "adoptedTrialIndex": 1,
+      "trialCount": 2,
+      "metrics": {
+        "warmupRequestedOutputPermille": 1000,
+        "phasePath": "warmup -> approach -> hold",
+        "maxOvershootC": 1.21,
+        "holdPeakToPeakC": 1.83,
+        "holdConfirmSeconds": 60,
+        "fullSpeedToStable": {
+          "settleTimeMs": 4133,
+          "limitMs": 5000
+        }
+      },
+      "trials": [
+        {
+          "trialIndex": 0,
+          "candidateId": "mock-pps5a-180c-trial-0-rejected",
+          "candidateHash": "sha256:74b33671eeeb5cc4bb4a678f213cd1cb415ac2e3070acdedbc2f7e5b5b9c38fd",
+          "disposition": "rejected",
+          "reviewOutcome": "failed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 5.49,
+          "holdPeakToPeakC": 0.5,
+          "fullSpeedToStable": {
+            "settleTimeMs": 10800,
+            "limitMs": 5000
+          },
+          "firstSequence": 296,
+          "lastSequence": 312,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 54000,
+          "bounds": {
+            "lowerTargetC": 160,
+            "upperTargetC": 200
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 160,
+            "upperTargetC": 200
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-180c-trial-0-rejected",
+            "candidateHash": "sha256:74b33671eeeb5cc4bb4a678f213cd1cb415ac2e3070acdedbc2f7e5b5b9c38fd",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 180,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 1033,
+              "brakeDistanceCentiC": 745,
+              "approachPowerPermille": 478,
+              "approachFloorPowerPermille": 315,
+              "approachDampingExponentPermille": 900,
+              "approachTailWindowCentiC": 110,
+              "holdPowerPermille": 262,
+              "holdReheatPowerPermille": 337,
+              "holdEntryCentiC": 138,
+              "holdExitCentiC": 85,
+              "holdOnCentiC": 13,
+              "holdOffCentiC": 161,
+              "overshootCutoffCentiC": 221,
+              "holdKpPermillePerC": 26,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 4,
+              "approachLeadTicks": 5,
+              "holdLeadTicks": 3
+            }
+          },
+          "stopReason": "overshoot hard gate exceeded"
+        },
+        {
+          "trialIndex": 1,
+          "candidateId": "mock-pps5a-candidate-realistic-v1",
+          "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+          "disposition": "adopted",
+          "reviewOutcome": "passed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 1.21,
+          "holdPeakToPeakC": 1.83,
+          "fullSpeedToStable": {
+            "settleTimeMs": 4133,
+            "limitMs": 5000
+          },
+          "firstSequence": 313,
+          "lastSequence": 353,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 140000,
+          "bounds": {
+            "lowerTargetC": 160,
+            "upperTargetC": 200
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 160,
+            "upperTargetC": 200
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-candidate-realistic-v1",
+            "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 180,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 1033,
+              "brakeDistanceCentiC": 733,
+              "approachPowerPermille": 490,
+              "approachFloorPowerPermille": 315,
+              "approachDampingExponentPermille": 900,
+              "approachTailWindowCentiC": 110,
+              "holdPowerPermille": 250,
+              "holdReheatPowerPermille": 325,
+              "holdEntryCentiC": 138,
+              "holdExitCentiC": 85,
+              "holdOnCentiC": 13,
+              "holdOffCentiC": 161,
+              "overshootCutoffCentiC": 221,
+              "holdKpPermillePerC": 26,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 4,
+              "approachLeadTicks": 5,
+              "holdLeadTicks": 3
+            }
+          },
+          "stopReason": "candidate passed hard gates and 60s hold confirm"
+        }
+      ]
+    },
+    {
+      "targetC": 220,
+      "reviewOutcome": "passed",
+      "reviewPassed": true,
+      "adoptedTrialIndex": 1,
+      "trialCount": 2,
+      "metrics": {
+        "warmupRequestedOutputPermille": 1000,
+        "phasePath": "warmup -> approach -> hold",
+        "maxOvershootC": 1.26,
+        "holdPeakToPeakC": 1.94,
+        "holdConfirmSeconds": 60,
+        "fullSpeedToStable": {
+          "settleTimeMs": 4491,
+          "limitMs": 5000
+        }
+      },
+      "trials": [
+        {
+          "trialIndex": 0,
+          "candidateId": "mock-pps5a-220c-trial-0-rejected",
+          "candidateHash": "sha256:20b8bc67de155e799530a891c714034080d54ed8aaa9ea02b40564a4ba9536a2",
+          "disposition": "rejected",
+          "reviewOutcome": "failed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 3.21,
+          "holdPeakToPeakC": 4.55,
+          "fullSpeedToStable": {
+            "settleTimeMs": 10800,
+            "limitMs": 5000
+          },
+          "firstSequence": 354,
+          "lastSequence": 371,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 58000,
+          "bounds": {
+            "lowerTargetC": 200,
+            "upperTargetC": 240
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 200,
+            "upperTargetC": 240
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-220c-trial-0-rejected",
+            "candidateHash": "sha256:20b8bc67de155e799530a891c714034080d54ed8aaa9ea02b40564a4ba9536a2",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 220,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 1071,
+              "brakeDistanceCentiC": 803,
+              "approachPowerPermille": 444,
+              "approachFloorPowerPermille": 341,
+              "approachDampingExponentPermille": 926,
+              "approachTailWindowCentiC": 123,
+              "holdPowerPermille": 288,
+              "holdReheatPowerPermille": 370,
+              "holdEntryCentiC": 152,
+              "holdExitCentiC": 95,
+              "holdOnCentiC": 14,
+              "holdOffCentiC": 180,
+              "overshootCutoffCentiC": 250,
+              "holdKpPermillePerC": 28,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 4,
+              "approachLeadTicks": 5,
+              "holdLeadTicks": 3
+            }
+          },
+          "stopReason": "hold peak-to-peak hard gate exceeded"
+        },
+        {
+          "trialIndex": 1,
+          "candidateId": "mock-pps5a-candidate-realistic-v1",
+          "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+          "disposition": "adopted",
+          "reviewOutcome": "passed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 1.26,
+          "holdPeakToPeakC": 1.94,
+          "fullSpeedToStable": {
+            "settleTimeMs": 4491,
+            "limitMs": 5000
+          },
+          "firstSequence": 372,
+          "lastSequence": 415,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 148000,
+          "bounds": {
+            "lowerTargetC": 200,
+            "upperTargetC": 240
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 200,
+            "upperTargetC": 240
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-candidate-realistic-v1",
+            "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 220,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 1071,
+              "brakeDistanceCentiC": 791,
+              "approachPowerPermille": 456,
+              "approachFloorPowerPermille": 341,
+              "approachDampingExponentPermille": 926,
+              "approachTailWindowCentiC": 123,
+              "holdPowerPermille": 276,
+              "holdReheatPowerPermille": 358,
+              "holdEntryCentiC": 152,
+              "holdExitCentiC": 95,
+              "holdOnCentiC": 14,
+              "holdOffCentiC": 180,
+              "overshootCutoffCentiC": 250,
+              "holdKpPermillePerC": 28,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 4,
+              "approachLeadTicks": 5,
+              "holdLeadTicks": 3
+            }
+          },
+          "stopReason": "candidate passed hard gates and 60s hold confirm"
+        }
+      ]
+    },
+    {
+      "targetC": 240,
+      "reviewOutcome": "passed",
+      "reviewPassed": true,
+      "adoptedTrialIndex": 1,
+      "trialCount": 2,
+      "metrics": {
+        "warmupRequestedOutputPermille": 1000,
+        "phasePath": "warmup -> approach -> hold",
+        "maxOvershootC": 1.32,
+        "holdPeakToPeakC": 2.0,
+        "holdConfirmSeconds": 60,
+        "fullSpeedToStable": {
+          "settleTimeMs": 4400,
+          "limitMs": 5000
+        }
+      },
+      "trials": [
+        {
+          "trialIndex": 0,
+          "candidateId": "mock-pps5a-240c-trial-0-rejected",
+          "candidateHash": "sha256:e3c1fcc49d5cedcecf37734dc8db6807e6e5ef837fe0897d8e7d52a3c32add6e",
+          "disposition": "rejected",
+          "reviewOutcome": "failed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 5.67,
+          "holdPeakToPeakC": 0.31,
+          "fullSpeedToStable": {
+            "settleTimeMs": 10800,
+            "limitMs": 5000
+          },
+          "firstSequence": 416,
+          "lastSequence": 434,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 62000,
+          "bounds": {
+            "lowerTargetC": 220,
+            "upperTargetC": 260
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 220,
+            "upperTargetC": 260
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-240c-trial-0-rejected",
+            "candidateHash": "sha256:e3c1fcc49d5cedcecf37734dc8db6807e6e5ef837fe0897d8e7d52a3c32add6e",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 240,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 1090,
+              "brakeDistanceCentiC": 832,
+              "approachPowerPermille": 428,
+              "approachFloorPowerPermille": 355,
+              "approachDampingExponentPermille": 940,
+              "approachTailWindowCentiC": 130,
+              "holdPowerPermille": 302,
+              "holdReheatPowerPermille": 387,
+              "holdEntryCentiC": 160,
+              "holdExitCentiC": 100,
+              "holdOnCentiC": 15,
+              "holdOffCentiC": 190,
+              "overshootCutoffCentiC": 265,
+              "holdKpPermillePerC": 30,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 5,
+              "approachLeadTicks": 6,
+              "holdLeadTicks": 4
+            }
+          },
+          "stopReason": "overshoot hard gate exceeded"
+        },
+        {
+          "trialIndex": 1,
+          "candidateId": "mock-pps5a-candidate-realistic-v1",
+          "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+          "disposition": "adopted",
+          "reviewOutcome": "passed",
+          "warmupRequestedOutputPermille": 1000,
+          "maxOvershootC": 1.32,
+          "holdPeakToPeakC": 2.0,
+          "fullSpeedToStable": {
+            "settleTimeMs": 4400,
+            "limitMs": 5000
+          },
+          "firstSequence": 435,
+          "lastSequence": 478,
+          "firstElapsedMs": 0,
+          "lastElapsedMs": 150000,
+          "bounds": {
+            "lowerTargetC": 220,
+            "upperTargetC": 260
+          },
+          "candidateSeed": {
+            "source": "mock-realistic-interpolated-bounds",
+            "lowerTargetC": 220,
+            "upperTargetC": 260
+          },
+          "canonicalCandidate": {
+            "candidateId": "mock-pps5a-candidate-realistic-v1",
+            "candidateHash": "sha256:a279f43c0c6a9932cc67da57307ca4f0975224c114916fb9e846848179f49bfe",
+            "powerClass": "pps5a",
+            "point": {
+              "targetC": 240,
+              "warmupPowerPermille": 1000,
+              "warmupReenterCentiC": 1090,
+              "brakeDistanceCentiC": 820,
+              "approachPowerPermille": 440,
+              "approachFloorPowerPermille": 355,
+              "approachDampingExponentPermille": 940,
+              "approachTailWindowCentiC": 130,
+              "holdPowerPermille": 290,
+              "holdReheatPowerPermille": 375,
+              "holdEntryCentiC": 160,
+              "holdExitCentiC": 100,
+              "holdOnCentiC": 15,
+              "holdOffCentiC": 190,
+              "overshootCutoffCentiC": 265,
+              "holdKpPermillePerC": 30,
+              "holdKiPermillePerCTick": 1,
+              "holdBlendTicks": 5,
+              "approachLeadTicks": 6,
+              "holdLeadTicks": 4
+            }
+          },
+          "stopReason": "candidate passed hard gates and 60s hold confirm"
+        }
+      ]
+    }
+  ]
+}
