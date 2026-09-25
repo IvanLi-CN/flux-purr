@@ -7,7 +7,9 @@
 
 use core::{
     cell::RefCell,
+    cell::UnsafeCell,
     fmt::Write as _,
+    mem::MaybeUninit,
     sync::atomic::{AtomicU32, Ordering},
 };
 
@@ -49,7 +51,6 @@ use esp_radio::{
 };
 use heapless::{String, Vec};
 use serde::Serialize;
-use static_cell::StaticCell;
 
 // Three sockets at 1 KiB per direction use less static RAM than the previous
 // two-socket 2 KiB layout while still covering the largest HTTP header and
@@ -97,20 +98,43 @@ static WIFI_CANCEL_REQUEST_ID: AtomicU32 = AtomicU32::new(0);
 static WIFI_CANCEL_NEXT_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static LAN_RUNTIME: RuntimeStatusMutex = BlockingMutex::new(RefCell::new(LanRuntimeState::empty()));
 static WIFI_PROVISIONING: WifiProvisioningMutex = Mutex::new(WifiProvisioningMachine::new());
-static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
-static NET_RUNNER: StaticCell<embassy_net::Runner<'static, WifiDevice<'static>>> =
-    StaticCell::new();
-static RADIO_CONTROLLER: StaticCell<RadioController<'static>> = StaticCell::new();
-static WIFI_CONTROLLER: StaticCell<WifiController<'static>> = StaticCell::new();
+// ESP32-S3 software resets retain the DRAM2 region. These resources are
+// recreated on every product boot, so a one-time StaticCell would panic after
+// returning from a RAM bring-up session. BootCell deliberately overwrites the
+// retained slot during the single-threaded startup sequence.
+struct BootCell<T>(UnsafeCell<MaybeUninit<T>>);
+
+unsafe impl<T> Sync for BootCell<T> {}
+
+impl<T> BootCell<T> {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(MaybeUninit::uninit()))
+    }
+
+    fn init(&'static self, value: T) -> &'static mut T {
+        // SAFETY: initialization is single-threaded before runtime tasks can
+        // access the cell; software reset intentionally overwrites its slot.
+        unsafe { (*self.0.get()).write(value) }
+    }
+
+    fn init_with(&'static self, f: impl FnOnce() -> T) -> &'static mut T {
+        self.init(f())
+    }
+}
+
+static NET_RESOURCES: BootCell<StackResources<8>> = BootCell::new();
+static NET_RUNNER: BootCell<embassy_net::Runner<'static, WifiDevice<'static>>> = BootCell::new();
+static RADIO_CONTROLLER: BootCell<RadioController<'static>> = BootCell::new();
+static WIFI_CONTROLLER: BootCell<WifiController<'static>> = BootCell::new();
 // The mutation-capable HTTP worker owns its full request workspace outside the
 // executor arena. Lightweight readers are served from published snapshots.
-static HTTP_WORKSPACE_0: StaticCell<HttpWorkspace> = StaticCell::new();
-static HTTP_RX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
-static HTTP_RX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
-static HTTP_RX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
-static HTTP_TX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
-static HTTP_TX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
-static HTTP_TX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
+static HTTP_WORKSPACE_0: BootCell<HttpWorkspace> = BootCell::new();
+static HTTP_RX_0: BootCell<[u8; HTTP_TCP_BUFFER_LEN]> = BootCell::new();
+static HTTP_RX_1: BootCell<[u8; HTTP_TCP_BUFFER_LEN]> = BootCell::new();
+static HTTP_RX_2: BootCell<[u8; HTTP_TCP_BUFFER_LEN]> = BootCell::new();
+static HTTP_TX_0: BootCell<[u8; HTTP_TCP_BUFFER_LEN]> = BootCell::new();
+static HTTP_TX_1: BootCell<[u8; HTTP_TCP_BUFFER_LEN]> = BootCell::new();
+static HTTP_TX_2: BootCell<[u8; HTTP_TCP_BUFFER_LEN]> = BootCell::new();
 static HTTP_SOCKETS: Channel<CriticalSectionRawMutex, HttpSocket, HTTP_SOCKET_COUNT> =
     Channel::new();
 static HTTP_WORKSPACES: Channel<CriticalSectionRawMutex, HttpWorkspaceSlot, HTTP_WORKSPACE_COUNT> =

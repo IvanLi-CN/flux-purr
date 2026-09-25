@@ -68,7 +68,9 @@ parses the frame but returns `unsupported_frame` without executing it.
 
 I2C only reads the compile-time whitelist (`0x22:0x01` and `0x22:0x09`). The
 buzzer emits a finite cue. Fan test uses `FanPhase::Mid` at `300‰` for ten
-seconds and then `FanPhase::Stop`.
+seconds, then disables `fan_en` with the product-safe `1000‰` PWM setpoint.
+The legacy `FanPhase::Stop` value is a status-model value and is not used as
+the hardware shutdown duty.
 
 ## RAM image contract
 
@@ -96,6 +98,11 @@ and that the installed `espflash` advertises both `--ram` and `--no-stub`.
   `scripts/check-ram-bringup-elf.sh`.
 - `VER-RAM-004` (covers: REQ-RAM-001, REQ-RAM-003, REQ-RAM-004, REQ-RAM-005): Authorized hardware validation remains a separate gate requiring a single
   owner-authorized serial port; build and mock results are not hardware proof.
+  The authorized port has proven RAM identity and the non-fan electrical
+  commands. The first fan attempt exposed a RAM command-loop scheduling defect
+  that reset the target during the ten-second window; completion remains a
+  hardware gate after the yielding-loop fix and a fresh exact-port
+  authorization. No alternate port is accepted as evidence.
 
 ## Related ADRs
 

@@ -1,5 +1,4 @@
 INCLUDE "ram-memory.x"
-INCLUDE "exception.x"
 REGION_ALIAS("ROTEXT", iram_seg);
 REGION_ALIAS("RWTEXT", iram_seg);
 REGION_ALIAS("RODATA", dram_seg);
@@ -8,7 +7,10 @@ REGION_ALIAS("RODATA", dram_seg);
 REGION_ALIAS("RWDATA", dram_seg);
 REGION_ALIAS("RTC_FAST_RWTEXT", rtc_fast_seg);
 REGION_ALIAS("RTC_FAST_RWDATA", rtc_fast_seg);
-INCLUDE "esp32s3.x"
+/* The product linker script reserves .rotext_dummy for Flash/DROM aliasing.
+   RAM Bring-up has no Flash image, so that reservation would move startup
+   code into the ROM downloader's protected IRAM window. */
+INCLUDE "ram-esp32s3.x"
 INCLUDE "hal-defaults.x"
 SECTIONS {
   INCLUDE "rwtext.x"
@@ -22,3 +24,4 @@ INCLUDE "dram2.x"
 INCLUDE "stack.x"
 INCLUDE "metadata.x"
 INCLUDE "eh_frame.x"
+ENTRY(ram_entry)

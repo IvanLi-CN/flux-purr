@@ -1115,6 +1115,15 @@ impl BootRuntimeState {
     async fn start_network(&mut self, spawner: &Spawner) {
         #[cfg(feature = "net_http")]
         {
+            // RAM bring-up returns through an ESP32 software reset. The ROM
+            // reset leaves the Wi-Fi modem state alive while product tasks
+            // and the esp-radio heap are gone, so re-entering esp-radio in
+            // that boot can fault inside the vendor NVS path. Keep the
+            // product USB/front-panel path available and defer Wi-Fi until a
+            // real power-on reset clears the modem state.
+            if self.system.reset_reason == "reset_reason=core_software\n" {
+                return;
+            }
             self.initialize_network_control_state().await;
             let result = self.spawn_network(spawner).await;
             if let Err(error) = result {
