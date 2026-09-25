@@ -3227,6 +3227,7 @@ pub(crate) fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> Us
             "Thermal-model run snapshots are not available until hardware initialization completes.",
             true,
         ),
+        Ok(UsbFrame::RamBringup { request_id, .. }) => product_ram_bringup_rejection(request_id),
         Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
             request_id,
             "unsupported_frame",
