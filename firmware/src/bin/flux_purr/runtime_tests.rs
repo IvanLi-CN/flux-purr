@@ -11348,6 +11348,25 @@ fn network_awaits_do_not_own_or_wrap_pd_service() {
 }
 
 #[test]
+fn deferred_network_startup_still_initializes_control_state() {
+    let boot = include_str!("boot.rs");
+    let start = boot
+        .split("async fn start_network(&mut self, spawner: &Spawner)")
+        .nth(1)
+        .expect("network startup helper must remain present");
+    let initialize = start
+        .find("self.initialize_network_control_state().await;")
+        .expect("network control state must initialize on every product boot");
+    let defer = start
+        .find("if self.system.defer_network_after_software_reset")
+        .expect("software-reset network deferral must remain explicit");
+    assert!(
+        initialize < defer,
+        "deferred network startup must not leave runtime network state uninitialized"
+    );
+}
+
+#[test]
 fn lan_runtime_helpers_are_excluded_without_net_http() {
     let runtime_loop = include_str!("runtime_loop.rs");
     for helper in [

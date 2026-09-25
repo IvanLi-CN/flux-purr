@@ -484,10 +484,12 @@ async fn command_loop(
     loop {
         service_pending_fan(state, usb);
         while let Ok(byte) = usb.read_byte() {
-            if state.pending_fan.is_some() && byte == b'\n' {
+            let fan_was_pending = state.pending_fan.is_some();
+            service_pending_fan(state, usb);
+            if fan_was_pending && byte == b'\n' {
                 state.line.clear();
             }
-            if state.pending_fan.is_some() {
+            if fan_was_pending {
                 continue;
             }
             if byte != b'\n' && state.line.len() < state.line.capacity() {
@@ -1007,6 +1009,21 @@ mod tests {
     #[test]
     fn ram_fan_shutdown_matches_product_safe_output() {
         assert_eq!(fan_stop_pwm_permille(), PRODUCT_SAFE_FAN_PWM_PERMILLE);
+    }
+
+    #[test]
+    fn fan_deadline_is_serviced_while_draining_usb() {
+        let source = include_str!("main.rs");
+        let loop_body = source
+            .split("while let Ok(byte) = usb.read_byte()")
+            .nth(1)
+            .expect("command loop must drain USB input");
+        assert!(
+            loop_body.contains("service_pending_fan(state, usb);")
+                && loop_body.find("service_pending_fan(state, usb);").unwrap()
+                    < loop_body.find("if fan_was_pending").unwrap(),
+            "fan deadline must be checked between received bytes"
+        );
     }
 }
 

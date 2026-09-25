@@ -1116,6 +1116,7 @@ impl BootRuntimeState {
     async fn start_network(&mut self, spawner: &Spawner) {
         #[cfg(feature = "net_http")]
         {
+            self.initialize_network_control_state().await;
             // RAM bring-up returns through an ESP32 software reset. The ROM
             // reset leaves the Wi-Fi modem state alive while product tasks
             // and the esp-radio heap are gone, so re-entering esp-radio in
@@ -1125,7 +1126,6 @@ impl BootRuntimeState {
             if self.system.defer_network_after_software_reset {
                 return;
             }
-            self.initialize_network_control_state().await;
             let result = self.spawn_network(spawner).await;
             if let Err(error) = result {
                 warn!("LAN control plane startup failed: {=str}", error.message());

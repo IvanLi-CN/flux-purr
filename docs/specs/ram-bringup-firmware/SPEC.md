@@ -98,9 +98,9 @@ and that the installed `espflash` advertises both `--ram` and `--no-stub`.
   `scripts/check-ram-bringup-elf.sh`.
 - `VER-RAM-004` (covers: REQ-RAM-001, REQ-RAM-003, REQ-RAM-004, REQ-RAM-005): Authorized hardware validation remains a separate gate requiring a single
   owner-authorized serial port; build and mock results are not hardware proof.
-  The current candidate requires a fresh exact-port HIL receipt after any
-  change to the RAM command loop or transport timing. No alternate port is
-  accepted as evidence.
+  The current candidate has no HIL receipt for changes to the RAM command
+  loop or transport timing. A fresh exact-port HIL receipt is required before
+  claiming hardware acceptance; no alternate port is accepted as evidence.
 
 ## Related ADRs
 

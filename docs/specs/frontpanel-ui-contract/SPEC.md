@@ -236,7 +236,7 @@ None
 
 - `VER-FP-001`: 固件单元测试与 RAM Bring-up preview command tests 通过，covers: REQ-FP-001, REQ-FP-003。
 - `VER-FP-002`: 默认主题与显式 `--theme light` 的设备渲染结果一致，显式 `--theme dark` 的设备渲染结果不同，covers: REQ-FP-002。
-- `VER-FP-003`: `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 在设备上验证全部已实现页面的两套逻辑/面板 RGB565 帧；owner-facing PNG 是由同一 renderer 生成并经视觉证据门禁人工复核的跟踪资产，covers: REQ-FP-004。
+- `VER-FP-003`: `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 在真实面板上验证全部已实现页面的两套主题、布局与交互结果；checked-in PNG 仅作为视觉跟踪资产，不由 CLI 导出，也不构成第二个预览入口，covers: REQ-FP-004。
 - `VER-FP-004`: 固件渲染测试覆盖全部温度调色板与温度带，验证 RGB565 饱和减 `4`、亮色右下 `1px` 阴影、前景覆盖顺序和暗色无阴影；Web 类型检查与 Storybook 状态验证每个调用点显式传入 `theme`，covers: REQ-FP-005, REQ-FP-006。
 
 ## Related ADRs
@@ -245,8 +245,8 @@ None
 
 ## Visual Evidence
 
-- 证据来源：`flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 使用的 `firmware_preview` renderer（`160×50` 逻辑像素，nearest-neighbor 放大展示）。
-- 绑定说明：以下图片由 RAM Bring-up preview command 直接复用固件字体、布局和状态 renderer；真机校准与最新 runtime 联动验证由 `frontpanel-input-interaction` 持续承接。
+- 证据来源：`flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 使用的设备 renderer（`160×50` 逻辑像素，真实面板呈现）。
+- 绑定说明：以下图片是与设备 renderer 对齐的视觉跟踪资产；CLI 的验收以真实面板状态和 JSONL 完成响应为准。
 
 ### Screen renders
 
@@ -280,7 +280,7 @@ None
 
 #### EEPROM incompatible
 
-该画面由 `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 直接复用设备 renderer、字体与 `DisplayCanvas` 生成，默认使用亮色主题；同目录同时保存 `160×50 RGB565LE` logical framebuffer 与 GC9D01 Landscape panel framebuffer。
+该画面由 `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 直接复用设备 renderer、字体与 `DisplayCanvas` 在真实面板呈现，默认使用亮色主题；同目录保存的图片仅用于视觉跟踪。
 
 ![EEPROM incompatible fault screen](./assets/eeprom-data-incompatible/eeprom-data-incompatible.png)
 
@@ -302,7 +302,7 @@ None
 
 #### WiFi Info
 
-该证据由 `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 复用固件 framebuffer renderer 生成，展示 runtime SSID、IPv4、RSSI 与配对码。
+该设备状态由 `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 复用固件 renderer 在真实面板呈现；图片仅展示预期布局，不由 CLI 生成。
 
 ![Front panel WiFi info](./assets/frontpanel-wifi-info.png)
 

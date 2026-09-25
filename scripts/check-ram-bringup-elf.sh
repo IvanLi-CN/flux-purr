@@ -102,7 +102,13 @@ while read -r _name section_type address offset size flags; do
     bad_section="name=${_name},addr=${address},size=${size}"
     break
   fi
-done < <("${readelf_bin}" -SW "${elf}" | awk '$3 == "PROGBITS" || $3 == "INIT_ARRAY" { print $2, $3, $4, $5, $6, $8 }')
+done < <("${readelf_bin}" -SW "${elf}" | awk '
+  # readelf prints single-digit section indexes as "[ 1]" and double-digit
+  # indexes as "[10]"; normalize both forms before selecting the columns.
+  $1 == "[" { name=$3; type=$4; address=$5; offset=$6; size=$7; flags=$9 }
+  $1 ~ /^\[[0-9]+\]$/ { name=$2; type=$3; address=$4; offset=$5; size=$6; flags=$8 }
+  (type == "PROGBITS" || type == "INIT_ARRAY") { print name, type, address, offset, size, flags }
+')
 
 if [[ -n "${bad_section}" ]]; then
   printf 'ELF contains a non-internal espflash loadable section: %s\n' "${bad_section}" >&2
