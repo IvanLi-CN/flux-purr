@@ -2252,9 +2252,9 @@ fn production_runtime_default_is_app() {
 }
 
 /// Deterministic physical preview states shared by the RAM bring-up binary.
-/// These are the scenarios that used to be rendered by the host preview
-/// executable, kept next to the production UI state model so the hardware
-/// preview cannot drift from it.
+/// These are the deterministic scenarios rendered by the RAM Bring-up
+/// firmware, kept next to the production UI state model so hardware preview
+/// cannot drift from it.
 pub mod preview {
     use super::*;
     use crate::{
@@ -2346,6 +2346,7 @@ pub mod preview {
             state
         }
 
+        #[allow(clippy::too_many_lines)]
         pub fn build(self) -> FrontPanelUiState {
             match self {
                 Self::KeyTestIdle => FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest),

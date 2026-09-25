@@ -14,3 +14,12 @@ cargo +esp clippy --locked \
      -D clippy::too_many_lines \
      -D clippy::too_many_arguments \
      -D clippy::excessive_nesting
+
+cargo +esp clippy --locked \
+  --package flux-purr-ram-bringup \
+  --target xtensa-esp32s3-none-elf \
+  --bin flux-purr-ram-bringup \
+  -- -D warnings \
+     -D clippy::too_many_lines \
+     -D clippy::too_many_arguments \
+     -D clippy::excessive_nesting

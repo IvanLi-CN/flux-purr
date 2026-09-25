@@ -98,11 +98,9 @@ and that the installed `espflash` advertises both `--ram` and `--no-stub`.
   `scripts/check-ram-bringup-elf.sh`.
 - `VER-RAM-004` (covers: REQ-RAM-001, REQ-RAM-003, REQ-RAM-004, REQ-RAM-005): Authorized hardware validation remains a separate gate requiring a single
   owner-authorized serial port; build and mock results are not hardware proof.
-  The authorized port has proven RAM identity and the non-fan electrical
-  commands. The first fan attempt exposed a RAM command-loop scheduling defect
-  that reset the target during the ten-second window; completion remains a
-  hardware gate after the yielding-loop fix and a fresh exact-port
-  authorization. No alternate port is accepted as evidence.
+  The current candidate requires a fresh exact-port HIL receipt after any
+  change to the RAM command loop or transport timing. No alternate port is
+  accepted as evidence.
 
 ## Related ADRs
 

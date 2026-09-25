@@ -111,6 +111,7 @@ impl<T> BootCell<T> {
         Self(UnsafeCell::new(MaybeUninit::uninit()))
     }
 
+    #[allow(clippy::mut_from_ref)]
     fn init(&'static self, value: T) -> &'static mut T {
         // SAFETY: initialization is single-threaded before runtime tasks can
         // access the cell; software reset intentionally overwrites its slot.

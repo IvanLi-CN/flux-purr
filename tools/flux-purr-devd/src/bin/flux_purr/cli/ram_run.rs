@@ -5,7 +5,7 @@ use espflash::{
     connection::{Connection, ResetAfterOperation, ResetBeforeOperation, SecurityInfo},
     target::Chip,
 };
-use object::{Object as _, ObjectSegment as _};
+use object::{Object as _, ObjectSection as _, ObjectSegment as _, SectionFlags};
 use serialport::{FlowControl, SerialPortType, UsbPortInfo};
 
 #[cfg(target_os = "macos")]
@@ -95,17 +95,21 @@ fn ram_run_action(
             .as_ref()
             .is_some_and(|runtime| ram_identity_matches(runtime, &expected_build_id, command));
     let mut ram_serial: Option<Box<dyn RamJsonlSerial>> = if !reusable {
+        let espflash_program = resolve_espflash_program();
+        ensure_pinned_ram_espflash(&espflash_program)?;
         ram_download_preflight(&options.port)?;
-        let _diagnostics = run_espflash_command(
-            &resolve_espflash_program(),
-            &ram_load_args(&options.port, &elf),
-        )?;
-        Some(open_ram_jsonl_serial(&options.port).map_err(|error| {
-            format!(
-                "RAM load completed but JSONL reopen failed on {}: {error}",
-                options.port
-            )
-        })?)
+        let _diagnostics =
+            run_espflash_command(&espflash_program, &ram_load_args(&options.port, &elf))?;
+        Some(
+            open_ram_jsonl_serial_retry(&options.port, Duration::from_secs(15)).map_err(
+                |error| {
+                    format!(
+                        "RAM load completed but JSONL reopen failed on {}: {error}",
+                        options.port
+                    )
+                },
+            )?,
+        )
     } else {
         None
     };
@@ -257,6 +261,34 @@ fn validate_ram_bringup_elf(path: &Path) -> Result<(), Box<dyn std::error::Error
         }
         loadable_segments += 1;
     }
+    for section in elf.sections() {
+        let header = section.elf_section_header();
+        let section_type = header.sh_type.get(elf.endian());
+        let section_flags = section.flags();
+        let is_allocated = !matches!(section_flags, SectionFlags::None)
+            && !matches!(section_flags, SectionFlags::Elf { sh_flags: 0 });
+        if section.size() == 0
+            || !matches!(
+                section_type,
+                object::elf::SHT_PROGBITS | object::elf::SHT_INIT_ARRAY
+            )
+            || header.sh_offset.get(elf.endian()) == 0
+            || section.address() == 0
+            || !is_allocated
+        {
+            continue;
+        }
+        let address = section.address();
+        let end = address
+            .checked_add(section.size())
+            .ok_or("RAM Bring-up ELF section address overflows")?;
+        if !ram_range_is_internal(address, end) {
+            return Err(format!(
+                "RAM Bring-up ELF loadable section 0x{address:08x}..0x{end:08x} is outside ESP32-S3 internal RAM"
+            )
+            .into());
+        }
+    }
     if loadable_segments == 0 {
         return Err("RAM Bring-up ELF contains no non-empty PT_LOAD segments".into());
     }
@@ -296,6 +328,37 @@ fn ram_load_args(port: &str, elf: &Path) -> Vec<String> {
         "--ram".into(),
         elf.to_string_lossy().into_owned(),
     ]
+}
+
+fn ensure_pinned_ram_espflash(
+    program: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let output = ProcessCommand::new(program).arg("--version").output()?;
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let version = if version.is_empty() {
+        String::from_utf8_lossy(&output.stderr).trim().to_string()
+    } else {
+        version
+    };
+    if !output.status.success() {
+        return Err(format!(
+            "RAM execution could not query pinned espflash 4.5.0; command failed for {}",
+            program.display()
+        )
+        .into());
+    }
+    validate_pinned_ram_espflash_version(&version)
+        .map_err(|error| format!("{error}; got {version:?} from {}", program.display()).into())
+}
+
+fn validate_pinned_ram_espflash_version(
+    version: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if version == "espflash 4.5.0" {
+        Ok(())
+    } else {
+        Err("RAM execution requires pinned espflash 4.5.0".into())
+    }
 }
 
 fn ram_download_preflight(port: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -682,6 +745,25 @@ fn open_ram_jsonl_serial(port: &str) -> io::Result<Box<dyn RamJsonlSerial>> {
         .map_err(io::Error::other)
 }
 
+fn open_ram_jsonl_serial_retry(
+    port: &str,
+    timeout: Duration,
+) -> io::Result<Box<dyn RamJsonlSerial>> {
+    let deadline = StdInstant::now() + timeout;
+    loop {
+        match open_ram_jsonl_serial(port) {
+            Ok(serial) => return Ok(serial),
+            Err(error) if is_transient_device_error(&error) => {
+                if StdInstant::now() >= deadline {
+                    return Err(error);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn exchange_jsonl(
     port: &str,
     request: &Value,
@@ -964,6 +1046,13 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--ram", "bringup.elf"]));
         assert!(args.iter().any(|value| value == "--no-stub"));
         assert!(args.windows(2).any(|pair| pair == ["--chip", "esp32s3"]));
+    }
+
+    #[test]
+    fn ram_load_rejects_unpinned_espflash_versions() {
+        assert!(validate_pinned_ram_espflash_version("espflash 4.5.0").is_ok());
+        assert!(validate_pinned_ram_espflash_version("espflash 4.6.0").is_err());
+        assert!(validate_pinned_ram_espflash_version("espflash 4.5.0\nwarning").is_err());
     }
 
     #[test]

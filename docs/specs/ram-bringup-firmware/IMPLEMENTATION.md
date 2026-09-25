@@ -35,10 +35,12 @@ verified `product` identity afterward.
 
 - Host firmware and CLI tests pass.
 - Xtensa release build and internal-memory ELF checker pass locally.
-- Authorized HIL on an exact owner-provided serial port confirmed RAM identity,
-  buttons, ADC, read-only I2C, RGB, buzzer, and the repaired ten-second fan
-  command without Flash writes. The ROM preflight reported `0x00000000`
-  security flags and did not take a Flash fallback path.
+- Earlier authorized HIL on an exact owner-provided serial port confirmed RAM
+  identity, buttons, ADC, read-only I2C, RGB, buzzer, and the repaired
+  ten-second fan command without Flash writes. The ROM preflight reported
+  `0x00000000` security flags and did not take a Flash fallback path. A fresh
+  exact-port HIL run is still required for any later candidate that changes
+  the RAM command loop or transport timing.
 - The first fan HIL attempt exposed a software scheduling defect: the RAM
   command loop used a synchronous busy loop and did not yield to the Embassy
   executor during the ten-second fan window, so the watchdog reset the target.

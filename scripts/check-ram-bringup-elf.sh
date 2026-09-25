@@ -85,6 +85,30 @@ if [[ -n "${bad_segment}" ]]; then
   exit 1
 fi
 
+# espflash 4.5.0 uploads allocatable PROGBITS/INIT_ARRAY sections rather than
+# PT_LOAD ranges. Validate the same section set so an orphan section cannot
+# bypass the runtime RAM-image guard.
+bad_section=''
+while read -r _name section_type address offset size flags; do
+  [[ "${section_type}" == "PROGBITS" || "${section_type}" == "INIT_ARRAY" ]] || continue
+  [[ "${offset}" != "00000000" && "${offset}" != "0x00000000" ]] || continue
+  [[ "${address}" != "00000000" && "${address}" != "0x00000000" ]] || continue
+  [[ "${size}" != "00000000" && "${size}" != "0x00000000" ]] || continue
+  [[ -n "${flags}" ]] || continue
+  address_dec=$((16#${address#0x}))
+  size_dec=$((16#${size#0x}))
+  end_dec=$((address_dec + size_dec))
+  if ! in_internal_range "${address_dec}" "${end_dec}"; then
+    bad_section="name=${_name},addr=${address},size=${size}"
+    break
+  fi
+done < <("${readelf_bin}" -SW "${elf}" | awk '$3 == "PROGBITS" || $3 == "INIT_ARRAY" { print $2, $3, $4, $5, $6, $8 }')
+
+if [[ -n "${bad_section}" ]]; then
+  printf 'ELF contains a non-internal espflash loadable section: %s\n' "${bad_section}" >&2
+  exit 1
+fi
+
 # Keep a little headroom for linker alignment while still making the budget
 # explicit and reviewable in CI.
 if ((iram_bytes > 0x5D400)); then

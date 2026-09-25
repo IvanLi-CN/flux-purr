@@ -318,7 +318,6 @@ struct PendingFanTest {
     request_id: String<48>,
     result: CommandResult,
     deadline: Instant,
-    next_heartbeat: Instant,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -485,24 +484,24 @@ async fn command_loop(
     loop {
         service_pending_fan(state, usb);
         while let Ok(byte) = usb.read_byte() {
+            if state.pending_fan.is_some() && byte == b'\n' {
+                state.line.clear();
+            }
             if state.pending_fan.is_some() {
-                if byte == b'\n' {
-                    state.line.clear();
-                }
                 continue;
             }
-            if byte == b'\n' {
-                if !handle_identity_line(state, usb) {
-                    if !handle_test_buttons_line(state, usb) {
-                        run_command(state, usb).await;
-                    }
-                }
-                state.line.clear();
-            } else if state.line.len() < state.line.capacity() {
+            if byte != b'\n' && state.line.len() < state.line.capacity() {
                 let _ = state.line.push(byte as char);
-            } else {
-                state.line.clear();
+                continue;
             }
+            if byte != b'\n' {
+                state.line.clear();
+                continue;
+            }
+            if !handle_identity_line(state, usb) && !handle_test_buttons_line(state, usb) {
+                run_command(state, usb).await;
+            }
+            state.line.clear();
         }
         Timer::after_millis(1).await;
     }
@@ -540,10 +539,6 @@ async fn run_command(state: &mut BringupState, usb: &mut UsbSerialJtag<'static, 
         write_command_error(state, usb, &request_id, "unsupported_command");
         return;
     }
-    if command == RamBringupCommand::TestFan {
-        start_fan_test(state, &request_id);
-        return;
-    }
     if frame.theme.is_some()
         && !matches!(
             command,
@@ -553,6 +548,10 @@ async fn run_command(state: &mut BringupState, usb: &mut UsbSerialJtag<'static, 
         )
     {
         write_command_error(state, usb, &request_id, "theme_requires_preview");
+        return;
+    }
+    if command == RamBringupCommand::TestFan {
+        start_fan_test(state, &request_id);
         return;
     }
     let theme = frame.theme.unwrap_or(RamBringupTheme::Light);
@@ -588,21 +587,16 @@ fn start_fan_test(state: &mut BringupState, request_id: &String<48>) {
         request_id: request,
         result,
         deadline: Instant::now() + Duration::from_secs(FAN_PHASE_DURATION_SECS.into()),
-        next_heartbeat: Instant::now() + Duration::from_secs(1),
     });
 }
 
 #[cfg(target_arch = "xtensa")]
 fn service_pending_fan(state: &mut BringupState, usb: &mut UsbSerialJtag<'static, Blocking>) {
-    let Some(mut pending) = state.pending_fan.take() else {
+    let Some(pending) = state.pending_fan.take() else {
         return;
     };
     let now = Instant::now();
     if now < pending.deadline {
-        if now >= pending.next_heartbeat {
-            let _ = usb.write(b"{\"type\":\"ram_fan_active\"}\n");
-            pending.next_heartbeat = now + Duration::from_secs(1);
-        }
         state.pending_fan = Some(pending);
         return;
     }
@@ -809,6 +803,10 @@ fn handle_test_buttons_line(
     if frame.command != Some(RamBringupCommand::TestButtons) {
         return false;
     }
+    if frame.theme.is_some() {
+        write_command_error(state, usb, &request_id, "theme_requires_preview");
+        return true;
+    }
     let length = write_response(
         state,
         usb,
@@ -831,6 +829,7 @@ fn handle_test_buttons_line(
 }
 
 #[cfg(target_arch = "xtensa")]
+#[allow(clippy::excessive_nesting)]
 async fn service_initial_identity(usb: &mut UsbSerialJtag<'static, Blocking>, identity: &Identity) {
     // The ROM USB handoff can take several seconds to re-enumerate. Keep the
     // initial probe alive while the host closes the ROM transport and reopens
@@ -977,7 +976,7 @@ fn apply_rgb(state: &mut BringupState, channels: RgbChannels) {
 
 #[cfg(target_arch = "xtensa")]
 fn sample_buttons(state: &BringupState) -> u8 {
-    (u8::from(state.center.is_low()) << 0)
+    u8::from(state.center.is_low())
         | (u8::from(state.right.is_low()) << 1)
         | (u8::from(state.down.is_low()) << 2)
         | (u8::from(state.left.is_low()) << 3)

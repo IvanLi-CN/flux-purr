@@ -46,7 +46,7 @@ pub const LAN_HTTP_LIGHT_BODY_MAX_LEN: usize = 512;
 /// 128-byte development origin, PNA approval, and an optimistic revision.
 pub const HTTP_RESPONSE_HEADER_MAX_LEN: usize = 640;
 
-#[cfg(any(test, target_arch = "xtensa"))]
+#[cfg(any(test, all(target_arch = "xtensa", feature = "net_http")))]
 pub(crate) fn format_http_response_headers(
     response_status: u16,
     body_len: usize,
