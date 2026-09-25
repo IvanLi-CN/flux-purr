@@ -737,7 +737,6 @@ fn open_ram_jsonl_serial(port: &str) -> io::Result<Box<dyn RamJsonlSerial>> {
     #[cfg(not(target_os = "macos"))]
     serialport::new(port, 115_200)
         .preserve_dtr_on_open()
-        .exclusive(false)
         .flow_control(serialport::FlowControl::None)
         .timeout(Duration::from_millis(100))
         .open_native()
