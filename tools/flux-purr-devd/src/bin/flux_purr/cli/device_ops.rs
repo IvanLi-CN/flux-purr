@@ -3,8 +3,14 @@ use super::*;
 pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cli = Cli::parse();
     let direct_flash_command = matches!(&cli.command, Command::Flash(_) | Command::Recover(_));
+    let direct_ram_run_command = matches!(&cli.command, Command::RamRun { .. });
     let explicit_devd_endpoint = devd_flag_was_supplied();
-    let managed_devd = prepare_devd(&mut cli, direct_flash_command, explicit_devd_endpoint).await?;
+    let managed_devd = prepare_devd(
+        &mut cli,
+        direct_flash_command || direct_ram_run_command,
+        explicit_devd_endpoint,
+    )
+    .await?;
     let client = Client::new();
     let payload = match cli.command {
         Command::Devices => {
@@ -38,6 +44,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::Update(args) => update_from_local_bundle(&client, &cli.devd, args).await?,
         Command::Flash(args) => direct_flash(args).await?,
         Command::Recover(args) => direct_recover(args).await?,
+        Command::RamRun { command } => direct_ram_run(command)?,
         Command::Eeprom { command } => handle_eeprom_command(&client, &cli.devd, command).await?,
         Command::Monitor(args) => {
             monitor_once(
@@ -71,7 +78,10 @@ pub(crate) async fn prepare_devd(
     explicit_devd_endpoint: bool,
 ) -> Result<Option<ManagedDevd>, Box<dyn std::error::Error + Send + Sync>> {
     if direct_flash_command && explicit_devd_endpoint {
-        return Err("flash and recover are direct-serial commands and do not accept --devd".into());
+        return Err(
+            "flash, recover, and ram-run are direct-serial commands and do not accept --devd"
+                .into(),
+        );
     }
     if should_start_managed_devd(direct_flash_command, explicit_devd_endpoint) {
         let managed = ManagedDevd::start().await?;
@@ -675,23 +685,6 @@ pub(crate) fn direct_elf_flash_reset_modes(
         return vec!["usb-reset", "usb-reset", "default-reset"];
     }
     vec!["default-reset"]
-}
-
-pub(crate) fn direct_elf_flash_with_reset_fallback(
-    program: &Path,
-    port: &str,
-    partition_table: &Path,
-    elf: &Path,
-    keep_download_mode: bool,
-) -> Result<EspflashDiagnostics, Box<dyn std::error::Error + Send + Sync>> {
-    direct_elf_flash_with_reset_fallback_options(
-        program,
-        port,
-        partition_table,
-        elf,
-        keep_download_mode,
-        false,
-    )
 }
 
 fn direct_elf_flash_with_reset_fallback_options(

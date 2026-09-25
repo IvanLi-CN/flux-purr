@@ -2620,6 +2620,7 @@ fn usb_frame_request_id(
         | UsbFrame::HeaterCurveConfig { request_id, .. }
         | UsbFrame::HeaterCurveSave { request_id }
         | UsbFrame::EepromMaintenance { request_id, .. }
+        | UsbFrame::RamBringup { request_id, .. }
         | UsbFrame::Response { request_id, .. } => Some(request_id.clone()),
         #[cfg(feature = "buzzer-test")]
         UsbFrame::BuzzerTest { request_id, .. }

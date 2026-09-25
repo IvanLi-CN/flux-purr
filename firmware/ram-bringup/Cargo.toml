@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 build = "build.rs"
 
 [dependencies]
-flux-purr-firmware = { path = "..", default-features = false, features = ["esp32s3", "pd-request-20v"] }
+flux-purr-firmware = { path = "..", default-features = false, features = ["esp32s3"] }
 embedded-graphics = "0.8.1"
 embedded-hal = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"] }
