@@ -5982,6 +5982,14 @@ fn direct_elf_flash_uses_usb_reset_fallback_without_manual_download_mode() {
         direct_elf_flash_reset_modes("/dev/cu.usbmodem2111401", true),
         ["no-reset"]
     );
+    let args = direct_elf_flash_args(
+        "/dev/cu.usbmodem2111401",
+        Path::new("firmware/partitions.csv"),
+        Path::new("firmware.elf"),
+        false,
+    )
+    .unwrap();
+    assert!(args.iter().any(|arg| arg == "--no-stub"));
 }
 
 #[test]

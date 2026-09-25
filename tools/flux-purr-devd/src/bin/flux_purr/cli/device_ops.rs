@@ -421,15 +421,33 @@ pub(crate) fn direct_flash_with_program(
     program: &Path,
     require_real_flash_enablement: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    direct_flash_with_program_options(args, program, require_real_flash_enablement, false)
+}
+
+pub(crate) fn direct_flash_with_program_allow_missing_app_descriptor(
+    args: FlashArgs,
+    program: &Path,
+    require_real_flash_enablement: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    direct_flash_with_program_options(args, program, require_real_flash_enablement, true)
+}
+
+fn direct_flash_with_program_options(
+    args: FlashArgs,
+    program: &Path,
+    require_real_flash_enablement: bool,
+    ignore_app_descriptor: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let backup_directory = if args.skip_backup {
         None
     } else {
         Some(developer_backup_directory()?)
     };
-    direct_flash_with_program_inner(
+    direct_flash_with_program_inner_options(
         args,
         program,
         require_real_flash_enablement,
+        ignore_app_descriptor,
         read_eeprom_snapshot,
         detect_rom_download_mode,
         backup_directory.as_deref(),
@@ -444,6 +462,26 @@ pub(crate) fn direct_flash_with_program_inner(
     args: FlashArgs,
     program: &Path,
     require_real_flash_enablement: bool,
+    snapshot_reader: SnapshotReader,
+    rom_probe: RomProbe,
+    backup_directory: Option<&Path>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    direct_flash_with_program_inner_options(
+        args,
+        program,
+        require_real_flash_enablement,
+        false,
+        snapshot_reader,
+        rom_probe,
+        backup_directory,
+    )
+}
+
+fn direct_flash_with_program_inner_options(
+    args: FlashArgs,
+    program: &Path,
+    require_real_flash_enablement: bool,
+    ignore_app_descriptor: bool,
     snapshot_reader: SnapshotReader,
     rom_probe: RomProbe,
     backup_directory: Option<&Path>,
@@ -483,12 +521,13 @@ pub(crate) fn direct_flash_with_program_inner(
         let directory = backup_directory.ok_or("developer backup directory is unavailable")?;
         Some(developer_backup::write_atomic(directory, &snapshot)?)
     };
-    let espflash = direct_elf_flash_with_reset_fallback(
+    let espflash = direct_elf_flash_with_reset_fallback_options(
         program,
         &args.port,
         partition_table.path(),
         &elf,
         args.keep_download_mode,
+        ignore_app_descriptor,
     )?;
     Ok(
         json!({"ok": true, "operation": "flash", "port": args.port, "elf": elf, "backup": backup_path, "espflash": espflash}),
@@ -578,6 +617,24 @@ pub(crate) fn direct_elf_flash_args_with_reset_mode(
     before_reset: &str,
     after_reset: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    direct_elf_flash_args_with_reset_mode_options(
+        port,
+        partition_table,
+        elf,
+        before_reset,
+        after_reset,
+        false,
+    )
+}
+
+fn direct_elf_flash_args_with_reset_mode_options(
+    port: &str,
+    partition_table: &Path,
+    elf: &Path,
+    before_reset: &str,
+    after_reset: &str,
+    ignore_app_descriptor: bool,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     let mut args = vec![
         "flash".into(),
         "--chip".into(),
@@ -586,6 +643,12 @@ pub(crate) fn direct_elf_flash_args_with_reset_mode(
         port.into(),
         "--non-interactive".into(),
     ];
+    if port.contains("usbmodem") {
+        args.push("--no-stub".into());
+    }
+    if ignore_app_descriptor {
+        args.push("--ignore-app-descriptor".into());
+    }
     args.extend([
         "--before".into(),
         before_reset.into(),
@@ -621,6 +684,24 @@ pub(crate) fn direct_elf_flash_with_reset_fallback(
     elf: &Path,
     keep_download_mode: bool,
 ) -> Result<EspflashDiagnostics, Box<dyn std::error::Error + Send + Sync>> {
+    direct_elf_flash_with_reset_fallback_options(
+        program,
+        port,
+        partition_table,
+        elf,
+        keep_download_mode,
+        false,
+    )
+}
+
+fn direct_elf_flash_with_reset_fallback_options(
+    program: &Path,
+    port: &str,
+    partition_table: &Path,
+    elf: &Path,
+    keep_download_mode: bool,
+    ignore_app_descriptor: bool,
+) -> Result<EspflashDiagnostics, Box<dyn std::error::Error + Send + Sync>> {
     let reset_modes = direct_elf_flash_reset_modes(port, keep_download_mode);
     for (index, before_reset) in reset_modes.iter().enumerate() {
         let after_reset = if *before_reset == "no-reset" {
@@ -628,12 +709,13 @@ pub(crate) fn direct_elf_flash_with_reset_fallback(
         } else {
             "hard-reset"
         };
-        let args = direct_elf_flash_args_with_reset_mode(
+        let args = direct_elf_flash_args_with_reset_mode_options(
             port,
             partition_table,
             elf,
             before_reset,
             after_reset,
+            ignore_app_descriptor,
         )?;
         match run_espflash_command(program, &args) {
             Ok(diagnostics) => return Ok(diagnostics),
