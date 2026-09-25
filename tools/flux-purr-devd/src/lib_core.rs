@@ -39,6 +39,7 @@ pub(crate) use firmware_update::*;
 pub(crate) use flash::*;
 pub use foundation::*;
 pub(crate) use http::*;
+pub use serial::acquire_serial_port_lock;
 pub(crate) use serial::*;
 pub(crate) use wifi_thermal::*;
 

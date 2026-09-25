@@ -3,8 +3,14 @@ use super::*;
 pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cli = Cli::parse();
     let direct_flash_command = matches!(&cli.command, Command::Flash(_) | Command::Recover(_));
+    let direct_ram_run_command = matches!(&cli.command, Command::RamRun { .. });
     let explicit_devd_endpoint = devd_flag_was_supplied();
-    let managed_devd = prepare_devd(&mut cli, direct_flash_command, explicit_devd_endpoint).await?;
+    let managed_devd = prepare_devd(
+        &mut cli,
+        direct_flash_command || direct_ram_run_command,
+        explicit_devd_endpoint,
+    )
+    .await?;
     let client = Client::new();
     let payload = match cli.command {
         Command::Devices => {
@@ -38,6 +44,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::Update(args) => update_from_local_bundle(&client, &cli.devd, args).await?,
         Command::Flash(args) => direct_flash(args).await?,
         Command::Recover(args) => direct_recover(args).await?,
+        Command::RamRun { command } => direct_ram_run(command)?,
         Command::Eeprom { command } => handle_eeprom_command(&client, &cli.devd, command).await?,
         Command::Monitor(args) => {
             monitor_once(
@@ -71,7 +78,10 @@ pub(crate) async fn prepare_devd(
     explicit_devd_endpoint: bool,
 ) -> Result<Option<ManagedDevd>, Box<dyn std::error::Error + Send + Sync>> {
     if direct_flash_command && explicit_devd_endpoint {
-        return Err("flash and recover are direct-serial commands and do not accept --devd".into());
+        return Err(
+            "flash, recover, and ram-run are direct-serial commands and do not accept --devd"
+                .into(),
+        );
     }
     if should_start_managed_devd(direct_flash_command, explicit_devd_endpoint) {
         let managed = ManagedDevd::start().await?;
@@ -408,6 +418,10 @@ pub(crate) async fn update_from_local_bundle(
 pub(crate) async fn direct_flash(
     args: FlashArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    validate_serial_port(&args.port)?;
+    let _serial_lock =
+        flux_purr_devd::acquire_serial_port_lock(&args.port, Duration::from_secs(30))
+            .map_err(io::Error::other)?;
     let program = resolve_espflash_program();
     direct_flash_with_program(args, &program, true)
 }
@@ -417,15 +431,33 @@ pub(crate) fn direct_flash_with_program(
     program: &Path,
     require_real_flash_enablement: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    direct_flash_with_program_options(args, program, require_real_flash_enablement, false)
+}
+
+pub(crate) fn direct_flash_with_program_allow_missing_app_descriptor(
+    args: FlashArgs,
+    program: &Path,
+    require_real_flash_enablement: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    direct_flash_with_program_options(args, program, require_real_flash_enablement, true)
+}
+
+fn direct_flash_with_program_options(
+    args: FlashArgs,
+    program: &Path,
+    require_real_flash_enablement: bool,
+    ignore_app_descriptor: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let backup_directory = if args.skip_backup {
         None
     } else {
         Some(developer_backup_directory()?)
     };
-    direct_flash_with_program_inner(
+    direct_flash_with_program_inner_options(
         args,
         program,
         require_real_flash_enablement,
+        ignore_app_descriptor,
         read_eeprom_snapshot,
         detect_rom_download_mode,
         backup_directory.as_deref(),
@@ -436,10 +468,31 @@ pub(crate) type SnapshotReader =
     fn(&str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
 pub(crate) type RomProbe = fn(&str) -> bool;
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn direct_flash_with_program_inner(
     args: FlashArgs,
     program: &Path,
     require_real_flash_enablement: bool,
+    snapshot_reader: SnapshotReader,
+    rom_probe: RomProbe,
+    backup_directory: Option<&Path>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    direct_flash_with_program_inner_options(
+        args,
+        program,
+        require_real_flash_enablement,
+        false,
+        snapshot_reader,
+        rom_probe,
+        backup_directory,
+    )
+}
+
+fn direct_flash_with_program_inner_options(
+    args: FlashArgs,
+    program: &Path,
+    require_real_flash_enablement: bool,
+    ignore_app_descriptor: bool,
     snapshot_reader: SnapshotReader,
     rom_probe: RomProbe,
     backup_directory: Option<&Path>,
@@ -479,12 +532,13 @@ pub(crate) fn direct_flash_with_program_inner(
         let directory = backup_directory.ok_or("developer backup directory is unavailable")?;
         Some(developer_backup::write_atomic(directory, &snapshot)?)
     };
-    let espflash = direct_elf_flash_with_reset_fallback(
+    let espflash = direct_elf_flash_with_reset_fallback_options(
         program,
         &args.port,
         partition_table.path(),
         &elf,
         args.keep_download_mode,
+        ignore_app_descriptor,
     )?;
     Ok(
         json!({"ok": true, "operation": "flash", "port": args.port, "elf": elf, "backup": backup_path, "espflash": espflash}),
@@ -495,6 +549,9 @@ pub(crate) async fn direct_recover(
     args: RecoverArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_serial_port(&args.port)?;
+    let _serial_lock =
+        flux_purr_devd::acquire_serial_port_lock(&args.port, Duration::from_secs(30))
+            .map_err(io::Error::other)?;
     if args.confirm != "ERASE" {
         return Err("recover requires --confirm ERASE".into());
     }
@@ -571,6 +628,24 @@ pub(crate) fn direct_elf_flash_args_with_reset_mode(
     before_reset: &str,
     after_reset: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    direct_elf_flash_args_with_reset_mode_options(
+        port,
+        partition_table,
+        elf,
+        before_reset,
+        after_reset,
+        false,
+    )
+}
+
+fn direct_elf_flash_args_with_reset_mode_options(
+    port: &str,
+    partition_table: &Path,
+    elf: &Path,
+    before_reset: &str,
+    after_reset: &str,
+    ignore_app_descriptor: bool,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     let mut args = vec![
         "flash".into(),
         "--chip".into(),
@@ -579,6 +654,12 @@ pub(crate) fn direct_elf_flash_args_with_reset_mode(
         port.into(),
         "--non-interactive".into(),
     ];
+    if port.contains("usbmodem") {
+        args.push("--no-stub".into());
+    }
+    if ignore_app_descriptor {
+        args.push("--ignore-app-descriptor".into());
+    }
     args.extend([
         "--before".into(),
         before_reset.into(),
@@ -607,12 +688,13 @@ pub(crate) fn direct_elf_flash_reset_modes(
     vec!["default-reset"]
 }
 
-pub(crate) fn direct_elf_flash_with_reset_fallback(
+fn direct_elf_flash_with_reset_fallback_options(
     program: &Path,
     port: &str,
     partition_table: &Path,
     elf: &Path,
     keep_download_mode: bool,
+    ignore_app_descriptor: bool,
 ) -> Result<EspflashDiagnostics, Box<dyn std::error::Error + Send + Sync>> {
     let reset_modes = direct_elf_flash_reset_modes(port, keep_download_mode);
     for (index, before_reset) in reset_modes.iter().enumerate() {
@@ -621,12 +703,13 @@ pub(crate) fn direct_elf_flash_with_reset_fallback(
         } else {
             "hard-reset"
         };
-        let args = direct_elf_flash_args_with_reset_mode(
+        let args = direct_elf_flash_args_with_reset_mode_options(
             port,
             partition_table,
             elf,
             before_reset,
             after_reset,
+            ignore_app_descriptor,
         )?;
         match run_espflash_command(program, &args) {
             Ok(diagnostics) => return Ok(diagnostics),

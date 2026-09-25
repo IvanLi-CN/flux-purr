@@ -5,7 +5,7 @@
 - Default architecture intent: `ESP32-S3FH4R2`
 - Current bring-up board profile: `S3 frontpanel GC9D01 display baseline`
 - Runtime style:
-  - host preview: shared scene renderer + framebuffer dump + PNG conversion
+  - physical RAM bring-up: shared scene renderer exercised on the real panel through the CLI
   - device runtime: `Embassy + esp-hal-embassy + SPI2.into_async() + five-way input + PID heater runtime + GPIO48 buzzer cues`
 
 ## GC9D01 display bring-up baseline
@@ -151,21 +151,22 @@ or supported by the production `flux-purr` firmware artifact.
 - Xtensa app runtime build:
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release`
 
-## Host preview workflow
+## RAM Bring-up workflow
 
-- Render a front-panel runtime framebuffer:
-  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-ready docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.framebuffer.bin`
-- Review the implemented screen themes without changing the on-device default:
-  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-ready .tmp/dashboard-dark.framebuffer.bin --theme dark`
-  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-ready .tmp/dashboard-light.framebuffer.bin --theme light`
-- The preview tool writes two framebuffer artifacts:
-  - logical preview framebuffer: `<preset>.framebuffer.bin` (`RGB565 LE`, `160x50`) for owner-facing PNG generation
-  - panel-order companion: `<preset>.panel.framebuffer.bin` (`RGB565 BE`, `50x160`) after applying the same GC9D01 orientation transform used on-device
-- Convert the logical preview framebuffer to PNG:
-  - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.framebuffer.bin --out docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.png`
-- The display bring-up preview follows the same conversion contract; `display_preview` writes logical and panel-order framebuffers, `fb_to_png.py` creates the `160x50` PNG, and ImageMagick `magick <preview>.png -filter point -resize 800% <zoom>.png` creates the `8x` nearest-neighbor owner-facing render.
-- Preview assets land under:
-  - `docs/specs/heater-pid-frontpanel-runtime/assets/`
+- Build the separate all-RAM artifact:
+  - `cargo +esp build -p flux-purr-ram-bringup --target xtensa-esp32s3-none-elf --target-dir firmware/target --release`
+  - `scripts/check-ram-bringup-elf.sh`
+- Run a physical preview or test through the repository CLI:
+  - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run preview display --port <SERIAL_PORT>`
+  - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run preview frontpanel --port <SERIAL_PORT>`
+  - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run preview status-light --port <SERIAL_PORT>`
+  - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run test buttons --port <SERIAL_PORT>`
+- RAM execution is the default and does not write Flash. `--reload` forces a
+  fresh load. `--install` is the only persistent branch and uses the existing
+  developer flash gate; it replaces the sole factory app.
+- Preview commands accept `--theme light|dark`; light is the default.
+- Return to the installed product with:
+  - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run exit --port <SERIAL_PORT>`
 
 ## MCU agentd diagnostic flow
 
@@ -209,5 +210,5 @@ or supported by the production `flux-purr` firmware artifact.
 - The ESP32-S3 executor reserves an 80 KiB shared task arena for the main loop and LAN tasks. WiFi drivers plus HTTP request/response buffers and mailbox staging use static storage so they do not consume async task-frame capacity.
 - The repository-root `espflash.toml` pins `firmware/partitions.csv` for the normal NVS, PHY, and factory-app layout. No supported layout declares a configuration fallback partition, and no MCU flash operation migrates or restores configuration; EEPROM remains physically outside the MCU flash target.
 - `firmware/build.rs` adds `defmt.x` for Xtensa builds, and `mcu-agentd.toml` stays pinned to `espflash` + `defmt` decoding.
-- Host checks keep using the std preview path so repository checks can run without Xtensa hardware.
+- Host checks cover the shared renderer and protocol; physical display acceptance requires the separate RAM Bring-up artifact.
 - This round still does not implement touch input, tach feedback, external PID tuning, or closed-loop VIN/current power compensation.

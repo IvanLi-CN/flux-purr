@@ -17,6 +17,7 @@ pub mod memory;
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 pub mod net;
 pub mod net_http;
+pub mod ram_bringup;
 pub mod status_light;
 pub mod thermal_plant;
 pub mod wifi_state;

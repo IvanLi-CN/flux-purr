@@ -2028,6 +2028,65 @@ fn early_usb_control_defers_network_until_main_loop() {
 }
 
 #[test]
+fn product_rejects_ram_bringup_frame() {
+    let response = usb_early_response(
+        r#"{"type":"ram_bringup","requestId":"ram-1","command":"test_adc"}"#,
+        &MemoryConfig::default(),
+    );
+    match response {
+        UsbFrame::Response {
+            request_id,
+            ok: false,
+            error: Some(error),
+            ..
+        } => {
+            assert_eq!(request_id.as_str(), "ram-1");
+            assert_eq!(error.code.as_str(), "unsupported_frame");
+        }
+        other => panic!("unexpected product response: {other:?}"),
+    }
+}
+
+#[test]
+fn product_ram_bringup_rejection_preserves_request_id() {
+    let mut request_id = heapless::String::new();
+    request_id.push_str("ram-runtime").unwrap();
+    match product_ram_bringup_rejection(request_id) {
+        UsbFrame::Response {
+            request_id,
+            ok: false,
+            error: Some(error),
+            ..
+        } => {
+            assert_eq!(request_id.as_str(), "ram-runtime");
+            assert_eq!(error.code.as_str(), "unsupported_frame");
+        }
+        other => panic!("unexpected runtime product response: {other:?}"),
+    }
+}
+
+#[test]
+fn runtime_recovery_rejects_ram_bringup_frame_with_request_id() {
+    let response = usb_recovery_response(
+        r#"{"type":"ram_bringup","requestId":"ram-recovery","command":"test_adc"}"#,
+        &MemoryConfig::default(),
+        0,
+    );
+    match response {
+        UsbFrame::Response {
+            request_id,
+            ok: false,
+            error: Some(error),
+            ..
+        } => {
+            assert_eq!(request_id.as_str(), "ram-recovery");
+            assert_eq!(error.code.as_str(), "unsupported_frame");
+        }
+        other => panic!("unexpected runtime recovery response: {other:?}"),
+    }
+}
+
+#[test]
 fn early_usb_control_defers_runtime_status_until_main_loop() {
     let response = usb_early_response(
         r#"{"type":"request","requestId":"boot-status","op":"get_status"}"#,
@@ -4718,7 +4777,7 @@ fn boot_memory_future_is_heap_pinned_before_eeprom_initialization() {
 }
 
 #[test]
-fn runtime_synchronization_uses_normal_static_storage() {
+fn runtime_synchronization_uses_reinitializable_boot_storage() {
     let support = include_str!("support.rs");
     let pd_service = include_str!("pd_service.rs");
     let tasks = include_str!("tasks.rs");
@@ -4731,13 +4790,12 @@ fn runtime_synchronization_uses_normal_static_storage() {
         "runtime synchronization must not overwrite storage that the executor can retain"
     );
     assert!(
-        network.contains("use static_cell::StaticCell;")
-            && network.contains("static NET_RESOURCES: StaticCell<StackResources<8>>")
-            && network.contains("static WIFI_CONTROLLER: StaticCell<WifiController<'static>>")
+        network.contains("struct BootCell<T>")
+            && network.contains("static NET_RESOURCES: BootCell<StackResources<8>>")
+            && network.contains("static WIFI_CONTROLLER: BootCell<WifiController<'static>>")
             && !network.contains("ResettableStatic")
-            && !network.contains("initialize_after_software_reset")
             && !network.contains("reset_runtime_sync_state"),
-        "network runtime storage must remain one-time initialized because spawned WiFi tasks retain those references"
+        "network runtime storage must be explicitly reinitialized after a RAM bring-up reset"
     );
 }
 
@@ -11287,6 +11345,25 @@ fn network_awaits_do_not_own_or_wrap_pd_service() {
     assert!(source.contains("async fn initialize_network_control_state"));
     assert!(source.contains("async fn spawn_network"));
     assert!(source.contains("flux_purr_firmware::net::spawn("));
+}
+
+#[test]
+fn deferred_network_startup_still_initializes_control_state() {
+    let boot = include_str!("boot.rs");
+    let start = boot
+        .split("async fn start_network(&mut self, spawner: &Spawner)")
+        .nth(1)
+        .expect("network startup helper must remain present");
+    let initialize = start
+        .find("self.initialize_network_control_state().await;")
+        .expect("network control state must initialize on every product boot");
+    let defer = start
+        .find("if self.system.defer_network_after_software_reset")
+        .expect("software-reset network deferral must remain explicit");
+    assert!(
+        initialize < defer,
+        "deferred network startup must not leave runtime network state uninitialized"
+    );
 }
 
 #[test]

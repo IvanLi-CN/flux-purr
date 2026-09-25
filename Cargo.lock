@@ -1832,6 +1832,7 @@ dependencies = [
  "ipnet",
  "md-5 0.10.6",
  "mdns-sd-discovery",
+ "object 0.39.1",
  "reqwest",
  "semver",
  "serde",
@@ -1883,6 +1884,30 @@ dependencies = [
  "serde-json-core",
  "serde_json",
  "sha2 0.10.9",
+ "static_cell",
+]
+
+[[package]]
+name = "flux-purr-ram-bringup"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-time",
+ "embedded-graphics",
+ "embedded-hal 1.0.0",
+ "embedded-hal-bus",
+ "esp-alloc",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-rtos",
+ "flux-purr-firmware",
+ "gc9d01",
+ "heapless 0.8.0",
+ "nb 1.1.0",
+ "serde",
+ "serde-json-core",
+ "serde_json",
  "static_cell",
 ]
 

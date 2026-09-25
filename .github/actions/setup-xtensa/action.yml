@@ -40,6 +40,8 @@ runs:
           --name esp
         source "$ESPUP_EXPORT_FILE"
 
+        cargo install espflash --version 4.5.0 --locked
+
         echo "$PATH" >> "$GITHUB_PATH"
         if [[ -n "${LIBCLANG_PATH:-}" ]]; then
           echo "LIBCLANG_PATH=${LIBCLANG_PATH}" >> "$GITHUB_ENV"

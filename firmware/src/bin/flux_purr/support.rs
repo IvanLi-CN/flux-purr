@@ -640,6 +640,36 @@ pub(crate) static mut EEPROM_RECORD_STAGING_STORAGE: MaybeUninit<
     [u8; EEPROM_RECORD_STAGING_BYTES],
 > = MaybeUninit::uninit();
 
+#[cfg(target_arch = "xtensa")]
+const PRODUCT_PANIC_RESET_MARKER: u32 = 0x5041_4E49;
+
+#[cfg(target_arch = "xtensa")]
+#[unsafe(link_section = ".uninit")]
+static mut PRODUCT_PANIC_RESET_MARKER_STORAGE: u32 = 0;
+
+/// Distinguish a product panic reset from the controlled reset used to leave
+/// a RAM bring-up session. The marker lives in retained no-init RAM and is
+/// cleared as soon as the next product boot observes it.
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn take_product_panic_reset_marker() -> bool {
+    unsafe {
+        let marker = core::ptr::addr_of_mut!(PRODUCT_PANIC_RESET_MARKER_STORAGE);
+        let marked = core::ptr::read_volatile(marker) == PRODUCT_PANIC_RESET_MARKER;
+        core::ptr::write_volatile(marker, 0);
+        marked
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn mark_product_panic_reset() {
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(PRODUCT_PANIC_RESET_MARKER_STORAGE),
+            PRODUCT_PANIC_RESET_MARKER,
+        );
+    }
+}
+
 /// Overwrite retained runtime storage after an ESP software reset.
 ///
 /// ESP application resets do not guarantee that the previous application's
@@ -840,6 +870,7 @@ pub(crate) fn panic(info: &PanicInfo<'_>) -> ! {
             format_args!("panic_location={}:{}\n", location.file(), location.line()),
         );
     }
+    mark_product_panic_reset();
     esp_hal::rom::ets_delay_us(250_000);
     esp_hal::system::software_reset()
 }

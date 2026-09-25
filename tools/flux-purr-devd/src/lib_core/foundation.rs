@@ -578,6 +578,7 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
 pub(crate) fn mock_identity(id: &str) -> Identity {
     Identity {
         device_id: id.to_string(),
+        firmware_kind: Some(FirmwareKind::Product),
         firmware_version: "fw/v0.4.0-dev".to_string(),
         build_id: "devd-mock".to_string(),
         git_sha: "unknown".to_string(),
@@ -799,6 +800,7 @@ pub(crate) fn native_placeholder_status(network: &NetworkSummary) -> ControlPlan
 pub(crate) fn native_placeholder_identity() -> Identity {
     Identity {
         device_id: String::new(),
+        firmware_kind: None,
         firmware_version: "unknown".to_string(),
         build_id: "native-serial-placeholder".to_string(),
         git_sha: "unknown".to_string(),
@@ -932,6 +934,8 @@ pub enum ConnectionState {
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
     pub device_id: String,
+    #[serde(default)]
+    pub firmware_kind: Option<FirmwareKind>,
     pub firmware_version: String,
     pub build_id: String,
     pub git_sha: String,
@@ -940,6 +944,13 @@ pub struct Identity {
     pub protocol_version: String,
     pub hostname: String,
     pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareKind {
+    Product,
+    RamBringup,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

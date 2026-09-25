@@ -192,6 +192,7 @@ pub(crate) struct BootDeviceTokens {
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct BootSystem {
     reset_reason: &'static str,
+    defer_network_after_software_reset: bool,
     startup_sequence: StartupSequence,
     runtime_mode: FrontPanelRuntimeMode,
     status_light_started_ms: u64,
@@ -1116,6 +1117,15 @@ impl BootRuntimeState {
         #[cfg(feature = "net_http")]
         {
             self.initialize_network_control_state().await;
+            // RAM bring-up returns through an ESP32 software reset. The ROM
+            // reset leaves the Wi-Fi modem state alive while product tasks
+            // and the esp-radio heap are gone, so re-entering esp-radio in
+            // that boot can fault inside the vendor NVS path. Keep the
+            // product USB/front-panel path available and defer Wi-Fi until a
+            // real power-on reset clears the modem state.
+            if self.system.defer_network_after_software_reset {
+                return;
+            }
             let result = self.spawn_network(spawner).await;
             if let Err(error) = result {
                 warn!("LAN control plane startup failed: {=str}", error.message());
@@ -1384,6 +1394,8 @@ pub(crate) fn initialize_boot_system(
 ) -> Box<BootSystem> {
     rom_boot_stage(b"system_enter");
     let reset_reason = reset_reason_log_line(esp_hal::system::reset_reason());
+    let defer_network_after_software_reset =
+        reset_reason == "reset_reason=core_software\n" && !take_product_panic_reset_marker();
     let mut startup_sequence = StartupSequence::new();
     let mut backlight = Output::new(tokens.gpio13, Level::Low, OutputConfig::default());
     backlight.set_low();
@@ -1452,6 +1464,7 @@ pub(crate) fn initialize_boot_system(
         storage,
         BootSystem {
             reset_reason,
+            defer_network_after_software_reset,
             startup_sequence,
             runtime_mode,
             status_light_started_ms,

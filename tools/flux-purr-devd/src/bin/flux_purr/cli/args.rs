@@ -56,6 +56,10 @@ pub(crate) enum Command {
     Update(UpdateArgs),
     Flash(FlashArgs),
     Recover(RecoverArgs),
+    RamRun {
+        #[command(subcommand)]
+        command: RamRunCommand,
+    },
     Eeprom {
         #[command(subcommand)]
         command: EepromCommand,
@@ -69,6 +73,115 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: UsbPortCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RamRunCommand {
+    Preview(RamRunPreviewArgs),
+    Test(RamRunTestArgs),
+    Exit(RamRunExitArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct RamRunPreviewArgs {
+    #[arg(value_enum)]
+    pub(crate) preview: RamPreview,
+    #[command(flatten)]
+    pub(crate) options: RamRunOptions,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct RamRunTestArgs {
+    #[arg(value_enum)]
+    pub(crate) test: RamTest,
+    #[command(flatten)]
+    pub(crate) options: RamRunOptions,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct RamRunExitArgs {
+    #[arg(long, value_name = "SERIAL_PORT")]
+    pub(crate) port: String,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct RamRunOptions {
+    #[arg(long, value_name = "SERIAL_PORT")]
+    pub(crate) port: String,
+    #[arg(long, conflicts_with = "install")]
+    pub(crate) reload: bool,
+    #[arg(long, conflicts_with = "reload")]
+    pub(crate) install: bool,
+    #[arg(
+        long,
+        requires = "install",
+        help = "Skip the Developer EEPROM backup; pair with --confirm NO_EEPROM_BACKUP"
+    )]
+    pub(crate) skip_backup: bool,
+    #[arg(
+        long,
+        requires = "skip_backup",
+        value_name = "TOKEN",
+        help = "Literal confirmation required by --skip-backup: NO_EEPROM_BACKUP"
+    )]
+    pub(crate) confirm: Option<String>,
+    #[arg(long, value_enum, help = "Preview theme: light (default) or dark")]
+    pub(crate) theme: Option<RamTheme>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RamPreview {
+    Display,
+    Frontpanel,
+    StatusLight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RamTest {
+    Buttons,
+    Adc,
+    I2c,
+    Rgb,
+    Buzzer,
+    Fan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RamTheme {
+    Light,
+    Dark,
+}
+
+impl RamTheme {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
+impl RamPreview {
+    pub(crate) const fn command(self) -> &'static str {
+        match self {
+            Self::Display => "preview_display",
+            Self::Frontpanel => "preview_frontpanel",
+            Self::StatusLight => "preview_status_light",
+        }
+    }
+}
+
+impl RamTest {
+    pub(crate) const fn command(self) -> &'static str {
+        match self {
+            Self::Buttons => "test_buttons",
+            Self::Adc => "test_adc",
+            Self::I2c => "test_i2c",
+            Self::Rgb => "test_rgb",
+            Self::Buzzer => "test_buzzer",
+            Self::Fan => "test_fan",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]

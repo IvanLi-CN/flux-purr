@@ -162,11 +162,10 @@
 
 ## Visual Evidence
 
-PR: none
 
 ![RGB status-light language](./assets/status-light-language.png)
 
-The host-side preview calls `status_light_output` directly. Each row shows its state from left to right in `140 ms` samples; dark circles are channels off at that sample.
+The physical RAM preview calls `status_light_output` through the Bring-up command. Each row shows its state from left to right in `140 ms` samples; dark circles are channels off at that sample.
 
 ## 方案概述（Approach, high-level）
 
