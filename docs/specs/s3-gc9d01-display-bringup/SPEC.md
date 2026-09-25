@@ -40,7 +40,7 @@
 - `firmware/Cargo.toml` 的显示/异步运行时依赖
 - `firmware/src/lib.rs` 与新增的显示模块
 - `firmware/src/bin/flux_purr.rs`
-- `firmware/src/bin/display_preview.rs` 与 framebuffer 导出逻辑
+- `flux-purr ram-run preview display --port <SERIAL_PORT>` 与设备端 renderer
 - `firmware/README.md`、必要的根 README 口径同步
 - `docs/specs/s3-gc9d01-display-bringup/assets/` 下的视觉证据
 
@@ -119,7 +119,7 @@ None
 
 ## Verification
 
-- VER-DISPLAY-001 (covers: REQ-DISPLAY-005, REQ-DISPLAY-006, REQ-DISPLAY-007, REQ-DISPLAY-008, REQ-DISPLAY-009, REQ-DISPLAY-010, REQ-DISPLAY-011, REQ-DISPLAY-015, REQ-DISPLAY-017, REQ-DISPLAY-018): Given `display_preview` 与 `fb_to_png.py`，When 生成启动屏、校准屏与 demo 场景的 framebuffer 并转换为 PNG，Then 预览图能显示方向标识、RGB 色块、灰阶块和文字标签。
+- VER-DISPLAY-001 (covers: REQ-DISPLAY-005, REQ-DISPLAY-006, REQ-DISPLAY-007, REQ-DISPLAY-008, REQ-DISPLAY-009, REQ-DISPLAY-010, REQ-DISPLAY-011, REQ-DISPLAY-015, REQ-DISPLAY-017, REQ-DISPLAY-018): Given an authorized exact serial port，When `flux-purr ram-run preview display --port <SERIAL_PORT>` runs，Then the physical panel renders the orientation marker, RGB swatches, grayscale blocks, and text labels。
 - VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004, REQ-DISPLAY-020, REQ-DISPLAY-021, REQ-DISPLAY-022): Given `flux-purr` device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release` 成功，并通过启动顺序测试确认背光控制先于 PD，PD 启动服务先于显示初始化与启动帧；编译配置和日志同时证明 Quad `2 MiB` PSRAM、PSRAM-only 驱动帧缓冲和 SPI2 `40 MHz` Mode 0。
 - VER-DISPLAY-003 (covers: REQ-DISPLAY-014): Given host 质量门，When 运行 `cargo test`、`cargo clippy --all-targets --all-features -D warnings`、`cargo build --release`，Then 全部通过。
 - VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 正常 App 路径先建立背光控制、完成有界 PD 启动服务，再显示 branded splash 并进入 Dashboard；Key Test 路径显示静态校准屏，并报告当前场景、方向配置与 profile。
@@ -193,8 +193,7 @@ None
 - Dark-theme panel-order framebuffer: `./assets/startup-splash-dark.panel.framebuffer.bin`
 - Dark-theme PNG preview source: `./assets/startup-splash-dark.preview.png`
 - Dark-theme owner-facing render (`8x`, `1280x400`): `./assets/startup-splash-dark.zoom.png`
-- Preview theme selection: `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin display_preview -- startup-splash <output> --theme dark|light`
-- PNG conversion: `FLUX_PURR_BUILD_MODE=release cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin display_preview -- startup-splash <output> --theme light|dark`, then `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in <output>.framebuffer.bin --out <output>.preview.png` and `magick <output>.preview.png -filter point -resize 800% <output>.zoom.png`.
+- Physical preview: `flux-purr ram-run preview display --port <SERIAL_PORT>`，可选 `--theme light|dark`。
 - Checked-in splash previews use the source-tree `VERSION` with release-mode identity; release preparation regenerates the final release bundle after the GitHub-signed VERSION-only preparation commit.
 
 ![Host boot-splash preview](./assets/startup-splash.zoom.png)

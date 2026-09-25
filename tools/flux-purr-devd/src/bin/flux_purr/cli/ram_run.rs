@@ -3,8 +3,9 @@ use super::*;
 use espflash::{
     command::Command as RomCommand,
     connection::{Connection, ResetAfterOperation, ResetBeforeOperation, SecurityInfo},
+    target::Chip,
 };
-use object::{Object as _, ObjectSection as _};
+use object::{Object as _, ObjectSegment as _};
 use serialport::{FlowControl, SerialPortType, UsbPortInfo};
 
 #[cfg(target_os = "macos")]
@@ -95,8 +96,10 @@ fn ram_run_action(
             .is_some_and(|runtime| ram_identity_matches(runtime, &expected_build_id, command));
     let mut ram_serial: Option<Box<dyn RamJsonlSerial>> = if !reusable {
         ram_download_preflight(&options.port)?;
-        let connection = load_ram_elf(&options.port, &elf)?;
-        drop(connection);
+        let _diagnostics = run_espflash_command(
+            &resolve_espflash_program(),
+            &ram_load_args(&options.port, &elf),
+        )?;
         Some(open_ram_jsonl_serial(&options.port).map_err(|error| {
             format!(
                 "RAM load completed but JSONL reopen failed on {}: {error}",
@@ -226,167 +229,73 @@ fn validate_ram_bringup_elf(path: &Path) -> Result<(), Box<dyn std::error::Error
         )
         .into());
     }
-    validate_local_elf(path)
-}
-
-const ESP32S3_USB_RAM_BLOCK_SIZE: usize = 0x1800;
-
-#[derive(Debug)]
-struct RamLoadSegment {
-    address: u32,
-    data: Vec<u8>,
-}
-
-/// Load the bring-up ELF through the ROM's USB RAM protocol without touching
-/// SPI flash. This matches the pinned espflash RAM target block size.
-fn load_ram_elf(
-    port: &str,
-    elf_path: &Path,
-) -> Result<Connection, Box<dyn std::error::Error + Send + Sync>> {
-    let elf_data = fs::read(elf_path)?;
-    let elf = object::read::elf::ElfFile32::<object::Endianness>::parse(elf_data.as_slice())
+    let data = fs::read(path)?;
+    let elf = object::read::elf::ElfFile32::<object::Endianness>::parse(data.as_slice())
         .map_err(|error| format!("invalid RAM Bring-up ELF: {error}"))?;
-    let entry = elf
-        .elf_header()
-        .e_entry
-        .get(elf.endian())
-        .try_into()
-        .map_err(|_| "RAM Bring-up ELF entry point is outside the 32-bit address space")?;
-    let mut segments = Vec::new();
-    for section in elf.sections() {
-        let address = section.address();
-        if address == 0 {
+    let entry = elf.entry();
+    if !ram_address_is_internal(entry) {
+        return Err(format!(
+            "RAM Bring-up ELF entry 0x{entry:08x} is outside ESP32-S3 internal RAM"
+        )
+        .into());
+    }
+    let mut loadable_segments = 0;
+    for segment in elf.segments() {
+        let address = segment.address();
+        let size = segment.size();
+        if size == 0 {
             continue;
         }
-        let data = section
-            .data()
-            .map_err(|_| "RAM Bring-up ELF has an invalid load section")?;
-        if data.is_empty() {
-            continue;
+        let end = address
+            .checked_add(size)
+            .ok_or("RAM Bring-up ELF segment address overflows")?;
+        if !ram_range_is_internal(address, end) {
+            return Err(format!(
+                "RAM Bring-up ELF PT_LOAD 0x{address:08x}..0x{end:08x} is outside ESP32-S3 internal RAM"
+            )
+            .into());
         }
-        // Load only real allocatable section bytes. PT_LOAD ranges can include
-        // linker NOBITS/alignment holes before `.data`; sending those holes
-        // would overwrite the ROM downloader's own DRAM state. Keep the
-        // original section length in MemBegin; espflash pads only MemData
-        // packets to the ROM's 4-byte boundary.
-        let bytes = data.to_vec();
-        let address: u32 = address
-            .try_into()
-            .map_err(|_| "RAM Bring-up ELF load address is outside the 32-bit address space")?;
-        segments.push(RamLoadSegment {
-            address,
-            data: bytes,
-        });
+        loadable_segments += 1;
     }
-    if segments.is_empty() {
-        return Err("RAM Bring-up ELF contains no loadable RAM segments".into());
+    if loadable_segments == 0 {
+        return Err("RAM Bring-up ELF contains no non-empty PT_LOAD segments".into());
     }
-
-    // Match espflash's RAM target: sort, merge adjacent sections (including a
-    // <=3-byte alignment gap), then pad each resulting segment to four bytes.
-    // Keeping the same segment boundaries matters because the ROM downloader
-    // tracks the declared byte count independently for every MEM_BEGIN.
-    segments.sort_by_key(|segment| segment.address);
-    let mut merged: Vec<RamLoadSegment> = Vec::with_capacity(segments.len());
-    for segment in segments {
-        if let Some(last) = merged.last_mut() {
-            let last_end = last.address + last.data.len() as u32;
-            let max_padding = (4 - last_end % 4) % 4;
-            if last_end + max_padding >= segment.address {
-                let gap = (segment.address - last_end) as usize;
-                last.data.extend(core::iter::repeat_n(0, gap));
-                last.data.extend_from_slice(&segment.data);
-                continue;
-            }
-        }
-        merged.push(segment);
-    }
-    for segment in &mut merged {
-        let padding = (4 - segment.data.len() % 4) % 4;
-        segment.data.extend(core::iter::repeat_n(0, padding));
-    }
-
-    let mut connection = open_ram_rom_connection(port)
-        .map_err(|error| format!("RAM load ROM connection failed on {port}: {error}"))?;
-    connection
-        .set_timeout(Duration::from_secs(30))
-        .map_err(|error| format!("RAM load ROM timeout setup failed: {error}"))?;
-    disable_rom_watchdog(&mut connection)
-        .map_err(|error| format!("RAM load ROM watchdog preparation failed: {error}"))?;
-
-    for segment in merged {
-        let address = segment.address;
-        let data = segment.data;
-        let block_count = ram_block_count(data.len());
-        connection
-            .command(RomCommand::MemBegin {
-                size: data.len() as u32,
-                blocks: block_count as u32,
-                block_size: ESP32S3_USB_RAM_BLOCK_SIZE as u32,
-                offset: address,
-                supports_encryption: false,
-            })
-            .map_err(|error| {
-                format!(
-                    "RAM load failed at MEM_BEGIN address 0x{address:08x}, size {}: {error}",
-                    data.len()
-                )
-            })?;
-        for (sequence, block) in data.chunks(ESP32S3_USB_RAM_BLOCK_SIZE).enumerate() {
-            connection
-                .command(RomCommand::MemData {
-                    sequence: sequence as u32,
-                    pad_to: 4,
-                    pad_byte: 0,
-                    data: block,
-                })
-                .map_err(|error| {
-                    format!(
-                        "RAM load failed at MEM_DATA address 0x{address:08x}, block {sequence}/{}: {error}",
-                        block_count
-                    )
-                })?;
-        }
-    }
-    connection
-        .command(RomCommand::MemEnd {
-            no_entry: false,
-            entry,
-        })
-        .map_err(|error| format!("RAM load failed at MEM_END entry 0x{entry:08x}: {error}"))?;
-    Ok(connection)
-}
-
-fn disable_rom_watchdog(
-    connection: &mut Connection,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // USB Serial/JTAG ROM downloads do not disable the RTC watchdog when the
-    // stub is intentionally skipped. Match esptool/espflash's direct-ROM
-    // preparation so larger RAM images are not reset mid-transfer.
-    const WDT_WPROTECT: u32 = 0x6000_80B0;
-    const WDT_CONFIG0: u32 = 0x6000_8098;
-    const WDT_KEY: u32 = 0x50D8_3AA1;
-    connection.command(RomCommand::WriteReg {
-        address: WDT_WPROTECT,
-        value: WDT_KEY,
-        mask: None,
-    })?;
-    connection.command(RomCommand::WriteReg {
-        address: WDT_CONFIG0,
-        value: 0,
-        mask: None,
-    })?;
-    connection.command(RomCommand::WriteReg {
-        address: WDT_WPROTECT,
-        value: 0,
-        mask: None,
-    })?;
     Ok(())
 }
 
-fn ram_block_count(size: usize) -> usize {
-    let padding = 4 - size % 4;
-    (size + padding).div_ceil(ESP32S3_USB_RAM_BLOCK_SIZE)
+const RAM_INTERNAL_RANGES: &[(u64, u64)] = &[
+    (0x4037_8000, 0x403e_0000),
+    (0x3fc8_8000, 0x3fd0_0000),
+    (0x600f_e000, 0x6010_0000),
+    (0x5000_0000, 0x5000_2000),
+];
+
+fn ram_range_is_internal(start: u64, end: u64) -> bool {
+    RAM_INTERNAL_RANGES
+        .iter()
+        .any(|(range_start, range_end)| start >= *range_start && end <= *range_end)
+}
+
+fn ram_address_is_internal(address: u64) -> bool {
+    ram_range_is_internal(address, address.saturating_add(1))
+}
+
+fn ram_load_args(port: &str, elf: &Path) -> Vec<String> {
+    vec![
+        "flash".into(),
+        "--chip".into(),
+        "esp32s3".into(),
+        "--port".into(),
+        port.into(),
+        "--before".into(),
+        "usb-reset".into(),
+        "--after".into(),
+        "no-reset".into(),
+        "--non-interactive".into(),
+        "--no-stub".into(),
+        "--ram".into(),
+        elf.to_string_lossy().into_owned(),
+    ]
 }
 
 fn ram_download_preflight(port: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -395,6 +304,15 @@ fn ram_download_preflight(port: &str) -> Result<(), Box<dyn std::error::Error + 
             "RAM execution ROM preflight failed on {port}: {error}; no Flash fallback was attempted"
         )
     })?;
+    let chip = connection
+        .detect_chip(false)
+        .map_err(|error| format!("RAM execution requires ESP32-S3 chip detection: {error}"))?;
+    if chip != Chip::Esp32s3 {
+        return Err(format!(
+            "RAM execution requires ESP32-S3, ROM detected {chip:?}; no Flash fallback was attempted"
+        )
+        .into());
+    }
     let security = match connection.command(RomCommand::GetSecurityInfo)? {
         espflash::command::CommandResponseValue::Vector(bytes) => {
             SecurityInfo::try_from(bytes.as_slice())?
@@ -1040,11 +958,19 @@ mod tests {
     }
 
     #[test]
-    fn esp32s3_ram_loader_uses_usb_rom_block_size() {
-        assert_eq!(ESP32S3_USB_RAM_BLOCK_SIZE, 0x1800);
-        assert_eq!(ram_block_count(0), 1);
-        assert_eq!(ram_block_count(1), 1);
-        assert_eq!(ram_block_count(0x800), 1);
-        assert_eq!(ram_block_count(0x1801), 2);
+    fn ram_load_uses_pinned_espflash_rom_path() {
+        let args = ram_load_args("/dev/cu.test", Path::new("bringup.elf"));
+        assert_eq!(args.first().map(String::as_str), Some("flash"));
+        assert!(args.windows(2).any(|pair| pair == ["--ram", "bringup.elf"]));
+        assert!(args.iter().any(|value| value == "--no-stub"));
+        assert!(args.windows(2).any(|pair| pair == ["--chip", "esp32s3"]));
+    }
+
+    #[test]
+    fn ram_ranges_reject_flash_mapped_segments() {
+        assert!(ram_range_is_internal(0x4037_8000, 0x4037_9000));
+        assert!(ram_range_is_internal(0x3fc8_8000, 0x3fc8_9000));
+        assert!(!ram_range_is_internal(0x4200_0000, 0x4200_1000));
+        assert!(!ram_range_is_internal(0x3c00_0000, 0x3c00_1000));
     }
 }

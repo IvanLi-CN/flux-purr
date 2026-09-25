@@ -3545,6 +3545,7 @@ pub(crate) fn usb_recovery_response(
             "Thermal-model run snapshots are unavailable because hardware bring-up did not complete.",
             true,
         ),
+        Ok(UsbFrame::RamBringup { request_id, .. }) => product_ram_bringup_rejection(request_id),
         Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
             request_id,
             "unsupported_frame",

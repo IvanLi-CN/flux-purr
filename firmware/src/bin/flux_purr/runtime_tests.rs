@@ -2066,6 +2066,27 @@ fn product_ram_bringup_rejection_preserves_request_id() {
 }
 
 #[test]
+fn runtime_recovery_rejects_ram_bringup_frame_with_request_id() {
+    let response = usb_recovery_response(
+        r#"{"type":"ram_bringup","requestId":"ram-recovery","command":"test_adc"}"#,
+        &MemoryConfig::default(),
+        0,
+    );
+    match response {
+        UsbFrame::Response {
+            request_id,
+            ok: false,
+            error: Some(error),
+            ..
+        } => {
+            assert_eq!(request_id.as_str(), "ram-recovery");
+            assert_eq!(error.code.as_str(), "unsupported_frame");
+        }
+        other => panic!("unexpected runtime recovery response: {other:?}"),
+    }
+}
+
+#[test]
 fn early_usb_control_defers_runtime_status_until_main_loop() {
     let response = usb_early_response(
         r#"{"type":"request","requestId":"boot-status","op":"get_status"}"#,
@@ -4756,7 +4777,7 @@ fn boot_memory_future_is_heap_pinned_before_eeprom_initialization() {
 }
 
 #[test]
-fn runtime_synchronization_uses_normal_static_storage() {
+fn runtime_synchronization_uses_reinitializable_boot_storage() {
     let support = include_str!("support.rs");
     let pd_service = include_str!("pd_service.rs");
     let tasks = include_str!("tasks.rs");
@@ -4769,13 +4790,12 @@ fn runtime_synchronization_uses_normal_static_storage() {
         "runtime synchronization must not overwrite storage that the executor can retain"
     );
     assert!(
-        network.contains("use static_cell::StaticCell;")
-            && network.contains("static NET_RESOURCES: StaticCell<StackResources<8>>")
-            && network.contains("static WIFI_CONTROLLER: StaticCell<WifiController<'static>>")
+        network.contains("struct BootCell<T>")
+            && network.contains("static NET_RESOURCES: BootCell<StackResources<8>>")
+            && network.contains("static WIFI_CONTROLLER: BootCell<WifiController<'static>>")
             && !network.contains("ResettableStatic")
-            && !network.contains("initialize_after_software_reset")
             && !network.contains("reset_runtime_sync_state"),
-        "network runtime storage must remain one-time initialized because spawned WiFi tasks retain those references"
+        "network runtime storage must be explicitly reinitialized after a RAM bring-up reset"
     );
 }
 

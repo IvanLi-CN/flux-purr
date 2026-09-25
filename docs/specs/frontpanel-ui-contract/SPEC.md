@@ -234,9 +234,9 @@ None
 
 ## Verification
 
-- `VER-FP-001`: 固件单元测试与 preview 工具测试通过，covers: REQ-FP-001, REQ-FP-003。
+- `VER-FP-001`: 固件单元测试与 RAM Bring-up preview command tests 通过，covers: REQ-FP-001, REQ-FP-003。
 - `VER-FP-002`: 默认 framebuffer 与显式 `--theme light` framebuffer 像素完全一致，显式 `--theme dark` 输出不同，covers: REQ-FP-002。
-- `VER-FP-003`: `frontpanel_preview` 的 host tests 为全部已实现页面验证两套逻辑/面板 RGB565 帧；owner-facing PNG 是由同一 renderer 生成并经视觉证据门禁人工复核的跟踪资产，covers: REQ-FP-004。
+- `VER-FP-003`: `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 在设备上验证全部已实现页面的两套逻辑/面板 RGB565 帧；owner-facing PNG 是由同一 renderer 生成并经视觉证据门禁人工复核的跟踪资产，covers: REQ-FP-004。
 - `VER-FP-004`: 固件渲染测试覆盖全部温度调色板与温度带，验证 RGB565 饱和减 `4`、亮色右下 `1px` 阴影、前景覆盖顺序和暗色无阴影；Web 类型检查与 Storybook 状态验证每个调用点显式传入 `theme`，covers: REQ-FP-005, REQ-FP-006。
 
 ## Related ADRs
@@ -245,8 +245,8 @@ None
 
 ## Visual Evidence
 
-- 证据来源：固件 `frontpanel_preview` 的 `firmware_preview` renderer（`160×50` 逻辑像素，nearest-neighbor 放大展示）。
-- 绑定说明：以下图片由 host-side preview 直接复用固件字体、布局和状态 renderer；真机校准与最新 runtime 联动验证由 `frontpanel-input-interaction` 持续承接。
+- 证据来源：`flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 使用的 `firmware_preview` renderer（`160×50` 逻辑像素，nearest-neighbor 放大展示）。
+- 绑定说明：以下图片由 RAM Bring-up preview command 直接复用固件字体、布局和状态 renderer；真机校准与最新 runtime 联动验证由 `frontpanel-input-interaction` 持续承接。
 
 ### Screen renders
 
@@ -280,7 +280,7 @@ None
 
 #### EEPROM incompatible
 
-该画面由固件 `frontpanel_preview` 直接复用设备 renderer、字体与 `DisplayCanvas` 生成，默认使用亮色主题；同目录同时保存 `160×50 RGB565LE` logical framebuffer 与 GC9D01 Landscape panel framebuffer。
+该画面由 `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 直接复用设备 renderer、字体与 `DisplayCanvas` 生成，默认使用亮色主题；同目录同时保存 `160×50 RGB565LE` logical framebuffer 与 GC9D01 Landscape panel framebuffer。
 
 ![EEPROM incompatible fault screen](./assets/eeprom-data-incompatible/eeprom-data-incompatible.png)
 
@@ -302,7 +302,7 @@ None
 
 #### WiFi Info
 
-该证据由 host-side `frontpanel_preview` 复用固件 framebuffer renderer 生成，展示 runtime SSID、IPv4、RSSI 与配对码。
+该证据由 `flux-purr ram-run preview frontpanel --port <SERIAL_PORT>` 复用固件 framebuffer renderer 生成，展示 runtime SSID、IPv4、RSSI 与配对码。
 
 ![Front panel WiFi info](./assets/frontpanel-wifi-info.png)
 

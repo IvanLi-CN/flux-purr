@@ -20,3 +20,11 @@ cargo +esp build --locked \
   --release
 bash scripts/check-firmware-boot-stack.sh \
   firmware/target-no-net/xtensa-esp32s3-none-elf/release/flux-purr
+
+cargo +esp build --locked \
+  --package flux-purr-ram-bringup \
+  --target xtensa-esp32s3-none-elf \
+  --target-dir firmware/target \
+  --release
+bash scripts/check-ram-bringup-elf.sh \
+  firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup

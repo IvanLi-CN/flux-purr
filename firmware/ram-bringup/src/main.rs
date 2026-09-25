@@ -544,6 +544,17 @@ async fn run_command(state: &mut BringupState, usb: &mut UsbSerialJtag<'static, 
         start_fan_test(state, &request_id);
         return;
     }
+    if frame.theme.is_some()
+        && !matches!(
+            command,
+            RamBringupCommand::PreviewDisplay
+                | RamBringupCommand::PreviewFrontpanel
+                | RamBringupCommand::PreviewStatusLight
+        )
+    {
+        write_command_error(state, usb, &request_id, "theme_requires_preview");
+        return;
+    }
     let theme = frame.theme.unwrap_or(RamBringupTheme::Light);
     let outcome = match command {
         RamBringupCommand::TestAdc => execute_test_adc(state).await,
