@@ -726,12 +726,12 @@ fn open_ram_jsonl_serial(port: &str) -> io::Result<Box<dyn RamJsonlSerial>> {
         // serialport would toggle DTR on some macOS driver versions and reset
         // the target after a RAM load, so use the same raw non-blocking path as
         // the regular devd transport.
-        return File::options()
+        File::options()
             .read(true)
             .write(true)
             .custom_flags(0x0004)
             .open(port)
-            .map(|file| Box::new(file) as Box<dyn RamJsonlSerial>);
+            .map(|file| Box::new(file) as Box<dyn RamJsonlSerial>)
     }
 
     #[cfg(not(target_os = "macos"))]

@@ -468,6 +468,7 @@ pub(crate) type SnapshotReader =
     fn(&str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
 pub(crate) type RomProbe = fn(&str) -> bool;
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn direct_flash_with_program_inner(
     args: FlashArgs,
     program: &Path,
