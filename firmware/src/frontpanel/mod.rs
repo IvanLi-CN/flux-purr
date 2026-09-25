@@ -2346,7 +2346,6 @@ pub mod preview {
             state
         }
 
-        #[allow(clippy::too_many_lines)]
         pub fn build(self) -> FrontPanelUiState {
             match self {
                 Self::KeyTestIdle => FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest),
@@ -2355,6 +2354,33 @@ pub mod preview {
                     Self::key_test(RawFrontPanelKey::CenterBoot, KeyGesture::DoublePress)
                 }
                 Self::KeyTestLong => Self::key_test(RawFrontPanelKey::Down, KeyGesture::LongPress),
+                Self::Dashboard
+                | Self::DashboardReady
+                | Self::DashboardPowerWait
+                | Self::DashboardEepromRestore
+                | Self::DashboardManual
+                | Self::DashboardFanOff
+                | Self::DashboardFanAuto
+                | Self::DashboardFanRun
+                | Self::DashboardOvertempA
+                | Self::DashboardOvertempB
+                | Self::DashboardInitializing
+                | Self::DashboardInitialRtdFault
+                | Self::DashboardTemp => self.build_dashboard(),
+                Self::Menu
+                | Self::PresetTemp
+                | Self::ActiveCooling
+                | Self::WifiInfo
+                | Self::DeviceInfo
+                | Self::EepromDataIncompatible
+                | Self::EepromPersistenceFault
+                | Self::EepromPersistenceSaveFailed
+                | Self::EepromPersistenceAcknowledged => self.build_settings(),
+            }
+        }
+
+        fn build_dashboard(self) -> FrontPanelUiState {
+            match self {
                 Self::Dashboard | Self::DashboardReady => Self::base_dashboard(),
                 Self::DashboardPowerWait => {
                     let mut state = Self::base_dashboard();
@@ -2434,6 +2460,12 @@ pub mod preview {
                     state.current_temp_deci_c = 250;
                     state
                 }
+                _ => unreachable!("non-dashboard state passed to build_dashboard"),
+            }
+        }
+
+        fn build_settings(self) -> FrontPanelUiState {
+            match self {
                 Self::Menu => {
                     let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
                     state.route = FrontPanelRoute::Menu;
@@ -2496,6 +2528,7 @@ pub mod preview {
                     state.heater_lock_reason = Some(HeaterLockReason::PersistenceRequired);
                     state
                 }
+                _ => unreachable!("non-settings state passed to build_settings"),
             }
         }
     }
