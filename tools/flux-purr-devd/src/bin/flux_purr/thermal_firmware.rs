@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs, io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -61,6 +61,7 @@ pub(crate) async fn run_firmware_tuning(
     let candidate_hash = firmware_candidate_profile_hash(&candidate_profile)?;
     let lease = create_lease(client, &resolved).await?;
     let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let mut statuses = Vec::new();
     let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
         let start = match request_leased(
             client,
@@ -95,23 +96,23 @@ pub(crate) async fn run_firmware_tuning(
                     Some(json!({"op": "cancel"})),
                 )
                 .await;
-                return render_host_failure(
-                    &resolved.device,
-                    &args.output_root,
-                    args.bundle_dir.clone(),
-                    Some(&run_id),
-                    "pps5a",
-                    "start_not_confirmed",
-                    false,
-                    Some((&candidate_id, &candidate_hash, &candidate_profile)),
-                );
+                return render_host_failure(HostFailureInput {
+                    device_id: &resolved.device,
+                    output_root: &args.output_root,
+                    bundle_dir: args.bundle_dir.clone(),
+                    run_id: Some(&run_id),
+                    power_class: "pps5a",
+                    reason: "start_not_confirmed",
+                    no_device_command: false,
+                    attempted_candidate: Some((&candidate_id, &candidate_hash, &candidate_profile)),
+                });
             }
         };
 
         let deadline = Instant::now()
             + Duration::from_secs(args.per_target_budget_seconds.saturating_mul(9).max(60));
         let mut after_sequence = next_event_sequence(&start);
-        let mut statuses = vec![start];
+        statuses.push(start);
         loop {
             let mut read_body = json!({"op": "read"});
             if let Some(sequence) = after_sequence {
@@ -155,15 +156,16 @@ pub(crate) async fn run_firmware_tuning(
 
         let input_dir = args.output_root.join(&run_id);
         fs::create_dir_all(&input_dir)?;
-        write_v2_input(
-            &input_dir,
-            &resolved.device,
-            &run_id,
-            &candidate_id,
-            &candidate_hash,
-            &candidate_profile,
-            &statuses,
-        )?;
+        write_v2_input(V2Input {
+            input_dir: &input_dir,
+            device_id: &resolved.device,
+            run_id: &run_id,
+            candidate_id: &candidate_id,
+            candidate_hash: &candidate_hash,
+            candidate_profile: &candidate_profile,
+            statuses: &statuses,
+            host_interruption: None,
+        })?;
         let mut rendered =
             thermal_tuning_v2_report::render_v2_bundle(ThermalTuningV2ReportInput {
                 input_dir: input_dir.clone(),
@@ -173,8 +175,8 @@ pub(crate) async fn run_firmware_tuning(
         Ok(rendered)
     }
     .await;
-    if result.is_err() {
-        let _ = request_leased(
+    if result.is_err()
+        && let Ok(canceled) = request_leased(
             client,
             &resolved,
             &lease.lease_id,
@@ -182,24 +184,37 @@ pub(crate) async fn run_firmware_tuning(
             "/thermal-tuning",
             Some(json!({"op": "cancel"})),
         )
-        .await;
+        .await
+    {
+        statuses.push(canceled);
     }
+    let rendered = match result {
+        Ok(rendered) => Ok(rendered),
+        Err(_) if !statuses.is_empty() => render_interrupted_run(InterruptedRunInput {
+            device_id: &resolved.device,
+            output_root: &args.output_root,
+            bundle_dir: args.bundle_dir,
+            run_id: &run_id,
+            candidate_id: &candidate_id,
+            seed_candidate_hash: &candidate_hash,
+            candidate_profile: &candidate_profile,
+            statuses: &statuses,
+        }),
+        Err(_) => render_host_failure(HostFailureInput {
+            device_id: &resolved.device,
+            output_root: &args.output_root,
+            bundle_dir: args.bundle_dir,
+            run_id: Some(&run_id),
+            power_class: "pps5a",
+            reason: "transport_or_runtime_failure",
+            no_device_command: false,
+            attempted_candidate: Some((&candidate_id, &candidate_hash, &candidate_profile)),
+        }),
+    };
     let release_result = release_lease(client, &resolved.devd, &lease.lease_id).await;
     heartbeat.abort();
     release_result?;
-    match result {
-        Ok(rendered) => Ok(rendered),
-        Err(_) => render_host_failure(
-            &resolved.device,
-            &args.output_root,
-            args.bundle_dir,
-            Some(&run_id),
-            "pps5a",
-            "transport_or_runtime_failure",
-            false,
-            Some((&candidate_id, &candidate_hash, &candidate_profile)),
-        ),
-    }
+    rendered
 }
 
 pub(crate) async fn confirm_firmware_save(
@@ -277,15 +292,16 @@ pub(crate) async fn confirm_firmware_save(
         let candidate_profile = candidate
             .pointer("/profile/value")
             .ok_or("candidate profile missing from input")?;
-        write_v2_input(
-            &args.input_dir,
-            &resolved.device,
+        write_v2_input(V2Input {
+            input_dir: &args.input_dir,
+            device_id: &resolved.device,
             run_id,
             candidate_id,
             candidate_hash,
             candidate_profile,
-            &statuses,
-        )?;
+            statuses: &statuses,
+            host_interruption: None,
+        })?;
         let mut rendered =
             thermal_tuning_v2_report::render_v2_bundle(ThermalTuningV2ReportInput {
                 input_dir: args.input_dir.clone(),
@@ -359,28 +375,82 @@ fn render_unsupported_pps3a(
     output_root: &PathBuf,
     bundle_dir: Option<PathBuf>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    render_host_failure(
+    render_host_failure(HostFailureInput {
         device_id,
         output_root,
         bundle_dir,
-        None,
-        "pps3a",
-        "pps3a_not_supported",
-        true,
-        None,
-    )
+        run_id: None,
+        power_class: "pps3a",
+        reason: "pps3a_not_supported",
+        no_device_command: true,
+        attempted_candidate: None,
+    })
+}
+
+struct InterruptedRunInput<'a> {
+    device_id: &'a str,
+    output_root: &'a PathBuf,
+    bundle_dir: Option<PathBuf>,
+    run_id: &'a str,
+    candidate_id: &'a str,
+    seed_candidate_hash: &'a str,
+    candidate_profile: &'a Value,
+    statuses: &'a [Value],
+}
+
+fn render_interrupted_run(
+    input: InterruptedRunInput<'_>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let candidate_hash = input
+        .statuses
+        .last()
+        .and_then(|status| status.get("candidateHash"))
+        .and_then(Value::as_str)
+        .unwrap_or(input.seed_candidate_hash);
+    let input_dir = input.output_root.join(input.run_id);
+    fs::create_dir_all(&input_dir)?;
+    write_v2_input(V2Input {
+        input_dir: &input_dir,
+        device_id: input.device_id,
+        run_id: input.run_id,
+        candidate_id: input.candidate_id,
+        candidate_hash,
+        candidate_profile: input.candidate_profile,
+        statuses: input.statuses,
+        host_interruption: Some("transport_or_runtime_failure"),
+    })?;
+    let mut rendered = thermal_tuning_v2_report::render_v2_bundle(ThermalTuningV2ReportInput {
+        input_dir: input_dir.clone(),
+        output_dir: input.bundle_dir,
+    })?;
+    rendered["rawInputDir"] = json!(input_dir);
+    Ok(rendered)
+}
+
+struct HostFailureInput<'a> {
+    device_id: &'a str,
+    output_root: &'a Path,
+    bundle_dir: Option<PathBuf>,
+    run_id: Option<&'a str>,
+    power_class: &'a str,
+    reason: &'a str,
+    no_device_command: bool,
+    attempted_candidate: Option<(&'a str, &'a str, &'a Value)>,
 }
 
 fn render_host_failure(
-    device_id: &str,
-    output_root: &PathBuf,
-    bundle_dir: Option<PathBuf>,
-    run_id: Option<&str>,
-    power_class: &str,
-    reason: &str,
-    no_device_command: bool,
-    attempted_candidate: Option<(&str, &str, &Value)>,
+    input: HostFailureInput<'_>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let HostFailureInput {
+        device_id,
+        output_root,
+        bundle_dir,
+        run_id,
+        power_class,
+        reason,
+        no_device_command,
+        attempted_candidate,
+    } = input;
     let run_id = run_id
         .map(str::to_owned)
         .unwrap_or_else(|| format!("firmware-failed-{}", current_unix_millis()));
@@ -488,10 +558,10 @@ fn firmware_candidate_profile_value(profile: &Value) -> Value {
         "holdLeadTicks",
     ];
     for key in inherited {
-        if !settings.contains_key(key) {
-            if let Some(value) = first_point.and_then(|point| point.get(key)) {
-                settings.insert(key.to_string(), value.clone());
-            }
+        if !settings.contains_key(key)
+            && let Some(value) = first_point.and_then(|point| point.get(key))
+        {
+            settings.insert(key.to_string(), value.clone());
         }
     }
     let defaults = [
@@ -579,23 +649,41 @@ fn validate_firmware_args(
     Ok(())
 }
 
-fn write_v2_input(
-    input_dir: &PathBuf,
-    device_id: &str,
-    run_id: &str,
-    candidate_id: &str,
-    candidate_hash: &str,
-    candidate_profile: &Value,
-    statuses: &[Value],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+struct V2Input<'a> {
+    input_dir: &'a Path,
+    device_id: &'a str,
+    run_id: &'a str,
+    candidate_id: &'a str,
+    candidate_hash: &'a str,
+    candidate_profile: &'a Value,
+    statuses: &'a [Value],
+    host_interruption: Option<&'a str>,
+}
+
+fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let V2Input {
+        input_dir,
+        device_id,
+        run_id,
+        candidate_id,
+        candidate_hash,
+        candidate_profile,
+        statuses,
+        host_interruption,
+    } = input;
     let samples = collect_events(statuses, true);
     let ledger = collect_events(statuses, false);
     let (device_trace, device_trace_verification) = verify_device_trace(statuses);
-    let terminal = statuses
+    let device_terminal = statuses
         .last()
         .and_then(|status| status.get("terminalDisposition"))
         .and_then(Value::as_str)
         .unwrap_or("failed");
+    let terminal = if host_interruption.is_some() {
+        "failed"
+    } else {
+        device_terminal
+    };
     let outcome = if terminal == "passed" {
         "passed"
     } else {
@@ -660,7 +748,8 @@ fn write_v2_input(
         "targetSet": {"physicalC": targets, "selectedC": targets, "executionOrderC": execution_order},
         "qualificationScope": {"kind": "default-pps5a-full-batch", "targetCount": targets.len(), "diagnosticOnly": false},
         "terminalDisposition": terminal,
-        "reviewDisposition": statuses.last().and_then(|status| status.get("reviewDisposition")).cloned().unwrap_or_else(|| json!("review_incomplete")),
+        "reviewDisposition": if host_interruption.is_some() { json!("review_incomplete") } else { statuses.last().and_then(|status| status.get("reviewDisposition")).cloned().unwrap_or_else(|| json!("review_incomplete")) },
+        "hostInterruption": host_interruption.map(|reason| json!({"reason": reason, "lastDeviceTerminalDisposition": device_terminal, "deviceState": "unconfirmed"})),
         "deviceTrace": device_trace,
         "deviceTraceVerification": device_trace_verification,
         "reportRuns": report_runs,
@@ -994,56 +1083,13 @@ fn collect_events(statuses: &[Value], samples: bool) -> Vec<Value> {
             if is_sample != samples {
                 continue;
             }
-            if samples {
-                if let Some(sample) = event.get("sample") {
-                    let mut flat = sample.clone();
-                    if let Some(object) = flat.as_object_mut() {
-                        object.insert("kind".to_string(), json!("sample"));
-                        if !object.contains_key("sequence") {
-                            if let Some(sequence) = event.get("sequence") {
-                                object.insert("sequence".to_string(), sequence.clone());
-                            }
-                        }
-                        if let Some(contract) = object.remove("ppsContract") {
-                            object.insert(
-                                "ppsContractMv".to_string(),
-                                contract.get("voltageMv").cloned().unwrap_or(Value::Null),
-                            );
-                            object.insert(
-                                "ppsContractMa".to_string(),
-                                contract.get("currentMa").cloned().unwrap_or(Value::Null),
-                            );
-                            object.insert(
-                                "ppsContractKind".to_string(),
-                                contract.get("kind").cloned().unwrap_or(Value::Null),
-                            );
-                            object.insert(
-                                "ppsContractConfirmed".to_string(),
-                                contract.get("confirmed").cloned().unwrap_or(Value::Null),
-                            );
-                        }
-                        if !object.contains_key("ppsRequestedMv") {
-                            if let Some(requested) = object.remove("requestedMv") {
-                                object.insert("ppsRequestedMv".to_string(), requested);
-                            }
-                        }
-                        if !object.contains_key("pidPhase") {
-                            if let Some(phase) = object.get("phase").cloned() {
-                                object.insert("pidPhase".to_string(), phase);
-                            }
-                        }
-                    }
-                    events.push(flat);
-                }
+            let converted = if samples {
+                flatten_sample_event(event)
             } else {
-                let mut ledger = event.clone();
-                if let Some(object) = ledger.as_object_mut() {
-                    object.insert(
-                        "kind".to_string(),
-                        event.get("kind").cloned().unwrap_or(json!("safety")),
-                    );
-                }
-                events.push(ledger);
+                Some(flatten_ledger_event(event))
+            };
+            if let Some(converted) = converted {
+                events.push(converted);
             }
         }
     }
@@ -1055,6 +1101,53 @@ fn collect_events(statuses: &[Value], samples: bool) -> Vec<Value> {
     });
     events.dedup_by_key(|event| event.get("sequence").and_then(Value::as_u64));
     events
+}
+
+fn flatten_sample_event(event: &Value) -> Option<Value> {
+    let mut flat = event.get("sample")?.clone();
+    if let Some(object) = flat.as_object_mut() {
+        object.insert("kind".to_string(), json!("sample"));
+        if !object.contains_key("sequence")
+            && let Some(sequence) = event.get("sequence")
+        {
+            object.insert("sequence".to_string(), sequence.clone());
+        }
+        if let Some(contract) = object.remove("ppsContract") {
+            for (target, source) in [
+                ("ppsContractMv", "voltageMv"),
+                ("ppsContractMa", "currentMa"),
+                ("ppsContractKind", "kind"),
+                ("ppsContractConfirmed", "confirmed"),
+            ] {
+                object.insert(
+                    target.to_string(),
+                    contract.get(source).cloned().unwrap_or(Value::Null),
+                );
+            }
+        }
+        if !object.contains_key("ppsRequestedMv")
+            && let Some(requested) = object.remove("requestedMv")
+        {
+            object.insert("ppsRequestedMv".to_string(), requested);
+        }
+        if !object.contains_key("pidPhase")
+            && let Some(phase) = object.get("phase").cloned()
+        {
+            object.insert("pidPhase".to_string(), phase);
+        }
+    }
+    Some(flat)
+}
+
+fn flatten_ledger_event(event: &Value) -> Value {
+    let mut ledger = event.clone();
+    if let Some(object) = ledger.as_object_mut() {
+        object.insert(
+            "kind".to_string(),
+            event.get("kind").cloned().unwrap_or(json!("safety")),
+        );
+    }
+    ledger
 }
 
 fn write_ndjson(
@@ -1073,9 +1166,10 @@ fn write_ndjson(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_stream_caught_up, firmware_candidate_profile_hash, firmware_candidate_profile_value,
-        next_event_sequence, render_host_failure, render_unsupported_pps3a,
-        trial_events_for_target, validate_save_input, verify_device_trace,
+        InterruptedRunInput, event_stream_caught_up, firmware_candidate_profile_hash,
+        firmware_candidate_profile_value, next_event_sequence, render_host_failure,
+        render_interrupted_run, render_unsupported_pps3a, trial_events_for_target,
+        validate_save_input, verify_device_trace,
     };
     use flux_purr_firmware::{
         control_plane::ThermalControlProfileWire,
@@ -1132,6 +1226,57 @@ mod tests {
         });
         assert!(!event_stream_caught_up(&terminal_with_backlog, Some(7)));
         assert!(event_stream_caught_up(&terminal_with_backlog, Some(12)));
+    }
+
+    #[test]
+    fn interrupted_run_keeps_collected_device_samples_and_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_root = dir.path().join("input");
+        let report_dir = dir.path().join("report");
+        let statuses = vec![json!({
+            "terminalDisposition": "running",
+            "reviewDisposition": "pending",
+            "candidateHash": "hash-device",
+            "trace": {"firstSequence": 0, "lastSequence": 0, "complete": false, "gap": false, "digest": "unconfirmed"},
+            "events": {"events": [{
+                "sequence": 0, "elapsedMs": 0, "kind": "sample", "phase": "warmup",
+                "targetC": 60, "trialIndex": 0, "reason": null, "trial": null, "decision": null,
+                "sample": {
+                    "sequence": 0, "elapsedMs": 0, "targetC": 60, "trialIndex": 0,
+                    "candidateId": "candidate-1", "candidateHash": "hash-device",
+                    "temperatureCentiC": 3500, "vinMv": 12000,
+                    "ppsContract": {"voltageMv": 12000, "currentMa": 5000, "kind": "pps5a", "confirmed": true},
+                    "requestedMv": 12000, "ppsPowerCeilingMv": 21000,
+                    "heaterRequestedOutputPermille": 1000, "heaterOutputPermille": 980,
+                    "measurementValid": true, "phase": "warmup"
+                }
+            }]}
+        })];
+        let rendered = render_interrupted_run(InterruptedRunInput {
+            device_id: "device-1",
+            output_root: &output_root,
+            bundle_dir: Some(report_dir.clone()),
+            run_id: "run-1",
+            candidate_id: "candidate-1",
+            seed_candidate_hash: "hash-seed",
+            candidate_profile: &json!({"settings": null, "points": []}),
+            statuses: &statuses,
+        })
+        .unwrap();
+
+        let bundle: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(report_dir.join("run.bundle.json")).unwrap())
+                .unwrap();
+        let samples = std::fs::read_to_string(report_dir.join("samples.ndjson")).unwrap();
+        assert_eq!(rendered["ownerOutcome"], "failed");
+        assert_eq!(bundle["terminalDisposition"], "failed");
+        assert_eq!(bundle["reviewDisposition"], "review_incomplete");
+        assert_eq!(
+            bundle["hostInterruption"]["lastDeviceTerminalDisposition"],
+            "running"
+        );
+        assert_eq!(bundle["candidate"]["candidateHash"], "hash-device");
+        assert!(samples.contains("\"temperatureCentiC\":3500"));
     }
 
     #[test]
@@ -1225,16 +1370,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let report_dir = dir.path().join("report");
         let profile = json!({"points": []});
-        let result = render_host_failure(
-            "test-device",
-            &dir.path().join("input"),
-            Some(report_dir.clone()),
-            Some("attempted-run"),
-            "pps5a",
-            "start_not_confirmed",
-            false,
-            Some(("attempted-candidate", "sha256:attempted", &profile)),
-        )
+        let result = render_host_failure(super::HostFailureInput {
+            device_id: "test-device",
+            output_root: &dir.path().join("input"),
+            bundle_dir: Some(report_dir.clone()),
+            run_id: Some("attempted-run"),
+            power_class: "pps5a",
+            reason: "start_not_confirmed",
+            no_device_command: false,
+            attempted_candidate: Some(("attempted-candidate", "sha256:attempted", &profile)),
+        })
         .unwrap();
         assert_eq!(result["ownerOutcome"], "failed");
         assert_eq!(result["trace"]["complete"], false);
