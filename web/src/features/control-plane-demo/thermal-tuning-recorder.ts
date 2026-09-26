@@ -1,0 +1,57 @@
+import type { ThermalTuningEvent, ThermalTuningStatus } from './contracts'
+
+export interface ThermalTuningRecording {
+  runId: string | null
+  status: ThermalTuningStatus
+  events: ThermalTuningEvent[]
+  acknowledgedThrough: number | null
+  gap: boolean
+  gapReason: string | null
+  complete: boolean
+}
+
+export function recordThermalTuningPage(
+  previous: ThermalTuningRecording | null,
+  status: ThermalTuningStatus
+): ThermalTuningRecording {
+  const sameRun = previous?.runId === status.runId
+  const events = sameRun ? [...previous.events] : []
+  let gap = (sameRun && previous.gap) || status.trace.gap
+  let gapReason = sameRun ? previous.gapReason : null
+  if (status.trace.gap) gapReason ??= 'device_trace_gap'
+
+  for (const event of status.events.events) {
+    const existing = events.find((item) => item.sequence === event.sequence)
+    if (existing) {
+      if (JSON.stringify(existing) !== JSON.stringify(event)) {
+        gap = true
+        gapReason ??= 'conflicting_event_sequence'
+      }
+      continue
+    }
+    const expected = events.length === 0 ? 0 : events[events.length - 1].sequence + 1
+    if (event.sequence !== expected) {
+      gap = true
+      gapReason ??= 'missing_event_sequence'
+      break
+    }
+    events.push(event)
+  }
+
+  const acknowledgedThrough = gap ? null : (events.at(-1)?.sequence ?? null)
+  const complete =
+    !gap &&
+    status.trace.complete &&
+    status.trace.firstSequence === 0 &&
+    acknowledgedThrough === status.trace.lastSequence &&
+    (status.events.nextSequence == null || status.events.nextSequence === acknowledgedThrough)
+  return {
+    runId: status.runId,
+    status,
+    events,
+    acknowledgedThrough,
+    gap,
+    gapReason,
+    complete,
+  }
+}
