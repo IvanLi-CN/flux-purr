@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 
 const DATA_PLACEHOLDER: &str = "__THERMAL_TUNING_V2_DATA__";
 const REPORT_TEMPLATE: &str = include_str!("thermal_tuning_v2_report_template.html");
+const PPS_ABSOLUTE_MIN_MV: u64 = 5_000;
+const PPS_ABSOLUTE_MAX_MV: u64 = 28_000;
 const ALLOWED_EVENT_KINDS: &[&str] = &[
     "sample",
     "phase_transition",
@@ -40,12 +42,12 @@ const REQUIRED_SAMPLE_FIELDS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone)]
-pub(super) struct ThermalTuningV2ReportInput {
-    pub(super) input_dir: PathBuf,
-    pub(super) output_dir: Option<PathBuf>,
+pub(crate) struct ThermalTuningV2ReportInput {
+    pub(crate) input_dir: PathBuf,
+    pub(crate) output_dir: Option<PathBuf>,
 }
 
-pub(super) fn render_v2_bundle(
+pub(crate) fn render_v2_bundle(
     input: ThermalTuningV2ReportInput,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let input_dir = absolute_path(&input.input_dir)?;
@@ -69,7 +71,7 @@ pub(super) fn render_v2_bundle(
     validate_bundle(&bundle)?;
     validate_candidate(&bundle, &candidate)?;
 
-    let event_audit = audit_events(&samples, &ledger);
+    let event_audit = audit_events(&bundle, &samples, &ledger);
     let report_runs = normalized_report_runs(&bundle, &samples)?;
     bundle["reportRuns"] = Value::Array(report_runs.clone());
     bundle["rawRuns"] = bundle
@@ -92,30 +94,15 @@ pub(super) fn render_v2_bundle(
             && run.get("reviewPassed").and_then(Value::as_bool) == Some(true)
     });
     let trace_complete = event_audit.trace.get("complete").and_then(Value::as_bool) == Some(true);
-    if trace_complete && all_runs_passed {
-        if bundle
-            .get("reviewDisposition")
-            .and_then(Value::as_str)
-            .is_none()
-        {
-            bundle["reviewDisposition"] = json!("passed");
-        }
-        if bundle
-            .get("terminalDisposition")
-            .and_then(Value::as_str)
-            .is_none()
-        {
-            bundle["terminalDisposition"] = json!("completed");
-        }
-    } else {
+    let promotion_verified = candidate_promotion_verified(&bundle, &candidate);
+    let qualified = trace_complete
+        && all_runs_passed
+        && promotion_verified
+        && bundle.get("terminalDisposition").and_then(Value::as_str) == Some("passed");
+    if !qualified {
         bundle["reviewDisposition"] = json!("review_incomplete");
-        bundle["terminalDisposition"] = json!("failed");
     }
-    bundle["ownerOutcome"] = json!(if trace_complete && all_runs_passed {
-        "passed"
-    } else {
-        "failed"
-    });
+    bundle["ownerOutcome"] = json!(if qualified { "passed" } else { "failed" });
 
     fs::create_dir_all(&output_dir)?;
     let samples_bytes = ndjson_bytes(&samples)?;
@@ -179,16 +166,89 @@ pub(super) fn render_v2_bundle(
     }))
 }
 
+fn candidate_promotion_verified(bundle: &Value, candidate: &Value) -> bool {
+    if bundle.get("engine").and_then(Value::as_str) != Some("firmware")
+        || candidate
+            .pointer("/promotion/state")
+            .and_then(Value::as_str)
+            != Some("saved")
+        || bundle
+            .pointer("/candidate/promotionState")
+            .and_then(Value::as_str)
+            != Some("saved")
+        || candidate.pointer("/profile/bank").and_then(Value::as_str) != Some("pps5a")
+    {
+        return false;
+    }
+    let run_id = bundle.get("runId").and_then(Value::as_str);
+    let candidate_id = candidate.get("candidateId").and_then(Value::as_str);
+    let candidate_hash = candidate.get("candidateHash").and_then(Value::as_str);
+    let power_class = bundle.get("powerClass").and_then(Value::as_str);
+    if candidate_id.is_none()
+        || candidate_hash.is_none()
+        || candidate_id
+            != bundle
+                .pointer("/candidate/candidateId")
+                .and_then(Value::as_str)
+        || candidate_hash
+            != bundle
+                .pointer("/candidate/candidateHash")
+                .and_then(Value::as_str)
+        || power_class != Some("pps5a")
+    {
+        return false;
+    }
+    let preview = &candidate["promotion"]["previewReceipt"];
+    let save = &candidate["promotion"]["saveReceipt"];
+    for receipt in [preview, save] {
+        if receipt.get("runId").and_then(Value::as_str) != run_id
+            || receipt.get("candidateId").and_then(Value::as_str) != candidate_id
+            || receipt.get("candidateHash").and_then(Value::as_str) != candidate_hash
+            || receipt.get("powerClass").and_then(Value::as_str) != power_class
+        {
+            return false;
+        }
+    }
+    preview.get("ramAppliedHash").and_then(Value::as_str) == candidate_hash
+        && save.get("bank").and_then(Value::as_str) == Some("pps5a")
+        && save.get("bankRevision").and_then(Value::as_u64).is_some()
+        && save.get("bankHash").and_then(Value::as_str) == candidate_hash
+        && save.get("atomic").and_then(Value::as_bool) == Some(true)
+        && save.get("readbackVerified").and_then(Value::as_bool) == Some(true)
+}
+
 #[derive(Debug)]
 struct EventAudit {
     trace: Value,
     counts: Value,
 }
 
-fn audit_events(samples: &[Value], ledger: &[Value]) -> EventAudit {
+fn audit_events(bundle: &Value, samples: &[Value], ledger: &[Value]) -> EventAudit {
     let mut by_sequence = BTreeMap::<u64, Value>::new();
     let mut counts = BTreeMap::<String, usize>::new();
     let mut reasons = Vec::<String>::new();
+    let host_preflight_3a = bundle.get("traceOrigin").and_then(Value::as_str)
+        == Some("host_preflight")
+        && bundle.get("powerClass").and_then(Value::as_str) == Some("pps3a")
+        && samples.is_empty()
+        && ledger.len() == 1
+        && ledger[0].get("kind").and_then(Value::as_str) == Some("safety")
+        && ledger[0].get("reason").and_then(Value::as_str) == Some("pps3a_not_supported");
+    if bundle.get("engine").and_then(Value::as_str) == Some("firmware") && !host_preflight_3a {
+        if bundle
+            .pointer("/deviceTraceVerification/verified")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            reasons.push("firmware device trace was not verified".to_string());
+        }
+    }
+    let apdo_max_mv = bundle
+        .pointer("/ppsVoltageBounds/apdoMaxMv")
+        .and_then(Value::as_u64);
+    let absolute_max_mv = bundle
+        .pointer("/ppsVoltageBounds/absoluteMaxMv")
+        .and_then(Value::as_u64);
     for (stream, events) in [
         ("samples.ndjson", samples),
         ("decision-ledger.ndjson", ledger),
@@ -237,11 +297,38 @@ fn audit_events(samples: &[Value], ledger: &[Value]) -> EventAudit {
                 {
                     reasons.push(format!("sequence {sequence} invalid heaterOutputPermille"));
                 }
+                let ceiling_mv = object.get("ppsPowerCeilingMv").and_then(Value::as_u64);
+                let requested_mv = object.get("ppsRequestedMv").and_then(Value::as_u64);
+                if !matches!(
+                    (ceiling_mv, requested_mv),
+                    (Some(ceiling), Some(requested))
+                        if (PPS_ABSOLUTE_MIN_MV..=PPS_ABSOLUTE_MAX_MV).contains(&ceiling)
+                            && requested <= ceiling
+                            && apdo_max_mv.is_none_or(|apdo_max| ceiling == apdo_max)
+                            && absolute_max_mv.is_none_or(|absolute_max| ceiling <= absolute_max)
+                ) {
+                    reasons.push(format!(
+                        "sequence {sequence} invalid PPS request voltage ceiling (mV)"
+                    ));
+                }
             }
         }
     }
     let first = by_sequence.keys().next().copied();
     let last = by_sequence.keys().next_back().copied();
+    if bundle.get("engine").and_then(Value::as_str) == Some("firmware")
+        && !host_preflight_3a
+        && (first
+            != bundle
+                .pointer("/deviceTrace/firstSequence")
+                .and_then(Value::as_u64)
+            || last
+                != bundle
+                    .pointer("/deviceTrace/lastSequence")
+                    .and_then(Value::as_u64))
+    {
+        reasons.push("report event range does not match verified device trace".to_string());
+    }
     if first != Some(0) {
         reasons.push("sequence does not start at zero".to_string());
     }
@@ -566,6 +653,85 @@ mod tests {
     }
 
     #[test]
+    fn missing_save_receipt_fails_without_rewriting_device_terminal_fact() {
+        let dir = tempdir().unwrap();
+        write_fixture(dir.path());
+        let candidate_path = dir.path().join("thermal-profile.candidate.json");
+        let mut candidate = read_json(&candidate_path).unwrap();
+        candidate["promotion"]["saveReceipt"] = Value::Null;
+        fs::write(
+            &candidate_path,
+            serde_json::to_vec_pretty(&candidate).unwrap(),
+        )
+        .unwrap();
+
+        let output = dir.path().join("out");
+        let result = render_v2_bundle(ThermalTuningV2ReportInput {
+            input_dir: dir.path().to_path_buf(),
+            output_dir: Some(output.clone()),
+        })
+        .unwrap();
+        assert_eq!(result["ownerOutcome"], "failed");
+        let bundle = read_json(&output.join("run.bundle.json")).unwrap();
+        assert_eq!(bundle["terminalDisposition"], "passed");
+        assert_eq!(bundle["reviewDisposition"], "review_incomplete");
+    }
+
+    #[test]
+    fn rejects_contract_power_milliwatts_as_voltage_ceiling() {
+        let dir = tempdir().unwrap();
+        write_fixture(dir.path());
+        let bundle_path = dir.path().join("run.bundle.json");
+        let mut input_bundle = read_json(&bundle_path).unwrap();
+        input_bundle["ppsVoltageBounds"]["absoluteMaxMv"] = Value::Null;
+        input_bundle["ppsVoltageBounds"]["apdoMaxMv"] = Value::Null;
+        fs::write(&bundle_path, serde_json::to_vec(&input_bundle).unwrap()).unwrap();
+        let samples_path = dir.path().join("samples.ndjson");
+        let mut sample: Value =
+            serde_json::from_str(&fs::read_to_string(&samples_path).unwrap()).unwrap();
+        sample["ppsPowerCeilingMv"] = json!(105_000);
+        fs::write(&samples_path, format!("{sample}\n")).unwrap();
+
+        let result = render_v2_bundle(ThermalTuningV2ReportInput {
+            input_dir: dir.path().to_path_buf(),
+            output_dir: Some(dir.path().join("out")),
+        })
+        .unwrap();
+        assert_eq!(result["ownerOutcome"], "failed");
+        let bundle = read_json(&dir.path().join("out/run.bundle.json")).unwrap();
+        assert_eq!(bundle["reviewDisposition"], "review_incomplete");
+        assert!(
+            result["trace"]["gap"]["details"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|detail| detail
+                    .as_str()
+                    .unwrap()
+                    .contains("PPS request voltage ceiling"))
+        );
+    }
+
+    #[test]
+    fn accepts_valid_voltage_ceiling_when_device_bounds_are_unavailable() {
+        let dir = tempdir().unwrap();
+        write_fixture(dir.path());
+        let bundle_path = dir.path().join("run.bundle.json");
+        let mut input_bundle = read_json(&bundle_path).unwrap();
+        input_bundle["ppsVoltageBounds"]["absoluteMaxMv"] = Value::Null;
+        input_bundle["ppsVoltageBounds"]["apdoMaxMv"] = Value::Null;
+        fs::write(&bundle_path, serde_json::to_vec(&input_bundle).unwrap()).unwrap();
+
+        let result = render_v2_bundle(ThermalTuningV2ReportInput {
+            input_dir: dir.path().to_path_buf(),
+            output_dir: Some(dir.path().join("out")),
+        })
+        .unwrap();
+        assert_eq!(result["ownerOutcome"], "passed");
+        assert_eq!(result["trace"]["complete"], true);
+    }
+
+    #[test]
     fn embeds_json_without_mutating_report_string_values() {
         let html = render_html(&json!({"value": "a&b < c \"quoted\""})).unwrap();
         assert!(html.contains("a\\u0026b \\u003c c \\\"quoted\\\""));
@@ -593,6 +759,8 @@ mod tests {
                 "device": {"id": "mock-device"},
                 "firmware": {"version": "mock-fw"},
                 "powerClass": "pps5a",
+                "candidate": {"candidateId": "candidate-60", "candidateHash": "sha256:mock", "promotionState": "saved"},
+                "ppsVoltageBounds": {"absoluteMaxMv": 28000, "apdoMaxMv": 21000},
                 "targetSet": {"physicalC": [60], "selectedC": [60], "executionOrderC": [60]},
                 "reportRuns": [{
                     "targetC": 60,
@@ -603,8 +771,10 @@ mod tests {
                     "metrics": {"maxOvershootC": 1.1, "holdPeakToPeakC": 1.2, "holdConfirmSeconds": 60},
                     "trials": [{"trialIndex": 1, "disposition": "adopted", "maxOvershootC": 1.1, "holdPeakToPeakC": 1.2}]
                 }],
-                "terminalDisposition": "completed",
-                "reviewDisposition": "passed"
+                "terminalDisposition": "passed",
+                "reviewDisposition": "passed",
+                "deviceTrace": {"firstSequence": 0, "lastSequence": 1, "complete": true, "gap": false, "digest": "mock-fixture"},
+                "deviceTraceVerification": {"verified": true, "source": "mock-fixture", "reasons": []}
             }))
             .unwrap(),
         )
@@ -612,14 +782,20 @@ mod tests {
         fs::write(
             dir.join("thermal-profile.candidate.json"),
             serde_json::to_vec_pretty(&json!({
-                "schema": "thermal-tuning-v2", "runId": "mock-run", "candidateId": "candidate-60", "candidateHash": "sha256:mock", "promotion": {"state": "sealed"}, "profile": {"targetC": 60}
+                "schema": "thermal-tuning-v2", "runId": "mock-run", "candidateId": "candidate-60", "candidateHash": "sha256:mock",
+                "promotion": {
+                    "state": "saved",
+                    "previewReceipt": {"runId": "mock-run", "candidateId": "candidate-60", "candidateHash": "sha256:mock", "powerClass": "pps5a", "ramAppliedHash": "sha256:mock"},
+                    "saveReceipt": {"runId": "mock-run", "candidateId": "candidate-60", "candidateHash": "sha256:mock", "powerClass": "pps5a", "bank": "pps5a", "bankRevision": 1, "bankHash": "sha256:mock", "atomic": true, "readbackVerified": true}
+                },
+                "profile": {"bank": "pps5a", "targetC": 60}
             }))
             .unwrap(),
         )
         .unwrap();
         fs::write(
             dir.join("samples.ndjson"),
-            "{\"sequence\":0,\"elapsedMs\":0,\"kind\":\"sample\",\"targetC\":60,\"trialIndex\":1,\"candidateId\":\"candidate-60\",\"candidateHash\":\"sha256:mock\",\"temperatureCentiC\":3500,\"vinMv\":12000,\"ppsContractMv\":21000,\"ppsContractMa\":5000,\"ppsContractKind\":\"pps\",\"ppsContractConfirmed\":true,\"ppsRequestedMv\":21000,\"ppsPowerCeilingMv\":105000,\"heaterRequestedOutputPermille\":1000,\"heaterOutputPermille\":980,\"measurementValid\":true,\"phase\":\"warmup\"}\n",
+            "{\"sequence\":0,\"elapsedMs\":0,\"kind\":\"sample\",\"targetC\":60,\"trialIndex\":1,\"candidateId\":\"candidate-60\",\"candidateHash\":\"sha256:mock\",\"temperatureCentiC\":3500,\"vinMv\":12000,\"ppsContractMv\":21000,\"ppsContractMa\":5000,\"ppsContractKind\":\"pps\",\"ppsContractConfirmed\":true,\"ppsRequestedMv\":21000,\"ppsPowerCeilingMv\":21000,\"heaterRequestedOutputPermille\":1000,\"heaterOutputPermille\":980,\"measurementValid\":true,\"phase\":\"warmup\"}\n",
         )
         .unwrap();
         fs::write(

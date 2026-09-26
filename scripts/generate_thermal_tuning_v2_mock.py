@@ -20,6 +20,7 @@ RUN_ID = "mock-firmware-v2-realistic-pps5a-20260925"
 DEVICE_ID = "mock-device-pps5a-thermal-bench-01"
 FIRMWARE_VERSION = "mock-firmware-v2.0.0+thermal"
 PPS_POLICY = "pps-policy-v2"
+APDO_MAX_MV = 28000
 
 
 def digest(value: object) -> str:
@@ -170,7 +171,7 @@ def realistic_sample(
         "ppsContractKind": "pps",
         "ppsContractConfirmed": True,
         "ppsRequestedMv": requested_mv,
-        "ppsPowerCeilingMv": contract_mv * 5,
+        "ppsPowerCeilingMv": APDO_MAX_MV,
         "heaterRequestedOutputPermille": max(0, min(1000, logical)),
         "heaterOutputPermille": max(0, min(1000, mos_pwm)),
         "measurementValid": True,
@@ -309,6 +310,12 @@ def build_bundle(output_dir: Path) -> None:
 
     candidate_points = [candidate_point(target) for target in TARGETS]
     candidate_id, candidate_hash, _ = candidate_identity(60, 1)
+    receipt_identity = {
+        "runId": RUN_ID,
+        "candidateId": candidate_id,
+        "candidateHash": candidate_hash,
+        "powerClass": "pps5a",
+    }
     candidate = {
         "schema": "thermal-tuning-v2",
         "runId": RUN_ID,
@@ -317,11 +324,20 @@ def build_bundle(output_dir: Path) -> None:
         "powerClass": "pps5a",
         "profile": {"bank": "pps5a", "points": candidate_points},
         "promotion": {
-            "state": "sealed",
-            "preview": {"status": "applied", "ramAppliedHash": candidate_hash},
-            "save": {
-                "status": "not_saved",
-                "reason": "mock report does not claim an EEPROM write",
+            "state": "saved",
+            "previewReceipt": {
+                **receipt_identity,
+                "ramAppliedHash": candidate_hash,
+                "evidenceSource": "mock-local-recorder",
+            },
+            "saveReceipt": {
+                **receipt_identity,
+                "bank": "pps5a",
+                "bankRevision": 17,
+                "bankHash": candidate_hash,
+                "atomic": True,
+                "readbackVerified": True,
+                "evidenceSource": "mock-local-recorder",
             },
         },
     }
@@ -394,6 +410,7 @@ def build_bundle(output_dir: Path) -> None:
             )
             ledger_sequence += 1
 
+    all_events = sorted(samples + ledger, key=lambda event: event["sequence"])
     bundle = {
         "schema": "thermal-tuning-v2",
         "runId": RUN_ID,
@@ -408,7 +425,7 @@ def build_bundle(output_dir: Path) -> None:
             "absoluteMaxMv": 28000,
             "policyFloorMv": 12000,
             "apdoMinMv": 5000,
-            "apdoMaxMv": 28000,
+            "apdoMaxMv": APDO_MAX_MV,
         },
         "targetSet": {
             "physicalC": TARGETS,
@@ -420,18 +437,30 @@ def build_bundle(output_dir: Path) -> None:
             "targetCount": len(TARGETS),
             "diagnosticOnly": False,
         },
-        "terminalDisposition": "completed",
+        "terminalDisposition": "passed",
         "reviewDisposition": "passed",
+        "deviceTrace": {
+            "firstSequence": all_events[0]["sequence"],
+            "lastSequence": all_events[-1]["sequence"],
+            "complete": True,
+            "gap": False,
+            "digest": digest(all_events),
+        },
+        "deviceTraceVerification": {
+            "verified": True,
+            "source": "mock_fixture_synthetic",
+            "reasons": [],
+        },
         "generatedAt": "2026-09-25T08:00:00Z",
         "candidate": {
             "candidateId": candidate_id,
             "candidateHash": candidate_hash,
             "powerClass": "pps5a",
-            "promotionState": "sealed",
+            "promotionState": "saved",
         },
         "referenceComparison": {
             "fixture": "external-5a-conformance-v1",
-            "status": "matched",
+            "status": "mock_not_verified",
             "algorithmCopied": False,
         },
         "capability": {
