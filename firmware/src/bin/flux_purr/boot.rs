@@ -81,7 +81,7 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) calibration_runtime_state: CalibrationRuntimeState,
     pub(crate) thermal_plant_workspace: &'static mut CalibrationThermalPlantWorkspace,
     pub(crate) thermal_control_profile_preview: Option<ThermalControlProfile>,
-    pub(crate) thermal_tuning: flux_purr_firmware::thermal_tuning::ThermalTuningRuntime,
+    pub(crate) thermal_tuning: Box<flux_purr_firmware::thermal_tuning::ThermalTuningRuntime>,
     pub(crate) heater_power_backend: HeaterPowerBackend,
     pub(crate) hold_pps_governor: HoldPpsGovernor,
     pub(crate) heater_controller: HeaterController,
@@ -138,6 +138,9 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) next_ui_refresh_ms: u64,
     pub(crate) suppress_pairing_input_until_released: bool,
 }
+
+#[cfg(target_arch = "xtensa")]
+const _: () = assert!(core::mem::size_of::<RuntimeLoopState>() <= 48 * 1024);
 
 #[cfg(target_arch = "xtensa")]
 macro_rules! assemble_runtime_loop {
@@ -369,7 +372,7 @@ pub(crate) struct BootRuntimeState {
     calibration_runtime_state: CalibrationRuntimeState,
     thermal_plant_workspace: &'static mut CalibrationThermalPlantWorkspace,
     thermal_control_profile_preview: Option<ThermalControlProfile>,
-    thermal_tuning: flux_purr_firmware::thermal_tuning::ThermalTuningRuntime,
+    thermal_tuning: Box<flux_purr_firmware::thermal_tuning::ThermalTuningRuntime>,
     heater_power_backend: HeaterPowerBackend,
     hold_pps_governor: HoldPpsGovernor,
     heater_controller: HeaterController,
@@ -414,6 +417,9 @@ pub(crate) struct BootRuntimeState {
 }
 
 #[cfg(target_arch = "xtensa")]
+const _: () = assert!(core::mem::size_of::<BootRuntimeState>() <= 48 * 1024);
+
+#[cfg(target_arch = "xtensa")]
 static mut THERMAL_PLANT_WORKSPACE_STORAGE: MaybeUninit<CalibrationThermalPlantWorkspace> =
     MaybeUninit::uninit();
 
@@ -425,6 +431,17 @@ fn new_thermal_plant_workspace() -> &'static mut CalibrationThermalPlantWorkspac
             CalibrationThermalPlantWorkspace::default(),
         )
     }
+}
+
+#[cfg(target_arch = "xtensa")]
+#[inline(never)]
+fn new_thermal_tuning_runtime() -> Box<flux_purr_firmware::thermal_tuning::ThermalTuningRuntime> {
+    // Display initialization registers PSRAM before this large object is allocated.
+    let storage = Box::<flux_purr_firmware::thermal_tuning::ThermalTuningRuntime>::new_uninit();
+    Box::write(
+        storage,
+        flux_purr_firmware::thermal_tuning::ThermalTuningRuntime::new(),
+    )
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -567,7 +584,7 @@ impl BootRuntimeState {
                 calibration_runtime_state: CalibrationRuntimeState::default(),
                 thermal_plant_workspace: new_thermal_plant_workspace(),
                 thermal_control_profile_preview: None,
-                thermal_tuning: flux_purr_firmware::thermal_tuning::ThermalTuningRuntime::new(),
+                thermal_tuning: new_thermal_tuning_runtime(),
                 heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
                     reason: HeaterPowerBackendReason::CapabilityReadFailed,
                     fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
