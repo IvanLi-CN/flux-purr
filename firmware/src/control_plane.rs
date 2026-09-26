@@ -1102,6 +1102,7 @@ pub const THERMAL_TUNING_HASH_MAX_LEN: usize = 71;
 #[serde(rename_all = "camelCase")]
 pub struct ThermalTuningStatusWire {
     pub phase: crate::thermal_tuning::ThermalTuningPhase,
+    pub trial_purpose: crate::thermal_tuning::ThermalTuningTrialPurpose,
     pub terminal_disposition: ThermalTuningTerminalDisposition,
     pub review_disposition: ThermalTuningReviewDisposition,
     pub power_class: Option<ThermalTuningPowerClass>,

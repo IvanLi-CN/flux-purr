@@ -1413,6 +1413,7 @@ fn thermal_tuning_status(
     let events = runtime.events_after(after_sequence);
     flux_purr_firmware::control_plane::ThermalTuningStatusWire {
         phase: runtime.phase,
+        trial_purpose: runtime.trial_purpose,
         terminal_disposition: runtime.terminal_disposition,
         review_disposition: runtime.review_disposition,
         power_class: runtime.power_class,

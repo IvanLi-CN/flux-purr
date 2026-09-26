@@ -11,7 +11,7 @@
 - A tuning run begins with a heater-off cooldown check, device event time is relative to the run command, and missing or broken stable-window evidence rejects the trial at the full-speed-to-stable deadline. A new candidate may run only after cooldown; the triggering sample and decision remain in the event trace. Each target has a monotonic 20-minute budget including cooldown, with no separate two-trial cap; safety faults still disarm immediately.
 - In the default nine-target scope, failed endpoints do not suppress the other endpoint. An interior target runs only when both recursive parent bounds were accepted; otherwise it records an interval-prune decision without heating. Eligible interior targets seed their point from the two accepted bounds, update the canonical candidate hash, and require a new RAM preview receipt at the next trial boundary.
 - Trial warmup evidence requires a first sample with at least 99.5% logical request and 99% physical PWM; after that point the logical request must remain full. A physical dip may remain between 95% and 99% for at most two seconds. Lower or longer dips invalidate the trial's warmup gate, while pre-full soft-start samples do not claim full-output evidence.
-- Trial decisions record the external strategy's eleven ordered score dimensions using device-local evidence. Hold PWM percentiles and the fitted approach-curve error are accumulated from the trial's own samples; missing evidence receives the explicit worst-rank sentinel rather than an invented measurement. Candidate batch ranking is not connected yet.
+- Trial decisions record the external strategy's eleven ordered score dimensions using device-local evidence. Hold PWM percentiles and the fitted approach-curve error are accumulated from the trial's own samples; missing evidence receives the explicit worst-rank sentinel rather than an invented measurement. Each target uses separate 12-second scout, current/predicted batch comparison and 60-second hold-confirm trials, with cooldown and trial-local metrics between them.
 
 ## Validation
 
@@ -22,4 +22,4 @@
 ## Remaining gaps
 
 - Physical thermal-loop acceptance requires a separately authorized device run.
-- Firmware tuning still uses a simple candidate mutation. It does not match the external 5A scout/retune or evidence-specific current/predicted candidate comparison, and the recorded score is not yet the active selection policy. Full 5A output, current-limit, failure and qualification behavior still requires authorized device evidence; heating HIL is not ready.
+- Firmware tuning still uses a simple candidate mutation and has not matched the external 5A retune or evidence-specific candidate variant rules. Batch ranking uses the device-local score but lacks complete conformance fixtures against the frozen host strategy. Full 5A output, current-limit, failure and qualification behavior still requires authorized device evidence; heating HIL is not ready.
