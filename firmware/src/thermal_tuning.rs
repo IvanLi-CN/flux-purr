@@ -943,7 +943,7 @@ impl ThermalTuningRuntime {
             .then(|| self.hold_error_sum_centi_c as f64 / (self.hold_output_count as f64 * 100.0));
         let mut slopes = self.approach_slopes_c_per_s.clone();
         slopes.sort_unstable_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
-        let slope_index = slopes.len().saturating_sub(1) / 2;
+        let slope_index = slopes.len() / 2;
         let evidence = TuneEvidence {
             target_c,
             tunable_stop: !self.near_target_evidence_overflow && !self.approach_curve_overflow,
@@ -2775,6 +2775,20 @@ mod tests {
         assert_eq!(runtime.hold_output_count, 0);
         assert!(runtime.first_hold_temperature_centi_c.is_none());
         assert!(runtime.previous_sample_at_ms.is_none());
+    }
+
+    #[test]
+    fn even_approach_slope_samples_use_main_strategy_upper_median() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.candidate_profile = Some(profile_with_targets(&[220]));
+        runtime.approach_output_histogram[960] = 1;
+        runtime.approach_output_count = 1;
+        runtime.approach_slopes_c_per_s.push(0.4).unwrap();
+        runtime.approach_slopes_c_per_s.push(1.2).unwrap();
+        runtime.mutate_candidate_for_failure(220, Some(0), None, None, 5_000);
+        let tuned = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(tuned.approach_floor_power_permille, 520);
+        assert_eq!(tuned.hold_power_permille, 350);
     }
 
     #[test]
