@@ -131,6 +131,26 @@ pub(crate) async fn run_firmware_tuning(
                 });
             statuses.push(status);
             if terminal && caught_up {
+                if let Some(sequence) = after_sequence {
+                    let confirmed = request_leased(
+                        client,
+                        &resolved,
+                        &lease.lease_id,
+                        Method::POST,
+                        "/thermal-tuning",
+                        Some(firmware_read_command(&run_id, Some(sequence))),
+                    )
+                    .await?;
+                    if confirmed.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
+                        || confirmed
+                            .pointer("/trace/lastSequence")
+                            .and_then(Value::as_u64)
+                            != Some(u64::from(sequence))
+                    {
+                        return Err("terminal tuning events were not confirmed".into());
+                    }
+                    statuses.push(confirmed);
+                }
                 break;
             }
             if Instant::now() >= deadline {
@@ -240,7 +260,7 @@ pub(crate) async fn confirm_firmware_save(
             &lease.lease_id,
             Method::POST,
             "/thermal-tuning",
-            Some(json!({"op": "read", "afterSequence": last_sequence})),
+            Some(firmware_read_command(run_id, last_sequence)),
         )
         .await?;
         if current.get("runId").and_then(Value::as_str) != Some(run_id)
@@ -283,6 +303,26 @@ pub(crate) async fn confirm_firmware_save(
             return Err("device did not return a verified save receipt".into());
         }
         statuses.push(saved);
+        if let Some(sequence) = statuses.last().and_then(next_event_sequence) {
+            let confirmed = request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::POST,
+                "/thermal-tuning",
+                Some(firmware_read_command(run_id, Some(sequence))),
+            )
+            .await?;
+            if confirmed.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
+                || confirmed
+                    .pointer("/trace/lastSequence")
+                    .and_then(Value::as_u64)
+                    != Some(u64::from(sequence))
+            {
+                return Err("saved tuning receipt event was not confirmed".into());
+            }
+            statuses.push(confirmed);
+        }
         let candidate_profile = candidate
             .pointer("/profile/value")
             .ok_or("candidate profile missing from input")?;
@@ -598,6 +638,14 @@ fn next_event_sequence(status: &Value) -> Option<u64> {
     status
         .pointer("/events/nextSequence")
         .and_then(Value::as_u64)
+}
+
+fn firmware_read_command(run_id: &str, after_sequence: Option<u64>) -> Value {
+    let mut command = json!({"op": "read", "runId": run_id});
+    if let Some(sequence) = after_sequence {
+        command["afterSequence"] = json!(sequence);
+    }
+    command
 }
 
 fn firmware_start_command(
@@ -1286,9 +1334,10 @@ fn write_ndjson(
 mod tests {
     use super::{
         InterruptedRunInput, build_report_trial, event_stream_caught_up,
-        firmware_candidate_profile_hash, firmware_candidate_profile_value, firmware_start_command,
-        next_event_sequence, render_host_failure, render_interrupted_run, render_unsupported_pps3a,
-        trial_events_for_target, validate_save_input, verify_device_trace,
+        firmware_candidate_profile_hash, firmware_candidate_profile_value, firmware_read_command,
+        firmware_start_command, next_event_sequence, render_host_failure, render_interrupted_run,
+        render_unsupported_pps3a, trial_events_for_target, validate_save_input,
+        verify_device_trace,
     };
     use flux_purr_firmware::{
         control_plane::ThermalControlProfileWire,
@@ -1296,6 +1345,14 @@ mod tests {
         thermal_tuning::{ThermalTuningEvent, digest_event_chain, hash_profile},
     };
     use serde_json::json;
+
+    #[test]
+    fn read_ack_is_bound_to_the_run_identity() {
+        assert_eq!(
+            firmware_read_command("run-1", Some(17)),
+            json!({"op": "read", "runId": "run-1", "afterSequence": 17})
+        );
+    }
 
     #[test]
     fn explicit_save_requires_verified_candidate_and_matching_preview_receipt() {
