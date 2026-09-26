@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    fs::{self, File},
+    io::{self, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -25,6 +26,86 @@ use super::{
 
 const FIRMWARE_PHYSICAL_TARGETS_C: &str = "60,80,100,120,140,160,180,220,240";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+struct StatusJournal {
+    file: File,
+    last_profile_hash: Option<String>,
+}
+
+impl StatusJournal {
+    fn create(input_dir: &Path) -> io::Result<Self> {
+        Ok(Self {
+            file: fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(input_dir.join("device-statuses.ndjson"))?,
+            last_profile_hash: None,
+        })
+    }
+
+    fn record(&mut self, statuses: &mut Vec<Value>, mut status: Value) -> io::Result<()> {
+        if !status_has_new_evidence(statuses.last(), &status) {
+            return Ok(());
+        }
+        let candidate_hash = status.get("candidateHash").and_then(Value::as_str);
+        let new_profile_hash = if status
+            .get("candidateProfile")
+            .is_some_and(|value| !value.is_null())
+        {
+            candidate_hash.map(str::to_owned)
+        } else {
+            None
+        };
+        if candidate_hash == self.last_profile_hash.as_deref()
+            && let Some(object) = status.as_object_mut()
+        {
+            object.remove("candidateProfile");
+        }
+        serde_json::to_writer(&mut self.file, &status).map_err(io::Error::other)?;
+        self.file.write_all(b"\n")?;
+        self.file.sync_data()?;
+        if let Some(hash) = new_profile_hash {
+            self.last_profile_hash = Some(hash);
+        }
+        statuses.push(status);
+        Ok(())
+    }
+}
+
+fn status_has_new_evidence(previous: Option<&Value>, current: &Value) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+    if current
+        .pointer("/events/events")
+        .and_then(Value::as_array)
+        .is_some_and(|events| !events.is_empty())
+    {
+        return true;
+    }
+    for pointer in [
+        "/trace/lastSequence",
+        "/trace/digest",
+        "/trace/complete",
+        "/trace/gap",
+        "/candidateHash",
+        "/phase",
+        "/terminalDisposition",
+        "/reviewDisposition",
+        "/previewReceipt",
+        "/saveReceipt",
+    ] {
+        if current.pointer(pointer) != previous.pointer(pointer) {
+            return true;
+        }
+    }
+    if current.get("terminalDisposition").and_then(Value::as_str) != Some("running")
+        && current.pointer("/events/nextSequence") != previous.pointer("/events/nextSequence")
+    {
+        return true;
+    }
+    false
+}
 
 pub(crate) async fn run_firmware_tuning(
     client: &Client,
@@ -60,6 +141,9 @@ pub(crate) async fn run_firmware_tuning(
         firmware_candidate_profile_value(&thermal_candidate_profile_to_value(&profile))
     };
     let candidate_hash = firmware_candidate_profile_hash(&candidate_profile)?;
+    let input_dir = args.output_root.join(&run_id);
+    fs::create_dir_all(&input_dir)?;
+    let mut journal = StatusJournal::create(&input_dir)?;
     let lease = create_lease(client, &resolved).await?;
     let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
     let mut statuses = Vec::new();
@@ -106,7 +190,7 @@ pub(crate) async fn run_firmware_tuning(
         let deadline = Instant::now()
             + Duration::from_secs(args.per_target_budget_seconds.saturating_mul(9).max(60));
         let mut after_sequence = next_event_sequence(&start);
-        statuses.push(start);
+        journal.record(&mut statuses, start)?;
         loop {
             let mut read_body = json!({"op": "read", "runId": run_id});
             if let Some(sequence) = after_sequence {
@@ -129,7 +213,7 @@ pub(crate) async fn run_firmware_tuning(
                 .is_some_and(|value| {
                     matches!(value, "candidate_ready" | "passed" | "failed" | "canceled")
                 });
-            statuses.push(status);
+            journal.record(&mut statuses, status)?;
             if terminal && caught_up {
                 if let Some(sequence) = after_sequence {
                     let confirmed = request_leased(
@@ -149,7 +233,7 @@ pub(crate) async fn run_firmware_tuning(
                     {
                         return Err("terminal tuning events were not confirmed".into());
                     }
-                    statuses.push(confirmed);
+                    journal.record(&mut statuses, confirmed)?;
                 }
                 break;
             }
@@ -168,8 +252,6 @@ pub(crate) async fn run_firmware_tuning(
             .unwrap_or(&candidate_hash)
             .to_string();
 
-        let input_dir = args.output_root.join(&run_id);
-        fs::create_dir_all(&input_dir)?;
         write_v2_input(V2Input {
             input_dir: &input_dir,
             device_id: &resolved.device,
@@ -200,7 +282,9 @@ pub(crate) async fn run_firmware_tuning(
         )
         .await
     {
-        statuses.push(canceled);
+        if let Err(error) = journal.record(&mut statuses, canceled) {
+            eprintln!("thermal tuning status journal failed after cancel: {error}");
+        }
     }
     let rendered = match result {
         Ok(rendered) => Ok(rendered),
@@ -1333,7 +1417,7 @@ fn write_ndjson(
 #[cfg(test)]
 mod tests {
     use super::{
-        InterruptedRunInput, build_report_trial, event_stream_caught_up,
+        InterruptedRunInput, StatusJournal, build_report_trial, event_stream_caught_up,
         firmware_candidate_profile_hash, firmware_candidate_profile_value, firmware_read_command,
         firmware_start_command, next_event_sequence, render_host_failure, render_interrupted_run,
         render_unsupported_pps3a, trial_events_for_target, validate_save_input,
@@ -1345,6 +1429,44 @@ mod tests {
         thermal_tuning::{ThermalTuningEvent, digest_event_chain, hash_profile},
     };
     use serde_json::json;
+
+    #[test]
+    fn journal_persists_each_event_page_before_the_next_ack() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = StatusJournal::create(directory.path()).unwrap();
+        let mut statuses = Vec::new();
+        let first = json!({
+            "candidateHash": "hash-1",
+            "candidateProfile": {"points": [60]},
+            "terminalDisposition": "running",
+            "trace": {"lastSequence": 0, "complete": false, "gap": false, "digest": "digest-0"},
+            "events": {"events": [{"sequence": 0}], "nextSequence": 0}
+        });
+        journal.record(&mut statuses, first.clone()).unwrap();
+        let mut idle = first.clone();
+        idle["events"] = json!({"events": [], "nextSequence": null});
+        journal.record(&mut statuses, idle).unwrap();
+        assert_eq!(statuses.len(), 1);
+
+        let mut terminal = first;
+        terminal["terminalDisposition"] = json!("candidate_ready");
+        terminal["trace"] =
+            json!({"lastSequence": 1, "complete": true, "gap": false, "digest": "digest-1"});
+        terminal["events"] = json!({"events": [{"sequence": 1}], "nextSequence": 1});
+        journal.record(&mut statuses, terminal.clone()).unwrap();
+        assert!(statuses[1].get("candidateProfile").is_none());
+
+        terminal["events"] = json!({"events": [], "nextSequence": null});
+        journal.record(&mut statuses, terminal).unwrap();
+        assert_eq!(statuses.len(), 3);
+        let recorded =
+            std::fs::read_to_string(directory.path().join("device-statuses.ndjson")).unwrap();
+        let from_disk: Vec<serde_json::Value> = recorded
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(from_disk, statuses);
+    }
 
     #[test]
     fn read_ack_is_bound_to_the_run_identity() {
