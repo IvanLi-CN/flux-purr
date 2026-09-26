@@ -56,7 +56,13 @@ export async function exportThermalTuningV2(
   const fullScope =
     EXECUTION_ORDER.every((target, index) => status.targetsC[index] === target) &&
     status.targetsC.length === EXECUTION_ORDER.length
-  const candidateState = status.saveReceipt?.readbackVerified
+  const candidateState = receiptIdentityVerified(
+    status.runId,
+    status.candidateId,
+    status.candidateHash,
+    asObject(status.previewReceipt),
+    asObject(status.saveReceipt)
+  )
     ? 'saved'
     : status.terminalDisposition === 'candidate_ready'
       ? status.sealed
@@ -407,7 +413,20 @@ function promotionVerified(
   const promotion = asObject(candidate.promotion)
   const preview = asObject(promotion?.previewReceipt)
   const save = asObject(promotion?.saveReceipt)
-  if (!preview || !save || promotion?.state !== 'saved') return false
+  return (
+    promotion?.state === 'saved' &&
+    receiptIdentityVerified(runId, candidateId, candidateHash, preview, save)
+  )
+}
+
+function receiptIdentityVerified(
+  runId: string,
+  candidateId: string | null,
+  candidateHash: string | null,
+  preview: JsonObject | null,
+  save: JsonObject | null
+) {
+  if (!preview || !save) return false
   return (
     [preview, save].every(
       (receipt) =>

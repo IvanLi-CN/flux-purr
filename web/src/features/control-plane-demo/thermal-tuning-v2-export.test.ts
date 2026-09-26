@@ -141,6 +141,8 @@ describe('Web thermal-tuning-v2 export', () => {
       readbackVerified: true,
     }
     expect(await promotion()).toBe('saved')
+    captured.status.saveReceipt.bankHash = `sha256:${'b'.repeat(64)}`
+    expect(await promotion()).toBe('rejected')
   })
 
   it('qualifies only a nine-target saved run with full receipts and trial evidence', async () => {
