@@ -20,6 +20,39 @@ function jsonResponse(value: unknown) {
 }
 
 describe('control-plane transport client', () => {
+  it('keeps firmware tuning commands on the device event contract', async () => {
+    const status = {
+      phase: 'idle',
+      trialPurpose: 'scout',
+      events: { events: [], nextSequence: null },
+    }
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(status))
+    const client = createControlPlaneHttpClient(fetcher)
+
+    await client.getThermalTuning('http://127.0.0.1:4170', 'device/5a', 'lease 1')
+    await client.configureThermalTuning('http://127.0.0.1:4170', 'device/5a', {
+      leaseId: 'lease 1',
+      op: 'read',
+      runId: 'run-1',
+      afterSequence: 42,
+    })
+
+    expect(fetcher).toHaveBeenNthCalledWith(
+      1,
+      'http://127.0.0.1:4170/api/v1/devices/device%2F5a/thermal-tuning?lease_id=lease%201',
+      undefined
+    )
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      'http://127.0.0.1:4170/api/v1/devices/device%2F5a/thermal-tuning',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ leaseId: 'lease 1', op: 'read', runId: 'run-1', afterSequence: 42 }),
+      }
+    )
+  })
+
   it('uses the dedicated devd LAN discovery endpoints', async () => {
     const fetcher = vi
       .fn<typeof fetch>()

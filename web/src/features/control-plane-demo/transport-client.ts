@@ -22,6 +22,8 @@ import type {
   NetworkSummary,
   RuntimeConfigRequest,
   ThermalPlantRunSnapshot,
+  ThermalTuningCommand,
+  ThermalTuningStatus,
   UsbRequestFrame,
   UsbWifiConfigFrame,
   WifiConfigRequest,
@@ -102,6 +104,12 @@ export interface ControlPlaneHttpClient {
     leaseId: string,
     afterSample?: number
   ): Promise<ThermalPlantRunSnapshot>
+  getThermalTuning(devdBaseUrl: string, deviceId: string, leaseId: string): Promise<ThermalTuningStatus>
+  configureThermalTuning(
+    devdBaseUrl: string,
+    deviceId: string,
+    request: ThermalTuningCommand
+  ): Promise<ThermalTuningStatus>
   configureCalibration(
     devdBaseUrl: string,
     deviceId: string,
@@ -296,6 +304,23 @@ export function createControlPlaneHttpClient(
       return requestJson<ThermalPlantRunSnapshot>(
         fetcher,
         `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/thermal-plant/run?lease_id=${encodeURIComponent(leaseId)}${cursor}`
+      )
+    },
+    getThermalTuning(devdBaseUrl, deviceId, leaseId) {
+      return requestJson<ThermalTuningStatus>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/thermal-tuning?lease_id=${encodeURIComponent(leaseId)}`
+      )
+    },
+    configureThermalTuning(devdBaseUrl, deviceId, request) {
+      return requestJson<ThermalTuningStatus>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/thermal-tuning`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        }
       )
     },
     configureCalibration(devdBaseUrl, deviceId, request) {

@@ -292,6 +292,15 @@ pub enum ThermalTuningPhase {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum ThermalTuningTrialPurpose {
+    Scout,
+    BatchCurrent,
+    BatchPredicted,
+    HoldConfirm,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ThermalTuningTerminalDisposition {
     Running,
     CandidateReady,
@@ -361,6 +370,7 @@ pub struct ThermalTuningSaveReceipt {
 #[serde(rename_all = "camelCase")]
 pub struct ThermalTuningStatus {
     pub phase: ThermalTuningPhase,
+    pub trial_purpose: ThermalTuningTrialPurpose,
     pub terminal_disposition: ThermalTuningTerminalDisposition,
     pub review_disposition: ThermalTuningReviewDisposition,
     pub power_class: Option<ThermalTuningPowerClass>,
