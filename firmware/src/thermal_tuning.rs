@@ -1690,23 +1690,36 @@ impl ThermalTuningRuntime {
             self.phase = ThermalTuningPhase::Failed;
             self.terminal_disposition = ThermalTuningTerminalDisposition::Failed;
         } else {
-            self.sealed = true;
-            self.phase = ThermalTuningPhase::Sealed;
+            self.sealed = false;
+            self.phase = ThermalTuningPhase::Completed;
             self.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
         }
     }
 
     pub fn seal(&mut self) -> Result<(), ThermalTuningError> {
-        if self.sealed
-            && self.terminal_disposition == ThermalTuningTerminalDisposition::CandidateReady
-        {
+        if self.terminal_disposition != ThermalTuningTerminalDisposition::CandidateReady {
+            return Err(ThermalTuningError::InvalidTransition);
+        }
+        if self.sealed {
             return Ok(());
         }
-        Err(ThermalTuningError::InvalidTransition)
+        if self.last_acknowledged_sequence != self.last_sequence
+            || self.preview_update_pending
+            || self.preview_receipt.is_none()
+        {
+            return Err(ThermalTuningError::InvalidTransition);
+        }
+        self.sealed = true;
+        self.phase = ThermalTuningPhase::Sealed;
+        self.push_phase_transition_event("candidate sealed for explicit save confirmation");
+        Ok(())
     }
 
     pub fn cancel(&mut self, reason: &str) -> Result<(), ThermalTuningError> {
-        if !self.armed && !self.sealed {
+        if !self.armed
+            && !self.sealed
+            && self.terminal_disposition != ThermalTuningTerminalDisposition::CandidateReady
+        {
             return Err(ThermalTuningError::NotRunning);
         }
         self.armed = false;
@@ -3219,6 +3232,56 @@ mod tests {
     }
 
     #[test]
+    fn candidate_seal_requires_prior_ack_and_creates_a_new_ack_boundary() {
+        let mut runtime = ThermalTuningRuntime::new();
+        let profile = profile_with_targets(&[60]);
+        let candidate_hash = hash_profile(&profile).unwrap();
+        runtime.run_id = Some(id("run-seal"));
+        runtime.candidate_id = Some(id("candidate-seal"));
+        runtime.candidate_hash = Some(candidate_hash.clone());
+        runtime.candidate_profile = Some(profile);
+        runtime.power_class = Some(ThermalTuningPowerClass::Pps5a);
+        runtime.phase = ThermalTuningPhase::Completed;
+        runtime.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
+        runtime.preview_receipt = Some(ThermalTuningPreviewReceipt {
+            run_id: id("run-seal"),
+            candidate_id: id("candidate-seal"),
+            candidate_hash: candidate_hash.clone(),
+            power_class: ThermalTuningPowerClass::Pps5a,
+            ram_applied_hash: candidate_hash,
+        });
+        runtime.push_event(
+            ThermalTuningEventKind::Decision,
+            Some(60),
+            Some(0),
+            None,
+            Some("target completed"),
+        );
+        let first_page = runtime.events_after(None);
+        assert_eq!(runtime.seal(), Err(ThermalTuningError::InvalidTransition));
+        assert!(!runtime.sealed);
+        runtime.events_after(first_page.next_sequence);
+        runtime.seal().unwrap();
+        assert!(runtime.sealed);
+        assert_eq!(runtime.trace().last_sequence, Some(1));
+        runtime.seal().unwrap();
+        assert_eq!(runtime.trace().last_sequence, Some(1));
+        assert_eq!(runtime.cancel("owner_cancel"), Ok(()));
+        assert!(!runtime.sealed);
+    }
+
+    #[test]
+    fn unsealed_ready_candidate_can_be_canceled() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
+        assert_eq!(runtime.cancel("owner_cancel"), Ok(()));
+        assert_eq!(
+            runtime.terminal_disposition,
+            ThermalTuningTerminalDisposition::Canceled
+        );
+    }
+
+    #[test]
     fn unsafe_sample_disarms_runtime() {
         let mut runtime = ThermalTuningRuntime::new();
         runtime
@@ -3373,6 +3436,7 @@ mod tests {
             runtime.terminal_disposition,
             ThermalTuningTerminalDisposition::CandidateReady
         );
+        assert!(!runtime.sealed);
         assert_eq!(runtime.trace().first_sequence, Some(0));
         assert!(runtime.trace().last_sequence.unwrap_or_default() > 200);
         assert_eq!(trial_open_sequence, Some(2));
@@ -3385,6 +3449,35 @@ mod tests {
         runtime.events_after(runtime.trace().last_sequence);
         assert_eq!(runtime.trace().digest, digest_before_ack);
         assert!(!runtime.trace().gap);
+        assert_eq!(
+            runtime.confirm_save(ThermalTuningSaveConfirmation {
+                run_id: "run-hold",
+                candidate_id: "candidate-hold",
+                candidate_hash: "hash-hold",
+                power_class: ThermalTuningPowerClass::Pps5a,
+                readback_verified: true,
+                bank_revision: 1,
+                bank_hash: hash("hash-hold"),
+            }),
+            Err(ThermalTuningError::NotSealed)
+        );
+        runtime.preview_receipt = Some(ThermalTuningPreviewReceipt {
+            run_id: id("run-hold"),
+            candidate_id: id("candidate-hold"),
+            candidate_hash: hash("hash-hold"),
+            power_class: ThermalTuningPowerClass::Pps5a,
+            ram_applied_hash: hash("hash-hold"),
+        });
+        runtime.preview_update_pending = false;
+        runtime.seal().unwrap();
+        assert!(runtime.sealed);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Sealed);
+        assert_ne!(runtime.trace().digest, digest_before_ack);
+        let seal_page = runtime.events_after(None);
+        assert!(seal_page.events.iter().any(|event| {
+            event.reason.as_deref() == Some("candidate sealed for explicit save confirmation")
+        }));
+        runtime.events_after(seal_page.next_sequence);
         assert_eq!(
             runtime.confirm_save(ThermalTuningSaveConfirmation {
                 run_id: "run-hold",
