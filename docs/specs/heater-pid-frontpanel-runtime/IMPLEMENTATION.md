@@ -8,7 +8,7 @@
 - Host fixtures and web/native contracts cover normal operation, cooling, over-temperature, sensor faults, and safe-off behavior.
 - The normalized heater/fan state is shared across firmware, devd, HTTP, and Web surfaces.
 - The separate `pps5a` thermal-tuning runtime records local samples and installs candidate RAM previews at trial boundaries. Normal 5A heating and tuning select the same existing point-local profile controller when a valid physical model and verified 5A-capable source are present. Host tests show that changing a candidate approach point changes the logical request, a 3A source retains plant-PI output, and an armed source-class change disarms before the controller changes. Preview identity, basic safety disarm, and a 60-second hold trace have host coverage; final MOS behavior still needs device evidence.
-- A tuning run begins with a heater-off cooldown check, device event time is relative to the run command, and missing or broken stable-window evidence disarms at the full-speed-to-stable deadline. The triggering sample and safety reason remain in the event trace.
+- A tuning run begins with a heater-off cooldown check, device event time is relative to the run command, and missing or broken stable-window evidence rejects the trial at the full-speed-to-stable deadline. A new candidate may run only after cooldown; the triggering sample and decision remain in the event trace. Each target has a monotonic 20-minute budget including cooldown, with no separate two-trial cap; safety faults still disarm immediately.
 
 ## Validation
 
@@ -19,4 +19,4 @@
 ## Remaining gaps
 
 - Physical thermal-loop acceptance requires a separately authorized device run.
-- Firmware tuning still uses a two-trial candidate mutation and a three-component score. It does not match the external 5A scout/retune, evidence-specific comparison, full score vector, target-local budget, or interval-blocking strategy. Full 5A output, current-limit, failure and qualification behavior still requires authorized device evidence; heating HIL is not ready.
+- Firmware tuning still uses a simple candidate mutation and a three-component score. It does not match the external 5A scout/retune, evidence-specific comparison, full score vector, or interval-blocking strategy. Full 5A output, current-limit, failure and qualification behavior still requires authorized device evidence; heating HIL is not ready.

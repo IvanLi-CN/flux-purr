@@ -17,7 +17,7 @@ pub const THERMAL_TUNING_EVENT_PAGE_SIZE: usize = 4;
 pub const THERMAL_TUNING_HOLD_CONFIRM_MS: u64 = 60_000;
 pub const THERMAL_TUNING_STABLE_WINDOW_MS: u64 = 10_000;
 pub const THERMAL_TUNING_STABLE_BAND_CENTI_C: i16 = 150;
-pub const THERMAL_TUNING_MAX_TRIALS_PER_TARGET: u8 = 2;
+pub const THERMAL_TUNING_TARGET_BUDGET_MS: u64 = 20 * 60 * 1_000;
 pub const THERMAL_TUNING_ID_MAX_LEN: usize = 48;
 pub const THERMAL_TUNING_REASON_MAX_LEN: usize = 96;
 // `sha256:` plus 64 hexadecimal characters.
@@ -288,6 +288,7 @@ pub struct ThermalTuningRuntime {
     pub targets_c: Vec<i16, THERMAL_TUNING_MAX_TARGETS>,
     pub target_index: usize,
     pub trial_index: u8,
+    pub target_started_elapsed_ms: u64,
     pub armed: bool,
     pub sealed: bool,
     pub save_confirmed: bool,
@@ -339,6 +340,7 @@ impl ThermalTuningRuntime {
             targets_c: Vec::new(),
             target_index: 0,
             trial_index: 0,
+            target_started_elapsed_ms: 0,
             armed: false,
             sealed: false,
             save_confirmed: false,
@@ -482,7 +484,12 @@ impl ThermalTuningRuntime {
         let hold_confirm = self.first_hold_elapsed_ms.is_some_and(|started| {
             elapsed_ms.saturating_sub(started) >= THERMAL_TUNING_HOLD_CONFIRM_MS
         });
-        let passes = warmup_full
+        let budget_available = self
+            .current_elapsed_ms
+            .saturating_sub(self.target_started_elapsed_ms)
+            < THERMAL_TUNING_TARGET_BUDGET_MS;
+        let passes = budget_available
+            && warmup_full
             && approach_to_hold
             && hold_confirm
             && self.stable_window_verified_at_ms.is_some()
@@ -491,16 +498,18 @@ impl ThermalTuningRuntime {
             && settle_time_ms.is_some_and(|value| value <= u64::from(full_speed_limit_ms));
         let stop_reason = if passes {
             "candidate passed hard gates and 60s hold confirm"
+        } else if !budget_available {
+            "target monotonic tuning budget exhausted"
         } else if !warmup_full {
             "warmup logical full-output hard gate failed"
+        } else if settle_time_ms.is_none_or(|value| value > u64::from(full_speed_limit_ms)) {
+            "full-speed-to-stable budget exhausted"
         } else if !approach_to_hold {
             "approach-to-hold hard gate failed"
         } else if max_overshoot_centi_c.is_some_and(|value| value > 300) {
             "overshoot hard gate exceeded"
         } else if hold_peak_to_peak_centi_c.is_some_and(|value| value > 300) {
             "hold peak-to-peak hard gate exceeded"
-        } else if settle_time_ms.is_none_or(|value| value > u64::from(full_speed_limit_ms)) {
-            "full-speed-to-stable budget exhausted"
         } else {
             "hold confirmation failed"
         };
@@ -555,7 +564,12 @@ impl ThermalTuningRuntime {
         settle_time_ms: Option<u64>,
         full_speed_limit_ms: u32,
     ) -> Result<(), ThermalTuningError> {
-        if self.trial_index + 1 < THERMAL_TUNING_MAX_TRIALS_PER_TARGET {
+        if self
+            .current_elapsed_ms
+            .saturating_sub(self.target_started_elapsed_ms)
+            < THERMAL_TUNING_TARGET_BUDGET_MS
+            && self.trial_index < u8::MAX
+        {
             self.trial_index = self.trial_index.saturating_add(1);
             self.mutate_candidate_for_failure(
                 target_c,
@@ -578,7 +592,7 @@ impl ThermalTuningRuntime {
             Some(target_c),
             Some(self.trial_index),
             None,
-            Some("target exhausted retry budget; heater disarmed"),
+            Some("target exhausted monotonic tuning budget; heater disarmed"),
         );
         Ok(())
     }
@@ -679,9 +693,15 @@ impl ThermalTuningRuntime {
             Some(sample),
             None,
         );
+        if self
+            .current_elapsed_ms
+            .saturating_sub(self.target_started_elapsed_ms)
+            >= THERMAL_TUNING_TARGET_BUDGET_MS
+        {
+            return self.finish_trial(sample_elapsed_ms);
+        }
         if self.full_speed_to_stable_timed_out(sample_elapsed_ms, expected_target) {
-            self.fail("full_speed_to_stable_timeout");
-            return Err(ThermalTuningError::InvalidTransition);
+            return self.finish_trial(sample_elapsed_ms);
         }
         if self.first_hold_elapsed_ms.is_some_and(|started| {
             sample_elapsed_ms.saturating_sub(started) >= THERMAL_TUNING_HOLD_CONFIRM_MS
@@ -765,6 +785,14 @@ impl ThermalTuningRuntime {
             Some(sample),
             None,
         );
+        if self
+            .current_elapsed_ms
+            .saturating_sub(self.target_started_elapsed_ms)
+            >= THERMAL_TUNING_TARGET_BUDGET_MS
+        {
+            self.fail("target_budget_exhausted_during_cooldown");
+            return Err(ThermalTuningError::InvalidTransition);
+        }
         if cooled && self.armed {
             self.phase = ThermalTuningPhase::Warmup;
             self.reset_trial_metrics();
@@ -861,6 +889,7 @@ impl ThermalTuningRuntime {
         if self.target_index + 1 < self.targets_c.len() {
             self.target_index += 1;
             self.trial_index = 0;
+            self.target_started_elapsed_ms = self.current_elapsed_ms;
             self.phase = ThermalTuningPhase::Cooldown;
             self.reset_trial_metrics();
             self.push_phase_transition_event("cooling before next target");
@@ -1067,6 +1096,8 @@ impl ThermalTuningRuntime {
         self.candidate_hash = None;
         self.targets_c.clear();
         self.target_index = 0;
+        self.trial_index = 0;
+        self.target_started_elapsed_ms = 0;
         self.armed = false;
         self.sealed = false;
         self.save_confirmed = false;
@@ -1491,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn full_speed_to_stable_timeout_records_the_sample_and_disarms() {
+    fn full_speed_to_stable_timeout_rejects_trial_and_cools_for_retry() {
         let mut runtime = started_single_target_runtime();
         runtime
             .record_sample(sample(0, ThermalTuningPhase::Warmup, 3_000))
@@ -1499,18 +1530,99 @@ mod tests {
         runtime
             .record_sample(sample(1_000, ThermalTuningPhase::Approach, 4_000))
             .unwrap();
-        assert_eq!(
-            runtime.record_sample(sample(11_000, ThermalTuningPhase::Approach, 4_500)),
-            Err(ThermalTuningError::InvalidTransition)
-        );
-        assert!(!runtime.armed);
-        assert_eq!(runtime.phase, ThermalTuningPhase::Failed);
+        runtime
+            .record_sample(sample(11_000, ThermalTuningPhase::Approach, 4_500))
+            .unwrap();
+        assert!(runtime.armed);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+        assert_eq!(runtime.trial_index, 1);
         assert!(runtime.events.iter().any(|event| {
             event.kind == ThermalTuningEventKind::Sample && event.elapsed_ms == 11_000
         }));
         assert!(runtime.events.iter().any(|event| {
-            event.kind == ThermalTuningEventKind::Safety
-                && event.reason.as_deref() == Some("full_speed_to_stable_timeout")
+            event.kind == ThermalTuningEventKind::Decision
+                && event.decision.as_ref().is_some_and(|decision| {
+                    decision.stop_reason == "full-speed-to-stable budget exhausted"
+                })
+        }));
+    }
+
+    #[test]
+    fn target_budget_replaces_the_two_trial_cap() {
+        let mut runtime = started_single_target_runtime();
+        let mut timestamp = 0;
+        for expected_trial in 0..3 {
+            if expected_trial > 0 {
+                let mut cooling = sample(timestamp, ThermalTuningPhase::Cooldown, 3_400);
+                cooling.trial_index = expected_trial;
+                cooling.candidate_hash = runtime.candidate_hash.clone().unwrap();
+                cooling.heater_requested_output_permille = 0;
+                cooling.heater_output_permille = 0;
+                runtime.record_sample(cooling).unwrap();
+            }
+            let mut warmup = sample(timestamp, ThermalTuningPhase::Warmup, 3_000);
+            warmup.trial_index = expected_trial;
+            warmup.candidate_hash = runtime.candidate_hash.clone().unwrap();
+            runtime.record_sample(warmup).unwrap();
+            let mut approach = sample(timestamp + 1_000, ThermalTuningPhase::Approach, 4_000);
+            approach.trial_index = expected_trial;
+            approach.candidate_hash = runtime.candidate_hash.clone().unwrap();
+            runtime.record_sample(approach.clone()).unwrap();
+            approach.elapsed_ms = timestamp + 11_000;
+            approach.temperature_centi_c = 4_500;
+            runtime.record_sample(approach).unwrap();
+            assert_eq!(runtime.trial_index, expected_trial + 1);
+            assert!(runtime.armed);
+            timestamp += 12_000;
+        }
+        let mut budget = sample(
+            THERMAL_TUNING_TARGET_BUDGET_MS,
+            ThermalTuningPhase::Cooldown,
+            3_400,
+        );
+        budget.trial_index = runtime.trial_index;
+        budget.candidate_hash = runtime.candidate_hash.clone().unwrap();
+        budget.heater_requested_output_permille = 0;
+        budget.heater_output_permille = 0;
+        assert_eq!(
+            runtime.record_sample(budget),
+            Err(ThermalTuningError::InvalidTransition)
+        );
+        assert!(!runtime.armed);
+        assert_eq!(
+            runtime.terminal_disposition,
+            ThermalTuningTerminalDisposition::Failed
+        );
+    }
+
+    #[test]
+    fn hold_completion_at_target_budget_cannot_qualify() {
+        let mut runtime = started_single_target_runtime();
+        for (elapsed_ms, phase, temperature) in [
+            (0, ThermalTuningPhase::Warmup, 3_000),
+            (1_000, ThermalTuningPhase::Approach, 5_500),
+            (1_100, ThermalTuningPhase::Hold, 6_000),
+            (11_100, ThermalTuningPhase::Hold, 6_000),
+            (
+                THERMAL_TUNING_TARGET_BUDGET_MS,
+                ThermalTuningPhase::Hold,
+                6_000,
+            ),
+        ] {
+            runtime
+                .record_sample(sample(elapsed_ms, phase, temperature))
+                .unwrap();
+        }
+        assert_eq!(
+            runtime.terminal_disposition,
+            ThermalTuningTerminalDisposition::Failed
+        );
+        assert!(runtime.save_receipt.is_none());
+        assert!(runtime.events.iter().any(|event| {
+            event.kind == ThermalTuningEventKind::Decision
+                && event.decision.as_ref().is_some_and(|decision| {
+                    decision.stop_reason == "target monotonic tuning budget exhausted"
+                })
         }));
     }
 
