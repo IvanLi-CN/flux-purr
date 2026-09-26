@@ -378,6 +378,7 @@ pub struct ThermalTuningRuntime {
     retained_trace_digest: TuningHash,
     first_sequence: Option<u32>,
     last_sequence: Option<u32>,
+    last_delivered_sequence: Option<u32>,
     next_sequence: u32,
     current_elapsed_ms: u64,
     sample_clock_origin_ms: Option<u64>,
@@ -452,6 +453,7 @@ impl ThermalTuningRuntime {
             retained_trace_digest: TuningHash::new(),
             first_sequence: None,
             last_sequence: None,
+            last_delivered_sequence: None,
             next_sequence: 0,
             current_elapsed_ms: 0,
             sample_clock_origin_ms: None,
@@ -1632,6 +1634,16 @@ impl ThermalTuningRuntime {
     }
 
     pub fn events_after(&mut self, after_sequence: Option<u32>) -> ThermalTuningEventPage {
+        let invalid_ack = after_sequence.is_some_and(|after| {
+            self.last_delivered_sequence
+                .is_none_or(|delivered| after > delivered)
+        });
+        if invalid_ack {
+            self.fail("event_ack_skipped_unconfirmed");
+            self.trace_gap = true;
+            self.review_disposition = ThermalTuningReviewDisposition::ReviewIncomplete;
+        }
+        let after_sequence = if invalid_ack { None } else { after_sequence };
         let first = self.events.first().map(|event| event.sequence);
         if after_sequence
             .is_some_and(|after| first.is_some_and(|sequence| after.saturating_add(1) < sequence))
@@ -1659,6 +1671,12 @@ impl ThermalTuningRuntime {
             }
         }
         let next_sequence = events.last().map(|event| event.sequence);
+        if let Some(sequence) = next_sequence {
+            self.last_delivered_sequence = Some(
+                self.last_delivered_sequence
+                    .map_or(sequence, |delivered| delivered.max(sequence)),
+            );
+        }
         ThermalTuningEventPage {
             events,
             next_sequence,
@@ -1724,6 +1742,7 @@ impl ThermalTuningRuntime {
         self.retained_trace_digest.clear();
         self.first_sequence = None;
         self.last_sequence = None;
+        self.last_delivered_sequence = None;
         self.next_sequence = 0;
         self.current_elapsed_ms = 0;
         self.sample_clock_origin_ms = None;
@@ -2955,6 +2974,30 @@ mod tests {
             runtime.terminal_disposition,
             ThermalTuningTerminalDisposition::Failed
         );
+    }
+
+    #[test]
+    fn event_ack_cannot_skip_undelivered_evidence() {
+        let mut runtime = started_single_target_runtime();
+        let first_page = runtime.events_after(None);
+        let delivered = first_page.next_sequence.unwrap();
+        assert!(runtime.trace().last_sequence.unwrap() >= delivered);
+
+        let skipped = runtime.events_after(Some(delivered + 1));
+        assert!(!runtime.armed);
+        assert_eq!(
+            runtime.terminal_disposition,
+            ThermalTuningTerminalDisposition::Failed
+        );
+        assert_eq!(
+            runtime.review_disposition,
+            ThermalTuningReviewDisposition::ReviewIncomplete
+        );
+        assert!(skipped.trace.gap);
+        assert!(runtime.events.iter().any(|event| {
+            event.kind == ThermalTuningEventKind::Safety
+                && event.reason.as_deref() == Some("event_ack_skipped_unconfirmed")
+        }));
     }
 
     #[test]

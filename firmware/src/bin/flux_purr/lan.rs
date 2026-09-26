@@ -308,7 +308,9 @@ pub(crate) async fn process_request_frame(
                 )),
             ),
         ),
-        UsbRequestOp::GetThermalTuning => process_thermal_tuning_read(context, request_id, None),
+        UsbRequestOp::GetThermalTuning => {
+            process_thermal_tuning_read(context, request_id, None, None)
+        }
         UsbRequestOp::SetLogLevel => (false, usb_response(request_id, UsbResponsePayload::Ack)),
         _ => unreachable!("flash preparation requests were handled before dispatch"),
     }
@@ -1128,7 +1130,7 @@ pub(crate) async fn process_thermal_tuning_frame(
             (true, response)
         }
         ThermalTuningCommandOp::Read => {
-            process_thermal_tuning_read(context, request_id, command.after_sequence)
+            process_thermal_tuning_read(context, request_id, command.run_id, command.after_sequence)
         }
     }
 }
@@ -1390,8 +1392,24 @@ async fn persist_thermal_tuning_candidate(
 fn process_thermal_tuning_read(
     context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    run_id: Option<heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>>,
     after_sequence: Option<u32>,
 ) -> (bool, UsbFrame) {
+    if after_sequence.is_some() && run_id.as_deref() != context.thermal_tuning.run_id.as_deref() {
+        context.thermal_tuning.fail("run_identity_mismatch");
+        context.thermal_tuning.trace_gap = true;
+        context.thermal_tuning.review_disposition =
+            flux_purr_firmware::thermal_tuning::ThermalTuningReviewDisposition::ReviewIncomplete;
+        context.ui_state.heater_enabled = false;
+        return (
+            true,
+            usb_error_response(
+                request_id,
+                "run_identity_mismatch",
+                "Event acknowledgement does not match the active tuning run.",
+            ),
+        );
+    }
     (
         false,
         usb_response(

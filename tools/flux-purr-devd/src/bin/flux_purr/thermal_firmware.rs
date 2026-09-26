@@ -108,7 +108,7 @@ pub(crate) async fn run_firmware_tuning(
         let mut after_sequence = next_event_sequence(&start);
         statuses.push(start);
         loop {
-            let mut read_body = json!({"op": "read"});
+            let mut read_body = json!({"op": "read", "runId": run_id});
             if let Some(sequence) = after_sequence {
                 read_body["afterSequence"] = json!(sequence);
             }
