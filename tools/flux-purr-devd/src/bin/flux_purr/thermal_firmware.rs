@@ -1059,17 +1059,32 @@ fn build_report_trial(
         .get("disposition")
         .and_then(Value::as_str)
         .unwrap_or("rejected");
+    let sample_start = trial_record
+        .get("sampleStartSequence")
+        .and_then(Value::as_u64);
+    let sample_end = trial_record
+        .get("sampleEndSequence")
+        .and_then(Value::as_u64);
     let sample_values = samples
         .iter()
         .filter(|sample| {
             sample.get("targetC").and_then(Value::as_i64) == Some(i64::from(target))
                 && sample.get("trialIndex").and_then(Value::as_i64) == Some(trial_index)
+                && sample.get("phase").and_then(Value::as_str) != Some("cooldown")
+                && sample
+                    .get("sequence")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|sequence| {
+                        sample_start.is_none_or(|start| sequence >= start)
+                            && sample_end.is_none_or(|end| sequence <= end)
+                    })
         })
         .collect::<Vec<_>>();
     let bounds = sample_bounds_for_trial(&sample_values);
     let phases = phase_path(&sample_values);
     let warmup_request = sample_values
         .iter()
+        .filter(|sample| sample.get("phase").and_then(Value::as_str) == Some("warmup"))
         .filter_map(|sample| {
             sample
                 .get("heaterRequestedOutputPermille")
@@ -1105,6 +1120,8 @@ fn build_report_trial(
         "fullSpeedToStable": {"settleTimeMs": settle_time, "limitMs": limit_ms},
         "firstSequence": bounds.0,
         "lastSequence": bounds.1,
+        "sampleStartSequence": sample_start,
+        "sampleEndSequence": sample_end,
         "firstElapsedMs": bounds.2,
         "lastElapsedMs": bounds.3,
         "bounds": {
@@ -1268,9 +1285,9 @@ fn write_ndjson(
 #[cfg(test)]
 mod tests {
     use super::{
-        InterruptedRunInput, event_stream_caught_up, firmware_candidate_profile_hash,
-        firmware_candidate_profile_value, firmware_start_command, next_event_sequence,
-        render_host_failure, render_interrupted_run, render_unsupported_pps3a,
+        InterruptedRunInput, build_report_trial, event_stream_caught_up,
+        firmware_candidate_profile_hash, firmware_candidate_profile_value, firmware_start_command,
+        next_event_sequence, render_host_failure, render_interrupted_run, render_unsupported_pps3a,
         trial_events_for_target, validate_save_input, verify_device_trace,
     };
     use flux_purr_firmware::{
@@ -1446,6 +1463,29 @@ mod tests {
         assert_eq!(trials.len(), 2);
         assert_eq!(trials[0]["trial"]["endSequence"], 9);
         assert!(trials[1]["trial"]["endSequence"].is_null());
+    }
+
+    #[test]
+    fn trial_report_excludes_cooldown_and_other_phase_warmup_requests() {
+        let trial = json!({
+            "targetC": 60, "trialIndex": 1,
+            "trial": {
+                "sampleStartSequence": 2, "sampleEndSequence": 4,
+                "candidate": {"candidateId": "candidate-1", "candidateHash": "hash-1"}
+            }
+        });
+        let samples = vec![
+            json!({"sequence": 1, "targetC": 60, "trialIndex": 1, "phase": "cooldown", "elapsedMs": 1000, "heaterRequestedOutputPermille": 1000}),
+            json!({"sequence": 2, "targetC": 60, "trialIndex": 1, "phase": "warmup", "elapsedMs": 2000, "heaterRequestedOutputPermille": 995}),
+            json!({"sequence": 3, "targetC": 60, "trialIndex": 1, "phase": "approach", "elapsedMs": 3000, "heaterRequestedOutputPermille": 1000}),
+            json!({"sequence": 4, "targetC": 60, "trialIndex": 1, "phase": "hold", "elapsedMs": 4000, "heaterRequestedOutputPermille": 400}),
+            json!({"sequence": 5, "targetC": 60, "trialIndex": 1, "phase": "cooldown", "elapsedMs": 5000, "heaterRequestedOutputPermille": 1000}),
+        ];
+        let report = build_report_trial(60, &trial, &samples, &[], "candidate-1", "hash-1");
+        assert_eq!(report["warmupRequestedOutputPermille"], 995);
+        assert_eq!(report["firstSequence"], 2);
+        assert_eq!(report["lastSequence"], 4);
+        assert_eq!(report["metrics"]["phasePath"], "warmup -> approach -> hold");
     }
 
     #[test]

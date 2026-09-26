@@ -757,7 +757,14 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("drawChart('temperatureChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('controlChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('voltageChart',samples,"));
-        assert!(REPORT_TEMPLATE.contains("drawPhaseBand(ctx,samples,left,plotW,maxT,height)"));
+        assert!(
+            REPORT_TEMPLATE.contains("drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height)")
+        );
+        assert!(REPORT_TEMPLATE.contains("sample.phase!=='cooldown'"));
+        assert!(
+            REPORT_TEMPLATE.contains("const lo=unit==='%'?0:ymin-pad, hi=unit==='%'?100:ymax+pad")
+        );
+        assert!(REPORT_TEMPLATE.contains("class=\"chart-legend\""));
         assert!(REPORT_TEMPLATE.contains("canvas.dataset.sampleCount=String(samples.length)"));
         assert!(REPORT_TEMPLATE.contains("if(last)last.endElapsedMs=elapsedMs"));
     }
