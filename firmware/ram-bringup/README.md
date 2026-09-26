@@ -11,7 +11,9 @@ bash scripts/build-ram-bringup.sh
 python3 firmware/ram-bringup/tools/check_ram_elf.py firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup --json
 ```
 
-The build checks the embedded calibration frame against the product renderer.
+The build checks the embedded calibration frame against the product renderer
+and injects the current Git commit into the RAM identity, so a committed
+source change cannot reuse an older RAM artifact.
 After changing that renderer, regenerate the frame with
 `cargo run --locked --manifest-path firmware/Cargo.toml --no-default-features --example ram_calibration_asset -- --write`.
 

@@ -11,6 +11,10 @@ cargo run --locked \
 
 # Xtensa RAM execution cannot use LLVM jump tables in the JSON parser.
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C jump-tables=no"
+source_sha="$(git rev-parse HEAD)"
+build_id="${source_sha:0:16}"
+FLUX_PURR_SOURCE_SHA="$source_sha" \
+FLUX_PURR_BUILD_ID="$build_id" \
 cargo +esp build --locked \
   --manifest-path firmware/ram-bringup/Cargo.toml \
   --target xtensa-esp32s3-none-elf \
