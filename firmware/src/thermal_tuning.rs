@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::adapters::pd::{FUSB302B_PD_ABSOLUTE_MAX_MV, FUSB302B_PD_ABSOLUTE_MIN_MV};
-use crate::memory::ThermalControlProfileConfig;
+use crate::memory::{ThermalControlProfileConfig, ThermalControlProfilePointConfig};
 
 pub const THERMAL_TUNING_TARGETS_C: [i16; 9] = [60, 80, 100, 120, 140, 160, 180, 220, 240];
 pub const THERMAL_TUNING_EXECUTION_ORDER_C: [i16; 9] = [60, 240, 140, 100, 80, 120, 180, 160, 220];
@@ -289,6 +289,8 @@ pub struct ThermalTuningRuntime {
     pub target_index: usize,
     pub trial_index: u8,
     pub target_started_elapsed_ms: u64,
+    pub accepted_target_mask: u16,
+    pub failed_target_mask: u16,
     pub armed: bool,
     pub sealed: bool,
     pub save_confirmed: bool,
@@ -297,6 +299,7 @@ pub struct ThermalTuningRuntime {
     pub trace_gap: bool,
     pub events: Vec<ThermalTuningEvent, THERMAL_TUNING_EVENT_CAPACITY>,
     pub candidate_profile: Option<ThermalControlProfileConfig>,
+    pub seed_source: TuningReason,
     pub preview_update_pending: bool,
     pub trial_start_sequence: Option<u32>,
     pub trial_start_elapsed_ms: Option<u64>,
@@ -341,6 +344,8 @@ impl ThermalTuningRuntime {
             target_index: 0,
             trial_index: 0,
             target_started_elapsed_ms: 0,
+            accepted_target_mask: 0,
+            failed_target_mask: 0,
             armed: false,
             sealed: false,
             save_confirmed: false,
@@ -349,6 +354,7 @@ impl ThermalTuningRuntime {
             trace_gap: false,
             events: Vec::new(),
             candidate_profile: None,
+            seed_source: TuningReason::new(),
             preview_update_pending: false,
             trial_start_sequence: None,
             trial_start_elapsed_ms: None,
@@ -404,6 +410,7 @@ impl ThermalTuningRuntime {
         self.candidate_id = Some(candidate_id);
         self.candidate_hash = Some(candidate_hash);
         self.candidate_profile = candidate_profile;
+        self.seed_source = bounded_reason("initial_candidate");
         if power_class != ThermalTuningPowerClass::Pps5a {
             self.fail("pps3a_not_supported");
             return Err(ThermalTuningError::InvalidPowerClass);
@@ -536,12 +543,9 @@ impl ThermalTuningRuntime {
         self.push_closed_trial_event(elapsed_ms);
         self.push_decision_event(decision);
         if passes {
+            self.accepted_target_mask |= target_bit(target_c);
             if self.target_index + 1 >= self.targets_c.len() {
-                self.sealed = true;
-                self.armed = false;
-                self.phase = ThermalTuningPhase::Sealed;
-                self.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
-                self.review_disposition = ThermalTuningReviewDisposition::Complete;
+                self.complete_target_scope();
             } else {
                 self.advance_target()?;
             }
@@ -578,23 +582,21 @@ impl ThermalTuningRuntime {
                 settle_time_ms,
                 full_speed_limit_ms,
             );
+            self.seed_source = bounded_reason("evidence_adjustment");
             self.phase = ThermalTuningPhase::Cooldown;
             self.reset_trial_metrics();
             self.push_phase_transition_event("cooling before retry");
             return Ok(());
         }
-        self.armed = false;
-        self.phase = ThermalTuningPhase::Failed;
-        self.terminal_disposition = ThermalTuningTerminalDisposition::Failed;
-        self.review_disposition = ThermalTuningReviewDisposition::Complete;
+        self.failed_target_mask |= target_bit(target_c);
         self.push_event(
-            ThermalTuningEventKind::Safety,
+            ThermalTuningEventKind::Decision,
             Some(target_c),
             Some(self.trial_index),
             None,
-            Some("target exhausted monotonic tuning budget; heater disarmed"),
+            Some("target exhausted monotonic tuning budget"),
         );
-        Ok(())
+        self.advance_target()
     }
 
     fn mutate_candidate_for_failure(
@@ -790,8 +792,15 @@ impl ThermalTuningRuntime {
             .saturating_sub(self.target_started_elapsed_ms)
             >= THERMAL_TUNING_TARGET_BUDGET_MS
         {
-            self.fail("target_budget_exhausted_during_cooldown");
-            return Err(ThermalTuningError::InvalidTransition);
+            self.failed_target_mask |= target_bit(expected_target);
+            self.push_event(
+                ThermalTuningEventKind::Decision,
+                Some(expected_target),
+                Some(self.trial_index),
+                None,
+                Some("target_budget_exhausted_during_cooldown"),
+            );
+            return self.advance_target();
         }
         if cooled && self.armed {
             self.phase = ThermalTuningPhase::Warmup;
@@ -886,18 +895,102 @@ impl ThermalTuningRuntime {
         if !self.armed {
             return Err(ThermalTuningError::NotRunning);
         }
-        if self.target_index + 1 < self.targets_c.len() {
+        while self.target_index + 1 < self.targets_c.len() {
             self.target_index += 1;
             self.trial_index = 0;
             self.target_started_elapsed_ms = self.current_elapsed_ms;
+            let target = self.targets_c[self.target_index];
+            if self
+                .required_accepted_bounds(target)
+                .is_some_and(|(lower, upper)| {
+                    self.accepted_target_mask & target_bit(lower) == 0
+                        || self.accepted_target_mask & target_bit(upper) == 0
+                })
+            {
+                self.failed_target_mask |= target_bit(target);
+                self.push_event(
+                    ThermalTuningEventKind::Decision,
+                    Some(target),
+                    None,
+                    None,
+                    Some("interval_pruned_without_accepted_bounds"),
+                );
+                continue;
+            }
+            if let Some((lower, upper)) = self.required_accepted_bounds(target) {
+                self.seed_target_from_bounds(target, lower, upper)?;
+            }
             self.phase = ThermalTuningPhase::Cooldown;
             self.reset_trial_metrics();
             self.push_phase_transition_event("cooling before next target");
-        } else {
-            self.phase = ThermalTuningPhase::Cooldown;
-            self.push_phase_transition_event("entered cooldown phase");
+            return Ok(());
         }
+        self.complete_target_scope();
         Ok(())
+    }
+
+    fn required_accepted_bounds(&self, target: i16) -> Option<(i16, i16)> {
+        if self.targets_c.as_slice() != THERMAL_TUNING_EXECUTION_ORDER_C {
+            return None;
+        }
+        match target {
+            140 => Some((60, 240)),
+            100 => Some((60, 140)),
+            80 => Some((60, 100)),
+            120 => Some((100, 140)),
+            180 => Some((140, 240)),
+            160 => Some((140, 180)),
+            220 => Some((180, 240)),
+            _ => None,
+        }
+    }
+
+    fn seed_target_from_bounds(
+        &mut self,
+        target: i16,
+        lower: i16,
+        upper: i16,
+    ) -> Result<(), ThermalTuningError> {
+        let profile = self
+            .candidate_profile
+            .as_mut()
+            .ok_or(ThermalTuningError::CandidateProfileRequired)?;
+        let point_at = |target_c| {
+            profile
+                .points
+                .iter()
+                .flatten()
+                .find(|point| point.target_temp_c == target_c)
+                .copied()
+        };
+        let lower_point = point_at(lower).ok_or(ThermalTuningError::CandidateProfileRequired)?;
+        let upper_point = point_at(upper).ok_or(ThermalTuningError::CandidateProfileRequired)?;
+        let seeded = interpolate_candidate_point(target, lower_point, upper_point);
+        let point = profile
+            .points
+            .iter_mut()
+            .flatten()
+            .find(|point| point.target_temp_c == target)
+            .ok_or(ThermalTuningError::CandidateProfileRequired)?;
+        *point = seeded;
+        self.candidate_hash = hash_profile(profile);
+        self.preview_update_pending = true;
+        self.preview_receipt = None;
+        self.seed_source = bounded_reason("accepted_bounds_linear");
+        Ok(())
+    }
+
+    fn complete_target_scope(&mut self) {
+        self.armed = false;
+        self.review_disposition = ThermalTuningReviewDisposition::Complete;
+        if self.failed_target_mask != 0 {
+            self.phase = ThermalTuningPhase::Failed;
+            self.terminal_disposition = ThermalTuningTerminalDisposition::Failed;
+        } else {
+            self.sealed = true;
+            self.phase = ThermalTuningPhase::Sealed;
+            self.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
+        }
     }
 
     pub fn seal(&mut self) -> Result<(), ThermalTuningError> {
@@ -1098,12 +1191,15 @@ impl ThermalTuningRuntime {
         self.target_index = 0;
         self.trial_index = 0;
         self.target_started_elapsed_ms = 0;
+        self.accepted_target_mask = 0;
+        self.failed_target_mask = 0;
         self.armed = false;
         self.sealed = false;
         self.save_confirmed = false;
         self.preview_receipt = None;
         self.save_receipt = None;
         self.candidate_profile = None;
+        self.seed_source.clear();
         self.preview_update_pending = false;
         self.trace_gap = false;
         self.events.clear();
@@ -1194,12 +1290,13 @@ impl ThermalTuningRuntime {
                     .as_ref()
                     .and_then(|profile| candidate_point(profile, target))
             }),
-            seed_source: bounded_reason("device_candidate_preview"),
-            lower_target_c: self
-                .target_index
-                .checked_sub(1)
-                .and_then(|index| self.targets_c.get(index).copied()),
-            upper_target_c: self.targets_c.get(self.target_index + 1).copied(),
+            seed_source: self.seed_source.clone(),
+            lower_target_c: target_c
+                .and_then(|target| self.required_accepted_bounds(target))
+                .map(|(lower, _)| lower),
+            upper_target_c: target_c
+                .and_then(|target| self.required_accepted_bounds(target))
+                .map(|(_, upper)| upper),
         }
     }
 
@@ -1291,6 +1388,62 @@ fn phase_transition_reason(phase: ThermalTuningPhase) -> &'static str {
 
 fn cooldown_threshold_c(target_c: i16) -> i16 {
     if target_c < 80 { 35 } else { target_c - 40 }
+}
+
+fn target_bit(target_c: i16) -> u16 {
+    THERMAL_TUNING_TARGETS_C
+        .iter()
+        .position(|target| *target == target_c)
+        .map_or(0, |index| 1 << index)
+}
+
+fn interpolate_candidate_point(
+    target_c: i16,
+    lower: ThermalControlProfilePointConfig,
+    upper: ThermalControlProfilePointConfig,
+) -> ThermalControlProfilePointConfig {
+    if lower.target_temp_c >= upper.target_temp_c {
+        return ThermalControlProfilePointConfig {
+            target_temp_c: target_c,
+            ..lower
+        };
+    }
+    let numerator = f32::from(target_c - lower.target_temp_c);
+    let denominator = f32::from(upper.target_temp_c - lower.target_temp_c);
+    let ratio = numerator / denominator;
+    let interpolate = |left: u16, right: u16, ceiling: u16| {
+        (f32::from(left) + (f32::from(right) - f32::from(left)) * ratio + 0.5)
+            .clamp(0.0, f32::from(ceiling)) as u16
+    };
+    let mut seeded = lower;
+    seeded.target_temp_c = target_c;
+    seeded.warmup_power_permille = 1_000;
+    macro_rules! field {
+        ($name:ident, $ceiling:expr) => {
+            seeded.$name = interpolate(lower.$name, upper.$name, $ceiling);
+        };
+    }
+    field!(brake_distance_centi_c, 5_000);
+    field!(approach_power_permille, 1_000);
+    field!(approach_floor_power_permille, 1_000);
+    field!(approach_damping_exponent_permille, 4_000);
+    field!(approach_tail_window_centi_c, 5_000);
+    field!(hold_power_permille, 1_000);
+    field!(hold_reheat_power_permille, 1_000);
+    field!(warmup_reenter_centi_c, 5_000);
+    field!(hold_entry_centi_c, 5_000);
+    field!(hold_exit_centi_c, 5_000);
+    field!(hold_on_centi_c, 5_000);
+    field!(hold_off_centi_c, 5_000);
+    field!(overshoot_cutoff_centi_c, 5_000);
+    field!(hold_kp_permille_per_c, 10_000);
+    field!(hold_ki_permille_per_c_tick, 10_000);
+    seeded.hold_ki_permille_per_c_tick = seeded.hold_ki_permille_per_c_tick.max(1);
+    field!(hold_blend_ticks, 255);
+    seeded.hold_blend_ticks = seeded.hold_blend_ticks.max(1);
+    field!(approach_lead_ticks, 255);
+    field!(hold_lead_ticks, 255);
+    seeded
 }
 
 fn candidate_point(
@@ -1584,10 +1737,7 @@ mod tests {
         budget.candidate_hash = runtime.candidate_hash.clone().unwrap();
         budget.heater_requested_output_permille = 0;
         budget.heater_output_permille = 0;
-        assert_eq!(
-            runtime.record_sample(budget),
-            Err(ThermalTuningError::InvalidTransition)
-        );
+        runtime.record_sample(budget).unwrap();
         assert!(!runtime.armed);
         assert_eq!(
             runtime.terminal_disposition,
@@ -1624,6 +1774,82 @@ mod tests {
                     decision.stop_reason == "target monotonic tuning budget exhausted"
                 })
         }));
+    }
+
+    #[test]
+    fn full_scope_prunes_midpoints_without_both_accepted_endpoints() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("run-pruned"),
+                candidate_id: id("candidate-pruned"),
+                candidate_hash: hash("hash-pruned"),
+                power_class: ThermalTuningPowerClass::Pps5a,
+                targets: &THERMAL_TUNING_EXECUTION_ORDER_C,
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile_with_targets(&THERMAL_TUNING_TARGETS_C)),
+            })
+            .unwrap();
+        runtime.accepted_target_mask = target_bit(60);
+        runtime.advance_target().unwrap();
+        assert_eq!(runtime.targets_c[runtime.target_index], 240);
+        runtime.failed_target_mask = target_bit(240);
+        runtime.advance_target().unwrap();
+        assert_eq!(
+            runtime.terminal_disposition,
+            ThermalTuningTerminalDisposition::Failed
+        );
+        assert!(!runtime.armed);
+        assert_eq!(runtime.failed_target_mask.count_ones(), 8);
+        assert_eq!(
+            runtime
+                .events
+                .iter()
+                .filter(|event| {
+                    event.reason.as_deref() == Some("interval_pruned_without_accepted_bounds")
+                })
+                .count(),
+            7
+        );
+    }
+
+    #[test]
+    fn full_scope_midpoint_uses_accepted_parent_bounds() {
+        let mut runtime = ThermalTuningRuntime::new();
+        let mut profile = profile_with_targets(&THERMAL_TUNING_TARGETS_C);
+        profile.points[0].as_mut().unwrap().brake_distance_centi_c = 400;
+        profile.points[8].as_mut().unwrap().brake_distance_centi_c = 800;
+        profile.points[4].as_mut().unwrap().brake_distance_centi_c = 300;
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("run-bounds"),
+                candidate_id: id("candidate-bounds"),
+                candidate_hash: hash("hash-bounds"),
+                power_class: ThermalTuningPowerClass::Pps5a,
+                targets: &THERMAL_TUNING_EXECUTION_ORDER_C,
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile),
+            })
+            .unwrap();
+        runtime.accepted_target_mask = target_bit(60);
+        runtime.advance_target().unwrap();
+        runtime.accepted_target_mask |= target_bit(240);
+        runtime.advance_target().unwrap();
+        assert_eq!(runtime.targets_c[runtime.target_index], 140);
+        let snapshot = runtime.candidate_snapshot(Some(140));
+        assert_eq!(
+            (snapshot.lower_target_c, snapshot.upper_target_c),
+            (Some(60), Some(240))
+        );
+        assert_eq!(snapshot.seed_source, "accepted_bounds_linear");
+        assert_eq!(snapshot.point.unwrap().brake_distance_centi_c, 578);
+        assert_ne!(runtime.candidate_hash.as_deref(), Some("hash-bounds"));
+        assert!(runtime.preview_update_pending);
+        assert!(runtime.armed);
     }
 
     #[test]
