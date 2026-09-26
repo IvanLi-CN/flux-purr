@@ -98,6 +98,7 @@ export async function exportThermalTuningV2(
     reportRuns.every((run) => run.reviewPassed && adoptedTrialPassesGate(run)) &&
     promotionVerified(status.runId, status.candidateId, status.candidateHash, candidate)
   const ownerOutcome = qualified ? 'passed' : 'failed'
+  const ppsBounds = status.ppsVoltageBounds
   const bundle: JsonObject = {
     schema: 'thermal-tuning-v2',
     runId: status.runId,
@@ -106,14 +107,18 @@ export async function exportThermalTuningV2(
     firmware: { source: 'device_identity', identity: 'device_reported' },
     powerClass: status.powerClass,
     sourceClass: 'device-local',
-    ppsControlPolicyVersion: 'device_reported',
+    ppsControlPolicyVersion: status.ppsControlPolicyVersion ?? null,
     ppsVoltageBounds: {
-      absoluteMinMv: null,
-      absoluteMaxMv: null,
-      policyFloorMv: null,
-      apdoMinMv: null,
-      apdoMaxMv: null,
-      availability: 'unavailable_device_contract_not_exposed',
+      absoluteMinMv: ppsBounds?.absoluteMinMv ?? null,
+      absoluteMaxMv: ppsBounds?.absoluteMaxMv ?? null,
+      policyFloorMv: ppsBounds?.policyFloorMv ?? null,
+      apdoMinMv: ppsBounds?.apdoMinMv ?? null,
+      apdoMaxMv: ppsBounds?.apdoMaxMv ?? null,
+      availability: !ppsBounds
+        ? 'unavailable_device_status_field'
+        : ppsBounds.apdoMinMv != null && ppsBounds.apdoMaxMv != null
+          ? 'device_local'
+          : 'unavailable_selected_apdo',
     },
     targetSet: {
       physicalC: PHYSICAL_TARGETS,

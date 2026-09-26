@@ -77,7 +77,16 @@ describe('Web thermal-tuning-v2 export', () => {
   it('exports all five standard files for a failed device run', async () => {
     const events = [event(0, 'safety', 60)]
     events[0].reason = 'sensor_fault'
-    const captured = recording(events)
+    const captured = recording(events, {
+      ppsControlPolicyVersion: 'hold-pps-governor-v1',
+      ppsVoltageBounds: {
+        absoluteMinMv: 5_000,
+        absoluteMaxMv: 28_000,
+        policyFloorMv: 12_000,
+        apdoMinMv: 11_000,
+        apdoMaxMv: 21_000,
+      },
+    })
     captured.status.trace.digest = await digestEventChain(events)
     const exported = await exportThermalTuningV2(captured, 'device-1', 'web_serial')
     const archive = unzipSync(exported.archive)
@@ -93,6 +102,11 @@ describe('Web thermal-tuning-v2 export', () => {
     expect(bundle.trace.complete).toBe(true)
     expect(bundle.ownerOutcome).toBe('failed')
     expect(bundle.deviceTraceVerification.verified).toBe(true)
+    expect(bundle.ppsControlPolicyVersion).toBe('hold-pps-governor-v1')
+    expect(bundle.ppsVoltageBounds).toMatchObject({
+      apdoMaxMv: 21_000,
+      availability: 'device_local',
+    })
     expect(strFromU8(archive['index.html'])).toContain('const REPORT=')
     expect(strFromU8(archive['index.html'])).not.toContain('__THERMAL_TUNING_V2_DATA__')
     expect(strFromU8(archive['decision-ledger.ndjson'])).toContain('sensor_fault')

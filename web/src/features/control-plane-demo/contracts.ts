@@ -299,6 +299,14 @@ export interface ThermalTuningStatus {
   terminalDisposition: 'running' | 'candidate_ready' | 'passed' | 'failed' | 'canceled'
   reviewDisposition: 'pending' | 'complete' | 'review_incomplete'
   powerClass: ThermalTuningPowerClass | null
+  ppsControlPolicyVersion?: string | null
+  ppsVoltageBounds?: {
+    absoluteMinMv: number
+    absoluteMaxMv: number
+    policyFloorMv: number
+    apdoMinMv: number | null
+    apdoMaxMv: number | null
+  } | null
   runId: string | null
   candidateId: string | null
   candidateHash: string | null
