@@ -1,0 +1,194 @@
+import { strFromU8, unzipSync } from 'fflate'
+import { describe, expect, it } from 'vitest'
+import type { ThermalTuningEvent, ThermalTuningStatus } from './contracts'
+import { digestEventChain } from './thermal-tuning-device-digest'
+import type { ThermalTuningRecording } from './thermal-tuning-recorder'
+import { exportThermalTuningV2 } from './thermal-tuning-v2-export'
+
+const TARGETS = [60, 80, 100, 120, 140, 160, 180, 220, 240]
+const EXECUTION_ORDER = [60, 240, 140, 100, 80, 120, 180, 160, 220]
+const CANDIDATE_HASH = `sha256:${'a'.repeat(64)}`
+
+function event(
+  sequence: number,
+  kind: ThermalTuningEvent['kind'],
+  targetC: number
+): ThermalTuningEvent {
+  return {
+    sequence,
+    elapsedMs: sequence * 1_000,
+    kind,
+    phase: kind === 'safety' ? 'failed' : 'hold',
+    targetC,
+    trialIndex: 0,
+    sample: null,
+    reason: null,
+    trial: null,
+    decision: null,
+  }
+}
+
+function recording(
+  events: ThermalTuningEvent[],
+  overrides: Partial<ThermalTuningStatus> = {}
+): ThermalTuningRecording {
+  const lastSequence = events.at(-1)?.sequence ?? null
+  const trace = {
+    firstSequence: 0,
+    lastSequence,
+    complete: true,
+    gap: false,
+    digest: '',
+  }
+  const status: ThermalTuningStatus = {
+    phase: 'failed',
+    trialPurpose: 'scout',
+    terminalDisposition: 'failed',
+    reviewDisposition: 'review_incomplete',
+    powerClass: 'pps5a',
+    runId: 'run-web-1',
+    candidateId: 'candidate-web-1',
+    candidateHash: CANDIDATE_HASH,
+    targetsC: EXECUTION_ORDER,
+    targetIndex: 0,
+    armed: false,
+    sealed: false,
+    saveConfirmed: false,
+    candidateProfile: null,
+    previewReceipt: null,
+    trace,
+    events: { events: [], nextSequence: null, trace },
+    saveReceipt: null,
+    ...overrides,
+  }
+  return {
+    runId: status.runId,
+    status,
+    events,
+    acknowledgedThrough: lastSequence,
+    confirmedThrough: lastSequence,
+    gap: false,
+    gapReason: null,
+    complete: true,
+  }
+}
+
+describe('Web thermal-tuning-v2 export', () => {
+  it('exports all five standard files for a failed device run', async () => {
+    const events = [event(0, 'safety', 60)]
+    events[0].reason = 'sensor_fault'
+    const captured = recording(events)
+    captured.status.trace.digest = await digestEventChain(events)
+    const exported = await exportThermalTuningV2(captured, 'device-1', 'web_serial')
+    const archive = unzipSync(exported.archive)
+    expect(Object.keys(archive).sort()).toEqual([
+      'decision-ledger.ndjson',
+      'index.html',
+      'run.bundle.json',
+      'samples.ndjson',
+      'thermal-profile.candidate.json',
+    ])
+    const bundle = JSON.parse(strFromU8(archive['run.bundle.json']))
+    expect(exported.ownerOutcome).toBe('failed')
+    expect(bundle.trace.complete).toBe(true)
+    expect(bundle.ownerOutcome).toBe('failed')
+    expect(bundle.deviceTraceVerification.verified).toBe(true)
+    expect(strFromU8(archive['index.html'])).toContain('const REPORT=')
+    expect(strFromU8(archive['index.html'])).not.toContain('__THERMAL_TUNING_V2_DATA__')
+    expect(strFromU8(archive['decision-ledger.ndjson'])).toContain('sensor_fault')
+  })
+
+  it('qualifies only a nine-target saved run with full receipts and trial evidence', async () => {
+    const events: ThermalTuningEvent[] = []
+    for (const targetC of TARGETS) {
+      const trial = event(events.length, 'candidate_trial', targetC)
+      trial.trial = {
+        startSequence: trial.sequence,
+        endSequence: trial.sequence + 4,
+        sampleStartSequence: trial.sequence + 1,
+        sampleEndSequence: trial.sequence + 3,
+        candidate: {
+          candidateId: 'candidate-web-1',
+          candidateHash: CANDIDATE_HASH,
+          powerClass: 'pps5a',
+        },
+      }
+      events.push(trial)
+      for (const [phaseIndex, phase] of (['warmup', 'approach', 'hold'] as const).entries()) {
+        const sample = event(events.length, 'sample', targetC)
+        sample.phase = phase
+        sample.sample = {
+          sequence: sample.sequence,
+          elapsedMs: sample.elapsedMs,
+          targetC,
+          trialIndex: 0,
+          candidateId: 'candidate-web-1',
+          candidateHash: CANDIDATE_HASH,
+          temperatureCentiC: targetC * 100 + phaseIndex,
+          vinMv: 11_800,
+          ppsContract: { voltageMv: 12_000, currentMa: 5_000, kind: 'pps5a', confirmed: true },
+          requestedMv: 10_000,
+          ppsPowerCeilingMv: 12_000,
+          heaterRequestedOutputPermille: phase === 'warmup' ? 1_000 : 420,
+          heaterOutputPermille: phase === 'warmup' ? 960 : 410,
+          measurementValid: true,
+          phase,
+        }
+        events.push(sample)
+      }
+      const decision = event(events.length, 'decision', targetC)
+      decision.decision = {
+        disposition: 'adopted',
+        maxOvershootCentiC: 120,
+        holdPeakToPeakCentiC: 150,
+        settleTimeMs: 8_000,
+        hardGateFullSpeedToStableMs: 12_000,
+        holdConfirm: true,
+      }
+      events.push(decision)
+    }
+    const captured = recording(events, {
+      phase: 'completed',
+      terminalDisposition: 'passed',
+      reviewDisposition: 'complete',
+      sealed: true,
+      saveConfirmed: true,
+      candidateProfile: {
+        settings: {},
+        points: TARGETS.map((targetTempC) => ({ targetTempC })),
+      },
+      previewReceipt: {
+        runId: 'run-web-1',
+        candidateId: 'candidate-web-1',
+        candidateHash: CANDIDATE_HASH,
+        powerClass: 'pps5a',
+        ramAppliedHash: CANDIDATE_HASH,
+      },
+      saveReceipt: {
+        runId: 'run-web-1',
+        candidateId: 'candidate-web-1',
+        candidateHash: CANDIDATE_HASH,
+        powerClass: 'pps5a',
+        bank: 'pps5a',
+        bankRevision: 3,
+        bankHash: CANDIDATE_HASH,
+        atomic: true,
+        readbackVerified: true,
+      },
+    })
+    captured.status.trace.digest = await digestEventChain(events)
+    const exported = await exportThermalTuningV2(captured, 'device-1', 'web_serial')
+    const bundle = JSON.parse(exported.files['run.bundle.json'])
+    expect(exported.ownerOutcome).toBe('passed')
+    expect(bundle.reportRuns).toHaveLength(9)
+    expect(
+      bundle.reportRuns.every((run: { reviewOutcome: string }) => run.reviewOutcome === 'passed')
+    ).toBe(true)
+    expect(bundle.deviceTraceVerification.verified).toBe(true)
+
+    captured.status.saveReceipt = null
+    expect((await exportThermalTuningV2(captured, 'device-1', 'web_serial')).ownerOutcome).toBe(
+      'failed'
+    )
+  })
+})
