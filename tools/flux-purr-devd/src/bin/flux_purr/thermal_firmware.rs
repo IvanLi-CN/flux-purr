@@ -1017,6 +1017,38 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
     } else {
         "rejected"
     };
+    let pps_bounds = statuses.iter().rev().find_map(|status| {
+        status
+            .get("ppsVoltageBounds")
+            .filter(|value| !value.is_null())
+    });
+    let pps_policy_version = statuses.iter().rev().find_map(|status| {
+        status
+            .get("ppsControlPolicyVersion")
+            .filter(|value| !value.is_null())
+    });
+    let bound = |field: &str| {
+        pps_bounds
+            .and_then(|value| value.get(field))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let pps_voltage_bounds = json!({
+        "absoluteMinMv": bound("absoluteMinMv"),
+        "absoluteMaxMv": bound("absoluteMaxMv"),
+        "policyFloorMv": bound("policyFloorMv"),
+        "apdoMinMv": bound("apdoMinMv"),
+        "apdoMaxMv": bound("apdoMaxMv"),
+        "availability": if pps_bounds.is_none() {
+            "unavailable_device_status_field"
+        } else if pps_bounds.and_then(|value| value.get("apdoMinMv")).and_then(Value::as_u64).is_some()
+            && pps_bounds.and_then(|value| value.get("apdoMaxMv")).and_then(Value::as_u64).is_some()
+        {
+            "device_local"
+        } else {
+            "unavailable_selected_apdo"
+        }
+    });
     let bundle = json!({
         "schema": "thermal-tuning-v2",
         "runId": run_id,
@@ -1025,15 +1057,8 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         "firmware": {"source": "device_identity", "identity": "device_reported"},
         "powerClass": "pps5a",
         "sourceClass": "device-local",
-        "ppsControlPolicyVersion": "device_reported",
-        "ppsVoltageBounds": {
-            "absoluteMinMv": null,
-            "absoluteMaxMv": null,
-            "policyFloorMv": null,
-            "apdoMinMv": null,
-            "apdoMaxMv": null,
-            "availability": "unavailable_device_contract_not_exposed"
-        },
+        "ppsControlPolicyVersion": pps_policy_version,
+        "ppsVoltageBounds": pps_voltage_bounds,
         "targetSet": {"physicalC": targets, "selectedC": targets, "executionOrderC": execution_order},
         "qualificationScope": {"kind": "default-pps5a-full-batch", "targetCount": targets.len(), "diagnosticOnly": false},
         "terminalDisposition": terminal,
@@ -1715,6 +1740,11 @@ mod tests {
             "terminalDisposition": "running",
             "reviewDisposition": "pending",
             "candidateHash": "hash-device",
+            "ppsControlPolicyVersion": "hold-pps-governor-v1",
+            "ppsVoltageBounds": {
+                "absoluteMinMv": 5000, "absoluteMaxMv": 28000,
+                "policyFloorMv": 12000, "apdoMinMv": 11000, "apdoMaxMv": 21000
+            },
             "trace": {"firstSequence": 0, "lastSequence": 0, "complete": false, "gap": false, "digest": "unconfirmed"},
             "events": {"events": [{
                 "sequence": 0, "elapsedMs": 0, "kind": "sample", "phase": "warmup",
@@ -1754,6 +1784,9 @@ mod tests {
             "running"
         );
         assert_eq!(bundle["candidate"]["candidateHash"], "hash-device");
+        assert_eq!(bundle["ppsControlPolicyVersion"], "hold-pps-governor-v1");
+        assert_eq!(bundle["ppsVoltageBounds"]["apdoMaxMv"], 21000);
+        assert_eq!(bundle["ppsVoltageBounds"]["availability"], "device_local");
         assert!(samples.contains("\"temperatureCentiC\":3500"));
     }
 
