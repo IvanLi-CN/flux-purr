@@ -125,6 +125,11 @@
 - 读取旧记录时，缺失 `0x05` 由旧 `0x04` 映射为 `Off`/`Normal`；缺失 `0x06` 默认 `Medium`。新标签优先于旧布尔值，写回同时保留 `0x04` 兼容投影。
 - 新写入的 thermal profile payload 必须以紧凑 `TCP3` 布局标识开头，两个 bank 独立存入 `ThermalPolicy` A/B 槽。`TCP2` 和无标识历史 payload 继续按各自旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。
 
+### 固件调优候选保存回执
+
+- `pps5a` 固件调优候选先在 RAM preview 应用，设备确认实际生效的 canonical hash 与 `runId + candidateId + candidateHash + powerClass` 一致后才签发 preview receipt。seal 后的第二次 `confirm-save` 仅保存同一候选，不重新执行调优。
+- save receipt 必须由 FPR2 原子事务的 ACTIVE generation、已读回验证的 `pps5a` bank hash 和相同候选身份构成。写入、读回、hash 或身份不匹配不得报告为 `passed` 或 `saved`，并须保持 heater disarmed 与可复核故障。`thermal_plant_auto` 的独立 ThermalPlant 原子事务和外部 runner 的已有 preview/save 语义不因此改变。
+
 ## 验收标准（Acceptance Criteria）
 
 - Given EEPROM 为空且可写，When 固件启动，Then 固件从批准的硬件配置初始化 EEPROM、验证写入，并在 UI 使用该配置。

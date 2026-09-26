@@ -60,15 +60,19 @@
   covering `20V` at `>=3A`; no ordinary runtime request may bypass this lock. `pps3a` / 65 W
   sources use the same active model when their calibrated heater curve provides the required
   temperature-aware power limit.
-- The sole production controller MUST implement the lumped thermal balance
+- The `pps3a` production controller MUST implement the lumped thermal balance
   `Ctheta*dT/dt = Ph - kc*(T-Ta) - kr*(Tk^4-TaK^4)` and a loss-feedforward predictive PI command
   `sat(Ploss(T) + Kp*(e-tau_d*dT/dt) + Ki*integral(e))`. Saturation MUST use the temperature-aware
   electrical power ceiling, and the integrator MUST use conditional anti-windup. The existing PPS
   square-root voltage mapping, PWM power compensation, current reserve, source capability checks,
   sensor faults, and absolute overtemperature protection remain mandatory actuator boundaries.
 - The plant controller's thermal target MUST equal the requested target temperature. It MUST NOT
-  apply target-specific temperature offsets or recover the historical point-local profile as a
-  hidden compensation path.
+  apply target-specific temperature offsets or use a point-local profile as hidden compensation.
+- With a valid physical model and verified 5A-capable PPS source, normal 5A heating and firmware
+  tuning MUST use the same point-local profile controller and effective preview/saved/default
+  profile. A mode flag alone MUST NOT turn a 3A source into the 5A path. Source-class changes
+  while armed MUST disarm and reset control state before re-arming. The existing actuator and
+  safety boundaries remain mandatory; the modeled `Pmax(T)` MUST NOT be presented as measured power.
 - Model calibration MUST persist raw RTD ADC observations, ambient raw RTD ADC observations,
   measured heater voltage, duty, and elapsed time. Temperature-indexed heater resistance and
   `kc/kr/Ctheta/tau_d` are derived projections fitted by the device from that trace. The raw trace
@@ -193,6 +197,13 @@
 
 None
 
+### 固件主控 5A 调优
+
+- `thermal tune --engine firmware` 只支持 `pps5a`。默认资格范围为 `60 / 80 / 100 / 120 / 140 / 160 / 180 / 220 / 240°C` 九个同等级目标，实际执行顺序为 `60, 240, 140, 100, 80, 120, 180, 160, 220`；缩小范围的诊断/复测不能产生默认资格通过结论。`pps3a` 不运行调优、不加热、不生成候选或保存，必须留下五文件失败审计；3A 调优属于独立后续范围。
+- 固件调优只在有效 `pps5a` PowerState、可用 thermal model、无标定/preview 互斥及有效安全状态下启动。候选仅在安全 trial boundary 通过既有 RAM preview 生效，5A 正常加热与调优均使用同一 point-local profile 控制器；PPS/PWM 映射及所有保护保持现行路径。不得另建调优专用加热状态机、功率公式、隐藏输出限幅或改变 `thermal_plant_auto` 单次受保护瞬态语义。
+- 5A 决策策略以当前主干外部主控 `thermal tune` 为冻结向量基线：目标顺序、冷却门槛、最近两侧已 accepted 点的 seed/线性插值、target-local scout/retune、current 与 evidence-specific predicted compare、完整 score vector、hard gate、单目标从 cooldown 开始的 `20min` 单调预算、失败区间阻断、accepted point 冻结、无默认独立轮次硬上限及 `60s` hold confirm 必须一致。设备缺少的外部 source 实测不得伪造；无法由本地 PPS/安全事实映射的向量应明确 unavailable 并失败，而非更改评分或通过门槛。
+- 每个 candidate 的 warmup 逻辑请求必须达到 `100%`，有完整 approach→hold、过冲 `<=3°C`、hold 峰峰值 `<=3°C`、目标相关 full-speed-to-stable 门槛与连续 `60s` hold confirm。前一候选、rejected trial 和 cooldown 样本不得计入 adopted candidate 的评分；实际 MOS PWM 与逻辑请求须分别取自生产输出链。
+
 ## 验收标准（Acceptance Criteria）
 
 - Given 显示初始化完成但 EEPROM/首个 RTD 尚未就绪，When Dashboard 首帧提交，Then 左侧显示 `---.-°C`，右侧显示 `SET ---`、`PPS ---`、`FAN ---`，且不得出现 `300°C` 或其它伪造温度。
@@ -215,7 +226,8 @@ None
 - Given native/Web Serial status 被读取，When 固件发布当前温度，Then `boardTempCenti/currentTempC` 必须直接由内部浮点 RTD 测量值四舍五入到 `0.01°C`，不得从前面板 `0.1°C` 显示值反推；前面板显示精度不得限制控制环或遥测精度。When RTD 进入 fault，Then owner-facing 温度显示必须保留最近一次有效读数，而不是写成 `0°C`。
 - Given Dashboard 过温告警，When 页面刷新，Then 告警只占据 SET 行并以两关键帧闪烁，FAN 行不切换到告警文案。
 - Given FUSB302B Source Capabilities 包含覆盖 `20V` 的 PPS APDO，When runtime 初始化 heater 后端，Then 选择 `pps-mos`；heater armed 且控制输出为 `0%` 时以单次最多 `500mV` 的步进回到有效工作下限并输出 `0%` PWM，heater disabled 时才恢复 idle Fixed standby（通常 `5V` 或更高合格 Fixed PDO）；`1..100%` 可在所选 APDO 的完整电压范围内请求 PPS/AVS 电压，`R(T)` 与 profile current reserve 不得降低 adjustable-voltage request ceiling，达到 floor 或处于 bounded down-ramp 时由 PWM 按等效功率连续降低。电流边界由所选 APDO 合同负责；对于不具备合格 PPS APDO 的固定 PDO fallback，duty 必须继续被压到不高于该电流合同对应的等效占空比。PPS 高于 floor 时 GPIO47 为 `100%` PWM。
-- Given active thermal plant and a `20V / >=3A` PPS source, When runtime arms production heating, Then `pps3a` MUST use the same projected physical plant as `pps5a`; it may arm only when persisted raw heater observations yield at least two valid `R(T)` points. The thermal controller's saturation power MUST be `Pmax(T)=min(Vsource^2/R(T), Vsource*Isource)`，production PPS request ceiling MUST equal the selected APDO maximum voltage；`R(T)` 与 persisted board-current reserve 均不得降低该电压上限。Changing RTD calibration may reproject the heater-watt estimate but MUST NOT create, invalidate, or require a separate 3A heat-loss calibration.
+- Given active thermal plant and a `20V / >=3A` PPS source, When runtime arms production heating, Then `pps3a` MUST retain the projected physical-plant PI and both classes MUST require a valid model with at least two persisted `R(T)` points. The 3A controller's modeled saturation power MUST be `Pmax(T)=min(Vsource^2/R(T), Vsource*Isource)`；5A profile-control requests MUST remain subject to the existing temperature-aware resistance, source-current and PPS/PWM actuator boundaries. Production PPS request ceiling MUST equal the selected APDO maximum voltage；`R(T)` 与 persisted board-current reserve 均不得降低该电压上限。Changing RTD calibration may reproject the heater-watt estimate but MUST NOT create, invalidate, or require a separate 3A heat-loss calibration.
+- Given a verified 5A-capable source and a valid model, When normal heating or firmware tuning runs the same target and effective point/settings, Then both MUST select the same profile controller and produce the same control decision for the same prior state and samples. Changing a preview point MUST change applicable observed control output; clearing it MUST restore the saved/default source. Given a 3A source or source-class loss during heating, Then 3A MUST retain plant-PI parity and any class transition MUST disarm before another controller can arm.
 - Given WARMUP 正在通过同一个 PPS APDO 动态调整功率，When 新目标电压与当前请求不同，Then 单次请求最多变化 `500mV`、MOS 必须保持导通且相邻请求至少间隔 `500ms`，从而为 `300ms` RTD 稳定窗口保留明确余量；只有 APDO/AVS/固定 PDO/fallback 等离散路径发生变化时才允许关 MOS，并使用至少 `275ms` 的 transition window。任何新控制 tick 都不得覆盖尚未完成的 transition。
 - Given 控制器从 Approach 进入 HOLD，When PPS 已建立交接电压，Then 固件必须锁定该电压并只用 PWM 响应 PI 输出，不得主动向下扫描 PPS。When 物理 PWM 持续饱和、温度仍低于目标且升温率不足，Then 才允许至少间隔 `2s` 向上调整一次，每次最多 `500mV`。
 - Given heater 仍 armed、控制输出暂时降为 `0%` 且当前 phase 不是 HOLD，When PPS 请求需要回到工作下限，Then MOS 必须立即关闭，但 PPS 电压仍须以单次最多 `500mV` 的有界步进收敛，不得从当前高电压直接跳到工作下限。When 当前 phase 是 HOLD，Then MOS 必须立即关闭但 PPS 保持锁定电压。
@@ -355,7 +367,7 @@ None
 
 ## Related ADRs
 
-None
+- [Source-class thermal controller selection](../../adr/0015-source-class-thermal-controller-selection.md)
 
 ## 方案概述（Approach, high-level）
 

@@ -13,11 +13,13 @@
 - `ControlPlaneStatus.persistenceFault` / `persistenceFaultAttentionPending` and `InstallStatus.lastPersistenceFault` retain their existing fields. Fault `code` identifies the domain and `slot` is `A`, `B`, or `single`; ordinary-domain failures remain local and the EEPROM error page owns explicit retry.
 - The `ThermalPlant` FPR2 payload keeps the fixed 768-byte slot by encoding each transient sample in 5 bytes: the low 15 bits of `elapsed_ticks` retain time and bit 15 records non-zero duty. Legacy FPM1 transient samples remain decoded from their 6-byte representation; records outside the 15-bit persisted time range are rejected before commit.
 - `tools/flux-purr-devd` does not stage or restore MCU internal configuration during update, flash, or recovery.
+- The firmware tuning path records a RAM preview receipt only after the candidate hash is applied, and binds its save receipt to the verified `pps5a` bank hash and FPR2 ACTIVE generation. Host tests cover matching and mismatched identities; no EEPROM-on-device tuning receipt has been accepted yet.
 
 ## Remaining Gaps
 
 - Keep EEPROM record compatibility only within EEPROM; do not import internal Flash records.
 - Keep firmware, host-tool, layout, and bundle tests aligned with the EEPROM-only boundary.
+- Validate tuning `confirm-save` across an authorized real EEPROM commit, readback, interruption, and rollback before considering its receipt qualified.
 
 ## References
 

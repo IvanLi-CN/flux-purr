@@ -230,13 +230,21 @@
 - Direct Web Serial 还必须支持 calibration live control、calibration auto-job read/write、ADC calibration samples/A-B slots/active-slot 与 heater curve preview/save，以保证 calibration workbench 的 transport parity。
 - Given direct Web Serial target remains selected but its in-memory browser client is no longer connected, When a calibration or runtime read/write is requested, Then Web may silently reuse the single already-authorized browser port with an identity check against the last confirmed device, but must not open the chooser or switch transport; when no unique authorized port exists it must stop with an actionable reconnect state.
 
+### 固件主控调优控制面与报告
+
+- 无 `--engine` 的 `flux-purr thermal tune` 保持既有外部主控 runner、source 参数与四文件 preliminary bundle；仅显式 `--engine firmware` 进入设备 5A 运行时并拒绝 `source-id`、`source-url` 及外部 source 覆盖。CLI、devd、LAN/serial 与 Web 必须消费同一独立 tuning command/status/event 契约；`thermal_plant_auto` 不使用该契约。
+- 命令包含 `start`、`cancel`、`seal`、`confirm-save`、按 `runId/afterSequence` 读和完整范围 ack。任何取消、无效/丢失供电、传感器/EEPROM 故障、候选身份不匹配或未确认事件溢出都必须 disarm；二次 `confirm-save` 不重新调优，只验证 `runId + candidateId + candidateHash + powerClass`、RAM applied hash 与 EEPROM 原子保存/readback。设备 status 应回显候选、trace、preview receipt、save receipt、完整失败原因以及已发布 EEPROM bank generation/hash。
+- firmware engine 的正式报告由相同的 `thermal report render-v2` 路径读取采样与结果数据生成，不得为示例另写展示页面。每次运行包括失败都固定产出 `index.html`、`run.bundle.json`、`samples.ndjson`、`thermal-profile.candidate.json` 和 `decision-ledger.ndjson`。bundle 顶层包含 schema、run/设备/固件身份、engine、power/source class、PPS policy version、absolute/policy-floor/APDO 电压边界、物理/所选目标及执行顺序、qualification scope、terminal/review disposition、完整 `reportRuns`/raw runs、trace、candidate、reference comparison、capability 与五文件 digest。
+- sample 固定记录 sequence、elapsed、目标/trial/candidate、温度、设备 VIN、PPS 合同 mV/mA/kind/confirmed、请求电压、所选可调电压上限 `ppsPowerCeilingMv`、PID 逻辑请求 `heaterRequestedOutputPermille`、最终 MOS PWM `heaterOutputPermille`、测量有效性与 phase。`ppsPowerCeilingMv` 单位为 mV，不是功率；PPS 合同电流只能称安全 ceiling。外部 VBUS、物理电流/功率不得作为本报告必需项、缺失提示或推断值。缺失设备本地必需事实须结构化标记 unavailable。
+- 非 sample ledger 固定保留 `phase_transition`、`candidate_trial`、`decision`、`safety`；trial 保留起止 sequence/时间/样本范围、完整 point-local candidate、hash、seed 和 bounds，decision 保留全部 score、hard gates、freeze/prune、disposition、stop reason 与 PPS scheduler 的本地决策证据。合并两类 NDJSON 后必须覆盖设备声明的全局零基 sequence，校验 digest；缺口、不一致、保存/readback 失败或未确认事件覆盖均为 `trace_gap/review_incomplete`，操作者结果只允许 `passed` 或 `failed`。
+- HTML 的目标卡、指标、候选详情和默认主图须指向同一 adopted trial，显示 trial 序号/总数；其余 trial 可切换，温度、逻辑请求/实际 PWM、VIN/PPS 电压和 PPS 合同电流图同步切换并使用独立量纲。报告显示 warmup/approach/hold、稳定窗口建立时间、full-speed-to-stable、过冲、hold p2p 与 `60s` 确认；cooldown 只留原始审计。Mock 示例必须只替换数据，并通过同一正式生成命令与渲染代码。
+
 ## Verification
 
 ### VER-RCP-TRANSPORT
 
 - covers: `REQ-RCP-TRANSPORT`
 - Method: firmware, host transport and fake serial tests; authorized product HIL for physical USB, Wi-Fi and programming behavior. USB recovery includes a partial marker, host absence beyond response deadlines, same-port reconnection and no mutation replay.
-
 
 - Given 无硬件环境，When 运行 host tests，Then USB frame parsing、request ID matching、redaction、runtime config、status adapter、lease expiry、bounded buffer、artifact verify 与 serial authorization guard 均通过。
 - Given devd mock target，When 创建 lease 并 heartbeat，Then lease 未过期前 mutating endpoint 成功，过期后返回 conflict/expired error。

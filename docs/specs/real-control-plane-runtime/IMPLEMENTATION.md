@@ -99,6 +99,7 @@
 
 ## Thermal acceptance state
 
+- An explicit `thermal tune --engine firmware` host path and independent firmware tuning command/status/event transport are present. The host can render five-file `thermal-tuning-v2` reports from sample/result input, verify the device event digest, and produce a no-heat `pps3a` preflight failure bundle. The default `thermal tune` path remains the external runner. These are implementation coverage, not 5A qualification.
 - `pps3a` / 65W 稀疏 acceptance bundle 已存在，并继续作为 3A 当前基准。
 - `pps5a` / 100W 路径已经具备 source-class 识别、bank 解析、preview seed、retune、approach characterization 与报告链路；`thermal-self-test-runs/approach-characterization-pd100w-pps5a-20260717-final/` 已作为当前 5A approach-reference 当前真相。
 - `thermal-self-test-runs/preliminary-pd100w-pps5a-60-140-220-20260717/` 是历史 5A preliminary review bundle：顶层回显 `bundleDisposition=preliminary_review`、`acceptedProfileRole=review_candidate_snapshot`、`selectedMode=100w`、`resolvedBank=pps5a`、`detectedSourceClass=pps5a`，并为 `60 / 140 / 220°C` 三个 tab 分别附带 `holdCheck`。该历史三点 bundle 不满足当前 full-batch validation report 合同。
@@ -106,6 +107,7 @@
 
 ## Remaining Gaps
 
+- Firmware tuning has no Web workbench or offline export yet. The firmware 5A decision strategy, complete failure-bundle behavior after transport/start errors, full-range event acknowledgement under sustained sampling, and authorized-device HIL are not validated; none of the new engine's passed outcomes may be treated as qualification evidence.
 - `pps5a` accepted EEPROM save 与 frozen baseline bundle 仍未完成；100W 路径虽已有 approach characterization current truth，但尚未形成 committed accepted bundle。
 - `/dev/cu.usbmodem2111401` 的受控真机验证已覆盖 DHCP 后 direct Chromium LAN pairing、bearer probe、lease、runtime write/readback/restore、设备重启后的显式 LAN reselect、DEVD USB bridge，以及 browser Web Serial 原生端口选择、同一 device ID 合并和 runtime write/readback/restore。mDNS TXT、SSE 长连接、竞争 lease、USB token reset 和全三 transport 连续切换仍未形成完整 HIL receipt，因此不得声称控制面验收已全部完成。
 - Web direct LAN 的显式 CIDR scan 由浏览器直接并发请求受限私有 IPv4 范围的匿名 `/health`；该面板不经过 `devd`，并以独立单元测试和 Storybook play 锁定范围限制、取消、结果选择、CIDR 本地偏好恢复、扫描面始终可见及无 DEVD 依赖。恢复的 CIDR 不会自动启动扫描，首次面板也不伪造地址或网段。native `devd`/CLI 的 mDNS 与 CIDR discovery 保持为另一条入口。
