@@ -1279,31 +1279,36 @@ impl ThermalTuningRuntime {
             && sample.phase != ThermalTuningPhase::Hold
             && (0..=800).contains(&error_centi_c)
         {
-            let output = usize::from(sample.heater_output_permille).min(1_000);
-            if self.approach_output_histogram[output] == u16::MAX {
-                self.near_target_evidence_overflow = true;
-            } else {
-                self.approach_output_histogram[output] += 1;
-                self.approach_output_count = self.approach_output_count.saturating_add(1);
-            }
-            if let (Some(previous_ms), Some(previous_temp)) = (
-                self.previous_sample_at_ms,
-                self.previous_sample_temperature_centi_c,
-            ) {
-                let delta_ms = sample.elapsed_ms.saturating_sub(previous_ms);
-                if delta_ms > 0 {
-                    let slope =
-                        f64::from(i32::from(sample.temperature_centi_c) - i32::from(previous_temp))
-                            * 10.0
-                            / delta_ms as f64;
-                    if slope > 0.05 && self.approach_slopes_c_per_s.push(slope).is_err() {
-                        self.near_target_evidence_overflow = true;
-                    }
-                }
-            }
+            self.record_near_target_evidence(sample);
         }
         self.previous_sample_at_ms = Some(sample.elapsed_ms);
         self.previous_sample_temperature_centi_c = Some(sample.temperature_centi_c);
+    }
+
+    fn record_near_target_evidence(&mut self, sample: &ThermalTuningSample) {
+        let output = usize::from(sample.heater_output_permille).min(1_000);
+        if self.approach_output_histogram[output] == u16::MAX {
+            self.near_target_evidence_overflow = true;
+        } else {
+            self.approach_output_histogram[output] += 1;
+            self.approach_output_count = self.approach_output_count.saturating_add(1);
+        }
+        let (Some(previous_ms), Some(previous_temp)) = (
+            self.previous_sample_at_ms,
+            self.previous_sample_temperature_centi_c,
+        ) else {
+            return;
+        };
+        let delta_ms = sample.elapsed_ms.saturating_sub(previous_ms);
+        if delta_ms == 0 {
+            return;
+        }
+        let slope = f64::from(i32::from(sample.temperature_centi_c) - i32::from(previous_temp))
+            * 10.0
+            / delta_ms as f64;
+        if slope > 0.05 && self.approach_slopes_c_per_s.push(slope).is_err() {
+            self.near_target_evidence_overflow = true;
+        }
     }
 
     fn strategy_curve_class(&self, target_c: i16) -> CurveClass {
@@ -1343,10 +1348,10 @@ impl ThermalTuningRuntime {
             } else {
                 0
             };
+            if sign != 0 && previous_sign != 0 && sign != previous_sign {
+                sign_changes += 1;
+            }
             if sign != 0 {
-                if previous_sign != 0 && sign != previous_sign {
-                    sign_changes += 1;
-                }
                 previous_sign = sign;
             }
         }

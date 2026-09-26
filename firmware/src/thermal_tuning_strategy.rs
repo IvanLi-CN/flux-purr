@@ -34,6 +34,14 @@ pub(crate) struct TuneEvidence {
     pub settle_limit_ms: u64,
 }
 
+struct HoldRippleInputs {
+    equilibrium: u16,
+    hold_p90: u16,
+    bursty_low_temp_hold: bool,
+    entering_below: f64,
+    entering_above: f64,
+}
+
 pub(crate) fn tune_point(
     previous: ThermalControlProfilePointConfig,
     evidence: TuneEvidence,
@@ -166,11 +174,13 @@ pub(crate) fn tune_point(
             &mut tuned,
             previous,
             evidence,
-            equilibrium,
-            hold_p90,
-            bursty_low_temp_hold,
-            entering_below,
-            entering_above,
+            HoldRippleInputs {
+                equilibrium,
+                hold_p90,
+                bursty_low_temp_hold,
+                entering_below,
+                entering_above,
+            },
         );
     } else {
         return previous;
@@ -370,12 +380,15 @@ fn apply_hold_ripple(
     point: &mut ThermalControlProfilePointConfig,
     previous: ThermalControlProfilePointConfig,
     evidence: TuneEvidence,
-    equilibrium: u16,
-    hold_p90: u16,
-    bursty_low_temp_hold: bool,
-    entering_below: f64,
-    entering_above: f64,
+    inputs: HoldRippleInputs,
 ) {
+    let HoldRippleInputs {
+        equilibrium,
+        hold_p90,
+        bursty_low_temp_hold,
+        entering_below,
+        entering_above,
+    } = inputs;
     let ripple_equilibrium = if bursty_low_temp_hold {
         previous
             .hold_power_permille
