@@ -1099,6 +1099,16 @@ pub struct ThermalTuningCommand {
 pub const THERMAL_TUNING_TARGET_CAPACITY: usize = 9;
 pub const THERMAL_TUNING_HASH_MAX_LEN: usize = 71;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningPpsVoltageBoundsWire {
+    pub absolute_min_mv: u16,
+    pub absolute_max_mv: u16,
+    pub policy_floor_mv: u16,
+    pub apdo_min_mv: Option<u16>,
+    pub apdo_max_mv: Option<u16>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThermalTuningStatusWire {
@@ -1107,6 +1117,10 @@ pub struct ThermalTuningStatusWire {
     pub terminal_disposition: ThermalTuningTerminalDisposition,
     pub review_disposition: ThermalTuningReviewDisposition,
     pub power_class: Option<ThermalTuningPowerClass>,
+    #[serde(default)]
+    pub pps_control_policy_version: Option<String<32>>,
+    #[serde(default)]
+    pub pps_voltage_bounds: Option<ThermalTuningPpsVoltageBoundsWire>,
     pub run_id: Option<String<REQUEST_ID_MAX_LEN>>,
     pub candidate_id: Option<String<REQUEST_ID_MAX_LEN>>,
     pub candidate_hash: Option<String<THERMAL_TUNING_HASH_MAX_LEN>>,
@@ -4864,6 +4878,27 @@ mod tests {
         assert!(encoded.contains(r#""type":"thermal_tuning""#));
         assert!(!encoded.contains("sourceId"));
         assert_eq!(parse_usb_frame(encoded).unwrap(), frame);
+    }
+
+    #[test]
+    fn tuning_pps_bounds_round_trip_as_device_local_voltage_limits() {
+        let bounds = ThermalTuningPpsVoltageBoundsWire {
+            absolute_min_mv: 5_000,
+            absolute_max_mv: 28_000,
+            policy_floor_mv: 12_000,
+            apdo_min_mv: Some(11_000),
+            apdo_max_mv: Some(21_000),
+        };
+        let mut output = [0u8; 256];
+        let encoded = serde_json_core::to_slice(&bounds, &mut output).unwrap();
+        let json = core::str::from_utf8(&output[..encoded]).unwrap();
+        assert!(json.contains(r#""policyFloorMv":12000"#));
+        assert_eq!(
+            serde_json_core::from_str::<ThermalTuningPpsVoltageBoundsWire>(json)
+                .unwrap()
+                .0,
+            bounds
+        );
     }
 
     #[cfg(feature = "buzzer-test")]

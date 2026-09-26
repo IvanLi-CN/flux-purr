@@ -1427,6 +1427,16 @@ fn thermal_tuning_status(
     context: &mut ControlLineContext<'_, '_, '_>,
     after_sequence: Option<u32>,
 ) -> flux_purr_firmware::control_plane::ThermalTuningStatusWire {
+    let mut pps_control_policy_version = heapless::String::<32>::new();
+    let _ = pps_control_policy_version.push_str("hold-pps-governor-v1");
+    let (apdo_min_mv, apdo_max_mv) = match *context.heater_power_backend {
+        HeaterPowerBackend::PpsMos {
+            pps_min_mv,
+            pps_max_mv,
+            ..
+        } => (Some(pps_min_mv), Some(pps_max_mv)),
+        HeaterPowerBackend::FixedPdPwmFallback { .. } => (None, None),
+    };
     let runtime = &mut *context.thermal_tuning;
     let events = runtime.events_after(after_sequence);
     flux_purr_firmware::control_plane::ThermalTuningStatusWire {
@@ -1435,6 +1445,16 @@ fn thermal_tuning_status(
         terminal_disposition: runtime.terminal_disposition,
         review_disposition: runtime.review_disposition,
         power_class: runtime.power_class,
+        pps_control_policy_version: Some(pps_control_policy_version),
+        pps_voltage_bounds: Some(
+            flux_purr_firmware::control_plane::ThermalTuningPpsVoltageBoundsWire {
+                absolute_min_mv: flux_purr_firmware::adapters::pd::FUSB302B_PD_ABSOLUTE_MIN_MV,
+                absolute_max_mv: flux_purr_firmware::adapters::pd::FUSB302B_PD_ABSOLUTE_MAX_MV,
+                policy_floor_mv: HEATER_ADJUSTABLE_MIN_MV,
+                apdo_min_mv,
+                apdo_max_mv,
+            },
+        ),
         run_id: runtime.run_id.clone(),
         candidate_id: runtime.candidate_id.clone(),
         candidate_hash: runtime.candidate_hash.clone(),
