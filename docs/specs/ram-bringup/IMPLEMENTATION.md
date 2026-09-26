@@ -9,6 +9,9 @@
 - `tools/flux-purr-devd/src/bin/flux_purr/cli/ram_run.rs` enforces the exact
   port, the in-process RAM ELF safety gate, matching identity/build/capability,
   and the pinned espflash RAM loader.
+- The host RAM loader validates ELF identification, program-header arithmetic,
+  loadable segment bounds, and internal-memory placement before invoking
+  espflash.
 - The product identity now carries `firmwareKind=product`; host discovery
   treats missing or unknown kinds as unknown and LAN validation accepts only
   product firmware.
