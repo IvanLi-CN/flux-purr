@@ -379,6 +379,7 @@ pub struct ThermalTuningRuntime {
     first_sequence: Option<u32>,
     last_sequence: Option<u32>,
     last_delivered_sequence: Option<u32>,
+    last_acknowledged_sequence: Option<u32>,
     next_sequence: u32,
     current_elapsed_ms: u64,
     sample_clock_origin_ms: Option<u64>,
@@ -454,6 +455,7 @@ impl ThermalTuningRuntime {
             first_sequence: None,
             last_sequence: None,
             last_delivered_sequence: None,
+            last_acknowledged_sequence: None,
             next_sequence: 0,
             current_elapsed_ms: 0,
             sample_clock_origin_ms: None,
@@ -1583,6 +1585,11 @@ impl ThermalTuningRuntime {
         if !self.sealed {
             return Err(ThermalTuningError::NotSealed);
         }
+        if self.last_acknowledged_sequence != self.last_sequence {
+            self.fail("event_ack_incomplete");
+            self.review_disposition = ThermalTuningReviewDisposition::ReviewIncomplete;
+            return Err(ThermalTuningError::InvalidTransition);
+        }
         if self.targets_c.as_slice() != THERMAL_TUNING_EXECUTION_ORDER_C {
             self.fail("non_qualification_scope");
             return Err(ThermalTuningError::InvalidTargets);
@@ -1644,6 +1651,12 @@ impl ThermalTuningRuntime {
             self.review_disposition = ThermalTuningReviewDisposition::ReviewIncomplete;
         }
         let after_sequence = if invalid_ack { None } else { after_sequence };
+        if let Some(acknowledged) = after_sequence {
+            self.last_acknowledged_sequence = Some(
+                self.last_acknowledged_sequence
+                    .map_or(acknowledged, |previous| previous.max(acknowledged)),
+            );
+        }
         let first = self.events.first().map(|event| event.sequence);
         if after_sequence
             .is_some_and(|after| first.is_some_and(|sequence| after.saturating_add(1) < sequence))
@@ -1743,6 +1756,7 @@ impl ThermalTuningRuntime {
         self.first_sequence = None;
         self.last_sequence = None;
         self.last_delivered_sequence = None;
+        self.last_acknowledged_sequence = None;
         self.next_sequence = 0;
         self.current_elapsed_ms = 0;
         self.sample_clock_origin_ms = None;
@@ -2117,7 +2131,70 @@ pub fn digest_event_chain(events: &[ThermalTuningEvent]) -> TuningHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::ThermalControlProfilePointConfig;
+    use crate::memory::{ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig};
+
+    #[test]
+    fn canonical_candidate_hash_matches_web_wire_fixture() {
+        let point = |target_temp_c| ThermalControlProfilePointConfig {
+            target_temp_c,
+            brake_distance_centi_c: 1,
+            warmup_power_permille: 1,
+            warmup_reenter_centi_c: 1,
+            approach_power_permille: 1,
+            approach_floor_power_permille: 1,
+            approach_damping_exponent_permille: 1,
+            approach_tail_window_centi_c: 1,
+            hold_power_permille: 1,
+            hold_reheat_power_permille: 1,
+            hold_entry_centi_c: 1,
+            hold_exit_centi_c: 1,
+            hold_on_centi_c: 1,
+            hold_off_centi_c: 1,
+            overshoot_cutoff_centi_c: 1,
+            hold_kp_permille_per_c: 1,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 1,
+            hold_lead_ticks: 1,
+        };
+        let profile = ThermalControlProfileConfig {
+            settings: ThermalControlProfileSettingsConfig {
+                temp_filter_alpha_permille: 1,
+                warmup_reenter_centi_c: 1,
+                hold_entry_centi_c: 1,
+                hold_exit_centi_c: 1,
+                hold_on_centi_c: 1,
+                hold_off_centi_c: 1,
+                overshoot_cutoff_centi_c: 1,
+                approach_max_ticks: 1,
+                approach_min_power_ratio_permille: 1,
+                hold_kp_permille_per_c: 1,
+                hold_ki_permille_per_c_tick: 1,
+                hold_blend_ticks: 1,
+                hold_reheat_power_permille: 1,
+                approach_lead_ticks: 1,
+                hold_lead_ticks: 1,
+                auto_adjustable_working_floor_mv: 1,
+                heater_current_reserve_ma: 1,
+            },
+            points: [
+                Some(point(60)),
+                Some(point(80)),
+                Some(point(100)),
+                Some(point(120)),
+                Some(point(140)),
+                Some(point(160)),
+                Some(point(180)),
+                Some(point(220)),
+                Some(point(240)),
+                None,
+            ],
+        };
+        assert_eq!(
+            hash_profile(&profile).unwrap().as_str(),
+            "sha256:841b20a8fec5278e37558f158496b234c89a2aca65f4393eb1a40fb4f6e40141"
+        );
+    }
 
     fn id(value: &str) -> TuningId {
         let mut result = TuningId::new();
@@ -2712,6 +2789,8 @@ mod tests {
         runtime.sealed = true;
         runtime.armed = false;
         runtime.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
+        let delivered = runtime.events_after(None).next_sequence;
+        runtime.events_after(delivered);
         let receipt = runtime
             .confirm_save(ThermalTuningSaveConfirmation {
                 run_id: "run-save",
@@ -2730,6 +2809,56 @@ mod tests {
         assert_eq!(
             runtime.terminal_disposition,
             ThermalTuningTerminalDisposition::Passed
+        );
+    }
+
+    #[test]
+    fn save_rejects_delivered_but_unacknowledged_events() {
+        let profile = profile_with_targets(&THERMAL_TUNING_EXECUTION_ORDER_C);
+        let candidate_hash = hash_profile(&profile).unwrap();
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("run-unacked"),
+                candidate_id: id("candidate-unacked"),
+                candidate_hash: candidate_hash.clone(),
+                power_class: ThermalTuningPowerClass::Pps5a,
+                targets: &THERMAL_TUNING_EXECUTION_ORDER_C,
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile),
+            })
+            .unwrap();
+        runtime.record_preview_applied().unwrap();
+        runtime.sealed = true;
+        runtime.armed = false;
+        runtime.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
+        runtime.events_after(None);
+
+        assert_eq!(
+            runtime.validate_save_identity(
+                "run-unacked",
+                "candidate-unacked",
+                candidate_hash.as_str(),
+                ThermalTuningPowerClass::Pps5a,
+            ),
+            Err(ThermalTuningError::InvalidTransition)
+        );
+        assert_eq!(
+            runtime.review_disposition,
+            ThermalTuningReviewDisposition::ReviewIncomplete
+        );
+        assert_eq!(
+            runtime.terminal_disposition,
+            ThermalTuningTerminalDisposition::Failed
+        );
+        assert!(runtime.save_receipt.is_none());
+        assert!(
+            runtime
+                .events
+                .iter()
+                .any(|event| { event.reason.as_deref() == Some("event_ack_incomplete") })
         );
     }
 
