@@ -26,6 +26,32 @@ pub(crate) fn resolve_thermal_profile_bank(
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProductionThermalController {
+    Plant,
+    Profile,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn production_thermal_controller(
+    power_state: PowerState,
+    mode: ThermalProfileMode,
+    manual_pps: &ManualPpsState,
+) -> ProductionThermalController {
+    if power_state.protocol == PowerProtocol::Ready
+        && power_state.available
+        && power_state.failure.is_none()
+        && power_state.active.is_some()
+        && manual_pps.has_matching_pps_apdo(20_000, 5_000)
+        && resolve_thermal_profile_bank(mode, manual_pps) == ThermalProfileBank::Pps5a
+    {
+        ProductionThermalController::Profile
+    } else {
+        ProductionThermalController::Plant
+    }
+}
+
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn thermal_control_runtime_wire(
     target_temp_c: i16,
@@ -654,6 +680,7 @@ pub(crate) struct HeaterController {
     pub(crate) heater_was_enabled: bool,
     pub(crate) warmup_started_at_ms: Option<u64>,
     pub(crate) thermal_plant_controller: ThermalPlantController,
+    pub(crate) production_controller: Option<ProductionThermalController>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -729,6 +756,7 @@ impl HeaterController {
             heater_was_enabled: false,
             warmup_started_at_ms: None,
             thermal_plant_controller: ThermalPlantController::new(),
+            production_controller: None,
         }
     }
 
@@ -753,6 +781,40 @@ impl HeaterController {
         self.heater_was_enabled = false;
         self.warmup_started_at_ms = None;
         self.thermal_plant_controller.reset();
+        self.production_controller = None;
+    }
+
+    pub(crate) fn update_production_at(
+        &mut self,
+        kind: ProductionThermalController,
+        input: ThermalPlantRuntimeInput,
+        profile: Option<ThermalControlProfile>,
+    ) -> (HeaterPidSnapshot, bool) {
+        let changed = self.production_controller != Some(kind);
+        let disarm_for_source_change =
+            self.production_controller.is_some() && changed && input.heater_enabled;
+        if changed {
+            self.reset_disabled_output(input.target_temp_c, input.measured_temp_c);
+            self.thermal_plant_controller.reset();
+            self.production_controller = Some(kind);
+        }
+        let heater_enabled = input.heater_enabled && !disarm_for_source_change;
+        let snapshot = match kind {
+            ProductionThermalController::Plant => {
+                self.update_thermal_plant_at(ThermalPlantRuntimeInput {
+                    heater_enabled,
+                    ..input
+                })
+            }
+            ProductionThermalController::Profile => self.update_at(
+                input.target_temp_c,
+                input.measured_temp_c,
+                heater_enabled,
+                profile,
+                input.now_ms,
+            ),
+        };
+        (snapshot, disarm_for_source_change)
     }
 
     pub(crate) fn reseed_measurement(&mut self, measured_temp_c: f32) {

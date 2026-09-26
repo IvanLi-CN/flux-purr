@@ -2829,6 +2829,36 @@ fn early_usb_control_defers_runtime_status_until_main_loop() {
 }
 
 #[test]
+fn thermal_tuning_is_unavailable_during_startup_and_recovery() {
+    let memory_config = MemoryConfig::default();
+    for request in [
+        r#"{"type":"thermal_tuning","requestId":"tune-startup","op":"read"}"#,
+        r#"{"type":"request","requestId":"tune-startup","op":"get_thermal_tuning"}"#,
+    ] {
+        for (response, expected_code) in [
+            (usb_early_response(request, &memory_config), "startup_busy"),
+            (
+                usb_recovery_response(request, &memory_config, 0),
+                "hardware_bringup_failed",
+            ),
+        ] {
+            match response {
+                UsbFrame::Response {
+                    request_id,
+                    ok: false,
+                    result: None,
+                    error: Some(error),
+                } => {
+                    assert_eq!(request_id.as_str(), "tune-startup");
+                    assert_eq!(error.code.as_str(), expected_code);
+                }
+                other => panic!("unexpected thermal tuning response: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
 fn startup_recovery_defers_network_and_status_until_persistent_state_is_ready() {
     let memory_config = MemoryConfig::default();
     for (request_id, request) in [
@@ -9141,6 +9171,181 @@ fn thermal_profile_auto_resolution_uses_advertised_20v_5a_capability() {
         resolve_thermal_profile_bank(ThermalProfileMode::W100, &ManualPpsState::default()),
         ThermalProfileBank::Pps5a
     );
+}
+
+fn production_power_fixture(max_ma: u16) -> (PowerState, ManualPpsState) {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_000, 21_000, max_ma)]);
+    let request = PdContractRequest::pps(20_000, max_ma).unwrap();
+    let contract = source.select_exact_contract(request).unwrap();
+    let active = ConfirmedActiveContract::from_private_contract(contract, source).unwrap();
+    let power_state = PowerState {
+        protocol: PowerProtocol::Ready,
+        available: true,
+        requested: None,
+        active: Some(active),
+        source_capabilities: source.view(),
+        failure: None,
+    };
+    let manual_pps = ManualPpsState::from_capabilities(adjustable_capabilities_from_view(
+        power_state.source_capabilities,
+    ));
+    (power_state, manual_pps)
+}
+
+fn production_test_profile(approach_power_permille: u16) -> ThermalControlProfile {
+    let mut points = [None; FRONTPANEL_PRESET_COUNT];
+    points[0] = Some(ThermalControlProfilePoint {
+        target_temp_c: 60,
+        brake_distance_centi_c: 1_400,
+        warmup_power_permille: 1_000,
+        warmup_reenter_centi_c: 400,
+        approach_power_permille,
+        approach_floor_power_permille: 100,
+        approach_damping_exponent_permille: 1_000,
+        approach_tail_window_centi_c: 100,
+        hold_power_permille: 250,
+        hold_reheat_power_permille: 300,
+        hold_entry_centi_c: 150,
+        hold_exit_centi_c: 250,
+        hold_on_centi_c: 30,
+        hold_off_centi_c: 50,
+        overshoot_cutoff_centi_c: 300,
+        hold_kp_permille_per_c: 100,
+        hold_ki_permille_per_c_tick: 10,
+        hold_blend_ticks: 4,
+        approach_lead_ticks: 8,
+        hold_lead_ticks: 6,
+    });
+    ThermalControlProfile {
+        settings: ThermalControlProfileSettings::default(),
+        points,
+    }
+}
+
+fn production_test_input(measured_temp_c: f32) -> ThermalPlantRuntimeInput {
+    ThermalPlantRuntimeInput {
+        target_temp_c: 60,
+        measured_temp_c,
+        ambient_temp_c: 25.0,
+        heater_enabled: true,
+        model: flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 100.0,
+            radiation_mw_per_k4: 0.0,
+            thermal_capacity_mj_per_c: 15_000.0,
+            transport_delay_ms: 200,
+        },
+        max_power_mw: 65_000.0,
+        now_ms: 3_000,
+    }
+}
+
+#[test]
+fn production_controller_requires_a_verified_five_amp_source() {
+    let (five_amp, five_amp_pps) = production_power_fixture(5_000);
+    assert_eq!(
+        production_thermal_controller(five_amp, ThermalProfileMode::Auto, &five_amp_pps),
+        ProductionThermalController::Profile
+    );
+    let (three_amp, three_amp_pps) = production_power_fixture(3_250);
+    assert_eq!(
+        production_thermal_controller(three_amp, ThermalProfileMode::W100, &three_amp_pps),
+        ProductionThermalController::Plant
+    );
+    assert_eq!(
+        production_thermal_controller(
+            PowerState::unavailable(),
+            ThermalProfileMode::W100,
+            &five_amp_pps
+        ),
+        ProductionThermalController::Plant
+    );
+    let negotiating = PowerState {
+        protocol: PowerProtocol::WaitingForAccept,
+        ..five_amp
+    };
+    assert_eq!(
+        production_thermal_controller(negotiating, ThermalProfileMode::Auto, &five_amp_pps),
+        ProductionThermalController::Plant
+    );
+}
+
+#[test]
+fn five_amp_normal_and_tuning_use_same_profile_controller() {
+    let mut normal = HeaterController::new();
+    normal.production_controller = Some(ProductionThermalController::Profile);
+    normal.phase = HeaterControlPhase::Approach;
+    normal.heater_was_enabled = true;
+    normal.last_target_temp_c = 60;
+    normal.filtered_temp_c = Some(54.0);
+    normal.previous_filtered_temp_c = Some(53.9);
+    normal.previous_measured_temp_c = Some(54.0);
+    let mut tuning = normal;
+    let profile = production_test_profile(300);
+    let input = production_test_input(54.5);
+    let (normal_output, normal_disarmed) =
+        normal.update_production_at(ProductionThermalController::Profile, input, Some(profile));
+    let (tuning_output, tuning_disarmed) =
+        tuning.update_production_at(ProductionThermalController::Profile, input, Some(profile));
+    assert!(!normal_disarmed && !tuning_disarmed);
+    assert_eq!(normal_output, tuning_output);
+
+    let mut changed_candidate = HeaterController::new();
+    changed_candidate.production_controller = Some(ProductionThermalController::Profile);
+    changed_candidate.phase = HeaterControlPhase::Approach;
+    changed_candidate.heater_was_enabled = true;
+    changed_candidate.last_target_temp_c = 60;
+    changed_candidate.filtered_temp_c = Some(54.0);
+    changed_candidate.previous_filtered_temp_c = Some(53.9);
+    changed_candidate.previous_measured_temp_c = Some(54.0);
+    let (changed_output, _) = changed_candidate.update_production_at(
+        ProductionThermalController::Profile,
+        input,
+        Some(production_test_profile(900)),
+    );
+    assert_ne!(normal_output.duty_percent, changed_output.duty_percent);
+    let normal_pwm = heater_physical_pwm_percent(normal_output.duty_percent, 21_000, 21_000, 100);
+    let changed_pwm = heater_physical_pwm_percent(changed_output.duty_percent, 21_000, 21_000, 100);
+    assert_ne!(normal_pwm, changed_pwm);
+}
+
+#[test]
+fn production_source_class_change_disarms_before_switching_controller() {
+    let mut controller = HeaterController::new();
+    let (first, disarmed) = controller.update_production_at(
+        ProductionThermalController::Plant,
+        production_test_input(30.0),
+        None,
+    );
+    assert!(!disarmed);
+    assert!(first.duty_percent > 0);
+    let (switched, disarmed) = controller.update_production_at(
+        ProductionThermalController::Profile,
+        production_test_input(31.0),
+        Some(production_test_profile(900)),
+    );
+    assert!(disarmed);
+    assert_eq!(switched.duty_percent, 0);
+    assert!(!controller.heater_was_enabled);
+}
+
+#[test]
+fn three_amp_production_matches_the_plant_controller() {
+    let mut direct = HeaterController::new();
+    let mut selected = HeaterController::new();
+    for (index, temperature_c) in [30.0, 40.0, 56.0, 59.7, 60.2].into_iter().enumerate() {
+        let input = ThermalPlantRuntimeInput {
+            now_ms: index as u64 * 50,
+            ..production_test_input(temperature_c)
+        };
+        let baseline = direct.update_thermal_plant_at(input);
+        let (actual, disarmed) = selected.update_production_at(
+            ProductionThermalController::Plant,
+            input,
+            Some(production_test_profile(900)),
+        );
+        assert!(!disarmed);
+        assert_eq!(actual, baseline);
+    }
 }
 
 #[test]

@@ -21,6 +21,11 @@ use crate::{
         ThermalControlProfileSettingsConfig, ThermalProfileBank, ThermalProfileMode,
         WifiStaticIpv4Config, adc_calibration_fit,
     },
+    thermal_tuning::{
+        ThermalTuningCommandOp, ThermalTuningEventPage, ThermalTuningPowerClass,
+        ThermalTuningReviewDisposition, ThermalTuningSaveReceipt, ThermalTuningTerminalDisposition,
+        ThermalTuningTrace,
+    },
 };
 
 pub const CONTROL_PLANE_API_VERSION: &str = "2026-05-29";
@@ -1073,6 +1078,49 @@ impl RuntimeConfigCommand {
     }
 }
 
+/// Firmware-owned thermal tuning is deliberately a separate control-plane
+/// stream. It carries no host source identity or external VBUS data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningCommand {
+    pub op: ThermalTuningCommandOp,
+    pub run_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    pub candidate_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    pub candidate_hash: Option<String<THERMAL_TUNING_HASH_MAX_LEN>>,
+    pub power_class: Option<ThermalTuningPowerClass>,
+    pub targets_c: Option<Vec<i16, THERMAL_TUNING_TARGET_CAPACITY>>,
+    pub after_sequence: Option<u32>,
+    /// Candidate profile enters through the same typed RAM-preview payload as
+    /// the normal runtime path. It is never an external source measurement.
+    pub candidate_profile: Option<ThermalControlProfileCommand>,
+}
+
+pub const THERMAL_TUNING_TARGET_CAPACITY: usize = 9;
+pub const THERMAL_TUNING_HASH_MAX_LEN: usize = 71;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningStatusWire {
+    pub phase: crate::thermal_tuning::ThermalTuningPhase,
+    pub terminal_disposition: ThermalTuningTerminalDisposition,
+    pub review_disposition: ThermalTuningReviewDisposition,
+    pub power_class: Option<ThermalTuningPowerClass>,
+    pub run_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    pub candidate_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    pub candidate_hash: Option<String<THERMAL_TUNING_HASH_MAX_LEN>>,
+    pub targets_c: Vec<i16, THERMAL_TUNING_TARGET_CAPACITY>,
+    pub target_index: usize,
+    pub armed: bool,
+    pub sealed: bool,
+    pub save_confirmed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_profile: Option<ThermalControlProfileWire>,
+    pub preview_receipt: Option<crate::thermal_tuning::ThermalTuningPreviewReceipt>,
+    pub trace: ThermalTuningTrace,
+    pub events: ThermalTuningEventPage,
+    pub save_receipt: Option<ThermalTuningSaveReceipt>,
+}
+
 fn apply_thermal_profile_command(config: &mut MemoryConfig, command: ThermalControlProfileCommand) {
     let bank = command
         .bank
@@ -1277,6 +1325,66 @@ impl From<ThermalControlProfileWire> for ThermalControlProfileConfig {
             config.points[index] = point.map(Into::into);
         }
         config
+    }
+}
+
+impl From<ThermalControlProfileConfig> for ThermalControlProfileWire {
+    fn from(value: ThermalControlProfileConfig) -> Self {
+        Self {
+            settings: Some(value.settings.into()),
+            points: value.points.map(|point| point.map(Into::into)),
+        }
+    }
+}
+
+impl From<ThermalControlProfilePointConfig> for ThermalControlProfilePointWire {
+    fn from(value: ThermalControlProfilePointConfig) -> Self {
+        Self {
+            target_temp_c: value.target_temp_c,
+            brake_distance_centi_c: value.brake_distance_centi_c,
+            warmup_power_permille: value.warmup_power_permille,
+            warmup_reenter_centi_c: value.warmup_reenter_centi_c,
+            approach_power_permille: value.approach_power_permille,
+            approach_floor_power_permille: value.approach_floor_power_permille,
+            approach_damping_exponent_permille: value.approach_damping_exponent_permille,
+            approach_tail_window_centi_c: value.approach_tail_window_centi_c,
+            hold_power_permille: value.hold_power_permille,
+            hold_reheat_power_permille: value.hold_reheat_power_permille,
+            hold_entry_centi_c: value.hold_entry_centi_c,
+            hold_exit_centi_c: value.hold_exit_centi_c,
+            hold_on_centi_c: value.hold_on_centi_c,
+            hold_off_centi_c: value.hold_off_centi_c,
+            overshoot_cutoff_centi_c: value.overshoot_cutoff_centi_c,
+            hold_kp_permille_per_c: value.hold_kp_permille_per_c,
+            hold_ki_permille_per_c_tick: value.hold_ki_permille_per_c_tick,
+            hold_blend_ticks: value.hold_blend_ticks,
+            approach_lead_ticks: value.approach_lead_ticks,
+            hold_lead_ticks: value.hold_lead_ticks,
+        }
+    }
+}
+
+impl From<ThermalControlProfileSettingsConfig> for ThermalControlProfileSettingsWire {
+    fn from(value: ThermalControlProfileSettingsConfig) -> Self {
+        Self {
+            temp_filter_alpha_permille: value.temp_filter_alpha_permille,
+            warmup_reenter_centi_c: value.warmup_reenter_centi_c,
+            hold_entry_centi_c: value.hold_entry_centi_c,
+            hold_exit_centi_c: value.hold_exit_centi_c,
+            hold_on_centi_c: value.hold_on_centi_c,
+            hold_off_centi_c: value.hold_off_centi_c,
+            overshoot_cutoff_centi_c: value.overshoot_cutoff_centi_c,
+            approach_max_ticks: value.approach_max_ticks,
+            approach_min_power_ratio_permille: value.approach_min_power_ratio_permille,
+            hold_kp_permille_per_c: value.hold_kp_permille_per_c,
+            hold_ki_permille_per_c_tick: value.hold_ki_permille_per_c_tick,
+            hold_blend_ticks: value.hold_blend_ticks,
+            hold_reheat_power_permille: value.hold_reheat_power_permille,
+            approach_lead_ticks: value.approach_lead_ticks,
+            hold_lead_ticks: value.hold_lead_ticks,
+            auto_adjustable_working_floor_mv: value.auto_adjustable_working_floor_mv,
+            heater_current_reserve_ma: value.heater_current_reserve_ma,
+        }
     }
 }
 
@@ -1740,6 +1848,10 @@ pub enum UsbFrame {
         request_id: String<REQUEST_ID_MAX_LEN>,
         config: RuntimeConfigCommand,
     },
+    ThermalTuning {
+        request_id: String<REQUEST_ID_MAX_LEN>,
+        command: ThermalTuningCommand,
+    },
     #[cfg(feature = "buzzer-test")]
     BuzzerTestResponse {
         request_id: String<REQUEST_ID_MAX_LEN>,
@@ -1849,6 +1961,20 @@ struct UsbFrameWire {
     thermal_profile_mode: Option<ThermalProfileModeWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thermal_control_profile: Option<Box<ThermalControlProfileCommand>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<Box<String<REQUEST_ID_MAX_LEN>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_id: Option<Box<String<REQUEST_ID_MAX_LEN>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_hash: Option<Box<String<THERMAL_TUNING_HASH_MAX_LEN>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    power_class: Option<ThermalTuningPowerClass>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    targets_c: Option<Box<Vec<i16, THERMAL_TUNING_TARGET_CAPACITY>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after_sequence: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_profile: Option<Box<ThermalControlProfileCommand>>,
     #[cfg(feature = "buzzer-test")]
     #[serde(skip_serializing_if = "Option::is_none")]
     buzzer_cue: Option<BuzzerCueId>,
@@ -2007,6 +2133,20 @@ struct UsbRuntimeConfigInboundWire {
     thermal_control_profile: Option<ThermalControlProfileCommand>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbThermalTuningInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    op: Option<ThermalTuningCommandOp>,
+    run_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    candidate_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    candidate_hash: Option<String<THERMAL_TUNING_HASH_MAX_LEN>>,
+    power_class: Option<ThermalTuningPowerClass>,
+    targets_c: Option<Vec<i16, THERMAL_TUNING_TARGET_CAPACITY>>,
+    after_sequence: Option<u32>,
+    candidate_profile: Option<ThermalControlProfileCommand>,
+}
+
 #[cfg(feature = "buzzer-test")]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2128,6 +2268,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
             "request" => usb_frame_from_request(value),
             "wifi_config" => usb_frame_from_wifi_config(value),
             "runtime_config" => usb_frame_from_runtime_config(value),
+            "thermal_tuning" => usb_frame_from_thermal_tuning(value),
             #[cfg(feature = "buzzer-test")]
             "buzzer_test" => usb_frame_from_buzzer_test(value),
             "calibration_config" => usb_frame_from_calibration_config(value),
@@ -2191,6 +2332,22 @@ fn usb_frame_from_runtime_config(value: UsbFrameWire) -> Result<UsbFrame, UsbFra
             calibration: value.calibration.map(|calibration| *calibration),
             thermal_profile_mode: value.thermal_profile_mode,
             thermal_control_profile: value.thermal_control_profile.map(|profile| *profile),
+        },
+    })
+}
+
+fn usb_frame_from_thermal_tuning(value: UsbFrameWire) -> Result<UsbFrame, UsbFrameError> {
+    Ok(UsbFrame::ThermalTuning {
+        request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
+        command: ThermalTuningCommand {
+            op: parse_thermal_tuning_op(value.op.as_deref())?,
+            run_id: value.run_id.map(|value| *value),
+            candidate_id: value.candidate_id.map(|value| *value),
+            candidate_hash: value.candidate_hash.map(|value| *value),
+            power_class: value.power_class,
+            targets_c: value.targets_c.map(|value| *value),
+            after_sequence: value.after_sequence,
+            candidate_profile: value.candidate_profile.map(|profile| *profile),
         },
     })
 }
@@ -2317,6 +2474,13 @@ impl From<&UsbFrame> for UsbFrameWire {
             calibration: None,
             thermal_profile_mode: None,
             thermal_control_profile: None,
+            run_id: None,
+            candidate_id: None,
+            candidate_hash: None,
+            power_class: None,
+            targets_c: None,
+            after_sequence: None,
+            candidate_profile: None,
             #[cfg(feature = "buzzer-test")]
             buzzer_cue: None,
             #[cfg(feature = "buzzer-test")]
@@ -2352,6 +2516,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             UsbFrame::Request { .. } => wire.encode_request(value),
             UsbFrame::WifiConfig { .. } => wire.encode_wifi_config(value),
             UsbFrame::RuntimeConfig { .. } => wire.encode_runtime_config(value),
+            UsbFrame::ThermalTuning { .. } => wire.encode_thermal_tuning(value),
             #[cfg(feature = "buzzer-test")]
             UsbFrame::BuzzerTest { .. } => wire.encode_buzzer_test(value),
             #[cfg(feature = "buzzer-test")]
@@ -2433,6 +2598,32 @@ impl UsbFrameWire {
         self.calibration = config.calibration.map(Box::new);
         self.thermal_profile_mode = config.thermal_profile_mode;
         self.thermal_control_profile = config.thermal_control_profile.map(Box::new);
+    }
+
+    fn encode_thermal_tuning(&mut self, value: &UsbFrame) {
+        let UsbFrame::ThermalTuning {
+            request_id,
+            command,
+        } = value
+        else {
+            unreachable!()
+        };
+        self.frame_type = string("thermal_tuning");
+        self.request_id = Some(request_id.clone());
+        self.op = Some(string(match command.op {
+            ThermalTuningCommandOp::Start => "start",
+            ThermalTuningCommandOp::Cancel => "cancel",
+            ThermalTuningCommandOp::Seal => "seal",
+            ThermalTuningCommandOp::ConfirmSave => "confirm_save",
+            ThermalTuningCommandOp::Read => "read",
+        }));
+        self.run_id = command.run_id.clone().map(Box::new);
+        self.candidate_id = command.candidate_id.clone().map(Box::new);
+        self.candidate_hash = command.candidate_hash.clone().map(Box::new);
+        self.power_class = command.power_class;
+        self.targets_c = command.targets_c.clone().map(Box::new);
+        self.after_sequence = command.after_sequence;
+        self.candidate_profile = command.candidate_profile.map(Box::new);
     }
 
     #[cfg(feature = "buzzer-test")]
@@ -2595,6 +2786,7 @@ pub enum UsbRequestOp {
     GetCalibration,
     GetCalibrationJob,
     GetHeaterCurve,
+    GetThermalTuning,
     SetLogLevel,
     ClearLanPairingToken,
     PrepareFlash,
@@ -2617,6 +2809,7 @@ impl UsbRequestOp {
             Self::GetCalibration => "get_calibration",
             Self::GetCalibrationJob => "get_calibration_job",
             Self::GetHeaterCurve => "get_heater_curve",
+            Self::GetThermalTuning => "get_thermal_tuning",
             Self::SetLogLevel => "set_log_level",
             Self::ClearLanPairingToken => "clear_lan_pairing_token",
             Self::PrepareFlash => "prepare_flash",
@@ -2680,6 +2873,7 @@ pub enum UsbResponsePayload {
     Calibration(CalibrationStateWire),
     CalibrationJob(CalibrationJobStateWire),
     ThermalPlantRun(ThermalPlantRunSnapshotWire),
+    ThermalTuning(Box<ThermalTuningStatusWire>),
     HeaterCurve(HeaterCurveStateWire),
     EepromBytes(Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>),
     #[serde(rename = "flashPreparation")]
@@ -2818,6 +3012,7 @@ pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
         "request" => parse_usb_request(trimmed),
         "wifi_config" => parse_usb_wifi_config(trimmed),
         "runtime_config" => parse_usb_runtime_config(trimmed),
+        "thermal_tuning" => parse_usb_thermal_tuning(trimmed),
         #[cfg(feature = "buzzer-test")]
         "buzzer_test" => parse_usb_buzzer_test(trimmed),
         "calibration_config" => parse_usb_calibration_config(trimmed),
@@ -2900,6 +3095,23 @@ fn parse_usb_runtime_config(line: &str) -> Result<UsbFrame, UsbFrameError> {
             calibration: frame.calibration,
             thermal_profile_mode: frame.thermal_profile_mode,
             thermal_control_profile: frame.thermal_control_profile,
+        },
+    })
+}
+
+fn parse_usb_thermal_tuning(line: &str) -> Result<UsbFrame, UsbFrameError> {
+    let frame = parse_usb_wire::<UsbThermalTuningInboundWire>(line)?;
+    Ok(UsbFrame::ThermalTuning {
+        request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+        command: ThermalTuningCommand {
+            op: frame.op.ok_or(UsbFrameError::MalformedJson)?,
+            run_id: frame.run_id,
+            candidate_id: frame.candidate_id,
+            candidate_hash: frame.candidate_hash,
+            power_class: frame.power_class,
+            targets_c: frame.targets_c,
+            after_sequence: frame.after_sequence,
+            candidate_profile: frame.candidate_profile,
         },
     })
 }
@@ -3168,11 +3380,23 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
         Some("get_calibration") => Ok(UsbRequestOp::GetCalibration),
         Some("get_calibration_job") => Ok(UsbRequestOp::GetCalibrationJob),
         Some("get_heater_curve") => Ok(UsbRequestOp::GetHeaterCurve),
+        Some("get_thermal_tuning") => Ok(UsbRequestOp::GetThermalTuning),
         Some("set_log_level") => Ok(UsbRequestOp::SetLogLevel),
         Some("clear_lan_pairing_token") => Ok(UsbRequestOp::ClearLanPairingToken),
         Some("prepare_flash") => Ok(UsbRequestOp::PrepareFlash),
         Some("get_flash_preparation") => Ok(UsbRequestOp::GetFlashPreparation),
         Some("cancel_flash_preparation") => Ok(UsbRequestOp::CancelFlashPreparation),
+        _ => Err(UsbFrameError::MalformedJson),
+    }
+}
+
+fn parse_thermal_tuning_op(value: Option<&str>) -> Result<ThermalTuningCommandOp, UsbFrameError> {
+    match value {
+        Some("start") => Ok(ThermalTuningCommandOp::Start),
+        Some("cancel") => Ok(ThermalTuningCommandOp::Cancel),
+        Some("seal") => Ok(ThermalTuningCommandOp::Seal),
+        Some("confirm_save") => Ok(ThermalTuningCommandOp::ConfirmSave),
+        Some("read") => Ok(ThermalTuningCommandOp::Read),
         _ => Err(UsbFrameError::MalformedJson),
     }
 }
@@ -4614,6 +4838,30 @@ mod tests {
         assert!(json.len() < USB_LINE_MAX_LEN);
         assert!(json.contains(r#""phase":"cooling""#));
         assert_eq!(parse_usb_frame(json).unwrap(), response);
+    }
+
+    #[test]
+    fn thermal_tuning_frame_round_trips_without_external_source_fields() {
+        let frame = parse_usb_frame(
+            r#"{"type":"thermal_tuning","requestId":"run-1","op":"start","runId":"run-1","candidateId":"candidate-1","candidateHash":"hash-1","powerClass":"pps5a","targetsC":[60,240,140,100,80,120,180,160,220]}"#,
+        )
+        .expect("thermal tuning frame parses");
+        let UsbFrame::ThermalTuning { command, .. } = &frame else {
+            panic!("expected thermal tuning frame");
+        };
+        assert_eq!(
+            command.power_class,
+            Some(crate::thermal_tuning::ThermalTuningPowerClass::Pps5a)
+        );
+        assert_eq!(
+            command.targets_c.as_ref().map(|targets| targets.len()),
+            Some(9)
+        );
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let encoded = write_usb_frame(&frame, &mut out).expect("thermal tuning frame writes");
+        assert!(encoded.contains(r#""type":"thermal_tuning""#));
+        assert!(!encoded.contains("sourceId"));
+        assert_eq!(parse_usb_frame(encoded).unwrap(), frame);
     }
 
     #[cfg(feature = "buzzer-test")]

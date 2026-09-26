@@ -81,6 +81,7 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) calibration_runtime_state: CalibrationRuntimeState,
     pub(crate) thermal_plant_workspace: &'static mut CalibrationThermalPlantWorkspace,
     pub(crate) thermal_control_profile_preview: Option<ThermalControlProfile>,
+    pub(crate) thermal_tuning: flux_purr_firmware::thermal_tuning::ThermalTuningRuntime,
     pub(crate) heater_power_backend: HeaterPowerBackend,
     pub(crate) hold_pps_governor: HoldPpsGovernor,
     pub(crate) heater_controller: HeaterController,
@@ -368,6 +369,7 @@ pub(crate) struct BootRuntimeState {
     calibration_runtime_state: CalibrationRuntimeState,
     thermal_plant_workspace: &'static mut CalibrationThermalPlantWorkspace,
     thermal_control_profile_preview: Option<ThermalControlProfile>,
+    thermal_tuning: flux_purr_firmware::thermal_tuning::ThermalTuningRuntime,
     heater_power_backend: HeaterPowerBackend,
     hold_pps_governor: HoldPpsGovernor,
     heater_controller: HeaterController,
@@ -565,6 +567,7 @@ impl BootRuntimeState {
                 calibration_runtime_state: CalibrationRuntimeState::default(),
                 thermal_plant_workspace: new_thermal_plant_workspace(),
                 thermal_control_profile_preview: None,
+                thermal_tuning: flux_purr_firmware::thermal_tuning::ThermalTuningRuntime::new(),
                 heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
                     reason: HeaterPowerBackendReason::CapabilityReadFailed,
                     fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,

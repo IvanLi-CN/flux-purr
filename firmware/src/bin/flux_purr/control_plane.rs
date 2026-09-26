@@ -2658,6 +2658,7 @@ fn usb_frame_request_id(
         UsbFrame::Request { request_id, .. }
         | UsbFrame::WifiConfig { request_id, .. }
         | UsbFrame::RuntimeConfig { request_id, .. }
+        | UsbFrame::ThermalTuning { request_id, .. }
         | UsbFrame::CalibrationConfig { request_id, .. }
         | UsbFrame::CalibrationJob { request_id, .. }
         | UsbFrame::ThermalPlantRun { request_id, .. }
@@ -3277,6 +3278,7 @@ pub(crate) fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> Us
         }
         Ok(UsbFrame::WifiConfig { request_id, .. })
         | Ok(UsbFrame::RuntimeConfig { request_id, .. })
+        | Ok(UsbFrame::ThermalTuning { request_id, .. })
         | Ok(UsbFrame::CalibrationJob { request_id, .. })
         | Ok(UsbFrame::CalibrationConfig { request_id, .. }) => usb_error_response_with_retryable(
             request_id,
@@ -3362,6 +3364,12 @@ pub(crate) fn usb_early_request_response(
         UsbRequestOp::GetHeaterCurve => usb_response(
             request_id,
             UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(memory_config, None)),
+        ),
+        UsbRequestOp::GetThermalTuning => usb_error_response_with_retryable(
+            request_id,
+            "startup_busy",
+            "Thermal tuning is not available until hardware initialization completes.",
+            true,
         ),
         UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
         UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
@@ -3603,6 +3611,7 @@ pub(crate) fn usb_recovery_response(
         }
         Ok(UsbFrame::WifiConfig { request_id, .. })
         | Ok(UsbFrame::RuntimeConfig { request_id, .. })
+        | Ok(UsbFrame::ThermalTuning { request_id, .. })
         | Ok(UsbFrame::CalibrationConfig { request_id, .. }) => usb_error_response_with_retryable(
             request_id,
             "hardware_bringup_failed",
@@ -3691,6 +3700,12 @@ pub(crate) fn usb_recovery_request_response(
         UsbRequestOp::GetHeaterCurve => usb_response(
             request_id,
             UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(memory_config, None)),
+        ),
+        UsbRequestOp::GetThermalTuning => usb_error_response_with_retryable(
+            request_id,
+            "hardware_bringup_failed",
+            "Thermal tuning is unavailable because hardware bring-up did not complete.",
+            true,
         ),
         UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
         UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(

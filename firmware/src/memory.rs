@@ -541,6 +541,12 @@ impl Default for ThermalControlProfileConfig {
     }
 }
 
+impl ThermalControlProfileConfig {
+    pub fn sanitize(&mut self) {
+        sanitize_thermal_control_profile(self);
+    }
+}
+
 impl Default for ThermalControlProfileSettingsConfig {
     fn default() -> Self {
         Self {

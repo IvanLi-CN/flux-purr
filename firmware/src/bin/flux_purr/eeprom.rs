@@ -874,7 +874,7 @@ pub(crate) struct PersistDomainMask(u8);
 #[cfg(target_arch = "xtensa")]
 impl PersistDomainMask {
     pub(crate) const SAFETY: Self = Self(1 << 0);
-    const THERMAL: Self = Self(1 << 1);
+    pub(crate) const THERMAL: Self = Self(1 << 1);
     const PREFERENCES: Self = Self(1 << 2);
     const NETWORK: Self = Self(1 << 3);
     pub(crate) const THERMAL_PLANT: Self = Self(1 << 4);

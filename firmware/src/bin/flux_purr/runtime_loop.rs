@@ -199,6 +199,7 @@ pub(crate) async fn runtime_process_usb_control_line(
             next_attention_reminder_ms: &mut state.next_attention_reminder_ms,
             buzzer: &mut state.buzzer,
             thermal_control_profile_preview: &mut state.thermal_control_profile_preview,
+            thermal_tuning: &mut state.thermal_tuning,
             last_raw_state: state.last_raw_state,
             latest_status_temp_c: state.latest_display_temp_c,
             latest_control_temp_c: state.latest_temp_c,
@@ -468,6 +469,7 @@ pub(crate) async fn runtime_process_lan_control(
             next_attention_reminder_ms: &mut state.next_attention_reminder_ms,
             buzzer: &mut state.buzzer,
             thermal_control_profile_preview: &mut state.thermal_control_profile_preview,
+            thermal_tuning: &mut state.thermal_tuning,
             last_raw_state: state.last_raw_state,
             latest_status_temp_c: state.latest_display_temp_c,
             latest_control_temp_c: state.latest_temp_c,
@@ -1499,6 +1501,13 @@ pub(crate) async fn runtime_reconcile_heater_arming(
     if force_output_off {
         state.ui_state.heater_enabled = false;
     }
+    if state.thermal_tuning.armed
+        && state.thermal_tuning.phase
+            != flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
+        && !state.ui_state.heater_enabled
+    {
+        state.thermal_tuning.fail("heater_interlock_disarmed");
+    }
     (force_output_off, needs_redraw)
 }
 
@@ -1508,47 +1517,33 @@ pub(crate) fn runtime_update_heater_controller(
     elapsed_ms: u64,
     force_output_off: bool,
 ) -> (HeaterPidSnapshot, u8, bool) {
-    let runtime_plant = thermal_plant_projection_for_runtime(&state.memory_config);
-    let runtime_source_limits = state.manual_pps_state.heater_source_limits();
-    let max_power_mw = heater_available_power_mw_for_temp(
-        state.latest_temp_c,
-        runtime_source_limits.map(|(_, max_mv, _)| max_mv),
-        runtime_source_limits.map(|(_, _, max_ma)| max_ma),
-        preview_heater_curve_config(state.preview_heater_curve.as_ref()),
-        &state.memory_config,
-    );
+    if state.thermal_tuning.armed
+        && let Some(target_c) = state
+            .thermal_tuning
+            .targets_c
+            .get(state.thermal_tuning.target_index)
+            .copied()
+    {
+        state.ui_state.target_temp_c = target_c;
+        if state.thermal_tuning.phase
+            == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
+        {
+            state.ui_state.heater_enabled = false;
+        }
+    }
     let thermal_plant_calibration_running = state.calibration_runtime_state.mode
         == CalibrationMode::ThermalPlant
         && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running;
     let pid_snapshot = if thermal_plant_calibration_running {
+        state.heater_controller.production_controller = None;
         thermal_plant_calibration_snapshot(
             state.latest_temp_c,
             state.calibration_runtime_state.heater_enabled,
         )
     } else if state.calibration_runtime_state.mode == CalibrationMode::Off {
-        match runtime_plant {
-            Some((model, ambient_temp_c)) => {
-                state
-                    .heater_controller
-                    .update_thermal_plant_at(ThermalPlantRuntimeInput {
-                        target_temp_c: state.ui_state.target_temp_c,
-                        measured_temp_c: state.latest_temp_c,
-                        ambient_temp_c,
-                        heater_enabled: state.ui_state.heater_enabled,
-                        model,
-                        max_power_mw: max_power_mw as f32,
-                        now_ms: elapsed_ms,
-                    })
-            }
-            None => state.heater_controller.update_at(
-                state.ui_state.target_temp_c,
-                state.latest_temp_c,
-                false,
-                None,
-                elapsed_ms,
-            ),
-        }
+        runtime_production_pid_snapshot(state, elapsed_ms)
     } else {
+        state.heater_controller.production_controller = None;
         state.heater_controller.update_at(
             state
                 .calibration_runtime_state
@@ -1572,6 +1567,70 @@ pub(crate) fn runtime_update_heater_controller(
         needs_redraw = true;
     }
     (pid_snapshot, requested_duty_percent, needs_redraw)
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_production_pid_snapshot(
+    state: &mut RuntimeLoopState,
+    elapsed_ms: u64,
+) -> HeaterPidSnapshot {
+    let Some((model, ambient_temp_c)) = thermal_plant_projection_for_runtime(&state.memory_config)
+    else {
+        state.heater_controller.production_controller = None;
+        return state.heater_controller.update_at(
+            state.ui_state.target_temp_c,
+            state.latest_temp_c,
+            false,
+            None,
+            elapsed_ms,
+        );
+    };
+    let kind = production_thermal_controller(
+        state.power_state,
+        state.memory_config.thermal_profile_mode,
+        &state.manual_pps_state,
+    );
+    if state.thermal_tuning.armed && kind != ProductionThermalController::Profile {
+        state.thermal_tuning.fail("pps5a_source_lost");
+        state.ui_state.heater_enabled = false;
+    }
+    let profile = if kind == ProductionThermalController::Profile {
+        active_thermal_control_profile(
+            &state.memory_config,
+            state.thermal_control_profile_preview,
+            &state.manual_pps_state,
+        )
+    } else {
+        None
+    };
+    let runtime_source_limits = state.manual_pps_state.heater_source_limits();
+    let max_power_mw = heater_available_power_mw_for_temp(
+        state.latest_temp_c,
+        runtime_source_limits.map(|(_, max_mv, _)| max_mv),
+        runtime_source_limits.map(|(_, _, max_ma)| max_ma),
+        preview_heater_curve_config(state.preview_heater_curve.as_ref()),
+        &state.memory_config,
+    );
+    let (snapshot, disarm_for_source_change) = state.heater_controller.update_production_at(
+        kind,
+        ThermalPlantRuntimeInput {
+            target_temp_c: state.ui_state.target_temp_c,
+            measured_temp_c: state.latest_temp_c,
+            ambient_temp_c,
+            heater_enabled: state.ui_state.heater_enabled,
+            model,
+            max_power_mw: max_power_mw as f32,
+            now_ms: elapsed_ms,
+        },
+        profile,
+    );
+    if disarm_for_source_change {
+        state.ui_state.heater_enabled = false;
+        if state.thermal_tuning.armed {
+            state.thermal_tuning.fail("power_class_changed");
+        }
+    }
+    snapshot
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2152,12 +2211,8 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
     let mut needs_redraw = false;
     if elapsed_ms >= state.next_control_deadline_ms {
         let control_started_ms = elapsed_ms;
-        state.heater_control_timing.interval_ms = control_started_ms
-            .saturating_sub(state.last_control_ms)
-            .min(u64::from(u16::MAX)) as u16;
-        state.last_control_ms = elapsed_ms;
-        state.next_control_deadline_ms =
-            next_heater_control_deadline_ms(state.next_control_deadline_ms, control_started_ms);
+        runtime_advance_heater_control_deadline(state, control_started_ms);
+        runtime_apply_pending_tuning_preview(state);
         let active_thermal_control_profile = active_thermal_control_profile(
             &state.memory_config,
             state.thermal_control_profile_preview,
@@ -2231,6 +2286,17 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
             elapsed_ms,
         })
         .await;
+        let tuning_disarmed = runtime_record_thermal_tuning_sample(
+            state,
+            elapsed_ms,
+            pid_snapshot,
+            requested_duty_percent,
+        );
+        if tuning_disarmed {
+            state.ui_state.heater_enabled = false;
+            needs_redraw |=
+                runtime_force_heater_safe_off(state, active_thermal_settings, elapsed_ms).await;
+        }
         needs_redraw |= runtime_reconcile_heater_status(state, current_pd_observation);
         runtime_log_heater_cycle(
             state,
@@ -2241,6 +2307,136 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
     }
 
     needs_redraw
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_advance_heater_control_deadline(state: &mut RuntimeLoopState, control_started_ms: u64) {
+    state.heater_control_timing.interval_ms = control_started_ms
+        .saturating_sub(state.last_control_ms)
+        .min(u64::from(u16::MAX)) as u16;
+    state.last_control_ms = control_started_ms;
+    state.next_control_deadline_ms =
+        next_heater_control_deadline_ms(state.next_control_deadline_ms, control_started_ms);
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_apply_pending_tuning_preview(state: &mut RuntimeLoopState) {
+    if !state.thermal_tuning.armed || !state.thermal_tuning.preview_update_pending {
+        return;
+    }
+    let initial_trial_boundary = state.thermal_tuning.phase
+        == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Warmup
+        && state.thermal_tuning.trial_sample_start_sequence.is_none();
+    if state.thermal_tuning.phase
+        != flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
+        && !initial_trial_boundary
+    {
+        state
+            .thermal_tuning
+            .fail("preview_update_outside_trial_boundary");
+        state.ui_state.heater_enabled = false;
+    } else if let Some(profile) = state.thermal_tuning.candidate_profile.as_ref() {
+        state.thermal_control_profile_preview = ThermalControlProfile::from_saved_config(profile);
+        if state.thermal_control_profile_preview.is_none()
+            || state.thermal_tuning.record_preview_applied().is_err()
+        {
+            state.thermal_control_profile_preview = None;
+            state.ui_state.heater_enabled = false;
+        }
+    } else {
+        state.thermal_tuning.fail("candidate_profile_missing");
+        state.ui_state.heater_enabled = false;
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_record_thermal_tuning_sample(
+    state: &mut RuntimeLoopState,
+    elapsed_ms: u64,
+    pid_snapshot: HeaterPidSnapshot,
+    requested_duty_percent: u8,
+) -> bool {
+    if !state.thermal_tuning.armed {
+        return false;
+    }
+    let Some(observation) = state.last_pd_observation else {
+        state.thermal_tuning.fail("pd_contract_lost");
+        state.ui_state.heater_enabled = false;
+        return true;
+    };
+    let power_class = if observation.current_ma >= 5_000 {
+        flux_purr_firmware::thermal_tuning::ThermalTuningPowerClass::Pps5a
+    } else {
+        flux_purr_firmware::thermal_tuning::ThermalTuningPowerClass::Pps3a
+    };
+    if state.thermal_tuning.run_id.is_none() {
+        state.thermal_tuning.fail("run_identity_missing");
+        state.ui_state.heater_enabled = false;
+        return true;
+    }
+    let candidate_id = state
+        .thermal_tuning
+        .candidate_id
+        .clone()
+        .unwrap_or_default();
+    let candidate_hash = state
+        .thermal_tuning
+        .candidate_hash
+        .clone()
+        .unwrap_or_default();
+    let phase = match pid_snapshot.phase {
+        HeaterControlPhase::Warmup => {
+            flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Warmup
+        }
+        HeaterControlPhase::Approach => {
+            flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Approach
+        }
+        HeaterControlPhase::Hold => flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Hold,
+    };
+    let HeaterPowerBackend::PpsMos {
+        adjustable_max_mv, ..
+    } = state.heater_power_backend
+    else {
+        state.thermal_tuning.fail("pps_backend_lost");
+        state.ui_state.heater_enabled = false;
+        return true;
+    };
+    let sample = flux_purr_firmware::thermal_tuning::ThermalTuningSample {
+        sequence: state.thermal_tuning.events.len() as u32 + 1,
+        elapsed_ms,
+        target_c: state.ui_state.target_temp_c,
+        trial_index: state.thermal_tuning.trial_index,
+        candidate_id,
+        candidate_hash,
+        temperature_centi_c: (state.latest_temp_c * 100.0).round() as i16,
+        vin_mv: state.latest_vin_mv,
+        pps_contract: flux_purr_firmware::thermal_tuning::ThermalTuningPpsContract {
+            voltage_mv: observation.contract_voltage_mv.unwrap_or_default(),
+            current_ma: observation.current_ma,
+            kind: power_class,
+            confirmed: observation.status.pd_active,
+        },
+        requested_mv: state.heater_power_backend.pd_request_mv(),
+        pps_power_ceiling_mv: u32::from(adjustable_max_mv),
+        heater_requested_output_permille: u16::from(requested_duty_percent).saturating_mul(10),
+        heater_output_permille: u16::from(state.last_heater_duty).saturating_mul(10),
+        measurement_valid: state.current_rtd_fault.is_none() && state.latest_temp_c.is_finite(),
+        phase,
+    };
+    let phase_before = state.thermal_tuning.phase;
+    if state.thermal_tuning.record_sample(sample).is_err() {
+        state.ui_state.heater_enabled = false;
+        return true;
+    }
+    if phase_before == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
+        && state.thermal_tuning.phase
+            == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Warmup
+    {
+        state.ui_state.heater_enabled = true;
+    }
+    !state.thermal_tuning.armed
+        || state.thermal_tuning.phase
+            == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
 }
 
 #[cfg(target_arch = "xtensa")]
