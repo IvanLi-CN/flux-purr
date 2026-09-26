@@ -41,35 +41,46 @@ pub enum Command {
 
 impl Command {
     pub fn parse(op: &str) -> Option<Self> {
-        match op {
-            "preview_display" => Some(Self::PreviewDisplay),
-            "preview_frontpanel" => Some(Self::PreviewFrontpanel),
-            "preview_status_light" => Some(Self::PreviewStatusLight),
-            "test_buttons" => Some(Self::TestButtons),
-            "test_adc" => Some(Self::TestAdc),
-            "test_i2c" => Some(Self::TestI2c),
-            "test_rgb" => Some(Self::TestRgb),
-            "test_buzzer" => Some(Self::TestBuzzer),
-            "test_fan" => Some(Self::TestFan),
-            "exit" => Some(Self::Exit),
-            _ => None,
+        let op = op.as_bytes();
+        if equal_literal(op, b"preview_display") {
+            Some(Self::PreviewDisplay)
+        } else if equal_literal(op, b"preview_frontpanel") {
+            Some(Self::PreviewFrontpanel)
+        } else if equal_literal(op, b"preview_status_light") {
+            Some(Self::PreviewStatusLight)
+        } else if equal_literal(op, b"test_buttons") {
+            Some(Self::TestButtons)
+        } else if equal_literal(op, b"test_adc") {
+            Some(Self::TestAdc)
+        } else if equal_literal(op, b"test_i2c") {
+            Some(Self::TestI2c)
+        } else if equal_literal(op, b"test_rgb") {
+            Some(Self::TestRgb)
+        } else if equal_literal(op, b"test_buzzer") {
+            Some(Self::TestBuzzer)
+        } else if equal_literal(op, b"test_fan") {
+            Some(Self::TestFan)
+        } else if equal_literal(op, b"exit") {
+            Some(Self::Exit)
+        } else {
+            None
         }
     }
+}
 
-    pub const fn capability(self) -> &'static str {
-        match self {
-            Self::PreviewDisplay => "preview_display",
-            Self::PreviewFrontpanel => "preview_frontpanel",
-            Self::PreviewStatusLight => "preview_status_light",
-            Self::TestButtons => "test_buttons",
-            Self::TestAdc => "test_adc",
-            Self::TestI2c => "test_i2c",
-            Self::TestRgb => "test_rgb",
-            Self::TestBuzzer => "test_buzzer",
-            Self::TestFan => "test_fan",
-            Self::Exit => "exit",
-        }
+#[inline(never)]
+pub fn equal_literal(value: &[u8], expected: &[u8]) -> bool {
+    if value.len() != expected.len() {
+        return false;
     }
+    let mut index = 0;
+    while index < expected.len() {
+        if value[index] != expected[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,10 +103,10 @@ impl Request {
             return None;
         }
         let command = Command::parse(&self.op)?;
-        if self.capability != command.capability() {
+        if !equal_literal(self.capability.as_bytes(), self.op.as_bytes()) {
             return None;
         }
-        if matches!(command, Command::TestI2c) {
+        if equal_literal(self.op.as_bytes(), b"test_i2c") {
             let address = self.address.unwrap_or(0x22);
             let register = self.register.unwrap_or(0x09);
             if !I2C_READ_ALLOWLIST.contains(&(address, register)) {
@@ -129,7 +140,9 @@ pub fn write_identity(out: &mut String<1024>) -> core::fmt::Result {
         if index != 0 {
             out.push(',').map_err(|_| core::fmt::Error)?;
         }
-        write!(out, "\"{capability}\"")?;
+        out.push('"').map_err(|_| core::fmt::Error)?;
+        out.push_str(capability).map_err(|_| core::fmt::Error)?;
+        out.push('"').map_err(|_| core::fmt::Error)?;
     }
     out.push_str("]},\"capabilities\":[")
         .map_err(|_| core::fmt::Error)?;
@@ -137,7 +150,9 @@ pub fn write_identity(out: &mut String<1024>) -> core::fmt::Result {
         if index != 0 {
             out.push(',').map_err(|_| core::fmt::Error)?;
         }
-        write!(out, "\"{capability}\"")?;
+        out.push('"').map_err(|_| core::fmt::Error)?;
+        out.push_str(capability).map_err(|_| core::fmt::Error)?;
+        out.push('"').map_err(|_| core::fmt::Error)?;
     }
     out.push_str("]}\n").map_err(|_| core::fmt::Error)
 }
@@ -145,16 +160,27 @@ pub fn write_identity(out: &mut String<1024>) -> core::fmt::Result {
 pub fn write_response(
     out: &mut String<512>,
     request_id: &str,
-    command: Command,
+    capability: &str,
     ok: bool,
     detail: &str,
 ) -> core::fmt::Result {
-    use core::fmt::Write;
-    writeln!(
-        out,
-        "{{\"type\":\"response\",\"requestId\":\"{request_id}\",\"ok\":{ok},\"firmwareKind\":\"{FIRMWARE_KIND}\",\"capability\":\"{}\",\"result\":{{\"detail\":\"{detail}\",\"heater\":\"off\",\"pd\":\"untouched\",\"eeprom\":\"untouched\"}}}}",
-        command.capability()
-    )
+    out.push_str("{\"type\":\"response\",\"requestId\":\"")
+        .map_err(|_| core::fmt::Error)?;
+    out.push_str(request_id).map_err(|_| core::fmt::Error)?;
+    out.push_str("\",\"ok\":").map_err(|_| core::fmt::Error)?;
+    out.push_str(if ok { "true" } else { "false" })
+        .map_err(|_| core::fmt::Error)?;
+    out.push_str(",\"firmwareKind\":\"")
+        .map_err(|_| core::fmt::Error)?;
+    out.push_str(FIRMWARE_KIND).map_err(|_| core::fmt::Error)?;
+    out.push_str("\",\"capability\":\"")
+        .map_err(|_| core::fmt::Error)?;
+    out.push_str(capability).map_err(|_| core::fmt::Error)?;
+    out.push_str("\",\"result\":{\"detail\":\"")
+        .map_err(|_| core::fmt::Error)?;
+    out.push_str(detail).map_err(|_| core::fmt::Error)?;
+    out.push_str("\",\"heater\":\"off\",\"pd\":\"untouched\",\"eeprom\":\"untouched\"}}\n")
+        .map_err(|_| core::fmt::Error)
 }
 
 #[cfg(test)]
@@ -173,6 +199,24 @@ mod tests {
         )
         .expect("request parses");
         assert_eq!(request.command(), None);
+    }
+
+    #[test]
+    fn response_is_valid_jsonl() {
+        let mut response = String::<512>::new();
+        write_response(
+            &mut response,
+            "r1",
+            "preview_status_light",
+            true,
+            "status_light_preview_ready",
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(response.as_bytes()).unwrap();
+        assert_eq!(value["type"], "response");
+        assert_eq!(value["requestId"], "r1");
+        assert_eq!(value["capability"], "preview_status_light");
+        assert_eq!(value["result"]["heater"], "off");
     }
 
     #[test]

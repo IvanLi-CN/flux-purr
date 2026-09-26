@@ -27,6 +27,17 @@ RGB, buzzer, and fan paths.
 - Every command starts and ends with heater output off. PD and EEPROM remain
   untouched. Fan and buzzer actions are bounded, and I2C is limited to
   read-only identification addresses.
+- `preview display` uses the pinned GC9D01 `panel_160x50` initialization,
+  including the display-on command and the physical column `15..64`, row
+  `0..159` window. It turns on the active-low backlight and displays the
+  product renderer's static calibration scene with corner direction markers,
+  color and grayscale blocks, and the panel/resolution label. The checked-in
+  panel-order RGB565 frame must match the product renderer's output.
+  `preview frontpanel` keeps its solid green physical-path preview. A
+  successful display transfer sets the status light cyan.
+  The SPI bus must be flushed before each DC or CS transition.
+  A successful command response confirms transfer completion; physical
+  display acceptance requires observing the lit panel.
 
 ## Commands
 

@@ -7,9 +7,13 @@ writer, network stack, or product control-plane dispatcher.
 Build the release ELF from the repository root:
 
 ```text
-cargo +esp build --manifest-path firmware/ram-bringup/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/ram-bringup/target --release
+bash scripts/build-ram-bringup.sh
 python3 firmware/ram-bringup/tools/check_ram_elf.py firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup --json
 ```
+
+The build checks the embedded calibration frame against the product renderer.
+After changing that renderer, regenerate the frame with
+`cargo run --locked --manifest-path firmware/Cargo.toml --no-default-features --example ram_calibration_asset -- --write`.
 
 The host command `flux-purr ram-run preview ...` or `flux-purr ram-run test ...`
 loads that exact ELF into RAM only after the explicit serial port is verified,

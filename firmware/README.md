@@ -154,7 +154,7 @@ or supported by the production `flux-purr` firmware artifact.
 ## RAM bring-up workflow
 
 - Build and validate the flash-free image:
-  - `cargo +esp build --manifest-path firmware/ram-bringup/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/ram-bringup/target --release`
+  - `bash scripts/build-ram-bringup.sh`
   - `python3 firmware/ram-bringup/tools/check_ram_elf.py firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup --json`
 - Run a physical display, front-panel, or status-light scenario on the explicitly authorized port:
   - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run preview display --port <authorized-port>`

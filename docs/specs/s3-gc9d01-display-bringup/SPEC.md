@@ -171,6 +171,15 @@ None
 
 ## Visual Evidence
 
+- Checked-in static calibration scene used by the RAM display preview: the
+  product renderer output includes corner direction markers, color and
+  grayscale blocks, and the `GC9D01 160x50 DX15` panel label. The RAM image
+  embeds the panel-order RGB565 frame generated from that renderer.
+- Calibration preview: `./assets/calibration.preview.png`
+- Owner-facing calibration render (`8x`, `1280x400`): `./assets/calibration.zoom.png`
+
+![Static calibration scene](./assets/calibration.zoom.png)
+
 - Checked-in renderer evidence（逻辑预览，`RGB565 LE`，`160x50`，`Orientation::Landscape`，`dx=15`，`dy=0`；默认亮色主题，背景为 RGB565 纯白）
 - Raw framebuffer: `./assets/startup.framebuffer.bin`
 - Panel-order framebuffer: `./assets/startup.panel.framebuffer.bin`

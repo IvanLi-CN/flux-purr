@@ -1,10 +1,12 @@
 use super::*;
-use flux_purr_devd::PRODUCT_BUILD_ID;
-use serialport::{FlowControl, SerialPortType, UsbPortInfo};
-use std::{
-    io::{Read, Write},
-    time::{Duration, Instant},
+use espflash::{
+    command::{Command as RomCommand, CommandType},
+    connection::{Connection, ResetAfterOperation, ResetBeforeOperation},
+    target::Chip,
 };
+use flux_purr_devd::PRODUCT_BUILD_ID;
+use serialport::{FlowControl, SerialPort, SerialPortType, TTYPort, UsbPortInfo};
+use std::time::{Duration, Instant};
 
 const IDENTITY_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
@@ -71,35 +73,45 @@ fn run_ram_operation(
     op: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_exact_ram_port(port)?;
-    let observed = read_identity(port).unwrap_or(ObservedIdentity {
-        firmware: ObservedFirmware::Unknown,
-        build_id: None,
-        capabilities: Vec::new(),
+    let observed = if reload {
+        None
+    } else {
+        read_identity(port).ok()
+    };
+    let matching_ram = observed.as_ref().is_some_and(|(identity, _)| {
+        identity.firmware == ObservedFirmware::RamBringup
+            && identity.build_id.as_deref() == Some(PRODUCT_BUILD_ID)
+            && identity
+                .capabilities
+                .iter()
+                .any(|capability| capability == op)
     });
-    let matching_ram = observed.firmware == ObservedFirmware::RamBringup
-        && observed.build_id.as_deref() == Some(PRODUCT_BUILD_ID)
-        && observed
-            .capabilities
-            .iter()
-            .any(|capability| capability == op);
-    let identity = if reload || !matching_ram {
+    let (identity, mut serial) = if matching_ram {
+        observed.expect("matching RAM identity must exist")
+    } else {
+        drop(observed);
         let elf = elf.map(Path::to_path_buf).unwrap_or_else(default_ram_elf);
         validate_local_elf(&elf)?;
         validate_ram_elf(&elf)?;
-        load_ram_elf(port, &elf)?;
-        read_identity_with_retry(port)?
-    } else {
-        observed
+        load_ram_elf(port, &elf)?
     };
     verify_ram_identity(&identity, op)?;
-    send_ram_request(port, op)
+    send_ram_request(&mut serial, op)
 }
 
 fn exit_ram(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_exact_ram_port(port)?;
-    let identity = read_identity_with_retry(port)?;
+    let (identity, mut serial) = match read_identity(port) {
+        Ok(result) => result,
+        Err(_) => {
+            let elf = default_ram_elf();
+            validate_local_elf(&elf)?;
+            validate_ram_elf(&elf)?;
+            load_ram_elf(port, &elf)?
+        }
+    };
     verify_ram_identity(&identity, "exit")?;
-    send_ram_request(port, "exit")
+    send_ram_request(&mut serial, "exit")
 }
 
 fn default_ram_elf() -> PathBuf {
@@ -107,12 +119,24 @@ fn default_ram_elf() -> PathBuf {
 }
 
 const ELF_PT_LOAD: u32 = 1;
+const ELF_SHT_PROGBITS: u32 = 1;
+const ELF_SHT_INIT_ARRAY: u32 = 14;
 const ELF_MACHINE_XTENSA: u16 = 94;
 const RAM_VECTORS: (u64, u64) = (0x4037_8000, 0x4037_8400);
 const RAM_IRAM: (u64, u64) = (0x4037_8400, 0x403b_8400);
 const RAM_DRAM: (u64, u64) = (0x3fc8_8000, 0x3fce_8000);
 const RAM_RESERVED: (u64, u64) = (0x3fce_8000, 0x3fce_d710);
 const RAM_FLASH_WINDOWS: [(u64, u64); 2] = [(0x4200_0000, 0x4400_0000), (0x3c00_0000, 0x3d00_0000)];
+const RAM_BLOCK_SIZE: usize = 0x1800;
+const USB_SERIAL_JTAG_PID: u16 = 0x1001;
+const RTC_CNTL_BASE: u32 = 0x6000_8000;
+const RTC_CNTL_SWD_CONF: u32 = RTC_CNTL_BASE + 0x00b4;
+const RTC_CNTL_SWD_WPROTECT: u32 = RTC_CNTL_BASE + 0x00b8;
+const RTC_CNTL_WDTCONFIG0: u32 = RTC_CNTL_BASE + 0x0098;
+const RTC_CNTL_WDTWPROTECT: u32 = RTC_CNTL_BASE + 0x00b0;
+const RTC_CNTL_SWD_WKEY: u32 = 0x8f1d_312a;
+const RTC_CNTL_WDT_WKEY: u32 = 0x50d8_3aa1;
+const RTC_CNTL_SWD_AUTO_FEED_EN: u32 = 1 << 31;
 
 struct RamElfHeader {
     class: u8,
@@ -120,6 +144,9 @@ struct RamElfHeader {
     phoff: u64,
     phentsize: u64,
     phnum: u64,
+    shoff: u64,
+    shentsize: u64,
+    shnum: u64,
 }
 
 pub(crate) fn validate_ram_elf(
@@ -189,14 +216,20 @@ fn parse_ram_elf_header(
         1 => (
             read_u32(data, 24)? as u64,
             read_u32(data, 28)? as u64,
+            read_u32(data, 32)? as u64,
             read_u16(data, 42)? as u64,
             read_u16(data, 44)? as u64,
+            read_u16(data, 46)? as u64,
+            read_u16(data, 48)? as u64,
         ),
         2 => (
             read_u64(data, 24)?,
             read_u64(data, 32)?,
+            read_u64(data, 40)?,
             read_u16(data, 54)? as u64,
             read_u16(data, 56)? as u64,
+            read_u16(data, 58)? as u64,
+            read_u16(data, 60)? as u64,
         ),
         _ => return Err(format!("unsupported RAM ELF class {class}").into()),
     };
@@ -204,8 +237,11 @@ fn parse_ram_elf_header(
         class,
         entry: values.0,
         phoff: values.1,
-        phentsize: values.2,
-        phnum: values.3,
+        shoff: values.2,
+        phentsize: values.3,
+        phnum: values.4,
+        shentsize: values.5,
+        shnum: values.6,
     })
 }
 
@@ -224,29 +260,28 @@ fn program_header_offset(
     usize::try_from(offset).map_err(|_| "RAM ELF program header is too large".into())
 }
 
+fn section_header_offset(
+    shoff: u64,
+    shentsize: u64,
+    index: u64,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let offset = shoff
+        .checked_add(
+            index
+                .checked_mul(shentsize)
+                .ok_or("RAM ELF section header overflow")?,
+        )
+        .ok_or("RAM ELF section header overflow")?;
+    usize::try_from(offset).map_err(|_| "RAM ELF section header is too large".into())
+}
+
 fn validate_ram_segment(
     data: &[u8],
     class: u8,
     index: u64,
     offset: usize,
 ) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
-    let (p_offset, vaddr, paddr, filesz, memsz) = if class == 1 {
-        (
-            read_u32(data, offset_field(offset, 4)?)? as u64,
-            read_u32(data, offset_field(offset, 8)?)? as u64,
-            read_u32(data, offset_field(offset, 12)?)? as u64,
-            read_u32(data, offset_field(offset, 16)?)? as u64,
-            read_u32(data, offset_field(offset, 20)?)? as u64,
-        )
-    } else {
-        (
-            read_u64(data, offset_field(offset, 8)?)?,
-            read_u64(data, offset_field(offset, 16)?)?,
-            read_u64(data, offset_field(offset, 24)?)?,
-            read_u64(data, offset_field(offset, 32)?)?,
-            read_u64(data, offset_field(offset, 40)?)?,
-        )
-    };
+    let (p_offset, vaddr, paddr, filesz, memsz) = ram_segment_fields(data, class, offset)?;
     if filesz > memsz {
         return Err(format!("RAM ELF segment {index} has p_filesz > p_memsz").into());
     }
@@ -281,6 +316,125 @@ fn validate_ram_segment(
         return Ok((0, memsz));
     }
     Err(format!("RAM ELF segment {index} is outside internal RAM").into())
+}
+
+fn ram_segment_fields(
+    data: &[u8],
+    class: u8,
+    offset: usize,
+) -> Result<(u64, u64, u64, u64, u64), Box<dyn std::error::Error + Send + Sync>> {
+    Ok(if class == 1 {
+        (
+            read_u32(data, offset_field(offset, 4)?)? as u64,
+            read_u32(data, offset_field(offset, 8)?)? as u64,
+            read_u32(data, offset_field(offset, 12)?)? as u64,
+            read_u32(data, offset_field(offset, 16)?)? as u64,
+            read_u32(data, offset_field(offset, 20)?)? as u64,
+        )
+    } else {
+        (
+            read_u64(data, offset_field(offset, 8)?)?,
+            read_u64(data, offset_field(offset, 16)?)?,
+            read_u64(data, offset_field(offset, 24)?)?,
+            read_u64(data, offset_field(offset, 32)?)?,
+            read_u64(data, offset_field(offset, 40)?)?,
+        )
+    })
+}
+
+fn ram_section_fields(
+    data: &[u8],
+    class: u8,
+    offset: usize,
+) -> Result<(u32, u64, u64, u64, u64), Box<dyn std::error::Error + Send + Sync>> {
+    Ok(if class == 1 {
+        (
+            read_u32(data, offset_field(offset, 4)?)?,
+            read_u32(data, offset_field(offset, 8)?)? as u64,
+            read_u32(data, offset_field(offset, 12)?)? as u64,
+            read_u32(data, offset_field(offset, 16)?)? as u64,
+            read_u32(data, offset_field(offset, 20)?)? as u64,
+        )
+    } else {
+        (
+            read_u32(data, offset_field(offset, 4)?)?,
+            read_u64(data, offset_field(offset, 8)?)?,
+            read_u64(data, offset_field(offset, 16)?)?,
+            read_u64(data, offset_field(offset, 24)?)?,
+            read_u64(data, offset_field(offset, 32)?)?,
+        )
+    })
+}
+
+fn validate_ram_section(
+    address: u64,
+    size: u64,
+    index: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let end = address
+        .checked_add(size)
+        .ok_or_else(|| format!("RAM ELF section {index} address overflow"))?;
+    if RAM_FLASH_WINDOWS
+        .iter()
+        .any(|window| ranges_overlap(address, end, *window))
+    {
+        return Err(format!("RAM ELF section {index} maps to flash").into());
+    }
+    if ranges_overlap(address, end, RAM_RESERVED) {
+        return Err(format!("RAM ELF section {index} overlaps reserved memory").into());
+    }
+    if address == RAM_VECTORS.0 && end <= RAM_VECTORS.1 {
+        return Ok(());
+    }
+    if range_contained(address, end, RAM_IRAM) || range_contained(address, end, RAM_DRAM) {
+        return Ok(());
+    }
+    Err(format!("RAM ELF section {index} is outside internal RAM").into())
+}
+
+fn ram_load_sections(
+    data: &[u8],
+    path: &Path,
+) -> Result<(u32, Vec<(u32, Vec<u8>)>), Box<dyn std::error::Error + Send + Sync>> {
+    let header = parse_ram_elf_header(data, path)?;
+    let expected_shentsize = if header.class == 1 { 40 } else { 64 };
+    if header.shentsize < expected_shentsize {
+        return Err("RAM ELF section header entry is too small".into());
+    }
+    let entry = u32::try_from(header.entry).map_err(|_| "RAM ELF entry does not fit")?;
+    let mut sections = Vec::new();
+    for index in 0..header.shnum {
+        let offset = section_header_offset(header.shoff, header.shentsize, index)?;
+        let (section_type, flags, address, data_offset, size) =
+            ram_section_fields(data, header.class, offset)?;
+        if !matches!(section_type, ELF_SHT_PROGBITS | ELF_SHT_INIT_ARRAY)
+            || flags == 0
+            || address == 0
+            || data_offset == 0
+            || size == 0
+        {
+            continue;
+        }
+        validate_ram_section(address, size, index)?;
+        let start = usize::try_from(data_offset)
+            .map_err(|_| format!("RAM ELF segment {index} offset is too large"))?;
+        let end = usize::try_from(
+            data_offset
+                .checked_add(size)
+                .ok_or_else(|| format!("RAM ELF segment {index} file range overflow"))?,
+        )
+        .map_err(|_| format!("RAM ELF segment {index} end is too large"))?;
+        let segment_data = data
+            .get(start..end)
+            .ok_or_else(|| format!("RAM ELF segment {index} exceeds the artifact"))?;
+        let address = u32::try_from(address)
+            .map_err(|_| format!("RAM ELF segment {index} address is too large"))?;
+        sections.push((address, segment_data.to_vec()));
+    }
+    if sections.is_empty() {
+        return Err("RAM ELF contains no loadable sections".into());
+    }
+    Ok((entry, sections))
 }
 
 fn offset_field(
@@ -339,27 +493,21 @@ fn validate_exact_ram_port(port: &str) -> Result<(), Box<dyn std::error::Error +
     Ok(())
 }
 
-fn read_identity_with_retry(
+fn read_identity(
     port: &str,
-) -> Result<ObservedIdentity, Box<dyn std::error::Error + Send + Sync>> {
-    let deadline = Instant::now() + IDENTITY_TIMEOUT;
-    loop {
-        if let Ok(identity) = read_identity(port) {
-            return Ok(identity);
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("RAM bring-up identity was not received on {port}").into());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn read_identity(port: &str) -> Result<ObservedIdentity, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(ObservedIdentity, TTYPort), Box<dyn std::error::Error + Send + Sync>> {
     validate_exact_ram_port(port)?;
     let mut serial = serialport::new(port, 115_200)
         .flow_control(FlowControl::None)
         .timeout(Duration::from_millis(200))
         .open_native()?;
+    let identity = read_identity_from_serial(&mut serial)?;
+    Ok((identity, serial))
+}
+
+fn read_identity_from_serial(
+    serial: &mut dyn SerialPort,
+) -> Result<ObservedIdentity, Box<dyn std::error::Error + Send + Sync>> {
     let deadline = Instant::now() + IDENTITY_TIMEOUT;
     let mut bytes = Vec::with_capacity(1024);
     let mut chunk = [0u8; 256];
@@ -437,15 +585,11 @@ fn verify_ram_identity(
 }
 
 fn send_ram_request(
-    port: &str,
+    serial: &mut dyn SerialPort,
     op: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    validate_exact_ram_port(port)?;
     let request_id = format!("ram-{}", current_unix_millis());
-    let mut serial = serialport::new(port, 115_200)
-        .flow_control(FlowControl::None)
-        .timeout(Duration::from_millis(250))
-        .open_native()?;
+    serial.set_timeout(Duration::from_millis(250))?;
     let request = format!(
         "{{\"type\":\"ram_bringup\",\"requestId\":\"{request_id}\",\"op\":\"{op}\",\"capability\":\"{op}\"}}\n"
     );
@@ -494,7 +638,31 @@ fn find_ram_response(
     Ok(None)
 }
 
-fn load_ram_elf(port: &str, elf: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn disable_usb_serial_jtag_watchdogs(
+    connection: &mut Connection,
+    usb_pid: u16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if usb_pid != USB_SERIAL_JTAG_PID {
+        return Ok(());
+    }
+    connection.write_reg(RTC_CNTL_WDTWPROTECT, RTC_CNTL_WDT_WKEY, None)?;
+    connection.write_reg(RTC_CNTL_WDTCONFIG0, 0, None)?;
+    connection.write_reg(RTC_CNTL_WDTWPROTECT, 0, None)?;
+    connection.write_reg(RTC_CNTL_SWD_WPROTECT, RTC_CNTL_SWD_WKEY, None)?;
+    let swd_config = connection.read_reg(RTC_CNTL_SWD_CONF)?;
+    connection.write_reg(
+        RTC_CNTL_SWD_CONF,
+        swd_config | RTC_CNTL_SWD_AUTO_FEED_EN,
+        None,
+    )?;
+    connection.write_reg(RTC_CNTL_SWD_WPROTECT, 0, None)?;
+    Ok(())
+}
+
+fn load_ram_elf(
+    port: &str,
+    elf: &Path,
+) -> Result<(ObservedIdentity, TTYPort), Box<dyn std::error::Error + Send + Sync>> {
     validate_exact_ram_port(port)?;
     let port_info = serialport::available_ports()?
         .into_iter()
@@ -511,27 +679,55 @@ fn load_ram_elf(port: &str, elf: &Path) -> Result<(), Box<dyn std::error::Error 
         },
         _ => return Err("RAM loader requires a USB serial target".into()),
     };
+    let usb_pid = usb_info.pid;
     let serial = serialport::new(port, 115_200)
         .flow_control(FlowControl::None)
         .open_native()?;
-    let connection = ::espflash::connection::Connection::new(
+    let mut connection = Connection::new(
         serial,
         usb_info,
-        ::espflash::connection::ResetAfterOperation::HardReset,
-        ::espflash::connection::ResetBeforeOperation::DefaultReset,
+        ResetAfterOperation::HardReset,
+        ResetBeforeOperation::DefaultReset,
         115_200,
     );
-    let mut flasher = ::espflash::flasher::Flasher::connect(
-        connection,
-        false,
-        true,
-        false,
-        Some(::espflash::target::Chip::Esp32s3),
-        None,
-    )?;
+    connection.begin()?;
+    connection.set_timeout(Duration::from_secs(3))?;
+    let chip = connection.detect_chip(false)?;
+    if chip != Chip::Esp32s3 {
+        return Err(format!("RAM loader detected unexpected chip: {chip}").into());
+    }
+    disable_usb_serial_jtag_watchdogs(&mut connection, usb_pid)?;
     let elf_data = fs::read(elf)?;
-    flasher.load_elf_to_ram(&elf_data, &mut ::espflash::target::DefaultProgressCallback)?;
-    Ok(())
+    let (entry, segments) = ram_load_sections(&elf_data, elf)?;
+    for (address, mut data) in segments {
+        let padding = (4 - data.len() % 4) % 4;
+        data.resize(data.len() + padding, 0);
+        let blocks = data.len().div_ceil(RAM_BLOCK_SIZE);
+        connection.command(RomCommand::MemBegin {
+            size: data.len() as u32,
+            blocks: blocks as u32,
+            block_size: RAM_BLOCK_SIZE as u32,
+            offset: address,
+            supports_encryption: false,
+        })?;
+        for (sequence, chunk) in data.chunks(RAM_BLOCK_SIZE).enumerate() {
+            connection.command(RomCommand::MemData {
+                data: chunk,
+                pad_to: 4,
+                pad_byte: 0,
+                sequence: sequence as u32,
+            })?;
+        }
+    }
+    connection.with_timeout(CommandType::MemEnd.timeout(), |connection| {
+        connection.command(RomCommand::MemEnd {
+            no_entry: false,
+            entry,
+        })
+    })?;
+    let mut serial = connection.into_serial();
+    let identity = read_identity_from_serial(&mut serial)?;
+    Ok((identity, serial))
 }
 
 #[cfg(test)]

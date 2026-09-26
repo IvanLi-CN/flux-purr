@@ -78,7 +78,7 @@ jobs:
           buildtargets: esp32s3
 
       - name: RAM bring-up ELF build
-        run: cargo +esp build --locked --manifest-path firmware/ram-bringup/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/ram-bringup/target --release
+        run: bash scripts/build-ram-bringup.sh
 
       - name: RAM ELF safety checker
         run: python3 firmware/ram-bringup/tools/check_ram_elf.py firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup --json
