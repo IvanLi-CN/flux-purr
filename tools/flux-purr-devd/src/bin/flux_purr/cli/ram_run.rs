@@ -114,10 +114,61 @@ const RAM_DRAM: (u64, u64) = (0x3fc8_8000, 0x3fce_8000);
 const RAM_RESERVED: (u64, u64) = (0x3fce_8000, 0x3fce_d710);
 const RAM_FLASH_WINDOWS: [(u64, u64); 2] = [(0x4200_0000, 0x4400_0000), (0x3c00_0000, 0x3d00_0000)];
 
+struct RamElfHeader {
+    class: u8,
+    entry: u64,
+    phoff: u64,
+    phentsize: u64,
+    phnum: u64,
+}
+
 pub(crate) fn validate_ram_elf(
     path: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let data = fs::read(path)?;
+    let header = parse_ram_elf_header(&data, path)?;
+    let expected_phentsize = if header.class == 1 { 32 } else { 56 };
+    if header.phentsize < expected_phentsize {
+        return Err("RAM ELF program header entry is too small".into());
+    }
+    let mut load_count = 0u32;
+    let mut iram_bytes = 0u64;
+    let mut dram_bytes = 0u64;
+    for index in 0..header.phnum {
+        let offset = program_header_offset(header.phoff, header.phentsize, index)?;
+        let p_type = read_u32(&data, offset)?;
+        if p_type != ELF_PT_LOAD {
+            continue;
+        }
+        load_count += 1;
+        let (segment_iram, segment_dram) =
+            validate_ram_segment(&data, header.class, index, offset)?;
+        iram_bytes = iram_bytes
+            .checked_add(segment_iram)
+            .ok_or("RAM ELF IRAM budget overflow")?;
+        dram_bytes = dram_bytes
+            .checked_add(segment_dram)
+            .ok_or("RAM ELF DRAM budget overflow")?;
+    }
+    if load_count == 0 {
+        return Err("RAM ELF contains no PT_LOAD segments".into());
+    }
+    if iram_bytes > RAM_IRAM.1 - RAM_IRAM.0 {
+        return Err("RAM ELF IRAM budget exceeded".into());
+    }
+    if dram_bytes > RAM_DRAM.1 - RAM_DRAM.0 {
+        return Err("RAM ELF DRAM budget exceeded".into());
+    }
+    if !(RAM_VECTORS.0..RAM_IRAM.1).contains(&header.entry) {
+        return Err("RAM ELF entry point is outside internal RAM".into());
+    }
+    Ok(())
+}
+
+fn parse_ram_elf_header(
+    data: &[u8],
+    path: &Path,
+) -> Result<RamElfHeader, Box<dyn std::error::Error + Send + Sync>> {
     if data.get(0..4) != Some(b"\x7fELF") {
         return Err(format!("RAM artifact is not an ELF: {}", path.display()).into());
     }
@@ -130,115 +181,115 @@ pub(crate) fn validate_ram_elf(
     if data.get(5) != Some(&1) {
         return Err("RAM ELF must use little-endian encoding".into());
     }
-    let machine = read_u16(&data, 18)?;
+    let machine = read_u16(data, 18)?;
     if machine != ELF_MACHINE_XTENSA {
         return Err(format!("RAM ELF machine {machine} is not Xtensa").into());
     }
-    let (entry, phoff, phentsize, phnum) = match class {
+    let values = match class {
         1 => (
-            read_u32(&data, 24)? as u64,
-            read_u32(&data, 28)? as u64,
-            read_u16(&data, 42)? as u64,
-            read_u16(&data, 44)? as u64,
+            read_u32(data, 24)? as u64,
+            read_u32(data, 28)? as u64,
+            read_u16(data, 42)? as u64,
+            read_u16(data, 44)? as u64,
         ),
         2 => (
-            read_u64(&data, 24)?,
-            read_u64(&data, 32)?,
-            read_u16(&data, 54)? as u64,
-            read_u16(&data, 56)? as u64,
+            read_u64(data, 24)?,
+            read_u64(data, 32)?,
+            read_u16(data, 54)? as u64,
+            read_u16(data, 56)? as u64,
         ),
         _ => return Err(format!("unsupported RAM ELF class {class}").into()),
     };
-    let expected_phentsize = if class == 1 { 32 } else { 56 };
-    if phentsize < expected_phentsize {
-        return Err("RAM ELF program header entry is too small".into());
+    Ok(RamElfHeader {
+        class,
+        entry: values.0,
+        phoff: values.1,
+        phentsize: values.2,
+        phnum: values.3,
+    })
+}
+
+fn program_header_offset(
+    phoff: u64,
+    phentsize: u64,
+    index: u64,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let offset = phoff
+        .checked_add(
+            index
+                .checked_mul(phentsize)
+                .ok_or("RAM ELF program header overflow")?,
+        )
+        .ok_or("RAM ELF program header overflow")?;
+    usize::try_from(offset).map_err(|_| "RAM ELF program header is too large".into())
+}
+
+fn validate_ram_segment(
+    data: &[u8],
+    class: u8,
+    index: u64,
+    offset: usize,
+) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
+    let (p_offset, vaddr, paddr, filesz, memsz) = if class == 1 {
+        (
+            read_u32(data, offset_field(offset, 4)?)? as u64,
+            read_u32(data, offset_field(offset, 8)?)? as u64,
+            read_u32(data, offset_field(offset, 12)?)? as u64,
+            read_u32(data, offset_field(offset, 16)?)? as u64,
+            read_u32(data, offset_field(offset, 20)?)? as u64,
+        )
+    } else {
+        (
+            read_u64(data, offset_field(offset, 8)?)?,
+            read_u64(data, offset_field(offset, 16)?)?,
+            read_u64(data, offset_field(offset, 24)?)?,
+            read_u64(data, offset_field(offset, 32)?)?,
+            read_u64(data, offset_field(offset, 40)?)?,
+        )
+    };
+    if filesz > memsz {
+        return Err(format!("RAM ELF segment {index} has p_filesz > p_memsz").into());
     }
-    let mut load_count = 0u32;
-    let mut iram_bytes = 0u64;
-    let mut dram_bytes = 0u64;
-    for index in 0..phnum {
-        let offset = phoff
-            .checked_add(
-                index
-                    .checked_mul(phentsize)
-                    .ok_or("RAM ELF program header overflow")?,
-            )
-            .ok_or("RAM ELF program header overflow")?;
-        let offset = usize::try_from(offset).map_err(|_| "RAM ELF program header is too large")?;
-        let p_type = read_u32(&data, offset)?;
-        if p_type != ELF_PT_LOAD {
-            continue;
-        }
-        load_count += 1;
-        let (p_offset, vaddr, paddr, filesz, memsz) = if class == 1 {
-            (
-                read_u32(&data, offset + 4)? as u64,
-                read_u32(&data, offset + 8)? as u64,
-                read_u32(&data, offset + 12)? as u64,
-                read_u32(&data, offset + 16)? as u64,
-                read_u32(&data, offset + 20)? as u64,
-            )
-        } else {
-            (
-                read_u64(&data, offset + 8)?,
-                read_u64(&data, offset + 16)?,
-                read_u64(&data, offset + 24)?,
-                read_u64(&data, offset + 32)?,
-                read_u64(&data, offset + 40)?,
-            )
-        };
-        if filesz > memsz {
-            return Err(format!("RAM ELF segment {index} has p_filesz > p_memsz").into());
-        }
-        if paddr != vaddr {
-            return Err(format!("RAM ELF segment {index} has a non-identity load address").into());
-        }
-        let end = paddr
-            .checked_add(memsz)
-            .ok_or_else(|| format!("RAM ELF segment {index} address overflow"))?;
-        let file_end = p_offset
-            .checked_add(filesz)
-            .ok_or_else(|| format!("RAM ELF segment {index} file range overflow"))?;
-        if usize::try_from(file_end).map_or(true, |end| end > data.len()) {
-            return Err(format!("RAM ELF segment {index} exceeds the artifact").into());
-        }
-        if RAM_FLASH_WINDOWS
-            .iter()
-            .any(|window| ranges_overlap(paddr, end, *window))
-        {
-            return Err(format!("RAM ELF segment {index} maps to flash").into());
-        }
-        if ranges_overlap(paddr, end, RAM_RESERVED) {
-            return Err(format!("RAM ELF segment {index} overlaps reserved memory").into());
-        }
-        if paddr == RAM_VECTORS.0 && end <= RAM_VECTORS.1 {
-            continue;
-        }
-        if range_contained(paddr, end, RAM_IRAM) {
-            iram_bytes = iram_bytes
-                .checked_add(memsz)
-                .ok_or("RAM ELF IRAM budget overflow")?;
-        } else if range_contained(paddr, end, RAM_DRAM) {
-            dram_bytes = dram_bytes
-                .checked_add(memsz)
-                .ok_or("RAM ELF DRAM budget overflow")?;
-        } else {
-            return Err(format!("RAM ELF segment {index} is outside internal RAM").into());
-        }
+    if paddr != vaddr {
+        return Err(format!("RAM ELF segment {index} has a non-identity load address").into());
     }
-    if load_count == 0 {
-        return Err("RAM ELF contains no PT_LOAD segments".into());
+    let end = paddr
+        .checked_add(memsz)
+        .ok_or_else(|| format!("RAM ELF segment {index} address overflow"))?;
+    let file_end = p_offset
+        .checked_add(filesz)
+        .ok_or_else(|| format!("RAM ELF segment {index} file range overflow"))?;
+    if usize::try_from(file_end).map_or(true, |end| end > data.len()) {
+        return Err(format!("RAM ELF segment {index} exceeds the artifact").into());
     }
-    if iram_bytes > RAM_IRAM.1 - RAM_IRAM.0 {
-        return Err("RAM ELF IRAM budget exceeded".into());
+    if RAM_FLASH_WINDOWS
+        .iter()
+        .any(|window| ranges_overlap(paddr, end, *window))
+    {
+        return Err(format!("RAM ELF segment {index} maps to flash").into());
     }
-    if dram_bytes > RAM_DRAM.1 - RAM_DRAM.0 {
-        return Err("RAM ELF DRAM budget exceeded".into());
+    if ranges_overlap(paddr, end, RAM_RESERVED) {
+        return Err(format!("RAM ELF segment {index} overlaps reserved memory").into());
     }
-    if !(RAM_VECTORS.0..RAM_IRAM.1).contains(&entry) {
-        return Err("RAM ELF entry point is outside internal RAM".into());
+    if paddr == RAM_VECTORS.0 && end <= RAM_VECTORS.1 {
+        return Ok((0, 0));
     }
-    Ok(())
+    if range_contained(paddr, end, RAM_IRAM) {
+        return Ok((memsz, 0));
+    }
+    if range_contained(paddr, end, RAM_DRAM) {
+        return Ok((0, memsz));
+    }
+    Err(format!("RAM ELF segment {index} is outside internal RAM").into())
+}
+
+fn offset_field(
+    offset: usize,
+    field: usize,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    offset
+        .checked_add(field)
+        .ok_or_else(|| "RAM ELF program header field overflow".into())
 }
 
 fn read_u16(data: &[u8], offset: usize) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
@@ -316,11 +367,8 @@ fn read_identity(port: &str) -> Result<ObservedIdentity, Box<dyn std::error::Err
         match serial.read(&mut chunk) {
             Ok(count) => {
                 bytes.extend_from_slice(&chunk[..count]);
-                while let Some(index) = bytes.iter().position(|byte| *byte == b'\n') {
-                    let line: Vec<u8> = bytes.drain(..=index).collect();
-                    if let Some(identity) = parse_identity_line(&line) {
-                        return Ok(identity);
-                    }
+                if let Some(identity) = next_identity(&mut bytes) {
+                    return Ok(identity);
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
@@ -328,6 +376,16 @@ fn read_identity(port: &str) -> Result<ObservedIdentity, Box<dyn std::error::Err
         }
     }
     Err("no identity frame received".into())
+}
+
+fn next_identity(bytes: &mut Vec<u8>) -> Option<ObservedIdentity> {
+    while let Some(index) = bytes.iter().position(|byte| *byte == b'\n') {
+        let line: Vec<u8> = bytes.drain(..=index).collect();
+        if let Some(identity) = parse_identity_line(&line) {
+            return Some(identity);
+        }
+    }
+    None
 }
 
 fn parse_identity_line(line: &[u8]) -> Option<ObservedIdentity> {
@@ -400,22 +458,8 @@ fn send_ram_request(
         match serial.read(&mut chunk) {
             Ok(count) => {
                 bytes.extend_from_slice(&chunk[..count]);
-                while let Some(index) = bytes.iter().position(|byte| *byte == b'\n') {
-                    let line: Vec<u8> = bytes.drain(..=index).collect();
-                    if let Ok(value) = serde_json::from_slice::<Value>(&line) {
-                        if value.get("type").and_then(Value::as_str) != Some("response")
-                            || value.get("firmwareKind").and_then(Value::as_str)
-                                != Some("ram_bringup")
-                            || value.get("capability").and_then(Value::as_str) != Some(op)
-                            || value.get("requestId").and_then(Value::as_str) != Some(&request_id)
-                        {
-                            continue;
-                        }
-                        if value.get("ok").and_then(Value::as_bool) == Some(true) {
-                            return Ok(value);
-                        }
-                        return Err(format!("RAM bring-up rejected {op}: {value}").into());
-                    }
+                if let Some(value) = find_ram_response(&mut bytes, op, &request_id)? {
+                    return Ok(value);
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
@@ -423,6 +467,31 @@ fn send_ram_request(
         }
     }
     Err(format!("RAM bring-up response timed out for {op}").into())
+}
+
+fn find_ram_response(
+    bytes: &mut Vec<u8>,
+    op: &str,
+    request_id: &str,
+) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    while let Some(index) = bytes.iter().position(|byte| *byte == b'\n') {
+        let line: Vec<u8> = bytes.drain(..=index).collect();
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("response")
+            || value.get("firmwareKind").and_then(Value::as_str) != Some("ram_bringup")
+            || value.get("capability").and_then(Value::as_str) != Some(op)
+            || value.get("requestId").and_then(Value::as_str) != Some(request_id)
+        {
+            continue;
+        }
+        if value.get("ok").and_then(Value::as_bool) == Some(true) {
+            return Ok(Some(value));
+        }
+        return Err(format!("RAM bring-up rejected {op}: {value}").into());
+    }
+    Ok(None)
 }
 
 fn load_ram_elf(port: &str, elf: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
