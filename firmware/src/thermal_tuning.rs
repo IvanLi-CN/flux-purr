@@ -2196,6 +2196,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decision_event_digest_fixture_for_web_export() {
+        let event: ThermalTuningEvent = serde_json::from_value(serde_json::json!({
+            "sequence": 0,
+            "elapsedMs": 4500,
+            "kind": "decision",
+            "phase": "hold",
+            "targetC": 60,
+            "trialIndex": 1,
+            "sample": null,
+            "reason": "candidate_adopted",
+            "trial": null,
+            "decision": {
+                "disposition": "adopted",
+                "purpose": "hold_confirm",
+                "maxOvershootCentiC": 125,
+                "holdPeakToPeakCentiC": 155,
+                "settleTimeMs": 7800,
+                "score": [0.0, 1.0, 1.25, 2.0, 3.5, 4.0, 5.25, 6.0, 7.5, 8.0, 9.25],
+                "warmupFull": true,
+                "approachToHold": true,
+                "holdConfirm": true,
+                "hardGateOvershootCentiC": 300,
+                "hardGateHoldPeakToPeakCentiC": 300,
+                "hardGateFullSpeedToStableMs": 12000,
+                "freeze": true,
+                "prune": false,
+                "stopReason": "accepted"
+            }
+        }))
+        .unwrap();
+        let mut encoded = [0u8; 4096];
+        let length = serde_json_core::to_slice(&event, &mut encoded).unwrap();
+        assert!(
+            core::str::from_utf8(&encoded[..length])
+                .unwrap()
+                .contains("\"score\":[0.0,1.0,1.25")
+        );
+        assert_eq!(
+            digest_event_chain(&[event]).as_str(),
+            "6ce5cc6485ed1f4d4a7d9e35e2ce766386da295efec80563c2eaa1ad47408b75"
+        );
+    }
+
     fn id(value: &str) -> TuningId {
         let mut result = TuningId::new();
         result.push_str(value).unwrap();

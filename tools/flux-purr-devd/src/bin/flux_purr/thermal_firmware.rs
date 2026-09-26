@@ -1561,6 +1561,10 @@ mod tests {
         }))
         .unwrap();
         let digest = digest_event_chain(&[event.clone()]);
+        assert_eq!(
+            digest.as_str(),
+            "6c91f9e71b0dd2e548b43b5c3bcebfb52a3834567a05b88469af1ea934122f44"
+        );
         let mut status = json!({
             "events": {"events": [serde_json::to_value(&event).unwrap()]},
             "trace": {"firstSequence": 0, "lastSequence": 0, "complete": true, "gap": false, "digest": digest.as_str()}
