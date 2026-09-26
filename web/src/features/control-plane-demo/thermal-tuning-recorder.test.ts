@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ThermalTuningEvent, ThermalTuningStatus } from './contracts'
-import { recordThermalTuningPage } from './thermal-tuning-recorder'
+import { nextTuningReadCommand, recordThermalTuningPage } from './thermal-tuning-recorder'
 
 const event = (sequence: number): ThermalTuningEvent => ({
   sequence,
@@ -50,6 +50,15 @@ function page(
 }
 
 describe('firmware tuning event recorder', () => {
+  it('never acknowledges restored events before checking the device run identity', () => {
+    const restored = recordThermalTuningPage(null, page([0, 1]))
+    expect(nextTuningReadCommand(restored, false)).toBeNull()
+    expect(nextTuningReadCommand(restored, true)).toEqual({
+      op: 'read',
+      runId: 'run-5a',
+      afterSequence: 1,
+    })
+  })
   it('completes only after the final contiguous page is confirmed by the device', () => {
     const first = recordThermalTuningPage(null, page([0, 1]))
     expect(first.acknowledgedThrough).toBe(1)

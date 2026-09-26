@@ -1,8 +1,16 @@
 import { Download, LoaderCircle, Save, ShieldAlert, Square, Upload } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import type { ThermalTuningCommand, ThermalTuningEvent, ThermalTuningStatus } from '../contracts'
-import { recordThermalTuningPage, type ThermalTuningRecording } from '../thermal-tuning-recorder'
+import {
+  nextTuningReadCommand,
+  recordThermalTuningPage,
+  type ThermalTuningRecording,
+} from '../thermal-tuning-recorder'
+import {
+  loadThermalTuningRecording,
+  persistThermalTuningRecording,
+} from '../thermal-tuning-browser-journal'
 import { exportThermalTuningV2 } from '../thermal-tuning-v2-export'
 import './firmware-tuning-workspace.css'
 
@@ -70,6 +78,13 @@ export function FirmwareTuningWorkspace({
   sendCommand: (command: DeviceCommand) => Promise<ThermalTuningStatus>
 }) {
   const [recording, setRecording] = useState<ThermalTuningRecording | null>(null)
+  const recordingRef = useRef<ThermalTuningRecording | null>(null)
+  const readStatusRef = useRef(readStatus)
+  const sendCommandRef = useRef(sendCommand)
+  readStatusRef.current = readStatus
+  sendCommandRef.current = sendCommand
+  const [journalReady, setJournalReady] = useState(false)
+  const [identityVerified, setIdentityVerified] = useState(false)
   const [candidate, setCandidate] = useState<ImportedCandidate | null>(null)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -81,22 +96,67 @@ export function FirmwareTuningWorkspace({
   const terminal = status?.terminalDisposition
 
   useEffect(() => {
-    if (!supported || pending || recording?.gap || recording?.complete) return
+    let cancelled = false
+    recordingRef.current = null
+    setRecording(null)
+    setJournalReady(false)
+    setIdentityVerified(false)
+    void loadThermalTuningRecording(deviceId)
+      .then((restored) => {
+        if (cancelled) return
+        recordingRef.current = restored
+        setRecording(restored)
+        setJournalReady(true)
+      })
+      .catch((failure) => {
+        if (cancelled) return
+        setError(messageOf(failure))
+        if (supported) {
+          void readStatusRef.current()
+            .then((current) => {
+              if (current.armed) return sendCommandRef.current({ op: 'cancel', runId: current.runId ?? undefined })
+            })
+            .catch(() => {})
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [deviceId, supported])
+
+  const recordStatus = useCallback(
+    async (next: ThermalTuningStatus, confirmedSequence: number | null = null) => {
+      const updated = recordThermalTuningPage(recordingRef.current, next, confirmedSequence)
+      try {
+        if (updated.runId) await persistThermalTuningRecording(deviceId, updated)
+      } catch (failure) {
+        if (updated.status.armed && updated.runId) {
+          try {
+            await sendCommand({ op: 'cancel', runId: updated.runId })
+          } catch {
+            // The original persistence failure still blocks event acknowledgement.
+          }
+        }
+        throw failure
+      }
+      recordingRef.current = updated
+      setRecording(updated)
+    },
+    [deviceId, sendCommand]
+  )
+
+  useEffect(() => {
+    if (!supported || !journalReady || pending || recording?.gap || (recording?.complete && identityVerified)) return
     let cancelled = false
     const timer = window.setTimeout(
       async () => {
         try {
-          const confirmedSequence = recording?.acknowledgedThrough ?? null
-          const next =
-            recording?.runId && confirmedSequence != null
-              ? await sendCommand({
-                  op: 'read',
-                  runId: recording.runId,
-                  afterSequence: confirmedSequence,
-                })
-              : await readStatus()
+          const command = nextTuningReadCommand(recording, identityVerified)
+          const confirmedSequence = command?.afterSequence ?? null
+          const next = command ? await sendCommand(command) : await readStatus()
           if (!cancelled) {
-            setRecording((current) => recordThermalTuningPage(current, next, confirmedSequence))
+            await recordStatus(next, confirmedSequence)
+            setIdentityVerified(true)
             setError(null)
             setPollAttempt(0)
           }
@@ -113,23 +173,24 @@ export function FirmwareTuningWorkspace({
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [armed, pending, pollAttempt, readStatus, recording, sendCommand, supported])
+  }, [armed, identityVerified, journalReady, pending, pollAttempt, readStatus, recordStatus, recording, sendCommand, supported])
 
   useEffect(() => {
     if (!recording?.gap || !recording.status.armed || !recording.runId) return
     if (canceledGapRun.current === recording.runId) return
     canceledGapRun.current = recording.runId
     void sendCommand({ op: 'cancel', runId: recording.runId })
-      .then((next) => setRecording((current) => recordThermalTuningPage(current, next)))
+      .then((next) => recordStatus(next))
       .catch((failure) => setError(messageOf(failure)))
-  }, [recording, sendCommand])
+  }, [recordStatus, recording, sendCommand])
 
   const apply = async (command: DeviceCommand) => {
+    if (!journalReady || !identityVerified) return
     setPending(true)
     setError(null)
     try {
       const next = await sendCommand(command)
-      setRecording((current) => recordThermalTuningPage(current, next))
+      await recordStatus(next)
     } catch (failure) {
       setError(messageOf(failure))
     } finally {
@@ -189,8 +250,9 @@ export function FirmwareTuningWorkspace({
     candidateHash: status?.candidateHash ?? undefined,
     powerClass: status?.powerClass ?? undefined,
   }
-  const canSeal = terminal === 'candidate_ready' && recording?.complete && !status?.sealed
+  const canSeal = identityVerified && terminal === 'candidate_ready' && recording?.complete && !status?.sealed
   const canSave =
+    identityVerified &&
     terminal === 'candidate_ready' &&
     recording?.complete &&
     status?.sealed &&
@@ -227,7 +289,7 @@ export function FirmwareTuningWorkspace({
         </span>
         <Button
           type="button"
-          disabled={!supported || !candidate || armed || terminal === 'candidate_ready' || pending}
+          disabled={!supported || !journalReady || !identityVerified || !candidate || armed || terminal === 'candidate_ready' || pending}
           onClick={start}
         >
           {pending ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : null}
@@ -236,7 +298,7 @@ export function FirmwareTuningWorkspace({
         <Button
           type="button"
           variant="destructive"
-          disabled={!supported || !armed || pending}
+          disabled={!supported || !identityVerified || !armed || pending}
           onClick={() => void apply({ op: 'cancel', runId: status?.runId ?? undefined })}
         >
           <Square aria-hidden="true" /> 停止

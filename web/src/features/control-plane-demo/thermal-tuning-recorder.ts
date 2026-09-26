@@ -1,4 +1,4 @@
-import type { ThermalTuningEvent, ThermalTuningStatus } from './contracts'
+import type { ThermalTuningCommand, ThermalTuningEvent, ThermalTuningStatus } from './contracts'
 
 export interface ThermalTuningRecording {
   runId: string | null
@@ -9,6 +9,14 @@ export interface ThermalTuningRecording {
   gap: boolean
   gapReason: string | null
   complete: boolean
+}
+
+export function nextTuningReadCommand(
+  recording: ThermalTuningRecording | null,
+  identityVerified: boolean
+): Omit<ThermalTuningCommand, 'leaseId'> | null {
+  if (!identityVerified || !recording?.runId || recording.acknowledgedThrough == null) return null
+  return { op: 'read', runId: recording.runId, afterSequence: recording.acknowledgedThrough }
 }
 
 export function recordThermalTuningPage(
@@ -23,7 +31,7 @@ export function recordThermalTuningPage(
   if (status.trace.gap) gapReason ??= 'device_trace_gap'
 
   for (const event of status.events.events) {
-    const existing = events.find((item) => item.sequence === event.sequence)
+    const existing = events[event.sequence]
     if (existing) {
       if (JSON.stringify(existing) !== JSON.stringify(event)) {
         gap = true
