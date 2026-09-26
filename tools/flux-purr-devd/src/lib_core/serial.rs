@@ -466,6 +466,42 @@ pub(crate) async fn serial_thermal_plant_run_get(
     extract_usb_payload(result, "thermal_plant_run")
 }
 
+pub(crate) async fn serial_thermal_tuning(
+    state: &AppState,
+    target: &DeviceRecord,
+    payload: &ThermalTuningRequest,
+) -> Result<ThermalTuningStatus, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-thermal-tuning", now_millis());
+    let request = serde_json::to_string(&UsbThermalTuningWire {
+        frame_type: "thermal_tuning",
+        request_id: &request_id,
+        op: payload.op,
+        run_id: payload.run_id.as_deref(),
+        candidate_id: payload.candidate_id.as_deref(),
+        candidate_hash: payload.candidate_hash.as_deref(),
+        power_class: payload.power_class,
+        targets_c: payload.targets_c.as_ref(),
+        after_sequence: payload.after_sequence,
+        candidate_profile: payload.candidate_profile.as_ref(),
+    })
+    .map_err(|_| HttpError::internal("failed to encode thermal tuning request"))?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        if matches!(payload.op, ThermalTuningCommandOp::Read) {
+            SerialRetryPolicy::ReadOnly
+        } else {
+            SerialRetryPolicy::SingleShot
+        },
+    )
+    .await?;
+    extract_usb_payload(result, "thermal_tuning")
+}
+
 pub(crate) async fn serial_calibration_job_config(
     state: &AppState,
     target: &DeviceRecord,

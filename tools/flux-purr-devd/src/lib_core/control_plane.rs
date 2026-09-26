@@ -354,6 +354,10 @@ pub fn app(state: AppState) -> Router {
             put(configure_runtime),
         )
         .route(
+            "/api/v1/devices/{device_id}/thermal-tuning",
+            get(device_thermal_tuning).post(configure_thermal_tuning),
+        )
+        .route(
             "/api/v1/devices/{device_id}/buzzer-test",
             post(configure_buzzer_test),
         )
