@@ -1887,6 +1887,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-purr-ram-bringup"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-time",
+ "embedded-hal-async",
+ "embedded-io-async 0.6.1",
+ "esp-hal",
+ "esp-rtos",
+ "heapless 0.8.0",
+ "serde",
+ "serde-json-core",
+ "serde_json",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

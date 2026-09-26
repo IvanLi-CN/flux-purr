@@ -301,7 +301,8 @@ pub(crate) fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
 }
 
 pub(crate) fn validate_lan_bridge_identity(identity: &Identity) -> Result<(), HttpError> {
-    let valid = !identity.device_id.trim().is_empty()
+    let valid = identity.firmware_kind == Some(FirmwareKind::Product)
+        && !identity.device_id.trim().is_empty()
         && identity.api_version == "2026-05-29"
         && identity.protocol_version == "flux-purr.usb.v1"
         && ["identity", "network", "status"].iter().all(|capability| {

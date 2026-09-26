@@ -3,8 +3,16 @@ use super::*;
 pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cli = Cli::parse();
     let direct_flash_command = matches!(&cli.command, Command::Flash(_) | Command::Recover(_));
+    let direct_ram_command = matches!(&cli.command, Command::RamRun { .. });
     let explicit_devd_endpoint = devd_flag_was_supplied();
-    let managed_devd = prepare_devd(&mut cli, direct_flash_command, explicit_devd_endpoint).await?;
+    let managed_devd = if direct_ram_command {
+        if explicit_devd_endpoint {
+            return Err("ram-run is a direct-serial command and does not accept --devd".into());
+        }
+        None
+    } else {
+        prepare_devd(&mut cli, direct_flash_command, explicit_devd_endpoint).await?
+    };
     let client = Client::new();
     let payload = match cli.command {
         Command::Devices => {
@@ -51,6 +59,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             handle_hardware_command(&client, &cli.devd, command).await?
         }
         Command::UsbPort { command } => handle_usb_port_command(command)?,
+        Command::RamRun { command } => execute_ram_run(command)?,
     };
 
     if cli.json {
@@ -78,7 +87,7 @@ pub(crate) async fn prepare_devd(
         cli.devd = managed.endpoint.to_string_lossy().into_owned();
         return Ok(Some(managed));
     }
-    if !direct_flash_command {
+    if !direct_flash_command && !matches!(cli.command, Command::RamRun { .. }) {
         validate_local_control_endpoint(&cli.devd)?;
     }
     Ok(None)

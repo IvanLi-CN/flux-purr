@@ -6,7 +6,7 @@
 
 ## Lifecycle
 
-- `active`: the display driver and host-preview baseline remains current even though later runtime behavior is maintained elsewhere.
+- `active`: the display driver remains current and physical preview behavior is maintained by the RAM bring-up topic.
 
 - The original display baseline used the `gc9d01-rs` async API and an async ESP32-S3 SPI bus.
 - A later synchronous migration retained an async timer implementation even though the synchronous transform did not poll it; panel operations could therefore report success before reset and Sleep-Out timing completed.

@@ -47,6 +47,13 @@ pub const PRODUCT_CHANNEL: &str = env!("FLUX_PURR_PRODUCT_CHANNEL");
 pub const PRODUCT_SOURCE_SHA: &str = env!("FLUX_PURR_PRODUCT_SOURCE_SHA");
 pub const PRODUCT_BUILD_ID: &str = env!("FLUX_PURR_PRODUCT_BUILD_ID");
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareKind {
+    Product,
+    RamBringup,
+}
+
 pub const DEFAULT_EVENT_LIMIT: usize = 1_000;
 pub const DEFAULT_LOG_LIMIT: usize = 2_000;
 pub const DEFAULT_TRACE_LIMIT: usize = 2_000;
@@ -577,6 +584,7 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
 
 pub(crate) fn mock_identity(id: &str) -> Identity {
     Identity {
+        firmware_kind: Some(FirmwareKind::Product),
         device_id: id.to_string(),
         firmware_version: "fw/v0.4.0-dev".to_string(),
         build_id: "devd-mock".to_string(),
@@ -798,6 +806,7 @@ pub(crate) fn native_placeholder_status(network: &NetworkSummary) -> ControlPlan
 
 pub(crate) fn native_placeholder_identity() -> Identity {
     Identity {
+        firmware_kind: None,
         device_id: String::new(),
         firmware_version: "unknown".to_string(),
         build_id: "native-serial-placeholder".to_string(),
@@ -931,6 +940,8 @@ pub enum ConnectionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
+    #[serde(default)]
+    pub firmware_kind: Option<FirmwareKind>,
     pub device_id: String,
     pub firmware_version: String,
     pub build_id: String,
