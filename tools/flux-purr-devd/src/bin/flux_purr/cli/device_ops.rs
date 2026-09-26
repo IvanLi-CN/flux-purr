@@ -573,7 +573,13 @@ fn direct_flash_with_program_inner_guarded(
                 }
                 return Err(error);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(format!(
+                    "EEPROM backup preflight failed on authorized port {}: {error}; firmware was not written",
+                    args.port
+                )
+                .into());
+            }
         };
         let directory = backup_directory.ok_or("developer backup directory is unavailable")?;
         Some(developer_backup::write_atomic(directory, &snapshot)?)

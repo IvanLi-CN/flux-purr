@@ -5946,6 +5946,41 @@ fn direct_flash_archives_before_invoking_espflash() {
     assert_eq!(result["espflash"]["command"], "flash");
 }
 
+#[test]
+fn direct_flash_reports_missing_snapshot_port_before_any_firmware_write() {
+    fn missing_snapshot(_port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound).into())
+    }
+    fn no_rom_mode(_port: &str) -> bool {
+        false
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let elf = directory.path().join("firmware.elf");
+    fs::write(&elf, b"\x7fELFtest fixture").unwrap();
+    let error = direct_flash_with_program_inner(
+        FlashArgs {
+            port: "/dev/cu.contract-test".to_string(),
+            elf: Some(elf),
+            skip_backup: false,
+            confirm: None,
+            keep_download_mode: false,
+        },
+        &directory.path().join("espflash-not-invoked"),
+        false,
+        missing_snapshot,
+        no_rom_mode,
+        Some(directory.path()),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("EEPROM backup preflight failed"));
+    assert!(error.contains("/dev/cu.contract-test"));
+    assert!(error.contains("firmware was not written"));
+    assert!(!directory.path().join("espflash-not-invoked").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn direct_flash_blocks_espflash_when_backup_directory_is_unavailable() {
