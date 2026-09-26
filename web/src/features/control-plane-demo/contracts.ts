@@ -254,7 +254,12 @@ export interface ThermalTuningSample {
   candidateHash: string
   temperatureCentiC: number
   vinMv: number
-  ppsContract: { voltageMv: number; currentMa: number; kind: ThermalTuningPowerClass; confirmed: boolean }
+  ppsContract: {
+    voltageMv: number
+    currentMa: number
+    kind: ThermalTuningPowerClass
+    confirmed: boolean
+  }
   requestedMv: number
   ppsPowerCeilingMv: number
   heaterRequestedOutputPermille: number
@@ -621,6 +626,11 @@ export interface UsbThermalPlantRunFrame {
   type: 'thermal_plant_run'
   requestId: string
   afterSample?: number
+}
+
+export interface UsbThermalTuningFrame extends Omit<ThermalTuningCommand, 'leaseId'> {
+  type: 'thermal_tuning'
+  requestId: string
 }
 
 export interface UsbCalibrationConfigFrame {
