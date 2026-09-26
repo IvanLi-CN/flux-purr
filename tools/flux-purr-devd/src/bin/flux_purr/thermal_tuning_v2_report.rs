@@ -99,7 +99,10 @@ pub(crate) fn render_v2_bundle(
         && all_runs_passed
         && promotion_verified
         && bundle.get("terminalDisposition").and_then(Value::as_str) == Some("passed");
-    if !qualified {
+    let promotion_inconsistent = bundle.get("terminalDisposition").and_then(Value::as_str)
+        == Some("passed")
+        && !promotion_verified;
+    if !trace_complete || promotion_inconsistent {
         bundle["reviewDisposition"] = json!("review_incomplete");
     }
     bundle["ownerOutcome"] = json!(if qualified { "passed" } else { "failed" });
@@ -688,6 +691,37 @@ mod tests {
         let bundle = read_json(&output.join("run.bundle.json")).unwrap();
         assert_eq!(bundle["terminalDisposition"], "passed");
         assert_eq!(bundle["reviewDisposition"], "review_incomplete");
+    }
+
+    #[test]
+    fn complete_candidate_review_remains_complete_before_explicit_save() {
+        let dir = tempdir().unwrap();
+        write_fixture(dir.path());
+        let bundle_path = dir.path().join("run.bundle.json");
+        let mut bundle = read_json(&bundle_path).unwrap();
+        bundle["terminalDisposition"] = json!("candidate_ready");
+        bundle["reviewDisposition"] = json!("complete");
+        fs::write(&bundle_path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+        let candidate_path = dir.path().join("thermal-profile.candidate.json");
+        let mut candidate = read_json(&candidate_path).unwrap();
+        candidate["promotion"]["state"] = json!("sealed");
+        candidate["promotion"]["saveReceipt"] = Value::Null;
+        fs::write(
+            &candidate_path,
+            serde_json::to_vec_pretty(&candidate).unwrap(),
+        )
+        .unwrap();
+
+        let output = dir.path().join("out");
+        let result = render_v2_bundle(ThermalTuningV2ReportInput {
+            input_dir: dir.path().to_path_buf(),
+            output_dir: Some(output.clone()),
+        })
+        .unwrap();
+        let rendered = read_json(&output.join("run.bundle.json")).unwrap();
+        assert_eq!(result["ownerOutcome"], "failed");
+        assert_eq!(rendered["terminalDisposition"], "candidate_ready");
+        assert_eq!(rendered["reviewDisposition"], "complete");
     }
 
     #[test]
