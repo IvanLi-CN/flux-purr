@@ -18,6 +18,7 @@ pub const THERMAL_TUNING_HOLD_CONFIRM_MS: u64 = 60_000;
 pub const THERMAL_TUNING_STABLE_WINDOW_MS: u64 = 10_000;
 pub const THERMAL_TUNING_STABLE_BAND_CENTI_C: i16 = 150;
 pub const THERMAL_TUNING_TARGET_BUDGET_MS: u64 = 20 * 60 * 1_000;
+const THERMAL_TUNING_APPROACH_TRACE_CAPACITY: usize = 256;
 pub const THERMAL_TUNING_ID_MAX_LEN: usize = 48;
 pub const THERMAL_TUNING_REASON_MAX_LEN: usize = 96;
 // `sha256:` plus 64 hexadecimal characters.
@@ -158,14 +159,14 @@ pub struct ThermalTuningTrialRecord {
     pub sample_end_sequence: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThermalTuningDecisionRecord {
     pub disposition: TuningReason,
     pub max_overshoot_centi_c: Option<u16>,
     pub hold_peak_to_peak_centi_c: Option<u16>,
     pub settle_time_ms: Option<u32>,
-    pub score: [Option<u32>; 3],
+    pub score: [f64; 11],
     pub warmup_full: bool,
     pub approach_to_hold: bool,
     pub hold_confirm: bool,
@@ -264,6 +265,12 @@ pub struct ThermalTuningEventPage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ThermalCurveSample {
+    elapsed_ms: u64,
+    temperature_centi_c: i16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThermalTuningError {
     InvalidPowerClass,
     InvalidTargets,
@@ -317,6 +324,18 @@ pub struct ThermalTuningRuntime {
     pub max_temperature_centi_c: Option<i16>,
     pub min_hold_temperature_centi_c: Option<i16>,
     pub max_hold_temperature_centi_c: Option<i16>,
+    approach_curve_samples: Vec<ThermalCurveSample, THERMAL_TUNING_APPROACH_TRACE_CAPACITY>,
+    approach_curve_closed: bool,
+    approach_curve_overflow: bool,
+    approach_tail_abs_error_sum_c: f64,
+    approach_tail_count: u32,
+    approach_curve_last_elapsed_ms: Option<u64>,
+    hold_output_histogram: [u16; 1001],
+    hold_output_count: u32,
+    first_band_elapsed_ms: Option<u64>,
+    first_band_exit_centi_c: Option<i16>,
+    deadline_nearest_distance_ms: u64,
+    deadline_nearest_temperature_centi_c: Option<i16>,
     trace_digest: TuningHash,
     retained_trace_digest: TuningHash,
     first_sequence: Option<u32>,
@@ -374,6 +393,18 @@ impl ThermalTuningRuntime {
             max_temperature_centi_c: None,
             min_hold_temperature_centi_c: None,
             max_hold_temperature_centi_c: None,
+            approach_curve_samples: Vec::new(),
+            approach_curve_closed: false,
+            approach_curve_overflow: false,
+            approach_tail_abs_error_sum_c: 0.0,
+            approach_tail_count: 0,
+            approach_curve_last_elapsed_ms: None,
+            hold_output_histogram: [0; 1001],
+            hold_output_count: 0,
+            first_band_elapsed_ms: None,
+            first_band_exit_centi_c: None,
+            deadline_nearest_distance_ms: u64::MAX,
+            deadline_nearest_temperature_centi_c: None,
             trace_digest: TuningHash::new(),
             retained_trace_digest: TuningHash::new(),
             first_sequence: None,
@@ -501,6 +532,7 @@ impl ThermalTuningRuntime {
             < THERMAL_TUNING_TARGET_BUDGET_MS;
         let passes = budget_available
             && warmup_full
+            && !self.approach_curve_overflow
             && approach_to_hold
             && hold_confirm
             && self.stable_window_verified_at_ms.is_some()
@@ -513,6 +545,8 @@ impl ThermalTuningRuntime {
             "target monotonic tuning budget exhausted"
         } else if !warmup_full {
             "warmup logical full-output hard gate failed"
+        } else if self.approach_curve_overflow {
+            "approach_curve_evidence_overflow"
         } else if settle_time_ms.is_none_or(|value| value > u64::from(full_speed_limit_ms)) {
             "full-speed-to-stable budget exhausted"
         } else if !approach_to_hold {
@@ -529,11 +563,13 @@ impl ThermalTuningRuntime {
             max_overshoot_centi_c,
             hold_peak_to_peak_centi_c,
             settle_time_ms: settle_time_ms.map(|value| value.min(u64::from(u32::MAX)) as u32),
-            score: [
-                max_overshoot_centi_c.map(u32::from),
-                hold_peak_to_peak_centi_c.map(u32::from),
-                settle_time_ms.map(|value| value.min(u64::from(u32::MAX)) as u32),
-            ],
+            score: self.trial_score(
+                target_c,
+                hold_confirm && budget_available,
+                max_overshoot_centi_c,
+                hold_peak_to_peak_centi_c,
+                settle_time_ms,
+            ),
             warmup_full,
             approach_to_hold,
             hold_confirm,
@@ -668,6 +704,18 @@ impl ThermalTuningRuntime {
         self.max_temperature_centi_c = None;
         self.min_hold_temperature_centi_c = None;
         self.max_hold_temperature_centi_c = None;
+        self.approach_curve_samples.clear();
+        self.approach_curve_closed = false;
+        self.approach_curve_overflow = false;
+        self.approach_tail_abs_error_sum_c = 0.0;
+        self.approach_tail_count = 0;
+        self.approach_curve_last_elapsed_ms = None;
+        self.hold_output_histogram = [0; 1001];
+        self.hold_output_count = 0;
+        self.first_band_elapsed_ms = None;
+        self.first_band_exit_centi_c = None;
+        self.deadline_nearest_distance_ms = u64::MAX;
+        self.deadline_nearest_temperature_centi_c = None;
     }
 
     pub fn record_sample(
@@ -822,24 +870,7 @@ impl ThermalTuningRuntime {
             self.trial_start_elapsed_ms = Some(sample.elapsed_ms);
         }
         self.current_elapsed_ms = sample.elapsed_ms;
-        if sample.phase == ThermalTuningPhase::Warmup {
-            let logical_full = sample.heater_requested_output_permille >= 995;
-            let physical_full = sample.heater_output_permille >= 990;
-            if !self.warmup_full_output {
-                self.warmup_full_output = logical_full && physical_full;
-            } else if !logical_full || sample.heater_output_permille < 950 {
-                self.warmup_full_output_invalid = true;
-            } else if !physical_full {
-                let started = self
-                    .warmup_physical_transient_started_at_ms
-                    .get_or_insert(sample.elapsed_ms);
-                if sample.elapsed_ms.saturating_sub(*started) > 2_000 {
-                    self.warmup_full_output_invalid = true;
-                }
-            } else {
-                self.warmup_physical_transient_started_at_ms = None;
-            }
-        }
+        self.update_warmup_output_evidence(sample);
         match sample.phase {
             ThermalTuningPhase::Approach => {
                 self.saw_approach = true;
@@ -848,19 +879,19 @@ impl ThermalTuningRuntime {
             ThermalTuningPhase::Hold => {
                 self.saw_hold = true;
                 self.warmup_exited_at_ms.get_or_insert(sample.elapsed_ms);
-                if self.first_hold_elapsed_ms.is_none()
-                    && i32::from(sample.temperature_centi_c)
-                        >= i32::from(expected_target) * 100 - 50
-                    && (i32::from(sample.temperature_centi_c) - i32::from(expected_target) * 100)
-                        .abs()
-                        <= 300
-                {
-                    self.first_hold_elapsed_ms = Some(sample.elapsed_ms);
-                }
+                self.first_hold_elapsed_ms.get_or_insert(sample.elapsed_ms);
             }
             _ => {}
         }
+        if sample.phase != ThermalTuningPhase::Warmup && !self.approach_curve_closed {
+            self.record_approach_curve_sample(sample);
+            self.approach_curve_closed = sample.phase == ThermalTuningPhase::Hold;
+        }
         if self.first_hold_elapsed_ms.is_some() {
+            let output = usize::from(sample.heater_output_permille).min(1_000);
+            self.hold_output_histogram[output] =
+                self.hold_output_histogram[output].saturating_add(1);
+            self.hold_output_count = self.hold_output_count.saturating_add(1);
             self.min_hold_temperature_centi_c = Some(
                 self.min_hold_temperature_centi_c
                     .map_or(sample.temperature_centi_c, |value| {
@@ -875,12 +906,60 @@ impl ThermalTuningRuntime {
             );
         }
         self.update_stable_window(sample, expected_target);
+        self.update_stability_evidence(sample, expected_target);
         self.max_temperature_centi_c = Some(
             self.max_temperature_centi_c
                 .map_or(sample.temperature_centi_c, |value| {
                     value.max(sample.temperature_centi_c)
                 }),
         );
+    }
+
+    fn update_warmup_output_evidence(&mut self, sample: &ThermalTuningSample) {
+        if sample.phase != ThermalTuningPhase::Warmup {
+            return;
+        }
+        let logical_full = sample.heater_requested_output_permille >= 995;
+        let physical_full = sample.heater_output_permille >= 990;
+        if !self.warmup_full_output {
+            self.warmup_full_output = logical_full && physical_full;
+            return;
+        }
+        if !logical_full || sample.heater_output_permille < 950 {
+            self.warmup_full_output_invalid = true;
+            return;
+        }
+        if physical_full {
+            self.warmup_physical_transient_started_at_ms = None;
+            return;
+        }
+        let started = self
+            .warmup_physical_transient_started_at_ms
+            .get_or_insert(sample.elapsed_ms);
+        self.warmup_full_output_invalid |= sample.elapsed_ms.saturating_sub(*started) > 2_000;
+    }
+
+    fn record_approach_curve_sample(&mut self, sample: &ThermalTuningSample) {
+        let first_elapsed_ms = self
+            .approach_curve_samples
+            .first()
+            .map_or(sample.elapsed_ms, |first| first.elapsed_ms);
+        self.approach_curve_last_elapsed_ms = Some(sample.elapsed_ms);
+        if sample.elapsed_ms.saturating_sub(first_elapsed_ms) > 10_000 {
+            let target_centi_c = i32::from(sample.target_c) * 100;
+            self.approach_tail_abs_error_sum_c +=
+                f64::from((i32::from(sample.temperature_centi_c) - target_centi_c).abs()) / 100.0;
+            self.approach_tail_count = self.approach_tail_count.saturating_add(1);
+        } else if self
+            .approach_curve_samples
+            .push(ThermalCurveSample {
+                elapsed_ms: sample.elapsed_ms,
+                temperature_centi_c: sample.temperature_centi_c,
+            })
+            .is_err()
+        {
+            self.approach_curve_overflow = true;
+        }
     }
 
     fn update_stable_window(&mut self, sample: &ThermalTuningSample, expected_target: i16) {
@@ -908,6 +987,160 @@ impl ThermalTuningRuntime {
         {
             self.stable_window_verified_at_ms = Some(sample.elapsed_ms);
         }
+    }
+
+    fn update_stability_evidence(&mut self, sample: &ThermalTuningSample, target_c: i16) {
+        let Some(warmup_exit) = self.warmup_exited_at_ms else {
+            return;
+        };
+        if sample.elapsed_ms < warmup_exit {
+            return;
+        }
+        let limit_ms = if target_c > 150 { 5_000 } else { 10_000 };
+        let deadline = warmup_exit.saturating_add(limit_ms);
+        let distance = sample.elapsed_ms.abs_diff(deadline);
+        if distance < self.deadline_nearest_distance_ms {
+            self.deadline_nearest_distance_ms = distance;
+            self.deadline_nearest_temperature_centi_c = Some(sample.temperature_centi_c);
+        }
+        let lower = i32::from(target_c) * 100 - i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C);
+        let upper = i32::from(target_c) * 100 + i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C);
+        let temperature = i32::from(sample.temperature_centi_c);
+        if self.first_band_elapsed_ms.is_none() {
+            if sample.elapsed_ms <= deadline && (lower..=upper).contains(&temperature) {
+                self.first_band_elapsed_ms = Some(sample.elapsed_ms);
+            }
+        } else if self.first_band_exit_centi_c.is_none() && !(lower..=upper).contains(&temperature)
+        {
+            self.first_band_exit_centi_c = Some(sample.temperature_centi_c);
+        }
+    }
+
+    fn hold_output_percentile(&self, percentile: f64) -> Option<f64> {
+        if self.hold_output_count == 0 {
+            return None;
+        }
+        let rank = ((f64::from(self.hold_output_count - 1) * percentile) + 0.5) as u32;
+        let mut seen = 0_u32;
+        for (percent, count) in self.hold_output_histogram.iter().enumerate() {
+            seen = seen.saturating_add(u32::from(*count));
+            if seen > rank {
+                return Some(percent as f64);
+            }
+        }
+        None
+    }
+
+    fn approach_curve_mean_abs_error_c(&self, target_c: i16) -> Option<f64> {
+        if self.approach_curve_overflow {
+            return None;
+        }
+        let first = self.approach_curve_samples.first()?;
+        let duration = self
+            .approach_curve_last_elapsed_ms?
+            .saturating_sub(first.elapsed_ms);
+        let start_c = f64::from(first.temperature_centi_c) / 100.0;
+        let target_c = f64::from(target_c);
+        if duration == 0 || target_c <= start_c {
+            return None;
+        }
+        let fitted_ms = duration.clamp(5_000, 10_000) as f64;
+        let total_error = self.approach_tail_abs_error_sum_c
+            + self
+                .approach_curve_samples
+                .iter()
+                .map(|sample| {
+                    let elapsed = sample.elapsed_ms.saturating_sub(first.elapsed_ms) as f64;
+                    let progress = (elapsed / fitted_ms).clamp(0.0, 1.0);
+                    let remaining = 1.0 - progress;
+                    let reference = start_c + (target_c - start_c) * (1.0 - remaining * remaining);
+                    (f64::from(sample.temperature_centi_c) / 100.0 - reference).abs()
+                })
+                .sum::<f64>();
+        Some(
+            total_error
+                / (self.approach_curve_samples.len() as f64 + f64::from(self.approach_tail_count)),
+        )
+    }
+
+    fn trial_score(
+        &self,
+        target_c: i16,
+        completed: bool,
+        overshoot_centi_c: Option<u16>,
+        hold_p2p_centi_c: Option<u16>,
+        settle_time_ms: Option<u64>,
+    ) -> [f64; 11] {
+        let missing = 1.0e12;
+        let limit_ms = if target_c > 150 { 5_000.0 } else { 10_000.0 };
+        let margin_ms = if target_c > 150 { 500.0 } else { 1_000.0 };
+        let overshoot_c = overshoot_centi_c.map(|value| f64::from(value) / 100.0);
+        let hold_p2p_c = hold_p2p_centi_c.map(|value| f64::from(value) / 100.0);
+        let settle_ms = settle_time_ms.map(|value| value as f64);
+        let metric_gate = completed
+            && overshoot_c.is_some_and(|value| value <= 3.0)
+            && hold_p2p_c.is_some_and(|value| value <= 3.0)
+            && settle_ms.is_some_and(|value| value <= limit_ms);
+        let gate_penalty = if metric_gate {
+            0.0
+        } else {
+            1.0 + overshoot_c.map_or(3.0, |value| (value - 3.0).max(0.0))
+                + hold_p2p_c.map_or(3.0, |value| (value - 3.0).max(0.0))
+                + settle_ms.map_or(2.0, |value| {
+                    ((value - limit_ms).max(0.0) / 1_000.0).min(5.0)
+                })
+        };
+        let low_margin = completed
+            && settle_ms.is_some_and(|value| value <= limit_ms && limit_ms - value < margin_ms);
+        let target_centi = i32::from(target_c) * 100;
+        let lower = target_centi - i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C);
+        let upper = target_centi + i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C);
+        let (progress_base, temperature_gap_c) =
+            if completed && settle_ms.is_some_and(|value| value <= limit_ms) {
+                (if low_margin { 0.25 } else { 0.0 }, 0.0)
+            } else if let Some(exit) = self.first_band_exit_centi_c {
+                let value = i32::from(exit);
+                (
+                    1.0,
+                    f64::from((lower - value).max(value - upper).max(0)) / 100.0,
+                )
+            } else if self.first_band_elapsed_ms.is_some() {
+                (0.0, 0.0)
+            } else if let Some(deadline_temp) = self.deadline_nearest_temperature_centi_c {
+                let value = i32::from(deadline_temp);
+                if value < lower || value > upper {
+                    (
+                        3.0,
+                        f64::from((lower - value).max(value - upper).max(0)) / 100.0,
+                    )
+                } else {
+                    (2.0, 0.0)
+                }
+            } else {
+                (4.0, 0.0)
+            };
+        let first_band_penalty = self.first_band_elapsed_ms.map_or(0.0, |value| {
+            (value.saturating_sub(self.trial_start_elapsed_ms.unwrap_or(0)) as f64 / 1_000_000.0)
+                .min(0.5)
+        });
+        let hold_spread = self
+            .hold_output_percentile(0.5)
+            .zip(self.hold_output_percentile(0.9))
+            .map_or(missing, |(median, p90)| (p90 - median).abs());
+        [
+            0.0,
+            if completed { 0.0 } else { 1.0 },
+            gate_penalty,
+            if low_margin { 1.0 } else { 0.0 },
+            progress_base + first_band_penalty + temperature_gap_c.min(5.0),
+            settle_ms.map_or(missing, |value| (value - (limit_ms - margin_ms)).max(0.0)),
+            settle_ms.unwrap_or(missing),
+            overshoot_c.unwrap_or(missing),
+            hold_p2p_c.unwrap_or(missing),
+            hold_spread,
+            self.approach_curve_mean_abs_error_c(target_c)
+                .unwrap_or(missing),
+        ]
     }
 
     pub fn advance_target(&mut self) -> Result<(), ThermalTuningError> {
@@ -1758,6 +1991,58 @@ mod tests {
             .record_sample(sample(200, ThermalTuningPhase::Warmup, 3_200))
             .unwrap();
         assert!(runtime.warmup_full_output_invalid);
+    }
+
+    #[test]
+    fn eleven_component_score_uses_local_hold_and_approach_evidence() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.trial_start_elapsed_ms = Some(0);
+        runtime.first_band_elapsed_ms = Some(5_200);
+        runtime.hold_output_histogram[300] = 3;
+        runtime.hold_output_histogram[400] = 1;
+        runtime.hold_output_count = 4;
+        runtime
+            .approach_curve_samples
+            .push(ThermalCurveSample {
+                elapsed_ms: 1_000,
+                temperature_centi_c: 5_000,
+            })
+            .unwrap();
+        runtime.approach_curve_last_elapsed_ms = Some(6_000);
+        runtime
+            .approach_curve_samples
+            .push(ThermalCurveSample {
+                elapsed_ms: 6_000,
+                temperature_centi_c: 6_000,
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.trial_score(60, true, Some(200), Some(150), Some(4_000)),
+            [
+                0.0, 0.0, 0.0, 0.0, 0.0052, 0.0, 4_000.0, 2.0, 1.5, 100.0, 0.0
+            ]
+        );
+        let low_margin = runtime.trial_score(60, true, Some(200), Some(150), Some(9_500));
+        assert_eq!(low_margin[3], 1.0);
+        assert_eq!(low_margin[4], 0.2552);
+        assert_eq!(low_margin[5], 500.0);
+    }
+
+    #[test]
+    fn approach_tail_keeps_exact_error_without_unbounded_sample_storage() {
+        let mut runtime = ThermalTuningRuntime::new();
+        let mut sample = sample(1_000, ThermalTuningPhase::Approach, 5_000);
+        runtime.record_approach_curve_sample(&sample);
+        sample.elapsed_ms = 6_000;
+        sample.temperature_centi_c = 6_000;
+        runtime.record_approach_curve_sample(&sample);
+        sample.elapsed_ms = 12_000;
+        sample.temperature_centi_c = 5_900;
+        runtime.record_approach_curve_sample(&sample);
+        assert_eq!(runtime.approach_curve_samples.len(), 2);
+        assert_eq!(runtime.approach_tail_count, 1);
+        let mean_error = runtime.approach_curve_mean_abs_error_c(60).unwrap();
+        assert!((mean_error - 3.5 / 3.0).abs() < 1.0e-9);
     }
 
     #[test]
