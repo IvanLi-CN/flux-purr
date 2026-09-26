@@ -956,21 +956,9 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
     } else {
         device_terminal
     };
-    let outcome = if terminal == "passed" {
-        "passed"
-    } else {
-        "failed"
-    };
     let targets = parse_thermal_targets(Some(FIRMWARE_PHYSICAL_TARGETS_C))?;
     let execution_order = THERMAL_TUNING_EXECUTION_ORDER_C;
-    let report_runs = build_report_runs(
-        &targets,
-        &samples,
-        &ledger,
-        candidate_id,
-        candidate_hash,
-        outcome,
-    );
+    let report_runs = build_report_runs(&targets, &samples, &ledger, candidate_id, candidate_hash);
     let effective_candidate_profile = statuses
         .iter()
         .rev()
@@ -1208,27 +1196,48 @@ fn build_report_runs(
     ledger: &[Value],
     fallback_candidate_id: &str,
     fallback_candidate_hash: &str,
-    terminal_outcome: &str,
 ) -> Vec<Value> {
     targets
         .iter()
         .map(|target| {
             let mut trials = trial_events_for_target(ledger, *target)
                 .into_iter()
-                .map(|event| build_report_trial(*target, event, samples, ledger, fallback_candidate_id, fallback_candidate_hash))
+                .map(|event| {
+                    build_report_trial(
+                        *target,
+                        event,
+                        samples,
+                        ledger,
+                        fallback_candidate_id,
+                        fallback_candidate_hash,
+                    )
+                })
                 .collect::<Vec<_>>();
-            trials.sort_by_key(|trial| trial.get("trialIndex").and_then(Value::as_i64).unwrap_or(i64::MAX));
-            let adopted = trials.iter().find(|trial| trial.get("disposition").and_then(Value::as_str) == Some("adopted"));
+            trials.sort_by_key(|trial| {
+                trial
+                    .get("trialIndex")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i64::MAX)
+            });
+            let adopted = trials
+                .iter()
+                .find(|trial| trial.get("disposition").and_then(Value::as_str) == Some("adopted"));
             let summary_trial = adopted.or_else(|| trials.last());
-            let review_outcome = if adopted.is_some() { "passed" } else { "failed" };
-            let adopted_trial_index = adopted.and_then(|trial| trial.get("trialIndex").cloned()).unwrap_or(Value::Null);
+            let review_outcome = if adopted.is_some() {
+                "passed"
+            } else {
+                "failed"
+            };
+            let adopted_trial_index = adopted
+                .and_then(|trial| trial.get("trialIndex").cloned())
+                .unwrap_or(Value::Null);
             let metrics = summary_trial
                 .and_then(|trial| trial.get("metrics").cloned())
                 .unwrap_or_else(|| json!({}));
             json!({
                 "targetC": target,
-                "reviewOutcome": if trials.is_empty() { terminal_outcome } else { review_outcome },
-                "reviewPassed": if trials.is_empty() { terminal_outcome == "passed" } else { adopted.is_some() },
+                "reviewOutcome": review_outcome,
+                "reviewPassed": adopted.is_some(),
                 "adoptedTrialIndex": adopted_trial_index,
                 "trialCount": trials.len(),
                 "metrics": metrics,
@@ -1520,11 +1529,11 @@ fn write_ndjson(
 #[cfg(test)]
 mod tests {
     use super::{
-        InterruptedRunInput, StatusJournal, build_report_trial, event_stream_caught_up,
-        firmware_candidate_profile_hash, firmware_candidate_profile_value, firmware_read_command,
-        firmware_start_command, next_event_sequence, render_host_failure, render_interrupted_run,
-        render_unsupported_pps3a, trial_events_for_target, validate_save_input,
-        verified_saved_receipt, verify_device_trace,
+        InterruptedRunInput, StatusJournal, build_report_runs, build_report_trial,
+        event_stream_caught_up, firmware_candidate_profile_hash, firmware_candidate_profile_value,
+        firmware_read_command, firmware_start_command, next_event_sequence, render_host_failure,
+        render_interrupted_run, render_unsupported_pps3a, trial_events_for_target,
+        validate_save_input, verified_saved_receipt, verify_device_trace,
     };
     use flux_purr_firmware::{
         control_plane::ThermalControlProfileWire,
@@ -1801,6 +1810,14 @@ mod tests {
         assert_eq!(trials.len(), 2);
         assert_eq!(trials[0]["trial"]["endSequence"], 9);
         assert!(trials[1]["trial"]["endSequence"].is_null());
+    }
+
+    #[test]
+    fn target_without_an_adopted_trial_cannot_inherit_the_device_passed_terminal() {
+        let runs = build_report_runs(&[60], &[], &[], "candidate-1", "hash-1");
+        assert_eq!(runs[0]["reviewOutcome"], "failed");
+        assert_eq!(runs[0]["reviewPassed"], false);
+        assert_eq!(runs[0]["trialCount"], 0);
     }
 
     #[test]
