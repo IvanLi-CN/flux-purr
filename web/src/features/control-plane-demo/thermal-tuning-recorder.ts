@@ -5,6 +5,7 @@ export interface ThermalTuningRecording {
   status: ThermalTuningStatus
   events: ThermalTuningEvent[]
   acknowledgedThrough: number | null
+  confirmedThrough: number | null
   gap: boolean
   gapReason: string | null
   complete: boolean
@@ -12,7 +13,8 @@ export interface ThermalTuningRecording {
 
 export function recordThermalTuningPage(
   previous: ThermalTuningRecording | null,
-  status: ThermalTuningStatus
+  status: ThermalTuningStatus,
+  confirmedSequence: number | null = null
 ): ThermalTuningRecording {
   const sameRun = previous?.runId === status.runId
   const events = sameRun ? [...previous.events] : []
@@ -39,17 +41,29 @@ export function recordThermalTuningPage(
   }
 
   const acknowledgedThrough = gap ? null : (events.at(-1)?.sequence ?? null)
+  const confirmedThrough =
+    !gap &&
+    sameRun &&
+    confirmedSequence != null &&
+    previous.acknowledgedThrough != null &&
+    confirmedSequence <= previous.acknowledgedThrough
+      ? Math.max(previous.confirmedThrough ?? -1, confirmedSequence)
+      : sameRun
+        ? previous.confirmedThrough
+        : null
   const complete =
     !gap &&
     status.trace.complete &&
     status.trace.firstSequence === 0 &&
     acknowledgedThrough === status.trace.lastSequence &&
+    confirmedThrough === status.trace.lastSequence &&
     (status.events.nextSequence == null || status.events.nextSequence === acknowledgedThrough)
   return {
     runId: status.runId,
     status,
     events,
     acknowledgedThrough,
+    confirmedThrough,
     gap,
     gapReason,
     complete,

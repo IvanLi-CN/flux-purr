@@ -50,15 +50,21 @@ function page(
 }
 
 describe('firmware tuning event recorder', () => {
-  it('acknowledges only contiguous delivered pages and completes at device last sequence', () => {
+  it('completes only after the final contiguous page is confirmed by the device', () => {
     const first = recordThermalTuningPage(null, page([0, 1]))
     expect(first.acknowledgedThrough).toBe(1)
-    const second = recordThermalTuningPage(first, page([2, 3], { lastSequence: 3, complete: true }))
+    const second = recordThermalTuningPage(
+      first,
+      page([2, 3], { lastSequence: 3, complete: true }),
+      1
+    )
     expect(second.events.map((item) => item.sequence)).toEqual([0, 1, 2, 3])
     expect(second.acknowledgedThrough).toBe(3)
-    expect(second.complete).toBe(true)
+    expect(second.confirmedThrough).toBe(1)
+    expect(second.complete).toBe(false)
 
-    const final = recordThermalTuningPage(second, page([], { lastSequence: 3, complete: true }))
+    const final = recordThermalTuningPage(second, page([], { lastSequence: 3, complete: true }), 3)
+    expect(final.confirmedThrough).toBe(3)
     expect(final.complete).toBe(true)
   })
 
