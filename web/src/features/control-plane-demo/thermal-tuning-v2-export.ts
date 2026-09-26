@@ -98,6 +98,10 @@ export async function exportThermalTuningV2(
     reportRuns.every((run) => run.reviewPassed && adoptedTrialPassesGate(run)) &&
     promotionVerified(status.runId, status.candidateId, status.candidateHash, candidate)
   const ownerOutcome = qualified ? 'passed' : 'failed'
+  const promotionInconsistent =
+    (status.terminalDisposition === 'passed' || status.saveReceipt != null) &&
+    !promotionVerified(status.runId, status.candidateId, status.candidateHash, candidate)
+  const reviewIncomplete = !eventAudit.trace.complete || !verification.verified || promotionInconsistent
   const ppsBounds = status.ppsVoltageBounds
   const bundle: JsonObject = {
     schema: 'thermal-tuning-v2',
@@ -131,7 +135,7 @@ export async function exportThermalTuningV2(
       diagnosticOnly: !fullScope,
     },
     terminalDisposition: status.terminalDisposition,
-    reviewDisposition: qualified ? status.reviewDisposition : 'review_incomplete',
+    reviewDisposition: reviewIncomplete ? 'review_incomplete' : status.reviewDisposition,
     deviceTrace: status.trace,
     deviceTraceVerification: verification,
     reportRuns,

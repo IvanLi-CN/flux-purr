@@ -121,12 +121,13 @@ describe('Web thermal-tuning-v2 export', () => {
     })
     captured.status.trace.digest = await digestEventChain(events)
 
-    const promotion = async () => {
+    const promotion = async (reviewDisposition = 'complete') => {
       const exported = await exportThermalTuningV2(captured, 'device-1', 'web_serial')
       const candidate = JSON.parse(exported.files['thermal-profile.candidate.json'])
       const bundle = JSON.parse(exported.files['run.bundle.json'])
       expect(exported.ownerOutcome).toBe('failed')
       expect(bundle.ownerOutcome).toBe('failed')
+      expect(bundle.reviewDisposition).toBe(reviewDisposition)
       return candidate.promotion.state
     }
 
@@ -156,7 +157,7 @@ describe('Web thermal-tuning-v2 export', () => {
     }
     expect(await promotion()).toBe('saved')
     captured.status.saveReceipt.bankHash = `sha256:${'b'.repeat(64)}`
-    expect(await promotion()).toBe('rejected')
+    expect(await promotion('review_incomplete')).toBe('rejected')
   })
 
   it('qualifies only a nine-target saved run with full receipts and trial evidence', async () => {
