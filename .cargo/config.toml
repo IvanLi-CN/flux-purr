@@ -1,9 +1,3 @@
-[target.xtensa-esp32s3-none-elf]
-rustflags = [
-  "-C",
-  "link-arg=-Tlinkall.x",
-]
-
 [env]
 ESP_TARGET = "esp32s3"
 DEFMT_LOG = "info"

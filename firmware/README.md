@@ -5,7 +5,7 @@
 - Default architecture intent: `ESP32-S3FH4R2`
 - Current bring-up board profile: `S3 frontpanel GC9D01 display baseline`
 - Runtime style:
-  - host preview: shared scene renderer + framebuffer dump + PNG conversion
+  - physical preview: flash-free RAM bring-up image + typed JSONL commands
   - device runtime: `Embassy + esp-hal-embassy + SPI2.into_async() + five-way input + PID heater runtime + GPIO48 buzzer cues`
 
 ## GC9D01 display bring-up baseline
@@ -70,7 +70,7 @@
   - `FAN_TACH = GPIO34` (reserved only in this round)
 - Runtime truth source:
   - `current_temp_c` is the live PT1000-derived temperature sample from `GPIO2 / ADC1`
-  - Light Dashboard temperature digits use a one-logical-pixel lower-right shadow derived by saturating each RGB565 channel by `4` before the foreground pass; dark Dashboard omits the shadow. Host preview and Web Canvas use the same explicit `light` / `dark` theme contract.
+  - Light Dashboard temperature digits use a one-logical-pixel lower-right shadow derived by saturating each RGB565 channel by `4` before the foreground pass; dark Dashboard omits the shadow. Storybook and the product renderer use the same explicit `light` / `dark` theme contract.
   - when RTD enters fault, the front panel keeps the last valid displayed temperature instead of synthesizing `0°C`
   - `target_temp_c` is clamped to `0..=400°C`
   - Dashboard and `Preset Temp` up/down short-presses adjust by `1°C`; holding up/down repeats after the `500ms` long-press threshold, first about every `120ms` and then about every `60ms`
@@ -151,21 +151,16 @@ or supported by the production `flux-purr` firmware artifact.
 - Xtensa app runtime build:
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release`
 
-## Host preview workflow
+## RAM bring-up workflow
 
-- Render a front-panel runtime framebuffer:
-  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-ready docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.framebuffer.bin`
-- Review the implemented screen themes without changing the on-device default:
-  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-ready .tmp/dashboard-dark.framebuffer.bin --theme dark`
-  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-ready .tmp/dashboard-light.framebuffer.bin --theme light`
-- The preview tool writes two framebuffer artifacts:
-  - logical preview framebuffer: `<preset>.framebuffer.bin` (`RGB565 LE`, `160x50`) for owner-facing PNG generation
-  - panel-order companion: `<preset>.panel.framebuffer.bin` (`RGB565 BE`, `50x160`) after applying the same GC9D01 orientation transform used on-device
-- Convert the logical preview framebuffer to PNG:
-  - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.framebuffer.bin --out docs/specs/heater-pid-frontpanel-runtime/assets/dashboard-ready.png`
-- The display bring-up preview follows the same conversion contract; `display_preview` writes logical and panel-order framebuffers, `fb_to_png.py` creates the `160x50` PNG, and ImageMagick `magick <preview>.png -filter point -resize 800% <zoom>.png` creates the `8x` nearest-neighbor owner-facing render.
-- Preview assets land under:
-  - `docs/specs/heater-pid-frontpanel-runtime/assets/`
+- Build and validate the flash-free image:
+  - `cargo +esp build --manifest-path firmware/ram-bringup/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/ram-bringup/target --release`
+  - `python3 firmware/ram-bringup/tools/check_ram_elf.py firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup --json`
+- Run a physical display, front-panel, or status-light scenario on the explicitly authorized port:
+  - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run preview display --port <authorized-port>`
+  - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run preview frontpanel --port <authorized-port>`
+  - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run preview status-light --port <authorized-port>`
+- GPIO, ADC, I2C identification, RGB, buzzer, fan, and safe exit checks use the same typed `ram_bringup` JSONL protocol. Heater output remains off; PD and EEPROM are untouched.
 
 ## MCU agentd diagnostic flow
 
@@ -204,10 +199,10 @@ or supported by the production `flux-purr` firmware artifact.
 
 ## Notes
 
-- The repository-root `.cargo/config.toml` carries the `build-std` and `linkall.x` settings required for `--manifest-path firmware/Cargo.toml` invocations from the repo root.
+- `firmware/build.rs` emits the `linkall.x` linker argument for product Xtensa builds; the repository-root `.cargo/config.toml` carries the shared `build-std` settings.
 - The same config bounds the ESP WiFi station RX/TX pools for the low-throughput LAN control plane. If WiFi driver or LAN task startup cannot be completed, firmware publishes a network error and continues the USB JSONL recovery/control loop.
 - The ESP32-S3 executor reserves an 80 KiB shared task arena for the main loop and LAN tasks. WiFi drivers plus HTTP request/response buffers and mailbox staging use static storage so they do not consume async task-frame capacity.
 - The repository-root `espflash.toml` pins `firmware/partitions.csv` for the normal NVS, PHY, and factory-app layout. No supported layout declares a configuration fallback partition, and no MCU flash operation migrates or restores configuration; EEPROM remains physically outside the MCU flash target.
 - `firmware/build.rs` adds `defmt.x` for Xtensa builds, and `mcu-agentd.toml` stays pinned to `espflash` + `defmt` decoding.
-- Host checks keep using the std preview path so repository checks can run without Xtensa hardware.
+- Host checks keep using the RAM bring-up protocol tests and ELF checker so repository checks can run without Xtensa hardware.
 - This round still does not implement touch input, tach feedback, external PID tuning, or closed-loop VIN/current power compensation.
