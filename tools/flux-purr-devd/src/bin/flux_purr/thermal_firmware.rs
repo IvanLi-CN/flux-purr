@@ -995,7 +995,13 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
                 .filter(|value| !value.is_null())
         })
         .cloned();
-    let candidate_state = if outcome == "passed" && save_receipt.is_some() {
+    let candidate_state = if verified_saved_receipt(
+        run_id,
+        candidate_id,
+        candidate_hash,
+        preview_receipt.as_ref(),
+        save_receipt.as_ref(),
+    ) {
         "saved"
     } else if terminal == "candidate_ready" {
         if statuses
@@ -1082,6 +1088,29 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         serde_json::to_vec(&statuses)?,
     )?;
     Ok(())
+}
+
+fn verified_saved_receipt(
+    run_id: &str,
+    candidate_id: &str,
+    candidate_hash: &str,
+    preview: Option<&Value>,
+    save: Option<&Value>,
+) -> bool {
+    let Some((preview, save)) = preview.zip(save) else {
+        return false;
+    };
+    [preview, save].into_iter().all(|receipt| {
+        receipt.get("runId").and_then(Value::as_str) == Some(run_id)
+            && receipt.get("candidateId").and_then(Value::as_str) == Some(candidate_id)
+            && receipt.get("candidateHash").and_then(Value::as_str) == Some(candidate_hash)
+            && receipt.get("powerClass").and_then(Value::as_str) == Some("pps5a")
+    }) && preview.get("ramAppliedHash").and_then(Value::as_str) == Some(candidate_hash)
+        && save.get("bank").and_then(Value::as_str) == Some("pps5a")
+        && save.get("bankHash").and_then(Value::as_str) == Some(candidate_hash)
+        && save.get("atomic").and_then(Value::as_bool) == Some(true)
+        && save.get("readbackVerified").and_then(Value::as_bool) == Some(true)
+        && save.get("bankRevision").and_then(Value::as_u64).is_some()
 }
 
 fn verify_device_trace(statuses: &[Value]) -> (Value, Value) {
@@ -1470,7 +1499,7 @@ mod tests {
         firmware_candidate_profile_hash, firmware_candidate_profile_value, firmware_read_command,
         firmware_start_command, next_event_sequence, render_host_failure, render_interrupted_run,
         render_unsupported_pps3a, trial_events_for_target, validate_save_input,
-        verify_device_trace,
+        verified_saved_receipt, verify_device_trace,
     };
     use flux_purr_firmware::{
         control_plane::ThermalControlProfileWire,
@@ -1543,6 +1572,34 @@ mod tests {
             firmware_read_command("run-1", Some(17)),
             json!({"op": "read", "runId": "run-1", "afterSequence": 17})
         );
+    }
+
+    #[test]
+    fn saved_promotion_requires_matching_device_receipts_even_if_review_fails() {
+        let preview = json!({
+            "runId": "run-1", "candidateId": "candidate-1", "candidateHash": "hash-1",
+            "powerClass": "pps5a", "ramAppliedHash": "hash-1"
+        });
+        let mut save = json!({
+            "runId": "run-1", "candidateId": "candidate-1", "candidateHash": "hash-1",
+            "powerClass": "pps5a", "bank": "pps5a", "bankRevision": 3,
+            "bankHash": "hash-1", "atomic": true, "readbackVerified": true
+        });
+        assert!(verified_saved_receipt(
+            "run-1",
+            "candidate-1",
+            "hash-1",
+            Some(&preview),
+            Some(&save)
+        ));
+        save["bankHash"] = json!("other");
+        assert!(!verified_saved_receipt(
+            "run-1",
+            "candidate-1",
+            "hash-1",
+            Some(&preview),
+            Some(&save)
+        ));
     }
 
     #[test]
