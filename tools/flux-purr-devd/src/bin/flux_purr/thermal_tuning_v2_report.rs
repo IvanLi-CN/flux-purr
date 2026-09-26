@@ -234,14 +234,14 @@ fn audit_events(bundle: &Value, samples: &[Value], ledger: &[Value]) -> EventAud
         && ledger.len() == 1
         && ledger[0].get("kind").and_then(Value::as_str) == Some("safety")
         && ledger[0].get("reason").and_then(Value::as_str) == Some("pps3a_not_supported");
-    if bundle.get("engine").and_then(Value::as_str) == Some("firmware") && !host_preflight_3a {
-        if bundle
+    if bundle.get("engine").and_then(Value::as_str) == Some("firmware")
+        && !host_preflight_3a
+        && bundle
             .pointer("/deviceTraceVerification/verified")
             .and_then(Value::as_bool)
             != Some(true)
-        {
-            reasons.push("firmware device trace was not verified".to_string());
-        }
+    {
+        reasons.push("firmware device trace was not verified".to_string());
     }
     let apdo_max_mv = bundle
         .pointer("/ppsVoltageBounds/apdoMaxMv")
@@ -276,41 +276,7 @@ fn audit_events(bundle: &Value, samples: &[Value], ledger: &[Value]) -> EventAud
                 reasons.push(format!("duplicate sequence {sequence}"));
             }
             if kind == "sample" {
-                for field in REQUIRED_SAMPLE_FIELDS {
-                    if !object.contains_key(*field) {
-                        reasons.push(format!("sequence {sequence} sample missing {field}"));
-                    }
-                }
-                if object
-                    .get("heaterRequestedOutputPermille")
-                    .and_then(Value::as_u64)
-                    .is_none_or(|value| value > 1000)
-                {
-                    reasons.push(format!(
-                        "sequence {sequence} invalid heaterRequestedOutputPermille"
-                    ));
-                }
-                if object
-                    .get("heaterOutputPermille")
-                    .and_then(Value::as_u64)
-                    .is_none_or(|value| value > 1000)
-                {
-                    reasons.push(format!("sequence {sequence} invalid heaterOutputPermille"));
-                }
-                let ceiling_mv = object.get("ppsPowerCeilingMv").and_then(Value::as_u64);
-                let requested_mv = object.get("ppsRequestedMv").and_then(Value::as_u64);
-                if !matches!(
-                    (ceiling_mv, requested_mv),
-                    (Some(ceiling), Some(requested))
-                        if (PPS_ABSOLUTE_MIN_MV..=PPS_ABSOLUTE_MAX_MV).contains(&ceiling)
-                            && requested <= ceiling
-                            && apdo_max_mv.is_none_or(|apdo_max| ceiling == apdo_max)
-                            && absolute_max_mv.is_none_or(|absolute_max| ceiling <= absolute_max)
-                ) {
-                    reasons.push(format!(
-                        "sequence {sequence} invalid PPS request voltage ceiling (mV)"
-                    ));
-                }
+                audit_sample_fields(object, sequence, apdo_max_mv, absolute_max_mv, &mut reasons);
             }
         }
     }
@@ -366,6 +332,43 @@ fn audit_events(bundle: &Value, samples: &[Value], ledger: &[Value]) -> EventAud
     }
 }
 
+fn audit_sample_fields(
+    object: &Map<String, Value>,
+    sequence: u64,
+    apdo_max_mv: Option<u64>,
+    absolute_max_mv: Option<u64>,
+    reasons: &mut Vec<String>,
+) {
+    for field in REQUIRED_SAMPLE_FIELDS {
+        if !object.contains_key(*field) {
+            reasons.push(format!("sequence {sequence} sample missing {field}"));
+        }
+    }
+    for field in ["heaterRequestedOutputPermille", "heaterOutputPermille"] {
+        if object
+            .get(field)
+            .and_then(Value::as_u64)
+            .is_none_or(|value| value > 1000)
+        {
+            reasons.push(format!("sequence {sequence} invalid {field}"));
+        }
+    }
+    let ceiling_mv = object.get("ppsPowerCeilingMv").and_then(Value::as_u64);
+    let requested_mv = object.get("ppsRequestedMv").and_then(Value::as_u64);
+    if !matches!(
+        (ceiling_mv, requested_mv),
+        (Some(ceiling), Some(requested))
+            if (PPS_ABSOLUTE_MIN_MV..=PPS_ABSOLUTE_MAX_MV).contains(&ceiling)
+                && requested <= ceiling
+                && apdo_max_mv.is_none_or(|apdo_max| ceiling == apdo_max)
+                && absolute_max_mv.is_none_or(|absolute_max| ceiling <= absolute_max)
+    ) {
+        reasons.push(format!(
+            "sequence {sequence} invalid PPS request voltage ceiling (mV)"
+        ));
+    }
+}
+
 fn normalized_report_runs(
     bundle: &Value,
     samples: &[Value],
@@ -412,19 +415,29 @@ fn normalized_report_runs(
             else {
                 continue;
             };
-            for (field, value) in [
-                ("firstSequence", first_sequence),
-                ("lastSequence", last_sequence),
-                ("firstElapsedMs", first_elapsed),
-                ("lastElapsedMs", last_elapsed),
-            ] {
-                if trial.get(field).and_then(Value::as_u64).is_none() {
-                    trial[field] = json!(value);
-                }
-            }
+            fill_trial_bounds(
+                trial,
+                [first_sequence, last_sequence, first_elapsed, last_elapsed],
+            );
         }
     }
     Ok(normalized)
+}
+
+fn fill_trial_bounds(trial: &mut Value, bounds: [u64; 4]) {
+    for (field, value) in [
+        "firstSequence",
+        "lastSequence",
+        "firstElapsedMs",
+        "lastElapsedMs",
+    ]
+    .into_iter()
+    .zip(bounds)
+    {
+        if trial.get(field).and_then(Value::as_u64).is_none() {
+            trial[field] = json!(value);
+        }
+    }
 }
 
 fn sample_bounds(samples: &[Value], target: i64, trial_index: i64) -> Option<(u64, u64, u64, u64)> {
