@@ -18,6 +18,7 @@ import { Route as ConsoleDevicesDeviceIdOverviewRouteImport } from './routes/_co
 import { Route as ConsoleDevicesDeviceIdSettingsRouteImport } from './routes/_console.devices.$deviceId.settings'
 import { Route as ConsoleDevicesDeviceIdUpdateRouteImport } from './routes/_console.devices.$deviceId.update'
 import { Route as ConsoleDevicesDeviceIdCalibrationIndexRouteImport } from './routes/_console.devices.$deviceId.calibration.index'
+import { Route as ConsoleDevicesDeviceIdCalibrationFirmwareTuningRouteImport } from './routes/_console.devices.$deviceId.calibration.firmware-tuning'
 import { Route as ConsoleDevicesDeviceIdCalibrationHeaterCurveRouteImport } from './routes/_console.devices.$deviceId.calibration.heater-curve'
 import { Route as ConsoleDevicesDeviceIdCalibrationRtdAdcRouteImport } from './routes/_console.devices.$deviceId.calibration.rtd-adc'
 import { Route as ConsoleDevicesDeviceIdCalibrationVinAdcRouteImport } from './routes/_console.devices.$deviceId.calibration.vin-adc'
@@ -74,6 +75,12 @@ const ConsoleDevicesDeviceIdCalibrationIndexRoute =
     path: '/devices/$deviceId/calibration/',
     getParentRoute: () => ConsoleRoute,
   } as any)
+const ConsoleDevicesDeviceIdCalibrationFirmwareTuningRoute =
+  ConsoleDevicesDeviceIdCalibrationFirmwareTuningRouteImport.update({
+    id: '/devices/$deviceId/calibration/firmware-tuning',
+    path: '/devices/$deviceId/calibration/firmware-tuning',
+    getParentRoute: () => ConsoleRoute,
+  } as any)
 const ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute =
   ConsoleDevicesDeviceIdCalibrationHeaterCurveRouteImport.update({
     id: '/devices/$deviceId/calibration/heater-curve',
@@ -119,6 +126,7 @@ export interface FileRoutesByFullPath {
   '/devices/$deviceId/settings': typeof ConsoleDevicesDeviceIdSettingsRouteWithChildren
   '/devices/$deviceId/update': typeof ConsoleDevicesDeviceIdUpdateRoute
   '/devices/$deviceId/': typeof ConsoleDevicesDeviceIdIndexRoute
+  '/devices/$deviceId/calibration/firmware-tuning': typeof ConsoleDevicesDeviceIdCalibrationFirmwareTuningRoute
   '/devices/$deviceId/calibration/heater-curve': typeof ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute
   '/devices/$deviceId/calibration/rtd-adc': typeof ConsoleDevicesDeviceIdCalibrationRtdAdcRoute
   '/devices/$deviceId/calibration/vin-adc': typeof ConsoleDevicesDeviceIdCalibrationVinAdcRoute
@@ -135,6 +143,7 @@ export interface FileRoutesByTo {
   '/devices/$deviceId/settings': typeof ConsoleDevicesDeviceIdSettingsRouteWithChildren
   '/devices/$deviceId/update': typeof ConsoleDevicesDeviceIdUpdateRoute
   '/devices/$deviceId': typeof ConsoleDevicesDeviceIdIndexRoute
+  '/devices/$deviceId/calibration/firmware-tuning': typeof ConsoleDevicesDeviceIdCalibrationFirmwareTuningRoute
   '/devices/$deviceId/calibration/heater-curve': typeof ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute
   '/devices/$deviceId/calibration/rtd-adc': typeof ConsoleDevicesDeviceIdCalibrationRtdAdcRoute
   '/devices/$deviceId/calibration/vin-adc': typeof ConsoleDevicesDeviceIdCalibrationVinAdcRoute
@@ -153,6 +162,7 @@ export interface FileRoutesById {
   '/_console/devices/$deviceId/settings': typeof ConsoleDevicesDeviceIdSettingsRouteWithChildren
   '/_console/devices/$deviceId/update': typeof ConsoleDevicesDeviceIdUpdateRoute
   '/_console/devices/$deviceId/': typeof ConsoleDevicesDeviceIdIndexRoute
+  '/_console/devices/$deviceId/calibration/firmware-tuning': typeof ConsoleDevicesDeviceIdCalibrationFirmwareTuningRoute
   '/_console/devices/$deviceId/calibration/heater-curve': typeof ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute
   '/_console/devices/$deviceId/calibration/rtd-adc': typeof ConsoleDevicesDeviceIdCalibrationRtdAdcRoute
   '/_console/devices/$deviceId/calibration/vin-adc': typeof ConsoleDevicesDeviceIdCalibrationVinAdcRoute
@@ -171,6 +181,7 @@ export interface FileRouteTypes {
     | '/devices/$deviceId/settings'
     | '/devices/$deviceId/update'
     | '/devices/$deviceId/'
+    | '/devices/$deviceId/calibration/firmware-tuning'
     | '/devices/$deviceId/calibration/heater-curve'
     | '/devices/$deviceId/calibration/rtd-adc'
     | '/devices/$deviceId/calibration/vin-adc'
@@ -187,6 +198,7 @@ export interface FileRouteTypes {
     | '/devices/$deviceId/settings'
     | '/devices/$deviceId/update'
     | '/devices/$deviceId'
+    | '/devices/$deviceId/calibration/firmware-tuning'
     | '/devices/$deviceId/calibration/heater-curve'
     | '/devices/$deviceId/calibration/rtd-adc'
     | '/devices/$deviceId/calibration/vin-adc'
@@ -204,6 +216,7 @@ export interface FileRouteTypes {
     | '/_console/devices/$deviceId/settings'
     | '/_console/devices/$deviceId/update'
     | '/_console/devices/$deviceId/'
+    | '/_console/devices/$deviceId/calibration/firmware-tuning'
     | '/_console/devices/$deviceId/calibration/heater-curve'
     | '/_console/devices/$deviceId/calibration/rtd-adc'
     | '/_console/devices/$deviceId/calibration/vin-adc'
@@ -282,6 +295,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ConsoleDevicesDeviceIdCalibrationIndexRouteImport
       parentRoute: typeof ConsoleRoute
     }
+    '/_console/devices/$deviceId/calibration/firmware-tuning': {
+      id: '/_console/devices/$deviceId/calibration/firmware-tuning'
+      path: '/devices/$deviceId/calibration/firmware-tuning'
+      fullPath: '/devices/$deviceId/calibration/firmware-tuning'
+      preLoaderRoute: typeof ConsoleDevicesDeviceIdCalibrationFirmwareTuningRouteImport
+      parentRoute: typeof ConsoleRoute
+    }
     '/_console/devices/$deviceId/calibration/heater-curve': {
       id: '/_console/devices/$deviceId/calibration/heater-curve'
       path: '/devices/$deviceId/calibration/heater-curve'
@@ -356,6 +376,7 @@ interface ConsoleRouteChildren {
   ConsoleDevicesDeviceIdSettingsRoute: typeof ConsoleDevicesDeviceIdSettingsRouteWithChildren
   ConsoleDevicesDeviceIdUpdateRoute: typeof ConsoleDevicesDeviceIdUpdateRoute
   ConsoleDevicesDeviceIdIndexRoute: typeof ConsoleDevicesDeviceIdIndexRoute
+  ConsoleDevicesDeviceIdCalibrationFirmwareTuningRoute: typeof ConsoleDevicesDeviceIdCalibrationFirmwareTuningRoute
   ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute: typeof ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute
   ConsoleDevicesDeviceIdCalibrationRtdAdcRoute: typeof ConsoleDevicesDeviceIdCalibrationRtdAdcRoute
   ConsoleDevicesDeviceIdCalibrationVinAdcRoute: typeof ConsoleDevicesDeviceIdCalibrationVinAdcRoute
@@ -371,6 +392,8 @@ const ConsoleRouteChildren: ConsoleRouteChildren = {
     ConsoleDevicesDeviceIdSettingsRouteWithChildren,
   ConsoleDevicesDeviceIdUpdateRoute: ConsoleDevicesDeviceIdUpdateRoute,
   ConsoleDevicesDeviceIdIndexRoute: ConsoleDevicesDeviceIdIndexRoute,
+  ConsoleDevicesDeviceIdCalibrationFirmwareTuningRoute:
+    ConsoleDevicesDeviceIdCalibrationFirmwareTuningRoute,
   ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute:
     ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute,
   ConsoleDevicesDeviceIdCalibrationRtdAdcRoute:

@@ -104,6 +104,8 @@ import type {
   PostHeatCoolingMode,
   RtdCalibrationSample,
   ThermalPlantRunSnapshot,
+  ThermalTuningCommand,
+  ThermalTuningStatus,
   VinCalibrationSample,
 } from '../contracts'
 import {
@@ -186,6 +188,7 @@ import type {
 import { UNAVAILABLE_TEMPERATURE_C } from '../types'
 import { isDirectWebSerialDevice } from '../web-serial'
 import { resolveWifiSettingsAccess } from '../wifi-settings-access'
+import { FirmwareTuningWorkspace } from './firmware-tuning-workspace'
 import { LanPairingPanel, type LanPairingPanelProps } from './lan-pairing-panel'
 import {
   createDefaultThermalPlantSnapshot,
@@ -542,6 +545,7 @@ function ConsoleViewLink({
     heater_curve: '/devices/$deviceId/calibration/heater-curve',
     rtd_adc: '/devices/$deviceId/calibration/rtd-adc',
     vin_adc: '/devices/$deviceId/calibration/vin-adc',
+    firmware_tuning: '/devices/$deviceId/calibration/firmware-tuning',
   } as const
   return <Link {...shared} to={calibrationPaths[calibrationTab]} params={{ deviceId }} />
 }
@@ -623,6 +627,7 @@ function CalibrationRouteTab({
     heater_curve: '/devices/$deviceId/calibration/heater-curve',
     rtd_adc: '/devices/$deviceId/calibration/rtd-adc',
     vin_adc: '/devices/$deviceId/calibration/vin-adc',
+    firmware_tuning: '/devices/$deviceId/calibration/firmware-tuning',
   } as const
   return (
     <TabsTrigger value={tab} className="industrial-calibration-tab" asChild>
@@ -2723,6 +2728,66 @@ export function ControlPlaneDemo({
     visibleRuntimeCalibration.job.status,
     webSerial,
   ])
+  const readFirmwareTuning = useCallback(async (): Promise<ThermalTuningStatus> => {
+    if (visibleDeviceIsDirectWebSerial) return webSerial.thermalTuning({ op: 'read' })
+    if (lanDeviceBaseUrl && visibleDeviceLeaseId) {
+      const session = loadLanDeviceSession(lanDeviceBaseUrl)
+      if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
+      return authorizedLanRequest<ThermalTuningStatus>(
+        session,
+        'thermal-tuning',
+        'GET',
+        undefined,
+        visibleDeviceLeaseId
+      )
+    }
+    if (visibleDeviceTransport === 'devd' && visibleDeviceLeaseId && devdBaseUrl) {
+      return controlClient.getThermalTuning(devdBaseUrl, visibleDeviceId, visibleDeviceLeaseId)
+    }
+    throw new Error('当前设备连接不支持固件调优。')
+  }, [
+    controlClient,
+    devdBaseUrl,
+    lanDeviceBaseUrl,
+    visibleDeviceId,
+    visibleDeviceIsDirectWebSerial,
+    visibleDeviceLeaseId,
+    visibleDeviceTransport,
+    webSerial,
+  ])
+  const commandFirmwareTuning = useCallback(
+    async (command: Omit<ThermalTuningCommand, 'leaseId'>): Promise<ThermalTuningStatus> => {
+      if (visibleDeviceIsDirectWebSerial) return webSerial.thermalTuning(command)
+      if (lanDeviceBaseUrl && visibleDeviceLeaseId) {
+        const session = loadLanDeviceSession(lanDeviceBaseUrl)
+        if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
+        return authorizedLanRequest<ThermalTuningStatus>(
+          session,
+          'thermal-tuning',
+          'POST',
+          command,
+          visibleDeviceLeaseId
+        )
+      }
+      if (visibleDeviceTransport === 'devd' && visibleDeviceLeaseId && devdBaseUrl) {
+        return controlClient.configureThermalTuning(devdBaseUrl, visibleDeviceId, {
+          leaseId: visibleDeviceLeaseId,
+          ...command,
+        })
+      }
+      throw new Error('当前设备连接不支持固件调优。')
+    },
+    [
+      controlClient,
+      devdBaseUrl,
+      lanDeviceBaseUrl,
+      visibleDeviceId,
+      visibleDeviceIsDirectWebSerial,
+      visibleDeviceLeaseId,
+      visibleDeviceTransport,
+      webSerial,
+    ]
+  )
   const scenarioEvents = useMemo(
     () =>
       allowDemoControls
@@ -4685,6 +4750,14 @@ export function ControlPlaneDemo({
                 heaterCurve={visibleHeaterCurve}
                 thermalPlantRun={visibleThermalPlantRun}
                 thermalPlantRunUnsupported={thermalPlantRunUnsupported}
+                firmwareTuningWorkspace={
+                  <FirmwareTuningWorkspace
+                    key={visibleDevice.id}
+                    supported={visibleDevice.capabilities.includes('thermal_tuning')}
+                    readStatus={readFirmwareTuning}
+                    sendCommand={commandFirmwareTuning}
+                  />
+                }
                 runtimeCalibration={visibleRuntimeCalibration}
                 calibrationRefs={visibleCalibrationRefs}
                 calibrationWorkspaceTab={visibleCalibrationWorkspaceTab}
@@ -5453,7 +5526,7 @@ function effectivePpsCurrentCapabilityMa(device: DeviceTarget) {
   )
 }
 
-function calibrationModeLabel(mode: CalibrationWorkbenchMode) {
+function calibrationModeLabel(mode: CalibrationWorkspaceTab) {
   switch (mode) {
     case 'vin_adc':
       return '电压读数标定'
@@ -5461,6 +5534,8 @@ function calibrationModeLabel(mode: CalibrationWorkbenchMode) {
       return '温度标定'
     case 'heater_curve':
       return '加热曲线标定'
+    case 'firmware_tuning':
+      return '固件热控调优'
   }
 }
 
@@ -5822,6 +5897,7 @@ function ViewPanel({
   heaterCurve,
   thermalPlantRun,
   thermalPlantRunUnsupported,
+  firmwareTuningWorkspace,
   runtimeCalibration,
   calibrationRefs,
   calibrationWorkspaceTab,
@@ -5893,6 +5969,7 @@ function ViewPanel({
   heaterCurve: HeaterCurveState
   thermalPlantRun: ThermalPlantRunSnapshot
   thermalPlantRunUnsupported: boolean
+  firmwareTuningWorkspace: ReactNode
   runtimeCalibration: CalibrationRuntimeState
   calibrationRefs: { rtdTempC: number; vinMv: number }
   calibrationWorkspaceTab: CalibrationWorkspaceTab
@@ -6050,6 +6127,7 @@ function ViewPanel({
         heaterCurve={heaterCurve}
         thermalPlantRun={thermalPlantRun}
         thermalPlantRunUnsupported={thermalPlantRunUnsupported}
+        firmwareTuningWorkspace={firmwareTuningWorkspace}
         runtimeCalibration={runtimeCalibration}
         refs={calibrationRefs}
         feedback={feedback}
@@ -7389,6 +7467,7 @@ function CalibrationView({
   heaterCurve,
   thermalPlantRun,
   thermalPlantRunUnsupported,
+  firmwareTuningWorkspace,
   runtimeCalibration,
   refs,
   feedback,
@@ -7418,6 +7497,7 @@ function CalibrationView({
   heaterCurve: HeaterCurveState
   thermalPlantRun: ThermalPlantRunSnapshot
   thermalPlantRunUnsupported: boolean
+  firmwareTuningWorkspace: ReactNode
   runtimeCalibration: CalibrationRuntimeState
   refs: { rtdTempC: number; vinMv: number }
   feedback: ActionFeedback
@@ -7909,6 +7989,9 @@ function CalibrationView({
             <CalibrationRouteTab navigation={navigation} tab="heater_curve">
               加热曲线标定
             </CalibrationRouteTab>
+            <CalibrationRouteTab navigation={navigation} tab="firmware_tuning">
+              固件热控调优
+            </CalibrationRouteTab>
             <CalibrationRouteTab navigation={navigation} tab="rtd_adc">
               温度标定
             </CalibrationRouteTab>
@@ -7942,6 +8025,13 @@ function CalibrationView({
                 }
               />
             </section>
+          </TabsContent>
+          <TabsContent
+            value="firmware_tuning"
+            className="industrial-calibration-tabs__content"
+            forceMount
+          >
+            {firmwareTuningWorkspace}
           </TabsContent>
           <TabsContent value="rtd_adc" className="industrial-calibration-tabs__content">
             <section className="industrial-calibration-mode-panel" aria-label="温度标定">
