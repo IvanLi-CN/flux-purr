@@ -1,8 +1,9 @@
-import { LoaderCircle, Save, ShieldAlert, Square, Upload } from 'lucide-react'
+import { Download, LoaderCircle, Save, ShieldAlert, Square, Upload } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import type { ThermalTuningCommand, ThermalTuningEvent, ThermalTuningStatus } from '../contracts'
 import { recordThermalTuningPage, type ThermalTuningRecording } from '../thermal-tuning-recorder'
+import { exportThermalTuningV2 } from '../thermal-tuning-v2-export'
 import './firmware-tuning-workspace.css'
 
 const EXECUTION_ORDER = [60, 240, 140, 100, 80, 120, 180, 160, 220]
@@ -57,10 +58,14 @@ interface ImportedCandidate {
 
 export function FirmwareTuningWorkspace({
   supported,
+  deviceId,
+  transport,
   readStatus,
   sendCommand,
 }: {
   supported: boolean
+  deviceId: string
+  transport: string
   readStatus: () => Promise<ThermalTuningStatus>
   sendCommand: (command: DeviceCommand) => Promise<ThermalTuningStatus>
 }) {
@@ -158,6 +163,26 @@ export function FirmwareTuningWorkspace({
     })
   }
 
+  const exportReport = async () => {
+    if (!recording?.runId) return
+    setPending(true)
+    setError(null)
+    try {
+      const report = await exportThermalTuningV2(recording, deviceId, transport)
+      const blob = new Blob([Uint8Array.from(report.archive)], { type: 'application/zip' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `thermal-tuning-v2-${recording.runId.replace(/[^a-zA-Z0-9_-]/g, '_')}.zip`
+      anchor.click()
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    } catch (failure) {
+      setError(messageOf(failure))
+    } finally {
+      setPending(false)
+    }
+  }
+
   const identity = {
     runId: status?.runId ?? undefined,
     candidateId: status?.candidateId ?? undefined,
@@ -230,6 +255,14 @@ export function FirmwareTuningWorkspace({
           onClick={() => void apply({ op: 'confirm_save', ...identity })}
         >
           <Save aria-hidden="true" /> 确认保存
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={!recording?.runId || pending}
+          onClick={() => void exportReport()}
+        >
+          <Download aria-hidden="true" /> 导出报告
         </Button>
       </div>
 

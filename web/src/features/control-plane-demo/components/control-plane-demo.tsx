@@ -4754,6 +4754,8 @@ export function ControlPlaneDemo({
                   <FirmwareTuningWorkspace
                     key={visibleDevice.id}
                     supported={visibleDevice.capabilities.includes('thermal_tuning')}
+                    deviceId={visibleDevice.id}
+                    transport={visibleDeviceTransport}
                     readStatus={readFirmwareTuning}
                     sendCommand={commandFirmwareTuning}
                   />

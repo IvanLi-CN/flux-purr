@@ -8,6 +8,8 @@ describe('firmware tuning workspace', () => {
     const html = renderToStaticMarkup(
       createElement(FirmwareTuningWorkspace, {
         supported: false,
+        deviceId: 'fixture',
+        transport: 'mock',
         readStatus: async () => {
           throw new Error('unexpected read')
         },
@@ -19,6 +21,7 @@ describe('firmware tuning workspace', () => {
     expect(html).toContain('当前设备固件不支持调优事件协议')
     expect(html).toContain('固件热控调优')
     expect(html).toContain('开始调优')
+    expect(html).toContain('导出报告')
   })
 
   it('checks the canonical device profile hash and rejects mock candidates', async () => {
