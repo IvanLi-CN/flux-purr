@@ -43,6 +43,23 @@ impl StatusJournal {
         })
     }
 
+    fn resume(input_dir: &Path, statuses: &[Value]) -> io::Result<Self> {
+        let last_profile_hash = statuses.iter().rev().find_map(|status| {
+            status
+                .get("candidateProfile")
+                .filter(|profile| !profile.is_null())
+                .and_then(|_| status.get("candidateHash"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+        Ok(Self {
+            file: fs::OpenOptions::new()
+                .append(true)
+                .open(input_dir.join("device-statuses.ndjson"))?,
+            last_profile_hash,
+        })
+    }
+
     fn record(&mut self, statuses: &mut Vec<Value>, mut status: Value) -> io::Result<()> {
         if !status_has_new_evidence(statuses.last(), &status) {
             return Ok(());
@@ -326,6 +343,7 @@ pub(crate) async fn confirm_firmware_save(
     )?)?;
     let mut statuses: Vec<Value> =
         serde_json::from_slice(&fs::read(args.input_dir.join("device-statuses.json"))?)?;
+    let mut journal = StatusJournal::resume(&args.input_dir, &statuses)?;
     let run_id = required_string(&bundle, "runId")?;
     let candidate_id = required_string(&candidate, "candidateId")?;
     let candidate_hash = required_string(&candidate, "candidateHash")?;
@@ -355,7 +373,7 @@ pub(crate) async fn confirm_firmware_save(
         {
             return Err("device candidate identity or trace changed before confirmation".into());
         }
-        statuses.push(current);
+        journal.record(&mut statuses, current)?;
         let sealed = request_leased(
             client,
             &resolved,
@@ -365,7 +383,27 @@ pub(crate) async fn confirm_firmware_save(
             Some(json!({"op": "seal"})),
         )
         .await?;
-        statuses.push(sealed);
+        let seal_sequence = next_event_sequence(&sealed)
+            .ok_or("sealed candidate did not emit an auditable transition")?;
+        journal.record(&mut statuses, sealed)?;
+        let seal_ack = request_leased(
+            client,
+            &resolved,
+            &lease.lease_id,
+            Method::POST,
+            "/thermal-tuning",
+            Some(firmware_read_command(run_id, Some(seal_sequence))),
+        )
+        .await?;
+        if seal_ack.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
+            || seal_ack
+                .pointer("/trace/lastSequence")
+                .and_then(Value::as_u64)
+                != Some(seal_sequence)
+        {
+            return Err("sealed candidate transition was not acknowledged".into());
+        }
+        journal.record(&mut statuses, seal_ack)?;
         let saved = request_leased(
             client,
             &resolved,
@@ -386,7 +424,7 @@ pub(crate) async fn confirm_firmware_save(
         {
             return Err("device did not return a verified save receipt".into());
         }
-        statuses.push(saved);
+        journal.record(&mut statuses, saved)?;
         if let Some(sequence) = statuses.last().and_then(next_event_sequence) {
             let confirmed = request_leased(
                 client,
@@ -405,7 +443,7 @@ pub(crate) async fn confirm_firmware_save(
             {
                 return Err("saved tuning receipt event was not confirmed".into());
             }
-            statuses.push(confirmed);
+            journal.record(&mut statuses, confirmed)?;
         }
         let candidate_profile = candidate
             .pointer("/profile/value")
@@ -957,8 +995,19 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
                 .filter(|value| !value.is_null())
         })
         .cloned();
-    let candidate_state = if outcome == "passed" {
+    let candidate_state = if outcome == "passed" && save_receipt.is_some() {
         "saved"
+    } else if terminal == "candidate_ready" {
+        if statuses
+            .last()
+            .and_then(|status| status.get("sealed"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            "sealed"
+        } else {
+            "candidate_ready"
+        }
     } else {
         "rejected"
     };
@@ -1459,6 +1508,26 @@ mod tests {
         terminal["events"] = json!({"events": [], "nextSequence": null});
         journal.record(&mut statuses, terminal).unwrap();
         assert_eq!(statuses.len(), 3);
+        let recorded =
+            std::fs::read_to_string(directory.path().join("device-statuses.ndjson")).unwrap();
+        let from_disk: Vec<serde_json::Value> = recorded
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(from_disk, statuses);
+
+        drop(journal);
+        let mut journal = StatusJournal::resume(directory.path(), &statuses).unwrap();
+        let sealed = json!({
+            "candidateHash": "hash-1",
+            "candidateProfile": {"points": [60]},
+            "sealed": true,
+            "terminalDisposition": "candidate_ready",
+            "trace": {"lastSequence": 2, "complete": true, "gap": false, "digest": "digest-2"},
+            "events": {"events": [{"sequence": 2}], "nextSequence": 2}
+        });
+        journal.record(&mut statuses, sealed).unwrap();
+        assert!(statuses.last().unwrap().get("candidateProfile").is_none());
         let recorded =
             std::fs::read_to_string(directory.path().join("device-statuses.ndjson")).unwrap();
         let from_disk: Vec<serde_json::Value> = recorded
