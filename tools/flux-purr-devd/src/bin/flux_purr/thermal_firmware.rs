@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -8,7 +8,9 @@ use std::{
 use flux_purr_firmware::{
     control_plane::ThermalControlProfileWire,
     memory::ThermalControlProfileConfig,
-    thermal_tuning::{ThermalTuningEvent, digest_event_chain, hash_profile},
+    thermal_tuning::{
+        THERMAL_TUNING_EXECUTION_ORDER_C, ThermalTuningEvent, digest_event_chain, hash_profile,
+    },
 };
 use reqwest::{Client, Method};
 use serde_json::{Value, json};
@@ -22,7 +24,6 @@ use super::{
 };
 
 const FIRMWARE_PHYSICAL_TARGETS_C: &str = "60,80,100,120,140,160,180,220,240";
-const FIRMWARE_EXECUTION_ORDER_C: &str = "60,240,140,100,80,120,180,160,220";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(crate) async fn run_firmware_tuning(
@@ -38,7 +39,7 @@ pub(crate) async fn run_firmware_tuning(
             "ok": true,
             "engine": "firmware",
             "powerClass": if pps3a_rejected { "pps3a" } else { "pps5a" },
-            "targetsC": if pps3a_rejected { Vec::new() } else { parse_thermal_targets(Some(FIRMWARE_EXECUTION_ORDER_C))? },
+            "targetsC": if pps3a_rejected { Vec::new() } else { THERMAL_TUNING_EXECUTION_ORDER_C.to_vec() },
             "device": resolved.device,
             "dryRun": true
         }));
@@ -69,19 +70,12 @@ pub(crate) async fn run_firmware_tuning(
             &lease.lease_id,
             Method::POST,
             "/thermal-tuning",
-            Some(json!({
-                "op": "start",
-                "runId": run_id,
-                "candidateId": candidate_id,
-                "candidateHash": candidate_hash,
-                "powerClass": "pps5a",
-                "targetsC": parse_thermal_targets(Some(FIRMWARE_EXECUTION_ORDER_C))?,
-                "candidateProfile": {
-                    "op": "preview",
-                    "bank": "pps5a",
-                    "profile": candidate_profile
-                }
-            })),
+            Some(firmware_start_command(
+                &run_id,
+                &candidate_id,
+                &candidate_hash,
+                &candidate_profile,
+            )),
         )
         .await
         {
@@ -324,12 +318,15 @@ fn validate_save_input(
     let run_id = required_string(bundle, "runId")?;
     let candidate_id = required_string(candidate, "candidateId")?;
     let candidate_hash = required_string(candidate, "candidateHash")?;
-    if bundle.get("terminalDisposition").and_then(Value::as_str) != Some("candidate_ready")
+    if !default_5a_scope_passed(bundle)
+        || bundle.get("terminalDisposition").and_then(Value::as_str) != Some("candidate_ready")
         || bundle
             .pointer("/deviceTraceVerification/verified")
             .and_then(Value::as_bool)
             != Some(true)
         || candidate.get("runId").and_then(Value::as_str) != Some(run_id)
+        || candidate.pointer("/profile/bank").and_then(Value::as_str) != Some("pps5a")
+        || candidate.get("powerClass").and_then(Value::as_str) != Some("pps5a")
         || bundle
             .pointer("/candidate/candidateId")
             .and_then(Value::as_str)
@@ -361,6 +358,90 @@ fn validate_save_input(
         return Err("input is not a verified, sealed firmware candidate".into());
     }
     Ok(())
+}
+
+fn default_5a_scope_passed(bundle: &Value) -> bool {
+    let Ok(physical) = parse_thermal_targets(Some(FIRMWARE_PHYSICAL_TARGETS_C)) else {
+        return false;
+    };
+    if bundle.get("schema").and_then(Value::as_str) != Some("thermal-tuning-v2")
+        || bundle.get("engine").and_then(Value::as_str) != Some("firmware")
+        || bundle.get("powerClass").and_then(Value::as_str) != Some("pps5a")
+        || bundle.pointer("/targetSet/physicalC") != Some(&json!(physical))
+        || bundle.pointer("/targetSet/selectedC") != Some(&json!(physical))
+        || bundle.pointer("/targetSet/executionOrderC")
+            != Some(&json!(THERMAL_TUNING_EXECUTION_ORDER_C))
+        || bundle
+            .pointer("/qualificationScope/kind")
+            .and_then(Value::as_str)
+            != Some("default-pps5a-full-batch")
+        || bundle
+            .pointer("/qualificationScope/diagnosticOnly")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || bundle
+            .get("hostInterruption")
+            .is_some_and(|value| !value.is_null())
+    {
+        return false;
+    }
+    let Some(runs) = bundle.get("reportRuns").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut accepted = BTreeSet::new();
+    for run in runs {
+        let Some(target_c) = run.get("targetC").and_then(Value::as_i64) else {
+            return false;
+        };
+        let Some(adopted_index) = run.get("adoptedTrialIndex").and_then(Value::as_i64) else {
+            return false;
+        };
+        let adopted = run
+            .get("trials")
+            .and_then(Value::as_array)
+            .and_then(|trials| {
+                trials.iter().find(|trial| {
+                    trial.get("trialIndex").and_then(Value::as_i64) == Some(adopted_index)
+                        && trial.get("disposition").and_then(Value::as_str) == Some("adopted")
+                })
+            });
+        if !physical.iter().any(|target| i64::from(*target) == target_c)
+            || !accepted.insert(target_c)
+            || run.get("reviewOutcome").and_then(Value::as_str) != Some("passed")
+            || run.get("reviewPassed").and_then(Value::as_bool) != Some(true)
+            || adopted.is_none_or(|trial| !adopted_trial_passes_gates(trial))
+        {
+            return false;
+        }
+    }
+    accepted.len() == physical.len()
+}
+
+fn adopted_trial_passes_gates(trial: &Value) -> bool {
+    let stable = trial.get("fullSpeedToStable").unwrap_or(&Value::Null);
+    let settle = stable.get("settleTimeMs").and_then(Value::as_u64);
+    let limit = stable.get("limitMs").and_then(Value::as_u64);
+    trial
+        .get("warmupRequestedOutputPermille")
+        .and_then(Value::as_u64)
+        .is_some_and(|value| value >= 995)
+        && trial
+            .get("maxOvershootC")
+            .and_then(Value::as_f64)
+            .is_some_and(|value| value <= 3.0)
+        && trial
+            .get("holdPeakToPeakC")
+            .and_then(Value::as_f64)
+            .is_some_and(|value| value <= 3.0)
+        && trial
+            .pointer("/metrics/holdConfirmSeconds")
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value >= 60)
+        && matches!((settle, limit), (Some(settle), Some(limit)) if settle <= limit)
+        && trial
+            .pointer("/metrics/phasePath")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.contains("approach") && path.contains("hold"))
 }
 
 fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, io::Error> {
@@ -517,6 +598,27 @@ fn next_event_sequence(status: &Value) -> Option<u64> {
     status
         .pointer("/events/nextSequence")
         .and_then(Value::as_u64)
+}
+
+fn firmware_start_command(
+    run_id: &str,
+    candidate_id: &str,
+    candidate_hash: &str,
+    candidate_profile: &Value,
+) -> Value {
+    json!({
+        "op": "start",
+        "runId": run_id,
+        "candidateId": candidate_id,
+        "candidateHash": candidate_hash,
+        "powerClass": "pps5a",
+        "targetsC": THERMAL_TUNING_EXECUTION_ORDER_C,
+        "candidateProfile": {
+            "op": "preview",
+            "bank": "pps5a",
+            "profile": candidate_profile
+        }
+    })
 }
 
 fn event_stream_caught_up(status: &Value, after_sequence: Option<u64>) -> bool {
@@ -690,7 +792,7 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         "failed"
     };
     let targets = parse_thermal_targets(Some(FIRMWARE_PHYSICAL_TARGETS_C))?;
-    let execution_order = parse_thermal_targets(Some(FIRMWARE_EXECUTION_ORDER_C))?;
+    let execution_order = THERMAL_TUNING_EXECUTION_ORDER_C;
     let report_runs = build_report_runs(
         &targets,
         &samples,
@@ -1167,9 +1269,9 @@ fn write_ndjson(
 mod tests {
     use super::{
         InterruptedRunInput, event_stream_caught_up, firmware_candidate_profile_hash,
-        firmware_candidate_profile_value, next_event_sequence, render_host_failure,
-        render_interrupted_run, render_unsupported_pps3a, trial_events_for_target,
-        validate_save_input, verify_device_trace,
+        firmware_candidate_profile_value, firmware_start_command, next_event_sequence,
+        render_host_failure, render_interrupted_run, render_unsupported_pps3a,
+        trial_events_for_target, validate_save_input, verify_device_trace,
     };
     use flux_purr_firmware::{
         control_plane::ThermalControlProfileWire,
@@ -1180,8 +1282,37 @@ mod tests {
 
     #[test]
     fn explicit_save_requires_verified_candidate_and_matching_preview_receipt() {
+        let physical = [60, 80, 100, 120, 140, 160, 180, 220, 240];
+        let runs = physical
+            .iter()
+            .map(|target| json!({
+                "targetC": target,
+                "reviewOutcome": "passed",
+                "reviewPassed": true,
+                "adoptedTrialIndex": 1,
+                "trials": [{
+                    "trialIndex": 1,
+                    "disposition": "adopted",
+                    "warmupRequestedOutputPermille": 1000,
+                    "maxOvershootC": 1.2,
+                    "holdPeakToPeakC": 1.8,
+                    "fullSpeedToStable": {"settleTimeMs": 7000, "limitMs": 10000},
+                    "metrics": {"holdConfirmSeconds": 60, "phasePath": "warmup -> approach -> hold"}
+                }]
+            }))
+            .collect::<Vec<_>>();
         let bundle = json!({
+            "schema": "thermal-tuning-v2",
             "runId": "run-1",
+            "engine": "firmware",
+            "powerClass": "pps5a",
+            "targetSet": {
+                "physicalC": physical,
+                "selectedC": physical,
+                "executionOrderC": [60, 240, 140, 100, 80, 120, 180, 160, 220]
+            },
+            "qualificationScope": {"kind": "default-pps5a-full-batch", "diagnosticOnly": false},
+            "reportRuns": runs,
             "terminalDisposition": "candidate_ready",
             "deviceTraceVerification": {"verified": true},
             "candidate": {"candidateId": "candidate-1", "candidateHash": "hash-1"}
@@ -1190,6 +1321,8 @@ mod tests {
             "runId": "run-1",
             "candidateId": "candidate-1",
             "candidateHash": "hash-1",
+            "powerClass": "pps5a",
+            "profile": {"bank": "pps5a"},
             "promotion": {
                 "previewReceipt": {
                     "runId": "run-1", "candidateId": "candidate-1",
@@ -1211,6 +1344,19 @@ mod tests {
         invalid_candidate = candidate.clone();
         invalid_candidate["promotion"]["saveReceipt"] = json!({"bankHash": "hash-1"});
         assert!(validate_save_input(&bundle, &invalid_candidate).is_err());
+        invalid_candidate = candidate.clone();
+        invalid_candidate["profile"]["bank"] = json!("pps3a");
+        assert!(validate_save_input(&bundle, &invalid_candidate).is_err());
+
+        invalid = bundle.clone();
+        invalid["reportRuns"][0]["trials"][0]["disposition"] = json!("rejected");
+        assert!(validate_save_input(&invalid, &candidate).is_err());
+        invalid = bundle.clone();
+        invalid["reportRuns"][0]["trials"][0]["metrics"]["holdConfirmSeconds"] = json!(12);
+        assert!(validate_save_input(&invalid, &candidate).is_err());
+        invalid = bundle.clone();
+        invalid["targetSet"]["selectedC"] = json!([60]);
+        assert!(validate_save_input(&invalid, &candidate).is_err());
     }
 
     #[test]
@@ -1226,6 +1372,16 @@ mod tests {
         });
         assert!(!event_stream_caught_up(&terminal_with_backlog, Some(7)));
         assert!(event_stream_caught_up(&terminal_with_backlog, Some(12)));
+    }
+
+    #[test]
+    fn firmware_start_preserves_recursive_target_order() {
+        let command = firmware_start_command("run-1", "candidate-1", "hash-1", &json!({}));
+        assert_eq!(
+            command["targetsC"],
+            json!([60, 240, 140, 100, 80, 120, 180, 160, 220])
+        );
+        assert_eq!(command["candidateProfile"]["bank"], "pps5a");
     }
 
     #[test]
