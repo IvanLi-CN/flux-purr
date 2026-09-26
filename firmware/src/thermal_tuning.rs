@@ -306,6 +306,8 @@ pub struct ThermalTuningRuntime {
     pub trial_sample_start_sequence: Option<u32>,
     pub trial_sample_end_sequence: Option<u32>,
     pub warmup_full_output: bool,
+    pub warmup_full_output_invalid: bool,
+    pub warmup_physical_transient_started_at_ms: Option<u64>,
     pub saw_approach: bool,
     pub saw_hold: bool,
     pub first_hold_elapsed_ms: Option<u64>,
@@ -361,6 +363,8 @@ impl ThermalTuningRuntime {
             trial_sample_start_sequence: None,
             trial_sample_end_sequence: None,
             warmup_full_output: false,
+            warmup_full_output_invalid: false,
+            warmup_physical_transient_started_at_ms: None,
             saw_approach: false,
             saw_hold: false,
             first_hold_elapsed_ms: None,
@@ -486,7 +490,7 @@ impl ThermalTuningRuntime {
             .zip(self.stable_window_started_at_ms)
             .map(|(warmup_exit, stable_start)| stable_start.saturating_sub(warmup_exit));
         let full_speed_limit_ms: u32 = if target_c > 150 { 5_000 } else { 10_000 };
-        let warmup_full = self.warmup_full_output;
+        let warmup_full = self.warmup_full_output && !self.warmup_full_output_invalid;
         let approach_to_hold = self.saw_approach && self.saw_hold;
         let hold_confirm = self.first_hold_elapsed_ms.is_some_and(|started| {
             elapsed_ms.saturating_sub(started) >= THERMAL_TUNING_HOLD_CONFIRM_MS
@@ -653,6 +657,8 @@ impl ThermalTuningRuntime {
         self.trial_sample_start_sequence = None;
         self.trial_sample_end_sequence = None;
         self.warmup_full_output = false;
+        self.warmup_full_output_invalid = false;
+        self.warmup_physical_transient_started_at_ms = None;
         self.saw_approach = false;
         self.saw_hold = false;
         self.first_hold_elapsed_ms = None;
@@ -816,10 +822,23 @@ impl ThermalTuningRuntime {
             self.trial_start_elapsed_ms = Some(sample.elapsed_ms);
         }
         self.current_elapsed_ms = sample.elapsed_ms;
-        if sample.heater_requested_output_permille >= 995
-            && sample.phase == ThermalTuningPhase::Warmup
-        {
-            self.warmup_full_output = true;
+        if sample.phase == ThermalTuningPhase::Warmup {
+            let logical_full = sample.heater_requested_output_permille >= 995;
+            let physical_full = sample.heater_output_permille >= 990;
+            if !self.warmup_full_output {
+                self.warmup_full_output = logical_full && physical_full;
+            } else if !logical_full || sample.heater_output_permille < 950 {
+                self.warmup_full_output_invalid = true;
+            } else if !physical_full {
+                let started = self
+                    .warmup_physical_transient_started_at_ms
+                    .get_or_insert(sample.elapsed_ms);
+                if sample.elapsed_ms.saturating_sub(*started) > 2_000 {
+                    self.warmup_full_output_invalid = true;
+                }
+            } else {
+                self.warmup_physical_transient_started_at_ms = None;
+            }
         }
         match sample.phase {
             ThermalTuningPhase::Approach => {
@@ -1641,7 +1660,11 @@ mod tests {
             } else {
                 400
             },
-            heater_output_permille: 380,
+            heater_output_permille: if phase == ThermalTuningPhase::Warmup {
+                1_000
+            } else {
+                380
+            },
             measurement_valid: true,
             phase,
         }
@@ -1698,6 +1721,43 @@ mod tests {
                     decision.stop_reason == "full-speed-to-stable budget exhausted"
                 })
         }));
+    }
+
+    #[test]
+    fn warmup_requires_sustained_logical_and_physical_full_output() {
+        let mut runtime = started_single_target_runtime();
+        let mut soft_start = sample(0, ThermalTuningPhase::Warmup, 3_000);
+        soft_start.heater_output_permille = 800;
+        runtime.record_sample(soft_start).unwrap();
+        assert!(!runtime.warmup_full_output);
+        runtime
+            .record_sample(sample(1_000, ThermalTuningPhase::Warmup, 3_100))
+            .unwrap();
+        assert!(runtime.warmup_full_output);
+        let mut bounded = sample(1_500, ThermalTuningPhase::Warmup, 3_200);
+        bounded.heater_output_permille = 970;
+        runtime.record_sample(bounded.clone()).unwrap();
+        bounded.elapsed_ms = 3_500;
+        runtime.record_sample(bounded.clone()).unwrap();
+        assert!(!runtime.warmup_full_output_invalid);
+        bounded.elapsed_ms = 3_551;
+        runtime.record_sample(bounded).unwrap();
+        assert!(runtime.warmup_full_output_invalid);
+    }
+
+    #[test]
+    fn warmup_logical_drop_cannot_recover_after_full_output() {
+        let mut runtime = started_single_target_runtime();
+        runtime
+            .record_sample(sample(0, ThermalTuningPhase::Warmup, 3_000))
+            .unwrap();
+        let mut reduced = sample(100, ThermalTuningPhase::Warmup, 3_100);
+        reduced.heater_requested_output_permille = 994;
+        runtime.record_sample(reduced).unwrap();
+        runtime
+            .record_sample(sample(200, ThermalTuningPhase::Warmup, 3_200))
+            .unwrap();
+        assert!(runtime.warmup_full_output_invalid);
     }
 
     #[test]
