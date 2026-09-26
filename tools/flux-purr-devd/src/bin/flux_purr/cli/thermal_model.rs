@@ -77,8 +77,16 @@ pub(crate) async fn handle_thermal_command(
         ThermalCommand::SelfTest(args) => {
             collect_thermal_self_test(client, default_devd, args).await
         }
-        ThermalCommand::Tune(args) => {
-            thermal_flagship::run_flagship_tuning(client, default_devd, args).await
+        ThermalCommand::Tune(args) => match args.engine {
+            ThermalTuneEngine::HostReference => {
+                thermal_flagship::run_flagship_tuning(client, default_devd, args).await
+            }
+            ThermalTuneEngine::Firmware => {
+                thermal_firmware::run_firmware_tuning(client, default_devd, args).await
+            }
+        },
+        ThermalCommand::ConfirmFirmwareSave(args) => {
+            thermal_firmware::confirm_firmware_save(client, default_devd, args).await
         }
         ThermalCommand::Report { command } => match command {
             ThermalReportCommand::RenderSelfTest(args) => {

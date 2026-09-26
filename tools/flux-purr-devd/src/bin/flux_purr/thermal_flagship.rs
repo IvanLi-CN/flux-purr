@@ -97,6 +97,9 @@ pub(super) async fn run_flagship_tuning(
     default_devd: &str,
     args: ThermalFlagshipTuneArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    if args.source_id.is_empty() || args.source_url.is_empty() {
+        return Err("host-reference engine requires --source-id and --source-url".into());
+    }
     let target_selector = flagship_target_selector(&args);
     let tune_targets_c = parse_thermal_targets(Some(&args.tune_targets_c))?;
     validate_flagship_scope(args.profile_mode, &tune_targets_c)?;

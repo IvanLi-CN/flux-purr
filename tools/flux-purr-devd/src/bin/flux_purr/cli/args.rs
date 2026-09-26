@@ -941,6 +941,11 @@ pub(crate) enum ThermalCommand {
         about = "Run the owner-facing 5A full-batch thermal tuning workflow and emit a canonical preliminary review bundle."
     )]
     Tune(ThermalFlagshipTuneArgs),
+    #[command(
+        name = "confirm-firmware-save",
+        about = "Confirm and save a sealed firmware tuning candidate from its recorded run input."
+    )]
+    ConfirmFirmwareSave(ThermalFirmwareSaveArgs),
     Report {
         #[command(subcommand)]
         command: ThermalReportCommand,
@@ -949,6 +954,13 @@ pub(crate) enum ThermalCommand {
         about = "Recompute analysis and tuned candidate from an existing thermal self-test run."
     )]
     Retune(ThermalRetuneArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub(crate) enum ThermalTuneEngine {
+    #[value(name = "host-reference")]
+    HostReference,
+    Firmware,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1150,6 +1162,8 @@ pub(crate) struct ThermalRetuneArgs {
 pub(crate) struct ThermalFlagshipTuneArgs {
     #[command(flatten)]
     pub(crate) target: TargetSelector,
+    #[arg(long = "engine", value_enum, default_value = "host-reference")]
+    pub(crate) engine: ThermalTuneEngine,
     #[arg(
         long = "source-kind",
         value_enum,
@@ -1160,11 +1174,13 @@ pub(crate) struct ThermalFlagshipTuneArgs {
     #[arg(
         long = "source-id",
         alias = "source-device-id",
+        default_value = "",
         help = "Expected bench source identity returned by the selected source provider."
     )]
     pub(crate) source_id: String,
     #[arg(
         long = "source-url",
+        default_value = "",
         help = "Bench source URL used by the selected source provider."
     )]
     pub(crate) source_url: String,
@@ -1273,6 +1289,19 @@ pub(crate) struct ThermalTuningV2ReportArgs {
     #[arg(
         long = "output-dir",
         help = "Output directory for the generated five-file thermal-tuning-v2 bundle. Defaults to <input-dir>/rendered."
+    )]
+    pub(crate) output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct ThermalFirmwareSaveArgs {
+    #[command(flatten)]
+    pub(crate) target: TargetSelector,
+    #[arg(long = "input-dir", help = "Raw firmware tuning run input directory.")]
+    pub(crate) input_dir: PathBuf,
+    #[arg(
+        long = "output-dir",
+        help = "Directory for the updated five-file report."
     )]
     pub(crate) output_dir: Option<PathBuf>,
 }
