@@ -98,6 +98,51 @@ describe('Web thermal-tuning-v2 export', () => {
     expect(strFromU8(archive['decision-ledger.ndjson'])).toContain('sensor_fault')
   })
 
+  it('keeps candidate review, seal, and EEPROM save as distinct states', async () => {
+    const events = [event(0, 'decision', 60)]
+    const captured = recording(events, {
+      phase: 'completed',
+      terminalDisposition: 'candidate_ready',
+      reviewDisposition: 'complete',
+    })
+    captured.status.trace.digest = await digestEventChain(events)
+
+    const promotion = async () => {
+      const exported = await exportThermalTuningV2(captured, 'device-1', 'web_serial')
+      const candidate = JSON.parse(exported.files['thermal-profile.candidate.json'])
+      const bundle = JSON.parse(exported.files['run.bundle.json'])
+      expect(exported.ownerOutcome).toBe('failed')
+      expect(bundle.ownerOutcome).toBe('failed')
+      return candidate.promotion.state
+    }
+
+    expect(await promotion()).toBe('candidate_ready')
+    captured.status.sealed = true
+    expect(await promotion()).toBe('sealed')
+    captured.status.phase = 'completed'
+    captured.status.terminalDisposition = 'passed'
+    captured.status.saveConfirmed = true
+    captured.status.previewReceipt = {
+      runId: 'run-web-1',
+      candidateId: 'candidate-web-1',
+      candidateHash: CANDIDATE_HASH,
+      powerClass: 'pps5a',
+      ramAppliedHash: CANDIDATE_HASH,
+    }
+    captured.status.saveReceipt = {
+      runId: 'run-web-1',
+      candidateId: 'candidate-web-1',
+      candidateHash: CANDIDATE_HASH,
+      powerClass: 'pps5a',
+      bank: 'pps5a',
+      bankRevision: 3,
+      bankHash: CANDIDATE_HASH,
+      atomic: true,
+      readbackVerified: true,
+    }
+    expect(await promotion()).toBe('saved')
+  })
+
   it('qualifies only a nine-target saved run with full receipts and trial evidence', async () => {
     const events: ThermalTuningEvent[] = []
     for (const targetC of TARGETS) {

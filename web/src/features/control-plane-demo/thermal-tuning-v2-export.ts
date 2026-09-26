@@ -56,7 +56,13 @@ export async function exportThermalTuningV2(
   const fullScope =
     EXECUTION_ORDER.every((target, index) => status.targetsC[index] === target) &&
     status.targetsC.length === EXECUTION_ORDER.length
-  const candidateState = status.saveReceipt?.readbackVerified ? 'saved' : 'rejected'
+  const candidateState = status.saveReceipt?.readbackVerified
+    ? 'saved'
+    : status.terminalDisposition === 'candidate_ready'
+      ? status.sealed
+        ? 'sealed'
+        : 'candidate_ready'
+      : 'rejected'
   const candidate = {
     schema: 'thermal-tuning-v2',
     runId: status.runId,
