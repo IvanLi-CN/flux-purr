@@ -164,6 +164,10 @@ struct RamElfHeader {
     shnum: u64,
 }
 
+type RamSegmentFields = (u64, u64, u64, u64, u64);
+type RamSectionFields = (u32, u64, u64, u64, u64);
+type RamLoadSection = (u32, Vec<u8>);
+
 pub(crate) fn validate_ram_elf(
     path: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -337,7 +341,7 @@ fn ram_segment_fields(
     data: &[u8],
     class: u8,
     offset: usize,
-) -> Result<(u64, u64, u64, u64, u64), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<RamSegmentFields, Box<dyn std::error::Error + Send + Sync>> {
     Ok(if class == 1 {
         (
             read_u32(data, offset_field(offset, 4)?)? as u64,
@@ -361,7 +365,7 @@ fn ram_section_fields(
     data: &[u8],
     class: u8,
     offset: usize,
-) -> Result<(u32, u64, u64, u64, u64), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<RamSectionFields, Box<dyn std::error::Error + Send + Sync>> {
     Ok(if class == 1 {
         (
             read_u32(data, offset_field(offset, 4)?)?,
@@ -410,7 +414,7 @@ fn validate_ram_section(
 fn ram_load_sections(
     data: &[u8],
     path: &Path,
-) -> Result<(u32, Vec<(u32, Vec<u8>)>), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(u32, Vec<RamLoadSection>), Box<dyn std::error::Error + Send + Sync>> {
     let header = parse_ram_elf_header(data, path)?;
     let expected_shentsize = if header.class == 1 { 40 } else { 64 };
     if header.shentsize < expected_shentsize {
