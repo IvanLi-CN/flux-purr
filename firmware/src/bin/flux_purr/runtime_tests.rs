@@ -5547,22 +5547,24 @@ fn boot_output_initialization_stays_in_one_boot_container() {
 }
 
 #[test]
-fn boot_backlight_waits_for_the_startup_frame() {
+fn boot_backlight_is_enabled_before_display_initialization() {
     let boot = include_str!("boot.rs");
+    let boot_system = boot
+        .split("pub(crate) fn initialize_boot_system(")
+        .nth(1)
+        .expect("boot system initialization is present");
+    let backlight = boot_system
+        .find("let mut backlight = Output::new(tokens.gpio13, Level::Low")
+        .expect("backlight is configured active-low");
+    let backlight_enable = boot_system
+        .find("backlight.set_low();")
+        .expect("backlight is enabled during boot system initialization");
+    assert!(backlight < backlight_enable);
     let display_stage = boot
         .split("pub(crate) async fn initialize_boot_display(")
         .nth(1)
         .expect("display boot stage is present");
-    let panel_init = display_stage
-        .find("initialize_display_panel(&mut runtime, &mut display).await")
-        .expect("panel initialization is present");
-    let startup_frame = display_stage
-        .find("present_startup_display(&mut runtime, &mut display, canvas, runtime_mode).await")
-        .expect("startup frame transfer is present");
-    let backlight_on = display_stage
-        .find("runtime.backlight.set_low();")
-        .expect("backlight is enabled after display setup");
-    assert!(panel_init < startup_frame && startup_frame < backlight_on);
+    assert!(!display_stage.contains("runtime.backlight.set_low();"));
 }
 
 #[test]
