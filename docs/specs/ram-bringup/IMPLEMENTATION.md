@@ -41,7 +41,10 @@
   loadable segment and section bounds, and internal-memory placement before
   invoking espflash. It requires the entry point to be in a file-backed
   executable vectors or IRAM section and loads the same validated ELF snapshot
-  that it checked.
+  that it checked. It transfers only file-backed sections: the ELF entry is the
+  Xtensa reset symbol, whose default `__zero_bss` hook clears `_bss_start` to
+  `_bss_end` before `main`; linker-owned `.stack` and `.noinit` memory are not
+  sent as synthetic zero-fill sections.
 - The host ELF parser keeps its tuple-shaped helper results behind named type
   aliases so the devd clippy gate stays clean without changing the loader or
   wire behavior.

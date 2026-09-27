@@ -80,7 +80,10 @@ vector overlaps, flash mapped addresses, non-identity load addresses, missing
 section tables, and missing loadable sections fail the check. The entry point
 must also fall inside a file-backed executable section: the complete
 linker-owned vectors section or an executable payload section within IRAM; the
-host validates and loads one immutable ELF snapshot.
+host validates and loads one immutable ELF snapshot. The host sends only
+file-backed allocated sections. When `p_memsz > p_filesz`, the Xtensa reset
+runtime entered by `MemEnd` clears `_bss_start.._bss_end` before `main`; the
+linker-owned `.stack` and `.noinit` tail stays out of the ROM transfer.
 
 ## Related ADRs
 

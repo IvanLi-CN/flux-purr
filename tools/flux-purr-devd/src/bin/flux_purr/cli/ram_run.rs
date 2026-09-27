@@ -534,6 +534,11 @@ fn ram_load_sections(
     let entry = u32::try_from(header.entry).map_err(|_| "RAM ELF entry does not fit")?;
     let mut entry_in_executable_section = false;
     let mut load = RamLoadAccumulator::default();
+    // MemEnd enters the ELF Reset symbol. The Xtensa runtime's default
+    // __zero_bss hook clears _bss_start.._bss_end before main; PT_LOAD
+    // memsz also includes the linker-owned stack, which must remain intact.
+    // Send only file-backed sections here so the ROM loader does not overwrite
+    // the stack while the runtime still owns BSS initialization.
     for index in 0..header.shnum {
         let offset = section_header_offset(header.shoff, header.shentsize, index)?;
         let fields = ram_section_fields(data, header.class, offset)?;
@@ -1201,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn ram_elf_loader_ignores_segment_memory_tail() {
+    fn ram_elf_loader_leaves_segment_memory_tail_to_runtime_reset() {
         let mut artifact = tempfile::NamedTempFile::new().unwrap();
         artifact
             .write_all(&test_elf_with_mem_size(0x4037_8400, 32, 48))
