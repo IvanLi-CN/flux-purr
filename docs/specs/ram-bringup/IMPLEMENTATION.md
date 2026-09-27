@@ -20,6 +20,9 @@
 - The host RAM loader validates ELF identification, program-header arithmetic,
   loadable segment bounds, and internal-memory placement before invoking
   espflash.
+- The host ELF parser keeps its tuple-shaped helper results behind named type
+  aliases so the devd clippy gate stays clean without changing the loader or
+  wire behavior.
 - The product identity now carries `firmwareKind=product`; host discovery
   treats missing or unknown kinds as unknown and LAN validation accepts only
   product firmware.
