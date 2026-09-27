@@ -6,8 +6,8 @@ from pathlib import Path
 from check_ram_elf import ElfError, validate
 
 
-def elf32(*segments: tuple[int, int, int]) -> bytes:
-    # (load address, memory size, flags)
+def elf32(*segments: tuple[int, int, int] | tuple[int, int, int, int]) -> bytes:
+    # (load address, memory size, flags) or (load address, file size, flags, memory size)
     header_size = 52
     ph_size = 32
     sh_size = 40
@@ -15,15 +15,28 @@ def elf32(*segments: tuple[int, int, int]) -> bytes:
     payload_offset = header_size + ph_size * len(segments)
     program_headers = []
     payload = bytearray()
-    for address, size, flags in segments:
+    for segment in segments:
+        address, file_size, flags = segment[:3]
+        memory_size = segment[3] if len(segment) == 4 else file_size
         program_headers.append(
-            struct.pack("<IIIIIIII", 1, payload_offset + len(payload), address, address, size, size, flags, 4)
+            struct.pack(
+                "<IIIIIIII",
+                1,
+                payload_offset + len(payload),
+                address,
+                address,
+                file_size,
+                memory_size,
+                flags,
+                4,
+            )
         )
-        payload.extend(b"\0" * size)
+        payload.extend(b"\0" * file_size)
     section_offset = payload_offset + len(payload)
     section_headers = [b"\0" * sh_size]
     payload_cursor = payload_offset
-    for address, size, flags in segments:
+    for segment in segments:
+        address, file_size, flags = segment[:3]
         section_headers.append(
             struct.pack(
                 "<IIIIIIIIII",
@@ -32,14 +45,14 @@ def elf32(*segments: tuple[int, int, int]) -> bytes:
                 flags | 0x2,
                 address,
                 payload_cursor,
-                size,
+                file_size,
                 0,
                 0,
                 4,
                 0,
             )
         )
-        payload_cursor += size
+        payload_cursor += file_size
     header = struct.pack(
         "<16sHHIIIIIHHHHHH",
         b"\x7fELF" + bytes([1, 1, 1]) + bytes(9),
@@ -70,6 +83,10 @@ class RamElfCheckTests(unittest.TestCase):
 
     def test_accepts_internal_ram_segments(self):
         report = validate(self.write(elf32((0x40378400, 32, 5), (0x3FC88000, 16, 6))))
+        self.assertTrue(report["ram_only"])
+
+    def test_accepts_zero_fill_segment_tail(self):
+        report = validate(self.write(elf32((0x40378400, 32, 5, 48))))
         self.assertTrue(report["ram_only"])
 
     def test_accepts_linker_vector_segment(self):
@@ -130,6 +147,15 @@ class RamElfCheckTests(unittest.TestCase):
         artifact = bytearray(elf32((0x40378400, 32, 5)))
         artifact[24:28] = (0x40378420).to_bytes(4, "little")
         artifact[52 + 20 : 52 + 24] = (64).to_bytes(4, "little")
+        with self.assertRaises(ElfError):
+            validate(self.write(bytes(artifact)))
+
+    def test_rejects_section_outside_load_segment(self):
+        artifact = bytearray(elf32((0x40378400, 32, 5)))
+        section_address_offset = 52 + 32 + 32 + 40 + 12
+        artifact[section_address_offset : section_address_offset + 4] = (0x40378420).to_bytes(
+            4, "little"
+        )
         with self.assertRaises(ElfError):
             validate(self.write(bytes(artifact)))
 

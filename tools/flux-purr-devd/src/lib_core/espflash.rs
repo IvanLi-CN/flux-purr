@@ -661,7 +661,19 @@ fn kill_espflash_process(child: &mut Child) -> io::Result<std::process::ExitStat
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Windows has no std process-group kill; taskkill's tree mode closes
+        // inherited stdout/stderr handles held by normal child processes.
+        let pid = child.id().to_string();
+        let taskkill = StdCommand::new("taskkill")
+            .args(["/PID", pid.as_str(), "/T", "/F"])
+            .status();
+        if taskkill.map_or(true, |status| !status.success()) {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = child.kill();
     child.wait()
 }

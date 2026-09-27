@@ -143,6 +143,7 @@ def validate(path: Path) -> dict[str, object]:
     dram_bytes = 0
     report_segments = []
     executable_entry = False
+    vectors_segment_seen = False
     for segment in segments:
         start = segment["paddr"]
         end = start + segment["memsz"]
@@ -157,6 +158,9 @@ def validate(path: Path) -> dict[str, object]:
         if any(overlaps(start, end, window) for window in RESERVED):
             raise ElfError(f"segment {segment['index']} overlaps reserved memory {start:#x}-{end:#x}")
         if start == VECTORS[0] and end == VECTORS[1]:
+            if vectors_segment_seen:
+                raise ElfError("ELF contains duplicate vectors segments")
+            vectors_segment_seen = True
             region = "vectors"
         elif contained(start, end, IRAM):
             iram_bytes += segment["memsz"]
@@ -172,6 +176,9 @@ def validate(path: Path) -> dict[str, object]:
         raise ElfError("ELF contains no loadable sections")
     report_sections = []
     executable_entry_section = False
+    vectors_section_seen = False
+    loaded_iram_bytes = 0
+    loaded_dram_bytes = 0
     for section in sections:
         start = section["address"]
         end = start + section["size"]
@@ -181,11 +188,45 @@ def validate(path: Path) -> dict[str, object]:
             raise ElfError(f"section {section['index']} maps to flash address {start:#x}")
         if any(overlaps(start, end, window) for window in RESERVED):
             raise ElfError(f"section {section['index']} overlaps reserved memory {start:#x}-{end:#x}")
+        file_end = section["offset"] + section["size"]
+        segment = next(
+            (
+                candidate
+                for candidate in report_segments
+                if contained(start, end, (candidate["paddr"], candidate["end"]))
+                and contained(
+                    section["offset"],
+                    file_end,
+                    (candidate["offset"], candidate["offset"] + candidate["filesz"]),
+                )
+            ),
+            None,
+        )
+        if segment is None:
+            raise ElfError(f"section {section['index']} is not backed by a PT_LOAD segment")
         if start == VECTORS[0] and end == VECTORS[1]:
+            if (
+                vectors_section_seen
+                or segment["paddr"] != VECTORS[0]
+                or segment["filesz"] != VECTORS[1] - VECTORS[0]
+                or segment["memsz"] != VECTORS[1] - VECTORS[0]
+                or section["offset"] != segment["offset"]
+                or section["size"] != segment["filesz"]
+            ):
+                raise ElfError(
+                    f"section {section['index']} is not the unique complete vectors section"
+                )
+            vectors_section_seen = True
             region = "vectors"
         elif contained(start, end, IRAM):
+            loaded_iram_bytes += section["size"]
+            if loaded_iram_bytes > IRAM[1] - IRAM[0]:
+                raise ElfError("IRAM load budget exceeded")
             region = "iram"
         elif contained(start, end, DRAM):
+            loaded_dram_bytes += section["size"]
+            if loaded_dram_bytes > DRAM[1] - DRAM[0]:
+                raise ElfError("DRAM load budget exceeded")
             region = "dram"
         else:
             raise ElfError(f"section {section['index']} is outside internal RAM {start:#x}-{end:#x}")
@@ -195,6 +236,24 @@ def validate(path: Path) -> dict[str, object]:
             and (region == "vectors" or region == "iram")
         )
         report_sections.append({**section, "region": region, "end": end})
+    if vectors_segment_seen and not vectors_section_seen:
+        raise ElfError("vectors segment has no complete vectors section")
+    for segment in report_segments:
+        zero_fill = segment["memsz"] - segment["filesz"]
+        if zero_fill == 0:
+            continue
+        start = segment["paddr"] + segment["filesz"]
+        end = start + zero_fill
+        if segment["region"] == "iram":
+            loaded_iram_bytes += zero_fill
+            if loaded_iram_bytes > IRAM[1] - IRAM[0]:
+                raise ElfError("IRAM load budget exceeded")
+        elif segment["region"] == "dram":
+            loaded_dram_bytes += zero_fill
+            if loaded_dram_bytes > DRAM[1] - DRAM[0]:
+                raise ElfError("DRAM load budget exceeded")
+        else:
+            raise ElfError(f"zero-fill range is outside internal RAM {start:#x}-{end:#x}")
     if iram_bytes > IRAM[1] - IRAM[0]:
         raise ElfError(f"IRAM budget exceeded: {iram_bytes} bytes")
     if dram_bytes > DRAM[1] - DRAM[0]:

@@ -202,9 +202,25 @@ type RamSegmentFields = (u64, u64, u64, u64, u64, u64);
 type RamSectionFields = (u32, u64, u64, u64, u64);
 type RamLoadSection = (u32, Vec<u8>);
 
+#[derive(Debug, Clone, Copy)]
+struct RamLoadSegment {
+    p_offset: u64,
+    paddr: u64,
+    filesz: u64,
+    memsz: u64,
+}
+
 struct RamElfImage {
     entry: u32,
     sections: Vec<RamLoadSection>,
+}
+
+#[derive(Default)]
+struct RamLoadAccumulator {
+    sections: Vec<RamLoadSection>,
+    vectors_section_seen: bool,
+    loaded_iram_bytes: u64,
+    loaded_dram_bytes: u64,
 }
 
 #[cfg(test)]
@@ -245,6 +261,8 @@ fn parse_validated_ram_elf(
     let mut iram_bytes = 0u64;
     let mut dram_bytes = 0u64;
     let mut executable_entry = false;
+    let mut segments = Vec::new();
+    let mut vectors_segment_seen = false;
     for index in 0..header.phnum {
         let offset = program_header_offset(header.phoff, header.phentsize, index)?;
         let p_type = read_u32(data, offset)?;
@@ -261,6 +279,20 @@ fn parse_validated_ram_elf(
         dram_bytes = dram_bytes
             .checked_add(segment_dram)
             .ok_or("RAM ELF DRAM budget overflow")?;
+        let (p_offset, paddr, _vaddr, filesz, memsz, _flags) =
+            ram_segment_fields(data, header.class, offset)?;
+        if paddr == RAM_VECTORS.0 && memsz == RAM_VECTORS.1 - RAM_VECTORS.0 {
+            if vectors_segment_seen {
+                return Err("RAM ELF contains duplicate vectors segments".into());
+            }
+            vectors_segment_seen = true;
+        }
+        segments.push(RamLoadSegment {
+            p_offset,
+            paddr,
+            filesz,
+            memsz,
+        });
     }
     if load_count == 0 {
         return Err("RAM ELF contains no PT_LOAD segments".into());
@@ -274,7 +306,7 @@ fn parse_validated_ram_elf(
     if !executable_entry {
         return Err("RAM ELF entry point is not inside an executable RAM segment".into());
     }
-    let (entry, sections) = ram_load_sections(data, path)?;
+    let (entry, sections) = ram_load_sections(data, path, &segments)?;
     Ok(RamElfImage { entry, sections })
 }
 
@@ -492,6 +524,7 @@ fn validate_ram_section(
 fn ram_load_sections(
     data: &[u8],
     path: &Path,
+    segments: &[RamLoadSegment],
 ) -> Result<(u32, Vec<RamLoadSection>), Box<dyn std::error::Error + Send + Sync>> {
     let header = parse_ram_elf_header(data, path)?;
     let expected_shentsize = if header.class == 1 { 40 } else { 64 };
@@ -499,47 +532,24 @@ fn ram_load_sections(
         return Err("RAM ELF section header entry is too small".into());
     }
     let entry = u32::try_from(header.entry).map_err(|_| "RAM ELF entry does not fit")?;
-    let mut sections = Vec::new();
     let mut entry_in_executable_section = false;
+    let mut load = RamLoadAccumulator::default();
     for index in 0..header.shnum {
         let offset = section_header_offset(header.shoff, header.shentsize, index)?;
-        let (section_type, flags, address, data_offset, size) =
-            ram_section_fields(data, header.class, offset)?;
-        if !matches!(section_type, ELF_SHT_PROGBITS | ELF_SHT_INIT_ARRAY)
-            || flags & ELF_SHF_ALLOC == 0
-            || address == 0
-            || data_offset == 0
-            || size == 0
-        {
-            continue;
-        }
-        validate_ram_section(address, size, index)?;
-        let section_end = address
-            .checked_add(size)
-            .ok_or_else(|| format!("RAM ELF section {index} address overflow"))?;
-        if flags & ELF_SHF_EXECINSTR != 0
-            && (address..section_end).contains(&header.entry)
-            && (address == RAM_VECTORS.0 && section_end == RAM_VECTORS.1
-                || range_contained(address, section_end, RAM_IRAM))
-        {
+        let fields = ram_section_fields(data, header.class, offset)?;
+        if append_ram_load_section(data, header.entry, index, fields, segments, &mut load)? {
             entry_in_executable_section = true;
         }
-        let start = usize::try_from(data_offset)
-            .map_err(|_| format!("RAM ELF segment {index} offset is too large"))?;
-        let end = usize::try_from(
-            data_offset
-                .checked_add(size)
-                .ok_or_else(|| format!("RAM ELF segment {index} file range overflow"))?,
-        )
-        .map_err(|_| format!("RAM ELF segment {index} end is too large"))?;
-        let segment_data = data
-            .get(start..end)
-            .ok_or_else(|| format!("RAM ELF segment {index} exceeds the artifact"))?;
-        let address = u32::try_from(address)
-            .map_err(|_| format!("RAM ELF segment {index} address is too large"))?;
-        sections.push((address, segment_data.to_vec()));
     }
-    if sections.is_empty() {
+    append_ram_zero_fill_sections(segments, &mut load)?;
+    if segments
+        .iter()
+        .any(|segment| segment.paddr == RAM_VECTORS.0)
+        && !load.vectors_section_seen
+    {
+        return Err("RAM ELF vectors segment has no complete vectors section".into());
+    }
+    if load.sections.is_empty() {
         return Err("RAM ELF contains no loadable sections".into());
     }
     if !entry_in_executable_section {
@@ -547,7 +557,142 @@ fn ram_load_sections(
             "RAM ELF entry point is not inside a file-backed executable RAM section".into(),
         );
     }
-    Ok((entry, sections))
+    Ok((entry, load.sections))
+}
+
+fn append_ram_load_section(
+    data: &[u8],
+    entry: u64,
+    index: u64,
+    (section_type, flags, address, data_offset, size): RamSectionFields,
+    segments: &[RamLoadSegment],
+    load: &mut RamLoadAccumulator,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    if !matches!(section_type, ELF_SHT_PROGBITS | ELF_SHT_INIT_ARRAY)
+        || flags & ELF_SHF_ALLOC == 0
+        || address == 0
+        || data_offset == 0
+        || size == 0
+    {
+        return Ok(false);
+    }
+    validate_ram_section(address, size, index)?;
+    let section_end = address
+        .checked_add(size)
+        .ok_or_else(|| format!("RAM ELF section {index} address overflow"))?;
+    let data_end = data_offset
+        .checked_add(size)
+        .ok_or_else(|| format!("RAM ELF section {index} file range overflow"))?;
+    let segment = segments
+        .iter()
+        .find(|segment| {
+            let Some(segment_end) = segment.paddr.checked_add(segment.memsz) else {
+                return false;
+            };
+            let Some(segment_file_end) = segment.p_offset.checked_add(segment.filesz) else {
+                return false;
+            };
+            range_contained(address, section_end, (segment.paddr, segment_end))
+                && range_contained(data_offset, data_end, (segment.p_offset, segment_file_end))
+        })
+        .ok_or_else(|| format!("RAM ELF section {index} is not backed by a PT_LOAD segment"))?;
+    if address == RAM_VECTORS.0 && section_end == RAM_VECTORS.1 {
+        if load.vectors_section_seen
+            || segment.paddr != RAM_VECTORS.0
+            || segment.memsz != RAM_VECTORS.1 - RAM_VECTORS.0
+            || segment.filesz != RAM_VECTORS.1 - RAM_VECTORS.0
+            || data_offset != segment.p_offset
+            || size != segment.filesz
+        {
+            return Err(format!(
+                "RAM ELF section {index} is not the unique complete vectors section"
+            )
+            .into());
+        }
+        load.vectors_section_seen = true;
+    } else {
+        record_ram_load_budget(
+            address,
+            size,
+            &mut load.loaded_iram_bytes,
+            &mut load.loaded_dram_bytes,
+        )?;
+    }
+    let start = usize::try_from(data_offset)
+        .map_err(|_| format!("RAM ELF section {index} offset is too large"))?;
+    let end = usize::try_from(data_end)
+        .map_err(|_| format!("RAM ELF section {index} end is too large"))?;
+    let segment_data = data
+        .get(start..end)
+        .ok_or_else(|| format!("RAM ELF section {index} exceeds the artifact"))?;
+    let address_u32 = u32::try_from(address)
+        .map_err(|_| format!("RAM ELF section {index} address is too large"))?;
+    load.sections.push((address_u32, segment_data.to_vec()));
+    Ok(flags & ELF_SHF_EXECINSTR != 0
+        && (address..section_end).contains(&entry)
+        && (address == RAM_VECTORS.0 && section_end == RAM_VECTORS.1
+            || range_contained(address, section_end, RAM_IRAM)))
+}
+
+fn append_ram_zero_fill_sections(
+    segments: &[RamLoadSegment],
+    load: &mut RamLoadAccumulator,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for segment in segments {
+        let zero_fill = segment
+            .memsz
+            .checked_sub(segment.filesz)
+            .ok_or("RAM ELF segment has p_filesz > p_memsz")?;
+        if zero_fill == 0 {
+            continue;
+        }
+        let address = segment
+            .paddr
+            .checked_add(segment.filesz)
+            .ok_or("RAM ELF zero-fill address overflow")?;
+        record_ram_load_budget(
+            address,
+            zero_fill,
+            &mut load.loaded_iram_bytes,
+            &mut load.loaded_dram_bytes,
+        )?;
+        let zero_fill_len =
+            usize::try_from(zero_fill).map_err(|_| "RAM ELF zero-fill section is too large")?;
+        load.sections.push((
+            u32::try_from(address).map_err(|_| "RAM ELF zero-fill address is too large")?,
+            vec![0; zero_fill_len],
+        ));
+    }
+    Ok(())
+}
+
+fn record_ram_load_budget(
+    address: u64,
+    size: u64,
+    loaded_iram_bytes: &mut u64,
+    loaded_dram_bytes: &mut u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let end = address
+        .checked_add(size)
+        .ok_or("RAM ELF load range overflow")?;
+    if range_contained(address, end, RAM_IRAM) {
+        *loaded_iram_bytes = loaded_iram_bytes
+            .checked_add(size)
+            .ok_or("RAM ELF IRAM load budget overflow")?;
+        if *loaded_iram_bytes > RAM_IRAM.1 - RAM_IRAM.0 {
+            return Err("RAM ELF IRAM load budget exceeded".into());
+        }
+    } else if range_contained(address, end, RAM_DRAM) {
+        *loaded_dram_bytes = loaded_dram_bytes
+            .checked_add(size)
+            .ok_or("RAM ELF DRAM load budget overflow")?;
+        if *loaded_dram_bytes > RAM_DRAM.1 - RAM_DRAM.0 {
+            return Err("RAM ELF DRAM load budget exceeded".into());
+        }
+    } else {
+        return Err("RAM ELF load range is outside internal RAM".into());
+    }
+    Ok(())
 }
 
 fn offset_field(
@@ -992,6 +1137,12 @@ mod tests {
         test_elf_with_payload_flags(address, payload_size, 5)
     }
 
+    fn test_elf_with_mem_size(address: u32, payload_size: usize, mem_size: usize) -> Vec<u8> {
+        let mut data = test_elf_with_payload_flags(address, payload_size, 5);
+        data[52 + 20..52 + 24].copy_from_slice(&(mem_size as u32).to_le_bytes());
+        data
+    }
+
     fn test_elf_with_payload_flags(address: u32, payload_size: usize, flags: u32) -> Vec<u8> {
         let payload_offset = 52 + 32;
         let section_offset = payload_offset + payload_size;
@@ -1080,5 +1231,31 @@ mod tests {
         let mut invalid = tempfile::NamedTempFile::new().unwrap();
         invalid.write_all(&artifact).unwrap();
         assert!(validate_ram_elf(invalid.path()).is_err());
+    }
+
+    #[test]
+    fn ram_elf_loader_zero_fills_segment_memory_tail() {
+        let mut artifact = tempfile::NamedTempFile::new().unwrap();
+        artifact
+            .write_all(&test_elf_with_mem_size(0x4037_8400, 32, 48))
+            .unwrap();
+
+        let image = read_validated_ram_elf(artifact.path()).unwrap();
+
+        assert_eq!(image.sections.len(), 2);
+        assert_eq!(image.sections[1].0, 0x4037_8420);
+        assert_eq!(image.sections[1].1, vec![0; 16]);
+    }
+
+    #[test]
+    fn ram_elf_loader_rejects_sections_outside_load_segments() {
+        let mut data = test_elf(0x4037_8400);
+        let section_offset = 52 + 32 + 32 + 40;
+        data[section_offset + 12..section_offset + 16]
+            .copy_from_slice(&0x4037_8420u32.to_le_bytes());
+        let mut artifact = tempfile::NamedTempFile::new().unwrap();
+        artifact.write_all(&data).unwrap();
+
+        assert!(read_validated_ram_elf(artifact.path()).is_err());
     }
 }
