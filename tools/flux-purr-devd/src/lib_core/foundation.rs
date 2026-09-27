@@ -33,7 +33,6 @@ pub(crate) use serde_json::{Value, json};
 pub(crate) use sha2::{Digest, Sha256};
 pub(crate) use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    process::Command,
     sync::broadcast,
 };
 pub(crate) use tokio_stream::{StreamExt, wrappers::BroadcastStream};
@@ -378,6 +377,7 @@ pub(crate) struct FirmwareApproval {
     pub(crate) lease_id: String,
     pub(crate) device_id: String,
     pub(crate) port_path: String,
+    pub(crate) usb_identity: Option<UsbSerialIdentity>,
     pub(crate) rom_mac: String,
     pub(crate) bundle_sha256: String,
     pub(crate) operation: FirmwareOperation,

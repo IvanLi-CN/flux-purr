@@ -106,6 +106,7 @@ pub(crate) async fn local_firmware_update(
     let (identity, status) =
         refresh_native_update_runtime_facts(&state, &target, &preflight_lease_id, &usb_identity)
             .await?;
+    validate_update_runtime_identity(DeviceTransport::NativeSerial, &identity)?;
     validate_update_runtime_facts(
         DeviceTransport::NativeSerial,
         &identity.firmware_version,
@@ -145,6 +146,7 @@ pub(crate) async fn local_firmware_update(
         progress.stage_completed("runtime_reconnect", json!({}));
     } else {
         progress.stage_failed("runtime_reconnect", "runtime_verification_failed");
+        mark_firmware_runtime_unverified(&state, &target.id);
     }
     let outcome = if verified {
         "verified"
@@ -322,6 +324,21 @@ pub(crate) fn validate_update_runtime_facts(
     Ok(())
 }
 
+pub(crate) fn validate_update_runtime_identity(
+    transport: DeviceTransport,
+    identity: &Identity,
+) -> Result<(), HttpError> {
+    if transport == DeviceTransport::NativeSerial
+        && identity.firmware_kind != Some(FirmwareKind::Product)
+    {
+        return Err(HttpError::forbidden(
+            "update_identity_required",
+            "Update requires a verified Flux Purr product runtime identity.",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn capture_native_serial_identity(
     port_path: &str,
 ) -> Result<UsbSerialIdentity, HttpError> {
@@ -444,6 +461,7 @@ pub(crate) async fn firmware_operation(
         &prepared.port_path,
         &prepared.rom_mac,
         &prepared.bundle.bundle_sha256,
+        prepared.usb_identity.as_ref(),
     );
     if payload.dry_run {
         let token =
@@ -697,6 +715,10 @@ pub(crate) async fn refresh_operation_facts(
     };
     if let Some(identity) = identity.as_ref() {
         prepared.current_version = identity.firmware_version.clone();
+        progress.require(validate_update_runtime_identity(
+            prepared.transport,
+            identity,
+        ))?;
     }
     update_operation_device(state, device_id, prepared, identity)?;
     progress.require(validate_update_runtime_facts(
@@ -814,6 +836,7 @@ pub(crate) fn create_firmware_approval(
             lease_id: payload.lease_id.clone(),
             device_id: device_id.to_string(),
             port_path: prepared.port_path.clone(),
+            usb_identity: prepared.usb_identity.clone(),
             rom_mac: prepared.rom_mac.clone(),
             bundle_sha256: prepared.bundle.bundle_sha256.clone(),
             operation: payload.operation,
@@ -851,6 +874,7 @@ pub(crate) fn authorize_firmware_operation(
         && approval.lease_id == payload.lease_id
         && approval.device_id == device_id
         && approval.port_path == prepared.port_path
+        && approval.usb_identity == prepared.usb_identity
         && approval.rom_mac == prepared.rom_mac
         && approval.bundle_sha256 == prepared.bundle.bundle_sha256
         && approval.operation == payload.operation
@@ -928,6 +952,7 @@ pub(crate) async fn reconnect_firmware_operation(
         progress.stage_completed("runtime_reconnect", json!({}));
     } else {
         progress.stage_failed("runtime_reconnect", "runtime_reconnect_failed");
+        mark_firmware_runtime_unverified(state, device_id);
     }
     progress.stage_started("runtime_verify", json!({}));
     Ok(identity.as_ref().is_ok_and(|identity| {
@@ -940,6 +965,14 @@ pub(crate) async fn reconnect_firmware_operation(
             && status.partition_table_sha256
                 == prepared.bundle.manifest.layout.partition_table_sha256
     }))
+}
+
+fn mark_firmware_runtime_unverified(state: &AppState, device_id: &str) {
+    if let Ok(mut state_lock) = state.lock()
+        && let Some(device) = state_lock.devices.get_mut(device_id)
+    {
+        device.connection = ConnectionState::Error;
+    }
 }
 
 pub(crate) async fn run_bundle_flash_transaction(
@@ -1195,7 +1228,14 @@ async fn require_bundle_espflash_success_for_target(
     target: FirmwareFlashTarget<'_>,
 ) -> Result<Output, HttpError> {
     require_usb_serial_identity(target.port_path, target.usb_identity)?;
-    let output = run_espflash_command_with_timeout(program, args, ESPFLASH_COMMAND_TIMEOUT).await?;
+    let output = run_espflash_command_with_identity(
+        program,
+        args,
+        ESPFLASH_COMMAND_TIMEOUT,
+        target.port_path,
+        target.usb_identity,
+    )
+    .await?;
     require_usb_serial_identity(target.port_path, target.usb_identity)?;
     if output.status.success() {
         return Ok(output);
@@ -1220,9 +1260,14 @@ async fn require_bundle_espflash_success_for_target(
             .expect("bundle recovery modes require an espflash --before argument");
         tokio::time::sleep(ESPFLASH_USB_RESET_RETRY_DELAY).await;
         require_usb_serial_identity(target.port_path, target.usb_identity)?;
-        let retry_output =
-            run_espflash_command_with_timeout(program, &retry_args, ESPFLASH_COMMAND_TIMEOUT)
-                .await?;
+        let retry_output = run_espflash_command_with_identity(
+            program,
+            &retry_args,
+            ESPFLASH_COMMAND_TIMEOUT,
+            target.port_path,
+            target.usb_identity,
+        )
+        .await?;
         require_usb_serial_identity(target.port_path, target.usb_identity)?;
         if retry_output.status.success() {
             return Ok(retry_output);

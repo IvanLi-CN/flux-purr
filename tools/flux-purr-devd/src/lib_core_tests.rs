@@ -3615,6 +3615,62 @@ fn usb_serial_identity_rejects_missing_or_replaced_serial_numbers() {
     assert!(UsbSerialIdentity::from_port_info(&missing).is_none());
 }
 
+#[test]
+fn firmware_update_identity_requires_product_runtime() {
+    let mut identity = mock_identity("mock-fp-lab-01");
+    assert!(validate_update_runtime_identity(DeviceTransport::NativeSerial, &identity).is_ok());
+
+    identity.firmware_kind = Some(FirmwareKind::RamBringup);
+    let error =
+        validate_update_runtime_identity(DeviceTransport::NativeSerial, &identity).unwrap_err();
+    assert_eq!(error.error.code, "update_identity_required");
+
+    identity.firmware_kind = None;
+    let error =
+        validate_update_runtime_identity(DeviceTransport::NativeSerial, &identity).unwrap_err();
+    assert_eq!(error.error.code, "update_identity_required");
+    assert!(validate_update_runtime_identity(DeviceTransport::Mock, &identity).is_ok());
+}
+
+#[test]
+fn firmware_preflight_digest_binds_usb_identity() {
+    let payload = FirmwareOperationRequest {
+        lease_id: "lease-1".into(),
+        artifact_id: "sha256:artifact".into(),
+        operation: FirmwareOperation::Update,
+        dry_run: true,
+        approval_token: None,
+        confirm: None,
+        allow_downgrade: false,
+    };
+    let first = UsbSerialIdentity {
+        vid: 0x303a,
+        pid: 0x1001,
+        serial_number: "target-a".into(),
+    };
+    let second = UsbSerialIdentity {
+        serial_number: "target-b".into(),
+        ..first.clone()
+    };
+    let digest_a = firmware_preflight_digest(
+        &payload,
+        "device-1",
+        "/dev/cu.usbmodem1",
+        "00:11:22:33:44:55",
+        "sha256:bundle",
+        Some(&first),
+    );
+    let digest_b = firmware_preflight_digest(
+        &payload,
+        "device-1",
+        "/dev/cu.usbmodem1",
+        "00:11:22:33:44:55",
+        "sha256:bundle",
+        Some(&second),
+    );
+    assert_ne!(digest_a, digest_b);
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn serial_lock_symlink_aliases_share_a_lock_identity() {

@@ -5,6 +5,7 @@ use flux_purr_devd::serial::{
 };
 
 const DIRECT_SERIAL_LOCK_TIMEOUT: Duration = Duration::from_secs(180);
+const DIRECT_ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn acquire_direct_serial_lock(
     port: &str,
@@ -733,8 +734,26 @@ fn run_guarded_espflash_command(
     usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<EspflashDiagnostics, Box<dyn std::error::Error + Send + Sync>> {
     ensure_direct_usb_identity(port, usb_identity)?;
-    let diagnostics = run_espflash_command(program, args)?;
+    let output = flux_purr_devd::espflash::run_espflash_command_blocking_with_identity(
+        program,
+        args,
+        DIRECT_ESPFLASH_COMMAND_TIMEOUT,
+        port,
+        usb_identity,
+    )
+    .map_err(|error| format!("{error:?}"))?;
     ensure_direct_usb_identity(port, usb_identity)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let diagnostics = classify_espflash_diagnostics(
+        args.first().map(String::as_str).unwrap_or("unknown"),
+        output.status.code(),
+        &stdout,
+        &stderr,
+    );
+    if !output.status.success() {
+        return Err(format_espflash_failure(&diagnostics).into());
+    }
     Ok(diagnostics)
 }
 
@@ -786,6 +805,7 @@ pub(crate) struct EspflashDiagnostics {
     pub(crate) stderr: String,
 }
 
+#[allow(dead_code)]
 pub(crate) fn run_espflash_command(
     program: &Path,
     args: &[String],

@@ -1,5 +1,12 @@
 pub(crate) use super::*;
 
+use std::{
+    io::Read,
+    process::{Command as StdCommand, Output, Stdio},
+    thread,
+    time::Instant,
+};
+
 pub(crate) fn resolve_artifact_path(root: Option<&Path>, path: &str) -> PathBuf {
     let path = PathBuf::from(path);
     if path.is_absolute() {
@@ -124,7 +131,8 @@ where
         for args in commands {
             require_usb_serial_identity(target.port_path, target.usb_identity)?;
             let output =
-                run_espflash_command_with_timeout(program, &args, ESPFLASH_COMMAND_TIMEOUT).await?;
+                run_espflash_command_with_target(program, &args, ESPFLASH_COMMAND_TIMEOUT, target)
+                    .await?;
             require_usb_serial_identity(target.port_path, target.usb_identity)?;
 
             if output.status.success() {
@@ -167,9 +175,13 @@ async fn handle_failed_espflash_attempt(
     if espflash_flash_end_requires_reset(args, output) {
         require_usb_serial_identity(target.port_path, target.usb_identity)?;
         let reset_args = build_espflash_reset_args(artifact, target.port_path, before_reset)?;
-        let reset_output =
-            run_espflash_command_with_timeout(program, &reset_args, ESPFLASH_COMMAND_TIMEOUT)
-                .await?;
+        let reset_output = run_espflash_command_with_target(
+            program,
+            &reset_args,
+            ESPFLASH_COMMAND_TIMEOUT,
+            target,
+        )
+        .await?;
         require_usb_serial_identity(target.port_path, target.usb_identity)?;
         if reset_output.status.success() {
             // The ROM accepted the image data but rejected the final
@@ -198,17 +210,146 @@ async fn handle_failed_espflash_attempt(
     Ok(true)
 }
 
+#[allow(dead_code)]
 pub(crate) async fn run_espflash_command_with_timeout(
     program: &Path,
     args: &[String],
     timeout: Duration,
 ) -> Result<Output, HttpError> {
-    let mut command = Command::new(program);
-    command.args(args).kill_on_drop(true);
-    tokio::time::timeout(timeout, command.output())
-        .await
-        .map_err(|_| {
+    run_espflash_command_with_identity_blocking(program, args, timeout, None, None).await
+}
+
+async fn run_espflash_command_with_target(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    target: EspflashTarget<'_>,
+) -> Result<Output, HttpError> {
+    run_espflash_command_with_identity_blocking(
+        program,
+        args,
+        timeout,
+        Some(target.port_path),
+        target.usb_identity,
+    )
+    .await
+}
+
+pub(crate) async fn run_espflash_command_with_identity(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    port_path: &str,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<Output, HttpError> {
+    run_espflash_command_with_identity_blocking(
+        program,
+        args,
+        timeout,
+        Some(port_path),
+        expected_usb_identity,
+    )
+    .await
+}
+
+async fn run_espflash_command_with_identity_blocking(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    port_path: Option<&str>,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<Output, HttpError> {
+    let program = program.to_owned();
+    let args = args.to_owned();
+    let port_path = port_path.map(str::to_owned);
+    let expected_usb_identity = expected_usb_identity.cloned();
+    tokio::task::spawn_blocking(move || {
+        run_espflash_command_blocking(
+            &program,
+            &args,
+            timeout,
+            port_path.as_deref(),
+            expected_usb_identity.as_ref(),
+        )
+    })
+    .await
+    .map_err(|error| {
+        HttpError::internal_with_details(
+            "flash_tool_unavailable",
+            "The espflash worker stopped unexpectedly.",
+            json!({ "error": error.to_string() }),
+        )
+    })?
+}
+
+pub fn run_espflash_command_blocking_with_identity(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    port_path: &str,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<Output, HttpError> {
+    run_espflash_command_blocking(
+        program,
+        args,
+        timeout,
+        Some(port_path),
+        expected_usb_identity,
+    )
+}
+
+fn run_espflash_command_blocking(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    port_path: Option<&str>,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<Output, HttpError> {
+    let mut child = StdCommand::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
             HttpError::internal_with_details(
+                "flash_tool_unavailable",
+                "Failed to start espflash.",
+                json!({ "program": program, "error": error.to_string() }),
+            )
+        })?;
+    let stdout = child.stdout.take().expect("espflash stdout is piped");
+    let stderr = child.stderr.take().expect("espflash stderr is piped");
+    let stdout_reader = thread::spawn(move || read_process_pipe(stdout));
+    let stderr_reader = thread::spawn(move || read_process_pipe(stderr));
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            HttpError::internal_with_details(
+                "flash_tool_failed",
+                "Failed to inspect the espflash process.",
+                json!({ "program": program, "error": error.to_string() }),
+            )
+        })? {
+            return collect_process_output(status, stdout_reader, stderr_reader);
+        }
+        if let (Some(port_path), Some(expected_usb_identity)) = (port_path, expected_usb_identity)
+            && !serial_port_usb_identity_matches(port_path, expected_usb_identity)
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(HttpError::forbidden(
+                "authorized_port_changed",
+                "The authorized USB target changed or disappeared while espflash was running; the operation was stopped.",
+            ));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(HttpError::internal_with_details(
                 "flash_tool_timeout",
                 "espflash did not finish before the command deadline.",
                 json!({
@@ -216,18 +357,48 @@ pub(crate) async fn run_espflash_command_with_timeout(
                     "args": args,
                     "timeoutMs": timeout.as_millis(),
                 }),
-            )
-        })?
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn read_process_pipe<R: Read>(mut reader: R) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    reader.read_to_end(&mut output)?;
+    Ok(output)
+}
+
+fn collect_process_output(
+    status: std::process::ExitStatus,
+    stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+) -> Result<Output, HttpError> {
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| HttpError::internal("The espflash stdout reader stopped unexpectedly."))?
         .map_err(|error| {
             HttpError::internal_with_details(
-                "flash_tool_unavailable",
-                "Failed to start espflash.",
-                json!({
-                    "program": program,
-                    "error": error.to_string(),
-                }),
+                "flash_tool_failed",
+                "Failed to read espflash stdout.",
+                json!({ "error": error.to_string() }),
             )
-        })
+        })?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| HttpError::internal("The espflash stderr reader stopped unexpectedly."))?
+        .map_err(|error| {
+            HttpError::internal_with_details(
+                "flash_tool_failed",
+                "Failed to read espflash stderr.",
+                json!({ "error": error.to_string() }),
+            )
+        })?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 pub(crate) fn build_espflash_reset_args(

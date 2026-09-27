@@ -18,6 +18,7 @@ pub(crate) fn firmware_preflight_digest(
     port_path: &str,
     rom_mac: &str,
     bundle_sha256: &str,
+    usb_identity: Option<&UsbSerialIdentity>,
 ) -> String {
     let value = json!({
         "leaseId": payload.lease_id,
@@ -27,6 +28,11 @@ pub(crate) fn firmware_preflight_digest(
         "bundleSha256": bundle_sha256,
         "operation": payload.operation,
         "allowDowngrade": payload.allow_downgrade,
+        "usbIdentity": usb_identity.map(|identity| json!({
+            "vid": identity.vid,
+            "pid": identity.pid,
+            "serialNumber": identity.serial_number,
+        })),
     });
     format!(
         "sha256:{}",

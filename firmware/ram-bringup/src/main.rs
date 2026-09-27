@@ -452,6 +452,7 @@ mod device {
         outputs.safe();
         let mut line = [0u8; LINE_MAX];
         let mut length = 0usize;
+        let mut discarding_line = false;
         loop {
             let byte = match usb.read_byte() {
                 Ok(byte) => byte,
@@ -461,7 +462,7 @@ mod device {
                 }
             };
             if byte == b'\n' {
-                if length > 0 {
+                if !discarding_line && length > 0 {
                     handle_line(
                         &mut outputs,
                         &mut inputs,
@@ -470,10 +471,14 @@ mod device {
                     );
                 }
                 length = 0;
+                discarding_line = false;
+            } else if discarding_line {
+                continue;
             } else if length < line.len() {
                 line[length] = byte;
                 length += 1;
             } else {
+                discarding_line = true;
                 length = 0;
                 outputs.safe();
             }
