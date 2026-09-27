@@ -20,6 +20,13 @@ RGB, buzzer, and fan paths.
 - The CLI accepts one explicit local serial port. It never scans for a
   replacement port, changes selectors, writes flash, reads or writes EEPROM,
   negotiates PD, or treats ROM download mode as an application identity.
+- Exact-port presence checks are platform-aware: Unix requires the supplied
+  device path to exist, while Windows validates the supplied `COMx` name
+  against the current serial enumeration. A missing authorized port never
+  causes the CLI to choose a replacement.
+- Serial process locks and in-process sessions use the same canonical port
+  identity, so macOS `tty`/`cu` aliases and filesystem aliases cannot leave a
+  stale session behind. Platforms without a safe lock primitive fail closed.
 - `ram-run` reuses a matching RAM image only when firmware kind, build id, and
   requested capability all match. Otherwise it validates the release ELF
   against the internal-RAM safety contract and loads it through the pinned

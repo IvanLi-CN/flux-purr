@@ -25,7 +25,10 @@
   on the existing `preview_display` capability.
 - Direct RAM, daemon flash, direct flash, and recover commands share the same
   per-port process lock; Unix uses `flock` and Windows uses a byte-range file
-  lock that survives worker-thread handoff.
+  lock that survives worker-thread handoff. Session-cache keys use the same
+  canonical identity as the process lock, Windows reconnect treats `COMx` as
+  an enumerated device name rather than a filesystem path, and unsupported
+  Unix platforms fail closed instead of following an unsafe lock-file alias.
 - The host RAM loader validates ELF identification, program-header arithmetic,
   loadable segment and section bounds, and internal-memory placement before
   invoking espflash. It requires the entry point to be in a file-backed
