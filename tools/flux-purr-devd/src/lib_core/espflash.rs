@@ -649,9 +649,21 @@ fn kill_and_collect_process_output(
     collect_process_output(status, stdout_reader, stderr_reader)
 }
 
-fn read_process_pipe<R: Read>(mut reader: R) -> io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    reader.read_to_end(&mut output)?;
+pub(crate) const MAX_ESPFLASH_CAPTURE_BYTES: usize = 64 * 1024;
+
+pub(crate) fn read_process_pipe<R: Read>(mut reader: R) -> io::Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(MAX_ESPFLASH_CAPTURE_BYTES);
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_ESPFLASH_CAPTURE_BYTES.saturating_sub(output.len());
+        if remaining > 0 {
+            output.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+    }
     Ok(output)
 }
 

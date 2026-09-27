@@ -1047,7 +1047,7 @@ pub(crate) async fn run_bundle_flash_transaction(
     )
     .await?;
     verify_bundle_checksums(&program, &common, bundle, target, progress).await?;
-    reset_after_bundle(&program, &common, target, progress).await?;
+    reset_after_bundle(&program, &common, initial_reset, target, progress).await?;
     Ok(())
 }
 
@@ -1193,16 +1193,28 @@ async fn verify_bundle_checksums(
 async fn reset_after_bundle(
     program: &Path,
     common: &[String],
+    before_reset: &str,
     target: FirmwareFlashTarget<'_>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<(), HttpError> {
     progress.stage_started("reset", json!({}));
-    let mut reset = vec!["reset".into()];
-    reset.extend(common.iter().cloned());
+    let reset = build_bundle_reset_args(common, before_reset);
     progress
         .require(require_bundle_espflash_success_for_target(program, &reset, target, true).await)?;
     progress.stage_completed("reset", json!({}));
     Ok(())
+}
+
+pub(crate) fn build_bundle_reset_args(common: &[String], before_reset: &str) -> Vec<String> {
+    let mut reset = vec!["reset".to_string()];
+    reset.extend(common.iter().cloned());
+    reset.extend([
+        "--before".to_string(),
+        before_reset.to_string(),
+        "--after".to_string(),
+        "hard-reset".to_string(),
+    ]);
+    reset
 }
 
 pub(crate) fn build_checksum_md5_args(common: &[String], address: u64, length: u64) -> Vec<String> {

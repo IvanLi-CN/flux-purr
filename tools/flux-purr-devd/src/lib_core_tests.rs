@@ -1489,6 +1489,42 @@ fn bundle_retry_replaces_only_the_recoverable_no_reset_mode() {
     );
 }
 
+#[test]
+fn bundle_reset_command_includes_recovery_reset_mode() {
+    let common = vec![
+        "--chip".to_string(),
+        "esp32s3".to_string(),
+        "--port".to_string(),
+        "/dev/cu.usbmodem2111401".to_string(),
+        "--non-interactive".to_string(),
+    ];
+
+    assert_eq!(
+        build_bundle_reset_args(&common, "usb-reset"),
+        vec![
+            "reset",
+            "--chip",
+            "esp32s3",
+            "--port",
+            "/dev/cu.usbmodem2111401",
+            "--non-interactive",
+            "--before",
+            "usb-reset",
+            "--after",
+            "hard-reset",
+        ]
+    );
+}
+
+#[test]
+fn espflash_process_pipe_caps_captured_output_while_draining() {
+    let input = vec![b'x'; MAX_ESPFLASH_CAPTURE_BYTES + 8 * 1024];
+
+    let output = read_process_pipe(std::io::Cursor::new(input)).unwrap();
+
+    assert_eq!(output.len(), MAX_ESPFLASH_CAPTURE_BYTES);
+}
+
 #[tokio::test]
 async fn runtime_endpoint_requires_valid_lease() {
     let state = AppState::test();
