@@ -193,17 +193,9 @@ struct ButtonKeyState {
     pending_short_at: Option<Instant>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct ButtonGestureTracker {
     keys: [ButtonKeyState; 5],
-}
-
-impl Default for ButtonGestureTracker {
-    fn default() -> Self {
-        Self {
-            keys: [ButtonKeyState::default(); 5],
-        }
-    }
 }
 
 impl ButtonGestureTracker {
@@ -211,96 +203,137 @@ impl ButtonGestureTracker {
         let mut events = Vec::new();
         for (index, state) in self.keys.iter_mut().enumerate() {
             if snapshot.pressed[index] {
-                if !state.pressed {
-                    if let Some(pending) = state.pending_short_at
-                        && now.duration_since(pending) > BUTTON_DOUBLE_CLICK
-                    {
-                        events.push(ButtonGestureEvent {
-                            key: BUTTON_NAMES[index],
-                            gesture: "short_press",
-                        });
-                        state.pending_short_at = None;
-                    }
-                    state.pressed = true;
-                    state.pressed_at = Some(now);
-                    state.long_reported = false;
-                }
-                if !state.long_reported
-                    && state
-                        .pressed_at
-                        .is_some_and(|started| now.duration_since(started) >= BUTTON_LONG_PRESS)
-                {
-                    events.push(ButtonGestureEvent {
-                        key: BUTTON_NAMES[index],
-                        gesture: "long_press",
-                    });
-                    state.long_reported = true;
-                    state.pending_short_at = None;
-                }
+                Self::observe_pressed(index, state, now, &mut events);
             } else {
-                if state.pressed {
-                    state.pressed = false;
-                    if !state.long_reported {
-                        if let Some(pending) = state.pending_short_at {
-                            if now.duration_since(pending) <= BUTTON_DOUBLE_CLICK {
-                                events.push(ButtonGestureEvent {
-                                    key: BUTTON_NAMES[index],
-                                    gesture: "double_click",
-                                });
-                                state.pending_short_at = None;
-                            } else {
-                                events.push(ButtonGestureEvent {
-                                    key: BUTTON_NAMES[index],
-                                    gesture: "short_press",
-                                });
-                                state.pending_short_at = Some(now);
-                            }
-                        } else {
-                            state.pending_short_at = Some(now);
-                        }
-                    } else {
-                        state.pending_short_at = None;
-                    }
-                    state.pressed_at = None;
-                    state.long_reported = false;
-                }
-                if let Some(pending) = state.pending_short_at
-                    && now.duration_since(pending) > BUTTON_DOUBLE_CLICK
-                {
-                    events.push(ButtonGestureEvent {
-                        key: BUTTON_NAMES[index],
-                        gesture: "short_press",
-                    });
-                    state.pending_short_at = None;
-                }
+                Self::observe_released(index, state, now, &mut events);
             }
         }
         events
     }
 
-    fn flush(&mut self, now: Instant) -> Vec<ButtonGestureEvent> {
-        let mut events = Vec::new();
-        for (index, state) in self.keys.iter_mut().enumerate() {
-            if state.pressed {
-                if !state.long_reported
-                    && state
-                        .pressed_at
-                        .is_some_and(|started| now.duration_since(started) >= BUTTON_LONG_PRESS)
-                {
+    fn observe_pressed(
+        index: usize,
+        state: &mut ButtonKeyState,
+        now: Instant,
+        events: &mut Vec<ButtonGestureEvent>,
+    ) {
+        if !state.pressed {
+            Self::flush_expired_short(index, state, now, events);
+            state.pressed = true;
+            state.pressed_at = Some(now);
+            state.long_reported = false;
+        }
+        if !Self::long_press_due(state, now) {
+            return;
+        }
+        events.push(ButtonGestureEvent {
+            key: BUTTON_NAMES[index],
+            gesture: "long_press",
+        });
+        state.long_reported = true;
+        state.pending_short_at = None;
+    }
+
+    fn observe_released(
+        index: usize,
+        state: &mut ButtonKeyState,
+        now: Instant,
+        events: &mut Vec<ButtonGestureEvent>,
+    ) {
+        if state.pressed {
+            Self::record_release(index, state, now, events);
+        }
+        Self::flush_expired_short(index, state, now, events);
+    }
+
+    fn record_release(
+        index: usize,
+        state: &mut ButtonKeyState,
+        now: Instant,
+        events: &mut Vec<ButtonGestureEvent>,
+    ) {
+        state.pressed = false;
+        if state.long_reported {
+            state.pending_short_at = None;
+        } else {
+            match state.pending_short_at {
+                Some(pending) if now.duration_since(pending) <= BUTTON_DOUBLE_CLICK => {
                     events.push(ButtonGestureEvent {
                         key: BUTTON_NAMES[index],
-                        gesture: "long_press",
+                        gesture: "double_click",
                     });
-                    state.long_reported = true;
+                    state.pending_short_at = None;
                 }
-            } else if state.pending_short_at.take().is_some() {
-                events.push(ButtonGestureEvent {
-                    key: BUTTON_NAMES[index],
-                    gesture: "short_press",
-                });
+                Some(_) => {
+                    events.push(ButtonGestureEvent {
+                        key: BUTTON_NAMES[index],
+                        gesture: "short_press",
+                    });
+                    state.pending_short_at = Some(now);
+                }
+                None => state.pending_short_at = Some(now),
             }
         }
-        events
+        state.pressed_at = None;
+        state.long_reported = false;
+    }
+
+    fn flush_expired_short(
+        index: usize,
+        state: &mut ButtonKeyState,
+        now: Instant,
+        events: &mut Vec<ButtonGestureEvent>,
+    ) {
+        if !Self::short_press_due(state, now) {
+            return;
+        }
+        events.push(ButtonGestureEvent {
+            key: BUTTON_NAMES[index],
+            gesture: "short_press",
+        });
+        state.pending_short_at = None;
+    }
+
+    fn flush(&mut self, now: Instant) -> Vec<ButtonGestureEvent> {
+        self.keys
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, state)| Self::flush_state(index, state, now))
+            .collect()
+    }
+
+    fn flush_state(
+        index: usize,
+        state: &mut ButtonKeyState,
+        now: Instant,
+    ) -> Option<ButtonGestureEvent> {
+        if !state.pressed {
+            return state.pending_short_at.take().map(|_| ButtonGestureEvent {
+                key: BUTTON_NAMES[index],
+                gesture: "short_press",
+            });
+        }
+        if !Self::long_press_due(state, now) {
+            return None;
+        }
+        state.long_reported = true;
+        Some(ButtonGestureEvent {
+            key: BUTTON_NAMES[index],
+            gesture: "long_press",
+        })
+    }
+
+    fn long_press_due(state: &ButtonKeyState, now: Instant) -> bool {
+        !state.long_reported
+            && state
+                .pressed_at
+                .is_some_and(|started| now.duration_since(started) >= BUTTON_LONG_PRESS)
+    }
+
+    fn short_press_due(state: &ButtonKeyState, now: Instant) -> bool {
+        state
+            .pending_short_at
+            .is_some_and(|pending| now.duration_since(pending) > BUTTON_DOUBLE_CLICK)
     }
 }
 
@@ -1223,46 +1256,7 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
             require_result_string_value(result, "detail", "status_light_pwm_breath_ready")?;
             require_result_string_value(result, "effect", "pwm_breathing_rainbow_8s")?;
         }
-        "test_buttons" => {
-            let detail = require_result_string(result, "detail")?;
-            if !matches!(
-                detail,
-                "buttons_read_only_ready"
-                    | "buttons_interactive_complete"
-                    | "buttons_interactive_timeout"
-            ) {
-                return Err(format!(
-                    "result.detail must identify a button sample or interactive session, got {detail:?}"
-                ));
-            }
-            let buttons = result
-                .get("buttons")
-                .and_then(Value::as_object)
-                .ok_or_else(|| "result.buttons must be an object".to_string())?;
-            for name in ["center", "right", "down", "left", "up"] {
-                if buttons.get(name).and_then(Value::as_bool).is_none() {
-                    return Err(format!("result.buttons.{name} must be a boolean"));
-                }
-            }
-            if detail != "buttons_read_only_ready" {
-                let interaction = result
-                    .get("interaction")
-                    .and_then(Value::as_object)
-                    .ok_or_else(|| "result.interaction must be an object".to_string())?;
-                if interaction.get("timeoutSeconds").and_then(Value::as_u64)
-                    != Some(BUTTON_INTERACTIVE_TIMEOUT.as_secs())
-                {
-                    return Err("result.interaction.timeoutSeconds must be 30".to_string());
-                }
-                if interaction
-                    .get("events")
-                    .and_then(Value::as_array)
-                    .is_none()
-                {
-                    return Err("result.interaction.events must be an array".to_string());
-                }
-            }
-        }
+        "test_buttons" => validate_button_result(result)?,
         "test_adc" => {
             require_result_string_value(result, "detail", "adc_read_only_ready")?;
             let adc = result
@@ -1303,6 +1297,47 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
             require_result_string_value(result, "detail", "safe_exit")?;
         }
         _ => return Err(format!("unsupported RAM capability: {op}")),
+    }
+    Ok(())
+}
+
+fn validate_button_result(result: &serde_json::Map<String, Value>) -> Result<(), String> {
+    let detail = require_result_string(result, "detail")?;
+    if !matches!(
+        detail,
+        "buttons_read_only_ready" | "buttons_interactive_complete" | "buttons_interactive_timeout"
+    ) {
+        return Err(format!(
+            "result.detail must identify a button sample or interactive session, got {detail:?}"
+        ));
+    }
+    let buttons = result
+        .get("buttons")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "result.buttons must be an object".to_string())?;
+    for name in ["center", "right", "down", "left", "up"] {
+        if buttons.get(name).and_then(Value::as_bool).is_none() {
+            return Err(format!("result.buttons.{name} must be a boolean"));
+        }
+    }
+    if detail == "buttons_read_only_ready" {
+        return Ok(());
+    }
+    let interaction = result
+        .get("interaction")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "result.interaction must be an object".to_string())?;
+    if interaction.get("timeoutSeconds").and_then(Value::as_u64)
+        != Some(BUTTON_INTERACTIVE_TIMEOUT.as_secs())
+    {
+        return Err("result.interaction.timeoutSeconds must be 30".to_string());
+    }
+    if interaction
+        .get("events")
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        return Err("result.interaction.events must be an array".to_string());
     }
     Ok(())
 }
