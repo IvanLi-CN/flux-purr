@@ -27,3 +27,10 @@ frame type as malformed.
 default. Use `--color red|green|blue|white|black|yellow|cyan|magenta` for a
 full-screen solid-color check; the option changes the typed request payload and
 does not select a different RAM image.
+
+Successful RAM responses include `ok=true`, a command-specific `result.detail`,
+and safety fields confirming `heater=off`, `pd=untouched`, and
+`eeprom=untouched`. Button, ADC, and I2C tests also return the sampled input or
+readback value, and the CLI displays those fields. `preview status-light`
+cycles red, yellow, green, cyan, blue, magenta, and white before returning the
+RGB LED to off.

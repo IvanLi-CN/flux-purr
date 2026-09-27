@@ -140,6 +140,35 @@ fn renders_active_lan_pairing_code() {
 }
 
 #[test]
+fn renders_ram_response_details_and_button_states() {
+    let rendered = render_human(&json!({
+        "ok": true,
+        "firmwareKind": "ram_bringup",
+        "capability": "test_buttons",
+        "result": {
+            "detail": "buttons_read_only_ready",
+            "heater": "off",
+            "pd": "untouched",
+            "eeprom": "untouched",
+            "buttons": {
+                "center": true,
+                "right": false,
+                "down": false,
+                "left": true,
+                "up": false,
+            },
+        },
+    }))
+    .unwrap();
+    assert!(rendered.contains("RAM PASS capability=test_buttons"));
+    assert!(rendered.contains("detail=buttons_read_only_ready"));
+    assert!(rendered.contains("heater=off pd=untouched eeprom=untouched"));
+    assert!(
+        rendered.contains("center=pressed,right=released,down=released,left=pressed,up=released")
+    );
+}
+
+#[test]
 fn renders_completed_developer_flash_with_espflash_stages_and_output() {
     let rendered = render_human(&json!({
         "ok": true,

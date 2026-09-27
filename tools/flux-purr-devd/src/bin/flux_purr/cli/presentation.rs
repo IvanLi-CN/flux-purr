@@ -3,6 +3,11 @@ use super::*;
 pub(crate) fn render_human(
     payload: &Value,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if payload.get("firmwareKind").and_then(Value::as_str) == Some("ram_bringup")
+        && payload.get("capability").is_some()
+    {
+        return render_ram_response(payload);
+    }
     if matches!(
         payload.get("operation").and_then(Value::as_str),
         Some("flash" | "recover")
@@ -63,6 +68,68 @@ pub(crate) fn render_human(
     Ok(serde_json::to_string_pretty(&redact_cli_sensitive(
         payload,
     ))?)
+}
+
+fn render_ram_response(
+    payload: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let status = if payload.get("ok").and_then(Value::as_bool) == Some(true) {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    let capability = payload
+        .get("capability")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let result = payload.get("result").unwrap_or(&Value::Null);
+    let detail = result.get("detail").and_then(Value::as_str).unwrap_or("-");
+    let mut output = format!(
+        "RAM {status} capability={capability} detail={detail} heater={} pd={} eeprom={}",
+        result.get("heater").and_then(Value::as_str).unwrap_or("-"),
+        result.get("pd").and_then(Value::as_str).unwrap_or("-"),
+        result.get("eeprom").and_then(Value::as_str).unwrap_or("-"),
+    );
+    if let Some(effect) = result.get("effect").and_then(Value::as_str) {
+        output.push_str(&format!(" effect={effect}"));
+    }
+    if let Some(buttons) = result.get("buttons").and_then(Value::as_object) {
+        output.push_str(" buttons=");
+        for (index, name) in ["center", "right", "down", "left", "up"]
+            .into_iter()
+            .enumerate()
+        {
+            if index != 0 {
+                output.push(',');
+            }
+            let state = if buttons.get(name).and_then(Value::as_bool).unwrap_or(false) {
+                "pressed"
+            } else {
+                "released"
+            };
+            output.push_str(&format!("{name}={state}"));
+        }
+    }
+    if let Some(adc) = result.get("adc").and_then(Value::as_object) {
+        output.push_str(&format!(
+            " adc=vin:{} rtd:{}",
+            adc.get("vin").and_then(Value::as_u64).unwrap_or_default(),
+            adc.get("rtd").and_then(Value::as_u64).unwrap_or_default(),
+        ));
+    }
+    if let Some(i2c) = result.get("i2c").and_then(Value::as_object) {
+        output.push_str(&format!(
+            " i2c=0x{:02x}:0x{:02x}=0x{:02x}",
+            i2c.get("address")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            i2c.get("register")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            i2c.get("value").and_then(Value::as_u64).unwrap_or_default(),
+        ));
+    }
+    Ok(output)
 }
 
 pub(crate) fn render_pairing_code(

@@ -44,6 +44,28 @@ pub enum DisplayPattern {
     Solid([u8; 2]),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseData {
+    None,
+    Effect(&'static str),
+    Buttons {
+        center: bool,
+        right: bool,
+        down: bool,
+        left: bool,
+        up: bool,
+    },
+    Adc {
+        vin: u16,
+        rtd: u16,
+    },
+    I2c {
+        address: u8,
+        register: u8,
+        value: u8,
+    },
+}
+
 impl DisplayPattern {
     pub fn parse(color: Option<&str>) -> Option<Self> {
         match color {
@@ -200,6 +222,7 @@ pub fn write_response(
     capability: &str,
     ok: bool,
     detail: &str,
+    data: ResponseData,
 ) -> core::fmt::Result {
     out.push_str("{\"type\":\"response\",\"requestId\":\"")
         .map_err(|_| core::fmt::Error)?;
@@ -216,8 +239,87 @@ pub fn write_response(
     out.push_str("\",\"result\":{\"detail\":\"")
         .map_err(|_| core::fmt::Error)?;
     out.push_str(detail).map_err(|_| core::fmt::Error)?;
-    out.push_str("\",\"heater\":\"off\",\"pd\":\"untouched\",\"eeprom\":\"untouched\"}}\n")
+    out.push_str("\",\"heater\":\"off\",\"pd\":\"untouched\",\"eeprom\":\"untouched\"")
+        .map_err(|_| core::fmt::Error)?;
+    match data {
+        ResponseData::None => {}
+        ResponseData::Effect(effect) => {
+            out.push_str(",\"effect\":\"")
+                .map_err(|_| core::fmt::Error)?;
+            out.push_str(effect).map_err(|_| core::fmt::Error)?;
+            out.push('"').map_err(|_| core::fmt::Error)?;
+        }
+        ResponseData::Buttons {
+            center,
+            right,
+            down,
+            left,
+            up,
+        } => {
+            out.push_str(",\"buttons\":{\"center\":")
+                .map_err(|_| core::fmt::Error)?;
+            push_bool(out, center)?;
+            out.push_str(",\"right\":").map_err(|_| core::fmt::Error)?;
+            push_bool(out, right)?;
+            out.push_str(",\"down\":").map_err(|_| core::fmt::Error)?;
+            push_bool(out, down)?;
+            out.push_str(",\"left\":").map_err(|_| core::fmt::Error)?;
+            push_bool(out, left)?;
+            out.push_str(",\"up\":").map_err(|_| core::fmt::Error)?;
+            push_bool(out, up)?;
+            out.push_str("}").map_err(|_| core::fmt::Error)?;
+        }
+        ResponseData::Adc { vin, rtd } => {
+            out.push_str(",\"adc\":{\"vin\":")
+                .map_err(|_| core::fmt::Error)?;
+            push_u16(out, vin)?;
+            out.push_str(",\"rtd\":").map_err(|_| core::fmt::Error)?;
+            push_u16(out, rtd)?;
+            out.push_str("}").map_err(|_| core::fmt::Error)?;
+        }
+        ResponseData::I2c {
+            address,
+            register,
+            value,
+        } => {
+            out.push_str(",\"i2c\":{\"address\":")
+                .map_err(|_| core::fmt::Error)?;
+            push_u16(out, address as u16)?;
+            out.push_str(",\"register\":")
+                .map_err(|_| core::fmt::Error)?;
+            push_u16(out, register as u16)?;
+            out.push_str(",\"value\":").map_err(|_| core::fmt::Error)?;
+            push_u16(out, value as u16)?;
+            out.push_str("}").map_err(|_| core::fmt::Error)?;
+        }
+    }
+    out.push_str("}}\n").map_err(|_| core::fmt::Error)
+}
+
+fn push_bool(out: &mut String<512>, value: bool) -> core::fmt::Result {
+    out.push_str(if value { "true" } else { "false" })
         .map_err(|_| core::fmt::Error)
+}
+
+fn push_u16(out: &mut String<512>, value: u16) -> core::fmt::Result {
+    if value == 0 {
+        out.push('0').map_err(|_| core::fmt::Error)?;
+        return Ok(());
+    }
+    let mut digits = [0u8; 5];
+    let mut length = 0;
+    let mut remaining = value;
+    while remaining != 0 {
+        digits[length] = (remaining % 10) as u8;
+        length += 1;
+        remaining /= 10;
+    }
+    while length != 0 {
+        length -= 1;
+        out.push((b'0' + digits[length]) as char)
+            .map_err(|_| core::fmt::Error)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -256,7 +358,8 @@ mod tests {
             "r1",
             "preview_status_light",
             true,
-            "status_light_preview_ready",
+            "status_light_rainbow_ready",
+            ResponseData::Effect("rainbow_7_color"),
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(response.as_bytes()).unwrap();
@@ -264,6 +367,31 @@ mod tests {
         assert_eq!(value["requestId"], "r1");
         assert_eq!(value["capability"], "preview_status_light");
         assert_eq!(value["result"]["heater"], "off");
+        assert_eq!(value["result"]["effect"], "rainbow_7_color");
+    }
+
+    #[test]
+    fn response_includes_button_states() {
+        let mut response = String::<512>::new();
+        write_response(
+            &mut response,
+            "r1",
+            "test_buttons",
+            true,
+            "buttons_read_only_ready",
+            ResponseData::Buttons {
+                center: true,
+                right: false,
+                down: false,
+                left: true,
+                up: false,
+            },
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(response.as_bytes()).unwrap();
+        assert_eq!(value["result"]["buttons"]["center"], true);
+        assert_eq!(value["result"]["buttons"]["left"], true);
+        assert_eq!(value["result"]["buttons"]["up"], false);
     }
 
     #[test]

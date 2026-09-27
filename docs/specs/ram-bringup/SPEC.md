@@ -40,6 +40,12 @@ RGB, buzzer, and fan paths.
   read-only identification addresses. `test_fan` drives the shared fan
   contract through GPIO35 (`FAN_EN`) and a bounded 25 kHz MCPWM signal on
   GPIO36 (`FAN_PWM`), then returns both outputs to their safe-off levels.
+- A successful response has `ok=true`, a command-specific `result.detail`, and
+  explicit `heater=off`, `pd=untouched`, and `eeprom=untouched` fields. Button
+  responses include the sampled pressed state for all five keys; ADC responses
+  include the VIN and RTD samples; I2C responses include the allowlisted
+  address, register, and returned byte. The CLI human renderer shows these
+  fields instead of reducing every successful response to `OK`.
 - `preview display` uses the pinned GC9D01 `panel_160x50` initialization,
   including the display-on command and the physical column `15..64`, row
   `0..159` window. It turns on the active-low backlight and displays the
@@ -53,6 +59,9 @@ RGB, buzzer, and fan paths.
   `preview frontpanel` remains a compatibility alias for the solid-green
   physical-path check; it is not the product front-panel UI preview. A
   successful display transfer sets the status light cyan.
+  `preview status-light` cycles the common-anode RGB LED through seven digital
+  colors (red, yellow, green, cyan, blue, magenta, white) and then turns it
+  off. It does not touch the display.
   The SPI bus must be flushed before each DC or CS transition.
   A successful command response confirms transfer completion; physical
   display acceptance requires observing the lit panel.

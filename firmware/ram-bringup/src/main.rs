@@ -17,7 +17,7 @@ fn rom_log_line(line: &[u8]) {
 
 #[cfg(target_arch = "xtensa")]
 mod device {
-    use super::protocol::{self, DisplayPattern};
+    use super::protocol::{self, DisplayPattern, ResponseData};
     use embedded_hal::pwm::SetDutyCycle;
     use embedded_hal::spi::SpiBus;
     use esp_hal::{
@@ -44,6 +44,7 @@ mod device {
     const MCPWM_PERIPHERAL_CLOCK_HZ: u32 = 40_000_000;
     const FAN_PWM_PERIOD_TICKS: u16 = 99;
     const FAN_PWM_FREQUENCY_HZ: u32 = 25_000;
+    const STATUS_LIGHT_RAINBOW_STEP_MS: u32 = 200;
     // Keep the frame out of rodata so the RAM ELF's executable segment stays below the next alignment boundary.
     #[unsafe(link_section = ".data")]
     static CALIBRATION_FRAME: [u8; DISPLAY_FRAME_BYTES] =
@@ -299,6 +300,23 @@ mod device {
                 .set_level(if blue { Level::Low } else { Level::High });
         }
 
+        fn status_light_rainbow(&mut self) {
+            // The common-anode RGB LED exposes seven distinct digital colors.
+            for (red, green, blue) in [
+                (true, false, false),
+                (true, true, false),
+                (false, true, false),
+                (false, true, true),
+                (false, false, true),
+                (true, false, true),
+                (true, true, true),
+            ] {
+                self.rgb(red, green, blue);
+                delay_ms(STATUS_LIGHT_RAINBOW_STEP_MS);
+            }
+            self.rgb(false, false, false);
+        }
+
         #[inline(never)]
         fn display_preview(&mut self, pattern: DisplayPattern) -> bool {
             self.display_reset.set_low();
@@ -495,71 +513,92 @@ mod device {
         let Some((request, _)) = protocol::parse_request(line) else {
             return;
         };
-        let Some(_command) = request.command() else {
+        let Some(command) = request.command() else {
             return;
         };
         let op = request.op.as_bytes();
-        let display_pattern = match _command {
+        let display_pattern = match command {
             protocol::Command::PreviewDisplay => request
                 .display_pattern()
                 .expect("validated display preview pattern"),
             protocol::Command::PreviewFrontpanel => DisplayPattern::Solid([0x07, 0xe0]),
             _ => DisplayPattern::Calibration,
         };
-        let (ok, detail) = if protocol::equal_literal(op, b"preview_display")
+        let (ok, detail, data) = if protocol::equal_literal(op, b"preview_display")
             || protocol::equal_literal(op, b"preview_frontpanel")
         {
             outputs.backlight.set_low();
             let ok = outputs.display_preview(display_pattern);
             if ok {
                 outputs.rgb(false, true, true);
-                (true, "display_preview_ready")
+                (
+                    true,
+                    "display_preview_ready",
+                    ResponseData::Effect("display_preview"),
+                )
             } else {
                 outputs.safe();
-                (false, "display_preview_failed")
+                (false, "display_preview_failed", ResponseData::None)
             }
         } else if protocol::equal_literal(op, b"preview_status_light") {
-            outputs.rgb(false, true, false);
-            (true, "status_light_preview_ready")
+            outputs.status_light_rainbow();
+            (
+                true,
+                "status_light_rainbow_ready",
+                ResponseData::Effect("rainbow_7_color"),
+            )
         } else if protocol::equal_literal(op, b"test_buttons") {
-            let _states = [
-                inputs.center.is_low(),
-                inputs.right.is_low(),
-                inputs.down.is_low(),
-                inputs.left.is_low(),
-                inputs.up.is_low(),
-            ];
-            (true, "buttons_read_only_ready")
+            let center = inputs.center.is_low();
+            let right = inputs.right.is_low();
+            let down = inputs.down.is_low();
+            let left = inputs.left.is_low();
+            let up = inputs.up.is_low();
+            (
+                true,
+                "buttons_read_only_ready",
+                ResponseData::Buttons {
+                    center,
+                    right,
+                    down,
+                    left,
+                    up,
+                },
+            )
         } else if protocol::equal_literal(op, b"test_adc") {
-            let mut vin_ok = false;
+            let mut vin_value = None;
             for _ in 0..1_000 {
                 match measurements.adc.read_oneshot(&mut measurements.vin) {
-                    Ok(_) => {
-                        vin_ok = true;
+                    Ok(value) => {
+                        vin_value = Some(value);
                         break;
                     }
                     Err(nb::Error::WouldBlock) => delay_ms(1),
                     Err(nb::Error::Other(_)) => break,
                 }
             }
-            let mut rtd_ok = false;
+            let mut rtd_value = None;
             for _ in 0..1_000 {
                 match measurements.adc.read_oneshot(&mut measurements.rtd) {
-                    Ok(_) => {
-                        rtd_ok = true;
+                    Ok(value) => {
+                        rtd_value = Some(value);
                         break;
                     }
                     Err(nb::Error::WouldBlock) => delay_ms(1),
                     Err(nb::Error::Other(_)) => break,
                 }
             }
+            let data = match (vin_value, rtd_value) {
+                (Some(vin), Some(rtd)) => ResponseData::Adc { vin, rtd },
+                _ => ResponseData::None,
+            };
             (
-                vin_ok && rtd_ok,
-                if vin_ok && rtd_ok {
+                data != ResponseData::None,
+                if data != ResponseData::None {
                     "adc_read_only_ready"
                 } else {
                     "adc_read_failed"
                 },
+                data,
             )
         } else if protocol::equal_literal(op, b"test_i2c") {
             let address = request.address.unwrap_or(0x22);
@@ -578,6 +617,15 @@ mod device {
                 } else {
                     "i2c_identification_read_failed"
                 },
+                if ok {
+                    ResponseData::I2c {
+                        address,
+                        register,
+                        value: value[0],
+                    }
+                } else {
+                    ResponseData::None
+                },
             )
         } else if protocol::equal_literal(op, b"test_rgb") {
             outputs.rgb(true, false, false);
@@ -587,22 +635,26 @@ mod device {
             outputs.rgb(false, false, true);
             delay_ms(100);
             outputs.rgb(false, false, false);
-            (true, "rgb_ready")
+            (true, "rgb_ready", ResponseData::Effect("rgb_3_color"))
         } else if protocol::equal_literal(op, b"test_buzzer") {
             outputs.buzzer.set_high();
             delay_ms(20);
             outputs.buzzer.set_low();
-            (true, "buzzer_ready")
+            (true, "buzzer_ready", ResponseData::Effect("20ms_pulse"))
         } else if protocol::equal_literal(op, b"test_fan") {
             let _ = outputs.fan_pwm.set_duty_cycle_percent(50);
             outputs.fan.set_high();
             delay_ms(500);
             let _ = outputs.fan_pwm.set_duty_cycle_percent(0);
             outputs.fan.set_low();
-            (true, "fan_ready")
+            (
+                true,
+                "fan_ready",
+                ResponseData::Effect("50_percent_pwm_500ms"),
+            )
         } else {
             outputs.safe();
-            (true, "safe_exit")
+            (true, "safe_exit", ResponseData::None)
         };
         outputs.heater.set_low();
         if !ok {
@@ -615,6 +667,7 @@ mod device {
             request.op.as_str(),
             ok,
             detail,
+            data,
         )
         .is_ok();
         if response_write_ok && !response.is_empty() {

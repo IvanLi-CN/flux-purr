@@ -1,10 +1,16 @@
 # RAM Bring-up Implementation
 
 - `firmware/ram-bringup/src/protocol.rs` defines the narrow typed JSONL
-  request, identity, capability, display-color, and response contract. JSONL
-  requests must consume the entire bounded line before command validation.
+  request, identity, capability, display-color, diagnostic result, and response
+  contract. JSONL requests must consume the entire bounded line before command
+  validation. Responses carry command-specific evidence for button, ADC, and
+  I2C reads plus bounded effect labels for output tests.
 - `firmware/ram-bringup/src/main.rs` initializes the ESP32-S3 runtime, emits
   identity before command handling, and owns the safe output boundary.
+- The status-light preview uses the common-anode RGB outputs to show the seven
+  available digital color combinations in sequence, then returns the LED to
+  the safe-off state. The host CLI renders the returned detail, safety fields,
+  and diagnostic samples instead of printing a generic success token.
 - The bounded `test_fan` action drives GPIO35 as the fan enable and GPIO36
   through MCPWM operator 0 at 25 kHz before returning both outputs to safe
   off; the product fan-voltage feedback contract is exercised without changing
