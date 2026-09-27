@@ -17,7 +17,7 @@ fn rom_log_line(line: &[u8]) {
 
 #[cfg(target_arch = "xtensa")]
 mod device {
-    use super::protocol;
+    use super::protocol::{self, DisplayPattern};
     use embedded_hal::spi::SpiBus;
     use esp_hal::{
         Blocking,
@@ -246,7 +246,7 @@ mod device {
         }
 
         #[inline(never)]
-        fn display_preview(&mut self, calibration: bool) -> bool {
+        fn display_preview(&mut self, pattern: DisplayPattern) -> bool {
             self.display_reset.set_low();
             delay_ms(10);
             self.display_reset.set_high();
@@ -319,15 +319,17 @@ mod device {
             self.display_dc.set_high();
             self.display_cs.set_low();
             let mut pixels = [0u8; 128];
-            for chunk in pixels.chunks_exact_mut(2) {
-                chunk.copy_from_slice(&[0x07, 0xe0]);
-            }
-            for index in 0..(DISPLAY_FRAME_BYTES / pixels.len()) {
-                let chunk = if calibration {
-                    &CALIBRATION_FRAME[index * pixels.len()..(index + 1) * pixels.len()]
-                } else {
+            let frame: &[u8] = match pattern {
+                DisplayPattern::Calibration => &CALIBRATION_FRAME,
+                DisplayPattern::Solid(rgb565) => {
+                    for chunk in pixels.chunks_exact_mut(2) {
+                        chunk.copy_from_slice(&rgb565);
+                    }
                     &pixels
-                };
+                }
+            };
+            for index in 0..(DISPLAY_FRAME_BYTES / pixels.len()) {
+                let chunk = &frame[index * pixels.len()..(index + 1) * pixels.len()];
                 if SpiBus::write(&mut self.display, chunk).is_err() {
                     self.display_cs.set_high();
                     return false;
@@ -429,11 +431,18 @@ mod device {
             return;
         };
         let op = request.op.as_bytes();
+        let display_pattern = match _command {
+            protocol::Command::PreviewDisplay => request
+                .display_pattern()
+                .expect("validated display preview pattern"),
+            protocol::Command::PreviewFrontpanel => DisplayPattern::Solid([0x07, 0xe0]),
+            _ => DisplayPattern::Calibration,
+        };
         let (ok, detail) = if protocol::equal_literal(op, b"preview_display")
             || protocol::equal_literal(op, b"preview_frontpanel")
         {
             outputs.backlight.set_low();
-            let ok = outputs.display_preview(protocol::equal_literal(op, b"preview_display"));
+            let ok = outputs.display_preview(display_pattern);
             if ok {
                 outputs.rgb(false, true, true);
                 (true, "display_preview_ready")

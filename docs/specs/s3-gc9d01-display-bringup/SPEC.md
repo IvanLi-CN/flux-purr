@@ -72,7 +72,7 @@
 - REQ-DISPLAY-012: splash 仅覆盖 App 的启动早期；后续首次 runtime Dashboard 刷新自然替换它。不得为 splash 增加阻塞安全初始化的固定等待。Key Test 启动继续显示静态校准屏。
 - REQ-DISPLAY-013: bring-up 阶段必须支持：`静态校准屏 -> 前面板显示基线`。
 - REQ-DISPLAY-014: 当前 display baseline 负责证明驱动、方向、偏移与产品 renderer 的物理输出；RAM bring-up 只提供有界物理路径，不进入产品固件 dispatcher。后续运行态是否轮播、是否 safe-off，由 `frontpanel-input-interaction` 冻结。
-- REQ-DISPLAY-015: 物理显示验证必须使用 release RAM ELF、RAM ELF checker、精确授权串口和 typed JSONL capability；命令执行前必须匹配 `firmwareKind`、`buildId` 与 capability，并保持 heater off、PD/EEPROM untouched。
+- REQ-DISPLAY-015: 物理显示验证必须使用 release RAM ELF、RAM ELF checker、精确授权串口和 typed JSONL capability；命令执行前必须匹配 `firmwareKind`、`buildId` 与 capability，并保持 heater off、PD/EEPROM untouched。`preview_display` 默认显示静态校准屏，并可通过受限的命名颜色参数切换整屏 RGB565 颜色检查；颜色切换不得要求新的 RAM image。
 - REQ-DISPLAY-016: 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
 - REQ-DISPLAY-020: 背光 `GPIO13` 必须在启动早期配置为 active-low，并在任何可能阻塞的 PD/I2C 工作前驱动为开启态；显示控制器初始化和启动帧刷屏必须在该背光控制已经确定后进行。显示初始化或首帧刷屏失败时仍必须进入既有可诊断 recovery 路径，不得依赖背光切换来掩盖显示故障。
 - REQ-DISPLAY-021: `ESP32-S3FH4R2` 显示启动必须启用 `esp-hal` `psram` feature，并通过 `ESP_HAL_CONFIG_PSRAM_MODE=quad` 固定 Quad 模式；启动必须使用 HAL 映射结果并通过实际 2MiB sentinel/alias probe 严格校验可寻址容量，不能把固定大小配置当作物理芯片存在性证明。GC9D01 驱动帧缓冲必须从独立的 PSRAM `EspHeap` 分配，大小为 `160×50×2 = 16 KiB`；逻辑 `DisplayCanvas` 与通用 runtime heap 必须继续位于内部 DRAM。

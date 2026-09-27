@@ -53,15 +53,29 @@ pub(crate) fn execute_ram_run(
     command: RamRunCommand,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     match command {
-        RamRunCommand::Preview(args) => run_ram_operation(
+        RamRunCommand::Preview(args) => {
+            let color = match (args.scenario, args.color) {
+                (RamPreviewScenario::Display, color) => color.map(RamPreviewColor::wire),
+                (_, None) => None,
+                (_, Some(_)) => {
+                    return Err("--color is only valid with 'ram-run preview display'".into());
+                }
+            };
+            run_ram_operation(
+                &args.port,
+                args.elf.as_deref(),
+                args.reload,
+                args.scenario.op(),
+                color,
+            )
+        }
+        RamRunCommand::Test(args) => run_ram_operation(
             &args.port,
             args.elf.as_deref(),
             args.reload,
-            args.scenario.op(),
+            args.test.op(),
+            None,
         ),
-        RamRunCommand::Test(args) => {
-            run_ram_operation(&args.port, args.elf.as_deref(), args.reload, args.test.op())
-        }
         RamRunCommand::Exit(args) => exit_ram(&args.port),
     }
 }
@@ -71,6 +85,7 @@ fn run_ram_operation(
     elf: Option<&Path>,
     reload: bool,
     op: &str,
+    color: Option<&str>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_exact_ram_port(port)?;
     let observed = if reload {
@@ -96,7 +111,7 @@ fn run_ram_operation(
         load_ram_elf(port, &elf)?
     };
     verify_ram_identity(&identity, op)?;
-    send_ram_request(&mut serial, op)
+    send_ram_request(&mut serial, op, color)
 }
 
 fn exit_ram(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -111,7 +126,7 @@ fn exit_ram(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync
         }
     };
     verify_ram_identity(&identity, "exit")?;
-    send_ram_request(&mut serial, "exit")
+    send_ram_request(&mut serial, "exit", None)
 }
 
 fn default_ram_elf() -> PathBuf {
@@ -587,12 +602,11 @@ fn verify_ram_identity(
 fn send_ram_request(
     serial: &mut dyn SerialPort,
     op: &str,
+    color: Option<&str>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let request_id = format!("ram-{}", current_unix_millis());
     serial.set_timeout(Duration::from_millis(250))?;
-    let request = format!(
-        "{{\"type\":\"ram_bringup\",\"requestId\":\"{request_id}\",\"op\":\"{op}\",\"capability\":\"{op}\"}}\n"
-    );
+    let request = build_ram_request(&request_id, op, color);
     serial.write_all(request.as_bytes())?;
     serial.flush()?;
     let deadline = Instant::now() + COMMAND_TIMEOUT;
@@ -611,6 +625,17 @@ fn send_ram_request(
         }
     }
     Err(format!("RAM bring-up response timed out for {op}").into())
+}
+
+fn build_ram_request(request_id: &str, op: &str, color: Option<&str>) -> String {
+    match color {
+        Some(color) => format!(
+            "{{\"type\":\"ram_bringup\",\"requestId\":\"{request_id}\",\"op\":\"{op}\",\"capability\":\"{op}\",\"color\":\"{color}\"}}\n"
+        ),
+        None => format!(
+            "{{\"type\":\"ram_bringup\",\"requestId\":\"{request_id}\",\"op\":\"{op}\",\"capability\":\"{op}\"}}\n"
+        ),
+    }
 }
 
 fn find_ram_response(
@@ -746,6 +771,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ram.firmware, ObservedFirmware::RamBringup);
+    }
+
+    #[test]
+    fn ram_display_request_can_select_a_named_color_without_changing_capability() {
+        let request = build_ram_request("ram-1", "preview_display", Some("red"));
+        let value: Value = serde_json::from_str(&request).expect("request should be JSON");
+        assert_eq!(value["op"], "preview_display");
+        assert_eq!(value["capability"], "preview_display");
+        assert_eq!(value["color"], "red");
+    }
+
+    #[test]
+    fn ram_display_request_omits_color_by_default() {
+        let request = build_ram_request("ram-1", "preview_display", None);
+        let value: Value = serde_json::from_str(&request).expect("request should be JSON");
+        assert!(value.get("color").is_none());
     }
 
     fn test_elf(address: u32) -> Vec<u8> {

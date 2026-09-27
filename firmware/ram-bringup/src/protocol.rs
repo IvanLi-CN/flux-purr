@@ -9,6 +9,7 @@ pub const FIRMWARE_KIND: &str = "ram_bringup";
 pub const REQUEST_ID_MAX: usize = 48;
 pub const OP_MAX: usize = 32;
 pub const CAPABILITY_MAX: usize = 32;
+pub const DISPLAY_COLOR_MAX: usize = 16;
 pub const CAPABILITIES: [&str; 12] = [
     "identity",
     "status",
@@ -37,6 +38,29 @@ pub enum Command {
     TestBuzzer,
     TestFan,
     Exit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayPattern {
+    Calibration,
+    Solid([u8; 2]),
+}
+
+impl DisplayPattern {
+    pub fn parse(color: Option<&str>) -> Option<Self> {
+        match color {
+            None | Some("calibration") => Some(Self::Calibration),
+            Some("red") => Some(Self::Solid([0xf8, 0x00])),
+            Some("green") => Some(Self::Solid([0x07, 0xe0])),
+            Some("blue") => Some(Self::Solid([0x00, 0x1f])),
+            Some("white") => Some(Self::Solid([0xff, 0xff])),
+            Some("black") => Some(Self::Solid([0x00, 0x00])),
+            Some("yellow") => Some(Self::Solid([0xff, 0xe0])),
+            Some("cyan") => Some(Self::Solid([0x07, 0xff])),
+            Some("magenta") => Some(Self::Solid([0xf8, 0x1f])),
+            Some(_) => None,
+        }
+    }
 }
 
 impl Command {
@@ -92,6 +116,8 @@ pub struct Request {
     pub op: String<OP_MAX>,
     pub capability: String<CAPABILITY_MAX>,
     #[serde(default)]
+    pub color: Option<String<DISPLAY_COLOR_MAX>>,
+    #[serde(default)]
     pub address: Option<u8>,
     #[serde(default)]
     pub register: Option<u8>,
@@ -106,6 +132,11 @@ impl Request {
         if !equal_literal(self.capability.as_bytes(), self.op.as_bytes()) {
             return None;
         }
+        if matches!(command, Command::PreviewDisplay)
+            && DisplayPattern::parse(self.color.as_deref()).is_none()
+        {
+            return None;
+        }
         if equal_literal(self.op.as_bytes(), b"test_i2c") {
             let address = self.address.unwrap_or(0x22);
             let register = self.register.unwrap_or(0x09);
@@ -114,6 +145,13 @@ impl Request {
             }
         }
         Some(command)
+    }
+
+    pub fn display_pattern(&self) -> Option<DisplayPattern> {
+        if !matches!(Command::parse(&self.op), Some(Command::PreviewDisplay)) {
+            return None;
+        }
+        DisplayPattern::parse(self.color.as_deref())
     }
 }
 
@@ -232,6 +270,33 @@ mod tests {
     fn request_id_rejects_json_injection_characters() {
         let (request, _) = parse_request(
             br#"{"type":"ram_bringup","requestId":"r\"1","op":"test_fan","capability":"test_fan"}"#,
+        )
+        .expect("request parses");
+        assert_eq!(request.command(), None);
+    }
+
+    #[test]
+    fn display_preview_defaults_to_calibration_and_accepts_named_colors() {
+        let (request, _) = parse_request(
+            br#"{"type":"ram_bringup","requestId":"r1","op":"preview_display","capability":"preview_display"}"#,
+        )
+        .expect("request parses");
+        assert_eq!(request.display_pattern(), Some(DisplayPattern::Calibration));
+
+        let (request, _) = parse_request(
+            br#"{"type":"ram_bringup","requestId":"r2","op":"preview_display","capability":"preview_display","color":"red"}"#,
+        )
+        .expect("request parses");
+        assert_eq!(
+            request.display_pattern(),
+            Some(DisplayPattern::Solid([0xf8, 0x00]))
+        );
+    }
+
+    #[test]
+    fn display_preview_rejects_unknown_colors() {
+        let (request, _) = parse_request(
+            br#"{"type":"ram_bringup","requestId":"r1","op":"preview_display","capability":"preview_display","color":"orange"}"#,
         )
         .expect("request parses");
         assert_eq!(request.command(), None);

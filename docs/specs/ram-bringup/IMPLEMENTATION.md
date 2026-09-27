@@ -1,7 +1,7 @@
 # RAM Bring-up Implementation
 
 - `firmware/ram-bringup/src/protocol.rs` defines the narrow typed JSONL
-  request, identity, capability, and response contract.
+  request, identity, capability, display-color, and response contract.
 - `firmware/ram-bringup/src/main.rs` initializes the ESP32-S3 runtime, emits
   identity before command handling, and owns the safe output boundary.
 - `firmware/examples/ram_calibration_asset.rs` renders the product's static
@@ -15,7 +15,8 @@
 - `tools/flux-purr-devd/src/bin/flux_purr/cli/ram_run.rs` enforces the exact
   port, the in-process RAM ELF safety gate, matching identity/build/capability,
   and the pinned espflash RAM loader. It holds the verified serial connection
-  through the preview command and response.
+  through the preview command and response, and encodes optional display colors
+  on the existing `preview_display` capability.
 - The host RAM loader validates ELF identification, program-header arithmetic,
   loadable segment bounds, and internal-memory placement before invoking
   espflash.

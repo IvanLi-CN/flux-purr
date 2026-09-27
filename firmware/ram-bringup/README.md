@@ -22,3 +22,8 @@ loads that exact ELF into RAM only after the explicit serial port is verified,
 then requires a matching `firmwareKind=ram_bringup`, `buildId`, and capability
 set before issuing a typed JSONL command. The product firmware rejects the RAM
 frame type as malformed.
+
+`ram-run preview display` shows the product renderer's calibration scene by
+default. Use `--color red|green|blue|white|black|yellow|cyan|magenta` for a
+full-screen solid-color check; the option changes the typed request payload and
+does not select a different RAM image.

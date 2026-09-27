@@ -30,10 +30,15 @@ RGB, buzzer, and fan paths.
 - `preview display` uses the pinned GC9D01 `panel_160x50` initialization,
   including the display-on command and the physical column `15..64`, row
   `0..159` window. It turns on the active-low backlight and displays the
-  product renderer's static calibration scene with corner direction markers,
-  color and grayscale blocks, and the panel/resolution label. The checked-in
-  panel-order RGB565 frame must match the product renderer's output.
-  `preview frontpanel` keeps its solid green physical-path preview. A
+  product renderer's static calibration scene by default, with corner
+  direction markers, color and grayscale blocks, and the panel/resolution
+  label. The checked-in panel-order RGB565 frame must match the product
+  renderer's output. It accepts an optional bounded `color` parameter for a
+  full-screen RGB565 solid-color check: `red`, `green`, `blue`, `white`,
+  `black`, `yellow`, `cyan`, or `magenta`. The request stays on the same
+  `preview_display` capability and does not require a new RAM image.
+  `preview frontpanel` remains a compatibility alias for the solid-green
+  physical-path check; it is not the product front-panel UI preview. A
   successful display transfer sets the status light cyan.
   The SPI bus must be flushed before each DC or CS transition.
   A successful command response confirms transfer completion; physical
@@ -43,6 +48,7 @@ RGB, buzzer, and fan paths.
 
 ```text
 flux-purr ram-run preview display --port <authorized-port>
+flux-purr ram-run preview display --color red --port <authorized-port>
 flux-purr ram-run preview frontpanel --port <authorized-port>
 flux-purr ram-run preview status-light --port <authorized-port>
 flux-purr ram-run test buttons|adc|i2c|rgb|buzzer|fan --port <authorized-port>

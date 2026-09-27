@@ -86,6 +86,12 @@ pub(crate) enum RamRunCommand {
 pub(crate) struct RamPreviewArgs {
     #[arg(value_enum)]
     pub(crate) scenario: RamPreviewScenario,
+    #[arg(
+        long,
+        value_enum,
+        help = "Fill the display with a named RGB565 color; omit for the calibration scene"
+    )]
+    pub(crate) color: Option<RamPreviewColor>,
     #[arg(long)]
     pub(crate) port: String,
     #[arg(long)]
@@ -94,11 +100,38 @@ pub(crate) struct RamPreviewArgs {
     pub(crate) reload: bool,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum RamPreviewScenario {
     Display,
     Frontpanel,
     StatusLight,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum RamPreviewColor {
+    Red,
+    Green,
+    Blue,
+    White,
+    Black,
+    Yellow,
+    Cyan,
+    Magenta,
+}
+
+impl RamPreviewColor {
+    pub(crate) const fn wire(self) -> &'static str {
+        match self {
+            Self::Red => "red",
+            Self::Green => "green",
+            Self::Blue => "blue",
+            Self::White => "white",
+            Self::Black => "black",
+            Self::Yellow => "yellow",
+            Self::Cyan => "cyan",
+            Self::Magenta => "magenta",
+        }
+    }
 }
 
 impl RamPreviewScenario {
