@@ -6054,6 +6054,48 @@ fn direct_flash_reports_missing_snapshot_port_before_any_firmware_write() {
     assert!(!directory.path().join("espflash-not-invoked").exists());
 }
 
+#[test]
+fn direct_flash_probes_rom_only_after_application_snapshot_times_out() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SNAPSHOT_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
+    fn no_application_response(
+        _port: &str,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        SNAPSHOT_ATTEMPTED.store(true, Ordering::SeqCst);
+        Err(io::Error::new(io::ErrorKind::TimedOut, "no USB JSONL response").into())
+    }
+    fn rom_probe(_port: &str) -> bool {
+        assert!(SNAPSHOT_ATTEMPTED.load(Ordering::SeqCst));
+        true
+    }
+
+    SNAPSHOT_ATTEMPTED.store(false, Ordering::SeqCst);
+    let directory = tempfile::tempdir().unwrap();
+    let elf = directory.path().join("firmware.elf");
+    fs::write(&elf, b"\x7fELFtest fixture").unwrap();
+
+    let error = direct_flash_with_program_inner(
+        FlashArgs {
+            port: "/dev/cu.contract-test".to_string(),
+            elf: Some(elf),
+            skip_backup: false,
+            confirm: None,
+            keep_download_mode: false,
+        },
+        Path::new("espflash-not-invoked"),
+        false,
+        no_application_response,
+        rom_probe,
+        Some(directory.path()),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("ROM download mode"));
+    assert!(error.to_string().contains("firmware was not written"));
+}
+
 #[cfg(unix)]
 #[test]
 fn direct_flash_blocks_espflash_when_backup_directory_is_unavailable() {
