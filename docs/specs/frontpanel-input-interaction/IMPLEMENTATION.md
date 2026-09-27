@@ -9,7 +9,7 @@
 
 ## Validation
 
-- Host preview and frontpanel interaction tests cover gesture and route transitions.
+- Product firmware tests cover gesture and route transitions.
 - Storybook and visual evidence cover the canonical input and navigation states.
 
 ## Remaining gaps

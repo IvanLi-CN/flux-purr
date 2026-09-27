@@ -117,8 +117,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout
+      - name: Checkout pull request head
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@v1
@@ -139,8 +142,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout
+      - name: Checkout pull request head
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@v1

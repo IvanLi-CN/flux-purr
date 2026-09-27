@@ -24,6 +24,7 @@ REQUIRED_SOURCE_CHECKS = {
     "Validate PR labels",
     "Firmware checks",
     "DEVD checks",
+    "DEVD Windows checks",
     "Web checks",
     "Worktree bootstrap",
 }
