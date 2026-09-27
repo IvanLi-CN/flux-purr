@@ -448,6 +448,35 @@ fn serial_scan_without_fixed_target_lists_all_espressif_candidates() {
     );
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn serial_scan_accepts_a_filesystem_alias_for_a_fixed_target() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().unwrap();
+    let device = directory.path().join("ttyUSB0");
+    let alias = directory.path().join("by-id").join("usb-flux-purr");
+    fs::create_dir(alias.parent().unwrap()).unwrap();
+    File::create(&device).unwrap();
+    symlink(&device, &alias).unwrap();
+    let ports = vec![serialport::SerialPortInfo {
+        port_name: device.to_str().unwrap().to_string(),
+        port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+            vid: 0x303a,
+            pid: 0x1001,
+            serial_number: Some("alias-target".to_string()),
+            manufacturer: Some("Espressif".to_string()),
+            product: Some("USB JTAG/serial debug unit".to_string()),
+        }),
+    }];
+
+    let devices = scan_serial_devices_from_available(Some(alias.as_path()), &ports);
+
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].port_path.as_deref(), alias.to_str());
+    assert_eq!(devices[0].connection, ConnectionState::Disconnected);
+}
+
 #[test]
 fn native_serial_devices_advertise_devd_flash_capabilities() {
     let device = serial_device_record("/dev/cu.usbmodem-test", None);
@@ -524,11 +553,12 @@ fn serial_refresh_removes_stale_native_devices_and_leases() {
         },
     );
 
-    refresh_serial_devices(&mut state, Vec::new());
+    let stale_ports = refresh_serial_devices(&mut state, Vec::new());
 
     assert!(state.devices.contains_key("mock-fp-lab-01"));
     assert!(!state.devices.contains_key("serial-stale"));
     assert!(state.leases.is_empty());
+    assert_eq!(stale_ports, vec!["/dev/tty.Bluetooth-Incoming-Port"]);
 }
 
 #[test]

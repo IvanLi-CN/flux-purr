@@ -56,15 +56,19 @@ pub(crate) async fn health(State(state): State<AppState>) -> Result<Json<Value>,
 
 pub(crate) async fn list_devices(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
     let serial_devices = scan_serial_devices(state.config.serial_port.as_deref());
-    let mut state_lock = state.lock()?;
-    refresh_serial_devices(&mut state_lock, serial_devices);
-    let devices = state_lock
-        .devices
-        .values()
-        .cloned()
-        .map(trim_device_record_for_list)
-        .map(device_list_payload)
-        .collect::<Vec<_>>();
+    let (stale_ports, devices) = {
+        let mut state_lock = state.lock()?;
+        let stale_ports = refresh_serial_devices(&mut state_lock, serial_devices);
+        let devices = state_lock
+            .devices
+            .values()
+            .cloned()
+            .map(trim_device_record_for_list)
+            .map(device_list_payload)
+            .collect::<Vec<_>>();
+        (stale_ports, devices)
+    };
+    remove_cached_serial_sessions_for_paths(&state.serial_sessions, &stale_ports)?;
     Ok(Json(json!({ "devices": devices })))
 }
 
@@ -485,8 +489,11 @@ pub(crate) async fn create_lease(
     let lease = {
         let serial_devices = scan_serial_devices(state.config.serial_port.as_deref());
         let mut state_lock = state.lock()?;
-        refresh_serial_devices(&mut state_lock, serial_devices);
-        state_lock.create_lease(&device_id)?
+        let stale_ports = refresh_serial_devices(&mut state_lock, serial_devices);
+        let lease = state_lock.create_lease(&device_id);
+        drop(state_lock);
+        remove_cached_serial_sessions_for_paths(&state.serial_sessions, &stale_ports)?;
+        lease?
     };
     state.emit(event(
         &device_id,

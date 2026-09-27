@@ -142,7 +142,7 @@ pub(crate) async fn local_firmware_update(
     };
     progress.operation_completed(outcome);
     Ok(Json(json!({
-        "ok": true,
+        "ok": verified,
         "operation": "update",
         "port": port,
         "artifactId": bundle.bundle_sha256,
@@ -202,22 +202,29 @@ pub(crate) fn find_local_update_target(
     port: &str,
 ) -> Result<DeviceRecord, HttpError> {
     let serial_devices = scan_serial_devices(Some(Path::new(port)));
-    let mut state_lock = state.lock()?;
-    refresh_serial_devices(&mut state_lock, serial_devices);
-    let target = state_lock
-        .devices
-        .values()
-        .find(|device| {
-            device.transport == DeviceTransport::NativeSerial
-                && device.port_path.as_deref() == Some(port)
-        })
-        .cloned()
-        .ok_or_else(|| {
-            HttpError::bad_request(
-                "serial_port_not_found",
-                "The supplied serial port is not present in the current device set.",
-            )
-        })?;
+    let (target, stale_ports) = {
+        let mut state_lock = state.lock()?;
+        let stale_ports = refresh_serial_devices(&mut state_lock, serial_devices);
+        let target = state_lock
+            .devices
+            .values()
+            .find(|device| {
+                device.transport == DeviceTransport::NativeSerial
+                    && device
+                        .port_path
+                        .as_deref()
+                        .is_some_and(|candidate| serial_port_paths_match(port, candidate))
+            })
+            .cloned();
+        (target, stale_ports)
+    };
+    remove_cached_serial_sessions_for_paths(&state.serial_sessions, &stale_ports)?;
+    let target = target.ok_or_else(|| {
+        HttpError::bad_request(
+            "serial_port_not_found",
+            "The supplied serial port is not present in the current device set.",
+        )
+    })?;
     if target.connection == ConnectionState::Error {
         return Err(HttpError::bad_request(
             "serial_port_missing",
@@ -1146,7 +1153,7 @@ async fn probe_native_rom_security_with_locks(
         let port_info = serialport::available_ports()
             .map_err(|error| error.to_string())?
             .into_iter()
-            .find(|candidate| candidate.port_name == port_path)
+            .find(|candidate| serial_port_paths_match(&port_path, &candidate.port_name))
             .ok_or_else(|| "authorized serial port is no longer enumerated".to_string())?;
         let usb_info = match port_info.port_type {
             SerialPortType::UsbPort(info) => info,

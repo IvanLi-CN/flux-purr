@@ -350,6 +350,20 @@ pub(crate) fn remove_expired_serial_sessions(
     }
 }
 
+pub(crate) fn remove_cached_serial_sessions_for_paths(
+    serial_sessions: &Arc<Mutex<SerialSessionMap>>,
+    port_paths: &[String],
+) -> Result<(), HttpError> {
+    if port_paths.is_empty() {
+        return Ok(());
+    }
+    let mut sessions = lock_serial_sessions(serial_sessions)?;
+    for port_path in port_paths {
+        remove_cached_serial_session(&mut sessions, port_path);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct DevdState {
     pub(crate) devices: HashMap<String, DeviceRecord>,
