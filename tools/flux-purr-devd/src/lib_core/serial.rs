@@ -7,6 +7,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 const SERIAL_LOCK_O_NOFOLLOW: i32 = 0x20000;
 #[cfg(target_os = "macos")]
 const SERIAL_LOCK_O_NOFOLLOW: i32 = 0x100;
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+const SERIAL_LOCK_O_NOFOLLOW: i32 = 0;
 
 pub(crate) fn firmware_preflight_digest(
     payload: &FirmwareOperationRequest,
@@ -1518,11 +1520,18 @@ pub(crate) fn serial_lock_path(port_path: &str) -> PathBuf {
 #[cfg(any(unix, windows))]
 fn serial_lock_identity(port_path: &str) -> String {
     #[cfg(target_os = "macos")]
-    if let Some(suffix) = port_path.strip_prefix("/dev/tty.") {
-        return format!("/dev/cu.{suffix}");
-    }
+    let port_path = port_path.strip_prefix("/dev/tty.").map_or_else(
+        || port_path.to_string(),
+        |suffix| format!("/dev/cu.{suffix}"),
+    );
 
-    port_path.to_string()
+    #[cfg(not(target_os = "macos"))]
+    let port_path = port_path.to_string();
+
+    std::fs::canonicalize(&port_path)
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_owned))
+        .unwrap_or(port_path)
 }
 
 #[cfg(any(unix, windows))]

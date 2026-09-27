@@ -557,7 +557,9 @@ fn range_contained(start: u64, end: u64, window: (u64, u64)) -> bool {
 
 fn validate_exact_ram_port(port: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_serial_port(port)?;
+    #[cfg(not(target_os = "windows"))]
     let path = Path::new(port);
+    #[cfg(not(target_os = "windows"))]
     if !path.exists() {
         return Err(format!("authorized serial port is unavailable: {port}").into());
     }
