@@ -126,6 +126,13 @@ class RamElfCheckTests(unittest.TestCase):
         with self.assertRaises(ElfError):
             validate(self.write(bytes(artifact)))
 
+    def test_rejects_entry_in_zero_fill_tail(self):
+        artifact = bytearray(elf32((0x40378400, 32, 5)))
+        artifact[24:28] = (0x40378420).to_bytes(4, "little")
+        artifact[52 + 20 : 52 + 24] = (64).to_bytes(4, "little")
+        with self.assertRaises(ElfError):
+            validate(self.write(bytes(artifact)))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -110,8 +110,8 @@ fn run_ram_operation(
         drop(observed);
         let elf = elf.map(Path::to_path_buf).unwrap_or_else(default_ram_elf);
         validate_local_elf(&elf)?;
-        validate_ram_elf(&elf)?;
-        load_ram_elf(port, &elf)?
+        let image = read_validated_ram_elf(&elf)?;
+        load_ram_elf(port, image)?
     };
     verify_ram_identity(&identity, op)?;
     send_ram_request(&mut serial, op, color)
@@ -125,8 +125,8 @@ fn exit_ram(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync
         Err(_) => {
             let elf = default_ram_elf();
             validate_local_elf(&elf)?;
-            validate_ram_elf(&elf)?;
-            load_ram_elf(port, &elf)?
+            let image = read_validated_ram_elf(&elf)?;
+            load_ram_elf(port, image)?
         }
     };
     verify_ram_identity(&identity, "exit")?;
@@ -147,6 +147,7 @@ fn default_ram_elf() -> PathBuf {
 const ELF_PT_LOAD: u32 = 1;
 const ELF_PF_X: u64 = 0x1;
 const ELF_SHF_ALLOC: u64 = 0x2;
+const ELF_SHF_EXECINSTR: u64 = 0x4;
 const ELF_SHT_PROGBITS: u32 = 1;
 const ELF_SHT_INIT_ARRAY: u32 = 14;
 const ELF_MACHINE_XTENSA: u16 = 94;
@@ -181,11 +182,29 @@ type RamSegmentFields = (u64, u64, u64, u64, u64, u64);
 type RamSectionFields = (u32, u64, u64, u64, u64);
 type RamLoadSection = (u32, Vec<u8>);
 
-pub(crate) fn validate_ram_elf(
-    path: &Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+struct RamElfImage {
+    entry: u32,
+    sections: Vec<RamLoadSection>,
+}
+
+#[cfg(test)]
+fn validate_ram_elf(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let data = fs::read(path)?;
-    let header = parse_ram_elf_header(&data, path)?;
+    parse_validated_ram_elf(&data, path).map(|_| ())
+}
+
+fn read_validated_ram_elf(
+    path: &Path,
+) -> Result<RamElfImage, Box<dyn std::error::Error + Send + Sync>> {
+    let data = fs::read(path)?;
+    parse_validated_ram_elf(&data, path)
+}
+
+fn parse_validated_ram_elf(
+    data: &[u8],
+    path: &Path,
+) -> Result<RamElfImage, Box<dyn std::error::Error + Send + Sync>> {
+    let header = parse_ram_elf_header(data, path)?;
     let expected_phentsize = if header.class == 1 { 32 } else { 56 };
     if header.phentsize < expected_phentsize {
         return Err("RAM ELF program header entry is too small".into());
@@ -196,13 +215,13 @@ pub(crate) fn validate_ram_elf(
     let mut executable_entry = false;
     for index in 0..header.phnum {
         let offset = program_header_offset(header.phoff, header.phentsize, index)?;
-        let p_type = read_u32(&data, offset)?;
+        let p_type = read_u32(data, offset)?;
         if p_type != ELF_PT_LOAD {
             continue;
         }
         load_count += 1;
         let (segment_iram, segment_dram, contains_executable_entry) =
-            validate_ram_segment(&data, header.class, index, offset, header.entry)?;
+            validate_ram_segment(data, header.class, index, offset, header.entry)?;
         executable_entry |= contains_executable_entry;
         iram_bytes = iram_bytes
             .checked_add(segment_iram)
@@ -223,8 +242,8 @@ pub(crate) fn validate_ram_elf(
     if !executable_entry {
         return Err("RAM ELF entry point is not inside an executable RAM segment".into());
     }
-    ram_load_sections(&data, path)?;
-    Ok(())
+    let (entry, sections) = ram_load_sections(data, path)?;
+    Ok(RamElfImage { entry, sections })
 }
 
 fn parse_ram_elf_header(
@@ -449,6 +468,7 @@ fn ram_load_sections(
     }
     let entry = u32::try_from(header.entry).map_err(|_| "RAM ELF entry does not fit")?;
     let mut sections = Vec::new();
+    let mut entry_in_executable_section = false;
     for index in 0..header.shnum {
         let offset = section_header_offset(header.shoff, header.shentsize, index)?;
         let (section_type, flags, address, data_offset, size) =
@@ -462,6 +482,16 @@ fn ram_load_sections(
             continue;
         }
         validate_ram_section(address, size, index)?;
+        let section_end = address
+            .checked_add(size)
+            .ok_or_else(|| format!("RAM ELF section {index} address overflow"))?;
+        if flags & ELF_SHF_EXECINSTR != 0
+            && (address..section_end).contains(&header.entry)
+            && (address == RAM_VECTORS.0 && section_end == RAM_VECTORS.1
+                || range_contained(address, section_end, RAM_IRAM))
+        {
+            entry_in_executable_section = true;
+        }
         let start = usize::try_from(data_offset)
             .map_err(|_| format!("RAM ELF segment {index} offset is too large"))?;
         let end = usize::try_from(
@@ -479,6 +509,11 @@ fn ram_load_sections(
     }
     if sections.is_empty() {
         return Err("RAM ELF contains no loadable sections".into());
+    }
+    if !entry_in_executable_section {
+        return Err(
+            "RAM ELF entry point is not inside a file-backed executable RAM section".into(),
+        );
     }
     Ok((entry, sections))
 }
@@ -717,7 +752,7 @@ fn disable_usb_serial_jtag_watchdogs(
 
 fn load_ram_elf(
     port: &str,
-    elf: &Path,
+    image: RamElfImage,
 ) -> Result<(ObservedIdentity, TTYPort), Box<dyn std::error::Error + Send + Sync>> {
     validate_exact_ram_port(port)?;
     let port_info = serialport::available_ports()?
@@ -753,9 +788,8 @@ fn load_ram_elf(
         return Err(format!("RAM loader detected unexpected chip: {chip}").into());
     }
     disable_usb_serial_jtag_watchdogs(&mut connection, usb_pid)?;
-    let elf_data = fs::read(elf)?;
-    let (entry, segments) = ram_load_sections(&elf_data, elf)?;
-    for (address, mut data) in segments {
+    let RamElfImage { entry, sections } = image;
+    for (address, mut data) in sections {
         let padding = (4 - data.len() % 4) % 4;
         data.resize(data.len() + padding, 0);
         let blocks = data.len().div_ceil(RAM_BLOCK_SIZE);
@@ -872,7 +906,13 @@ mod tests {
         data[ph + 28..ph + 32].copy_from_slice(&4u32.to_le_bytes());
         let section = section_offset + 40;
         data[section + 4..section + 8].copy_from_slice(&ELF_SHT_PROGBITS.to_le_bytes());
-        data[section + 8..section + 12].copy_from_slice(&(ELF_SHF_ALLOC as u32).to_le_bytes());
+        let section_flags = ELF_SHF_ALLOC
+            | if u64::from(flags) & ELF_PF_X != 0 {
+                ELF_SHF_EXECINSTR
+            } else {
+                0
+            };
+        data[section + 8..section + 12].copy_from_slice(&(section_flags as u32).to_le_bytes());
         data[section + 12..section + 16].copy_from_slice(&address.to_le_bytes());
         data[section + 16..section + 20].copy_from_slice(&(payload_offset as u32).to_le_bytes());
         data[section + 20..section + 24].copy_from_slice(&(payload_size as u32).to_le_bytes());
@@ -914,6 +954,16 @@ mod tests {
         invalid
             .write_all(&test_elf_with_payload_flags(0x3fc8_8000, 32, 6))
             .unwrap();
+        assert!(validate_ram_elf(invalid.path()).is_err());
+    }
+
+    #[test]
+    fn ram_elf_gate_rejects_entry_in_zero_fill_tail() {
+        let mut artifact = test_elf_with_payload(0x4037_8400, 32);
+        artifact[24..28].copy_from_slice(&0x4037_8420u32.to_le_bytes());
+        artifact[52 + 20..52 + 24].copy_from_slice(&64u32.to_le_bytes());
+        let mut invalid = tempfile::NamedTempFile::new().unwrap();
+        invalid.write_all(&artifact).unwrap();
         assert!(validate_ram_elf(invalid.path()).is_err());
     }
 }

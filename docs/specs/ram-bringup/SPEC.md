@@ -64,7 +64,10 @@ except for the complete linker-owned vectors segment at
 `0x40378000..0x40378400`. Payload sections must avoid vectors and reserved
 memory, preserve `p_filesz <= p_memsz`, and fit the explicit budgets. Partial
 vector overlaps, flash mapped addresses, non-identity load addresses, missing
-section tables, and missing loadable sections fail the check.
+section tables, and missing loadable sections fail the check. The entry point
+must also fall inside a file-backed executable section: the complete
+linker-owned vectors section or an executable payload section within IRAM; the
+host validates and loads one immutable ELF snapshot.
 
 ## Related ADRs
 

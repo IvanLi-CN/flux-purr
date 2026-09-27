@@ -12,6 +12,7 @@ from pathlib import Path
 PT_LOAD = 1
 PF_X = 0x1
 SHF_ALLOC = 0x2
+SHF_EXECINSTR = 0x4
 EM_XTENSA = 94
 
 # These windows mirror firmware/ram-bringup/memory.x. The linker-owned vectors
@@ -170,6 +171,7 @@ def validate(path: Path) -> dict[str, object]:
     if not sections:
         raise ElfError("ELF contains no loadable sections")
     report_sections = []
+    executable_entry_section = False
     for section in sections:
         start = section["address"]
         end = start + section["size"]
@@ -187,6 +189,11 @@ def validate(path: Path) -> dict[str, object]:
             region = "dram"
         else:
             raise ElfError(f"section {section['index']} is outside internal RAM {start:#x}-{end:#x}")
+        executable_entry_section |= bool(
+            section["flags"] & SHF_EXECINSTR
+            and start <= entry < end
+            and (region == "vectors" or region == "iram")
+        )
         report_sections.append({**section, "region": region, "end": end})
     if iram_bytes > IRAM[1] - IRAM[0]:
         raise ElfError(f"IRAM budget exceeded: {iram_bytes} bytes")
@@ -194,6 +201,10 @@ def validate(path: Path) -> dict[str, object]:
         raise ElfError(f"DRAM budget exceeded: {dram_bytes} bytes")
     if not executable_entry:
         raise ElfError(f"entry point {entry:#x} is not inside an executable RAM segment")
+    if not executable_entry_section:
+        raise ElfError(
+            f"entry point {entry:#x} is not inside a file-backed executable RAM section"
+        )
     return {
         "path": str(path),
         "machine": "xtensa",

@@ -3540,6 +3540,15 @@ fn serial_lock_is_not_reentrant_until_previous_session_is_dropped() {
     assert!(reopened.is_ok());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn serial_lock_aliases_share_a_lock_identity() {
+    assert_eq!(
+        serial_lock_path("/dev/cu.usbmodem21141401"),
+        serial_lock_path("/dev/tty.usbmodem21141401")
+    );
+}
+
 #[tokio::test]
 async fn cancelled_request_keeps_serial_rpc_locked_until_worker_finishes() {
     let serial_rpc = Arc::new(tokio::sync::Mutex::new(()));

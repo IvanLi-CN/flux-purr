@@ -28,7 +28,9 @@
   lock that survives worker-thread handoff.
 - The host RAM loader validates ELF identification, program-header arithmetic,
   loadable segment and section bounds, and internal-memory placement before
-  invoking espflash.
+  invoking espflash. It requires the entry point to be in a file-backed
+  executable vectors or IRAM section and loads the same validated ELF snapshot
+  that it checked.
 - The host ELF parser keeps its tuple-shaped helper results behind named type
   aliases so the devd clippy gate stays clean without changing the loader or
   wire behavior.

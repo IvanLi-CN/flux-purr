@@ -109,7 +109,13 @@ pub(crate) async fn local_firmware_update(
         &identity.firmware_version,
         &status,
     )?;
-    let security = probe_native_rom_security(&state, &port).await?;
+    let serial_rpc =
+        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
+    drop_cached_serial_session(&state.serial_sessions, &port)?;
+    let serial_lock = acquire_serial_process_lock(&port, ESPFLASH_COMMAND_TIMEOUT).await?;
+    let security =
+        probe_native_rom_security_with_locks(&state, &port, Some(&serial_rpc), Some(&serial_lock))
+            .await?;
     security.validate_for_flash()?;
     progress.stage_completed("preflight", json!({}));
     run_bundle_flash_transaction(
@@ -118,6 +124,8 @@ pub(crate) async fn local_firmware_update(
         FirmwareOperation::Update,
         &port,
         &mut progress,
+        Some(serial_rpc),
+        Some(serial_lock),
     )
     .await?;
     progress.stage_started("runtime_reconnect", json!({}));
@@ -330,6 +338,8 @@ pub(crate) struct PreparedFirmwareOperation {
     current_version: String,
     status: ControlPlaneStatus,
     rom_mac: String,
+    serial_rpc: Option<tokio::sync::OwnedMutexGuard<()>>,
+    serial_lock: Option<SerialPortProcessLock>,
 }
 
 pub(crate) async fn firmware_operation(
@@ -345,7 +355,8 @@ pub(crate) async fn firmware_operation(
         payload.dry_run,
     );
     progress.operation_started();
-    let prepared = prepare_firmware_operation(&state, &device_id, &payload, &mut progress).await?;
+    let mut prepared =
+        prepare_firmware_operation(&state, &device_id, &payload, &mut progress).await?;
     if payload.dry_run {
         progress.stage_started("preflight", json!({}));
     }
@@ -391,6 +402,8 @@ pub(crate) async fn firmware_operation(
         payload.operation,
         &prepared.port_path,
         &mut progress,
+        prepared.serial_rpc.take(),
+        prepared.serial_lock.take(),
     )
     .await?;
     let verified =
@@ -452,13 +465,34 @@ pub(crate) async fn prepare_firmware_operation(
         target,
         bundle,
         rom_mac: String::new(),
+        serial_rpc: None,
+        serial_lock: None,
     };
     refresh_operation_facts(state, device_id, payload, &mut prepared, progress).await?;
+    if !payload.dry_run && prepared.transport == DeviceTransport::NativeSerial {
+        prepared.serial_rpc = Some(progress.require(
+            acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
+        )?);
+        progress.require(drop_cached_serial_session(
+            &state.serial_sessions,
+            &prepared.port_path,
+        ))?;
+        prepared.serial_lock = Some(progress.require(
+            acquire_serial_process_lock(&prepared.port_path, ESPFLASH_COMMAND_TIMEOUT).await,
+        )?);
+    }
     if payload.dry_run {
         progress.stage_completed("transport", json!({}));
         progress.stage_started("rom_reset", json!({}));
     }
-    prepared.rom_mac = operation_rom_security(state, &prepared, progress).await?;
+    prepared.rom_mac = operation_rom_security(
+        state,
+        &prepared,
+        prepared.serial_rpc.as_ref(),
+        prepared.serial_lock.as_ref(),
+        progress,
+    )
+    .await?;
     if payload.dry_run {
         progress.stage_completed("rom_reset", json!({}));
         progress.stage_started("chip_flash_security", json!({}));
@@ -586,6 +620,8 @@ pub(crate) fn update_operation_device(
 pub(crate) async fn operation_rom_security(
     state: &AppState,
     prepared: &PreparedFirmwareOperation,
+    serial_rpc: Option<&tokio::sync::OwnedMutexGuard<()>>,
+    serial_lock: Option<&SerialPortProcessLock>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<String, HttpError> {
     let security = match prepared.transport {
@@ -599,9 +635,15 @@ pub(crate) async fn operation_rom_security(
             flash_size_bytes: 4 * 1024 * 1024,
             package_matches: true,
         },
-        DeviceTransport::NativeSerial => {
-            progress.require(probe_native_rom_security(state, &prepared.port_path).await)?
-        }
+        DeviceTransport::NativeSerial => progress.require(
+            probe_native_rom_security_with_locks(
+                state,
+                &prepared.port_path,
+                serial_rpc,
+                serial_lock,
+            )
+            .await,
+        )?,
         DeviceTransport::Lan => unreachable!(),
     };
     progress.require(security.validate_for_flash())?;
@@ -778,16 +820,24 @@ pub(crate) async fn run_bundle_flash_transaction(
     operation: FirmwareOperation,
     port_path: &str,
     progress: &mut FirmwareOperationProgress,
+    serial_rpc: Option<tokio::sync::OwnedMutexGuard<()>>,
+    serial_lock: Option<SerialPortProcessLock>,
 ) -> Result<(), HttpError> {
-    let _serial_rpc = progress.require(
-        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
-    )?;
+    let _serial_rpc = match serial_rpc {
+        Some(guard) => guard,
+        None => progress.require(
+            acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
+        )?,
+    };
     progress.require(drop_cached_serial_session(
         &state.serial_sessions,
         port_path,
     ))?;
-    let _serial_lock =
-        progress.require(acquire_serial_process_lock(port_path, ESPFLASH_COMMAND_TIMEOUT).await)?;
+    let _serial_lock = match serial_lock {
+        Some(lock) => lock,
+        None => progress
+            .require(acquire_serial_process_lock(port_path, ESPFLASH_COMMAND_TIMEOUT).await)?,
+    };
     let workspace = progress.require(tempfile::tempdir().map_err(|error| {
         HttpError::internal(&format!("failed to create flash workspace: {error}"))
     }))?;
@@ -1068,9 +1118,11 @@ pub(crate) fn espflash_command_error(
     }
 }
 
-pub(crate) async fn probe_native_rom_security(
+async fn probe_native_rom_security_with_locks(
     state: &AppState,
     port_path: &str,
+    serial_rpc: Option<&tokio::sync::OwnedMutexGuard<()>>,
+    serial_lock: Option<&SerialPortProcessLock>,
 ) -> Result<RomSecurityInfo, HttpError> {
     use ::espflash::{
         connection::{Connection, ResetAfterOperation, ResetBeforeOperation},
@@ -1078,9 +1130,17 @@ pub(crate) async fn probe_native_rom_security(
     };
     use serialport::{FlowControl, SerialPortType, UsbPortInfo};
 
-    let _serial_rpc =
-        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
+    let _owned_serial_rpc = if serial_rpc.is_none() {
+        Some(acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?)
+    } else {
+        None
+    };
     drop_cached_serial_session(&state.serial_sessions, port_path)?;
+    let _owned_serial_lock = if serial_lock.is_none() {
+        Some(acquire_serial_process_lock(port_path, ESPFLASH_COMMAND_TIMEOUT).await?)
+    } else {
+        None
+    };
     let port_path = port_path.to_owned();
     tokio::task::spawn_blocking(move || {
         let port_info = serialport::available_ports()

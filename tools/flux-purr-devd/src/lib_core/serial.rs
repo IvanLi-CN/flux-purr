@@ -1,5 +1,13 @@
 pub(crate) use super::*;
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+#[cfg(target_os = "linux")]
+const SERIAL_LOCK_O_NOFOLLOW: i32 = 0x20000;
+#[cfg(target_os = "macos")]
+const SERIAL_LOCK_O_NOFOLLOW: i32 = 0x100;
+
 pub(crate) fn firmware_preflight_digest(
     payload: &FirmwareOperationRequest,
     device_id: &str,
@@ -1387,6 +1395,8 @@ impl SerialPortProcessLock {
             .truncate(false)
             .read(true)
             .write(true)
+            .mode(0o600)
+            .custom_flags(SERIAL_LOCK_O_NOFOLLOW)
             .open(&lock_path)
             .map_err(|error| {
                 HttpError::new(
@@ -1495,7 +1505,7 @@ impl Drop for SerialPortProcessLock {
 #[cfg(any(unix, windows))]
 pub(crate) fn serial_lock_path(port_path: &str) -> PathBuf {
     let mut hasher = Sha256::new();
-    hasher.update(port_path.as_bytes());
+    hasher.update(serial_lock_identity(port_path).as_bytes());
     let digest = hasher.finalize();
     let mut name = String::from("flux-purr-devd-serial-");
     for byte in &digest[..8] {
@@ -1506,6 +1516,16 @@ pub(crate) fn serial_lock_path(port_path: &str) -> PathBuf {
 }
 
 #[cfg(any(unix, windows))]
+fn serial_lock_identity(port_path: &str) -> String {
+    #[cfg(target_os = "macos")]
+    if let Some(suffix) = port_path.strip_prefix("/dev/tty.") {
+        return format!("/dev/cu.{suffix}");
+    }
+
+    port_path.to_string()
+}
+
+#[cfg(any(unix, windows))]
 fn serial_lock_directory() -> PathBuf {
     if let Ok(config_dir) = user_config_dir() {
         return config_dir.join("locks");
@@ -1513,7 +1533,8 @@ fn serial_lock_directory() -> PathBuf {
 
     #[cfg(unix)]
     {
-        PathBuf::from("/tmp/flux-purr-devd/locks")
+        let uid = unsafe { geteuid() };
+        std::env::temp_dir().join(format!("flux-purr-devd-{uid}"))
     }
     #[cfg(windows)]
     {
@@ -1541,7 +1562,45 @@ fn ensure_serial_lock_directory(lock_path: &Path) -> Result<(), HttpError> {
             ),
             true,
         )
-    })
+    })?;
+
+    #[cfg(unix)]
+    {
+        let metadata = fs::symlink_metadata(parent).map_err(|error| {
+            HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "serial_lock_failed",
+                &format!(
+                    "Failed to inspect serial lock directory {}: {error}",
+                    parent.display()
+                ),
+                true,
+            )
+        })?;
+        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { geteuid() } {
+            return Err(HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "serial_lock_failed",
+                "Serial lock directory is not owned by the current user.",
+                false,
+            ));
+        }
+        if metadata.mode() & 0o077 != 0 {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "serial_lock_failed",
+                    &format!(
+                        "Failed to restrict serial lock directory {}: {error}",
+                        parent.display()
+                    ),
+                    true,
+                )
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn acquire_serial_process_lock(

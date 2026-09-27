@@ -2,8 +2,6 @@ pub(crate) use super::*;
 
 #[cfg(unix)]
 pub(crate) use std::os::fd::AsRawFd;
-#[cfg(target_os = "macos")]
-pub(crate) use std::os::unix::fs::OpenOptionsExt;
 pub(crate) use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
@@ -123,6 +121,7 @@ pub(crate) enum SerialRetryPolicy {
 #[cfg(unix)]
 unsafe extern "C" {
     pub(crate) fn flock(fd: i32, operation: i32) -> i32;
+    pub(crate) fn geteuid() -> u32;
 }
 
 #[derive(Debug, Clone)]
