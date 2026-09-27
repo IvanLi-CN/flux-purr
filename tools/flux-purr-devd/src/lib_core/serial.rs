@@ -2139,16 +2139,70 @@ fn serial_port_path_is_present(port_path: &str) -> bool {
 pub(crate) fn write_serial_request(
     port: &mut dyn SerialSessionPort,
     request: &str,
+    deadline: Instant,
 ) -> Result<(), HttpError> {
     validate_serial_request_len(request)?;
     port.begin_write()?;
-    let write_result = port
-        .write_all(request.as_bytes())
-        .and_then(|_| port.write_all(b"\n"))
-        .and_then(|_| port.flush());
+    let write_deadline = (Instant::now() + SERIAL_WRITE_TIMEOUT).min(deadline);
+    let write_result = write_serial_bytes(port, request.as_bytes(), write_deadline)
+        .and_then(|_| write_serial_bytes(port, b"\n", write_deadline))
+        .and_then(|_| flush_serial_write(port, write_deadline));
     let restore_result = port.finish_write();
     write_result.map_err(serial_io_http_error)?;
     restore_result
+}
+
+fn write_serial_bytes(
+    port: &mut dyn SerialSessionPort,
+    bytes: &[u8],
+    deadline: Instant,
+) -> io::Result<()> {
+    let mut written = 0;
+    while written < bytes.len() {
+        if Instant::now() >= deadline {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        match port.write(&bytes[written..]) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(count) => written += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                std::thread::sleep(
+                    SERIAL_READ_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn flush_serial_write(port: &mut dyn SerialSessionPort, deadline: Instant) -> io::Result<()> {
+    loop {
+        if Instant::now() >= deadline {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        match port.flush() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                std::thread::sleep(
+                    SERIAL_READ_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 pub(crate) fn validate_serial_request_len(request: &str) -> Result<(), HttpError> {
@@ -2177,13 +2231,13 @@ fn write_serial_request_with_reopen_with_identity(
     deadline: Instant,
     expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<SerialSession, HttpError> {
-    match write_serial_request(&mut *session.port, request) {
+    match write_serial_request(&mut *session.port, request, deadline) {
         Ok(()) => Ok(session),
         Err(error) if is_recoverable_write_http_error(&error) => {
             drop(session);
             let mut reopened =
                 reopen_serial_session_with_identity(port_path, deadline, expected_usb_identity)?;
-            write_serial_request(&mut *reopened.port, request)?;
+            write_serial_request(&mut *reopened.port, request, deadline)?;
             Ok(reopened)
         }
         Err(error) => Err(error),
@@ -2459,4 +2513,57 @@ pub(crate) fn is_recoverable_write_http_error(error: &HttpError) -> bool {
             .strip_prefix("Serial I/O failed: ")
             .map(is_recoverable_serial_error_message)
             .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    struct IntermittentPort {
+        written: Vec<u8>,
+        write_calls: usize,
+    }
+
+    impl Read for IntermittentPort {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+    }
+
+    impl Write for IntermittentPort {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.write_calls += 1;
+            if self.write_calls == 2 {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            let count = buf.len().min(3);
+            self.written.extend_from_slice(&buf[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SerialSessionPort for IntermittentPort {
+        fn begin_write(&mut self) -> Result<(), HttpError> {
+            Ok(())
+        }
+
+        fn finish_write(&mut self) -> Result<(), HttpError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn request_write_resumes_after_partial_nonblocking_write() {
+        let mut port = IntermittentPort {
+            written: Vec::new(),
+            write_calls: 0,
+        };
+        let request = "x".repeat(5_000);
+        write_serial_request(&mut port, &request, Instant::now() + Duration::from_secs(1)).unwrap();
+        assert_eq!(port.written, format!("{request}\n").as_bytes());
+    }
 }
