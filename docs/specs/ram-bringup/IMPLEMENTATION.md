@@ -9,7 +9,10 @@
   build script verifies the asset against the renderer, and the image stores
   it in data memory to keep the executable segment within its RAM layout.
 - `firmware/ram-bringup/memory.x` maps loadable text, rodata, and data to
-  internal RAM. `tools/check_ram_elf.py` is the release artifact gate.
+  internal RAM and emits the complete linker-owned vectors segment. The
+  vectors range is accepted only as that exact segment; payload sections may
+  not partially overlap it. `tools/check_ram_elf.py` is the release artifact
+  gate.
 - `scripts/build-ram-bringup.sh` builds the release ELF with Xtensa jump tables
   disabled. The RAM JSON parser must not use indirect table jumps.
 - `tools/flux-purr-devd/src/bin/flux_purr/cli/ram_run.rs` enforces the exact

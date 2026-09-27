@@ -51,7 +51,7 @@ class RamElfCheckTests(unittest.TestCase):
         report = validate(self.write(elf32((0x40378400, 32, 5), (0x3FC88000, 16, 6))))
         self.assertTrue(report["ram_only"])
 
-    def test_accepts_exact_vector_segment(self):
+    def test_accepts_linker_vector_segment(self):
         report = validate(self.write(elf32((0x40378000, 32, 5))))
         self.assertEqual(report["segments"][0]["region"], "vectors")
 

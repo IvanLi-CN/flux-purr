@@ -229,11 +229,23 @@ mod device {
             self.buzzer.set_low();
             self.backlight.set_high();
             self.display_reset.set_high();
-            self.display_cs.set_high();
-            self.display_dc.set_low();
+            let _ = self.set_display_cs(Level::High);
+            let _ = self.set_display_dc(Level::Low);
             self.red.set_high();
             self.green.set_high();
             self.blue.set_high();
+        }
+
+        fn set_display_cs(&mut self, level: Level) -> bool {
+            let flushed = SpiBus::flush(&mut self.display).is_ok();
+            self.display_cs.set_level(level);
+            flushed
+        }
+
+        fn set_display_dc(&mut self, level: Level) -> bool {
+            let flushed = SpiBus::flush(&mut self.display).is_ok();
+            self.display_dc.set_level(level);
+            flushed
         }
 
         fn rgb(&mut self, red: bool, green: bool, blue: bool) {
@@ -316,8 +328,10 @@ mod device {
                 return false;
             }
             delay_ms(100);
-            self.display_dc.set_high();
-            self.display_cs.set_low();
+            if !self.set_display_dc(Level::High) || !self.set_display_cs(Level::Low) {
+                let _ = self.set_display_cs(Level::High);
+                return false;
+            }
             let mut pixels = [0u8; 128];
             let frame: &[u8] = match pattern {
                 DisplayPattern::Calibration => &CALIBRATION_FRAME,
@@ -335,40 +349,43 @@ mod device {
                     &frame[..]
                 };
                 if SpiBus::write(&mut self.display, chunk).is_err() {
-                    self.display_cs.set_high();
+                    let _ = self.set_display_cs(Level::High);
                     return false;
                 }
             }
             if SpiBus::flush(&mut self.display).is_err() {
-                self.display_cs.set_high();
+                let _ = self.set_display_cs(Level::High);
                 return false;
             }
-            self.display_cs.set_high();
-            true
+            self.set_display_cs(Level::High)
         }
 
         fn command(&mut self, command: u8, data: &[u8]) -> bool {
-            self.display_cs.set_low();
-            self.display_dc.set_low();
+            if !self.set_display_cs(Level::Low) || !self.set_display_dc(Level::Low) {
+                let _ = self.set_display_cs(Level::High);
+                return false;
+            }
             if SpiBus::write(&mut self.display, &[command])
                 .and_then(|_| SpiBus::flush(&mut self.display))
                 .is_err()
             {
-                self.display_cs.set_high();
+                let _ = self.set_display_cs(Level::High);
                 return false;
             }
             if !data.is_empty() {
-                self.display_dc.set_high();
+                if !self.set_display_dc(Level::High) {
+                    let _ = self.set_display_cs(Level::High);
+                    return false;
+                }
                 if SpiBus::write(&mut self.display, data)
                     .and_then(|_| SpiBus::flush(&mut self.display))
                     .is_err()
                 {
-                    self.display_cs.set_high();
+                    let _ = self.set_display_cs(Level::High);
                     return false;
                 }
             }
-            self.display_cs.set_high();
-            true
+            self.set_display_cs(Level::High)
         }
     }
 

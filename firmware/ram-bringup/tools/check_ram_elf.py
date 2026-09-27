@@ -12,8 +12,9 @@ from pathlib import Path
 PT_LOAD = 1
 EM_XTENSA = 94
 
-# These windows mirror firmware/ram-bringup/memory.x. Vectors and the top of
-# DRAM are reserved for reset/runtime state and are not available to payloads.
+# These windows mirror firmware/ram-bringup/memory.x. The linker-owned vectors
+# segment is allowed only as the complete exact vectors window; payloads cannot
+# partially overlap or otherwise use that range.
 IRAM = (0x40378400, 0x403B8400)
 DRAM = (0x3FC88000, 0x3FCE8000)
 VECTORS = (0x40378000, 0x40378400)

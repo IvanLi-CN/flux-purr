@@ -69,6 +69,9 @@ jobs:
       - name: Firmware clippy
         run: bash scripts/check-firmware-clippy.sh
 
+      - name: Product firmware tests
+        run: cargo test --locked --manifest-path firmware/Cargo.toml --all-targets
+
       - name: RAM bring-up protocol tests
         run: cargo test --locked -p flux-purr-ram-bringup --all-targets
 

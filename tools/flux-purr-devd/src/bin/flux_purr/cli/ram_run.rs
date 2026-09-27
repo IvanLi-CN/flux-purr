@@ -5,11 +5,13 @@ use espflash::{
     target::Chip,
 };
 use flux_purr_devd::PRODUCT_BUILD_ID;
+use flux_purr_devd::serial::SerialPortProcessLock;
 use serialport::{FlowControl, SerialPort, SerialPortType, TTYPort, UsbPortInfo};
 use std::time::{Duration, Instant};
 
 const IDENTITY_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
+const RAM_OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const RAM_ELF_RELATIVE_PATH: &str =
     "firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup";
 
@@ -88,6 +90,7 @@ fn run_ram_operation(
     color: Option<&str>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_exact_ram_port(port)?;
+    let _serial_lock = acquire_ram_port_lock(port)?;
     let observed = if reload {
         None
     } else {
@@ -116,6 +119,7 @@ fn run_ram_operation(
 
 fn exit_ram(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_exact_ram_port(port)?;
+    let _serial_lock = acquire_ram_port_lock(port)?;
     let (identity, mut serial) = match read_identity(port) {
         Ok(result) => result,
         Err(_) => {
@@ -127,6 +131,13 @@ fn exit_ram(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync
     };
     verify_ram_identity(&identity, "exit")?;
     send_ram_request(&mut serial, "exit", None)
+}
+
+fn acquire_ram_port_lock(
+    port: &str,
+) -> Result<SerialPortProcessLock, Box<dyn std::error::Error + Send + Sync>> {
+    SerialPortProcessLock::acquire(port, Instant::now() + RAM_OPERATION_LOCK_TIMEOUT)
+        .map_err(|error| format!("failed to acquire RAM serial lock: {error:?}").into())
 }
 
 fn default_ram_elf() -> PathBuf {
@@ -791,6 +802,21 @@ mod tests {
         let request = build_ram_request("ram-1", "preview_display", None);
         let value: Value = serde_json::from_str(&request).expect("request should be JSON");
         assert!(value.get("color").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ram_port_lock_is_exclusive() {
+        let port = format!("/tmp/flux-purr-devd-ram-test-port-{}", std::process::id());
+        let first = acquire_ram_port_lock(&port).expect("first RAM lock should succeed");
+        let second =
+            match SerialPortProcessLock::acquire(&port, Instant::now() + Duration::from_millis(25))
+            {
+                Ok(_) => panic!("second RAM lock should be rejected"),
+                Err(error) => error,
+            };
+        assert!(format!("{second:?}").contains("serial_lock_timeout"));
+        drop(first);
     }
 
     fn test_elf(address: u32) -> Vec<u8> {

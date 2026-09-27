@@ -1347,13 +1347,13 @@ pub(crate) fn store_serial_session(
     serial_sessions.insert(port_path.to_string(), session);
 }
 
-pub(crate) struct SerialPortProcessLock {
+pub struct SerialPortProcessLock {
     #[cfg(unix)]
     file: File,
 }
 
 impl SerialPortProcessLock {
-    pub(crate) fn acquire(port_path: &str, deadline: Instant) -> Result<Self, HttpError> {
+    pub fn acquire(port_path: &str, deadline: Instant) -> Result<Self, HttpError> {
         #[cfg(unix)]
         {
             Self::acquire_unix(port_path, deadline).map(|file| Self { file })
