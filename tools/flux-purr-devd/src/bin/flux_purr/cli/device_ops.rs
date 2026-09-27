@@ -1165,8 +1165,9 @@ pub(crate) fn write_snapshot_request<S: Write + ?Sized>(
     serial: &mut S,
     value: &Value,
 ) -> io::Result<()> {
-    serial.write_all(serde_json::to_string(value).unwrap().as_bytes())?;
-    serial.write_all(b"\n")?;
+    let payload = serde_json::to_string(value).unwrap();
+    write_snapshot_bytes(serial, payload.as_bytes())?;
+    write_snapshot_bytes(serial, b"\n")?;
     serial.flush()
 }
 
@@ -1178,7 +1179,7 @@ fn open_snapshot_serial(
     port: &str,
 ) -> Result<Box<dyn SnapshotSerial>, Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(target_os = "macos")]
-    if port.starts_with("/dev/cu.usbmodem") {
+    if snapshot_uses_raw_usb_port(port) {
         return Ok(Box::new(open_raw_usb_serial_jtag_port(port)?));
     }
 
@@ -1187,6 +1188,33 @@ fn open_snapshot_serial(
             .timeout(Duration::from_secs(2))
             .open()?,
     ))
+}
+
+pub(crate) fn snapshot_uses_raw_usb_port(port: &str) -> bool {
+    cfg!(target_os = "macos") && port.starts_with("/dev/cu.usbmodem")
+}
+
+fn write_snapshot_bytes<W: Write + ?Sized>(serial: &mut W, mut bytes: &[u8]) -> io::Result<()> {
+    let deadline = StdInstant::now() + Duration::from_secs(2);
+    while !bytes.is_empty() {
+        if StdInstant::now() >= deadline {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        match serial.write(bytes) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => bytes = &bytes[written..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]

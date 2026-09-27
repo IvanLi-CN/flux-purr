@@ -16,24 +16,97 @@ use axum::{
 
 struct SnapshotFixtureReader {
     bytes: VecDeque<u8>,
+    would_block_once: bool,
 }
 
 impl SnapshotFixtureReader {
     fn from_bytes(bytes: &[u8]) -> Self {
         Self {
             bytes: bytes.iter().copied().collect(),
+            would_block_once: false,
+        }
+    }
+
+    fn after_would_block(bytes: &[u8]) -> Self {
+        Self {
+            bytes: bytes.iter().copied().collect(),
+            would_block_once: true,
         }
     }
 }
 
 impl Read for SnapshotFixtureReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.would_block_once {
+            self.would_block_once = false;
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         let Some(byte) = self.bytes.pop_front() else {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "fixture timeout"));
         };
         buf[0] = byte;
         Ok(1)
     }
+}
+
+#[derive(Default)]
+struct SnapshotFixtureWriter {
+    bytes: Vec<u8>,
+    would_block_once: bool,
+}
+
+impl Write for SnapshotFixtureWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.would_block_once {
+            self.would_block_once = false;
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn snapshot_port_uses_raw_io_for_macos_usb_serial_jtag() {
+    assert_eq!(
+        snapshot_uses_raw_usb_port("/dev/cu.usbmodem-fixture"),
+        cfg!(target_os = "macos")
+    );
+    assert!(!snapshot_uses_raw_usb_port("/dev/cu.usbserial-1234"));
+}
+
+#[test]
+fn snapshot_request_retries_nonblocking_write() {
+    let mut writer = SnapshotFixtureWriter {
+        would_block_once: true,
+        ..Default::default()
+    };
+
+    write_snapshot_request(&mut writer, &json!({"op":"eeprom_snapshot_open"})).unwrap();
+
+    assert!(writer.bytes.ends_with(b"\n"));
+    let request: Value = serde_json::from_slice(&writer.bytes[..writer.bytes.len() - 1]).unwrap();
+    assert_eq!(request["op"], "eeprom_snapshot_open");
+}
+
+#[test]
+fn snapshot_response_retries_nonblocking_idle_read() {
+    let mut reader = SnapshotFixtureReader::after_would_block(
+        b"{\"ok\":true,\"requestId\":\"snapshot-test\",\"capacity\":8192}\n",
+    );
+
+    let response = read_snapshot_response(
+        &mut reader,
+        "snapshot-test",
+        StdInstant::now() + Duration::from_secs(1),
+    )
+    .unwrap();
+
+    assert_eq!(response["capacity"], 8192);
 }
 
 #[test]
