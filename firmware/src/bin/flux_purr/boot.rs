@@ -199,6 +199,7 @@ pub(crate) struct BootSystem {
     reset_reason: &'static str,
     startup_sequence: StartupSequence,
     runtime_mode: FrontPanelRuntimeMode,
+    backlight: Output<'static>,
     status_light_started_ms: u64,
     pd_runtime_started_ms: u64,
     pd_contract_ready: bool,
@@ -1401,8 +1402,9 @@ pub(crate) fn initialize_boot_system(
     rom_boot_stage(b"system_enter");
     let reset_reason = reset_reason_log_line(esp_hal::system::reset_reason());
     let mut startup_sequence = StartupSequence::new();
-    let mut backlight = Output::new(tokens.gpio13, Level::Low, OutputConfig::default());
-    backlight.set_low();
+    // Keep the active-low panel backlight off until the controller has been
+    // initialized and the startup frame has been transferred successfully.
+    let backlight = Output::new(tokens.gpio13, Level::High, OutputConfig::default());
     assert!(startup_sequence.advance(StartupSequenceStage::BacklightReady));
     let eeprom_record_staging = initialize_eeprom_record_staging();
     let software_interrupts = SoftwareInterruptControl::new(tokens.software_interrupt);
@@ -1432,7 +1434,7 @@ pub(crate) fn initialize_boot_system(
     #[cfg(not(feature = "web_serial"))]
     let persistence_log_sink = NoopPersistenceLogSink;
     #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=backlight_on\n");
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=backlight_off\n");
     #[cfg(feature = "web_serial")]
     usb_write_frame(
         &mut usb_serial,
@@ -1470,6 +1472,7 @@ pub(crate) fn initialize_boot_system(
             reset_reason,
             startup_sequence,
             runtime_mode,
+            backlight,
             status_light_started_ms,
             pd_runtime_started_ms: 0,
             pd_contract_ready: false,
@@ -1648,6 +1651,7 @@ pub(crate) struct BootDisplayContext<'a> {
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct BootDisplayRuntimeContext<'a> {
     startup_sequence: &'a mut StartupSequence,
+    backlight: &'a mut Output<'static>,
     power_state_subscription: &'a mut PowerStateSubscription<'static>,
     initial_pd_observation: &'a mut Option<PdStatusObservation>,
     status_light: StatusLightState,
@@ -1929,6 +1933,10 @@ pub(crate) async fn initialize_boot_display(
     rom_boot_stage(b"display_driver_ready");
     initialize_display_panel(&mut runtime, &mut display).await;
     let canvas = present_startup_display(&mut runtime, &mut display, canvas, runtime_mode).await;
+    runtime.backlight.set_low();
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(runtime.usb_serial, b"boot_stage=backlight_on\n");
+    rom_boot_stage(b"backlight_on");
     info!("backlight active-low: gpio13 low -> on");
     let inputs = initialize_frontpanel_inputs(center, right, down, left, up);
     #[cfg(feature = "web_serial")]
@@ -2388,6 +2396,7 @@ pub(crate) async fn initialize_boot_display_from_parts(
         runtime_mode: system.runtime_mode,
         runtime: BootDisplayRuntimeContext {
             startup_sequence: &mut system.startup_sequence,
+            backlight: &mut system.backlight,
             power_state_subscription: &mut system.power_state_subscription,
             initial_pd_observation: &mut system.initial_pd_observation,
             status_light: StatusLightState::Booting,

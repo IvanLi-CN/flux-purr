@@ -5547,6 +5547,25 @@ fn boot_output_initialization_stays_in_one_boot_container() {
 }
 
 #[test]
+fn boot_backlight_waits_for_the_startup_frame() {
+    let boot = include_str!("boot.rs");
+    let display_stage = boot
+        .split("pub(crate) async fn initialize_boot_display(")
+        .nth(1)
+        .expect("display boot stage is present");
+    let panel_init = display_stage
+        .find("initialize_display_panel(&mut runtime, &mut display).await")
+        .expect("panel initialization is present");
+    let startup_frame = display_stage
+        .find("present_startup_display(&mut runtime, &mut display, canvas, runtime_mode).await")
+        .expect("startup frame transfer is present");
+    let backlight_on = display_stage
+        .find("runtime.backlight.set_low();")
+        .expect("backlight is enabled after display setup");
+    assert!(panel_init < startup_frame && startup_frame < backlight_on);
+}
+
+#[test]
 fn boot_memory_future_is_heap_pinned_before_eeprom_initialization() {
     let boot = include_str!("boot.rs");
     let normalized_boot: String = boot.split_whitespace().collect();
