@@ -120,6 +120,12 @@ class RamElfCheckTests(unittest.TestCase):
         with self.assertRaises(ElfError):
             validate(self.write(bytes(artifact)))
 
+    def test_rejects_entry_outside_executable_load_segment(self):
+        artifact = bytearray(elf32((0x40378400, 32, 5), (0x3FC88000, 16, 6)))
+        artifact[24:28] = (0x3FC88000).to_bytes(4, "little")
+        with self.assertRaises(ElfError):
+            validate(self.write(bytes(artifact)))
+
 
 if __name__ == "__main__":
     unittest.main()

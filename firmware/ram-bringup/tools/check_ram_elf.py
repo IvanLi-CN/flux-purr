@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 PT_LOAD = 1
+PF_X = 0x1
 SHF_ALLOC = 0x2
 EM_XTENSA = 94
 
@@ -140,6 +141,7 @@ def validate(path: Path) -> dict[str, object]:
     iram_bytes = 0
     dram_bytes = 0
     report_segments = []
+    executable_entry = False
     for segment in segments:
         start = segment["paddr"]
         end = start + segment["memsz"]
@@ -163,6 +165,7 @@ def validate(path: Path) -> dict[str, object]:
             region = "dram"
         else:
             raise ElfError(f"segment {segment['index']} is outside internal RAM {start:#x}-{end:#x}")
+        executable_entry |= bool(segment["flags"] & PF_X and start <= entry < end)
         report_segments.append({**segment, "region": region, "end": end})
     if not sections:
         raise ElfError("ELF contains no loadable sections")
@@ -189,8 +192,8 @@ def validate(path: Path) -> dict[str, object]:
         raise ElfError(f"IRAM budget exceeded: {iram_bytes} bytes")
     if dram_bytes > DRAM[1] - DRAM[0]:
         raise ElfError(f"DRAM budget exceeded: {dram_bytes} bytes")
-    if not (VECTORS[0] <= entry < IRAM[1]):
-        raise ElfError(f"entry point {entry:#x} is outside executable internal RAM")
+    if not executable_entry:
+        raise ElfError(f"entry point {entry:#x} is not inside an executable RAM segment")
     return {
         "path": str(path),
         "machine": "xtensa",

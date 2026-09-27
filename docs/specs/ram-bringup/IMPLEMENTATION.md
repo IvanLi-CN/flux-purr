@@ -4,6 +4,9 @@
   request, identity, capability, display-color, and response contract.
 - `firmware/ram-bringup/src/main.rs` initializes the ESP32-S3 runtime, emits
   identity before command handling, and owns the safe output boundary.
+- The diagnostic image uses bounded blocking peripheral calls because it runs
+  outside the product Embassy executor; the product firmware's async display
+  contract remains scoped to `firmware/` runtime paths.
 - `firmware/examples/ram_calibration_asset.rs` renders the product's static
   calibration scene into the panel-order frame embedded by the RAM image. The
   build script verifies the asset against the renderer, and the image stores

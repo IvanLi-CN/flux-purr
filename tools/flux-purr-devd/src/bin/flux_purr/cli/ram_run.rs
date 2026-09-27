@@ -145,6 +145,7 @@ fn default_ram_elf() -> PathBuf {
 }
 
 const ELF_PT_LOAD: u32 = 1;
+const ELF_PF_X: u64 = 0x1;
 const ELF_SHF_ALLOC: u64 = 0x2;
 const ELF_SHT_PROGBITS: u32 = 1;
 const ELF_SHT_INIT_ARRAY: u32 = 14;
@@ -176,7 +177,7 @@ struct RamElfHeader {
     shnum: u64,
 }
 
-type RamSegmentFields = (u64, u64, u64, u64, u64);
+type RamSegmentFields = (u64, u64, u64, u64, u64, u64);
 type RamSectionFields = (u32, u64, u64, u64, u64);
 type RamLoadSection = (u32, Vec<u8>);
 
@@ -192,6 +193,7 @@ pub(crate) fn validate_ram_elf(
     let mut load_count = 0u32;
     let mut iram_bytes = 0u64;
     let mut dram_bytes = 0u64;
+    let mut executable_entry = false;
     for index in 0..header.phnum {
         let offset = program_header_offset(header.phoff, header.phentsize, index)?;
         let p_type = read_u32(&data, offset)?;
@@ -199,8 +201,9 @@ pub(crate) fn validate_ram_elf(
             continue;
         }
         load_count += 1;
-        let (segment_iram, segment_dram) =
-            validate_ram_segment(&data, header.class, index, offset)?;
+        let (segment_iram, segment_dram, contains_executable_entry) =
+            validate_ram_segment(&data, header.class, index, offset, header.entry)?;
+        executable_entry |= contains_executable_entry;
         iram_bytes = iram_bytes
             .checked_add(segment_iram)
             .ok_or("RAM ELF IRAM budget overflow")?;
@@ -217,9 +220,10 @@ pub(crate) fn validate_ram_elf(
     if dram_bytes > RAM_DRAM.1 - RAM_DRAM.0 {
         return Err("RAM ELF DRAM budget exceeded".into());
     }
-    if !(RAM_VECTORS.0..RAM_IRAM.1).contains(&header.entry) {
-        return Err("RAM ELF entry point is outside internal RAM".into());
+    if !executable_entry {
+        return Err("RAM ELF entry point is not inside an executable RAM segment".into());
     }
+    ram_load_sections(&data, path)?;
     Ok(())
 }
 
@@ -311,8 +315,9 @@ fn validate_ram_segment(
     class: u8,
     index: u64,
     offset: usize,
-) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
-    let (p_offset, vaddr, paddr, filesz, memsz) = ram_segment_fields(data, class, offset)?;
+    entry: u64,
+) -> Result<(u64, u64, bool), Box<dyn std::error::Error + Send + Sync>> {
+    let (p_offset, vaddr, paddr, filesz, memsz, flags) = ram_segment_fields(data, class, offset)?;
     if filesz > memsz {
         return Err(format!("RAM ELF segment {index} has p_filesz > p_memsz").into());
     }
@@ -338,13 +343,21 @@ fn validate_ram_segment(
         return Err(format!("RAM ELF segment {index} overlaps reserved memory").into());
     }
     if paddr == RAM_VECTORS.0 && end == RAM_VECTORS.1 {
-        return Ok((0, 0));
+        return Ok((0, 0, flags & ELF_PF_X != 0 && (paddr..end).contains(&entry)));
     }
     if range_contained(paddr, end, RAM_IRAM) {
-        return Ok((memsz, 0));
+        return Ok((
+            memsz,
+            0,
+            flags & ELF_PF_X != 0 && (paddr..end).contains(&entry),
+        ));
     }
     if range_contained(paddr, end, RAM_DRAM) {
-        return Ok((0, memsz));
+        return Ok((
+            0,
+            memsz,
+            flags & ELF_PF_X != 0 && (paddr..end).contains(&entry),
+        ));
     }
     Err(format!("RAM ELF segment {index} is outside internal RAM").into())
 }
@@ -361,6 +374,7 @@ fn ram_segment_fields(
             read_u32(data, offset_field(offset, 12)?)? as u64,
             read_u32(data, offset_field(offset, 16)?)? as u64,
             read_u32(data, offset_field(offset, 20)?)? as u64,
+            read_u32(data, offset_field(offset, 24)?)? as u64,
         )
     } else {
         (
@@ -369,6 +383,7 @@ fn ram_segment_fields(
             read_u64(data, offset_field(offset, 24)?)?,
             read_u64(data, offset_field(offset, 32)?)?,
             read_u64(data, offset_field(offset, 40)?)?,
+            read_u32(data, offset_field(offset, 4)?)? as u64,
         )
     })
 }
@@ -825,19 +840,27 @@ mod tests {
     }
 
     fn test_elf_with_payload(address: u32, payload_size: usize) -> Vec<u8> {
+        test_elf_with_payload_flags(address, payload_size, 5)
+    }
+
+    fn test_elf_with_payload_flags(address: u32, payload_size: usize, flags: u32) -> Vec<u8> {
         let payload_offset = 52 + 32;
-        let mut data = vec![0u8; payload_offset + payload_size];
+        let section_offset = payload_offset + payload_size;
+        let mut data = vec![0u8; section_offset + 2 * 40];
         data[0..4].copy_from_slice(b"\x7fELF");
         data[4] = 1;
         data[5] = 1;
         data[16..18].copy_from_slice(&2u16.to_le_bytes());
         data[18..20].copy_from_slice(&ELF_MACHINE_XTENSA.to_le_bytes());
         data[20..24].copy_from_slice(&1u32.to_le_bytes());
-        data[24..28].copy_from_slice(&0x4037_8400u32.to_le_bytes());
+        data[24..28].copy_from_slice(&address.to_le_bytes());
         data[28..32].copy_from_slice(&52u32.to_le_bytes());
+        data[32..36].copy_from_slice(&(section_offset as u32).to_le_bytes());
         data[40..42].copy_from_slice(&52u16.to_le_bytes());
         data[42..44].copy_from_slice(&32u16.to_le_bytes());
         data[44..46].copy_from_slice(&1u16.to_le_bytes());
+        data[46..48].copy_from_slice(&40u16.to_le_bytes());
+        data[48..50].copy_from_slice(&2u16.to_le_bytes());
         let ph = 52;
         data[ph..ph + 4].copy_from_slice(&ELF_PT_LOAD.to_le_bytes());
         data[ph + 4..ph + 8].copy_from_slice(&(payload_offset as u32).to_le_bytes());
@@ -845,8 +868,15 @@ mod tests {
         data[ph + 12..ph + 16].copy_from_slice(&address.to_le_bytes());
         data[ph + 16..ph + 20].copy_from_slice(&(payload_size as u32).to_le_bytes());
         data[ph + 20..ph + 24].copy_from_slice(&(payload_size as u32).to_le_bytes());
-        data[ph + 24..ph + 28].copy_from_slice(&5u32.to_le_bytes());
+        data[ph + 24..ph + 28].copy_from_slice(&flags.to_le_bytes());
         data[ph + 28..ph + 32].copy_from_slice(&4u32.to_le_bytes());
+        let section = section_offset + 40;
+        data[section + 4..section + 8].copy_from_slice(&ELF_SHT_PROGBITS.to_le_bytes());
+        data[section + 8..section + 12].copy_from_slice(&(ELF_SHF_ALLOC as u32).to_le_bytes());
+        data[section + 12..section + 16].copy_from_slice(&address.to_le_bytes());
+        data[section + 16..section + 20].copy_from_slice(&(payload_offset as u32).to_le_bytes());
+        data[section + 20..section + 24].copy_from_slice(&(payload_size as u32).to_le_bytes());
+        data[section + 32..section + 36].copy_from_slice(&4u32.to_le_bytes());
         data
     }
 
@@ -876,5 +906,14 @@ mod tests {
                 .unwrap();
             assert!(validate_ram_elf(invalid.path()).is_err());
         }
+    }
+
+    #[test]
+    fn ram_elf_gate_rejects_entry_outside_executable_segment() {
+        let mut invalid = tempfile::NamedTempFile::new().unwrap();
+        invalid
+            .write_all(&test_elf_with_payload_flags(0x3fc8_8000, 32, 6))
+            .unwrap();
+        assert!(validate_ram_elf(invalid.path()).is_err());
     }
 }

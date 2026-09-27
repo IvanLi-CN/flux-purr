@@ -59,7 +59,7 @@
 ### MUST
 
 - REQ-DISPLAY-001: 显示驱动固定使用 `gc9d01-rs` 的 `panel_160x50` profile。
-- REQ-DISPLAY-002: 当前 `esp-rtos` 设备端 SPI 使用异步模式，面板传输和计时让出 Embassy executor；不得用 blocking SPI 兜底。
+- REQ-DISPLAY-002: 当前产品 `esp-rtos` 设备端 SPI 使用异步模式，面板传输和计时让出 Embassy executor；产品运行时不得用 blocking SPI 兜底。独立的 `firmware/ram-bringup` 诊断镜像不运行产品 executor，可使用有界 blocking SPI 完成 RAM 物理链路验证。
 - REQ-DISPLAY-003: 面板硬复位、Sleep-Out 与 Display-On 的规定延时必须在异步驱动操作完成前真实等待；不得丢弃或伪造未被轮询的 timer future。
 - REQ-DISPLAY-004: 板级显示引脚固定为：`DC=GPIO10`、`MOSI=GPIO11`、`SCLK=GPIO12`、`BLK=GPIO13`、`RES=GPIO14`、`CS=GPIO15`。
 - REQ-DISPLAY-005: 首轮面板 profile 按 `panel_160x50`、`width=160`、`height=50`、`dx=15`、`dy=0`、初始 `Orientation::Landscape` 实现。

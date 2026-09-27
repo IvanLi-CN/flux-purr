@@ -1381,6 +1381,7 @@ impl SerialPortProcessLock {
     #[cfg(unix)]
     pub(crate) fn acquire_unix(port_path: &str, deadline: Instant) -> Result<File, HttpError> {
         let lock_path = serial_lock_path(port_path);
+        ensure_serial_lock_directory(&lock_path)?;
         let file = File::options()
             .create(true)
             .truncate(false)
@@ -1427,6 +1428,7 @@ impl SerialPortProcessLock {
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
         let lock_path = serial_lock_path(port_path);
+        ensure_serial_lock_directory(&lock_path)?;
         let file = File::options()
             .create(true)
             .truncate(false)
@@ -1500,7 +1502,46 @@ pub(crate) fn serial_lock_path(port_path: &str) -> PathBuf {
         name.push_str(&format!("{byte:02x}"));
     }
     name.push_str(".lock");
-    std::env::temp_dir().join(name)
+    serial_lock_directory().join(name)
+}
+
+#[cfg(any(unix, windows))]
+fn serial_lock_directory() -> PathBuf {
+    if let Ok(config_dir) = user_config_dir() {
+        return config_dir.join("locks");
+    }
+
+    #[cfg(unix)]
+    {
+        PathBuf::from("/tmp/flux-purr-devd/locks")
+    }
+    #[cfg(windows)]
+    {
+        std::env::temp_dir().join("flux-purr-devd").join("locks")
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn ensure_serial_lock_directory(lock_path: &Path) -> Result<(), HttpError> {
+    let parent = lock_path.parent().ok_or_else(|| {
+        HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "serial_lock_failed",
+            "Serial lock path has no parent directory.",
+            true,
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "serial_lock_failed",
+            &format!(
+                "Failed to create serial lock directory {}: {error}",
+                parent.display()
+            ),
+            true,
+        )
+    })
 }
 
 pub(crate) async fn acquire_serial_process_lock(
