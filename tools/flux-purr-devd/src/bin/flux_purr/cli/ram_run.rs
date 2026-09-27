@@ -1,7 +1,7 @@
 use super::*;
 use espflash::{
     command::{Command as RomCommand, CommandType},
-    connection::{Connection, ResetAfterOperation, ResetBeforeOperation},
+    connection::{Connection, Port, ResetAfterOperation, ResetBeforeOperation},
     target::Chip,
 };
 use flux_purr_devd::PRODUCT_BUILD_ID;
@@ -9,7 +9,7 @@ use flux_purr_devd::serial::{
     ESP32S3_USB_SERIAL_JTAG_PID, ESP32S3_USB_SERIAL_JTAG_VID, SerialPortProcessLock,
     UsbSerialIdentity, serial_port_paths_match, serial_port_usb_identity_matches,
 };
-use serialport::{FlowControl, SerialPort, SerialPortType, TTYPort, UsbPortInfo};
+use serialport::{FlowControl, SerialPort, SerialPortType, UsbPortInfo};
 use std::time::{Duration, Instant};
 
 const IDENTITY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -625,7 +625,7 @@ fn ensure_ram_target(
 fn read_identity(
     port: &str,
     expected: &UsbSerialIdentity,
-) -> Result<(ObservedIdentity, TTYPort), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(ObservedIdentity, Port), Box<dyn std::error::Error + Send + Sync>> {
     ensure_ram_target(port, expected)?;
     let mut serial = serialport::new(port, 115_200)
         .flow_control(FlowControl::None)
@@ -827,7 +827,7 @@ fn load_ram_elf(
     port: &str,
     image: RamElfImage,
     expected: &UsbSerialIdentity,
-) -> Result<(ObservedIdentity, TTYPort), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(ObservedIdentity, Port), Box<dyn std::error::Error + Send + Sync>> {
     ensure_ram_target(port, expected)?;
     let port_info = serialport::available_ports()?
         .into_iter()

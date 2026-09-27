@@ -1830,6 +1830,7 @@ dependencies = [
  "espflash",
  "hex",
  "ipnet",
+ "libc",
  "md-5 0.10.6",
  "mdns-sd-discovery",
  "reqwest",

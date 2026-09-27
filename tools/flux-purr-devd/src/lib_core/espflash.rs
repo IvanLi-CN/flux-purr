@@ -11,6 +11,9 @@ use std::{
     time::Instant,
 };
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 pub(crate) fn resolve_artifact_path(root: Option<&Path>, path: &str) -> PathBuf {
     let path = PathBuf::from(path);
     if path.is_absolute() {
@@ -311,8 +314,7 @@ impl Drop for EspflashProcessGuard {
         if let Ok(mut child) = self.control.child.lock()
             && let Some(mut child) = child.take()
         {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = kill_espflash_process(&mut child);
         }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -328,18 +330,13 @@ fn run_espflash_command_blocking_with_control(
     expected_usb_identity: Option<&UsbSerialIdentity>,
     control: &Arc<EspflashProcessControl>,
 ) -> Result<Output, HttpError> {
-    let mut child = StdCommand::new(program)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            HttpError::internal_with_details(
-                "flash_tool_unavailable",
-                "Failed to start espflash.",
-                json!({ "program": program, "error": error.to_string() }),
-            )
-        })?;
+    let mut child = spawn_espflash_process(program, args).map_err(|error| {
+        HttpError::internal_with_details(
+            "flash_tool_unavailable",
+            "Failed to start espflash.",
+            json!({ "program": program, "error": error.to_string() }),
+        )
+    })?;
     let stdout = child.stdout.take().expect("espflash stdout is piped");
     let stderr = child.stderr.take().expect("espflash stderr is piped");
     {
@@ -521,8 +518,7 @@ fn take_and_kill_controlled_child(
     let mut child = slot
         .take()
         .ok_or_else(|| io::Error::other("espflash process is no longer available"))?;
-    let _ = child.kill();
-    child.wait()
+    kill_espflash_process(&mut child)
 }
 
 pub fn run_espflash_command_blocking_with_identity(
@@ -548,18 +544,13 @@ fn run_espflash_command_blocking(
     port_path: Option<&str>,
     expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<Output, HttpError> {
-    let mut child = StdCommand::new(program)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            HttpError::internal_with_details(
-                "flash_tool_unavailable",
-                "Failed to start espflash.",
-                json!({ "program": program, "error": error.to_string() }),
-            )
-        })?;
+    let mut child = spawn_espflash_process(program, args).map_err(|error| {
+        HttpError::internal_with_details(
+            "flash_tool_unavailable",
+            "Failed to start espflash.",
+            json!({ "program": program, "error": error.to_string() }),
+        )
+    })?;
     let stdout = child.stdout.take().expect("espflash stdout is piped");
     let stderr = child.stderr.take().expect("espflash stderr is piped");
     let stdout_reader = thread::spawn(move || read_process_pipe(stdout));
@@ -597,8 +588,7 @@ fn run_espflash_command_blocking(
         if let (Some(port_path), Some(expected_usb_identity)) = (port_path, expected_usb_identity)
             && !serial_port_usb_identity_matches(port_path, expected_usb_identity)
         {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = kill_espflash_process(&mut child);
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
             return Err(HttpError::forbidden(
@@ -638,8 +628,7 @@ fn kill_and_collect_process_output(
     stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
     stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
 ) -> Result<Output, HttpError> {
-    let _ = child.kill();
-    let status = child.wait().map_err(|error| {
+    let status = kill_espflash_process(child).map_err(|error| {
         HttpError::internal_with_details(
             "flash_tool_failed",
             "Failed to reap the espflash process.",
@@ -647,6 +636,34 @@ fn kill_and_collect_process_output(
         )
     })?;
     collect_process_output(status, stdout_reader, stderr_reader)
+}
+
+fn spawn_espflash_process(program: &Path, args: &[String]) -> io::Result<Child> {
+    let mut command = StdCommand::new(program);
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    command.spawn()
+}
+
+fn kill_espflash_process(child: &mut Child) -> io::Result<std::process::ExitStatus> {
+    #[cfg(unix)]
+    {
+        let process_group = -(child.id() as libc::pid_t);
+        let result = unsafe { libc::kill(process_group, libc::SIGKILL) };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                let _ = child.kill();
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    child.wait()
 }
 
 pub(crate) const MAX_ESPFLASH_CAPTURE_BYTES: usize = 64 * 1024;
