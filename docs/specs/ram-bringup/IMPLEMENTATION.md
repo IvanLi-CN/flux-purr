@@ -20,8 +20,9 @@
   and the pinned espflash RAM loader. It holds the verified serial connection
   through the preview command and response, and encodes optional display colors
   on the existing `preview_display` capability.
-- Direct RAM, flash, and recover commands share the same per-port process lock;
-  Unix uses `flock` and Windows uses a named mutex.
+- Direct RAM, daemon flash, direct flash, and recover commands share the same
+  per-port process lock; Unix uses `flock` and Windows uses a byte-range file
+  lock that survives worker-thread handoff.
 - The host RAM loader validates ELF identification, program-header arithmetic,
   loadable segment and section bounds, and internal-memory placement before
   invoking espflash.

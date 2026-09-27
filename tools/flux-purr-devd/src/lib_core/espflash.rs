@@ -298,6 +298,7 @@ pub(crate) async fn run_espflash_with_exclusive_serial(
     let _serial_rpc =
         acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
     drop_cached_serial_session(&state.serial_sessions, port_path)?;
+    let _serial_lock = acquire_serial_process_lock(port_path, ESPFLASH_COMMAND_TIMEOUT).await?;
     let program = resolve_espflash_program();
     run_flash_transaction_with_program(artifact, root, port_path, &program).await
 }

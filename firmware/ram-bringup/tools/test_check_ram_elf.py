@@ -29,7 +29,7 @@ def elf32(*segments: tuple[int, int, int]) -> bytes:
                 "<IIIIIIIIII",
                 0,
                 1,
-                flags,
+                flags | 0x2,
                 address,
                 payload_cursor,
                 size,
@@ -104,6 +104,13 @@ class RamElfCheckTests(unittest.TestCase):
         artifact = bytearray(elf32((0x40378400, 32, 5)))
         artifact[32:36] = (0).to_bytes(4, "little")
         artifact[48:50] = (0).to_bytes(2, "little")
+        with self.assertRaises(ElfError):
+            validate(self.write(bytes(artifact)))
+
+    def test_rejects_non_allocated_section(self):
+        artifact = bytearray(elf32((0x40378400, 32, 5)))
+        section_flags_offset = 52 + 32 + 32 + 40 + 8
+        artifact[section_flags_offset : section_flags_offset + 4] = (1).to_bytes(4, "little")
         with self.assertRaises(ElfError):
             validate(self.write(bytes(artifact)))
 

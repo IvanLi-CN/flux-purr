@@ -786,6 +786,8 @@ pub(crate) async fn run_bundle_flash_transaction(
         &state.serial_sessions,
         port_path,
     ))?;
+    let _serial_lock =
+        progress.require(acquire_serial_process_lock(port_path, ESPFLASH_COMMAND_TIMEOUT).await)?;
     let workspace = progress.require(tempfile::tempdir().map_err(|error| {
         HttpError::internal(&format!("failed to create flash workspace: {error}"))
     }))?;

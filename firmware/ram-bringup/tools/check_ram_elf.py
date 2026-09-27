@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 PT_LOAD = 1
+SHF_ALLOC = 0x2
 EM_XTENSA = 94
 
 # These windows mirror firmware/ram-bringup/memory.x. The linker-owned vectors
@@ -103,7 +104,13 @@ def parse_elf(data: bytes) -> tuple[int, list[dict[str, int]], list[dict[str, in
             _, section_type, flags, address, data_offset, size, _, _, _, _ = fields
         else:
             _, section_type, flags, address, data_offset, size, _, _, _, _ = fields
-        if section_type in (1, 14) and flags != 0 and address != 0 and data_offset != 0 and size != 0:
+        if (
+            section_type in (1, 14)
+            and flags & SHF_ALLOC
+            and address != 0
+            and data_offset != 0
+            and size != 0
+        ):
             sections.append(
                 {
                     "index": index,

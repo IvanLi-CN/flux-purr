@@ -145,6 +145,7 @@ fn default_ram_elf() -> PathBuf {
 }
 
 const ELF_PT_LOAD: u32 = 1;
+const ELF_SHF_ALLOC: u64 = 0x2;
 const ELF_SHT_PROGBITS: u32 = 1;
 const ELF_SHT_INIT_ARRAY: u32 = 14;
 const ELF_MACHINE_XTENSA: u16 = 94;
@@ -438,7 +439,7 @@ fn ram_load_sections(
         let (section_type, flags, address, data_offset, size) =
             ram_section_fields(data, header.class, offset)?;
         if !matches!(section_type, ELF_SHT_PROGBITS | ELF_SHT_INIT_ARRAY)
-            || flags == 0
+            || flags & ELF_SHF_ALLOC == 0
             || address == 0
             || data_offset == 0
             || size == 0

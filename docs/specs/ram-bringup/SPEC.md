@@ -58,7 +58,8 @@ flux-purr ram-run exit --port <authorized-port>
 ## ELF gate
 
 `tools/check_ram_elf.py` parses ELF program headers and loadable section
-headers. Xtensa loadable segments must stay in the internal IRAM/DRAM windows,
+headers. Only allocated (`SHF_ALLOC`) payload sections are loadable. Xtensa
+loadable segments must stay in the internal IRAM/DRAM windows,
 except for the complete linker-owned vectors segment at
 `0x40378000..0x40378400`. Payload sections must avoid vectors and reserved
 memory, preserve `p_filesz <= p_memsz`, and fit the explicit budgets. Partial

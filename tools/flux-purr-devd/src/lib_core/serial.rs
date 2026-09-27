@@ -1351,7 +1351,7 @@ pub struct SerialPortProcessLock {
     #[cfg(unix)]
     file: File,
     #[cfg(windows)]
-    mutex: windows_sys::Win32::Foundation::HANDLE,
+    file: File,
 }
 
 impl SerialPortProcessLock {
@@ -1363,7 +1363,7 @@ impl SerialPortProcessLock {
 
         #[cfg(windows)]
         {
-            Self::acquire_windows(port_path, deadline).map(|mutex| Self { mutex })
+            Self::acquire_windows(port_path, deadline).map(|file| Self { file })
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -1418,38 +1418,52 @@ impl SerialPortProcessLock {
     }
 
     #[cfg(windows)]
-    fn acquire_windows(
-        port_path: &str,
-        deadline: Instant,
-    ) -> Result<windows_sys::Win32::Foundation::HANDLE, HttpError> {
-        use windows_sys::Win32::Foundation::{
-            CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    fn acquire_windows(port_path: &str, deadline: Instant) -> Result<File, HttpError> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, GetLastError};
+        use windows_sys::Win32::Storage::FileSystem::{
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
         };
-        use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
 
-        let name = serial_lock_name(port_path);
-        // SAFETY: the mutex name is a valid, NUL-terminated UTF-16 string and
-        // the default security descriptor is appropriate for same-user CLI processes.
-        let mutex = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
-        if mutex.is_null() {
-            return Err(HttpError::new(
-                StatusCode::BAD_GATEWAY,
-                "serial_lock_failed",
-                "Failed to create the Windows USB serial lock.",
-                true,
-            ));
-        }
+        let lock_path = serial_lock_path(port_path);
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "serial_lock_failed",
+                    &format!(
+                        "Failed to open serial lock {}: {error}",
+                        lock_path.display()
+                    ),
+                    true,
+                )
+            })?;
+        let mut overlapped = OVERLAPPED::default();
         while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let wait_ms = remaining.as_millis().clamp(1, u32::MAX as u128) as u32;
-            // SAFETY: `mutex` is a live handle returned by CreateMutexW.
-            let result = unsafe { WaitForSingleObject(mutex, wait_ms) };
-            if result == WAIT_OBJECT_0 || result == WAIT_ABANDONED {
-                return Ok(mutex);
+            // SAFETY: the file handle is owned by `file`, and `overlapped` is
+            // zero-initialized for the synchronous byte-range lock operation.
+            let acquired = unsafe {
+                LockFileEx(
+                    file.as_raw_handle(),
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0,
+                    1,
+                    0,
+                    &mut overlapped,
+                )
+            };
+            if acquired != 0 {
+                return Ok(file);
             }
-            if result != WAIT_TIMEOUT {
-                // SAFETY: the handle is still owned by this function.
-                unsafe { CloseHandle(mutex) };
+            // SAFETY: GetLastError reads the result of the immediately preceding
+            // LockFileEx call on this thread.
+            if unsafe { GetLastError() } != ERROR_LOCK_VIOLATION {
                 return Err(HttpError::new(
                     StatusCode::BAD_GATEWAY,
                     "serial_lock_failed",
@@ -1457,9 +1471,8 @@ impl SerialPortProcessLock {
                     true,
                 ));
             }
+            std::thread::sleep(SERIAL_READ_TIMEOUT);
         }
-        // SAFETY: the mutex was not acquired and remains owned by this function.
-        unsafe { CloseHandle(mutex) };
         Err(HttpError::new(
             StatusCode::GATEWAY_TIMEOUT,
             "serial_lock_timeout",
@@ -1477,21 +1490,7 @@ impl Drop for SerialPortProcessLock {
     }
 }
 
-#[cfg(windows)]
-impl Drop for SerialPortProcessLock {
-    fn drop(&mut self) {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::ReleaseMutex;
-
-        // SAFETY: `mutex` is owned by this guard and was acquired by the current thread.
-        unsafe {
-            let _ = ReleaseMutex(self.mutex);
-            let _ = CloseHandle(self.mutex);
-        }
-    }
-}
-
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn serial_lock_path(port_path: &str) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(port_path.as_bytes());
@@ -1504,16 +1503,15 @@ pub(crate) fn serial_lock_path(port_path: &str) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
-#[cfg(windows)]
-fn serial_lock_name(port_path: &str) -> Vec<u16> {
-    let mut hasher = Sha256::new();
-    hasher.update(port_path.as_bytes());
-    let digest = hasher.finalize();
-    let mut name = String::from("Local\\flux-purr-devd-serial-");
-    for byte in &digest[..8] {
-        name.push_str(&format!("{byte:02x}"));
-    }
-    name.encode_utf16().chain(std::iter::once(0)).collect()
+pub(crate) async fn acquire_serial_process_lock(
+    port_path: &str,
+    timeout: Duration,
+) -> Result<SerialPortProcessLock, HttpError> {
+    let port_path = port_path.to_string();
+    let deadline = Instant::now() + timeout;
+    tokio::task::spawn_blocking(move || SerialPortProcessLock::acquire(&port_path, deadline))
+        .await
+        .map_err(|_| HttpError::internal("serial lock worker failed"))?
 }
 
 pub(crate) fn is_esp_usb_serial_jtag_port(port_path: &str) -> bool {
