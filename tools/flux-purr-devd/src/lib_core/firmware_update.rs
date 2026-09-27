@@ -952,10 +952,9 @@ pub(crate) async fn reconnect_firmware_operation(
         progress.stage_completed("runtime_reconnect", json!({}));
     } else {
         progress.stage_failed("runtime_reconnect", "runtime_reconnect_failed");
-        mark_firmware_runtime_unverified(state, device_id);
     }
     progress.stage_started("runtime_verify", json!({}));
-    Ok(identity.as_ref().is_ok_and(|identity| {
+    let verified = identity.as_ref().is_ok_and(|identity| {
         identity.firmware_version == prepared.bundle.manifest.identity.version
             && identity.git_sha == prepared.bundle.manifest.identity.source_sha
             && identity.build_id == prepared.bundle.manifest.identity.build_id
@@ -964,7 +963,11 @@ pub(crate) async fn reconnect_firmware_operation(
             && status.layout_version == prepared.bundle.manifest.layout.version
             && status.partition_table_sha256
                 == prepared.bundle.manifest.layout.partition_table_sha256
-    }))
+    });
+    if !verified {
+        mark_firmware_runtime_unverified(state, device_id);
+    }
+    Ok(verified)
 }
 
 fn mark_firmware_runtime_unverified(state: &AppState, device_id: &str) {
