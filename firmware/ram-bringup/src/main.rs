@@ -329,7 +329,11 @@ mod device {
                 }
             };
             for index in 0..(DISPLAY_FRAME_BYTES / pixels.len()) {
-                let chunk = &frame[index * pixels.len()..(index + 1) * pixels.len()];
+                let chunk = if matches!(pattern, DisplayPattern::Calibration) {
+                    &frame[index * pixels.len()..(index + 1) * pixels.len()]
+                } else {
+                    &frame[..]
+                };
                 if SpiBus::write(&mut self.display, chunk).is_err() {
                     self.display_cs.set_high();
                     return false;
