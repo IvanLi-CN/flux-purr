@@ -1350,6 +1350,8 @@ pub(crate) fn store_serial_session(
 pub struct SerialPortProcessLock {
     #[cfg(unix)]
     file: File,
+    #[cfg(windows)]
+    mutex: windows_sys::Win32::Foundation::HANDLE,
 }
 
 impl SerialPortProcessLock {
@@ -1359,10 +1361,20 @@ impl SerialPortProcessLock {
             Self::acquire_unix(port_path, deadline).map(|file| Self { file })
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            Self::acquire_windows(port_path, deadline).map(|mutex| Self { mutex })
+        }
+
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (port_path, deadline);
-            Ok(Self {})
+            Err(HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "serial_lock_unsupported",
+                "Exclusive USB serial access is unsupported on this platform.",
+                false,
+            ))
         }
     }
 
@@ -1404,6 +1416,57 @@ impl SerialPortProcessLock {
             true,
         ))
     }
+
+    #[cfg(windows)]
+    fn acquire_windows(
+        port_path: &str,
+        deadline: Instant,
+    ) -> Result<windows_sys::Win32::Foundation::HANDLE, HttpError> {
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        };
+        use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+        let name = serial_lock_name(port_path);
+        // SAFETY: the mutex name is a valid, NUL-terminated UTF-16 string and
+        // the default security descriptor is appropriate for same-user CLI processes.
+        let mutex = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        if mutex.is_null() {
+            return Err(HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "serial_lock_failed",
+                "Failed to create the Windows USB serial lock.",
+                true,
+            ));
+        }
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let wait_ms = remaining.as_millis().clamp(1, u32::MAX as u128) as u32;
+            // SAFETY: `mutex` is a live handle returned by CreateMutexW.
+            let result = unsafe { WaitForSingleObject(mutex, wait_ms) };
+            if result == WAIT_OBJECT_0 || result == WAIT_ABANDONED {
+                return Ok(mutex);
+            }
+            if result != WAIT_TIMEOUT {
+                // SAFETY: the handle is still owned by this function.
+                unsafe { CloseHandle(mutex) };
+                return Err(HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "serial_lock_failed",
+                    "Windows USB serial lock wait failed.",
+                    true,
+                ));
+            }
+        }
+        // SAFETY: the mutex was not acquired and remains owned by this function.
+        unsafe { CloseHandle(mutex) };
+        Err(HttpError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "serial_lock_timeout",
+            "Timed out waiting for exclusive USB serial access.",
+            true,
+        ))
+    }
 }
 
 #[cfg(unix)]
@@ -1411,6 +1474,20 @@ impl Drop for SerialPortProcessLock {
     fn drop(&mut self) {
         // SAFETY: flock is called with a valid file descriptor owned by `self.file`.
         let _ = unsafe { flock(self.file.as_raw_fd(), LOCK_UN) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SerialPortProcessLock {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::ReleaseMutex;
+
+        // SAFETY: `mutex` is owned by this guard and was acquired by the current thread.
+        unsafe {
+            let _ = ReleaseMutex(self.mutex);
+            let _ = CloseHandle(self.mutex);
+        }
     }
 }
 
@@ -1425,6 +1502,18 @@ pub(crate) fn serial_lock_path(port_path: &str) -> PathBuf {
     }
     name.push_str(".lock");
     std::env::temp_dir().join(name)
+}
+
+#[cfg(windows)]
+fn serial_lock_name(port_path: &str) -> Vec<u16> {
+    let mut hasher = Sha256::new();
+    hasher.update(port_path.as_bytes());
+    let digest = hasher.finalize();
+    let mut name = String::from("Local\\flux-purr-devd-serial-");
+    for byte in &digest[..8] {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    name.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 pub(crate) fn is_esp_usb_serial_jtag_port(port_path: &str) -> bool {

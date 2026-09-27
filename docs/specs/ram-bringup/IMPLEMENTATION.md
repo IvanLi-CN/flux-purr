@@ -20,9 +20,11 @@
   and the pinned espflash RAM loader. It holds the verified serial connection
   through the preview command and response, and encodes optional display colors
   on the existing `preview_display` capability.
+- Direct RAM, flash, and recover commands share the same per-port process lock;
+  Unix uses `flock` and Windows uses a named mutex.
 - The host RAM loader validates ELF identification, program-header arithmetic,
-  loadable segment bounds, and internal-memory placement before invoking
-  espflash.
+  loadable segment and section bounds, and internal-memory placement before
+  invoking espflash.
 - The host ELF parser keeps its tuple-shaped helper results behind named type
   aliases so the devd clippy gate stays clean without changing the loader or
   wire behavior.

@@ -3498,18 +3498,36 @@ fn serial_request_line_limit_accepts_full_line_and_rejects_overflow() {
     assert_eq!(error.error.code, "usb_request_too_large");
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn serial_lock_is_not_reentrant_until_previous_session_is_dropped() {
-    let port_path = "/tmp/flux-purr-devd-test-port";
+    let port_path = if cfg!(windows) {
+        "COM_FLUX_PURR_TEST"
+    } else {
+        "/tmp/flux-purr-devd-test-port"
+    };
     let deadline = Instant::now() + Duration::from_millis(250);
 
     let first = SerialPortProcessLock::acquire(port_path, deadline).unwrap();
 
-    let second = match SerialPortProcessLock::acquire(
-        port_path,
-        Instant::now() + Duration::from_millis(250),
-    ) {
+    let second = {
+        #[cfg(unix)]
+        {
+            SerialPortProcessLock::acquire(port_path, Instant::now() + Duration::from_millis(250))
+        }
+        #[cfg(windows)]
+        {
+            std::thread::spawn(move || {
+                SerialPortProcessLock::acquire(
+                    port_path,
+                    Instant::now() + Duration::from_millis(250),
+                )
+            })
+            .join()
+            .expect("serial lock worker should finish")
+        }
+    };
+    let second = match second {
         Ok(_) => panic!("second serial lock should time out while first session is alive"),
         Err(error) => error,
     };

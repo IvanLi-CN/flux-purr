@@ -336,7 +336,7 @@ fn validate_ram_segment(
     if ranges_overlap(paddr, end, RAM_RESERVED) {
         return Err(format!("RAM ELF segment {index} overlaps reserved memory").into());
     }
-    if paddr == RAM_VECTORS.0 && end <= RAM_VECTORS.1 {
+    if paddr == RAM_VECTORS.0 && end == RAM_VECTORS.1 {
         return Ok((0, 0));
     }
     if range_contained(paddr, end, RAM_IRAM) {
@@ -413,7 +413,7 @@ fn validate_ram_section(
     if ranges_overlap(address, end, RAM_RESERVED) {
         return Err(format!("RAM ELF section {index} overlaps reserved memory").into());
     }
-    if address == RAM_VECTORS.0 && end <= RAM_VECTORS.1 {
+    if address == RAM_VECTORS.0 && end == RAM_VECTORS.1 {
         return Ok(());
     }
     if range_contained(address, end, RAM_IRAM) || range_contained(address, end, RAM_DRAM) {
@@ -820,8 +820,11 @@ mod tests {
     }
 
     fn test_elf(address: u32) -> Vec<u8> {
+        test_elf_with_payload(address, 32)
+    }
+
+    fn test_elf_with_payload(address: u32, payload_size: usize) -> Vec<u8> {
         let payload_offset = 52 + 32;
-        let payload_size = 32usize;
         let mut data = vec![0u8; payload_offset + payload_size];
         data[0..4].copy_from_slice(b"\x7fELF");
         data[4] = 1;
@@ -855,5 +858,22 @@ mod tests {
         let mut flash = tempfile::NamedTempFile::new().unwrap();
         flash.write_all(&test_elf(0x4200_0000)).unwrap();
         assert!(validate_ram_elf(flash.path()).is_err());
+    }
+
+    #[test]
+    fn ram_elf_gate_accepts_only_the_complete_vectors_segment() {
+        let mut valid = tempfile::NamedTempFile::new().unwrap();
+        valid
+            .write_all(&test_elf_with_payload(0x4037_8000, 0x400))
+            .unwrap();
+        assert!(validate_ram_elf(valid.path()).is_ok());
+
+        for payload_size in [32, 0x401] {
+            let mut invalid = tempfile::NamedTempFile::new().unwrap();
+            invalid
+                .write_all(&test_elf_with_payload(0x4037_8000, payload_size))
+                .unwrap();
+            assert!(validate_ram_elf(invalid.path()).is_err());
+        }
     }
 }

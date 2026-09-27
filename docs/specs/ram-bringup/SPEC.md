@@ -57,12 +57,13 @@ flux-purr ram-run exit --port <authorized-port>
 
 ## ELF gate
 
-`tools/check_ram_elf.py` parses ELF program headers and requires Xtensa
-loadable segments to stay in the internal IRAM/DRAM windows, except for the
-complete linker-owned vectors segment at `0x40378000..0x40378400`. Payload
-sections must avoid vectors and reserved memory, preserve `p_filesz <= p_memsz`,
-and fit the explicit budgets. Partial vector overlaps, flash mapped addresses,
-and non-identity load addresses fail the check.
+`tools/check_ram_elf.py` parses ELF program headers and loadable section
+headers. Xtensa loadable segments must stay in the internal IRAM/DRAM windows,
+except for the complete linker-owned vectors segment at
+`0x40378000..0x40378400`. Payload sections must avoid vectors and reserved
+memory, preserve `p_filesz <= p_memsz`, and fit the explicit budgets. Partial
+vector overlaps, flash mapped addresses, non-identity load addresses, missing
+section tables, and missing loadable sections fail the check.
 
 ## Related ADRs
 

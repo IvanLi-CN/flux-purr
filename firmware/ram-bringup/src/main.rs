@@ -237,15 +237,19 @@ mod device {
         }
 
         fn set_display_cs(&mut self, level: Level) -> bool {
-            let flushed = SpiBus::flush(&mut self.display).is_ok();
+            if SpiBus::flush(&mut self.display).is_err() {
+                return false;
+            }
             self.display_cs.set_level(level);
-            flushed
+            true
         }
 
         fn set_display_dc(&mut self, level: Level) -> bool {
-            let flushed = SpiBus::flush(&mut self.display).is_ok();
+            if SpiBus::flush(&mut self.display).is_err() {
+                return false;
+            }
             self.display_dc.set_level(level);
-            flushed
+            true
         }
 
         fn rgb(&mut self, red: bool, green: bool, blue: bool) {

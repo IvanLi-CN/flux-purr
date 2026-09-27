@@ -26,7 +26,7 @@ class ElfError(ValueError):
     pass
 
 
-def parse_elf(data: bytes) -> tuple[int, list[dict[str, int]]]:
+def parse_elf(data: bytes) -> tuple[int, list[dict[str, int]], list[dict[str, int]]]:
     if data[:4] != b"\x7fELF":
         raise ElfError("artifact is not an ELF")
     if len(data) < 6:
@@ -37,13 +37,17 @@ def parse_elf(data: bytes) -> tuple[int, list[dict[str, int]]]:
     if elf_class == 1:
         header_fmt = "<16sHHIIIIIHHHHHH"
         program_fmt = "<IIIIIIII"
+        section_fmt = "<IIIIIIIIII"
         entry_index = 4
         phoff_index, phentsize_index, phnum_index = 5, 9, 10
+        shoff_index, shentsize_index, shnum_index = 6, 11, 12
     elif elf_class == 2:
         header_fmt = "<16sHHIQQQIHHHHHH"
         program_fmt = "<IIQQQQQQ"
+        section_fmt = "<IIQQQQIIQQ"
         entry_index = 4
         phoff_index, phentsize_index, phnum_index = 5, 9, 10
+        shoff_index, shentsize_index, shnum_index = 6, 11, 12
     else:
         raise ElfError(f"unsupported ELF class {elf_class}")
     header_size = struct.calcsize(header_fmt)
@@ -81,7 +85,36 @@ def parse_elf(data: bytes) -> tuple[int, list[dict[str, int]]]:
                     "align": p_align,
                 }
             )
-    return header[entry_index], segments
+    shoff = header[shoff_index]
+    shentsize = header[shentsize_index]
+    shnum = header[shnum_index]
+    expected_section = struct.calcsize(section_fmt)
+    if shnum == 0 or shoff == 0:
+        raise ElfError("ELF contains no section headers")
+    if shentsize < expected_section:
+        raise ElfError("section header entry is too small")
+    sections: list[dict[str, int]] = []
+    for index in range(shnum):
+        offset = shoff + index * shentsize
+        if offset + expected_section > len(data):
+            raise ElfError("truncated section header table")
+        fields = struct.unpack_from(section_fmt, data, offset)
+        if elf_class == 1:
+            _, section_type, flags, address, data_offset, size, _, _, _, _ = fields
+        else:
+            _, section_type, flags, address, data_offset, size, _, _, _, _ = fields
+        if section_type in (1, 14) and flags != 0 and address != 0 and data_offset != 0 and size != 0:
+            sections.append(
+                {
+                    "index": index,
+                    "type": section_type,
+                    "flags": flags,
+                    "address": address,
+                    "offset": data_offset,
+                    "size": size,
+                }
+            )
+    return header[entry_index], segments, sections
 
 
 def overlaps(start: int, end: int, window: tuple[int, int]) -> bool:
@@ -94,7 +127,7 @@ def contained(start: int, end: int, window: tuple[int, int]) -> bool:
 
 def validate(path: Path) -> dict[str, object]:
     data = path.read_bytes()
-    entry, segments = parse_elf(data)
+    entry, segments, sections = parse_elf(data)
     if not segments:
         raise ElfError("ELF contains no PT_LOAD segments")
     iram_bytes = 0
@@ -113,7 +146,7 @@ def validate(path: Path) -> dict[str, object]:
             raise ElfError(f"segment {segment['index']} maps to flash address {start:#x}")
         if any(overlaps(start, end, window) for window in RESERVED):
             raise ElfError(f"segment {segment['index']} overlaps reserved memory {start:#x}-{end:#x}")
-        if start == VECTORS[0] and end <= VECTORS[1]:
+        if start == VECTORS[0] and end == VECTORS[1]:
             region = "vectors"
         elif contained(start, end, IRAM):
             iram_bytes += segment["memsz"]
@@ -124,6 +157,27 @@ def validate(path: Path) -> dict[str, object]:
         else:
             raise ElfError(f"segment {segment['index']} is outside internal RAM {start:#x}-{end:#x}")
         report_segments.append({**segment, "region": region, "end": end})
+    if not sections:
+        raise ElfError("ELF contains no loadable sections")
+    report_sections = []
+    for section in sections:
+        start = section["address"]
+        end = start + section["size"]
+        if section["offset"] + section["size"] > len(data):
+            raise ElfError(f"section {section['index']} exceeds the artifact")
+        if any(overlaps(start, end, window) for window in FLASH_WINDOWS):
+            raise ElfError(f"section {section['index']} maps to flash address {start:#x}")
+        if any(overlaps(start, end, window) for window in RESERVED):
+            raise ElfError(f"section {section['index']} overlaps reserved memory {start:#x}-{end:#x}")
+        if start == VECTORS[0] and end == VECTORS[1]:
+            region = "vectors"
+        elif contained(start, end, IRAM):
+            region = "iram"
+        elif contained(start, end, DRAM):
+            region = "dram"
+        else:
+            raise ElfError(f"section {section['index']} is outside internal RAM {start:#x}-{end:#x}")
+        report_sections.append({**section, "region": region, "end": end})
     if iram_bytes > IRAM[1] - IRAM[0]:
         raise ElfError(f"IRAM budget exceeded: {iram_bytes} bytes")
     if dram_bytes > DRAM[1] - DRAM[0]:
@@ -135,6 +189,7 @@ def validate(path: Path) -> dict[str, object]:
         "machine": "xtensa",
         "entry": entry,
         "segments": report_segments,
+        "sections": report_sections,
         "iram_bytes": iram_bytes,
         "iram_budget": IRAM[1] - IRAM[0],
         "dram_bytes": dram_bytes,

@@ -1,4 +1,14 @@
 use super::*;
+use flux_purr_devd::serial::SerialPortProcessLock;
+
+const DIRECT_SERIAL_LOCK_TIMEOUT: Duration = Duration::from_secs(180);
+
+fn acquire_direct_serial_lock(
+    port: &str,
+) -> Result<SerialPortProcessLock, Box<dyn std::error::Error + Send + Sync>> {
+    SerialPortProcessLock::acquire(port, StdInstant::now() + DIRECT_SERIAL_LOCK_TIMEOUT)
+        .map_err(|error| format!("failed to acquire serial lock: {error:?}").into())
+}
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cli = Cli::parse();
@@ -463,6 +473,7 @@ pub(crate) fn direct_flash_with_program_inner(
     if require_real_flash_enablement {
         ensure_real_flash_enabled()?;
     }
+    let _serial_lock = acquire_direct_serial_lock(&args.port)?;
     if !args.skip_backup && rom_probe(&args.port) {
         return Err(
             "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
@@ -510,6 +521,7 @@ pub(crate) async fn direct_recover(
     validate_local_elf(&args.elf)?;
     let partition_table = embedded_partition_table()?;
     ensure_real_flash_enabled()?;
+    let _serial_lock = acquire_direct_serial_lock(&args.port)?;
     let program = resolve_espflash_program();
     let erase_args = direct_erase_flash_args(&args.port);
     let erase_diagnostics = run_espflash_command(&program, &erase_args)?;
