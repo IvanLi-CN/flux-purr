@@ -1225,7 +1225,7 @@ async fn usbmodem_connection_failure_retries_usb_reset_before_default_reset() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn bundle_flash_retries_a_transient_connection_failure() {
+async fn bundle_flash_does_not_retry_a_write_connection_failure() {
     let dir = tempdir().unwrap();
     let program = dir.path().join("retrying-bundle-espflash.sh");
     let attempts = dir.path().join("attempts.log");
@@ -1242,7 +1242,7 @@ async fn bundle_flash_retries_a_transient_connection_failure() {
     permissions.set_mode(0o700);
     std::fs::set_permissions(&program, permissions).unwrap();
 
-    require_bundle_espflash_success(
+    let error = require_bundle_espflash_success(
         &program,
         &[
             "write-bin".to_string(),
@@ -1252,11 +1252,13 @@ async fn bundle_flash_retries_a_transient_connection_failure() {
         "/dev/cu.usbmodem2111401",
     )
     .await
-    .unwrap();
+    .unwrap_err();
+
+    assert_eq!(error.error.code, "espflash_failed");
 
     assert_eq!(
         std::fs::read_to_string(attempts).unwrap(),
-        "write-bin --before no-reset\nwrite-bin --before usb-reset\n"
+        "write-bin --before no-reset\n"
     );
 }
 
@@ -1303,7 +1305,11 @@ async fn espflash_subprocess_timeout_is_reported_without_hanging_the_request() {
 
     let dir = tempdir().unwrap();
     let program = dir.path().join("stuck-espflash");
-    std::fs::write(&program, "#!/bin/sh\nsleep 5\n").unwrap();
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf 'partial stdout\\n'\nprintf 'partial stderr\\n' >&2\nsleep 5\n",
+    )
+    .unwrap();
     let mut permissions = std::fs::metadata(&program).unwrap().permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&program, permissions).unwrap();
@@ -1312,13 +1318,16 @@ async fn espflash_subprocess_timeout_is_reported_without_hanging_the_request() {
     let error = run_espflash_command_with_timeout(
         &program,
         &["read-flash".to_string()],
-        Duration::from_millis(50),
+        Duration::from_millis(250),
     )
     .await
     .unwrap_err();
 
     assert_eq!(error.error.code, "flash_tool_timeout");
-    assert!(started.elapsed() < Duration::from_secs(1));
+    let details = error.error.details.expect("timeout diagnostics");
+    assert!(details.get("stdout").is_some());
+    assert!(details.get("stderr").is_some());
+    assert!(started.elapsed() < Duration::from_secs(2));
 }
 
 #[tokio::test]
@@ -3995,6 +4004,52 @@ fn seed_test_bundle(state: &AppState) -> String {
     ));
     fs::rename(output, canonical).unwrap();
     bundle.bundle_sha256
+}
+
+#[test]
+fn runtime_verification_requires_product_firmware_kind() {
+    let directory = tempdir().unwrap();
+    let bundle = firmware_bundle::build_bundle(
+        &directory.path().join("runtime.fluxpurr-fw"),
+        firmware_bundle::BundleIdentity {
+            version: "0.1.0".into(),
+            source_sha: "e9754917ee23481dd30571fb7a78cb2c486b82a3".into(),
+            build_id: "0123456789abcdef".into(),
+            channel: firmware_bundle::BundleChannel::Local,
+        },
+        &vec![0x11; 0x4000],
+        include_bytes!("../../../firmware/partitions.bin"),
+        &vec![0x33; 0x4000],
+    )
+    .unwrap();
+    let identity = Identity {
+        firmware_kind: Some(FirmwareKind::Product),
+        device_id: "device".into(),
+        firmware_version: bundle.manifest.identity.version.clone(),
+        build_id: bundle.manifest.identity.build_id.clone(),
+        git_sha: bundle.manifest.identity.source_sha.clone(),
+        board: "esp32-s3".into(),
+        api_version: "2026-05-29".into(),
+        protocol_version: "flux-purr.usb.v1".into(),
+        hostname: "device".into(),
+        capabilities: vec![],
+    };
+
+    assert!(runtime_identity_matches_bundle(&identity, &bundle));
+    assert!(!runtime_identity_matches_bundle(
+        &Identity {
+            firmware_kind: Some(FirmwareKind::RamBringup),
+            ..identity.clone()
+        },
+        &bundle,
+    ));
+    assert!(!runtime_identity_matches_bundle(
+        &Identity {
+            firmware_kind: None,
+            ..identity
+        },
+        &bundle,
+    ));
 }
 
 #[test]

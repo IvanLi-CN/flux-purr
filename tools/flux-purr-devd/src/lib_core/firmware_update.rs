@@ -269,15 +269,24 @@ pub(crate) async fn verify_reconnected_firmware(
         Some(usb_identity),
     )
     .await;
-    identity.as_ref().is_ok_and(|identity| {
-        identity.firmware_version == bundle.manifest.identity.version
-            && identity.git_sha == bundle.manifest.identity.source_sha
-            && identity.build_id == bundle.manifest.identity.build_id
-    }) && install_status.as_ref().is_ok_and(|status| {
-        status.layout_id == bundle.manifest.layout.id
-            && status.layout_version == bundle.manifest.layout.version
-            && status.partition_table_sha256 == bundle.manifest.layout.partition_table_sha256
-    })
+    identity
+        .as_ref()
+        .is_ok_and(|identity| runtime_identity_matches_bundle(identity, bundle))
+        && install_status.as_ref().is_ok_and(|status| {
+            status.layout_id == bundle.manifest.layout.id
+                && status.layout_version == bundle.manifest.layout.version
+                && status.partition_table_sha256 == bundle.manifest.layout.partition_table_sha256
+        })
+}
+
+pub(crate) fn runtime_identity_matches_bundle(
+    identity: &Identity,
+    bundle: &firmware_bundle::FirmwareBundle,
+) -> bool {
+    identity.firmware_kind == Some(FirmwareKind::Product)
+        && identity.firmware_version == bundle.manifest.identity.version
+        && identity.git_sha == bundle.manifest.identity.source_sha
+        && identity.build_id == bundle.manifest.identity.build_id
 }
 
 pub(crate) fn bundle_summary(bundle: &firmware_bundle::FirmwareBundle) -> FirmwareBundleSummary {
@@ -954,16 +963,15 @@ pub(crate) async fn reconnect_firmware_operation(
         progress.stage_failed("runtime_reconnect", "runtime_reconnect_failed");
     }
     progress.stage_started("runtime_verify", json!({}));
-    let verified = identity.as_ref().is_ok_and(|identity| {
-        identity.firmware_version == prepared.bundle.manifest.identity.version
-            && identity.git_sha == prepared.bundle.manifest.identity.source_sha
-            && identity.build_id == prepared.bundle.manifest.identity.build_id
-    }) && install_status.as_ref().is_ok_and(|status| {
-        status.layout_id == prepared.bundle.manifest.layout.id
-            && status.layout_version == prepared.bundle.manifest.layout.version
-            && status.partition_table_sha256
-                == prepared.bundle.manifest.layout.partition_table_sha256
-    });
+    let verified = identity
+        .as_ref()
+        .is_ok_and(|identity| runtime_identity_matches_bundle(identity, &prepared.bundle))
+        && install_status.as_ref().is_ok_and(|status| {
+            status.layout_id == prepared.bundle.manifest.layout.id
+                && status.layout_version == prepared.bundle.manifest.layout.version
+                && status.partition_table_sha256
+                    == prepared.bundle.manifest.layout.partition_table_sha256
+        });
     if !verified {
         mark_firmware_runtime_unverified(state, device_id);
     }
@@ -1101,7 +1109,8 @@ async fn run_bundle_erase_if_needed(
         "--after".into(),
         "no-reset".into(),
     ]);
-    progress.require(require_bundle_espflash_success_for_target(program, &args, target).await)?;
+    progress
+        .require(require_bundle_espflash_success_for_target(program, &args, target, true).await)?;
     progress.stage_completed("erase", json!({}));
     progress.stage_started(
         "write_segments",
@@ -1128,8 +1137,9 @@ async fn write_bundle_segments(
     for segment in &bundle.manifest.segments {
         let path = workspace.join(format!("{:?}.bin", segment.kind));
         let args = build_bundle_write_bin_args(common, "no-reset", segment.address, &path);
-        progress
-            .require(require_bundle_espflash_success_for_target(program, &args, target).await)?;
+        progress.require(
+            require_bundle_espflash_success_for_target(program, &args, target, false).await,
+        )?;
         completed_bytes = completed_bytes.saturating_add(segment.length);
         progress.stage_progress(
             "write_segments",
@@ -1158,7 +1168,7 @@ async fn verify_bundle_checksums(
     for (index, segment) in bundle.manifest.segments.iter().enumerate() {
         let checksum = build_checksum_md5_args(common, segment.address, segment.length);
         let output = progress.require(
-            require_bundle_espflash_success_for_target(program, &checksum, target).await,
+            require_bundle_espflash_success_for_target(program, &checksum, target, false).await,
         )?;
         if !String::from_utf8_lossy(&output.stdout)
             .to_ascii_lowercase()
@@ -1189,7 +1199,8 @@ async fn reset_after_bundle(
     progress.stage_started("reset", json!({}));
     let mut reset = vec!["reset".into()];
     reset.extend(common.iter().cloned());
-    progress.require(require_bundle_espflash_success_for_target(program, &reset, target).await)?;
+    progress
+        .require(require_bundle_espflash_success_for_target(program, &reset, target, true).await)?;
     progress.stage_completed("reset", json!({}));
     Ok(())
 }
@@ -1221,6 +1232,8 @@ pub(crate) async fn require_bundle_espflash_success(
             port_path,
             usb_identity: None,
         },
+        args.first()
+            .is_some_and(|command| matches!(command.as_str(), "erase-flash" | "reset")),
     )
     .await
 }
@@ -1229,6 +1242,7 @@ async fn require_bundle_espflash_success_for_target(
     program: &Path,
     args: &[String],
     target: FirmwareFlashTarget<'_>,
+    allow_connection_recovery: bool,
 ) -> Result<Output, HttpError> {
     require_usb_serial_identity(target.port_path, target.usb_identity)?;
     let output = run_espflash_command_with_identity(
@@ -1243,7 +1257,10 @@ async fn require_bundle_espflash_success_for_target(
     if output.status.success() {
         return Ok(output);
     }
-    if !is_esp_usb_serial_jtag_port(target.port_path) || !espflash_connection_failed(&output) {
+    if !allow_connection_recovery
+        || !is_esp_usb_serial_jtag_port(target.port_path)
+        || !espflash_connection_failed(&output)
+    {
         return Err(espflash_command_error(program, args, &output));
     }
     let Some(before_index) = args.iter().position(|argument| argument == "--before") else {

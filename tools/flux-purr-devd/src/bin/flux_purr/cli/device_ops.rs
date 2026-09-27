@@ -6,6 +6,7 @@ use flux_purr_devd::serial::{
 
 const DIRECT_SERIAL_LOCK_TIMEOUT: Duration = Duration::from_secs(180);
 const DIRECT_ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
+const DIRECT_ROM_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn acquire_direct_serial_lock(
     port: &str,
@@ -486,7 +487,7 @@ pub(crate) fn direct_flash_with_program(
 
 pub(crate) type SnapshotReader =
     fn(&str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
-pub(crate) type RomProbe = fn(&str) -> bool;
+pub(crate) type RomProbe = fn(&str, Option<&UsbSerialIdentity>) -> bool;
 
 #[allow(dead_code)]
 pub(crate) fn direct_flash_with_program_inner(
@@ -529,7 +530,7 @@ fn direct_flash_with_program_inner_guarded(
     }
     let _serial_lock = acquire_direct_serial_lock(&args.port)?;
     ensure_direct_usb_identity(&args.port, usb_identity)?;
-    if !args.skip_backup && rom_probe(&args.port) {
+    if !args.skip_backup && rom_probe(&args.port, usb_identity) {
         return Err(
             "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
                 .into(),
@@ -543,7 +544,7 @@ fn direct_flash_with_program_inner_guarded(
             Ok(snapshot) => snapshot,
             Err(error) if snapshot_error_may_be_rom_mode(error.as_ref()) => {
                 ensure_direct_usb_identity(&args.port, usb_identity)?;
-                if rom_probe(&args.port) {
+                if rom_probe(&args.port, usb_identity) {
                     return Err(
                         "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
                             .into(),
@@ -1164,13 +1165,19 @@ pub(crate) fn snapshot_error_may_be_rom_mode(error: &dyn std::error::Error) -> b
     message.contains("no USB JSONL response") || message.contains("non-JSON serial output")
 }
 
-pub(crate) fn detect_rom_download_mode(port: &str) -> bool {
+pub(crate) fn detect_rom_download_mode(
+    port: &str,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> bool {
     let program = resolve_espflash_program();
-    ProcessCommand::new(program)
-        .args(rom_download_probe_args(port))
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    flux_purr_devd::espflash::run_espflash_command_blocking_with_identity(
+        &program,
+        &rom_download_probe_args(port),
+        DIRECT_ROM_PROBE_TIMEOUT,
+        port,
+        expected_usb_identity,
+    )
+    .is_ok_and(|output| output.status.success())
 }
 
 pub(crate) fn rom_download_probe_args(port: &str) -> Vec<String> {

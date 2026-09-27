@@ -161,7 +161,8 @@ fn request_id_is_safe(request_id: &[u8]) -> bool {
 }
 
 pub fn parse_request(line: &[u8]) -> Option<(Request, usize)> {
-    serde_json_core::de::from_slice(line).ok()
+    let (request, consumed) = serde_json_core::de::from_slice(line).ok()?;
+    (consumed == line.len()).then_some((request, consumed))
 }
 
 pub fn write_identity(out: &mut String<1024>) -> core::fmt::Result {
@@ -308,5 +309,13 @@ mod tests {
         )
         .expect("request parses");
         assert_eq!(request.command(), None);
+    }
+
+    #[test]
+    fn request_parser_rejects_trailing_bytes() {
+        assert!(parse_request(
+            br#"{"type":"ram_bringup","requestId":"r1","op":"exit","capability":"exit"}garbage"#,
+        )
+        .is_none());
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use flux_purr_devd::serial::UsbSerialIdentity;
 use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
@@ -5748,7 +5749,7 @@ fn direct_flash_archives_before_invoking_espflash() {
     fn fixture_snapshot(_port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(vec![0xa5; developer_backup::EEPROM_SNAPSHOT_BYTES])
     }
-    fn fixture_rom_probe(_port: &str) -> bool {
+    fn fixture_rom_probe(_port: &str, _expected: Option<&UsbSerialIdentity>) -> bool {
         false
     }
 
@@ -5805,7 +5806,7 @@ fn direct_flash_blocks_espflash_when_backup_directory_is_unavailable() {
     fn fixture_snapshot(_port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(vec![0x3c; developer_backup::EEPROM_SNAPSHOT_BYTES])
     }
-    fn fixture_rom_probe(_port: &str) -> bool {
+    fn fixture_rom_probe(_port: &str, _expected: Option<&UsbSerialIdentity>) -> bool {
         false
     }
 

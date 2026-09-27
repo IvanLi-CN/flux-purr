@@ -554,6 +554,7 @@ pub(crate) async fn serial_eeprom_maintenance(
 ) -> Result<EepromMaintenanceResponse, HttpError> {
     validate_eeprom_maintenance_request(payload)?;
     let port_path = native_port_path(target)?;
+    let usb_identity = capture_native_serial_identity(&port_path)?;
     let request_id = format!("devd-{}-eeprom", now_millis());
     let request = serde_json::to_string(&UsbEepromMaintenanceWire {
         frame_type: "eeprom_maintenance",
@@ -576,6 +577,7 @@ pub(crate) async fn serial_eeprom_maintenance(
                 SerialRetryPolicy::SingleShot
             }
         },
+        Some(usb_identity),
     )
     .await?;
     let bytes = if payload.op == EepromMaintenanceOp::Read {
@@ -728,6 +730,7 @@ pub(crate) async fn serial_exchange_sensitive(
     request_id: String,
     request: String,
     retry_policy: SerialRetryPolicy,
+    expected_usb_identity: Option<UsbSerialIdentity>,
 ) -> Result<Value, HttpError> {
     serial_exchange_with_visibility_and_identity(
         state,
@@ -738,7 +741,7 @@ pub(crate) async fn serial_exchange_sensitive(
         SerialExchangeOptions {
             retry_policy,
             record_payload: false,
-            expected_usb_identity: None,
+            expected_usb_identity,
         },
     )
     .await

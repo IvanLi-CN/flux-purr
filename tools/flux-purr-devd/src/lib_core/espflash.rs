@@ -2,7 +2,7 @@ pub(crate) use super::*;
 
 use std::{
     io::Read,
-    process::{Command as StdCommand, Output, Stdio},
+    process::{Child, Command as StdCommand, Output, Stdio},
     thread,
     time::Instant,
 };
@@ -323,14 +323,33 @@ fn run_espflash_command_blocking(
     let stderr_reader = thread::spawn(move || read_process_pipe(stderr));
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(status) = child.try_wait().map_err(|error| {
-            HttpError::internal_with_details(
-                "flash_tool_failed",
-                "Failed to inspect the espflash process.",
-                json!({ "program": program, "error": error.to_string() }),
-            )
-        })? {
-            return collect_process_output(status, stdout_reader, stderr_reader);
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return collect_process_output(status, stdout_reader, stderr_reader);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let details =
+                    match kill_and_collect_process_output(&mut child, stdout_reader, stderr_reader)
+                    {
+                        Ok(output) => json!({
+                            "program": program,
+                            "error": error.to_string(),
+                            "stdout": bounded_espflash_output(&output.stdout),
+                            "stderr": bounded_espflash_output(&output.stderr),
+                        }),
+                        Err(cleanup_error) => json!({
+                            "program": program,
+                            "error": error.to_string(),
+                            "cleanupError": cleanup_error.error.message,
+                        }),
+                    };
+                return Err(HttpError::internal_with_details(
+                    "flash_tool_failed",
+                    "Failed to inspect the espflash process.",
+                    details,
+                ));
+            }
         }
         if let (Some(port_path), Some(expected_usb_identity)) = (port_path, expected_usb_identity)
             && !serial_port_usb_identity_matches(port_path, expected_usb_identity)
@@ -345,22 +364,46 @@ fn run_espflash_command_blocking(
             ));
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
+            let details =
+                match kill_and_collect_process_output(&mut child, stdout_reader, stderr_reader) {
+                    Ok(output) => json!({
+                        "program": program,
+                        "args": args,
+                        "timeoutMs": timeout.as_millis(),
+                        "stdout": bounded_espflash_output(&output.stdout),
+                        "stderr": bounded_espflash_output(&output.stderr),
+                    }),
+                    Err(cleanup_error) => json!({
+                        "program": program,
+                        "args": args,
+                        "timeoutMs": timeout.as_millis(),
+                        "cleanupError": cleanup_error.error.message,
+                    }),
+                };
             return Err(HttpError::internal_with_details(
                 "flash_tool_timeout",
                 "espflash did not finish before the command deadline.",
-                json!({
-                    "program": program,
-                    "args": args,
-                    "timeoutMs": timeout.as_millis(),
-                }),
+                details,
             ));
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn kill_and_collect_process_output(
+    child: &mut Child,
+    stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+) -> Result<Output, HttpError> {
+    let _ = child.kill();
+    let status = child.wait().map_err(|error| {
+        HttpError::internal_with_details(
+            "flash_tool_failed",
+            "Failed to reap the espflash process.",
+            json!({ "error": error.to_string() }),
+        )
+    })?;
+    collect_process_output(status, stdout_reader, stderr_reader)
 }
 
 fn read_process_pipe<R: Read>(mut reader: R) -> io::Result<Vec<u8>> {
