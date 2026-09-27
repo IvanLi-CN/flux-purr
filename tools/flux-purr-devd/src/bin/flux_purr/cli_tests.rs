@@ -169,6 +169,27 @@ fn renders_ram_response_details_and_button_states() {
 }
 
 #[test]
+fn rejects_contract_invalid_ram_success_response() {
+    let error = render_human(&json!({
+        "ok": true,
+        "firmwareKind": "ram_bringup",
+        "capability": "test_buttons",
+        "result": {
+            "detail": "buttons_read_only_ready",
+            "heater": "off",
+            "pd": "untouched",
+            "eeprom": "untouched",
+        },
+    }))
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("result.buttons must be an object")
+    );
+}
+
+#[test]
 fn renders_completed_developer_flash_with_espflash_stages_and_output() {
     let rendered = render_human(&json!({
         "ok": true,

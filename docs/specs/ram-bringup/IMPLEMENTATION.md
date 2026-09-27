@@ -32,11 +32,11 @@
 - `tools/flux-purr-devd/src/bin/flux_purr/cli/ram_run.rs` enforces the exact
   port, stable ESP32-S3 USB VID/PID/serial identity, the in-process RAM ELF
   safety gate, the `flux-purr.usb.v1` JSONL contract, matching
-  identity/build/capability, and the pinned espflash RAM loader. It rechecks the
-  USB identity after acquiring the process lock and before RAM writes or JSONL
-  requests, then holds the verified serial connection through the preview
-  command and response. Optional display colors remain on the existing
-  `preview_display` capability.
+  identity/build/capability, complete command-specific response evidence, and
+  the pinned espflash RAM loader. It rechecks the USB identity after acquiring
+  the process lock and before RAM writes or JSONL requests, then holds the
+  verified serial connection through the preview command and response.
+  Optional display colors remain on the existing `preview_display` capability.
 - Direct RAM, daemon flash, direct flash, and recover commands share the same
   per-port process lock; Unix uses `flock` and Windows uses a byte-range file
   lock that survives worker-thread handoff. Session-cache keys use the same

@@ -912,11 +912,132 @@ fn find_ram_response(
             continue;
         }
         if value.get("ok").and_then(Value::as_bool) == Some(true) {
+            validate_ram_success_response(&value, op)
+                .map_err(|error| format!("RAM bring-up response for {op} is invalid: {error}"))?;
             return Ok(Some(value));
         }
         return Err(format!("RAM bring-up rejected {op}: {value}").into());
     }
     Ok(None)
+}
+
+pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(), String> {
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err("ok must be true".to_string());
+    }
+    let result = value
+        .get("result")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "result must be an object".to_string())?;
+    require_result_string(result, "detail")?;
+    require_result_string_value(result, "heater", "off")?;
+    require_result_string_value(result, "pd", "untouched")?;
+    require_result_string_value(result, "eeprom", "untouched")?;
+
+    match op {
+        "preview_display" | "preview_frontpanel" => {
+            require_result_string_value(result, "detail", "display_preview_ready")?;
+            require_result_string_value(result, "effect", "display_preview")?;
+        }
+        "preview_status_light" => {
+            require_result_string_value(result, "detail", "status_light_rainbow_ready")?;
+            require_result_string_value(result, "effect", "rainbow_7_color")?;
+        }
+        "test_buttons" => {
+            require_result_string_value(result, "detail", "buttons_read_only_ready")?;
+            let buttons = result
+                .get("buttons")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "result.buttons must be an object".to_string())?;
+            for name in ["center", "right", "down", "left", "up"] {
+                if buttons.get(name).and_then(Value::as_bool).is_none() {
+                    return Err(format!("result.buttons.{name} must be a boolean"));
+                }
+            }
+        }
+        "test_adc" => {
+            require_result_string_value(result, "detail", "adc_read_only_ready")?;
+            let adc = result
+                .get("adc")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "result.adc must be an object".to_string())?;
+            for name in ["vin", "rtd"] {
+                require_u16(adc, name)?;
+            }
+        }
+        "test_i2c" => {
+            require_result_string_value(result, "detail", "i2c_identification_read_only_ready")?;
+            let i2c = result
+                .get("i2c")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "result.i2c must be an object".to_string())?;
+            if require_u8(i2c, "address")? != 0x22 {
+                return Err("result.i2c.address is not the allowlisted address".to_string());
+            }
+            if require_u8(i2c, "register")? != 0x09 {
+                return Err("result.i2c.register is not the allowlisted register".to_string());
+            }
+            require_u8(i2c, "value")?;
+        }
+        "test_rgb" => {
+            require_result_string_value(result, "detail", "rgb_ready")?;
+            require_result_string_value(result, "effect", "rgb_3_color")?;
+        }
+        "test_buzzer" => {
+            require_result_string_value(result, "detail", "buzzer_ready")?;
+            require_result_string_value(result, "effect", "20ms_pulse")?;
+        }
+        "test_fan" => {
+            require_result_string_value(result, "detail", "fan_ready")?;
+            require_result_string_value(result, "effect", "50_percent_pwm_500ms")?;
+        }
+        "exit" => {
+            require_result_string_value(result, "detail", "safe_exit")?;
+        }
+        _ => return Err(format!("unsupported RAM capability: {op}")),
+    }
+    Ok(())
+}
+
+fn require_result_string<'a>(
+    result: &'a serde_json::Map<String, Value>,
+    name: &str,
+) -> Result<&'a str, String> {
+    result
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("result.{name} must be a non-empty string"))
+}
+
+fn require_result_string_value(
+    result: &serde_json::Map<String, Value>,
+    name: &str,
+    expected: &str,
+) -> Result<(), String> {
+    let actual = require_result_string(result, name)?;
+    if actual != expected {
+        return Err(format!(
+            "result.{name} must be {expected:?}, got {actual:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn require_u8(values: &serde_json::Map<String, Value>, name: &str) -> Result<u8, String> {
+    let value = values
+        .get(name)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{name} must be an unsigned integer"))?;
+    u8::try_from(value).map_err(|_| format!("{name} is outside the u8 range"))
+}
+
+fn require_u16(values: &serde_json::Map<String, Value>, name: &str) -> Result<u16, String> {
+    let value = values
+        .get(name)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{name} must be an unsigned integer"))?;
+    u16::try_from(value).map_err(|_| format!("{name} is outside the u16 range"))
 }
 
 fn disable_usb_serial_jtag_watchdogs(
@@ -1065,6 +1186,72 @@ mod tests {
         let request = build_ram_request("ram-1", "preview_display", None);
         let value: Value = serde_json::from_str(&request).expect("request should be JSON");
         assert!(value.get("color").is_none());
+    }
+
+    #[test]
+    fn ram_success_validation_requires_safety_and_command_evidence() {
+        let valid = serde_json::json!({
+            "ok": true,
+            "result": {
+                "detail": "buttons_read_only_ready",
+                "heater": "off",
+                "pd": "untouched",
+                "eeprom": "untouched",
+                "buttons": {
+                    "center": false,
+                    "right": false,
+                    "down": false,
+                    "left": false,
+                    "up": false,
+                },
+            },
+        });
+        assert!(validate_ram_success_response(&valid, "test_buttons").is_ok());
+
+        let mut missing_safety = valid.clone();
+        missing_safety["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("heater");
+        assert!(validate_ram_success_response(&missing_safety, "test_buttons").is_err());
+
+        let mut missing_evidence = valid;
+        missing_evidence["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("buttons");
+        assert!(validate_ram_success_response(&missing_evidence, "test_buttons").is_err());
+    }
+
+    #[test]
+    fn ram_success_validation_checks_measurement_shapes_and_allowlist() {
+        let adc = serde_json::json!({
+            "ok": true,
+            "result": {
+                "detail": "adc_read_only_ready",
+                "heater": "off",
+                "pd": "untouched",
+                "eeprom": "untouched",
+                "adc": {"vin": 572, "rtd": 1299},
+            },
+        });
+        assert!(validate_ram_success_response(&adc, "test_adc").is_ok());
+
+        let i2c = serde_json::json!({
+            "ok": true,
+            "result": {
+                "detail": "i2c_identification_read_only_ready",
+                "heater": "off",
+                "pd": "untouched",
+                "eeprom": "untouched",
+                "i2c": {"address": 34, "register": 9, "value": 6},
+            },
+        });
+        assert!(validate_ram_success_response(&i2c, "test_i2c").is_ok());
+
+        let mut wrong_address = i2c;
+        wrong_address["result"]["i2c"]["address"] = serde_json::json!(80);
+        assert!(validate_ram_success_response(&wrong_address, "test_i2c").is_err());
     }
 
     #[test]

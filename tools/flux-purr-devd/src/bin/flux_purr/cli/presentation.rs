@@ -82,6 +82,10 @@ fn render_ram_response(
         .get("capability")
         .and_then(Value::as_str)
         .unwrap_or("-");
+    if status == "PASS" {
+        super::ram_run::validate_ram_success_response(payload, capability)
+            .map_err(|error| format!("invalid RAM success response: {error}"))?;
+    }
     let result = payload.get("result").unwrap_or(&Value::Null);
     let detail = result.get("detail").and_then(Value::as_str).unwrap_or("-");
     let mut output = format!(

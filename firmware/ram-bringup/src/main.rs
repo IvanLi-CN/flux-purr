@@ -642,16 +642,25 @@ mod device {
             outputs.buzzer.set_low();
             (true, "buzzer_ready", ResponseData::Effect("20ms_pulse"))
         } else if protocol::equal_literal(op, b"test_fan") {
-            let _ = outputs.fan_pwm.set_duty_cycle_percent(50);
-            outputs.fan.set_high();
-            delay_ms(500);
-            let _ = outputs.fan_pwm.set_duty_cycle_percent(0);
-            outputs.fan.set_low();
-            (
-                true,
-                "fan_ready",
-                ResponseData::Effect("50_percent_pwm_500ms"),
-            )
+            if outputs.fan_pwm.set_duty_cycle_percent(50).is_err() {
+                outputs.safe();
+                (false, "fan_pwm_start_failed", ResponseData::None)
+            } else {
+                outputs.fan.set_high();
+                delay_ms(500);
+                let stopped = outputs.fan_pwm.set_duty_cycle_percent(0).is_ok();
+                outputs.fan.set_low();
+                if !stopped {
+                    outputs.safe();
+                    (false, "fan_pwm_stop_failed", ResponseData::None)
+                } else {
+                    (
+                        true,
+                        "fan_ready",
+                        ResponseData::Effect("50_percent_pwm_500ms"),
+                    )
+                }
+            }
         } else {
             outputs.safe();
             (true, "safe_exit", ResponseData::None)

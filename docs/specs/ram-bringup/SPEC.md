@@ -44,8 +44,9 @@ RGB, buzzer, and fan paths.
   explicit `heater=off`, `pd=untouched`, and `eeprom=untouched` fields. Button
   responses include the sampled pressed state for all five keys; ADC responses
   include the VIN and RTD samples; I2C responses include the allowlisted
-  address, register, and returned byte. The CLI human renderer shows these
-  fields instead of reducing every successful response to `OK`.
+  address, register, and returned byte. The CLI validates these required fields
+  before accepting a response and shows them instead of reducing every
+  successful response to `OK`.
 - `preview display` uses the pinned GC9D01 `panel_160x50` initialization,
   including the display-on command and the physical column `15..64`, row
   `0..159` window. It turns on the active-low backlight and displays the
