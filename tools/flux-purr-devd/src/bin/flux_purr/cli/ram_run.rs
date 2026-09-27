@@ -541,7 +541,6 @@ fn ram_load_sections(
             entry_in_executable_section = true;
         }
     }
-    append_ram_zero_fill_sections(segments, &mut load)?;
     if segments
         .iter()
         .any(|segment| segment.paddr == RAM_VECTORS.0)
@@ -632,38 +631,6 @@ fn append_ram_load_section(
         && (address..section_end).contains(&entry)
         && (address == RAM_VECTORS.0 && section_end == RAM_VECTORS.1
             || range_contained(address, section_end, RAM_IRAM)))
-}
-
-fn append_ram_zero_fill_sections(
-    segments: &[RamLoadSegment],
-    load: &mut RamLoadAccumulator,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for segment in segments {
-        let zero_fill = segment
-            .memsz
-            .checked_sub(segment.filesz)
-            .ok_or("RAM ELF segment has p_filesz > p_memsz")?;
-        if zero_fill == 0 {
-            continue;
-        }
-        let address = segment
-            .paddr
-            .checked_add(segment.filesz)
-            .ok_or("RAM ELF zero-fill address overflow")?;
-        record_ram_load_budget(
-            address,
-            zero_fill,
-            &mut load.loaded_iram_bytes,
-            &mut load.loaded_dram_bytes,
-        )?;
-        let zero_fill_len =
-            usize::try_from(zero_fill).map_err(|_| "RAM ELF zero-fill section is too large")?;
-        load.sections.push((
-            u32::try_from(address).map_err(|_| "RAM ELF zero-fill address is too large")?,
-            vec![0; zero_fill_len],
-        ));
-    }
-    Ok(())
 }
 
 fn record_ram_load_budget(
@@ -1234,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn ram_elf_loader_zero_fills_segment_memory_tail() {
+    fn ram_elf_loader_ignores_segment_memory_tail() {
         let mut artifact = tempfile::NamedTempFile::new().unwrap();
         artifact
             .write_all(&test_elf_with_mem_size(0x4037_8400, 32, 48))
@@ -1242,9 +1209,9 @@ mod tests {
 
         let image = read_validated_ram_elf(artifact.path()).unwrap();
 
-        assert_eq!(image.sections.len(), 2);
-        assert_eq!(image.sections[1].0, 0x4037_8420);
-        assert_eq!(image.sections[1].1, vec![0; 16]);
+        assert_eq!(image.sections.len(), 1);
+        assert_eq!(image.sections[0].0, 0x4037_8400);
+        assert_eq!(image.sections[0].1.len(), 32);
     }
 
     #[test]
