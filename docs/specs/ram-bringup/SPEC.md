@@ -33,7 +33,9 @@ RGB, buzzer, and fan paths.
   `espflash=4.5.0` RAM loader.
 - Every command starts and ends with heater output off. PD and EEPROM remain
   untouched. Fan and buzzer actions are bounded, and I2C is limited to
-  read-only identification addresses.
+  read-only identification addresses. `test_fan` drives the shared fan
+  contract through GPIO35 (`FAN_EN`) and a bounded 25 kHz MCPWM signal on
+  GPIO36 (`FAN_PWM`), then returns both outputs to their safe-off levels.
 - `preview display` uses the pinned GC9D01 `panel_160x50` initialization,
   including the display-on command and the physical column `15..64`, row
   `0..159` window. It turns on the active-low backlight and displays the

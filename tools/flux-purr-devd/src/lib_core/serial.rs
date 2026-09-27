@@ -1277,6 +1277,8 @@ pub(crate) fn process_boot_read_chunk(
 pub(crate) type SerialSessionMap = HashMap<String, SerialSession>;
 
 pub(crate) struct SerialSession {
+    session_key: String,
+    port_path: String,
     _serial_lock: SerialPortProcessLock,
     port: Box<dyn SerialSessionPort>,
 }
@@ -1345,19 +1347,46 @@ pub(crate) fn take_or_open_serial_session(
     port_path: &str,
     deadline: Instant,
 ) -> Result<SerialSession, HttpError> {
-    let session_key = serial_session_key(port_path);
-    serial_sessions
-        .remove(&session_key)
-        .map(Ok)
-        .unwrap_or_else(|| open_serial_session(port_path, deadline))
+    if let Some(session) = take_cached_serial_session(serial_sessions, port_path) {
+        if serial_port_path_is_present(port_path) {
+            return Ok(session);
+        }
+        drop(session);
+    }
+    reopen_serial_session(port_path, deadline)
 }
 
 pub(crate) fn store_serial_session(
     serial_sessions: &mut SerialSessionMap,
-    port_path: &str,
+    _port_path: &str,
     session: SerialSession,
 ) {
-    serial_sessions.insert(serial_session_key(port_path), session);
+    serial_sessions.insert(session.session_key.clone(), session);
+}
+
+pub(crate) fn remove_cached_serial_session(
+    serial_sessions: &mut SerialSessionMap,
+    port_path: &str,
+) -> Option<SerialSession> {
+    take_cached_serial_session(serial_sessions, port_path)
+}
+
+fn take_cached_serial_session(
+    serial_sessions: &mut SerialSessionMap,
+    port_path: &str,
+) -> Option<SerialSession> {
+    let session_key = serial_session_key(port_path);
+    if let Some(session) = serial_sessions.remove(&session_key) {
+        return Some(session);
+    }
+    if let Some(session) = serial_sessions.remove(port_path) {
+        return Some(session);
+    }
+    let cached_key = serial_sessions
+        .iter()
+        .find(|(_, session)| session.port_path == port_path)
+        .map(|(key, _)| key.clone());
+    cached_key.and_then(|key| serial_sessions.remove(&key))
 }
 
 pub struct SerialPortProcessLock {
@@ -1562,6 +1591,22 @@ pub(crate) fn serial_session_key(port_path: &str) -> String {
     serial_lock_identity(port_path)
 }
 
+pub fn serial_port_paths_match(requested: &str, enumerated: &str) -> bool {
+    if requested == enumerated {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        false
+    }
+
+    #[cfg(not(windows))]
+    {
+        serial_session_key(requested) == serial_session_key(enumerated)
+    }
+}
+
 #[cfg(any(unix, windows))]
 fn serial_lock_directory() -> PathBuf {
     if let Ok(config_dir) = user_config_dir() {
@@ -1694,9 +1739,20 @@ pub(crate) fn open_serial_session(
     port_path: &str,
     deadline: Instant,
 ) -> Result<SerialSession, HttpError> {
+    if !serial_port_path_is_present(port_path) {
+        return Err(HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "serial_port_unavailable",
+            &format!("Authorized serial port is not currently enumerated: {port_path}"),
+            true,
+        ));
+    }
+    let session_key = serial_session_key(port_path);
     let serial_lock = SerialPortProcessLock::acquire(port_path, deadline)?;
     let port = open_serial_port(port_path)?;
     Ok(SerialSession {
+        session_key,
+        port_path: port_path.to_string(),
         _serial_lock: serial_lock,
         port,
     })
@@ -1728,8 +1784,13 @@ pub(crate) fn reopen_serial_session(
 fn serial_port_path_is_present(port_path: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
-        let _ = port_path;
-        true
+        serialport::available_ports()
+            .map(|ports| {
+                ports
+                    .iter()
+                    .any(|candidate| serial_port_paths_match(port_path, &candidate.port_name))
+            })
+            .unwrap_or(false)
     }
 
     #[cfg(not(target_os = "windows"))]

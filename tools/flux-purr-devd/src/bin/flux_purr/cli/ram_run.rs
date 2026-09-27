@@ -5,7 +5,7 @@ use espflash::{
     target::Chip,
 };
 use flux_purr_devd::PRODUCT_BUILD_ID;
-use flux_purr_devd::serial::SerialPortProcessLock;
+use flux_purr_devd::serial::{SerialPortProcessLock, serial_port_paths_match};
 use serialport::{FlowControl, SerialPort, SerialPortType, TTYPort, UsbPortInfo};
 use std::time::{Duration, Instant};
 
@@ -565,7 +565,7 @@ fn validate_exact_ram_port(port: &str) -> Result<(), Box<dyn std::error::Error +
     }
     let enumerated = serialport::available_ports()?
         .into_iter()
-        .find(|candidate| candidate.port_name == port)
+        .find(|candidate| serial_port_paths_match(port, &candidate.port_name))
         .ok_or_else(|| format!("authorized serial port is no longer enumerated: {port}"))?;
     if !matches!(
         enumerated.port_type,
@@ -759,7 +759,7 @@ fn load_ram_elf(
     validate_exact_ram_port(port)?;
     let port_info = serialport::available_ports()?
         .into_iter()
-        .find(|candidate| candidate.port_name == port)
+        .find(|candidate| serial_port_paths_match(port, &candidate.port_name))
         .ok_or_else(|| format!("authorized serial port is no longer enumerated: {port}"))?;
     let usb_info = match port_info.port_type {
         SerialPortType::UsbPort(info) => info,

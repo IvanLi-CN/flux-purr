@@ -3551,6 +3551,10 @@ fn serial_lock_aliases_share_a_lock_identity() {
         serial_session_key("/dev/cu.usbmodem21141401"),
         serial_session_key("/dev/tty.usbmodem21141401")
     );
+    assert!(serial_port_paths_match(
+        "/dev/cu.usbmodem21141401",
+        "/dev/tty.usbmodem21141401"
+    ));
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -3573,6 +3577,10 @@ fn serial_lock_symlink_aliases_share_a_lock_identity() {
         serial_session_key(device.to_str().unwrap()),
         serial_session_key(alias.to_str().unwrap())
     );
+    assert!(serial_port_paths_match(
+        device.to_str().unwrap(),
+        alias.to_str().unwrap()
+    ));
 }
 
 #[tokio::test]

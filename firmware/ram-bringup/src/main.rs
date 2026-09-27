@@ -18,12 +18,18 @@ fn rom_log_line(line: &[u8]) {
 #[cfg(target_arch = "xtensa")]
 mod device {
     use super::protocol::{self, DisplayPattern};
+    use embedded_hal::pwm::SetDutyCycle;
     use embedded_hal::spi::SpiBus;
     use esp_hal::{
         Blocking,
         analog::adc::{Adc, AdcConfig, AdcPin, Attenuation},
         gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
         i2c::master::{Config as I2cConfig, I2c},
+        mcpwm::{
+            McPwm, PeripheralClockConfig,
+            operator::{PwmPin, PwmPinConfig},
+            timer::PwmWorkingMode,
+        },
         spi::{
             Mode as SpiMode,
             master::{Config as SpiConfig, Spi},
@@ -35,6 +41,9 @@ mod device {
 
     const LINE_MAX: usize = 512;
     const DISPLAY_FRAME_BYTES: usize = 160 * 50 * 2;
+    const MCPWM_PERIPHERAL_CLOCK_HZ: u32 = 40_000_000;
+    const FAN_PWM_PERIOD_TICKS: u16 = 99;
+    const FAN_PWM_FREQUENCY_HZ: u32 = 25_000;
     // Keep the frame out of rodata so the RAM ELF's executable segment stays below the next alignment boundary.
     #[unsafe(link_section = ".data")]
     static CALIBRATION_FRAME: [u8; DISPLAY_FRAME_BYTES] =
@@ -66,6 +75,7 @@ mod device {
         gpio9: esp_hal::peripherals::GPIO9<'static>,
         gpio47: esp_hal::peripherals::GPIO47<'static>,
         gpio35: esp_hal::peripherals::GPIO35<'static>,
+        gpio36: esp_hal::peripherals::GPIO36<'static>,
         gpio48: esp_hal::peripherals::GPIO48<'static>,
         gpio13: esp_hal::peripherals::GPIO13<'static>,
         gpio14: esp_hal::peripherals::GPIO14<'static>,
@@ -77,6 +87,7 @@ mod device {
         gpio11: esp_hal::peripherals::GPIO11<'static>,
         gpio12: esp_hal::peripherals::GPIO12<'static>,
         gpio15: esp_hal::peripherals::GPIO15<'static>,
+        mcpwm0: esp_hal::peripherals::MCPWM0<'static>,
     }
 
     impl PeripheralTokens {
@@ -98,6 +109,7 @@ mod device {
                 GPIO9: gpio9,
                 GPIO47: gpio47,
                 GPIO35: gpio35,
+                GPIO36: gpio36,
                 GPIO48: gpio48,
                 GPIO13: gpio13,
                 GPIO14: gpio14,
@@ -109,6 +121,7 @@ mod device {
                 GPIO11: gpio11,
                 GPIO12: gpio12,
                 GPIO15: gpio15,
+                MCPWM0: mcpwm0,
                 ..
             } = peripherals;
             (
@@ -127,6 +140,7 @@ mod device {
                     gpio9,
                     gpio47,
                     gpio35,
+                    gpio36,
                     gpio48,
                     gpio13,
                     gpio14,
@@ -138,6 +152,7 @@ mod device {
                     gpio11,
                     gpio12,
                     gpio15,
+                    mcpwm0,
                 },
             )
         }
@@ -146,6 +161,7 @@ mod device {
     pub struct Outputs {
         heater: Output<'static>,
         fan: Output<'static>,
+        fan_pwm: PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 0, true>,
         buzzer: Output<'static>,
         backlight: Output<'static>,
         display_reset: Output<'static>,
@@ -207,9 +223,30 @@ mod device {
             .map_err(|_| OutputInitError::Display)?
             .with_sck(tokens.gpio12)
             .with_mosi(tokens.gpio11);
+            let pwm_clock =
+                PeripheralClockConfig::with_frequency(Rate::from_hz(MCPWM_PERIPHERAL_CLOCK_HZ))
+                    .expect("failed to derive RAM MCPWM peripheral clock");
+            let mcpwm = McPwm::new(tokens.mcpwm0, pwm_clock);
+            let esp_hal::mcpwm::McPwm {
+                mut timer0,
+                mut operator0,
+                ..
+            } = mcpwm;
+            operator0.set_timer(&timer0);
+            let mut fan_pwm = operator0.with_pin_a(tokens.gpio36, PwmPinConfig::UP_ACTIVE_HIGH);
+            let fan_timer = pwm_clock
+                .timer_clock_with_frequency(
+                    FAN_PWM_PERIOD_TICKS,
+                    PwmWorkingMode::Increase,
+                    Rate::from_hz(FAN_PWM_FREQUENCY_HZ),
+                )
+                .expect("failed to derive RAM fan PWM timer clock");
+            timer0.start(fan_timer);
+            let _ = fan_pwm.set_duty_cycle_percent(0);
             let outputs = Self {
                 heater: Output::new(tokens.gpio47, Level::Low, OutputConfig::default()),
                 fan: Output::new(tokens.gpio35, Level::Low, OutputConfig::default()),
+                fan_pwm,
                 buzzer: Output::new(tokens.gpio48, Level::Low, OutputConfig::default()),
                 backlight: Output::new(tokens.gpio13, Level::High, OutputConfig::default()),
                 display_reset: Output::new(tokens.gpio14, Level::High, OutputConfig::default()),
@@ -226,6 +263,7 @@ mod device {
         fn safe(&mut self) {
             self.heater.set_low();
             self.fan.set_low();
+            let _ = self.fan_pwm.set_duty_cycle_percent(0);
             self.buzzer.set_low();
             self.backlight.set_high();
             self.display_reset.set_high();
@@ -551,8 +589,10 @@ mod device {
             outputs.buzzer.set_low();
             (true, "buzzer_ready")
         } else if protocol::equal_literal(op, b"test_fan") {
+            let _ = outputs.fan_pwm.set_duty_cycle_percent(50);
             outputs.fan.set_high();
             delay_ms(500);
+            let _ = outputs.fan_pwm.set_duty_cycle_percent(0);
             outputs.fan.set_low();
             (true, "fan_ready")
         } else {

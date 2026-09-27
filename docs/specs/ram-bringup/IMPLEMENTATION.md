@@ -4,6 +4,10 @@
   request, identity, capability, display-color, and response contract.
 - `firmware/ram-bringup/src/main.rs` initializes the ESP32-S3 runtime, emits
   identity before command handling, and owns the safe output boundary.
+- The bounded `test_fan` action drives GPIO35 as the fan enable and GPIO36
+  through MCPWM operator 0 at 25 kHz before returning both outputs to safe
+  off; the product fan-voltage feedback contract is exercised without changing
+  the display path.
 - The diagnostic image uses bounded blocking peripheral calls because it runs
   outside the product Embassy executor; the product firmware's async display
   contract remains scoped to `firmware/` runtime paths.
