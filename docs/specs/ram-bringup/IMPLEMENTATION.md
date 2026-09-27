@@ -39,10 +39,10 @@
   safety gate, the `flux-purr.usb.v1` JSONL contract, matching
   identity/build/capability, complete command-specific response evidence, and
   the pinned espflash RAM loader. It rechecks the USB identity after acquiring
-  the process lock and before RAM writes or JSONL command sessions, then holds
-  the verified serial connection through the preview command and response.
+  the process lock and before RAM writes or JSONL requests, then holds the
+  verified serial connection through the preview command and response.
   Interactive button polling keeps the same lock and rechecks the identity
-  during its bounded window.
+  immediately before every bounded request.
   Optional display colors remain on the existing `preview_display` capability.
 - Direct RAM, daemon flash, direct flash, and recover commands share the same
   per-port process lock; Unix uses `flock` and Windows uses a byte-range file

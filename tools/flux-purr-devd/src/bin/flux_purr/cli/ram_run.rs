@@ -374,16 +374,11 @@ fn run_interactive_buttons(
         BUTTON_INTERACTIVE_TIMEOUT.as_secs()
     );
     let deadline = Instant::now() + BUTTON_INTERACTIVE_TIMEOUT;
-    let mut next_target_check = Instant::now();
     let mut tracker = ButtonGestureTracker::default();
     let mut events = Vec::new();
     let mut latest = None;
     while Instant::now() < deadline {
-        let now = Instant::now();
-        if now >= next_target_check {
-            ensure_ram_target(port, &session.usb_identity)?;
-            next_target_check = now + Duration::from_secs(1);
-        }
+        ensure_ram_target(port, &session.usb_identity)?;
         let value =
             match send_ram_request_until(&mut session.serial, "test_buttons", None, deadline) {
                 Ok(value) => value,

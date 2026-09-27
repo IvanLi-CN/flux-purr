@@ -26,9 +26,10 @@ RGB, buzzer, and fan paths.
   causes the CLI to choose a replacement.
 - ESP32-S3 USB Serial/JTAG targets must expose a stable USB VID/PID and serial
   number. `ram-run` captures that identity and rechecks it after lock
-  acquisition, before RAM load, and before each command session; the 30-second
-  interactive button session rechecks it during polling as well. A missing or
-  changed identity fails closed without selecting a replacement target.
+  acquisition, before RAM load, and before each request; the 30-second
+  interactive button session performs the same check before every polling
+  request. A missing or changed identity fails closed without selecting a
+  replacement target.
 - Serial process locks and in-process sessions use the same canonical port
   identity, so macOS `tty`/`cu` aliases and filesystem aliases cannot leave a
   stale session behind. Platforms without a safe lock primitive fail closed.
