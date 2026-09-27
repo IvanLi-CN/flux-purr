@@ -730,7 +730,7 @@ fn send_ram_request(
     while Instant::now() < deadline {
         match serial.read(&mut chunk) {
             Ok(count) => {
-                bytes.extend_from_slice(&chunk[..count]);
+                append_ram_response_bytes(&mut bytes, &chunk[..count])?;
                 if let Some(value) = find_ram_response(&mut bytes, op, &request_id)? {
                     return Ok(value);
                 }
@@ -740,6 +740,17 @@ fn send_ram_request(
         }
     }
     Err(format!("RAM bring-up response timed out for {op}").into())
+}
+
+fn append_ram_response_bytes(
+    bytes: &mut Vec<u8>,
+    chunk: &[u8],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if bytes.len().saturating_add(chunk.len()) > RAM_RESPONSE_BUFFER_LIMIT {
+        return Err("RAM bring-up response exceeded the JSONL frame limit".into());
+    }
+    bytes.extend_from_slice(chunk);
+    Ok(())
 }
 
 fn build_ram_request(request_id: &str, op: &str, color: Option<&str>) -> String {
@@ -924,6 +935,12 @@ mod tests {
         let request = build_ram_request("ram-1", "preview_display", None);
         let value: Value = serde_json::from_str(&request).expect("request should be JSON");
         assert!(value.get("color").is_none());
+    }
+
+    #[test]
+    fn ram_response_buffer_rejects_an_unbounded_jsonl_frame() {
+        let mut bytes = vec![b'x'; RAM_RESPONSE_BUFFER_LIMIT];
+        assert!(append_ram_response_bytes(&mut bytes, b"y").is_err());
     }
 
     #[cfg(unix)]
