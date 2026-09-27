@@ -1,5 +1,8 @@
 use super::*;
-use flux_purr_devd::serial::SerialPortProcessLock;
+use flux_purr_devd::serial::{
+    SerialPortProcessLock, UsbSerialIdentity, serial_port_usb_identity,
+    serial_port_usb_identity_matches,
+};
 
 const DIRECT_SERIAL_LOCK_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -8,6 +11,24 @@ fn acquire_direct_serial_lock(
 ) -> Result<SerialPortProcessLock, Box<dyn std::error::Error + Send + Sync>> {
     SerialPortProcessLock::acquire(port, StdInstant::now() + DIRECT_SERIAL_LOCK_TIMEOUT)
         .map_err(|error| format!("failed to acquire serial lock: {error:?}").into())
+}
+
+fn capture_direct_usb_identity(
+    port: &str,
+) -> Result<UsbSerialIdentity, Box<dyn std::error::Error + Send + Sync>> {
+    serial_port_usb_identity(port).map_err(|error| {
+        format!("direct flash requires a stable USB target identity: {error}").into()
+    })
+}
+
+fn ensure_direct_usb_identity(
+    port: &str,
+    expected: Option<&UsbSerialIdentity>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if expected.is_none_or(|expected| serial_port_usb_identity_matches(port, expected)) {
+        return Ok(());
+    }
+    Err("authorized USB target changed or disappeared; no replacement port will be selected".into())
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -436,18 +457,29 @@ pub(crate) fn direct_flash_with_program(
     program: &Path,
     require_real_flash_enablement: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let usb_identity = {
+        #[cfg(test)]
+        {
+            None
+        }
+        #[cfg(not(test))]
+        {
+            Some(capture_direct_usb_identity(&args.port)?)
+        }
+    };
     let backup_directory = if args.skip_backup {
         None
     } else {
         Some(developer_backup_directory()?)
     };
-    direct_flash_with_program_inner(
+    direct_flash_with_program_inner_guarded(
         args,
         program,
         require_real_flash_enablement,
         read_eeprom_snapshot,
         detect_rom_download_mode,
         backup_directory.as_deref(),
+        usb_identity.as_ref(),
     )
 }
 
@@ -455,6 +487,7 @@ pub(crate) type SnapshotReader =
     fn(&str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
 pub(crate) type RomProbe = fn(&str) -> bool;
 
+#[allow(dead_code)]
 pub(crate) fn direct_flash_with_program_inner(
     args: FlashArgs,
     program: &Path,
@@ -462,6 +495,26 @@ pub(crate) fn direct_flash_with_program_inner(
     snapshot_reader: SnapshotReader,
     rom_probe: RomProbe,
     backup_directory: Option<&Path>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    direct_flash_with_program_inner_guarded(
+        args,
+        program,
+        require_real_flash_enablement,
+        snapshot_reader,
+        rom_probe,
+        backup_directory,
+        None,
+    )
+}
+
+fn direct_flash_with_program_inner_guarded(
+    args: FlashArgs,
+    program: &Path,
+    require_real_flash_enablement: bool,
+    snapshot_reader: SnapshotReader,
+    rom_probe: RomProbe,
+    backup_directory: Option<&Path>,
+    usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_serial_port(&args.port)?;
     if args.skip_backup && args.confirm.as_deref() != Some("NO_EEPROM_BACKUP") {
@@ -474,6 +527,7 @@ pub(crate) fn direct_flash_with_program_inner(
         ensure_real_flash_enabled()?;
     }
     let _serial_lock = acquire_direct_serial_lock(&args.port)?;
+    ensure_direct_usb_identity(&args.port, usb_identity)?;
     if !args.skip_backup && rom_probe(&args.port) {
         return Err(
             "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
@@ -483,9 +537,11 @@ pub(crate) fn direct_flash_with_program_inner(
     let backup_path = if args.skip_backup {
         None
     } else {
+        ensure_direct_usb_identity(&args.port, usb_identity)?;
         let snapshot = match snapshot_reader(&args.port) {
             Ok(snapshot) => snapshot,
             Err(error) if snapshot_error_may_be_rom_mode(error.as_ref()) => {
+                ensure_direct_usb_identity(&args.port, usb_identity)?;
                 if rom_probe(&args.port) {
                     return Err(
                         "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
@@ -499,12 +555,14 @@ pub(crate) fn direct_flash_with_program_inner(
         let directory = backup_directory.ok_or("developer backup directory is unavailable")?;
         Some(developer_backup::write_atomic(directory, &snapshot)?)
     };
+    ensure_direct_usb_identity(&args.port, usb_identity)?;
     let espflash = direct_elf_flash_with_reset_fallback(
         program,
         &args.port,
         partition_table.path(),
         &elf,
         args.keep_download_mode,
+        usb_identity,
     )?;
     Ok(
         json!({"ok": true, "operation": "flash", "port": args.port, "elf": elf, "backup": backup_path, "espflash": espflash}),
@@ -515,6 +573,7 @@ pub(crate) async fn direct_recover(
     args: RecoverArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     validate_serial_port(&args.port)?;
+    let usb_identity = capture_direct_usb_identity(&args.port)?;
     if args.confirm != "ERASE" {
         return Err("recover requires --confirm ERASE".into());
     }
@@ -522,11 +581,14 @@ pub(crate) async fn direct_recover(
     let partition_table = embedded_partition_table()?;
     ensure_real_flash_enabled()?;
     let _serial_lock = acquire_direct_serial_lock(&args.port)?;
+    ensure_direct_usb_identity(&args.port, Some(&usb_identity))?;
     let program = resolve_espflash_program();
     let erase_args = direct_erase_flash_args(&args.port);
-    let erase_diagnostics = run_espflash_command(&program, &erase_args)?;
+    let erase_diagnostics =
+        run_guarded_espflash_command(&program, &erase_args, &args.port, Some(&usb_identity))?;
     let flash_args = direct_elf_flash_args(&args.port, partition_table.path(), &args.elf, false)?;
-    let flash_diagnostics = run_espflash_command(&program, &flash_args)?;
+    let flash_diagnostics =
+        run_guarded_espflash_command(&program, &flash_args, &args.port, Some(&usb_identity))?;
     Ok(
         json!({"ok": true, "operation": "recover", "port": args.port, "elf": args.elf, "eeprom": "untouched", "espflash": {"erase": erase_diagnostics, "flash": flash_diagnostics}}),
     )
@@ -634,6 +696,7 @@ pub(crate) fn direct_elf_flash_with_reset_fallback(
     partition_table: &Path,
     elf: &Path,
     keep_download_mode: bool,
+    usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<EspflashDiagnostics, Box<dyn std::error::Error + Send + Sync>> {
     let reset_modes = direct_elf_flash_reset_modes(port, keep_download_mode);
     for (index, before_reset) in reset_modes.iter().enumerate() {
@@ -649,7 +712,7 @@ pub(crate) fn direct_elf_flash_with_reset_fallback(
             before_reset,
             after_reset,
         )?;
-        match run_espflash_command(program, &args) {
+        match run_guarded_espflash_command(program, &args, port, usb_identity) {
             Ok(diagnostics) => return Ok(diagnostics),
             Err(error)
                 if index + 1 < reset_modes.len()
@@ -661,6 +724,18 @@ pub(crate) fn direct_elf_flash_with_reset_fallback(
         }
     }
     unreachable!("the direct flash reset sequence is never empty")
+}
+
+fn run_guarded_espflash_command(
+    program: &Path,
+    args: &[String],
+    port: &str,
+    usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<EspflashDiagnostics, Box<dyn std::error::Error + Send + Sync>> {
+    ensure_direct_usb_identity(port, usb_identity)?;
+    let diagnostics = run_espflash_command(program, args)?;
+    ensure_direct_usb_identity(port, usb_identity)?;
+    Ok(diagnostics)
 }
 
 pub(crate) fn direct_erase_flash_args(port: &str) -> Vec<String> {

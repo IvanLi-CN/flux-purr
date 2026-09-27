@@ -42,18 +42,41 @@ pub(crate) fn resolve_verified_artifact_path(
     Ok(candidate)
 }
 
+#[allow(dead_code)]
 pub(crate) async fn run_espflash_with_program(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
     port_path: &str,
     program: &Path,
 ) -> Result<(), HttpError> {
-    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
-        build_espflash_args_with_reset_mode(artifact, root, port_path, before_reset)
-    })
+    run_espflash_with_reset_fallback_with_program_and_identity(
+        program,
+        artifact,
+        port_path,
+        None,
+        |before_reset| build_espflash_args_with_reset_mode(artifact, root, port_path, before_reset),
+    )
     .await
 }
 
+pub(crate) async fn run_espflash_with_program_and_identity(
+    artifact: &FirmwareArtifact,
+    root: Option<&Path>,
+    port_path: &str,
+    program: &Path,
+    usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<(), HttpError> {
+    run_espflash_with_reset_fallback_with_program_and_identity(
+        program,
+        artifact,
+        port_path,
+        usb_identity,
+        |before_reset| build_espflash_args_with_reset_mode(artifact, root, port_path, before_reset),
+    )
+    .await
+}
+
+#[allow(dead_code)]
 pub(crate) async fn run_espflash_with_reset_fallback_with_program<F>(
     program: &Path,
     artifact: &FirmwareArtifact,
@@ -63,14 +86,46 @@ pub(crate) async fn run_espflash_with_reset_fallback_with_program<F>(
 where
     F: Fn(&str) -> Result<Vec<Vec<String>>, HttpError>,
 {
+    run_espflash_with_reset_fallback_with_program_and_identity(
+        program,
+        artifact,
+        port_path,
+        None,
+        build_commands,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct EspflashTarget<'a> {
+    port_path: &'a str,
+    usb_identity: Option<&'a UsbSerialIdentity>,
+}
+
+async fn run_espflash_with_reset_fallback_with_program_and_identity<F>(
+    program: &Path,
+    artifact: &FirmwareArtifact,
+    port_path: &str,
+    usb_identity: Option<&UsbSerialIdentity>,
+    build_commands: F,
+) -> Result<(), HttpError>
+where
+    F: Fn(&str) -> Result<Vec<Vec<String>>, HttpError>,
+{
+    let target = EspflashTarget {
+        port_path,
+        usb_identity,
+    };
     let reset_modes = espflash_reset_modes(artifact, port_path);
     for (mode_index, before_reset) in reset_modes.iter().enumerate() {
         let commands = build_commands(before_reset)?;
         let mut retry_with_next_reset = false;
 
         for args in commands {
+            require_usb_serial_identity(target.port_path, target.usb_identity)?;
             let output =
                 run_espflash_command_with_timeout(program, &args, ESPFLASH_COMMAND_TIMEOUT).await?;
+            require_usb_serial_identity(target.port_path, target.usb_identity)?;
 
             if output.status.success() {
                 continue;
@@ -78,7 +133,7 @@ where
             retry_with_next_reset = handle_failed_espflash_attempt(
                 program,
                 artifact,
-                port_path,
+                target,
                 before_reset,
                 &args,
                 &output,
@@ -100,20 +155,22 @@ where
     ))
 }
 
-pub(crate) async fn handle_failed_espflash_attempt(
+async fn handle_failed_espflash_attempt(
     program: &Path,
     artifact: &FirmwareArtifact,
-    port_path: &str,
+    target: EspflashTarget<'_>,
     before_reset: &str,
     args: &[String],
     output: &Output,
     can_retry: bool,
 ) -> Result<bool, HttpError> {
     if espflash_flash_end_requires_reset(args, output) {
-        let reset_args = build_espflash_reset_args(artifact, port_path, before_reset)?;
+        require_usb_serial_identity(target.port_path, target.usb_identity)?;
+        let reset_args = build_espflash_reset_args(artifact, target.port_path, before_reset)?;
         let reset_output =
             run_espflash_command_with_timeout(program, &reset_args, ESPFLASH_COMMAND_TIMEOUT)
                 .await?;
+        require_usb_serial_identity(target.port_path, target.usb_identity)?;
         if reset_output.status.success() {
             // The ROM accepted the image data but rejected the final
             // run-user-code transition. Reset once, then verify runtime_ready.
@@ -135,7 +192,7 @@ pub(crate) async fn handle_failed_espflash_attempt(
             espflash_failure_details(program, args, output),
         ));
     }
-    if is_esp_usb_serial_jtag_port(port_path) {
+    if is_esp_usb_serial_jtag_port(target.port_path) {
         tokio::time::sleep(ESPFLASH_USB_RESET_RETRY_DELAY).await;
     }
     Ok(true)
@@ -217,6 +274,7 @@ pub(crate) fn build_bundle_write_bin_args(
     args
 }
 
+#[allow(dead_code)]
 pub(crate) async fn run_flash_transaction_with_program(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
@@ -224,6 +282,16 @@ pub(crate) async fn run_flash_transaction_with_program(
     program: &Path,
 ) -> Result<(), HttpError> {
     run_espflash_with_program(artifact, root, port_path, program).await
+}
+
+pub(crate) async fn run_flash_transaction_with_program_and_identity(
+    artifact: &FirmwareArtifact,
+    root: Option<&Path>,
+    port_path: &str,
+    program: &Path,
+    usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<(), HttpError> {
+    run_espflash_with_program_and_identity(artifact, root, port_path, program, usb_identity).await
 }
 
 pub(crate) fn resolve_espflash_program() -> PathBuf {
@@ -294,13 +362,21 @@ pub(crate) async fn run_espflash_with_exclusive_serial(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
     port_path: &str,
+    usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<(), HttpError> {
     let _serial_rpc =
         acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
     drop_cached_serial_session(&state.serial_sessions, port_path)?;
     let _serial_lock = acquire_serial_process_lock(port_path, ESPFLASH_COMMAND_TIMEOUT).await?;
     let program = resolve_espflash_program();
-    run_flash_transaction_with_program(artifact, root, port_path, &program).await
+    run_flash_transaction_with_program_and_identity(
+        artifact,
+        root,
+        port_path,
+        &program,
+        usb_identity,
+    )
+    .await
 }
 
 pub(crate) async fn acquire_serial_rpc_with_timeout(

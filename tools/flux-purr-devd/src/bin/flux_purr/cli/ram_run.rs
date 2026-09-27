@@ -17,6 +17,8 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
 const RAM_OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const RAM_ELF_RELATIVE_PATH: &str =
     "firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup";
+const RAM_PROTOCOL_VERSION: &str = "flux-purr.usb.v1";
+const RAM_FRAMING: &str = "jsonl";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ObservedFirmware {
@@ -34,6 +36,10 @@ struct IdentityBody {
     build_id: Option<String>,
     #[serde(default)]
     capabilities: Vec<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    #[serde(default)]
+    framing: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +51,10 @@ struct IdentityFrame {
     firmware_kind: Option<String>,
     #[serde(default)]
     identity: Option<IdentityBody>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    #[serde(default)]
+    framing: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +62,8 @@ struct ObservedIdentity {
     firmware: ObservedFirmware,
     build_id: Option<String>,
     capabilities: Vec<String>,
+    protocol_version: Option<String>,
+    framing: Option<String>,
 }
 
 pub(crate) fn execute_ram_run(
@@ -660,6 +672,8 @@ fn parse_identity_line(line: &[u8]) -> Option<ObservedIdentity> {
         firmware,
         build_id: body.build_id,
         capabilities: body.capabilities,
+        protocol_version: frame.protocol_version.or(body.protocol_version),
+        framing: frame.framing.or(body.framing),
     })
 }
 
@@ -671,6 +685,14 @@ fn verify_ram_identity(
         return Err(
             "RAM bring-up identity is unknown or the target is still product firmware".into(),
         );
+    }
+    if identity.protocol_version.as_deref() != Some(RAM_PROTOCOL_VERSION)
+        || identity.framing.as_deref() != Some(RAM_FRAMING)
+    {
+        return Err(format!(
+            "RAM bring-up protocol mismatch: expected {RAM_PROTOCOL_VERSION}/{RAM_FRAMING}"
+        )
+        .into());
     }
     if identity.build_id.as_deref() != Some(PRODUCT_BUILD_ID) {
         return Err(format!(
@@ -867,6 +889,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ram.firmware, ObservedFirmware::RamBringup);
+    }
+
+    #[test]
+    fn ram_identity_requires_the_declared_protocol_and_framing() {
+        let identity = ObservedIdentity {
+            firmware: ObservedFirmware::RamBringup,
+            build_id: Some(PRODUCT_BUILD_ID.to_string()),
+            capabilities: vec!["test_fan".to_string()],
+            protocol_version: Some(RAM_PROTOCOL_VERSION.to_string()),
+            framing: Some(RAM_FRAMING.to_string()),
+        };
+        assert!(verify_ram_identity(&identity, "test_fan").is_ok());
+
+        let mut mismatched = identity;
+        mismatched.framing = Some("raw".to_string());
+        assert!(verify_ram_identity(&mismatched, "test_fan").is_err());
     }
 
     #[test]

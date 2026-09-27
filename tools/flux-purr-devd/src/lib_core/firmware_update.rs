@@ -104,7 +104,8 @@ pub(crate) async fn local_firmware_update(
     let preflight_lease_id = format!("local-update-{}", progress.operation_id());
     progress.stage_started("preflight", json!({}));
     let (identity, status) =
-        refresh_native_update_runtime_facts(&state, &target, &preflight_lease_id).await?;
+        refresh_native_update_runtime_facts(&state, &target, &preflight_lease_id, &usb_identity)
+            .await?;
     validate_update_runtime_facts(
         DeviceTransport::NativeSerial,
         &identity.firmware_version,
@@ -139,7 +140,7 @@ pub(crate) async fn local_firmware_update(
     )
     .await?;
     progress.stage_started("runtime_reconnect", json!({}));
-    let verified = verify_reconnected_firmware(&state, &target, &bundle).await;
+    let verified = verify_reconnected_firmware(&state, &target, &bundle, &usb_identity).await;
     if verified {
         progress.stage_completed("runtime_reconnect", json!({}));
     } else {
@@ -248,14 +249,22 @@ pub(crate) async fn verify_reconnected_firmware(
     state: &AppState,
     target: &DeviceRecord,
     bundle: &firmware_bundle::FirmwareBundle,
+    usb_identity: &UsbSerialIdentity,
 ) -> bool {
-    let identity =
-        serial_request_payload::<Identity>(state, target, "get_identity", "identity").await;
-    let install_status = serial_request_payload::<InstallStatus>(
+    let identity = serial_request_payload_with_identity::<Identity>(
+        state,
+        target,
+        "get_identity",
+        "identity",
+        Some(usb_identity),
+    )
+    .await;
+    let install_status = serial_request_payload_with_identity::<InstallStatus>(
         state,
         target,
         "get_install_status",
         "install_status",
+        Some(usb_identity),
     )
     .await;
     identity.as_ref().is_ok_and(|identity| {
@@ -313,7 +322,9 @@ pub(crate) fn validate_update_runtime_facts(
     Ok(())
 }
 
-fn capture_native_serial_identity(port_path: &str) -> Result<UsbSerialIdentity, HttpError> {
+pub(crate) fn capture_native_serial_identity(
+    port_path: &str,
+) -> Result<UsbSerialIdentity, HttpError> {
     serial_port_usb_identity(port_path).map_err(|error| {
         HttpError::forbidden(
             "authorized_port_identity_required",
@@ -339,10 +350,17 @@ pub(crate) async fn refresh_native_update_runtime_facts(
     state: &AppState,
     target: &DeviceRecord,
     lease_id: &str,
+    usb_identity: &UsbSerialIdentity,
 ) -> Result<(Identity, ControlPlaneStatus), HttpError> {
-    let identity =
-        serial_request_payload::<Identity>(state, target, "get_identity", "identity").await?;
-    let _stopped = serial_runtime_config(
+    let identity = serial_request_payload_with_identity::<Identity>(
+        state,
+        target,
+        "get_identity",
+        "identity",
+        Some(usb_identity),
+    )
+    .await?;
+    let _stopped = serial_runtime_config_with_identity(
         state,
         target,
         &RuntimeConfigRequest {
@@ -362,10 +380,17 @@ pub(crate) async fn refresh_native_update_runtime_facts(
             thermal_profile_mode: None,
             thermal_control_profile: None,
         },
+        Some(usb_identity),
     )
     .await?;
-    let status =
-        serial_request_payload::<ControlPlaneStatus>(state, target, "get_status", "status").await?;
+    let status = serial_request_payload_with_identity::<ControlPlaneStatus>(
+        state,
+        target,
+        "get_status",
+        "status",
+        Some(usb_identity),
+    )
+    .await?;
     Ok((identity, status))
 }
 
@@ -385,6 +410,12 @@ pub(crate) struct PreparedFirmwareOperation {
 pub(crate) struct FirmwareFlashGuards<'a> {
     serial_rpc: Option<tokio::sync::OwnedMutexGuard<()>>,
     serial_lock: Option<SerialPortProcessLock>,
+    usb_identity: Option<&'a UsbSerialIdentity>,
+}
+
+#[derive(Clone, Copy)]
+struct FirmwareFlashTarget<'a> {
+    port_path: &'a str,
     usb_identity: Option<&'a UsbSerialIdentity>,
 }
 
@@ -523,6 +554,9 @@ pub(crate) async fn prepare_firmware_operation(
     }
     refresh_operation_facts(state, device_id, payload, &mut prepared, progress).await?;
     if prepared.transport == DeviceTransport::NativeSerial {
+        let serial_rpc = progress.require(
+            acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
+        )?;
         let serial_lock = if payload.operation == FirmwareOperation::Update {
             let cached = progress.require(take_cached_serial_process_lock(
                 &state.serial_sessions,
@@ -549,9 +583,7 @@ pub(crate) async fn prepare_firmware_operation(
             ))?;
         }
         prepared.serial_lock = Some(serial_lock);
-        prepared.serial_rpc = Some(progress.require(
-            acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
-        )?);
+        prepared.serial_rpc = Some(serial_rpc);
     }
     if payload.dry_run {
         progress.stage_completed("transport", json!({}));
@@ -640,9 +672,17 @@ pub(crate) async fn refresh_operation_facts(
     }
     let identity = match prepared.transport {
         DeviceTransport::NativeSerial => {
+            let usb_identity = prepared.usb_identity.as_ref().ok_or_else(|| {
+                progress.fail(HttpError::internal("native update is missing USB identity"))
+            })?;
             let (identity, status) = progress.require(
-                refresh_native_update_runtime_facts(state, &prepared.target, &payload.lease_id)
-                    .await,
+                refresh_native_update_runtime_facts(
+                    state,
+                    &prepared.target,
+                    &payload.lease_id,
+                    usb_identity,
+                )
+                .await,
             )?;
             prepared.status = status;
             Some(identity)
@@ -853,22 +893,35 @@ pub(crate) async fn reconnect_firmware_operation(
     prepared: &PreparedFirmwareOperation,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<bool, HttpError> {
+    progress.stage_started("runtime_reconnect", json!({}));
     let target = {
         let inner = progress.require(state.lock())?;
-        inner
-            .devices
-            .get(device_id)
-            .cloned()
-            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))
-    }?;
-    progress.stage_started("runtime_reconnect", json!({}));
-    let identity =
-        serial_request_payload::<Identity>(state, &target, "get_identity", "identity").await;
-    let install_status = serial_request_payload::<InstallStatus>(
+        inner.devices.get(device_id).cloned()
+    };
+    let Some(target) = target else {
+        progress.stage_failed("runtime_reconnect", "device_not_found");
+        progress.stage_started("runtime_verify", json!({}));
+        return Ok(false);
+    };
+    let usb_identity = prepared.usb_identity.as_ref().ok_or_else(|| {
+        progress.fail(HttpError::internal(
+            "native firmware operation is missing USB identity",
+        ))
+    })?;
+    let identity = serial_request_payload_with_identity::<Identity>(
+        state,
+        &target,
+        "get_identity",
+        "identity",
+        Some(usb_identity),
+    )
+    .await;
+    let install_status = serial_request_payload_with_identity::<InstallStatus>(
         state,
         &target,
         "get_install_status",
         "install_status",
+        Some(usb_identity),
     )
     .await;
     if identity.is_ok() && install_status.is_ok() {
@@ -915,6 +968,10 @@ pub(crate) async fn run_bundle_flash_transaction(
     if let Some(usb_identity) = guards.usb_identity {
         progress.require(ensure_native_serial_identity(port_path, usb_identity))?;
     }
+    let target = FirmwareFlashTarget {
+        port_path,
+        usb_identity: guards.usb_identity,
+    };
     let workspace = progress.require(tempfile::tempdir().map_err(|error| {
         HttpError::internal(&format!("failed to create flash workspace: {error}"))
     }))?;
@@ -931,22 +988,22 @@ pub(crate) async fn run_bundle_flash_transaction(
         &program,
         &common,
         initial_reset,
-        port_path,
         bundle,
+        target,
         progress,
     )
     .await?;
     write_bundle_segments(
         &program,
         &common,
-        port_path,
         bundle,
         workspace.path(),
+        target,
         progress,
     )
     .await?;
-    verify_bundle_checksums(&program, &common, port_path, bundle, progress).await?;
-    reset_after_bundle(&program, &common, port_path, progress).await?;
+    verify_bundle_checksums(&program, &common, bundle, target, progress).await?;
+    reset_after_bundle(&program, &common, target, progress).await?;
     Ok(())
 }
 
@@ -977,13 +1034,13 @@ pub(crate) fn espflash_common_args(port_path: &str) -> Vec<String> {
     ]
 }
 
-pub(crate) async fn run_bundle_erase_if_needed(
+async fn run_bundle_erase_if_needed(
     operation: FirmwareOperation,
     program: &Path,
     common: &[String],
     initial_reset: &str,
-    port_path: &str,
     bundle: &firmware_bundle::FirmwareBundle,
+    target: FirmwareFlashTarget<'_>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<(), HttpError> {
     let total_bytes = bundle
@@ -1008,7 +1065,7 @@ pub(crate) async fn run_bundle_erase_if_needed(
         "--after".into(),
         "no-reset".into(),
     ]);
-    progress.require(require_bundle_espflash_success(program, &args, port_path).await)?;
+    progress.require(require_bundle_espflash_success_for_target(program, &args, target).await)?;
     progress.stage_completed("erase", json!({}));
     progress.stage_started(
         "write_segments",
@@ -1017,12 +1074,12 @@ pub(crate) async fn run_bundle_erase_if_needed(
     Ok(())
 }
 
-pub(crate) async fn write_bundle_segments(
+async fn write_bundle_segments(
     program: &Path,
     common: &[String],
-    port_path: &str,
     bundle: &firmware_bundle::FirmwareBundle,
     workspace: &Path,
+    target: FirmwareFlashTarget<'_>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<(), HttpError> {
     let total_bytes = bundle
@@ -1035,7 +1092,8 @@ pub(crate) async fn write_bundle_segments(
     for segment in &bundle.manifest.segments {
         let path = workspace.join(format!("{:?}.bin", segment.kind));
         let args = build_bundle_write_bin_args(common, "no-reset", segment.address, &path);
-        progress.require(require_bundle_espflash_success(program, &args, port_path).await)?;
+        progress
+            .require(require_bundle_espflash_success_for_target(program, &args, target).await)?;
         completed_bytes = completed_bytes.saturating_add(segment.length);
         progress.stage_progress(
             "write_segments",
@@ -1049,11 +1107,11 @@ pub(crate) async fn write_bundle_segments(
     Ok(())
 }
 
-pub(crate) async fn verify_bundle_checksums(
+async fn verify_bundle_checksums(
     program: &Path,
     common: &[String],
-    port_path: &str,
     bundle: &firmware_bundle::FirmwareBundle,
+    target: FirmwareFlashTarget<'_>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<(), HttpError> {
     let total = bundle.manifest.segments.len();
@@ -1063,8 +1121,9 @@ pub(crate) async fn verify_bundle_checksums(
     );
     for (index, segment) in bundle.manifest.segments.iter().enumerate() {
         let checksum = build_checksum_md5_args(common, segment.address, segment.length);
-        let output = progress
-            .require(require_bundle_espflash_success(program, &checksum, port_path).await)?;
+        let output = progress.require(
+            require_bundle_espflash_success_for_target(program, &checksum, target).await,
+        )?;
         if !String::from_utf8_lossy(&output.stdout)
             .to_ascii_lowercase()
             .contains(&segment.md5)
@@ -1085,16 +1144,16 @@ pub(crate) async fn verify_bundle_checksums(
     Ok(())
 }
 
-pub(crate) async fn reset_after_bundle(
+async fn reset_after_bundle(
     program: &Path,
     common: &[String],
-    port_path: &str,
+    target: FirmwareFlashTarget<'_>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<(), HttpError> {
     progress.stage_started("reset", json!({}));
     let mut reset = vec!["reset".into()];
     reset.extend(common.iter().cloned());
-    progress.require(require_bundle_espflash_success(program, &reset, port_path).await)?;
+    progress.require(require_bundle_espflash_success_for_target(program, &reset, target).await)?;
     progress.stage_completed("reset", json!({}));
     Ok(())
 }
@@ -1113,16 +1172,35 @@ pub(crate) fn build_checksum_md5_args(common: &[String], address: u64, length: u
     args
 }
 
+#[allow(dead_code)]
 pub(crate) async fn require_bundle_espflash_success(
     program: &Path,
     args: &[String],
     port_path: &str,
 ) -> Result<Output, HttpError> {
+    require_bundle_espflash_success_for_target(
+        program,
+        args,
+        FirmwareFlashTarget {
+            port_path,
+            usb_identity: None,
+        },
+    )
+    .await
+}
+
+async fn require_bundle_espflash_success_for_target(
+    program: &Path,
+    args: &[String],
+    target: FirmwareFlashTarget<'_>,
+) -> Result<Output, HttpError> {
+    require_usb_serial_identity(target.port_path, target.usb_identity)?;
     let output = run_espflash_command_with_timeout(program, args, ESPFLASH_COMMAND_TIMEOUT).await?;
+    require_usb_serial_identity(target.port_path, target.usb_identity)?;
     if output.status.success() {
         return Ok(output);
     }
-    if !is_esp_usb_serial_jtag_port(port_path) || !espflash_connection_failed(&output) {
+    if !is_esp_usb_serial_jtag_port(target.port_path) || !espflash_connection_failed(&output) {
         return Err(espflash_command_error(program, args, &output));
     }
     let Some(before_index) = args.iter().position(|argument| argument == "--before") else {
@@ -1141,9 +1219,11 @@ pub(crate) async fn require_bundle_espflash_success(
         let retry_args = replace_espflash_before_reset(args, reset_mode)
             .expect("bundle recovery modes require an espflash --before argument");
         tokio::time::sleep(ESPFLASH_USB_RESET_RETRY_DELAY).await;
+        require_usb_serial_identity(target.port_path, target.usb_identity)?;
         let retry_output =
             run_espflash_command_with_timeout(program, &retry_args, ESPFLASH_COMMAND_TIMEOUT)
                 .await?;
+        require_usb_serial_identity(target.port_path, target.usb_identity)?;
         if retry_output.status.success() {
             return Ok(retry_output);
         }
@@ -1223,12 +1303,19 @@ async fn probe_native_rom_security_with_locks(
         ensure_native_serial_identity(port_path, usb_identity)?;
     }
     let port_path = port_path.to_owned();
+    let expected_usb_identity = usb_identity.cloned();
     tokio::task::spawn_blocking(move || {
         let port_info = serialport::available_ports()
             .map_err(|error| error.to_string())?
             .into_iter()
             .find(|candidate| serial_port_paths_match(&port_path, &candidate.port_name))
             .ok_or_else(|| "authorized serial port is no longer enumerated".to_string())?;
+        if expected_usb_identity
+            .as_ref()
+            .is_some_and(|expected| !expected.matches_port_info(&port_info))
+        {
+            return Err("authorized USB target changed or disappeared".to_string());
+        }
         let usb_info = match port_info.port_type {
             SerialPortType::UsbPort(info) => info,
             SerialPortType::PciPort | SerialPortType::Unknown => UsbPortInfo {

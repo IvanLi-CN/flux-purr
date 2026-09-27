@@ -7,6 +7,7 @@ pub(crate) async fn execute_flash(
     artifact_id: &str,
     port_path: &str,
 ) -> Result<Json<FlashResult>, HttpError> {
+    let usb_identity = capture_native_serial_identity(port_path)?;
     state.emit(event(
         device_id,
         "flash",
@@ -18,6 +19,7 @@ pub(crate) async fn execute_flash(
         artifact,
         state.config.artifact_root.as_deref(),
         port_path,
+        Some(&usb_identity),
     )
     .await
     {
@@ -35,7 +37,14 @@ pub(crate) async fn execute_flash(
         "firmware boot observation started",
         json!({ "artifactId": artifact_id }),
     ));
-    let boot = match observe_post_flash_boot(state, device_id, port_path).await {
+    let boot = match observe_post_flash_boot(
+        state,
+        device_id,
+        port_path,
+        Some(usb_identity.clone()),
+    )
+    .await
+    {
         Ok(boot) => boot,
         Err(error) => {
             state.emit(event(
