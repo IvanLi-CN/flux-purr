@@ -1371,6 +1371,21 @@ pub(crate) fn remove_cached_serial_session(
     take_cached_serial_session(serial_sessions, port_path)
 }
 
+pub(crate) fn take_cached_serial_process_lock(
+    serial_sessions: &Arc<Mutex<SerialSessionMap>>,
+    port_path: &str,
+) -> Result<Option<SerialPortProcessLock>, HttpError> {
+    let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
+    let Some(session) = take_cached_serial_session(&mut serial_sessions, port_path) else {
+        return Ok(None);
+    };
+    let SerialSession {
+        _serial_lock, port, ..
+    } = session;
+    drop(port);
+    Ok(Some(_serial_lock))
+}
+
 fn take_cached_serial_session(
     serial_sessions: &mut SerialSessionMap,
     port_path: &str,
@@ -1605,6 +1620,55 @@ pub fn serial_port_paths_match(requested: &str, enumerated: &str) -> bool {
     {
         serial_session_key(requested) == serial_session_key(enumerated)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbSerialIdentity {
+    pub vid: u16,
+    pub pid: u16,
+    pub serial_number: String,
+}
+
+impl UsbSerialIdentity {
+    pub fn from_port_info(info: &serialport::SerialPortInfo) -> Option<Self> {
+        let serialport::SerialPortType::UsbPort(usb) = &info.port_type else {
+            return None;
+        };
+        let serial_number = usb.serial_number.as_deref()?.trim();
+        if serial_number.is_empty() {
+            return None;
+        }
+        Some(Self {
+            vid: usb.vid,
+            pid: usb.pid,
+            serial_number: serial_number.to_string(),
+        })
+    }
+
+    pub fn matches_port_info(&self, info: &serialport::SerialPortInfo) -> bool {
+        Self::from_port_info(info).as_ref() == Some(self)
+    }
+}
+
+pub fn serial_port_usb_identity(port_path: &str) -> Result<UsbSerialIdentity, String> {
+    let port = serialport::available_ports()
+        .map_err(|error| format!("failed to enumerate authorized serial port: {error}"))?
+        .into_iter()
+        .find(|candidate| serial_port_paths_match(port_path, &candidate.port_name))
+        .ok_or_else(|| format!("authorized serial port is no longer enumerated: {port_path}"))?;
+    UsbSerialIdentity::from_port_info(&port)
+        .ok_or_else(|| format!("authorized serial port has no stable USB identity: {port_path}"))
+}
+
+pub fn serial_port_usb_identity_matches(port_path: &str, expected: &UsbSerialIdentity) -> bool {
+    serialport::available_ports()
+        .ok()
+        .and_then(|ports| {
+            ports
+                .into_iter()
+                .find(|candidate| serial_port_paths_match(port_path, &candidate.port_name))
+        })
+        .is_some_and(|candidate| expected.matches_port_info(&candidate))
 }
 
 #[cfg(any(unix, windows))]

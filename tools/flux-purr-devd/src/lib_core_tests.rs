@@ -3587,6 +3587,34 @@ fn serial_lock_aliases_share_a_lock_identity() {
     ));
 }
 
+#[test]
+fn usb_serial_identity_rejects_missing_or_replaced_serial_numbers() {
+    let info = serialport::SerialPortInfo {
+        port_name: "/dev/cu.usbmodem-test".to_string(),
+        port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+            vid: 0x303a,
+            pid: 0x1001,
+            serial_number: Some("D0:CF:13:08:A1:48".to_string()),
+            manufacturer: Some("Espressif".to_string()),
+            product: Some("USB JTAG/serial debug unit".to_string()),
+        }),
+    };
+    let identity = UsbSerialIdentity::from_port_info(&info).unwrap();
+    assert!(identity.matches_port_info(&info));
+
+    let mut replaced = info.clone();
+    if let serialport::SerialPortType::UsbPort(usb) = &mut replaced.port_type {
+        usb.serial_number = Some("replacement-target".to_string());
+    }
+    assert!(!identity.matches_port_info(&replaced));
+
+    let mut missing = info;
+    if let serialport::SerialPortType::UsbPort(usb) = &mut missing.port_type {
+        usb.serial_number = None;
+    }
+    assert!(UsbSerialIdentity::from_port_info(&missing).is_none());
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn serial_lock_symlink_aliases_share_a_lock_identity() {

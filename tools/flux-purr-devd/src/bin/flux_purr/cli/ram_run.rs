@@ -5,7 +5,10 @@ use espflash::{
     target::Chip,
 };
 use flux_purr_devd::PRODUCT_BUILD_ID;
-use flux_purr_devd::serial::{SerialPortProcessLock, serial_port_paths_match};
+use flux_purr_devd::serial::{
+    SerialPortProcessLock, UsbSerialIdentity, serial_port_paths_match,
+    serial_port_usb_identity_matches,
+};
 use serialport::{FlowControl, SerialPort, SerialPortType, TTYPort, UsbPortInfo};
 use std::time::{Duration, Instant};
 
@@ -89,12 +92,13 @@ fn run_ram_operation(
     op: &str,
     color: Option<&str>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    validate_exact_ram_port(port)?;
+    let usb_identity = validate_exact_ram_port(port)?;
     let _serial_lock = acquire_ram_port_lock(port)?;
+    ensure_ram_target(port, &usb_identity)?;
     let observed = if reload {
         None
     } else {
-        read_identity(port).ok()
+        read_identity(port, &usb_identity).ok()
     };
     let matching_ram = observed.as_ref().is_some_and(|(identity, _)| {
         identity.firmware == ObservedFirmware::RamBringup
@@ -111,25 +115,28 @@ fn run_ram_operation(
         let elf = elf.map(Path::to_path_buf).unwrap_or_else(default_ram_elf);
         validate_local_elf(&elf)?;
         let image = read_validated_ram_elf(&elf)?;
-        load_ram_elf(port, image)?
+        load_ram_elf(port, image, &usb_identity)?
     };
     verify_ram_identity(&identity, op)?;
+    ensure_ram_target(port, &usb_identity)?;
     send_ram_request(&mut serial, op, color)
 }
 
 fn exit_ram(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    validate_exact_ram_port(port)?;
+    let usb_identity = validate_exact_ram_port(port)?;
     let _serial_lock = acquire_ram_port_lock(port)?;
-    let (identity, mut serial) = match read_identity(port) {
+    ensure_ram_target(port, &usb_identity)?;
+    let (identity, mut serial) = match read_identity(port, &usb_identity) {
         Ok(result) => result,
         Err(_) => {
             let elf = default_ram_elf();
             validate_local_elf(&elf)?;
             let image = read_validated_ram_elf(&elf)?;
-            load_ram_elf(port, image)?
+            load_ram_elf(port, image, &usb_identity)?
         }
     };
     verify_ram_identity(&identity, "exit")?;
+    ensure_ram_target(port, &usb_identity)?;
     send_ram_request(&mut serial, "exit", None)
 }
 
@@ -555,7 +562,9 @@ fn range_contained(start: u64, end: u64, window: (u64, u64)) -> bool {
     window.0 <= start && end <= window.1
 }
 
-fn validate_exact_ram_port(port: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn validate_exact_ram_port(
+    port: &str,
+) -> Result<UsbSerialIdentity, Box<dyn std::error::Error + Send + Sync>> {
     validate_serial_port(port)?;
     #[cfg(not(target_os = "windows"))]
     let path = Path::new(port);
@@ -567,19 +576,32 @@ fn validate_exact_ram_port(port: &str) -> Result<(), Box<dyn std::error::Error +
         .into_iter()
         .find(|candidate| serial_port_paths_match(port, &candidate.port_name))
         .ok_or_else(|| format!("authorized serial port is no longer enumerated: {port}"))?;
-    if !matches!(
-        enumerated.port_type,
-        SerialPortType::UsbPort(_) | SerialPortType::Unknown
-    ) {
-        return Err(format!("authorized serial port is not a USB serial target: {port}").into());
+    let identity = UsbSerialIdentity::from_port_info(&enumerated)
+        .ok_or_else(|| format!("authorized serial port has no stable USB identity: {port}"))?;
+    if identity.vid != 0x303a || identity.pid != USB_SERIAL_JTAG_PID {
+        return Err(format!(
+            "authorized serial port is not an ESP32-S3 USB Serial/JTAG target: {port}"
+        )
+        .into());
     }
-    Ok(())
+    Ok(identity)
+}
+
+fn ensure_ram_target(
+    port: &str,
+    expected: &UsbSerialIdentity,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if serial_port_usb_identity_matches(port, expected) {
+        return Ok(());
+    }
+    Err(format!("authorized USB target changed or is no longer enumerated: {port}").into())
 }
 
 fn read_identity(
     port: &str,
+    expected: &UsbSerialIdentity,
 ) -> Result<(ObservedIdentity, TTYPort), Box<dyn std::error::Error + Send + Sync>> {
-    validate_exact_ram_port(port)?;
+    ensure_ram_target(port, expected)?;
     let mut serial = serialport::new(port, 115_200)
         .flow_control(FlowControl::None)
         .timeout(Duration::from_millis(200))
@@ -755,12 +777,18 @@ fn disable_usb_serial_jtag_watchdogs(
 fn load_ram_elf(
     port: &str,
     image: RamElfImage,
+    expected: &UsbSerialIdentity,
 ) -> Result<(ObservedIdentity, TTYPort), Box<dyn std::error::Error + Send + Sync>> {
-    validate_exact_ram_port(port)?;
+    ensure_ram_target(port, expected)?;
     let port_info = serialport::available_ports()?
         .into_iter()
         .find(|candidate| serial_port_paths_match(port, &candidate.port_name))
         .ok_or_else(|| format!("authorized serial port is no longer enumerated: {port}"))?;
+    if !expected.matches_port_info(&port_info) {
+        return Err(
+            format!("authorized USB target changed or is no longer enumerated: {port}").into(),
+        );
+    }
     let usb_info = match port_info.port_type {
         SerialPortType::UsbPort(info) => info,
         SerialPortType::Unknown => UsbPortInfo {
@@ -789,6 +817,7 @@ fn load_ram_elf(
     if chip != Chip::Esp32s3 {
         return Err(format!("RAM loader detected unexpected chip: {chip}").into());
     }
+    ensure_ram_target(port, expected)?;
     disable_usb_serial_jtag_watchdogs(&mut connection, usb_pid)?;
     let RamElfImage { entry, sections } = image;
     for (address, mut data) in sections {

@@ -97,6 +97,7 @@ pub(crate) async fn local_firmware_update(
         &bundle.bundle_sha256,
         false,
     );
+    let usb_identity = capture_native_serial_identity(&port)?;
     progress.operation_started();
     progress.stage_started("authorization", json!({ "port": port }));
     progress.stage_completed("authorization", json!({ "port": port }));
@@ -111,11 +112,17 @@ pub(crate) async fn local_firmware_update(
     )?;
     let serial_rpc =
         acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
-    drop_cached_serial_session(&state.serial_sessions, &port)?;
-    let serial_lock = acquire_serial_process_lock(&port, ESPFLASH_COMMAND_TIMEOUT).await?;
-    let security =
-        probe_native_rom_security_with_locks(&state, &port, Some(&serial_rpc), Some(&serial_lock))
-            .await?;
+    let serial_lock = take_cached_serial_process_lock(&state.serial_sessions, &port)?
+        .ok_or_else(|| HttpError::internal("native update lost its serial session lock"))?;
+    ensure_native_serial_identity(&port, &usb_identity)?;
+    let security = probe_native_rom_security_with_locks(
+        &state,
+        &port,
+        Some(&serial_rpc),
+        Some(&serial_lock),
+        Some(&usb_identity),
+    )
+    .await?;
     security.validate_for_flash()?;
     progress.stage_completed("preflight", json!({}));
     run_bundle_flash_transaction(
@@ -124,8 +131,11 @@ pub(crate) async fn local_firmware_update(
         FirmwareOperation::Update,
         &port,
         &mut progress,
-        Some(serial_rpc),
-        Some(serial_lock),
+        FirmwareFlashGuards {
+            serial_rpc: Some(serial_rpc),
+            serial_lock: Some(serial_lock),
+            usb_identity: Some(&usb_identity),
+        },
     )
     .await?;
     progress.stage_started("runtime_reconnect", json!({}));
@@ -303,6 +313,28 @@ pub(crate) fn validate_update_runtime_facts(
     Ok(())
 }
 
+fn capture_native_serial_identity(port_path: &str) -> Result<UsbSerialIdentity, HttpError> {
+    serial_port_usb_identity(port_path).map_err(|error| {
+        HttpError::forbidden(
+            "authorized_port_identity_required",
+            &format!("Firmware operation requires a stable USB target identity: {error}"),
+        )
+    })
+}
+
+fn ensure_native_serial_identity(
+    port_path: &str,
+    expected: &UsbSerialIdentity,
+) -> Result<(), HttpError> {
+    if serial_port_usb_identity_matches(port_path, expected) {
+        return Ok(());
+    }
+    Err(HttpError::forbidden(
+        "authorized_port_changed",
+        "The authorized USB target changed or disappeared; no replacement port will be selected.",
+    ))
+}
+
 pub(crate) async fn refresh_native_update_runtime_facts(
     state: &AppState,
     target: &DeviceRecord,
@@ -345,8 +377,15 @@ pub(crate) struct PreparedFirmwareOperation {
     current_version: String,
     status: ControlPlaneStatus,
     rom_mac: String,
+    usb_identity: Option<UsbSerialIdentity>,
     serial_rpc: Option<tokio::sync::OwnedMutexGuard<()>>,
     serial_lock: Option<SerialPortProcessLock>,
+}
+
+pub(crate) struct FirmwareFlashGuards<'a> {
+    serial_rpc: Option<tokio::sync::OwnedMutexGuard<()>>,
+    serial_lock: Option<SerialPortProcessLock>,
+    usb_identity: Option<&'a UsbSerialIdentity>,
 }
 
 pub(crate) async fn firmware_operation(
@@ -409,8 +448,11 @@ pub(crate) async fn firmware_operation(
         payload.operation,
         &prepared.port_path,
         &mut progress,
-        prepared.serial_rpc.take(),
-        prepared.serial_lock.take(),
+        FirmwareFlashGuards {
+            serial_rpc: prepared.serial_rpc.take(),
+            serial_lock: prepared.serial_lock.take(),
+            usb_identity: prepared.usb_identity.as_ref(),
+        },
     )
     .await?;
     let verified =
@@ -472,20 +514,43 @@ pub(crate) async fn prepare_firmware_operation(
         target,
         bundle,
         rom_mac: String::new(),
+        usb_identity: None,
         serial_rpc: None,
         serial_lock: None,
     };
+    if prepared.transport == DeviceTransport::NativeSerial {
+        prepared.usb_identity = Some(capture_native_serial_identity(&prepared.port_path)?);
+    }
     refresh_operation_facts(state, device_id, payload, &mut prepared, progress).await?;
-    if !payload.dry_run && prepared.transport == DeviceTransport::NativeSerial {
+    if prepared.transport == DeviceTransport::NativeSerial {
+        let serial_lock = if payload.operation == FirmwareOperation::Update {
+            let cached = progress.require(take_cached_serial_process_lock(
+                &state.serial_sessions,
+                &prepared.port_path,
+            ))?;
+            cached.ok_or_else(|| {
+                progress.fail(HttpError::internal(
+                    "native update lost its serial session lock",
+                ))
+            })?
+        } else {
+            progress.require(drop_cached_serial_session(
+                &state.serial_sessions,
+                &prepared.port_path,
+            ))?;
+            progress.require(
+                acquire_serial_process_lock(&prepared.port_path, ESPFLASH_COMMAND_TIMEOUT).await,
+            )?
+        };
+        if let Some(usb_identity) = prepared.usb_identity.as_ref() {
+            progress.require(ensure_native_serial_identity(
+                &prepared.port_path,
+                usb_identity,
+            ))?;
+        }
+        prepared.serial_lock = Some(serial_lock);
         prepared.serial_rpc = Some(progress.require(
             acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
-        )?);
-        progress.require(drop_cached_serial_session(
-            &state.serial_sessions,
-            &prepared.port_path,
-        ))?;
-        prepared.serial_lock = Some(progress.require(
-            acquire_serial_process_lock(&prepared.port_path, ESPFLASH_COMMAND_TIMEOUT).await,
         )?);
     }
     if payload.dry_run {
@@ -497,6 +562,7 @@ pub(crate) async fn prepare_firmware_operation(
         &prepared,
         prepared.serial_rpc.as_ref(),
         prepared.serial_lock.as_ref(),
+        prepared.usb_identity.as_ref(),
         progress,
     )
     .await?;
@@ -629,6 +695,7 @@ pub(crate) async fn operation_rom_security(
     prepared: &PreparedFirmwareOperation,
     serial_rpc: Option<&tokio::sync::OwnedMutexGuard<()>>,
     serial_lock: Option<&SerialPortProcessLock>,
+    usb_identity: Option<&UsbSerialIdentity>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<String, HttpError> {
     let security = match prepared.transport {
@@ -648,6 +715,7 @@ pub(crate) async fn operation_rom_security(
                 &prepared.port_path,
                 serial_rpc,
                 serial_lock,
+                usb_identity,
             )
             .await,
         )?,
@@ -827,10 +895,9 @@ pub(crate) async fn run_bundle_flash_transaction(
     operation: FirmwareOperation,
     port_path: &str,
     progress: &mut FirmwareOperationProgress,
-    serial_rpc: Option<tokio::sync::OwnedMutexGuard<()>>,
-    serial_lock: Option<SerialPortProcessLock>,
+    guards: FirmwareFlashGuards<'_>,
 ) -> Result<(), HttpError> {
-    let _serial_rpc = match serial_rpc {
+    let _serial_rpc = match guards.serial_rpc {
         Some(guard) => guard,
         None => progress.require(
             acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
@@ -840,11 +907,14 @@ pub(crate) async fn run_bundle_flash_transaction(
         &state.serial_sessions,
         port_path,
     ))?;
-    let _serial_lock = match serial_lock {
+    let _serial_lock = match guards.serial_lock {
         Some(lock) => lock,
         None => progress
             .require(acquire_serial_process_lock(port_path, ESPFLASH_COMMAND_TIMEOUT).await)?,
     };
+    if let Some(usb_identity) = guards.usb_identity {
+        progress.require(ensure_native_serial_identity(port_path, usb_identity))?;
+    }
     let workspace = progress.require(tempfile::tempdir().map_err(|error| {
         HttpError::internal(&format!("failed to create flash workspace: {error}"))
     }))?;
@@ -1130,6 +1200,7 @@ async fn probe_native_rom_security_with_locks(
     port_path: &str,
     serial_rpc: Option<&tokio::sync::OwnedMutexGuard<()>>,
     serial_lock: Option<&SerialPortProcessLock>,
+    usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<RomSecurityInfo, HttpError> {
     use ::espflash::{
         connection::{Connection, ResetAfterOperation, ResetBeforeOperation},
@@ -1148,6 +1219,9 @@ async fn probe_native_rom_security_with_locks(
     } else {
         None
     };
+    if let Some(usb_identity) = usb_identity {
+        ensure_native_serial_identity(port_path, usb_identity)?;
+    }
     let port_path = port_path.to_owned();
     tokio::task::spawn_blocking(move || {
         let port_info = serialport::available_ports()
