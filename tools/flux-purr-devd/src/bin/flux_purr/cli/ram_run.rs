@@ -177,6 +177,7 @@ const RAM_RESERVED: (u64, u64) = (0x3fce_8000, 0x3fce_d710);
 const RAM_FLASH_WINDOWS: [(u64, u64); 2] = [(0x4200_0000, 0x4400_0000), (0x3c00_0000, 0x3d00_0000)];
 const RAM_BLOCK_SIZE: usize = 0x1800;
 const RAM_RESPONSE_BUFFER_LIMIT: usize = 16 * 1024;
+const RAM_ELF_FILE_LIMIT: u64 = 8 * 1024 * 1024;
 const RTC_CNTL_BASE: u32 = 0x6000_8000;
 const RTC_CNTL_SWD_CONF: u32 = RTC_CNTL_BASE + 0x00b4;
 const RTC_CNTL_SWD_WPROTECT: u32 = RTC_CNTL_BASE + 0x00b8;
@@ -208,15 +209,27 @@ struct RamElfImage {
 
 #[cfg(test)]
 fn validate_ram_elf(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let data = fs::read(path)?;
+    let data = read_ram_elf_file(path)?;
     parse_validated_ram_elf(&data, path).map(|_| ())
 }
 
 fn read_validated_ram_elf(
     path: &Path,
 ) -> Result<RamElfImage, Box<dyn std::error::Error + Send + Sync>> {
-    let data = fs::read(path)?;
+    let data = read_ram_elf_file(path)?;
     parse_validated_ram_elf(&data, path)
+}
+
+fn read_ram_elf_file(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    let size = fs::metadata(path)?.len();
+    if size > RAM_ELF_FILE_LIMIT {
+        return Err(format!(
+            "RAM ELF exceeds the {RAM_ELF_FILE_LIMIT} byte file-size limit: {}",
+            path.display()
+        )
+        .into());
+    }
+    Ok(fs::read(path)?)
 }
 
 fn parse_validated_ram_elf(
@@ -941,6 +954,19 @@ mod tests {
     fn ram_response_buffer_rejects_an_unbounded_jsonl_frame() {
         let mut bytes = vec![b'x'; RAM_RESPONSE_BUFFER_LIMIT];
         assert!(append_ram_response_bytes(&mut bytes, b"y").is_err());
+    }
+
+    #[test]
+    fn ram_elf_gate_rejects_an_oversized_file_before_reading_it() {
+        let mut invalid = tempfile::NamedTempFile::new().unwrap();
+        invalid
+            .as_file_mut()
+            .set_len(RAM_ELF_FILE_LIMIT + 1)
+            .unwrap();
+
+        let error = read_validated_ram_elf(invalid.path()).err().unwrap();
+
+        assert!(error.to_string().contains("file-size limit"));
     }
 
     #[cfg(unix)]

@@ -3,6 +3,7 @@ use flux_purr_devd::serial::{
     SerialPortProcessLock, UsbSerialIdentity, serial_port_usb_identity,
     serial_port_usb_identity_matches,
 };
+use std::io::Read;
 
 const DIRECT_SERIAL_LOCK_TIMEOUT: Duration = Duration::from_secs(180);
 const DIRECT_ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
@@ -617,7 +618,9 @@ pub(crate) fn validate_local_elf(
     if !path.is_file() {
         return Err(format!("local ELF does not exist: {}", path.display()).into());
     }
-    if fs::read(path)?.get(0..4) != Some(b"\x7fELF") {
+    let mut magic = [0_u8; 4];
+    fs::File::open(path)?.read_exact(&mut magic)?;
+    if magic != *b"\x7fELF" {
         return Err(format!("local artifact is not an ELF: {}", path.display()).into());
     }
     Ok(())

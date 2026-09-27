@@ -789,8 +789,12 @@ async fn serial_exchange_with_visibility_and_identity(
     let SerialExchangeOptions {
         retry_policy,
         record_payload,
-        expected_usb_identity,
+        expected_usb_identity: requested_usb_identity,
     } = options;
+    let expected_usb_identity = match requested_usb_identity {
+        Some(identity) => Some(identity),
+        None => Some(capture_native_serial_identity(&port_path)?),
+    };
     if record_payload {
         record_transport_event(state, device_id, "tx", "usb_jsonl", &request_id, &request);
     }

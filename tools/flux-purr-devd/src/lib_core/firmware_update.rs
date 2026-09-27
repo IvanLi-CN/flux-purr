@@ -117,14 +117,19 @@ pub(crate) async fn local_firmware_update(
     let serial_lock = take_cached_serial_process_lock(&state.serial_sessions, &port)?
         .ok_or_else(|| HttpError::internal("native update lost its serial session lock"))?;
     ensure_native_serial_identity(&port, &usb_identity)?;
-    let security = probe_native_rom_security_with_locks(
+    let probe = probe_native_rom_security_with_locks(
         &state,
         &port,
-        Some(&serial_rpc),
-        Some(&serial_lock),
-        Some(&usb_identity),
+        Some(serial_rpc),
+        Some(serial_lock),
+        Some(usb_identity.clone()),
     )
     .await?;
+    let RomSecurityProbeOutput {
+        security,
+        serial_rpc,
+        serial_lock,
+    } = probe;
     security.validate_for_flash()?;
     progress.stage_completed("preflight", json!({}));
     run_bundle_flash_transaction(
@@ -134,8 +139,8 @@ pub(crate) async fn local_firmware_update(
         &port,
         &mut progress,
         FirmwareFlashGuards {
-            serial_rpc: Some(serial_rpc),
-            serial_lock: Some(serial_lock),
+            serial_rpc,
+            serial_lock,
             usb_identity: Some(&usb_identity),
         },
     )
@@ -439,6 +444,12 @@ pub(crate) struct FirmwareFlashGuards<'a> {
     usb_identity: Option<&'a UsbSerialIdentity>,
 }
 
+pub(crate) struct RomSecurityProbeOutput {
+    security: RomSecurityInfo,
+    serial_rpc: Option<tokio::sync::OwnedMutexGuard<()>>,
+    serial_lock: Option<SerialPortProcessLock>,
+}
+
 #[derive(Clone, Copy)]
 struct FirmwareFlashTarget<'a> {
     port_path: &'a str,
@@ -616,15 +627,20 @@ pub(crate) async fn prepare_firmware_operation(
         progress.stage_completed("transport", json!({}));
         progress.stage_started("rom_reset", json!({}));
     }
-    prepared.rom_mac = operation_rom_security(
+    let serial_rpc = prepared.serial_rpc.take();
+    let serial_lock = prepared.serial_lock.take();
+    let probe = operation_rom_security(
         state,
         &prepared,
-        prepared.serial_rpc.as_ref(),
-        prepared.serial_lock.as_ref(),
-        prepared.usb_identity.as_ref(),
+        serial_rpc,
+        serial_lock,
+        prepared.usb_identity.clone(),
         progress,
     )
     .await?;
+    prepared.rom_mac = probe.security.rom_mac.clone();
+    prepared.serial_rpc = probe.serial_rpc;
+    prepared.serial_lock = probe.serial_lock;
     if payload.dry_run {
         progress.stage_completed("rom_reset", json!({}));
         progress.stage_started("chip_flash_security", json!({}));
@@ -764,12 +780,12 @@ pub(crate) fn update_operation_device(
 pub(crate) async fn operation_rom_security(
     state: &AppState,
     prepared: &PreparedFirmwareOperation,
-    serial_rpc: Option<&tokio::sync::OwnedMutexGuard<()>>,
-    serial_lock: Option<&SerialPortProcessLock>,
-    usb_identity: Option<&UsbSerialIdentity>,
+    serial_rpc: Option<tokio::sync::OwnedMutexGuard<()>>,
+    serial_lock: Option<SerialPortProcessLock>,
+    usb_identity: Option<UsbSerialIdentity>,
     progress: &mut FirmwareOperationProgress,
-) -> Result<String, HttpError> {
-    let security = match prepared.transport {
+) -> Result<RomSecurityProbeOutput, HttpError> {
+    let probe = match prepared.transport {
         DeviceTransport::Mock => RomSecurityInfo {
             rom_mac: prepared.target.identity.device_id.clone(),
             secure_boot_enabled: false,
@@ -780,20 +796,28 @@ pub(crate) async fn operation_rom_security(
             flash_size_bytes: 4 * 1024 * 1024,
             package_matches: true,
         },
-        DeviceTransport::NativeSerial => progress.require(
-            probe_native_rom_security_with_locks(
+        DeviceTransport::NativeSerial => {
+            return probe_native_rom_security_with_locks(
                 state,
                 &prepared.port_path,
                 serial_rpc,
                 serial_lock,
                 usb_identity,
             )
-            .await,
-        )?,
+            .await
+            .and_then(|probe| {
+                progress.require(probe.security.validate_for_flash())?;
+                Ok(probe)
+            });
+        }
         DeviceTransport::Lan => unreachable!(),
     };
-    progress.require(security.validate_for_flash())?;
-    Ok(security.rom_mac)
+    progress.require(probe.validate_for_flash())?;
+    Ok(RomSecurityProbeOutput {
+        security: probe,
+        serial_rpc: None,
+        serial_lock: None,
+    })
 }
 
 pub(crate) fn validate_operation_downgrade(
@@ -1355,36 +1379,50 @@ pub(crate) fn espflash_command_error(
 async fn probe_native_rom_security_with_locks(
     state: &AppState,
     port_path: &str,
-    serial_rpc: Option<&tokio::sync::OwnedMutexGuard<()>>,
-    serial_lock: Option<&SerialPortProcessLock>,
-    usb_identity: Option<&UsbSerialIdentity>,
-) -> Result<RomSecurityInfo, HttpError> {
-    let _owned_serial_rpc = if serial_rpc.is_none() {
-        Some(acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?)
-    } else {
-        None
+    serial_rpc: Option<tokio::sync::OwnedMutexGuard<()>>,
+    serial_lock: Option<SerialPortProcessLock>,
+    usb_identity: Option<UsbSerialIdentity>,
+) -> Result<RomSecurityProbeOutput, HttpError> {
+    let serial_rpc = match serial_rpc {
+        Some(guard) => Some(guard),
+        None => Some(
+            acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?,
+        ),
     };
     drop_cached_serial_session(&state.serial_sessions, port_path)?;
-    let _owned_serial_lock = if serial_lock.is_none() {
-        Some(acquire_serial_process_lock(port_path, ESPFLASH_COMMAND_TIMEOUT).await?)
-    } else {
-        None
+    let serial_lock = match serial_lock {
+        Some(lock) => Some(lock),
+        None => Some(acquire_serial_process_lock(port_path, ESPFLASH_COMMAND_TIMEOUT).await?),
     };
-    if let Some(usb_identity) = usb_identity {
+    if let Some(usb_identity) = usb_identity.as_ref() {
         ensure_native_serial_identity(port_path, usb_identity)?;
     }
     let port_path = port_path.to_owned();
-    let expected_usb_identity = usb_identity.cloned();
-    tokio::task::spawn_blocking(move || {
-        probe_native_rom_security_blocking(&port_path, expected_usb_identity.as_ref())
+    let expected_usb_identity = usb_identity;
+    let probe_port_path = port_path.clone();
+    let probe_usb_identity = expected_usb_identity.clone();
+    // The blocking probe owns both guards until its final runtime reset. If the
+    // request future is cancelled, the worker still serializes the target.
+    let (security, serial_rpc, serial_lock) = tokio::task::spawn_blocking(move || {
+        let result =
+            probe_native_rom_security_blocking(&probe_port_path, probe_usb_identity.as_ref());
+        (result, serial_rpc, serial_lock)
     })
     .await
-    .map_err(|error| HttpError::internal(&format!("ROM security probe task failed: {error}")))?
-    .map_err(|error| {
+    .map_err(|error| HttpError::internal(&format!("ROM security probe task failed: {error}")))?;
+    let security = security.map_err(|error| {
         HttpError::forbidden(
             "security_info_unknown",
             &format!("ROM security probe failed; flashing is blocked: {error}"),
         )
+    })?;
+    if let Some(usb_identity) = expected_usb_identity.as_ref() {
+        ensure_native_serial_identity(&port_path, usb_identity)?;
+    }
+    Ok(RomSecurityProbeOutput {
+        security,
+        serial_rpc,
+        serial_lock,
     })
 }
 
