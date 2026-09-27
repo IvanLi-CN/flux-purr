@@ -3,6 +3,10 @@ pub(crate) use super::*;
 use std::{
     io::Read,
     process::{Child, Command as StdCommand, Output, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Instant,
 };
@@ -263,23 +267,262 @@ async fn run_espflash_command_with_identity_blocking(
     let args = args.to_owned();
     let port_path = port_path.map(str::to_owned);
     let expected_usb_identity = expected_usb_identity.cloned();
-    tokio::task::spawn_blocking(move || {
-        run_espflash_command_blocking(
+    let control = Arc::new(EspflashProcessControl::default());
+    let worker_control = Arc::clone(&control);
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let worker = thread::spawn(move || {
+        let result = run_espflash_command_blocking_with_control(
             &program,
             &args,
             timeout,
             port_path.as_deref(),
             expected_usb_identity.as_ref(),
-        )
-    })
-    .await
-    .map_err(|error| {
+            &worker_control,
+        );
+        let _ = sender.send(result);
+    });
+    let _guard = EspflashProcessGuard {
+        control,
+        worker: Some(worker),
+    };
+    receiver.await.map_err(|error| {
         HttpError::internal_with_details(
-            "flash_tool_unavailable",
+            "flash_tool_failed",
             "The espflash worker stopped unexpectedly.",
             json!({ "error": error.to_string() }),
         )
     })?
+}
+
+#[derive(Default)]
+struct EspflashProcessControl {
+    child: Mutex<Option<Child>>,
+    cancelled: AtomicBool,
+}
+
+struct EspflashProcessGuard {
+    control: Arc<EspflashProcessControl>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for EspflashProcessGuard {
+    fn drop(&mut self) {
+        self.control.cancelled.store(true, Ordering::Release);
+        if let Ok(mut child) = self.control.child.lock()
+            && let Some(mut child) = child.take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn run_espflash_command_blocking_with_control(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    port_path: Option<&str>,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+    control: &Arc<EspflashProcessControl>,
+) -> Result<Output, HttpError> {
+    let mut child = StdCommand::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            HttpError::internal_with_details(
+                "flash_tool_unavailable",
+                "Failed to start espflash.",
+                json!({ "program": program, "error": error.to_string() }),
+            )
+        })?;
+    let stdout = child.stdout.take().expect("espflash stdout is piped");
+    let stderr = child.stderr.take().expect("espflash stderr is piped");
+    {
+        let mut slot = control
+            .child
+            .lock()
+            .map_err(|_| HttpError::internal("The espflash process state lock failed."))?;
+        *slot = Some(child);
+    }
+    let stdout_reader = thread::spawn(move || read_process_pipe(stdout));
+    let stderr_reader = thread::spawn(move || read_process_pipe(stderr));
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if control.cancelled.load(Ordering::Acquire) {
+            kill_controlled_child(control);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(HttpError::internal("espflash operation was cancelled"));
+        }
+        let status = {
+            let mut slot = control
+                .child
+                .lock()
+                .map_err(|_| HttpError::internal("The espflash process state lock failed."))?;
+            let child = slot
+                .as_mut()
+                .ok_or_else(|| HttpError::internal("The espflash process was cancelled."))?;
+            child.try_wait()
+        };
+        match status {
+            Ok(Some(status)) => {
+                let _ = control.child.lock().map(|mut slot| slot.take());
+                return collect_process_output(status, stdout_reader, stderr_reader);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(controlled_inspection_error(
+                    control,
+                    stdout_reader,
+                    stderr_reader,
+                    program,
+                    error,
+                ));
+            }
+        }
+        if let (Some(port_path), Some(expected_usb_identity)) = (port_path, expected_usb_identity)
+            && !serial_port_usb_identity_matches(port_path, expected_usb_identity)
+        {
+            kill_controlled_child(control);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(HttpError::forbidden(
+                "authorized_port_changed",
+                "The authorized USB target changed or disappeared while espflash was running; the operation was stopped.",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(controlled_timeout_error(
+                control,
+                stdout_reader,
+                stderr_reader,
+                program,
+                args,
+                timeout,
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn controlled_inspection_error(
+    control: &Arc<EspflashProcessControl>,
+    stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    program: &Path,
+    error: io::Error,
+) -> HttpError {
+    let details = match kill_and_collect_controlled_child(control, stdout_reader, stderr_reader) {
+        Ok(output) => json!({
+            "program": program,
+            "error": error.to_string(),
+            "stdout": bounded_espflash_output(&output.stdout),
+            "stderr": bounded_espflash_output(&output.stderr),
+        }),
+        Err(cleanup_error) => json!({
+            "program": program,
+            "error": error.to_string(),
+            "cleanupError": cleanup_error.error.message,
+        }),
+    };
+    HttpError::internal_with_details(
+        "flash_tool_failed",
+        "Failed to inspect the espflash process.",
+        details,
+    )
+}
+
+fn controlled_timeout_error(
+    control: &Arc<EspflashProcessControl>,
+    stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+) -> HttpError {
+    let details = match kill_and_collect_controlled_child(control, stdout_reader, stderr_reader) {
+        Ok(output) => json!({
+            "program": program,
+            "args": args,
+            "timeoutMs": timeout.as_millis(),
+            "stdout": bounded_espflash_output(&output.stdout),
+            "stderr": bounded_espflash_output(&output.stderr),
+        }),
+        Err(cleanup_error) => json!({
+            "program": program,
+            "args": args,
+            "timeoutMs": timeout.as_millis(),
+            "cleanupError": cleanup_error.error.message,
+        }),
+    };
+    HttpError::internal_with_details(
+        "flash_tool_timeout",
+        "espflash did not finish before the command deadline.",
+        details,
+    )
+}
+
+fn kill_controlled_child(control: &Arc<EspflashProcessControl>) {
+    let _ = take_and_kill_controlled_child(control);
+}
+
+fn kill_and_collect_controlled_child(
+    control: &Arc<EspflashProcessControl>,
+    stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+) -> Result<Output, HttpError> {
+    let status = take_and_kill_controlled_child(control).map_err(|error| {
+        HttpError::internal_with_details(
+            "flash_tool_failed",
+            "Failed to reap the espflash process.",
+            json!({ "error": error.to_string() }),
+        )
+    })?;
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| HttpError::internal("The espflash stdout reader stopped unexpectedly."))?
+        .map_err(|error| {
+            HttpError::internal_with_details(
+                "flash_tool_failed",
+                "Failed to read espflash stdout.",
+                json!({ "error": error.to_string() }),
+            )
+        })?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| HttpError::internal("The espflash stderr reader stopped unexpectedly."))?
+        .map_err(|error| {
+            HttpError::internal_with_details(
+                "flash_tool_failed",
+                "Failed to read espflash stderr.",
+                json!({ "error": error.to_string() }),
+            )
+        })?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn take_and_kill_controlled_child(
+    control: &Arc<EspflashProcessControl>,
+) -> io::Result<std::process::ExitStatus> {
+    let mut slot = control
+        .child
+        .lock()
+        .map_err(|_| io::Error::other("espflash process state lock failed"))?;
+    let mut child = slot
+        .take()
+        .ok_or_else(|| io::Error::other("espflash process is no longer available"))?;
+    let _ = child.kill();
+    child.wait()
 }
 
 pub fn run_espflash_command_blocking_with_identity(

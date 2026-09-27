@@ -6,8 +6,8 @@ use espflash::{
 };
 use flux_purr_devd::PRODUCT_BUILD_ID;
 use flux_purr_devd::serial::{
-    SerialPortProcessLock, UsbSerialIdentity, serial_port_paths_match,
-    serial_port_usb_identity_matches,
+    ESP32S3_USB_SERIAL_JTAG_PID, ESP32S3_USB_SERIAL_JTAG_VID, SerialPortProcessLock,
+    UsbSerialIdentity, serial_port_paths_match, serial_port_usb_identity_matches,
 };
 use serialport::{FlowControl, SerialPort, SerialPortType, TTYPort, UsbPortInfo};
 use std::time::{Duration, Instant};
@@ -176,7 +176,7 @@ const RAM_DRAM: (u64, u64) = (0x3fc8_8000, 0x3fce_8000);
 const RAM_RESERVED: (u64, u64) = (0x3fce_8000, 0x3fce_d710);
 const RAM_FLASH_WINDOWS: [(u64, u64); 2] = [(0x4200_0000, 0x4400_0000), (0x3c00_0000, 0x3d00_0000)];
 const RAM_BLOCK_SIZE: usize = 0x1800;
-const USB_SERIAL_JTAG_PID: u16 = 0x1001;
+const RAM_RESPONSE_BUFFER_LIMIT: usize = 16 * 1024;
 const RTC_CNTL_BASE: u32 = 0x6000_8000;
 const RTC_CNTL_SWD_CONF: u32 = RTC_CNTL_BASE + 0x00b4;
 const RTC_CNTL_SWD_WPROTECT: u32 = RTC_CNTL_BASE + 0x00b8;
@@ -590,7 +590,7 @@ fn validate_exact_ram_port(
         .ok_or_else(|| format!("authorized serial port is no longer enumerated: {port}"))?;
     let identity = UsbSerialIdentity::from_port_info(&enumerated)
         .ok_or_else(|| format!("authorized serial port has no stable USB identity: {port}"))?;
-    if identity.vid != 0x303a || identity.pid != USB_SERIAL_JTAG_PID {
+    if identity.vid != ESP32S3_USB_SERIAL_JTAG_VID || identity.pid != ESP32S3_USB_SERIAL_JTAG_PID {
         return Err(format!(
             "authorized serial port is not an ESP32-S3 USB Serial/JTAG target: {port}"
         )
@@ -631,6 +631,9 @@ fn read_identity_from_serial(
     while Instant::now() < deadline {
         match serial.read(&mut chunk) {
             Ok(count) => {
+                if bytes.len().saturating_add(count) > RAM_RESPONSE_BUFFER_LIMIT {
+                    return Err("RAM bring-up response exceeded the JSONL frame limit".into());
+                }
                 bytes.extend_from_slice(&chunk[..count]);
                 if let Some(identity) = next_identity(&mut bytes) {
                     return Ok(identity);
@@ -779,7 +782,7 @@ fn disable_usb_serial_jtag_watchdogs(
     connection: &mut Connection,
     usb_pid: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if usb_pid != USB_SERIAL_JTAG_PID {
+    if usb_pid != ESP32S3_USB_SERIAL_JTAG_PID {
         return Ok(());
     }
     connection.write_reg(RTC_CNTL_WDTWPROTECT, RTC_CNTL_WDT_WKEY, None)?;

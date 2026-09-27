@@ -485,8 +485,10 @@ pub(crate) fn direct_flash_with_program(
     )
 }
 
-pub(crate) type SnapshotReader =
-    fn(&str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
+pub(crate) type SnapshotReader = fn(
+    &str,
+    Option<&UsbSerialIdentity>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
 pub(crate) type RomProbe = fn(&str, Option<&UsbSerialIdentity>) -> bool;
 
 #[allow(dead_code)]
@@ -540,7 +542,7 @@ fn direct_flash_with_program_inner_guarded(
         None
     } else {
         ensure_direct_usb_identity(&args.port, usb_identity)?;
-        let snapshot = match snapshot_reader(&args.port) {
+        let snapshot = match snapshot_reader(&args.port, usb_identity) {
             Ok(snapshot) => snapshot,
             Err(error) if snapshot_error_may_be_rom_mode(error.as_ref()) => {
                 ensure_direct_usb_identity(&args.port, usb_identity)?;
@@ -979,11 +981,12 @@ pub(crate) fn developer_backup_directory()
 
 pub(crate) fn read_eeprom_snapshot(
     port: &str,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    match read_eeprom_snapshot_protocol(port) {
+    match read_eeprom_snapshot_protocol(port, expected_usb_identity) {
         Ok(snapshot) => Ok(snapshot),
         Err(error) if snapshot_protocol_compatibility_fallback(error.as_ref()) => {
-            read_legacy_eeprom_snapshot(port)
+            read_legacy_eeprom_snapshot(port, expected_usb_identity)
         }
         Err(error) => Err(error),
     }
@@ -997,16 +1000,21 @@ pub(crate) fn snapshot_protocol_compatibility_fallback(error: &dyn std::error::E
 
 pub(crate) fn read_eeprom_snapshot_protocol(
     port: &str,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     const SNAPSHOT_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
     let mut serial = serialport::new(port, 115_200)
         .timeout(Duration::from_secs(2))
         .open()?;
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
     let deadline = StdInstant::now() + SNAPSHOT_SESSION_TIMEOUT;
     let session_id = format!("snapshot-{}", current_unix_millis());
     let open =
         json!({"op":"eeprom_snapshot_open","requestId":session_id,"capacity":8192,"chunkMax":32});
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
     write_snapshot_request(&mut *serial, &open)?;
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
     let open_response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
     if open_response.get("capacity").and_then(Value::as_u64) != Some(8192)
         || open_response.get("chunkMax").and_then(Value::as_u64) != Some(32)
@@ -1015,10 +1023,12 @@ pub(crate) fn read_eeprom_snapshot_protocol(
     }
     let mut snapshot = Vec::with_capacity(8192);
     for offset in (0..8192_u32).step_by(32) {
+        ensure_direct_usb_identity(port, expected_usb_identity)?;
         write_snapshot_request(
             &mut *serial,
             &json!({"op":"eeprom_snapshot_read","requestId":session_id,"offset":offset,"length":32}),
         )?;
+        ensure_direct_usb_identity(port, expected_usb_identity)?;
         let response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
         if response.get("offset").and_then(Value::as_u64) != Some(u64::from(offset)) {
             return Err("snapshot response returned an unexpected offset".into());
@@ -1039,10 +1049,12 @@ pub(crate) fn read_eeprom_snapshot_protocol(
         }
     }
     let digest = format!("sha256:{:x}", Sha256::digest(&snapshot));
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
     write_snapshot_request(
         &mut *serial,
         &json!({"op":"eeprom_snapshot_close","requestId":session_id,"sha256":digest}),
     )?;
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
     let response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
     if response.get("sha256").and_then(Value::as_str) != Some(digest.as_str()) {
         return Err("EEPROM snapshot hash verification failed".into());
@@ -1052,11 +1064,14 @@ pub(crate) fn read_eeprom_snapshot_protocol(
 
 pub(crate) fn read_legacy_eeprom_snapshot(
     port: &str,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     const LEGACY_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
     let mut serial = serialport::new(port, 115_200)
         .timeout(Duration::from_secs(2))
         .open()?;
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
     let deadline = StdInstant::now() + LEGACY_SESSION_TIMEOUT;
     let session_id = format!("eeprom-legacy-{}", current_unix_millis());
     let mut image = Vec::with_capacity(EEPROM_CAPACITY_BYTES);
@@ -1070,7 +1085,9 @@ pub(crate) fn read_legacy_eeprom_snapshot(
             "offset": offset,
             "length": length,
         });
+        ensure_direct_usb_identity(port, expected_usb_identity)?;
         write_snapshot_request(&mut *serial, &request)?;
+        ensure_direct_usb_identity(port, expected_usb_identity)?;
         let response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
         let bytes = response
             .get("result")
@@ -1215,7 +1232,7 @@ pub(crate) fn read_snapshot_response<R: Read + ?Sized>(
             let mut byte = [0_u8; 1];
             match serial.read(&mut byte) {
                 Ok(1) if byte[0] == b'\n' => break,
-                Ok(1) => bytes.push(byte[0]),
+                Ok(1) => push_snapshot_response_byte(&mut bytes, byte[0])?,
                 Ok(_) => continue,
                 Err(error) if error.kind() == io::ErrorKind::TimedOut => {
                     return Err(snapshot_timeout_error(&observation));
@@ -1245,6 +1262,18 @@ pub(crate) fn read_snapshot_response<R: Read + ?Sized>(
         }
         return Ok(value);
     }
+}
+
+fn push_snapshot_response_byte(bytes: &mut Vec<u8>, byte: u8) -> io::Result<()> {
+    const SNAPSHOT_RESPONSE_LINE_LIMIT: usize = 16 * 1024;
+    if bytes.len() >= SNAPSHOT_RESPONSE_LINE_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "EEPROM snapshot response exceeded the JSONL frame limit",
+        ));
+    }
+    bytes.push(byte);
+    Ok(())
 }
 
 impl ManagedDevd {

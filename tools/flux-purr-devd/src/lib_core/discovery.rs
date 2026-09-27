@@ -6,8 +6,9 @@ pub(crate) async fn execute_flash(
     artifact: &FirmwareArtifact,
     artifact_id: &str,
     port_path: &str,
+    usb_identity: &UsbSerialIdentity,
 ) -> Result<Json<FlashResult>, HttpError> {
-    let usb_identity = capture_native_serial_identity(port_path)?;
+    require_usb_serial_identity(port_path, Some(usb_identity))?;
     state.emit(event(
         device_id,
         "flash",
@@ -19,7 +20,7 @@ pub(crate) async fn execute_flash(
         artifact,
         state.config.artifact_root.as_deref(),
         port_path,
-        Some(&usb_identity),
+        Some(usb_identity),
     )
     .await
     {
@@ -121,11 +122,12 @@ pub(crate) fn scan_serial_devices_from_available(
 }
 
 pub(crate) fn is_flux_purr_usb_candidate(port: &serialport::SerialPortInfo) -> bool {
-    port.port_name.starts_with("/dev/cu.usbmodem")
-        || matches!(
-            &port.port_type,
-            serialport::SerialPortType::UsbPort(info) if info.vid == 0x303a
-        )
+    matches!(
+        &port.port_type,
+        serialport::SerialPortType::UsbPort(info)
+            if info.vid == ESP32S3_USB_SERIAL_JTAG_VID
+                && info.pid == ESP32S3_USB_SERIAL_JTAG_PID
+    )
 }
 
 pub(crate) fn refresh_serial_devices(
@@ -203,7 +205,9 @@ pub(crate) fn missing_serial_device_record(
         .filter(|port| {
             matches!(
                 &port.port_type,
-                serialport::SerialPortType::UsbPort(info) if info.vid == 0x303a
+                serialport::SerialPortType::UsbPort(info)
+                    if info.vid == ESP32S3_USB_SERIAL_JTAG_VID
+                        && info.pid == ESP32S3_USB_SERIAL_JTAG_PID
             )
         })
         .map(|port| port.port_name.clone())

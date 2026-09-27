@@ -5746,7 +5746,10 @@ fn direct_flash_skip_backup_calls_only_espflash_flash() {
 fn direct_flash_archives_before_invoking_espflash() {
     use std::os::unix::fs::PermissionsExt;
 
-    fn fixture_snapshot(_port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    fn fixture_snapshot(
+        _port: &str,
+        _expected: Option<&UsbSerialIdentity>,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(vec![0xa5; developer_backup::EEPROM_SNAPSHOT_BYTES])
     }
     fn fixture_rom_probe(_port: &str, _expected: Option<&UsbSerialIdentity>) -> bool {
@@ -5803,7 +5806,10 @@ fn direct_flash_archives_before_invoking_espflash() {
 fn direct_flash_blocks_espflash_when_backup_directory_is_unavailable() {
     use std::os::unix::fs::PermissionsExt;
 
-    fn fixture_snapshot(_port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    fn fixture_snapshot(
+        _port: &str,
+        _expected: Option<&UsbSerialIdentity>,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(vec![0x3c; developer_backup::EEPROM_SNAPSHOT_BYTES])
     }
     fn fixture_rom_probe(_port: &str, _expected: Option<&UsbSerialIdentity>) -> bool {
@@ -5861,6 +5867,23 @@ fn eeprom_snapshot_reports_absent_device_output_without_claiming_an_eeprom_fault
     assert!(error.to_string().contains("no USB JSONL response"));
     assert!(error.to_string().contains("EEPROM health is unknown"));
     assert!(error.to_string().contains("firmware was not written"));
+}
+
+#[test]
+fn eeprom_snapshot_rejects_an_unbounded_jsonl_frame() {
+    let mut bytes = vec![b' '; 16 * 1024 + 1];
+    bytes.push(b'\n');
+    let mut reader = SnapshotFixtureReader::from_bytes(&bytes);
+
+    let error = read_snapshot_response(
+        &mut reader,
+        "snapshot-test",
+        StdInstant::now() + Duration::from_secs(1),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("frame limit"));
 }
 
 #[test]

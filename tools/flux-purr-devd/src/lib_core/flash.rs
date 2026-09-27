@@ -17,9 +17,10 @@ pub(crate) async fn flash_device(
     Json(payload): Json<FlashRequest>,
 ) -> Result<Json<FlashResult>, HttpError> {
     let artifact_id = payload.artifact.artifact_id.clone();
-    let dry_run_approval = flash_dry_run_approval(&payload)?;
     let port_path =
         resolve_flash_port(&state, &device_id, Some(&payload.lease_id), payload.dry_run)?;
+    let usb_identity = capture_flash_usb_identity(&port_path)?;
+    let dry_run_approval = flash_dry_run_approval(&payload, &port_path, usb_identity.clone())?;
     verify_flash_artifact(&state, &device_id, &payload.artifact, &artifact_id)?;
 
     if payload.dry_run {
@@ -34,14 +35,36 @@ pub(crate) async fn flash_device(
     require_flash_dry_run(&state, &device_id, &dry_run_approval, &artifact_id)?;
     require_flash_confirmation(&state, &device_id, &payload.confirm, &artifact_id)?;
     require_real_flash_enabled(&state, &device_id, &artifact_id)?;
+    let usb_identity = usb_identity.as_ref().ok_or_else(|| {
+        HttpError::forbidden(
+            "authorized_port_identity_required",
+            "Real flash requires a stable USB target identity.",
+        )
+    })?;
     execute_flash(
         &state,
         &device_id,
         &payload.artifact,
         &artifact_id,
         &port_path,
+        usb_identity,
     )
     .await
+}
+
+fn capture_flash_usb_identity(port_path: &str) -> Result<Option<UsbSerialIdentity>, HttpError> {
+    if port_path.is_empty() {
+        return Ok(None);
+    }
+    #[cfg(test)]
+    {
+        let _ = port_path;
+        Ok(None)
+    }
+    #[cfg(not(test))]
+    {
+        Ok(Some(capture_native_serial_identity(port_path)?))
+    }
 }
 
 pub(crate) fn resolve_flash_port(

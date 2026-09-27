@@ -987,6 +987,7 @@ pub(crate) fn serial_exchange_blocking(
                         request_id,
                         request,
                         deadline,
+                        expected_usb_identity: expected_usb_identity.as_ref(),
                     },
                     &read_buf[..read],
                     &mut line,
@@ -1018,13 +1019,7 @@ pub(crate) fn serial_exchange_blocking(
             }
             Err(error) if is_recoverable_serial_io_error(&error) => {
                 drop(session);
-                session = reopen_serial_session_with_identity(
-                    port_path,
-                    deadline,
-                    expected_usb_identity.as_ref(),
-                )?;
-                session = write_serial_request_with_reopen_with_identity(
-                    session,
+                session = reopen_serial_request_with_identity(
                     port_path,
                     request,
                     deadline,
@@ -1048,6 +1043,22 @@ pub(crate) fn serial_exchange_blocking(
         "Timed out waiting for a matching USB JSONL response.",
         true,
     ))
+}
+
+fn reopen_serial_request_with_identity(
+    port_path: &str,
+    request: &str,
+    deadline: Instant,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<SerialSession, HttpError> {
+    let session = reopen_serial_session_with_identity(port_path, deadline, expected_usb_identity)?;
+    write_serial_request_with_reopen_with_identity(
+        session,
+        port_path,
+        request,
+        deadline,
+        expected_usb_identity,
+    )
 }
 
 pub(crate) fn observe_post_flash_boot_blocking(
@@ -1292,6 +1303,7 @@ pub(crate) struct SerialResponseLineContext<'a> {
     request_id: &'a str,
     request: &'a str,
     deadline: Instant,
+    expected_usb_identity: Option<&'a UsbSerialIdentity>,
 }
 
 pub(crate) enum SerialChunkResult {
@@ -1355,11 +1367,12 @@ pub(crate) fn process_serial_response_line(
         Instant::now(),
         context.deadline,
     ) {
-        let session = write_serial_request_with_reopen(
+        let session = write_serial_request_with_reopen_with_identity(
             session,
             context.port_path,
             context.request,
             context.deadline,
+            context.expected_usb_identity,
         )?;
         return Ok((session, SerialLineAction::Continue(false)));
     }
@@ -1775,11 +1788,17 @@ pub struct UsbSerialIdentity {
     pub serial_number: String,
 }
 
+pub const ESP32S3_USB_SERIAL_JTAG_VID: u16 = 0x303a;
+pub const ESP32S3_USB_SERIAL_JTAG_PID: u16 = 0x1001;
+
 impl UsbSerialIdentity {
     pub fn from_port_info(info: &serialport::SerialPortInfo) -> Option<Self> {
         let serialport::SerialPortType::UsbPort(usb) = &info.port_type else {
             return None;
         };
+        if usb.vid != ESP32S3_USB_SERIAL_JTAG_VID || usb.pid != ESP32S3_USB_SERIAL_JTAG_PID {
+            return None;
+        }
         let serial_number = usb.serial_number.as_deref()?.trim();
         if serial_number.is_empty() {
             return None;
@@ -2073,15 +2092,6 @@ pub(crate) fn serial_timeout_config_http_error(error: serialport::Error) -> Http
         &format!("Failed to configure serial timeout: {error}"),
         true,
     )
-}
-
-pub(crate) fn write_serial_request_with_reopen(
-    session: SerialSession,
-    port_path: &str,
-    request: &str,
-    deadline: Instant,
-) -> Result<SerialSession, HttpError> {
-    write_serial_request_with_reopen_with_identity(session, port_path, request, deadline, None)
 }
 
 fn write_serial_request_with_reopen_with_identity(

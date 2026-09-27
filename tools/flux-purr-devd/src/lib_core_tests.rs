@@ -426,7 +426,21 @@ fn serial_scan_without_fixed_target_lists_all_espressif_candidates() {
             }),
         },
         serialport::SerialPortInfo {
+            port_name: "/dev/cu.usbmodem-other-espressif".to_string(),
+            port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+                vid: ESP32S3_USB_SERIAL_JTAG_VID,
+                pid: 0x1002,
+                serial_number: Some("other-espressif-device".to_string()),
+                manufacturer: Some("Espressif".to_string()),
+                product: Some("Other USB serial device".to_string()),
+            }),
+        },
+        serialport::SerialPortInfo {
             port_name: "/dev/cu.other".to_string(),
+            port_type: serialport::SerialPortType::Unknown,
+        },
+        serialport::SerialPortInfo {
+            port_name: "/dev/cu.usbmodem-untyped".to_string(),
             port_type: serialport::SerialPortType::Unknown,
         },
     ];
@@ -1328,6 +1342,59 @@ async fn espflash_subprocess_timeout_is_reported_without_hanging_the_request() {
     assert!(details.get("stdout").is_some());
     assert!(details.get("stderr").is_some());
     assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn espflash_subprocess_is_killed_when_request_is_cancelled() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let pid_file = dir.path().join("espflash.pid");
+    let program = dir.path().join("cancellable-espflash");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 30\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&program, permissions).unwrap();
+
+    let task_program = program.clone();
+    let task = tokio::spawn(async move {
+        run_espflash_command_with_timeout(&task_program, &[], Duration::from_secs(30)).await
+    });
+    let started = Instant::now();
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+            break pid;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    task.abort();
+    let _ = task.await;
+    let kill_check = |pid: &str| {
+        std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    let stopped = (0..100).any(|_| {
+        if !kill_check(&pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        false
+    });
+    assert!(stopped, "cancelled espflash child is still running");
 }
 
 #[tokio::test]
@@ -2704,6 +2771,33 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
 }
 
 #[test]
+fn legacy_flash_dry_run_approval_binds_port_and_usb_identity() {
+    let directory = tempdir().unwrap();
+    let payload = FlashRequest {
+        lease_id: "lease-1".into(),
+        artifact: test_artifact_with_file(directory.path(), "firmware.bin", b"firmware-image"),
+        dry_run: true,
+        confirm: None,
+    };
+    let identity = UsbSerialIdentity {
+        vid: ESP32S3_USB_SERIAL_JTAG_VID,
+        pid: ESP32S3_USB_SERIAL_JTAG_PID,
+        serial_number: "target-a".into(),
+    };
+    let approval =
+        flash_dry_run_approval(&payload, "/dev/cu.usbmodem-a", Some(identity.clone())).unwrap();
+    assert_eq!(approval.port_path, "/dev/cu.usbmodem-a");
+    assert_eq!(approval.usb_identity, Some(identity.clone()));
+
+    let mut replaced = approval.clone();
+    replaced.usb_identity = Some(UsbSerialIdentity {
+        serial_number: "target-b".into(),
+        ..identity
+    });
+    assert_ne!(approval, replaced);
+}
+
+#[test]
 fn wifi_response_redacts_password_shape() {
     let request = WifiConfigRequest {
         lease_id: "lease-1".to_string(),
@@ -3611,6 +3705,18 @@ fn usb_serial_identity_rejects_missing_or_replaced_serial_numbers() {
     let identity = UsbSerialIdentity::from_port_info(&info).unwrap();
     assert!(identity.matches_port_info(&info));
 
+    let mut wrong_pid = info.clone();
+    if let serialport::SerialPortType::UsbPort(usb) = &mut wrong_pid.port_type {
+        usb.pid = ESP32S3_USB_SERIAL_JTAG_PID + 1;
+    }
+    assert!(UsbSerialIdentity::from_port_info(&wrong_pid).is_none());
+
+    let mut wrong_vid = info.clone();
+    if let serialport::SerialPortType::UsbPort(usb) = &mut wrong_vid.port_type {
+        usb.vid = ESP32S3_USB_SERIAL_JTAG_VID + 1;
+    }
+    assert!(UsbSerialIdentity::from_port_info(&wrong_vid).is_none());
+
     let mut replaced = info.clone();
     if let serialport::SerialPortType::UsbPort(usb) = &mut replaced.port_type {
         usb.serial_number = Some("replacement-target".to_string());
@@ -4097,6 +4203,23 @@ fn security_info_fails_closed_for_each_protected_state() {
     ] {
         assert!(blocked.validate_for_flash().is_err());
     }
+}
+
+#[test]
+fn rom_probe_result_requires_runtime_reset_after_success_or_failure() {
+    assert_eq!(finalize_rom_probe_result::<u8>(Ok(7), Ok(())), Ok(7));
+    assert_eq!(
+        finalize_rom_probe_result::<u8>(Err("probe failed".into()), Ok(())),
+        Err("probe failed".into())
+    );
+    assert_eq!(
+        finalize_rom_probe_result::<u8>(Ok(7), Err("reset failed".into())),
+        Err("ROM security probe passed; resetting target to runtime failed: reset failed".into())
+    );
+    assert_eq!(
+        finalize_rom_probe_result::<u8>(Err("probe failed".into()), Err("reset failed".into())),
+        Err("probe failed; resetting target to runtime failed: reset failed".into())
+    );
 }
 
 #[tokio::test]

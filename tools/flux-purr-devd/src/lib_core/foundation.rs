@@ -389,6 +389,8 @@ pub(crate) struct FirmwareApproval {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FlashDryRunApproval {
     pub(crate) lease_id: String,
+    pub(crate) port_path: String,
+    pub(crate) usb_identity: Option<UsbSerialIdentity>,
     pub(crate) artifact_fingerprint: String,
 }
 

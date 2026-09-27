@@ -1347,12 +1347,6 @@ async fn probe_native_rom_security_with_locks(
     serial_lock: Option<&SerialPortProcessLock>,
     usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<RomSecurityInfo, HttpError> {
-    use ::espflash::{
-        connection::{Connection, ResetAfterOperation, ResetBeforeOperation},
-        flasher::Flasher,
-    };
-    use serialport::{FlowControl, SerialPortType, UsbPortInfo};
-
     let _owned_serial_rpc = if serial_rpc.is_none() {
         Some(acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?)
     } else {
@@ -1370,45 +1364,75 @@ async fn probe_native_rom_security_with_locks(
     let port_path = port_path.to_owned();
     let expected_usb_identity = usb_identity.cloned();
     tokio::task::spawn_blocking(move || {
-        let port_info = serialport::available_ports()
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .find(|candidate| serial_port_paths_match(&port_path, &candidate.port_name))
-            .ok_or_else(|| "authorized serial port is no longer enumerated".to_string())?;
-        if expected_usb_identity
-            .as_ref()
-            .is_some_and(|expected| !expected.matches_port_info(&port_info))
-        {
-            return Err("authorized USB target changed or disappeared".to_string());
+        probe_native_rom_security_blocking(&port_path, expected_usb_identity.as_ref())
+    })
+    .await
+    .map_err(|error| HttpError::internal(&format!("ROM security probe task failed: {error}")))?
+    .map_err(|error| {
+        HttpError::forbidden(
+            "security_info_unknown",
+            &format!("ROM security probe failed; flashing is blocked: {error}"),
+        )
+    })
+}
+
+fn probe_native_rom_security_blocking(
+    port_path: &str,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<RomSecurityInfo, String> {
+    use ::espflash::{
+        connection::{Connection, ResetAfterOperation, ResetBeforeOperation},
+        flasher::Flasher,
+    };
+    use serialport::{FlowControl, SerialPortType, UsbPortInfo};
+
+    let port_info = serialport::available_ports()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|candidate| serial_port_paths_match(port_path, &candidate.port_name))
+        .ok_or_else(|| "authorized serial port is no longer enumerated".to_string())?;
+    if expected_usb_identity
+        .as_ref()
+        .is_some_and(|expected| !expected.matches_port_info(&port_info))
+    {
+        return Err("authorized USB target changed or disappeared".to_string());
+    }
+    let usb_info = match port_info.port_type {
+        SerialPortType::UsbPort(info) => info,
+        SerialPortType::PciPort | SerialPortType::Unknown => UsbPortInfo {
+            vid: 0,
+            pid: 0,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+        },
+        _ => return Err("authorized port is not a supported USB serial target".to_string()),
+    };
+    let serial = serialport::new(port_path, 115_200)
+        .flow_control(FlowControl::None)
+        .open_native()
+        .map_err(|error| error.to_string())?;
+    let connection = Connection::new(
+        serial,
+        usb_info,
+        ResetAfterOperation::HardReset,
+        ResetBeforeOperation::DefaultReset,
+        115_200,
+    );
+    let mut flasher = match Flasher::try_connect(connection, false, true, false, None, None) {
+        Ok(flasher) => flasher,
+        Err(error) => {
+            let (connect_error, mut connection) = *error;
+            let reset_error = connection.reset().err();
+            return Err(match reset_error {
+                Some(reset_error) => format!(
+                    "ROM connection failed: {connect_error}; resetting target to runtime failed: {reset_error}"
+                ),
+                None => format!("ROM connection failed: {connect_error}"),
+            });
         }
-        let usb_info = match port_info.port_type {
-            SerialPortType::UsbPort(info) => info,
-            SerialPortType::PciPort | SerialPortType::Unknown => UsbPortInfo {
-                vid: 0,
-                pid: 0,
-                serial_number: None,
-                manufacturer: None,
-                product: None,
-            },
-            _ => {
-                return Err(String::from(
-                    "authorized port is not a supported USB serial target",
-                ));
-            }
-        };
-        let serial = serialport::new(&port_path, 115_200)
-            .flow_control(FlowControl::None)
-            .open_native()
-            .map_err(|error| error.to_string())?;
-        let connection = Connection::new(
-            serial,
-            usb_info,
-            ResetAfterOperation::HardReset,
-            ResetBeforeOperation::DefaultReset,
-            115_200,
-        );
-        let mut flasher = Flasher::connect(connection, false, true, false, None, None)
-            .map_err(|error| error.to_string())?;
+    };
+    let probe_result = (|| -> Result<RomSecurityInfo, String> {
         let info = flasher.security_info().map_err(|error| error.to_string())?;
         let device = flasher.device_info().map_err(|error| error.to_string())?;
         const ESP32S3_EFUSE_BLOCK1: u32 = 0x6000_7044;
@@ -1436,15 +1460,28 @@ async fn probe_native_rom_security_with_locks(
             flash_size_bytes: u64::from(device.flash_size.size()),
             package_matches: flash_cap == 2 && psram_cap == 2,
         })
-    })
-    .await
-    .map_err(|error| HttpError::internal(&format!("ROM security probe task failed: {error}")))?
-    .map_err(|error| {
-        HttpError::forbidden(
-            "security_info_unknown",
-            &format!("ROM security probe failed; flashing is blocked: {error}"),
-        )
-    })
+    })();
+    let reset_result = flasher
+        .connection()
+        .reset()
+        .map_err(|error| error.to_string());
+    finalize_rom_probe_result(probe_result, reset_result)
+}
+
+pub(crate) fn finalize_rom_probe_result<T>(
+    probe_result: Result<T, String>,
+    reset_result: Result<(), String>,
+) -> Result<T, String> {
+    match (probe_result, reset_result) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(probe_error), Ok(())) => Err(probe_error),
+        (Ok(_), Err(reset_error)) => Err(format!(
+            "ROM security probe passed; resetting target to runtime failed: {reset_error}"
+        )),
+        (Err(probe_error), Err(reset_error)) => Err(format!(
+            "{probe_error}; resetting target to runtime failed: {reset_error}"
+        )),
+    }
 }
 
 pub(crate) fn firmware_preflight_stages() -> Vec<String> {
