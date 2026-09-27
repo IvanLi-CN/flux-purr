@@ -13,8 +13,12 @@ use serialport::{FlowControl, SerialPort, SerialPortType, UsbPortInfo};
 use std::time::{Duration, Instant};
 
 const IDENTITY_TIMEOUT: Duration = Duration::from_secs(5);
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const RAM_OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const BUTTON_INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(30);
+const BUTTON_SAMPLE_INTERVAL: Duration = Duration::from_millis(50);
+const BUTTON_LONG_PRESS: Duration = Duration::from_millis(700);
+const BUTTON_DOUBLE_CLICK: Duration = Duration::from_millis(350);
 const RAM_ELF_RELATIVE_PATH: &str =
     "firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup";
 const RAM_PROTOCOL_VERSION: &str = "flux-purr.usb.v1";
@@ -86,6 +90,9 @@ pub(crate) fn execute_ram_run(
                 color,
             )
         }
+        RamRunCommand::Test(args) if args.test == RamTestKind::Buttons => {
+            run_interactive_buttons(&args.port, args.elf.as_deref(), args.reload)
+        }
         RamRunCommand::Test(args) => run_ram_operation(
             &args.port,
             args.elf.as_deref(),
@@ -104,8 +111,24 @@ fn run_ram_operation(
     op: &str,
     color: Option<&str>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut session = open_ram_session(port, elf, reload, op)?;
+    send_ram_request(&mut session.serial, op, color)
+}
+
+struct RamSession {
+    _serial_lock: SerialPortProcessLock,
+    usb_identity: UsbSerialIdentity,
+    serial: Port,
+}
+
+fn open_ram_session(
+    port: &str,
+    elf: Option<&Path>,
+    reload: bool,
+    op: &str,
+) -> Result<RamSession, Box<dyn std::error::Error + Send + Sync>> {
     let usb_identity = validate_exact_ram_port(port)?;
-    let _serial_lock = acquire_ram_port_lock(port)?;
+    let serial_lock = acquire_ram_port_lock(port)?;
     ensure_ram_target(port, &usb_identity)?;
     let observed = if reload {
         None
@@ -120,7 +143,7 @@ fn run_ram_operation(
                 .iter()
                 .any(|capability| capability == op)
     });
-    let (identity, mut serial) = if matching_ram {
+    let (identity, serial) = if matching_ram {
         observed.expect("matching RAM identity must exist")
     } else {
         drop(observed);
@@ -131,7 +154,256 @@ fn run_ram_operation(
     };
     verify_ram_identity(&identity, op)?;
     ensure_ram_target(port, &usb_identity)?;
-    send_ram_request(&mut serial, op, color)
+    Ok(RamSession {
+        _serial_lock: serial_lock,
+        usb_identity,
+        serial,
+    })
+}
+
+const BUTTON_NAMES: [&str; 5] = ["center", "right", "down", "left", "up"];
+
+#[derive(Debug, Clone, Copy)]
+struct ButtonSnapshot {
+    pressed: [bool; 5],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ButtonGestureEvent {
+    key: &'static str,
+    gesture: &'static str,
+}
+
+impl ButtonGestureEvent {
+    fn effect(self) -> &'static str {
+        match self.gesture {
+            "short_press" => "success",
+            "double_click" => "accent",
+            "long_press" => "info_cyan",
+            _ => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ButtonKeyState {
+    pressed: bool,
+    pressed_at: Option<Instant>,
+    long_reported: bool,
+    pending_short_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ButtonGestureTracker {
+    keys: [ButtonKeyState; 5],
+}
+
+impl Default for ButtonGestureTracker {
+    fn default() -> Self {
+        Self {
+            keys: [ButtonKeyState::default(); 5],
+        }
+    }
+}
+
+impl ButtonGestureTracker {
+    fn observe(&mut self, snapshot: ButtonSnapshot, now: Instant) -> Vec<ButtonGestureEvent> {
+        let mut events = Vec::new();
+        for (index, state) in self.keys.iter_mut().enumerate() {
+            if snapshot.pressed[index] {
+                if !state.pressed {
+                    if let Some(pending) = state.pending_short_at
+                        && now.duration_since(pending) > BUTTON_DOUBLE_CLICK
+                    {
+                        events.push(ButtonGestureEvent {
+                            key: BUTTON_NAMES[index],
+                            gesture: "short_press",
+                        });
+                        state.pending_short_at = None;
+                    }
+                    state.pressed = true;
+                    state.pressed_at = Some(now);
+                    state.long_reported = false;
+                }
+                if !state.long_reported
+                    && state
+                        .pressed_at
+                        .is_some_and(|started| now.duration_since(started) >= BUTTON_LONG_PRESS)
+                {
+                    events.push(ButtonGestureEvent {
+                        key: BUTTON_NAMES[index],
+                        gesture: "long_press",
+                    });
+                    state.long_reported = true;
+                    state.pending_short_at = None;
+                }
+            } else {
+                if state.pressed {
+                    state.pressed = false;
+                    if !state.long_reported {
+                        if let Some(pending) = state.pending_short_at {
+                            if now.duration_since(pending) <= BUTTON_DOUBLE_CLICK {
+                                events.push(ButtonGestureEvent {
+                                    key: BUTTON_NAMES[index],
+                                    gesture: "double_click",
+                                });
+                                state.pending_short_at = None;
+                            } else {
+                                events.push(ButtonGestureEvent {
+                                    key: BUTTON_NAMES[index],
+                                    gesture: "short_press",
+                                });
+                                state.pending_short_at = Some(now);
+                            }
+                        } else {
+                            state.pending_short_at = Some(now);
+                        }
+                    } else {
+                        state.pending_short_at = None;
+                    }
+                    state.pressed_at = None;
+                    state.long_reported = false;
+                }
+                if let Some(pending) = state.pending_short_at
+                    && now.duration_since(pending) > BUTTON_DOUBLE_CLICK
+                {
+                    events.push(ButtonGestureEvent {
+                        key: BUTTON_NAMES[index],
+                        gesture: "short_press",
+                    });
+                    state.pending_short_at = None;
+                }
+            }
+        }
+        events
+    }
+
+    fn flush(&mut self, now: Instant) -> Vec<ButtonGestureEvent> {
+        let mut events = Vec::new();
+        for (index, state) in self.keys.iter_mut().enumerate() {
+            if state.pressed {
+                if !state.long_reported
+                    && state
+                        .pressed_at
+                        .is_some_and(|started| now.duration_since(started) >= BUTTON_LONG_PRESS)
+                {
+                    events.push(ButtonGestureEvent {
+                        key: BUTTON_NAMES[index],
+                        gesture: "long_press",
+                    });
+                    state.long_reported = true;
+                }
+            } else if state.pending_short_at.take().is_some() {
+                events.push(ButtonGestureEvent {
+                    key: BUTTON_NAMES[index],
+                    gesture: "short_press",
+                });
+            }
+        }
+        events
+    }
+}
+
+fn button_snapshot(
+    value: &Value,
+) -> Result<ButtonSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let buttons = value
+        .get("result")
+        .and_then(|result| result.get("buttons"))
+        .and_then(Value::as_object)
+        .ok_or("RAM button response is missing result.buttons")?;
+    let mut pressed = [false; 5];
+    for (index, name) in BUTTON_NAMES.into_iter().enumerate() {
+        pressed[index] = buttons
+            .get(name)
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("RAM button response is missing result.buttons.{name}"))?;
+    }
+    Ok(ButtonSnapshot { pressed })
+}
+
+fn print_button_event(event: ButtonGestureEvent) {
+    eprintln!(
+        "RAM BUTTON EVENT key={} gesture={} effect={}",
+        event.key,
+        event.gesture,
+        event.effect()
+    );
+}
+
+fn button_event_value(event: ButtonGestureEvent) -> Value {
+    serde_json::json!({
+        "key": event.key,
+        "gesture": event.gesture,
+        "effect": event.effect(),
+    })
+}
+
+fn add_button_interaction_result(
+    mut value: Value,
+    events: &[ButtonGestureEvent],
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let result = value
+        .get_mut("result")
+        .and_then(Value::as_object_mut)
+        .ok_or("RAM button response is missing result object")?;
+    let detail = if events.is_empty() {
+        "buttons_interactive_timeout"
+    } else {
+        "buttons_interactive_complete"
+    };
+    result.insert("detail".to_string(), Value::String(detail.to_string()));
+    result.insert(
+        "interaction".to_string(),
+        serde_json::json!({
+            "timeoutSeconds": BUTTON_INTERACTIVE_TIMEOUT.as_secs(),
+            "events": events.iter().copied().map(button_event_value).collect::<Vec<_>>(),
+        }),
+    );
+    Ok(value)
+}
+
+fn run_interactive_buttons(
+    port: &str,
+    elf: Option<&Path>,
+    reload: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut session = open_ram_session(port, elf, reload, "test_buttons")?;
+    eprintln!(
+        "RAM BUTTONS READY: short press, long press, or double click any key within {} seconds; no input ends the test automatically.",
+        BUTTON_INTERACTIVE_TIMEOUT.as_secs()
+    );
+    let deadline = Instant::now() + BUTTON_INTERACTIVE_TIMEOUT;
+    let mut next_target_check = Instant::now();
+    let mut tracker = ButtonGestureTracker::default();
+    let mut events = Vec::new();
+    let mut latest = None;
+    while Instant::now() < deadline {
+        let now = Instant::now();
+        if now >= next_target_check {
+            ensure_ram_target(port, &session.usb_identity)?;
+            next_target_check = now + Duration::from_secs(1);
+        }
+        let value =
+            match send_ram_request_until(&mut session.serial, "test_buttons", None, deadline) {
+                Ok(value) => value,
+                Err(_error) if Instant::now() >= deadline => break,
+                Err(error) => return Err(error),
+            };
+        let snapshot = button_snapshot(&value)?;
+        for event in tracker.observe(snapshot, Instant::now()) {
+            print_button_event(event);
+            events.push(event);
+        }
+        latest = Some(value);
+        std::thread::sleep(BUTTON_SAMPLE_INTERVAL);
+    }
+    for event in tracker.flush(Instant::now()) {
+        print_button_event(event);
+        events.push(event);
+    }
+    let latest = latest.ok_or("RAM button interaction did not receive a sample")?;
+    add_button_interaction_result(latest, &events)
 }
 
 fn exit_ram(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -849,15 +1121,28 @@ fn send_ram_request(
     op: &str,
     color: Option<&str>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    send_ram_request_until(serial, op, color, Instant::now() + COMMAND_TIMEOUT)
+}
+
+fn send_ram_request_until(
+    serial: &mut dyn SerialPort,
+    op: &str,
+    color: Option<&str>,
+    deadline: Instant,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let request_id = format!("ram-{}", current_unix_millis());
-    serial.set_timeout(Duration::from_millis(250))?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(format!("RAM bring-up response timed out for {op}").into());
+    }
     let request = build_ram_request(&request_id, op, color);
     serial.write_all(request.as_bytes())?;
     serial.flush()?;
-    let deadline = Instant::now() + COMMAND_TIMEOUT;
     let mut bytes = Vec::with_capacity(1024);
     let mut chunk = [0u8; 256];
     while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        serial.set_timeout(remaining.min(Duration::from_millis(250)))?;
         match serial.read(&mut chunk) {
             Ok(count) => {
                 append_ram_response_bytes(&mut bytes, &chunk[..count])?;
@@ -940,11 +1225,21 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
             require_result_string_value(result, "effect", "display_preview")?;
         }
         "preview_status_light" => {
-            require_result_string_value(result, "detail", "status_light_rainbow_ready")?;
-            require_result_string_value(result, "effect", "rainbow_7_color")?;
+            require_result_string_value(result, "detail", "status_light_pwm_breath_ready")?;
+            require_result_string_value(result, "effect", "pwm_breathing_rainbow_8s")?;
         }
         "test_buttons" => {
-            require_result_string_value(result, "detail", "buttons_read_only_ready")?;
+            let detail = require_result_string(result, "detail")?;
+            if !matches!(
+                detail,
+                "buttons_read_only_ready"
+                    | "buttons_interactive_complete"
+                    | "buttons_interactive_timeout"
+            ) {
+                return Err(format!(
+                    "result.detail must identify a button sample or interactive session, got {detail:?}"
+                ));
+            }
             let buttons = result
                 .get("buttons")
                 .and_then(Value::as_object)
@@ -952,6 +1247,24 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
             for name in ["center", "right", "down", "left", "up"] {
                 if buttons.get(name).and_then(Value::as_bool).is_none() {
                     return Err(format!("result.buttons.{name} must be a boolean"));
+                }
+            }
+            if detail != "buttons_read_only_ready" {
+                let interaction = result
+                    .get("interaction")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| "result.interaction must be an object".to_string())?;
+                if interaction.get("timeoutSeconds").and_then(Value::as_u64)
+                    != Some(BUTTON_INTERACTIVE_TIMEOUT.as_secs())
+                {
+                    return Err("result.interaction.timeoutSeconds must be 30".to_string());
+                }
+                if interaction
+                    .get("events")
+                    .and_then(Value::as_array)
+                    .is_none()
+                {
+                    return Err("result.interaction.events must be an array".to_string());
                 }
             }
         }
@@ -1221,6 +1534,107 @@ mod tests {
             .unwrap()
             .remove("buttons");
         assert!(validate_ram_success_response(&missing_evidence, "test_buttons").is_err());
+    }
+
+    #[test]
+    fn button_gesture_tracker_distinguishes_short_long_and_double() {
+        let start = Instant::now();
+
+        let mut short = ButtonGestureTracker::default();
+        assert!(
+            short
+                .observe(
+                    ButtonSnapshot {
+                        pressed: [true, false, false, false, false],
+                    },
+                    start,
+                )
+                .is_empty()
+        );
+        assert!(
+            short
+                .observe(
+                    ButtonSnapshot {
+                        pressed: [false, false, false, false, false],
+                    },
+                    start + Duration::from_millis(100),
+                )
+                .is_empty()
+        );
+        let short_events = short.observe(
+            ButtonSnapshot {
+                pressed: [false, false, false, false, false],
+            },
+            start + Duration::from_millis(500),
+        );
+        assert_eq!(short_events[0].gesture, "short_press");
+
+        let mut long = ButtonGestureTracker::default();
+        long.observe(
+            ButtonSnapshot {
+                pressed: [true, false, false, false, false],
+            },
+            start,
+        );
+        let long_events = long.observe(
+            ButtonSnapshot {
+                pressed: [true, false, false, false, false],
+            },
+            start + Duration::from_millis(800),
+        );
+        assert_eq!(long_events[0].gesture, "long_press");
+
+        let mut double = ButtonGestureTracker::default();
+        double.observe(
+            ButtonSnapshot {
+                pressed: [true, false, false, false, false],
+            },
+            start,
+        );
+        double.observe(
+            ButtonSnapshot {
+                pressed: [false, false, false, false, false],
+            },
+            start + Duration::from_millis(100),
+        );
+        double.observe(
+            ButtonSnapshot {
+                pressed: [true, false, false, false, false],
+            },
+            start + Duration::from_millis(200),
+        );
+        let double_events = double.observe(
+            ButtonSnapshot {
+                pressed: [false, false, false, false, false],
+            },
+            start + Duration::from_millis(300),
+        );
+        assert_eq!(double_events[0].gesture, "double_click");
+    }
+
+    #[test]
+    fn interactive_button_result_requires_a_30_second_event_window() {
+        let value = serde_json::json!({
+            "ok": true,
+            "result": {
+                "detail": "buttons_interactive_timeout",
+                "heater": "off",
+                "pd": "untouched",
+                "eeprom": "untouched",
+                "buttons": {
+                    "center": false,
+                    "right": false,
+                    "down": false,
+                    "left": false,
+                    "up": false,
+                },
+                "interaction": {
+                    "timeoutSeconds": 30,
+                    "events": [],
+                },
+            },
+        });
+        assert!(validate_ram_success_response(&value, "test_buttons").is_ok());
     }
 
     #[test]

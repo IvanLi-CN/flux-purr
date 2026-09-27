@@ -157,6 +157,10 @@ fn renders_ram_response_details_and_button_states() {
                 "left": true,
                 "up": false,
             },
+            "interaction": {
+                "timeoutSeconds": 30,
+                "events": [{"key": "center", "gesture": "double_click", "effect": "accent"}],
+            },
         },
     }))
     .unwrap();
@@ -166,6 +170,7 @@ fn renders_ram_response_details_and_button_states() {
     assert!(
         rendered.contains("center=pressed,right=released,down=released,left=pressed,up=released")
     );
+    assert!(rendered.contains("interaction=timeout:30s events=[center:double_click:accent]"));
 }
 
 #[test]

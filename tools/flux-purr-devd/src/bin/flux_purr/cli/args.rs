@@ -156,7 +156,7 @@ pub(crate) struct RamTestArgs {
     pub(crate) reload: bool,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum RamTestKind {
     Buttons,
     Adc,

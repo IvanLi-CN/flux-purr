@@ -7,10 +7,15 @@
   I2C reads plus bounded effect labels for output tests.
 - `firmware/ram-bringup/src/main.rs` initializes the ESP32-S3 runtime, emits
   identity before command handling, and owns the safe output boundary.
-- The status-light preview uses the common-anode RGB outputs to show the seven
-  available digital color combinations in sequence, then returns the LED to
-  the safe-off state. The host CLI renders the returned detail, safety fields,
-  and diagnostic samples instead of printing a generic success token.
+- The status-light preview uses software PWM on the common-anode RGB outputs to
+  play an approximately 8-second hue-changing breathing gradient, then returns
+  the LED to the safe-off state. The host CLI renders the returned detail,
+  safety fields, and diagnostic samples instead of printing a generic success
+  token.
+- The interactive button test keeps one verified RAM serial session for a
+  bounded 30-second polling window. The host recognizes short-press,
+  long-press, and double-click gestures from the typed five-key snapshots and
+  prints each key/effect event before returning the final evidence envelope.
 - The bounded `test_fan` action drives GPIO35 as the fan enable and GPIO36
   through MCPWM operator 0 at 25 kHz before returning both outputs to safe
   off; the product fan-voltage feedback contract is exercised without changing
@@ -34,8 +39,10 @@
   safety gate, the `flux-purr.usb.v1` JSONL contract, matching
   identity/build/capability, complete command-specific response evidence, and
   the pinned espflash RAM loader. It rechecks the USB identity after acquiring
-  the process lock and before RAM writes or JSONL requests, then holds the
-  verified serial connection through the preview command and response.
+  the process lock and before RAM writes or JSONL command sessions, then holds
+  the verified serial connection through the preview command and response.
+  Interactive button polling keeps the same lock and rechecks the identity
+  during its bounded window.
   Optional display colors remain on the existing `preview_display` capability.
 - Direct RAM, daemon flash, direct flash, and recover commands share the same
   per-port process lock; Unix uses `flock` and Windows uses a byte-range file

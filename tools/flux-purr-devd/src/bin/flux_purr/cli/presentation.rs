@@ -114,6 +114,32 @@ fn render_ram_response(
             output.push_str(&format!("{name}={state}"));
         }
     }
+    if let Some(interaction) = result.get("interaction").and_then(Value::as_object) {
+        let events = interaction
+            .get("events")
+            .and_then(Value::as_array)
+            .map(|events| {
+                events
+                    .iter()
+                    .filter_map(|event| {
+                        let key = event.get("key").and_then(Value::as_str)?;
+                        let gesture = event.get("gesture").and_then(Value::as_str)?;
+                        let effect = event.get("effect").and_then(Value::as_str)?;
+                        Some(format!("{key}:{gesture}:{effect}"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        output.push_str(&format!(
+            " interaction=timeout:{}s events=[{}]",
+            interaction
+                .get("timeoutSeconds")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            events
+        ));
+    }
     if let Some(adc) = result.get("adc").and_then(Value::as_object) {
         output.push_str(&format!(
             " adc=vin:{} rtd:{}",

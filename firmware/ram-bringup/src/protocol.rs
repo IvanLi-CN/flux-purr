@@ -358,8 +358,8 @@ mod tests {
             "r1",
             "preview_status_light",
             true,
-            "status_light_rainbow_ready",
-            ResponseData::Effect("rainbow_7_color"),
+            "status_light_pwm_breath_ready",
+            ResponseData::Effect("pwm_breathing_rainbow_8s"),
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(response.as_bytes()).unwrap();
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(value["requestId"], "r1");
         assert_eq!(value["capability"], "preview_status_light");
         assert_eq!(value["result"]["heater"], "off");
-        assert_eq!(value["result"]["effect"], "rainbow_7_color");
+        assert_eq!(value["result"]["effect"], "pwm_breathing_rainbow_8s");
     }
 
     #[test]

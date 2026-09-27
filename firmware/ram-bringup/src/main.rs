@@ -44,7 +44,11 @@ mod device {
     const MCPWM_PERIPHERAL_CLOCK_HZ: u32 = 40_000_000;
     const FAN_PWM_PERIOD_TICKS: u16 = 99;
     const FAN_PWM_FREQUENCY_HZ: u32 = 25_000;
-    const STATUS_LIGHT_RAINBOW_STEP_MS: u32 = 200;
+    const STATUS_LIGHT_PWM_BREATH_DURATION_MS: u32 = 8_000;
+    const STATUS_LIGHT_PWM_FRAME_MS: u32 = 20;
+    const STATUS_LIGHT_PWM_SLOT_MS: u32 = 1;
+    const STATUS_LIGHT_PWM_SLOTS: u8 = 16;
+    const STATUS_LIGHT_BREATH_PERIOD_MS: u32 = 2_000;
     // Keep the frame out of rodata so the RAM ELF's executable segment stays below the next alignment boundary.
     #[unsafe(link_section = ".data")]
     static CALIBRATION_FRAME: [u8; DISPLAY_FRAME_BYTES] =
@@ -194,6 +198,29 @@ mod device {
         Display,
     }
 
+    fn rainbow_color(position: u8) -> (u8, u8, u8) {
+        let position = u16::from(position);
+        let (red, green, blue) = if position < 43 {
+            (255 - position * 6, position * 6, 0)
+        } else if position < 86 {
+            let position = position - 43;
+            (0, 255 - position * 6, position * 6)
+        } else if position < 128 {
+            let position = position - 86;
+            (position * 6, 0, 255 - position * 6)
+        } else if position < 171 {
+            let position = position - 128;
+            (255 - position * 6, position * 6, 0)
+        } else if position < 214 {
+            let position = position - 171;
+            (0, 255 - position * 6, position * 6)
+        } else {
+            let position = position - 214;
+            (position * 6, 0, 255 - position * 6)
+        };
+        (red as u8, green as u8, blue as u8)
+    }
+
     impl Outputs {
         fn new(tokens: PeripheralTokens) -> Result<(Self, Inputs, Measurements), OutputInitError> {
             let input_config = InputConfig::default().with_pull(Pull::Up);
@@ -300,19 +327,36 @@ mod device {
                 .set_level(if blue { Level::Low } else { Level::High });
         }
 
-        fn status_light_rainbow(&mut self) {
-            // The common-anode RGB LED exposes seven distinct digital colors.
-            for (red, green, blue) in [
-                (true, false, false),
-                (true, true, false),
-                (false, true, false),
-                (false, true, true),
-                (false, false, true),
-                (true, false, true),
-                (true, true, true),
-            ] {
-                self.rgb(red, green, blue);
-                delay_ms(STATUS_LIGHT_RAINBOW_STEP_MS);
+        fn status_light_pwm_breath(&mut self) {
+            let mut elapsed = 0;
+            while elapsed < STATUS_LIGHT_PWM_BREATH_DURATION_MS {
+                let hue = (elapsed * 255 / STATUS_LIGHT_PWM_BREATH_DURATION_MS) as u8;
+                let (red, green, blue) = rainbow_color(hue);
+                let breath_phase = elapsed % STATUS_LIGHT_BREATH_PERIOD_MS;
+                let half_period = STATUS_LIGHT_BREATH_PERIOD_MS / 2;
+                let breath = if breath_phase < half_period {
+                    breath_phase * 255 / half_period
+                } else {
+                    (STATUS_LIGHT_BREATH_PERIOD_MS - breath_phase) * 255 / half_period
+                };
+                let amplitude = 32 + breath * 223 / 255;
+                let red_duty = u16::from(red) * amplitude as u16 / 255;
+                let green_duty = u16::from(green) * amplitude as u16 / 255;
+                let blue_duty = u16::from(blue) * amplitude as u16 / 255;
+
+                let mut slot = 0;
+                while slot < STATUS_LIGHT_PWM_SLOTS {
+                    let threshold = u16::from(slot) * 16;
+                    self.rgb(
+                        red_duty > threshold,
+                        green_duty > threshold,
+                        blue_duty > threshold,
+                    );
+                    delay_ms(STATUS_LIGHT_PWM_SLOT_MS);
+                    slot += 1;
+                }
+                delay_ms(STATUS_LIGHT_PWM_FRAME_MS - u32::from(STATUS_LIGHT_PWM_SLOTS));
+                elapsed += STATUS_LIGHT_PWM_FRAME_MS;
             }
             self.rgb(false, false, false);
         }
@@ -541,11 +585,11 @@ mod device {
                 (false, "display_preview_failed", ResponseData::None)
             }
         } else if protocol::equal_literal(op, b"preview_status_light") {
-            outputs.status_light_rainbow();
+            outputs.status_light_pwm_breath();
             (
                 true,
-                "status_light_rainbow_ready",
-                ResponseData::Effect("rainbow_7_color"),
+                "status_light_pwm_breath_ready",
+                ResponseData::Effect("pwm_breathing_rainbow_8s"),
             )
         } else if protocol::equal_literal(op, b"test_buttons") {
             let center = inputs.center.is_low();

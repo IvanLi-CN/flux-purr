@@ -31,6 +31,8 @@ does not select a different RAM image.
 Successful RAM responses include `ok=true`, a command-specific `result.detail`,
 and safety fields confirming `heater=off`, `pd=untouched`, and
 `eeprom=untouched`. Button, ADC, and I2C tests also return the sampled input or
-readback value, and the CLI displays those fields. `preview status-light`
-cycles red, yellow, green, cyan, blue, magenta, and white before returning the
-RGB LED to off.
+readback value, and the CLI displays those fields. `preview status-light` plays
+an approximately 8-second PWM breathing rainbow before returning the RGB LED
+to off. `ram-run test buttons` prints a ready prompt, recognizes short press,
+long press, and double click gestures for 30 seconds, and reports each key and
+effect before returning the final interaction evidence.
