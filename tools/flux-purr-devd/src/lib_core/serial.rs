@@ -2,13 +2,15 @@ pub(crate) use super::*;
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 
 #[cfg(target_os = "linux")]
 const SERIAL_LOCK_O_NOFOLLOW: i32 = 0x20000;
 #[cfg(target_os = "macos")]
 const SERIAL_LOCK_O_NOFOLLOW: i32 = 0x100;
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-const SERIAL_LOCK_O_NOFOLLOW: i32 = 0;
+#[cfg(windows)]
+const SERIAL_LOCK_FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 pub(crate) fn firmware_preflight_digest(
     payload: &FirmwareOperationRequest,
@@ -1343,8 +1345,9 @@ pub(crate) fn take_or_open_serial_session(
     port_path: &str,
     deadline: Instant,
 ) -> Result<SerialSession, HttpError> {
+    let session_key = serial_session_key(port_path);
     serial_sessions
-        .remove(port_path)
+        .remove(&session_key)
         .map(Ok)
         .unwrap_or_else(|| open_serial_session(port_path, deadline))
 }
@@ -1354,7 +1357,7 @@ pub(crate) fn store_serial_session(
     port_path: &str,
     session: SerialSession,
 ) {
-    serial_sessions.insert(port_path.to_string(), session);
+    serial_sessions.insert(serial_session_key(port_path), session);
 }
 
 pub struct SerialPortProcessLock {
@@ -1366,9 +1369,20 @@ pub struct SerialPortProcessLock {
 
 impl SerialPortProcessLock {
     pub fn acquire(port_path: &str, deadline: Instant) -> Result<Self, HttpError> {
-        #[cfg(unix)]
+        #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
         {
             Self::acquire_unix(port_path, deadline).map(|file| Self { file })
+        }
+
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+        {
+            let _ = (port_path, deadline);
+            Err(HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "serial_lock_unsupported",
+                "Exclusive USB serial access is unsupported on this Unix platform.",
+                false,
+            ))
         }
 
         #[cfg(windows)]
@@ -1388,7 +1402,7 @@ impl SerialPortProcessLock {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
     pub(crate) fn acquire_unix(port_path: &str, deadline: Instant) -> Result<File, HttpError> {
         let lock_path = serial_lock_path(port_path);
         ensure_serial_lock_directory(&lock_path)?;
@@ -1441,11 +1455,22 @@ impl SerialPortProcessLock {
 
         let lock_path = serial_lock_path(port_path);
         ensure_serial_lock_directory(&lock_path)?;
+        if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
+            if metadata.file_type().is_symlink() {
+                return Err(HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "serial_lock_failed",
+                    "Serial lock path must not be a Windows reparse point.",
+                    false,
+                ));
+            }
+        }
         let file = File::options()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
+            .custom_flags(SERIAL_LOCK_FILE_FLAG_OPEN_REPARSE_POINT)
             .open(&lock_path)
             .map_err(|error| {
                 HttpError::new(
@@ -1517,7 +1542,6 @@ pub(crate) fn serial_lock_path(port_path: &str) -> PathBuf {
     serial_lock_directory().join(name)
 }
 
-#[cfg(any(unix, windows))]
 fn serial_lock_identity(port_path: &str) -> String {
     #[cfg(target_os = "macos")]
     let port_path = port_path.strip_prefix("/dev/tty.").map_or_else(
@@ -1532,6 +1556,10 @@ fn serial_lock_identity(port_path: &str) -> String {
         .ok()
         .and_then(|path| path.to_str().map(str::to_owned))
         .unwrap_or(port_path)
+}
+
+pub(crate) fn serial_session_key(port_path: &str) -> String {
+    serial_lock_identity(port_path)
 }
 
 #[cfg(any(unix, windows))]
@@ -1679,7 +1707,7 @@ pub(crate) fn reopen_serial_session(
     deadline: Instant,
 ) -> Result<SerialSession, HttpError> {
     while Instant::now() < deadline {
-        if Path::new(port_path).exists() {
+        if serial_port_path_is_present(port_path) {
             match open_serial_session(port_path, deadline) {
                 Ok(session) => return Ok(session),
                 Err(error) if error.error.retryable => {}
@@ -1695,6 +1723,19 @@ pub(crate) fn reopen_serial_session(
         "Timed out waiting for the USB serial port to reappear.",
         true,
     ))
+}
+
+fn serial_port_path_is_present(port_path: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = port_path;
+        true
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Path::new(port_path).exists()
+    }
 }
 
 pub(crate) fn write_serial_request(

@@ -10,9 +10,7 @@ pub const REQUEST_ID_MAX: usize = 48;
 pub const OP_MAX: usize = 32;
 pub const CAPABILITY_MAX: usize = 32;
 pub const DISPLAY_COLOR_MAX: usize = 16;
-pub const CAPABILITIES: [&str; 12] = [
-    "identity",
-    "status",
+pub const CAPABILITIES: [&str; 10] = [
     "preview_display",
     "preview_frontpanel",
     "preview_status_light",
@@ -224,6 +222,16 @@ pub fn write_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advertised_capabilities_match_command_surface() {
+        for capability in CAPABILITIES {
+            assert!(
+                Command::parse(capability).is_some(),
+                "capability has no command implementation: {capability}"
+            );
+        }
+    }
 
     #[test]
     fn only_typed_capability_bound_commands_are_accepted() {

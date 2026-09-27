@@ -324,7 +324,7 @@ pub(crate) fn drop_cached_serial_session(
     port_path: &str,
 ) -> Result<(), HttpError> {
     let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
-    serial_sessions.remove(port_path);
+    serial_sessions.remove(&serial_session_key(port_path));
     Ok(())
 }
 

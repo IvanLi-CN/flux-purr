@@ -346,7 +346,7 @@ pub(crate) fn remove_expired_serial_sessions(
         else {
             continue;
         };
-        sessions.remove(port_path);
+        sessions.remove(&serial_session_key(port_path));
     }
 }
 
