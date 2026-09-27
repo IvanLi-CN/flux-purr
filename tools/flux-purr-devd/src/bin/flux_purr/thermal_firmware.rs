@@ -17,10 +17,10 @@ use reqwest::{Client, Method};
 use serde_json::{Value, json};
 
 use super::{
-    ThermalFirmwareSaveArgs, ThermalFlagshipTuneArgs, ThermalProfileMode, ThermalTuneEngine,
-    create_lease, current_unix_millis, load_thermal_default_seed_candidate_profile,
-    parse_thermal_targets, release_lease, request_leased, resolve_target, spawn_heartbeat,
-    thermal_candidate_profile_to_value,
+    ResolvedUsbTarget, ThermalFirmwareSaveArgs, ThermalFlagshipTuneArgs, ThermalProfileMode,
+    ThermalTuneEngine, create_lease, current_unix_millis,
+    load_thermal_default_seed_candidate_profile, parse_thermal_targets, release_lease,
+    request_leased, resolve_target, spawn_heartbeat, thermal_candidate_profile_to_value,
     thermal_tuning_v2_report::{self, ThermalTuningV2ReportInput},
 };
 
@@ -182,25 +182,52 @@ pub(crate) async fn run_firmware_tuning(
         {
             Ok(start) => start,
             Err(_) => {
-                let _ = request_leased(
+                let rejected = request_leased(
                     client,
                     &resolved,
                     &lease.lease_id,
                     Method::POST,
                     "/thermal-tuning",
-                    Some(json!({"op": "cancel"})),
+                    Some(firmware_read_command(&run_id, None)),
                 )
                 .await;
-                return render_host_failure(HostFailureInput {
-                    device_id: &resolved.device,
-                    output_root: &args.output_root,
-                    bundle_dir: args.bundle_dir.clone(),
-                    run_id: Some(&run_id),
-                    power_class: "pps5a",
-                    reason: "start_not_confirmed",
-                    no_device_command: false,
-                    attempted_candidate: Some((&candidate_id, &candidate_hash, &candidate_profile)),
-                });
+                match rejected {
+                    Ok(status)
+                        if is_confirmed_rejected_start(
+                            &status,
+                            &run_id,
+                            &candidate_id,
+                            &candidate_hash,
+                        ) =>
+                    {
+                        status
+                    }
+                    _ => {
+                        let _ = request_leased(
+                            client,
+                            &resolved,
+                            &lease.lease_id,
+                            Method::POST,
+                            "/thermal-tuning",
+                            Some(json!({"op": "cancel"})),
+                        )
+                        .await;
+                        return render_host_failure(HostFailureInput {
+                            device_id: &resolved.device,
+                            output_root: &args.output_root,
+                            bundle_dir: args.bundle_dir.clone(),
+                            run_id: Some(&run_id),
+                            power_class: "pps5a",
+                            reason: "start_not_confirmed",
+                            no_device_command: false,
+                            attempted_candidate: Some((
+                                &candidate_id,
+                                &candidate_hash,
+                                &candidate_profile,
+                            )),
+                        });
+                    }
+                }
             }
         };
 
@@ -231,27 +258,21 @@ pub(crate) async fn run_firmware_tuning(
                     matches!(value, "candidate_ready" | "passed" | "failed" | "canceled")
                 });
             journal.record(&mut statuses, status)?;
+            if terminal
+                && caught_up
+                && let Some(sequence) = after_sequence
+            {
+                let confirmed = confirm_terminal_tuning_events(
+                    client,
+                    &resolved,
+                    &lease.lease_id,
+                    &run_id,
+                    sequence,
+                )
+                .await?;
+                journal.record(&mut statuses, confirmed)?;
+            }
             if terminal && caught_up {
-                if let Some(sequence) = after_sequence {
-                    let confirmed = request_leased(
-                        client,
-                        &resolved,
-                        &lease.lease_id,
-                        Method::POST,
-                        "/thermal-tuning",
-                        Some(firmware_read_command(&run_id, Some(sequence))),
-                    )
-                    .await?;
-                    if confirmed.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
-                        || confirmed
-                            .pointer("/trace/lastSequence")
-                            .and_then(Value::as_u64)
-                            != Some(u64::from(sequence))
-                    {
-                        return Err("terminal tuning events were not confirmed".into());
-                    }
-                    journal.record(&mut statuses, confirmed)?;
-                }
                 break;
             }
             if Instant::now() >= deadline {
@@ -298,10 +319,9 @@ pub(crate) async fn run_firmware_tuning(
             Some(json!({"op": "cancel"})),
         )
         .await
+        && let Err(error) = journal.record(&mut statuses, canceled)
     {
-        if let Err(error) = journal.record(&mut statuses, canceled) {
-            eprintln!("thermal tuning status journal failed after cancel: {error}");
-        }
+        eprintln!("thermal tuning status journal failed after cancel: {error}");
     }
     let rendered = match result {
         Ok(rendered) => Ok(rendered),
@@ -439,7 +459,7 @@ pub(crate) async fn confirm_firmware_save(
                 || confirmed
                     .pointer("/trace/lastSequence")
                     .and_then(Value::as_u64)
-                    != Some(u64::from(sequence))
+                    != Some(sequence)
             {
                 return Err("saved tuning receipt event was not confirmed".into());
             }
@@ -756,10 +776,51 @@ fn render_host_failure(
     })
 }
 
+async fn confirm_terminal_tuning_events(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    run_id: &str,
+    sequence: u64,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let confirmed = request_leased(
+        client,
+        resolved,
+        lease_id,
+        Method::POST,
+        "/thermal-tuning",
+        Some(firmware_read_command(run_id, Some(sequence))),
+    )
+    .await?;
+    if confirmed.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
+        || confirmed
+            .pointer("/trace/lastSequence")
+            .and_then(Value::as_u64)
+            != Some(sequence)
+    {
+        return Err("terminal tuning events were not confirmed".into());
+    }
+    Ok(confirmed)
+}
+
 fn next_event_sequence(status: &Value) -> Option<u64> {
     status
         .pointer("/events/nextSequence")
         .and_then(Value::as_u64)
+}
+
+fn is_confirmed_rejected_start(
+    status: &Value,
+    run_id: &str,
+    candidate_id: &str,
+    candidate_hash: &str,
+) -> bool {
+    status.get("runId").and_then(Value::as_str) == Some(run_id)
+        && status.get("candidateId").and_then(Value::as_str) == Some(candidate_id)
+        && status.get("candidateHash").and_then(Value::as_str) == Some(candidate_hash)
+        && status.get("powerClass").and_then(Value::as_str) == Some("pps5a")
+        && status.get("terminalDisposition").and_then(Value::as_str) == Some("failed")
+        && status.get("armed").and_then(Value::as_bool) == Some(false)
 }
 
 fn firmware_read_command(run_id: &str, after_sequence: Option<u64>) -> Value {
@@ -1531,9 +1592,9 @@ mod tests {
     use super::{
         InterruptedRunInput, StatusJournal, build_report_runs, build_report_trial,
         event_stream_caught_up, firmware_candidate_profile_hash, firmware_candidate_profile_value,
-        firmware_read_command, firmware_start_command, next_event_sequence, render_host_failure,
-        render_interrupted_run, render_unsupported_pps3a, trial_events_for_target,
-        validate_save_input, verified_saved_receipt, verify_device_trace,
+        firmware_read_command, firmware_start_command, is_confirmed_rejected_start,
+        next_event_sequence, render_host_failure, render_interrupted_run, render_unsupported_pps3a,
+        trial_events_for_target, validate_save_input, verified_saved_receipt, verify_device_trace,
     };
     use flux_purr_firmware::{
         control_plane::ThermalControlProfileWire,
@@ -1950,5 +2011,38 @@ mod tests {
         .unwrap();
         assert_eq!(candidate["profile"], profile);
         assert_eq!(candidate["promotion"]["state"], "unavailable");
+    }
+
+    #[test]
+    fn rejected_start_requires_matching_device_identity_and_disarmed_failure() {
+        let mut status = json!({
+            "runId": "run-1",
+            "candidateId": "candidate-1",
+            "candidateHash": "hash-1",
+            "powerClass": "pps5a",
+            "terminalDisposition": "failed",
+            "armed": false
+        });
+        assert!(is_confirmed_rejected_start(
+            &status,
+            "run-1",
+            "candidate-1",
+            "hash-1"
+        ));
+        status["candidateHash"] = json!("other-hash");
+        assert!(!is_confirmed_rejected_start(
+            &status,
+            "run-1",
+            "candidate-1",
+            "hash-1"
+        ));
+        status["candidateHash"] = json!("hash-1");
+        status["armed"] = json!(true);
+        assert!(!is_confirmed_rejected_start(
+            &status,
+            "run-1",
+            "candidate-1",
+            "hash-1"
+        ));
     }
 }
