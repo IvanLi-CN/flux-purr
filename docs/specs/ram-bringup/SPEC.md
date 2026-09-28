@@ -41,9 +41,12 @@ RGB, buzzer, and fan paths.
   untouched. Fan and buzzer actions are bounded, and I2C is limited to
   read-only identification addresses. `test_buzzer` emits a 1 kHz tone for
   one second, one second of silence, and a 2 kHz tone for one second before
-  returning its typed success response. `test_fan` drives the shared fan
-  contract through GPIO35 (`FAN_EN`) and a bounded 25 kHz MCPWM signal on
-  GPIO36 (`FAN_PWM`), then returns both outputs to their safe-off levels.
+  returning its typed success response. `test_rgb` holds red, green, and blue
+  for one second each and repeats that sequence five times before turning the
+  LED off. `test_fan` drives the shared fan contract through GPIO35
+  (`FAN_EN`) and a bounded 25 kHz MCPWM signal on GPIO36 (`FAN_PWM`) at 50%
+  for five seconds, 100% for five seconds, and 0% for five seconds before
+  returning both outputs to their safe-off levels.
 - A successful response has `ok=true`, a command-specific `result.detail`, and
   explicit `heater=off`, `pd=untouched`, and `eeprom=untouched` fields. Button
   snapshots include the sampled pressed state for all five keys; the default

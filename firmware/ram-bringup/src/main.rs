@@ -44,6 +44,9 @@ mod device {
     const MCPWM_PERIPHERAL_CLOCK_HZ: u32 = 40_000_000;
     const FAN_PWM_PERIOD_TICKS: u16 = 99;
     const FAN_PWM_FREQUENCY_HZ: u32 = 25_000;
+    const FAN_PWM_STAGE_DURATION_MS: u32 = 5_000;
+    const RGB_COLOR_DURATION_MS: u32 = 1_000;
+    const RGB_COLOR_CYCLES: u8 = 5;
     const STATUS_LIGHT_PWM_BREATH_DURATION_MS: u32 = 8_000;
     const STATUS_LIGHT_PWM_FRAME_MS: u32 = 20;
     const STATUS_LIGHT_PWM_SLOT_MS: u32 = 1;
@@ -331,6 +334,20 @@ mod device {
                 .set_level(if green { Level::Low } else { Level::High });
             self.blue
                 .set_level(if blue { Level::Low } else { Level::High });
+        }
+
+        fn rgb_test_sequence(&mut self) {
+            let mut cycle = 0;
+            while cycle < RGB_COLOR_CYCLES {
+                self.rgb(true, false, false);
+                delay_ms(RGB_COLOR_DURATION_MS);
+                self.rgb(false, true, false);
+                delay_ms(RGB_COLOR_DURATION_MS);
+                self.rgb(false, false, true);
+                delay_ms(RGB_COLOR_DURATION_MS);
+                cycle += 1;
+            }
+            self.rgb(false, false, false);
         }
 
         fn status_light_pwm_breath(&mut self) {
@@ -698,14 +715,12 @@ mod device {
                 },
             )
         } else if protocol::equal_literal(op, b"test_rgb") {
-            outputs.rgb(true, false, false);
-            delay_ms(100);
-            outputs.rgb(false, true, false);
-            delay_ms(100);
-            outputs.rgb(false, false, true);
-            delay_ms(100);
-            outputs.rgb(false, false, false);
-            (true, "rgb_ready", ResponseData::Effect("rgb_3_color"))
+            outputs.rgb_test_sequence();
+            (
+                true,
+                "rgb_ready",
+                ResponseData::Effect("rgb_red_green_blue_1s_x5"),
+            )
         } else if protocol::equal_literal(op, b"test_buzzer") {
             outputs.buzzer_test_sequence();
             (
@@ -719,18 +734,24 @@ mod device {
                 (false, "fan_pwm_start_failed", ResponseData::None)
             } else {
                 outputs.fan.set_high();
-                delay_ms(500);
-                let stopped = outputs.fan_pwm.set_duty_cycle_percent(0).is_ok();
-                outputs.fan.set_low();
-                if !stopped {
+                delay_ms(FAN_PWM_STAGE_DURATION_MS);
+                if outputs.fan_pwm.set_duty_cycle_percent(100).is_err() {
                     outputs.safe();
-                    (false, "fan_pwm_stop_failed", ResponseData::None)
+                    (false, "fan_pwm_full_speed_failed", ResponseData::None)
                 } else {
-                    (
-                        true,
-                        "fan_ready",
-                        ResponseData::Effect("50_percent_pwm_500ms"),
-                    )
+                    delay_ms(FAN_PWM_STAGE_DURATION_MS);
+                    if outputs.fan_pwm.set_duty_cycle_percent(0).is_err() {
+                        outputs.safe();
+                        (false, "fan_pwm_zero_speed_failed", ResponseData::None)
+                    } else {
+                        delay_ms(FAN_PWM_STAGE_DURATION_MS);
+                        outputs.fan.set_low();
+                        (
+                            true,
+                            "fan_ready",
+                            ResponseData::Effect("fan_50_percent_5s_100_percent_5s_0_percent_5s"),
+                        )
+                    }
                 }
             }
         } else {

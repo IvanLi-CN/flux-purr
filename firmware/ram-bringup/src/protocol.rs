@@ -388,6 +388,43 @@ mod tests {
     }
 
     #[test]
+    fn rgb_response_describes_the_slow_five_cycle_sequence() {
+        let mut response = String::<512>::new();
+        write_response(
+            &mut response,
+            "r1",
+            "test_rgb",
+            true,
+            "rgb_ready",
+            ResponseData::Effect("rgb_red_green_blue_1s_x5"),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(response.as_bytes()).unwrap();
+        assert_eq!(value["result"]["detail"], "rgb_ready");
+        assert_eq!(value["result"]["effect"], "rgb_red_green_blue_1s_x5");
+    }
+
+    #[test]
+    fn fan_response_describes_the_three_five_second_pwm_stages() {
+        let mut response = String::<512>::new();
+        write_response(
+            &mut response,
+            "r1",
+            "test_fan",
+            true,
+            "fan_ready",
+            ResponseData::Effect("fan_50_percent_5s_100_percent_5s_0_percent_5s"),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(response.as_bytes()).unwrap();
+        assert_eq!(value["result"]["detail"], "fan_ready");
+        assert_eq!(
+            value["result"]["effect"],
+            "fan_50_percent_5s_100_percent_5s_0_percent_5s"
+        );
+    }
+
+    #[test]
     fn response_includes_button_states() {
         let mut response = String::<512>::new();
         write_response(

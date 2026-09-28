@@ -20,10 +20,14 @@
   before returning the final evidence envelope. The host keeps the event list
   bounded at 1024 entries; an input stream that reaches that limit ends with
   an explicit `event_limit` stop reason.
+- The bounded `test_rgb` action holds each common-anode RGB channel for one
+  second in red, green, blue order and repeats the sequence five times before
+  returning all channels to safe off.
 - The bounded `test_fan` action drives GPIO35 as the fan enable and GPIO36
-  through MCPWM operator 0 at 25 kHz before returning both outputs to safe
-  off; the product fan-voltage feedback contract is exercised without changing
-  the display path.
+  through MCPWM operator 0 at 25 kHz for 50% duty for five seconds, 100% duty
+  for five seconds, and 0% duty for five seconds before returning both outputs
+  to safe off; the product fan-voltage feedback contract is exercised without
+  changing the display path.
 - The bounded `test_buzzer` action bit-bangs GPIO48 as a 50% square wave at
   1 kHz for one second, holds it low for one second, then emits 2 kHz for one
   second before returning the pin low and reporting the typed sequence.

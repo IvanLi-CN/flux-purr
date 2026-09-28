@@ -13,7 +13,7 @@ use serialport::{FlowControl, SerialPort, SerialPortType, UsbPortInfo};
 use std::time::{Duration, Instant};
 
 const IDENTITY_TIMEOUT: Duration = Duration::from_secs(5);
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const RAM_OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const BUTTON_INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(30);
 const BUTTON_MAX_EVENTS: usize = 1024;
@@ -1376,7 +1376,7 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
         }
         "test_rgb" => {
             require_result_string_value(result, "detail", "rgb_ready")?;
-            require_result_string_value(result, "effect", "rgb_3_color")?;
+            require_result_string_value(result, "effect", "rgb_red_green_blue_1s_x5")?;
         }
         "test_buzzer" => {
             require_result_string_value(result, "detail", "buzzer_ready")?;
@@ -1384,7 +1384,11 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
         }
         "test_fan" => {
             require_result_string_value(result, "detail", "fan_ready")?;
-            require_result_string_value(result, "effect", "50_percent_pwm_500ms")?;
+            require_result_string_value(
+                result,
+                "effect",
+                "fan_50_percent_5s_100_percent_5s_0_percent_5s",
+            )?;
         }
         "exit" => {
             require_result_string_value(result, "detail", "safe_exit")?;
@@ -1689,6 +1693,39 @@ mod tests {
         let mut stale = valid;
         stale["result"]["effect"] = Value::String("20ms_pulse".to_string());
         assert!(validate_ram_success_response(&stale, "test_buzzer").is_err());
+    }
+
+    #[test]
+    fn ram_rgb_and_fan_validation_require_the_slow_sequences() {
+        let rgb = serde_json::json!({
+            "ok": true,
+            "result": {
+                "detail": "rgb_ready",
+                "effect": "rgb_red_green_blue_1s_x5",
+                "heater": "off",
+                "pd": "untouched",
+                "eeprom": "untouched",
+            },
+        });
+        assert!(validate_ram_success_response(&rgb, "test_rgb").is_ok());
+        let mut stale_rgb = rgb;
+        stale_rgb["result"]["effect"] = Value::String("rgb_3_color".to_string());
+        assert!(validate_ram_success_response(&stale_rgb, "test_rgb").is_err());
+
+        let fan = serde_json::json!({
+            "ok": true,
+            "result": {
+                "detail": "fan_ready",
+                "effect": "fan_50_percent_5s_100_percent_5s_0_percent_5s",
+                "heater": "off",
+                "pd": "untouched",
+                "eeprom": "untouched",
+            },
+        });
+        assert!(validate_ram_success_response(&fan, "test_fan").is_ok());
+        let mut stale_fan = fan;
+        stale_fan["result"]["effect"] = Value::String("50_percent_pwm_500ms".to_string());
+        assert!(validate_ram_success_response(&stale_fan, "test_fan").is_err());
     }
 
     #[test]
