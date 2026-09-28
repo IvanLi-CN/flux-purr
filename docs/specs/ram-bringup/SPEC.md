@@ -39,7 +39,9 @@ RGB, buzzer, and fan paths.
   `espflash=4.5.0` RAM loader.
 - Every command starts and ends with heater output off. PD and EEPROM remain
   untouched. Fan and buzzer actions are bounded, and I2C is limited to
-  read-only identification addresses. `test_fan` drives the shared fan
+  read-only identification addresses. `test_buzzer` emits a 1 kHz tone for
+  one second, one second of silence, and a 2 kHz tone for one second before
+  returning its typed success response. `test_fan` drives the shared fan
   contract through GPIO35 (`FAN_EN`) and a bounded 25 kHz MCPWM signal on
   GPIO36 (`FAN_PWM`), then returns both outputs to their safe-off levels.
 - A successful response has `ok=true`, a command-specific `result.detail`, and

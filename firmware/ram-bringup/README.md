@@ -33,7 +33,9 @@ and safety fields confirming `heater=off`, `pd=untouched`, and
 `eeprom=untouched`. Button, ADC, and I2C tests also return the sampled input or
 readback value, and the CLI displays those fields. `preview status-light` plays
 an approximately 8-second PWM breathing rainbow before returning the RGB LED
-to off. `ram-run test buttons` prints a ready prompt, recognizes short press,
+to off. `ram-run test buzzer` plays a 1 kHz tone for one second, one second of
+silence, and a 2 kHz tone for one second before returning the buzzer low.
+`ram-run test buttons` prints a ready prompt, recognizes short press,
 long press, and double click gestures, and ends after 30 seconds with no
 recognized event. That inactivity timer resets after every button event; each
 event includes its `elapsedMs` and `triggeredAtUnixMs` values in the final

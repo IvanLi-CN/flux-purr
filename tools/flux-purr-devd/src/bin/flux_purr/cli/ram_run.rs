@@ -1380,7 +1380,7 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
         }
         "test_buzzer" => {
             require_result_string_value(result, "detail", "buzzer_ready")?;
-            require_result_string_value(result, "effect", "20ms_pulse")?;
+            require_result_string_value(result, "effect", "1khz_1s_silence_1s_2khz_1s")?;
         }
         "test_fan" => {
             require_result_string_value(result, "detail", "fan_ready")?;
@@ -1670,6 +1670,25 @@ mod tests {
         let request = build_ram_request("ram-1", "preview_display", None);
         let value: Value = serde_json::from_str(&request).expect("request should be JSON");
         assert!(value.get("color").is_none());
+    }
+
+    #[test]
+    fn ram_buzzer_validation_requires_the_two_tone_sequence() {
+        let valid = serde_json::json!({
+            "ok": true,
+            "result": {
+                "detail": "buzzer_ready",
+                "effect": "1khz_1s_silence_1s_2khz_1s",
+                "heater": "off",
+                "pd": "untouched",
+                "eeprom": "untouched",
+            },
+        });
+        assert!(validate_ram_success_response(&valid, "test_buzzer").is_ok());
+
+        let mut stale = valid;
+        stale["result"]["effect"] = Value::String("20ms_pulse".to_string());
+        assert!(validate_ram_success_response(&stale, "test_buzzer").is_err());
     }
 
     #[test]

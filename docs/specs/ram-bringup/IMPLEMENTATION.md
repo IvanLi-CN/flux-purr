@@ -24,6 +24,9 @@
   through MCPWM operator 0 at 25 kHz before returning both outputs to safe
   off; the product fan-voltage feedback contract is exercised without changing
   the display path.
+- The bounded `test_buzzer` action bit-bangs GPIO48 as a 50% square wave at
+  1 kHz for one second, holds it low for one second, then emits 2 kHz for one
+  second before returning the pin low and reporting the typed sequence.
 - The diagnostic image uses bounded blocking peripheral calls because it runs
   outside the product Embassy executor; the product firmware's async display
   contract remains scoped to `firmware/` runtime paths.

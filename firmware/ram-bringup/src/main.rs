@@ -49,6 +49,12 @@ mod device {
     const STATUS_LIGHT_PWM_SLOT_MS: u32 = 1;
     const STATUS_LIGHT_PWM_SLOTS: u8 = 16;
     const STATUS_LIGHT_BREATH_PERIOD_MS: u32 = 2_000;
+    const BUZZER_TONE_DURATION_MS: u32 = 1_000;
+    const BUZZER_TONE_GAP_MS: u32 = 1_000;
+    const BUZZER_1KHZ_HALF_PERIOD_US: u32 = 500;
+    const BUZZER_2KHZ_HALF_PERIOD_US: u32 = 250;
+    const BUZZER_1KHZ_CYCLES: u32 = BUZZER_TONE_DURATION_MS;
+    const BUZZER_2KHZ_CYCLES: u32 = BUZZER_TONE_DURATION_MS * 2;
     // Keep the frame out of rodata so the RAM ELF's executable segment stays below the next alignment boundary.
     #[unsafe(link_section = ".data")]
     static CALIBRATION_FRAME: [u8; DISPLAY_FRAME_BYTES] =
@@ -359,6 +365,26 @@ mod device {
                 elapsed += STATUS_LIGHT_PWM_FRAME_MS;
             }
             self.rgb(false, false, false);
+        }
+
+        #[inline(never)]
+        fn buzzer_tone(&mut self, half_period_us: u32, cycles: u32) {
+            let mut cycle = 0;
+            while cycle < cycles {
+                self.buzzer.set_high();
+                esp_hal::rom::ets_delay_us(half_period_us);
+                self.buzzer.set_low();
+                esp_hal::rom::ets_delay_us(half_period_us);
+                cycle += 1;
+            }
+        }
+
+        fn buzzer_test_sequence(&mut self) {
+            self.buzzer_tone(BUZZER_1KHZ_HALF_PERIOD_US, BUZZER_1KHZ_CYCLES);
+            self.buzzer.set_low();
+            delay_ms(BUZZER_TONE_GAP_MS);
+            self.buzzer_tone(BUZZER_2KHZ_HALF_PERIOD_US, BUZZER_2KHZ_CYCLES);
+            self.buzzer.set_low();
         }
 
         #[inline(never)]
@@ -681,10 +707,12 @@ mod device {
             outputs.rgb(false, false, false);
             (true, "rgb_ready", ResponseData::Effect("rgb_3_color"))
         } else if protocol::equal_literal(op, b"test_buzzer") {
-            outputs.buzzer.set_high();
-            delay_ms(20);
-            outputs.buzzer.set_low();
-            (true, "buzzer_ready", ResponseData::Effect("20ms_pulse"))
+            outputs.buzzer_test_sequence();
+            (
+                true,
+                "buzzer_ready",
+                ResponseData::Effect("1khz_1s_silence_1s_2khz_1s"),
+            )
         } else if protocol::equal_literal(op, b"test_fan") {
             if outputs.fan_pwm.set_duty_cycle_percent(50).is_err() {
                 outputs.safe();

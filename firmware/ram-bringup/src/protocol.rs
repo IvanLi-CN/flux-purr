@@ -371,6 +371,23 @@ mod tests {
     }
 
     #[test]
+    fn buzzer_response_describes_the_two_tone_sequence() {
+        let mut response = String::<512>::new();
+        write_response(
+            &mut response,
+            "r1",
+            "test_buzzer",
+            true,
+            "buzzer_ready",
+            ResponseData::Effect("1khz_1s_silence_1s_2khz_1s"),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(response.as_bytes()).unwrap();
+        assert_eq!(value["result"]["detail"], "buzzer_ready");
+        assert_eq!(value["result"]["effect"], "1khz_1s_silence_1s_2khz_1s");
+    }
+
+    #[test]
     fn response_includes_button_states() {
         let mut response = String::<512>::new();
         write_response(
