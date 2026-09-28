@@ -201,8 +201,9 @@ fn pd_service_preempts_lower_priority_application_work() {
         "PD policy must have a dedicated Embassy task"
     );
     assert!(
-        boot.contains("InterruptExecutor::new(software_interrupts.software_interrupt2)")
-            && boot.contains("pd_realtime_executor.start(Priority::Priority3)")
+        boot.contains("start_pd_realtime_executor(software_interrupts.software_interrupt2)")
+            && boot.contains("InterruptExecutor::new(software_interrupt)")
+            && boot.contains("executor.start(Priority::Priority3)")
             && boot.contains("buzzer_realtime_executor.start(Priority::Priority2)")
             && pd_service.contains("PD_REALTIME_EXECUTOR_STORAGE")
             && pd_service.contains("spawn_pd_service(\n    spawner: embassy_executor::SendSpawner"),
@@ -11547,6 +11548,38 @@ fn pps_keepalive_deadline_requires_a_fresh_expected_control_response() {
         6,
         true
     ));
+}
+
+#[test]
+fn only_a_fresh_reject_or_wait_settles_a_pending_request() {
+    let mut policy = fusb302b::SinkPolicy::new(12_000, 3_000);
+    assert!(
+        policy
+            .on_source_capabilities_with_message_id(
+                &[pps_source_capability(5_500, 21_000, 3_000)],
+                Some(3),
+            )
+            .is_some()
+    );
+    let phase = policy.phase();
+    assert_eq!(phase, SinkPhase::WaitingForAccept);
+
+    for message_type in [4, 12] {
+        assert!(!response_rejects_pending_request(
+            phase,
+            message_type,
+            policy.source_capabilities_message_is_fresh(Some(2)),
+        ));
+        policy.on_control_message_with_message_id(message_type, Some(2), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+        assert!(response_rejects_pending_request(
+            phase,
+            message_type,
+            policy.source_capabilities_message_is_fresh(Some(4)),
+        ));
+    }
+    assert!(!response_rejects_pending_request(phase, 3, true));
+    assert!(!response_rejects_pending_request(SinkPhase::Ready, 4, true));
 }
 
 #[test]

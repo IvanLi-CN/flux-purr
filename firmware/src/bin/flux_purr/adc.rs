@@ -680,6 +680,20 @@ pub(crate) fn pps_keepalive_response_is_valid(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn response_rejects_pending_request(
+    phase: SinkPhase,
+    message_type: u8,
+    message_id_is_fresh: bool,
+) -> bool {
+    message_id_is_fresh
+        && matches!(
+            phase,
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        )
+        && matches!(message_type, 4 | 12)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn successful_contract_confirmation_clears_timeout(
     was_waiting_for_ps_rdy: bool,
     phase: SinkPhase,
@@ -1643,8 +1657,10 @@ impl Fusb302bRuntime {
             self.handle_control_message(message, now_ms);
         } else {
             let message_id = Some((message.header() >> 9) as u8 & 0x07);
-            self.policy
-                .on_unhandled_data_message_with_message_id(message_id);
+            self.policy.on_unhandled_data_message_with_message_id(
+                message_id,
+                self.last_source_capabilities_request_at_ms.is_some(),
+            );
         }
         true
     }
@@ -1708,17 +1724,16 @@ impl Fusb302bRuntime {
         let was_waiting_for_ps_rdy = self.policy.phase() == SinkPhase::WaitingForPsRdy;
         let message_type = (message.header() & 0x1f) as u8;
         let message_id = Some((message.header() >> 9) as u8 & 0x07);
+        let phase = self.policy.phase();
+        let message_id_is_fresh = self.policy.source_capabilities_message_is_fresh(message_id);
         let keepalive_response_is_valid = pps_keepalive_response_is_valid(
-            self.policy.phase(),
+            phase,
             self.pps_keepalive_pending_at_ms.is_some(),
             message_type,
-            self.policy.source_capabilities_message_is_fresh(message_id),
+            message_id_is_fresh,
         );
-        self.request_rejected = matches!(message_type, 4 | 12)
-            && matches!(
-                self.policy.phase(),
-                SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-            );
+        self.request_rejected |=
+            response_rejects_pending_request(phase, message_type, message_id_is_fresh);
         self.policy
             .on_control_message_with_message_id(message_type, message_id, now_ms);
         if keepalive_response_is_valid {

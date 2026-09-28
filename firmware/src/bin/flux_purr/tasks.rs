@@ -110,6 +110,44 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
+fn prepare_automatic_idle_restore<PWM>(
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
+) -> Option<bool>
+where
+    PWM: SetDutyCycle,
+{
+    match context.manual_pps.automatic_restore_phase() {
+        AutomaticRestorePhase::NotRequired | AutomaticRestorePhase::ResetBackend => {
+            return Some(false);
+        }
+        AutomaticRestorePhase::AwaitIdle(ticket) => {
+            if let Some(outcome) = context.pd_port.try_take_ticket(ticket) {
+                context.manual_pps.complete_automatic_restore(outcome);
+                if context.manual_pps.automatic_restore_phase()
+                    == AutomaticRestorePhase::ResetBackend
+                {
+                    return Some(false);
+                }
+            }
+        }
+        AutomaticRestorePhase::RequestIdle => {
+            match context.pd_port.restore_automatic_idle_contract() {
+                PdRequestState::Confirmed => {
+                    context.manual_pps.automatic_restore_confirmed = true;
+                    return Some(false);
+                }
+                PdRequestState::Pending(ticket) => {
+                    context.manual_pps.automatic_restore_ticket = Some(ticket);
+                }
+                PdRequestState::Failed => {}
+            }
+        }
+    }
+    apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+    None
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn prepare_manual_pps<PWM>(
     context: &mut HeaterPowerOutputContext<'_, PWM>,
 ) -> Option<bool>
@@ -145,35 +183,7 @@ where
         }
     }
     if !context.manual_pps.enabled {
-        match context.manual_pps.automatic_restore_phase() {
-            AutomaticRestorePhase::NotRequired | AutomaticRestorePhase::ResetBackend => {
-                return Some(false);
-            }
-            AutomaticRestorePhase::AwaitIdle(ticket) => {
-                if let Some(outcome) = context.pd_port.try_take_ticket(ticket) {
-                    context.manual_pps.complete_automatic_restore(outcome);
-                    if context.manual_pps.automatic_restore_phase()
-                        == AutomaticRestorePhase::ResetBackend
-                    {
-                        return Some(false);
-                    }
-                }
-            }
-            AutomaticRestorePhase::RequestIdle => {
-                match context.pd_port.restore_automatic_idle_contract() {
-                    PdRequestState::Confirmed => {
-                        context.manual_pps.automatic_restore_confirmed = true;
-                        return Some(false);
-                    }
-                    PdRequestState::Pending(ticket) => {
-                        context.manual_pps.automatic_restore_ticket = Some(ticket);
-                    }
-                    PdRequestState::Failed => {}
-                }
-            }
-        }
-        apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-        return None;
+        return prepare_automatic_idle_restore(context);
     }
     context.hold_pps_governor.reset();
     let target_mv = match require_manual_pps_target(context.manual_pps) {

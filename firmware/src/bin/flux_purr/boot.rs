@@ -1393,6 +1393,19 @@ fn spawn_status_light_task(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn start_pd_realtime_executor(
+    software_interrupt: esp_hal::interrupt::software::SoftwareInterrupt<'static, 2>,
+) -> embassy_executor::SendSpawner {
+    let executor = unsafe {
+        initialize_after_software_reset(
+            core::ptr::addr_of_mut!(PD_REALTIME_EXECUTOR_STORAGE),
+            InterruptExecutor::new(software_interrupt),
+        )
+    };
+    executor.start(Priority::Priority3)
+}
+
+#[cfg(target_arch = "xtensa")]
 #[inline(never)]
 pub(crate) fn initialize_boot_system(
     spawner: Spawner,
@@ -1414,13 +1427,7 @@ pub(crate) fn initialize_boot_system(
         )
     };
     let buzzer_realtime_spawner = buzzer_realtime_executor.start(Priority::Priority2);
-    let pd_realtime_executor = unsafe {
-        initialize_after_software_reset(
-            core::ptr::addr_of_mut!(PD_REALTIME_EXECUTOR_STORAGE),
-            InterruptExecutor::new(software_interrupts.software_interrupt2),
-        )
-    };
-    let pd_realtime_spawner = pd_realtime_executor.start(Priority::Priority3);
+    let pd_realtime_spawner = start_pd_realtime_executor(software_interrupts.software_interrupt2);
     let status_light_started_ms = spawn_status_light_task(
         spawner,
         tokens.status_light_red,

@@ -334,11 +334,16 @@ impl SinkPolicy {
         true
     }
 
-    pub fn on_unhandled_data_message_with_message_id(&mut self, message_id: Option<u8>) {
+    pub fn on_unhandled_data_message_with_message_id(
+        &mut self,
+        message_id: Option<u8>,
+        discovery_query_active: bool,
+    ) {
         if matches!(
             self.phase,
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy | SinkPhase::Ready
-        ) {
+        ) || (self.phase == SinkPhase::WaitingForSourceCapabilities && discovery_query_active)
+        {
             let _ = self.observe_source_message_id(message_id);
         }
     }
@@ -1430,7 +1435,7 @@ mod tests {
                 .is_some()
         );
         for id in 1..=3 {
-            policy.on_unhandled_data_message_with_message_id(Some(id));
+            policy.on_unhandled_data_message_with_message_id(Some(id), false);
         }
         policy.on_control_message_with_message_id(3, Some(4), 0);
         assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
@@ -1438,10 +1443,27 @@ mod tests {
         assert_eq!(policy.phase(), SinkPhase::Ready);
 
         policy.on_received_protocol_reset();
-        policy.on_unhandled_data_message_with_message_id(Some(0));
+        policy.on_unhandled_data_message_with_message_id(Some(0), false);
         assert!(
             policy
                 .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(4))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn source_data_after_discovery_query_fences_duplicate_capabilities() {
+        let mut policy = SinkPolicy::new(12_000, 3_000);
+        policy.on_received_protocol_reset();
+        policy.on_unhandled_data_message_with_message_id(Some(0), true);
+        assert_eq!(
+            policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(0)),
+            None
+        );
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(1))
                 .is_some()
         );
     }
