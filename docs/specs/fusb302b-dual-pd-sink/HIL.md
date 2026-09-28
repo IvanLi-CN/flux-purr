@@ -101,7 +101,7 @@ not clear an owner-held setting just to manufacture an idle baseline.
 Confirm the front panel remains usable and the source does not cycle its output.
 Record a second status after at least 10 seconds: uptime must increase without
 a restart and the contract and VIN must remain stable. Save the confirmed idle
-contract kind, voltage, current, source capability summary, and VIN for the
+contract kind, voltage, current, contractual power, source capability summary, and VIN for the
 later restoration comparison.
 
 ## Manual PPS and restoration
@@ -141,11 +141,37 @@ image and fixture.
 Normally release the override and confirm automatic idle within 10 seconds:
 
 ```sh
-target/debug/flux-purr pd pps clear --devd "$SOCKET" --device "$DEVICE" --json
-target/debug/flux-purr status --devd "$SOCKET" --device "$DEVICE" --json \
-  | jq '{uptimeSeconds, pdState, pdContractKind, pdContractMv,
-         pdContractCurrentMa, manualPpsEnabled, voltageMv,
-         heaterEnabled, heaterPhysicalOutputPercent}'
+(
+  set -euo pipefail
+  IDLE_KIND='<recorded-automatic-idle-contract-kind>'
+  IDLE_MV='<recorded-automatic-idle-contract-mv>'
+  IDLE_MA='<recorded-automatic-idle-contract-ma>'
+  IDLE_POWER_MW='<recorded-automatic-idle-contract-power-mw>'
+  deadline=$(( $(date +%s) + 10 ))
+  target/debug/flux-purr pd pps clear --devd "$SOCKET" --device "$DEVICE" --json
+  restored=false
+  while :; do
+    sample="$(target/debug/flux-purr status --devd "$SOCKET" --device "$DEVICE" --json)"
+    sampled_at="$(date +%s)"
+    printf '%s\n' "$sample" | jq -c '{uptimeSeconds, pdState, pdContractKind,
+      pdContractMv, pdContractCurrentMa, pdContractPowerMw,
+      manualPpsEnabled, voltageMv, heaterEnabled, heaterPhysicalOutputPercent}'
+    if printf '%s\n' "$sample" | jq -e --arg kind "$IDLE_KIND" \
+      --argjson mv "$IDLE_MV" --argjson ma "$IDLE_MA" \
+      --argjson power "$IDLE_POWER_MW" \
+      'select(.manualPpsEnabled == false and .pdState == "ready"
+        and .pdContractKind == $kind and .pdContractMv == $mv
+        and .pdContractCurrentMa == $ma and .pdContractPowerMw == $power
+        and .heaterEnabled == false and .heaterPhysicalOutputPercent == 0)' \
+      >/dev/null && [ "$sampled_at" -le "$deadline" ]; then
+      restored=true
+      break
+    fi
+    [ "$sampled_at" -ge "$deadline" ] && break
+    sleep 1
+  done
+  test "$restored" = true
+)
 ```
 
 The later status must show `manualPpsEnabled=false`, a ready contract
@@ -162,15 +188,25 @@ before leaving the bench.
 
 While holding a PPS voltage, use the front panel and read `status` and
 `runtime get` through the CLI. Apply at least 60 seconds of read-only
-control-plane load:
+control-plane load. Set `REQUEST_MV` and `REQUEST_MA` to the selected test
+point, including its current limit:
 
 ```sh
 (
   set -euo pipefail
+  REQUEST_MV='<selected-contract-mv>'
+  REQUEST_MA='<selected-contract-ma>'
   for sample in $(seq 1 60); do
     target/debug/flux-purr status --devd "$SOCKET" --device "$DEVICE" --json \
-      | jq -ec '{uptimeSeconds, pdState, pdContractKind, pdContractMv,
-                 voltageMv, heaterPhysicalOutputPercent}'
+      | jq -ec --argjson mv "$REQUEST_MV" --argjson ma "$REQUEST_MA" \
+          'select(.pdState == "ready" and .pdContractKind == "pps"
+            and .pdContractMv == $mv and .pdContractCurrentMa == $ma
+            and .pdContractPowerMw == ($mv * $ma / 1000)
+            and ($mv != 20000 or $ma != 5000 or .pdPerformanceGuaranteed == true)
+            and .heaterPhysicalOutputPercent == 0)
+          | {uptimeSeconds, pdState, pdContractKind, pdContractMv,
+             pdContractCurrentMa, pdContractPowerMw, pdPerformanceGuaranteed,
+             voltageMv, heaterPhysicalOutputPercent}'
     target/debug/flux-purr runtime get --devd "$SOCKET" --device "$DEVICE" --json \
       | jq -ec '{targetTempC, heaterEnabled}'
     sleep 1
@@ -180,7 +216,8 @@ control-plane load:
 
 All reads must succeed. The front panel and source output must remain stable;
 status must retain a ready PPS contract at the selected voltage, VIN near the
-request, increasing uptime, and zero physical heater output. This tests the
+request, the selected contractual current/power and performance tier,
+increasing uptime, and zero physical heater output. This tests the
 user-visible effect of scheduling under ordinary control-plane work.
 
 ## Result and cleanup

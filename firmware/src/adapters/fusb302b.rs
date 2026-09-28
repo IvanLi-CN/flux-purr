@@ -43,7 +43,7 @@ pub const SOURCE_CAPS_RETRY_INTERVAL_MS: u64 = 5_000;
 
 fn source_message_id_is_newer(last: u8, current: u8) -> bool {
     let distance = current.wrapping_sub(last) & 0x07;
-    (1..=4).contains(&distance)
+    (1..=3).contains(&distance)
 }
 
 /// The only recovery actions available after a Source_Capabilities timeout.
@@ -1364,9 +1364,28 @@ mod tests {
     fn source_message_id_accepts_small_forward_sequence_distances() {
         assert!(source_message_id_is_newer(7, 0));
         assert!(source_message_id_is_newer(1, 3));
-        assert!(source_message_id_is_newer(1, 5));
+        assert!(!source_message_id_is_newer(1, 5));
         assert!(!source_message_id_is_newer(1, 6));
         assert!(!source_message_id_is_newer(5, 2));
+    }
+
+    #[test]
+    fn half_range_source_responses_cannot_confirm_a_pending_contract() {
+        let mut policy = SinkPolicy::new(12_000, 3_000);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(0))
+                .is_some()
+        );
+
+        policy.on_control_message_with_message_id(3, Some(4), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+        policy.on_control_message_with_message_id(3, Some(1), 1);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        policy.on_control_message_with_message_id(6, Some(5), 2);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        policy.on_control_message_with_message_id(6, Some(2), 3);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
     }
 
     #[test]
