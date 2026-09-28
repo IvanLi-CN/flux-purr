@@ -3755,6 +3755,25 @@ fn manual_pps_config_validates_capability_and_updates_status_payload() {
     assert!(manual_pps.consume_automatic_restore_pending());
 }
 
+#[test]
+fn clearing_manual_pps_requires_coordinator_idle_release() {
+    let mut manual_pps = ManualPpsState {
+        enabled: true,
+        owner: ManualPpsOwner::Debug,
+        target_mv: Some(20_000),
+        target_ma: Some(3_000),
+        applied_mv: Some(20_000),
+        ..ManualPpsState::default()
+    };
+
+    manual_pps.clear();
+
+    assert_eq!(
+        manual_pps.automatic_restore_phase(),
+        AutomaticRestorePhase::RequestIdle,
+    );
+}
+
 fn manual_pps_enable_command() -> RuntimeConfigCommand {
     RuntimeConfigCommand {
         target_temp_c: None,

@@ -2265,6 +2265,52 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn manual_pps_restore_retries_idle_until_confirmed() {
+        let mut manual_pps = ManualPpsState {
+            enabled: true,
+            target_mv: Some(20_000),
+            target_ma: Some(3_000),
+            ..ManualPpsState::default()
+        };
+        manual_pps.clear();
+        let ticket = PowerTicket {
+            owner: None,
+            sequence: 1,
+            result_slot: 0,
+        };
+        manual_pps.automatic_restore_ticket = Some(ticket);
+        assert_eq!(
+            manual_pps.automatic_restore_phase(),
+            AutomaticRestorePhase::AwaitIdle(ticket),
+        );
+
+        manual_pps.complete_automatic_restore(TicketOutcome::Rejected);
+        assert_eq!(
+            manual_pps.automatic_restore_phase(),
+            AutomaticRestorePhase::RequestIdle,
+        );
+
+        let capabilities =
+            SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 5_000)]);
+        let contract = capabilities
+            .select_exact_contract(PdContractRequest::pps(12_000, 5_000).unwrap())
+            .unwrap();
+        let active =
+            ConfirmedActiveContract::from_private_contract(contract, capabilities).unwrap();
+        manual_pps.automatic_restore_ticket = Some(ticket);
+        manual_pps.complete_automatic_restore(TicketOutcome::Confirmed(active));
+        assert_eq!(
+            manual_pps.automatic_restore_phase(),
+            AutomaticRestorePhase::ResetBackend,
+        );
+        assert!(manual_pps.consume_automatic_restore_pending());
+        assert_eq!(
+            manual_pps.automatic_restore_phase(),
+            AutomaticRestorePhase::NotRequired,
+        );
+    }
+
     fn pps_source_capability(min_mv: u16, max_mv: u16, max_ma: u16) -> u32 {
         (0b11 << 30)
             | (u32::from(max_mv / 100) << 17)

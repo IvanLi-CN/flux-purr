@@ -116,37 +116,71 @@ pub(crate) async fn prepare_manual_pps<PWM>(
 where
     PWM: SetDutyCycle,
 {
+    if context.manual_pps.enabled {
+        if let Some(ticket) = context.manual_pps.automatic_restore_ticket.take() {
+            context.pd_port.discard_ticket(ticket);
+        }
+    }
     if let Some(ticket) = context.manual_pps.pending_power_ticket {
-        match context.pd_port.try_take_ticket(ticket) {
-            Some(outcome) => {
-                let confirmed_mv = context.manual_pps.pending_power_request_mv;
-                context.manual_pps.pending_power_ticket = None;
-                context.manual_pps.pending_power_request_mv = None;
-                if !context.manual_pps.enabled {
+        if !context.manual_pps.enabled {
+            context.pd_port.discard_ticket(ticket);
+            context.manual_pps.pending_power_ticket = None;
+            context.manual_pps.pending_power_request_mv = None;
+        } else {
+            match context.pd_port.try_take_ticket(ticket) {
+                Some(outcome) => {
+                    let confirmed_mv = context.manual_pps.pending_power_request_mv;
+                    context.manual_pps.pending_power_ticket = None;
+                    context.manual_pps.pending_power_request_mv = None;
+                    if matches!(outcome, TicketOutcome::Confirmed(_)) {
+                        context.manual_pps.applied_mv = confirmed_mv;
+                        return None;
+                    }
+                    context.manual_pps.fail(ManualPpsError::WriteFailed);
+                    apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
                     return None;
                 }
-                if matches!(outcome, TicketOutcome::Confirmed(_)) {
-                    context.manual_pps.applied_mv = confirmed_mv;
-                    return None;
-                }
-                context.manual_pps.fail(ManualPpsError::WriteFailed);
-                apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-                request_idle_restore_fire_and_forget(context.pd_port);
-                return None;
+                None => return None,
             }
-            None if context.manual_pps.enabled => return None,
-            None => {}
         }
     }
     if !context.manual_pps.enabled {
-        return Some(false);
+        match context.manual_pps.automatic_restore_phase() {
+            AutomaticRestorePhase::NotRequired | AutomaticRestorePhase::ResetBackend => {
+                return Some(false);
+            }
+            AutomaticRestorePhase::AwaitIdle(ticket) => {
+                if let Some(outcome) = context.pd_port.try_take_ticket(ticket) {
+                    context.manual_pps.complete_automatic_restore(outcome);
+                    if context.manual_pps.automatic_restore_phase()
+                        == AutomaticRestorePhase::ResetBackend
+                    {
+                        return Some(false);
+                    }
+                }
+            }
+            AutomaticRestorePhase::RequestIdle => {
+                match context.pd_port.restore_automatic_idle_contract() {
+                    PdRequestState::Confirmed => {
+                        context.manual_pps.automatic_restore_confirmed = true;
+                        return Some(false);
+                    }
+                    PdRequestState::Pending(ticket) => {
+                        context.manual_pps.automatic_restore_ticket = Some(ticket);
+                    }
+                    PdRequestState::Failed => {}
+                }
+            }
+        }
+        apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+        return None;
     }
     context.hold_pps_governor.reset();
     let target_mv = match require_manual_pps_target(context.manual_pps) {
         Ok(target_mv) => target_mv,
         Err(_) => {
             apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-            return Some(true);
+            return None;
         }
     };
     let target_ma = context.manual_pps.target_ma.unwrap_or(0);
@@ -157,8 +191,7 @@ where
     {
         context.manual_pps.fail(ManualPpsError::PdNotReady);
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-        request_idle_restore_fire_and_forget(context.pd_port);
-        return Some(false);
+        return None;
     }
     if !manual_pps_request_required(
         *context.manual_pps,
@@ -170,7 +203,7 @@ where
     let Ok(request) = PdContractRequest::pps(target_mv, target_ma) else {
         context.manual_pps.fail(ManualPpsError::InvalidCurrent);
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-        return Some(false);
+        return None;
     };
     match context
         .pd_port
@@ -191,12 +224,11 @@ where
         PdRequestState::Failed => {
             context.manual_pps.fail(ManualPpsError::WriteFailed);
             apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-            request_idle_restore_fire_and_forget(context.pd_port);
             info!(
                 "manual pps override cleared reason={=str}",
                 ManualPpsError::WriteFailed.code()
             );
-            Some(false)
+            None
         }
     }
 }
@@ -218,7 +250,9 @@ pub(crate) fn reset_backend_after_manual_pps_restore<PWM>(
 ) where
     PWM: SetDutyCycle,
 {
-    if !context.manual_pps.consume_automatic_restore_pending() {
+    if context.manual_pps.automatic_restore_phase() != AutomaticRestorePhase::ResetBackend
+        || !context.manual_pps.consume_automatic_restore_pending()
+    {
         return;
     }
     reset_automatic_heater_backend(context.backend);

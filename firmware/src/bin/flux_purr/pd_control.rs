@@ -462,6 +462,8 @@ pub(crate) struct ManualPpsState {
     pub(crate) capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
     pub(crate) error: Option<ManualPpsError>,
     pub(crate) automatic_restore_pending: bool,
+    pub(crate) automatic_restore_ticket: Option<PowerTicket>,
+    pub(crate) automatic_restore_confirmed: bool,
     pub(crate) allow_pending_refresh: bool,
     pub(crate) pending_power_ticket: Option<PowerTicket>,
     pub(crate) pending_power_request_mv: Option<u16>,
@@ -484,11 +486,22 @@ impl Default for ManualPpsState {
             capability_apdos: [None; ch224q::MAX_PPS_APDOS],
             error: None,
             automatic_restore_pending: false,
+            automatic_restore_ticket: None,
+            automatic_restore_confirmed: false,
             allow_pending_refresh: false,
             pending_power_ticket: None,
             pending_power_request_mv: None,
         }
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AutomaticRestorePhase {
+    NotRequired,
+    RequestIdle,
+    AwaitIdle(PowerTicket),
+    ResetBackend,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1416,6 +1429,7 @@ impl ManualPpsState {
         self.target_ma = Some(target_ma);
         self.error = None;
         self.automatic_restore_pending = false;
+        self.automatic_restore_confirmed = false;
         Ok(())
     }
 
@@ -1441,6 +1455,7 @@ impl ManualPpsState {
         self.applied_mv = None;
         self.error = None;
         self.automatic_restore_pending = false;
+        self.automatic_restore_confirmed = false;
         Ok(())
     }
 
@@ -1452,13 +1467,15 @@ impl ManualPpsState {
         let mut refreshed = Self::from_fusb302b_capabilities(capabilities);
         refreshed.pending_power_ticket = previous.pending_power_ticket;
         refreshed.pending_power_request_mv = previous.pending_power_request_mv;
+        refreshed.automatic_restore_ticket = previous.automatic_restore_ticket;
+        refreshed.automatic_restore_confirmed = previous.automatic_restore_confirmed;
+        refreshed.automatic_restore_pending = previous.automatic_restore_pending;
         if previous.enabled {
             refreshed.enabled = true;
             refreshed.owner = previous.owner;
             refreshed.target_mv = previous.target_mv;
             refreshed.target_ma = previous.target_ma;
             refreshed.applied_mv = None;
-            refreshed.automatic_restore_pending = previous.automatic_restore_pending;
         }
         *self = refreshed;
     }
@@ -1475,6 +1492,9 @@ impl ManualPpsState {
         self.applied_mv = None;
         self.error = None;
         self.automatic_restore_pending |= had_override;
+        if had_override {
+            self.automatic_restore_confirmed = false;
+        }
     }
 
     pub(crate) fn fail(&mut self, error: ManualPpsError) {
@@ -1485,11 +1505,30 @@ impl ManualPpsState {
         self.applied_mv = None;
         self.error = Some(error);
         self.automatic_restore_pending = true;
+        self.automatic_restore_confirmed = false;
+    }
+
+    pub(crate) fn automatic_restore_phase(&self) -> AutomaticRestorePhase {
+        if !self.automatic_restore_pending {
+            AutomaticRestorePhase::NotRequired
+        } else if self.automatic_restore_confirmed {
+            AutomaticRestorePhase::ResetBackend
+        } else if let Some(ticket) = self.automatic_restore_ticket {
+            AutomaticRestorePhase::AwaitIdle(ticket)
+        } else {
+            AutomaticRestorePhase::RequestIdle
+        }
+    }
+
+    pub(crate) fn complete_automatic_restore(&mut self, outcome: TicketOutcome) {
+        self.automatic_restore_ticket = None;
+        self.automatic_restore_confirmed = matches!(outcome, TicketOutcome::Confirmed(_));
     }
 
     pub(crate) fn consume_automatic_restore_pending(&mut self) -> bool {
         let pending = self.automatic_restore_pending;
         self.automatic_restore_pending = false;
+        self.automatic_restore_confirmed = false;
         pending
     }
 }
