@@ -26,6 +26,7 @@
     "Release completion",
     "Firmware checks",
     "DEVD checks",
+    "DEVD Windows checks",
     "Web checks",
     "Worktree bootstrap"
   ],
@@ -45,7 +46,7 @@
     {
       "workflow": "CI PR",
       "path": ".github/workflows/ci.yml",
-      "jobs": ["Firmware checks", "DEVD checks", "Web checks", "Worktree bootstrap"]
+      "jobs": ["Firmware checks", "DEVD checks", "DEVD Windows checks", "Web checks", "Worktree bootstrap"]
     }
   ],
   "expected_preparation_workflows": [
@@ -59,7 +60,7 @@
     {
       "workflow": "CI Main",
       "path": ".github/workflows/ci-main.yml",
-      "jobs": ["Release preparation validation", "Firmware checks", "DEVD checks", "Web checks", "Worktree bootstrap"]
+      "jobs": ["Release preparation validation", "Firmware checks", "DEVD checks", "DEVD Windows checks", "Web checks", "Worktree bootstrap"]
     }
   ],
   "expected_release_workflows": [

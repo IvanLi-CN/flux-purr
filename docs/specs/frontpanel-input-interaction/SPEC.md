@@ -28,7 +28,7 @@
 
 - `firmware/src/frontpanel/**`
 - `firmware/src/bin/flux_purr.rs`
-- `firmware/src/bin/frontpanel_preview.rs`
+- `firmware/ram-bringup/src/main.rs` typed front-panel preview command
 - `web/src/features/frontpanel-preview/**`
 - `web/src/stories/FrontPanelDisplay.stories.tsx`
 - `docs/specs/frontpanel-input-interaction/**`
@@ -75,7 +75,7 @@
 
 - raw-pin -> logical-key 映射表与扫描逻辑解耦，便于硬件校准后单点更新。
 - 固件与 Web mock reducer 的路由与交互语义保持一致，避免“双实现”漂移。
-- `Key Test` 和 App mock 页面都提供稳定的 host preview / Storybook 入口，方便后续回归。
+- `Key Test` 和 App mock 页面都提供稳定的 RAM bring-up / Storybook 入口，方便后续回归。
 
 ### COULD
 
@@ -156,7 +156,7 @@
 | `FrontPanelUiState / FrontPanelRoute / FrontPanelRuntimeMode` | Rust state model | internal | New | None | firmware | runtime / preview | 固件 reducer 与路由状态 |
 | `FrontPanelRuntimeState / FrontPanelScreen` | TypeScript type | internal | Updated | None | web | Storybook / preview harness | Web mock runtime 对齐固件语义 |
 | `FrontPanelRuntimeHarness` | React component | internal | New | None | web | Storybook play coverage | 稳定交互驱动器 |
-| `frontpanel_preview` | Host preview bin | internal | New | None | firmware | visual evidence | 导出 framebuffer 供 PNG 转换 |
+| `ram-run preview frontpanel` | RAM bring-up CLI command | internal | New | None | firmware/devd | physical validation | 在 heater off 约束下驱动前面板 |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -200,7 +200,7 @@ None
 ### UI / Storybook / Firmware Preview
 
 - Web 侧必须先清 Storybook coverage，再截图。
-- 固件侧必须通过 host preview 产出 framebuffer 与 PNG。
+- 固件侧的物理路径必须通过 `flux-purr ram-run` 验证；可截图的视觉证据由 Storybook 和 checked-in renderer assets 提供。
 - owner-facing 图片与 spec 资产必须绑定到当前实现 head，且聊天回图前先做 immutable snapshot。
 
 ## 文档更新（Docs to Update）
@@ -223,9 +223,13 @@ None
 - 开放问题：未来是否需要在 `Key Test` 模式叠加串口日志或屏幕页码提示，本轮暂不扩 scope。
 - 假设：当前 S3 frontpanel 板和 GC9D01 显示方向已按现有 board baseline 固定，后续只校准按键映射。
 
+## Related ADRs
+
+None
+
 ## Visual Evidence
 
-- 证据来源：Storybook canvas stories + firmware host preview + 真机 flash/monitor 校准记录
+- 证据来源：Storybook canvas stories + product renderer assets + RAM bring-up 实机校准记录
 - 绑定说明：以下图片对应当前本地实现；聊天验收图与 spec 资产保持同源
 
 ### Storybook canvas

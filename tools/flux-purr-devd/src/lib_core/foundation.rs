@@ -2,8 +2,6 @@ pub(crate) use super::*;
 
 #[cfg(unix)]
 pub(crate) use std::os::fd::AsRawFd;
-#[cfg(target_os = "macos")]
-pub(crate) use std::os::unix::fs::OpenOptionsExt;
 pub(crate) use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
@@ -35,7 +33,6 @@ pub(crate) use serde_json::{Value, json};
 pub(crate) use sha2::{Digest, Sha256};
 pub(crate) use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    process::Command,
     sync::broadcast,
 };
 pub(crate) use tokio_stream::{StreamExt, wrappers::BroadcastStream};
@@ -46,6 +43,13 @@ pub const PRODUCT_VERSION: &str = env!("FLUX_PURR_PRODUCT_VERSION");
 pub const PRODUCT_CHANNEL: &str = env!("FLUX_PURR_PRODUCT_CHANNEL");
 pub const PRODUCT_SOURCE_SHA: &str = env!("FLUX_PURR_PRODUCT_SOURCE_SHA");
 pub const PRODUCT_BUILD_ID: &str = env!("FLUX_PURR_PRODUCT_BUILD_ID");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareKind {
+    Product,
+    RamBringup,
+}
 
 pub const DEFAULT_EVENT_LIMIT: usize = 1_000;
 pub const DEFAULT_LOG_LIMIT: usize = 2_000;
@@ -116,6 +120,7 @@ pub(crate) enum SerialRetryPolicy {
 #[cfg(unix)]
 unsafe extern "C" {
     pub(crate) fn flock(fd: i32, operation: i32) -> i32;
+    pub(crate) fn geteuid() -> u32;
 }
 
 #[derive(Debug, Clone)]
@@ -340,8 +345,22 @@ pub(crate) fn remove_expired_serial_sessions(
         else {
             continue;
         };
-        sessions.remove(port_path);
+        remove_cached_serial_session(sessions, port_path);
     }
+}
+
+pub(crate) fn remove_cached_serial_sessions_for_paths(
+    serial_sessions: &Arc<Mutex<SerialSessionMap>>,
+    port_paths: &[String],
+) -> Result<(), HttpError> {
+    if port_paths.is_empty() {
+        return Ok(());
+    }
+    let mut sessions = lock_serial_sessions(serial_sessions)?;
+    for port_path in port_paths {
+        remove_cached_serial_session(&mut sessions, port_path);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -358,6 +377,7 @@ pub(crate) struct FirmwareApproval {
     pub(crate) lease_id: String,
     pub(crate) device_id: String,
     pub(crate) port_path: String,
+    pub(crate) usb_identity: Option<UsbSerialIdentity>,
     pub(crate) rom_mac: String,
     pub(crate) bundle_sha256: String,
     pub(crate) operation: FirmwareOperation,
@@ -369,6 +389,8 @@ pub(crate) struct FirmwareApproval {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FlashDryRunApproval {
     pub(crate) lease_id: String,
+    pub(crate) port_path: String,
+    pub(crate) usb_identity: Option<UsbSerialIdentity>,
     pub(crate) artifact_fingerprint: String,
 }
 
@@ -577,6 +599,7 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
 
 pub(crate) fn mock_identity(id: &str) -> Identity {
     Identity {
+        firmware_kind: Some(FirmwareKind::Product),
         device_id: id.to_string(),
         firmware_version: "fw/v0.4.0-dev".to_string(),
         build_id: "devd-mock".to_string(),
@@ -798,6 +821,7 @@ pub(crate) fn native_placeholder_status(network: &NetworkSummary) -> ControlPlan
 
 pub(crate) fn native_placeholder_identity() -> Identity {
     Identity {
+        firmware_kind: None,
         device_id: String::new(),
         firmware_version: "unknown".to_string(),
         build_id: "native-serial-placeholder".to_string(),
@@ -931,6 +955,8 @@ pub enum ConnectionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
+    #[serde(default)]
+    pub firmware_kind: Option<FirmwareKind>,
     pub device_id: String,
     pub firmware_version: String,
     pub build_id: String,

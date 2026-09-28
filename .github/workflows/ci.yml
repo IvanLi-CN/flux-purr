@@ -76,15 +76,31 @@ jobs:
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/check-firmware-clippy.sh
 
-      - name: Host preview tests
+      - name: Product firmware tests
         if: needs.classify.outputs.kind == 'source'
-        run: cargo test --locked --manifest-path firmware/Cargo.toml --features host-preview --all-targets
+        run: cargo test --locked --manifest-path firmware/Cargo.toml --all-targets
+
+      - name: RAM bring-up protocol tests
+        if: needs.classify.outputs.kind == 'source'
+        run: cargo test --locked -p flux-purr-ram-bringup --all-targets
 
       - name: Setup Xtensa toolchain
         if: needs.classify.outputs.kind == 'source'
         uses: ./.github/actions/setup-xtensa
         with:
           buildtargets: esp32s3
+
+      - name: RAM bring-up ELF build
+        if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/build-ram-bringup.sh
+
+      - name: RAM ELF safety checker
+        if: needs.classify.outputs.kind == 'source'
+        run: python3 firmware/ram-bringup/tools/check_ram_elf.py firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup --json
+
+      - name: RAM ELF checker tests
+        if: needs.classify.outputs.kind == 'source'
+        run: python3 -m unittest discover -s firmware/ram-bringup/tools -p 'test_*.py'
 
       - name: Firmware Xtensa clippy
         if: needs.classify.outputs.kind == 'source'
@@ -101,8 +117,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout
+      - name: Checkout pull request head
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@v1
@@ -123,8 +142,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout
+      - name: Checkout pull request head
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@v1

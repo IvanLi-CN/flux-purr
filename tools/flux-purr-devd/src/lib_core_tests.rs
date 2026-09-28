@@ -426,7 +426,21 @@ fn serial_scan_without_fixed_target_lists_all_espressif_candidates() {
             }),
         },
         serialport::SerialPortInfo {
+            port_name: "/dev/cu.usbmodem-other-espressif".to_string(),
+            port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+                vid: ESP32S3_USB_SERIAL_JTAG_VID,
+                pid: 0x1002,
+                serial_number: Some("other-espressif-device".to_string()),
+                manufacturer: Some("Espressif".to_string()),
+                product: Some("Other USB serial device".to_string()),
+            }),
+        },
+        serialport::SerialPortInfo {
             port_name: "/dev/cu.other".to_string(),
+            port_type: serialport::SerialPortType::Unknown,
+        },
+        serialport::SerialPortInfo {
+            port_name: "/dev/cu.usbmodem-untyped".to_string(),
             port_type: serialport::SerialPortType::Unknown,
         },
     ];
@@ -446,6 +460,35 @@ fn serial_scan_without_fixed_target_lists_all_espressif_candidates() {
             .iter()
             .all(|device| device.identity.hostname.is_empty())
     );
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn serial_scan_accepts_a_filesystem_alias_for_a_fixed_target() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().unwrap();
+    let device = directory.path().join("ttyUSB0");
+    let alias = directory.path().join("by-id").join("usb-flux-purr");
+    fs::create_dir(alias.parent().unwrap()).unwrap();
+    File::create(&device).unwrap();
+    symlink(&device, &alias).unwrap();
+    let ports = vec![serialport::SerialPortInfo {
+        port_name: device.to_str().unwrap().to_string(),
+        port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+            vid: 0x303a,
+            pid: 0x1001,
+            serial_number: Some("alias-target".to_string()),
+            manufacturer: Some("Espressif".to_string()),
+            product: Some("USB JTAG/serial debug unit".to_string()),
+        }),
+    }];
+
+    let devices = scan_serial_devices_from_available(Some(alias.as_path()), &ports);
+
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].port_path.as_deref(), alias.to_str());
+    assert_eq!(devices[0].connection, ConnectionState::Disconnected);
 }
 
 #[test]
@@ -524,11 +567,12 @@ fn serial_refresh_removes_stale_native_devices_and_leases() {
         },
     );
 
-    refresh_serial_devices(&mut state, Vec::new());
+    let stale_ports = refresh_serial_devices(&mut state, Vec::new());
 
     assert!(state.devices.contains_key("mock-fp-lab-01"));
     assert!(!state.devices.contains_key("serial-stale"));
     assert!(state.leases.is_empty());
+    assert_eq!(stale_ports, vec!["/dev/tty.Bluetooth-Incoming-Port"]);
 }
 
 #[test]
@@ -1195,7 +1239,7 @@ async fn usbmodem_connection_failure_retries_usb_reset_before_default_reset() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn bundle_flash_retries_a_transient_connection_failure() {
+async fn bundle_flash_does_not_retry_a_write_connection_failure() {
     let dir = tempdir().unwrap();
     let program = dir.path().join("retrying-bundle-espflash.sh");
     let attempts = dir.path().join("attempts.log");
@@ -1212,7 +1256,7 @@ async fn bundle_flash_retries_a_transient_connection_failure() {
     permissions.set_mode(0o700);
     std::fs::set_permissions(&program, permissions).unwrap();
 
-    require_bundle_espflash_success(
+    let error = require_bundle_espflash_success(
         &program,
         &[
             "write-bin".to_string(),
@@ -1222,11 +1266,13 @@ async fn bundle_flash_retries_a_transient_connection_failure() {
         "/dev/cu.usbmodem2111401",
     )
     .await
-    .unwrap();
+    .unwrap_err();
+
+    assert_eq!(error.error.code, "espflash_failed");
 
     assert_eq!(
         std::fs::read_to_string(attempts).unwrap(),
-        "write-bin --before no-reset\nwrite-bin --before usb-reset\n"
+        "write-bin --before no-reset\n"
     );
 }
 
@@ -1273,7 +1319,11 @@ async fn espflash_subprocess_timeout_is_reported_without_hanging_the_request() {
 
     let dir = tempdir().unwrap();
     let program = dir.path().join("stuck-espflash");
-    std::fs::write(&program, "#!/bin/sh\nsleep 5\n").unwrap();
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf 'partial stdout\\n'\nprintf 'partial stderr\\n' >&2\nsleep 5\n",
+    )
+    .unwrap();
     let mut permissions = std::fs::metadata(&program).unwrap().permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&program, permissions).unwrap();
@@ -1282,13 +1332,69 @@ async fn espflash_subprocess_timeout_is_reported_without_hanging_the_request() {
     let error = run_espflash_command_with_timeout(
         &program,
         &["read-flash".to_string()],
-        Duration::from_millis(50),
+        Duration::from_millis(250),
     )
     .await
     .unwrap_err();
 
     assert_eq!(error.error.code, "flash_tool_timeout");
-    assert!(started.elapsed() < Duration::from_secs(1));
+    let details = error.error.details.expect("timeout diagnostics");
+    assert!(details.get("stdout").is_some());
+    assert!(details.get("stderr").is_some());
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn espflash_subprocess_is_killed_when_request_is_cancelled() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let pid_file = dir.path().join("espflash.pid");
+    let program = dir.path().join("cancellable-espflash");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 30\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&program, permissions).unwrap();
+
+    let task_program = program.clone();
+    let task = tokio::spawn(async move {
+        run_espflash_command_with_timeout(&task_program, &[], Duration::from_secs(30)).await
+    });
+    let started = Instant::now();
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+            break pid;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    task.abort();
+    let _ = task.await;
+    let kill_check = |pid: &str| {
+        std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    let stopped = (0..100).any(|_| {
+        if !kill_check(&pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        false
+    });
+    assert!(stopped, "cancelled espflash child is still running");
 }
 
 #[tokio::test]
@@ -1381,6 +1487,42 @@ fn bundle_retry_replaces_only_the_recoverable_no_reset_mode() {
             "no-reset".to_string(),
         ])
     );
+}
+
+#[test]
+fn bundle_reset_command_includes_recovery_reset_mode() {
+    let common = vec![
+        "--chip".to_string(),
+        "esp32s3".to_string(),
+        "--port".to_string(),
+        "/dev/cu.usbmodem2111401".to_string(),
+        "--non-interactive".to_string(),
+    ];
+
+    assert_eq!(
+        build_bundle_reset_args(&common, "usb-reset"),
+        vec![
+            "reset",
+            "--chip",
+            "esp32s3",
+            "--port",
+            "/dev/cu.usbmodem2111401",
+            "--non-interactive",
+            "--before",
+            "usb-reset",
+            "--after",
+            "hard-reset",
+        ]
+    );
+}
+
+#[test]
+fn espflash_process_pipe_caps_captured_output_while_draining() {
+    let input = vec![b'x'; MAX_ESPFLASH_CAPTURE_BYTES + 8 * 1024];
+
+    let output = read_process_pipe(std::io::Cursor::new(input)).unwrap();
+
+    assert_eq!(output.len(), MAX_ESPFLASH_CAPTURE_BYTES);
 }
 
 #[tokio::test]
@@ -2665,6 +2807,33 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
 }
 
 #[test]
+fn legacy_flash_dry_run_approval_binds_port_and_usb_identity() {
+    let directory = tempdir().unwrap();
+    let payload = FlashRequest {
+        lease_id: "lease-1".into(),
+        artifact: test_artifact_with_file(directory.path(), "firmware.bin", b"firmware-image"),
+        dry_run: true,
+        confirm: None,
+    };
+    let identity = UsbSerialIdentity {
+        vid: ESP32S3_USB_SERIAL_JTAG_VID,
+        pid: ESP32S3_USB_SERIAL_JTAG_PID,
+        serial_number: "target-a".into(),
+    };
+    let approval =
+        flash_dry_run_approval(&payload, "/dev/cu.usbmodem-a", Some(identity.clone())).unwrap();
+    assert_eq!(approval.port_path, "/dev/cu.usbmodem-a");
+    assert_eq!(approval.usb_identity, Some(identity.clone()));
+
+    let mut replaced = approval.clone();
+    replaced.usb_identity = Some(UsbSerialIdentity {
+        serial_number: "target-b".into(),
+        ..identity
+    });
+    assert_ne!(approval, replaced);
+}
+
+#[test]
 fn wifi_response_redacts_password_shape() {
     let request = WifiConfigRequest {
         lease_id: "lease-1".to_string(),
@@ -3498,18 +3667,36 @@ fn serial_request_line_limit_accepts_full_line_and_rejects_overflow() {
     assert_eq!(error.error.code, "usb_request_too_large");
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn serial_lock_is_not_reentrant_until_previous_session_is_dropped() {
-    let port_path = "/tmp/flux-purr-devd-test-port";
+    let port_path = if cfg!(windows) {
+        "COM_FLUX_PURR_TEST"
+    } else {
+        "/tmp/flux-purr-devd-test-port"
+    };
     let deadline = Instant::now() + Duration::from_millis(250);
 
     let first = SerialPortProcessLock::acquire(port_path, deadline).unwrap();
 
-    let second = match SerialPortProcessLock::acquire(
-        port_path,
-        Instant::now() + Duration::from_millis(250),
-    ) {
+    let second = {
+        #[cfg(unix)]
+        {
+            SerialPortProcessLock::acquire(port_path, Instant::now() + Duration::from_millis(250))
+        }
+        #[cfg(windows)]
+        {
+            std::thread::spawn(move || {
+                SerialPortProcessLock::acquire(
+                    port_path,
+                    Instant::now() + Duration::from_millis(250),
+                )
+            })
+            .join()
+            .expect("serial lock worker should finish")
+        }
+    };
+    let second = match second {
         Ok(_) => panic!("second serial lock should time out while first session is alive"),
         Err(error) => error,
     };
@@ -3520,6 +3707,145 @@ fn serial_lock_is_not_reentrant_until_previous_session_is_dropped() {
     let reopened =
         SerialPortProcessLock::acquire(port_path, Instant::now() + Duration::from_millis(250));
     assert!(reopened.is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn serial_lock_aliases_share_a_lock_identity() {
+    assert_eq!(
+        serial_lock_path("/dev/cu.usbmodem21141401"),
+        serial_lock_path("/dev/tty.usbmodem21141401")
+    );
+    assert_eq!(
+        serial_session_key("/dev/cu.usbmodem21141401"),
+        serial_session_key("/dev/tty.usbmodem21141401")
+    );
+    assert!(serial_port_paths_match(
+        "/dev/cu.usbmodem21141401",
+        "/dev/tty.usbmodem21141401"
+    ));
+}
+
+#[test]
+fn usb_serial_identity_rejects_missing_or_replaced_serial_numbers() {
+    let info = serialport::SerialPortInfo {
+        port_name: "/dev/cu.usbmodem-test".to_string(),
+        port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+            vid: 0x303a,
+            pid: 0x1001,
+            serial_number: Some("D0:CF:13:08:A1:48".to_string()),
+            manufacturer: Some("Espressif".to_string()),
+            product: Some("USB JTAG/serial debug unit".to_string()),
+        }),
+    };
+    let identity = UsbSerialIdentity::from_port_info(&info).unwrap();
+    assert!(identity.matches_port_info(&info));
+
+    let mut wrong_pid = info.clone();
+    if let serialport::SerialPortType::UsbPort(usb) = &mut wrong_pid.port_type {
+        usb.pid = ESP32S3_USB_SERIAL_JTAG_PID + 1;
+    }
+    assert!(UsbSerialIdentity::from_port_info(&wrong_pid).is_none());
+
+    let mut wrong_vid = info.clone();
+    if let serialport::SerialPortType::UsbPort(usb) = &mut wrong_vid.port_type {
+        usb.vid = ESP32S3_USB_SERIAL_JTAG_VID + 1;
+    }
+    assert!(UsbSerialIdentity::from_port_info(&wrong_vid).is_none());
+
+    let mut replaced = info.clone();
+    if let serialport::SerialPortType::UsbPort(usb) = &mut replaced.port_type {
+        usb.serial_number = Some("replacement-target".to_string());
+    }
+    assert!(!identity.matches_port_info(&replaced));
+
+    let mut missing = info;
+    if let serialport::SerialPortType::UsbPort(usb) = &mut missing.port_type {
+        usb.serial_number = None;
+    }
+    assert!(UsbSerialIdentity::from_port_info(&missing).is_none());
+}
+
+#[test]
+fn firmware_update_identity_requires_product_runtime() {
+    let mut identity = mock_identity("mock-fp-lab-01");
+    assert!(validate_update_runtime_identity(DeviceTransport::NativeSerial, &identity).is_ok());
+
+    identity.firmware_kind = Some(FirmwareKind::RamBringup);
+    let error =
+        validate_update_runtime_identity(DeviceTransport::NativeSerial, &identity).unwrap_err();
+    assert_eq!(error.error.code, "update_identity_required");
+
+    identity.firmware_kind = None;
+    let error =
+        validate_update_runtime_identity(DeviceTransport::NativeSerial, &identity).unwrap_err();
+    assert_eq!(error.error.code, "update_identity_required");
+    assert!(validate_update_runtime_identity(DeviceTransport::Mock, &identity).is_ok());
+}
+
+#[test]
+fn firmware_preflight_digest_binds_usb_identity() {
+    let payload = FirmwareOperationRequest {
+        lease_id: "lease-1".into(),
+        artifact_id: "sha256:artifact".into(),
+        operation: FirmwareOperation::Update,
+        dry_run: true,
+        approval_token: None,
+        confirm: None,
+        allow_downgrade: false,
+    };
+    let first = UsbSerialIdentity {
+        vid: 0x303a,
+        pid: 0x1001,
+        serial_number: "target-a".into(),
+    };
+    let second = UsbSerialIdentity {
+        serial_number: "target-b".into(),
+        ..first.clone()
+    };
+    let digest_a = firmware_preflight_digest(
+        &payload,
+        "device-1",
+        "/dev/cu.usbmodem1",
+        "00:11:22:33:44:55",
+        "sha256:bundle",
+        Some(&first),
+    );
+    let digest_b = firmware_preflight_digest(
+        &payload,
+        "device-1",
+        "/dev/cu.usbmodem1",
+        "00:11:22:33:44:55",
+        "sha256:bundle",
+        Some(&second),
+    );
+    assert_ne!(digest_a, digest_b);
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn serial_lock_symlink_aliases_share_a_lock_identity() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().unwrap();
+    let device = directory.path().join("ttyUSB0");
+    let alias = directory.path().join("by-id").join("usb-flux-purr");
+    std::fs::create_dir(alias.parent().unwrap()).unwrap();
+    std::fs::File::create(&device).unwrap();
+    symlink(&device, &alias).unwrap();
+
+    assert_eq!(
+        serial_lock_path(device.to_str().unwrap()),
+        serial_lock_path(alias.to_str().unwrap())
+    );
+    assert_eq!(
+        serial_session_key(device.to_str().unwrap()),
+        serial_session_key(alias.to_str().unwrap())
+    );
+    assert!(serial_port_paths_match(
+        device.to_str().unwrap(),
+        alias.to_str().unwrap()
+    ));
 }
 
 #[tokio::test]
@@ -3823,6 +4149,52 @@ fn seed_test_bundle(state: &AppState) -> String {
 }
 
 #[test]
+fn runtime_verification_requires_product_firmware_kind() {
+    let directory = tempdir().unwrap();
+    let bundle = firmware_bundle::build_bundle(
+        &directory.path().join("runtime.fluxpurr-fw"),
+        firmware_bundle::BundleIdentity {
+            version: "0.1.0".into(),
+            source_sha: "e9754917ee23481dd30571fb7a78cb2c486b82a3".into(),
+            build_id: "0123456789abcdef".into(),
+            channel: firmware_bundle::BundleChannel::Local,
+        },
+        &vec![0x11; 0x4000],
+        include_bytes!("../../../firmware/partitions.bin"),
+        &vec![0x33; 0x4000],
+    )
+    .unwrap();
+    let identity = Identity {
+        firmware_kind: Some(FirmwareKind::Product),
+        device_id: "device".into(),
+        firmware_version: bundle.manifest.identity.version.clone(),
+        build_id: bundle.manifest.identity.build_id.clone(),
+        git_sha: bundle.manifest.identity.source_sha.clone(),
+        board: "esp32-s3".into(),
+        api_version: "2026-05-29".into(),
+        protocol_version: "flux-purr.usb.v1".into(),
+        hostname: "device".into(),
+        capabilities: vec![],
+    };
+
+    assert!(runtime_identity_matches_bundle(&identity, &bundle));
+    assert!(!runtime_identity_matches_bundle(
+        &Identity {
+            firmware_kind: Some(FirmwareKind::RamBringup),
+            ..identity.clone()
+        },
+        &bundle,
+    ));
+    assert!(!runtime_identity_matches_bundle(
+        &Identity {
+            firmware_kind: None,
+            ..identity
+        },
+        &bundle,
+    ));
+}
+
+#[test]
 fn security_info_fails_closed_for_each_protected_state() {
     let safe = RomSecurityInfo {
         rom_mac: "00:11:22:33:44:55".into(),
@@ -3867,6 +4239,23 @@ fn security_info_fails_closed_for_each_protected_state() {
     ] {
         assert!(blocked.validate_for_flash().is_err());
     }
+}
+
+#[test]
+fn rom_probe_result_requires_runtime_reset_after_success_or_failure() {
+    assert_eq!(finalize_rom_probe_result::<u8>(Ok(7), Ok(())), Ok(7));
+    assert_eq!(
+        finalize_rom_probe_result::<u8>(Err("probe failed".into()), Ok(())),
+        Err("probe failed".into())
+    );
+    assert_eq!(
+        finalize_rom_probe_result::<u8>(Ok(7), Err("reset failed".into())),
+        Err("ROM security probe passed; resetting target to runtime failed: reset failed".into())
+    );
+    assert_eq!(
+        finalize_rom_probe_result::<u8>(Err("probe failed".into()), Err("reset failed".into())),
+        Err("probe failed; resetting target to runtime failed: reset failed".into())
+    );
 }
 
 #[tokio::test]

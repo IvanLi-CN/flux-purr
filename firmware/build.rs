@@ -5,20 +5,25 @@ fn main() {
         .expect("firmware must live below the repository root");
     let resolver = repo_root.join("scripts/product-version.py");
     let build_mode = std::env::var("FLUX_PURR_BUILD_MODE").unwrap_or_else(|_| "development".into());
-    let source_sha = std::env::var("FLUX_PURR_SOURCE_SHA")
-        .ok()
-        .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .or_else(|| {
-            std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .and_then(|output| String::from_utf8(output.stdout).ok())
-                .map(|value| value.trim().to_string())
-                .filter(|value| value.len() == 40)
-        })
-        .expect("FLUX_PURR_SOURCE_SHA or a Git checkout is required");
+    let source_sha = match std::env::var("FLUX_PURR_SOURCE_SHA") {
+        Ok(value) => {
+            if !valid_source_sha(&value) {
+                panic!(
+                    "FLUX_PURR_SOURCE_SHA must be a 40-character lowercase hexadecimal commit SHA"
+                );
+            }
+            value
+        }
+        Err(_) => std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| valid_source_sha(value))
+            .expect("FLUX_PURR_SOURCE_SHA or a Git checkout is required"),
+    };
     let version = std::process::Command::new("python3")
         .arg(&resolver)
         .args(["--mode", &build_mode, "--source-sha", &source_sha])
@@ -34,10 +39,14 @@ fn main() {
         .expect("product-version.py output is not UTF-8")
         .trim()
         .to_string();
-    let build_id = std::env::var("FLUX_PURR_BUILD_ID")
-        .ok()
-        .filter(|value| (16..=64).contains(&value.len()))
-        .unwrap_or_else(|| source_sha[..16].to_string());
+    let expected_build_id = &source_sha[..16];
+    let build_id = match std::env::var("FLUX_PURR_BUILD_ID") {
+        Ok(value) if value == expected_build_id => value,
+        Ok(value) => panic!(
+            "FLUX_PURR_BUILD_ID {value:?} does not match source SHA prefix {expected_build_id:?}"
+        ),
+        Err(_) => expected_build_id.to_string(),
+    };
 
     println!("cargo:rustc-env=FLUX_PURR_FW_VERSION={version}");
     println!("cargo:rustc-env=FLUX_PURR_SOURCE_SHA={source_sha}");
@@ -53,8 +62,16 @@ fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     if target_arch == "xtensa" && target_os == "none" {
+        println!("cargo:rustc-link-arg=-Tlinkall.x");
         println!("cargo:rustc-link-arg=-Tdefmt.x");
     }
+}
+
+fn valid_source_sha(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn watch_git_identity(repo_root: &std::path::Path) {

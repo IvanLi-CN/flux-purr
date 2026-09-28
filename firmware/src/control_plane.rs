@@ -43,6 +43,13 @@ pub const EEPROM_MAINTENANCE_CHUNK_MAX: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum FirmwareKind {
+    Product,
+    RamBringup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NetworkState {
     /// No WiFi credentials are configured. This is the absence state, not a
     /// connection attempt result.
@@ -115,6 +122,7 @@ impl Default for NetworkSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
+    pub firmware_kind: FirmwareKind,
     pub device_id: String<DEVICE_ID_MAX_LEN>,
     pub firmware_version: String<32>,
     pub build_id: String<BUILD_ID_MAX_LEN>,
@@ -150,6 +158,7 @@ impl Identity {
         #[cfg(feature = "buzzer-test")]
         push_str(&mut capabilities, "buzzer_test");
         Self {
+            firmware_kind: FirmwareKind::Product,
             device_id: string("flux-purr-s3-001"),
             firmware_version: string(env!("FLUX_PURR_FW_VERSION")),
             build_id: string(env!("FLUX_PURR_BUILD_ID")),
@@ -3208,6 +3217,7 @@ mod tests {
     #[test]
     fn identity_lists_feature_capabilities() {
         let identity = Identity::firmware_default();
+        assert_eq!(identity.firmware_kind, FirmwareKind::Product);
         assert!(
             identity
                 .capabilities
@@ -3283,6 +3293,16 @@ mod tests {
         assert_eq!(
             parse_usb_frame(json).expect("compact response parses"),
             frame
+        );
+    }
+
+    #[test]
+    fn product_dispatcher_rejects_ram_bringup_frames() {
+        assert_eq!(
+            parse_usb_frame(
+                r#"{"type":"ram_bringup","requestId":"r1","op":"test_fan","capability":"test_fan"}"#
+            ),
+            Err(UsbFrameError::MalformedJson)
         );
     }
 

@@ -22,7 +22,8 @@
 - Direct `--port` Developer flash and recovery command parsing and dispatch are implemented without devd or HTTP.
 - Plaintext automatic EEPROM backup and retention cleanup are implemented in the host tool with Unix modes and a Windows current-user DACL. The paired explicit bypass skips ROM probing and the complete snapshot/archive path before invoking espflash.
 - A deterministic fake-espflash host test covers the actual direct-flash bypass branch and proves that it makes no ROM probe or snapshot access.
-- Espflash execution diagnostics retain bounded stdout and stderr, classify observed flash stages, and distinguish connection, write, verification, and finalization failures.
+- Espflash execution diagnostics retain bounded stdout and stderr, classify observed flash stages, and distinguish connection, write, verification, and finalization failures. ROM probes are bounded; connection recovery is limited to erase/reset commands, while interrupted segment writes and ROM checksums fail without an implicit retry.
+- Every protected espflash process continuously revalidates the authorized USB identity. Legacy EEPROM maintenance captures and binds the same identity for its read/write/erase exchange, and runtime verification requires a `product` firmware kind in addition to version, source, build, and layout facts.
 - The firmware and partition layout use EEPROM-only persistence; internal Flash configuration fallback is removed.
 
 ## References

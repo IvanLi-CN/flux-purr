@@ -1,11 +1,24 @@
 pub(crate) use super::*;
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+
+#[cfg(target_os = "linux")]
+const SERIAL_LOCK_O_NOFOLLOW: i32 = 0x20000;
+#[cfg(target_os = "macos")]
+const SERIAL_LOCK_O_NOFOLLOW: i32 = 0x100;
+#[cfg(windows)]
+const SERIAL_LOCK_FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
 pub(crate) fn firmware_preflight_digest(
     payload: &FirmwareOperationRequest,
     device_id: &str,
     port_path: &str,
     rom_mac: &str,
     bundle_sha256: &str,
+    usb_identity: Option<&UsbSerialIdentity>,
 ) -> String {
     let value = json!({
         "leaseId": payload.lease_id,
@@ -15,6 +28,11 @@ pub(crate) fn firmware_preflight_digest(
         "bundleSha256": bundle_sha256,
         "operation": payload.operation,
         "allowDowngrade": payload.allow_downgrade,
+        "usbIdentity": usb_identity.map(|identity| json!({
+            "vid": identity.vid,
+            "pid": identity.pid,
+            "serialNumber": identity.serial_number,
+        })),
     });
     format!(
         "sha256:{}",
@@ -31,6 +49,19 @@ pub(crate) async fn serial_request_payload<T>(
 where
     T: DeserializeOwned + Send + 'static,
 {
+    serial_request_payload_with_identity(state, target, op, payload_key, None).await
+}
+
+pub(crate) async fn serial_request_payload_with_identity<T>(
+    state: &AppState,
+    target: &DeviceRecord,
+    op: &'static str,
+    payload_key: &'static str,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<T, HttpError>
+where
+    T: DeserializeOwned + Send + 'static,
+{
     let port_path = native_port_path(target)?;
     let request_id = format!("devd-{}-{op}", now_millis());
     let request = serde_json::to_string(&UsbRequestWire {
@@ -39,13 +70,14 @@ where
         op,
     })
     .map_err(|_| HttpError::internal("failed to encode USB request"))?;
-    let result = serial_exchange(
+    let result = serial_exchange_with_identity(
         state,
         &target.id,
         port_path,
         request_id,
         request,
         SerialRetryPolicy::ReadOnly,
+        expected_usb_identity.cloned(),
     )
     .await?;
     extract_usb_payload(result, payload_key)
@@ -205,6 +237,15 @@ pub(crate) async fn serial_runtime_config(
     target: &DeviceRecord,
     payload: &RuntimeConfigRequest,
 ) -> Result<ControlPlaneStatus, HttpError> {
+    serial_runtime_config_with_identity(state, target, payload, None).await
+}
+
+pub(crate) async fn serial_runtime_config_with_identity(
+    state: &AppState,
+    target: &DeviceRecord,
+    payload: &RuntimeConfigRequest,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<ControlPlaneStatus, HttpError> {
     let port_path = native_port_path(target)?;
     let request_id = format!("devd-{}-runtime", now_millis());
     let request = serde_json::to_string(&UsbRuntimeConfigWire {
@@ -226,23 +267,25 @@ pub(crate) async fn serial_runtime_config(
         thermal_control_profile: payload.thermal_control_profile.as_ref(),
     })
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
-    match serial_exchange(
+    match serial_exchange_with_identity(
         state,
         &target.id,
         port_path,
         request_id,
         request,
         SerialRetryPolicy::SingleShot,
+        expected_usb_identity.cloned(),
     )
     .await
     {
         Ok(result) => extract_usb_payload(result, "status"),
         Err(error) if should_reconcile_runtime_config_timeout(&error) => {
-            match serial_request_payload::<ControlPlaneStatus>(
+            match serial_request_payload_with_identity::<ControlPlaneStatus>(
                 state,
                 target,
                 "get_status",
                 "status",
+                expected_usb_identity,
             )
             .await
             {
@@ -511,6 +554,7 @@ pub(crate) async fn serial_eeprom_maintenance(
 ) -> Result<EepromMaintenanceResponse, HttpError> {
     validate_eeprom_maintenance_request(payload)?;
     let port_path = native_port_path(target)?;
+    let usb_identity = capture_native_serial_identity(&port_path)?;
     let request_id = format!("devd-{}-eeprom", now_millis());
     let request = serde_json::to_string(&UsbEepromMaintenanceWire {
         frame_type: "eeprom_maintenance",
@@ -533,6 +577,7 @@ pub(crate) async fn serial_eeprom_maintenance(
                 SerialRetryPolicy::SingleShot
             }
         },
+        Some(usb_identity),
     )
     .await?;
     let bytes = if payload.op == EepromMaintenanceOp::Read {
@@ -639,14 +684,41 @@ pub(crate) async fn serial_exchange(
     request: String,
     retry_policy: SerialRetryPolicy,
 ) -> Result<Value, HttpError> {
-    serial_exchange_with_visibility(
+    serial_exchange_with_visibility_and_identity(
         state,
         device_id,
         port_path,
         request_id,
         request,
-        retry_policy,
-        true,
+        SerialExchangeOptions {
+            retry_policy,
+            record_payload: true,
+            expected_usb_identity: None,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn serial_exchange_with_identity(
+    state: &AppState,
+    device_id: &str,
+    port_path: String,
+    request_id: String,
+    request: String,
+    retry_policy: SerialRetryPolicy,
+    expected_usb_identity: Option<UsbSerialIdentity>,
+) -> Result<Value, HttpError> {
+    serial_exchange_with_visibility_and_identity(
+        state,
+        device_id,
+        port_path,
+        request_id,
+        request,
+        SerialExchangeOptions {
+            retry_policy,
+            record_payload: true,
+            expected_usb_identity,
+        },
     )
     .await
 }
@@ -658,19 +730,24 @@ pub(crate) async fn serial_exchange_sensitive(
     request_id: String,
     request: String,
     retry_policy: SerialRetryPolicy,
+    expected_usb_identity: Option<UsbSerialIdentity>,
 ) -> Result<Value, HttpError> {
-    serial_exchange_with_visibility(
+    serial_exchange_with_visibility_and_identity(
         state,
         device_id,
         port_path,
         request_id,
         request,
-        retry_policy,
-        false,
+        SerialExchangeOptions {
+            retry_policy,
+            record_payload: false,
+            expected_usb_identity,
+        },
     )
     .await
 }
 
+#[allow(dead_code)]
 pub(crate) async fn serial_exchange_with_visibility(
     state: &AppState,
     device_id: &str,
@@ -680,6 +757,44 @@ pub(crate) async fn serial_exchange_with_visibility(
     retry_policy: SerialRetryPolicy,
     record_payload: bool,
 ) -> Result<Value, HttpError> {
+    serial_exchange_with_visibility_and_identity(
+        state,
+        device_id,
+        port_path,
+        request_id,
+        request,
+        SerialExchangeOptions {
+            retry_policy,
+            record_payload,
+            expected_usb_identity: None,
+        },
+    )
+    .await
+}
+
+struct SerialExchangeOptions {
+    retry_policy: SerialRetryPolicy,
+    record_payload: bool,
+    expected_usb_identity: Option<UsbSerialIdentity>,
+}
+
+async fn serial_exchange_with_visibility_and_identity(
+    state: &AppState,
+    device_id: &str,
+    port_path: String,
+    request_id: String,
+    request: String,
+    options: SerialExchangeOptions,
+) -> Result<Value, HttpError> {
+    let SerialExchangeOptions {
+        retry_policy,
+        record_payload,
+        expected_usb_identity: requested_usb_identity,
+    } = options;
+    let expected_usb_identity = match requested_usb_identity {
+        Some(identity) => Some(identity),
+        None => Some(capture_native_serial_identity(&port_path)?),
+    };
     if record_payload {
         record_transport_event(state, device_id, "tx", "usb_jsonl", &request_id, &request);
     }
@@ -698,6 +813,7 @@ pub(crate) async fn serial_exchange_with_visibility(
             request_id: &worker_request_id,
             request: &request,
             retry_policy,
+            expected_usb_identity,
         })
     })
     .await?;
@@ -819,6 +935,7 @@ pub(crate) struct SerialExchangeContext<'a> {
     request_id: &'a str,
     request: &'a str,
     retry_policy: SerialRetryPolicy,
+    expected_usb_identity: Option<UsbSerialIdentity>,
 }
 
 pub(crate) fn serial_exchange_blocking(
@@ -833,11 +950,23 @@ pub(crate) fn serial_exchange_blocking(
         request_id,
         request,
         retry_policy,
+        expected_usb_identity,
     } = context;
     let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
     let deadline = Instant::now() + serial_rpc_timeout(retry_policy);
-    let mut session = take_or_open_serial_session(&mut serial_sessions, port_path, deadline)?;
-    session = write_serial_request_with_reopen(session, port_path, request, deadline)?;
+    let mut session = take_or_open_serial_session_with_identity(
+        &mut serial_sessions,
+        port_path,
+        deadline,
+        expected_usb_identity.as_ref(),
+    )?;
+    session = write_serial_request_with_reopen_with_identity(
+        session,
+        port_path,
+        request,
+        deadline,
+        expected_usb_identity.as_ref(),
+    )?;
 
     // A USB Serial/JTAG port may reset the target as it opens. Do not keep
     // resending a JSONL command while the runtime is starting: the firmware
@@ -862,6 +991,7 @@ pub(crate) fn serial_exchange_blocking(
                         request_id,
                         request,
                         deadline,
+                        expected_usb_identity: expected_usb_identity.as_ref(),
                     },
                     &read_buf[..read],
                     &mut line,
@@ -893,8 +1023,12 @@ pub(crate) fn serial_exchange_blocking(
             }
             Err(error) if is_recoverable_serial_io_error(&error) => {
                 drop(session);
-                session = reopen_serial_session(port_path, deadline)?;
-                session = write_serial_request_with_reopen(session, port_path, request, deadline)?;
+                session = reopen_serial_request_with_identity(
+                    port_path,
+                    request,
+                    deadline,
+                    expected_usb_identity.as_ref(),
+                )?;
                 retry_after_runtime_ready = false;
                 line.clear();
                 discarding_overlong_line = false;
@@ -915,16 +1049,36 @@ pub(crate) fn serial_exchange_blocking(
     ))
 }
 
+fn reopen_serial_request_with_identity(
+    port_path: &str,
+    request: &str,
+    deadline: Instant,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<SerialSession, HttpError> {
+    let session = reopen_serial_session_with_identity(port_path, deadline, expected_usb_identity)?;
+    write_serial_request_with_reopen_with_identity(
+        session,
+        port_path,
+        request,
+        deadline,
+        expected_usb_identity,
+    )
+}
+
 pub(crate) fn observe_post_flash_boot_blocking(
     state: &Arc<Mutex<DevdState>>,
     events: &broadcast::Sender<DevdEvent>,
     device_id: &str,
     serial_sessions: &Arc<Mutex<SerialSessionMap>>,
     port_path: &str,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<BootObservation, HttpError> {
     let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
     let deadline = Instant::now() + POST_FLASH_BOOT_TIMEOUT;
-    let mut session = reopen_serial_session(port_path, deadline)?;
+    require_usb_serial_identity(port_path, expected_usb_identity)?;
+    let mut session =
+        reopen_serial_session_with_identity(port_path, deadline, expected_usb_identity)?;
+    require_usb_serial_identity(port_path, expected_usb_identity)?;
     let mut observation = BootObservation::default();
     let mut read_buf = [0_u8; 256];
     let mut line = Vec::new();
@@ -959,7 +1113,13 @@ pub(crate) fn observe_post_flash_boot_blocking(
             }
             Err(error) if is_recoverable_serial_io_error(&error) => {
                 drop(session);
-                session = reopen_serial_session(port_path, deadline)?;
+                require_usb_serial_identity(port_path, expected_usb_identity)?;
+                session = reopen_serial_session_with_identity(
+                    port_path,
+                    deadline,
+                    expected_usb_identity,
+                )?;
+                require_usb_serial_identity(port_path, expected_usb_identity)?;
                 line.clear();
                 discarding_overlong_line = false;
             }
@@ -983,6 +1143,7 @@ pub(crate) async fn observe_post_flash_boot(
     state: &AppState,
     device_id: &str,
     port_path: &str,
+    expected_usb_identity: Option<UsbSerialIdentity>,
 ) -> Result<BootObservation, HttpError> {
     let state_lock = state.inner.clone();
     let events = state.events.clone();
@@ -999,6 +1160,7 @@ pub(crate) async fn observe_post_flash_boot(
                 &device_id,
                 &serial_sessions,
                 &port_path,
+                expected_usb_identity.as_ref(),
             )
         },
     )
@@ -1145,6 +1307,7 @@ pub(crate) struct SerialResponseLineContext<'a> {
     request_id: &'a str,
     request: &'a str,
     deadline: Instant,
+    expected_usb_identity: Option<&'a UsbSerialIdentity>,
 }
 
 pub(crate) enum SerialChunkResult {
@@ -1208,11 +1371,12 @@ pub(crate) fn process_serial_response_line(
         Instant::now(),
         context.deadline,
     ) {
-        let session = write_serial_request_with_reopen(
+        let session = write_serial_request_with_reopen_with_identity(
             session,
             context.port_path,
             context.request,
             context.deadline,
+            context.expected_usb_identity,
         )?;
         return Ok((session, SerialLineAction::Continue(false)));
     }
@@ -1265,6 +1429,8 @@ pub(crate) fn process_boot_read_chunk(
 pub(crate) type SerialSessionMap = HashMap<String, SerialSession>;
 
 pub(crate) struct SerialSession {
+    session_key: String,
+    port_path: String,
     _serial_lock: SerialPortProcessLock,
     port: Box<dyn SerialSessionPort>,
 }
@@ -1328,52 +1494,132 @@ pub(crate) fn lock_serial_sessions(
         .map_err(|_| HttpError::internal("serial session lock poisoned"))
 }
 
+#[allow(dead_code)]
 pub(crate) fn take_or_open_serial_session(
     serial_sessions: &mut SerialSessionMap,
     port_path: &str,
     deadline: Instant,
 ) -> Result<SerialSession, HttpError> {
-    serial_sessions
-        .remove(port_path)
-        .map(Ok)
-        .unwrap_or_else(|| open_serial_session(port_path, deadline))
+    take_or_open_serial_session_with_identity(serial_sessions, port_path, deadline, None)
+}
+
+fn take_or_open_serial_session_with_identity(
+    serial_sessions: &mut SerialSessionMap,
+    port_path: &str,
+    deadline: Instant,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<SerialSession, HttpError> {
+    if let Some(session) = take_cached_serial_session(serial_sessions, port_path) {
+        if serial_port_path_is_present(port_path) {
+            require_usb_serial_identity(port_path, expected_usb_identity)?;
+            return Ok(session);
+        }
+        drop(session);
+    }
+    reopen_serial_session_with_identity(port_path, deadline, expected_usb_identity)
 }
 
 pub(crate) fn store_serial_session(
     serial_sessions: &mut SerialSessionMap,
-    port_path: &str,
+    _port_path: &str,
     session: SerialSession,
 ) {
-    serial_sessions.insert(port_path.to_string(), session);
+    serial_sessions.insert(session.session_key.clone(), session);
 }
 
-pub(crate) struct SerialPortProcessLock {
+pub(crate) fn remove_cached_serial_session(
+    serial_sessions: &mut SerialSessionMap,
+    port_path: &str,
+) -> Option<SerialSession> {
+    take_cached_serial_session(serial_sessions, port_path)
+}
+
+pub(crate) fn take_cached_serial_process_lock(
+    serial_sessions: &Arc<Mutex<SerialSessionMap>>,
+    port_path: &str,
+) -> Result<Option<SerialPortProcessLock>, HttpError> {
+    let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
+    let Some(session) = take_cached_serial_session(&mut serial_sessions, port_path) else {
+        return Ok(None);
+    };
+    let SerialSession {
+        _serial_lock, port, ..
+    } = session;
+    drop(port);
+    Ok(Some(_serial_lock))
+}
+
+fn take_cached_serial_session(
+    serial_sessions: &mut SerialSessionMap,
+    port_path: &str,
+) -> Option<SerialSession> {
+    let session_key = serial_session_key(port_path);
+    if let Some(session) = serial_sessions.remove(&session_key) {
+        return Some(session);
+    }
+    if let Some(session) = serial_sessions.remove(port_path) {
+        return Some(session);
+    }
+    let cached_key = serial_sessions
+        .iter()
+        .find(|(_, session)| session.port_path == port_path)
+        .map(|(key, _)| key.clone());
+    cached_key.and_then(|key| serial_sessions.remove(&key))
+}
+
+pub struct SerialPortProcessLock {
     #[cfg(unix)]
+    file: File,
+    #[cfg(windows)]
     file: File,
 }
 
 impl SerialPortProcessLock {
-    pub(crate) fn acquire(port_path: &str, deadline: Instant) -> Result<Self, HttpError> {
-        #[cfg(unix)]
+    pub fn acquire(port_path: &str, deadline: Instant) -> Result<Self, HttpError> {
+        #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
         {
             Self::acquire_unix(port_path, deadline).map(|file| Self { file })
         }
 
-        #[cfg(not(unix))]
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
         {
             let _ = (port_path, deadline);
-            Ok(Self {})
+            Err(HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "serial_lock_unsupported",
+                "Exclusive USB serial access is unsupported on this Unix platform.",
+                false,
+            ))
+        }
+
+        #[cfg(windows)]
+        {
+            Self::acquire_windows(port_path, deadline).map(|file| Self { file })
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (port_path, deadline);
+            Err(HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "serial_lock_unsupported",
+                "Exclusive USB serial access is unsupported on this platform.",
+                false,
+            ))
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
     pub(crate) fn acquire_unix(port_path: &str, deadline: Instant) -> Result<File, HttpError> {
         let lock_path = serial_lock_path(port_path);
+        ensure_serial_lock_directory(&lock_path)?;
         let file = File::options()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
+            .mode(0o600)
+            .custom_flags(SERIAL_LOCK_O_NOFOLLOW)
             .open(&lock_path)
             .map_err(|error| {
                 HttpError::new(
@@ -1404,6 +1650,82 @@ impl SerialPortProcessLock {
             true,
         ))
     }
+
+    #[cfg(windows)]
+    fn acquire_windows(port_path: &str, deadline: Instant) -> Result<File, HttpError> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, GetLastError};
+        use windows_sys::Win32::Storage::FileSystem::{
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+        };
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let lock_path = serial_lock_path(port_path);
+        ensure_serial_lock_directory(&lock_path)?;
+        if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
+            if metadata.file_type().is_symlink() {
+                return Err(HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "serial_lock_failed",
+                    "Serial lock path must not be a Windows reparse point.",
+                    false,
+                ));
+            }
+        }
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .custom_flags(SERIAL_LOCK_FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&lock_path)
+            .map_err(|error| {
+                HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "serial_lock_failed",
+                    &format!(
+                        "Failed to open serial lock {}: {error}",
+                        lock_path.display()
+                    ),
+                    true,
+                )
+            })?;
+        let mut overlapped = OVERLAPPED::default();
+        while Instant::now() < deadline {
+            // SAFETY: the file handle is owned by `file`, and `overlapped` is
+            // zero-initialized for the synchronous byte-range lock operation.
+            let acquired = unsafe {
+                LockFileEx(
+                    file.as_raw_handle(),
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0,
+                    1,
+                    0,
+                    &mut overlapped,
+                )
+            };
+            if acquired != 0 {
+                return Ok(file);
+            }
+            // SAFETY: GetLastError reads the result of the immediately preceding
+            // LockFileEx call on this thread.
+            if unsafe { GetLastError() } != ERROR_LOCK_VIOLATION {
+                return Err(HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "serial_lock_failed",
+                    "Windows USB serial lock wait failed.",
+                    true,
+                ));
+            }
+            std::thread::sleep(SERIAL_READ_TIMEOUT);
+        }
+        Err(HttpError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "serial_lock_timeout",
+            "Timed out waiting for exclusive USB serial access.",
+            true,
+        ))
+    }
 }
 
 #[cfg(unix)]
@@ -1414,17 +1736,210 @@ impl Drop for SerialPortProcessLock {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn serial_lock_path(port_path: &str) -> PathBuf {
     let mut hasher = Sha256::new();
-    hasher.update(port_path.as_bytes());
+    hasher.update(serial_lock_identity(port_path).as_bytes());
     let digest = hasher.finalize();
     let mut name = String::from("flux-purr-devd-serial-");
     for byte in &digest[..8] {
         name.push_str(&format!("{byte:02x}"));
     }
     name.push_str(".lock");
-    std::env::temp_dir().join(name)
+    serial_lock_directory().join(name)
+}
+
+fn serial_lock_identity(port_path: &str) -> String {
+    #[cfg(target_os = "macos")]
+    let port_path = port_path.strip_prefix("/dev/tty.").map_or_else(
+        || port_path.to_string(),
+        |suffix| format!("/dev/cu.{suffix}"),
+    );
+
+    #[cfg(not(target_os = "macos"))]
+    let port_path = port_path.to_string();
+
+    std::fs::canonicalize(&port_path)
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_owned))
+        .unwrap_or(port_path)
+}
+
+pub(crate) fn serial_session_key(port_path: &str) -> String {
+    serial_lock_identity(port_path)
+}
+
+pub fn serial_port_paths_match(requested: &str, enumerated: &str) -> bool {
+    if requested == enumerated {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        false
+    }
+
+    #[cfg(not(windows))]
+    {
+        serial_session_key(requested) == serial_session_key(enumerated)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbSerialIdentity {
+    pub vid: u16,
+    pub pid: u16,
+    pub serial_number: String,
+}
+
+pub const ESP32S3_USB_SERIAL_JTAG_VID: u16 = 0x303a;
+pub const ESP32S3_USB_SERIAL_JTAG_PID: u16 = 0x1001;
+
+impl UsbSerialIdentity {
+    pub fn from_port_info(info: &serialport::SerialPortInfo) -> Option<Self> {
+        let serialport::SerialPortType::UsbPort(usb) = &info.port_type else {
+            return None;
+        };
+        if usb.vid != ESP32S3_USB_SERIAL_JTAG_VID || usb.pid != ESP32S3_USB_SERIAL_JTAG_PID {
+            return None;
+        }
+        let serial_number = usb.serial_number.as_deref()?.trim();
+        if serial_number.is_empty() {
+            return None;
+        }
+        Some(Self {
+            vid: usb.vid,
+            pid: usb.pid,
+            serial_number: serial_number.to_string(),
+        })
+    }
+
+    pub fn matches_port_info(&self, info: &serialport::SerialPortInfo) -> bool {
+        Self::from_port_info(info).as_ref() == Some(self)
+    }
+}
+
+pub fn serial_port_usb_identity(port_path: &str) -> Result<UsbSerialIdentity, String> {
+    let port = serialport::available_ports()
+        .map_err(|error| format!("failed to enumerate authorized serial port: {error}"))?
+        .into_iter()
+        .find(|candidate| serial_port_paths_match(port_path, &candidate.port_name))
+        .ok_or_else(|| format!("authorized serial port is no longer enumerated: {port_path}"))?;
+    UsbSerialIdentity::from_port_info(&port)
+        .ok_or_else(|| format!("authorized serial port has no stable USB identity: {port_path}"))
+}
+
+pub fn serial_port_usb_identity_matches(port_path: &str, expected: &UsbSerialIdentity) -> bool {
+    serialport::available_ports()
+        .ok()
+        .and_then(|ports| {
+            ports
+                .into_iter()
+                .find(|candidate| serial_port_paths_match(port_path, &candidate.port_name))
+        })
+        .is_some_and(|candidate| expected.matches_port_info(&candidate))
+}
+
+pub(crate) fn require_usb_serial_identity(
+    port_path: &str,
+    expected: Option<&UsbSerialIdentity>,
+) -> Result<(), HttpError> {
+    if expected.is_none_or(|expected| serial_port_usb_identity_matches(port_path, expected)) {
+        return Ok(());
+    }
+    Err(HttpError::forbidden(
+        "authorized_port_changed",
+        "The authorized USB target changed or disappeared; no replacement port will be selected.",
+    ))
+}
+
+#[cfg(any(unix, windows))]
+fn serial_lock_directory() -> PathBuf {
+    if let Ok(config_dir) = user_config_dir() {
+        return config_dir.join("locks");
+    }
+
+    #[cfg(unix)]
+    {
+        let uid = unsafe { geteuid() };
+        std::env::temp_dir().join(format!("flux-purr-devd-{uid}"))
+    }
+    #[cfg(windows)]
+    {
+        std::env::temp_dir().join("flux-purr-devd").join("locks")
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn ensure_serial_lock_directory(lock_path: &Path) -> Result<(), HttpError> {
+    let parent = lock_path.parent().ok_or_else(|| {
+        HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "serial_lock_failed",
+            "Serial lock path has no parent directory.",
+            true,
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "serial_lock_failed",
+            &format!(
+                "Failed to create serial lock directory {}: {error}",
+                parent.display()
+            ),
+            true,
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        let metadata = fs::symlink_metadata(parent).map_err(|error| {
+            HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "serial_lock_failed",
+                &format!(
+                    "Failed to inspect serial lock directory {}: {error}",
+                    parent.display()
+                ),
+                true,
+            )
+        })?;
+        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { geteuid() } {
+            return Err(HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "serial_lock_failed",
+                "Serial lock directory is not owned by the current user.",
+                false,
+            ));
+        }
+        if metadata.mode() & 0o077 != 0 {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "serial_lock_failed",
+                    &format!(
+                        "Failed to restrict serial lock directory {}: {error}",
+                        parent.display()
+                    ),
+                    true,
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn acquire_serial_process_lock(
+    port_path: &str,
+    timeout: Duration,
+) -> Result<SerialPortProcessLock, HttpError> {
+    let port_path = port_path.to_string();
+    let deadline = Instant::now() + timeout;
+    tokio::task::spawn_blocking(move || SerialPortProcessLock::acquire(&port_path, deadline))
+        .await
+        .map_err(|_| HttpError::internal("serial lock worker failed"))?
 }
 
 pub(crate) fn is_esp_usb_serial_jtag_port(port_path: &str) -> bool {
@@ -1466,25 +1981,55 @@ pub(crate) fn open_serial_port(port_path: &str) -> Result<Box<dyn SerialSessionP
         })
 }
 
+#[allow(dead_code)]
 pub(crate) fn open_serial_session(
     port_path: &str,
     deadline: Instant,
 ) -> Result<SerialSession, HttpError> {
+    open_serial_session_with_identity(port_path, deadline, None)
+}
+
+fn open_serial_session_with_identity(
+    port_path: &str,
+    deadline: Instant,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<SerialSession, HttpError> {
+    if !serial_port_path_is_present(port_path) {
+        return Err(HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "serial_port_unavailable",
+            &format!("Authorized serial port is not currently enumerated: {port_path}"),
+            true,
+        ));
+    }
+    let session_key = serial_session_key(port_path);
     let serial_lock = SerialPortProcessLock::acquire(port_path, deadline)?;
+    require_usb_serial_identity(port_path, expected_usb_identity)?;
     let port = open_serial_port(port_path)?;
     Ok(SerialSession {
+        session_key,
+        port_path: port_path.to_string(),
         _serial_lock: serial_lock,
         port,
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn reopen_serial_session(
     port_path: &str,
     deadline: Instant,
 ) -> Result<SerialSession, HttpError> {
+    reopen_serial_session_with_identity(port_path, deadline, None)
+}
+
+fn reopen_serial_session_with_identity(
+    port_path: &str,
+    deadline: Instant,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<SerialSession, HttpError> {
     while Instant::now() < deadline {
-        if Path::new(port_path).exists() {
-            match open_serial_session(port_path, deadline) {
+        if serial_port_path_is_present(port_path) {
+            match open_serial_session_with_identity(port_path, deadline, expected_usb_identity) {
                 Ok(session) => return Ok(session),
                 Err(error) if error.error.retryable => {}
                 Err(error) => return Err(error),
@@ -1499,6 +2044,24 @@ pub(crate) fn reopen_serial_session(
         "Timed out waiting for the USB serial port to reappear.",
         true,
     ))
+}
+
+fn serial_port_path_is_present(port_path: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        serialport::available_ports()
+            .map(|ports| {
+                ports
+                    .iter()
+                    .any(|candidate| serial_port_paths_match(port_path, &candidate.port_name))
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Path::new(port_path).exists()
+    }
 }
 
 pub(crate) fn write_serial_request(
@@ -1535,17 +2098,19 @@ pub(crate) fn serial_timeout_config_http_error(error: serialport::Error) -> Http
     )
 }
 
-pub(crate) fn write_serial_request_with_reopen(
+fn write_serial_request_with_reopen_with_identity(
     mut session: SerialSession,
     port_path: &str,
     request: &str,
     deadline: Instant,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<SerialSession, HttpError> {
     match write_serial_request(&mut *session.port, request) {
         Ok(()) => Ok(session),
         Err(error) if is_recoverable_write_http_error(&error) => {
             drop(session);
-            let mut reopened = reopen_serial_session(port_path, deadline)?;
+            let mut reopened =
+                reopen_serial_session_with_identity(port_path, deadline, expected_usb_identity)?;
             write_serial_request(&mut *reopened.port, request)?;
             Ok(reopened)
         }

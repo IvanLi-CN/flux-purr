@@ -1830,6 +1830,7 @@ dependencies = [
  "espflash",
  "hex",
  "ipnet",
+ "libc",
  "md-5 0.10.6",
  "mdns-sd-discovery",
  "reqwest",
@@ -1884,6 +1885,21 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "static_cell",
+]
+
+[[package]]
+name = "flux-purr-ram-bringup"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embedded-hal 1.0.0",
+ "esp-hal",
+ "esp-rtos",
+ "heapless 0.8.0",
+ "nb 1.1.0",
+ "serde",
+ "serde-json-core",
+ "serde_json",
 ]
 
 [[package]]

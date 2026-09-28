@@ -3,6 +3,11 @@ use super::*;
 pub(crate) fn render_human(
     payload: &Value,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if payload.get("firmwareKind").and_then(Value::as_str) == Some("ram_bringup")
+        && payload.get("capability").is_some()
+    {
+        return render_ram_response(payload);
+    }
     if matches!(
         payload.get("operation").and_then(Value::as_str),
         Some("flash" | "recover")
@@ -63,6 +68,140 @@ pub(crate) fn render_human(
     Ok(serde_json::to_string_pretty(&redact_cli_sensitive(
         payload,
     ))?)
+}
+
+fn render_ram_response(
+    payload: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let status = if payload.get("ok").and_then(Value::as_bool) == Some(true) {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    let capability = payload
+        .get("capability")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    if status == "PASS" {
+        super::ram_run::validate_ram_success_response(payload, capability)
+            .map_err(|error| format!("invalid RAM success response: {error}"))?;
+    }
+    let result = payload.get("result").unwrap_or(&Value::Null);
+    let detail = result.get("detail").and_then(Value::as_str).unwrap_or("-");
+    let mut output = format!(
+        "RAM {status} capability={capability} detail={detail} heater={} pd={} eeprom={}",
+        result.get("heater").and_then(Value::as_str).unwrap_or("-"),
+        result.get("pd").and_then(Value::as_str).unwrap_or("-"),
+        result.get("eeprom").and_then(Value::as_str).unwrap_or("-"),
+    );
+    if let Some(effect) = result.get("effect").and_then(Value::as_str) {
+        output.push_str(&format!(" effect={effect}"));
+    }
+    if let Some(buttons) = result.get("buttons").and_then(Value::as_object) {
+        output.push_str(" buttons=");
+        for (index, name) in ["center", "right", "down", "left", "up"]
+            .into_iter()
+            .enumerate()
+        {
+            if index != 0 {
+                output.push(',');
+            }
+            let state = if buttons.get(name).and_then(Value::as_bool).unwrap_or(false) {
+                "pressed"
+            } else {
+                "released"
+            };
+            output.push_str(&format!("{name}={state}"));
+        }
+    }
+    if let Some(interaction) = result.get("interaction").and_then(Value::as_object) {
+        let events = interaction
+            .get("events")
+            .and_then(Value::as_array)
+            .map(|events| {
+                events
+                    .iter()
+                    .filter_map(|event| {
+                        let key = event.get("key").and_then(Value::as_str)?;
+                        let gesture = event.get("gesture").and_then(Value::as_str)?;
+                        let effect = event.get("effect").and_then(Value::as_str)?;
+                        let elapsed_ms = event.get("elapsedMs").and_then(Value::as_u64)?;
+                        Some(format!("{key}:{gesture}:{effect}@+{elapsed_ms}ms"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        let stop_reason = interaction
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .unwrap_or("inactivity_timeout");
+        output.push_str(&format!(
+            " interaction={stop_reason}:{}s events=[{}]",
+            interaction
+                .get("inactivityTimeoutSeconds")
+                .or_else(|| interaction.get("timeoutSeconds"))
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            events
+        ));
+    }
+    if let Some(adc) = result.get("adc").and_then(Value::as_object) {
+        output.push_str(&format!(
+            " adc=vin:{} rtd:{}",
+            adc.get("vin").and_then(Value::as_u64).unwrap_or_default(),
+            adc.get("rtd").and_then(Value::as_u64).unwrap_or_default(),
+        ));
+    }
+    append_ram_power_evidence(&mut output, result);
+    if let Some(i2c) = result.get("i2c").and_then(Value::as_object) {
+        output.push_str(&format!(
+            " i2c=0x{:02x}:0x{:02x}=0x{:02x}",
+            i2c.get("address")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            i2c.get("register")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            i2c.get("value").and_then(Value::as_u64).unwrap_or_default(),
+        ));
+    }
+    Ok(output)
+}
+
+fn append_ram_power_evidence(output: &mut String, result: &Value) {
+    let Some(power) = result.get("power").and_then(Value::as_object) else {
+        return;
+    };
+    let measured = power
+        .get("measured")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let voltage_ok = power
+        .get("voltageOk")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let input_mv = power.get("inputMv").and_then(Value::as_u64).unwrap_or(0);
+    let minimum_mv = power
+        .get("minimumMv")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if measured && voltage_ok {
+        output.push_str(&format!(
+            " power=input:{}mV minimum:{}mV status=ok",
+            input_mv, minimum_mv
+        ));
+    } else if measured {
+        output.push_str(&format!(
+            " WARNING=fan_input_below_minimum power=input:{}mV minimum:{}mV",
+            input_mv, minimum_mv
+        ));
+    } else {
+        output.push_str(&format!(
+            " WARNING=fan_input_unavailable power=input=unknown minimum:{}mV",
+            minimum_mv
+        ));
+    }
 }
 
 pub(crate) fn render_pairing_code(

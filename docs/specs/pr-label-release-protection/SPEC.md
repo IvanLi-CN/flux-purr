@@ -59,7 +59,7 @@ Flux Purr 使用 PR label gate、PR-local version preparation、product release 
 - Every Ubuntu job that builds `flux-purr-devd` MUST use the shared Linux serial dependency action before the locked build.
 - Manual `Release Product` recovery MUST accept an explicit prepared main merge SHA and recover its existing identity without recomputing release intent.
 - A partial-run retry with an existing stable tag MUST verify that the tag points at the candidate and that any existing Release manifest matches the resolved source, version, channel, components, and asset hashes before reusing it.
-- 主分支 required checks 必须包含 `Validate PR labels`、`Release completion`、`Firmware checks`、`DEVD checks`、`Web checks` 与 `Worktree bootstrap`。
+- 主分支 required checks 必须包含 `Validate PR labels`、`Release completion`、`Firmware checks`、`DEVD checks`、`DEVD Windows checks`、`Web checks` 与 `Worktree bootstrap`。
 - `Label Gate` 与 `Release completion` 必须以 PR number 为并发键使用 `queue: max`；required gate 不得启用 `cancel-in-progress: true`。
 - 每个 required gate run 必须在执行时通过只读 GitHub API 获取当前 PR labels，并以该 snapshot 作为判定输入；事件 payload 不能覆盖当前 snapshot。
 

@@ -58,6 +58,8 @@ pub(crate) mod calibration_capture;
 pub(crate) mod device_ops;
 #[path = "cli/presentation.rs"]
 pub(crate) mod presentation;
+#[path = "cli/ram_run.rs"]
+pub(crate) mod ram_run;
 #[path = "cli/thermal_model.rs"]
 pub(crate) mod thermal_model;
 #[path = "cli/thermal_workflow.rs"]
@@ -71,6 +73,7 @@ pub(crate) use calibration::*;
 pub(crate) use calibration_capture::*;
 pub(crate) use device_ops::*;
 pub(crate) use presentation::*;
+pub(crate) use ram_run::*;
 pub(crate) use thermal_model::*;
 pub(crate) use thermal_workflow::*;
 pub(crate) use transport::*;

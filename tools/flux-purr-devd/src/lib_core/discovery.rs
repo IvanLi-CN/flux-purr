@@ -6,7 +6,9 @@ pub(crate) async fn execute_flash(
     artifact: &FirmwareArtifact,
     artifact_id: &str,
     port_path: &str,
+    usb_identity: &UsbSerialIdentity,
 ) -> Result<Json<FlashResult>, HttpError> {
+    require_usb_serial_identity(port_path, Some(usb_identity))?;
     state.emit(event(
         device_id,
         "flash",
@@ -18,6 +20,7 @@ pub(crate) async fn execute_flash(
         artifact,
         state.config.artifact_root.as_deref(),
         port_path,
+        Some(usb_identity),
     )
     .await
     {
@@ -35,7 +38,14 @@ pub(crate) async fn execute_flash(
         "firmware boot observation started",
         json!({ "artifactId": artifact_id }),
     ));
-    let boot = match observe_post_flash_boot(state, device_id, port_path).await {
+    let boot = match observe_post_flash_boot(
+        state,
+        device_id,
+        port_path,
+        Some(usb_identity.clone()),
+    )
+    .await
+    {
         Ok(boot) => boot,
         Err(error) => {
             state.emit(event(
@@ -93,32 +103,50 @@ pub(crate) fn scan_serial_devices_from_available(
             .collect();
     };
     let port_name = serial_port.to_string_lossy().into_owned();
+    #[cfg(not(target_os = "windows"))]
     if !serial_port.exists() {
+        return vec![missing_serial_device_record(&port_name, available_ports)];
+    }
+    #[cfg(target_os = "windows")]
+    if !available_ports
+        .iter()
+        .any(|port| serial_port_paths_match(&port_name, &port.port_name))
+    {
         return vec![missing_serial_device_record(&port_name, available_ports)];
     }
 
     let port_info = available_ports
         .iter()
-        .find(|port| port.port_name == port_name);
+        .find(|port| serial_port_paths_match(&port_name, &port.port_name));
     vec![serial_device_record(&port_name, port_info)]
 }
 
 pub(crate) fn is_flux_purr_usb_candidate(port: &serialport::SerialPortInfo) -> bool {
-    port.port_name.starts_with("/dev/cu.usbmodem")
-        || matches!(
-            &port.port_type,
-            serialport::SerialPortType::UsbPort(info) if info.vid == 0x303a
-        )
+    matches!(
+        &port.port_type,
+        serialport::SerialPortType::UsbPort(info)
+            if info.vid == ESP32S3_USB_SERIAL_JTAG_VID
+                && info.pid == ESP32S3_USB_SERIAL_JTAG_PID
+    )
 }
 
-pub(crate) fn refresh_serial_devices(state: &mut DevdState, serial_devices: Vec<DeviceRecord>) {
+pub(crate) fn refresh_serial_devices(
+    state: &mut DevdState,
+    serial_devices: Vec<DeviceRecord>,
+) -> Vec<String> {
+    let mut stale_ports = Vec::new();
     let serial_ids = serial_devices
         .iter()
         .map(|device| device.id.clone())
         .collect::<HashSet<_>>();
 
     state.devices.retain(|_, device| {
-        device.transport != DeviceTransport::NativeSerial || serial_ids.contains(&device.id)
+        let keep =
+            device.transport != DeviceTransport::NativeSerial || serial_ids.contains(&device.id);
+        if !keep && let Some(port_path) = device.port_path.as_deref() {
+            stale_ports.push(port_path.to_string());
+        }
+        keep
     });
     state
         .leases
@@ -126,6 +154,12 @@ pub(crate) fn refresh_serial_devices(state: &mut DevdState, serial_devices: Vec<
 
     for device in serial_devices {
         if let Some(existing) = state.devices.get_mut(&device.id) {
+            if existing.transport == DeviceTransport::NativeSerial
+                && existing.port_path != device.port_path
+                && let Some(port_path) = existing.port_path.as_deref()
+            {
+                stale_ports.push(port_path.to_string());
+            }
             existing.display_name = device.display_name;
             existing.port_path = device.port_path;
             existing.transport = device.transport;
@@ -133,6 +167,7 @@ pub(crate) fn refresh_serial_devices(state: &mut DevdState, serial_devices: Vec<
             state.devices.insert(device.id.clone(), device);
         }
     }
+    stale_ports
 }
 
 pub(crate) fn serial_device_record(
@@ -170,7 +205,9 @@ pub(crate) fn missing_serial_device_record(
         .filter(|port| {
             matches!(
                 &port.port_type,
-                serialport::SerialPortType::UsbPort(info) if info.vid == 0x303a
+                serialport::SerialPortType::UsbPort(info)
+                    if info.vid == ESP32S3_USB_SERIAL_JTAG_VID
+                        && info.pid == ESP32S3_USB_SERIAL_JTAG_PID
             )
         })
         .map(|port| port.port_name.clone())

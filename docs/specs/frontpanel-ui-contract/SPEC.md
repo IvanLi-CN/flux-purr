@@ -21,12 +21,12 @@
 - 冻结 `160×50` 前面板主界面与两级设置菜单的视觉和导航契约。
 - 为 `Dashboard`、`Key Test`、`Menu L1`、`Preset Temp`、`FAN CTRL`、`WiFi Info`、`Device Info` 提供确定性渲染源。
 - 约束屏幕网格、字体预算、颜色 token、状态文案和五向键导航映射。
-- 以固件 host preview 的 RGB565 framebuffer 作为设备渲染真相源；`web/` 预览实现作为可截图的伴随展示面。
+- 以产品固件 renderer 的 RGB565 framebuffer 作为设备渲染真相源；`web/` Storybook 作为可截图的伴随展示面，RAM bring-up 负责受控物理显示验证。
 - 输出一张界面设计规范图，明确配色、字体、温度分段与小屏布局规则。
 
 ### Non-goals
 
-- 不落地真实 LCD 驱动时序或硬件总线管线；固件 framebuffer 与 draw API 的 host preview 属于本主题范围。
+- 不落地真实 LCD 驱动时序或硬件总线管线；固件 framebuffer、产品 renderer 与 Storybook 视觉契约属于本主题范围，物理 RAM 验证由 `ram-bringup` 主题负责。
 - 不扩展 HTTP / WebSocket 契约，也不新增设备遥测字段。
 - 不在本轮定义 heater PID 或 Wi‑Fi 配置写回逻辑；FAN CTRL 的多档策略显示与编辑以运行时 spec 为准。
 - 不处理多语言字体资产；本轮 on-device 文案默认只用短英文与缩写。
@@ -62,7 +62,7 @@
 - 一级菜单必须一次显示 `Preset Temp`、`FAN CTRL`、`WiFi Info`、`Device Info` 四项。
 - 五向键的手势与路由行为不再由本 spec 冻结；输入与导航合同以 `frontpanel-input-interaction` 为准。
 - 二级页面必须维持“单主任务”结构，不得塞入多个同级编辑面板。
-- 预览实现必须支持确定性截图，不依赖真实固件或真实设备。
+- Storybook 预览实现必须支持确定性截图，不依赖真实固件或真实设备；物理显示验证使用 `flux-purr ram-run`。
 
 ### SHOULD
 
@@ -80,7 +80,7 @@
 
 ### Front panel palette
 
-Dashboard 使用单一纯白仪表面，不以深浅色卡片切割温度区与状态栈。默认亮色主题用于设备运行；其余亮色页面将文字与图标放在纯白内容 panel 上，panel 外仅保留中性灰白边界。host-side preview 为所有已实现页面提供这套亮色仪表面与深色仪表面，供两种主题的可读性审阅。
+Dashboard 使用单一纯白仪表面，不以深浅色卡片切割温度区与状态栈。默认亮色主题用于设备运行；其余亮色页面将文字与图标放在纯白内容 panel 上，panel 外仅保留中性灰白边界。Storybook 为所有已实现页面提供这套亮色仪表面与深色仪表面，供两种主题的可读性审阅。
 
 | Token | Dark | Light | Usage |
 | --- | --- | --- | --- |
@@ -118,7 +118,7 @@ value widths and remains within `x=79..84`.
 - 默认分段语义：`<40 冷`、`40–59 蓝`、`60–99 青`、`100–149 绿`、`150–199 黄绿`、`200–249 金黄`、`250–299 橙`、`300+ 过温紫`。
 - 阈值后续允许在设置界面调整，但颜色映射顺序固定不变。
 - Dashboard 温度颜色以固件 RGB565 调色板为真相源；亮色大温度数字先在右下一个逻辑像素以每个 RGB565 通道饱和减 `4` 的同色系暗色绘制阴影，再绘制原位前景，暗色主题不绘制阴影。
-- Web `FrontPanelDisplayProps` 必须显式提供 `theme: FrontPanelTheme`（`light | dark`）；Web Canvas 与固件 host preview 使用相同温度色表、阈值顺序和阴影规则。
+- Web `FrontPanelDisplayProps` 必须显式提供 `theme: FrontPanelTheme`（`light | dark`）；Web Canvas 与产品 renderer 使用相同温度色表、阈值顺序和阴影规则。
 - Dashboard 的 `background`、`divider`、`muted`、`disabled`、`setpoint`、`success`、`warning`、`info`、`heaterTrack` 与 `heaterFill` 必须直接对齐固件 `DashboardTheme` 的 RGB565 色值；`SAFE` 风扇状态使用 warning 色，`OFF` 使用 disabled 色，`AUTO` 使用 info 色，`RUN` 使用 success 色。
 - Web preview 在未设置 `VITE_FRONTPANEL_PD_CONTRACT_MV` 时必须使用固件相同的默认 `12_000mV` PPS 合同；仅显式配置的 `12_000`、`20_000` 或 `28_000mV` 可覆盖该预览值。
 
@@ -184,7 +184,7 @@ None
 ## 实现前置条件（Definition of Ready / Preconditions）
 
 - 前面板硬件基线已明确为 `160×50` / RGB565 级别小彩屏。
-- 固件 framebuffer preview 与 Web Storybook 必须共享同一 FAN CTRL 可见字段契约。
+- 产品 renderer 与 Web Storybook 必须共享同一 FAN CTRL 可见字段契约；RAM bring-up 只验证物理显示链路。
 - on-device 文案默认使用英文短词和缩写。
 - 持久化故障使用同一错误页 renderer：安全域或迁移故障显示 `EEPROM DATA`、`REQUIRED`/`INCOMPATIBLE`、`HEATER LOCKED`；普通偏好/网络失败显示 `EEPROM DATA`、`SAVE FAILED`、`HEATER AVAILABLE`。错误页底部显示 `HOLD CENTER RETRY`，中键长按触发一次持久化 retry，其他按键确认提示后仍可进入菜单、风扇和诊断页；heater、PPS 与 calibration 继续保持独立锁定，详细错误仅由 USB/devd 提供。全 `0xFF` EEPROM 不显示该场景。
 
@@ -208,20 +208,20 @@ None
 
 ## 方案概述（Approach, high-level）
 
-- 使用固件 host preview 作为最小稳定渲染器，把所有前面板画面统一约束到 `160×50` 逻辑像素并序列化为 RGB565；浏览器侧 `canvas` 只复现已冻结的视觉契约。
+- 使用产品固件 renderer 作为最小稳定渲染器，把所有前面板画面统一约束到 `160×50` 逻辑像素并序列化为 RGB565；浏览器侧 `canvas` 只复现已冻结的视觉契约，RAM bring-up 验证真实面板总线。
 - 主界面采用“左大温度 / 右侧状态栈”的强层级布局，确保小屏条件下先读主值、再读功率和系统状态。
 - 菜单页统一使用短词条和单任务二级页，减少主人后续把 Web 控制台思路误搬到前面板上的风险。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
-- 风险：浏览器预览和固件字体栅格并非同一实现，Web 伴随面仍需以固件 host preview 的像素证据为准。
+- 风险：浏览器预览和固件字体栅格并非同一实现，Web 伴随面仍需以产品 renderer 的像素证据为准。
 - 风险：`WiFi Info` 与 `Device Info` 一旦字段变长，必须依赖缩写策略，否则会挤压布局。
 - 开放问题：后续是否需要加入中文字体或多语言切换，本轮暂不处理。
 - 假设（需主人确认）：当前样机的主要显示方向和 `160×50` 横屏布局一致。
 
 ## Context and Scope
 
-本主题定义 Flux Purr `160×50` RGB565 前面板的 Dashboard、诊断页、设置页与双配色渲染契约。范围覆盖固件 host preview、设备默认主题和与这些页面绑定的视觉证据；真实 LCD 驱动时序与热控算法不在本主题内。
+本主题定义 Flux Purr `160×50` RGB565 前面板的 Dashboard、诊断页、设置页与双配色渲染契约。范围覆盖产品 renderer、设备默认主题、Storybook 和与这些页面绑定的视觉证据；真实 LCD 驱动时序与热控算法不在本主题内。
 
 ## Requirements
 
@@ -236,7 +236,7 @@ None
 
 - `VER-FP-001`: 固件单元测试与 preview 工具测试通过，covers: REQ-FP-001, REQ-FP-003。
 - `VER-FP-002`: 默认 framebuffer 与显式 `--theme light` framebuffer 像素完全一致，显式 `--theme dark` 输出不同，covers: REQ-FP-002。
-- `VER-FP-003`: `frontpanel_preview` 的 host tests 为全部已实现页面验证两套逻辑/面板 RGB565 帧；owner-facing PNG 是由同一 renderer 生成并经视觉证据门禁人工复核的跟踪资产，covers: REQ-FP-004。
+- `VER-FP-003`: RAM bring-up protocol tests validate the typed front-panel capability and the physical command requires heater off plus untouched PD/EEPROM; owner-facing UI evidence remains Storybook, covers: REQ-FP-004。
 - `VER-FP-004`: 固件渲染测试覆盖全部温度调色板与温度带，验证 RGB565 饱和减 `4`、亮色右下 `1px` 阴影、前景覆盖顺序和暗色无阴影；Web 类型检查与 Storybook 状态验证每个调用点显式传入 `theme`，covers: REQ-FP-005, REQ-FP-006。
 
 ## Related ADRs
@@ -245,8 +245,8 @@ None
 
 ## Visual Evidence
 
-- 证据来源：固件 `frontpanel_preview` 的 `firmware_preview` renderer（`160×50` 逻辑像素，nearest-neighbor 放大展示）。
-- 绑定说明：以下图片由 host-side preview 直接复用固件字体、布局和状态 renderer；真机校准与最新 runtime 联动验证由 `frontpanel-input-interaction` 持续承接。
+- 证据来源：Storybook 的 renderer 预览与 RAM bring-up 的物理命令结果。
+- 绑定说明：真机校准与最新 runtime 联动验证由 `frontpanel-input-interaction` 持续承接。
 
 ### Screen renders
 
@@ -280,7 +280,7 @@ None
 
 #### EEPROM incompatible
 
-该画面由固件 `frontpanel_preview` 直接复用设备 renderer、字体与 `DisplayCanvas` 生成，默认使用亮色主题；同目录同时保存 `160×50 RGB565LE` logical framebuffer 与 GC9D01 Landscape panel framebuffer。
+该画面由产品 renderer 与 RAM bring-up 物理路径共同定义，RAM 路径保持 heater off 且不写 EEPROM。
 
 ![EEPROM incompatible fault screen](./assets/eeprom-data-incompatible/eeprom-data-incompatible.png)
 
@@ -302,7 +302,7 @@ None
 
 #### WiFi Info
 
-该证据由 host-side `frontpanel_preview` 复用固件 framebuffer renderer 生成，展示 runtime SSID、IPv4、RSSI 与配对码。
+该证据由 Storybook 展示 runtime SSID、IPv4、RSSI 与配对码；RAM bring-up 不启动网络。
 
 ![Front panel WiFi info](./assets/frontpanel-wifi-info.png)
 

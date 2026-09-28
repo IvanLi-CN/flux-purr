@@ -69,6 +69,120 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: UsbPortCommand,
     },
+    RamRun {
+        #[command(subcommand)]
+        command: RamRunCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RamRunCommand {
+    Preview(RamPreviewArgs),
+    Test(RamTestArgs),
+    Exit(RamExitArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RamPreviewArgs {
+    #[arg(value_enum)]
+    pub(crate) scenario: RamPreviewScenario,
+    #[arg(
+        long,
+        value_enum,
+        help = "Fill the display with a named RGB565 color; omit for the calibration scene"
+    )]
+    pub(crate) color: Option<RamPreviewColor>,
+    #[arg(long)]
+    pub(crate) port: String,
+    #[arg(long)]
+    pub(crate) elf: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) reload: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RamPreviewScenario {
+    Display,
+    Frontpanel,
+    StatusLight,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum RamPreviewColor {
+    Red,
+    Green,
+    Blue,
+    White,
+    Black,
+    Yellow,
+    Cyan,
+    Magenta,
+}
+
+impl RamPreviewColor {
+    pub(crate) const fn wire(self) -> &'static str {
+        match self {
+            Self::Red => "red",
+            Self::Green => "green",
+            Self::Blue => "blue",
+            Self::White => "white",
+            Self::Black => "black",
+            Self::Yellow => "yellow",
+            Self::Cyan => "cyan",
+            Self::Magenta => "magenta",
+        }
+    }
+}
+
+impl RamPreviewScenario {
+    pub(crate) const fn op(self) -> &'static str {
+        match self {
+            Self::Display => "preview_display",
+            Self::Frontpanel => "preview_frontpanel",
+            Self::StatusLight => "preview_status_light",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RamTestArgs {
+    #[arg(value_enum)]
+    pub(crate) test: RamTestKind,
+    #[arg(long)]
+    pub(crate) port: String,
+    #[arg(long)]
+    pub(crate) elf: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) reload: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RamTestKind {
+    Buttons,
+    Adc,
+    I2c,
+    Rgb,
+    Buzzer,
+    Fan,
+}
+
+impl RamTestKind {
+    pub(crate) const fn op(self) -> &'static str {
+        match self {
+            Self::Buttons => "test_buttons",
+            Self::Adc => "test_adc",
+            Self::I2c => "test_i2c",
+            Self::Rgb => "test_rgb",
+            Self::Buzzer => "test_buzzer",
+            Self::Fan => "test_fan",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RamExitArgs {
+    #[arg(long)]
+    pub(crate) port: String,
 }
 
 #[derive(Debug, Subcommand)]

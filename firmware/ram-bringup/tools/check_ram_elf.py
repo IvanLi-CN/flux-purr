@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Validate that an ESP32-S3 RAM bring-up ELF has no flash load segments."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import struct
+import sys
+from pathlib import Path
+
+PT_LOAD = 1
+PF_X = 0x1
+SHF_ALLOC = 0x2
+SHF_EXECINSTR = 0x4
+EM_XTENSA = 94
+
+# These windows mirror firmware/ram-bringup/memory.x. The linker-owned vectors
+# segment is allowed only as the complete exact vectors window; payloads cannot
+# partially overlap or otherwise use that range.
+IRAM = (0x40378400, 0x403B8400)
+DRAM = (0x3FC88000, 0x3FCE8000)
+VECTORS = (0x40378000, 0x40378400)
+RESERVED = ((0x3FCE8000, 0x3FCED710),)
+FLASH_WINDOWS = ((0x42000000, 0x44000000), (0x3C000000, 0x3D000000))
+
+
+class ElfError(ValueError):
+    pass
+
+
+def parse_elf(data: bytes) -> tuple[int, list[dict[str, int]], list[dict[str, int]]]:
+    if data[:4] != b"\x7fELF":
+        raise ElfError("artifact is not an ELF")
+    if len(data) < 6:
+        raise ElfError("truncated ELF identification header")
+    if data[5] != 1:
+        raise ElfError("only little-endian ELF is supported")
+    elf_class = data[4]
+    if elf_class == 1:
+        header_fmt = "<16sHHIIIIIHHHHHH"
+        program_fmt = "<IIIIIIII"
+        section_fmt = "<IIIIIIIIII"
+        entry_index = 4
+        phoff_index, phentsize_index, phnum_index = 5, 9, 10
+        shoff_index, shentsize_index, shnum_index = 6, 11, 12
+    elif elf_class == 2:
+        header_fmt = "<16sHHIQQQIHHHHHH"
+        program_fmt = "<IIQQQQQQ"
+        section_fmt = "<IIQQQQIIQQ"
+        entry_index = 4
+        phoff_index, phentsize_index, phnum_index = 5, 9, 10
+        shoff_index, shentsize_index, shnum_index = 6, 11, 12
+    else:
+        raise ElfError(f"unsupported ELF class {elf_class}")
+    header_size = struct.calcsize(header_fmt)
+    if len(data) < header_size:
+        raise ElfError("truncated ELF header")
+    header = struct.unpack_from(header_fmt, data)
+    if header[2] != EM_XTENSA:
+        raise ElfError(f"unexpected ELF machine {header[2]}, expected Xtensa ({EM_XTENSA})")
+    phoff = header[phoff_index]
+    phentsize = header[phentsize_index]
+    phnum = header[phnum_index]
+    expected = struct.calcsize(program_fmt)
+    if phentsize < expected:
+        raise ElfError("program header entry is too small")
+    segments: list[dict[str, int]] = []
+    for index in range(phnum):
+        offset = phoff + index * phentsize
+        if offset + expected > len(data):
+            raise ElfError("truncated program header table")
+        fields = struct.unpack_from(program_fmt, data, offset)
+        if elf_class == 1:
+            p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align = fields
+        else:
+            p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align = fields
+        if p_type == PT_LOAD:
+            segments.append(
+                {
+                    "index": index,
+                    "offset": p_offset,
+                    "vaddr": p_vaddr,
+                    "paddr": p_paddr,
+                    "filesz": p_filesz,
+                    "memsz": p_memsz,
+                    "flags": p_flags,
+                    "align": p_align,
+                }
+            )
+    shoff = header[shoff_index]
+    shentsize = header[shentsize_index]
+    shnum = header[shnum_index]
+    expected_section = struct.calcsize(section_fmt)
+    if shnum == 0 or shoff == 0:
+        raise ElfError("ELF contains no section headers")
+    if shentsize < expected_section:
+        raise ElfError("section header entry is too small")
+    sections: list[dict[str, int]] = []
+    for index in range(shnum):
+        offset = shoff + index * shentsize
+        if offset + expected_section > len(data):
+            raise ElfError("truncated section header table")
+        fields = struct.unpack_from(section_fmt, data, offset)
+        if elf_class == 1:
+            _, section_type, flags, address, data_offset, size, _, _, _, _ = fields
+        else:
+            _, section_type, flags, address, data_offset, size, _, _, _, _ = fields
+        if (
+            section_type in (1, 14)
+            and flags & SHF_ALLOC
+            and address != 0
+            and data_offset != 0
+            and size != 0
+        ):
+            sections.append(
+                {
+                    "index": index,
+                    "type": section_type,
+                    "flags": flags,
+                    "address": address,
+                    "offset": data_offset,
+                    "size": size,
+                }
+            )
+    return header[entry_index], segments, sections
+
+
+def overlaps(start: int, end: int, window: tuple[int, int]) -> bool:
+    return start < window[1] and end > window[0]
+
+
+def contained(start: int, end: int, window: tuple[int, int]) -> bool:
+    return window[0] <= start and end <= window[1]
+
+
+def validate(path: Path) -> dict[str, object]:
+    data = path.read_bytes()
+    entry, segments, sections = parse_elf(data)
+    if not segments:
+        raise ElfError("ELF contains no PT_LOAD segments")
+    iram_bytes = 0
+    dram_bytes = 0
+    report_segments = []
+    executable_entry = False
+    vectors_segment_seen = False
+    for segment in segments:
+        start = segment["paddr"]
+        end = start + segment["memsz"]
+        if segment["filesz"] > segment["memsz"]:
+            raise ElfError(f"segment {segment['index']} has p_filesz > p_memsz")
+        if segment["offset"] + segment["filesz"] > len(data):
+            raise ElfError(f"segment {segment['index']} exceeds the artifact")
+        if segment["paddr"] != segment["vaddr"]:
+            raise ElfError(f"segment {segment['index']} has a non-identity load address")
+        if any(overlaps(start, end, window) for window in FLASH_WINDOWS):
+            raise ElfError(f"segment {segment['index']} maps to flash address {start:#x}")
+        if any(overlaps(start, end, window) for window in RESERVED):
+            raise ElfError(f"segment {segment['index']} overlaps reserved memory {start:#x}-{end:#x}")
+        if start == VECTORS[0] and end == VECTORS[1]:
+            if vectors_segment_seen:
+                raise ElfError("ELF contains duplicate vectors segments")
+            vectors_segment_seen = True
+            region = "vectors"
+        elif contained(start, end, IRAM):
+            iram_bytes += segment["memsz"]
+            region = "iram"
+        elif contained(start, end, DRAM):
+            dram_bytes += segment["memsz"]
+            region = "dram"
+        else:
+            raise ElfError(f"segment {segment['index']} is outside internal RAM {start:#x}-{end:#x}")
+        executable_entry |= bool(segment["flags"] & PF_X and start <= entry < end)
+        report_segments.append({**segment, "region": region, "end": end})
+    if not sections:
+        raise ElfError("ELF contains no loadable sections")
+    report_sections = []
+    executable_entry_section = False
+    vectors_section_seen = False
+    loaded_iram_bytes = 0
+    loaded_dram_bytes = 0
+    for section in sections:
+        start = section["address"]
+        end = start + section["size"]
+        if section["offset"] + section["size"] > len(data):
+            raise ElfError(f"section {section['index']} exceeds the artifact")
+        if any(overlaps(start, end, window) for window in FLASH_WINDOWS):
+            raise ElfError(f"section {section['index']} maps to flash address {start:#x}")
+        if any(overlaps(start, end, window) for window in RESERVED):
+            raise ElfError(f"section {section['index']} overlaps reserved memory {start:#x}-{end:#x}")
+        file_end = section["offset"] + section["size"]
+        segment = next(
+            (
+                candidate
+                for candidate in report_segments
+                if contained(start, end, (candidate["paddr"], candidate["end"]))
+                and contained(
+                    section["offset"],
+                    file_end,
+                    (candidate["offset"], candidate["offset"] + candidate["filesz"]),
+                )
+            ),
+            None,
+        )
+        if segment is None:
+            raise ElfError(f"section {section['index']} is not backed by a PT_LOAD segment")
+        if start == VECTORS[0] and end == VECTORS[1]:
+            if (
+                vectors_section_seen
+                or segment["paddr"] != VECTORS[0]
+                or segment["filesz"] != VECTORS[1] - VECTORS[0]
+                or segment["memsz"] != VECTORS[1] - VECTORS[0]
+                or section["offset"] != segment["offset"]
+                or section["size"] != segment["filesz"]
+            ):
+                raise ElfError(
+                    f"section {section['index']} is not the unique complete vectors section"
+                )
+            vectors_section_seen = True
+            region = "vectors"
+        elif contained(start, end, IRAM):
+            loaded_iram_bytes += section["size"]
+            if loaded_iram_bytes > IRAM[1] - IRAM[0]:
+                raise ElfError("IRAM load budget exceeded")
+            region = "iram"
+        elif contained(start, end, DRAM):
+            loaded_dram_bytes += section["size"]
+            if loaded_dram_bytes > DRAM[1] - DRAM[0]:
+                raise ElfError("DRAM load budget exceeded")
+            region = "dram"
+        else:
+            raise ElfError(f"section {section['index']} is outside internal RAM {start:#x}-{end:#x}")
+        executable_entry_section |= bool(
+            section["flags"] & SHF_EXECINSTR
+            and start <= entry < end
+            and (region == "vectors" or region == "iram")
+        )
+        report_sections.append({**section, "region": region, "end": end})
+    if vectors_segment_seen and not vectors_section_seen:
+        raise ElfError("vectors segment has no complete vectors section")
+    for segment in report_segments:
+        zero_fill = segment["memsz"] - segment["filesz"]
+        if zero_fill == 0:
+            continue
+        start = segment["paddr"] + segment["filesz"]
+        end = start + zero_fill
+        if segment["region"] == "iram":
+            loaded_iram_bytes += zero_fill
+            if loaded_iram_bytes > IRAM[1] - IRAM[0]:
+                raise ElfError("IRAM load budget exceeded")
+        elif segment["region"] == "dram":
+            loaded_dram_bytes += zero_fill
+            if loaded_dram_bytes > DRAM[1] - DRAM[0]:
+                raise ElfError("DRAM load budget exceeded")
+        else:
+            raise ElfError(f"zero-fill range is outside internal RAM {start:#x}-{end:#x}")
+    if iram_bytes > IRAM[1] - IRAM[0]:
+        raise ElfError(f"IRAM budget exceeded: {iram_bytes} bytes")
+    if dram_bytes > DRAM[1] - DRAM[0]:
+        raise ElfError(f"DRAM budget exceeded: {dram_bytes} bytes")
+    if not executable_entry:
+        raise ElfError(f"entry point {entry:#x} is not inside an executable RAM segment")
+    if not executable_entry_section:
+        raise ElfError(
+            f"entry point {entry:#x} is not inside a file-backed executable RAM section"
+        )
+    return {
+        "path": str(path),
+        "machine": "xtensa",
+        "entry": entry,
+        "segments": report_segments,
+        "sections": report_sections,
+        "iram_bytes": iram_bytes,
+        "iram_budget": IRAM[1] - IRAM[0],
+        "dram_bytes": dram_bytes,
+        "dram_budget": DRAM[1] - DRAM[0],
+        "ram_only": True,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("elf", type=Path)
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    args = parser.parse_args()
+    try:
+        report = validate(args.elf)
+    except (OSError, ElfError) as error:
+        if args.as_json:
+            print(json.dumps({"ram_only": False, "error": str(error)}))
+        else:
+            print(f"RAM ELF check failed: {error}", file=sys.stderr)
+        return 1
+    if args.as_json:
+        print(json.dumps(report, sort_keys=True))
+    else:
+        print(
+            f"RAM ELF OK: {args.elf} entry={report['entry']:#x} "
+            f"iram={report['iram_bytes']}/{report['iram_budget']} "
+            f"dram={report['dram_bytes']}/{report['dram_budget']}"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

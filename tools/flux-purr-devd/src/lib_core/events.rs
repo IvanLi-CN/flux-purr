@@ -226,9 +226,13 @@ pub(crate) fn is_sensitive_field_key(key: &str) -> bool {
 
 pub(crate) fn flash_dry_run_approval(
     payload: &FlashRequest,
+    port_path: &str,
+    usb_identity: Option<UsbSerialIdentity>,
 ) -> Result<FlashDryRunApproval, HttpError> {
     Ok(FlashDryRunApproval {
         lease_id: payload.lease_id.clone(),
+        port_path: port_path.to_string(),
+        usb_identity,
         artifact_fingerprint: artifact_fingerprint(&payload.artifact)?,
     })
 }

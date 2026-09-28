@@ -89,6 +89,7 @@
 ### Edge cases / errors
 
 - 端口消失或重新枚举：除 Browser 写后运行时验证中对同一 origin 已授权集合的唯一 `0x303A:0x1001` 精确匹配重解析外，当前事务失败，绝不自动选择新端口；重解析有多个或零个候选同样失败。
+- Native devd update/install 在获取精确端口后绑定 ESP32-S3 USB 的 VID/PID/序列号，并在安全预检、ROM 探测和写入前重新确认同一身份；身份缺失或变化时 fail closed，不选择替代端口。
 - Browser `GET_SECURITY_INFO`：接受恰好 20 字节的完整安全记录，或不少于 24 字节的完整 ROM/扩展响应；后者只解释协议定义的前 20 字节并忽略 ROM transport trailer 与后续扩展。少于 20 字节、21–23 字节截断响应、未知安全位或任一安全功能启用时：`blocked`，不得尝试写入。
 - 写入已完成但 runtime 未在时限内重连：`write_complete_unverified`，不得宣称成功。
 - 空白或损坏 persistence：写入安全默认，`commissioningRequired=true`；旧有效 record 缺少该 TLV 时视为已完成。

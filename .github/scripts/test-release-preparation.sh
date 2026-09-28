@@ -41,6 +41,7 @@ checks.write_text(json.dumps({"check_runs": [
     {"name": "Validate PR labels", "conclusion": "success", "completed_at": "2026-08-30T03:43:31Z"},
     {"name": "Firmware checks", "conclusion": "success", "completed_at": "2026-08-30T03:45:52Z"},
     {"name": "DEVD checks", "conclusion": "success", "completed_at": "2026-08-30T03:44:59Z"},
+    {"name": "DEVD Windows checks", "conclusion": "success", "completed_at": "2026-08-30T03:45:11Z"},
     {"name": "Web checks", "conclusion": "success", "completed_at": "2026-08-30T03:48:37Z"},
     {"name": "Worktree bootstrap", "conclusion": "success", "completed_at": "2026-08-30T03:43:38Z"},
 ]}), encoding="utf-8")
