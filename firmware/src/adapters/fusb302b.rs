@@ -523,13 +523,12 @@ impl SinkPolicy {
     }
 
     /// Process a control response only after accepting its Source message ID.
-    /// Returns whether the message ID was accepted.
     pub fn on_control_message_with_message_id(
         &mut self,
         message_type: u8,
         message_id: Option<u8>,
         now_ms: u64,
-    ) -> bool {
+    ) {
         const ACCEPT: u8 = 3;
         const PS_RDY: u8 = 6;
         const REJECT: u8 = 4;
@@ -540,7 +539,7 @@ impl SinkPolicy {
         // while Ready, must advance the Source sequence without changing the
         // confirmed contract unless the policy is awaiting that transition.
         if message_type == 1 || !self.observe_source_message_id(message_id) {
-            return false;
+            return;
         }
 
         match (self.phase, message_type) {
@@ -559,7 +558,6 @@ impl SinkPolicy {
             (_, REJECT | WAIT) => self.cancel_pending_request(),
             _ => {}
         }
-        true
     }
 
     pub fn on_detach_or_reset(&mut self) {

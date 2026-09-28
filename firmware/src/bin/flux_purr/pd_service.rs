@@ -498,7 +498,7 @@ fn pending_terminal(
         PdServiceTerminalContext {
             phase: runtime.policy.phase(),
             request_timed_out: runtime.request_timed_out,
-            request_rejected: runtime.request_rejection.observed(),
+            request_rejected: runtime.request_rejected,
             diagnostic_request_timed_out: FUSB302B_DIAGNOSTIC.load(Ordering::Acquire)
                 == FUSB302B_DIAG_REQUEST_TIMEOUT,
             refresh_pending: runtime.source_capabilities_refresh_pending,

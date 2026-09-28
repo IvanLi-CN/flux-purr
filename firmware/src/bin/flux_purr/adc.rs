@@ -639,7 +639,7 @@ pub(crate) struct Fusb302bRuntime {
     pub(crate) vbus_low_interlocked: bool,
     pub(crate) vbus_restore_candidate_since_ms: Option<u64>,
     pub(crate) awaiting_vbus_restore: bool,
-    pub(crate) request_rejection: PdRequestRejection,
+    pub(crate) request_rejected: bool,
     pub(crate) request_timed_out: bool,
     pub(crate) idle_transition_target_mv: Option<u16>,
     pub(crate) idle_transition_last_step_at_ms: Option<u64>,
@@ -677,47 +677,6 @@ pub(crate) fn pps_keepalive_response_is_valid(
         && phase == SinkPhase::Ready
         && message_id_is_fresh
         && matches!(message_type, 3 | 4 | 6 | 12)
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-#[derive(Clone, Copy, Default)]
-pub(crate) struct PdRequestRejection {
-    observed_in_turn: bool,
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-impl PdRequestRejection {
-    pub(crate) const fn new() -> Self {
-        Self {
-            observed_in_turn: false,
-        }
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.observed_in_turn = false;
-    }
-
-    pub(crate) fn observe_control_response(
-        &mut self,
-        phase_before: SinkPhase,
-        message_type: u8,
-        response_accepted: bool,
-    ) {
-        self.observed_in_turn |= response_accepted
-            && matches!(message_type, 4 | 12)
-            && matches!(
-                phase_before,
-                SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-            );
-    }
-
-    pub(crate) const fn observed(self) -> bool {
-        self.observed_in_turn
-    }
-
-    pub(crate) const fn continues_burst(self, received_message: bool) -> bool {
-        received_message && !self.observed_in_turn
-    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -770,7 +729,7 @@ impl Fusb302bRuntime {
             vbus_low_interlocked: false,
             vbus_restore_candidate_since_ms: None,
             awaiting_vbus_restore: false,
-            request_rejection: PdRequestRejection::new(),
+            request_rejected: false,
             request_timed_out: false,
             idle_transition_target_mv: None,
             idle_transition_last_step_at_ms: None,
@@ -1029,7 +988,7 @@ impl Fusb302bRuntime {
         replace_pending: bool,
     ) -> PdContractRequestState {
         self.pps_keepalive_pending_at_ms = None;
-        self.request_rejection.clear();
+        self.request_rejected = false;
         self.request_timed_out = false;
         self.idle_transition_target_mv = None;
         self.idle_transition_last_step_at_ms = None;
@@ -1104,7 +1063,7 @@ impl Fusb302bRuntime {
         self.source_capabilities_tx_confirmed = false;
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
-        self.request_rejection.clear();
+        self.request_rejected = false;
         self.request_timed_out = false;
         self.idle_transition_target_mv = None;
         self.idle_transition_last_step_at_ms = None;
@@ -1127,7 +1086,7 @@ impl Fusb302bRuntime {
         request_contract: bool,
     ) -> PdContractRequestState {
         self.pps_keepalive_pending_at_ms = None;
-        self.request_rejection.clear();
+        self.request_rejected = false;
         self.request_timed_out = false;
         if replace_pending {
             self.source_capabilities_refresh_pending = false;
@@ -1187,7 +1146,7 @@ impl Fusb302bRuntime {
             return PdContractRequestState::Pending;
         }
         self.pps_keepalive_pending_at_ms = None;
-        self.request_rejection.clear();
+        self.request_rejected = false;
         self.request_timed_out = false;
         if replace_pending {
             let reuse_confirmed_pps = self.policy.phase() == SinkPhase::Ready
@@ -1742,24 +1701,22 @@ impl Fusb302bRuntime {
     }
 
     fn handle_control_message(&mut self, message: PdPacket, now_ms: u64) {
-        let phase_before = self.policy.phase();
-        let was_waiting_for_ps_rdy = phase_before == SinkPhase::WaitingForPsRdy;
+        let was_waiting_for_ps_rdy = self.policy.phase() == SinkPhase::WaitingForPsRdy;
         let message_type = (message.header() & 0x1f) as u8;
         let message_id = Some((message.header() >> 9) as u8 & 0x07);
-        let response_accepted =
-            self.policy
-                .on_control_message_with_message_id(message_type, message_id, now_ms);
         let keepalive_response_is_valid = pps_keepalive_response_is_valid(
-            phase_before,
+            self.policy.phase(),
             self.pps_keepalive_pending_at_ms.is_some(),
             message_type,
-            response_accepted,
+            self.policy.source_capabilities_message_is_fresh(message_id),
         );
-        self.request_rejection.observe_control_response(
-            phase_before,
-            message_type,
-            response_accepted,
-        );
+        self.request_rejected = matches!(message_type, 4 | 12)
+            && matches!(
+                self.policy.phase(),
+                SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+            );
+        self.policy
+            .on_control_message_with_message_id(message_type, message_id, now_ms);
         if keepalive_response_is_valid {
             self.pps_keepalive_pending_at_ms = None;
         }
@@ -1835,7 +1792,6 @@ impl Fusb302bRuntime {
         // leaves the value false and therefore withdraws heater permission.
         self.vbus_status_observed = false;
         self.vbus_status_raw = 0;
-        self.request_rejection.clear();
         let now_ms = now.as_millis();
         if !fusb302b_transport_retry_due(self.transport_recovery_not_before_ms, now_ms) {
             return false;
@@ -1868,7 +1824,7 @@ impl Fusb302bRuntime {
     ) -> bool {
         for _ in 0..FUSB302B_RX_BURST_LIMIT {
             let (result, received_message) = self.poll_receive_event(i2c, now, now_ms).await;
-            if !result || !self.request_rejection.continues_burst(received_message) {
+            if !result || !received_message {
                 return result;
             }
         }
