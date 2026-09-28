@@ -20,6 +20,8 @@ const BUTTON_MAX_EVENTS: usize = 1024;
 const BUTTON_SAMPLE_INTERVAL: Duration = Duration::from_millis(50);
 const BUTTON_LONG_PRESS: Duration = Duration::from_millis(700);
 const BUTTON_DOUBLE_CLICK: Duration = Duration::from_millis(350);
+const FAN_MIN_INPUT_MV: u64 = 12_500;
+const FAN_PWM_STAGE_DURATION_MS: u64 = 5_000;
 const RAM_ELF_RELATIVE_PATH: &str =
     "firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup";
 const RAM_PROTOCOL_VERSION: &str = "flux-purr.usb.v1";
@@ -1260,6 +1262,7 @@ fn send_ram_request_until(
     serial.write_all(request.as_bytes())?;
     serial.flush()?;
     let mut bytes = Vec::with_capacity(1024);
+    let mut fan_power_seen = false;
     let mut chunk = [0u8; 256];
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1267,7 +1270,9 @@ fn send_ram_request_until(
         match serial.read(&mut chunk) {
             Ok(count) => {
                 append_ram_response_bytes(&mut bytes, &chunk[..count])?;
-                if let Some(value) = find_ram_response(&mut bytes, op, &request_id)? {
+                if let Some(value) =
+                    find_ram_response(&mut bytes, op, &request_id, &mut fan_power_seen)?
+                {
                     return Ok(value);
                 }
             }
@@ -1304,12 +1309,42 @@ fn find_ram_response(
     bytes: &mut Vec<u8>,
     op: &str,
     request_id: &str,
+    fan_power_seen: &mut bool,
 ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
     while let Some(index) = bytes.iter().position(|byte| *byte == b'\n') {
         let line: Vec<u8> = bytes.drain(..=index).collect();
         let Ok(value) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
+        if value.get("type").and_then(Value::as_str) == Some("progress")
+            && value.get("firmwareKind").and_then(Value::as_str) == Some("ram_bringup")
+            && value.get("capability").and_then(Value::as_str) == Some(op)
+            && value.get("requestId").and_then(Value::as_str) == Some(request_id)
+        {
+            print_ram_progress(&value);
+            if value
+                .get("result")
+                .and_then(Value::as_object)
+                .and_then(|result| result.get("kind"))
+                .and_then(Value::as_str)
+                == Some("power")
+            {
+                *fan_power_seen = true;
+            }
+            continue;
+        }
+        if op == "test_fan" && value.get("type").and_then(Value::as_str) == Some("fp") {
+            print_ram_compact_fan_power(&value);
+            *fan_power_seen = true;
+            continue;
+        }
+        if op == "test_fan"
+            && *fan_power_seen
+            && value.get("type").and_then(Value::as_str) == Some("fs")
+        {
+            print_ram_fan_stage_progress(&value);
+            continue;
+        }
         if value.get("type").and_then(Value::as_str) != Some("response")
             || value.get("firmwareKind").and_then(Value::as_str) != Some("ram_bringup")
             || value.get("capability").and_then(Value::as_str) != Some(op)
@@ -1325,6 +1360,92 @@ fn find_ram_response(
         return Err(format!("RAM bring-up rejected {op}: {value}").into());
     }
     Ok(None)
+}
+
+fn print_ram_progress(value: &Value) {
+    let Some(result) = value.get("result").and_then(Value::as_object) else {
+        return;
+    };
+    match result.get("kind").and_then(Value::as_str) {
+        Some("power") => {
+            let measured = result
+                .get("measured")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let voltage_ok = result
+                .get("voltageOk")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let input_mv = result.get("inputMv").and_then(Value::as_u64).unwrap_or(0);
+            let minimum_mv = result
+                .get("minimumMv")
+                .and_then(Value::as_u64)
+                .unwrap_or(FAN_MIN_INPUT_MV);
+            if measured && voltage_ok {
+                eprintln!(
+                    "RAM FAN POWER: measured={}mV minimum={}mV status=ok",
+                    input_mv, minimum_mv
+                );
+            } else if measured {
+                eprintln!(
+                    "RAM FAN POWER WARNING: measured={}mV minimum={}mV; fan may not start",
+                    input_mv, minimum_mv
+                );
+            } else {
+                eprintln!(
+                    "RAM FAN POWER WARNING: VIN measurement unavailable; minimum={}mV was not verified",
+                    minimum_mv
+                );
+            }
+        }
+        Some("pwm_stage") => {
+            let duty_percent = result
+                .get("dutyPercent")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            let duration_ms = result
+                .get("durationMs")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            eprintln!(
+                "RAM FAN PWM STAGE: duty={}%; duration={}s; started",
+                duty_percent,
+                duration_ms / 1_000
+            );
+        }
+        _ => {}
+    }
+}
+
+fn print_ram_fan_stage_progress(value: &Value) {
+    let duty_percent = value.get("d").and_then(Value::as_u64).unwrap_or_default();
+    eprintln!(
+        "RAM FAN PWM STAGE: duty={}%; duration={}s; started",
+        duty_percent,
+        FAN_PWM_STAGE_DURATION_MS / 1_000
+    );
+}
+
+fn print_ram_compact_fan_power(value: &Value) {
+    let measured = value.get("m").and_then(Value::as_bool).unwrap_or(false);
+    let voltage_ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let input_mv = value.get("v").and_then(Value::as_u64).unwrap_or(0);
+    if measured && voltage_ok {
+        eprintln!(
+            "RAM FAN POWER: measured={}mV minimum={}mV status=ok",
+            input_mv, FAN_MIN_INPUT_MV
+        );
+    } else if measured {
+        eprintln!(
+            "RAM FAN POWER WARNING: measured={}mV minimum={}mV; fan may not start",
+            input_mv, FAN_MIN_INPUT_MV
+        );
+    } else {
+        eprintln!(
+            "RAM FAN POWER WARNING: VIN measurement unavailable; minimum={}mV was not verified",
+            FAN_MIN_INPUT_MV
+        );
+    }
 }
 
 pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(), String> {
@@ -1389,6 +1510,22 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
                 "effect",
                 "fan_50_percent_5s_100_percent_5s_0_percent_5s",
             )?;
+            let power = result
+                .get("power")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "result.power must be an object".to_string())?;
+            require_u16(power, "vinRaw")?;
+            require_u16(power, "vinAdcMv")?;
+            require_u32(power, "inputMv")?;
+            if require_u16(power, "minimumMv")? as u64 != FAN_MIN_INPUT_MV {
+                return Err(format!("result.power.minimumMv must be {FAN_MIN_INPUT_MV}"));
+            }
+            if power.get("measured").and_then(Value::as_bool).is_none() {
+                return Err("result.power.measured must be a boolean".to_string());
+            }
+            if power.get("voltageOk").and_then(Value::as_bool).is_none() {
+                return Err("result.power.voltageOk must be a boolean".to_string());
+            }
         }
         "exit" => {
             require_result_string_value(result, "detail", "safe_exit")?;
@@ -1526,6 +1663,14 @@ fn require_u16(values: &serde_json::Map<String, Value>, name: &str) -> Result<u1
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("{name} must be an unsigned integer"))?;
     u16::try_from(value).map_err(|_| format!("{name} is outside the u16 range"))
+}
+
+fn require_u32(values: &serde_json::Map<String, Value>, name: &str) -> Result<u32, String> {
+    let value = values
+        .get(name)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{name} must be an unsigned integer"))?;
+    u32::try_from(value).map_err(|_| format!("{name} is outside the u32 range"))
 }
 
 fn disable_usb_serial_jtag_watchdogs(
@@ -1677,6 +1822,24 @@ mod tests {
     }
 
     #[test]
+    fn compact_fan_stage_frame_is_consumed_before_the_final_response() {
+        let mut bytes = br#"{"type":"fp","v":12500,"m":true,"ok":true}
+{"type":"fs","d":50}
+"#
+        .to_vec();
+        bytes.extend_from_slice(
+            br#"{"type":"response","firmwareKind":"ram_bringup","requestId":"ram-1","capability":"test_fan","ok":true,"result":{"detail":"fan_ready","heater":"off","pd":"untouched","eeprom":"untouched","effect":"fan_50_percent_5s_100_percent_5s_0_percent_5s","power":{"vinRaw":1800,"vinAdcMv":1100,"inputMv":12500,"minimumMv":12500,"measured":true,"voltageOk":true}}}
+"#,
+        );
+        let mut fan_power_seen = false;
+        let response = find_ram_response(&mut bytes, "test_fan", "ram-1", &mut fan_power_seen)
+            .unwrap()
+            .expect("final response should be returned");
+        assert_eq!(response["result"]["detail"], "fan_ready");
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
     fn ram_buzzer_validation_requires_the_two_tone_sequence() {
         let valid = serde_json::json!({
             "ok": true,
@@ -1720,6 +1883,14 @@ mod tests {
                 "heater": "off",
                 "pd": "untouched",
                 "eeprom": "untouched",
+                "power": {
+                    "vinRaw": 1800,
+                    "vinAdcMv": 1100,
+                    "inputMv": 12500,
+                    "minimumMv": 12500,
+                    "measured": true,
+                    "voltageOk": true,
+                },
             },
         });
         assert!(validate_ram_success_response(&fan, "test_fan").is_ok());

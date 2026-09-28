@@ -36,9 +36,13 @@ an approximately 8-second PWM breathing rainbow before returning the RGB LED
 to off. `ram-run test buzzer` plays a 1 kHz tone for one second, one second of
 silence, and a 2 kHz tone for one second before returning the buzzer low.
 `ram-run test rgb` holds red, green, and blue for one second each and repeats
-the sequence five times before turning the LED off. `ram-run test fan` runs
+the sequence five times before turning the LED off. `ram-run test fan` first
+samples the calibrated VIN divider and checks for at least 12.5V, then runs
 50% PWM for five seconds, 100% PWM for five seconds, and 0% PWM for five
-seconds before returning the fan outputs to off.
+seconds before returning the fan outputs to off. The CLI prints a power
+warning when VIN is below 12.5V or cannot be measured, and prints each PWM
+stage as it starts. RAM bring-up leaves PD untouched, so it does not negotiate
+the source voltage itself.
 `ram-run test buttons` prints a ready prompt, recognizes short press,
 long press, and double click gestures, and ends after 30 seconds with no
 recognized event. That inactivity timer resets after every button event; each

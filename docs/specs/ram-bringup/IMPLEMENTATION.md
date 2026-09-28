@@ -23,11 +23,17 @@
 - The bounded `test_rgb` action holds each common-anode RGB channel for one
   second in red, green, blue order and repeats the sequence five times before
   returning all channels to safe off.
-- The bounded `test_fan` action drives GPIO35 as the fan enable and GPIO36
-  through MCPWM operator 0 at 25 kHz for 50% duty for five seconds, 100% duty
-  for five seconds, and 0% duty for five seconds before returning both outputs
-  to safe off; the product fan-voltage feedback contract is exercised without
-  changing the display path.
+- The bounded `test_fan` action calibrates the GPIO1 VIN ADC sample through the
+  ESP32-S3 ADC curve and the frozen `56 kOhm / 5.1 kOhm` divider model before
+  driving GPIO35 as the fan enable and GPIO36 through MCPWM operator 0 at
+  25 kHz for 50% duty for five seconds, 100% duty for five seconds, and 0%
+  duty for five seconds before returning both outputs to safe off. It reports
+  the raw ADC code, calibrated ADC millivolts, calculated input millivolts,
+  and a 12.5V minimum result. The RAM image never writes PD; a missing or low
+  source contract is a CLI warning rather than an implicit power mutation.
+  The firmware emits compact `fp` (power) and `fs` (PWM stage) JSONL frames;
+  the host consumes the power frame first, then renders each stage frame in
+  the same fan session.
 - The bounded `test_buzzer` action bit-bangs GPIO48 as a 50% square wave at
   1 kHz for one second, holds it low for one second, then emits 2 kHz for one
   second before returning the pin low and reporting the typed sequence.

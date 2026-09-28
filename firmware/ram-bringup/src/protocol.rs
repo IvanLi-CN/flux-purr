@@ -64,6 +64,14 @@ pub enum ResponseData {
         register: u8,
         value: u8,
     },
+    Fan {
+        vin_raw: u16,
+        vin_adc_mv: u16,
+        input_mv: u32,
+        minimum_mv: u16,
+        measured: bool,
+        voltage_ok: bool,
+    },
 }
 
 impl DisplayPattern {
@@ -292,11 +300,75 @@ pub fn write_response(
             push_u16(out, value as u16)?;
             out.push_str("}").map_err(|_| core::fmt::Error)?;
         }
+        ResponseData::Fan {
+            vin_raw,
+            vin_adc_mv,
+            input_mv,
+            minimum_mv,
+            measured,
+            voltage_ok,
+        } => {
+            out.push_str(",\"effect\":\"fan_50_percent_5s_100_percent_5s_0_percent_5s\",\"power\":{\"vinRaw\":")
+                .map_err(|_| core::fmt::Error)?;
+            push_u16(out, vin_raw)?;
+            out.push_str(",\"vinAdcMv\":")
+                .map_err(|_| core::fmt::Error)?;
+            push_u16(out, vin_adc_mv)?;
+            out.push_str(",\"inputMv\":")
+                .map_err(|_| core::fmt::Error)?;
+            push_u32(out, input_mv)?;
+            out.push_str(",\"minimumMv\":")
+                .map_err(|_| core::fmt::Error)?;
+            push_u16(out, minimum_mv)?;
+            out.push_str(",\"measured\":")
+                .map_err(|_| core::fmt::Error)?;
+            push_bool(out, measured)?;
+            out.push_str(",\"voltageOk\":")
+                .map_err(|_| core::fmt::Error)?;
+            push_bool(out, voltage_ok)?;
+            out.push_str("}").map_err(|_| core::fmt::Error)?;
+        }
     }
     out.push_str("}}\n").map_err(|_| core::fmt::Error)
 }
 
+pub fn write_fan_voltage_compact_progress(
+    out: &mut String<256>,
+    input_mv: u32,
+    measured: bool,
+    voltage_ok: bool,
+) -> core::fmt::Result {
+    out.push_str("{\"type\":\"fp\",\"v\":")
+        .map_err(|_| core::fmt::Error)?;
+    push_u32_small(out, input_mv)?;
+    out.push_str(",\"m\":").map_err(|_| core::fmt::Error)?;
+    push_bool_small(out, measured)?;
+    out.push_str(",\"ok\":").map_err(|_| core::fmt::Error)?;
+    push_bool_small(out, voltage_ok)?;
+    out.push_str("}\n").map_err(|_| core::fmt::Error)
+}
+
+pub fn write_fan_stage_progress(
+    out: &mut String<256>,
+    _request_id: &str,
+    duty_percent: u8,
+    _duration_ms: u32,
+) -> core::fmt::Result {
+    let frame = match duty_percent {
+        50 => "{\"type\":\"fs\",\"d\":50}\n",
+        100 => "{\"type\":\"fs\",\"d\":100}\n",
+        0 => "{\"type\":\"fs\",\"d\":0}\n",
+        _ => return Err(core::fmt::Error),
+    };
+    out.push_str(frame).map_err(|_| core::fmt::Error)
+}
+
 fn push_bool(out: &mut String<512>, value: bool) -> core::fmt::Result {
+    out.push_str(if value { "true" } else { "false" })
+        .map_err(|_| core::fmt::Error)
+}
+
+fn push_bool_small(out: &mut String<256>, value: bool) -> core::fmt::Result {
     out.push_str(if value { "true" } else { "false" })
         .map_err(|_| core::fmt::Error)
 }
@@ -307,6 +379,48 @@ fn push_u16(out: &mut String<512>, value: u16) -> core::fmt::Result {
         return Ok(());
     }
     let mut digits = [0u8; 5];
+    let mut length = 0;
+    let mut remaining = value;
+    while remaining != 0 {
+        digits[length] = (remaining % 10) as u8;
+        length += 1;
+        remaining /= 10;
+    }
+    while length != 0 {
+        length -= 1;
+        out.push((b'0' + digits[length]) as char)
+            .map_err(|_| core::fmt::Error)?;
+    }
+    Ok(())
+}
+
+fn push_u32(out: &mut String<512>, value: u32) -> core::fmt::Result {
+    if value == 0 {
+        out.push('0').map_err(|_| core::fmt::Error)?;
+        return Ok(());
+    }
+    let mut digits = [0u8; 10];
+    let mut length = 0;
+    let mut remaining = value;
+    while remaining != 0 {
+        digits[length] = (remaining % 10) as u8;
+        length += 1;
+        remaining /= 10;
+    }
+    while length != 0 {
+        length -= 1;
+        out.push((b'0' + digits[length]) as char)
+            .map_err(|_| core::fmt::Error)?;
+    }
+    Ok(())
+}
+
+fn push_u32_small(out: &mut String<256>, value: u32) -> core::fmt::Result {
+    if value == 0 {
+        out.push('0').map_err(|_| core::fmt::Error)?;
+        return Ok(());
+    }
+    let mut digits = [0u8; 10];
     let mut length = 0;
     let mut remaining = value;
     while remaining != 0 {
@@ -413,7 +527,14 @@ mod tests {
             "test_fan",
             true,
             "fan_ready",
-            ResponseData::Effect("fan_50_percent_5s_100_percent_5s_0_percent_5s"),
+            ResponseData::Fan {
+                vin_raw: 1800,
+                vin_adc_mv: 1100,
+                input_mv: 12_500,
+                minimum_mv: 12_500,
+                measured: true,
+                voltage_ok: true,
+            },
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(response.as_bytes()).unwrap();
@@ -422,6 +543,29 @@ mod tests {
             value["result"]["effect"],
             "fan_50_percent_5s_100_percent_5s_0_percent_5s"
         );
+        assert_eq!(value["result"]["power"]["inputMv"], 12_500);
+        assert_eq!(value["result"]["power"]["minimumMv"], 12_500);
+        assert_eq!(value["result"]["power"]["voltageOk"], true);
+    }
+
+    #[test]
+    fn fan_progress_frames_describe_power_and_pwm_stage_starts() {
+        let mut compact_power = String::<256>::new();
+        write_fan_voltage_compact_progress(&mut compact_power, 12_500, true, true).unwrap();
+        let compact_power_value: serde_json::Value =
+            serde_json::from_slice(compact_power.as_bytes()).unwrap();
+        assert_eq!(compact_power_value["type"], "fp");
+        assert_eq!(compact_power_value["v"], 12_500);
+        assert_eq!(compact_power_value["m"], true);
+        assert_eq!(compact_power_value["ok"], true);
+        assert!(compact_power.as_bytes().len() < 64);
+
+        let mut stage = String::<256>::new();
+        write_fan_stage_progress(&mut stage, "r1", 50, 5_000).unwrap();
+        let stage_value: serde_json::Value = serde_json::from_slice(stage.as_bytes()).unwrap();
+        assert_eq!(stage_value["type"], "fs");
+        assert_eq!(stage_value["d"], 50);
+        assert!(stage.as_bytes().len() < 64);
     }
 
     #[test]

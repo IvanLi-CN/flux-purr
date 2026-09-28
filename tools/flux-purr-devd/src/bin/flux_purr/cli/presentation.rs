@@ -153,6 +153,7 @@ fn render_ram_response(
             adc.get("rtd").and_then(Value::as_u64).unwrap_or_default(),
         ));
     }
+    append_ram_power_evidence(&mut output, result);
     if let Some(i2c) = result.get("i2c").and_then(Value::as_object) {
         output.push_str(&format!(
             " i2c=0x{:02x}:0x{:02x}=0x{:02x}",
@@ -166,6 +167,41 @@ fn render_ram_response(
         ));
     }
     Ok(output)
+}
+
+fn append_ram_power_evidence(output: &mut String, result: &Value) {
+    let Some(power) = result.get("power").and_then(Value::as_object) else {
+        return;
+    };
+    let measured = power
+        .get("measured")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let voltage_ok = power
+        .get("voltageOk")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let input_mv = power.get("inputMv").and_then(Value::as_u64).unwrap_or(0);
+    let minimum_mv = power
+        .get("minimumMv")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if measured && voltage_ok {
+        output.push_str(&format!(
+            " power=input:{}mV minimum:{}mV status=ok",
+            input_mv, minimum_mv
+        ));
+    } else if measured {
+        output.push_str(&format!(
+            " WARNING=fan_input_below_minimum power=input:{}mV minimum:{}mV",
+            input_mv, minimum_mv
+        ));
+    } else {
+        output.push_str(&format!(
+            " WARNING=fan_input_unavailable power=input=unknown minimum:{}mV",
+            minimum_mv
+        ));
+    }
 }
 
 pub(crate) fn render_pairing_code(

@@ -22,7 +22,7 @@ mod device {
     use embedded_hal::spi::SpiBus;
     use esp_hal::{
         Blocking,
-        analog::adc::{Adc, AdcConfig, AdcPin, Attenuation},
+        analog::adc::{Adc, AdcCalCurve, AdcCalScheme, AdcConfig, AdcPin, Attenuation},
         gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
         i2c::master::{Config as I2cConfig, I2c},
         mcpwm::{
@@ -45,6 +45,9 @@ mod device {
     const FAN_PWM_PERIOD_TICKS: u16 = 99;
     const FAN_PWM_FREQUENCY_HZ: u32 = 25_000;
     const FAN_PWM_STAGE_DURATION_MS: u32 = 5_000;
+    const FAN_MIN_INPUT_MV: u16 = 12_500;
+    const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
+    const VIN_DIVIDER_R_LOW_OHMS: u32 = 5_100;
     const RGB_COLOR_DURATION_MS: u32 = 1_000;
     const RGB_COLOR_CYCLES: u8 = 5;
     const STATUS_LIGHT_PWM_BREATH_DURATION_MS: u32 = 8_000;
@@ -198,8 +201,17 @@ mod device {
     pub struct Measurements {
         adc: AdcDriver,
         vin: AdcPin1,
+        vin_calibration: AdcCalCurve<esp_hal::peripherals::ADC1<'static>>,
         rtd: AdcPin2,
         i2c: I2cBus,
+    }
+
+    #[derive(Clone, Copy)]
+    struct FanVoltage {
+        vin_raw: u16,
+        vin_adc_mv: u16,
+        input_mv: u32,
+        voltage_ok: bool,
     }
 
     enum OutputInitError {
@@ -243,6 +255,7 @@ mod device {
             let mut adc_config = AdcConfig::new();
             let vin = adc_config.enable_pin(tokens.gpio1, Attenuation::_11dB);
             let rtd = adc_config.enable_pin(tokens.gpio2, Attenuation::_11dB);
+            let vin_calibration = AdcCalCurve::new_cal(Attenuation::_11dB);
             let adc = Adc::new(tokens.adc1, adc_config);
             let i2c = I2c::new(
                 tokens.i2c0,
@@ -294,7 +307,17 @@ mod device {
                 green: Output::new(tokens.gpio38, Level::High, OutputConfig::default()),
                 blue: Output::new(tokens.gpio37, Level::High, OutputConfig::default()),
             };
-            Ok((outputs, inputs, Measurements { adc, vin, rtd, i2c }))
+            Ok((
+                outputs,
+                inputs,
+                Measurements {
+                    adc,
+                    vin,
+                    vin_calibration,
+                    rtd,
+                    i2c,
+                },
+            ))
         }
 
         fn safe(&mut self) {
@@ -569,6 +592,7 @@ mod device {
             if byte == b'\n' {
                 if !discarding_line && length > 0 {
                     handle_line(
+                        &mut usb,
                         &mut outputs,
                         &mut inputs,
                         &mut measurements,
@@ -591,6 +615,7 @@ mod device {
     }
 
     fn handle_line(
+        usb: &mut UsbSerialJtag<'static, Blocking>,
         outputs: &mut Outputs,
         inputs: &mut Inputs,
         measurements: &mut Measurements,
@@ -729,27 +754,39 @@ mod device {
                 ResponseData::Effect("1khz_1s_silence_1s_2khz_1s"),
             )
         } else if protocol::equal_literal(op, b"test_fan") {
+            let voltage = measure_fan_voltage(measurements);
+            emit_fan_voltage_progress(voltage);
             if outputs.fan_pwm.set_duty_cycle_percent(50).is_err() {
                 outputs.safe();
                 (false, "fan_pwm_start_failed", ResponseData::None)
             } else {
                 outputs.fan.set_high();
+                emit_fan_stage_progress(request.request_id.as_str(), 50);
                 delay_ms(FAN_PWM_STAGE_DURATION_MS);
                 if outputs.fan_pwm.set_duty_cycle_percent(100).is_err() {
                     outputs.safe();
                     (false, "fan_pwm_full_speed_failed", ResponseData::None)
                 } else {
+                    emit_fan_stage_progress(request.request_id.as_str(), 100);
                     delay_ms(FAN_PWM_STAGE_DURATION_MS);
                     if outputs.fan_pwm.set_duty_cycle_percent(0).is_err() {
                         outputs.safe();
                         (false, "fan_pwm_zero_speed_failed", ResponseData::None)
                     } else {
+                        emit_fan_stage_progress(request.request_id.as_str(), 0);
                         delay_ms(FAN_PWM_STAGE_DURATION_MS);
                         outputs.fan.set_low();
                         (
                             true,
                             "fan_ready",
-                            ResponseData::Effect("fan_50_percent_5s_100_percent_5s_0_percent_5s"),
+                            ResponseData::Fan {
+                                vin_raw: voltage.map_or(0, |value| value.vin_raw),
+                                vin_adc_mv: voltage.map_or(0, |value| value.vin_adc_mv),
+                                input_mv: voltage.map_or(0, |value| value.input_mv),
+                                minimum_mv: FAN_MIN_INPUT_MV,
+                                measured: voltage.is_some(),
+                                voltage_ok: voltage.is_some_and(|value| value.voltage_ok),
+                            },
                         )
                     }
                 }
@@ -773,11 +810,72 @@ mod device {
         )
         .is_ok();
         if response_write_ok && !response.is_empty() {
-            super::rom_log_line(response.as_bytes());
+            usb_log_line(usb, response.as_bytes());
         }
         if protocol::equal_literal(op, b"exit") {
             esp_hal::system::software_reset();
         }
+    }
+
+    fn measure_fan_voltage(measurements: &mut Measurements) -> Option<FanVoltage> {
+        let mut vin_raw = None;
+        for _ in 0..1_000 {
+            match measurements.adc.read_oneshot(&mut measurements.vin) {
+                Ok(value) => {
+                    vin_raw = Some(value & 0x0fff);
+                    break;
+                }
+                Err(nb::Error::WouldBlock) => delay_ms(1),
+                Err(nb::Error::Other(_)) => break,
+            }
+        }
+        let vin_raw = vin_raw?;
+        let vin_adc_mv = measurements.vin_calibration.adc_val(vin_raw);
+        let divider_total = VIN_DIVIDER_R_HIGH_OHMS + VIN_DIVIDER_R_LOW_OHMS;
+        let input_mv = u32::from(vin_adc_mv).saturating_mul(divider_total) / VIN_DIVIDER_R_LOW_OHMS;
+        Some(FanVoltage {
+            vin_raw,
+            vin_adc_mv,
+            input_mv,
+            voltage_ok: input_mv >= u32::from(FAN_MIN_INPUT_MV),
+        })
+    }
+
+    fn emit_fan_voltage_progress(voltage: Option<FanVoltage>) {
+        let mut progress = String::<256>::new();
+        let (input_mv, measured, voltage_ok) = voltage.map_or((0, false, false), |value| {
+            (value.input_mv, true, value.voltage_ok)
+        });
+        if protocol::write_fan_voltage_compact_progress(
+            &mut progress,
+            input_mv,
+            measured,
+            voltage_ok,
+        )
+        .is_ok()
+        {
+            super::rom_log_line(progress.as_bytes());
+            delay_ms(20);
+        }
+    }
+
+    fn emit_fan_stage_progress(request_id: &str, duty_percent: u8) {
+        let mut progress = String::<256>::new();
+        if protocol::write_fan_stage_progress(
+            &mut progress,
+            request_id,
+            duty_percent,
+            FAN_PWM_STAGE_DURATION_MS,
+        )
+        .is_ok()
+        {
+            super::rom_log_line(progress.as_bytes());
+            delay_ms(20);
+        }
+    }
+
+    fn usb_log_line(usb: &mut UsbSerialJtag<'static, Blocking>, line: &[u8]) {
+        let _ = usb.write(line);
     }
 }
 

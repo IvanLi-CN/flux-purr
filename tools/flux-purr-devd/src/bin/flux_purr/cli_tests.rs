@@ -178,6 +178,33 @@ fn renders_ram_response_details_and_button_states() {
 }
 
 #[test]
+fn renders_ram_fan_voltage_warning_and_evidence() {
+    let rendered = render_human(&json!({
+        "ok": true,
+        "firmwareKind": "ram_bringup",
+        "capability": "test_fan",
+        "result": {
+            "detail": "fan_ready",
+            "effect": "fan_50_percent_5s_100_percent_5s_0_percent_5s",
+            "heater": "off",
+            "pd": "untouched",
+            "eeprom": "untouched",
+            "power": {
+                "vinRaw": 1600,
+                "vinAdcMv": 975,
+                "inputMv": 11070,
+                "minimumMv": 12500,
+                "measured": true,
+                "voltageOk": false,
+            },
+        },
+    }))
+    .unwrap();
+    assert!(rendered.contains("WARNING=fan_input_below_minimum"));
+    assert!(rendered.contains("power=input:11070mV minimum:12500mV"));
+}
+
+#[test]
 fn rejects_contract_invalid_ram_success_response() {
     let error = render_human(&json!({
         "ok": true,

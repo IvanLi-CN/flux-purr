@@ -43,10 +43,16 @@ RGB, buzzer, and fan paths.
   one second, one second of silence, and a 2 kHz tone for one second before
   returning its typed success response. `test_rgb` holds red, green, and blue
   for one second each and repeats that sequence five times before turning the
-  LED off. `test_fan` drives the shared fan contract through GPIO35
-  (`FAN_EN`) and a bounded 25 kHz MCPWM signal on GPIO36 (`FAN_PWM`) at 50%
-  for five seconds, 100% for five seconds, and 0% for five seconds before
-  returning both outputs to their safe-off levels.
+  LED off. `test_fan` samples the calibrated GPIO1 VIN divider before driving
+  the shared fan contract through GPIO35 (`FAN_EN`) and a bounded 25 kHz MCPWM
+  signal on GPIO36 (`FAN_PWM`) at 50% for five seconds, 100% for five seconds,
+  and 0% for five seconds before returning both outputs to their safe-off
+  levels. The fan test treats 12.5V at the VIN input as its minimum operating
+  voltage, includes the measured input voltage in its response, and warns when
+  the measurement is unavailable or below the minimum. RAM bring-up leaves PD
+  untouched; the source contract must therefore be established before loading
+  the RAM image. The CLI prints a compact `fs` progress frame when each PWM
+  stage starts, after the compact `fp` power frame for the same session.
 - A successful response has `ok=true`, a command-specific `result.detail`, and
   explicit `heater=off`, `pd=untouched`, and `eeprom=untouched` fields. Button
   snapshots include the sampled pressed state for all five keys; the default
