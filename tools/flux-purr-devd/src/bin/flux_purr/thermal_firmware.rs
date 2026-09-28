@@ -164,7 +164,10 @@ pub(crate) async fn run_firmware_tuning(
     let lease = create_lease(client, &resolved).await?;
     let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
     let mut statuses = Vec::new();
+    let mut profile_mode_prepared = false;
     let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
+        ensure_firmware_profile_mode(client, &resolved, &lease.lease_id).await?;
+        profile_mode_prepared = true;
         let start = match request_leased(
             client,
             &resolved,
@@ -310,6 +313,7 @@ pub(crate) async fn run_firmware_tuning(
     }
     .await;
     if result.is_err()
+        && profile_mode_prepared
         && let Ok(canceled) = request_leased(
             client,
             &resolved,
@@ -341,7 +345,11 @@ pub(crate) async fn run_firmware_tuning(
             bundle_dir: args.bundle_dir,
             run_id: Some(&run_id),
             power_class: "pps5a",
-            reason: "transport_or_runtime_failure",
+            reason: if profile_mode_prepared {
+                "transport_or_runtime_failure"
+            } else {
+                "profile_mode_not_confirmed"
+            },
             no_device_command: false,
             attempted_candidate: Some((&candidate_id, &candidate_hash, &candidate_profile)),
         }),
@@ -350,6 +358,52 @@ pub(crate) async fn run_firmware_tuning(
     heartbeat.abort();
     release_result?;
     rendered
+}
+
+fn firmware_profile_mode_ready(status: &Value) -> bool {
+    status.get("thermalProfileMode").and_then(Value::as_str) == Some("100w")
+        && status
+            .get("thermalProfileResolvedBank")
+            .and_then(Value::as_str)
+            == Some("pps5a")
+}
+
+async fn ensure_firmware_profile_mode(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let status = request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
+    if firmware_profile_mode_ready(&status) {
+        return Ok(());
+    }
+    if status.get("heaterEnabled").and_then(Value::as_bool) != Some(false) {
+        return Err("heater must be off before selecting the 5A profile mode".into());
+    }
+    request_leased(
+        client,
+        resolved,
+        lease_id,
+        Method::PUT,
+        "/runtime",
+        Some(json!({"thermalProfileMode": "100w"})),
+    )
+    .await?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status =
+            request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
+        if firmware_profile_mode_ready(&status) {
+            return Ok(());
+        }
+        if status.get("heaterEnabled").and_then(Value::as_bool) != Some(false) {
+            return Err("heater became armed while selecting the 5A profile mode".into());
+        }
+        if Instant::now() >= deadline {
+            return Err("5A profile mode readback timed out".into());
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 pub(crate) async fn confirm_firmware_save(
@@ -1592,9 +1646,10 @@ mod tests {
     use super::{
         InterruptedRunInput, StatusJournal, build_report_runs, build_report_trial,
         event_stream_caught_up, firmware_candidate_profile_hash, firmware_candidate_profile_value,
-        firmware_read_command, firmware_start_command, is_confirmed_rejected_start,
-        next_event_sequence, render_host_failure, render_interrupted_run, render_unsupported_pps3a,
-        trial_events_for_target, validate_save_input, verified_saved_receipt, verify_device_trace,
+        firmware_profile_mode_ready, firmware_read_command, firmware_start_command,
+        is_confirmed_rejected_start, next_event_sequence, render_host_failure,
+        render_interrupted_run, render_unsupported_pps3a, trial_events_for_target,
+        validate_save_input, verified_saved_receipt, verify_device_trace,
     };
     use flux_purr_firmware::{
         control_plane::ThermalControlProfileWire,
@@ -1602,6 +1657,22 @@ mod tests {
         thermal_tuning::{ThermalTuningEvent, digest_event_chain, hash_profile},
     };
     use serde_json::json;
+
+    #[test]
+    fn firmware_tuning_requires_5a_mode_and_resolved_bank() {
+        assert!(!firmware_profile_mode_ready(&json!({
+            "thermalProfileMode": "65w",
+            "thermalProfileResolvedBank": "pps3a"
+        })));
+        assert!(!firmware_profile_mode_ready(&json!({
+            "thermalProfileMode": "100w",
+            "thermalProfileResolvedBank": "pps3a"
+        })));
+        assert!(firmware_profile_mode_ready(&json!({
+            "thermalProfileMode": "100w",
+            "thermalProfileResolvedBank": "pps5a"
+        })));
+    }
 
     #[test]
     fn journal_persists_each_event_page_before_the_next_ack() {
