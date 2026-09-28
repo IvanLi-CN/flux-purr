@@ -10,17 +10,20 @@ use flux_purr_firmware::{
     control_plane::ThermalControlProfileWire,
     memory::ThermalControlProfileConfig,
     thermal_tuning::{
-        THERMAL_TUNING_EXECUTION_ORDER_C, ThermalTuningEvent, digest_event_chain, hash_profile,
+        THERMAL_TUNING_EXECUTION_ORDER_C, THERMAL_TUNING_TARGETS_C, ThermalTuningEvent,
+        digest_event_chain, hash_profile,
     },
 };
 use reqwest::{Client, Method};
 use serde_json::{Value, json};
 
 use super::{
-    ResolvedUsbTarget, ThermalFirmwareSaveArgs, ThermalFlagshipTuneArgs, ThermalProfileMode,
-    ThermalTuneEngine, create_lease, current_unix_millis,
+    ResolvedUsbTarget, ThermalCandidateProfile, ThermalFirmwareSaveArgs, ThermalFlagshipTuneArgs,
+    ThermalProfileMode, ThermalTuneEngine, create_lease, current_unix_millis,
     load_thermal_default_seed_candidate_profile, parse_thermal_targets, release_lease,
-    request_leased, resolve_target, spawn_heartbeat, thermal_candidate_profile_to_value,
+    request_leased, resolve_target, spawn_heartbeat, thermal_candidate_point,
+    thermal_candidate_profile_from_value, thermal_candidate_profile_to_value,
+    thermal_interpolated_candidate_point,
     thermal_tuning_v2_report::{self, ThermalTuningV2ReportInput},
 };
 
@@ -61,7 +64,7 @@ impl StatusJournal {
     }
 
     fn record(&mut self, statuses: &mut Vec<Value>, mut status: Value) -> io::Result<()> {
-        if !status_has_new_evidence(statuses.last(), &status) {
+        if !status_has_new_evidence(statuses.last(), &status, self.last_profile_hash.as_deref()) {
             return Ok(());
         }
         let candidate_hash = status.get("candidateHash").and_then(Value::as_str);
@@ -89,7 +92,11 @@ impl StatusJournal {
     }
 }
 
-fn status_has_new_evidence(previous: Option<&Value>, current: &Value) -> bool {
+fn status_has_new_evidence(
+    previous: Option<&Value>,
+    current: &Value,
+    last_profile_hash: Option<&str>,
+) -> bool {
     let Some(previous) = previous else {
         return true;
     };
@@ -97,6 +104,13 @@ fn status_has_new_evidence(previous: Option<&Value>, current: &Value) -> bool {
         .pointer("/events/events")
         .and_then(Value::as_array)
         .is_some_and(|events| !events.is_empty())
+    {
+        return true;
+    }
+    if current
+        .get("candidateProfile")
+        .is_some_and(|profile| !profile.is_null())
+        && current.get("candidateHash").and_then(Value::as_str) != last_profile_hash
     {
         return true;
     }
@@ -148,15 +162,14 @@ pub(crate) async fn run_firmware_tuning(
 
     let run_id = format!("firmware-pps5a-{}", current_unix_millis());
     let candidate_id = format!("{run_id}-candidate");
-    let candidate_profile = if let Some(path) = args.seed_profile_file.as_ref() {
+    let seed_profile = if let Some(path) = args.seed_profile_file.as_ref() {
         let imported: Value = serde_json::from_slice(&fs::read(path)?)?;
-        firmware_candidate_profile_value(&super::thermal_candidate_profile_to_value(
-            &super::thermal_candidate_profile_from_value(imported),
-        ))
+        thermal_candidate_profile_from_value(imported)
     } else {
         let (profile, _) = load_thermal_default_seed_candidate_profile("pps5a")?;
-        firmware_candidate_profile_value(&thermal_candidate_profile_to_value(&profile))
+        profile
     };
+    let candidate_profile = materialize_firmware_seed_profile(seed_profile)?;
     let candidate_hash = firmware_candidate_profile_hash(&candidate_profile)?;
     let input_dir = args.output_root.join(&run_id);
     fs::create_dir_all(&input_dir)?;
@@ -184,7 +197,8 @@ pub(crate) async fn run_firmware_tuning(
         .await
         {
             Ok(start) => start,
-            Err(_) => {
+            Err(error) => {
+                eprintln!("firmware thermal tuning start failed: {error}");
                 let rejected = request_leased(
                     client,
                     &resolved,
@@ -251,7 +265,11 @@ pub(crate) async fn run_firmware_tuning(
                 "/thermal-tuning",
                 Some(read_body),
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                eprintln!("firmware thermal tuning event read failed: {error}");
+                error
+            })?;
             after_sequence = next_event_sequence(&status).or(after_sequence);
             let caught_up = event_stream_caught_up(&status, after_sequence);
             let terminal = status
@@ -981,6 +999,29 @@ fn firmware_candidate_profile_value(profile: &Value) -> Value {
         );
     }
     Value::Object(std::mem::take(object))
+}
+
+fn materialize_firmware_seed_profile(
+    seed: ThermalCandidateProfile,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut points = Vec::with_capacity(THERMAL_TUNING_TARGETS_C.len());
+    for target in THERMAL_TUNING_TARGETS_C {
+        let point = thermal_candidate_point(&seed, target)
+            .or_else(|| thermal_interpolated_candidate_point(&seed, target))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("5A seed cannot materialize {target}C target"),
+                )
+            })?;
+        points.push(point);
+    }
+    Ok(firmware_candidate_profile_value(
+        &thermal_candidate_profile_to_value(&ThermalCandidateProfile {
+            settings: seed.settings,
+            points,
+        }),
+    ))
 }
 
 fn firmware_candidate_profile_hash(
@@ -1733,6 +1774,33 @@ mod tests {
     }
 
     #[test]
+    fn journal_keeps_profile_returned_after_event_pages() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = StatusJournal::create(directory.path()).unwrap();
+        let mut statuses = Vec::new();
+        journal
+            .record(
+                &mut statuses,
+                json!({"candidateHash": "hash-2", "events": {"events": []}, "trace": {"lastSequence": 2}}),
+            )
+            .unwrap();
+        journal
+            .record(
+                &mut statuses,
+                json!({"candidateHash": "hash-2", "candidateProfile": {"points": [60]}, "events": {"events": []}, "trace": {"lastSequence": 2}}),
+            )
+            .unwrap();
+        journal
+            .record(
+                &mut statuses,
+                json!({"candidateHash": "hash-2", "candidateProfile": {"points": [60]}, "events": {"events": []}, "trace": {"lastSequence": 2}}),
+            )
+            .unwrap();
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[1]["candidateProfile"]["points"], json!([60]));
+    }
+
+    #[test]
     fn read_ack_is_bound_to_the_run_identity() {
         assert_eq!(
             firmware_read_command("run-1", Some(17)),
@@ -2025,6 +2093,22 @@ mod tests {
         let mut config: ThermalControlProfileConfig = wire.into();
         config.sanitize();
         assert_eq!(hash_profile(&config).unwrap().as_str(), host_hash);
+    }
+
+    #[test]
+    fn default_5a_seed_materializes_every_firmware_target() {
+        let (seed, _) = super::load_thermal_default_seed_candidate_profile("pps5a").unwrap();
+        let profile = super::materialize_firmware_seed_profile(seed).unwrap();
+        let targets: Vec<i16> = profile["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|point| point.get("targetTempC").and_then(serde_json::Value::as_i64))
+            .map(|target| target as i16)
+            .collect();
+        assert_eq!(targets, vec![60, 80, 100, 120, 140, 160, 180, 220, 240]);
+        assert_eq!(profile["points"].as_array().unwrap().len(), 10);
+        assert!(super::firmware_candidate_profile_hash(&profile).is_ok());
     }
 
     #[test]
