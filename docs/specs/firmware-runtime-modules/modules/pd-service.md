@@ -46,11 +46,10 @@ confirmation and a fresh status observation.
   reports `TimedOut` rather than using cached capabilities as success. A
   superseded command still present in the mailbox is discarded before any
   policy or hardware operation.
-- Each acquired turn reads up to three consecutive completed RX frames before
-  evaluating the pending-contract deadline. A queued `Accept` and `PS_RDY`
-  can confirm a contract at the deadline without being discarded by timeout
-  recovery. An empty FIFO still reaches the bounded timeout check; VBUS loss,
-  reset, protection, and transport faults remain immediate failure paths.
+- Fresh PPS keepalive `Accept`, `PS_RDY`, `Reject`, and `Wait` responses advance
+  Source MessageID tracking even while the active contract remains ready.
+  Later contract confirmations are checked against that updated sequence;
+  duplicate and stale responses cannot settle a new request.
 - Mutex-protected read-only snapshot.
 - Sole FUSB302B protocol/I2C service.
 

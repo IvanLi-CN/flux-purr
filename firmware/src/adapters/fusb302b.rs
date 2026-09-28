@@ -1318,6 +1318,35 @@ mod tests {
     }
 
     #[test]
+    fn pps_keepalive_responses_do_not_stale_a_later_contract_confirmation() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(0))
+                .is_some()
+        );
+        policy.on_control_message_with_message_id(3, Some(1), 0);
+        policy.on_control_message_with_message_id(6, Some(2), 1);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract().voltage_mv, 12_000);
+
+        for (accept_id, ps_rdy_id) in [(3, 4), (5, 6)] {
+            policy.on_control_message_with_message_id(3, Some(accept_id), 5_000);
+            policy.on_control_message_with_message_id(6, Some(ps_rdy_id), 5_001);
+            assert_eq!(policy.phase(), SinkPhase::Ready);
+            assert_eq!(policy.active_contract().voltage_mv, 12_000);
+        }
+
+        let request = crate::adapters::pd::PdContractRequest::pps(20_000, 5_000).unwrap();
+        assert!(policy.request_contract(request).is_some());
+        policy.on_control_message_with_message_id(3, Some(7), 10_000);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        policy.on_control_message_with_message_id(6, Some(0), 10_001);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract().voltage_mv, 20_000);
+    }
+
+    #[test]
     fn source_response_message_ids_accept_wraparound_and_reject_old_ids() {
         let mut policy = SinkPolicy::new(20_000, 5_000);
         let _ = policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(7));
