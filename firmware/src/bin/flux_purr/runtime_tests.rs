@@ -11543,6 +11543,45 @@ fn contract_request_response_timeout_uses_the_slow_transition_window() {
 }
 
 #[test]
+fn queued_contract_confirmation_precedes_pending_request_timeout() {
+    let mut policy = fusb302b::SinkPolicy::new(12_000, 5_000);
+    let pps_5a = 0xc1a4_3264;
+    assert!(policy.on_source_capabilities(&[pps_5a]).is_some());
+    policy.on_control_message(3, 0);
+    policy.on_control_message(6, 0);
+    let request = PdContractRequest::pps(20_000, 5_000).unwrap();
+    assert!(policy.request_contract(request).is_some());
+    assert!(contract_request_response_timeout_due(Some(1_000), 6_000));
+
+    policy.on_control_message(3, 6_000);
+    policy.on_control_message(6, 6_000);
+    assert_eq!(policy.phase(), SinkPhase::Ready);
+    assert_eq!(policy.active_contract().voltage_mv, 20_000);
+    assert_eq!(policy.active_contract().current_ma, 5_000);
+
+    let adc = include_str!("adc.rs");
+    let poll = adc
+        .split("pub(crate) async fn poll(")
+        .nth(1)
+        .and_then(|source| source.split("async fn poll_receive_messages").next())
+        .expect("PD poll and receive path must remain adjacent");
+    let receive = poll
+        .find("self.poll_receive_messages(i2c, now, now_ms).await")
+        .expect("PD poll must receive queued responses");
+    let timeout = poll
+        .find("self.poll_pending_request(i2c, now, now_ms).await")
+        .expect("PD poll must retain the bounded timeout");
+    assert!(
+        receive < timeout,
+        "queued PD responses must precede timeout recovery"
+    );
+    assert!(
+        adc.contains("for _ in 0..FUSB302B_RX_BURST_LIMIT"),
+        "one PD turn must drain bounded Accept and PS_RDY frames"
+    );
+}
+
+#[test]
 fn fusb302b_protocol_fault_snapshot_codes_map_faults() {
     assert_eq!(
         fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_RETRY_FAILED),
