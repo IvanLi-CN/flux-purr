@@ -50,6 +50,11 @@ confirmation and a fresh status observation.
   Source MessageID tracking even while the active contract remains ready.
   Later contract confirmations are checked against that updated sequence;
   duplicate and stale responses cannot settle a new request.
+- Each acquired turn reads up to three consecutive completed RX frames before
+  evaluating the pending-contract deadline. A queued `Accept` and `PS_RDY`
+  can confirm a contract at the deadline without being discarded by timeout
+  recovery. An empty FIFO still reaches the bounded timeout check; VBUS loss,
+  reset, protection, and transport faults remain immediate failure paths.
 - Mutex-protected read-only snapshot.
 - Sole FUSB302B protocol/I2C service.
 

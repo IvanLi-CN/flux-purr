@@ -1803,14 +1803,17 @@ impl Fusb302bRuntime {
         if let Some(result) = self.poll_vbus_restore(i2c, now, now_ms).await {
             return result;
         }
+        if let Some(result) = self.poll_attachment(i2c, now, now_ms).await {
+            return result;
+        }
+        if !self.poll_receive_messages(i2c, now, now_ms).await {
+            return false;
+        }
         if let Some(result) = self.poll_pending_request(i2c, now, now_ms).await {
             return result;
         }
         self.poll_pps_transition_capability_refresh(now_ms);
-        if let Some(result) = self.poll_attachment(i2c, now, now_ms).await {
-            return result;
-        }
-        self.poll_receive_messages(i2c, now, now_ms).await
+        true
     }
 
     async fn poll_receive_messages(
@@ -1819,6 +1822,21 @@ impl Fusb302bRuntime {
         now: PdTimestamp,
         now_ms: u64,
     ) -> bool {
+        for _ in 0..FUSB302B_RX_BURST_LIMIT {
+            let (result, received_message) = self.poll_receive_event(i2c, now, now_ms).await;
+            if !result || !received_message {
+                return result;
+            }
+        }
+        true
+    }
+
+    async fn poll_receive_event(
+        &mut self,
+        i2c: &mut PdI2c<'_>,
+        now: PdTimestamp,
+        now_ms: u64,
+    ) -> (bool, bool) {
         let (event, status0) =
             match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending).await {
                 Ok(observation) => observation,
@@ -1849,12 +1867,13 @@ impl Fusb302bRuntime {
                         )
                         .await;
                     self.record_protocol_fault(protocol_fault);
-                    return recovered;
+                    return (recovered, false);
                 }
             };
         self.vbus_status_raw = status0;
         self.vbus_status_observed = !matches!(event, Fusb302bReceiveEvent::VbusLow { .. });
-        match event {
+        let received_message = matches!(event, Fusb302bReceiveEvent::Message(_));
+        let result = match event {
             Fusb302bReceiveEvent::VbusLow { transition } => {
                 self.handle_vbus_low_event(i2c, now_ms, transition).await
             }
@@ -1875,6 +1894,7 @@ impl Fusb302bRuntime {
             Fusb302bReceiveEvent::RetryFailed => self.handle_retry_failed(i2c, now).await,
             Fusb302bReceiveEvent::Protection => self.handle_protection_event(),
             Fusb302bReceiveEvent::UnsupportedSop => self.handle_unsupported_sop(i2c, now).await,
-        }
+        };
+        (result, received_message)
     }
 }
