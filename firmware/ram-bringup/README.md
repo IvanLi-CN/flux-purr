@@ -37,4 +37,5 @@ to off. `ram-run test buttons` prints a ready prompt, recognizes short press,
 long press, and double click gestures, and ends after 30 seconds with no
 recognized event. That inactivity timer resets after every button event; each
 event includes its `elapsedMs` and `triggeredAtUnixMs` values in the final
-evidence.
+evidence. A noisy input stream is bounded at 1024 reported events and returns
+an explicit `event_limit` stop reason if it reaches that safety limit.

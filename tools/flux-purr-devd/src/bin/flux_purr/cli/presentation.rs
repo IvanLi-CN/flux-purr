@@ -132,8 +132,12 @@ fn render_ram_response(
                     .join(",")
             })
             .unwrap_or_default();
+        let stop_reason = interaction
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .unwrap_or("inactivity_timeout");
         output.push_str(&format!(
-            " interaction=inactivity_timeout:{}s events=[{}]",
+            " interaction={stop_reason}:{}s events=[{}]",
             interaction
                 .get("inactivityTimeoutSeconds")
                 .or_else(|| interaction.get("timeoutSeconds"))

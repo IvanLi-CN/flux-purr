@@ -17,7 +17,9 @@
   recognizes short-press, long-press, and double-click gestures from the typed
   five-key snapshots, resets the inactivity timer after each button event, and
   prints each event with its session-relative and Unix-millisecond trigger times
-  before returning the final evidence envelope.
+  before returning the final evidence envelope. The host keeps the event list
+  bounded at 1024 entries; an input stream that reaches that limit ends with
+  an explicit `event_limit` stop reason.
 - The bounded `test_fan` action drives GPIO35 as the fan enable and GPIO36
   through MCPWM operator 0 at 25 kHz before returning both outputs to safe
   off; the product fan-voltage feedback contract is exercised without changing

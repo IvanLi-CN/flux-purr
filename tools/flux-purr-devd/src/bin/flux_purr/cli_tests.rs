@@ -160,6 +160,7 @@ fn renders_ram_response_details_and_button_states() {
             "interaction": {
                 "timeoutSeconds": 30,
                 "inactivityTimeoutSeconds": 30,
+                "stopReason": "inactivity_timeout",
                 "events": [{"key": "center", "gesture": "double_click", "effect": "accent", "elapsedMs": 1250, "triggeredAtUnixMs": 1790000000123u64}],
             },
         },

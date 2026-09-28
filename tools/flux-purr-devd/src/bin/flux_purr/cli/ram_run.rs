@@ -16,6 +16,7 @@ const IDENTITY_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const RAM_OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const BUTTON_INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(30);
+const BUTTON_MAX_EVENTS: usize = 1024;
 const BUTTON_SAMPLE_INTERVAL: Duration = Duration::from_millis(50);
 const BUTTON_LONG_PRESS: Duration = Duration::from_millis(700);
 const BUTTON_DOUBLE_CLICK: Duration = Duration::from_millis(350);
@@ -174,6 +175,21 @@ struct ButtonGestureEvent {
     gesture: &'static str,
     triggered_at: Instant,
     triggered_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ButtonInteractionStopReason {
+    InactivityTimeout,
+    EventLimit,
+}
+
+impl ButtonInteractionStopReason {
+    fn wire_value(self) -> &'static str {
+        match self {
+            Self::InactivityTimeout => "inactivity_timeout",
+            Self::EventLimit => "event_limit",
+        }
+    }
 }
 
 impl ButtonGestureEvent {
@@ -404,15 +420,18 @@ fn add_button_interaction_result(
     mut value: Value,
     events: &[ButtonGestureEvent],
     session_started: Instant,
+    stop_reason: ButtonInteractionStopReason,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let result = value
         .get_mut("result")
         .and_then(Value::as_object_mut)
         .ok_or("RAM button response is missing result object")?;
-    let detail = if events.is_empty() {
-        "buttons_interactive_timeout"
-    } else {
-        "buttons_interactive_complete"
+    let detail = match stop_reason {
+        ButtonInteractionStopReason::EventLimit => "buttons_interactive_event_limit",
+        ButtonInteractionStopReason::InactivityTimeout if events.is_empty() => {
+            "buttons_interactive_timeout"
+        }
+        ButtonInteractionStopReason::InactivityTimeout => "buttons_interactive_complete",
     };
     result.insert("detail".to_string(), Value::String(detail.to_string()));
     result.insert(
@@ -420,6 +439,7 @@ fn add_button_interaction_result(
         serde_json::json!({
             "timeoutSeconds": BUTTON_INTERACTIVE_TIMEOUT.as_secs(),
             "inactivityTimeoutSeconds": BUTTON_INTERACTIVE_TIMEOUT.as_secs(),
+            "stopReason": stop_reason.wire_value(),
             "events": events.iter().copied().map(|event| button_event_value(event, session_started)).collect::<Vec<_>>(),
         }),
     );
@@ -442,6 +462,7 @@ fn run_interactive_buttons(
     let mut events = Vec::new();
     let mut latest = None;
     let mut previous_snapshot: Option<ButtonSnapshot> = None;
+    let mut stop_reason = ButtonInteractionStopReason::InactivityTimeout;
     while Instant::now() < inactivity_deadline {
         ensure_ram_target(port, &session.usb_identity)?;
         let value = match send_ram_request_until(
@@ -455,6 +476,7 @@ fn run_interactive_buttons(
             Err(error) => return Err(error),
         };
         let snapshot = button_snapshot(&value)?;
+        latest = Some(value);
         let observed_at = Instant::now();
         let observed_events = tracker.observe(snapshot, observed_at);
         let button_activity =
@@ -466,17 +488,29 @@ fn run_interactive_buttons(
         for event in observed_events {
             print_button_event(event, session_started);
             events.push(event);
+            if events.len() >= BUTTON_MAX_EVENTS {
+                stop_reason = ButtonInteractionStopReason::EventLimit;
+                break;
+            }
         }
-        latest = Some(value);
+        if stop_reason == ButtonInteractionStopReason::EventLimit {
+            break;
+        }
         std::thread::sleep(BUTTON_SAMPLE_INTERVAL);
     }
-    let finished_at = Instant::now();
-    for event in tracker.flush(finished_at) {
-        print_button_event(event, session_started);
-        events.push(event);
+    if stop_reason == ButtonInteractionStopReason::InactivityTimeout {
+        let finished_at = Instant::now();
+        for event in tracker.flush(finished_at) {
+            print_button_event(event, session_started);
+            events.push(event);
+            if events.len() >= BUTTON_MAX_EVENTS {
+                stop_reason = ButtonInteractionStopReason::EventLimit;
+                break;
+            }
+        }
     }
     let latest = latest.ok_or("RAM button interaction did not receive a sample")?;
-    add_button_interaction_result(latest, &events, session_started)
+    add_button_interaction_result(latest, &events, session_started, stop_reason)
 }
 
 fn exit_ram(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -1350,7 +1384,10 @@ fn validate_button_result(result: &serde_json::Map<String, Value>) -> Result<(),
     let detail = require_result_string(result, "detail")?;
     if !matches!(
         detail,
-        "buttons_read_only_ready" | "buttons_interactive_complete" | "buttons_interactive_timeout"
+        "buttons_read_only_ready"
+            | "buttons_interactive_complete"
+            | "buttons_interactive_timeout"
+            | "buttons_interactive_event_limit"
     ) {
         return Err(format!(
             "result.detail must identify a button sample or interactive session, got {detail:?}"
@@ -1378,6 +1415,22 @@ fn validate_button_result(result: &serde_json::Map<String, Value>) -> Result<(),
         {
             return Err(format!("result.interaction.{field} must be 30"));
         }
+    }
+    let stop_reason = interaction
+        .get("stopReason")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "result.interaction.stopReason must be a non-empty string".to_string())?;
+    let expected_stop_reason = match detail {
+        "buttons_interactive_event_limit" => ButtonInteractionStopReason::EventLimit.wire_value(),
+        "buttons_interactive_complete" | "buttons_interactive_timeout" => {
+            ButtonInteractionStopReason::InactivityTimeout.wire_value()
+        }
+        _ => return Err("result.detail is not an interactive button result".to_string()),
+    };
+    if stop_reason != expected_stop_reason {
+        return Err(format!(
+            "result.interaction.stopReason must be {expected_stop_reason:?} for {detail:?}"
+        ));
     }
     let events = interaction
         .get("events")
@@ -1744,6 +1797,7 @@ mod tests {
                 "interaction": {
                     "timeoutSeconds": 30,
                     "inactivityTimeoutSeconds": 30,
+                    "stopReason": "inactivity_timeout",
                     "events": [],
                 },
             },
@@ -1770,6 +1824,7 @@ mod tests {
                 "interaction": {
                     "timeoutSeconds": 30,
                     "inactivityTimeoutSeconds": 30,
+                    "stopReason": "inactivity_timeout",
                     "events": [{
                         "key": "center",
                         "gesture": "short_press",
@@ -1782,6 +1837,10 @@ mod tests {
         value["result"]["interaction"]["events"][0]["elapsedMs"] = serde_json::json!(1250u64);
         value["result"]["interaction"]["events"][0]["triggeredAtUnixMs"] =
             serde_json::json!(1790000000123u64);
+        assert!(validate_ram_success_response(&value, "test_buttons").is_ok());
+
+        value["result"]["detail"] = serde_json::json!("buttons_interactive_event_limit");
+        value["result"]["interaction"]["stopReason"] = serde_json::json!("event_limit");
         assert!(validate_ram_success_response(&value, "test_buttons").is_ok());
     }
 

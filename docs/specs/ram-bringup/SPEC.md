@@ -52,9 +52,11 @@ RGB, buzzer, and fan paths.
   its session-relative `elapsedMs` and wall-clock `triggeredAtUnixMs`, alongside
   the key, gesture, and effect. ADC responses include the VIN and RTD samples;
   I2C responses include the allowlisted address, register, and returned byte.
-  The CLI
-  validates these required fields before accepting a response and shows them
-  instead of reducing every successful response to `OK`.
+  The CLI validates these required fields before accepting a response and shows
+  them instead of reducing every successful response to `OK`. To keep a noisy
+  or faulty input bounded, the host caps one session at 1024 reported events
+  and returns `buttons_interactive_event_limit` with `stopReason=event_limit`
+  when that safety limit is reached.
 - `preview display` uses the pinned GC9D01 `panel_160x50` initialization,
   including the display-on command and the physical column `15..64`, row
   `0..159` window. It turns on the active-low backlight and displays the
