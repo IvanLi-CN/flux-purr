@@ -34,5 +34,7 @@ and safety fields confirming `heater=off`, `pd=untouched`, and
 readback value, and the CLI displays those fields. `preview status-light` plays
 an approximately 8-second PWM breathing rainbow before returning the RGB LED
 to off. `ram-run test buttons` prints a ready prompt, recognizes short press,
-long press, and double click gestures for 30 seconds, and reports each key and
-effect before returning the final interaction evidence.
+long press, and double click gestures, and ends after 30 seconds with no
+recognized event. That inactivity timer resets after every button event; each
+event includes its `elapsedMs` and `triggeredAtUnixMs` values in the final
+evidence.

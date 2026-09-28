@@ -172,9 +172,20 @@ struct ButtonSnapshot {
 struct ButtonGestureEvent {
     key: &'static str,
     gesture: &'static str,
+    triggered_at: Instant,
+    triggered_at_unix_ms: u64,
 }
 
 impl ButtonGestureEvent {
+    fn new(key: &'static str, gesture: &'static str, now: Instant) -> Self {
+        Self {
+            key,
+            gesture,
+            triggered_at: now,
+            triggered_at_unix_ms: current_unix_millis(),
+        }
+    }
+
     fn effect(self) -> &'static str {
         match self.gesture {
             "short_press" => "success",
@@ -226,10 +237,11 @@ impl ButtonGestureTracker {
         if !Self::long_press_due(state, now) {
             return;
         }
-        events.push(ButtonGestureEvent {
-            key: BUTTON_NAMES[index],
-            gesture: "long_press",
-        });
+        events.push(ButtonGestureEvent::new(
+            BUTTON_NAMES[index],
+            "long_press",
+            now,
+        ));
         state.long_reported = true;
         state.pending_short_at = None;
     }
@@ -258,17 +270,19 @@ impl ButtonGestureTracker {
         } else {
             match state.pending_short_at {
                 Some(pending) if now.duration_since(pending) <= BUTTON_DOUBLE_CLICK => {
-                    events.push(ButtonGestureEvent {
-                        key: BUTTON_NAMES[index],
-                        gesture: "double_click",
-                    });
+                    events.push(ButtonGestureEvent::new(
+                        BUTTON_NAMES[index],
+                        "double_click",
+                        now,
+                    ));
                     state.pending_short_at = None;
                 }
                 Some(_) => {
-                    events.push(ButtonGestureEvent {
-                        key: BUTTON_NAMES[index],
-                        gesture: "short_press",
-                    });
+                    events.push(ButtonGestureEvent::new(
+                        BUTTON_NAMES[index],
+                        "short_press",
+                        now,
+                    ));
                     state.pending_short_at = Some(now);
                 }
                 None => state.pending_short_at = Some(now),
@@ -287,10 +301,11 @@ impl ButtonGestureTracker {
         if !Self::short_press_due(state, now) {
             return;
         }
-        events.push(ButtonGestureEvent {
-            key: BUTTON_NAMES[index],
-            gesture: "short_press",
-        });
+        events.push(ButtonGestureEvent::new(
+            BUTTON_NAMES[index],
+            "short_press",
+            now,
+        ));
         state.pending_short_at = None;
     }
 
@@ -308,19 +323,20 @@ impl ButtonGestureTracker {
         now: Instant,
     ) -> Option<ButtonGestureEvent> {
         if !state.pressed {
-            return state.pending_short_at.take().map(|_| ButtonGestureEvent {
-                key: BUTTON_NAMES[index],
-                gesture: "short_press",
-            });
+            return state
+                .pending_short_at
+                .take()
+                .map(|_| ButtonGestureEvent::new(BUTTON_NAMES[index], "short_press", now));
         }
         if !Self::long_press_due(state, now) {
             return None;
         }
         state.long_reported = true;
-        Some(ButtonGestureEvent {
-            key: BUTTON_NAMES[index],
-            gesture: "long_press",
-        })
+        Some(ButtonGestureEvent::new(
+            BUTTON_NAMES[index],
+            "long_press",
+            now,
+        ))
     }
 
     fn long_press_due(state: &ButtonKeyState, now: Instant) -> bool {
@@ -355,26 +371,39 @@ fn button_snapshot(
     Ok(ButtonSnapshot { pressed })
 }
 
-fn print_button_event(event: ButtonGestureEvent) {
+fn print_button_event(event: ButtonGestureEvent, session_started: Instant) {
+    let elapsed_ms = event
+        .triggered_at
+        .saturating_duration_since(session_started)
+        .as_millis();
     eprintln!(
-        "RAM BUTTON EVENT key={} gesture={} effect={}",
+        "RAM BUTTON EVENT at=+{}ms unixMs={} key={} gesture={} effect={}",
+        elapsed_ms,
+        event.triggered_at_unix_ms,
         event.key,
         event.gesture,
         event.effect()
     );
 }
 
-fn button_event_value(event: ButtonGestureEvent) -> Value {
+fn button_event_value(event: ButtonGestureEvent, session_started: Instant) -> Value {
+    let elapsed_ms = event
+        .triggered_at
+        .saturating_duration_since(session_started)
+        .as_millis();
     serde_json::json!({
         "key": event.key,
         "gesture": event.gesture,
         "effect": event.effect(),
+        "elapsedMs": elapsed_ms,
+        "triggeredAtUnixMs": event.triggered_at_unix_ms,
     })
 }
 
 fn add_button_interaction_result(
     mut value: Value,
     events: &[ButtonGestureEvent],
+    session_started: Instant,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let result = value
         .get_mut("result")
@@ -390,7 +419,8 @@ fn add_button_interaction_result(
         "interaction".to_string(),
         serde_json::json!({
             "timeoutSeconds": BUTTON_INTERACTIVE_TIMEOUT.as_secs(),
-            "events": events.iter().copied().map(button_event_value).collect::<Vec<_>>(),
+            "inactivityTimeoutSeconds": BUTTON_INTERACTIVE_TIMEOUT.as_secs(),
+            "events": events.iter().copied().map(|event| button_event_value(event, session_started)).collect::<Vec<_>>(),
         }),
     );
     Ok(value)
@@ -402,36 +432,51 @@ fn run_interactive_buttons(
     reload: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let mut session = open_ram_session(port, elf, reload, "test_buttons")?;
+    let session_started = Instant::now();
     eprintln!(
-        "RAM BUTTONS READY: short press, long press, or double click any key within {} seconds; no input ends the test automatically.",
+        "RAM BUTTONS READY: short press, long press, or double click any key; the inactivity timeout is {} seconds after the last button event.",
         BUTTON_INTERACTIVE_TIMEOUT.as_secs()
     );
-    let deadline = Instant::now() + BUTTON_INTERACTIVE_TIMEOUT;
+    let mut inactivity_deadline = session_started + BUTTON_INTERACTIVE_TIMEOUT;
     let mut tracker = ButtonGestureTracker::default();
     let mut events = Vec::new();
     let mut latest = None;
-    while Instant::now() < deadline {
+    let mut previous_snapshot: Option<ButtonSnapshot> = None;
+    while Instant::now() < inactivity_deadline {
         ensure_ram_target(port, &session.usb_identity)?;
-        let value =
-            match send_ram_request_until(&mut session.serial, "test_buttons", None, deadline) {
-                Ok(value) => value,
-                Err(_error) if Instant::now() >= deadline => break,
-                Err(error) => return Err(error),
-            };
+        let value = match send_ram_request_until(
+            &mut session.serial,
+            "test_buttons",
+            None,
+            inactivity_deadline,
+        ) {
+            Ok(value) => value,
+            Err(_error) if Instant::now() >= inactivity_deadline => break,
+            Err(error) => return Err(error),
+        };
         let snapshot = button_snapshot(&value)?;
-        for event in tracker.observe(snapshot, Instant::now()) {
-            print_button_event(event);
+        let observed_at = Instant::now();
+        let observed_events = tracker.observe(snapshot, observed_at);
+        let button_activity =
+            previous_snapshot.is_some_and(|previous| previous.pressed != snapshot.pressed);
+        if button_activity || !observed_events.is_empty() {
+            inactivity_deadline = observed_at + BUTTON_INTERACTIVE_TIMEOUT;
+        }
+        previous_snapshot = Some(snapshot);
+        for event in observed_events {
+            print_button_event(event, session_started);
             events.push(event);
         }
         latest = Some(value);
         std::thread::sleep(BUTTON_SAMPLE_INTERVAL);
     }
-    for event in tracker.flush(Instant::now()) {
-        print_button_event(event);
+    let finished_at = Instant::now();
+    for event in tracker.flush(finished_at) {
+        print_button_event(event, session_started);
         events.push(event);
     }
     let latest = latest.ok_or("RAM button interaction did not receive a sample")?;
-    add_button_interaction_result(latest, &events)
+    add_button_interaction_result(latest, &events, session_started)
 }
 
 fn exit_ram(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -1327,17 +1372,46 @@ fn validate_button_result(result: &serde_json::Map<String, Value>) -> Result<(),
         .get("interaction")
         .and_then(Value::as_object)
         .ok_or_else(|| "result.interaction must be an object".to_string())?;
-    if interaction.get("timeoutSeconds").and_then(Value::as_u64)
-        != Some(BUTTON_INTERACTIVE_TIMEOUT.as_secs())
-    {
-        return Err("result.interaction.timeoutSeconds must be 30".to_string());
+    for field in ["timeoutSeconds", "inactivityTimeoutSeconds"] {
+        if interaction.get(field).and_then(Value::as_u64)
+            != Some(BUTTON_INTERACTIVE_TIMEOUT.as_secs())
+        {
+            return Err(format!("result.interaction.{field} must be 30"));
+        }
     }
-    if interaction
+    let events = interaction
         .get("events")
         .and_then(Value::as_array)
-        .is_none()
-    {
-        return Err("result.interaction.events must be an array".to_string());
+        .ok_or_else(|| "result.interaction.events must be an array".to_string())?;
+    for (index, event) in events.iter().enumerate() {
+        let event = event
+            .as_object()
+            .ok_or_else(|| format!("result.interaction.events[{index}] must be an object"))?;
+        for field in ["key", "gesture", "effect"] {
+            if event
+                .get(field)
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                return Err(format!(
+                    "result.interaction.events[{index}].{field} must be a non-empty string"
+                ));
+            }
+        }
+        if event.get("elapsedMs").and_then(Value::as_u64).is_none() {
+            return Err(format!(
+                "result.interaction.events[{index}].elapsedMs must be a non-negative integer"
+            ));
+        }
+        if event
+            .get("triggeredAtUnixMs")
+            .and_then(Value::as_u64)
+            .is_none()
+        {
+            return Err(format!(
+                "result.interaction.events[{index}].triggeredAtUnixMs must be a non-negative integer"
+            ));
+        }
     }
     Ok(())
 }
@@ -1598,6 +1672,11 @@ mod tests {
             start + Duration::from_millis(500),
         );
         assert_eq!(short_events[0].gesture, "short_press");
+        assert_eq!(
+            short_events[0].triggered_at,
+            start + Duration::from_millis(500)
+        );
+        assert!(short_events[0].triggered_at_unix_ms > 0);
 
         let mut long = ButtonGestureTracker::default();
         long.observe(
@@ -1640,10 +1719,14 @@ mod tests {
             start + Duration::from_millis(300),
         );
         assert_eq!(double_events[0].gesture, "double_click");
+        assert_eq!(
+            double_events[0].triggered_at,
+            start + Duration::from_millis(300)
+        );
     }
 
     #[test]
-    fn interactive_button_result_requires_a_30_second_event_window() {
+    fn interactive_button_result_requires_a_30_second_inactivity_window() {
         let value = serde_json::json!({
             "ok": true,
             "result": {
@@ -1660,10 +1743,45 @@ mod tests {
                 },
                 "interaction": {
                     "timeoutSeconds": 30,
+                    "inactivityTimeoutSeconds": 30,
                     "events": [],
                 },
             },
         });
+        assert!(validate_ram_success_response(&value, "test_buttons").is_ok());
+    }
+
+    #[test]
+    fn interactive_button_events_require_trigger_times() {
+        let mut value = serde_json::json!({
+            "ok": true,
+            "result": {
+                "detail": "buttons_interactive_complete",
+                "heater": "off",
+                "pd": "untouched",
+                "eeprom": "untouched",
+                "buttons": {
+                    "center": false,
+                    "right": false,
+                    "down": false,
+                    "left": false,
+                    "up": false,
+                },
+                "interaction": {
+                    "timeoutSeconds": 30,
+                    "inactivityTimeoutSeconds": 30,
+                    "events": [{
+                        "key": "center",
+                        "gesture": "short_press",
+                        "effect": "success",
+                    }],
+                },
+            },
+        });
+        assert!(validate_ram_success_response(&value, "test_buttons").is_err());
+        value["result"]["interaction"]["events"][0]["elapsedMs"] = serde_json::json!(1250u64);
+        value["result"]["interaction"]["events"][0]["triggeredAtUnixMs"] =
+            serde_json::json!(1790000000123u64);
         assert!(validate_ram_success_response(&value, "test_buttons").is_ok());
     }
 

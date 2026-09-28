@@ -12,10 +12,12 @@
   the LED to the safe-off state. The host CLI renders the returned detail,
   safety fields, and diagnostic samples instead of printing a generic success
   token.
-- The interactive button test keeps one verified RAM serial session for a
-  bounded 30-second polling window. The host recognizes short-press,
-  long-press, and double-click gestures from the typed five-key snapshots and
-  prints each key/effect event before returning the final evidence envelope.
+- The interactive button test keeps one verified RAM serial session and polls
+  until 30 seconds have elapsed without a button event. The host
+  recognizes short-press, long-press, and double-click gestures from the typed
+  five-key snapshots, resets the inactivity timer after each button event, and
+  prints each event with its session-relative and Unix-millisecond trigger times
+  before returning the final evidence envelope.
 - The bounded `test_fan` action drives GPIO35 as the fan enable and GPIO36
   through MCPWM operator 0 at 25 kHz before returning both outputs to safe
   off; the product fan-voltage feedback contract is exercised without changing

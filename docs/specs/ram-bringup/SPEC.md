@@ -26,10 +26,10 @@ RGB, buzzer, and fan paths.
   causes the CLI to choose a replacement.
 - ESP32-S3 USB Serial/JTAG targets must expose a stable USB VID/PID and serial
   number. `ram-run` captures that identity and rechecks it after lock
-  acquisition, before RAM load, and before each request; the 30-second
-  interactive button session performs the same check before every polling
-  request. A missing or changed identity fails closed without selecting a
-  replacement target.
+  acquisition, before RAM load, and before each request; the interactive
+  button session performs the same check before every polling request. A
+  missing or changed identity fails closed without selecting a replacement
+  target.
 - Serial process locks and in-process sessions use the same canonical port
   identity, so macOS `tty`/`cu` aliases and filesystem aliases cannot leave a
   stale session behind. Platforms without a safe lock primitive fail closed.
@@ -45,12 +45,16 @@ RGB, buzzer, and fan paths.
 - A successful response has `ok=true`, a command-specific `result.detail`, and
   explicit `heater=off`, `pd=untouched`, and `eeprom=untouched` fields. Button
   snapshots include the sampled pressed state for all five keys; the default
-  CLI button test keeps the RAM session open for a 30-second interactive window,
-  prints a ready prompt, and reports short-press, long-press, and double-click
-  gestures with the key name and effect. ADC responses include the VIN and RTD
-  samples; I2C responses include the allowlisted address, register, and returned
-  byte. The CLI validates these required fields before accepting a response and
-  shows them instead of reducing every successful response to `OK`.
+  CLI button test prints a ready prompt, recognizes short-press, long-press,
+  and double-click gestures, and ends only after 30 seconds with no recognized
+  event. The 30-second inactivity timer starts when the session is ready and
+  resets after each button state event or recognized gesture. Each event reports
+  its session-relative `elapsedMs` and wall-clock `triggeredAtUnixMs`, alongside
+  the key, gesture, and effect. ADC responses include the VIN and RTD samples;
+  I2C responses include the allowlisted address, register, and returned byte.
+  The CLI
+  validates these required fields before accepting a response and shows them
+  instead of reducing every successful response to `OK`.
 - `preview display` uses the pinned GC9D01 `panel_160x50` initialization,
   including the display-on command and the physical column `15..64`, row
   `0..159` window. It turns on the active-low backlight and displays the

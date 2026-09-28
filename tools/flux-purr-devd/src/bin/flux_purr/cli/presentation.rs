@@ -125,16 +125,18 @@ fn render_ram_response(
                         let key = event.get("key").and_then(Value::as_str)?;
                         let gesture = event.get("gesture").and_then(Value::as_str)?;
                         let effect = event.get("effect").and_then(Value::as_str)?;
-                        Some(format!("{key}:{gesture}:{effect}"))
+                        let elapsed_ms = event.get("elapsedMs").and_then(Value::as_u64)?;
+                        Some(format!("{key}:{gesture}:{effect}@+{elapsed_ms}ms"))
                     })
                     .collect::<Vec<_>>()
                     .join(",")
             })
             .unwrap_or_default();
         output.push_str(&format!(
-            " interaction=timeout:{}s events=[{}]",
+            " interaction=inactivity_timeout:{}s events=[{}]",
             interaction
-                .get("timeoutSeconds")
+                .get("inactivityTimeoutSeconds")
+                .or_else(|| interaction.get("timeoutSeconds"))
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
             events
