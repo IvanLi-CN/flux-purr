@@ -2294,6 +2294,12 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
         );
         if tuning_disarmed {
             state.ui_state.heater_enabled = false;
+            if !state.thermal_tuning.armed
+                && state.thermal_tuning.terminal_disposition
+                    == flux_purr_firmware::thermal_tuning::ThermalTuningTerminalDisposition::Failed
+            {
+                state.thermal_control_profile_preview = None;
+            }
             needs_redraw |=
                 runtime_force_heater_safe_off(state, active_thermal_settings, elapsed_ms).await;
         }
@@ -2334,6 +2340,7 @@ fn runtime_apply_pending_tuning_preview(state: &mut RuntimeLoopState) {
         state
             .thermal_tuning
             .fail("preview_update_outside_trial_boundary");
+        state.thermal_control_profile_preview = None;
         state.ui_state.heater_enabled = false;
     } else if let Some(profile) = state.thermal_tuning.candidate_profile.as_ref() {
         state.thermal_control_profile_preview = ThermalControlProfile::from_saved_config(profile);
@@ -2345,6 +2352,7 @@ fn runtime_apply_pending_tuning_preview(state: &mut RuntimeLoopState) {
         }
     } else {
         state.thermal_tuning.fail("candidate_profile_missing");
+        state.thermal_control_profile_preview = None;
         state.ui_state.heater_enabled = false;
     }
 }

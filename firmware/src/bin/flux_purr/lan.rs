@@ -1091,11 +1091,14 @@ pub(crate) async fn process_thermal_tuning_frame(
         ThermalTuningCommandOp::Cancel => {
             let result = context.thermal_tuning.cancel("host_cancel");
             context.ui_state.heater_enabled = false;
+            if result.is_ok() {
+                *context.thermal_control_profile_preview = None;
+            }
             let response = match result {
                 Ok(()) => usb_response(
                     request_id,
                     UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(
-                        context, None,
+                        context, None, false,
                     ))),
                 ),
                 Err(error) => usb_error_response(
@@ -1113,7 +1116,7 @@ pub(crate) async fn process_thermal_tuning_frame(
                     usb_response(
                         request_id,
                         UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(
-                            context, None,
+                            context, None, false,
                         ))),
                     )
                 }
@@ -1221,7 +1224,9 @@ fn process_thermal_tuning_start(
             context.ui_state.heater_enabled = false;
             usb_response(
                 request_id,
-                UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(context, None))),
+                UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(
+                    context, None, true,
+                ))),
             )
         }
         Err(error) => {
@@ -1375,7 +1380,9 @@ async fn persist_thermal_tuning_candidate(
     match completed {
         Ok(_) => usb_response(
             request_id,
-            UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(context, None))),
+            UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(
+                context, None, false,
+            ))),
         ),
         Err(error) => {
             context.thermal_tuning.fail("save_receipt_missing");
@@ -1417,6 +1424,7 @@ fn process_thermal_tuning_read(
             UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(
                 context,
                 after_sequence,
+                false,
             ))),
         ),
     )
@@ -1426,6 +1434,7 @@ fn process_thermal_tuning_read(
 fn thermal_tuning_status(
     context: &mut ControlLineContext<'_, '_, '_>,
     after_sequence: Option<u32>,
+    include_profile_with_events: bool,
 ) -> flux_purr_firmware::control_plane::ThermalTuningStatusWire {
     let mut pps_control_policy_version = heapless::String::<32>::new();
     let _ = pps_control_policy_version.push_str("hold-pps-governor-v1");
@@ -1439,6 +1448,11 @@ fn thermal_tuning_status(
     };
     let runtime = &mut *context.thermal_tuning;
     let events = runtime.events_after(after_sequence);
+    let candidate_profile = if include_profile_with_events || events.events.is_empty() {
+        runtime.candidate_profile.map(Into::into)
+    } else {
+        None
+    };
     flux_purr_firmware::control_plane::ThermalTuningStatusWire {
         phase: runtime.phase,
         trial_purpose: runtime.trial_purpose,
@@ -1463,7 +1477,7 @@ fn thermal_tuning_status(
         armed: runtime.armed,
         sealed: runtime.sealed,
         save_confirmed: runtime.save_confirmed,
-        candidate_profile: runtime.candidate_profile.map(Into::into),
+        candidate_profile,
         preview_receipt: runtime.preview_receipt.clone(),
         trace: events.trace.clone(),
         events,
