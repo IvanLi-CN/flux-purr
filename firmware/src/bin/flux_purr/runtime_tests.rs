@@ -11523,6 +11523,7 @@ fn stale_reject_or_wait_cannot_settle_a_request_and_a_valid_rejection_stays_latc
     for message_type in [4, 12] {
         for wait_for_ps_rdy in [false, true] {
             let mut policy = fusb302b::SinkPolicy::new(12_000, 5_000);
+            let mut rejection = PdRequestRejection::new();
             let pps_5a = 0xc1a4_3264;
             assert!(
                 policy
@@ -11539,9 +11540,9 @@ fn stale_reject_or_wait_cannot_settle_a_request_and_a_valid_rejection_stays_latc
             let phase_before = policy.phase();
             let stale =
                 policy.on_control_message_with_message_id(message_type, Some(last_message_id), 2);
-            let rejected =
-                request_rejected_after_control_response(false, phase_before, message_type, stale);
-            assert!(!rejected);
+            rejection.observe_control_response(phase_before, message_type, stale);
+            assert!(!rejection.observed());
+            assert!(rejection.continues_burst(true));
             assert_eq!(policy.phase(), phase_before);
 
             let accepted = policy.on_control_message_with_message_id(
@@ -11549,22 +11550,66 @@ fn stale_reject_or_wait_cannot_settle_a_request_and_a_valid_rejection_stays_latc
                 Some(last_message_id + 1),
                 3,
             );
-            let rejected = request_rejected_after_control_response(
-                rejected,
-                phase_before,
-                message_type,
-                accepted,
-            );
-            assert!(rejected);
+            rejection.observe_control_response(phase_before, message_type, accepted);
+            assert!(rejection.observed());
+            assert!(!rejection.continues_burst(true));
             assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
-            assert!(request_rejected_after_control_response(
-                rejected,
-                policy.phase(),
-                3,
-                true
-            ));
+            rejection.observe_control_response(policy.phase(), 3, true);
+            assert!(rejection.observed());
         }
     }
+    assert!(!PdRequestRejection::new().continues_burst(false));
+}
+
+#[test]
+fn fresh_rejection_defers_queued_capabilities_before_another_request() {
+    let pps_5a = 0xc1a4_3264;
+    let mut policy = fusb302b::SinkPolicy::new(12_000, 5_000);
+    let mut rejection = PdRequestRejection::new();
+    assert!(
+        policy
+            .on_source_capabilities_with_message_id(&[pps_5a], Some(0))
+            .is_some()
+    );
+    let phase_before = policy.phase();
+    let fresh_rejection = policy.on_control_message_with_message_id(12, Some(1), 1);
+    rejection.observe_control_response(phase_before, 12, fresh_rejection);
+    assert!(rejection.observed());
+    assert!(!rejection.continues_burst(true));
+    assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+
+    // The queued capabilities are processed only after the rejection turn ends.
+    rejection.clear();
+    assert!(!rejection.observed());
+    assert!(rejection.continues_burst(true));
+    assert!(
+        policy
+            .on_source_capabilities_with_message_id(&[pps_5a], Some(2))
+            .is_some()
+    );
+    assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+}
+
+#[test]
+fn pps_keepalive_rejection_does_not_end_a_ready_receive_burst() {
+    let pps_5a = 0xc1a4_3264;
+    let mut policy = fusb302b::SinkPolicy::new(12_000, 5_000);
+    let mut rejection = PdRequestRejection::new();
+    assert!(
+        policy
+            .on_source_capabilities_with_message_id(&[pps_5a], Some(0))
+            .is_some()
+    );
+    assert!(policy.on_control_message_with_message_id(3, Some(1), 1));
+    assert!(policy.on_control_message_with_message_id(6, Some(2), 2));
+    assert_eq!(policy.phase(), SinkPhase::Ready);
+
+    let phase_before = policy.phase();
+    let response_accepted = policy.on_control_message_with_message_id(12, Some(3), 3);
+    rejection.observe_control_response(phase_before, 12, response_accepted);
+    assert!(!rejection.observed());
+    assert!(rejection.continues_burst(true));
+    assert_eq!(policy.phase(), SinkPhase::Ready);
 }
 
 #[test]
