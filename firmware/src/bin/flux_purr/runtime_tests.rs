@@ -189,21 +189,24 @@ fn runtime_pd_snapshot_refreshes_after_display_consumes_a_notification() {
 }
 
 #[test]
-fn pd_service_is_owned_by_an_independent_normal_task() {
+fn pd_service_preempts_lower_priority_application_work() {
     let source = RUNTIME_IMPLEMENTATION;
     let support = include_str!("support.rs");
     let pd_service = include_str!("pd_service.rs");
     let runtime_loop = include_str!("runtime_loop.rs");
+    let boot = include_str!("boot.rs");
 
     assert!(
         pd_service.contains("#[embassy_executor::task]\nasync fn pd_service_task"),
         "PD policy must have a dedicated Embassy task"
     );
     assert!(
-        !source.contains("PD_REALTIME_EXECUTOR")
-            && !source.contains("software_interrupt2")
-            && !source.contains("Priority::Priority3"),
-        "the full PD protocol must not run in an interrupt executor"
+        boot.contains("InterruptExecutor::new(software_interrupts.software_interrupt2)")
+            && boot.contains("pd_realtime_executor.start(Priority::Priority3)")
+            && boot.contains("buzzer_realtime_executor.start(Priority::Priority2)")
+            && pd_service.contains("PD_REALTIME_EXECUTOR_STORAGE")
+            && pd_service.contains("spawn_pd_service(\n    spawner: embassy_executor::SendSpawner"),
+        "PD protocol must preempt ordinary work and the priority-2 buzzer"
     );
     assert!(
         pd_service
@@ -214,8 +217,9 @@ fn pd_service_is_owned_by_an_independent_normal_task() {
     assert!(
         !pd_service.contains("PD_SERVICE_TICK_SIGNAL")
             && !pd_service.contains("async fn run_pd_service_tick")
-            && pd_service.contains("EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await"),
-        "the PD task must own its normal-executor cadence timer"
+            && pd_service.contains("pd_service_delay_ms(")
+            && pd_service.contains("EmbassyTimer::after_millis(delay_ms).await"),
+        "the PD task must own its bounded cadence timer"
     );
     let pd_task = pd_service
         .split("async fn pd_service_task")
@@ -223,8 +227,8 @@ fn pd_service_is_owned_by_an_independent_normal_task() {
         .and_then(|source| source.split("pub(crate) fn spawn_pd_service").next())
         .expect("PD task body must remain present");
     assert!(
-        pd_task.contains("EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await"),
-        "the normal PD task must yield between bounded service turns"
+        pd_task.contains("EmbassyTimer::after_millis(delay_ms).await"),
+        "the PD task must yield between bounded service turns"
     );
     assert!(
         !source.contains("Spawner::for_current_executor")
@@ -233,16 +237,13 @@ fn pd_service_is_owned_by_an_independent_normal_task() {
             && FIRMWARE_ENTRYPOINT.contains("runtime::run(spawner).await"),
         "the main task must start PD during direct boot"
     );
-    let boot = include_str!("boot.rs");
-    let pd_service = include_str!("pd_service.rs");
     assert!(
-        !boot.contains("PD_REALTIME_EXECUTOR_STORAGE")
-            && !boot.contains("software_interrupt2")
-            && boot.contains("pub(crate) async fn initialize_boot_pd(")
-            && boot.contains("spawner: Spawner,")
-            && !pd_service.contains("PD_REALTIME_EXECUTOR_REF")
-            && !pd_service.contains("pd_realtime_spawner()"),
-        "PD service startup must use the normal executor spawner"
+        boot.contains("pub(crate) async fn initialize_boot_pd(")
+            && boot.contains("spawn_pd_service(system.pd_realtime_spawner")
+            && pd_service.contains("let bus = unsafe { &*(bus_address as *const SharedI2cBus) }")
+            && pd_service.contains("esp_hal::system::Cpu::current()")
+            && support.contains("pub(crate) fn into_bus_address(mut self) -> usize"),
+        "PD startup must keep the non-Send async bus on CPU0 while using its own executor"
     );
     assert!(
         !runtime_loop.contains("runtime_service_pd")
@@ -268,6 +269,15 @@ fn pd_service_is_owned_by_an_independent_normal_task() {
             && !support.contains("BlockingMutex<CriticalSectionRawMutex, HalI2c"),
         "shared I2C access must not wrap the bus in a blocking async adapter"
     );
+}
+
+#[test]
+fn pd_service_cadence_compensates_for_work_and_bus_contention() {
+    assert_eq!(pd_service_delay_ms(0, true), PD_SERVICE_TICK_MS);
+    assert_eq!(pd_service_delay_ms(3, true), 2);
+    assert_eq!(pd_service_delay_ms(PD_SERVICE_TICK_MS, true), 1);
+    assert_eq!(pd_service_delay_ms(20, true), 1);
+    assert_eq!(pd_service_delay_ms(0, false), PD_SERVICE_BUSY_RETRY_MS);
 }
 
 #[test]
@@ -299,7 +309,9 @@ fn pd_service_never_waits_for_the_shared_i2c_bus() {
         "PD bus acquisition must be an immediate try-lock"
     );
     assert!(
-        pd_service.contains("if i2c.try_acquire()") && pd_service.contains("i2c.release()"),
+        pd_service.contains("let acquired_bus = i2c.try_acquire()")
+            && pd_service.contains("if acquired_bus")
+            && pd_service.contains("i2c.release()"),
         "a busy EEPROM transaction must make PD skip this turn and retry later"
     );
     assert!(

@@ -1142,7 +1142,7 @@ async fn power_coordinator_task() {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) fn spawn_power_coordinator(spawner: Spawner) {
+pub(crate) fn spawn_power_coordinator(spawner: embassy_executor::SendSpawner) {
     spawner
         .spawn(power_coordinator_task())
         .expect("failed to spawn power coordinator");

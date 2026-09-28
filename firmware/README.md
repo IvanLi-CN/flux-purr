@@ -124,7 +124,7 @@
   - the production artifact targets `FUSB302BMPX`; it performs two stable Device ID reads plus a readable status-bank check before selecting the controller
   - accepted FUSB302 Device ID forms (`0x8x`, including the observed `0x81`, and `0x9x`) use one shared PPS/PD 3.0 policy path; the identity check only rejects invalid or colliding I2C responders
   - an unreadable, conflicting, or unsupported identity becomes `unknown`; no CH224Q probe, guessed PD write, or startup wait is performed
-  - PD negotiation runs in a dedicated normal-executor Embassy task. The task owns its `5ms` cadence timer, FUSB302B policy, and physical PD I2C transactions; it processes at most one mailbox request before each poll and publishes snapshots. The Front Panel task never polls or mutates PD state. `Accept + PS_RDY` is required before a contract is usable, and it never arms heating automatically
+  - PD negotiation runs in a priority-3 software-interrupt executor, above the priority-2 buzzer and ordinary Front Panel work. Its Embassy task compensates for bounded turn duration to target a `5ms` start-to-start cadence and retries a busy I2C bus after `1ms`; it processes at most one mailbox request before each poll and publishes snapshots. The Front Panel task never polls or mutates PD state. `Accept + PS_RDY` is required before a contract is usable, and it never arms heating automatically
   - until the contract is ready, the Dashboard shows `POWER/WAIT` with real sensor data while GPIO47 remains at `0%`
 - Historical `fan-cycle` smoke-test behavior remains documented in `s3-fan-cycle-bringup`; it is no longer the active runtime contract for the default `flux-purr` artifact.
 

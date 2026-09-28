@@ -342,6 +342,11 @@ impl<'a> PdI2c<'a> {
         self.guard = None;
     }
 
+    pub(crate) fn into_bus_address(mut self) -> usize {
+        self.release();
+        self.bus as *const SharedI2cBus as usize
+    }
+
     fn bus_mut(&mut self) -> Result<&mut HalI2c<'static, Async>, PdI2cError> {
         self.guard.as_deref_mut().ok_or(PdI2cError::BusBusy)
     }

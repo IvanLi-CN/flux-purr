@@ -203,6 +203,7 @@ pub(crate) struct BootSystem {
     pd_runtime_started_ms: u64,
     pd_contract_ready: bool,
     buzzer_realtime_spawner: embassy_executor::SendSpawner,
+    pd_realtime_spawner: embassy_executor::SendSpawner,
     eeprom_i2c: I2c<'static>,
     #[cfg(feature = "net_http")]
     shared_i2c: &'static SharedI2cBus,
@@ -1413,6 +1414,13 @@ pub(crate) fn initialize_boot_system(
         )
     };
     let buzzer_realtime_spawner = buzzer_realtime_executor.start(Priority::Priority2);
+    let pd_realtime_executor = unsafe {
+        initialize_after_software_reset(
+            core::ptr::addr_of_mut!(PD_REALTIME_EXECUTOR_STORAGE),
+            InterruptExecutor::new(software_interrupts.software_interrupt2),
+        )
+    };
+    let pd_realtime_spawner = pd_realtime_executor.start(Priority::Priority3);
     let status_light_started_ms = spawn_status_light_task(
         spawner,
         tokens.status_light_red,
@@ -1474,6 +1482,7 @@ pub(crate) fn initialize_boot_system(
             pd_runtime_started_ms: 0,
             pd_contract_ready: false,
             buzzer_realtime_spawner,
+            pd_realtime_spawner,
             eeprom_i2c,
             #[cfg(feature = "net_http")]
             shared_i2c: i2c_bus,
@@ -1500,7 +1509,7 @@ pub(crate) fn initialize_boot_system(
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-pub(crate) async fn initialize_boot_pd(spawner: Spawner, system: &mut BootSystem) {
+pub(crate) async fn initialize_boot_pd(system: &mut BootSystem) {
     rom_boot_stage(b"pd_stage_enter");
     let mut pd_task_i2c = system
         .pd_task_i2c
@@ -1547,7 +1556,7 @@ pub(crate) async fn initialize_boot_pd(spawner: Spawner, system: &mut BootSystem
                     device_id, FUSB302B_INITIAL_PPS_REQUEST_MV, MAX_HEATER_CONTRACT_MA,
                 );
                 let client = PdServiceClient::mark_starting_fusb302b();
-                spawn_pd_service(spawner, pd_task_i2c, Box::new(runtime));
+                spawn_pd_service(system.pd_realtime_spawner, pd_task_i2c, Box::new(runtime));
                 rom_boot_stage(b"pd_service_spawned");
                 client
             }
@@ -2655,7 +2664,6 @@ async fn run_boot_system_stage_task(spawner: Spawner, mut pipeline: Box<BootPipe
 async fn run_boot_pd_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline>) {
     record_boot_heartbeat();
     initialize_boot_pd(
-        spawner,
         pipeline
             .system
             .as_mut()
