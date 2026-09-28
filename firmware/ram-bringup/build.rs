@@ -56,6 +56,8 @@ fn main() {
         )
         .expect("write RAM linker script");
         println!("cargo:rustc-link-arg=-T{}", link_script.display());
+        // ESP32-S3 IRAM is intentionally both writable and executable for the RAM image.
+        println!("cargo:rustc-link-arg=-Wl,--no-warn-rwx-segments");
     }
 }
 
