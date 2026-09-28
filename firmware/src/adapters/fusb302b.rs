@@ -534,6 +534,12 @@ impl SinkPolicy {
         const REJECT: u8 = 4;
         const WAIT: u8 = 12;
 
+        if !matches!(
+            self.phase,
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy | SinkPhase::Ready
+        ) {
+            return;
+        }
         // GoodCRC echoes the Sink's message ID and is not a Source sequence
         // entry. Other fresh control messages, including PPS renewal replies
         // while Ready, must advance the Source sequence without changing the
@@ -1386,6 +1392,25 @@ mod tests {
         assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
         policy.on_control_message_with_message_id(6, Some(2), 3);
         assert_eq!(policy.phase(), SinkPhase::Ready);
+    }
+
+    #[test]
+    fn abandoned_control_response_cannot_poison_capability_rediscovery() {
+        let mut policy = SinkPolicy::new(12_000, 3_000);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(7))
+                .is_some()
+        );
+        policy.on_received_protocol_reset();
+        policy.on_control_message_with_message_id(6, Some(0), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(4))
+                .is_some()
+        );
+        assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
     }
 
     #[test]
