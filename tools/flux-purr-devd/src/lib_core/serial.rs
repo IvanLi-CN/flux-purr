@@ -989,7 +989,7 @@ pub(crate) fn serial_exchange_blocking(
         expected_usb_identity,
     } = context;
     let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
-    let deadline = Instant::now() + serial_rpc_timeout(retry_policy);
+    let deadline = Instant::now() + serial_request_timeout(retry_policy, request.len());
     let mut session = take_or_open_serial_session_with_identity(
         &mut serial_sessions,
         port_path,
@@ -1208,6 +1208,19 @@ pub(crate) fn serial_rpc_timeout(retry_policy: SerialRetryPolicy) -> Duration {
         SerialRetryPolicy::ReadOnly => SERIAL_READ_ONLY_RPC_TIMEOUT,
         SerialRetryPolicy::SingleShot => SERIAL_RPC_TIMEOUT,
     }
+}
+
+fn serial_write_timeout(request_len: usize) -> Duration {
+    if request_len > 4_096 {
+        Duration::from_secs(10)
+    } else {
+        SERIAL_WRITE_TIMEOUT
+    }
+}
+
+fn serial_request_timeout(retry_policy: SerialRetryPolicy, request_len: usize) -> Duration {
+    serial_rpc_timeout(retry_policy)
+        .max(serial_write_timeout(request_len) + Duration::from_secs(10))
 }
 
 pub(crate) fn emit_serial_log_line(
@@ -1503,13 +1516,13 @@ pub(crate) struct SerialSession {
 }
 
 pub trait SerialSessionPort: Read + Write + Send {
-    fn begin_write(&mut self) -> Result<(), HttpError>;
+    fn begin_write(&mut self, timeout: Duration) -> Result<(), HttpError>;
     fn finish_write(&mut self) -> Result<(), HttpError>;
 }
 
 impl SerialSessionPort for Box<dyn serialport::SerialPort> {
-    fn begin_write(&mut self) -> Result<(), HttpError> {
-        self.set_timeout(SERIAL_WRITE_TIMEOUT)
+    fn begin_write(&mut self, timeout: Duration) -> Result<(), HttpError> {
+        self.set_timeout(timeout)
             .map_err(serial_timeout_config_http_error)
     }
 
@@ -1554,7 +1567,7 @@ impl Write for RawUsbSerialJtagPort {
 
 #[cfg(target_os = "macos")]
 impl SerialSessionPort for RawUsbSerialJtagPort {
-    fn begin_write(&mut self) -> Result<(), HttpError> {
+    fn begin_write(&mut self, _timeout: Duration) -> Result<(), HttpError> {
         Ok(())
     }
 
@@ -2142,8 +2155,9 @@ pub(crate) fn write_serial_request(
     deadline: Instant,
 ) -> Result<(), HttpError> {
     validate_serial_request_len(request)?;
-    port.begin_write()?;
-    let write_deadline = (Instant::now() + SERIAL_WRITE_TIMEOUT).min(deadline);
+    let write_timeout = serial_write_timeout(request.len());
+    port.begin_write(write_timeout)?;
+    let write_deadline = (Instant::now() + write_timeout).min(deadline);
     let write_result = write_serial_bytes(port, request.as_bytes(), write_deadline)
         .and_then(|_| write_serial_bytes(port, b"\n", write_deadline))
         .and_then(|_| flush_serial_write(port, write_deadline));
@@ -2547,7 +2561,7 @@ mod write_tests {
     }
 
     impl SerialSessionPort for IntermittentPort {
-        fn begin_write(&mut self) -> Result<(), HttpError> {
+        fn begin_write(&mut self, _timeout: Duration) -> Result<(), HttpError> {
             Ok(())
         }
 
@@ -2565,5 +2579,19 @@ mod write_tests {
         let request = "x".repeat(5_000);
         write_serial_request(&mut port, &request, Instant::now() + Duration::from_secs(1)).unwrap();
         assert_eq!(port.written, format!("{request}\n").as_bytes());
+    }
+
+    #[test]
+    fn large_control_frames_have_a_bounded_longer_write_window() {
+        assert_eq!(serial_write_timeout(4_096), SERIAL_WRITE_TIMEOUT);
+        assert!(serial_write_timeout(5_000) > SERIAL_WRITE_TIMEOUT);
+        assert!(
+            serial_request_timeout(SerialRetryPolicy::SingleShot, 5_000)
+                >= serial_write_timeout(5_000) + Duration::from_secs(10)
+        );
+        assert_eq!(
+            serial_request_timeout(SerialRetryPolicy::SingleShot, 4_096),
+            SERIAL_RPC_TIMEOUT
+        );
     }
 }
