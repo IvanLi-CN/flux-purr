@@ -680,6 +680,22 @@ pub(crate) fn pps_keepalive_response_is_valid(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn request_rejected_after_control_response(
+    previously_rejected: bool,
+    phase_before: SinkPhase,
+    message_type: u8,
+    response_accepted: bool,
+) -> bool {
+    previously_rejected
+        || (response_accepted
+            && matches!(message_type, 4 | 12)
+            && matches!(
+                phase_before,
+                SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+            ))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn successful_contract_confirmation_clears_timeout(
     was_waiting_for_ps_rdy: bool,
     phase: SinkPhase,
@@ -1701,22 +1717,25 @@ impl Fusb302bRuntime {
     }
 
     fn handle_control_message(&mut self, message: PdPacket, now_ms: u64) {
-        let was_waiting_for_ps_rdy = self.policy.phase() == SinkPhase::WaitingForPsRdy;
+        let phase_before = self.policy.phase();
+        let was_waiting_for_ps_rdy = phase_before == SinkPhase::WaitingForPsRdy;
         let message_type = (message.header() & 0x1f) as u8;
         let message_id = Some((message.header() >> 9) as u8 & 0x07);
+        let response_accepted =
+            self.policy
+                .on_control_message_with_message_id(message_type, message_id, now_ms);
         let keepalive_response_is_valid = pps_keepalive_response_is_valid(
-            self.policy.phase(),
+            phase_before,
             self.pps_keepalive_pending_at_ms.is_some(),
             message_type,
-            self.policy.source_capabilities_message_is_fresh(message_id),
+            response_accepted,
         );
-        self.request_rejected = matches!(message_type, 4 | 12)
-            && matches!(
-                self.policy.phase(),
-                SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-            );
-        self.policy
-            .on_control_message_with_message_id(message_type, message_id, now_ms);
+        self.request_rejected = request_rejected_after_control_response(
+            self.request_rejected,
+            phase_before,
+            message_type,
+            response_accepted,
+        );
         if keepalive_response_is_valid {
             self.pps_keepalive_pending_at_ms = None;
         }

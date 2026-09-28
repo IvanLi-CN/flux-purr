@@ -11519,6 +11519,55 @@ fn pps_keepalive_deadline_requires_a_fresh_expected_control_response() {
 }
 
 #[test]
+fn stale_reject_or_wait_cannot_settle_a_request_and_a_valid_rejection_stays_latched() {
+    for message_type in [4, 12] {
+        for wait_for_ps_rdy in [false, true] {
+            let mut policy = fusb302b::SinkPolicy::new(12_000, 5_000);
+            let pps_5a = 0xc1a4_3264;
+            assert!(
+                policy
+                    .on_source_capabilities_with_message_id(&[pps_5a], Some(0))
+                    .is_some()
+            );
+            let last_message_id = if wait_for_ps_rdy {
+                assert!(policy.on_control_message_with_message_id(3, Some(1), 1));
+                assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+                1
+            } else {
+                0
+            };
+            let phase_before = policy.phase();
+            let stale =
+                policy.on_control_message_with_message_id(message_type, Some(last_message_id), 2);
+            let rejected =
+                request_rejected_after_control_response(false, phase_before, message_type, stale);
+            assert!(!rejected);
+            assert_eq!(policy.phase(), phase_before);
+
+            let accepted = policy.on_control_message_with_message_id(
+                message_type,
+                Some(last_message_id + 1),
+                3,
+            );
+            let rejected = request_rejected_after_control_response(
+                rejected,
+                phase_before,
+                message_type,
+                accepted,
+            );
+            assert!(rejected);
+            assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+            assert!(request_rejected_after_control_response(
+                rejected,
+                policy.phase(),
+                3,
+                true
+            ));
+        }
+    }
+}
+
+#[test]
 fn successful_contract_confirmation_clears_a_previous_timeout_marker() {
     assert!(successful_contract_confirmation_clears_timeout(
         true,
