@@ -1823,68 +1823,78 @@ impl Fusb302bRuntime {
         now_ms: u64,
     ) -> bool {
         for _ in 0..FUSB302B_RX_BURST_LIMIT {
-            let (event, status0) =
-                match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending).await {
-                    Ok(observation) => observation,
-                    Err(fault) => {
-                        let protocol_fault = match fault {
-                            Fusb302bReceiveFault::InterruptRead(i2c_error) => {
-                                self.record_i2c_error(i2c_error);
-                                FUSB302B_PROTOCOL_FAULT_READ_INTERRUPTS_IO
-                            }
-                            Fusb302bReceiveFault::StatusRead(i2c_error) => {
-                                self.record_i2c_error(i2c_error);
-                                FUSB302B_PROTOCOL_FAULT_READ_STATUS_IO
-                            }
-                            Fusb302bReceiveFault::ReceiveFifoFlush => {
-                                FUSB302B_PROTOCOL_FAULT_RX_FIFO_FLUSH_IO
-                            }
-                            Fusb302bReceiveFault::PacketReceive(i2c_error) => {
-                                self.record_i2c_error(i2c_error);
-                                FUSB302B_PROTOCOL_FAULT_RECEIVE_PACKET_IO
-                            }
-                        };
-                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
-                        let recovered = self
-                            .recover_transient_transport_fault(
-                                i2c,
-                                fusb302b::TransientTransportFault::ReceiveIoError,
-                                now,
-                            )
-                            .await;
-                        self.record_protocol_fault(protocol_fault);
-                        return recovered;
-                    }
-                };
-            self.vbus_status_raw = status0;
-            self.vbus_status_observed = !matches!(event, Fusb302bReceiveEvent::VbusLow { .. });
-            let received_message = matches!(event, Fusb302bReceiveEvent::Message(_));
-            let result = match event {
-                Fusb302bReceiveEvent::VbusLow { transition } => {
-                    self.handle_vbus_low_event(i2c, now_ms, transition).await
-                }
-                Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent } => {
-                    self.handle_empty_event(i2c, now, now_ms, tx_sent, gcrc_sent)
-                        .await
-                }
-                Fusb302bReceiveEvent::Partial { tx_sent, gcrc_sent } => {
-                    self.handle_partial_event(i2c, now, now_ms, tx_sent, gcrc_sent)
-                        .await
-                }
-                Fusb302bReceiveEvent::Message(message) => {
-                    self.handle_message_event(i2c, now, now_ms, message).await
-                }
-                Fusb302bReceiveEvent::ReceivedReset(action) => {
-                    self.handle_received_reset(i2c, now, action).await
-                }
-                Fusb302bReceiveEvent::RetryFailed => self.handle_retry_failed(i2c, now).await,
-                Fusb302bReceiveEvent::Protection => self.handle_protection_event(),
-                Fusb302bReceiveEvent::UnsupportedSop => self.handle_unsupported_sop(i2c, now).await,
-            };
+            let (result, received_message) = self.poll_receive_event(i2c, now, now_ms).await;
             if !result || !received_message {
                 return result;
             }
         }
         true
+    }
+
+    async fn poll_receive_event(
+        &mut self,
+        i2c: &mut PdI2c<'_>,
+        now: PdTimestamp,
+        now_ms: u64,
+    ) -> (bool, bool) {
+        let (event, status0) =
+            match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending).await {
+                Ok(observation) => observation,
+                Err(fault) => {
+                    let protocol_fault = match fault {
+                        Fusb302bReceiveFault::InterruptRead(i2c_error) => {
+                            self.record_i2c_error(i2c_error);
+                            FUSB302B_PROTOCOL_FAULT_READ_INTERRUPTS_IO
+                        }
+                        Fusb302bReceiveFault::StatusRead(i2c_error) => {
+                            self.record_i2c_error(i2c_error);
+                            FUSB302B_PROTOCOL_FAULT_READ_STATUS_IO
+                        }
+                        Fusb302bReceiveFault::ReceiveFifoFlush => {
+                            FUSB302B_PROTOCOL_FAULT_RX_FIFO_FLUSH_IO
+                        }
+                        Fusb302bReceiveFault::PacketReceive(i2c_error) => {
+                            self.record_i2c_error(i2c_error);
+                            FUSB302B_PROTOCOL_FAULT_RECEIVE_PACKET_IO
+                        }
+                    };
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                    let recovered = self
+                        .recover_transient_transport_fault(
+                            i2c,
+                            fusb302b::TransientTransportFault::ReceiveIoError,
+                            now,
+                        )
+                        .await;
+                    self.record_protocol_fault(protocol_fault);
+                    return (recovered, false);
+                }
+            };
+        self.vbus_status_raw = status0;
+        self.vbus_status_observed = !matches!(event, Fusb302bReceiveEvent::VbusLow { .. });
+        let received_message = matches!(event, Fusb302bReceiveEvent::Message(_));
+        let result = match event {
+            Fusb302bReceiveEvent::VbusLow { transition } => {
+                self.handle_vbus_low_event(i2c, now_ms, transition).await
+            }
+            Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent } => {
+                self.handle_empty_event(i2c, now, now_ms, tx_sent, gcrc_sent)
+                    .await
+            }
+            Fusb302bReceiveEvent::Partial { tx_sent, gcrc_sent } => {
+                self.handle_partial_event(i2c, now, now_ms, tx_sent, gcrc_sent)
+                    .await
+            }
+            Fusb302bReceiveEvent::Message(message) => {
+                self.handle_message_event(i2c, now, now_ms, message).await
+            }
+            Fusb302bReceiveEvent::ReceivedReset(action) => {
+                self.handle_received_reset(i2c, now, action).await
+            }
+            Fusb302bReceiveEvent::RetryFailed => self.handle_retry_failed(i2c, now).await,
+            Fusb302bReceiveEvent::Protection => self.handle_protection_event(),
+            Fusb302bReceiveEvent::UnsupportedSop => self.handle_unsupported_sop(i2c, now).await,
+        };
+        (result, received_message)
     }
 }
