@@ -1641,6 +1641,10 @@ impl Fusb302bRuntime {
         }
         if message.payload().is_empty() {
             self.handle_control_message(message, now_ms);
+        } else {
+            let message_id = Some((message.header() >> 9) as u8 & 0x07);
+            self.policy
+                .on_unhandled_data_message_with_message_id(message_id);
         }
         true
     }

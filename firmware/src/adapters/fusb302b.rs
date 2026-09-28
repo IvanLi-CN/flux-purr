@@ -321,9 +321,8 @@ impl SinkPolicy {
         })
     }
 
-    /// Record every received SOP Source message, including messages that do
-    /// not affect the current policy phase. A small forward distance is a
-    /// fresh message; equal and half-range/old values remain duplicates.
+    /// Record a received SOP Source message in the current exchange. A small
+    /// forward distance is fresh; equal and half-range/old values are not.
     pub fn observe_source_message_id(&mut self, source_message_id: Option<u8>) -> bool {
         let Some(source_message_id) = source_message_id.map(|value| value & 0x07) else {
             return true;
@@ -333,6 +332,15 @@ impl SinkPolicy {
         }
         self.source_message_id = Some(source_message_id);
         true
+    }
+
+    pub fn on_unhandled_data_message_with_message_id(&mut self, message_id: Option<u8>) {
+        if matches!(
+            self.phase,
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy | SinkPhase::Ready
+        ) {
+            let _ = self.observe_source_message_id(message_id);
+        }
     }
 
     fn begin_request(&mut self, capabilities: SourceCapabilities) -> Option<[u8; 4]> {
@@ -1411,6 +1419,31 @@ mod tests {
                 .is_some()
         );
         assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+    }
+
+    #[test]
+    fn interleaved_source_data_advances_message_id_before_accept() {
+        let mut policy = SinkPolicy::new(12_000, 3_000);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(0))
+                .is_some()
+        );
+        for id in 1..=3 {
+            policy.on_unhandled_data_message_with_message_id(Some(id));
+        }
+        policy.on_control_message_with_message_id(3, Some(4), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        policy.on_control_message_with_message_id(6, Some(5), 1);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+
+        policy.on_received_protocol_reset();
+        policy.on_unhandled_data_message_with_message_id(Some(0));
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(4))
+                .is_some()
+        );
     }
 
     #[test]
