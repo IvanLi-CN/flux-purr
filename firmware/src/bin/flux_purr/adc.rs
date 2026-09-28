@@ -626,6 +626,8 @@ pub(crate) struct Fusb302bRuntime {
     pub(crate) next_message_id: u8,
     pub(crate) attached_at_ms: Option<u64>,
     pub(crate) last_source_capabilities_request_at_ms: Option<u64>,
+    // Recovery seeds the retry timestamp before a query is actually sent.
+    pub(crate) source_capabilities_query_sent: bool,
     pub(crate) source_capabilities_refresh_pending: bool,
     pub(crate) source_capabilities_refresh_for_contract: bool,
     pub(crate) source_capabilities_refresh_requested_at_ms: Option<u64>,
@@ -730,6 +732,7 @@ impl Fusb302bRuntime {
             next_message_id: 0,
             attached_at_ms: None,
             last_source_capabilities_request_at_ms: None,
+            source_capabilities_query_sent: false,
             source_capabilities_refresh_pending: false,
             source_capabilities_refresh_for_contract: false,
             source_capabilities_refresh_requested_at_ms: None,
@@ -762,6 +765,7 @@ impl Fusb302bRuntime {
         self.policy.on_received_protocol_reset();
         self.attached_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = None;
+        self.source_capabilities_query_sent = false;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
@@ -836,6 +840,7 @@ impl Fusb302bRuntime {
         self.next_message_id = 0;
         self.attached_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = None;
+        self.source_capabilities_query_sent = false;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
@@ -944,6 +949,7 @@ impl Fusb302bRuntime {
                 // so the polling path consumes that already-handled status
                 // until this bounded re-query is sent.
                 self.last_source_capabilities_request_at_ms = Some(now_ms);
+                self.source_capabilities_query_sent = false;
                 self.source_capabilities_refresh_pending = false;
                 self.source_capabilities_refresh_for_contract = false;
                 self.source_capabilities_refresh_requested_at_ms = None;
@@ -1070,6 +1076,7 @@ impl Fusb302bRuntime {
 
     pub(crate) async fn abort_pending_operation(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) {
         self.policy.cancel_pending_request();
+        self.source_capabilities_query_sent = false;
         self.pps_keepalive_pending_at_ms = None;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_for_contract = false;
@@ -1103,6 +1110,7 @@ impl Fusb302bRuntime {
         self.request_rejected = false;
         self.request_timed_out = false;
         if replace_pending {
+            self.source_capabilities_query_sent = false;
             self.source_capabilities_refresh_pending = false;
             self.source_capabilities_refresh_for_contract = false;
             self.source_capabilities_refresh_requested_at_ms = None;
@@ -1137,6 +1145,7 @@ impl Fusb302bRuntime {
         self.source_capabilities_refresh_for_contract = request_contract;
         self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = Some(now_ms);
+        self.source_capabilities_query_sent = true;
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
         PdContractRequestState::Pending
     }
@@ -1556,6 +1565,7 @@ impl Fusb302bRuntime {
             self.source_capabilities_tx_confirmed = false;
             self.source_capabilities_gcrc_seen = false;
             self.last_source_capabilities_request_at_ms = Some(now_ms);
+            self.source_capabilities_query_sent = true;
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
         } else if self.pps_keepalive_due(now_ms) {
             let Some(rdo) = self.policy.refresh_active_pps() else {
@@ -1594,7 +1604,7 @@ impl Fusb302bRuntime {
             FUSB302B_DIAG_SOURCE_CAPS_GCRC_SEEN
         } else if self.source_capabilities_tx_confirmed {
             FUSB302B_DIAG_SOURCE_CAPS_TX_CONFIRMED
-        } else if self.last_source_capabilities_request_at_ms.is_some() {
+        } else if self.source_capabilities_query_sent {
             FUSB302B_DIAG_SOURCE_CAPS_REQUESTED
         } else {
             FUSB302B_DIAG_WAITING_SOURCE_CAPS
@@ -1659,7 +1669,7 @@ impl Fusb302bRuntime {
             let message_id = Some((message.header() >> 9) as u8 & 0x07);
             self.policy.on_unhandled_data_message_with_message_id(
                 message_id,
-                self.last_source_capabilities_request_at_ms.is_some(),
+                self.source_capabilities_query_sent,
             );
         }
         true
@@ -1736,6 +1746,11 @@ impl Fusb302bRuntime {
             response_rejects_pending_request(phase, message_type, message_id_is_fresh);
         self.policy
             .on_control_message_with_message_id(message_type, message_id, now_ms);
+        if phase != SinkPhase::WaitingForSourceCapabilities
+            && self.policy.phase() == SinkPhase::WaitingForSourceCapabilities
+        {
+            self.source_capabilities_query_sent = false;
+        }
         if keepalive_response_is_valid {
             self.pps_keepalive_pending_at_ms = None;
         }

@@ -1455,6 +1455,14 @@ mod tests {
     fn source_data_after_discovery_query_fences_duplicate_capabilities() {
         let mut policy = SinkPolicy::new(12_000, 3_000);
         policy.on_received_protocol_reset();
+        policy.on_unhandled_data_message_with_message_id(Some(0), false);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(0))
+                .is_some()
+        );
+
+        policy.on_received_protocol_reset();
         policy.on_unhandled_data_message_with_message_id(Some(0), true);
         assert_eq!(
             policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(0)),
