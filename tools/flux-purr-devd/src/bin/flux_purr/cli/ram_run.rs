@@ -486,9 +486,12 @@ fn run_interactive_buttons(
         }
         previous_snapshot = Some(snapshot);
         for event in observed_events {
+            if !try_push_button_event(&mut events, event) {
+                stop_reason = ButtonInteractionStopReason::EventLimit;
+                break;
+            }
             print_button_event(event, session_started);
-            events.push(event);
-            if events.len() >= BUTTON_MAX_EVENTS {
+            if events.len() == BUTTON_MAX_EVENTS {
                 stop_reason = ButtonInteractionStopReason::EventLimit;
                 break;
             }
@@ -501,9 +504,12 @@ fn run_interactive_buttons(
     if stop_reason == ButtonInteractionStopReason::InactivityTimeout {
         let finished_at = Instant::now();
         for event in tracker.flush(finished_at) {
+            if !try_push_button_event(&mut events, event) {
+                stop_reason = ButtonInteractionStopReason::EventLimit;
+                break;
+            }
             print_button_event(event, session_started);
-            events.push(event);
-            if events.len() >= BUTTON_MAX_EVENTS {
+            if events.len() == BUTTON_MAX_EVENTS {
                 stop_reason = ButtonInteractionStopReason::EventLimit;
                 break;
             }
@@ -511,6 +517,14 @@ fn run_interactive_buttons(
     }
     let latest = latest.ok_or("RAM button interaction did not receive a sample")?;
     add_button_interaction_result(latest, &events, session_started, stop_reason)
+}
+
+fn try_push_button_event(events: &mut Vec<ButtonGestureEvent>, event: ButtonGestureEvent) -> bool {
+    if events.len() >= BUTTON_MAX_EVENTS {
+        return false;
+    }
+    events.push(event);
+    true
 }
 
 fn exit_ram(port: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -1803,6 +1817,24 @@ mod tests {
             },
         });
         assert!(validate_ram_success_response(&value, "test_buttons").is_ok());
+    }
+
+    #[test]
+    fn interactive_button_event_limit_does_not_overshoot() {
+        let now = Instant::now();
+        let mut events = Vec::new();
+        for expected_len in 1..=BUTTON_MAX_EVENTS {
+            assert!(try_push_button_event(
+                &mut events,
+                ButtonGestureEvent::new("center", "short_press", now),
+            ));
+            assert_eq!(events.len(), expected_len);
+        }
+        assert!(!try_push_button_event(
+            &mut events,
+            ButtonGestureEvent::new("center", "short_press", now),
+        ));
+        assert_eq!(events.len(), BUTTON_MAX_EVENTS);
     }
 
     #[test]
