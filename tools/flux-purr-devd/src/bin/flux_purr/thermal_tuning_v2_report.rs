@@ -73,6 +73,7 @@ pub(crate) fn render_v2_bundle(
 
     let event_audit = audit_events(&bundle, &samples, &ledger);
     let report_runs = normalized_report_runs(&bundle, &samples)?;
+    let safety_summary = safety_summary(&bundle, &ledger);
     bundle["reportRuns"] = Value::Array(report_runs.clone());
     bundle["rawRuns"] = bundle
         .get("rawRuns")
@@ -80,6 +81,7 @@ pub(crate) fn render_v2_bundle(
         .unwrap_or_else(|| Value::Array(report_runs.clone()));
     bundle["trace"] = event_audit.trace.clone();
     bundle["eventCounts"] = event_audit.counts.clone();
+    bundle["safetySummary"] = safety_summary.clone();
     bundle["generatedBy"] = json!("flux-purr thermal report render-v2");
     bundle["files"] = json!({
         "index.html": "index.html",
@@ -333,6 +335,72 @@ fn audit_events(bundle: &Value, samples: &[Value], ledger: &[Value]) -> EventAud
                 .collect(),
         ),
     }
+}
+
+fn safety_summary(bundle: &Value, ledger: &[Value]) -> Value {
+    if let Some(event) = ledger
+        .iter()
+        .filter(|event| event.get("kind").and_then(Value::as_str) == Some("safety"))
+        .min_by_key(|event| {
+            event
+                .get("sequence")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX)
+        })
+    {
+        return json!({
+            "kind": "safety",
+            "source": "device_event",
+            "reason": event.get("reason").cloned().unwrap_or_else(|| json!("device_safety_event")),
+            "sequence": event.get("sequence").cloned().unwrap_or(Value::Null),
+            "elapsedMs": event.get("elapsedMs").cloned().unwrap_or(Value::Null),
+            "phase": event.get("phase").cloned().unwrap_or(Value::Null),
+            "heaterState": event.get("heaterState").cloned().unwrap_or(Value::Null),
+            "origin": event.get("origin").cloned().unwrap_or(Value::Null),
+        });
+    }
+
+    if let Some(interruption) = bundle.get("hostInterruption").and_then(Value::as_object) {
+        return json!({
+            "kind": "safety",
+            "source": "host_interruption",
+            "reason": interruption.get("reason").cloned().unwrap_or_else(|| json!("host_interruption")),
+            "sequence": Value::Null,
+            "elapsedMs": Value::Null,
+            "phase": "failed",
+            "heaterState": interruption.get("deviceState").cloned().unwrap_or_else(|| json!("unconfirmed")),
+            "origin": "host",
+        });
+    }
+
+    if let Some(reason) = bundle.get("rejectionReason").and_then(Value::as_str) {
+        return json!({
+            "kind": "safety",
+            "source": "host_preflight",
+            "reason": reason,
+            "sequence": 0,
+            "elapsedMs": 0,
+            "phase": "failed",
+            "heaterState": "not_commanded",
+            "origin": "host",
+        });
+    }
+
+    if bundle.get("terminalDisposition").and_then(Value::as_str) == Some("failed") {
+        let trace_gap = bundle.pointer("/deviceTrace/gap").and_then(Value::as_bool) == Some(true);
+        return json!({
+            "kind": "safety",
+            "source": if trace_gap { "trace_audit" } else { "device_terminal" },
+            "reason": if trace_gap { "trace_gap" } else { "device_terminal_failed_without_safety_event" },
+            "sequence": Value::Null,
+            "elapsedMs": Value::Null,
+            "phase": "failed",
+            "heaterState": "unconfirmed",
+            "origin": "report_audit",
+        });
+    }
+
+    Value::Null
 }
 
 fn audit_sample_fields(
@@ -666,6 +734,32 @@ mod tests {
         assert_eq!(bundle["trace"]["complete"], false);
         assert_eq!(bundle["reviewDisposition"], "review_incomplete");
         assert_eq!(bundle["trace"]["gap"]["reason"], "trace_gap");
+    }
+
+    #[test]
+    fn renders_global_safety_event_before_trial_details() {
+        let dir = tempdir().unwrap();
+        write_fixture(dir.path());
+        fs::write(
+            dir.path().join("decision-ledger.ndjson"),
+            "{\"sequence\":0,\"elapsedMs\":0,\"kind\":\"safety\",\"phase\":\"failed\",\"reason\":\"heater_interlock_disarmed\",\"heaterState\":\"disarmed\"}\n",
+        )
+        .unwrap();
+        let output = dir.path().join("out");
+        render_v2_bundle(ThermalTuningV2ReportInput {
+            input_dir: dir.path().to_path_buf(),
+            output_dir: Some(output.clone()),
+        })
+        .unwrap();
+        let bundle = read_json(&output.join("run.bundle.json")).unwrap();
+        assert_eq!(
+            bundle["safetySummary"]["reason"],
+            "heater_interlock_disarmed"
+        );
+        assert_eq!(bundle["safetySummary"]["source"], "device_event");
+        let html = fs::read_to_string(output.join("index.html")).unwrap();
+        assert!(html.contains("heater_interlock_disarmed"));
+        assert!(html.contains("safetySummary"));
     }
 
     #[test]

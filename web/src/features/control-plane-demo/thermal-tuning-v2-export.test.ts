@@ -110,6 +110,12 @@ describe('Web thermal-tuning-v2 export', () => {
     expect(strFromU8(archive['index.html'])).toContain('const REPORT=')
     expect(strFromU8(archive['index.html'])).not.toContain('__THERMAL_TUNING_V2_DATA__')
     expect(strFromU8(archive['decision-ledger.ndjson'])).toContain('sensor_fault')
+    expect(bundle.safetySummary).toMatchObject({
+      source: 'device_event',
+      reason: 'sensor_fault',
+      sequence: 0,
+    })
+    expect(strFromU8(archive['index.html'])).toContain('安全终止事实')
   })
 
   it('keeps candidate review, seal, and EEPROM save as distinct states', async () => {

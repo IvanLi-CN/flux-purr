@@ -1,6 +1,6 @@
 import { zipSync } from 'fflate'
 import reportTemplate from '../../../../tools/flux-purr-devd/src/bin/flux_purr/thermal_tuning_v2_report_template.html?raw'
-import type { ThermalTuningEvent } from './contracts'
+import type { ThermalTuningEvent, ThermalTuningStatus } from './contracts'
 import { digestEventChain } from './thermal-tuning-device-digest'
 import type { ThermalTuningRecording } from './thermal-tuning-recorder'
 
@@ -87,6 +87,7 @@ export async function exportThermalTuningV2(
     },
   }
   const eventAudit = await auditEvents(samples, ledger, status.trace, verification.verified)
+  const safetySummary = buildSafetySummary(ledger, status.terminalDisposition, status.trace.gap)
   const qualified =
     status.terminalDisposition === 'passed' &&
     status.powerClass === 'pps5a' &&
@@ -101,7 +102,8 @@ export async function exportThermalTuningV2(
   const promotionInconsistent =
     (status.terminalDisposition === 'passed' || status.saveReceipt != null) &&
     !promotionVerified(status.runId, status.candidateId, status.candidateHash, candidate)
-  const reviewIncomplete = !eventAudit.trace.complete || !verification.verified || promotionInconsistent
+  const reviewIncomplete =
+    !eventAudit.trace.complete || !verification.verified || promotionInconsistent
   const ppsBounds = status.ppsVoltageBounds
   const bundle: JsonObject = {
     schema: 'thermal-tuning-v2',
@@ -142,6 +144,7 @@ export async function exportThermalTuningV2(
     rawRuns: reportRuns,
     trace: eventAudit.trace,
     eventCounts: eventAudit.counts,
+    safetySummary,
     candidate: {
       candidateId: status.candidateId,
       candidateHash: status.candidateHash,
@@ -244,6 +247,44 @@ function buildReportRun(
     metrics: summary?.metrics ?? {},
     trials,
   }
+}
+
+function buildSafetySummary(
+  ledger: ThermalTuningEvent[],
+  terminalDisposition: ThermalTuningStatus['terminalDisposition'],
+  traceGap: boolean
+): JsonObject | null {
+  const event = [...ledger]
+    .filter((item) => item.kind === 'safety')
+    .sort(
+      (left, right) =>
+        (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER)
+    )[0]
+  if (event) {
+    return {
+      kind: 'safety',
+      source: 'device_event',
+      reason: event.reason ?? 'device_safety_event',
+      sequence: event.sequence,
+      elapsedMs: event.elapsedMs,
+      phase: event.phase,
+      heaterState: null,
+      origin: null,
+    }
+  }
+  if (terminalDisposition === 'failed') {
+    return {
+      kind: 'safety',
+      source: traceGap ? 'trace_audit' : 'device_terminal',
+      reason: traceGap ? 'trace_gap' : 'device_terminal_failed_without_safety_event',
+      sequence: null,
+      elapsedMs: null,
+      phase: 'failed',
+      heaterState: 'unconfirmed',
+      origin: 'report_audit',
+    }
+  }
+  return null
 }
 
 function buildTrial(
