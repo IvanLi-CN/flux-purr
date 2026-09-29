@@ -1208,7 +1208,7 @@ fn process_thermal_tuning_start(
     // persisted resistance curve, or the selected PPS APDO is not ready.
     let model_available = thermal_model_heater_allowed(
         context.memory_config,
-        &*context.calibration_runtime_state,
+        *context.calibration_runtime_state,
         *context.manual_pps,
     );
     let calibration_conflict = context.calibration_runtime_state.mode != CalibrationMode::Off

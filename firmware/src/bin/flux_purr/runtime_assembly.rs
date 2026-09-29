@@ -38,6 +38,7 @@ macro_rules! build_runtime_loop_state {
             thermal_plant_workspace,
             thermal_control_profile_preview,
             thermal_tuning,
+            pending_automatic_pps,
             heater_power_backend,
             hold_pps_governor,
             heater_controller,
@@ -126,6 +127,8 @@ macro_rules! build_runtime_loop_state {
         let last_control_ms = 0;
         let next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
         let heater_control_timing = HeaterControlTiming::default();
+        let tuning_pd_wait_started_ms = None;
+        let tuning_heater_rearm_pending = false;
         let _ = reset_reason;
         let _ = status_light_started_ms;
         let transport = RuntimeTransportState {
@@ -192,6 +195,9 @@ macro_rules! build_runtime_loop_state {
             thermal_plant_workspace,
             thermal_control_profile_preview,
             thermal_tuning,
+            tuning_pd_wait_started_ms,
+            tuning_heater_rearm_pending,
+            pending_automatic_pps,
             heater_power_backend,
             hold_pps_governor,
             heater_controller,

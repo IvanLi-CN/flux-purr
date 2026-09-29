@@ -109,8 +109,57 @@ pub(crate) fn tuning_interlock_reason(
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TuningPdWaitDecision {
+    Ready,
+    Wait,
+    Fail(&'static str),
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn tuning_pd_wait_decision(
+    power_state: PowerState,
+    wait_started_ms: Option<u64>,
+    now_ms: u64,
+    ticket_pending: bool,
+    request_failed: bool,
+) -> TuningPdWaitDecision {
+    if power_state.failure.is_some() {
+        return TuningPdWaitDecision::Fail("pd_contract_lost");
+    }
+    if request_failed {
+        return TuningPdWaitDecision::Fail("pd_request_failed");
+    }
+    if power_state.protocol == PowerProtocol::Ready
+        && power_state.active.is_some()
+        && (!ticket_pending || wait_started_ms.is_none())
+    {
+        return TuningPdWaitDecision::Ready;
+    }
+    if (matches!(
+        power_state.protocol,
+        PowerProtocol::WaitingForAccept | PowerProtocol::WaitingForPsRdy
+    ) && power_state.requested.is_some())
+        || (ticket_pending
+            && wait_started_ms.is_some()
+            && power_state.protocol == PowerProtocol::Ready
+            && power_state.active.is_some())
+    {
+        if wait_started_ms
+            .is_some_and(|started| now_ms.saturating_sub(started) > AUTOMATIC_PPS_TICKET_WAIT_MS)
+        {
+            TuningPdWaitDecision::Fail("pd_request_timeout")
+        } else {
+            TuningPdWaitDecision::Wait
+        }
+    } else {
+        TuningPdWaitDecision::Fail("pd_contract_lost")
+    }
+}
+
 #[cfg(target_arch = "xtensa")]
-pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
+pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
     let mut needs_redraw = false;
     // Display I/O consumes the same watch receiver while keeping the physical
     // heater interlock current. Its notification can already be consumed when
@@ -139,6 +188,25 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
         state.last_pd_status_log_key = pd_status_log_key(current_pd_observation);
     }
     state.last_pd_observation = current_pd_observation;
+    let tuning_power_decision = state.thermal_tuning.armed.then(|| {
+        tuning_pd_wait_decision(
+            state.power_state,
+            state.tuning_pd_wait_started_ms,
+            elapsed_ms,
+            state.pending_automatic_pps.is_some(),
+            matches!(
+                state.heater_power_backend,
+                HeaterPowerBackend::FixedPdPwmFallback {
+                    reason: HeaterPowerBackendReason::AdjustableRequestFailed,
+                    ..
+                }
+            ),
+        )
+    });
+    if tuning_power_decision == Some(TuningPdWaitDecision::Wait) {
+        state.tuning_pd_wait_started_ms.get_or_insert(elapsed_ms);
+        state.tuning_heater_rearm_pending |= state.ui_state.heater_enabled;
+    }
     needs_redraw |= apply_pd_contract_observation(
         current_pd_observation,
         &mut state.pd_contract_ready,
@@ -148,9 +216,40 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
         &mut state.heater_pwm,
         &mut state.last_heater_duty,
     );
-    if state.thermal_tuning.armed && !state.pd_contract_ready {
-        state.thermal_tuning.fail("pd_contract_lost");
-        state.thermal_control_profile_preview = None;
+    match tuning_power_decision {
+        Some(TuningPdWaitDecision::Ready) if state.tuning_pd_wait_started_ms.is_some() => {
+            state.tuning_pd_wait_started_ms = None;
+            let profile_ready = production_thermal_controller(
+                state.power_state,
+                state.memory_config.thermal_profile_mode,
+                &state.manual_pps_state,
+            ) == ProductionThermalController::Profile;
+            if !profile_ready {
+                state.thermal_tuning.fail("pps5a_source_lost");
+                state.thermal_control_profile_preview = None;
+            } else if state.tuning_heater_rearm_pending
+                && state.pd_contract_ready
+                && state.current_rtd_fault.is_none()
+                && state.heater_controller.fault_latched().is_none()
+                && !state.ui_state.persistence_locked()
+                && !state.cooling_disabled_lock_latched
+                && state.calibration_runtime_state.mode == CalibrationMode::Off
+            {
+                state.ui_state.heater_enabled = true;
+            }
+            state.tuning_heater_rearm_pending = false;
+        }
+        Some(TuningPdWaitDecision::Fail(reason)) => {
+            state.thermal_tuning.fail(reason);
+            state.thermal_control_profile_preview = None;
+            state.tuning_pd_wait_started_ms = None;
+            state.tuning_heater_rearm_pending = false;
+        }
+        None => {
+            state.tuning_pd_wait_started_ms = None;
+            state.tuning_heater_rearm_pending = false;
+        }
+        _ => {}
     }
 
     needs_redraw
@@ -1537,9 +1636,15 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         && state.thermal_tuning.phase
             != flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
         && !state.ui_state.heater_enabled
+        && (state.tuning_pd_wait_started_ms.is_none()
+            || !model_allowed
+            || persistence_locked
+            || state.cooling_disabled_lock_latched
+            || state.heater_controller.fault_latched().is_some()
+            || state.current_rtd_fault.is_some())
     {
         state.thermal_tuning.fail(tuning_interlock_reason(
-            state.pd_contract_ready,
+            state.pd_contract_ready || state.tuning_pd_wait_started_ms.is_some(),
             model_allowed,
             persistence_locked,
             state.cooling_disabled_lock_latched,
@@ -1630,7 +1735,18 @@ fn runtime_production_pid_snapshot(
         state.memory_config.thermal_profile_mode,
         &state.manual_pps_state,
     );
-    if state.thermal_tuning.armed && kind != ProductionThermalController::Profile {
+    if state.tuning_pd_wait_started_ms.is_some() {
+        return pause_tuning_profile_controller(
+            &mut state.heater_controller,
+            state.ui_state.target_temp_c,
+            state.latest_temp_c,
+            elapsed_ms,
+        );
+    }
+    if state.thermal_tuning.armed
+        && state.tuning_pd_wait_started_ms.is_none()
+        && kind != ProductionThermalController::Profile
+    {
         state.thermal_tuning.fail("pps5a_source_lost");
         state.ui_state.heater_enabled = false;
     }
@@ -1673,6 +1789,17 @@ fn runtime_production_pid_snapshot(
     snapshot
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn pause_tuning_profile_controller(
+    controller: &mut HeaterController,
+    target_temp_c: i16,
+    measured_temp_c: f32,
+    now_ms: u64,
+) -> HeaterPidSnapshot {
+    controller.production_controller = None;
+    controller.update_at(target_temp_c, measured_temp_c, false, None, now_ms)
+}
+
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct RuntimeHeaterOutputContext<'a> {
     state: &'a mut RuntimeLoopState,
@@ -1703,6 +1830,7 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
         backend: &mut state.heater_power_backend,
+        pending_automatic_pps: &mut state.pending_automatic_pps,
         hold_pps_governor: &mut state.hold_pps_governor,
         manual_pps: &mut state.manual_pps_state,
         pd_observation: current_pd_observation,
@@ -1964,6 +2092,7 @@ pub(crate) async fn runtime_force_heater_safe_off(
         pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
         backend: &mut state.heater_power_backend,
+        pending_automatic_pps: &mut state.pending_automatic_pps,
         hold_pps_governor: &mut state.hold_pps_governor,
         manual_pps: &mut state.manual_pps_state,
         pd_observation: state.last_pd_observation,
@@ -2407,6 +2536,9 @@ fn runtime_record_thermal_tuning_sample(
     if !state.thermal_tuning.armed {
         return false;
     }
+    if state.tuning_pd_wait_started_ms.is_some() {
+        return false;
+    }
     let Some(observation) = state.last_pd_observation else {
         state.thermal_tuning.fail("pd_contract_lost");
         state.ui_state.heater_enabled = false;
@@ -2464,7 +2596,10 @@ fn runtime_record_thermal_tuning_sample(
             kind: power_class,
             confirmed: observation.status.pd_active,
         },
-        requested_mv: state.heater_power_backend.pd_request_mv(),
+        requested_mv: state
+            .pending_automatic_pps
+            .map(|pending| pending.request_mv)
+            .unwrap_or_else(|| state.heater_power_backend.pd_request_mv()),
         pps_power_ceiling_mv: u32::from(adjustable_max_mv),
         heater_requested_output_permille: u16::from(requested_duty_percent).saturating_mul(10),
         heater_output_permille: u16::from(state.last_heater_duty).saturating_mul(10),
@@ -2612,7 +2747,7 @@ pub(crate) async fn run_runtime_loop(mut state: Box<RuntimeLoopState>) -> ! {
         let elapsed_ms = Instant::now()
             .as_millis()
             .saturating_sub(state.runtime_started_ms);
-        let mut needs_redraw = runtime_apply_pd_snapshot(&mut state);
+        let mut needs_redraw = runtime_apply_pd_snapshot(&mut state, elapsed_ms);
         let input = runtime_process_input(&mut state, elapsed_ms).await;
         needs_redraw |= input.needs_redraw;
         if input.skip_iteration {

@@ -60,6 +60,11 @@ where
         return false;
     }
     let manual_pps_active = context.manual_pps.enabled;
+    if (manual_pps_active || !matches!(*context.backend, HeaterPowerBackend::PpsMos { .. }))
+        && let Some(pending) = context.pending_automatic_pps.take()
+    {
+        context.pd_port.discard_ticket(pending.ticket);
+    }
     let _ = release_terminal_fixed_pd_disarm_for_new_work(
         context.backend,
         context.heater_enabled,
@@ -148,16 +153,40 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
+fn complete_manual_pps_ticket<PWM>(
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
+    ticket: PowerTicket,
+) -> Option<bool>
+where
+    PWM: SetDutyCycle,
+{
+    let outcome = context.pd_port.try_take_ticket(ticket)?;
+    let confirmed_mv = context.manual_pps.pending_power_request_mv;
+    context.manual_pps.pending_power_ticket = None;
+    context.manual_pps.pending_power_request_mv = None;
+    match outcome {
+        TicketOutcome::Confirmed(_) => {
+            context.manual_pps.applied_mv = confirmed_mv;
+        }
+        _ => {
+            context.manual_pps.fail(ManualPpsError::WriteFailed);
+            apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+        }
+    }
+    Some(false)
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn prepare_manual_pps<PWM>(
     context: &mut HeaterPowerOutputContext<'_, PWM>,
 ) -> Option<bool>
 where
     PWM: SetDutyCycle,
 {
-    if context.manual_pps.enabled {
-        if let Some(ticket) = context.manual_pps.automatic_restore_ticket.take() {
-            context.pd_port.discard_ticket(ticket);
-        }
+    if context.manual_pps.enabled
+        && let Some(ticket) = context.manual_pps.automatic_restore_ticket.take()
+    {
+        context.pd_port.discard_ticket(ticket);
     }
     if let Some(ticket) = context.manual_pps.pending_power_ticket {
         if !context.manual_pps.enabled {
@@ -165,21 +194,7 @@ where
             context.manual_pps.pending_power_ticket = None;
             context.manual_pps.pending_power_request_mv = None;
         } else {
-            match context.pd_port.try_take_ticket(ticket) {
-                Some(outcome) => {
-                    let confirmed_mv = context.manual_pps.pending_power_request_mv;
-                    context.manual_pps.pending_power_ticket = None;
-                    context.manual_pps.pending_power_request_mv = None;
-                    if matches!(outcome, TicketOutcome::Confirmed(_)) {
-                        context.manual_pps.applied_mv = confirmed_mv;
-                        return None;
-                    }
-                    context.manual_pps.fail(ManualPpsError::WriteFailed);
-                    apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-                    return None;
-                }
-                None => return None,
-            }
+            return complete_manual_pps_ticket(context, ticket);
         }
     }
     if !context.manual_pps.enabled {
@@ -348,6 +363,7 @@ where
         pd_port,
         heater_pwm,
         backend,
+        pending_automatic_pps: _,
         hold_pps_governor: _,
         manual_pps: _,
         pd_observation,
@@ -710,7 +726,7 @@ where
         fixed_request: ch224q::VoltageRequest::V12,
         terminal_fixed_pd_disarmed: false,
     };
-    if fixed_request_confirmed {
+    if fixed_request_confirmed && context.heater_enabled && context.pd_observation.is_some() {
         let negotiated_current_ma = context
             .pd_observation
             .filter(|observation| observation.status.pd_active)
@@ -754,12 +770,7 @@ where
         return None;
     }
     let HeaterPowerBackend::PpsMos {
-        pps_min_mv,
-        idle_request_mv,
-        pps_max_mv,
-        adjustable_max_mv,
-        capability_max_ma,
-        ..
+        capability_max_ma, ..
     } = *context.backend
     else {
         return Some(false);
@@ -779,7 +790,15 @@ where
     };
     match request_state {
         PdRequestState::Pending(ticket) => {
-            context.pd_port.discard_ticket(ticket);
+            *context.pending_automatic_pps = Some(PendingAutomaticPpsTransition {
+                ticket,
+                request_mv: request.request_mv,
+                request_mode: request.request_mode,
+                mode_changed: request.mode_changed,
+                blank_heater: request.blank_heater,
+                gate_duty_percent: request.gate_duty_percent,
+                started_at_ms: context.now_ms,
+            });
             if request.blank_heater {
                 apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
             }
@@ -790,7 +809,34 @@ where
             return Some(fallback_from_adjustable_request(context).await);
         }
     }
-    if should_restore_gate_after_adjustable_request(request.blank_heater, request.gate_duty_percent)
+    Some(finish_pps_voltage_transition(context, request))
+}
+
+#[cfg(target_arch = "xtensa")]
+fn finish_pps_voltage_transition<PWM>(
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
+    request: PpsVoltageTransition,
+) -> bool
+where
+    PWM: SetDutyCycle,
+{
+    let HeaterPowerBackend::PpsMos {
+        pps_min_mv,
+        idle_request_mv,
+        pps_max_mv,
+        adjustable_max_mv,
+        capability_max_ma,
+        ..
+    } = *context.backend
+    else {
+        return false;
+    };
+    if context.heater_enabled
+        && context.pd_observation.is_some()
+        && should_restore_gate_after_adjustable_request(
+            request.blank_heater,
+            request.gate_duty_percent,
+        )
     {
         apply_heater_duty(
             context.heater_pwm,
@@ -818,7 +864,57 @@ where
         current_limit_fixed_request_confirmed: false,
         terminal_fixed_pd_disarmed: false,
     };
-    Some(true)
+    true
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn complete_pending_automatic_pps<PWM>(
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
+) -> Option<bool>
+where
+    PWM: SetDutyCycle,
+{
+    let pending = (*context.pending_automatic_pps)?;
+    let outcome = context.pd_port.try_take_ticket(pending.ticket);
+    let HeaterPowerBackend::PpsMos {
+        capability_max_ma, ..
+    } = *context.backend
+    else {
+        return Some(false);
+    };
+    let decision = automatic_pps_ticket_decision(
+        outcome,
+        pending.started_at_ms,
+        context.now_ms,
+        pending.request_mv,
+        capability_max_ma,
+    );
+    if decision == AutomaticPpsTicketDecision::Wait {
+        if pending.blank_heater {
+            apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+        }
+        return Some(false);
+    }
+    *context.pending_automatic_pps = None;
+    if outcome.is_none() {
+        context.pd_port.discard_ticket(pending.ticket);
+    }
+    match decision {
+        AutomaticPpsTicketDecision::Confirmed => Some(finish_pps_voltage_transition(
+            context,
+            PpsVoltageTransition {
+                request_mv: pending.request_mv,
+                request_mode: pending.request_mode,
+                mode_changed: pending.mode_changed,
+                voltage_changed: true,
+                request_transition_pending: false,
+                gate_duty_percent: pending.gate_duty_percent,
+                blank_heater: pending.blank_heater,
+            },
+        )),
+        AutomaticPpsTicketDecision::Failed => Some(fallback_from_adjustable_request(context).await),
+        AutomaticPpsTicketDecision::Wait => None,
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -962,6 +1058,9 @@ where
     PWM: SetDutyCycle,
 {
     let mut context = context;
+    if let Some(result) = complete_pending_automatic_pps(&mut context).await {
+        return result;
+    }
     let Some(limits) = pps_operating_limits(&context) else {
         return false;
     };
