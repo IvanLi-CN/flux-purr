@@ -959,6 +959,7 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("mA · safety ceiling · local evidence"));
         assert!(REPORT_TEMPLATE.contains("chartGrid.hidden=samples.length===0"));
         assert!(REPORT_TEMPLATE.contains("该目标尚无候选试验样本"));
+        assert!(REPORT_TEMPLATE.contains(".summary-metrics strong{display:block;color:var(--ink);font:650 13px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}"));
         assert!(
             REPORT_TEMPLATE.contains("drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height)")
         );
