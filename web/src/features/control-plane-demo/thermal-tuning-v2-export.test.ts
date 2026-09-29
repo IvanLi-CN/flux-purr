@@ -101,6 +101,8 @@ describe('Web thermal-tuning-v2 export', () => {
     expect(exported.ownerOutcome).toBe('failed')
     expect(bundle.trace.complete).toBe(true)
     expect(bundle.ownerOutcome).toBe('failed')
+    expect(bundle.generatedAt).toEqual(expect.any(Number))
+    expect(bundle.generatedAt).toBeGreaterThan(0)
     expect(bundle.deviceTraceVerification.verified).toBe(true)
     expect(bundle.ppsControlPolicyVersion).toBe('hold-pps-governor-v1')
     expect(bundle.ppsVoltageBounds).toMatchObject({

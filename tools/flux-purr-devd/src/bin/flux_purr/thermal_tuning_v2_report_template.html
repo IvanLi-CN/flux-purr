@@ -43,11 +43,13 @@
     .target-tabs button:last-child,.trial-tabs button:last-child{border-right:0}
     .target-tabs button.active,.trial-tabs button.active{background:var(--ink);color:#fff}
     .target-tabs button:focus-visible,.trial-tabs button:focus-visible{outline:3px solid #0c659055;outline-offset:-3px}
-    .facts{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-top:14px}
-    .fact{background:#fff;padding:11px 12px;min-width:0}
+    .facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,165px),1fr));background:#fff;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-top:14px}
+    .fact{background:#fff;padding:11px 12px;min-width:0;border-right:1px solid var(--line);border-bottom:1px solid var(--line)}
     .fact label{display:block;color:var(--muted);font-size:11px;margin-bottom:3px}
     .fact strong{font:650 13px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
     .chart-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,804px),1fr));gap:16px}
+    .chart-grid[hidden],.no-trial[hidden]{display:none}
+    .no-trial{padding:16px;border-left:3px solid var(--amber);background:var(--amber-bg);color:var(--ink)}
     .chart-panel{min-width:0}
     .chart-panel.wide{grid-column:1/-1}
     .panel-title{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:10px}
@@ -107,7 +109,8 @@
   <section class="panel"><div class="trial-tabs" id="trialTabs"></div><div class="trial-summary" id="trialSummary"></div></section>
 
   <section class="section-head"><div><h2>设备本地响应</h2><p>图表直接使用样本事件；外部 VBUS/物理功率不被伪造。</p></div></section>
-  <section class="chart-grid">
+  <div class="no-trial" id="noTrial" hidden></div>
+  <section class="chart-grid" id="chartGrid">
     <article class="panel chart-panel wide"><div class="panel-title"><h3>温度 / 目标 / phase</h3><span>°C · local device sequence</span></div><div class="chart-legend"><span style="--legend-color:#b13d35">temperature</span><span style="--legend-color:#17232a">target</span><span style="--legend-color:#d98b2b">Warmup</span><span style="--legend-color:#2f78a8">Approach</span><span style="--legend-color:#2d8a68">Hold</span><span style="--legend-color:#7966a8">Cooldown</span><span style="--legend-color:#69757c">Terminal</span></div><div class="chart-wrap"><canvas id="temperatureChart"></canvas></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>逻辑请求 / 最终 MOS PWM</h3><span>% · 0..100%</span></div><div class="chart-legend"><span style="--legend-color:#0c6590">logical request</span><span style="--legend-color:#b13d35">MOS PWM</span></div><div class="chart-wrap"><canvas id="controlChart"></canvas></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>VIN / PPS 合同与请求电压</h3><span>V · local evidence</span></div><div class="chart-legend"><span style="--legend-color:#16818b">VIN</span><span style="--legend-color:#936a08">PPS contract</span><span style="--legend-color:#0c6590">PPS request</span></div><div class="chart-wrap"><canvas id="voltageChart"></canvas></div></article>
@@ -154,7 +157,8 @@ function renderHeader(){
   $('title').textContent=`Firmware Thermal Tuning V2 · ${BUNDLE.powerClass??'—'}`;
   $('subtitle').textContent=`${BUNDLE.engine??'—'} engine · ${BUNDLE.qualificationScope?.kind??'qualification'} · ${TARGETS.length} target points · run ${BUNDLE.runId??'—'}`;
   $('meta').innerHTML=[['Power class',BUNDLE.powerClass],['PPS policy',BUNDLE.ppsControlPolicyVersion],['Candidate',BUNDLE.candidate?.candidateId||CANDIDATE.candidateId],['Outcome',BUNDLE.ownerOutcome]].map(([key,value])=>`<span>${esc(key)} <b>${esc(value)}</b></span>`).join('');
-  $('stamp').innerHTML=`DEVICE ${esc(BUNDLE.device?.id)}<br>FIRMWARE ${esc(BUNDLE.firmware?.version)}<br>GENERATED ${esc(BUNDLE.generatedAt||'mock')}`;
+  const generatedAt=typeof BUNDLE.generatedAt==='number'&&Number.isFinite(BUNDLE.generatedAt)&&BUNDLE.generatedAt>0?new Date(BUNDLE.generatedAt).toLocaleString('zh-CN',{hour12:false}):'unavailable';
+  $('stamp').innerHTML=`DEVICE ${esc(BUNDLE.device?.id)}<br>FIRMWARE ${esc(BUNDLE.firmware?.version)}<br>GENERATED ${esc(generatedAt)}`;
 }
 function renderTrace(){
   const trace=BUNDLE.trace||{}; const complete=trace.complete===true;
@@ -233,6 +237,9 @@ function drawChart(canvasId, samples, series, unit, options={}){
 }
 function renderCharts(){
   const samples=samplesForTrial();
+  const noTrial=$('noTrial'); const chartGrid=$('chartGrid');
+  noTrial.hidden=samples.length>0; chartGrid.hidden=samples.length===0;
+  if(!samples.length){noTrial.textContent=currentRun().executionStatus==='not_attempted'?'该目标尚未执行，没有候选试验曲线。':'该目标尚无候选试验样本；冷却和终止事件保留在原始记录中。';return;}
   drawChart('temperatureChart',samples,[{label:'temperature',color:'#b13d35',data:samples.map(s=>Number(s.temperatureCentiC)/100)},{label:'target',color:'#17232a',dash:[5,4],width:1,data:samples.map(()=>activeTarget)}],'°C',{phaseBand:true});
   drawChart('controlChart',samples,[{label:'logical request',color:'#0c6590',data:samples.map(s=>Number(s.heaterRequestedOutputPermille)/10)},{label:'MOS PWM',color:'#b13d35',data:samples.map(s=>Number(s.heaterOutputPermille)/10)}],'%');
   drawChart('voltageChart',samples,[{label:'VIN',color:'#16818b',data:samples.map(s=>Number(s.vinMv)/1000)},{label:'PPS contract',color:'#936a08',data:samples.map(s=>Number(s.ppsContractMv)/1000)},{label:'PPS request',color:'#0c6590',data:samples.map(s=>Number(s.ppsRequestedMv)/1000)}],'V');

@@ -8,6 +8,8 @@ use std::{
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use super::current_unix_millis;
+
 const DATA_PLACEHOLDER: &str = "__THERMAL_TUNING_V2_DATA__";
 const REPORT_TEMPLATE: &str = include_str!("thermal_tuning_v2_report_template.html");
 const PPS_ABSOLUTE_MIN_MV: u64 = 5_000;
@@ -83,6 +85,7 @@ pub(crate) fn render_v2_bundle(
     bundle["eventCounts"] = event_audit.counts.clone();
     bundle["safetySummary"] = safety_summary.clone();
     bundle["generatedBy"] = json!("flux-purr thermal report render-v2");
+    bundle["generatedAt"] = json!(current_unix_millis());
     bundle["files"] = json!({
         "index.html": "index.html",
         "run.bundle.json": "run.bundle.json",
@@ -813,6 +816,11 @@ mod tests {
         })
         .unwrap();
         let bundle = read_json(&output.join("run.bundle.json")).unwrap();
+        assert!(
+            bundle["generatedAt"]
+                .as_u64()
+                .is_some_and(|value| value > 0)
+        );
         assert_eq!(
             bundle["safetySummary"]["reason"],
             "heater_interlock_disarmed"
@@ -949,6 +957,8 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("drawChart('currentChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("Number(s.ppsContractMa)"));
         assert!(REPORT_TEMPLATE.contains("mA · safety ceiling · local evidence"));
+        assert!(REPORT_TEMPLATE.contains("chartGrid.hidden=samples.length===0"));
+        assert!(REPORT_TEMPLATE.contains("该目标尚无候选试验样本"));
         assert!(
             REPORT_TEMPLATE.contains("drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height)")
         );
@@ -961,6 +971,8 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("if(last)last.endElapsedMs=elapsedMs"));
         assert!(REPORT_TEMPLATE.contains("run.executionStatus||'—'"));
         assert!(REPORT_TEMPLATE.contains("run.blockedBy?.reason||run.stopReason||'—'"));
+        assert!(REPORT_TEMPLATE.contains("new Date(BUNDLE.generatedAt).toLocaleString"));
+        assert!(!REPORT_TEMPLATE.contains("BUNDLE.generatedAt||'mock'"));
     }
 
     #[test]

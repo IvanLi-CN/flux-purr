@@ -173,7 +173,7 @@ export async function exportThermalTuningV2(
       },
     },
     generatedBy: 'flux-purr web thermal-tuning-v2',
-    generatedAt: new Date().toISOString(),
+    generatedAt: Date.now(),
     ownerOutcome,
     files: {
       'index.html': 'index.html',
