@@ -1203,7 +1203,14 @@ fn process_thermal_tuning_start(
         context.memory_config.thermal_profile_mode,
         context.manual_pps,
     ) == ThermalProfileBank::Pps5a;
-    let model_available = thermal_plant_projection_for_runtime(context.memory_config).is_some();
+    // The tuning start gate must match the production heater gate. A valid
+    // thermal projection alone is insufficient when commissioning, the
+    // persisted resistance curve, or the selected PPS APDO is not ready.
+    let model_available = thermal_model_heater_allowed(
+        context.memory_config,
+        &*context.calibration_runtime_state,
+        *context.manual_pps,
+    );
     let calibration_conflict = context.calibration_runtime_state.mode != CalibrationMode::Off
         || context.thermal_control_profile_preview.is_some();
     let response = match context.thermal_tuning.start_at(
