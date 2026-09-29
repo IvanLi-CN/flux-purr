@@ -371,6 +371,7 @@ where
         current_temp_c,
         duty_percent,
         heater_enabled: _,
+        tuning_power_stage: _,
         control_phase: _,
         control_error_c: _,
         filtered_slope_c_per_s: _,
@@ -926,15 +927,16 @@ fn pps_request_mv_for_context<PWM>(
     control_floor_mv: u16,
     source_request_ceiling_mv: u16,
 ) -> u16 {
-    let automatic_request_mv = heater_adjustable_request_mv(
+    let automatic_request_mv = automatic_pps_request_mv(
         context.duty_percent,
         context.heater_enabled,
+        context.tuning_power_stage,
         current_request_mv,
         idle_request_mv,
         control_floor_mv,
         source_request_ceiling_mv,
     );
-    if manual_pps_active {
+    if manual_pps_active || context.tuning_power_stage {
         automatic_request_mv
     } else {
         context

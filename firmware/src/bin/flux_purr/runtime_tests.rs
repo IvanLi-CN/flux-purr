@@ -8607,6 +8607,23 @@ fn heater_armed_zero_output_steps_toward_working_floor() {
 }
 
 #[test]
+fn tuning_cooldown_stages_full_pps_voltage_without_heater_output() {
+    assert_eq!(
+        automatic_pps_request_mv(0, false, true, 12_000, 12_000, 6_100, 21_000),
+        12_500
+    );
+    assert_eq!(
+        automatic_pps_request_mv(0, false, true, 21_000, 12_000, 6_100, 21_000),
+        21_000
+    );
+    assert_eq!(
+        automatic_pps_request_mv(0, false, false, 21_000, 12_000, 6_100, 21_000),
+        12_000
+    );
+    assert_eq!(heater_physical_pwm_percent(0, 21_000, 12_000, 100), 0);
+}
+
+#[test]
 fn heater_pwm_frequency_is_100hz_for_all_heater_backends() {
     assert_eq!(HEATER_PWM_FREQUENCY_HZ, 100);
 }

@@ -705,6 +705,7 @@ impl BootRuntimeState {
             current_temp_c: 0.0,
             duty_percent: 0,
             heater_enabled: false,
+            tuning_power_stage: false,
             control_phase: HeaterControlPhase::Warmup,
             control_error_c: 0.0,
             filtered_slope_c_per_s: 0.0,

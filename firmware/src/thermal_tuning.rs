@@ -1217,6 +1217,8 @@ impl ThermalTuningRuntime {
         sample.phase = ThermalTuningPhase::Cooldown;
         let cooled = i32::from(sample.temperature_centi_c)
             <= i32::from(cooldown_threshold_c(expected_target)) * 100;
+        let trial_power_ready = u32::from(sample.requested_mv) == sample.pps_power_ceiling_mv
+            && u32::from(sample.pps_contract.voltage_mv) == sample.pps_power_ceiling_mv;
         self.push_event(
             ThermalTuningEventKind::Sample,
             Some(expected_target),
@@ -1239,7 +1241,7 @@ impl ThermalTuningRuntime {
             );
             return self.advance_target();
         }
-        if cooled && self.armed {
+        if cooled && trial_power_ready && self.armed {
             self.phase = ThermalTuningPhase::Warmup;
             self.reset_trial_metrics();
             self.push_candidate_trial_event(self.trial_index);
@@ -2653,6 +2655,42 @@ mod tests {
         cooling.candidate_hash = runtime.candidate_hash.clone().unwrap();
         cooling.heater_requested_output_permille = 0;
         cooling.heater_output_permille = 0;
+        runtime.record_sample(cooling).unwrap();
+        assert_eq!(runtime.phase, ThermalTuningPhase::Warmup);
+    }
+
+    #[test]
+    fn cooldown_waits_for_confirmed_trial_voltage_before_warmup() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("run-power-staging"),
+                candidate_id: id("candidate-hold"),
+                candidate_hash: hash("hash-hold"),
+                power_class: ThermalTuningPowerClass::Pps5a,
+                targets: &[60],
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile_with_targets(&[60])),
+            })
+            .unwrap();
+
+        let mut cooling = sample(0, ThermalTuningPhase::Cooldown, 3_400);
+        cooling.heater_requested_output_permille = 0;
+        cooling.heater_output_permille = 0;
+        cooling.requested_mv = 12_000;
+        runtime.record_sample(cooling.clone()).unwrap();
+        assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+
+        cooling.elapsed_ms = 300;
+        cooling.requested_mv = 21_000;
+        cooling.pps_contract.voltage_mv = 12_000;
+        runtime.record_sample(cooling.clone()).unwrap();
+        assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+
+        cooling.elapsed_ms = 600;
+        cooling.pps_contract.voltage_mv = 21_000;
         runtime.record_sample(cooling).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Warmup);
     }

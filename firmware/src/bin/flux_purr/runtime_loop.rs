@@ -1844,6 +1844,10 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         } else {
             state.ui_state.heater_enabled
         },
+        tuning_power_stage: state.thermal_tuning.armed
+            && state.thermal_tuning.phase
+                == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
+            && !force_output_off,
         control_phase: pid_snapshot.phase,
         control_error_c: pid_snapshot.error_c,
         filtered_slope_c_per_s: pid_snapshot.filtered_slope_c_per_s,
@@ -2100,6 +2104,7 @@ pub(crate) async fn runtime_force_heater_safe_off(
         current_temp_c: state.latest_temp_c,
         duty_percent: 0,
         heater_enabled: false,
+        tuning_power_stage: false,
         control_phase: HeaterControlPhase::Warmup,
         control_error_c: -1.0,
         filtered_slope_c_per_s: -1.0,

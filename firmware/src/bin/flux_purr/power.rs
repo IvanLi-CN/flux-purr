@@ -61,6 +61,7 @@ pub(crate) struct HeaterPowerOutputContext<'a, PWM> {
     pub(crate) current_temp_c: f32,
     pub(crate) duty_percent: u8,
     pub(crate) heater_enabled: bool,
+    pub(crate) tuning_power_stage: bool,
     pub(crate) control_phase: HeaterControlPhase,
     pub(crate) control_error_c: f32,
     pub(crate) filtered_slope_c_per_s: f32,

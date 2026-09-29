@@ -2278,6 +2278,30 @@ pub(crate) fn heater_adjustable_request_mv(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_pps_request_mv(
+    duty_percent: u8,
+    heater_enabled: bool,
+    tuning_power_stage: bool,
+    current_request_mv: u16,
+    idle_request_mv: u16,
+    control_floor_mv: u16,
+    safe_max_mv: u16,
+) -> u16 {
+    heater_adjustable_request_mv(
+        if tuning_power_stage {
+            100
+        } else {
+            duty_percent
+        },
+        heater_enabled,
+        current_request_mv,
+        idle_request_mv,
+        control_floor_mv,
+        safe_max_mv,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn select_heater_power_backend(
     capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     status: Option<Status>,
