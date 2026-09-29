@@ -12470,6 +12470,38 @@ fn pd_contract_loss_relocks_an_armed_heater() {
 }
 
 #[test]
+fn tuning_failure_identifies_the_interlock_that_disarmed_heating() {
+    assert_eq!(
+        tuning_interlock_reason(false, true, false, false, false, false),
+        "pd_contract_lost"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, true, true, false, false, false),
+        "persistence_interlock_disarmed"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, false, false, false, false, false),
+        "thermal_model_interlock_disarmed"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, true, false, true, false, false),
+        "cooling_interlock_disarmed"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, true, false, false, true, false),
+        "controller_fault_disarmed"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, true, false, false, false, true),
+        "sensor_fault_disarmed"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, true, false, false, false, false),
+        "heater_arm_cleared_before_trial"
+    );
+}
+
+#[test]
 fn pd_ready_transition_discards_power_wait_heater_arm_until_rearmed() {
     let mut ui_state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
     ui_state.set_dashboard_presentation(

@@ -83,6 +83,32 @@ fn power_state_observation(state: PowerState) -> Option<PdStatusObservation> {
     state.observation()
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn tuning_interlock_reason(
+    pd_ready: bool,
+    model_allowed: bool,
+    persistence_locked: bool,
+    cooling_locked: bool,
+    controller_fault: bool,
+    sensor_fault: bool,
+) -> &'static str {
+    if !pd_ready {
+        "pd_contract_lost"
+    } else if persistence_locked {
+        "persistence_interlock_disarmed"
+    } else if !model_allowed {
+        "thermal_model_interlock_disarmed"
+    } else if cooling_locked {
+        "cooling_interlock_disarmed"
+    } else if controller_fault {
+        "controller_fault_disarmed"
+    } else if sensor_fault {
+        "sensor_fault_disarmed"
+    } else {
+        "heater_arm_cleared_before_trial"
+    }
+}
+
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
     let mut needs_redraw = false;
@@ -122,6 +148,10 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
         &mut state.heater_pwm,
         &mut state.last_heater_duty,
     );
+    if state.thermal_tuning.armed && !state.pd_contract_ready {
+        state.thermal_tuning.fail("pd_contract_lost");
+        state.thermal_control_profile_preview = None;
+    }
 
     needs_redraw
 }
@@ -1474,24 +1504,26 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         state.heater_controller.clear_fault_latch();
         info!("calibration heater re-arm -> cleared latched fault");
     }
+    let model_allowed = thermal_model_heater_allowed(
+        &state.memory_config,
+        state.calibration_runtime_state,
+        state.manual_pps_state,
+    );
+    let persistence_locked = state.ui_state.persistence_locked();
     let mut desired_heater_enabled = reconcile_runtime_heater_enabled(
         state.ui_state.heater_enabled,
         state.calibration_runtime_state,
         state.current_rtd_fault,
         state.cooling_disabled_lock_latched,
         state.heater_controller.fault_latched().is_some(),
-        thermal_model_heater_allowed(
-            &state.memory_config,
-            state.calibration_runtime_state,
-            state.manual_pps_state,
-        ),
+        model_allowed,
         state.pd_contract_ready,
     );
     desired_heater_enabled = consume_thermal_plant_completion_disarm(
         &mut state.calibration_runtime_state,
         desired_heater_enabled,
     );
-    if state.ui_state.persistence_locked() {
+    if persistence_locked {
         desired_heater_enabled = false;
     }
     if state.ui_state.heater_enabled != desired_heater_enabled {
@@ -1506,7 +1538,15 @@ pub(crate) async fn runtime_reconcile_heater_arming(
             != flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
         && !state.ui_state.heater_enabled
     {
-        state.thermal_tuning.fail("heater_interlock_disarmed");
+        state.thermal_tuning.fail(tuning_interlock_reason(
+            state.pd_contract_ready,
+            model_allowed,
+            persistence_locked,
+            state.cooling_disabled_lock_latched,
+            state.heater_controller.fault_latched().is_some(),
+            state.current_rtd_fault.is_some(),
+        ));
+        state.thermal_control_profile_preview = None;
     }
     (force_output_off, needs_redraw)
 }
