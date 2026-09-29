@@ -111,6 +111,7 @@
     <article class="panel chart-panel wide"><div class="panel-title"><h3>温度 / 目标 / phase</h3><span>°C · local device sequence</span></div><div class="chart-legend"><span style="--legend-color:#b13d35">temperature</span><span style="--legend-color:#17232a">target</span><span style="--legend-color:#d98b2b">Warmup</span><span style="--legend-color:#2f78a8">Approach</span><span style="--legend-color:#2d8a68">Hold</span><span style="--legend-color:#7966a8">Cooldown</span><span style="--legend-color:#69757c">Terminal</span></div><div class="chart-wrap"><canvas id="temperatureChart"></canvas></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>逻辑请求 / 最终 MOS PWM</h3><span>% · 0..100%</span></div><div class="chart-legend"><span style="--legend-color:#0c6590">logical request</span><span style="--legend-color:#b13d35">MOS PWM</span></div><div class="chart-wrap"><canvas id="controlChart"></canvas></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>VIN / PPS 合同与请求电压</h3><span>V · local evidence</span></div><div class="chart-legend"><span style="--legend-color:#16818b">VIN</span><span style="--legend-color:#936a08">PPS contract</span><span style="--legend-color:#0c6590">PPS request</span></div><div class="chart-wrap"><canvas id="voltageChart"></canvas></div></article>
+    <article class="panel chart-panel"><div class="panel-title"><h3>PPS 合同电流</h3><span>mA · safety ceiling · local evidence</span></div><div class="chart-legend"><span style="--legend-color:#936a08">PPS contract current</span></div><div class="chart-wrap"><canvas id="currentChart"></canvas></div></article>
   </section>
 
   <section class="section-head"><div><h2>结果与审计</h2><p>decision ledger、candidate identity 与结构化设备事实。</p></div></section>
@@ -235,6 +236,7 @@ function renderCharts(){
   drawChart('temperatureChart',samples,[{label:'temperature',color:'#b13d35',data:samples.map(s=>Number(s.temperatureCentiC)/100)},{label:'target',color:'#17232a',dash:[5,4],width:1,data:samples.map(()=>activeTarget)}],'°C',{phaseBand:true});
   drawChart('controlChart',samples,[{label:'logical request',color:'#0c6590',data:samples.map(s=>Number(s.heaterRequestedOutputPermille)/10)},{label:'MOS PWM',color:'#b13d35',data:samples.map(s=>Number(s.heaterOutputPermille)/10)}],'%');
   drawChart('voltageChart',samples,[{label:'VIN',color:'#16818b',data:samples.map(s=>Number(s.vinMv)/1000)},{label:'PPS contract',color:'#936a08',data:samples.map(s=>Number(s.ppsContractMv)/1000)},{label:'PPS request',color:'#0c6590',data:samples.map(s=>Number(s.ppsRequestedMv)/1000)}],'V');
+  drawChart('currentChart',samples,[{label:'PPS contract current',color:'#936a08',data:samples.map(s=>Number(s.ppsContractMa))}],'mA');
 }
 function renderLedger(){
   const trial=currentTrial(); const trialIndex=Number(trial.trialIndex??currentRun().adoptedTrialIndex??0); const rows=LEDGER.filter(item=>Number(item.targetC)===activeTarget&&Number(item.trialIndex)===trialIndex).sort((a,b)=>Number(a.sequence)-Number(b.sequence));

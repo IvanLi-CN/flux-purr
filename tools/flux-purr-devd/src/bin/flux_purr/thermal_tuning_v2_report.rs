@@ -946,6 +946,9 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("drawChart('temperatureChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('controlChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('voltageChart',samples,"));
+        assert!(REPORT_TEMPLATE.contains("drawChart('currentChart',samples,"));
+        assert!(REPORT_TEMPLATE.contains("Number(s.ppsContractMa)"));
+        assert!(REPORT_TEMPLATE.contains("mA · safety ceiling · local evidence"));
         assert!(
             REPORT_TEMPLATE.contains("drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height)")
         );

@@ -122,6 +122,8 @@ describe('Web thermal-tuning-v2 export', () => {
     })
     expect(strFromU8(archive['index.html'])).toContain('安全终止事实')
     expect(strFromU8(archive['index.html'])).toContain('executionStatus')
+    expect(strFromU8(archive['index.html'])).toContain("drawChart('currentChart',samples,")
+    expect(strFromU8(archive['index.html'])).toContain('Number(s.ppsContractMa)')
   })
 
   it('keeps candidate review, seal, and EEPROM save as distinct states', async () => {
