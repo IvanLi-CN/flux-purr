@@ -13,8 +13,9 @@ pub const THERMAL_TUNING_EXECUTION_ORDER_C: [i16; 9] = [60, 240, 140, 100, 80, 1
 pub const THERMAL_TUNING_MAX_TARGETS: usize = 9;
 pub const THERMAL_TUNING_EVENT_CAPACITY: usize = 256;
 // Samples carry the full local PPS/control evidence and must fit one bounded
-// JSONL response. Hosts page through the stream with afterSequence.
-pub const THERMAL_TUNING_EVENT_PAGE_SIZE: usize = 4;
+// JSONL response. Keep pages small enough for the USB host to drain the live
+// stream while the runtime continues sampling at its 300 ms cadence.
+pub const THERMAL_TUNING_EVENT_PAGE_SIZE: usize = 2;
 pub const THERMAL_TUNING_HOLD_CONFIRM_MS: u64 = 60_000;
 pub const THERMAL_TUNING_SCOUT_HOLD_MS: u64 = 12_000;
 pub const THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS: u64 = 300;
