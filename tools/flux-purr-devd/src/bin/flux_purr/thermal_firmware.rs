@@ -278,9 +278,11 @@ pub(crate) async fn run_firmware_tuning(
                 .is_some_and(|value| {
                     matches!(value, "candidate_ready" | "passed" | "failed" | "canceled")
                 });
+            let trace_gap = status_trace_gap(&status);
             journal.record(&mut statuses, status)?;
             if terminal
                 && caught_up
+                && !trace_gap
                 && let Some(sequence) = after_sequence
             {
                 let confirmed = confirm_terminal_tuning_events(
@@ -925,6 +927,18 @@ fn firmware_start_command(
 }
 
 fn event_stream_caught_up(status: &Value, after_sequence: Option<u64>) -> bool {
+    if status_trace_gap(status)
+        && status
+            .get("terminalDisposition")
+            .and_then(Value::as_str)
+            .is_some_and(|value| matches!(value, "failed" | "canceled"))
+        && status
+            .pointer("/events/events")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+    {
+        return true;
+    }
     match status
         .pointer("/trace/lastSequence")
         .and_then(Value::as_u64)
@@ -932,6 +946,10 @@ fn event_stream_caught_up(status: &Value, after_sequence: Option<u64>) -> bool {
         Some(last_sequence) => after_sequence.is_some_and(|received| received >= last_sequence),
         None => true,
     }
+}
+
+fn status_trace_gap(status: &Value) -> bool {
+    status.pointer("/trace/gap").and_then(Value::as_bool) == Some(true)
 }
 
 fn firmware_candidate_profile_value(profile: &Value) -> Value {
@@ -1928,6 +1946,22 @@ mod tests {
         });
         assert!(!event_stream_caught_up(&terminal_with_backlog, Some(7)));
         assert!(event_stream_caught_up(&terminal_with_backlog, Some(12)));
+    }
+
+    #[test]
+    fn terminal_trace_gap_does_not_wait_for_an_unretained_event() {
+        let gap_with_backlog = json!({
+            "terminalDisposition": "failed",
+            "events": {"events": [{"sequence": 320}], "nextSequence": 320},
+            "trace": {"lastSequence": 321, "gap": true}
+        });
+        assert!(!event_stream_caught_up(&gap_with_backlog, Some(320)));
+        let drained_gap = json!({
+            "terminalDisposition": "failed",
+            "events": {"events": [], "nextSequence": null},
+            "trace": {"lastSequence": 321, "gap": true}
+        });
+        assert!(event_stream_caught_up(&drained_gap, Some(320)));
     }
 
     #[test]

@@ -2432,7 +2432,7 @@ fn runtime_record_thermal_tuning_sample(
         phase,
     };
     let phase_before = state.thermal_tuning.phase;
-    if state.thermal_tuning.record_sample(sample).is_err() {
+    if state.thermal_tuning.record_live_sample(sample).is_err() {
         state.ui_state.heater_enabled = false;
         return true;
     }

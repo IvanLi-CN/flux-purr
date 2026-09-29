@@ -17,6 +17,7 @@ pub const THERMAL_TUNING_EVENT_CAPACITY: usize = 256;
 pub const THERMAL_TUNING_EVENT_PAGE_SIZE: usize = 4;
 pub const THERMAL_TUNING_HOLD_CONFIRM_MS: u64 = 60_000;
 pub const THERMAL_TUNING_SCOUT_HOLD_MS: u64 = 12_000;
+pub const THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS: u64 = 300;
 pub const THERMAL_TUNING_STABLE_WINDOW_MS: u64 = 10_000;
 pub const THERMAL_TUNING_STABLE_BAND_CENTI_C: i16 = 150;
 pub const THERMAL_TUNING_TARGET_BUDGET_MS: u64 = 20 * 60 * 1_000;
@@ -393,6 +394,7 @@ pub struct ThermalTuningRuntime {
     next_sequence: u32,
     current_elapsed_ms: u64,
     sample_clock_origin_ms: Option<u64>,
+    last_live_sample_elapsed_ms: Option<u64>,
 }
 
 impl Default for ThermalTuningRuntime {
@@ -478,6 +480,7 @@ impl ThermalTuningRuntime {
             next_sequence: 0,
             current_elapsed_ms: 0,
             sample_clock_origin_ms: None,
+            last_live_sample_elapsed_ms: None,
         }
     }
 
@@ -1107,6 +1110,41 @@ impl ThermalTuningRuntime {
         {
             self.finish_trial(sample_elapsed_ms)?;
         }
+        Ok(())
+    }
+
+    pub fn record_live_sample(
+        &mut self,
+        sample: ThermalTuningSample,
+    ) -> Result<(), ThermalTuningError> {
+        let mut checked = sample.clone();
+        checked.elapsed_ms = checked
+            .elapsed_ms
+            .saturating_sub(self.sample_clock_origin_ms.unwrap_or(0));
+        self.validate_sample(&checked)?;
+        if self.phase == ThermalTuningPhase::Cooldown
+            && (checked.heater_output_permille != 0
+                || checked.heater_requested_output_permille != 0)
+        {
+            self.fail("cooldown_output_not_zero");
+            return Err(ThermalTuningError::InvalidTransition);
+        }
+        let phase_changed =
+            self.phase != ThermalTuningPhase::Cooldown && self.phase != checked.phase;
+        if !phase_changed
+            && self.last_live_sample_elapsed_ms.is_some_and(|last| {
+                checked.elapsed_ms.saturating_sub(last) < THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS
+            })
+        {
+            return Ok(());
+        }
+        let previous_phase = self.phase;
+        self.record_sample(sample)?;
+        self.last_live_sample_elapsed_ms = if self.phase == previous_phase {
+            Some(checked.elapsed_ms)
+        } else {
+            None
+        };
         Ok(())
     }
 
@@ -1965,6 +2003,7 @@ impl ThermalTuningRuntime {
         self.next_sequence = 0;
         self.current_elapsed_ms = 0;
         self.sample_clock_origin_ms = None;
+        self.last_live_sample_elapsed_ms = None;
     }
 
     fn push_phase_transition_event(&mut self, reason: &str) {
@@ -2546,6 +2585,99 @@ mod tests {
         cooling.heater_output_permille = 0;
         runtime.record_sample(cooling).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Warmup);
+    }
+
+    #[test]
+    fn live_samples_follow_host_cadence_without_skipping_safety() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("run-live-cadence"),
+                candidate_id: id("candidate-hold"),
+                candidate_hash: hash("hash-hold"),
+                power_class: ThermalTuningPowerClass::Pps5a,
+                targets: &[60],
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile_with_targets(&[60])),
+            })
+            .unwrap();
+        for elapsed_ms in (0..=1_000).step_by(100) {
+            let mut cooling = sample(elapsed_ms, ThermalTuningPhase::Warmup, 7_000);
+            cooling.heater_requested_output_permille = 0;
+            cooling.heater_output_permille = 0;
+            runtime.record_live_sample(cooling).unwrap();
+        }
+        assert_eq!(
+            runtime
+                .events
+                .iter()
+                .filter(|event| event.kind == ThermalTuningEventKind::Sample)
+                .count(),
+            4
+        );
+
+        let mut invalid = sample(1_050, ThermalTuningPhase::Warmup, 7_000);
+        invalid.heater_requested_output_permille = 0;
+        invalid.heater_output_permille = 0;
+        invalid.pps_contract.confirmed = false;
+        assert_eq!(
+            runtime.record_live_sample(invalid),
+            Err(ThermalTuningError::InvalidTransition)
+        );
+        assert!(!runtime.armed);
+    }
+
+    #[test]
+    fn live_sample_pages_remain_contiguous_beyond_event_capacity() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("run-live-pages"),
+                candidate_id: id("candidate-hold"),
+                candidate_hash: hash("hash-hold"),
+                power_class: ThermalTuningPowerClass::Pps5a,
+                targets: &[60],
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile_with_targets(&[60])),
+            })
+            .unwrap();
+        let mut cursor = None;
+        let mut received = Vec::<u32, 512>::new();
+        for elapsed_ms in (0..=90_000).step_by(100) {
+            let mut cooling = sample(elapsed_ms, ThermalTuningPhase::Warmup, 7_000);
+            cooling.heater_requested_output_permille = 0;
+            cooling.heater_output_permille = 0;
+            runtime.record_live_sample(cooling).unwrap();
+            if elapsed_ms % 1_200 == 0 {
+                let page = runtime.events_after(cursor);
+                for event in page.events {
+                    received.push(event.sequence).unwrap();
+                }
+                cursor = page.next_sequence.or(cursor);
+            }
+        }
+        loop {
+            let page = runtime.events_after(cursor);
+            if page.events.is_empty() {
+                break;
+            }
+            for event in page.events {
+                received.push(event.sequence).unwrap();
+            }
+            cursor = page.next_sequence;
+        }
+        assert!(!runtime.trace().gap);
+        assert!(received.len() > THERMAL_TUNING_EVENT_CAPACITY);
+        assert!(
+            received
+                .iter()
+                .enumerate()
+                .all(|(index, sequence)| *sequence == index as u32)
+        );
     }
 
     fn record_current_trial_sample(
