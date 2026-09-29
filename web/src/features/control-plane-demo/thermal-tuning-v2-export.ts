@@ -53,6 +53,14 @@ export async function exportThermalTuningV2(
   const reportRuns = PHYSICAL_TARGETS.map((target) =>
     buildReportRun(target, samples, ledger, status.candidateId, status.candidateHash)
   )
+  annotateExecutionStatus(
+    reportRuns,
+    samples,
+    ledger,
+    status.targetsC,
+    status.terminalDisposition,
+    status.trace.gap
+  )
   const fullScope =
     EXECUTION_ORDER.every((target, index) => status.targetsC[index] === target) &&
     status.targetsC.length === EXECUTION_ORDER.length
@@ -246,6 +254,48 @@ function buildReportRun(
     trialCount: trials.length,
     metrics: summary?.metrics ?? {},
     trials,
+  }
+}
+
+function annotateExecutionStatus(
+  reportRuns: Array<Record<string, unknown>>,
+  samples: JsonObject[],
+  ledger: ThermalTuningEvent[],
+  selectedTargets: number[],
+  terminalDisposition: ThermalTuningStatus['terminalDisposition'],
+  traceGap: boolean
+) {
+  const executionOrder = selectedTargets
+  const hasEvidence = (target: number) =>
+    samples.some((sample) => Number(sample.targetC) === target) ||
+    reportRuns.some(
+      (run) => Number(run.targetC) === target && Array.isArray(run.trials) && run.trials.length > 0
+    )
+  const lastAttemptedTarget = [...executionOrder].reverse().find(hasEvidence) ?? null
+  const safetyEvent = [...ledger]
+    .filter((event) => event.kind === 'safety')
+    .sort(
+      (left, right) =>
+        (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER)
+    )[0]
+  const terminalReason =
+    safetyEvent?.reason ??
+    (terminalDisposition === 'failed' ? (traceGap ? 'trace_gap' : 'run_terminated') : null)
+  for (const run of reportRuns) {
+    const target = Number(run.targetC)
+    const attempted = hasEvidence(target)
+    run.executionStatus = attempted ? 'attempted' : 'not_attempted'
+    if (attempted) {
+      run.blockedBy = null
+      continue
+    }
+    run.stopReason = 'run_terminated_before_target'
+    run.blockedBy = {
+      targetC: lastAttemptedTarget,
+      reason: selectedTargets.includes(target)
+        ? (terminalReason ?? 'run_terminated_before_target')
+        : 'outside_selected_scope',
+    }
   }
 }
 

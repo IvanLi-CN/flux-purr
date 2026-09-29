@@ -115,7 +115,13 @@ describe('Web thermal-tuning-v2 export', () => {
       reason: 'sensor_fault',
       sequence: 0,
     })
+    expect(bundle.reportRuns[0]).toMatchObject({
+      executionStatus: 'not_attempted',
+      stopReason: 'run_terminated_before_target',
+      blockedBy: { targetC: null, reason: 'sensor_fault' },
+    })
     expect(strFromU8(archive['index.html'])).toContain('安全终止事实')
+    expect(strFromU8(archive['index.html'])).toContain('executionStatus')
   })
 
   it('keeps candidate review, seal, and EEPROM save as distinct states', async () => {

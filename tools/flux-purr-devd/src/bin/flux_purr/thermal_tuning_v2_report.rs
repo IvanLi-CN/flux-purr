@@ -72,7 +72,7 @@ pub(crate) fn render_v2_bundle(
     validate_candidate(&bundle, &candidate)?;
 
     let event_audit = audit_events(&bundle, &samples, &ledger);
-    let report_runs = normalized_report_runs(&bundle, &samples)?;
+    let report_runs = normalized_report_runs(&bundle, &samples, &ledger)?;
     let safety_summary = safety_summary(&bundle, &ledger);
     bundle["reportRuns"] = Value::Array(report_runs.clone());
     bundle["rawRuns"] = bundle
@@ -443,6 +443,7 @@ fn audit_sample_fields(
 fn normalized_report_runs(
     bundle: &Value,
     samples: &[Value],
+    ledger: &[Value],
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(runs) = bundle.get("reportRuns").and_then(Value::as_array) else {
         return Err(io::Error::new(
@@ -452,6 +453,34 @@ fn normalized_report_runs(
         .into());
     };
     let mut normalized = runs.to_vec();
+    let execution_order = bundle
+        .pointer("/targetSet/executionOrderC")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_i64).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let selected_targets = bundle
+        .pointer("/targetSet/selectedC")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_i64).collect::<Vec<_>>())
+        .unwrap_or_else(|| execution_order.clone());
+    let safety = safety_summary(bundle, ledger);
+    let terminal_reason = safety
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            (bundle.get("terminalDisposition").and_then(Value::as_str) == Some("failed"))
+                .then(|| "run_terminated".to_owned())
+        });
+    let last_attempted_target = execution_order.iter().rev().find(|target| {
+        normalized.iter().any(|run| {
+            run.get("targetC")
+                .or_else(|| run.get("targetTempC"))
+                .and_then(Value::as_i64)
+                == Some(**target)
+                && run_has_evidence(run, samples, **target)
+        })
+    });
     normalized.sort_by_key(|run| {
         run.get("targetC")
             .or_else(|| run.get("targetTempC"))
@@ -473,6 +502,29 @@ fn normalized_report_runs(
             .get("targetC")
             .or_else(|| run.get("targetTempC"))
             .and_then(Value::as_i64);
+        let has_evidence = target.is_some_and(|target| run_has_evidence(run, samples, target));
+        run["executionStatus"] = json!(if has_evidence {
+            "attempted"
+        } else {
+            "not_attempted"
+        });
+        if !has_evidence {
+            run["stopReason"] = json!("run_terminated_before_target");
+            let blocked_reason = if target.is_some_and(|target| !selected_targets.contains(&target))
+            {
+                "outside_selected_scope"
+            } else {
+                terminal_reason
+                    .as_deref()
+                    .unwrap_or("run_terminated_before_target")
+            };
+            run["blockedBy"] = json!({
+                "targetC": last_attempted_target.copied(),
+                "reason": blocked_reason,
+            });
+        } else {
+            run["blockedBy"] = Value::Null;
+        }
         let Some(trials) = run.get_mut("trials").and_then(Value::as_array_mut) else {
             continue;
         };
@@ -493,6 +545,15 @@ fn normalized_report_runs(
         }
     }
     Ok(normalized)
+}
+
+fn run_has_evidence(run: &Value, samples: &[Value], target: i64) -> bool {
+    run.get("trials")
+        .and_then(Value::as_array)
+        .is_some_and(|trials| !trials.is_empty())
+        || samples
+            .iter()
+            .any(|sample| sample.get("targetC").and_then(Value::as_i64) == Some(target))
 }
 
 fn fill_trial_bounds(trial: &mut Value, bounds: [u64; 4]) {
@@ -895,6 +956,51 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("class=\"chart-legend\""));
         assert!(REPORT_TEMPLATE.contains("canvas.dataset.sampleCount=String(samples.length)"));
         assert!(REPORT_TEMPLATE.contains("if(last)last.endElapsedMs=elapsedMs"));
+        assert!(REPORT_TEMPLATE.contains("run.executionStatus||'—'"));
+        assert!(REPORT_TEMPLATE.contains("run.blockedBy?.reason||run.stopReason||'—'"));
+    }
+
+    #[test]
+    fn marks_unattempted_targets_and_their_blocking_target() {
+        let dir = tempdir().unwrap();
+        write_fixture(dir.path());
+        let bundle_path = dir.path().join("run.bundle.json");
+        let mut input_bundle = read_json(&bundle_path).unwrap();
+        input_bundle["targetSet"] = json!({
+            "physicalC": [60, 80],
+            "selectedC": [60, 80],
+            "executionOrderC": [60, 80]
+        });
+        input_bundle["terminalDisposition"] = json!("failed");
+        input_bundle["reviewDisposition"] = json!("review_incomplete");
+        input_bundle["deviceTrace"]["gap"] = json!(true);
+        input_bundle["reportRuns"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "targetC": 80,
+                "reviewOutcome": "failed",
+                "reviewPassed": false,
+                "trialCount": 0,
+                "trials": []
+            }));
+        fs::write(&bundle_path, serde_json::to_vec(&input_bundle).unwrap()).unwrap();
+
+        let output = dir.path().join("out");
+        render_v2_bundle(ThermalTuningV2ReportInput {
+            input_dir: dir.path().to_path_buf(),
+            output_dir: Some(output.clone()),
+        })
+        .unwrap();
+        let bundle = read_json(&output.join("run.bundle.json")).unwrap();
+        let runs = bundle["reportRuns"].as_array().unwrap();
+        let attempted = runs.iter().find(|run| run["targetC"] == 60).unwrap();
+        let unattempted = runs.iter().find(|run| run["targetC"] == 80).unwrap();
+        assert_eq!(attempted["executionStatus"], "attempted");
+        assert_eq!(unattempted["executionStatus"], "not_attempted");
+        assert_eq!(unattempted["stopReason"], "run_terminated_before_target");
+        assert_eq!(unattempted["blockedBy"]["targetC"], 60);
+        assert_eq!(unattempted["blockedBy"]["reason"], "trace_gap");
     }
 
     fn write_fixture(dir: &Path) {
