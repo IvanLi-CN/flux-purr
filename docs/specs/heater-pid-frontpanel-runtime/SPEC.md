@@ -201,6 +201,7 @@ None
 
 - `thermal tune --engine firmware` 只支持 `pps5a`。默认资格范围为 `60 / 80 / 100 / 120 / 140 / 160 / 180 / 220 / 240°C` 九个同等级目标，实际执行顺序为 `60, 240, 140, 100, 80, 120, 180, 160, 220`；缩小范围的诊断/复测不能产生默认资格通过结论。`pps3a` 不运行调优、不加热、不生成候选或保存，必须留下五文件失败审计；3A 调优属于独立后续范围。
 - 固件调优只在有效 `pps5a` PowerState、可用 thermal model、无标定/preview 互斥及有效安全状态下启动。候选仅在安全 trial boundary 通过既有 RAM preview 生效，5A 正常加热与调优均使用同一 point-local profile 控制器；PPS/PWM 映射及所有保护保持现行路径。不得另建调优专用加热状态机、功率公式、隐藏输出限幅或改变 `thermal_plant_auto` 单次受保护瞬态语义。
+- 固件调优的决策与报告样本按设备本地 `300ms` 节拍记录；生产热控 tick 不降频。每个 tick 仍须检查样本身份、PPS 合同、测温有效性与 cooldown 零输出，phase 切换须立即记录，不得因审计节拍延迟失效关热。
 - 5A 决策策略以当前主干外部主控 `thermal tune` 为冻结向量基线：目标顺序、冷却门槛、最近两侧已 accepted 点的 seed/线性插值、target-local scout/retune、current 与 evidence-specific predicted compare、完整 score vector、hard gate、单目标从 cooldown 开始的 `20min` 单调预算、失败区间阻断、accepted point 冻结、无默认独立轮次硬上限及 `60s` hold confirm 必须一致。设备缺少的外部 source 实测不得伪造；无法由本地 PPS/安全事实映射的向量应明确 unavailable 并失败，而非更改评分或通过门槛。
 - 每个 candidate 的 warmup 逻辑请求必须达到 `100%`，有完整 approach→hold、过冲 `<=3°C`、hold 峰峰值 `<=3°C`、目标相关 full-speed-to-stable 门槛与连续 `60s` hold confirm。前一候选、rejected trial 和 cooldown 样本不得计入 adopted candidate 的评分；实际 MOS PWM 与逻辑请求须分别取自生产输出链。
 

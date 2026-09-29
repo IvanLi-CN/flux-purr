@@ -99,7 +99,7 @@
 
 ## Thermal acceptance state
 
-- An explicit `thermal tune --engine firmware` host path and independent firmware tuning command/status/event transport are present. The host can render five-file `thermal-tuning-v2` reports from sample/result input, verify the device event digest, and produce a no-heat `pps3a` preflight failure bundle. The default `thermal tune` path remains the external runner. These are implementation coverage, not 5A qualification.
+- An explicit `thermal tune --engine firmware` host path and independent firmware tuning command/status/event transport are present. The device validates live safety inputs on every control tick and records tuning samples at `300ms`; the host drains retained pages and renders an explicit failed report when a terminal trace gap cannot be recovered. The host can render five-file `thermal-tuning-v2` reports from sample/result input, verify the device event digest, and produce a no-heat `pps3a` preflight failure bundle. The default `thermal tune` path remains the external runner. These are implementation coverage, not 5A qualification.
 - `pps3a` / 65W 稀疏 acceptance bundle 已存在，并继续作为 3A 当前基准。
 - `pps5a` / 100W 路径已经具备 source-class 识别、bank 解析、preview seed、retune、approach characterization 与报告链路；`thermal-self-test-runs/approach-characterization-pd100w-pps5a-20260717-final/` 已作为当前 5A approach-reference 当前真相。
 - `thermal-self-test-runs/preliminary-pd100w-pps5a-60-140-220-20260717/` 是历史 5A preliminary review bundle：顶层回显 `bundleDisposition=preliminary_review`、`acceptedProfileRole=review_candidate_snapshot`、`selectedMode=100w`、`resolvedBank=pps5a`、`detectedSourceClass=pps5a`，并为 `60 / 140 / 220°C` 三个 tab 分别附带 `holdCheck`。该历史三点 bundle 不满足当前 full-batch validation report 合同。
