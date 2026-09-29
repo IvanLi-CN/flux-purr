@@ -9320,6 +9320,25 @@ fn production_controller_requires_a_verified_five_amp_source() {
         production_thermal_controller(negotiating, ThermalProfileMode::Auto, &five_amp_pps),
         ProductionThermalController::Plant
     );
+    let continuous = PowerState {
+        requested: Some(PdContractRequest::pps(20_100, 5_000).unwrap()),
+        ..negotiating
+    };
+    assert_eq!(
+        production_thermal_controller(continuous, ThermalProfileMode::Auto, &five_amp_pps),
+        ProductionThermalController::Profile
+    );
+    assert_eq!(
+        production_thermal_controller(
+            PowerState {
+                requested: Some(PdContractRequest::pps(20_100, 3_000).unwrap()),
+                ..continuous
+            },
+            ThermalProfileMode::Auto,
+            &five_amp_pps
+        ),
+        ProductionThermalController::Plant
+    );
 }
 
 #[test]
@@ -12499,6 +12518,103 @@ fn tuning_failure_identifies_the_interlock_that_disarmed_heating() {
         tuning_interlock_reason(true, true, false, false, false, false),
         "heater_arm_cleared_before_trial"
     );
+}
+
+#[test]
+fn tuning_waits_for_an_admitted_pd_request_instead_of_failing_at_first_missing_snapshot() {
+    let request = PdContractRequest::pps(12_500, 5_000).unwrap();
+    let pending = PowerState {
+        protocol: PowerProtocol::WaitingForAccept,
+        available: true,
+        requested: Some(request),
+        active: None,
+        failure: None,
+        ..PowerState::unavailable()
+    };
+    assert_eq!(
+        tuning_pd_wait_decision(pending, Some(100), 129, true, false),
+        TuningPdWaitDecision::Wait
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(pending, Some(100), 5_601, true, false),
+        TuningPdWaitDecision::Fail("pd_request_timeout")
+    );
+
+    let failed = PowerState {
+        failure: Some(PowerFailure::Detached),
+        ..pending
+    };
+    assert_eq!(
+        tuning_pd_wait_decision(failed, Some(100), 129, true, false),
+        TuningPdWaitDecision::Fail("pd_contract_lost")
+    );
+
+    let (ready, _) = production_power_fixture(5_000);
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 129, true, false),
+        TuningPdWaitDecision::Wait
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 129, false, false),
+        TuningPdWaitDecision::Ready
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 129, false, true),
+        TuningPdWaitDecision::Fail("pd_request_failed")
+    );
+}
+
+#[test]
+fn automatic_pps_ticket_requires_the_exact_confirmed_contract() {
+    let (ready, _) = production_power_fixture(5_000);
+    let active = ready.active.unwrap();
+    assert_eq!(
+        automatic_pps_ticket_decision(None, 100, 129, 20_000, 5_000),
+        AutomaticPpsTicketDecision::Wait
+    );
+    assert_eq!(
+        automatic_pps_ticket_decision(
+            Some(TicketOutcome::Confirmed(active)),
+            100,
+            129,
+            20_000,
+            5_000,
+        ),
+        AutomaticPpsTicketDecision::Confirmed
+    );
+    assert_eq!(
+        automatic_pps_ticket_decision(
+            Some(TicketOutcome::Confirmed(active)),
+            100,
+            129,
+            19_500,
+            5_000,
+        ),
+        AutomaticPpsTicketDecision::Failed
+    );
+    assert_eq!(
+        automatic_pps_ticket_decision(Some(TicketOutcome::Rejected), 100, 129, 20_000, 5_000),
+        AutomaticPpsTicketDecision::Failed
+    );
+    assert_eq!(
+        automatic_pps_ticket_decision(None, 100, 5_601, 20_000, 5_000),
+        AutomaticPpsTicketDecision::Failed
+    );
+}
+
+#[test]
+fn tuning_power_wait_resumes_profile_without_a_false_source_change() {
+    let mut controller = HeaterController::new();
+    controller.production_controller = Some(ProductionThermalController::Profile);
+    let paused = pause_tuning_profile_controller(&mut controller, 60, 34.0, 129);
+    assert_eq!(paused.duty_percent, 0);
+    assert_eq!(controller.production_controller, None);
+    let (_, disarm) = controller.update_production_at(
+        ProductionThermalController::Profile,
+        production_test_input(34.0),
+        Some(production_test_profile(300)),
+    );
+    assert!(!disarm);
 }
 
 #[test]

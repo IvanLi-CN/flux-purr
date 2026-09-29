@@ -39,7 +39,14 @@ pub(crate) fn production_thermal_controller(
     mode: ThermalProfileMode,
     manual_pps: &ManualPpsState,
 ) -> ProductionThermalController {
-    if power_state.protocol == PowerProtocol::Ready
+    let contract_continuous = match power_state.protocol {
+        PowerProtocol::Ready => true,
+        PowerProtocol::WaitingForAccept | PowerProtocol::WaitingForPsRdy => power_state
+            .requested
+            .is_some_and(|request| pps_adjustment_is_continuous(power_state, request)),
+        _ => false,
+    };
+    if contract_continuous
         && power_state.available
         && power_state.failure.is_none()
         && power_state.active.is_some()
