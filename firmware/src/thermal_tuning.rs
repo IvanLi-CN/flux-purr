@@ -2359,11 +2359,37 @@ pub fn hash_profile(profile: &ThermalControlProfileConfig) -> Option<TuningHash>
     Some(output)
 }
 
+const TRACE_DIGEST_DOMAIN: &[u8] = b"thermal-tuning-event-digest-v2";
+const TRACE_SCORE_SCALE: f64 = 1_000_000.0;
+
+fn quantized_score(value: f64) -> i64 {
+    if value.is_nan() {
+        return i64::MIN;
+    }
+    let scaled = value * TRACE_SCORE_SCALE;
+    if scaled >= i64::MAX as f64 {
+        i64::MAX
+    } else if scaled <= i64::MIN as f64 {
+        i64::MIN
+    } else if scaled >= 0.0 {
+        (scaled + 0.5) as i64
+    } else {
+        (scaled - 0.5) as i64
+    }
+}
+
 fn chained_event_digest(previous: &TuningHash, event: &ThermalTuningEvent) -> TuningHash {
     let mut hasher = Sha256::new();
     hasher.update(previous.as_bytes());
+    hasher.update(TRACE_DIGEST_DOMAIN);
+    let mut canonical = event.clone();
+    let decision_score = canonical.decision.as_mut().map(|decision| {
+        let score = decision.score;
+        decision.score = [0.0; 11];
+        score
+    });
     let mut encoded = [0_u8; 4096];
-    if let Ok(length) = serde_json_core::to_slice(event, &mut encoded) {
+    if let Ok(length) = serde_json_core::to_slice(&canonical, &mut encoded) {
         hasher.update(&encoded[..length]);
     } else {
         hasher.update(event.sequence.to_le_bytes());
@@ -2373,6 +2399,12 @@ fn chained_event_digest(previous: &TuningHash, event: &ThermalTuningEvent) -> Tu
         hasher.update([event.trial_index.unwrap_or_default()]);
         if let Some(reason) = &event.reason {
             hasher.update(reason.as_bytes());
+        }
+    }
+    if let Some(score) = decision_score {
+        hasher.update(b"score-micros");
+        for value in score {
+            hasher.update(quantized_score(value).to_le_bytes());
         }
     }
     let digest = hasher.finalize();
@@ -2497,8 +2529,44 @@ mod tests {
         );
         assert_eq!(
             digest_event_chain(&[event]).as_str(),
-            "6ce5cc6485ed1f4d4a7d9e35e2ce766386da295efec80563c2eaa1ad47408b75"
+            "97d020d2c3f902b33a1d48b53e684e2c5e93d7bd76eb6138f249ccbc3e51e893"
         );
+    }
+
+    #[test]
+    fn decision_digest_quantizes_float_score_for_cross_target_stability() {
+        let mut event = serde_json::from_value::<ThermalTuningEvent>(serde_json::json!({
+            "sequence": 0,
+            "elapsedMs": 0,
+            "kind": "decision",
+            "phase": "hold",
+            "targetC": 60,
+            "trialIndex": 0,
+            "sample": null,
+            "reason": "accepted",
+            "trial": null,
+            "decision": {
+                "disposition": "accepted",
+                "purpose": "hold_confirm",
+                "maxOvershootCentiC": 100,
+                "holdPeakToPeakCentiC": 100,
+                "settleTimeMs": 1000,
+                "score": [1.2345670, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "warmupFull": true,
+                "approachToHold": true,
+                "holdConfirm": true,
+                "hardGateOvershootCentiC": 300,
+                "hardGateHoldPeakToPeakCentiC": 300,
+                "hardGateFullSpeedToStableMs": 10000,
+                "freeze": true,
+                "prune": false,
+                "stopReason": "accepted"
+            }
+        }))
+        .unwrap();
+        let baseline = digest_event_chain(&[event.clone()]);
+        event.decision.as_mut().unwrap().score[0] += 0.0000001;
+        assert_eq!(baseline, digest_event_chain(&[event]));
     }
 
     fn id(value: &str) -> TuningId {

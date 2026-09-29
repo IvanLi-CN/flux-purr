@@ -2095,7 +2095,7 @@ mod tests {
         let digest = digest_event_chain(&[event.clone()]);
         assert_eq!(
             digest.as_str(),
-            "6c91f9e71b0dd2e548b43b5c3bcebfb52a3834567a05b88469af1ea934122f44"
+            "4ea3bc9c23cbf417bbcd6468998d28c493745c28305d92ead01274c3a2f4f9d3"
         );
         let mut status = json!({
             "events": {"events": [serde_json::to_value(&event).unwrap()]},
