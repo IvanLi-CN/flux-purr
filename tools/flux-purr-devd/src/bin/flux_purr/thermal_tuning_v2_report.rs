@@ -1009,7 +1009,7 @@ mod tests {
 
     #[test]
     fn report_template_binds_all_charts_to_selected_trial_and_phase_band() {
-        assert!(REPORT_TEMPLATE.contains("const samples=samplesForTrial();"));
+        assert!(REPORT_TEMPLATE.contains("const trialSamples=samplesForTrial();"));
         assert!(REPORT_TEMPLATE.contains("drawChart('temperatureChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('controlChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('voltageChart',samples,"));
@@ -1023,6 +1023,21 @@ mod tests {
             REPORT_TEMPLATE.contains("drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height)")
         );
         assert!(REPORT_TEMPLATE.contains("sample.phase!=='cooldown'"));
+        assert!(REPORT_TEMPLATE.contains("function postTrialSamples()"));
+        assert!(REPORT_TEMPLATE.contains("sample.phase==='cooldown'"));
+        assert!(
+            REPORT_TEMPLATE.contains("chartRange==='full'?[...trialSamples,...postTrialSamples()]")
+        );
+        assert!(REPORT_TEMPLATE.contains("stableBand:[activeTarget-1.5,activeTarget+1.5]"));
+        assert!(REPORT_TEMPLATE.contains("['trial duration',ms(trialDuration)]"));
+        assert!(REPORT_TEMPLATE.contains(
+            "['qualified Hold',`${ms(holdDuration)} / ${confirm?'60.00s confirm':'12.00s scout'}`]"
+        ));
+        assert!(REPORT_TEMPLATE.contains("['post-stop peak',postPeak==null?'unavailable'"));
+        assert!(REPORT_TEMPLATE.contains("for(const id of CHART_IDS){const canvas=$(id);canvas.addEventListener('pointermove',moveHover)"));
+        assert!(REPORT_TEMPLATE.contains("line.dataset.sequence=String(sample.sequence)"));
+        assert!(REPORT_TEMPLATE.contains("tooltip.dataset.sequence=String(sample.sequence)"));
+        assert!(REPORT_TEMPLATE.contains("value!=null&&Number.isFinite(Number(value))"));
         assert!(REPORT_TEMPLATE.contains("centiC(cooldown.startTemperatureCentiC)"));
         assert!(REPORT_TEMPLATE.contains("centiC(cooldown.thresholdCentiC)"));
         assert!(
