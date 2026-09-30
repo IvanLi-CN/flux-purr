@@ -23,6 +23,8 @@ pub const THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS: u64 = 300;
 pub const THERMAL_TUNING_STABLE_WINDOW_MS: u64 = 10_000;
 pub const THERMAL_TUNING_STABLE_BAND_CENTI_C: i16 = 150;
 pub const THERMAL_TUNING_TARGET_BUDGET_MS: u64 = 20 * 60 * 1_000;
+const THERMAL_TUNING_HOLD_ENTRY_BELOW_CENTI_C: i32 = 50;
+const THERMAL_TUNING_HOLD_ENTRY_BAND_CENTI_C: i32 = 300;
 const THERMAL_TUNING_APPROACH_TRACE_CAPACITY: usize = 256;
 pub const THERMAL_TUNING_ID_MAX_LEN: usize = 48;
 pub const THERMAL_TUNING_REASON_MAX_LEN: usize = 96;
@@ -1281,7 +1283,14 @@ impl ThermalTuningRuntime {
             ThermalTuningPhase::Hold => {
                 self.saw_hold = true;
                 self.warmup_exited_at_ms.get_or_insert(sample.elapsed_ms);
-                self.first_hold_elapsed_ms.get_or_insert(sample.elapsed_ms);
+                let target_centi_c = i32::from(expected_target) * 100;
+                let temperature_centi_c = i32::from(sample.temperature_centi_c);
+                if temperature_centi_c >= target_centi_c - THERMAL_TUNING_HOLD_ENTRY_BELOW_CENTI_C
+                    && (temperature_centi_c - target_centi_c).abs()
+                        <= THERMAL_TUNING_HOLD_ENTRY_BAND_CENTI_C
+                {
+                    self.first_hold_elapsed_ms.get_or_insert(sample.elapsed_ms);
+                }
             }
             _ => {}
         }
@@ -3008,6 +3017,44 @@ mod tests {
             event.kind == ThermalTuningEventKind::Decision
                 && event.decision.as_ref().is_some_and(|decision| {
                     decision.stop_reason == "full-speed-to-stable budget exhausted"
+                })
+        }));
+    }
+
+    #[test]
+    fn hold_observation_starts_near_target_after_early_hold_phase() {
+        let mut runtime = started_single_target_runtime();
+        runtime
+            .record_sample(sample(0, ThermalTuningPhase::Warmup, 3_600))
+            .unwrap();
+        runtime
+            .record_sample(sample(1_000, ThermalTuningPhase::Approach, 5_000))
+            .unwrap();
+        runtime
+            .record_sample(sample(2_000, ThermalTuningPhase::Hold, 5_696))
+            .unwrap();
+        assert_eq!(runtime.first_hold_elapsed_ms, None);
+        assert_eq!(runtime.hold_output_count, 0);
+
+        runtime
+            .record_sample(sample(6_000, ThermalTuningPhase::Hold, 5_970))
+            .unwrap();
+        assert_eq!(runtime.first_hold_elapsed_ms, Some(6_000));
+        runtime
+            .record_sample(sample(10_000, ThermalTuningPhase::Hold, 6_131))
+            .unwrap();
+        runtime
+            .record_sample(sample(16_000, ThermalTuningPhase::Hold, 6_000))
+            .unwrap();
+        assert_eq!(runtime.trial_index, 0);
+        runtime
+            .record_sample(sample(18_000, ThermalTuningPhase::Hold, 6_000))
+            .unwrap();
+        assert!(runtime.events.iter().any(|event| {
+            event.kind == ThermalTuningEventKind::Decision
+                && event.decision.as_ref().is_some_and(|decision| {
+                    decision.disposition.as_str() == "passed"
+                        && decision.hold_peak_to_peak_centi_c == Some(161)
                 })
         }));
     }
