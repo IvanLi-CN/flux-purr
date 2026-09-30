@@ -103,6 +103,10 @@ pub(crate) fn render_v2_bundle(
     let qualified = trace_complete
         && all_runs_passed
         && promotion_verified
+        && bundle
+            .pointer("/qualificationScope/diagnosticOnly")
+            .and_then(Value::as_bool)
+            == Some(false)
         && bundle.get("terminalDisposition").and_then(Value::as_str) == Some("passed");
     let promotion_inconsistent = bundle.get("terminalDisposition").and_then(Value::as_str)
         == Some("passed")
@@ -814,6 +818,28 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_subset_never_qualifies_even_with_a_saved_device_receipt() {
+        let dir = tempdir().unwrap();
+        write_fixture(dir.path());
+        let bundle_path = dir.path().join("run.bundle.json");
+        let mut bundle = read_json(&bundle_path).unwrap();
+        bundle["qualificationScope"] = json!({
+            "kind": "diagnostic-retest", "targetCount": 1, "diagnosticOnly": true
+        });
+        fs::write(&bundle_path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+        let output = dir.path().join("out");
+        let result = render_v2_bundle(ThermalTuningV2ReportInput {
+            input_dir: dir.path().to_path_buf(),
+            output_dir: Some(output.clone()),
+        })
+        .unwrap();
+        assert_eq!(result["ownerOutcome"], "failed");
+        let rendered = read_json(&output.join("run.bundle.json")).unwrap();
+        assert_eq!(rendered["terminalDisposition"], "passed");
+        assert_eq!(rendered["qualificationScope"]["diagnosticOnly"], true);
+    }
+
+    #[test]
     fn renders_trace_gap_as_failed_review_without_silencing_the_gap() {
         let dir = tempdir().unwrap();
         write_fixture(dir.path());
@@ -1143,6 +1169,7 @@ mod tests {
                 "candidate": {"candidateId": "candidate-60", "candidateHash": "sha256:mock", "promotionState": "saved"},
                 "ppsVoltageBounds": {"absoluteMaxMv": 28000, "apdoMaxMv": 21000},
                 "targetSet": {"physicalC": [60], "selectedC": [60], "executionOrderC": [60]},
+                "qualificationScope": {"kind": "default-pps5a-full-batch", "targetCount": 1, "diagnosticOnly": false},
                 "reportRuns": [{
                     "targetC": 60,
                     "reviewOutcome": "passed",

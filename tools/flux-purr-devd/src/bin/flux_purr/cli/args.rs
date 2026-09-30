@@ -1231,7 +1231,7 @@ pub(crate) struct ThermalFlagshipTuneArgs {
     #[arg(
         long = "tune-targets-c",
         default_value = "60,80,100,120,140,160,180,220,240",
-        help = "Comma-separated full-batch tuning target set. Execution order is derived recursively from the physical temperature order."
+        help = "Comma-separated tuning targets. Firmware subsets are diagnostic-only and cannot qualify or be saved."
     )]
     pub(crate) tune_targets_c: String,
     #[arg(

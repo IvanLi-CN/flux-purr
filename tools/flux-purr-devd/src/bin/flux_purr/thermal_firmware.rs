@@ -10,8 +10,8 @@ use flux_purr_firmware::{
     control_plane::ThermalControlProfileWire,
     memory::ThermalControlProfileConfig,
     thermal_tuning::{
-        THERMAL_TUNING_EXECUTION_ORDER_C, THERMAL_TUNING_TARGETS_C, ThermalTuningEvent,
-        digest_event_chain, hash_profile,
+        THERMAL_TUNING_EXECUTION_ORDER_C, THERMAL_TUNING_TARGET_BUDGET_MS,
+        THERMAL_TUNING_TARGETS_C, ThermalTuningEvent, digest_event_chain, hash_profile,
     },
 };
 use reqwest::{Client, Method};
@@ -143,7 +143,8 @@ pub(crate) async fn run_firmware_tuning(
     default_devd: &str,
     args: ThermalFlagshipTuneArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    validate_firmware_args(&args)?;
+    let selected_targets = validate_firmware_args(&args)?;
+    let execution_order = selected_execution_order(&selected_targets);
     let resolved = resolve_target(args.target.clone(), default_devd)?;
     let pps3a_rejected = args.profile_mode == ThermalProfileMode::W65;
     if args.dry_run {
@@ -151,7 +152,8 @@ pub(crate) async fn run_firmware_tuning(
             "ok": true,
             "engine": "firmware",
             "powerClass": if pps3a_rejected { "pps3a" } else { "pps5a" },
-            "targetsC": if pps3a_rejected { Vec::new() } else { THERMAL_TUNING_EXECUTION_ORDER_C.to_vec() },
+            "targetsC": if pps3a_rejected { Vec::new() } else { execution_order.clone() },
+            "diagnosticOnly": pps3a_rejected || selected_targets.len() != THERMAL_TUNING_TARGETS_C.len(),
             "device": resolved.device,
             "dryRun": true
         }));
@@ -192,6 +194,7 @@ pub(crate) async fn run_firmware_tuning(
                 &candidate_id,
                 &candidate_hash,
                 &candidate_profile,
+                &execution_order,
             )),
         )
         .await
@@ -242,14 +245,14 @@ pub(crate) async fn run_firmware_tuning(
                                 &candidate_hash,
                                 &candidate_profile,
                             )),
+                            selected_targets: Some(&selected_targets),
                         });
                     }
                 }
             }
         };
 
-        let deadline = Instant::now()
-            + Duration::from_secs(args.per_target_budget_seconds.saturating_mul(9).max(60));
+        let deadline = Instant::now() + firmware_host_watchdog(selected_targets.len());
         let mut after_sequence = next_event_sequence(&start);
         journal.record(&mut statuses, start)?;
         loop {
@@ -322,6 +325,8 @@ pub(crate) async fn run_firmware_tuning(
             candidate_profile: &candidate_profile,
             statuses: &statuses,
             host_interruption: None,
+            selected_targets: &selected_targets,
+            execution_order: &execution_order,
         })?;
         let mut rendered =
             thermal_tuning_v2_report::render_v2_bundle(ThermalTuningV2ReportInput {
@@ -358,6 +363,8 @@ pub(crate) async fn run_firmware_tuning(
             seed_candidate_hash: &candidate_hash,
             candidate_profile: &candidate_profile,
             statuses: &statuses,
+            selected_targets: &selected_targets,
+            execution_order: &execution_order,
         }),
         Err(_) => render_host_failure(HostFailureInput {
             device_id: &resolved.device,
@@ -372,6 +379,7 @@ pub(crate) async fn run_firmware_tuning(
             },
             no_device_command: false,
             attempted_candidate: Some((&candidate_id, &candidate_hash, &candidate_profile)),
+            selected_targets: Some(&selected_targets),
         }),
     };
     let release_result = release_lease(client, &resolved.devd, &lease.lease_id).await;
@@ -551,6 +559,8 @@ pub(crate) async fn confirm_firmware_save(
             candidate_profile,
             statuses: &statuses,
             host_interruption: None,
+            selected_targets: &THERMAL_TUNING_TARGETS_C,
+            execution_order: &THERMAL_TUNING_EXECUTION_ORDER_C,
         })?;
         let mut rendered =
             thermal_tuning_v2_report::render_v2_bundle(ThermalTuningV2ReportInput {
@@ -721,6 +731,7 @@ fn render_unsupported_pps3a(
         reason: "pps3a_not_supported",
         no_device_command: true,
         attempted_candidate: None,
+        selected_targets: None,
     })
 }
 
@@ -733,6 +744,8 @@ struct InterruptedRunInput<'a> {
     seed_candidate_hash: &'a str,
     candidate_profile: &'a Value,
     statuses: &'a [Value],
+    selected_targets: &'a [i16],
+    execution_order: &'a [i16],
 }
 
 fn render_interrupted_run(
@@ -755,6 +768,8 @@ fn render_interrupted_run(
         candidate_profile: input.candidate_profile,
         statuses: input.statuses,
         host_interruption: Some("transport_or_runtime_failure"),
+        selected_targets: input.selected_targets,
+        execution_order: input.execution_order,
     })?;
     let mut rendered = thermal_tuning_v2_report::render_v2_bundle(ThermalTuningV2ReportInput {
         input_dir: input_dir.clone(),
@@ -773,6 +788,7 @@ struct HostFailureInput<'a> {
     reason: &'a str,
     no_device_command: bool,
     attempted_candidate: Option<(&'a str, &'a str, &'a Value)>,
+    selected_targets: Option<&'a [i16]>,
 }
 
 fn render_host_failure(
@@ -787,6 +803,7 @@ fn render_host_failure(
         reason,
         no_device_command,
         attempted_candidate,
+        selected_targets,
     } = input;
     let run_id = run_id
         .map(str::to_owned)
@@ -803,8 +820,8 @@ fn render_host_failure(
         "sourceClass": "unavailable",
         "ppsControlPolicyVersion": null,
         "ppsVoltageBounds": {"absoluteMinMv": null, "absoluteMaxMv": null, "policyFloorMv": null, "apdoMinMv": null, "apdoMaxMv": null, "availability": "device_not_queried"},
-        "targetSet": {"physicalC": parse_thermal_targets(Some(FIRMWARE_PHYSICAL_TARGETS_C))?, "selectedC": [], "executionOrderC": []},
-        "qualificationScope": {"kind": "host-failure", "targetCount": 0, "diagnosticOnly": true},
+        "targetSet": {"physicalC": parse_thermal_targets(Some(FIRMWARE_PHYSICAL_TARGETS_C))?, "selectedC": selected_targets.unwrap_or(&[]), "executionOrderC": selected_targets.map(selected_execution_order).unwrap_or_default()},
+        "qualificationScope": {"kind": "host-failure", "targetCount": selected_targets.map_or(0, <[i16]>::len), "diagnosticOnly": true},
         "terminalDisposition": "failed",
         "reviewDisposition": "review_incomplete",
         "traceOrigin": if no_device_command { "host_preflight" } else { "host_unconfirmed" },
@@ -910,6 +927,7 @@ fn firmware_start_command(
     candidate_id: &str,
     candidate_hash: &str,
     candidate_profile: &Value,
+    execution_order: &[i16],
 ) -> Value {
     json!({
         "op": "start",
@@ -917,7 +935,7 @@ fn firmware_start_command(
         "candidateId": candidate_id,
         "candidateHash": candidate_hash,
         "powerClass": "pps5a",
-        "targetsC": THERMAL_TUNING_EXECUTION_ORDER_C,
+        "targetsC": execution_order,
         "candidateProfile": {
             "op": "preview",
             "bank": "pps5a",
@@ -1067,7 +1085,7 @@ fn firmware_candidate_profile_hash(
 
 fn validate_firmware_args(
     args: &ThermalFlagshipTuneArgs,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
     if args.engine != ThermalTuneEngine::Firmware {
         return Err("firmware runner received a non-firmware engine".into());
     }
@@ -1089,10 +1107,25 @@ fn validate_firmware_args(
     }
     let requested = parse_thermal_targets(Some(&args.tune_targets_c))?;
     let expected = parse_thermal_targets(Some(FIRMWARE_PHYSICAL_TARGETS_C))?;
-    if requested != expected {
-        return Err("firmware engine requires the complete default PPS 5A target scope".into());
+    if requested.iter().any(|target| !expected.contains(target)) {
+        return Err("firmware engine targets must belong to the PPS 5A target set".into());
     }
-    Ok(())
+    Ok(requested)
+}
+
+fn selected_execution_order(selected_targets: &[i16]) -> Vec<i16> {
+    THERMAL_TUNING_EXECUTION_ORDER_C
+        .into_iter()
+        .filter(|target| selected_targets.contains(target))
+        .collect()
+}
+
+fn firmware_host_watchdog(target_count: usize) -> Duration {
+    Duration::from_millis(
+        THERMAL_TUNING_TARGET_BUDGET_MS
+            .saturating_mul(target_count as u64)
+            .saturating_add(60_000),
+    )
 }
 
 struct V2Input<'a> {
@@ -1104,6 +1137,8 @@ struct V2Input<'a> {
     candidate_profile: &'a Value,
     statuses: &'a [Value],
     host_interruption: Option<&'a str>,
+    selected_targets: &'a [i16],
+    execution_order: &'a [i16],
 }
 
 fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1116,6 +1151,8 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         candidate_profile,
         statuses,
         host_interruption,
+        selected_targets,
+        execution_order,
     } = input;
     let samples = collect_events(statuses, true);
     let ledger = collect_events(statuses, false);
@@ -1131,8 +1168,13 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         device_terminal
     };
     let targets = parse_thermal_targets(Some(FIRMWARE_PHYSICAL_TARGETS_C))?;
-    let execution_order = THERMAL_TUNING_EXECUTION_ORDER_C;
-    let report_runs = build_report_runs(&targets, &samples, &ledger, candidate_id, candidate_hash);
+    let report_runs = build_report_runs(
+        selected_targets,
+        &samples,
+        &ledger,
+        candidate_id,
+        candidate_hash,
+    );
     let effective_candidate_profile = statuses
         .iter()
         .rev()
@@ -1221,8 +1263,8 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         "sourceClass": "device-local",
         "ppsControlPolicyVersion": pps_policy_version,
         "ppsVoltageBounds": pps_voltage_bounds,
-        "targetSet": {"physicalC": targets, "selectedC": targets, "executionOrderC": execution_order},
-        "qualificationScope": {"kind": "default-pps5a-full-batch", "targetCount": targets.len(), "diagnosticOnly": false},
+        "targetSet": {"physicalC": targets, "selectedC": selected_targets, "executionOrderC": execution_order},
+        "qualificationScope": {"kind": if selected_targets.len() == targets.len() { "default-pps5a-full-batch" } else { "diagnostic-retest" }, "targetCount": selected_targets.len(), "diagnosticOnly": selected_targets.len() != targets.len()},
         "terminalDisposition": terminal,
         "reviewDisposition": if host_interruption.is_some() { json!("review_incomplete") } else { statuses.last().and_then(|status| status.get("reviewDisposition")).cloned().unwrap_or_else(|| json!("review_incomplete")) },
         "hostInterruption": host_interruption.map(|reason| json!({"reason": reason, "lastDeviceTerminalDisposition": device_terminal, "deviceState": "unconfirmed"})),
@@ -1706,14 +1748,17 @@ fn write_ndjson(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Cli, Command, ThermalCommand};
     use super::{
         InterruptedRunInput, StatusJournal, build_report_runs, build_report_trial,
         event_stream_caught_up, firmware_candidate_profile_hash, firmware_candidate_profile_value,
-        firmware_profile_mode_ready, firmware_read_command, firmware_start_command,
-        is_confirmed_rejected_start, next_event_sequence, render_host_failure,
-        render_interrupted_run, render_unsupported_pps3a, trial_events_for_target,
+        firmware_host_watchdog, firmware_profile_mode_ready, firmware_read_command,
+        firmware_start_command, is_confirmed_rejected_start, next_event_sequence,
+        render_host_failure, render_interrupted_run, render_unsupported_pps3a,
+        selected_execution_order, trial_events_for_target, validate_firmware_args,
         validate_save_input, verified_saved_receipt, verify_device_trace,
     };
+    use clap::Parser;
     use flux_purr_firmware::{
         control_plane::ThermalControlProfileWire,
         memory::ThermalControlProfileConfig,
@@ -1970,12 +2015,66 @@ mod tests {
 
     #[test]
     fn firmware_start_preserves_recursive_target_order() {
-        let command = firmware_start_command("run-1", "candidate-1", "hash-1", &json!({}));
+        let command = firmware_start_command(
+            "run-1",
+            "candidate-1",
+            "hash-1",
+            &json!({}),
+            &selected_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220, 240]),
+        );
         assert_eq!(
             command["targetsC"],
             json!([60, 240, 140, 100, 80, 120, 180, 160, 220])
         );
         assert_eq!(command["candidateProfile"]["bank"], "pps5a");
+    }
+
+    #[test]
+    fn firmware_diagnostic_subset_preserves_device_order() {
+        let selected = [60, 100, 240];
+        let order = selected_execution_order(&selected);
+        assert_eq!(order, [60, 240, 100]);
+        let command = firmware_start_command("run-1", "candidate-1", "hash-1", &json!({}), &order);
+        assert_eq!(command["targetsC"], json!([60, 240, 100]));
+    }
+
+    #[test]
+    fn firmware_host_watchdog_covers_the_device_budget_per_selected_target() {
+        assert_eq!(firmware_host_watchdog(1).as_secs(), 21 * 60);
+        assert_eq!(firmware_host_watchdog(9).as_secs(), 9 * 20 * 60 + 60);
+    }
+
+    #[test]
+    fn firmware_cli_accepts_only_frozen_5a_diagnostic_targets() {
+        let parse = |targets: &str| {
+            Cli::try_parse_from([
+                "flux-purr",
+                "thermal",
+                "tune",
+                "--engine",
+                "firmware",
+                "--device",
+                "test-device",
+                "--tune-targets-c",
+                targets,
+                "--dry-run",
+            ])
+            .unwrap()
+        };
+        let Command::Thermal {
+            command: ThermalCommand::Tune(selected),
+        } = parse("60,240").command
+        else {
+            panic!("expected thermal tune command");
+        };
+        assert_eq!(validate_firmware_args(&selected).unwrap(), [60, 240]);
+        let Command::Thermal {
+            command: ThermalCommand::Tune(unsupported),
+        } = parse("60,200").command
+        else {
+            panic!("expected thermal tune command");
+        };
+        assert!(validate_firmware_args(&unsupported).is_err());
     }
 
     #[test]
@@ -2016,6 +2115,8 @@ mod tests {
             seed_candidate_hash: "hash-seed",
             candidate_profile: &json!({"settings": null, "points": []}),
             statuses: &statuses,
+            selected_targets: &[60],
+            execution_order: &[60],
         })
         .unwrap();
 
@@ -2026,6 +2127,9 @@ mod tests {
         assert_eq!(rendered["ownerOutcome"], "failed");
         assert_eq!(bundle["terminalDisposition"], "failed");
         assert_eq!(bundle["reviewDisposition"], "review_incomplete");
+        assert_eq!(bundle["qualificationScope"]["diagnosticOnly"], true);
+        assert_eq!(bundle["qualificationScope"]["kind"], "diagnostic-retest");
+        assert_eq!(bundle["targetSet"]["selectedC"], json!([60]));
         assert_eq!(
             bundle["hostInterruption"]["lastDeviceTerminalDisposition"],
             "running"
@@ -2204,6 +2308,7 @@ mod tests {
             reason: "start_not_confirmed",
             no_device_command: false,
             attempted_candidate: Some(("attempted-candidate", "sha256:attempted", &profile)),
+            selected_targets: Some(&[60]),
         })
         .unwrap();
         assert_eq!(result["ownerOutcome"], "failed");
