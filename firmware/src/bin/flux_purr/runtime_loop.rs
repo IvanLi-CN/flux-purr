@@ -2666,7 +2666,7 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
     if state.ui_refresh_pending && elapsed_ms >= state.next_ui_refresh_ms {
         let display_flush_result = run_display_operation_with_snapshot_and_heater(
             flush_ui(&mut state.display, state.canvas, &state.ui_state),
-            &mut state.power_state_subscription,
+            &mut state.display_power_state_subscription,
             &mut state.last_pd_observation,
             &mut state.heater_pwm,
             &mut state.last_heater_duty,

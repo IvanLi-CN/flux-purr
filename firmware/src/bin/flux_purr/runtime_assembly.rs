@@ -121,6 +121,9 @@ macro_rules! build_runtime_loop_state {
         let mut power_state_subscription = pd_port
             .subscribe_power_state()
             .expect("power state receiver capacity is reserved for the runtime loop");
+        let display_power_state_subscription = pd_port
+            .subscribe_power_state()
+            .expect("power state receiver capacity is reserved for the display");
         let power_state = power_state_subscription
             .try_get()
             .unwrap_or_else(PowerState::unavailable);
@@ -169,6 +172,7 @@ macro_rules! build_runtime_loop_state {
             eeprom_i2c,
             pd_port,
             power_state_subscription,
+            display_power_state_subscription,
             power_state,
             fan_enable,
             fan_pwm,

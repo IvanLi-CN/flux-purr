@@ -605,6 +605,15 @@ fn front_panel_cannot_service_pd_or_borrow_the_pd_bus() {
 }
 
 #[test]
+fn runtime_display_cannot_consume_the_thermal_power_subscription() {
+    let assembly = include_str!("runtime_assembly.rs");
+    let runtime = include_str!("runtime_loop.rs");
+    assert!(assembly.contains("let display_power_state_subscription = pd_port"));
+    assert!(runtime.contains("&mut state.display_power_state_subscription"));
+    assert!(runtime.contains("state.power_state_subscription.changed()"));
+}
+
+#[test]
 fn fusb302b_received_resets_do_not_request_cc_reinitialization() {
     assert_eq!(
         fusb302b_received_reset_action(FUSB302B_INTERRUPTA_SOFT_RESET),
