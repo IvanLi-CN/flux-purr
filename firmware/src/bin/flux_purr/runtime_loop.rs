@@ -2209,6 +2209,17 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
             output_level: FanOutputLevel::Medium,
         };
     }
+    state.tuning_cooling_latched = tuning_cooling_requested(
+        state.tuning_cooling_latched,
+        state.tuning_was_armed_last_cycle,
+        state.thermal_tuning.armed,
+        state.thermal_tuning.phase,
+        state.ui_state.heater_enabled,
+        state.latest_temp_c,
+        state.current_rtd_fault.is_none() && state.latest_temp_c.is_finite(),
+    );
+    state.tuning_was_armed_last_cycle = state.thermal_tuning.armed;
+    fan_decision = tuning_cooldown_fan_decision(fan_decision, state.tuning_cooling_latched);
     runtime_confirm_fan_power(state, &mut fan_decision, elapsed_ms);
     state.fan_policy_state = fan_decision.state;
     state.fan_command = fan_decision.command;

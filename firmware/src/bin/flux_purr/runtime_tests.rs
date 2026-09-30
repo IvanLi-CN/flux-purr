@@ -1,4 +1,5 @@
 use super::*;
+use flux_purr_firmware::thermal_tuning::ThermalTuningPhase;
 
 fn pps_source_capability(min_mv: u16, max_mv: u16, max_ma: u16) -> u32 {
     (0b11 << 30)
@@ -10272,6 +10273,129 @@ fn multi_level_post_heat_cooling_follows_temperature_bands() {
         fast_tail.command,
         FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf)
     );
+}
+
+#[test]
+fn tuning_cooldown_forces_full_fan_without_changing_normal_post_heat_policy() {
+    for mode in [
+        PostHeatCoolingMode::Off,
+        PostHeatCoolingMode::Normal,
+        PostHeatCoolingMode::Fast,
+    ] {
+        let ordinary = fan_policy_decision_with_modes(
+            55,
+            1_000,
+            false,
+            true,
+            mode,
+            HeatingFanGuardMode::Medium,
+            (FanPolicyState::Disabled, false),
+        );
+        let cooling = tuning_cooldown_fan_decision(ordinary, true);
+        assert_eq!(cooling.state, FanPolicyState::Full);
+        assert_eq!(
+            cooling.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::Full)
+        );
+        assert_eq!(cooling.display_state, FanDisplayState::Run);
+        assert_eq!(cooling.output_level, FanOutputLevel::High);
+        assert_eq!(cooling.source, FanPolicySource::PostHeat);
+        assert_eq!(tuning_cooldown_fan_decision(ordinary, false), ordinary);
+    }
+}
+
+#[test]
+fn tuning_cooldown_preserves_safety_fan_provenance() {
+    let safety = FanPolicyDecision {
+        state: FanPolicyState::SafeHalf,
+        command: FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf),
+        display_state: FanDisplayState::Safe,
+        source: FanPolicySource::Safety,
+        output_level: FanOutputLevel::Medium,
+    };
+    let cooling = tuning_cooldown_fan_decision(safety, true);
+    assert_eq!(
+        cooling.command,
+        FanHardwareCommand::from_profile(FanVoltageProfile::Full)
+    );
+    assert_eq!(cooling.source, FanPolicySource::Safety);
+    assert_eq!(cooling.display_state, FanDisplayState::Safe);
+}
+
+#[test]
+fn tuning_cooling_continues_after_terminal_until_forty_degrees() {
+    assert!(tuning_cooling_requested(
+        false,
+        true,
+        false,
+        ThermalTuningPhase::Failed,
+        false,
+        55.0,
+        true,
+    ));
+    assert!(tuning_cooling_requested(
+        true,
+        false,
+        false,
+        ThermalTuningPhase::Failed,
+        false,
+        41.0,
+        true,
+    ));
+    assert!(!tuning_cooling_requested(
+        true,
+        false,
+        false,
+        ThermalTuningPhase::Failed,
+        false,
+        40.0,
+        true,
+    ));
+    assert!(tuning_cooling_requested(
+        true,
+        false,
+        false,
+        ThermalTuningPhase::Failed,
+        false,
+        40.4,
+        true,
+    ));
+    assert!(tuning_cooling_requested(
+        true,
+        false,
+        false,
+        ThermalTuningPhase::Failed,
+        false,
+        -1.0,
+        false,
+    ));
+    assert!(!tuning_cooling_requested(
+        true,
+        false,
+        false,
+        ThermalTuningPhase::Failed,
+        true,
+        55.0,
+        true,
+    ));
+    assert!(!tuning_cooling_requested(
+        false,
+        false,
+        false,
+        ThermalTuningPhase::Failed,
+        false,
+        55.0,
+        true,
+    ));
+    assert!(tuning_cooling_requested(
+        false,
+        false,
+        true,
+        ThermalTuningPhase::Cooldown,
+        false,
+        40.0,
+        true,
+    ));
 }
 
 #[test]

@@ -527,6 +527,53 @@ pub(crate) fn fan_policy_decision_with_modes(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn tuning_cooldown_fan_decision(
+    ordinary: FanPolicyDecision,
+    tuning_cooldown: bool,
+) -> FanPolicyDecision {
+    if !tuning_cooldown {
+        return ordinary;
+    }
+    let safety = ordinary.source == FanPolicySource::Safety;
+    FanPolicyDecision {
+        state: FanPolicyState::Full,
+        command: FanHardwareCommand::from_profile(FanVoltageProfile::Full),
+        display_state: if safety {
+            FanDisplayState::Safe
+        } else {
+            FanDisplayState::Run
+        },
+        source: if safety {
+            FanPolicySource::Safety
+        } else {
+            FanPolicySource::PostHeat
+        },
+        output_level: FanOutputLevel::High,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn tuning_cooling_requested(
+    cooling_latched: bool,
+    tuning_was_armed: bool,
+    tuning_armed: bool,
+    tuning_phase: flux_purr_firmware::thermal_tuning::ThermalTuningPhase,
+    heater_enabled: bool,
+    temperature_c: f32,
+    temperature_valid: bool,
+) -> bool {
+    if tuning_armed
+        && tuning_phase == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
+    {
+        return true;
+    }
+    if heater_enabled || (temperature_valid && temperature_c <= 40.0) {
+        return false;
+    }
+    cooling_latched || (tuning_was_armed && !tuning_armed)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn heating_guard_pulse_state(
     current_temp_c: i16,
     guard_mode: HeatingFanGuardMode,

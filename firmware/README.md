@@ -101,6 +101,7 @@
   - measurement fault-latch requires the fault condition to clear before a later explicit re-arm; clearing a fault never restores heater output automatically
 - Fan control:
   - heater falling edge starts POST cooling: `Normal` uses medium output above `40°C`, then low output for `30s`; `Fast` uses high output above `60°C`, medium output through `40°C`, then medium output for `30s`
+  - firmware-owned thermal tuning overrides the ordinary POST mode during every heater-off cooldown: MOS PWM stays at zero and the fan uses full output; after the run terminates above `40°C`, full output continues until a valid temperature reaches `40°C` or normal heating resumes
   - while `heater_enabled`, HEAT guard supports `Off/Low/Medium/High`; Low/Medium use ten-second minimum-output pulses with temperature interpolation, and High uses continuous low output above `80°C`
   - `>350°C` heater lock with at least medium output, `>360°C` high output, sensor faults, and `>=420°C` hard cutoff override both user policies
   - unacknowledged thermal runaway forces the existing active-cooling envelope regardless of the owner policy: `>60°C` full speed and `40~60°C` at `50%`; the forced state ends at `<40°C` or on acknowledgement, whichever comes first
