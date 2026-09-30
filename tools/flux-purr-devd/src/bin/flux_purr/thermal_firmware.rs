@@ -1450,12 +1450,19 @@ fn build_report_runs(
             let metrics = summary_trial
                 .and_then(|trial| trial.get("metrics").cloned())
                 .unwrap_or_else(|| json!({}));
+            let stop_reason =
+                thermal_tuning_v2_report::target_budget_stop_reason(ledger, i64::from(*target))
+                    .or_else(|| {
+                        summary_trial
+                            .and_then(|trial| trial.get("stopReason").and_then(Value::as_str))
+                    });
             json!({
                 "targetC": target,
                 "reviewOutcome": review_outcome,
                 "reviewPassed": adopted.is_some(),
                 "adoptedTrialIndex": adopted_trial_index,
                 "trialCount": trials.len(),
+                "stopReason": stop_reason,
                 "metrics": metrics,
                 "trials": trials
             })
@@ -2042,6 +2049,62 @@ mod tests {
     fn firmware_host_watchdog_covers_the_device_budget_per_selected_target() {
         assert_eq!(firmware_host_watchdog(1).as_secs(), 21 * 60);
         assert_eq!(firmware_host_watchdog(9).as_secs(), 9 * 20 * 60 + 60);
+    }
+
+    #[test]
+    fn hil_failed_endpoint_replay_keeps_cooldown_and_confirm_failure() {
+        // Device-local event slice from run firmware-pps5a-1790777485600.
+        let samples = vec![
+            json!({"sequence": 35, "elapsedMs": 11462, "targetC": 60, "trialIndex": 0, "phase": "warmup", "temperatureCentiC": 3971, "heaterRequestedOutputPermille": 1000}),
+            json!({"sequence": 65, "elapsedMs": 20598, "targetC": 60, "trialIndex": 0, "phase": "hold", "temperatureCentiC": 5802, "heaterRequestedOutputPermille": 0}),
+            json!({"sequence": 85, "elapsedMs": 27620, "targetC": 60, "trialIndex": 0, "phase": "hold", "temperatureCentiC": 6409, "heaterRequestedOutputPermille": 0}),
+            json!({"sequence": 1562, "elapsedMs": 551458, "targetC": 60, "trialIndex": 1, "phase": "warmup", "temperatureCentiC": 4013, "heaterRequestedOutputPermille": 1000}),
+            json!({"sequence": 1595, "elapsedMs": 561407, "targetC": 60, "trialIndex": 1, "phase": "hold", "temperatureCentiC": 5836, "heaterRequestedOutputPermille": 0}),
+            json!({"sequence": 1610, "elapsedMs": 566676, "targetC": 60, "trialIndex": 1, "phase": "hold", "temperatureCentiC": 6160, "heaterRequestedOutputPermille": 0}),
+            json!({"sequence": 3395, "elapsedMs": 1200513, "targetC": 240, "trialIndex": 0, "phase": "warmup", "temperatureCentiC": 4834, "heaterRequestedOutputPermille": 1000}),
+            json!({"sequence": 3758, "elapsedMs": 1326766, "targetC": 240, "trialIndex": 0, "phase": "hold", "temperatureCentiC": 23891, "heaterRequestedOutputPermille": 900}),
+            json!({"sequence": 3812, "elapsedMs": 1343999, "targetC": 240, "trialIndex": 1, "phase": "warmup", "temperatureCentiC": 19840, "heaterRequestedOutputPermille": 1000}),
+            json!({"sequence": 4005, "elapsedMs": 1411624, "targetC": 240, "trialIndex": 1, "phase": "approach", "temperatureCentiC": 23854, "heaterRequestedOutputPermille": 930}),
+        ];
+        let ledger = vec![
+            json!({"kind": "candidate_trial", "targetC": 60, "trialIndex": 0, "trial": {"startElapsedMs": 11462, "endElapsedMs": 27620, "startTemperatureCentiC": 3971, "cooldownThresholdCentiC": 4000, "sampleStartSequence": 35, "sampleEndSequence": 85, "endSequence": 86}}),
+            json!({"kind": "decision", "targetC": 60, "trialIndex": 0, "decision": {"disposition": "rejected", "purpose": "scout", "stopReason": "full-speed-to-stable budget exhausted", "maxOvershootCentiC": 409, "holdPeakToPeakCentiC": 433, "settleTimeMs": null, "hardGateFullSpeedToStableMs": 10000}}),
+            json!({"kind": "candidate_trial", "elapsedMs": 551331, "targetC": 60, "trialIndex": 1, "trial": {"startElapsedMs": 551331, "startTemperatureCentiC": 3999, "cooldownThresholdCentiC": 4000, "endSequence": null}}),
+            json!({"kind": "candidate_trial", "targetC": 60, "trialIndex": 1, "trial": {"startElapsedMs": 551458, "endElapsedMs": 566676, "startTemperatureCentiC": 3999, "cooldownThresholdCentiC": 4000, "sampleStartSequence": 1562, "sampleEndSequence": 1610, "endSequence": 1611}}),
+            json!({"kind": "decision", "targetC": 60, "trialIndex": 1, "decision": {"disposition": "rejected", "purpose": "batch_current", "stopReason": "full-speed-to-stable budget exhausted", "maxOvershootCentiC": 160, "holdPeakToPeakCentiC": 197, "settleTimeMs": null, "hardGateFullSpeedToStableMs": 10000}}),
+            json!({"kind": "decision", "targetC": 60, "trialIndex": 2, "reason": "target_budget_exhausted_during_cooldown"}),
+            json!({"kind": "candidate_trial", "targetC": 240, "trialIndex": 0, "trial": {"startElapsedMs": 1200513, "endElapsedMs": 1326766, "startTemperatureCentiC": 4839, "cooldownThresholdCentiC": 20000, "sampleStartSequence": 3395, "sampleEndSequence": 3758, "endSequence": 3759}}),
+            json!({"kind": "decision", "targetC": 240, "trialIndex": 0, "decision": {"disposition": "passed", "purpose": "scout", "stopReason": "candidate passed 12s scout hard gates", "maxOvershootCentiC": 2, "holdPeakToPeakCentiC": 120, "settleTimeMs": 2061, "hardGateFullSpeedToStableMs": 5000}}),
+            json!({"kind": "candidate_trial", "targetC": 240, "trialIndex": 1, "trial": {"startElapsedMs": 1343999, "endElapsedMs": 1411624, "startTemperatureCentiC": 19965, "cooldownThresholdCentiC": 20000, "sampleStartSequence": 3812, "sampleEndSequence": 4005, "endSequence": 4006}}),
+            json!({"kind": "decision", "targetC": 240, "trialIndex": 1, "decision": {"disposition": "rejected", "purpose": "hold_confirm", "stopReason": "full-speed-to-stable budget exhausted", "settleTimeMs": 5095, "hardGateFullSpeedToStableMs": 5000}}),
+            json!({"kind": "decision", "targetC": 240, "trialIndex": 14, "reason": "target_budget_exhausted_during_cooldown"}),
+        ];
+        let runs = build_report_runs(&[60, 240], &samples, &ledger, "candidate-1", "hash-1");
+        assert_eq!(runs[0]["reviewOutcome"], "failed");
+        assert_eq!(
+            runs[0]["stopReason"],
+            "target_budget_exhausted_during_cooldown"
+        );
+        assert_eq!(runs[0]["trials"][0]["maxOvershootC"], 4.09);
+        assert_eq!(
+            runs[0]["trials"][1]["fullSpeedToStable"]["settleTimeMs"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            ledger[2]["elapsedMs"].as_u64().unwrap()
+                - ledger[0]["trial"]["endElapsedMs"].as_u64().unwrap(),
+            523711
+        );
+        assert_eq!(runs[1]["reviewOutcome"], "failed");
+        assert_eq!(
+            runs[1]["stopReason"],
+            "target_budget_exhausted_during_cooldown"
+        );
+        assert_eq!(runs[1]["trials"][0]["disposition"], "passed");
+        assert_eq!(
+            runs[1]["trials"][1]["stopReason"],
+            "full-speed-to-stable budget exhausted"
+        );
     }
 
     #[test]

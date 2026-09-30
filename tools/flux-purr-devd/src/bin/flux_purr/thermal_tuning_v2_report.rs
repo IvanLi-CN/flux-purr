@@ -510,6 +510,8 @@ fn normalized_report_runs(
             .or_else(|| run.get("targetTempC"))
             .and_then(Value::as_i64);
         let has_evidence = target.is_some_and(|target| run_has_evidence(run, samples, target));
+        let target_budget_reason =
+            target.and_then(|target| target_budget_stop_reason(ledger, target));
         run["executionStatus"] = json!(if has_evidence {
             "attempted"
         } else {
@@ -538,6 +540,9 @@ fn normalized_report_runs(
             });
         } else {
             run["blockedBy"] = Value::Null;
+            if let Some(reason) = target_budget_reason {
+                run["stopReason"] = json!(reason);
+            }
         }
         let Some(trials) = run.get_mut("trials").and_then(Value::as_array_mut) else {
             continue;
@@ -574,6 +579,16 @@ fn normalized_report_runs(
         }
     }
     Ok(normalized)
+}
+
+pub(super) fn target_budget_stop_reason(ledger: &[Value], target: i64) -> Option<&str> {
+    ledger.iter().rev().find_map(|event| {
+        (event.get("kind").and_then(Value::as_str) == Some("decision")
+            && event.get("targetC").and_then(Value::as_i64) == Some(target))
+        .then(|| event.get("reason").and_then(Value::as_str))
+        .flatten()
+        .filter(|reason| reason.starts_with("target_budget_exhausted"))
+    })
 }
 
 fn run_has_evidence(run: &Value, samples: &[Value], target: i64) -> bool {
@@ -1154,6 +1169,30 @@ mod tests {
             "interval_pruned_without_accepted_bounds"
         );
         assert!(pruned["blockedBy"]["targetC"].is_null());
+    }
+
+    #[test]
+    fn attempted_target_uses_device_budget_terminal_reason_on_rerender() {
+        let bundle = json!({
+            "targetSet": {"selectedC": [60], "executionOrderC": [60]},
+            "terminalDisposition": "failed",
+            "reportRuns": [{"targetC": 60, "reviewOutcome": "failed", "trials": [{"trialIndex": 1, "stopReason": "full-speed-to-stable budget exhausted"}]}]
+        });
+        let samples = vec![json!({"kind": "sample", "targetC": 60, "trialIndex": 1})];
+        let ledger = vec![json!({
+            "kind": "decision", "targetC": 60, "trialIndex": 2,
+            "reason": "target_budget_exhausted_during_cooldown"
+        })];
+        let runs = normalized_report_runs(&bundle, &samples, &ledger).unwrap();
+        assert_eq!(runs[0]["executionStatus"], "attempted");
+        assert_eq!(
+            runs[0]["stopReason"],
+            "target_budget_exhausted_during_cooldown"
+        );
+        assert_eq!(
+            runs[0]["trials"][0]["stopReason"],
+            "full-speed-to-stable budget exhausted"
+        );
     }
 
     fn write_fixture(dir: &Path) {
