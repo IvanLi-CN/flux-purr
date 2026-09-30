@@ -206,7 +206,7 @@ None
 - 固件调优的决策与报告样本按设备本地 `300ms` 节拍记录；生产热控 tick 不降频。每个 tick 仍须检查样本身份、PPS 合同、测温有效性与 cooldown 零输出，phase 切换须立即记录，不得因审计节拍延迟失效关热。
 - 5A 决策策略以当前主干外部主控 `thermal tune` 为冻结向量基线：除固件 60°C 首次和重试 cooldown 起点由 `35°C` 调整为 `40°C` 外，目标顺序、其它冷却门槛、最近两侧已 accepted 点的 seed/线性插值、target-local scout/retune、current 与 evidence-specific predicted compare、完整 score vector、hard gate、单目标从 cooldown 开始的 `20min` 单调预算、失败区间阻断、accepted point 冻结、无默认独立轮次硬上限及 `60s` hold confirm 必须一致。设备缺少的外部 source 实测不得伪造；无法由本地 PPS/安全事实映射的向量应明确 unavailable 并失败，而非更改评分或通过门槛。每个固件 `candidate_trial` 必须保留 `startTemperatureCentiC` 与 `cooldownThresholdCentiC`，标准报告的对应 trial 必须在 `cooldownGate` 中保留这两个原始 centi-C 值并随试验切换显示；旧证据缺少字段时标为 `unavailable_device_trial_record`，不得按当前策略倒填。
 - 5A 候选比较必须包含外部策略的 evidence-specific 优先级：当低中温 trial 的过冲、hold 峰峰值或 hold 入口剩余热量任一超过 `3°C`，并且出现“门槛内进入目标带后从高侧离开”或“门槛时仍未进入目标带”任一事实时，须优先比较增加刹车并降低逼近能量的保守候选，不能让曲线的 `underpowered` 标签单独把高侧失败转成减小刹车、提高逼近能量。已完成 scout、验证稳定窗口、过冲 `<=3°C` 而 hold 峰峰值在 `(3,4]°C` 时，须优先比较只调整 hold PI/过渡的波动修整候选；未验证稳定窗口不得套用该专用分支。候选仍在 trial boundary 通过 RAM preview 生效，所有原有 hard gate 不变。
-- 每个 candidate 的 warmup 逻辑请求必须达到 `100%`，有完整 approach→hold、过冲 `<=3°C`、hold 峰峰值 `<=3°C`、目标相关 full-speed-to-stable 门槛与连续 `60s` hold confirm。前一候选、rejected trial 和 cooldown 样本不得计入 adopted candidate 的评分；实际 MOS PWM 与逻辑请求须分别取自生产输出链。
+- 每个 candidate 的 warmup 逻辑请求必须达到 `100%`，有完整 approach→hold、过冲 `<=3°C`、hold 峰峰值 `<=3°C`、目标相关 full-speed-to-stable 门槛与连续 `60s` hold confirm。固件试验与外部主控调优使用相同的 hold 观察起点：控制 phase 已进入 Hold、设备温度不低于目标减 `0.5°C`，且与目标的绝对温差不超过 `3°C`；只有从这一样本开始才统计 hold 峰峰值、控制输出与连续 `12s` scout / `60s` confirm，起点后的离带样本仍须计入，不得以 phase 切换时刻提前开始。前一候选、rejected trial 和 cooldown 样本不得计入 adopted candidate 的评分；实际 MOS PWM 与逻辑请求须分别取自生产输出链。
 
 ## 验收标准（Acceptance Criteria）
 
