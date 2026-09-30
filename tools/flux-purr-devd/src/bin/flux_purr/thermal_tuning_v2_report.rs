@@ -512,17 +512,24 @@ fn normalized_report_runs(
             "not_attempted"
         });
         if !has_evidence {
-            run["stopReason"] = json!("run_terminated_before_target");
-            let blocked_reason = if target.is_some_and(|target| !selected_targets.contains(&target))
-            {
+            let target_decision = ledger.iter().rev().find_map(|event| {
+                (event.get("kind").and_then(Value::as_str) == Some("decision")
+                    && event.get("targetC").and_then(Value::as_i64) == target
+                    && event.get("trialIndex").is_none_or(Value::is_null))
+                .then(|| event.get("reason").and_then(Value::as_str))
+                .flatten()
+            });
+            let outside_scope = target.is_some_and(|target| !selected_targets.contains(&target));
+            let blocked_reason = if outside_scope {
                 "outside_selected_scope"
             } else {
-                terminal_reason
-                    .as_deref()
+                target_decision
+                    .or(terminal_reason.as_deref())
                     .unwrap_or("run_terminated_before_target")
             };
+            run["stopReason"] = json!(target_decision.unwrap_or("run_terminated_before_target"));
             run["blockedBy"] = json!({
-                "targetC": last_attempted_target.copied(),
+                "targetC": if target_decision.is_some() { None } else { last_attempted_target.copied() },
                 "reason": blocked_reason,
             });
         } else {
@@ -1074,6 +1081,38 @@ mod tests {
         assert_eq!(unattempted["stopReason"], "run_terminated_before_target");
         assert_eq!(unattempted["blockedBy"]["targetC"], 60);
         assert_eq!(unattempted["blockedBy"]["reason"], "trace_gap");
+    }
+
+    #[test]
+    fn preserves_device_interval_prune_reason_for_unattempted_target() {
+        let bundle = json!({
+            "targetSet": {"selectedC": [60, 140], "executionOrderC": [60, 140]},
+            "terminalDisposition": "failed",
+            "reportRuns": [
+                {"targetC": 60, "reviewOutcome": "failed", "trials": []},
+                {"targetC": 140, "reviewOutcome": "failed", "trials": []}
+            ]
+        });
+        let samples = vec![json!({"kind": "sample", "targetC": 60})];
+        let ledger = vec![json!({
+            "kind": "decision",
+            "targetC": 140,
+            "trialIndex": null,
+            "reason": "interval_pruned_without_accepted_bounds"
+        })];
+
+        let runs = normalized_report_runs(&bundle, &samples, &ledger).unwrap();
+        let pruned = runs.iter().find(|run| run["targetC"] == 140).unwrap();
+        assert_eq!(pruned["executionStatus"], "not_attempted");
+        assert_eq!(
+            pruned["stopReason"],
+            "interval_pruned_without_accepted_bounds"
+        );
+        assert_eq!(
+            pruned["blockedBy"]["reason"],
+            "interval_pruned_without_accepted_bounds"
+        );
+        assert!(pruned["blockedBy"]["targetC"].is_null());
     }
 
     fn write_fixture(dir: &Path) {
