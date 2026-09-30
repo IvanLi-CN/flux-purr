@@ -12549,11 +12549,11 @@ fn tuning_waits_for_an_admitted_pd_request_instead_of_failing_at_first_missing_s
         ..PowerState::unavailable()
     };
     assert_eq!(
-        tuning_pd_wait_decision(pending, Some(100), 129, true, false),
+        tuning_pd_wait_decision(pending, Some(100), 129, Some(100), false),
         TuningPdWaitDecision::Wait
     );
     assert_eq!(
-        tuning_pd_wait_decision(pending, Some(100), 5_601, true, false),
+        tuning_pd_wait_decision(pending, Some(100), 5_601, Some(100), false),
         TuningPdWaitDecision::Fail("pd_request_timeout")
     );
 
@@ -12562,22 +12562,37 @@ fn tuning_waits_for_an_admitted_pd_request_instead_of_failing_at_first_missing_s
         ..pending
     };
     assert_eq!(
-        tuning_pd_wait_decision(failed, Some(100), 129, true, false),
+        tuning_pd_wait_decision(failed, Some(100), 129, Some(100), false),
         TuningPdWaitDecision::Fail("pd_contract_lost")
     );
 
     let (ready, _) = production_power_fixture(5_000);
     assert_eq!(
-        tuning_pd_wait_decision(ready, Some(100), 129, true, false),
+        tuning_pd_wait_decision(ready, Some(100), 129, Some(100), false),
         TuningPdWaitDecision::Wait
     );
     assert_eq!(
-        tuning_pd_wait_decision(ready, Some(100), 129, false, false),
+        tuning_pd_wait_decision(ready, None, 129, Some(100), false),
+        TuningPdWaitDecision::Wait,
+        "a pending ticket must block the previous ready contract even before the wait marker is set"
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 129, None, false),
         TuningPdWaitDecision::Ready
     );
     assert_eq!(
-        tuning_pd_wait_decision(ready, Some(100), 129, false, true),
+        tuning_pd_wait_decision(ready, Some(100), 129, None, true),
         TuningPdWaitDecision::Fail("pd_request_failed")
+    );
+
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 10_642, Some(9_920), false),
+        TuningPdWaitDecision::Wait,
+        "a newly admitted 500 mV ticket must not inherit the first step's deadline"
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 15_421, Some(9_920), false),
+        TuningPdWaitDecision::Fail("pd_request_timeout")
     );
 }
 

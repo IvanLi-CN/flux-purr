@@ -122,7 +122,7 @@ pub(crate) fn tuning_pd_wait_decision(
     power_state: PowerState,
     wait_started_ms: Option<u64>,
     now_ms: u64,
-    ticket_pending: bool,
+    ticket_started_ms: Option<u64>,
     request_failed: bool,
 ) -> TuningPdWaitDecision {
     if power_state.failure.is_some() {
@@ -133,7 +133,7 @@ pub(crate) fn tuning_pd_wait_decision(
     }
     if power_state.protocol == PowerProtocol::Ready
         && power_state.active.is_some()
-        && (!ticket_pending || wait_started_ms.is_none())
+        && ticket_started_ms.is_none()
     {
         return TuningPdWaitDecision::Ready;
     }
@@ -141,12 +141,10 @@ pub(crate) fn tuning_pd_wait_decision(
         power_state.protocol,
         PowerProtocol::WaitingForAccept | PowerProtocol::WaitingForPsRdy
     ) && power_state.requested.is_some())
-        || (ticket_pending
-            && wait_started_ms.is_some()
-            && power_state.protocol == PowerProtocol::Ready
-            && power_state.active.is_some())
+        || ticket_started_ms.is_some()
     {
-        if wait_started_ms
+        if ticket_started_ms
+            .or(wait_started_ms)
             .is_some_and(|started| now_ms.saturating_sub(started) > AUTOMATIC_PPS_TICKET_WAIT_MS)
         {
             TuningPdWaitDecision::Fail("pd_request_timeout")
@@ -193,7 +191,9 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
             state.power_state,
             state.tuning_pd_wait_started_ms,
             elapsed_ms,
-            state.pending_automatic_pps.is_some(),
+            state
+                .pending_automatic_pps
+                .map(|pending| pending.started_at_ms),
             matches!(
                 state.heater_power_backend,
                 HeaterPowerBackend::FixedPdPwmFallback {
