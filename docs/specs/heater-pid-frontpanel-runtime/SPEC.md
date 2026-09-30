@@ -296,6 +296,12 @@ None
 
 ## Visual Evidence
 
+- 5A firmware tuning v2 报告的真实 HIL 失败记录：桌面与移动视图展示 `60°C` 试验的有效 Hold、稳定带和停热后数据。截图用于验证报告呈现，不代表该目标通过调优。
+
+![5A firmware tuning v2 report desktop](./assets/firmware-tuning-v2-linked-charts-desktop.png)
+
+![5A firmware tuning v2 report mobile](./assets/firmware-tuning-v2-linked-charts-mobile.png)
+
 - 3A 九点 thermal-plant 合规摘要：9 个目标均为 `passed`，摘要卡直接显示稳定窗口建立用时、动态门槛、过冲与 hold 峰峰值；报告源为 `pps3a` / `f293cc9c139e`。
 
 ![3A nine-point thermal report](./assets/pps3a-ninepoint-report.png)
