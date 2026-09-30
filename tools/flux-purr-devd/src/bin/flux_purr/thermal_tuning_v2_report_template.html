@@ -139,6 +139,7 @@ const $=id=>document.getElementById(id);
 const esc=value=>String(value??'—').replace(/[&<>\"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[char]));
 const num=(value,digits=2)=>Number.isFinite(Number(value))?Number(value).toFixed(digits):'—';
 const ms=value=>Number.isFinite(Number(value))?`${(Number(value)/1000).toFixed(2)}s`:'—';
+const centiC=value=>value==null||!Number.isFinite(Number(value))?'unavailable':`${(Number(value)/100).toFixed(2)}°C`;
 function currentRun(){return RUNS.find(run=>Number(run.targetC??run.targetTempC)===activeTarget)||RUNS[0]||{};}
 function trialsFor(run){return Array.isArray(run.trials)?run.trials:[];}
 function currentTrial(){
@@ -188,8 +189,8 @@ function renderTargetTabs(){
 function renderTrialTabs(){
   const run=currentRun(); const trials=trialsFor(run); const selected=Number(currentTrial().trialIndex);
   $('trialTabs').innerHTML=trials.length?trials.map(trial=>`<button class="${Number(trial.trialIndex)===selected?'active':''}" onclick="setActiveTrial(${Number(trial.trialIndex)})">trial ${esc(trial.trialIndex)} · ${esc(trial.disposition||'—')}</button>`).join(''):'<span class="muted" style="padding:10px">no trial data</span>';
-  const trial=currentTrial(); const gate=trial.fullSpeedToStable||{};
-  $('trialSummary').innerHTML=[['disposition',trial.disposition],['warmup',percent(trial.warmupRequestedOutputPermille)],['overshoot',`${num(trial.maxOvershootC)}°C`],['hold p2p',`${num(trial.holdPeakToPeakC)}°C`],['stable',`${ms(gate.settleTimeMs)} / ${ms(gate.limitMs)}`],['sample range',`${trial.firstSequence??'—'}..${trial.lastSequence??'—'}`]].map(([label,value])=>`<div class="metric"><label>${esc(label)}</label><strong>${esc(value)}</strong></div>`).join('');
+  const trial=currentTrial(); const gate=trial.fullSpeedToStable||{}; const cooldown=trial.cooldownGate||{};
+  $('trialSummary').innerHTML=[['disposition',trial.disposition],['cooldown start',centiC(cooldown.startTemperatureCentiC)],['start limit',centiC(cooldown.thresholdCentiC)],['warmup',percent(trial.warmupRequestedOutputPermille)],['overshoot',`${num(trial.maxOvershootC)}°C`],['hold p2p',`${num(trial.holdPeakToPeakC)}°C`],['stable',`${ms(gate.settleTimeMs)} / ${ms(gate.limitMs)}`],['sample range',`${trial.firstSequence??'—'}..${trial.lastSequence??'—'}`]].map(([label,value])=>`<div class="metric"><label>${esc(label)}</label><strong>${esc(value)}</strong></div>`).join('');
 }
 const PHASE_COLORS={warmup:'#d98b2b',approach:'#2f78a8',hold:'#2d8a68',cooldown:'#7966a8',terminal:'#69757c',unknown:'#9aa5aa'};
 function phaseLabel(value){return String(value||'unknown').replace(/(^|[_-])([a-z])/g,(_,prefix,letter)=>`${prefix}${letter.toUpperCase()}`);}

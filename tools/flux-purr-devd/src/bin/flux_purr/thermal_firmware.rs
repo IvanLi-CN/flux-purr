@@ -1536,6 +1536,10 @@ fn build_report_trial(
         "maxOvershootC": decision_record.get("maxOvershootCentiC").and_then(Value::as_f64).map(|value| value / 100.0),
         "holdPeakToPeakC": decision_record.get("holdPeakToPeakCentiC").and_then(Value::as_f64).map(|value| value / 100.0),
         "fullSpeedToStable": {"settleTimeMs": settle_time, "limitMs": limit_ms},
+        "cooldownGate": {
+            "startTemperatureCentiC": trial_record.get("startTemperatureCentiC").cloned().unwrap_or(Value::Null),
+            "thresholdCentiC": trial_record.get("cooldownThresholdCentiC").cloned().unwrap_or(Value::Null)
+        },
         "firstSequence": bounds.0,
         "lastSequence": bounds.1,
         "sampleStartSequence": sample_start,
@@ -2060,6 +2064,7 @@ mod tests {
             "targetC": 60, "trialIndex": 1,
             "trial": {
                 "sampleStartSequence": 2, "sampleEndSequence": 4,
+                "startTemperatureCentiC": 3_987, "cooldownThresholdCentiC": 4_000,
                 "candidate": {"candidateId": "candidate-1", "candidateHash": "hash-1"}
             }
         });
@@ -2075,6 +2080,21 @@ mod tests {
         assert_eq!(report["firstSequence"], 2);
         assert_eq!(report["lastSequence"], 4);
         assert_eq!(report["metrics"]["phasePath"], "warmup -> approach -> hold");
+        assert_eq!(report["cooldownGate"]["startTemperatureCentiC"], 3_987);
+        assert_eq!(report["cooldownGate"]["thresholdCentiC"], 4_000);
+        let mut historical = trial.clone();
+        historical["trial"]
+            .as_object_mut()
+            .unwrap()
+            .remove("startTemperatureCentiC");
+        historical["trial"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cooldownThresholdCentiC");
+        let old_report =
+            build_report_trial(60, &historical, &samples, &[], "candidate-1", "hash-1");
+        assert!(old_report["cooldownGate"]["startTemperatureCentiC"].is_null());
+        assert!(old_report["cooldownGate"]["thresholdCentiC"].is_null());
     }
 
     #[test]

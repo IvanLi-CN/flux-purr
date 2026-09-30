@@ -533,6 +533,21 @@ fn normalized_report_runs(
         };
         let Some(target) = target else { continue };
         for trial in trials {
+            let start = trial
+                .pointer("/cooldownGate/startTemperatureCentiC")
+                .and_then(Value::as_i64);
+            let threshold = trial
+                .pointer("/cooldownGate/thresholdCentiC")
+                .and_then(Value::as_i64);
+            trial["cooldownGate"] = json!({
+                "startTemperatureCentiC": start,
+                "thresholdCentiC": threshold,
+                "availability": if start.is_some() && threshold.is_some() {
+                    "device_local"
+                } else {
+                    "unavailable_device_trial_record"
+                }
+            });
             let Some(trial_index) = trial.get("trialIndex").and_then(Value::as_i64) else {
                 continue;
             };
@@ -762,6 +777,19 @@ mod tests {
         let html = fs::read_to_string(output.join("index.html")).unwrap();
         assert!(html.contains("Firmware Thermal Tuning V2"));
         assert!(html.contains("pps5a"));
+        let bundle = read_json(&output.join("run.bundle.json")).unwrap();
+        assert_eq!(
+            bundle["reportRuns"][0]["trials"][0]["cooldownGate"]["startTemperatureCentiC"],
+            3_500
+        );
+        assert_eq!(
+            bundle["reportRuns"][0]["trials"][0]["cooldownGate"]["thresholdCentiC"],
+            4_000
+        );
+        assert_eq!(
+            bundle["reportRuns"][0]["trials"][0]["cooldownGate"]["availability"],
+            "device_local"
+        );
 
         let bundle: Value = read_json(&output.join("run.bundle.json")).unwrap();
         let mut bundle_basis = bundle.clone();
@@ -949,6 +977,30 @@ mod tests {
     }
 
     #[test]
+    fn historical_trial_without_cooldown_evidence_is_explicitly_unavailable() {
+        let dir = tempdir().unwrap();
+        write_fixture(dir.path());
+        let input_path = dir.path().join("run.bundle.json");
+        let mut input = read_json(&input_path).unwrap();
+        input["reportRuns"][0]["trials"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("cooldownGate");
+        fs::write(&input_path, serde_json::to_vec(&input).unwrap()).unwrap();
+        let output = dir.path().join("out");
+        render_v2_bundle(ThermalTuningV2ReportInput {
+            input_dir: dir.path().to_path_buf(),
+            output_dir: Some(output.clone()),
+        })
+        .unwrap();
+        let bundle = read_json(&output.join("run.bundle.json")).unwrap();
+        let gate = &bundle["reportRuns"][0]["trials"][0]["cooldownGate"];
+        assert!(gate["startTemperatureCentiC"].is_null());
+        assert!(gate["thresholdCentiC"].is_null());
+        assert_eq!(gate["availability"], "unavailable_device_trial_record");
+    }
+
+    #[test]
     fn report_template_binds_all_charts_to_selected_trial_and_phase_band() {
         assert!(REPORT_TEMPLATE.contains("const samples=samplesForTrial();"));
         assert!(REPORT_TEMPLATE.contains("drawChart('temperatureChart',samples,"));
@@ -964,6 +1016,11 @@ mod tests {
             REPORT_TEMPLATE.contains("drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height)")
         );
         assert!(REPORT_TEMPLATE.contains("sample.phase!=='cooldown'"));
+        assert!(REPORT_TEMPLATE.contains("centiC(cooldown.startTemperatureCentiC)"));
+        assert!(REPORT_TEMPLATE.contains("centiC(cooldown.thresholdCentiC)"));
+        assert!(
+            REPORT_TEMPLATE.contains("value==null||!Number.isFinite(Number(value))?'unavailable'")
+        );
         assert!(
             REPORT_TEMPLATE.contains("const lo=unit==='%'?0:ymin-pad, hi=unit==='%'?100:ymax+pad")
         );
@@ -1039,7 +1096,7 @@ mod tests {
                     "adoptedTrialIndex": 1,
                     "trialCount": 2,
                     "metrics": {"maxOvershootC": 1.1, "holdPeakToPeakC": 1.2, "holdConfirmSeconds": 60},
-                    "trials": [{"trialIndex": 1, "disposition": "adopted", "maxOvershootC": 1.1, "holdPeakToPeakC": 1.2}]
+                    "trials": [{"trialIndex": 1, "disposition": "adopted", "maxOvershootC": 1.1, "holdPeakToPeakC": 1.2, "cooldownGate": {"startTemperatureCentiC": 3500, "thresholdCentiC": 4000}}]
                 }],
                 "terminalDisposition": "passed",
                 "reviewDisposition": "passed",
