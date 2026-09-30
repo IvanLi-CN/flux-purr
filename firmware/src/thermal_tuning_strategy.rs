@@ -32,6 +32,11 @@ pub(crate) struct TuneEvidence {
     pub first_hold_after_warmup_ms: Option<u64>,
     pub stable_window_after_warmup_ms: Option<u64>,
     pub settle_limit_ms: u64,
+    pub scout_hold_complete: bool,
+    pub stable_window_verified: bool,
+    pub first_band_observed: bool,
+    pub first_band_exit_centi_c: Option<i16>,
+    pub deadline_temperature_centi_c: Option<i16>,
 }
 
 struct HoldRippleInputs {
@@ -48,6 +53,12 @@ pub(crate) fn tune_point(
 ) -> ThermalControlProfilePointConfig {
     if !evidence.tunable_stop {
         return previous;
+    }
+    if let Some(trimmed) = hold_ripple_trim_candidate(previous, evidence) {
+        return trimmed;
+    }
+    if let Some(conservative) = conservative_high_side_candidate(previous, evidence) {
+        return conservative;
     }
     let curve_needs_tuning = matches!(
         evidence.curve_class,
@@ -197,6 +208,91 @@ pub(crate) fn tune_point(
         .max(tuned.approach_power_permille)
         .min(1_000);
     tuned
+}
+
+fn hold_ripple_trim_candidate(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> Option<ThermalControlProfilePointConfig> {
+    if evidence.target_c > 150
+        || !evidence.scout_hold_complete
+        || !evidence.stable_window_verified
+        || evidence.full_speed_failed
+        || evidence.overshoot_c > 3.0
+        || !(3.0..=4.0).contains(&evidence.hold_p2p_c)
+    {
+        return None;
+    }
+    let mut point = previous;
+    point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+    point.hold_blend_ticks = point.hold_blend_ticks.saturating_add(1).min(8);
+    (point != previous).then_some(point)
+}
+
+fn conservative_high_side_candidate(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> Option<ThermalControlProfilePointConfig> {
+    if evidence.target_c > 150 {
+        return None;
+    }
+    let severity_c = evidence
+        .overshoot_c
+        .max(evidence.hold_p2p_c)
+        .max(evidence.residual_c);
+    if severity_c <= 3.0 {
+        return None;
+    }
+    let lower = i32::from(evidence.target_c) * 100 - 150;
+    let upper = i32::from(evidence.target_c) * 100 + 150;
+    let broke_high = evidence
+        .first_band_exit_centi_c
+        .is_some_and(|temperature| i32::from(temperature) > upper);
+    let missed_band = !evidence.first_band_observed
+        && evidence
+            .deadline_temperature_centi_c
+            .is_some_and(|temperature| {
+                let temperature = i32::from(temperature);
+                temperature < lower || temperature > upper
+            });
+    if !broke_high && !missed_band {
+        return None;
+    }
+
+    let trim = if severity_c >= 20.0 { 180 } else { 100 };
+    let mut point = previous;
+    point.brake_distance_centi_c = point
+        .brake_distance_centi_c
+        .saturating_add(if severity_c >= 20.0 { 500 } else { 300 })
+        .min(5_000);
+    point.hold_entry_centi_c = point.hold_entry_centi_c.saturating_add(100).min(450);
+    point.hold_exit_centi_c = point
+        .hold_exit_centi_c
+        .saturating_add(80)
+        .min(point.hold_entry_centi_c.saturating_sub(20).max(20));
+    point.approach_floor_power_permille = point
+        .approach_floor_power_permille
+        .saturating_sub(trim)
+        .max(100);
+    point.approach_power_permille = point
+        .approach_power_permille
+        .saturating_sub(trim)
+        .max(point.approach_floor_power_permille.saturating_add(80))
+        .min(1_000);
+    point.hold_power_permille = point.hold_power_permille.saturating_sub(trim / 2).max(100);
+    point.hold_reheat_power_permille = point
+        .hold_reheat_power_permille
+        .saturating_sub(trim / 2)
+        .max(point.hold_power_permille);
+    point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+    point.overshoot_cutoff_centi_c = point
+        .overshoot_cutoff_centi_c
+        .saturating_sub(40)
+        .max(point.hold_off_centi_c.saturating_add(40));
+    point.hold_off_centi_c = point
+        .hold_off_centi_c
+        .min(point.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
+    (point != previous).then_some(point)
 }
 
 fn apply_high_temp_power_limit(point: &mut ThermalControlProfilePointConfig, near_target: u16) {
@@ -545,6 +641,11 @@ mod tests {
             first_hold_after_warmup_ms: None,
             stable_window_after_warmup_ms: None,
             settle_limit_ms: 10_000,
+            scout_hold_complete: false,
+            stable_window_verified: false,
+            first_band_observed: false,
+            first_band_exit_centi_c: None,
+            deadline_temperature_centi_c: None,
         }
     }
 
@@ -577,6 +678,42 @@ mod tests {
     }
 
     #[test]
+    fn observed_60c_high_side_failure_must_not_accelerate_next_candidate() {
+        let mut previous = point(60);
+        previous.brake_distance_centi_c = 1_100;
+        previous.approach_lead_ticks = 6;
+        previous.approach_power_permille = 450;
+        previous.approach_floor_power_permille = 160;
+        previous.approach_damping_exponent_permille = 4_000;
+        previous.hold_power_permille = 135;
+        previous.hold_reheat_power_permille = 170;
+        previous.hold_entry_centi_c = 220;
+        previous.hold_exit_centi_c = 400;
+        previous.hold_lead_ticks = 6;
+        previous.hold_blend_ticks = 1;
+
+        let mut facts = evidence(60);
+        facts.curve_class = CurveClass::Underpowered;
+        facts.overshoot_c = 3.19;
+        facts.hold_p2p_c = 5.22;
+        facts.residual_c = 5.22;
+        facts.under_c = 2.03;
+        facts.over_c = 3.19;
+        facts.hold_sample_count = 20;
+        facts.first_hold_error_c = Some(2.03);
+        facts.hold_median_output_permille = Some(0);
+        facts.hold_p90_output_permille = Some(0);
+        facts.first_band_observed = true;
+        facts.first_band_exit_centi_c = Some(6_154);
+
+        let tuned = tune_point(previous, facts);
+        assert_eq!(tuned.brake_distance_centi_c, 1_400);
+        assert_eq!(tuned.approach_lead_ticks, 6);
+        assert_eq!(tuned.approach_power_permille, 350);
+        assert_eq!(tuned.approach_floor_power_permille, 100);
+    }
+
+    #[test]
     fn bounded_residual_matches_main_coast_gate_vector() {
         let mut previous = point(60);
         previous.brake_distance_centi_c = 1_910;
@@ -589,6 +726,34 @@ mod tests {
         let tuned = tune_point(previous, facts);
         assert_eq!(tuned.brake_distance_centi_c, 1_910);
         assert_eq!(tuned.hold_exit_centi_c, 380);
+    }
+
+    #[test]
+    fn completed_small_hold_ripple_uses_trim_without_approach_acceleration() {
+        let mut previous = point(60);
+        previous.hold_kp_permille_per_c = 8;
+        previous.hold_blend_ticks = 1;
+        let mut facts = evidence(60);
+        facts.full_speed_failed = false;
+        facts.scout_hold_complete = true;
+        facts.stable_window_verified = true;
+        facts.hold_sample_count = 35;
+        facts.overshoot_c = 1.41;
+        facts.hold_p2p_c = 3.58;
+        let tuned = tune_point(previous, facts);
+        assert_eq!(tuned.hold_blend_ticks, 2);
+        assert_eq!(tuned.hold_kp_permille_per_c, 8);
+        assert_eq!(
+            tuned.brake_distance_centi_c,
+            previous.brake_distance_centi_c
+        );
+        assert_eq!(
+            tuned.approach_power_permille,
+            previous.approach_power_permille
+        );
+
+        facts.stable_window_verified = false;
+        assert_ne!(tune_point(previous, facts), tuned);
     }
 
     #[test]

@@ -1002,6 +1002,13 @@ impl ThermalTuningRuntime {
                 .zip(self.warmup_exited_at_ms)
                 .map(|(stable, warmup)| stable.saturating_sub(warmup)),
             settle_limit_ms: u64::from(full_speed_limit_ms),
+            scout_hold_complete: self.first_hold_elapsed_ms.is_some_and(|started| {
+                self.current_elapsed_ms.saturating_sub(started) >= THERMAL_TUNING_SCOUT_HOLD_MS
+            }),
+            stable_window_verified: self.stable_window_verified_at_ms.is_some(),
+            first_band_observed: self.first_band_elapsed_ms.is_some(),
+            first_band_exit_centi_c: self.first_band_exit_centi_c,
+            deadline_temperature_centi_c: self.deadline_nearest_temperature_centi_c,
         };
         let tuned = tune_point(previous, evidence);
         if tuned == previous {
@@ -2792,6 +2799,66 @@ mod tests {
     }
 
     #[test]
+    fn observed_60c_high_side_trace_installs_conservative_candidate() {
+        let mut profile = profile_with_targets(&[60]);
+        let point = profile.points[0].as_mut().unwrap();
+        point.brake_distance_centi_c = 1_100;
+        point.approach_lead_ticks = 6;
+        point.approach_power_permille = 450;
+        point.approach_floor_power_permille = 160;
+        point.approach_damping_exponent_permille = 4_000;
+        point.hold_power_permille = 135;
+        point.hold_reheat_power_permille = 170;
+        point.hold_entry_centi_c = 220;
+        point.hold_exit_centi_c = 400;
+        point.hold_lead_ticks = 6;
+        point.hold_blend_ticks = 1;
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("high-side-trace"),
+                candidate_id: id("candidate-hold"),
+                candidate_hash: hash("hash-hold"),
+                power_class: ThermalTuningPowerClass::Pps5a,
+                targets: &[60],
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile),
+            })
+            .unwrap();
+        let mut cooldown = sample(0, ThermalTuningPhase::Cooldown, 3_470);
+        cooldown.heater_requested_output_permille = 0;
+        cooldown.heater_output_permille = 0;
+        runtime.record_sample(cooldown).unwrap();
+        for (elapsed_ms, phase, temperature_centi_c) in [
+            (1_000, ThermalTuningPhase::Warmup, 3_470),
+            (17_000, ThermalTuningPhase::Warmup, 4_800),
+            (17_587, ThermalTuningPhase::Approach, 4_823),
+            (21_131, ThermalTuningPhase::Approach, 5_725),
+            (21_488, ThermalTuningPhase::Hold, 5_797),
+            (21_932, ThermalTuningPhase::Hold, 5_855),
+            (24_800, ThermalTuningPhase::Hold, 6_148),
+            (25_147, ThermalTuningPhase::Hold, 6_154),
+            (27_573, ThermalTuningPhase::Hold, 6_319),
+            (27_916, ThermalTuningPhase::Hold, 6_307),
+        ] {
+            let mut observed = sample(elapsed_ms, phase, temperature_centi_c);
+            if phase == ThermalTuningPhase::Hold {
+                observed.heater_requested_output_permille = 0;
+                observed.heater_output_permille = 0;
+            }
+            runtime.record_sample(observed).unwrap();
+        }
+        assert_eq!(runtime.trial_index, 1);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+        let selected = runtime.batch_predicted_profile.unwrap();
+        let selected_point = selected.points[0].unwrap();
+        assert_eq!(selected_point.brake_distance_centi_c, 1_400);
+        assert_eq!(selected_point.approach_power_permille, 350);
+    }
+
+    #[test]
     fn live_samples_follow_host_cadence_without_skipping_safety() {
         let mut runtime = ThermalTuningRuntime::new();
         runtime
@@ -3094,7 +3161,7 @@ mod tests {
     }
 
     #[test]
-    fn local_trial_samples_drive_residual_heat_candidate_adjustment() {
+    fn local_trial_samples_select_conservative_high_side_candidate() {
         let mut runtime = ThermalTuningRuntime::new();
         runtime.candidate_profile = Some(profile_with_targets(&[60]));
         for (elapsed, phase, temperature) in [
@@ -3110,10 +3177,10 @@ mod tests {
         assert_eq!(runtime.hold_error_sum_centi_c, -860);
         runtime.mutate_candidate_for_failure(60, Some(770), Some(680), None, 10_000);
         let tuned = runtime.candidate_profile.unwrap().points[0].unwrap();
-        assert_eq!(tuned.brake_distance_centi_c, 650);
-        assert_eq!(tuned.approach_damping_exponent_permille, 1_200);
-        assert_eq!(tuned.approach_lead_ticks, 2);
-        assert_eq!(tuned.hold_power_permille, 350);
+        assert_eq!(tuned.brake_distance_centi_c, 600);
+        assert_eq!(tuned.approach_power_permille, 650);
+        assert_eq!(tuned.approach_floor_power_permille, 300);
+        assert_eq!(tuned.hold_power_permille, 300);
     }
 
     #[test]
