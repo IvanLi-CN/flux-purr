@@ -378,6 +378,11 @@ pub struct ThermalTuningRuntime {
     approach_curve_overflow: bool,
     approach_tail_abs_error_sum_c: f64,
     approach_tail_count: u32,
+    approach_tail_max_above_c: f64,
+    approach_tail_max_below_c: f64,
+    approach_tail_first_sign: i8,
+    approach_tail_last_sign: i8,
+    approach_tail_sign_changes: u16,
     approach_curve_last_elapsed_ms: Option<u64>,
     hold_output_histogram: [u16; 1001],
     hold_output_count: u32,
@@ -468,6 +473,11 @@ impl ThermalTuningRuntime {
             approach_curve_overflow: false,
             approach_tail_abs_error_sum_c: 0.0,
             approach_tail_count: 0,
+            approach_tail_max_above_c: 0.0,
+            approach_tail_max_below_c: 0.0,
+            approach_tail_first_sign: 0,
+            approach_tail_last_sign: 0,
+            approach_tail_sign_changes: 0,
             approach_curve_last_elapsed_ms: None,
             hold_output_histogram: [0; 1001],
             hold_output_count: 0,
@@ -1068,6 +1078,11 @@ impl ThermalTuningRuntime {
         self.approach_curve_overflow = false;
         self.approach_tail_abs_error_sum_c = 0.0;
         self.approach_tail_count = 0;
+        self.approach_tail_max_above_c = 0.0;
+        self.approach_tail_max_below_c = 0.0;
+        self.approach_tail_first_sign = 0;
+        self.approach_tail_last_sign = 0;
+        self.approach_tail_sign_changes = 0;
         self.approach_curve_last_elapsed_ms = None;
         self.hold_output_histogram = [0; 1001];
         self.hold_output_count = 0;
@@ -1417,7 +1432,7 @@ impl ThermalTuningRuntime {
     }
 
     fn strategy_curve_class(&self, target_c: i16) -> CurveClass {
-        if self.approach_curve_overflow || self.approach_tail_count > 0 {
+        if self.approach_curve_overflow {
             return CurveClass::Insufficient;
         }
         let Some(first) = self.approach_curve_samples.first() else {
@@ -1426,7 +1441,10 @@ impl ThermalTuningRuntime {
         let Some(last) = self.approach_curve_samples.last() else {
             return CurveClass::Insufficient;
         };
-        let raw_duration = last.elapsed_ms.saturating_sub(first.elapsed_ms);
+        let raw_duration = self
+            .approach_curve_last_elapsed_ms
+            .unwrap_or(last.elapsed_ms)
+            .saturating_sub(first.elapsed_ms);
         let target_delta =
             f64::from(i32::from(target_c) * 100 - i32::from(first.temperature_centi_c)) / 100.0;
         if raw_duration == 0 || target_delta <= 0.0 {
@@ -1459,6 +1477,14 @@ impl ThermalTuningRuntime {
             if sign != 0 {
                 previous_sign = sign;
             }
+        }
+        max_above = max_above.max(self.approach_tail_max_above_c);
+        max_below = max_below.max(self.approach_tail_max_below_c);
+        if self.approach_tail_first_sign != 0 {
+            if previous_sign != 0 && previous_sign != self.approach_tail_first_sign {
+                sign_changes += 1;
+            }
+            sign_changes += self.approach_tail_sign_changes;
         }
         if max_above >= 1.0 && max_above > max_below + 0.4 {
             CurveClass::BrakeLate
@@ -1502,9 +1528,41 @@ impl ThermalTuningRuntime {
             .map_or(sample.elapsed_ms, |first| first.elapsed_ms);
         self.approach_curve_last_elapsed_ms = Some(sample.elapsed_ms);
         if sample.elapsed_ms.saturating_sub(first_elapsed_ms) > 10_000 {
-            let target_centi_c = i32::from(sample.target_c) * 100;
-            self.approach_tail_abs_error_sum_c +=
-                f64::from((i32::from(sample.temperature_centi_c) - target_centi_c).abs()) / 100.0;
+            let Some(first) = self.approach_curve_samples.first() else {
+                return;
+            };
+            let raw_duration_ms = sample.elapsed_ms.saturating_sub(first.elapsed_ms);
+            let fitted_ms = raw_duration_ms.clamp(5_000, 10_000) as f64;
+            let start_c = f64::from(first.temperature_centi_c) / 100.0;
+            let target_c = f64::from(sample.target_c);
+            let normalized = (sample.elapsed_ms.saturating_sub(first.elapsed_ms) as f64
+                / fitted_ms)
+                .clamp(0.0, 1.0);
+            let progress = 1.0 - (1.0 - normalized) * (1.0 - normalized);
+            let reference_c = start_c + (target_c - start_c) * progress;
+            let deviation_c = f64::from(sample.temperature_centi_c) / 100.0 - reference_c;
+            self.approach_tail_abs_error_sum_c += deviation_c.abs();
+            self.approach_tail_max_above_c =
+                self.approach_tail_max_above_c.max(deviation_c.max(0.0));
+            self.approach_tail_max_below_c =
+                self.approach_tail_max_below_c.max((-deviation_c).max(0.0));
+            let sign = if deviation_c > 0.5 {
+                1
+            } else if deviation_c < -0.5 {
+                -1
+            } else {
+                0
+            };
+            if sign != 0 {
+                if self.approach_tail_first_sign == 0 {
+                    self.approach_tail_first_sign = sign;
+                } else if self.approach_tail_last_sign != 0 && self.approach_tail_last_sign != sign
+                {
+                    self.approach_tail_sign_changes =
+                        self.approach_tail_sign_changes.saturating_add(1);
+                }
+                self.approach_tail_last_sign = sign;
+            }
             self.approach_tail_count = self.approach_tail_count.saturating_add(1);
         } else if self
             .approach_curve_samples
@@ -3376,6 +3434,37 @@ mod tests {
         let tuned = runtime.candidate_profile.unwrap().points[0].unwrap();
         assert_eq!(tuned.approach_floor_power_permille, 520);
         assert_eq!(tuned.hold_power_permille, 350);
+    }
+
+    #[test]
+    fn late_approach_curve_keeps_real_hil_class() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tools/flux-purr-devd/tests/fixtures/thermal-60c-late-window-replays.json"
+        ))
+        .unwrap();
+        let fixture = &fixtures[1];
+        assert_eq!(fixture["sourceTrialIndex"], 6);
+        let mut runtime = ThermalTuningRuntime::new();
+        for row in fixture["samples"].as_array().unwrap() {
+            let phase: ThermalTuningPhase = serde_json::from_value(row[4].clone()).unwrap();
+            if phase == ThermalTuningPhase::Warmup {
+                continue;
+            }
+            let measured = sample(
+                row[0].as_u64().unwrap(),
+                phase,
+                row[1].as_i64().unwrap() as i16,
+            );
+            runtime.record_approach_curve_sample(&measured);
+            if phase == ThermalTuningPhase::Hold {
+                break;
+            }
+        }
+        assert!(runtime.approach_tail_count > 0);
+        assert!(matches!(
+            runtime.strategy_curve_class(60),
+            CurveClass::Underpowered
+        ));
     }
 
     #[test]
