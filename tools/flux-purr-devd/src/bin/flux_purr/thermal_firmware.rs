@@ -10,6 +10,7 @@ use flux_purr_firmware::{
     control_plane::ThermalControlProfileWire,
     memory::ThermalControlProfileConfig,
     thermal_tuning::{
+        THERMAL_TUNING_EVENT_CAPACITY, THERMAL_TUNING_EVENT_PAGE_SIZE,
         THERMAL_TUNING_EXECUTION_ORDER_C, THERMAL_TUNING_TARGET_BUDGET_MS,
         THERMAL_TUNING_TARGETS_C, ThermalTuningEvent, digest_event_chain, hash_profile,
     },
@@ -29,6 +30,7 @@ use super::{
 
 const FIRMWARE_PHYSICAL_TARGETS_C: &str = "60,80,100,120,140,160,180,220,240";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct StatusJournal {
     file: File,
@@ -337,20 +339,26 @@ pub(crate) async fn run_firmware_tuning(
         Ok(rendered)
     }
     .await;
-    if result.is_err()
-        && profile_mode_prepared
-        && let Ok(canceled) = request_leased(
-            client,
-            &resolved,
-            &lease.lease_id,
-            Method::POST,
-            "/thermal-tuning",
-            Some(json!({"op": "cancel"})),
+    if result.is_err() && profile_mode_prepared {
+        match tokio::time::timeout(
+            TERMINAL_DRAIN_TIMEOUT,
+            cancel_and_drain_firmware_run(
+                client,
+                &resolved,
+                &lease.lease_id,
+                &run_id,
+                &mut journal,
+                &mut statuses,
+            ),
         )
         .await
-        && let Err(error) = journal.record(&mut statuses, canceled)
-    {
-        eprintln!("thermal tuning status journal failed after cancel: {error}");
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("thermal tuning cancel/trace recovery failed: {error}"),
+            Err(_) => {
+                eprintln!("thermal tuning cancel/trace recovery exceeded its bounded deadline")
+            }
+        }
     }
     let rendered = match result {
         Ok(rendered) => Ok(rendered),
@@ -386,6 +394,85 @@ pub(crate) async fn run_firmware_tuning(
     heartbeat.abort();
     release_result?;
     rendered
+}
+
+async fn cancel_and_drain_firmware_run(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    run_id: &str,
+    journal: &mut StatusJournal,
+    statuses: &mut Vec<Value>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // A cancel response can repeat the last delivered page. It does not imply
+    // that the retained tail (including the safety event) has been collected.
+    let canceled = request_leased(
+        client,
+        resolved,
+        lease_id,
+        Method::POST,
+        "/thermal-tuning",
+        Some(json!({"op": "cancel"})),
+    )
+    .await?;
+    require_disarmed_run(&canceled, run_id)?;
+    journal.record(statuses, canceled)?;
+    let mut after_sequence = statuses.iter().filter_map(next_event_sequence).max();
+    let max_pages = THERMAL_TUNING_EVENT_CAPACITY.div_ceil(THERMAL_TUNING_EVENT_PAGE_SIZE) + 1;
+    for _ in 0..max_pages {
+        let previous = after_sequence;
+        let status = request_leased(
+            client,
+            resolved,
+            lease_id,
+            Method::POST,
+            "/thermal-tuning",
+            Some(firmware_read_command(run_id, after_sequence)),
+        )
+        .await?;
+        require_disarmed_run(&status, run_id)?;
+        let received = next_event_sequence(&status).max(after_sequence);
+        let caught_up = event_stream_caught_up(&status, received);
+        let gap = status_trace_gap(&status);
+        // Advance the device ACK only after this page has reached durable storage.
+        journal.record(statuses, status)?;
+        after_sequence = received;
+        if caught_up {
+            if !gap && let Some(sequence) = after_sequence {
+                let confirmed =
+                    confirm_terminal_tuning_events(client, resolved, lease_id, run_id, sequence)
+                        .await?;
+                require_disarmed_run(&confirmed, run_id)?;
+                journal.record(statuses, confirmed)?;
+            }
+            return Ok(());
+        }
+        if after_sequence == previous {
+            return Err("terminal tuning trace recovery made no progress".into());
+        }
+    }
+    Err("terminal tuning trace recovery exceeded the retained event capacity".into())
+}
+
+fn require_disarmed_run(
+    status: &Value,
+    run_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if status.get("runId").and_then(Value::as_str) != Some(run_id)
+        || status.get("armed").and_then(Value::as_bool) != Some(false)
+        || !status
+            .get("terminalDisposition")
+            .and_then(Value::as_str)
+            .is_some_and(|terminal| {
+                matches!(
+                    terminal,
+                    "canceled" | "failed" | "candidate_ready" | "passed"
+                )
+            })
+    {
+        return Err("terminal tuning recovery did not confirm the same disarmed run".into());
+    }
+    Ok(())
 }
 
 fn firmware_profile_mode_ready(status: &Value) -> bool {
@@ -2202,6 +2289,138 @@ mod tests {
         assert_eq!(bundle["ppsVoltageBounds"]["apdoMaxMv"], 21000);
         assert_eq!(bundle["ppsVoltageBounds"]["availability"], "device_local");
         assert!(samples.contains("\"temperatureCentiC\":3500"));
+    }
+
+    #[tokio::test]
+    async fn transport_timeout_cancels_and_drains_retained_terminal_events() {
+        run_interrupted_transport_case(false).await;
+    }
+
+    #[tokio::test]
+    async fn transport_timeout_with_lost_events_remains_a_failed_trace_gap() {
+        run_interrupted_transport_case(true).await;
+    }
+
+    async fn run_interrupted_transport_case(trace_gap: bool) {
+        use axum::{
+            Json, Router,
+            routing::{delete, get, post},
+        };
+        use std::sync::{Arc, Mutex};
+
+        let directory = tempfile::tempdir().unwrap();
+        let output_root = directory.path().join("input");
+        let report_dir = directory.path().join("report");
+        let commands = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let recorded_commands = commands.clone();
+        let events: Vec<serde_json::Value> = (0..3)
+            .map(|sequence| {
+                json!({
+                    "sequence": sequence, "elapsedMs": sequence * 350,
+                    "kind": if sequence == 2 { "safety" } else { "phase_transition" },
+                    "phase": if sequence == 2 { "canceled" } else { "cooldown" },
+                    "targetC": 60, "trialIndex": 0,
+                    "reason": if sequence == 2 { Some("canceled") } else { None },
+                    "sample": null, "trial": null, "decision": null
+                })
+            })
+            .collect();
+        let typed_events: Vec<ThermalTuningEvent> = events
+            .iter()
+            .map(|event| serde_json::from_value(event.clone()).unwrap())
+            .collect();
+        let digest = digest_event_chain(&typed_events);
+        let app = Router::new()
+            .route("/api/v1/devices/bench/leases", post(|| async {
+                Json(json!({"leaseId": "test", "ttlMs": 10000}))
+            }))
+            .route("/api/v1/leases/test/heartbeat", post(|| async { Json(json!({})) }))
+            .route("/api/v1/leases/test", delete(|| async { Json(json!({})) }))
+            .route("/api/v1/devices/bench/status", get(|| async {
+                Json(json!({"thermalProfileMode": "100w", "thermalProfileResolvedBank": "pps5a"}))
+            }))
+            .route("/api/v1/devices/bench/thermal-tuning", post(move |Json(command): Json<serde_json::Value>| {
+                let commands = recorded_commands.clone();
+                let events = events.clone();
+                let digest = digest.clone();
+                async move {
+                    let mut commands = commands.lock().unwrap();
+                    commands.push(command.clone());
+                    let canceled = commands.iter().any(|command| command["op"] == "cancel");
+                    if command["op"] == "read" && !canceled {
+                        return (axum::http::StatusCode::GATEWAY_TIMEOUT,
+                            Json(json!({"error": {"code": "usb_response_timeout", "retryable": true}})));
+                    }
+                    let start = commands.iter().find(|command| command["op"] == "start").unwrap();
+                    let next = if command["op"] == "read" {
+                        command["afterSequence"].as_u64().map_or(0, |sequence| sequence + 1)
+                    } else { 0 };
+                    let page: Vec<_> = events.iter().filter(|event| event["sequence"].as_u64() == Some(next) && (!trace_gap || next == 0))
+                        .cloned().collect();
+                    (axum::http::StatusCode::OK, Json(json!({
+                        "runId": start["runId"], "candidateId": start["candidateId"],
+                        "candidateHash": start["candidateHash"], "powerClass": "pps5a",
+                        "armed": !canceled, "phase": if canceled { "canceled" } else { "cooldown" },
+                        "terminalDisposition": if canceled { "canceled" } else { "running" },
+                        "reviewDisposition": "review_incomplete",
+                        "trace": {"firstSequence": 0, "lastSequence": if canceled { 2 } else { 0 },
+                            "complete": canceled && !trace_gap, "gap": canceled && trace_gap, "digest": digest},
+                        "events": {"nextSequence": page.last().map(|event| event["sequence"].clone()), "events": page}
+                    })))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let cli = Cli::parse_from([
+            "flux-purr",
+            "thermal",
+            "tune",
+            "--engine",
+            "firmware",
+            "--device",
+            "bench",
+            "--tune-targets-c",
+            "60",
+            "--output-root",
+            output_root.to_str().unwrap(),
+            "--bundle-dir",
+            report_dir.to_str().unwrap(),
+        ]);
+        let Command::Thermal {
+            command: ThermalCommand::Tune(args),
+        } = cli.command
+        else {
+            panic!("expected firmware tune command");
+        };
+        let rendered = super::run_firmware_tuning(&reqwest::Client::new(), &base, args)
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(rendered["ownerOutcome"], "failed");
+        let bundle: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(report_dir.join("run.bundle.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            bundle["deviceTraceVerification"]["verified"], !trace_gap,
+            "cancel must retrieve the retained tail before rendering the failure report"
+        );
+        let reads_after_cancel: Vec<_> = commands
+            .lock()
+            .unwrap()
+            .iter()
+            .skip_while(|command| command["op"] != "cancel")
+            .skip(1)
+            .map(|command| command["afterSequence"].clone())
+            .collect();
+        if trace_gap {
+            assert_eq!(reads_after_cancel, [json!(0)]);
+            assert_eq!(bundle["deviceTrace"]["gap"], true);
+        } else {
+            assert_eq!(reads_after_cancel, [json!(0), json!(1), json!(2)]);
+        }
     }
 
     #[test]
