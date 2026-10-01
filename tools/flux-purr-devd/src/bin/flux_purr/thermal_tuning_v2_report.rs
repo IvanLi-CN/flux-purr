@@ -1055,8 +1055,12 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("drawChart('controlChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('voltageChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('currentChart',samples,"));
-        assert!(REPORT_TEMPLATE.contains("Number(s.ppsContractMa)"));
+        assert!(REPORT_TEMPLATE.contains("chartValue(s.ppsContractMa)"));
         assert!(REPORT_TEMPLATE.contains("mA · safety ceiling · local evidence"));
+        assert!(REPORT_TEMPLATE.contains("const chartNumber=value=>"));
+        assert!(REPORT_TEMPLATE.contains("const tickLabels="));
+        assert!(REPORT_TEMPLATE.contains("canvas.dataset.plotLeft=String(left)"));
+        assert!(REPORT_TEMPLATE.contains("Hold (controller)"));
         assert!(REPORT_TEMPLATE.contains("chartGrid.hidden=samples.length===0"));
         assert!(REPORT_TEMPLATE.contains("该目标尚无候选试验样本"));
         assert!(REPORT_TEMPLATE.contains(".summary-metrics strong{display:block;color:var(--ink);font:650 13px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}"));

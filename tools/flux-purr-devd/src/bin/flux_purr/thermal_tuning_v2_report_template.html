@@ -120,10 +120,10 @@
   <section class="section-head"><div><h2>试验选择</h2><p>每个目标保留完整 candidate trial、结果与失败事实。</p></div></section>
   <section class="panel"><div class="trial-tabs" id="trialTabs"></div><div class="trial-summary" id="trialSummary"></div></section>
 
-  <section class="section-head"><div><h2>设备本地响应</h2><p>图表直接使用样本事件；外部 VBUS/物理功率不被伪造。</p></div><div class="chart-toolbar"><div class="chart-range" aria-label="图表时间范围"><button type="button" id="trialRange" aria-pressed="true" onclick="setChartRange('trial')">试验</button><button type="button" id="fullRange" aria-pressed="false" onclick="setChartRange('full')">含停热后</button></div></div></section>
+  <section class="section-head"><div><h2>设备本地响应</h2><p>图表直接使用样本事件；外部 VBUS/物理功率不被伪造。绿色 Hold 是控制器 phase，不等于已满足 qualified hold；资格仍由稳定带、10s 稳定窗和 12s/60s hold 指标判定。</p></div><div class="chart-toolbar"><div class="chart-range" aria-label="图表时间范围"><button type="button" id="trialRange" aria-pressed="true" onclick="setChartRange('trial')">试验</button><button type="button" id="fullRange" aria-pressed="false" onclick="setChartRange('full')">含停热后</button></div></div></section>
   <div class="no-trial" id="noTrial" hidden></div>
   <section class="chart-grid" id="chartGrid">
-    <article class="panel chart-panel wide"><div class="panel-title"><h3>温度 / 目标 / phase</h3><span>°C · local device sequence</span></div><div class="chart-legend"><span style="--legend-color:#b13d35">temperature</span><span style="--legend-color:#17232a">target</span><span style="--legend-color:#2d8a68">稳定带 ±1.5°C</span><span style="--legend-color:#d98b2b">Warmup</span><span style="--legend-color:#2f78a8">Approach</span><span style="--legend-color:#2d8a68">Hold</span><span style="--legend-color:#7966a8">Cooldown</span><span style="--legend-color:#69757c">Terminal</span></div><div class="chart-wrap"><canvas id="temperatureChart" tabindex="0" aria-label="温度图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
+    <article class="panel chart-panel wide"><div class="panel-title"><h3>温度 / 目标 / phase</h3><span>°C · local device sequence</span></div><div class="chart-legend"><span style="--legend-color:#b13d35">temperature</span><span style="--legend-color:#17232a">target</span><span style="--legend-color:#2d8a68">稳定带 ±1.5°C</span><span style="--legend-color:#d98b2b">Warmup</span><span style="--legend-color:#2f78a8">Approach</span><span style="--legend-color:#2d8a68">Hold (controller)</span><span style="--legend-color:#7966a8">Cooldown</span><span style="--legend-color:#69757c">Terminal</span></div><div class="chart-wrap"><canvas id="temperatureChart" tabindex="0" aria-label="温度图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>逻辑请求 / 最终 MOS PWM</h3><span>% · 0..100%</span></div><div class="chart-legend"><span style="--legend-color:#0c6590">logical request</span><span style="--legend-color:#b13d35">MOS PWM</span></div><div class="chart-wrap"><canvas id="controlChart" tabindex="0" aria-label="输出图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>VIN / PPS 合同与请求电压</h3><span>V · local evidence</span></div><div class="chart-legend"><span style="--legend-color:#16818b">VIN</span><span style="--legend-color:#936a08">PPS contract</span><span style="--legend-color:#0c6590">PPS request</span></div><div class="chart-wrap"><canvas id="voltageChart" tabindex="0" aria-label="电压图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>PPS 合同电流</h3><span>mA · safety ceiling · local evidence</span></div><div class="chart-legend"><span style="--legend-color:#936a08">PPS contract current</span></div><div class="chart-wrap"><canvas id="currentChart" tabindex="0" aria-label="电流上限图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
@@ -155,6 +155,8 @@ const CHART_IDS=['temperatureChart','controlChart','voltageChart','currentChart'
 const $=id=>document.getElementById(id);
 const esc=value=>String(value??'—').replace(/[&<>\"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[char]));
 const num=(value,digits=2)=>value!=null&&Number.isFinite(Number(value))?Number(value).toFixed(digits):'—';
+const chartNumber=value=>value!=null&&Number.isFinite(Number(value))?Number(value).toFixed(1):'—';
+const chartValue=value=>value==null||value===''||!Number.isFinite(Number(value))?NaN:Number(value);
 const ms=value=>value!=null&&Number.isFinite(Number(value))?`${(Number(value)/1000).toFixed(2)}s`:'—';
 const seconds=value=>value!=null&&Number.isFinite(Number(value))?`${num(value,0)}s`:'—';
 const degrees=value=>value!=null&&Number.isFinite(Number(value))?`${num(value)}°C`:'—';
@@ -228,7 +230,7 @@ function renderTrialTabs(){
   $('trialSummary').innerHTML=[['disposition',trial.disposition],['stop reason',trial.stopReason||'—'],['trial duration',ms(trialDuration)],['cooldown start',centiC(cooldown.startTemperatureCentiC)],['start limit',centiC(cooldown.thresholdCentiC)],['warmup',percent(trial.warmupRequestedOutputPermille)],['trial overshoot',degrees(trial.maxOvershootC)],['hold p2p',degrees(trial.holdPeakToPeakC)],['stable band',`${num(activeTarget-1.5)}..${num(activeTarget+1.5)}°C`],['stable verified',gate.settleTimeMs==null?'no / 10.00s window':`${ms(gate.settleTimeMs)} / ${ms(gate.limitMs)} gate`],['qualified Hold',`${ms(holdDuration)} / ${confirm?'60.00s confirm':'12.00s scout'}`],['60s confirm',`${seconds(trial.metrics?.holdConfirmSeconds)} / 60s`],['post-stop peak',postPeak==null?'unavailable':`${num(postPeak)}°C (${num(postPeak-activeTarget)}°C above target)`],['post-stop samples',String(after.length)],['sample range',`${trial.firstSequence??'—'}..${trial.lastSequence??'—'}`]].map(([label,value])=>`<div class="metric"><label>${esc(label)}</label><strong>${esc(value)}</strong></div>`).join('');
 }
 const PHASE_COLORS={warmup:'#d98b2b',approach:'#2f78a8',hold:'#2d8a68',cooldown:'#7966a8',terminal:'#69757c',unknown:'#9aa5aa'};
-function phaseLabel(value){return String(value||'unknown').replace(/(^|[_-])([a-z])/g,(_,prefix,letter)=>`${prefix}${letter.toUpperCase()}`);}
+function phaseLabel(value){const phase=String(value||'unknown');if(phase.toLowerCase()==='hold')return 'Hold (controller)';return phase.replace(/(^|[_-])([a-z])/g,(_,prefix,letter)=>`${prefix}${letter.toUpperCase()}`);}
 function phaseSegments(samples){
   const segments=[];
   for(const sample of samples){
@@ -263,11 +265,11 @@ function drawChart(canvasId, samples, series, unit, options={}){
   const canvas=$(canvasId); const rect=canvas.getBoundingClientRect(); const width=Math.max(300,Math.floor(rect.width)); const height=Math.max(220,Math.floor(rect.height)); const dpr=window.devicePixelRatio||1;
   canvas.dataset.trialIndex=String(currentTrial().trialIndex??''); canvas.dataset.targetC=String(activeTarget); canvas.dataset.sampleCount=String(samples.length); canvas.dataset.sequenceRange=samples.length?`${samples[0].sequence}..${samples[samples.length-1].sequence}`:'empty';
   canvas.width=width*dpr; canvas.height=height*dpr; const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr); ctx.clearRect(0,0,width,height);
-  const points=series.flatMap(item=>item.data.map(Number).filter(Number.isFinite)); if(options.stableBand)points.push(...options.stableBand); const ymin=points.length?Math.min(...points):0; const ymax=points.length?Math.max(...points):1; const pad=Math.max((ymax-ymin)*.18,.5); const lo=unit==='%'?0:ymin-pad, hi=unit==='%'?100:ymax+pad; canvas.dataset.yRange=`${lo}..${hi}`; const left=54,right=18,top=14,bottom=58; const plotW=width-left-right,plotH=height-top-bottom;
+  const points=series.flatMap(item=>item.data.map(Number).filter(Number.isFinite)); if(options.stableBand)points.push(...options.stableBand); const ymin=points.length?Math.min(...points):0; const ymax=points.length?Math.max(...points):1; const pad=Math.max((ymax-ymin)*.18,.5); const lo=unit==='%'?0:ymin-pad, hi=unit==='%'?100:ymax+pad; canvas.dataset.yRange=`${lo}..${hi}`; ctx.font='11px ui-monospace,monospace'; const tickLabels=Array.from({length:5},(_,i)=>{const value=hi-(hi-lo)*i/4;return `${unit==='%'?value.toFixed(0):chartNumber(value)}${unit}`;}); const left=Math.max(54,Math.ceil(Math.max(...tickLabels.map(label=>ctx.measureText(label).width)))+16),right=18,top=14,bottom=58; canvas.dataset.plotLeft=String(left); const plotW=width-left-right,plotH=height-top-bottom;
   const startT=Number(samples[0]?.elapsedMs)||0; const spanT=Math.max((Number(samples[samples.length-1]?.elapsedMs)||startT)-startT,1);canvas.dataset.startElapsedMs=String(startT);canvas.dataset.spanMs=String(spanT);canvas.dataset.plotWidth=String(plotW);
   if(options.stableBand){const upper=top+(1-(options.stableBand[1]-lo)/(hi-lo))*plotH;const lower=top+(1-(options.stableBand[0]-lo)/(hi-lo))*plotH;ctx.fillStyle='#2d8a6819';ctx.fillRect(left,upper,plotW,lower-upper);ctx.strokeStyle='#2d8a68';ctx.lineWidth=1;ctx.setLineDash([4,4]);for(const y of [upper,lower]){ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();}ctx.setLineDash([]);}
-  ctx.strokeStyle='#e6ebee';ctx.lineWidth=1;ctx.font='11px ui-monospace,monospace';ctx.fillStyle='#65747d';ctx.textAlign='right';
-  for(let i=0;i<5;i++){const y=top+plotH*i/4;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();const label=hi-(hi-lo)*i/4;ctx.fillText(`${label.toFixed(unit==='%'?0:1)}${unit}`,left-8,y+4);}
+  ctx.strokeStyle='#e6ebee';ctx.lineWidth=1;ctx.fillStyle='#65747d';ctx.textAlign='right';
+  for(let i=0;i<5;i++){const y=top+plotH*i/4;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();ctx.fillText(tickLabels[i],left-8,y+4);}
   ctx.textAlign='center';ctx.fillStyle='#65747d';
   for(let i=0;i<5;i++){const x=left+plotW*i/4;ctx.fillText(`${(spanT*i/4/1000).toFixed(0)}s`,x,height-9);}
   for(const item of series){ctx.strokeStyle=item.color;ctx.lineWidth=item.width||2;ctx.setLineDash(item.dash||[]);ctx.beginPath();item.data.forEach((value,index)=>{const sample=samples[index];const x=left+(((Number(sample?.elapsedMs)||startT)-startT)/spanT)*plotW;const y=top+(1-(value-lo)/(hi-lo))*plotH;if(index===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.stroke();ctx.setLineDash([]);}
@@ -283,7 +285,7 @@ function nearestSample(elapsedMs){
 function sampleValue(value,scale,unit){return value==null||!Number.isFinite(Number(value))?'unavailable':`${num(Number(value)/scale)} ${unit}`;}
 function showHover(sample,clientX,clientY){
   hoverSample=sample;
-  for(const id of CHART_IDS){const canvas=$(id);const line=canvas.parentElement.querySelector('.chart-crosshair');const x=54+(Number(sample.elapsedMs)-Number(canvas.dataset.startElapsedMs))/Number(canvas.dataset.spanMs)*Number(canvas.dataset.plotWidth);line.style.left=`${x}px`;line.dataset.sequence=String(sample.sequence);line.hidden=false;}
+  for(const id of CHART_IDS){const canvas=$(id);const line=canvas.parentElement.querySelector('.chart-crosshair');const left=Number(canvas.dataset.plotLeft)||54;const x=left+(Number(sample.elapsedMs)-Number(canvas.dataset.startElapsedMs))/Number(canvas.dataset.spanMs)*Number(canvas.dataset.plotWidth);line.style.left=`${x}px`;line.dataset.sequence=String(sample.sequence);line.hidden=false;}
   const tooltip=$('chartTooltip');const trialStart=Number(samplesForTrial()[0]?.elapsedMs)||Number(sample.elapsedMs);
   const rows=[['phase',sample.phase??sample.pidPhase??'unavailable'],['temperature',sampleValue(sample.temperatureCentiC,100,'°C')],['target',`${activeTarget} °C`],['stable band',`${num(activeTarget-1.5)}..${num(activeTarget+1.5)} °C`],['logical request',sampleValue(sample.heaterRequestedOutputPermille,10,'%')],['MOS PWM',sampleValue(sample.heaterOutputPermille,10,'%')],['VIN',sampleValue(sample.vinMv,1000,'V')],['PPS contract',sampleValue(sample.ppsContractMv,1000,'V')],['PPS request',sampleValue(sample.ppsRequestedMv,1000,'V')],['PPS current ceiling',sampleValue(sample.ppsContractMa,1,'mA')]];
   tooltip.innerHTML=`<strong>+${ms(Number(sample.elapsedMs)-trialStart)} · sequence ${esc(sample.sequence)}</strong><dl>${rows.map(([key,value])=>`<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl>`;
@@ -293,7 +295,7 @@ function showHover(sample,clientX,clientY){
 }
 function moveHover(event){
   if(!chartSamples.length)return;
-  const canvas=event.currentTarget;const rect=canvas.getBoundingClientRect();const left=54,plotW=Number(canvas.dataset.plotWidth);const fraction=Math.max(0,Math.min(1,(event.clientX-rect.left-left)/plotW));
+  const canvas=event.currentTarget;const rect=canvas.getBoundingClientRect();const left=Number(canvas.dataset.plotLeft)||54,plotW=Number(canvas.dataset.plotWidth);const fraction=Math.max(0,Math.min(1,(event.clientX-rect.left-left)/plotW));
   const elapsed=Number(canvas.dataset.startElapsedMs)+fraction*Number(canvas.dataset.spanMs);
   showHover(nearestSample(elapsed),event.clientX,event.clientY);
 }
@@ -309,10 +311,10 @@ function renderCharts(){
   const noTrial=$('noTrial'); const chartGrid=$('chartGrid');
   noTrial.hidden=samples.length>0; chartGrid.hidden=samples.length===0;
   if(!samples.length){noTrial.textContent=currentRun().executionStatus==='not_attempted'?'该目标尚未执行，没有候选试验曲线。':'该目标尚无候选试验样本；冷却和终止事件保留在原始记录中。';return;}
-  drawChart('temperatureChart',samples,[{label:'temperature',color:'#b13d35',data:samples.map(s=>Number(s.temperatureCentiC)/100)},{label:'target',color:'#17232a',dash:[5,4],width:1,data:samples.map(()=>activeTarget)}],'°C',{phaseBand:true,stableBand:[activeTarget-1.5,activeTarget+1.5]});
-  drawChart('controlChart',samples,[{label:'logical request',color:'#0c6590',data:samples.map(s=>Number(s.heaterRequestedOutputPermille)/10)},{label:'MOS PWM',color:'#b13d35',data:samples.map(s=>Number(s.heaterOutputPermille)/10)}],'%');
-  drawChart('voltageChart',samples,[{label:'VIN',color:'#16818b',data:samples.map(s=>Number(s.vinMv)/1000)},{label:'PPS contract',color:'#936a08',data:samples.map(s=>Number(s.ppsContractMv)/1000)},{label:'PPS request',color:'#0c6590',data:samples.map(s=>Number(s.ppsRequestedMv)/1000)}],'V');
-  drawChart('currentChart',samples,[{label:'PPS contract current',color:'#936a08',data:samples.map(s=>Number(s.ppsContractMa))}],'mA');
+  drawChart('temperatureChart',samples,[{label:'temperature',color:'#b13d35',data:samples.map(s=>chartValue(s.temperatureCentiC)/100)},{label:'target',color:'#17232a',dash:[5,4],width:1,data:samples.map(()=>activeTarget)}],'°C',{phaseBand:true,stableBand:[activeTarget-1.5,activeTarget+1.5]});
+  drawChart('controlChart',samples,[{label:'logical request',color:'#0c6590',data:samples.map(s=>chartValue(s.heaterRequestedOutputPermille)/10)},{label:'MOS PWM',color:'#b13d35',data:samples.map(s=>chartValue(s.heaterOutputPermille)/10)}],'%');
+  drawChart('voltageChart',samples,[{label:'VIN',color:'#16818b',data:samples.map(s=>chartValue(s.vinMv)/1000)},{label:'PPS contract',color:'#936a08',data:samples.map(s=>chartValue(s.ppsContractMv)/1000)},{label:'PPS request',color:'#0c6590',data:samples.map(s=>chartValue(s.ppsRequestedMv)/1000)}],'V');
+  drawChart('currentChart',samples,[{label:'PPS contract current',color:'#936a08',data:samples.map(s=>chartValue(s.ppsContractMa))}],'mA');
 }
 function renderLedger(){
   const trial=currentTrial(); const trialIndex=Number(trial.trialIndex??currentRun().adoptedTrialIndex??0); const rows=LEDGER.filter(item=>Number(item.targetC)===activeTarget&&Number(item.trialIndex)===trialIndex).sort((a,b)=>Number(a.sequence)-Number(b.sequence));
