@@ -574,19 +574,18 @@ fn conservative_high_side_candidate(
     if severity_c <= 3.0 {
         return None;
     }
-    let lower = i32::from(evidence.target_c) * 100 - 150;
     let upper = i32::from(evidence.target_c) * 100 + 150;
     let broke_high = evidence
         .first_band_exit_centi_c
         .is_some_and(|temperature| i32::from(temperature) > upper);
-    let missed_band = !evidence.first_band_observed
+    let missed_upper_band = !evidence.first_band_observed
         && evidence
             .deadline_temperature_centi_c
             .is_some_and(|temperature| {
                 let temperature = i32::from(temperature);
-                temperature < lower || temperature > upper
+                temperature > upper
             });
-    if !broke_high && !missed_band {
+    if !broke_high && !missed_upper_band {
         return None;
     }
 
@@ -1042,6 +1041,38 @@ mod tests {
         assert_eq!(tuned.approach_lead_ticks, 6);
         assert_eq!(tuned.approach_power_permille, 350);
         assert_eq!(tuned.approach_floor_power_permille, 100);
+    }
+
+    #[test]
+    fn observed_60c_lower_band_miss_accelerates_next_candidate() {
+        let mut previous = point(60);
+        previous.brake_distance_centi_c = 1_400;
+        previous.approach_power_permille = 350;
+        previous.approach_floor_power_permille = 100;
+        previous.approach_damping_exponent_permille = 4_000;
+        previous.hold_power_permille = 100;
+        previous.hold_reheat_power_permille = 120;
+        previous.hold_entry_centi_c = 320;
+        previous.hold_exit_centi_c = 300;
+        previous.approach_lead_ticks = 6;
+        previous.hold_lead_ticks = 6;
+        let mut facts = evidence(60);
+        facts.curve_class = CurveClass::Underpowered;
+        facts.overshoot_c = 1.05;
+        facts.hold_p2p_c = 1.50;
+        facts.residual_c = 3.58;
+        facts.under_c = 3.17;
+        facts.over_c = 0.84;
+        facts.hold_sample_count = 40;
+        facts.first_hold_error_c = Some(3.17);
+        facts.first_band_observed = false;
+        facts.deadline_temperature_centi_c = Some(5_792);
+
+        let tuned = tune_point(previous, facts);
+
+        assert!(tuned.brake_distance_centi_c < previous.brake_distance_centi_c);
+        assert!(tuned.approach_power_permille > previous.approach_power_permille);
+        assert!(tuned.approach_floor_power_permille > previous.approach_floor_power_permille);
     }
 
     #[test]

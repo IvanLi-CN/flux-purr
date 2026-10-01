@@ -1499,11 +1499,7 @@ fn conservative_high_side_candidate(
     if severity_c <= 3.0
         || !matches!(
             evidence.get("failureClass").and_then(Value::as_str),
-            Some(
-                "stable_window_broke_high"
-                    | "missed_upper_band_before_limit"
-                    | "missed_lower_band_before_limit"
-            )
+            Some("stable_window_broke_high" | "missed_upper_band_before_limit")
         )
     {
         return None;
@@ -5055,6 +5051,53 @@ mod tests {
         assert!(tuned.hold_power_permille < current.hold_power_permille);
         assert!(tuned.hold_reheat_power_permille < current.hold_reheat_power_permille);
         assert!(tuned.overshoot_cutoff_centi_c < current.overshoot_cutoff_centi_c);
+    }
+
+    #[test]
+    fn conservative_high_side_candidate_rejects_lower_band_miss() {
+        let current = ThermalCandidatePoint {
+            target_temp_c: 60,
+            brake_distance_centi_c: 1_100,
+            warmup_power_permille: 1_000,
+            approach_power_permille: 450,
+            approach_floor_power_permille: 160,
+            approach_damping_exponent_permille: 4_000,
+            approach_tail_window_centi_c: 375,
+            hold_power_permille: 100,
+            hold_reheat_power_permille: 120,
+            warmup_reenter_centi_c: 1_000,
+            hold_entry_centi_c: 320,
+            hold_exit_centi_c: 300,
+            hold_on_centi_c: 30,
+            hold_off_centi_c: 50,
+            overshoot_cutoff_centi_c: 90,
+            hold_kp_permille_per_c: 8,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 6,
+            hold_lead_ticks: 6,
+        };
+        let result = ThermalStageResult {
+            target_temp_c: 60,
+            rise_time_ms: 10_000,
+            max_overshoot_c: 1.05,
+            hold_peak_to_peak_c: 1.50,
+            sample_count: 40,
+            stop_reason: "full_speed_to_stable budget exhausted",
+            terminal_runtime_drop_reason: None,
+            analysis: ThermalStageAnalysis {
+                residual_heat_after_hold_entry_c: Some(3.58),
+                ..ThermalStageAnalysis::default()
+            },
+            guard: ThermalApproachGuardAnalysis::default(),
+            full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
+        };
+        let evidence = json!({
+            "failureClass": "missed_lower_band_before_limit",
+            "temperatureGapC": 0.58
+        });
+
+        assert!(conservative_high_side_candidate(current, &result, &evidence, 60).is_none());
     }
 
     #[test]
