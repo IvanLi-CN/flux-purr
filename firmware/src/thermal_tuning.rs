@@ -1114,7 +1114,13 @@ impl ThermalTuningRuntime {
         {
             return self.finish_trial(sample_elapsed_ms);
         }
-        if self.full_speed_to_stable_timed_out(sample_elapsed_ms, expected_target) {
+        // The frozen external strategy collects complete short-hold evidence
+        // for scout and batch trials even after the settle gate fails. Only
+        // final confirmation stops early; all trials retain the target budget
+        // and the per-tick safety checks.
+        if self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm
+            && self.full_speed_to_stable_timed_out(sample_elapsed_ms, expected_target)
+        {
             return self.finish_trial(sample_elapsed_ms);
         }
         let required_hold_ms = if self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm {
@@ -2768,6 +2774,8 @@ mod tests {
             (300, ThermalTuningPhase::Warmup, 4_000),
             (1_300, ThermalTuningPhase::Approach, 4_500),
             (11_300, ThermalTuningPhase::Approach, 5_000),
+            (12_000, ThermalTuningPhase::Hold, 5_990),
+            (24_000, ThermalTuningPhase::Hold, 6_350),
         ] {
             runtime
                 .record_sample(sample(elapsed_ms, phase, temperature_centi_c))
@@ -2784,14 +2792,14 @@ mod tests {
         assert_eq!(closed_first.start_temperature_centi_c, Some(4_000));
         assert_eq!(closed_first.cooldown_threshold_centi_c, Some(4_000));
 
-        let mut retry = sample(11_600, ThermalTuningPhase::Cooldown, 4_001);
+        let mut retry = sample(24_300, ThermalTuningPhase::Cooldown, 4_001);
         retry.trial_index = runtime.trial_index;
         retry.candidate_hash = runtime.candidate_hash.clone().unwrap();
         retry.heater_requested_output_permille = 0;
         retry.heater_output_permille = 0;
         runtime.record_sample(retry.clone()).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
-        retry.elapsed_ms = 11_900;
+        retry.elapsed_ms = 24_600;
         retry.temperature_centi_c = 4_000;
         runtime.record_sample(retry).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Warmup);
@@ -2808,7 +2816,7 @@ mod tests {
     }
 
     #[test]
-    fn observed_60c_high_side_trace_installs_conservative_candidate() {
+    fn high_side_trace_prefix_with_complete_hold_installs_conservative_candidate() {
         let mut profile = profile_with_targets(&[60]);
         let point = profile.points[0].as_mut().unwrap();
         point.brake_distance_centi_c = 1_100;
@@ -2851,6 +2859,10 @@ mod tests {
             (25_147, ThermalTuningPhase::Hold, 6_154),
             (27_573, ThermalTuningPhase::Hold, 6_319),
             (27_916, ThermalTuningPhase::Hold, 6_307),
+            // Synthetic continuation of the observed prefix: the previous
+            // early-stop implementation did not capture this hold tail.
+            (33_000, ThermalTuningPhase::Hold, 6_300),
+            (36_800, ThermalTuningPhase::Hold, 6_290),
         ] {
             let mut observed = sample(elapsed_ms, phase, temperature_centi_c);
             if phase == ThermalTuningPhase::Hold {
@@ -2996,8 +3008,49 @@ mod tests {
     }
 
     #[test]
-    fn full_speed_to_stable_timeout_rejects_trial_and_cools_for_retry() {
+    fn scout_and_batch_collect_full_hold_after_settle_failure() {
+        for purpose in [
+            ThermalTuningTrialPurpose::Scout,
+            ThermalTuningTrialPurpose::BatchCurrent,
+            ThermalTuningTrialPurpose::BatchPredicted,
+        ] {
+            let mut runtime = started_single_target_runtime();
+            runtime.trial_purpose = purpose;
+            if purpose != ThermalTuningTrialPurpose::Scout {
+                runtime.batch_current_profile = runtime.candidate_profile;
+            }
+            for (elapsed_ms, phase, temperature) in [
+                (0, ThermalTuningPhase::Warmup, 3_900),
+                (1_000, ThermalTuningPhase::Approach, 5_000),
+                (5_000, ThermalTuningPhase::Hold, 5_980),
+                (11_100, ThermalTuningPhase::Hold, 6_350),
+            ] {
+                record_current_trial_sample(&mut runtime, elapsed_ms, phase, temperature);
+            }
+            assert_eq!(runtime.phase, ThermalTuningPhase::Hold, "{purpose:?}");
+            assert_eq!(runtime.trial_index, 0, "{purpose:?}");
+            assert!(runtime.events.iter().all(|event| event.decision.is_none()));
+
+            record_current_trial_sample(&mut runtime, 17_000, ThermalTuningPhase::Hold, 6_400);
+            let decision_event = runtime
+                .events
+                .iter()
+                .find(|event| event.decision.is_some())
+                .unwrap();
+            let decision = decision_event.decision.as_ref().unwrap();
+            assert_eq!(decision_event.elapsed_ms, 17_000);
+            assert_eq!(decision.purpose, purpose);
+            assert_eq!(decision.disposition.as_str(), "rejected");
+            assert_eq!(decision.max_overshoot_centi_c, Some(400));
+            assert_eq!(decision.hold_peak_to_peak_centi_c, Some(420));
+            assert!(!decision.hold_confirm);
+        }
+    }
+
+    #[test]
+    fn hold_confirm_settle_timeout_rejects_trial_and_cools_for_retry() {
         let mut runtime = started_single_target_runtime();
+        runtime.trial_purpose = ThermalTuningTrialPurpose::HoldConfirm;
         runtime
             .record_sample(sample(0, ThermalTuningPhase::Warmup, 3_000))
             .unwrap();
@@ -3300,9 +3353,22 @@ mod tests {
             approach.elapsed_ms = timestamp + 11_000;
             approach.temperature_centi_c = 4_500;
             runtime.record_sample(approach).unwrap();
+            assert_eq!(runtime.trial_index, expected_trial);
+            record_current_trial_sample(
+                &mut runtime,
+                timestamp + 12_000,
+                ThermalTuningPhase::Hold,
+                6_000,
+            );
+            record_current_trial_sample(
+                &mut runtime,
+                timestamp + 24_000,
+                ThermalTuningPhase::Hold,
+                6_160,
+            );
             assert_eq!(runtime.trial_index, expected_trial + 1);
             assert!(runtime.armed);
-            timestamp += 12_000;
+            timestamp += 25_000;
         }
         let mut budget = sample(
             THERMAL_TUNING_TARGET_BUDGET_MS,
