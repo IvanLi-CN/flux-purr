@@ -672,6 +672,7 @@ pub(crate) fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
         fan_display_state: "AUTO".to_string(),
         fan_enabled: true,
         fan_pwm_permille: 500,
+        fan_pad_observation: None,
         voltage_mv: 20_010,
         current_ma: 840,
         board_temp_centi: 3_840,
@@ -763,6 +764,7 @@ pub(crate) fn native_placeholder_status(network: &NetworkSummary) -> ControlPlan
         fan_display_state: "OFF".to_string(),
         fan_enabled: false,
         fan_pwm_permille: 0,
+        fan_pad_observation: None,
         voltage_mv: 0,
         current_ma: 0,
         board_temp_centi: -100,
@@ -1064,6 +1066,13 @@ pub(crate) struct UsbWifiConfigReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FanPadObservation {
+    pub enable_pad_high: bool,
+    pub pwm_pad_high: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ControlPlaneStatus {
     pub mode: String,
     pub uptime_seconds: u32,
@@ -1089,6 +1098,8 @@ pub struct ControlPlaneStatus {
     pub fan_display_state: String,
     pub fan_enabled: bool,
     pub fan_pwm_permille: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_pad_observation: Option<FanPadObservation>,
     pub voltage_mv: u32,
     pub current_ma: u32,
     pub board_temp_centi: i32,

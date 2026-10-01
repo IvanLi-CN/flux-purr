@@ -1,6 +1,28 @@
 #[allow(unused_imports)]
 use super::*;
 
+#[cfg(all(target_arch = "xtensa", feature = "fan-observe"))]
+pub(crate) fn initialize_fan_pad_observation() {
+    // SAFETY: output initialization has completed and retains sole ownership
+    // of GPIO35/36. Enable only their input buffers; do not change the output
+    // enable, GPIO matrix, pulls, mux function, or MCPWM configuration.
+    let io_mux = unsafe { &*esp_hal::peripherals::IO_MUX::PTR };
+    for pin in [35, 36] {
+        io_mux.gpio(pin).modify(|_, w| w.fun_ie().set_bit());
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "fan-observe"))]
+pub(crate) fn observe_fan_pads() -> flux_purr_firmware::control_plane::FanPadObservationWire {
+    // SAFETY: read the GPIO input bank only. The fan driver remains the sole
+    // output owner; this snapshot neither writes outputs nor waits in the loop.
+    let levels = unsafe { (&*esp_hal::peripherals::GPIO::PTR).in1().read().bits() };
+    flux_purr_firmware::control_plane::FanPadObservationWire {
+        enable_pad_high: levels & (1 << (35 - 32)) != 0,
+        pwm_pad_high: levels & (1 << (36 - 32)) != 0,
+    }
+}
+
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const FAN_WORKING_CONTRACT_MV: u16 = 12_000;
 

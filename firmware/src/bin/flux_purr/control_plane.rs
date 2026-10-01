@@ -182,6 +182,10 @@ pub(crate) fn populate_status_control_and_faults(
     status.heater_coast_active = context.pid_snapshot.coast_active;
     status.heater_control_interval_ms = context.heater_control_timing.interval_ms;
     status.heater_control_cycle_ms = context.heater_control_timing.cycle_ms;
+    #[cfg(all(target_arch = "xtensa", feature = "fan-observe"))]
+    {
+        status.fan_pad_observation = Some(observe_fan_pads());
+    }
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]

@@ -230,6 +230,14 @@ pub struct AdcDiagnosticsWire {
     pub vin_raw_code_mean: u16,
 }
 
+/// Instantaneous digital pad readback, not fan voltage or tachometer evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanPadObservationWire {
+    pub enable_pad_high: bool,
+    pub pwm_pad_high: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlPlaneStatus {
@@ -255,6 +263,8 @@ pub struct ControlPlaneStatus {
     pub fan_display_state: FanDisplayState,
     pub fan_enabled: bool,
     pub fan_pwm_permille: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_pad_observation: Option<FanPadObservationWire>,
     pub voltage_mv: u32,
     pub current_ma: u32,
     pub board_temp_centi: i32,
@@ -571,6 +581,7 @@ impl ControlPlaneStatus {
                 fan_display_state,
                 fan_enabled: status.fan_enabled,
                 fan_pwm_permille: status.fan_pwm_permille,
+                fan_pad_observation: None,
                 voltage_mv: status.voltage_mv,
                 current_ma: status.current_ma,
                 board_temp_centi: status.board_temp_centi,
@@ -3794,6 +3805,10 @@ mod tests {
             NetworkSummary::default(),
         );
         status.thermal_control_profile_preview = true;
+        status.fan_pad_observation = Some(FanPadObservationWire {
+            enable_pad_high: true,
+            pwm_pad_high: false,
+        });
         status.thermal_control = ThermalControlRuntimeWire {
             profile_active: true,
             profile_covers_target: true,
@@ -3835,6 +3850,7 @@ mod tests {
 
         assert!(json.contains(r#""thermalControl":{"profileActive":true"#));
         assert!(json.contains(r#""autoAdjustableWorkingFloorMv":6100"#));
+        assert!(json.contains(r#""fanPadObservation":{"enablePadHigh":true,"pwmPadHigh":false}"#));
     }
 
     #[test]

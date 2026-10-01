@@ -3139,6 +3139,32 @@ fn usb_response_decoder_extracts_runtime_config_status_payload() {
     assert!(status.heater_enabled);
     assert!(!status.active_cooling_enabled);
     assert!(status.adc_diagnostics.is_none());
+    assert!(status.fan_pad_observation.is_none());
+}
+
+#[test]
+fn usb_response_decoder_preserves_fan_pad_disagreement_with_command() {
+    let mut status = mock_status(&native_placeholder_network());
+    status.fan_enabled = true;
+    status.fan_pwm_permille = 0;
+    status.fan_pad_observation = Some(FanPadObservation {
+        enable_pad_high: true,
+        pwm_pad_high: true,
+    });
+    let frame = format!(
+        r#"{{"type":"response","requestId":"fan-pad","ok":true,"result":{{"status":{}}}}}"#,
+        serde_json::to_string(&status).unwrap()
+    );
+    let payload = decode_usb_response_line(frame.as_bytes(), "fan-pad")
+        .unwrap()
+        .unwrap();
+    let decoded = extract_usb_payload::<ControlPlaneStatus>(payload, "status").unwrap();
+    let observed = decoded.fan_pad_observation.as_ref().unwrap();
+    assert!(observed.enable_pad_high);
+    assert!(observed.pwm_pad_high);
+    assert_eq!(decoded.fan_pwm_permille, 0);
+    let forwarded = serde_json::to_value(decoded).unwrap();
+    assert_eq!(forwarded["fanPadObservation"]["pwmPadHigh"], true);
 }
 
 #[test]

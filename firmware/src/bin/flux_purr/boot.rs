@@ -2091,6 +2091,8 @@ pub(crate) fn initialize_boot_outputs(
     let _ = fan_pwm.set_duty_cycle_percent(pwm_percent_from_permille(
         FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
     ));
+    #[cfg(feature = "fan-observe")]
+    initialize_fan_pad_observation();
     operator1.set_timer(&timer1);
     let mut heater_pwm = operator1.with_pin_a(context.heater_pwm_pin, PwmPinConfig::UP_ACTIVE_HIGH);
     let heater_timer_cfg = pwm_clock_cfg

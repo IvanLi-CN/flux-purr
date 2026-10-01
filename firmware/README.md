@@ -109,6 +109,7 @@
   - the `FAN CTRL` page edits only POST/HEAT modes and never displays PD, voltage, PWM, tach, or hardcoded thermal rules
   - on the current board, full-speed fan output is `GPIO35=high` plus `GPIO36 duty=0%`
   - on the current board, the minimum-output-voltage fan profile is `GPIO35=high` plus `GPIO36 duty=100%` (`1000‰`); the fan rail control law is inverted
+  - the optional `fan-observe` diagnostic build enables GPIO35/36 input buffers without changing their output routing or PWM. USB/devd status includes `fanPadObservation.enablePadHigh` and `pwmPadHigh`, sampled from the digital input bank. At constant 0%/100% PWM these observations can distinguish endpoint output from the requested duty; an instantaneous sample at intermediate duty cannot measure duty or frequency. Neither field measures fan rail voltage or mechanical RPM. Standard builds omit the observation
 - Buzzer control:
   - `GPIO48` is driven by `MCPWM0 timer2/operator2`, separate from the heater and fan PWM channels
   - boot and idle are silent
