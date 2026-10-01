@@ -60,6 +60,32 @@ pub(crate) fn tune_point(
     if let Some(conservative) = conservative_high_side_candidate(previous, evidence) {
         return conservative;
     }
+    let predicted = tune_base_point(previous, evidence);
+    apply_stability_gate(previous, predicted, evidence)
+}
+
+fn tune_base_point(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> ThermalControlProfilePointConfig {
+    let inputs = base_tuning_inputs(previous, evidence);
+    let BaseTuningInputs {
+        equilibrium,
+        hold_p90,
+        near_target_power,
+        entering_below,
+        entering_above,
+        hold_gate_lag,
+        approach_underpowered,
+        high_temp_power_limited,
+        stability_overshoot,
+        entry_residual_dominant,
+        overshoot_dominant,
+        low_temp_hold_entry_carry,
+        hold_ripple,
+        bursty_low_temp_hold,
+        timely_hold_late_stability,
+    } = inputs;
     let curve_needs_tuning = matches!(
         evidence.curve_class,
         CurveClass::BrakeLate | CurveClass::Underpowered | CurveClass::Oscillatory
@@ -72,6 +98,95 @@ pub(crate) fn tune_point(
         return previous;
     }
 
+    let mut tuned = previous;
+    if high_temp_power_limited {
+        apply_high_temp_power_limit(&mut tuned, near_target_power);
+    } else if timely_hold_late_stability {
+        tuned.hold_exit_centi_c = tuned
+            .hold_exit_centi_c
+            .max(round_positive((evidence.under_c + 0.2) * 100.0).clamp(80, 300));
+    } else if low_temp_hold_entry_carry {
+        let before = tuned.hold_lead_ticks;
+        tuned.hold_lead_ticks = tuned
+            .hold_lead_ticks
+            .saturating_add(if evidence.residual_c >= 2.0 { 2 } else { 1 })
+            .min(8);
+        if tuned.hold_lead_ticks == before {
+            tuned.hold_power_permille = tuned.hold_power_permille.saturating_sub(20).max(40);
+            tuned.hold_off_centi_c = tuned.hold_off_centi_c.saturating_add(20).min(400);
+        }
+        tuned.hold_reheat_power_permille = tuned
+            .hold_reheat_power_permille
+            .saturating_sub(30)
+            .max(tuned.hold_power_permille);
+    } else if hold_gate_lag {
+        tuned.approach_lead_ticks = tuned
+            .approach_lead_ticks
+            .saturating_add(if evidence.target_c >= 120 { 1 } else { 2 })
+            .min(12);
+    } else if approach_underpowered {
+        apply_approach_underpowered(&mut tuned, evidence.target_c, near_target_power);
+    } else if overshoot_dominant {
+        apply_overshoot(
+            &mut tuned,
+            previous,
+            evidence,
+            equilibrium,
+            stability_overshoot,
+            entry_residual_dominant,
+        );
+    } else if hold_ripple {
+        apply_hold_ripple(
+            &mut tuned,
+            previous,
+            evidence,
+            HoldRippleInputs {
+                equilibrium,
+                hold_p90,
+                bursty_low_temp_hold,
+                entering_below,
+                entering_above,
+            },
+        );
+    } else {
+        return previous;
+    }
+    tuned.hold_reheat_power_permille = tuned
+        .hold_reheat_power_permille
+        .max(tuned.hold_power_permille);
+    tuned.approach_power_permille = tuned
+        .approach_power_permille
+        .max(tuned.approach_floor_power_permille)
+        .min(1_000);
+    tuned.warmup_power_permille = tuned
+        .warmup_power_permille
+        .max(tuned.approach_power_permille)
+        .min(1_000);
+    tuned
+}
+
+struct BaseTuningInputs {
+    equilibrium: u16,
+    hold_p90: u16,
+    near_target_power: u16,
+    entering_below: f64,
+    entering_above: f64,
+    hold_gate_lag: bool,
+    approach_underpowered: bool,
+    high_temp_power_limited: bool,
+    stability_overshoot: bool,
+    entry_residual_dominant: bool,
+    overshoot_dominant: bool,
+    low_temp_hold_entry_carry: bool,
+    hold_ripple: bool,
+    bursty_low_temp_hold: bool,
+    timely_hold_late_stability: bool,
+}
+
+fn base_tuning_inputs(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> BaseTuningInputs {
     let equilibrium = evidence
         .hold_median_output_permille
         .unwrap_or(previous.hold_power_permille);
@@ -142,72 +257,288 @@ pub(crate) fn tune_point(
             .is_some_and(|time| time > evidence.settle_limit_ms)
         && evidence.under_c <= 1.5
         && evidence.over_c <= 1.5;
-
-    let mut tuned = previous;
-    if high_temp_power_limited {
-        apply_high_temp_power_limit(&mut tuned, near_target_power);
-    } else if timely_hold_late_stability {
-        tuned.hold_exit_centi_c = tuned
-            .hold_exit_centi_c
-            .max(round_positive((evidence.under_c + 0.2) * 100.0).clamp(80, 300));
-    } else if low_temp_hold_entry_carry {
-        let before = tuned.hold_lead_ticks;
-        tuned.hold_lead_ticks = tuned
-            .hold_lead_ticks
-            .saturating_add(if evidence.residual_c >= 2.0 { 2 } else { 1 })
-            .min(8);
-        if tuned.hold_lead_ticks == before {
-            tuned.hold_power_permille = tuned.hold_power_permille.saturating_sub(20).max(40);
-            tuned.hold_off_centi_c = tuned.hold_off_centi_c.saturating_add(20).min(400);
-        }
-        tuned.hold_reheat_power_permille = tuned
-            .hold_reheat_power_permille
-            .saturating_sub(30)
-            .max(tuned.hold_power_permille);
-    } else if hold_gate_lag {
-        tuned.approach_lead_ticks = tuned
-            .approach_lead_ticks
-            .saturating_add(if evidence.target_c >= 120 { 1 } else { 2 })
-            .min(12);
-    } else if approach_underpowered {
-        apply_approach_underpowered(&mut tuned, evidence.target_c, near_target_power);
-    } else if overshoot_dominant {
-        apply_overshoot(
-            &mut tuned,
-            previous,
-            evidence,
-            equilibrium,
-            stability_overshoot,
-            entry_residual_dominant,
-        );
-    } else if hold_ripple {
-        apply_hold_ripple(
-            &mut tuned,
-            previous,
-            evidence,
-            HoldRippleInputs {
-                equilibrium,
-                hold_p90,
-                bursty_low_temp_hold,
-                entering_below,
-                entering_above,
-            },
-        );
-    } else {
-        return previous;
+    BaseTuningInputs {
+        equilibrium,
+        hold_p90,
+        near_target_power,
+        entering_below,
+        entering_above,
+        hold_gate_lag,
+        approach_underpowered,
+        high_temp_power_limited,
+        stability_overshoot,
+        entry_residual_dominant,
+        overshoot_dominant,
+        low_temp_hold_entry_carry,
+        hold_ripple,
+        bursty_low_temp_hold,
+        timely_hold_late_stability,
     }
-    tuned.hold_reheat_power_permille = tuned
-        .hold_reheat_power_permille
-        .max(tuned.hold_power_permille);
-    tuned.approach_power_permille = tuned
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GateFailure {
+    LowMargin,
+    MissedLow,
+    MissedHigh,
+    BrokeLow,
+    BrokeHigh,
+    Other,
+}
+
+fn stability_gate_evidence(evidence: TuneEvidence) -> (GateFailure, f64) {
+    if evidence.scout_hold_complete
+        && let Some(started) = evidence.stable_window_after_warmup_ms
+        && started <= evidence.settle_limit_ms
+    {
+        let margin = if evidence.target_c > 150 { 500 } else { 1_000 };
+        return (
+            if evidence.settle_limit_ms - started < margin {
+                GateFailure::LowMargin
+            } else {
+                GateFailure::Other
+            },
+            0.0,
+        );
+    }
+    let target = i32::from(evidence.target_c) * 100;
+    let lower = target - 150;
+    let upper = target + 150;
+    let temperature = if evidence.first_band_observed {
+        evidence.first_band_exit_centi_c
+    } else {
+        evidence.deadline_temperature_centi_c
+    };
+    match temperature.map(i32::from) {
+        Some(value) if value < lower => (
+            if evidence.first_band_observed {
+                GateFailure::BrokeLow
+            } else {
+                GateFailure::MissedLow
+            },
+            f64::from(lower - value) / 100.0,
+        ),
+        Some(value) if value > upper => (
+            if evidence.first_band_observed {
+                GateFailure::BrokeHigh
+            } else {
+                GateFailure::MissedHigh
+            },
+            f64::from(value - upper) / 100.0,
+        ),
+        _ => (GateFailure::Other, 0.0),
+    }
+}
+
+fn apply_stability_gate(
+    previous: ThermalControlProfilePointConfig,
+    point: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> ThermalControlProfilePointConfig {
+    let (failure, gap_c) = stability_gate_evidence(evidence);
+    if matches!(
+        failure,
+        GateFailure::MissedLow | GateFailure::BrokeLow | GateFailure::LowMargin
+    ) {
+        apply_low_side_gate(previous, point, evidence, failure, gap_c)
+    } else if matches!(failure, GateFailure::BrokeHigh | GateFailure::MissedHigh) {
+        apply_high_side_gate(previous, point, evidence.target_c, gap_c)
+    } else {
+        point
+    }
+}
+
+fn apply_low_side_gate(
+    previous: ThermalControlProfilePointConfig,
+    mut point: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+    failure: GateFailure,
+    gap_c: f64,
+) -> ThermalControlProfilePointConfig {
+    let low_temperature = evidence.target_c <= 150;
+    let brake_step = if low_temperature {
+        match failure {
+            GateFailure::LowMargin => 100,
+            GateFailure::MissedLow if gap_c <= 1.5 => 160,
+            GateFailure::MissedLow => 300,
+            _ if gap_c <= 0.5 => 120,
+            _ if gap_c <= 1.5 => 180,
+            _ => 260,
+        }
+    } else if failure == GateFailure::LowMargin {
+        120
+    } else if gap_c <= 0.5 {
+        180
+    } else if gap_c <= 1.5 {
+        260
+    } else {
+        360
+    };
+    let brake_floor = if low_temperature { 450 } else { 150 };
+    point.brake_distance_centi_c = previous
+        .brake_distance_centi_c
+        .saturating_sub(brake_step)
+        .max(brake_floor.min(previous.brake_distance_centi_c));
+    let power_step = if low_temperature {
+        if failure == GateFailure::LowMargin {
+            80
+        } else if gap_c <= 1.5 {
+            120
+        } else {
+            240
+        }
+    } else if gap_c <= 1.0 {
+        180
+    } else {
+        260
+    };
+    point.approach_floor_power_permille = previous
+        .approach_floor_power_permille
+        .saturating_add(power_step)
+        .max(previous.hold_power_permille)
+        .min(1_000);
+    point.approach_power_permille = previous
         .approach_power_permille
-        .max(tuned.approach_floor_power_permille)
+        .saturating_add(power_step)
+        .max(point.approach_floor_power_permille.saturating_add(80))
         .min(1_000);
-    tuned.warmup_power_permille = tuned
-        .warmup_power_permille
-        .max(tuned.approach_power_permille)
+    point.approach_damping_exponent_permille = point
+        .approach_damping_exponent_permille
+        .saturating_sub(if low_temperature { 180 } else { 260 })
+        .max(100);
+    if low_temperature {
+        point.approach_lead_ticks = previous.approach_lead_ticks.saturating_sub(1).min(12);
+        point = bound_low_side_step(previous, point, evidence, failure, gap_c);
+    }
+    point
+}
+
+fn bound_low_side_step(
+    previous: ThermalControlProfilePointConfig,
+    mut point: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+    failure: GateFailure,
+    gap_c: f64,
+) -> ThermalControlProfilePointConfig {
+    // Bound the complete prediction after the gate correction, using
+    // the frozen strategy's observed overshoot/ripple safety margin.
+    let safe_step = evidence.overshoot_c <= 1.5 && evidence.hold_p2p_c <= 2.0;
+    let (power_limit, brake_limit, damping_limit) =
+        if failure == GateFailure::MissedLow && gap_c >= 1.5 && safe_step {
+            (240, 300, 360)
+        } else if gap_c <= 0.5 && safe_step {
+            (120, 120, 180)
+        } else {
+            (80, 80, 120)
+        };
+    point.approach_floor_power_permille = point.approach_floor_power_permille.min(
+        previous
+            .approach_floor_power_permille
+            .saturating_add(power_limit),
+    );
+    point.approach_power_permille = point
+        .approach_power_permille
+        .min(previous.approach_power_permille.saturating_add(power_limit))
+        .max(point.approach_floor_power_permille.saturating_add(80));
+    point.brake_distance_centi_c = point
+        .brake_distance_centi_c
+        .max(previous.brake_distance_centi_c.saturating_sub(brake_limit));
+    point.approach_damping_exponent_permille = point.approach_damping_exponent_permille.max(
+        previous
+            .approach_damping_exponent_permille
+            .saturating_sub(damping_limit),
+    );
+    point.approach_lead_ticks = point
+        .approach_lead_ticks
+        .max(previous.approach_lead_ticks.saturating_sub(1));
+    point
+}
+
+fn apply_high_side_gate(
+    previous: ThermalControlProfilePointConfig,
+    mut point: ThermalControlProfilePointConfig,
+    target_c: i16,
+    gap_c: f64,
+) -> ThermalControlProfilePointConfig {
+    let low_temperature = target_c <= 150;
+    let severe = low_temperature && gap_c >= 1.5;
+    let (min_brake, max_brake) = if severe {
+        (140, 240)
+    } else if low_temperature {
+        (80, 140)
+    } else {
+        (120, 180)
+    };
+    point.brake_distance_centi_c = point.brake_distance_centi_c.clamp(
+        previous.brake_distance_centi_c.saturating_add(min_brake),
+        previous.brake_distance_centi_c.saturating_add(max_brake),
+    );
+    if low_temperature {
+        point.brake_distance_centi_c = point.brake_distance_centi_c.max(450);
+    }
+    point.approach_lead_ticks = point
+        .approach_lead_ticks
+        .max(
+            previous
+                .approach_lead_ticks
+                .saturating_add(if severe { 2 } else { 1 }),
+        )
+        .min(12);
+    point.approach_damping_exponent_permille = point
+        .approach_damping_exponent_permille
+        .clamp(
+            previous
+                .approach_damping_exponent_permille
+                .saturating_add(50),
+            previous
+                .approach_damping_exponent_permille
+                .saturating_add(180),
+        )
+        .max(180);
+    if low_temperature {
+        trim_low_temperature_high_side(previous, &mut point, severe);
+    } else if point.hold_power_permille >= 900 {
+        point.hold_power_permille = point.hold_power_permille.saturating_sub(180).max(780);
+        point.hold_reheat_power_permille = point
+            .hold_reheat_power_permille
+            .saturating_sub(200)
+            .max(point.hold_power_permille)
+            .max(800);
+        point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(2).max(10);
+        point.overshoot_cutoff_centi_c = point.overshoot_cutoff_centi_c.saturating_sub(20).max(140);
+    }
+    point
+}
+
+fn trim_low_temperature_high_side(
+    previous: ThermalControlProfilePointConfig,
+    point: &mut ThermalControlProfilePointConfig,
+    severe: bool,
+) {
+    let trim = if severe { 180 } else { 80 };
+    point.approach_floor_power_permille = previous
+        .approach_floor_power_permille
+        .saturating_sub(trim)
+        .max(previous.hold_power_permille)
+        .max(100);
+    point.approach_power_permille = previous
+        .approach_power_permille
+        .saturating_sub(trim)
+        .max(point.approach_floor_power_permille.saturating_add(80))
         .min(1_000);
-    tuned
+    point.hold_reheat_power_permille = previous
+        .hold_reheat_power_permille
+        .saturating_sub(if severe { 100 } else { trim / 2 })
+        .max(previous.hold_power_permille);
+    point.hold_kp_permille_per_c = previous.hold_kp_permille_per_c.saturating_sub(4).max(8);
+    if severe {
+        point.hold_ki_permille_per_c_tick = previous.hold_ki_permille_per_c_tick.saturating_sub(1);
+        point.hold_blend_ticks = previous.hold_blend_ticks.saturating_add(1).min(8);
+    }
+    point.overshoot_cutoff_centi_c = previous.overshoot_cutoff_centi_c.saturating_sub(40).max(80);
+    point.hold_off_centi_c = previous
+        .hold_off_centi_c
+        .min(point.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
 }
 
 fn hold_ripple_trim_candidate(

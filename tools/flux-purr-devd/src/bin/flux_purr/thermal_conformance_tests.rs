@@ -22,7 +22,9 @@ fn firmware_candidate_matches_external_lower_band_hil_replay() {
     let profile_value = json!({
         "settings": fixture["settings"], "points": [fixture["point"]]
     });
-    let expected = external_candidate(&profile_value, fixture["samples"].as_array().unwrap());
+    let (expected, failure_class) =
+        external_candidate(&profile_value, fixture["samples"].as_array().unwrap());
+    assert_eq!(failure_class, "missed_lower_band_before_limit");
     let actual = firmware_candidate(profile_value, fixture["samples"].as_array().unwrap());
     assert_eq!(
         actual, expected,
@@ -30,7 +32,31 @@ fn firmware_candidate_matches_external_lower_band_hil_replay() {
     );
 }
 
-fn external_candidate(profile_value: &Value, rows: &[Value]) -> ThermalCandidatePoint {
+#[test]
+fn firmware_candidate_matches_external_late_window_hil_replays() {
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/thermal-60c-late-window-replays.json"
+    ))
+    .unwrap();
+    let mut differences = Vec::new();
+    for fixture in fixtures {
+        let profile_value = json!({
+            "settings": fixture["settings"], "points": [fixture["point"]]
+        });
+        let rows = fixture["samples"].as_array().unwrap();
+        let (expected, failure_class) = external_candidate(&profile_value, rows);
+        let actual = firmware_candidate(profile_value, rows);
+        if actual != expected {
+            differences.push(format!(
+                "trial {} ({failure_class}): firmware {actual:?}; external {expected:?}",
+                fixture["sourceTrialIndex"]
+            ));
+        }
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+fn external_candidate(profile_value: &Value, rows: &[Value]) -> (ThermalCandidatePoint, String) {
     let origin = rows[0][0].as_u64().unwrap();
     let samples: Vec<ThermalReplayStageSample> = rows
         .iter()
@@ -102,7 +128,7 @@ fn external_candidate(profile_value: &Value, rows: &[Value]) -> ThermalCandidate
         })
         .collect();
     let evidence = stability_evidence_for_stage(&result.to_value(), &chart_samples, 60);
-    assert_eq!(evidence["failureClass"], "missed_lower_band_before_limit");
+    let failure_class = evidence["failureClass"].as_str().unwrap().to_owned();
     let predicted = apply_flagship_gate_nudge(
         &current,
         tune_thermal_candidate_point(current, &result),
@@ -110,15 +136,14 @@ fn external_candidate(profile_value: &Value, rows: &[Value]) -> ThermalCandidate
         60,
     );
     let predicted = bound_low_temperature_candidate_step(&current, predicted, &evidence, 60);
-    select_evidence_specific_candidate(
+    let selected = select_evidence_specific_candidate(
         current,
         predicted,
         hold_ripple_trim_candidate(current, &result, &evidence, 60),
         conservative_high_side_candidate(current, &result, &evidence, 60),
-        "missed_lower_band_before_limit".to_owned(),
-    )
-    .unwrap()
-    .1
+        failure_class.clone(),
+    );
+    (selected.map_or(current, |(_, point)| point), failure_class)
 }
 
 fn firmware_candidate(profile_value: Value, rows: &[Value]) -> ThermalCandidatePoint {
