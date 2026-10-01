@@ -387,7 +387,10 @@ pub struct ThermalTuningRuntime {
     near_target_evidence_overflow: bool,
     previous_sample_at_ms: Option<u64>,
     previous_sample_temperature_centi_c: Option<i16>,
+    first_controller_hold_elapsed_ms: Option<u64>,
     first_hold_temperature_centi_c: Option<i16>,
+    min_controller_hold_temperature_centi_c: Option<i16>,
+    max_controller_hold_temperature_centi_c: Option<i16>,
     hold_error_sum_centi_c: i64,
     hold_threshold_crossed: bool,
     first_band_elapsed_ms: Option<u64>,
@@ -474,7 +477,10 @@ impl ThermalTuningRuntime {
             near_target_evidence_overflow: false,
             previous_sample_at_ms: None,
             previous_sample_temperature_centi_c: None,
+            first_controller_hold_elapsed_ms: None,
             first_hold_temperature_centi_c: None,
+            min_controller_hold_temperature_centi_c: None,
+            max_controller_hold_temperature_centi_c: None,
             hold_error_sum_centi_c: 0,
             hold_threshold_crossed: false,
             first_band_elapsed_ms: None,
@@ -973,16 +979,20 @@ impl ThermalTuningRuntime {
                         f64::from(i32::from(maximum) - i32::from(first)).max(0.0) / 100.0
                     },
                 ),
-            under_c: self.min_hold_temperature_centi_c.map_or(0.0, |minimum| {
-                f64::from(i32::from(target_c) * 100 - i32::from(minimum)).max(0.0) / 100.0
-            }),
-            over_c: self.max_hold_temperature_centi_c.map_or(0.0, |maximum| {
-                f64::from(i32::from(maximum) - i32::from(target_c) * 100).max(0.0) / 100.0
-            }),
+            under_c: self
+                .min_controller_hold_temperature_centi_c
+                .map_or(0.0, |minimum| {
+                    f64::from(i32::from(target_c) * 100 - i32::from(minimum)).max(0.0) / 100.0
+                }),
+            over_c: self
+                .max_controller_hold_temperature_centi_c
+                .map_or(0.0, |maximum| {
+                    f64::from(i32::from(maximum) - i32::from(target_c) * 100).max(0.0) / 100.0
+                }),
             hold_sample_count: self.hold_output_count,
             hold_threshold_crossed: self.hold_threshold_crossed,
             hold_mean_error_c,
-            hold_max_below_c: self.min_hold_temperature_centi_c.map(|minimum| {
+            hold_max_below_c: self.min_controller_hold_temperature_centi_c.map(|minimum| {
                 f64::from(i32::from(target_c) * 100 - i32::from(minimum)).max(0.0) / 100.0
             }),
             first_hold_error_c,
@@ -996,7 +1006,7 @@ impl ThermalTuningRuntime {
             approach_median_slope_c_per_s: slopes.get(slope_index).copied(),
             curve_class: self.strategy_curve_class(target_c),
             first_hold_after_warmup_ms: self
-                .first_hold_elapsed_ms
+                .first_controller_hold_elapsed_ms
                 .zip(self.warmup_exited_at_ms)
                 .map(|(hold, warmup)| hold.saturating_sub(warmup)),
             stable_window_after_warmup_ms: self
@@ -1067,7 +1077,10 @@ impl ThermalTuningRuntime {
         self.near_target_evidence_overflow = false;
         self.previous_sample_at_ms = None;
         self.previous_sample_temperature_centi_c = None;
+        self.first_controller_hold_elapsed_ms = None;
         self.first_hold_temperature_centi_c = None;
+        self.min_controller_hold_temperature_centi_c = None;
+        self.max_controller_hold_temperature_centi_c = None;
         self.hold_error_sum_centi_c = 0;
         self.hold_threshold_crossed = false;
         self.first_band_elapsed_ms = None;
@@ -1289,6 +1302,13 @@ impl ThermalTuningRuntime {
             ThermalTuningPhase::Hold => {
                 self.saw_hold = true;
                 self.warmup_exited_at_ms.get_or_insert(sample.elapsed_ms);
+                // Strategy analysis starts at the controller's first Hold
+                // sample, including entry residual heat. Qualification timing
+                // starts independently when the physical hold gate is met.
+                self.first_controller_hold_elapsed_ms
+                    .get_or_insert(sample.elapsed_ms);
+                self.first_hold_temperature_centi_c
+                    .get_or_insert(sample.temperature_centi_c);
                 let target_centi_c = i32::from(expected_target) * 100;
                 let temperature_centi_c = i32::from(sample.temperature_centi_c);
                 if temperature_centi_c >= target_centi_c - THERMAL_TUNING_HOLD_ENTRY_BELOW_CENTI_C
@@ -1304,9 +1324,7 @@ impl ThermalTuningRuntime {
             self.record_approach_curve_sample(sample);
             self.approach_curve_closed = sample.phase == ThermalTuningPhase::Hold;
         }
-        if self.first_hold_elapsed_ms.is_some() {
-            self.first_hold_temperature_centi_c
-                .get_or_insert(sample.temperature_centi_c);
+        if self.first_hold_temperature_centi_c.is_some() {
             self.hold_error_sum_centi_c = self.hold_error_sum_centi_c.saturating_add(
                 i64::from(expected_target) * 100 - i64::from(sample.temperature_centi_c),
             );
@@ -1314,6 +1332,20 @@ impl ThermalTuningRuntime {
             self.hold_output_histogram[output] =
                 self.hold_output_histogram[output].saturating_add(1);
             self.hold_output_count = self.hold_output_count.saturating_add(1);
+            self.min_controller_hold_temperature_centi_c = Some(
+                self.min_controller_hold_temperature_centi_c
+                    .map_or(sample.temperature_centi_c, |value| {
+                        value.min(sample.temperature_centi_c)
+                    }),
+            );
+            self.max_controller_hold_temperature_centi_c = Some(
+                self.max_controller_hold_temperature_centi_c
+                    .map_or(sample.temperature_centi_c, |value| {
+                        value.max(sample.temperature_centi_c)
+                    }),
+            );
+        }
+        if self.first_hold_elapsed_ms.is_some() {
             self.min_hold_temperature_centi_c = Some(
                 self.min_hold_temperature_centi_c
                     .map_or(sample.temperature_centi_c, |value| {
@@ -1348,7 +1380,7 @@ impl ThermalTuningRuntime {
                 .map_or(150, |point| point.hold_entry_centi_c);
             self.hold_threshold_crossed |= error_centi_c <= i32::from(hold_entry);
         }
-        if self.first_hold_elapsed_ms.is_none()
+        if self.first_hold_temperature_centi_c.is_none()
             && sample.phase != ThermalTuningPhase::Hold
             && (0..=800).contains(&error_centi_c)
         {
@@ -3087,7 +3119,9 @@ mod tests {
             .record_sample(sample(2_000, ThermalTuningPhase::Hold, 5_696))
             .unwrap();
         assert_eq!(runtime.first_hold_elapsed_ms, None);
-        assert_eq!(runtime.hold_output_count, 0);
+        assert_eq!(runtime.hold_output_count, 1);
+        assert_eq!(runtime.first_hold_temperature_centi_c, Some(5_696));
+        assert_eq!(runtime.min_hold_temperature_centi_c, None);
 
         runtime
             .record_sample(sample(6_000, ThermalTuningPhase::Hold, 5_970))
@@ -3281,6 +3315,38 @@ mod tests {
         assert_eq!(tuned.approach_power_permille, 650);
         assert_eq!(tuned.approach_floor_power_permille, 300);
         assert_eq!(tuned.hold_power_permille, 300);
+    }
+
+    #[test]
+    fn controller_hold_analysis_keeps_entry_before_qualification_timer() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.candidate_profile = Some(profile_with_targets(&[60]));
+        for (elapsed, phase, temperature) in [
+            (1_000, ThermalTuningPhase::Approach, 5_000),
+            (2_000, ThermalTuningPhase::Hold, 5_687),
+            (3_000, ThermalTuningPhase::Approach, 5_800),
+        ] {
+            runtime.update_trial_metrics(&sample(elapsed, phase, temperature), 60);
+        }
+        assert_eq!(runtime.first_controller_hold_elapsed_ms, Some(2_000));
+        assert_eq!(runtime.first_hold_temperature_centi_c, Some(5_687));
+        assert_eq!(runtime.hold_output_count, 2);
+        assert_eq!(runtime.approach_output_count, 0);
+        assert!(runtime.first_hold_elapsed_ms.is_none());
+        assert!(runtime.min_hold_temperature_centi_c.is_none());
+        runtime.update_trial_metrics(&sample(4_000, ThermalTuningPhase::Hold, 5_950), 60);
+        runtime.update_trial_metrics(&sample(5_000, ThermalTuningPhase::Hold, 6_060), 60);
+        assert_eq!(runtime.first_hold_elapsed_ms, Some(4_000));
+        assert_eq!(runtime.hold_output_count, 4);
+        assert_eq!(runtime.hold_error_sum_centi_c, 503);
+        assert_eq!(runtime.min_controller_hold_temperature_centi_c, Some(5_687));
+        assert_eq!(runtime.max_controller_hold_temperature_centi_c, Some(6_060));
+        assert_eq!(runtime.min_hold_temperature_centi_c, Some(5_950));
+        assert_eq!(runtime.max_hold_temperature_centi_c, Some(6_060));
+        runtime.reset_trial_metrics();
+        assert!(runtime.first_controller_hold_elapsed_ms.is_none());
+        assert!(runtime.min_controller_hold_temperature_centi_c.is_none());
+        assert!(runtime.max_controller_hold_temperature_centi_c.is_none());
     }
 
     #[test]

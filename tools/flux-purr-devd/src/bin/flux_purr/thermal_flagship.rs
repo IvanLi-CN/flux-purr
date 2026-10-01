@@ -22,6 +22,10 @@ use super::{
 };
 
 const DEFAULT_OUTPUT_ROOT: &str = "thermal-self-test-runs";
+
+#[cfg(test)]
+#[path = "thermal_conformance_tests.rs"]
+mod firmware_conformance_tests;
 const SCOUT_STAGE_TIMEOUT_SECONDS: u64 = 180;
 const SCOUT_WARMUP_TIMEOUT_SECONDS: u64 = 180;
 const FLAGSHIP_ENVIRONMENT_RETRY_LIMIT: u8 = 1;
