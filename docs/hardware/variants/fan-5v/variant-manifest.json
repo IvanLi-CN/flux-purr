@@ -39,6 +39,12 @@
       "ren_pd": 100000,
       "rser_en": 2200
     },
+    "physical_designators": {
+      "rfbb": "R19",
+      "rfbt": "R20",
+      "rinj": "R18",
+      "rpwm": "R15"
+    },
     "capacitors": {
       "cpwm_uf": 1.0,
       "cff_pf": 12,

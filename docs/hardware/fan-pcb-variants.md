@@ -59,16 +59,19 @@ This repository does not currently carry the live PCB CAD source. Therefore, the
 ## 4) `fan-12v` variant
 
 - Silkscreen: `12V FAN ONLY`
-- Output range: `6.6 V ~ 12.0 V`
-- Shared network stays unchanged except for:
-  - `RFBT = 124 kΩ 1%`
+- Nominal output range: `3.45 V ~ 12.14 V`
+- Physical resistor designators and E24 values:
+  - `R19 (RFBB) = 13 kΩ 1%`
+  - `R20 (RFBT) = 150 kΩ 1%`
+  - `R18 (RINJ) = 47 kΩ 1%`
+  - `R15 (RPWM) = 10 kΩ 1%`
 - Output capacitor rules:
   - main `FAN_VCC` output caps: `2 x 22 uF`
   - each cap must be `>=25 V`
   - footprint must be `1206` or larger
   - add `100 nF` local decoupling close to the fan connector in the live CAD source
 - Approximate hardware control law:
-  - `VOUT ~= 12.04 - 5.46 * Duty`
+  - `VOUT ~= 12.14 - 8.69 * Duty`
 - Variant manifest: `docs/hardware/variants/fan-12v/variant-manifest.json`
 - Fan-rail BOM overlay: `docs/hardware/variants/fan-12v/fan-rail-bom.csv`
 
@@ -96,5 +99,5 @@ Recommended names:
 
 - `fan_pwm_permille` is normalized across both variants; firmware and HTTP payloads must not infer or expose actual fan voltage from it.
 - Future closed-loop fan control is expected to operate on temperature error and normalized actuator commands, not on a fixed fan-voltage target.
-- `fan-12v` intentionally does not chase reliable startup below about `6.6 V` in the open-loop rail design; if a specific board later needs startup tuning, keep that tuning outside the shared firmware contract.
+- The selected `fan-12v` range covers the tested fan's approximately `3.3 V ~ 3.5 V` low-speed operating region; assembled-board startup and tolerance behavior still require bench validation, and any later startup tuning stays outside the shared firmware contract.
 - Because the live CAD source is not checked into this repository, the `100 nF` local decoupling requirement for `fan-12v` is frozen as a manifest / layout action rather than a checked-in designator.

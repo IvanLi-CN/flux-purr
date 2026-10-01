@@ -138,7 +138,7 @@ Current hardware design notes and manufacturing support assets are frozen in:
 The fan rail is maintained as two sibling PCB variants that keep the same firmware-facing GPIO and status contract:
 
 - `fan-5v`: adjustable `3.0 V ~ 5.06 V`
-- `fan-12v`: adjustable `6.6 V ~ 12.0 V`
+- `fan-12v`: adjustable nominal `3.45 V ~ 12.14 V` with an E24 feedback network
 
 ## Research baseline
 

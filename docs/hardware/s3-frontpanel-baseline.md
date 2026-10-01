@@ -9,7 +9,7 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 - 3.3 V rail: `TPS62933DRLR` (fixed `3.3 V`)
 - Fan rail: `TPS62933DRLR` adjustable sibling variants
   - `fan-5v`: `3.0 V ~ 5.0 V`
-  - `fan-12v`: `6.6 V ~ 12.0 V`
+  - `fan-12v`: nominal `3.45 V ~ 12.14 V` with the E24 feedback network
 - Display: same 1.12-inch panel class used in `iso-usb-hub`
 - Front-panel keys: direct-to-MCU, no I2C GPIO expander
 - Archived controller-board netlist: `docs/hardware/netlists/main-controller-board.enet` (`fan-5v` baseline)
@@ -168,8 +168,8 @@ The supported fixed-PD fallback is not an LED fault. It preserves the selected r
     - `EN` uses a weak pulldown such as `100 kOhm`
     - connector silkscreen must read `5V FAN ONLY`
   - `fan-12v` overlay:
-    - output range `6.6 V ~ 12.0 V`
-    - keep the same network except `RFBT = 124 kOhm 1%`
+    - nominal output range `3.45 V ~ 12.14 V`
+    - physical resistor designators: `R19 (RFBB) = 13 kOhm`, `R20 (RFBT) = 150 kOhm`, `R18 (RINJ) = 47 kOhm`, `R15 (RPWM) = 10 kOhm`; use E24 nominal values with `1%` tolerance
     - every capacitor directly on `FAN_VCC` must be `>=25 V`
     - the two main output capacitors must use `1206` or larger footprints
     - add local `100 nF` decoupling near the fan connector in live CAD
