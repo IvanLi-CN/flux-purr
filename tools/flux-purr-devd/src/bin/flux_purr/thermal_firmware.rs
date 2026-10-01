@@ -31,9 +31,11 @@ use super::{
 const FIRMWARE_PHYSICAL_TARGETS_C: &str = "60,80,100,120,140,160,180,220,240";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
+const RUNTIME_AUDIT_INTERVAL: Duration = Duration::from_secs(5);
 
 struct StatusJournal {
     file: File,
+    runtime_file: File,
     last_profile_hash: Option<String>,
 }
 
@@ -44,6 +46,10 @@ impl StatusJournal {
                 .write(true)
                 .create_new(true)
                 .open(input_dir.join("device-statuses.ndjson"))?,
+            runtime_file: fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(input_dir.join("device-runtime-statuses.ndjson"))?,
             last_profile_hash: None,
         })
     }
@@ -61,6 +67,10 @@ impl StatusJournal {
             file: fs::OpenOptions::new()
                 .append(true)
                 .open(input_dir.join("device-statuses.ndjson"))?,
+            runtime_file: fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(input_dir.join("device-runtime-statuses.ndjson"))?,
             last_profile_hash,
         })
     }
@@ -91,6 +101,24 @@ impl StatusJournal {
         }
         statuses.push(status);
         Ok(())
+    }
+
+    fn record_runtime(
+        &mut self,
+        run_id: &str,
+        after_sequence: Option<u64>,
+        runtime: &Value,
+    ) -> io::Result<()> {
+        serde_json::to_writer(
+            &mut self.runtime_file,
+            &json!({
+                "runId": run_id, "afterSequence": after_sequence,
+                "receivedAtUnixMs": current_unix_millis(), "status": runtime
+            }),
+        )
+        .map_err(io::Error::other)?;
+        self.runtime_file.write_all(b"\n")?;
+        self.runtime_file.sync_data()
     }
 }
 
@@ -183,7 +211,8 @@ pub(crate) async fn run_firmware_tuning(
     let mut statuses = Vec::new();
     let mut profile_mode_prepared = false;
     let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
-        ensure_firmware_profile_mode(client, &resolved, &lease.lease_id).await?;
+        let runtime = ensure_firmware_profile_mode(client, &resolved, &lease.lease_id).await?;
+        journal.record_runtime(&run_id, None, &runtime)?;
         profile_mode_prepared = true;
         let start = match request_leased(
             client,
@@ -255,6 +284,7 @@ pub(crate) async fn run_firmware_tuning(
         };
 
         let deadline = Instant::now() + firmware_host_watchdog(selected_targets.len());
+        let mut next_runtime_audit = Instant::now();
         let mut after_sequence = next_event_sequence(&start);
         journal.record(&mut statuses, start)?;
         loop {
@@ -302,6 +332,16 @@ pub(crate) async fn run_firmware_tuning(
             }
             if terminal && caught_up {
                 break;
+            }
+            if caught_up && Instant::now() >= next_runtime_audit {
+                let runtime = request_leased(
+                    client, &resolved, &lease.lease_id, Method::GET, "/status", None,
+                ).await?;
+                journal.record_runtime(&run_id, after_sequence, &runtime)?;
+                eprintln!("firmware tuning: temperature={}C heater={}%, fan command enabled={} level={} pwm={}permille",
+                    runtime["currentTempC"], runtime["heaterPhysicalOutputPercent"],
+                    runtime["fanEnabled"], runtime["fanOutputLevel"], runtime["fanPwmPermille"]);
+                next_runtime_audit = Instant::now() + RUNTIME_AUDIT_INTERVAL;
             }
             if Instant::now() >= deadline {
                 return Err("firmware thermal tuning exceeded the bounded run budget".into());
@@ -487,10 +527,10 @@ async fn ensure_firmware_profile_mode(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let status = request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
     if firmware_profile_mode_ready(&status) {
-        return Ok(());
+        return Ok(status);
     }
     if status.get("heaterEnabled").and_then(Value::as_bool) != Some(false) {
         return Err("heater must be off before selecting the 5A profile mode".into());
@@ -509,7 +549,7 @@ async fn ensure_firmware_profile_mode(
         let status =
             request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
         if firmware_profile_mode_ready(&status) {
-            return Ok(());
+            return Ok(status);
         }
         if status.get("heaterEnabled").and_then(Value::as_bool) != Some(false) {
             return Err("heater became armed while selecting the 5A profile mode".into());
@@ -2337,7 +2377,9 @@ mod tests {
             .route("/api/v1/leases/test/heartbeat", post(|| async { Json(json!({})) }))
             .route("/api/v1/leases/test", delete(|| async { Json(json!({})) }))
             .route("/api/v1/devices/bench/status", get(|| async {
-                Json(json!({"thermalProfileMode": "100w", "thermalProfileResolvedBank": "pps5a"}))
+                Json(json!({"thermalProfileMode": "100w", "thermalProfileResolvedBank": "pps5a",
+                    "currentTempC": 43.5, "heaterPhysicalOutputPercent": 0,
+                    "fanEnabled": true, "fanOutputLevel": "high", "fanPwmPermille": 0}))
             }))
             .route("/api/v1/devices/bench/thermal-tuning", post(move |Json(command): Json<serde_json::Value>| {
                 let commands = recorded_commands.clone();
@@ -2347,7 +2389,8 @@ mod tests {
                     let mut commands = commands.lock().unwrap();
                     commands.push(command.clone());
                     let canceled = commands.iter().any(|command| command["op"] == "cancel");
-                    if command["op"] == "read" && !canceled {
+                    if command["op"] == "read" && !canceled
+                        && commands.iter().filter(|command| command["op"] == "read").count() > 1 {
                         return (axum::http::StatusCode::GATEWAY_TIMEOUT,
                             Json(json!({"error": {"code": "usb_response_timeout", "retryable": true}})));
                     }
@@ -2355,7 +2398,7 @@ mod tests {
                     let next = if command["op"] == "read" {
                         command["afterSequence"].as_u64().map_or(0, |sequence| sequence + 1)
                     } else { 0 };
-                    let page: Vec<_> = events.iter().filter(|event| event["sequence"].as_u64() == Some(next) && (!trace_gap || next == 0))
+                    let page: Vec<_> = events.iter().filter(|event| event["sequence"].as_u64() == Some(next) && (!trace_gap || next == 0) && (canceled || next == 0))
                         .cloned().collect();
                     (axum::http::StatusCode::OK, Json(json!({
                         "runId": start["runId"], "candidateId": start["candidateId"],
@@ -2400,6 +2443,23 @@ mod tests {
             .unwrap();
         server.abort();
         assert_eq!(rendered["ownerOutcome"], "failed");
+        let runtime_path = std::path::PathBuf::from(rendered["rawInputDir"].as_str().unwrap())
+            .join("device-runtime-statuses.ndjson");
+        let runtime_lines = std::fs::read_to_string(runtime_path).unwrap();
+        let runtime: Vec<serde_json::Value> = runtime_lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            runtime.len(),
+            2,
+            "preflight and running snapshots must both be durable"
+        );
+        assert!(runtime[0]["afterSequence"].is_null());
+        assert_eq!(runtime[1]["afterSequence"], 0);
+        assert_eq!(runtime[1]["status"]["fanEnabled"], true);
+        assert_eq!(runtime[1]["status"]["fanPwmPermille"], 0);
+        assert_eq!(runtime[1]["status"]["heaterPhysicalOutputPercent"], 0);
         let bundle: serde_json::Value =
             serde_json::from_slice(&std::fs::read(report_dir.join("run.bundle.json")).unwrap())
                 .unwrap();
