@@ -204,8 +204,19 @@ fn render_pd_hil_summary(
         .and_then(|policy| policy.get("vinValidation"))
         .and_then(Value::as_str)
         .unwrap_or("adc");
+    let vbus_observation = if vin_validation == "external_source" {
+        "unmeasured".to_string()
+    } else {
+        format!(
+            "{}mV",
+            final_reset
+                .get("defaultVbusMv")
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
+        )
+    };
     Ok(format!(
-        "PD HIL SUMMARY overall={} vinValidation={} pass={} unsupported={} negotiation_failed={} measurement_failed={} recovery_failed={} reset={} pd={} vbusObservation={}mV evidence={}",
+        "PD HIL SUMMARY overall={} vinValidation={} pass={} unsupported={} negotiation_failed={} measurement_failed={} recovery_failed={} reset={} pd={} vbusObservation={} evidence={}",
         overall,
         vin_validation,
         count("pass"),
@@ -219,10 +230,7 @@ fn render_pd_hil_summary(
             .unwrap_or("unknown")
             .to_ascii_uppercase(),
         result.get("pd").and_then(Value::as_str).unwrap_or("-"),
-        final_reset
-            .get("defaultVbusMv")
-            .and_then(Value::as_u64)
-            .unwrap_or_default(),
+        vbus_observation,
         payload
             .get("evidenceDir")
             .and_then(Value::as_str)

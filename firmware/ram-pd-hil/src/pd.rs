@@ -321,6 +321,10 @@ pub const fn object_count(header: u16) -> u8 {
     ((header >> 12) & 0x07) as u8
 }
 
+pub const fn message_id(header: u16) -> u8 {
+    ((header >> 9) & 0x07) as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

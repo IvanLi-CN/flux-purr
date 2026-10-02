@@ -104,7 +104,7 @@ mod device {
     const EMIT_SESSION_PROGRESS: bool = false;
     const EMIT_TIER_PROGRESS: bool = true;
     const EMIT_SAMPLE_PROGRESS: bool = false;
-    const EMIT_CAPABILITY_PROGRESS: bool = false;
+    const EMIT_CAPABILITY_PROGRESS: bool = true;
     const EMIT_RECOVERY_PROGRESS: bool = false;
     // ROM output is synchronous on the USB Serial/JTAG path. A packet trace in
     // the receive helper would delay Source_Capabilities -> Request beyond a
@@ -642,6 +642,23 @@ mod device {
             }
             let _ = write!(result, "{}", capabilities.objects[index].raw);
         }
+        let _ = result.push_str("],\"objects\":[");
+        for index in 0..usize::from(capabilities.count) {
+            if index != 0 {
+                let _ = result.push(',');
+            }
+            let object = capabilities.objects[index];
+            let _ = write!(
+                result,
+                "{{\"position\":{},\"mode\":\"{}\",\"minMv\":{},\"maxMv\":{},\"maxMa\":{},\"raw\":{}}}",
+                object.position,
+                object.mode.as_str(),
+                object.min_mv,
+                object.max_mv,
+                object.max_ma,
+                object.raw,
+            );
+        }
         let _ = result.push_str("],\"heater\":\"off\",\"pd\":\"owned\",\"eeprom\":\"untouched\"}");
         emit_progress(usb, request_id, sequence, result.as_str());
     }
@@ -761,6 +778,7 @@ mod device {
         let retained_polarity = existing_attachment_polarity(&mut *i2c);
         let mut phy = Fusb302::with_address(&mut *i2c, I2C_ADDRESS);
         let pending_source_capabilities = capture_pending_source_capabilities(&mut phy);
+        let mut source_message_id = None;
 
         // RAM loading does not reset the external FUSB302B. If the production
         // runtime already selected a CC pin and VBUS is still present, keep
@@ -780,7 +798,11 @@ mod device {
                 return Ok(pending_source_capabilities);
             }
             let mut message_id = 0;
-            return Ok(receive_packet(&mut phy, &mut message_id));
+            return Ok(receive_packet(
+                &mut phy,
+                &mut message_id,
+                &mut source_message_id,
+            ));
         }
 
         if phy.init().is_err()
@@ -816,7 +838,11 @@ mod device {
                 return Ok(pending_source_capabilities);
             }
             let mut message_id = 0;
-            return Ok(receive_packet(&mut phy, &mut message_id));
+            return Ok(receive_packet(
+                &mut phy,
+                &mut message_id,
+                &mut source_message_id,
+            ));
         }
 
         if phy.set_measure_cc(None).is_err()
@@ -848,7 +874,11 @@ mod device {
                             return Ok(pending_source_capabilities);
                         }
                         let mut message_id = 0;
-                        return Ok(receive_packet(&mut phy, &mut message_id));
+                        return Ok(receive_packet(
+                            &mut phy,
+                            &mut message_id,
+                            &mut source_message_id,
+                        ));
                     }
                     return attach_failure(&mut phy, "fusb302b_attached_configuration_failed");
                 }
@@ -881,7 +911,11 @@ mod device {
                         return Ok(pending_source_capabilities);
                     }
                     let mut message_id = 0;
-                    return Ok(receive_packet(&mut phy, &mut message_id));
+                    return Ok(receive_packet(
+                        &mut phy,
+                        &mut message_id,
+                        &mut source_message_id,
+                    ));
                 }
             }
         }
@@ -921,9 +955,27 @@ mod device {
         HardReset,
     }
 
+    fn source_message_id_is_fresh(last: Option<u8>, current: u8) -> bool {
+        let Some(last) = last else {
+            return true;
+        };
+        let delta = (current.wrapping_add(8).wrapping_sub(last)) & 0x07;
+        (1..=4).contains(&delta)
+    }
+
+    fn observe_source_message_id(packet: &PdPacket, last: &mut Option<u8>) -> bool {
+        let current = pd::message_id(packet.header());
+        if !source_message_id_is_fresh(*last, current) {
+            return false;
+        }
+        *last = Some(current);
+        true
+    }
+
     fn receive_packet_with_probe<I2C, F>(
         phy: &mut Fusb302<I2C>,
         message_id: &mut u8,
+        source_message_id: &mut Option<u8>,
         mut emit_stage: F,
     ) -> ReceiveOutcome
     where
@@ -954,6 +1006,7 @@ mod device {
             emit_stage("capabilities_receive_hard_reset");
             let _ = phy.flush_fifos();
             *message_id = 0;
+            *source_message_id = None;
             emit_stage("capabilities_receive_hard_reset_recovered");
             return ReceiveOutcome::HardReset;
         }
@@ -963,6 +1016,7 @@ mod device {
             let accept = PdPacket::new(SopType::Sop, pd::accept_header(0), &[]);
             let accepted = accept.is_ok_and(|packet| phy.transmit(&packet).is_ok());
             *message_id = 0;
+            *source_message_id = None;
             emit_stage(if accepted {
                 "capabilities_receive_soft_reset_accepted"
             } else {
@@ -1015,6 +1069,10 @@ mod device {
         if EMIT_ROM_PACKET_TRACE {
             super::rom_diag_hex_u32(b"ram_pd_hil_rx_header=0x", u32::from(packet.header()));
         }
+        if !observe_source_message_id(&packet, source_message_id) {
+            emit_stage("capabilities_receive_stale_message");
+            return ReceiveOutcome::Empty;
+        }
         emit_stage("capabilities_receive_returned");
         ReceiveOutcome::Packet(packet)
     }
@@ -1022,8 +1080,9 @@ mod device {
     fn receive_packet<I2C: embedded_hal::i2c::I2c>(
         phy: &mut Fusb302<I2C>,
         message_id: &mut u8,
+        source_message_id: &mut Option<u8>,
     ) -> Option<PdPacket> {
-        match receive_packet_with_probe(phy, message_id, |_| {}) {
+        match receive_packet_with_probe(phy, message_id, source_message_id, |_| {}) {
             ReceiveOutcome::Packet(packet) => Some(packet),
             ReceiveOutcome::Empty | ReceiveOutcome::SoftReset | ReceiveOutcome::HardReset => None,
         }
@@ -1082,6 +1141,7 @@ mod device {
         request_id: &str,
         sequence: &mut u32,
         message_id: &mut u8,
+        source_message_id: &mut Option<u8>,
     ) -> Result<(), StopReason> {
         let request_payload = pd::request_data_object(selected);
         if phy.flush_fifos().is_err() {
@@ -1129,7 +1189,7 @@ mod device {
             if !receive_progress_reported {
                 emit_session_progress(usb, request_id, sequence, "default_request_receive_begin");
             }
-            let packet = receive_packet_with_probe(phy, message_id, |_| {});
+            let packet = receive_packet_with_probe(phy, message_id, source_message_id, |_| {});
             if !receive_progress_reported {
                 emit_session_progress(
                     usb,
@@ -1188,6 +1248,7 @@ mod device {
         request_id: &str,
         sequence: &mut u32,
         message_id: &mut u8,
+        source_message_id: &mut Option<u8>,
         pending_packet: Option<PdPacket>,
         cached_capabilities: Option<pd::SourceCapabilities>,
     ) -> Result<ResetResult, StopReason> {
@@ -1223,6 +1284,7 @@ mod device {
                 sequence,
                 request_id,
                 message_id,
+                source_message_id,
                 pending_packet,
             ) {
                 Ok(capabilities) => capabilities,
@@ -1254,6 +1316,7 @@ mod device {
             request_id,
             sequence,
             message_id,
+            source_message_id,
         );
         match request_result {
             Ok(()) => {}
@@ -1293,7 +1356,7 @@ mod device {
             let _ = pd_irq.is_low();
             for _ in 0..16 {
                 check_deadline(usb, cancel, recovery_deadline)?;
-                if receive_packet(phy, message_id).is_none() {
+                if receive_packet(phy, message_id, source_message_id).is_none() {
                     break;
                 }
             }
@@ -1354,12 +1417,13 @@ mod device {
         sequence: &mut u32,
         request_id: &str,
         message_id: &mut u8,
+        source_message_id: &mut Option<u8>,
         wait_ms: u32,
     ) -> Result<Option<(PdPacket, pd::SourceCapabilities)>, StopReason> {
         let wait_deadline = now_ms().saturating_add(wait_ms);
         while now_ms() < wait_deadline {
             check_deadline(usb, cancel, deadline_ms)?;
-            if let Some(packet) = receive_packet(phy, message_id) {
+            if let Some(packet) = receive_packet(phy, message_id, source_message_id) {
                 if let Ok(capabilities) =
                     pd::decode_source_capabilities(packet.header(), packet.payload())
                 {
@@ -1380,6 +1444,7 @@ mod device {
         sequence: &mut u32,
         request_id: &str,
         message_id: &mut u8,
+        source_message_id: &mut Option<u8>,
     ) -> Result<Option<(PdPacket, pd::SourceCapabilities)>, StopReason> {
         emit_session_progress(
             usb,
@@ -1434,7 +1499,7 @@ mod device {
         let wait_deadline = now_ms().saturating_add(CAPABILITIES_PROTOCOL_RESET_WAIT_MS);
         while now_ms() < wait_deadline {
             check_deadline(usb, cancel, deadline_ms)?;
-            match receive_packet_with_probe(phy, message_id, |_| {}) {
+            match receive_packet_with_probe(phy, message_id, source_message_id, |_| {}) {
                 ReceiveOutcome::Packet(packet) => {
                     if let Ok(capabilities) =
                         pd::decode_source_capabilities(packet.header(), packet.payload())
@@ -1451,6 +1516,7 @@ mod device {
                         && pd::object_count(packet.header()) == 0
                     {
                         *message_id = 0;
+                        *source_message_id = None;
                         emit_session_progress(
                             usb,
                             request_id,
@@ -1492,6 +1558,7 @@ mod device {
         sequence: &mut u32,
         request_id: &str,
         message_id: &mut u8,
+        source_message_id: &mut Option<u8>,
         pending_packet: Option<PdPacket>,
     ) -> Result<pd::SourceCapabilities, StopReason> {
         check_deadline(usb, cancel, deadline_ms)?;
@@ -1499,8 +1566,12 @@ mod device {
             if let Ok(capabilities) =
                 pd::decode_source_capabilities(packet.header(), packet.payload())
             {
-                emit_source_capabilities(usb, request_id, sequence, &packet, capabilities);
-                return Ok(capabilities);
+                if !observe_source_message_id(&packet, source_message_id) {
+                    emit_session_progress(usb, request_id, sequence, "capabilities_pending_stale");
+                } else {
+                    emit_source_capabilities(usb, request_id, sequence, &packet, capabilities);
+                    return Ok(capabilities);
+                }
             }
             emit_session_progress(usb, request_id, sequence, "capabilities_pending_ignored");
         }
@@ -1513,6 +1584,7 @@ mod device {
             sequence,
             request_id,
             message_id,
+            source_message_id,
             SOURCE_CAPS_INITIAL_WAIT_MS,
         )? {
             emit_source_capabilities(usb, request_id, sequence, &packet, capabilities);
@@ -1540,7 +1612,7 @@ mod device {
             let mut packet_seen = false;
             while now_ms() < response_deadline {
                 check_deadline(usb, cancel, deadline_ms)?;
-                let Some(packet) = receive_packet(phy, message_id) else {
+                let Some(packet) = receive_packet(phy, message_id, source_message_id) else {
                     delay_ms(5);
                     continue;
                 };
@@ -1602,6 +1674,7 @@ mod device {
             sequence,
             request_id,
             message_id,
+            source_message_id,
         )? {
             emit_source_capabilities(usb, request_id, sequence, &packet, capabilities);
             emit_capability_progress(usb, request_id, sequence, capabilities);
@@ -1624,6 +1697,7 @@ mod device {
         sequence: &mut u32,
         request_id: &str,
         message_id: &mut u8,
+        source_message_id: &mut Option<u8>,
     ) -> Result<pd::SourceCapabilities, StopReason> {
         check_deadline(usb, cancel, deadline_ms)?;
         if phy.flush_fifos().is_err() {
@@ -1663,7 +1737,7 @@ mod device {
             .min(deadline_ms);
         while now_ms() < response_deadline {
             check_deadline(usb, cancel, deadline_ms)?;
-            match receive_packet_with_probe(phy, message_id, |_| {}) {
+            match receive_packet_with_probe(phy, message_id, source_message_id, |_| {}) {
                 ReceiveOutcome::Packet(packet) => {
                     if let Ok(capabilities) =
                         pd::decode_source_capabilities(packet.header(), packet.payload())
@@ -1718,6 +1792,7 @@ mod device {
         selected: pd::SelectedContract,
         index: usize,
         message_id: &mut u8,
+        source_message_id: &mut Option<u8>,
         validate_vin: bool,
     ) -> Result<TierRecord, StopReason> {
         let mut tier = TierRecord::new(selected.target);
@@ -1754,7 +1829,7 @@ mod device {
         let mut accepted = false;
         while now_ms() < negotiation_deadline {
             check_deadline(usb, cancel, session_deadline_ms)?;
-            if let Some(packet) = receive_packet(phy, message_id) {
+            if let Some(packet) = receive_packet(phy, message_id, source_message_id) {
                 match pd::message_type(packet.header()) {
                     3 => accepted = true,
                     4 => {
@@ -1814,13 +1889,13 @@ mod device {
 
             if now < next_sample {
                 let _ = pd_irq.is_low();
-                let _ = receive_packet(phy, message_id);
+                let _ = receive_packet(phy, message_id, source_message_id);
                 delay_ms(1);
                 continue;
             }
             next_sample = now.saturating_add(pd::SAMPLE_INTERVAL_MS);
             let _ = pd_irq.is_low();
-            let _ = receive_packet(phy, message_id);
+            let _ = receive_packet(phy, message_id, source_message_id);
             let status_ok = phy
                 .read_status()
                 .is_ok_and(|status| status.status0 & STATUS0_VBUSOK != 0);
@@ -1945,6 +2020,7 @@ mod device {
         let mut sequence = 0u32;
         let mut cancel = CancelState::new();
         let mut message_id = 0u8;
+        let mut source_message_id = None;
         emit_session_progress(usb, request_id, &mut sequence, "preflight");
 
         let pending_packet = match attach_sink(&mut measurements.i2c) {
@@ -1971,6 +2047,7 @@ mod device {
             request_id,
             &mut sequence,
             &mut message_id,
+            &mut source_message_id,
             pending_packet,
             None,
         ) {
@@ -1997,6 +2074,7 @@ mod device {
                     request_id,
                     &mut sequence,
                     &mut message_id,
+                    &mut source_message_id,
                     None,
                     None,
                 )
@@ -2035,6 +2113,7 @@ mod device {
                 request_id,
                 &mut sequence,
                 &mut message_id,
+                &mut source_message_id,
                 None,
                 None,
             )
@@ -2077,6 +2156,7 @@ mod device {
                 &mut sequence,
                 request_id,
                 &mut message_id,
+                &mut source_message_id,
             );
             if let Ok(capabilities) = capabilities_for_tier {
                 result.source_capabilities = capabilities;
@@ -2097,6 +2177,7 @@ mod device {
                         selected,
                         index,
                         &mut message_id,
+                        &mut source_message_id,
                         validate_vin,
                     ) {
                         Ok(tier) => tier,
@@ -2187,6 +2268,7 @@ mod device {
             request_id,
             &mut sequence,
             &mut message_id,
+            &mut source_message_id,
             None,
             None,
         ) {
@@ -2241,6 +2323,11 @@ mod device {
         if external_source {
             push_json_u32(
                 out,
+                ",\"sourceAdvertisedMaxMa\":",
+                u32::from(tier.source_max_ma),
+            )?;
+            push_json_u32(
+                out,
                 ",\"contractCurrentMa\":",
                 u32::from(tier.contract_current_ma),
             )?;
@@ -2263,6 +2350,19 @@ mod device {
                 },
             )?;
             push_json_u32(out, ",\"sampleCount\":", u32::from(tier.sample_count))?;
+            push_json_u32(out, ",\"requestSentAtMs\":", tier.request_sent_ms)?;
+            push_json_u32(
+                out,
+                ",\"contractConfirmedAtMs\":",
+                tier.contract_confirmed_ms,
+            )?;
+            push_json_u32(out, ",\"holdStartedAtMs\":", tier.hold_started_ms)?;
+            push_json_u32(out, ",\"holdFinishedAtMs\":", tier.hold_finished_ms)?;
+            push_json_u32(
+                out,
+                ",\"invalidSampleCount\":",
+                u32::from(tier.invalid_sample_count),
+            )?;
             return out.push('}').map_err(|_| core::fmt::Error);
         }
         push_json_u32(
@@ -2377,7 +2477,7 @@ mod device {
         emit_stage("summary_policy_done");
         let source_count = usize::from(result.source_capabilities.count).min(pd::MAX_SOURCE_PDOS);
         if source_count == 0 {
-            out.push_str("\"sourceCapabilities\":{\"count\":0,\"rawPdos\":[]}")
+            out.push_str("\"sourceCapabilities\":{\"count\":0,\"rawPdos\":[],\"objects\":[]}")
                 .map_err(|_| core::fmt::Error)?;
         } else {
             out.push_str("\"sourceCapabilities\":{\"count\":")
@@ -2392,6 +2492,30 @@ mod device {
                     out.push(',').map_err(|_| core::fmt::Error)?;
                 }
                 push_u32(out, result.source_capabilities.objects[index].raw)?;
+            }
+            out.push_str("],\"objects\":[")
+                .map_err(|_| core::fmt::Error)?;
+            for index in 0..source_count {
+                if index != 0 {
+                    out.push(',').map_err(|_| core::fmt::Error)?;
+                }
+                let object = result.source_capabilities.objects[index];
+                out.push_str("{\"position\":")
+                    .map_err(|_| core::fmt::Error)?;
+                push_u32(out, u32::from(object.position))?;
+                out.push_str(",\"mode\":\"").map_err(|_| core::fmt::Error)?;
+                out.push_str(object.mode.as_str())
+                    .map_err(|_| core::fmt::Error)?;
+                out.push_str("\",\"minMv\":")
+                    .map_err(|_| core::fmt::Error)?;
+                push_u32(out, u32::from(object.min_mv))?;
+                out.push_str(",\"maxMv\":").map_err(|_| core::fmt::Error)?;
+                push_u32(out, u32::from(object.max_mv))?;
+                out.push_str(",\"maxMa\":").map_err(|_| core::fmt::Error)?;
+                push_u32(out, u32::from(object.max_ma))?;
+                out.push_str(",\"raw\":").map_err(|_| core::fmt::Error)?;
+                push_u32(out, object.raw)?;
+                out.push('}').map_err(|_| core::fmt::Error)?;
             }
             out.push_str("]}").map_err(|_| core::fmt::Error)?;
         }

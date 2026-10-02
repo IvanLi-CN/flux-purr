@@ -12,8 +12,8 @@ heater low and EEPROM untouched.
 
 The host workflow is `ram-run test pd-sink`. It selects the dedicated ELF,
 requires an explicit local evidence directory, checks the exact USB identity
-throughout the session, prints live progress, writes `events.ndjson` and
-`summary.json`, validates the terminal contract, and accepts
+throughout the session, prints live progress, writes `events.ndjson`,
+`summary.json`, and `transcript.log`, validates the terminal contract, and accepts
 `external_source_pass` when the complete protocol matrix is valid. Incomplete
 or failing outcomes remain non-zero.
 
@@ -22,10 +22,12 @@ non-blocking FIFO path. The device does not write progress synchronously while
 the source is waiting for a PD response. After each tier reaches a terminal
 state, the queued start and terminal events are drained before the next PD
 request is sent. The live tier event carries the matrix position, mode, target,
-and status; contract measurements remain authoritative in the terminal summary.
-The currently accepted external-source profile emits these live tier events and
-session-boundary frames, while the terminal summary remains authoritative for
-capabilities, recovery, and voltage evidence. Formal calibrated-ADC acceptance
+and status; the terminal summary retains the negotiated contract, hold timing,
+and sample evidence for every tier. Source Capabilities are retained in both
+raw and decoded-object form. The currently accepted external-source profile
+emits these live tier events and session-boundary frames, while the terminal
+summary remains authoritative for capabilities, recovery, and voltage evidence.
+Formal calibrated-ADC acceptance
 still requires the fuller capability/sample/recovery progress profile and is
 not claimed by the physical receipt below.
 
@@ -33,7 +35,9 @@ The external source record is an operator-side observation retained beside the
 PD evidence. The CLI does not accept, parse, or machine-bind that record to a
 specific tier; `external_source_pass` therefore reports complete PD protocol
 and recovery evidence, while the independent voltage judgment remains a
-manual acceptance step.
+manual acceptance step. In this mode the device-side final-reset voltage is
+explicitly unmeasured; the CLI records the fixed-contract and `VBUSOK` recovery
+evidence without substituting a zero reading for a measurement.
 
 When a RAM reload leaves the attached source in the previous PD message-id
 session, capability discovery preserves any already-received advertisement. If
@@ -78,8 +82,9 @@ The completed external-source diagnostic evidence is
 `target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-candidate`.
 The terminal summary parses as `overall=external_source_pass`,
 `pd=default_verified`, `22/22` passing tiers, and a passing fixed 5V final
-reset. The evidence contains 44 tier events, covering `REQUESTING` and `PASS`
-for every matrix row, followed by the terminal summary. The independent
-IsolaPurr record for device `856a141cdbd4`, `port_c`, reports
-`power_enabled=true`, `data_connected=true`, `status=ok`, and `5045mV` after
-the run. The external-source acceptance did not use ADC voltage validation.
+reset. The evidence contains the complete matrix, raw and decoded capability
+objects, per-tier contract/hold timing and sample counts, `events.ndjson`,
+`summary.json`, and `transcript.log`. The independent IsolaPurr record for
+device `856a141cdbd4`, `port_c`, reports `power_enabled=true`,
+`data_connected=true`, `status=ok`, and `5045mV` after the run. The
+external-source acceptance did not use ADC voltage validation.

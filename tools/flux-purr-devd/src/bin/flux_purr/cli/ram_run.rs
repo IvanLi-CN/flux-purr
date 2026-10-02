@@ -19,7 +19,6 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const PD_HIL_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const PD_HIL_SERIAL_RECONNECT_ATTEMPTS: u16 = 300;
 const PD_HIL_SERIAL_RECONNECT_DELAY: Duration = Duration::from_millis(10);
-const PD_HIL_EVIDENCE_FLUSH_INTERVAL: usize = 32;
 const RAM_OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const BUTTON_INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(30);
 const BUTTON_MAX_EVENTS: usize = 1024;
@@ -1342,7 +1341,6 @@ struct PdHilEvidence {
     transcript_path: PathBuf,
     events: BufWriter<File>,
     transcript: BufWriter<File>,
-    events_since_flush: usize,
 }
 
 impl PdHilEvidence {
@@ -1362,7 +1360,6 @@ impl PdHilEvidence {
             transcript_path,
             events: BufWriter::new(File::create(directory.join("events.ndjson"))?),
             transcript: BufWriter::new(File::create(directory.join("transcript.log"))?),
-            events_since_flush: 0,
         };
         evidence.record(&serde_json::json!({
             "kind": "metadata",
@@ -1388,11 +1385,7 @@ impl PdHilEvidence {
     fn record(&mut self, value: &Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         serde_json::to_writer(&mut self.events, value)?;
         self.events.write_all(b"\n")?;
-        self.events_since_flush += 1;
-        if self.events_since_flush >= PD_HIL_EVIDENCE_FLUSH_INTERVAL {
-            self.events.flush()?;
-            self.events_since_flush = 0;
-        }
+        self.events.flush()?;
         Ok(())
     }
 
@@ -1709,12 +1702,19 @@ fn send_pd_hil_request(
         Ok(value) => finish_pd_hil_evidence(evidence, evidence_dir, value),
         Err(error) => {
             let message = error.to_string();
-            let _ = finish_pd_hil_evidence(
+            let finalization = finish_pd_hil_evidence(
                 evidence,
                 evidence_dir,
                 pd_hil_failure_summary(&request_id, &message),
             );
-            Err(message.into())
+            match finalization {
+                Ok(_) => Err(message.into()),
+                Err(finalization_error) => Err(format!(
+                    "{message}; PD HIL evidence finalization failed in {}: {finalization_error}",
+                    evidence_dir.display()
+                )
+                .into()),
+            }
         }
     }
 }
@@ -2218,16 +2218,47 @@ fn validate_pd_hil_summary(
         .get("rawPdos")
         .and_then(Value::as_array)
         .ok_or_else(|| "result.sourceCapabilities.rawPdos must be an array".to_string())?;
-    if capability_count == 0 || raw_pdos.len() != capability_count as usize {
+    let objects = source_capabilities
+        .get("objects")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "result.sourceCapabilities.objects must be an array".to_string())?;
+    if capability_count == 0
+        || raw_pdos.len() != capability_count as usize
+        || objects.len() != capability_count as usize
+    {
         return Err("result.sourceCapabilities is incomplete".to_string());
+    }
+    for (index, object) in objects.iter().enumerate() {
+        let object = object.as_object().ok_or_else(|| {
+            format!("result.sourceCapabilities.objects[{index}] must be an object")
+        })?;
+        for field in ["position", "minMv", "maxMv", "maxMa", "raw"] {
+            if object.get(field).and_then(Value::as_u64).is_none() {
+                return Err(format!(
+                    "result.sourceCapabilities.objects[{index}].{field} is missing"
+                ));
+            }
+        }
+        if !matches!(
+            object.get("mode").and_then(Value::as_str),
+            Some("fixed" | "pps")
+        ) {
+            return Err(format!(
+                "result.sourceCapabilities.objects[{index}].mode is invalid"
+            ));
+        }
+        if object.get("raw") != raw_pdos.get(index) {
+            return Err(format!(
+                "result.sourceCapabilities.objects[{index}].raw does not match rawPdos"
+            ));
+        }
     }
     let (tier_count, pass_count, unsupported_count) = validate_pd_hil_tiers(result, external_vin)?;
     let (reset_status, final_reset) = validate_pd_hil_final_reset(result)?;
     let complete_matrix =
         tier_count == 22 && pass_count == 22 && reset_status == "pass" && pd == "default_verified";
     if overall == "pass"
-        && (external_vin
-            || !complete_matrix
+        && (!complete_matrix
             || final_reset
                 .get("defaultVbusMv")
                 .and_then(Value::as_u64)
@@ -2237,9 +2268,20 @@ fn validate_pd_hil_summary(
             "result.overall=pass lacks complete tier or default-state evidence".to_string(),
         );
     }
-    if overall == "external_source_pass" && (!external_vin || !complete_matrix) {
+    if overall == "external_source_pass"
+        && (!external_vin
+            || !complete_matrix
+            || final_reset.get("defaultVbusMv").and_then(Value::as_u64) != Some(0)
+            || final_reset
+                .get("sampleCount")
+                .and_then(Value::as_u64)
+                .is_none_or(|count| count < 8)
+            || final_reset.get("reason").and_then(Value::as_str)
+                != Some("default_contract_confirmed_external_vin"))
+    {
         return Err(
-            "result.overall=external_source_pass lacks complete protocol evidence".to_string(),
+            "result.overall=external_source_pass lacks complete external recovery evidence"
+                .to_string(),
         );
     }
     if overall == "unsupported"
@@ -2455,14 +2497,20 @@ fn validate_pd_hil_tiers(
                     "result.tiers[{index}].contractCurrentMa is below the approved minimum"
                 ));
             }
+            for field in [
+                "sourceAdvertisedMaxMa",
+                "requestSentAtMs",
+                "contractConfirmedAtMs",
+                "holdStartedAtMs",
+                "holdFinishedAtMs",
+                "invalidSampleCount",
+            ] {
+                if tier.get(field).and_then(Value::as_u64).is_none() {
+                    return Err(format!("result.tiers[{index}].{field} is required"));
+                }
+            }
             if !external_vin {
                 for field in [
-                    "sourceAdvertisedMaxMa",
-                    "requestSentAtMs",
-                    "contractConfirmedAtMs",
-                    "holdStartedAtMs",
-                    "holdFinishedAtMs",
-                    "invalidSampleCount",
                     "minMeasuredVinMv",
                     "maxMeasuredVinMv",
                     "meanMeasuredVinMv",
@@ -2965,7 +3013,11 @@ mod tests {
                     "minimumCurrentMa": 3000,
                     "recoveryMode": "fixed_5v_contract",
                 },
-                "sourceCapabilities": {"count": 1, "rawPdos": [123]},
+                "sourceCapabilities": {
+                    "count": 1,
+                    "rawPdos": [123],
+                    "objects": [{"position": 1, "mode": "fixed", "minMv": 5000, "maxMv": 5000, "maxMa": 3000, "raw": 123}],
+                },
                 "tiers": (0..22).map(|index| serde_json::json!({
                     "mode": if index < 5 { "fixed" } else { "pps" },
                     "targetMv": if index < 5 {
@@ -3060,7 +3112,11 @@ mod tests {
                     "minimumCurrentMa": 3000,
                 "recoveryMode": "fixed_5v_contract",
                 },
-                "sourceCapabilities": {"count": 1, "rawPdos": [123]},
+                "sourceCapabilities": {
+                    "count": 1,
+                    "rawPdos": [123],
+                    "objects": [{"position": 1, "mode": "fixed", "minMv": 5000, "maxMv": 5000, "maxMa": 3000, "raw": 123}],
+                },
                 "tiers": tiers,
                 "finalReset": {
                     "status": "pass",
@@ -3079,6 +3135,11 @@ mod tests {
         external["result"]["policy"]["vinValidation"] =
             Value::String("external_source".to_string());
         external["result"]["finalReset"]["defaultVbusMv"] = 5990.into();
+        assert!(validate_ram_success_response(&external, PD_HIL_CAPABILITY).is_err());
+        external["result"]["finalReset"]["defaultVbusMv"] = 0.into();
+        external["result"]["finalReset"]["sampleCount"] = 10.into();
+        external["result"]["finalReset"]["reason"] =
+            Value::String("default_contract_confirmed_external_vin".to_string());
         assert!(validate_ram_success_response(&external, PD_HIL_CAPABILITY).is_ok());
         assert!(!pd_hil_requires_nonzero(&external));
 
