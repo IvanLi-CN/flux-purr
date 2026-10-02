@@ -210,6 +210,7 @@ None
 - 确认失败后的候选生成必须对齐冻结外部主控的 `reseed_after_failed_hold_confirm`，使用 stage metrics/guard 的基础修正，再按完整审计事实施加专用 confirmation nudge；不能把 scout 的 evidence-specific candidate、batch gate nudge 或 step bound 直接用作确认 reseed。外部基础修正的 stage 解析不携带 curve/hold analysis，这一输入投影与专用 nudge 使用的完整事实必须分别保留，不得因此丢弃报告证据。Hold 门槛 crossing 必须同时观察 Approach 和首次进入 Hold 后的样本，避免跨 phase 的采样遗漏把 hold gate lag 错分为未进入 Hold 的低侧 miss。Celsius 差值和 rounded reseed step 必须通过真实采样及高低侧向量与冻结路径差分验证；缺失 Hold 证据不能作为已验证低波动的资格事实。通过的短 scout 候选仍须被选中并重新执行 `60s` confirmation，确认失败只触发同一 target 内的 reseed，不得直接升格或保存。
 - 每个 candidate 的 warmup 逻辑请求必须达到 `100%`，有完整 approach→hold、过冲 `<=3°C`、hold 峰峰值 `<=3°C`、目标相关 full-speed-to-stable 门槛与连续 `60s` hold confirm。固件试验与外部主控调优使用相同的 hold 观察起点：控制 phase 已进入 Hold、设备温度不低于目标减 `0.5°C`，且与目标的绝对温差不超过 `3°C`；只有从这一样本开始才统计 hold 峰峰值、控制输出与连续 `12s` scout / `60s` confirm，起点后的离带样本仍须计入，不得以 phase 切换时刻提前开始。前一候选、rejected trial 和 cooldown 样本不得计入 adopted candidate 的评分；实际 MOS PWM 与逻辑请求须分别取自生产输出链。
 - 固件调优的标准 HTML 报告必须把整个 trial 时长、从有效 Hold 观察起点计算的实际保温时长、连续 `10s` 稳定窗口及 `12s` scout / `60s` confirm 分别标示，缺失的稳定时间不得显示为 `0s`。温度图须显示目标及其 `±1.5°C` 稳定带上下限；试验内评分指标与试验停止后的冷却/滑行峰值分开标记，且提供包含停热后原始样本的全程图。四张设备本地图表须共用相同的采样时间范围；悬浮或键盘选择任一图的采样时，所有图在对应时间显示联动竖线，并在指针附近显示该采样的温度、目标、phase、逻辑输出、MOS PWM、VIN、PPS 合同/请求电压和电流安全上限。图表切换或试验切换不得伪造、删减原始样本，也不得改变资格结论。
+- 四张设备本地图表同时标示实际存在的 `Warmup → Approach` 与 `Approach → Hold` 分界，随目标、trial 和时间范围切换更新；未进入的阶段不得补画分界。温度图在分界与温度曲线的交点标记温度，并以水平连接线连到对应温度轴刻度标签。分界优先使用该 trial 的本地 phase transition 时间；边界落在两个采样之间时，交点按同一温度曲线的线性连接计算并保留插值来源，缺失温度不得伪造。精确温度标签与一般轴刻度必须避免重叠。
 
 ## 验收标准（Acceptance Criteria）
 

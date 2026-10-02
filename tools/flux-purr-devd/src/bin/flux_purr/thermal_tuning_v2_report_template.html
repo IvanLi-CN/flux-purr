@@ -245,6 +245,45 @@ function phaseSegments(samples){
   }
   return segments;
 }
+function phaseBoundaries(samples){
+  const boundaries=[];
+  for(let index=1;index<samples.length;index++){
+    const previous=samples[index-1],sample=samples[index];
+    const from=String(previous.phase||previous.pidPhase||'unknown'),to=String(sample.phase||sample.pidPhase||'unknown');
+    if(!((from==='warmup'&&to==='approach')||(from==='approach'&&to==='hold')))continue;
+    const event=LEDGER.find(item=>item.kind==='phase_transition'&&Number(item.targetC)===activeTarget&&Number(item.trialIndex)===Number(currentTrial().trialIndex)&&item.phase===to&&Number(item.elapsedMs)>=Number(previous.elapsedMs)&&Number(item.elapsedMs)<=Number(sample.elapsedMs));
+    const elapsedMs=Number(event?.elapsedMs??sample.elapsedMs);
+    const before=chartValue(previous.temperatureCentiC),after=chartValue(sample.temperatureCentiC);
+    const exact=elapsedMs===Number(sample.elapsedMs);
+    const span=Number(sample.elapsedMs)-Number(previous.elapsedMs);
+    const temperatureCentiC=exact?after:span>0&&Number.isFinite(before)&&Number.isFinite(after)?before+(after-before)*(elapsedMs-Number(previous.elapsedMs))/span:NaN;
+    boundaries.push({from,to,elapsedMs,temperatureC:temperatureCentiC/100,temperatureSource:exact?'sample':'interpolated',sequence:event?.sequence??sample.sequence});
+  }
+  return boundaries;
+}
+function temperatureAxisMarkers(boundaries,top,plotH,lo,hi){
+  const markers=boundaries.filter(boundary=>Number.isFinite(boundary.temperatureC)).map(boundary=>({...boundary,y:top+(1-(boundary.temperatureC-lo)/(hi-lo))*plotH,label:`${boundary.temperatureC.toFixed(2)}°C`})).sort((a,b)=>a.y-b.y);
+  for(let index=0;index<markers.length;index++)markers[index].labelY=Math.max(markers[index].y,top,index?markers[index-1].labelY+16:top);
+  for(let index=markers.length-1;index>=0;index--)markers[index].labelY=Math.min(markers[index].labelY,top+plotH,index<markers.length-1?markers[index+1].labelY-16:top+plotH);
+  return markers;
+}
+function drawPhaseBoundaries(ctx,boundaries,geometry,axisMarkers){
+  const {left,plotW,startT,spanT,top,plotH}=geometry;
+  for(const boundary of boundaries){
+    const x=left+(boundary.elapsedMs-startT)/spanT*plotW;
+    ctx.strokeStyle=PHASE_COLORS[boundary.to];ctx.lineWidth=1;ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,top+plotH);ctx.stroke();
+  }
+  for(const marker of axisMarkers){
+    const x=left+(marker.elapsedMs-startT)/spanT*plotW,color=PHASE_COLORS[marker.to];
+    ctx.strokeStyle=color;ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(left,marker.y);ctx.lineTo(x,marker.y);ctx.stroke();ctx.setLineDash([]);
+    ctx.beginPath();ctx.moveTo(left-5,marker.y);ctx.lineTo(left,marker.y);ctx.stroke();
+    if(marker.labelY!==marker.y){ctx.beginPath();ctx.moveTo(left-5,marker.y);ctx.lineTo(left-5,marker.labelY);ctx.stroke();}
+    ctx.fillStyle='#fff';ctx.fillRect(left-10-ctx.measureText(marker.label).width,marker.labelY-7,ctx.measureText(marker.label).width+4,15);
+    ctx.fillStyle=color;ctx.textAlign='right';ctx.fillText(marker.label,left-8,marker.labelY+4);
+    ctx.beginPath();ctx.arc(x,marker.y,3,0,Math.PI*2);ctx.fill();
+  }
+  ctx.setLineDash([]);
+}
 function drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height){
   if(!samples.length)return;
   const bandTop=height-48,bandHeight=16;
@@ -257,7 +296,6 @@ function drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height){
     ctx.fillStyle=color+'33';ctx.fillRect(x1,bandTop,Math.max(2,x2-x1),bandHeight);
     ctx.strokeStyle=color;ctx.lineWidth=1;ctx.strokeRect(x1+.5,bandTop+.5,Math.max(1,x2-x1-1),bandHeight-1);
     if(x2-x1>=44){ctx.fillStyle=color;ctx.font='10px ui-monospace,monospace';ctx.textAlign='center';ctx.fillText(phaseLabel(segment.phase),x1+(x2-x1)/2,bandTop+11);}
-    if(segment.startIndex>0){ctx.strokeStyle=color+'99';ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(x1,24);ctx.lineTo(x1,bandTop);ctx.stroke();ctx.setLineDash([]);}
   }
   ctx.fillStyle='#65747d';ctx.font='10px ui-monospace,monospace';ctx.textAlign='right';ctx.fillText('phase',left-8,bandTop+11);
 }
@@ -265,14 +303,15 @@ function drawChart(canvasId, samples, series, unit, options={}){
   const canvas=$(canvasId); const rect=canvas.getBoundingClientRect(); const width=Math.max(300,Math.floor(rect.width)); const height=Math.max(220,Math.floor(rect.height)); const dpr=window.devicePixelRatio||1;
   canvas.dataset.trialIndex=String(currentTrial().trialIndex??''); canvas.dataset.targetC=String(activeTarget); canvas.dataset.sampleCount=String(samples.length); canvas.dataset.sequenceRange=samples.length?`${samples[0].sequence}..${samples[samples.length-1].sequence}`:'empty';
   canvas.width=width*dpr; canvas.height=height*dpr; const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr); ctx.clearRect(0,0,width,height);
-  const points=series.flatMap(item=>item.data.map(Number).filter(Number.isFinite)); if(options.stableBand)points.push(...options.stableBand); const ymin=points.length?Math.min(...points):0; const ymax=points.length?Math.max(...points):1; const pad=Math.max((ymax-ymin)*.18,.5); const lo=unit==='%'?0:ymin-pad, hi=unit==='%'?100:ymax+pad; canvas.dataset.yRange=`${lo}..${hi}`; ctx.font='11px ui-monospace,monospace'; const tickLabels=Array.from({length:5},(_,i)=>{const value=hi-(hi-lo)*i/4;return `${unit==='%'?value.toFixed(0):chartNumber(value)}${unit}`;}); const left=Math.max(54,Math.ceil(Math.max(...tickLabels.map(label=>ctx.measureText(label).width)))+16),right=18,top=14,bottom=58; canvas.dataset.plotLeft=String(left); const plotW=width-left-right,plotH=height-top-bottom;
+  const points=series.flatMap(item=>item.data.map(Number).filter(Number.isFinite)); if(options.stableBand)points.push(...options.stableBand); const ymin=points.length?Math.min(...points):0; const ymax=points.length?Math.max(...points):1; const pad=Math.max((ymax-ymin)*.18,.5); const lo=unit==='%'?0:ymin-pad, hi=unit==='%'?100:ymax+pad; canvas.dataset.yRange=`${lo}..${hi}`; ctx.font='11px ui-monospace,monospace'; const tickLabels=Array.from({length:5},(_,i)=>{const value=hi-(hi-lo)*i/4;return `${unit==='%'?value.toFixed(0):chartNumber(value)}${unit}`;}); const boundaries=phaseBoundaries(samples); const axisLabels=options.phaseBand?boundaries.filter(item=>Number.isFinite(item.temperatureC)).map(item=>`${item.temperatureC.toFixed(2)}°C`):[]; const left=Math.max(54,Math.ceil(Math.max(...[...tickLabels,...axisLabels].map(label=>ctx.measureText(label).width)))+16),right=18,top=14,bottom=58; canvas.dataset.plotLeft=String(left); const plotW=width-left-right,plotH=height-top-bottom; const axisMarkers=options.phaseBand?temperatureAxisMarkers(boundaries,top,plotH,lo,hi):[];canvas.dataset.phaseBoundaries=JSON.stringify(boundaries);canvas.dataset.temperatureAxisMarkers=JSON.stringify(axisMarkers);
   const startT=Number(samples[0]?.elapsedMs)||0; const spanT=Math.max((Number(samples[samples.length-1]?.elapsedMs)||startT)-startT,1);canvas.dataset.startElapsedMs=String(startT);canvas.dataset.spanMs=String(spanT);canvas.dataset.plotWidth=String(plotW);
   if(options.stableBand){const upper=top+(1-(options.stableBand[1]-lo)/(hi-lo))*plotH;const lower=top+(1-(options.stableBand[0]-lo)/(hi-lo))*plotH;ctx.fillStyle='#2d8a6819';ctx.fillRect(left,upper,plotW,lower-upper);ctx.strokeStyle='#2d8a68';ctx.lineWidth=1;ctx.setLineDash([4,4]);for(const y of [upper,lower]){ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();}ctx.setLineDash([]);}
   ctx.strokeStyle='#e6ebee';ctx.lineWidth=1;ctx.fillStyle='#65747d';ctx.textAlign='right';
-  for(let i=0;i<5;i++){const y=top+plotH*i/4;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();ctx.fillText(tickLabels[i],left-8,y+4);}
+  for(let i=0;i<5;i++){const y=top+plotH*i/4;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();if(!axisMarkers.some(marker=>Math.abs(marker.labelY-y)<15))ctx.fillText(tickLabels[i],left-8,y+4);}
   ctx.textAlign='center';ctx.fillStyle='#65747d';
   for(let i=0;i<5;i++){const x=left+plotW*i/4;ctx.fillText(`${(spanT*i/4/1000).toFixed(0)}s`,x,height-9);}
   for(const item of series){ctx.strokeStyle=item.color;ctx.lineWidth=item.width||2;ctx.setLineDash(item.dash||[]);ctx.beginPath();item.data.forEach((value,index)=>{const sample=samples[index];const x=left+(((Number(sample?.elapsedMs)||startT)-startT)/spanT)*plotW;const y=top+(1-(value-lo)/(hi-lo))*plotH;if(index===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.stroke();ctx.setLineDash([]);}
+  ctx.font='11px ui-monospace,monospace';drawPhaseBoundaries(ctx,boundaries,{left,plotW,startT,spanT,top,plotH},axisMarkers);
   if(options.phaseBand)drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height);
 }
 function clearHover(){hoverSample=null;$('chartTooltip').hidden=true;for(const id of CHART_IDS){$(id).parentElement.querySelector('.chart-crosshair').hidden=true;}}
