@@ -373,6 +373,7 @@ where
         heater_enabled: _,
         tuning_power_stage: _,
         control_phase: _,
+        initial_profile_approach: _,
         control_error_c: _,
         filtered_slope_c_per_s: _,
         warmup_soft_start_percent,
@@ -939,9 +940,9 @@ fn pps_request_mv_for_context<PWM>(
     if manual_pps_active || context.tuning_power_stage {
         automatic_request_mv
     } else {
-        context
-            .hold_pps_governor
-            .request_mv(HoldPpsRequestInput {
+        heater_phase_pps_request_mv(
+            context.hold_pps_governor,
+            HoldPpsRequestInput {
                 phase: context.control_phase,
                 duty_percent: context.duty_percent,
                 actual_error_c: context.control_error_c,
@@ -950,8 +951,10 @@ fn pps_request_mv_for_context<PWM>(
                 control_floor_mv,
                 safe_max_mv: source_request_ceiling_mv,
                 now_ms: context.now_ms,
-            })
-            .unwrap_or(automatic_request_mv)
+            },
+            context.initial_profile_approach,
+        )
+        .unwrap_or(automatic_request_mv)
     }
 }
 

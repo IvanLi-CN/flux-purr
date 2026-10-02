@@ -714,6 +714,7 @@ impl BootRuntimeState {
             heater_enabled: false,
             tuning_power_stage: false,
             control_phase: HeaterControlPhase::Warmup,
+            initial_profile_approach: false,
             control_error_c: 0.0,
             filtered_slope_c_per_s: 0.0,
             warmup_soft_start_percent: 0,

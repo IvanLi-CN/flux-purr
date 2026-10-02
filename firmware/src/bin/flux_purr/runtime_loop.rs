@@ -113,8 +113,69 @@ pub(crate) fn tuning_interlock_reason(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TuningPdWaitDecision {
     Ready,
+    Continue,
     Wait,
     Fail(&'static str),
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn tuning_pps_transition_decision(
+    decision: TuningPdWaitDecision,
+    power_state: PowerState,
+    request: Option<PdContractRequest>,
+    blank_heater: bool,
+    cooldown: bool,
+) -> TuningPdWaitDecision {
+    if decision == TuningPdWaitDecision::Wait
+        && !blank_heater
+        && !cooldown
+        && request.is_some_and(|request| {
+            request.operating_current_ma() >= 5_000
+                && pps_adjustment_is_continuous(power_state, request)
+        })
+    {
+        TuningPdWaitDecision::Continue
+    } else {
+        decision
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_tuning_power_decision(
+    state: &RuntimeLoopState,
+    elapsed_ms: u64,
+) -> Option<TuningPdWaitDecision> {
+    state.thermal_tuning.armed.then(|| {
+        let pending = state.pending_automatic_pps;
+        let decision = tuning_pd_wait_decision(
+            state.power_state,
+            state.tuning_pd_wait_started_ms,
+            elapsed_ms,
+            pending.map(|pending| pending.started_at_ms),
+            matches!(
+                state.heater_power_backend,
+                HeaterPowerBackend::FixedPdPwmFallback {
+                    reason: HeaterPowerBackendReason::AdjustableRequestFailed,
+                    ..
+                }
+            ),
+        );
+        let request = pending.and_then(|pending| {
+            PdContractRequest::pps(
+                pending.request_mv,
+                state.power_state.active?.operating_current_ma,
+            )
+            .ok()
+        });
+        tuning_pps_transition_decision(
+            decision,
+            state.power_state,
+            request,
+            pending.is_none_or(|pending| pending.blank_heater),
+            state.thermal_tuning.phase
+                == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown,
+        )
+    })
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -186,23 +247,7 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
         state.last_pd_status_log_key = pd_status_log_key(current_pd_observation);
     }
     state.last_pd_observation = current_pd_observation;
-    let tuning_power_decision = state.thermal_tuning.armed.then(|| {
-        tuning_pd_wait_decision(
-            state.power_state,
-            state.tuning_pd_wait_started_ms,
-            elapsed_ms,
-            state
-                .pending_automatic_pps
-                .map(|pending| pending.started_at_ms),
-            matches!(
-                state.heater_power_backend,
-                HeaterPowerBackend::FixedPdPwmFallback {
-                    reason: HeaterPowerBackendReason::AdjustableRequestFailed,
-                    ..
-                }
-            ),
-        )
-    });
+    let tuning_power_decision = runtime_tuning_power_decision(state, elapsed_ms);
     if tuning_power_decision == Some(TuningPdWaitDecision::Wait) {
         state.tuning_pd_wait_started_ms.get_or_insert(elapsed_ms);
         state.tuning_heater_rearm_pending |= state.ui_state.heater_enabled;
@@ -242,6 +287,10 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
         Some(TuningPdWaitDecision::Fail(reason)) => {
             state.thermal_tuning.fail(reason);
             state.thermal_control_profile_preview = None;
+            state.tuning_pd_wait_started_ms = None;
+            state.tuning_heater_rearm_pending = false;
+        }
+        Some(TuningPdWaitDecision::Continue) => {
             state.tuning_pd_wait_started_ms = None;
             state.tuning_heater_rearm_pending = false;
         }
@@ -1849,6 +1898,7 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
                 == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
             && !force_output_off,
         control_phase: pid_snapshot.phase,
+        initial_profile_approach: state.heater_controller.initial_profile_approach(),
         control_error_c: pid_snapshot.error_c,
         filtered_slope_c_per_s: pid_snapshot.filtered_slope_c_per_s,
         warmup_soft_start_percent: pid_snapshot.warmup_soft_start_percent,
@@ -2106,6 +2156,7 @@ pub(crate) async fn runtime_force_heater_safe_off(
         heater_enabled: false,
         tuning_power_stage: false,
         control_phase: HeaterControlPhase::Warmup,
+        initial_profile_approach: false,
         control_error_c: -1.0,
         filtered_slope_c_per_s: -1.0,
         warmup_soft_start_percent: 0,

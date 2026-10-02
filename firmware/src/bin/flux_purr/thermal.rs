@@ -74,6 +74,21 @@ pub(crate) fn production_thermal_controller(
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn heater_phase_pps_request_mv(
+    governor: &mut HoldPpsGovernor,
+    input: HoldPpsRequestInput,
+    initial_profile_approach: bool,
+) -> Option<u16> {
+    if initial_profile_approach {
+        // Only Hold, or an Approach recovering from Hold, owns the handoff
+        // voltage. A fresh profile Approach must still use the normal down-ramp.
+        governor.reset();
+        return None;
+    }
+    governor.request_mv(input)
+}
+
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn thermal_control_runtime_wire(
     target_temp_c: i16,
@@ -759,6 +774,12 @@ pub(crate) fn control_cycle_parameters(target: ThermalControlTarget) -> (f32, u1
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl HeaterController {
+    pub(crate) fn initial_profile_approach(&self) -> bool {
+        self.production_controller == Some(ProductionThermalController::Profile)
+            && self.phase == HeaterControlPhase::Approach
+            && !self.recovering_from_hold
+    }
+
     pub(crate) const fn new() -> Self {
         Self {
             fault_latched: None,

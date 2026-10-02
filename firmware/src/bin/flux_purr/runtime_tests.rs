@@ -8766,6 +8766,127 @@ fn hold_pps_governor_keeps_the_approach_voltage_when_headroom_is_sufficient() {
 }
 
 #[test]
+fn profile_first_approach_downramps_pps_but_hold_recovery_keeps_the_handoff() {
+    let mut controller = HeaterController::new();
+    controller.production_controller = Some(ProductionThermalController::Profile);
+    controller.phase = HeaterControlPhase::Approach;
+    assert!(controller.initial_profile_approach());
+    controller.recovering_from_hold = true;
+    assert!(!controller.initial_profile_approach());
+    controller.recovering_from_hold = false;
+    controller.production_controller = Some(ProductionThermalController::Plant);
+    assert!(!controller.initial_profile_approach());
+    let mut governor = HoldPpsGovernor::new();
+    let input = HoldPpsRequestInput {
+        phase: HeaterControlPhase::Approach,
+        duty_percent: 10,
+        actual_error_c: 16.18,
+        filtered_slope_c_per_s: 2.4,
+        current_request_mv: 21_000,
+        control_floor_mv: 6_100,
+        safe_max_mv: 21_000,
+        now_ms: 4_000,
+    };
+    let automatic = automatic_pps_request_mv(10, true, false, 21_000, 12_000, 6_100, 21_000);
+    assert_eq!(automatic, 20_500);
+    assert_eq!(
+        heater_phase_pps_request_mv(&mut governor, input, true).unwrap_or(automatic),
+        20_500,
+    );
+    let hold = HoldPpsRequestInput {
+        phase: HeaterControlPhase::Hold,
+        current_request_mv: 10_000,
+        now_ms: 8_000,
+        ..input
+    };
+    assert_eq!(
+        heater_phase_pps_request_mv(&mut governor, hold, false),
+        Some(10_000)
+    );
+    assert_eq!(
+        heater_phase_pps_request_mv(
+            &mut governor,
+            HoldPpsRequestInput {
+                phase: HeaterControlPhase::Approach,
+                ..hold
+            },
+            false,
+        ),
+        Some(10_000),
+    );
+    // Re-entering Warmup/first Approach starts a new down-ramp, even after Hold.
+    assert_eq!(
+        heater_phase_pps_request_mv(&mut governor, input, true),
+        None
+    );
+    assert_eq!(governor, HoldPpsGovernor::new());
+    // The established 3A plant path does not receive the profile-only guard.
+    assert_eq!(
+        heater_phase_pps_request_mv(&mut governor, input, false),
+        Some(21_000)
+    );
+}
+
+#[test]
+fn tuning_continuous_pps_downramp_does_not_restart_the_trial_or_hide_failure() {
+    let (power, _) = production_power_fixture(5_000);
+    let request = PdContractRequest::pps(19_500, 5_000).unwrap();
+    for protocol in [
+        PowerProtocol::Ready,
+        PowerProtocol::WaitingForAccept,
+        PowerProtocol::WaitingForPsRdy,
+    ] {
+        let state = PowerState {
+            protocol,
+            requested: Some(request),
+            ..power
+        };
+        let pending = tuning_pd_wait_decision(state, None, 200, Some(100), false);
+        assert_eq!(pending, TuningPdWaitDecision::Wait);
+        assert_eq!(
+            tuning_pps_transition_decision(pending, state, Some(request), false, false),
+            TuningPdWaitDecision::Continue,
+        );
+        assert_eq!(
+            tuning_pps_transition_decision(pending, state, Some(request), true, false),
+            TuningPdWaitDecision::Wait,
+        );
+        assert_eq!(
+            tuning_pps_transition_decision(pending, state, Some(request), false, true),
+            TuningPdWaitDecision::Wait,
+        );
+        let timeout = tuning_pd_wait_decision(
+            state,
+            None,
+            AUTOMATIC_PPS_TICKET_WAIT_MS + 101,
+            Some(100),
+            false,
+        );
+        assert_eq!(
+            tuning_pps_transition_decision(timeout, state, Some(request), false, false),
+            TuningPdWaitDecision::Fail("pd_request_timeout"),
+        );
+    }
+    for state in [PowerState::unavailable(), production_power_fixture(3_250).0] {
+        assert_eq!(
+            tuning_pps_transition_decision(
+                TuningPdWaitDecision::Wait,
+                state,
+                Some(request),
+                false,
+                false
+            ),
+            TuningPdWaitDecision::Wait,
+        );
+    }
+    let failure = TuningPdWaitDecision::Fail("pd_request_failed");
+    assert_eq!(
+        tuning_pps_transition_decision(failure, power, Some(request), false, false),
+        failure
+    );
+}
+
+#[test]
 fn hold_pps_governor_steps_toward_a_lower_safe_max_without_clamping() {
     let mut governor = HoldPpsGovernor::new();
     assert_eq!(
