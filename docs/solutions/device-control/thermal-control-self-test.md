@@ -272,7 +272,7 @@ Do not run default `0% / 25% / 50%` approach-only characterization inside the fl
 For candidate tuning:
 
 - warmup itself remains fixed at `100%`
-- full-speed timeout without valid hold evidence is treated as approach power / early coast / near-target sustain evidence
+- firmware-owned full-speed timeout without a started stable window ends every scout, batch or confirmation stage immediately; only samples captured up to the hard boundary may be used as approach/early-coast evidence, and no controller Hold phase after that boundary may be used to qualify a candidate. The external runner's existing `TuningScout` collects a longer trace while reporting the failed gate; this capture exception is not the firmware engine's stopping policy
 - if valid hold samples exist and hold p2p is above limit, do not let full-speed timeout hide hold ripple
 - high-temperature low-side deep hold drop must tune hold residency / sustain / lead instead of being classified as residual overshoot
 - source/runtime/sample-rate/measurement faults must not mutate the candidate

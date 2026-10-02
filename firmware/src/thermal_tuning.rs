@@ -1179,13 +1179,11 @@ impl ThermalTuningRuntime {
         {
             return self.finish_trial(sample_elapsed_ms);
         }
-        // The frozen external strategy collects complete short-hold evidence
-        // for scout and batch trials even after the settle gate fails. Only
-        // final confirmation stops early; all trials retain the target budget
-        // and the per-tick safety checks.
-        if self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm
-            && self.full_speed_to_stable_timed_out(sample_elapsed_ms, expected_target)
-        {
+        // The full-speed-to-stable gate is a hard stage boundary for every
+        // trial purpose. A controller Hold phase is diagnostic only; if no
+        // physical stable window has started by the deadline, stop heating
+        // immediately and retain the samples up to this boundary as evidence.
+        if self.full_speed_to_stable_timed_out(sample_elapsed_ms, expected_target) {
             return self.finish_trial(sample_elapsed_ms);
         }
         let required_hold_ms = if self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm {
@@ -1220,7 +1218,23 @@ impl ThermalTuningRuntime {
         }
         let phase_changed =
             self.phase != ThermalTuningPhase::Cooldown && self.phase != checked.phase;
+        // Recording cadence must not postpone a hard deadline or a broken
+        // in-flight stable window beyond the current control cycle.
+        let deadline_check_due = self.warmup_exited_at_ms.is_some_and(|warmup_exit_ms| {
+            let limit_ms = if checked.target_c > 150 {
+                5_000
+            } else {
+                10_000
+            };
+            checked.elapsed_ms >= warmup_exit_ms.saturating_add(limit_ms)
+                && self.stable_window_verified_at_ms.is_none()
+                && (self.stable_window_started_at_ms.is_none()
+                    || (i32::from(checked.temperature_centi_c) - i32::from(checked.target_c) * 100)
+                        .abs()
+                        > i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C))
+        });
         if !phase_changed
+            && !deadline_check_due
             && self.last_live_sample_elapsed_ms.is_some_and(|last| {
                 checked.elapsed_ms.saturating_sub(last) < THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS
             })
@@ -2897,8 +2911,6 @@ mod tests {
             (300, ThermalTuningPhase::Warmup, 3_500),
             (1_300, ThermalTuningPhase::Approach, 4_500),
             (11_300, ThermalTuningPhase::Approach, 5_000),
-            (12_000, ThermalTuningPhase::Hold, 5_990),
-            (24_000, ThermalTuningPhase::Hold, 6_350),
         ] {
             runtime
                 .record_sample(sample(elapsed_ms, phase, temperature_centi_c))
@@ -2915,14 +2927,14 @@ mod tests {
         assert_eq!(closed_first.start_temperature_centi_c, Some(3_500));
         assert_eq!(closed_first.cooldown_threshold_centi_c, Some(3_500));
 
-        let mut retry = sample(24_300, ThermalTuningPhase::Cooldown, 3_501);
+        let mut retry = sample(11_600, ThermalTuningPhase::Cooldown, 3_501);
         retry.trial_index = runtime.trial_index;
         retry.candidate_hash = runtime.candidate_hash.clone().unwrap();
         retry.heater_requested_output_permille = 0;
         retry.heater_output_permille = 0;
         runtime.record_sample(retry.clone()).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
-        retry.elapsed_ms = 24_600;
+        retry.elapsed_ms = 11_900;
         retry.temperature_centi_c = 3_500;
         runtime.record_sample(retry).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Warmup);
@@ -2939,7 +2951,7 @@ mod tests {
     }
 
     #[test]
-    fn high_side_trace_prefix_with_complete_hold_installs_conservative_candidate() {
+    fn high_side_trace_stops_when_the_stable_window_breaks_before_deadline() {
         let mut profile = profile_with_targets(&[60]);
         let point = profile.points[0].as_mut().unwrap();
         point.brake_distance_centi_c = 1_100;
@@ -2982,10 +2994,6 @@ mod tests {
             (25_147, ThermalTuningPhase::Hold, 6_154),
             (27_573, ThermalTuningPhase::Hold, 6_319),
             (27_916, ThermalTuningPhase::Hold, 6_307),
-            // Synthetic continuation of the observed prefix: the previous
-            // early-stop implementation did not capture this hold tail.
-            (33_000, ThermalTuningPhase::Hold, 6_300),
-            (36_800, ThermalTuningPhase::Hold, 6_290),
         ] {
             let mut observed = sample(elapsed_ms, phase, temperature_centi_c);
             if phase == ThermalTuningPhase::Hold {
@@ -2996,6 +3004,16 @@ mod tests {
         }
         assert_eq!(runtime.trial_index, 1);
         assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+        let decision_event = runtime
+            .events
+            .iter()
+            .find(|event| event.decision.is_some())
+            .unwrap();
+        assert_eq!(decision_event.elapsed_ms, 27_916);
+        assert_eq!(
+            decision_event.decision.as_ref().unwrap().stop_reason,
+            "full-speed-to-stable budget exhausted"
+        );
         let selected = runtime.batch_predicted_profile.unwrap();
         let selected_point = selected.points[0].unwrap();
         assert_eq!(selected_point.brake_distance_centi_c, 1_400);
@@ -3131,7 +3149,7 @@ mod tests {
     }
 
     #[test]
-    fn scout_and_batch_collect_full_hold_after_settle_failure() {
+    fn scout_and_batch_stop_at_full_speed_deadline_without_stable_window() {
         for purpose in [
             ThermalTuningTrialPurpose::Scout,
             ThermalTuningTrialPurpose::BatchCurrent,
@@ -3145,28 +3163,133 @@ mod tests {
             for (elapsed_ms, phase, temperature) in [
                 (0, ThermalTuningPhase::Warmup, 3_900),
                 (1_000, ThermalTuningPhase::Approach, 5_000),
-                (5_000, ThermalTuningPhase::Hold, 5_980),
-                (11_100, ThermalTuningPhase::Hold, 6_350),
+                (5_000, ThermalTuningPhase::Hold, 5_500),
+                (11_000, ThermalTuningPhase::Hold, 5_500),
             ] {
                 record_current_trial_sample(&mut runtime, elapsed_ms, phase, temperature);
             }
-            assert_eq!(runtime.phase, ThermalTuningPhase::Hold, "{purpose:?}");
-            assert_eq!(runtime.trial_index, 0, "{purpose:?}");
-            assert!(runtime.events.iter().all(|event| event.decision.is_none()));
-
-            record_current_trial_sample(&mut runtime, 17_000, ThermalTuningPhase::Hold, 6_400);
+            assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown, "{purpose:?}");
+            assert_eq!(runtime.trial_index, 1, "{purpose:?}");
             let decision_event = runtime
                 .events
                 .iter()
                 .find(|event| event.decision.is_some())
                 .unwrap();
             let decision = decision_event.decision.as_ref().unwrap();
-            assert_eq!(decision_event.elapsed_ms, 17_000);
+            assert_eq!(decision_event.elapsed_ms, 11_000);
             assert_eq!(decision.purpose, purpose);
             assert_eq!(decision.disposition.as_str(), "rejected");
-            assert_eq!(decision.max_overshoot_centi_c, Some(400));
-            assert_eq!(decision.hold_peak_to_peak_centi_c, Some(420));
+            assert_eq!(decision.max_overshoot_centi_c, Some(0));
+            assert_eq!(decision.hold_peak_to_peak_centi_c, None);
             assert!(!decision.hold_confirm);
+        }
+    }
+
+    #[test]
+    fn live_trial_five_replay_stops_before_qualified_hold_despite_controller_hold() {
+        let mut runtime = started_single_target_runtime();
+        // Actual phase/temperature boundary observations from run
+        // firmware-pps5a-1790966844116, trial 5, relative to its trial start.
+        for (elapsed_ms, phase, temperature) in [
+            (0, ThermalTuningPhase::Warmup, 3_495),
+            (4_061, ThermalTuningPhase::Approach, 4_314),
+            (13_840, ThermalTuningPhase::Hold, 5_582),
+        ] {
+            runtime
+                .record_live_sample(sample(elapsed_ms, phase, temperature))
+                .unwrap();
+        }
+        assert_eq!(runtime.phase, ThermalTuningPhase::Hold);
+        assert!(runtime.first_hold_elapsed_ms.is_none());
+        // Controller Hold cannot extend the full-speed-to-stable deadline.
+        runtime
+            .record_live_sample(sample(14_061, ThermalTuningPhase::Hold, 5_593))
+            .unwrap();
+        assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+        assert_eq!(runtime.trial_index, 1);
+        let event = runtime
+            .events
+            .iter()
+            .find(|event| event.decision.is_some())
+            .unwrap();
+        let decision = event.decision.as_ref().unwrap();
+        assert_eq!(event.elapsed_ms, 14_061);
+        assert_eq!(
+            decision.stop_reason,
+            "full-speed-to-stable budget exhausted"
+        );
+        assert!(decision.settle_time_ms.is_none());
+        assert!(decision.hold_peak_to_peak_centi_c.is_none());
+        assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
+    fn live_deadline_checks_high_temperature_and_broken_timely_window_each_cycle() {
+        for (target, window_start, elapsed_ms, temperature) in [
+            (180, None, 6_000, 17_000),
+            (60, Some(10_900), 11_010, 5_840),
+        ] {
+            let mut runtime = ThermalTuningRuntime::new();
+            runtime
+                .start(ThermalTuningStart {
+                    run_id: id("run-deadline"),
+                    candidate_id: id("candidate-hold"),
+                    candidate_hash: hash("hash-hold"),
+                    power_class: ThermalTuningPowerClass::Pps5a,
+                    targets: &[target],
+                    pps_ready: true,
+                    thermal_model_available: true,
+                    calibration_conflict: false,
+                    candidate_profile: Some(profile_with_targets(&[target])),
+                })
+                .unwrap();
+            let mut cooling = sample(0, ThermalTuningPhase::Cooldown, 3_400);
+            cooling.target_c = target;
+            cooling.heater_requested_output_permille = 0;
+            cooling.heater_output_permille = 0;
+            runtime.record_sample(cooling).unwrap();
+            for (at_ms, phase, temp) in [
+                (0, ThermalTuningPhase::Warmup, target * 100 - 4_000),
+                (1_000, ThermalTuningPhase::Approach, target * 100 - 2_000),
+                (
+                    elapsed_ms - 110,
+                    ThermalTuningPhase::Hold,
+                    if window_start.is_some() {
+                        target * 100 - 100
+                    } else {
+                        target * 100 - 2_000
+                    },
+                ),
+            ] {
+                let mut observed = sample(at_ms, phase, temp);
+                observed.target_c = target;
+                runtime.record_live_sample(observed).unwrap();
+            }
+            assert_eq!(runtime.stable_window_started_at_ms, window_start);
+            // A second sample in the same phase establishes normal recording
+            // cadence. The failure only 50ms later must bypass that cadence.
+            let recent_temp = if window_start.is_some() {
+                target * 100 - 100
+            } else {
+                temperature
+            };
+            let mut recent = sample(elapsed_ms - 50, ThermalTuningPhase::Hold, recent_temp);
+            recent.target_c = target;
+            runtime.record_live_sample(recent).unwrap();
+            let mut observed = sample(elapsed_ms, ThermalTuningPhase::Hold, temperature);
+            observed.target_c = target;
+            runtime.record_live_sample(observed).unwrap();
+            assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown, "{target}C");
+            let event = runtime
+                .events
+                .iter()
+                .find(|event| event.decision.is_some())
+                .unwrap();
+            assert_eq!(event.elapsed_ms, elapsed_ms);
+            assert_eq!(
+                event.decision.as_ref().unwrap().stop_reason,
+                "full-speed-to-stable budget exhausted"
+            );
         }
     }
 
@@ -3541,22 +3664,9 @@ mod tests {
             approach.elapsed_ms = timestamp + 11_000;
             approach.temperature_centi_c = 4_500;
             runtime.record_sample(approach).unwrap();
-            assert_eq!(runtime.trial_index, expected_trial);
-            record_current_trial_sample(
-                &mut runtime,
-                timestamp + 12_000,
-                ThermalTuningPhase::Hold,
-                6_000,
-            );
-            record_current_trial_sample(
-                &mut runtime,
-                timestamp + 24_000,
-                ThermalTuningPhase::Hold,
-                6_160,
-            );
             assert_eq!(runtime.trial_index, expected_trial + 1);
             assert!(runtime.armed);
-            timestamp += 25_000;
+            timestamp += 12_000;
         }
         let mut budget = sample(
             THERMAL_TUNING_TARGET_BUDGET_MS,
