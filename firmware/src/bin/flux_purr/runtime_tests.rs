@@ -9563,6 +9563,41 @@ fn production_output_uses_five_amp_candidate_settings_without_changing_three_amp
 }
 
 #[test]
+fn adc_conversion_ready_in_microseconds_does_not_require_a_timer_wakeup() {
+    let polls = core::cell::Cell::new(0_u64);
+    let result = poll_adc_conversion(
+        || {
+            polls.set(polls.get() + 1);
+            if polls.get() >= 6 {
+                Ok(1_234_u16)
+            } else {
+                Err(nb::Error::WouldBlock)
+            }
+        },
+        || polls.get(),
+    );
+    assert_eq!(result, Ok(1_234));
+}
+
+#[test]
+fn adc_conversion_polling_yields_when_slow_and_preserves_errors() {
+    let polls = core::cell::Cell::new(0_u64);
+    let result: nb::Result<u16, ()> = poll_adc_conversion(
+        || {
+            polls.set(polls.get() + 1);
+            Err(nb::Error::WouldBlock)
+        },
+        || polls.get(),
+    );
+    assert_eq!(result, Err(nb::Error::WouldBlock));
+    assert!(polls.get() <= 50);
+    assert_eq!(
+        poll_adc_conversion::<u16>(|| Err(nb::Error::Other(())), || 0),
+        Err(nb::Error::Other(())),
+    );
+}
+
+#[test]
 fn production_source_class_change_disarms_before_switching_controller() {
     let mut controller = HeaterController::new();
     let (first, disarmed) = controller.update_production_at(

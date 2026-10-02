@@ -2444,6 +2444,11 @@ pub(crate) async fn runtime_reconcile_network_and_status(
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
+    let elapsed_ms = elapsed_ms.max(
+        Instant::now()
+            .as_millis()
+            .saturating_sub(state.runtime_started_ms),
+    );
     let mut needs_redraw = false;
     if elapsed_ms >= state.next_control_deadline_ms {
         let control_started_ms = elapsed_ms;

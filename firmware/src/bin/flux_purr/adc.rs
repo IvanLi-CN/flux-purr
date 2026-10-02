@@ -206,7 +206,11 @@ where
     PIN: AdcChannel,
 {
     loop {
-        match adc.read_oneshot(pin) {
+        let poll_started_us = Instant::now().as_micros();
+        match poll_adc_conversion(
+            || adc.read_oneshot(pin),
+            || Instant::now().as_micros().saturating_sub(poll_started_us),
+        ) {
             Ok(value) => {
                 let raw_code = mask_adc1_raw_code(value);
                 return Some(AdcConvertedSample {
@@ -216,6 +220,24 @@ where
             }
             Err(nb::Error::WouldBlock) => EmbassyTimer::after_micros(50).await,
             Err(_) => return None,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const ADC_FAST_POLL_BUDGET_US: u64 = 50;
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn poll_adc_conversion<T>(
+    mut read: impl FnMut() -> nb::Result<T, ()>,
+    mut elapsed_us: impl FnMut() -> u64,
+) -> nb::Result<T, ()> {
+    loop {
+        match read() {
+            Err(nb::Error::WouldBlock) if elapsed_us() < ADC_FAST_POLL_BUDGET_US => {
+                core::hint::spin_loop();
+            }
+            result => return result,
         }
     }
 }
@@ -266,6 +288,11 @@ where
         if let Some(sample) = sample {
             if discarded_valid_samples < RTD_SETTLE_DISCARD_SAMPLE_COUNT {
                 discarded_valid_samples = discarded_valid_samples.saturating_add(1);
+                // Yield between groups of discarded conversions too, so the
+                // fast-ready path cannot monopolize the executor for the prefix.
+                if discarded_valid_samples.is_multiple_of(samples_per_phase) {
+                    embassy_futures::yield_now().await;
+                }
             } else {
                 sum_mv = sum_mv.saturating_add(u32::from(sample.calibrated_mv));
                 sum_raw_code = sum_raw_code.saturating_add(u32::from(sample.raw_code));
