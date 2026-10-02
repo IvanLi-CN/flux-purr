@@ -86,6 +86,9 @@ fn render_ram_response(
         super::ram_run::validate_ram_success_response(payload, capability)
             .map_err(|error| format!("invalid RAM success response: {error}"))?;
     }
+    if capability == "test_pd_sink" {
+        return render_pd_hil_summary(payload);
+    }
     let result = payload.get("result").unwrap_or(&Value::Null);
     let detail = result.get("detail").and_then(Value::as_str).unwrap_or("-");
     let mut output = format!(
@@ -167,6 +170,64 @@ fn render_ram_response(
         ));
     }
     Ok(output)
+}
+
+fn render_pd_hil_summary(
+    payload: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let result = payload
+        .get("result")
+        .ok_or("PD HIL summary is missing result")?;
+    let overall = result
+        .get("overall")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_ascii_uppercase();
+    let tiers = result
+        .get("tiers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let count = |status: &str| {
+        tiers
+            .iter()
+            .filter(|tier| tier.get("status").and_then(Value::as_str) == Some(status))
+            .count()
+    };
+    let final_reset = result
+        .get("finalReset")
+        .and_then(Value::as_object)
+        .ok_or("PD HIL summary is missing finalReset")?;
+    let vin_validation = result
+        .get("policy")
+        .and_then(Value::as_object)
+        .and_then(|policy| policy.get("vinValidation"))
+        .and_then(Value::as_str)
+        .unwrap_or("adc");
+    Ok(format!(
+        "PD HIL SUMMARY overall={} vinValidation={} pass={} unsupported={} negotiation_failed={} measurement_failed={} recovery_failed={} reset={} pd={} vbusObservation={}mV evidence={}",
+        overall,
+        vin_validation,
+        count("pass"),
+        count("unsupported"),
+        count("negotiation_failed"),
+        count("measurement_failed"),
+        count("recovery_failed"),
+        final_reset
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_ascii_uppercase(),
+        result.get("pd").and_then(Value::as_str).unwrap_or("-"),
+        final_reset
+            .get("defaultVbusMv")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        payload
+            .get("evidenceDir")
+            .and_then(Value::as_str)
+            .unwrap_or("-"),
+    ))
 }
 
 fn append_ram_power_evidence(output: &mut String, result: &Value) {

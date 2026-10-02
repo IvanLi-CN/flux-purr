@@ -1,0 +1,79 @@
+# Flux Purr PD Sink Voltage HIL Implementation
+
+## Current Coverage
+
+The repository contains the production FUSB302B PD Sink policy and service, a
+general RAM bring-up image, and a capability-scoped PD HIL RAM image. The
+general RAM image does not own the PD controller and reports `pd=untouched`.
+The PD HIL image owns GPIO7 and the FUSB302B bus for one `test_pd_sink`
+session, and uses the VIN ADC for formal validation. In external-source
+diagnostic mode it does not read the VIN ADC during tier holds; it keeps the
+heater low and EEPROM untouched.
+
+The host workflow is `ram-run test pd-sink`. It selects the dedicated ELF,
+requires an explicit local evidence directory, checks the exact USB identity
+throughout the session, prints live progress, writes `events.ndjson` and
+`summary.json`, validates the terminal contract, and accepts
+`external_source_pass` when the complete protocol matrix is valid. Incomplete
+or failing outcomes remain non-zero.
+
+Progress transport uses a bounded RAM queue and the USB Serial/JTAG
+non-blocking FIFO path. The device does not write progress synchronously while
+the source is waiting for a PD response. After each tier reaches a terminal
+state, the queued start and terminal events are drained before the next PD
+request is sent. The live tier event carries the matrix position, mode, target,
+and status; contract measurements remain authoritative in the terminal summary.
+The currently accepted external-source profile emits these live tier events and
+session-boundary frames, while the terminal summary remains authoritative for
+capabilities, recovery, and voltage evidence. Formal calibrated-ADC acceptance
+still requires the fuller capability/sample/recovery progress profile and is
+not claimed by the physical receipt below.
+
+When a RAM reload leaves the attached source in the previous PD message-id
+session, capability discovery preserves any already-received advertisement. If
+the initial window expires without capabilities, the HIL image sends one
+bounded `Get_Source_Capabilities` query. A GoodCRC-only response triggers one
+numbered USB-PD Soft Reset using the inherited next sink Message ID. It waits
+for `Accept`, resets the local Message ID to zero, and then waits for a fresh
+source advertisement. It does not use the local FUSB302B PD reset or restart
+Type-C toggle.
+
+Before every Fixed and PPS tier, the image refreshes Source Capabilities while
+preserving the current confirmed contract, then sends the exact replacement
+request directly. The session uses fixed 5V only for its initial boundary and
+its terminal recovery; it does not force a 5V request between tiers.
+
+## Design Gate
+
+The design decisions in `SPEC.md` are settled. The implementation is covered
+by the following source and validation surfaces:
+
+- `firmware/ram-pd-hil/` contains the RAM-only image, policy codec, protocol,
+  linker boundary, and build metadata.
+- `tools/flux-purr-devd/src/bin/flux_purr/cli/ram_run.rs` contains the
+  capability-specific loader selection, evidence writer, response validator,
+  and human summary.
+- `scripts/build-ram-pd-hil.sh` builds the Xtensa image and runs the RAM-only
+  ELF gate.
+- Host tests cover source capability decoding, request encoding, protocol
+  framing, summary validation, and exit classification.
+
+## Physical Acceptance Status
+
+The authorized MCU port is `/dev/cu.usbmodem21141401`. The external-source
+diagnostic uses IsolaPurr device `856a141cdbd4`, port `port_c`, as the voltage
+observer. Earlier evidence under
+`target/pd-hil-evidence/pd-hil-20260928-external-source-final15` reached
+recovery tier 23 and observed the fixed `5/9/12/15/20V` plateaus plus the PPS
+ladder through `21V`, but it did not receive a terminal summary and is not a
+completed CLI acceptance.
+
+The completed external-source diagnostic evidence is
+`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-candidate`.
+The terminal summary parses as `overall=external_source_pass`,
+`pd=default_verified`, `22/22` passing tiers, and a passing fixed 5V final
+reset. The evidence contains 44 tier events, covering `REQUESTING` and `PASS`
+for every matrix row, followed by the terminal summary. The independent
+IsolaPurr record for device `856a141cdbd4`, `port_c`, reports
+`power_enabled=true`, `data_connected=true`, `status=ok`, and `5045mV` after
+the run. The external-source acceptance did not use ADC voltage validation.

@@ -9,11 +9,17 @@ use flux_purr_devd::serial::{
     ESP32S3_USB_SERIAL_JTAG_PID, ESP32S3_USB_SERIAL_JTAG_VID, SerialPortProcessLock,
     UsbSerialIdentity, serial_port_paths_match, serial_port_usb_identity_matches,
 };
+#[cfg(target_os = "macos")]
+use flux_purr_devd::serial::{RawUsbSerialJtagPort, open_raw_usb_serial_jtag_port};
 use serialport::{FlowControl, SerialPort, SerialPortType, UsbPortInfo};
 use std::time::{Duration, Instant};
 
 const IDENTITY_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const PD_HIL_COMMAND_TIMEOUT: Duration = Duration::from_secs(240);
+const PD_HIL_SERIAL_RECONNECT_ATTEMPTS: u16 = 300;
+const PD_HIL_SERIAL_RECONNECT_DELAY: Duration = Duration::from_millis(10);
+const PD_HIL_EVIDENCE_FLUSH_INTERVAL: usize = 32;
 const RAM_OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const BUTTON_INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(30);
 const BUTTON_MAX_EVENTS: usize = 1024;
@@ -24,8 +30,16 @@ const FAN_MIN_INPUT_MV: u64 = 12_500;
 const FAN_PWM_STAGE_DURATION_MS: u64 = 5_000;
 const RAM_ELF_RELATIVE_PATH: &str =
     "firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup";
+const PD_HIL_ELF_RELATIVE_PATH: &str =
+    "firmware/ram-pd-hil/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-pd-hil";
 const RAM_PROTOCOL_VERSION: &str = "flux-purr.usb.v1";
 const RAM_FRAMING: &str = "jsonl";
+const PD_HIL_CAPABILITY: &str = "test_pd_sink";
+
+#[cfg(target_os = "macos")]
+type ReconnectedPdHilSerial = RawUsbSerialJtagPort;
+#[cfg(not(target_os = "macos"))]
+type ReconnectedPdHilSerial = Port;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ObservedFirmware {
@@ -47,6 +61,8 @@ struct IdentityBody {
     protocol_version: Option<String>,
     #[serde(default)]
     framing: Option<String>,
+    #[serde(default)]
+    reset_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +87,7 @@ struct ObservedIdentity {
     capabilities: Vec<String>,
     protocol_version: Option<String>,
     framing: Option<String>,
+    reset_reason: Option<String>,
 }
 
 pub(crate) fn execute_ram_run(
@@ -96,6 +113,10 @@ pub(crate) fn execute_ram_run(
         RamRunCommand::Test(args) if args.test == RamTestKind::Buttons => {
             run_interactive_buttons(&args.port, args.elf.as_deref(), args.reload)
         }
+        RamRunCommand::Test(args) if args.test == RamTestKind::PdSink => run_pd_hil(&args),
+        RamRunCommand::Test(args) if args.skip_vin_validation => {
+            Err("--skip-vin-validation is only valid with 'ram-run test pd-sink'".into())
+        }
         RamRunCommand::Test(args) => run_ram_operation(
             &args.port,
             args.elf.as_deref(),
@@ -118,9 +139,24 @@ fn run_ram_operation(
     send_ram_request(&mut session.serial, op, color)
 }
 
+fn run_pd_hil(args: &RamTestArgs) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let evidence_dir = args
+        .evidence_dir
+        .as_deref()
+        .ok_or("ram-run test pd-sink requires --evidence-dir")?;
+    let session = open_ram_session(
+        &args.port,
+        args.elf.as_deref(),
+        args.reload,
+        PD_HIL_CAPABILITY,
+    )?;
+    send_pd_hil_request(&args.port, session, evidence_dir, !args.skip_vin_validation)
+}
+
 struct RamSession {
     _serial_lock: SerialPortProcessLock,
     usb_identity: UsbSerialIdentity,
+    identity: ObservedIdentity,
     serial: Port,
 }
 
@@ -150,7 +186,9 @@ fn open_ram_session(
         observed.expect("matching RAM identity must exist")
     } else {
         drop(observed);
-        let elf = elf.map(Path::to_path_buf).unwrap_or_else(default_ram_elf);
+        let elf = elf
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| default_ram_elf_for(op));
         validate_local_elf(&elf)?;
         let image = read_validated_ram_elf(&elf)?;
         load_ram_elf(port, image, &usb_identity)?
@@ -160,6 +198,7 @@ fn open_ram_session(
     Ok(RamSession {
         _serial_lock: serial_lock,
         usb_identity,
+        identity,
         serial,
     })
 }
@@ -556,6 +595,14 @@ fn acquire_ram_port_lock(
 
 fn default_ram_elf() -> PathBuf {
     flux_purr_repo_root().join(RAM_ELF_RELATIVE_PATH)
+}
+
+fn default_ram_elf_for(op: &str) -> PathBuf {
+    if op == PD_HIL_CAPABILITY {
+        flux_purr_repo_root().join(PD_HIL_ELF_RELATIVE_PATH)
+    } else {
+        default_ram_elf()
+    }
 }
 
 const ELF_PT_LOAD: u32 = 1;
@@ -1168,7 +1215,8 @@ fn read_identity_from_serial(
             Err(error) => return Err(error.into()),
         }
     }
-    Err("no identity frame received".into())
+    let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]);
+    Err(format!("no identity frame received; serial output preview: {preview:?}").into())
 }
 
 fn next_identity(bytes: &mut Vec<u8>) -> Option<ObservedIdentity> {
@@ -1202,6 +1250,7 @@ fn parse_identity_line(line: &[u8]) -> Option<ObservedIdentity> {
         capabilities: body.capabilities,
         protocol_version: frame.protocol_version.or(body.protocol_version),
         framing: frame.framing.or(body.framing),
+        reset_reason: body.reset_reason,
     })
 }
 
@@ -1283,6 +1332,398 @@ fn send_ram_request_until(
     Err(format!("RAM bring-up response timed out for {op}").into())
 }
 
+struct PdHilEvidence {
+    events_path: PathBuf,
+    summary_path: PathBuf,
+    events: BufWriter<File>,
+    events_since_flush: usize,
+}
+
+impl PdHilEvidence {
+    fn create(
+        directory: &Path,
+        port: &str,
+        identity: &UsbSerialIdentity,
+        ram_identity: &ObservedIdentity,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        fs::create_dir_all(directory)?;
+        let events_path = directory.join("events.ndjson");
+        let summary_path = directory.join("summary.json");
+        let mut evidence = Self {
+            events_path,
+            summary_path,
+            events: BufWriter::new(File::create(directory.join("events.ndjson"))?),
+            events_since_flush: 0,
+        };
+        evidence.record(&serde_json::json!({
+            "kind": "metadata",
+            "schemaVersion": 1,
+            "port": port,
+            "usbIdentity": {
+                "vid": identity.vid,
+                "pid": identity.pid,
+                "serialNumber": identity.serial_number,
+            },
+            "buildId": PRODUCT_BUILD_ID,
+            "protocolVersion": RAM_PROTOCOL_VERSION,
+            "framing": RAM_FRAMING,
+            "ramIdentity": {
+                "resetReason": ram_identity.reset_reason,
+            },
+            "createdAtUnixMs": current_unix_millis(),
+        }))?;
+        Ok(evidence)
+    }
+
+    fn record(&mut self, value: &Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        serde_json::to_writer(&mut self.events, value)?;
+        self.events.write_all(b"\n")?;
+        self.events_since_flush += 1;
+        if self.events_since_flush >= PD_HIL_EVIDENCE_FLUSH_INTERVAL {
+            self.events.flush()?;
+            self.events_since_flush = 0;
+        }
+        Ok(())
+    }
+
+    fn finish(
+        mut self,
+        summary: &Value,
+    ) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error + Send + Sync>> {
+        self.record(summary)?;
+        self.events.flush()?;
+        let mut file = BufWriter::new(File::create(&self.summary_path)?);
+        serde_json::to_writer_pretty(&mut file, summary)?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        Ok((self.events_path, self.summary_path))
+    }
+}
+
+#[derive(Default)]
+struct PdHilSummaryChunks {
+    expected_count: Option<usize>,
+    chunks: Vec<Option<Vec<u8>>>,
+}
+
+impl PdHilSummaryChunks {
+    fn accept(
+        &mut self,
+        result: &Value,
+    ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
+        if result.get("kind").and_then(Value::as_str) != Some("summary_chunk") {
+            return Ok(None);
+        }
+        let count = result
+            .get("count")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or("PD HIL summary chunk is missing count")?;
+        let index = result
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or("PD HIL summary chunk is missing index")?;
+        if count == 0 || count > 1024 || index >= count {
+            return Err("PD HIL summary chunk has an invalid index or count".into());
+        }
+        if result.get("encoding").and_then(Value::as_str) != Some("hex") {
+            return Err("PD HIL summary chunk has an unsupported encoding".into());
+        }
+        let encoded = result
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or("PD HIL summary chunk is missing data")?;
+        let decoded = decode_summary_chunk(encoded)?;
+        if self.expected_count.is_none() {
+            self.expected_count = Some(count);
+            self.chunks.resize_with(count, || None);
+        }
+        if self.expected_count != Some(count) {
+            return Err("PD HIL summary chunk count changed during reassembly".into());
+        }
+        if let Some(existing) = &self.chunks[index] {
+            if existing != &decoded {
+                return Err("PD HIL summary chunk was received with conflicting data".into());
+            }
+        } else {
+            self.chunks[index] = Some(decoded);
+        }
+        if !self.chunks.iter().all(Option::is_some) {
+            return Ok(None);
+        }
+        let total = self
+            .chunks
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(Vec::len)
+            .sum::<usize>();
+        if total > RAM_RESPONSE_BUFFER_LIMIT {
+            return Err("PD HIL summary chunks exceeded the JSONL frame limit".into());
+        }
+        let mut frame = Vec::with_capacity(total);
+        for chunk in &self.chunks {
+            frame.extend_from_slice(chunk.as_ref().expect("all summary chunks are present"));
+        }
+        Ok(Some(serde_json::from_slice(&frame)?))
+    }
+}
+
+fn decode_summary_chunk(
+    encoded: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    if !encoded.len().is_multiple_of(2) {
+        return Err("PD HIL summary chunk has odd-length hex data".into());
+    }
+    let mut decoded = Vec::with_capacity(encoded.len() / 2);
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let high = hex_nibble(pair[0]).ok_or("PD HIL summary chunk has invalid hex data")?;
+        let low = hex_nibble(pair[1]).ok_or("PD HIL summary chunk has invalid hex data")?;
+        decoded.push((high << 4) | low);
+    }
+    Ok(decoded)
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn send_pd_hil_request(
+    port: &str,
+    session: RamSession,
+    evidence_dir: &Path,
+    validate_vin: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let RamSession {
+        _serial_lock,
+        usb_identity,
+        identity,
+        serial,
+    } = session;
+    let mut serial = Some(serial);
+    let mut evidence = PdHilEvidence::create(evidence_dir, port, &usb_identity, &identity)?;
+    let request_id = format!("pd-hil-{}", current_unix_millis());
+    let request = build_pd_hil_request(&request_id, validate_vin);
+    evidence.record(&serde_json::json!({
+        "kind": "request",
+        "requestId": request_id,
+        "capability": PD_HIL_CAPABILITY,
+        "vinValidation": if validate_vin { "adc" } else { "external_source" },
+        "wire": request.trim_end(),
+    }))?;
+    let serial_port = serial.as_mut().expect("PD HIL serial must be present");
+    serial_port.write_all(request.as_bytes())?;
+    serial_port.flush()?;
+
+    let deadline = Instant::now() + PD_HIL_COMMAND_TIMEOUT;
+    let mut bytes = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 256];
+    let mut summary_chunks = PdHilSummaryChunks::default();
+    let mut recovered_serial: Option<ReconnectedPdHilSerial> = None;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let read_result = if let Some(recovered_serial) = recovered_serial.as_mut() {
+            read_reconnected_pd_hil_serial(recovered_serial, &mut chunk, remaining)
+        } else {
+            ensure_ram_target(port, &usb_identity)?;
+            let serial_port = serial
+                .as_mut()
+                .ok_or("PD HIL serial was closed before recovery")?;
+            serial_port.set_timeout(remaining.min(Duration::from_millis(250)))?;
+            serial_port.read(&mut chunk)
+        };
+        match read_result {
+            Ok(count) => {
+                append_ram_response_bytes(&mut bytes, &chunk[..count])?;
+                if let Some(value) = find_pd_hil_response(
+                    &mut bytes,
+                    &request_id,
+                    &mut evidence,
+                    &mut summary_chunks,
+                )? {
+                    validate_ram_success_response(&value, PD_HIL_CAPABILITY)
+                        .map_err(|error| format!("PD HIL summary is invalid: {error}"))?;
+                    let mut value = value;
+                    let (events_path, summary_path) = evidence.finish(&value)?;
+                    let object = value
+                        .as_object_mut()
+                        .ok_or("PD HIL summary must be a JSON object")?;
+                    object.insert(
+                        "evidenceDir".to_string(),
+                        Value::String(evidence_dir.display().to_string()),
+                    );
+                    object.insert(
+                        "eventsPath".to_string(),
+                        Value::String(events_path.display().to_string()),
+                    );
+                    object.insert(
+                        "summaryPath".to_string(),
+                        Value::String(summary_path.display().to_string()),
+                    );
+                    let mut summary_file = BufWriter::new(File::create(&summary_path)?);
+                    serde_json::to_writer_pretty(&mut summary_file, &value)?;
+                    summary_file.write_all(b"\n")?;
+                    summary_file.flush()?;
+                    return Ok(value);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) if is_recoverable_pd_hil_serial_error(&error) => {
+                let original_error = error.to_string();
+                evidence.record(&serde_json::json!({
+                    "kind": "serial_error",
+                    "error": original_error.as_str(),
+                    "errorKind": format!("{:?}", error.kind()),
+                    "port": port,
+                }))?;
+                drop(serial.take());
+                let (serial, attempt) = reconnect_pd_hil_serial(
+                    port,
+                    &usb_identity,
+                    deadline,
+                )
+                .map_err(|error| {
+                    format!(
+                        "PD HIL serial connection could not be recovered after {original_error}: {error}"
+                    )
+                })?;
+                recovered_serial = Some(serial);
+                evidence.record(&serde_json::json!({
+                    "kind": "serial_reconnect",
+                    "attempt": attempt,
+                    "status": "reconnected",
+                    "port": port,
+                }))?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err("PD HIL response timed out; no terminal summary was received".into())
+}
+
+fn reopen_pd_hil_serial(
+    port: &str,
+    expected: &UsbSerialIdentity,
+) -> Result<ReconnectedPdHilSerial, Box<dyn std::error::Error + Send + Sync>> {
+    ensure_ram_target(port, expected)?;
+    #[cfg(target_os = "macos")]
+    let serial = open_raw_usb_serial_jtag_port(port)?;
+    #[cfg(not(target_os = "macos"))]
+    let serial = serialport::new(port, 115_200)
+        .flow_control(FlowControl::None)
+        .timeout(Duration::from_millis(250))
+        .open_native()?;
+    ensure_ram_target(port, expected)?;
+    Ok(serial)
+}
+
+fn reconnect_pd_hil_serial(
+    port: &str,
+    expected: &UsbSerialIdentity,
+    deadline: Instant,
+) -> Result<(ReconnectedPdHilSerial, u16), Box<dyn std::error::Error + Send + Sync>> {
+    let mut last_error = String::from("authorized port is unavailable");
+    for attempt in 1..=PD_HIL_SERIAL_RECONNECT_ATTEMPTS {
+        if Instant::now() >= deadline {
+            break;
+        }
+        match reopen_pd_hil_serial(port, expected) {
+            Ok(serial) => return Ok((serial, attempt)),
+            Err(error) => {
+                last_error = error.to_string();
+                std::thread::sleep(PD_HIL_SERIAL_RECONNECT_DELAY);
+            }
+        }
+    }
+    Err(last_error.into())
+}
+
+#[cfg(target_os = "macos")]
+fn read_reconnected_pd_hil_serial(
+    serial: &mut ReconnectedPdHilSerial,
+    chunk: &mut [u8],
+    _remaining: Duration,
+) -> std::io::Result<usize> {
+    match serial.read(chunk) {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            std::thread::sleep(Duration::from_millis(5));
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "USB Serial/JTAG read would block",
+            ))
+        }
+        result => result,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_reconnected_pd_hil_serial(
+    serial: &mut ReconnectedPdHilSerial,
+    chunk: &mut [u8],
+    remaining: Duration,
+) -> std::io::Result<usize> {
+    serial.set_timeout(remaining.min(Duration::from_millis(250)))?;
+    serial.read(chunk)
+}
+
+fn is_recoverable_pd_hil_serial_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::UnexpectedEof
+    ) || error.to_string().contains("Device not configured")
+}
+
+fn find_pd_hil_response(
+    bytes: &mut Vec<u8>,
+    request_id: &str,
+    evidence: &mut PdHilEvidence,
+    summary_chunks: &mut PdHilSummaryChunks,
+) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    while let Some(index) = bytes.iter().position(|byte| *byte == b'\n') {
+        let line: Vec<u8> = bytes.drain(..=index).collect();
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+            let text = String::from_utf8_lossy(&line);
+            evidence.record(&serde_json::json!({
+                "kind": "serial_text",
+                "text": text.trim_end_matches(['\r', '\n']),
+            }))?;
+            continue;
+        };
+        evidence.record(&value)?;
+        let matches_request = value.get("requestId").and_then(Value::as_str) == Some(request_id);
+        let capability = value.get("capability").and_then(Value::as_str);
+        if value.get("type").and_then(Value::as_str) == Some("progress")
+            && matches_request
+            && capability == Some(PD_HIL_CAPABILITY)
+        {
+            print_pd_hil_progress(&value);
+            if let Some(result) = value.get("result")
+                && let Some(summary) = summary_chunks.accept(result)?
+            {
+                return Ok(Some(summary));
+            }
+            continue;
+        }
+        if (value.get("type").and_then(Value::as_str) == Some("pd_hil_summary")
+            || value.get("type").and_then(Value::as_str) == Some("response"))
+            && matches_request
+            && capability == Some(PD_HIL_CAPABILITY)
+        {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
 fn append_ram_response_bytes(
     bytes: &mut Vec<u8>,
     chunk: &[u8],
@@ -1303,6 +1744,12 @@ fn build_ram_request(request_id: &str, op: &str, color: Option<&str>) -> String 
             "{{\"type\":\"ram_bringup\",\"requestId\":\"{request_id}\",\"op\":\"{op}\",\"capability\":\"{op}\"}}\n"
         ),
     }
+}
+
+fn build_pd_hil_request(request_id: &str, validate_vin: bool) -> String {
+    format!(
+        "{{\"type\":\"ram_bringup\",\"requestId\":\"{request_id}\",\"op\":\"{PD_HIL_CAPABILITY}\",\"capability\":\"{PD_HIL_CAPABILITY}\",\"validateVin\":{validate_vin}}}\n"
+    )
 }
 
 fn find_ram_response(
@@ -1417,6 +1864,92 @@ fn print_ram_progress(value: &Value) {
     }
 }
 
+fn print_pd_hil_progress(value: &Value) {
+    let Some(result) = value.get("result").and_then(Value::as_object) else {
+        return;
+    };
+    match result.get("kind").and_then(Value::as_str) {
+        Some("session") => eprintln!(
+            "PD HIL SESSION stage={}",
+            result
+                .get("stage")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ),
+        Some("capabilities") => eprintln!(
+            "PD HIL CAPABILITIES count={}",
+            result
+                .get("count")
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
+        ),
+        Some("tier") => {
+            let status = result
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            if status == "requesting"
+                || status == "pass"
+                || status == "unsupported"
+                || status == "negotiation_failed"
+                || status == "measurement_failed"
+                || status == "cancelled"
+                || status == "global_timeout"
+            {
+                let status_label = status.to_ascii_uppercase();
+                let index = progress_number(result, "index");
+                let total = progress_number(result, "total");
+                let contract_mv = progress_number(result, "contractMv");
+                let contract_current_ma = progress_number(result, "contractCurrentMa");
+                let measured_vin_mv = progress_number(result, "measuredVinMv");
+                eprintln!(
+                    "PD HIL TIER {}/{} mode={} target={}mV status={} contract={}mV current={}mA vin={}mV",
+                    index,
+                    total,
+                    result.get("mode").and_then(Value::as_str).unwrap_or("-"),
+                    result
+                        .get("targetMv")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default(),
+                    status_label,
+                    contract_mv,
+                    contract_current_ma,
+                    measured_vin_mv,
+                );
+            }
+        }
+        Some("recovery") => eprintln!(
+            "PD HIL RESET tier={} status={} pd={} vbus={}mV reason={}",
+            result
+                .get("index")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            result
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_ascii_uppercase(),
+            result.get("pd").and_then(Value::as_str).unwrap_or("-"),
+            result
+                .get("defaultVbusMv")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            result.get("reason").and_then(Value::as_str).unwrap_or("-"),
+        ),
+        _ => {}
+    }
+    let mut stderr = std::io::stderr();
+    let _ = std::io::Write::flush(&mut stderr);
+}
+
+fn progress_number(result: &serde_json::Map<String, Value>, key: &str) -> String {
+    result
+        .get(key)
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
 fn print_ram_fan_stage_progress(value: &Value) {
     let duty_percent = value.get("d").and_then(Value::as_u64).unwrap_or_default();
     eprintln!(
@@ -1458,8 +1991,12 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
         .ok_or_else(|| "result must be an object".to_string())?;
     require_result_string(result, "detail")?;
     require_result_string_value(result, "heater", "off")?;
-    require_result_string_value(result, "pd", "untouched")?;
     require_result_string_value(result, "eeprom", "untouched")?;
+    if op == PD_HIL_CAPABILITY {
+        validate_pd_hil_summary(value, result)?;
+    } else {
+        require_result_string_value(result, "pd", "untouched")?;
+    }
 
     match op {
         "preview_display" | "preview_frontpanel" => {
@@ -1527,12 +2064,209 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
                 return Err("result.power.voltageOk must be a boolean".to_string());
             }
         }
+        PD_HIL_CAPABILITY => {}
         "exit" => {
             require_result_string_value(result, "detail", "safe_exit")?;
         }
         _ => return Err(format!("unsupported RAM capability: {op}")),
     }
     Ok(())
+}
+
+fn validate_pd_hil_summary(
+    value: &Value,
+    result: &serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let pd = require_result_string(result, "pd")?;
+    if !matches!(pd, "default_verified" | "resetting" | "owned") {
+        return Err(format!(
+            "result.pd has an invalid PD ownership state: {pd:?}"
+        ));
+    }
+    let overall = validate_pd_hil_overall(result)?;
+    let external_vin = validate_pd_hil_policy(result)?;
+    let (tier_count, pass_count, unsupported_count) = validate_pd_hil_tiers(result)?;
+    let (reset_status, final_reset) = validate_pd_hil_final_reset(result)?;
+    let complete_matrix =
+        tier_count == 22 && pass_count == 22 && reset_status == "pass" && pd == "default_verified";
+    if overall == "pass"
+        && (external_vin
+            || !complete_matrix
+            || final_reset
+                .get("defaultVbusMv")
+                .and_then(Value::as_u64)
+                .is_none_or(|value| !(4_750..=5_250).contains(&value)))
+    {
+        return Err(
+            "result.overall=pass lacks complete tier or default-state evidence".to_string(),
+        );
+    }
+    if overall == "external_source_pass" && (!external_vin || !complete_matrix) {
+        return Err(
+            "result.overall=external_source_pass lacks complete protocol evidence".to_string(),
+        );
+    }
+    if overall == "unsupported" && unsupported_count == 0 {
+        return Err("result.overall=unsupported has no unsupported tier".to_string());
+    }
+    if value.get("requestId").and_then(Value::as_str).is_none() {
+        return Err("PD HIL summary requestId is missing".to_string());
+    }
+    Ok(())
+}
+
+fn validate_pd_hil_overall(result: &serde_json::Map<String, Value>) -> Result<&str, String> {
+    let overall = require_result_string(result, "overall")?;
+    if !matches!(
+        overall,
+        "pass"
+            | "external_source_pass"
+            | "unsupported"
+            | "fail"
+            | "recovery_failed"
+            | "cancelled"
+            | "global_timeout"
+            | "capability_discovery_failed"
+    ) {
+        return Err(format!("result.overall has an invalid value: {overall:?}"));
+    }
+    Ok(overall)
+}
+
+fn validate_pd_hil_policy(result: &serde_json::Map<String, Value>) -> Result<bool, String> {
+    if result.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
+        return Err("result.schemaVersion must be 1".to_string());
+    }
+    if result.get("controller").and_then(Value::as_str) != Some("fusb302b") {
+        return Err("result.controller must be fusb302b".to_string());
+    }
+    let policy = result
+        .get("policy")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "result.policy must be an object".to_string())?;
+    let vin_validation = policy
+        .get("vinValidation")
+        .and_then(Value::as_str)
+        .unwrap_or("adc");
+    if !matches!(vin_validation, "adc" | "external_source") {
+        return Err("result.policy.vinValidation is invalid".to_string());
+    }
+    if policy.get("holdMs").and_then(Value::as_u64) != Some(2_000)
+        || policy.get("sampleIntervalMs").and_then(Value::as_u64) != Some(50)
+        || policy.get("currentCeilingMa").and_then(Value::as_u64) != Some(5_000)
+        || policy.get("minimumCurrentMa").and_then(Value::as_u64) != Some(3_000)
+        || policy.get("recoveryMode").and_then(Value::as_str) != Some("fixed_5v_contract")
+    {
+        return Err("result.policy does not match the approved PD HIL bounds".to_string());
+    }
+    Ok(vin_validation == "external_source")
+}
+
+fn validate_pd_hil_tiers(
+    result: &serde_json::Map<String, Value>,
+) -> Result<(usize, usize, usize), String> {
+    let tiers = result
+        .get("tiers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "result.tiers must be an array".to_string())?;
+    if tiers.len() > 22 {
+        return Err("result.tiers contains more than the approved 22 rows".to_string());
+    }
+    let mut pass_count = 0usize;
+    let mut unsupported_count = 0usize;
+    for (index, tier) in tiers.iter().enumerate() {
+        let tier = tier
+            .as_object()
+            .ok_or_else(|| format!("result.tiers[{index}] must be an object"))?;
+        let mode = tier
+            .get("mode")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("result.tiers[{index}].mode is missing"))?;
+        if !matches!(mode, "fixed" | "pps") {
+            return Err(format!("result.tiers[{index}].mode is invalid"));
+        }
+        if tier.get("targetMv").and_then(Value::as_u64).is_none() {
+            return Err(format!("result.tiers[{index}].targetMv is missing"));
+        }
+        let status = tier
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("result.tiers[{index}].status is missing"))?;
+        if !matches!(
+            status,
+            "pass"
+                | "unsupported"
+                | "negotiation_failed"
+                | "measurement_failed"
+                | "recovery_failed"
+                | "cancelled"
+                | "global_timeout"
+                | "not_run"
+        ) {
+            return Err(format!("result.tiers[{index}].status is invalid"));
+        }
+        if tier.get("measuredCurrentMa").is_some() || tier.get("loadPower").is_some() {
+            return Err(format!(
+                "result.tiers[{index}] contains forbidden current evidence"
+            ));
+        }
+        if status == "pass" {
+            pass_count += 1;
+        } else if status == "unsupported" {
+            unsupported_count += 1;
+        }
+    }
+    Ok((tiers.len(), pass_count, unsupported_count))
+}
+
+fn validate_pd_hil_final_reset(
+    result: &serde_json::Map<String, Value>,
+) -> Result<(&str, &serde_json::Map<String, Value>), String> {
+    let final_reset = result
+        .get("finalReset")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "result.finalReset must be an object".to_string())?;
+    let reset_status = final_reset
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "result.finalReset.status is missing".to_string())?;
+    if !matches!(reset_status, "pass" | "fail") {
+        return Err("result.finalReset.status is invalid".to_string());
+    }
+    if final_reset.get("pendingRequest") != Some(&Value::Null) {
+        return Err("result.finalReset must clear pendingRequest".to_string());
+    }
+    if reset_status == "pass" {
+        let active_contract = final_reset
+            .get("activeContract")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                "result.finalReset must record the stable fixed 5V recovery contract".to_string()
+            })?;
+        if active_contract.get("mode").and_then(Value::as_str) != Some("fixed")
+            || active_contract.get("voltageMv").and_then(Value::as_u64) != Some(5_000)
+            || active_contract
+                .get("currentMa")
+                .and_then(Value::as_u64)
+                .is_none_or(|value| value == 0)
+        {
+            return Err(
+                "result.finalReset.activeContract must be a nonzero fixed 5V contract".to_string(),
+            );
+        }
+    } else if final_reset.get("activeContract") != Some(&Value::Null) {
+        return Err("failed result.finalReset must not claim an active contract".to_string());
+    }
+    Ok((reset_status, final_reset))
+}
+
+pub(crate) fn pd_hil_requires_nonzero(value: &Value) -> bool {
+    value.get("capability").and_then(Value::as_str) == Some(PD_HIL_CAPABILITY)
+        && value
+            .get("result")
+            .and_then(|result| result.get("overall"))
+            .and_then(Value::as_str)
+            .is_some_and(|overall| !matches!(overall, "pass" | "external_source_pass"))
 }
 
 fn validate_button_result(result: &serde_json::Map<String, Value>) -> Result<(), String> {
@@ -1797,6 +2531,7 @@ mod tests {
             capabilities: vec!["test_fan".to_string()],
             protocol_version: Some(RAM_PROTOCOL_VERSION.to_string()),
             framing: Some(RAM_FRAMING.to_string()),
+            reset_reason: None,
         };
         assert!(verify_ram_identity(&identity, "test_fan").is_ok());
 
@@ -1819,6 +2554,14 @@ mod tests {
         let request = build_ram_request("ram-1", "preview_display", None);
         let value: Value = serde_json::from_str(&request).expect("request should be JSON");
         assert!(value.get("color").is_none());
+    }
+
+    #[test]
+    fn pd_hil_request_can_use_external_voltage_evidence() {
+        let request = build_pd_hil_request("pd-hil-1", false);
+        let value: Value = serde_json::from_str(&request).expect("request should be JSON");
+        assert_eq!(value["capability"], PD_HIL_CAPABILITY);
+        assert_eq!(value["validateVin"], false);
     }
 
     #[test]
@@ -1932,6 +2675,110 @@ mod tests {
             .unwrap()
             .remove("buttons");
         assert!(validate_ram_success_response(&missing_evidence, "test_buttons").is_err());
+    }
+
+    #[test]
+    fn pd_hil_validation_accepts_unsupported_tiers_and_requires_nonzero_exit() {
+        let summary = serde_json::json!({
+            "type": "pd_hil_summary",
+            "requestId": "pd-hil-test",
+            "capability": "test_pd_sink",
+            "ok": true,
+            "result": {
+                "detail": "pd_hil_complete",
+                "heater": "off",
+                "pd": "default_verified",
+                "eeprom": "untouched",
+                "schemaVersion": 1,
+                "controller": "fusb302b",
+                "overall": "unsupported",
+                "policy": {
+                    "holdMs": 2000,
+                    "sampleIntervalMs": 50,
+                    "currentCeilingMa": 5000,
+                    "minimumCurrentMa": 3000,
+                    "recoveryMode": "fixed_5v_contract",
+                },
+                "tiers": [{
+                    "mode": "fixed",
+                    "targetMv": 5000,
+                    "status": "unsupported",
+                    "reason": "no_exact_fixed_pdo",
+                }],
+                "finalReset": {
+                    "status": "pass",
+                    "activeContract": {"mode": "fixed", "voltageMv": 5000, "currentMa": 3000},
+                    "pendingRequest": null,
+                    "defaultVbusMv": 5000,
+                },
+            },
+        });
+        assert!(validate_ram_success_response(&summary, PD_HIL_CAPABILITY).is_ok());
+        assert!(pd_hil_requires_nonzero(&summary));
+
+        let mut forbidden_current = summary.clone();
+        forbidden_current["result"]["tiers"][0]["measuredCurrentMa"] = 3000.into();
+        assert!(validate_ram_success_response(&forbidden_current, PD_HIL_CAPABILITY).is_err());
+    }
+
+    #[test]
+    fn pd_hil_validation_accepts_only_a_complete_pass_matrix() {
+        let tiers = (0..22)
+            .map(|index| {
+                serde_json::json!({
+                    "mode": if index < 5 { "fixed" } else { "pps" },
+                    "targetMv": if index < 5 {
+                        [5000, 9000, 12000, 15000, 20000][index]
+                    } else {
+                        5000 + (index - 5) * 1000
+                    },
+                    "status": "pass",
+                })
+            })
+            .collect::<Vec<_>>();
+        let summary = serde_json::json!({
+            "type": "pd_hil_summary",
+            "requestId": "pd-hil-test",
+            "capability": "test_pd_sink",
+            "ok": true,
+            "result": {
+                "detail": "pd_hil_complete",
+                "heater": "off",
+                "pd": "default_verified",
+                "eeprom": "untouched",
+                "schemaVersion": 1,
+                "controller": "fusb302b",
+                "overall": "pass",
+                "policy": {
+                    "holdMs": 2000,
+                    "sampleIntervalMs": 50,
+                    "currentCeilingMa": 5000,
+                    "minimumCurrentMa": 3000,
+                    "recoveryMode": "fixed_5v_contract",
+                },
+                "tiers": tiers,
+                "finalReset": {
+                    "status": "pass",
+                    "activeContract": {"mode": "fixed", "voltageMv": 5000, "currentMa": 3000},
+                    "pendingRequest": null,
+                    "defaultVbusMv": 5000,
+                },
+            },
+        });
+        assert!(validate_ram_success_response(&summary, PD_HIL_CAPABILITY).is_ok());
+        assert!(!pd_hil_requires_nonzero(&summary));
+
+        let mut external = summary.clone();
+        external["result"]["overall"] = Value::String("external_source_pass".to_string());
+        external["result"]["policy"]["vinValidation"] =
+            Value::String("external_source".to_string());
+        external["result"]["finalReset"]["defaultVbusMv"] = 5990.into();
+        assert!(validate_ram_success_response(&external, PD_HIL_CAPABILITY).is_ok());
+        assert!(!pd_hil_requires_nonzero(&external));
+
+        let mut incomplete = summary;
+        incomplete["result"]["tiers"][21]["status"] = Value::String("unsupported".to_string());
+        assert!(validate_ram_success_response(&incomplete, PD_HIL_CAPABILITY).is_err());
     }
 
     #[test]

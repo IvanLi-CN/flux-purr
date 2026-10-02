@@ -66,6 +66,7 @@
 | heater-7p0-3p2-variant | active | `heater-7p0-3p2-variant/IMPLEMENTATION.md` | `heater-7p0-3p2-variant/SPEC.md` | - | 7.0 cm, 3.2 ohm heater hardware variant |
 | heater-pid-frontpanel-runtime | active | `heater-pid-frontpanel-runtime/IMPLEMENTATION.md` | `heater-pid-frontpanel-runtime/SPEC.md` | - | Heater PID, fan policy, protection, and dashboard runtime truth source |
 | mini-hotplate-doc-baseline | archived | `mini-hotplate-doc-baseline/IMPLEMENTATION.md` | `mini-hotplate-doc-baseline/SPEC.md` | - | Source-collection and evidence baseline is complete |
+| pd-sink-voltage-hil | active | `pd-sink-voltage-hil/IMPLEMENTATION.md` | `pd-sink-voltage-hil/SPEC.md` | - | Approved exact Fixed/PPS voltage HIL design with VIN hold evidence and verified reset |
 | pr-label-release-protection | active | `pr-label-release-protection/IMPLEMENTATION.md` | `pr-label-release-protection/SPEC.md` | - | Label-driven release intent and branch protection policy |
 | real-control-plane-runtime | active | `real-control-plane-runtime/IMPLEMENTATION.md` | `real-control-plane-runtime/SPEC.md` | - | Web, firmware, and native devd real transport contract |
 | release-failure-telegram-alerts | active | `release-failure-telegram-alerts/IMPLEMENTATION.md` | `release-failure-telegram-alerts/SPEC.md` | - | Release failure notification workflow and recovery context |
