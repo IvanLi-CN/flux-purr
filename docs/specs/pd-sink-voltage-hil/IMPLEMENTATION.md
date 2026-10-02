@@ -17,6 +17,11 @@ throughout the session, prints live progress, writes `events.ndjson`,
 `external_source_pass` when the complete protocol matrix is valid. Incomplete
 or failing outcomes remain non-zero.
 
+When `--reload` loads a RAM image while stale product or prior-RAM JSONL output
+is still buffered on the serial stream, the loader consumes frames until the
+current `PRODUCT_BUILD_ID` is observed. This keeps a stale identity frame from
+being reported as the newly loaded RAM image.
+
 Progress transport uses a bounded RAM queue and the USB Serial/JTAG
 non-blocking FIFO path. The device does not write progress synchronously while
 the source is waiting for a PD response. After each tier reaches a terminal
@@ -88,18 +93,15 @@ recovery tier 23 and observed the fixed `5/9/12/15/20V` plateaus plus the PPS
 ladder through `21V`, but it did not receive a terminal summary and is not a
 completed CLI acceptance.
 
-The owner-authorized external-source diagnostic record from the historical
-validated code candidate is kept locally under
-`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-pr-ready-final-4675`.
-It was generated from source SHA `4675b95c216a933762600aef183c353778df35d3`
-and parses as `overall=external_source_pass`, `pd=default_verified`, `22/22`
-passing tiers, and a passing fixed 5V final reset. This is local evidence for
-the validated code candidate, not a versioned PR artifact; a new run must use
-an empty directory and record its own source SHA, USB identity, command line,
-and complete file set before being cited for physical acceptance. The
-independent IsolaPurr record for device `856a141cdbd4`, `port_c`, reports
-`power_enabled=true`, `data_connected=true`, `status=ok`, and `5044mV` after
+The current-head external-source diagnostic record is kept locally under
+`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-pr-ready-final-2f3ca27b-r2`.
+It was generated from source SHA
+`2f3ca27ba0b5cf67d4e2cd699d4e2a225de349d2`, build ID `2f3ca27ba0b5cf67`, and
+the exact authorized port `/dev/cu.usbmodem21141401`. It parses as
+`overall=external_source_pass`, `pd=default_verified`, `22/22` passing tiers,
+and a passing fixed 5V final reset. This is local evidence rather than a
+versioned PR artifact; the evidence directory records its own source SHA, USB
+identity, command request, and complete file set. The independent IsolaPurr
+record for device `856a141cdbd4`, `port_c`, reports
+`power_enabled=true`, `data_connected=true`, `status=ok`, and `5045mV` after
 the run. The external-source acceptance did not use ADC voltage validation.
-This historical receipt is not acceptance evidence for a later PR head; the
-current head requires a new run with its own source SHA and exact authorized
-USB identity before physical acceptance can be claimed.
