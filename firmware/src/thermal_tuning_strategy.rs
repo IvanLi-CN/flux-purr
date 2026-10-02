@@ -64,6 +64,146 @@ pub(crate) fn tune_point(
     apply_stability_gate(previous, predicted, evidence)
 }
 
+pub(crate) fn reseed_after_hold_confirm(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> ThermalControlProfilePointConfig {
+    if !evidence.tunable_stop {
+        return previous;
+    }
+    // The frozen external confirmation path tunes parsed stage metrics/guard,
+    // then applies a separate confirmation nudge from the full audit analysis.
+    // Its parsed stage has no curve/hold analysis. Preserve that projection
+    // here; scout/batch evidence and all recorded device facts stay intact.
+    let base = TuneEvidence {
+        residual_c: evidence.overshoot_c,
+        under_c: 0.0,
+        over_c: 0.0,
+        hold_sample_count: 0,
+        hold_mean_error_c: None,
+        hold_max_below_c: None,
+        first_hold_error_c: None,
+        hold_median_output_permille: None,
+        hold_p90_output_permille: None,
+        approach_median_output_permille: None,
+        approach_median_slope_c_per_s: None,
+        curve_class: CurveClass::Insufficient,
+        ..evidence
+    };
+    let mut point = tune_base_point(previous, base);
+    let (failure, _) = stability_gate_evidence(evidence);
+    if evidence.target_c > 150 {
+        reseed_high_temperature_hold(&mut point, evidence, failure);
+    } else {
+        reseed_low_temperature_hold(&mut point, evidence, failure);
+    }
+    point
+}
+
+fn reseed_high_temperature_hold(
+    point: &mut ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+    failure: GateFailure,
+) {
+    let median = evidence.hold_median_output_permille.unwrap_or(0);
+    let p90 = evidence.hold_p90_output_permille.unwrap_or(0);
+    if matches!(failure, GateFailure::BrokeHigh | GateFailure::LowMargin)
+        && median >= 900
+        && p90 >= 950
+    {
+        point.hold_power_permille = point.hold_power_permille.saturating_sub(220).max(700);
+        point.hold_reheat_power_permille = point
+            .hold_reheat_power_permille
+            .saturating_sub(260)
+            .max(point.hold_power_permille)
+            .max(720);
+        point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+        point.overshoot_cutoff_centi_c = point.overshoot_cutoff_centi_c.saturating_sub(40).max(120);
+        point.hold_entry_centi_c = point.hold_entry_centi_c.saturating_sub(20).max(120);
+        point.hold_exit_centi_c = point.hold_exit_centi_c.saturating_sub(20).max(120);
+    }
+    if matches!(failure, GateFailure::BrokeLow | GateFailure::MissedLow)
+        && (median == 0 || p90 < 900)
+    {
+        point.brake_distance_centi_c = point.brake_distance_centi_c.saturating_sub(40).max(120);
+        point.approach_lead_ticks = point.approach_lead_ticks.saturating_sub(1);
+        point.hold_power_permille = point
+            .hold_power_permille
+            .saturating_add(80)
+            .clamp(700, 1_000);
+        point.hold_reheat_power_permille = point
+            .hold_reheat_power_permille
+            .saturating_add(60)
+            .max(point.hold_power_permille)
+            .min(1_000);
+        point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_add(4).min(24);
+        point.hold_on_centi_c = point.hold_on_centi_c.saturating_add(4).min(60);
+    }
+}
+
+fn reseed_low_temperature_hold(
+    point: &mut ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+    failure: GateFailure,
+) {
+    let high_side = matches!(failure, GateFailure::BrokeHigh | GateFailure::MissedHigh);
+    let within_gate = evidence.scout_hold_complete
+        && evidence
+            .stable_window_after_warmup_ms
+            .is_some_and(|start| start <= evidence.settle_limit_ms)
+        && failure == GateFailure::Other;
+    let exceeds_hard_gate =
+        (high_side || within_gate) && (evidence.overshoot_c > 3.0 || evidence.hold_p2p_c > 3.0);
+    if !exceeds_hard_gate
+        && !(high_side && (evidence.overshoot_c > 1.5 || evidence.hold_p2p_c > 1.5))
+    {
+        return;
+    }
+    let floor_c = if exceeds_hard_gate { 3.0 } else { 1.5 };
+    let severity = (evidence.overshoot_c - floor_c)
+        .max(evidence.hold_p2p_c - floor_c)
+        .max(0.0);
+    let mild = exceeds_hard_gate && severity < 1.0;
+    let brake_step = if mild {
+        40
+    } else {
+        round_positive(severity * 75.0 + 80.0).clamp(80, 350)
+    };
+    let lead_step = if severity >= 2.0 { 2 } else { u16::from(!mild) };
+    let trim = if severity >= 2.0 {
+        120
+    } else if mild {
+        40
+    } else {
+        80
+    };
+    point.brake_distance_centi_c = point
+        .brake_distance_centi_c
+        .saturating_add(brake_step)
+        .clamp(450, 5_000);
+    point.approach_lead_ticks = point.approach_lead_ticks.saturating_add(lead_step).min(12);
+    point.approach_floor_power_permille = point
+        .approach_floor_power_permille
+        .saturating_sub(trim)
+        .max(point.hold_power_permille)
+        .max(100);
+    point.approach_power_permille = point
+        .approach_power_permille
+        .saturating_sub(trim)
+        .max(point.approach_floor_power_permille.saturating_add(80))
+        .min(1_000);
+    point.hold_reheat_power_permille = point
+        .hold_reheat_power_permille
+        .saturating_sub(trim / 2)
+        .max(point.hold_power_permille);
+    point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+    point.hold_blend_ticks = point.hold_blend_ticks.saturating_sub(1).max(1);
+    point.overshoot_cutoff_centi_c = point.overshoot_cutoff_centi_c.saturating_sub(40).max(80);
+    point.hold_off_centi_c = point
+        .hold_off_centi_c
+        .min(point.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
+}
+
 fn tune_base_point(
     previous: ThermalControlProfilePointConfig,
     evidence: TuneEvidence,

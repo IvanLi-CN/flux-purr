@@ -30,6 +30,7 @@
 
 ## Validation
 
+- Confirmation-failure reseeding has its own frozen external-strategy projection and nudge; scout/batch transformations remain separate. A differential replay of the 43 actual samples from run `firmware-pps5a-1790952587626`, trial 6, proves brake/Approach/floor/damping/lead `1280/350/180/3910/3` after the failed confirmation. Applying the scout transformation to that same evidence instead produced `1100/590/340/3730/5`; the following physical scout exceeded both overshoot and hold-ripple gates. The regression exercises the runtime's `HoldConfirm -> Cooldown -> Scout` boundary and compares every point field with the external confirmation path. Independent low-temperature high-side and high-temperature high/low-side vectors cover the dedicated nudges, cross-phase hold-threshold observation and rounded step boundaries. This replay proves strategy conformance, not physical qualification or EEPROM persistence.
 - Firmware host tests, web unit tests, and frontpanel preview fixtures cover the runtime state model.
 - Safety paths retain fail-closed behavior when sensor, control, or transport checks fail.
 - Host-side frontpanel preview and state-transition tests cover placeholders, EEPROM restore, PD wait, initial sensor fault, first valid RTD promotion, and preservation of the last valid temperature after runtime faults.

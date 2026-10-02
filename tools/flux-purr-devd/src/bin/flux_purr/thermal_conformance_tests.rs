@@ -56,6 +56,197 @@ fn firmware_candidate_matches_external_late_window_hil_replays() {
     assert!(differences.is_empty(), "{}", differences.join("\n"));
 }
 
+#[test]
+fn firmware_hold_confirm_reseed_matches_external_35c_hil_replay() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/thermal-60c-hold-confirm-lower-band.json"
+    ))
+    .unwrap();
+    let profile_value = json!({"settings": fixture["settings"], "points": [fixture["point"]]});
+    let rows = fixture["samples"].as_array().unwrap();
+    let (expected, result) =
+        external_confirmation_reseed(&profile_value, rows, "full_speed_to_stable_timeout");
+    assert_eq!(result.analysis.hold_sample_count, 0);
+    assert_eq!(expected.brake_distance_centi_c, 1_280);
+    assert_eq!(expected.approach_power_permille, 350);
+    assert_eq!(expected.approach_floor_power_permille, 180);
+    assert_eq!(expected.approach_damping_exponent_permille, 3_910);
+    assert_eq!(expected.approach_lead_ticks, 3);
+    let runtime = replay_firmware_trials(
+        profile_value,
+        rows,
+        ThermalTuningTrialPurpose::HoldConfirm,
+        1,
+    );
+    assert_eq!(runtime.trial_purpose, ThermalTuningTrialPurpose::Scout);
+    assert_eq!(runtime.trial_index, 1);
+    let actual = candidate_point_from_runtime(runtime);
+    assert_eq!(
+        actual, expected,
+        "failed 60s confirmation must reseed with the external confirmation strategy, not the scout batch strategy"
+    );
+}
+
+#[test]
+fn confirmation_reseed_high_and_low_side_vectors_match_external_strategy() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/thermal-60c-hold-confirm-lower-band.json"
+    ))
+    .unwrap();
+    for (target, stop, rows) in [
+        (
+            60,
+            "full_speed_to_stable_timeout",
+            json!([
+                [0, 4000, 1000, 1000, "warmup"],
+                [1000, 5500, 150, 150, "approach"],
+                [2000, 6000, 100, 100, "hold"],
+                [8000, 6240, 0, 0, "hold"],
+                [11000, 6240, 0, 0, "hold"]
+            ]),
+        ),
+        (
+            60,
+            "completed",
+            json!([
+                [0, 4000, 1000, 1000, "warmup"],
+                [1000, 5500, 150, 150, "approach"],
+                [2000, 6000, 100, 100, "hold"],
+                [12000, 6000, 100, 100, "hold"],
+                [62000, 6380, 0, 0, "hold"]
+            ]),
+        ),
+        (
+            180,
+            "full_speed_to_stable_timeout",
+            json!([
+                [0, 14000, 1000, 1000, "warmup"],
+                [1000, 17500, 950, 950, "approach"],
+                [2000, 18000, 1000, 1000, "hold"],
+                [4000, 18240, 950, 950, "hold"],
+                [6000, 18240, 950, 950, "hold"]
+            ]),
+        ),
+        (
+            180,
+            "full_speed_to_stable_timeout",
+            json!([
+                [0, 14000, 1000, 1000, "warmup"],
+                [1000, 17500, 500, 500, "approach"],
+                [2000, 18000, 600, 600, "hold"],
+                [4000, 17760, 500, 500, "hold"],
+                [6000, 17760, 500, 500, "hold"]
+            ]),
+        ),
+    ] {
+        let mut point = fixture["point"].clone();
+        point["targetTempC"] = json!(target);
+        let profile = json!({"settings": fixture["settings"], "points": [point]});
+        let rows = rows.as_array().unwrap();
+        let (expected, _) = external_confirmation_reseed(&profile, rows, stop);
+        let runtime =
+            replay_firmware_trials(profile, rows, ThermalTuningTrialPurpose::HoldConfirm, 1);
+        assert_eq!(
+            runtime.trial_index, 1,
+            "{target}C {stop} must finish the failed confirm"
+        );
+        assert_eq!(
+            candidate_point_from_runtime(runtime),
+            expected,
+            "{target}C {stop}"
+        );
+    }
+}
+
+fn external_confirmation_reseed(
+    profile_value: &Value,
+    rows: &[Value],
+    stop_reason: &'static str,
+) -> (ThermalCandidatePoint, ThermalStageResult) {
+    let samples = replay_samples(rows);
+    let current = thermal_candidate_profile_from_value(profile_value.clone()).points[0];
+    let target = current.target_temp_c;
+    let mut stable = ThermalFullSpeedStableTracker::new(target);
+    let mut guard = ThermalApproachGuardTracker::new(target, current.hold_entry_centi_c);
+    for sample in &samples {
+        stable.observe(
+            sample.current_temp_c,
+            sample.elapsed_ms,
+            sample.control_phase.as_deref(),
+        );
+        guard.observe(
+            sample.current_temp_c,
+            sample.elapsed_ms,
+            sample.control_phase.as_deref(),
+        );
+    }
+    let hold_start = samples.iter().position(|sample| {
+        sample.control_phase_in_hold
+            && sample.current_temp_c >= f64::from(target) - 0.5
+            && (sample.current_temp_c - f64::from(target)).abs() <= 3.0
+    });
+    let hold = hold_start.map(|start| &samples[start..]).unwrap_or(&[]);
+    let max_temp = samples
+        .iter()
+        .map(|sample| sample.current_temp_c)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let p2p = if hold.is_empty() {
+        f64::INFINITY
+    } else {
+        hold.iter()
+            .map(|sample| sample.current_temp_c)
+            .fold(f64::NEG_INFINITY, f64::max)
+            - hold
+                .iter()
+                .map(|sample| sample.current_temp_c)
+                .fold(f64::INFINITY, f64::min)
+    };
+    let result = ThermalStageResult {
+        target_temp_c: target,
+        rise_time_ms: hold.first().map_or(0, |sample| sample.elapsed_ms),
+        max_overshoot_c: (max_temp - f64::from(target)).max(0.0),
+        hold_peak_to_peak_c: p2p,
+        sample_count: samples.len(),
+        stop_reason,
+        terminal_runtime_drop_reason: None,
+        analysis: thermal_replay_stage_analysis(&samples, target),
+        guard: guard.finalize(),
+        full_speed_to_stable: stable.finalize(),
+    };
+    let stage = result.to_value();
+    let chart_samples = samples
+        .iter()
+        .map(|sample| {
+            json!({
+                "t": sample.elapsed_ms as f64 / 1000.0, "temp": sample.current_temp_c
+            })
+        })
+        .collect::<Vec<_>>();
+    let expected = apply_hold_confirm_reseed_nudge(
+        tune_thermal_candidate_point(current, &thermal_stage_result_from_value(&stage).unwrap()),
+        &stage,
+        &chart_samples,
+        target,
+    );
+    (expected, result)
+}
+
+fn replay_samples(rows: &[Value]) -> Vec<ThermalReplayStageSample> {
+    let origin = rows[0][0].as_u64().unwrap();
+    rows.iter()
+        .map(|row| ThermalReplayStageSample {
+            elapsed_ms: row[0].as_u64().unwrap() - origin,
+            current_temp_c: row[1].as_f64().unwrap() / 100.0,
+            heater_output_percent: (row[3].as_u64().unwrap() / 10) as u8,
+            control_phase: Some(row[4].as_str().unwrap().to_owned()),
+            control_phase_in_hold: row[4] == "hold",
+            source_voltage_mv: None,
+            source_current_ma: None,
+            source_power_mw: None,
+        })
+        .collect()
+}
+
 fn external_candidate(profile_value: &Value, rows: &[Value]) -> (ThermalCandidatePoint, String) {
     let origin = rows[0][0].as_u64().unwrap();
     let samples: Vec<ThermalReplayStageSample> = rows
@@ -147,6 +338,27 @@ fn external_candidate(profile_value: &Value, rows: &[Value]) -> (ThermalCandidat
 }
 
 fn firmware_candidate(profile_value: Value, rows: &[Value]) -> ThermalCandidatePoint {
+    let runtime = replay_firmware_trials(profile_value, rows, ThermalTuningTrialPurpose::Scout, 2);
+    assert_eq!(
+        runtime.trial_purpose,
+        ThermalTuningTrialPurpose::BatchPredicted
+    );
+    candidate_point_from_runtime(runtime)
+}
+
+fn candidate_point_from_runtime(runtime: ThermalTuningRuntime) -> ThermalCandidatePoint {
+    let actual_wire: ThermalControlProfileWire = runtime.candidate_profile.unwrap().into();
+    let actual_profile =
+        thermal_candidate_profile_from_value(serde_json::to_value(actual_wire).unwrap());
+    actual_profile.points[0]
+}
+
+fn replay_firmware_trials(
+    profile_value: Value,
+    rows: &[Value],
+    purpose: ThermalTuningTrialPurpose,
+    trial_count: u8,
+) -> ThermalTuningRuntime {
     let origin = rows[0][0].as_u64().unwrap();
     let mut wire_value = profile_value;
     wire_value["points"]
@@ -154,6 +366,7 @@ fn firmware_candidate(profile_value: Value, rows: &[Value]) -> ThermalCandidateP
         .unwrap()
         .resize(10, Value::Null);
     let wire: ThermalControlProfileWire = serde_json::from_value(wire_value).unwrap();
+    let target_c = wire.points[0].unwrap().target_temp_c;
     let profile = wire.into();
     let mut runtime = ThermalTuningRuntime::new();
     let candidate_id: TuningId = "candidate-replay".try_into().unwrap();
@@ -163,23 +376,24 @@ fn firmware_candidate(profile_value: Value, rows: &[Value]) -> ThermalCandidateP
             candidate_id: candidate_id.clone(),
             candidate_hash: hash_profile(&profile).unwrap(),
             power_class: ThermalTuningPowerClass::Pps5a,
-            targets: &[60],
+            targets: &[target_c],
             pps_ready: true,
             thermal_model_available: true,
             calibration_conflict: false,
             candidate_profile: Some(profile),
         })
         .unwrap();
+    runtime.trial_purpose = purpose;
     let mut cursor = None;
     // Drive both the scout and current batch through the real runtime so the
     // public profile contains the predicted candidate at its trial boundary.
-    for trial_index in 0..2 {
+    for trial_index in 0..trial_count {
         let offset = trial_index as u64 * 100_000;
         let hash = runtime.candidate_hash.clone().unwrap();
         let mut cooling = ThermalTuningSample {
             sequence: 0,
             elapsed_ms: offset,
-            target_c: 60,
+            target_c,
             trial_index,
             candidate_id: candidate_id.clone(),
             candidate_hash: hash,
@@ -214,14 +428,10 @@ fn firmware_candidate(profile_value: Value, rows: &[Value]) -> ThermalCandidateP
                 }
                 cursor = page.next_sequence;
             }
+            if runtime.trial_index != trial_index {
+                break;
+            }
         }
     }
-    assert_eq!(
-        runtime.trial_purpose,
-        ThermalTuningTrialPurpose::BatchPredicted
-    );
-    let actual_wire: ThermalControlProfileWire = runtime.candidate_profile.unwrap().into();
-    let actual_profile =
-        thermal_candidate_profile_from_value(serde_json::to_value(actual_wire).unwrap());
-    actual_profile.points[0]
+    runtime
 }

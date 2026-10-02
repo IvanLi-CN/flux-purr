@@ -6,7 +6,9 @@ use sha2::{Digest, Sha256};
 
 use crate::adapters::pd::{FUSB302B_PD_ABSOLUTE_MAX_MV, FUSB302B_PD_ABSOLUTE_MIN_MV};
 use crate::memory::{ThermalControlProfileConfig, ThermalControlProfilePointConfig};
-use crate::thermal_tuning_strategy::{CurveClass, TuneEvidence, tune_point};
+use crate::thermal_tuning_strategy::{
+    CurveClass, TuneEvidence, reseed_after_hold_confirm, tune_point,
+};
 
 pub const THERMAL_TUNING_TARGETS_C: [i16; 9] = [60, 80, 100, 120, 140, 160, 180, 220, 240];
 pub const THERMAL_TUNING_EXECUTION_ORDER_C: [i16; 9] = [60, 240, 140, 100, 80, 120, 180, 160, 220];
@@ -965,6 +967,48 @@ impl ThermalTuningRuntime {
         else {
             return;
         };
+        let evidence = self.candidate_failure_evidence(
+            target_c,
+            max_overshoot_centi_c,
+            hold_peak_to_peak_centi_c,
+            settle_time_ms,
+            full_speed_limit_ms,
+        );
+        let tuned = if self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm {
+            reseed_after_hold_confirm(previous, evidence)
+        } else {
+            tune_point(previous, evidence)
+        };
+        if tuned == previous {
+            return;
+        }
+        let Some(profile) = self.candidate_profile.as_mut() else {
+            return;
+        };
+        let Some(point) = profile
+            .points
+            .iter_mut()
+            .flatten()
+            .find(|point| point.target_temp_c == target_c)
+        else {
+            return;
+        };
+        *point = tuned;
+        if let Some(hash) = hash_profile(profile) {
+            self.candidate_hash = Some(hash);
+            self.preview_update_pending = true;
+            self.preview_receipt = None;
+        }
+    }
+
+    fn candidate_failure_evidence(
+        &self,
+        target_c: i16,
+        max_overshoot_centi_c: Option<u16>,
+        hold_peak_to_peak_centi_c: Option<u16>,
+        settle_time_ms: Option<u64>,
+        full_speed_limit_ms: u32,
+    ) -> TuneEvidence {
         let first_hold_error_c = self.first_hold_temperature_centi_c.map(|temperature| {
             f64::from(i32::from(target_c) * 100 - i32::from(temperature)) / 100.0
         });
@@ -973,7 +1017,7 @@ impl ThermalTuningRuntime {
         let mut slopes = self.approach_slopes_c_per_s.clone();
         slopes.sort_unstable_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
         let slope_index = slopes.len() / 2;
-        let evidence = TuneEvidence {
+        let mut evidence = TuneEvidence {
             target_c,
             tunable_stop: !self.near_target_evidence_overflow && !self.approach_curve_overflow,
             full_speed_failed: settle_time_ms
@@ -1032,27 +1076,20 @@ impl ThermalTuningRuntime {
             first_band_exit_centi_c: self.first_band_exit_centi_c,
             deadline_temperature_centi_c: self.deadline_nearest_temperature_centi_c,
         };
-        let tuned = tune_point(previous, evidence);
-        if tuned == previous {
-            return;
+        if self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm {
+            // Reconstruct the frozen host stage's Celsius differences before
+            // its rounded reseed steps, including exact half-step boundaries.
+            evidence.overshoot_c = self.max_temperature_centi_c.map_or(0.0, |maximum| {
+                (f64::from(maximum) / 100.0 - f64::from(target_c)).max(0.0)
+            });
+            evidence.hold_p2p_c = self
+                .min_hold_temperature_centi_c
+                .zip(self.max_hold_temperature_centi_c)
+                .map_or(0.0, |(minimum, maximum)| {
+                    f64::from(maximum) / 100.0 - f64::from(minimum) / 100.0
+                });
         }
-        let Some(profile) = self.candidate_profile.as_mut() else {
-            return;
-        };
-        let Some(point) = profile
-            .points
-            .iter_mut()
-            .flatten()
-            .find(|point| point.target_temp_c == target_c)
-        else {
-            return;
-        };
-        *point = tuned;
-        if let Some(hash) = hash_profile(profile) {
-            self.candidate_hash = Some(hash);
-            self.preview_update_pending = true;
-            self.preview_receipt = None;
-        }
+        evidence
     }
 
     fn reset_trial_metrics(&mut self) {
@@ -1387,7 +1424,9 @@ impl ThermalTuningRuntime {
     fn update_strategy_evidence(&mut self, sample: &ThermalTuningSample, target_c: i16) {
         let target_centi_c = i32::from(target_c) * 100;
         let error_centi_c = target_centi_c - i32::from(sample.temperature_centi_c);
-        if sample.phase == ThermalTuningPhase::Approach {
+        if sample.phase == ThermalTuningPhase::Approach
+            || (sample.phase == ThermalTuningPhase::Hold && self.saw_approach)
+        {
             let hold_entry = self
                 .candidate_profile
                 .as_ref()
