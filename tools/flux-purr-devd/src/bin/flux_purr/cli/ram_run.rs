@@ -12,6 +12,7 @@ use flux_purr_devd::serial::{
 use flux_purr_devd::serial::{RawUsbSerialJtagPort, open_raw_usb_serial_jtag_port};
 use flux_purr_devd::{PRODUCT_BUILD_ID, PRODUCT_SOURCE_SHA};
 use serialport::{FlowControl, SerialPort, SerialPortType, UsbPortInfo};
+use std::fs::OpenOptions;
 use std::time::{Duration, Instant};
 
 const IDENTITY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1380,8 +1381,18 @@ impl PdHilEvidence {
             events_path,
             summary_path,
             transcript_path,
-            events: BufWriter::new(File::create(directory.join("events.ndjson"))?),
-            transcript: BufWriter::new(File::create(directory.join("transcript.log"))?),
+            events: BufWriter::new(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(directory.join("events.ndjson"))?,
+            ),
+            transcript: BufWriter::new(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(directory.join("transcript.log"))?,
+            ),
         };
         evidence.record(&serde_json::json!({
             "kind": "metadata",
@@ -1428,7 +1439,12 @@ impl PdHilEvidence {
         self.record(summary)?;
         self.events.flush()?;
         self.transcript.flush()?;
-        let mut file = BufWriter::new(File::create(&self.summary_path)?);
+        let mut file = BufWriter::new(
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&self.summary_path)?,
+        );
         serde_json::to_writer_pretty(&mut file, summary)?;
         file.write_all(b"\n")?;
         file.flush()?;

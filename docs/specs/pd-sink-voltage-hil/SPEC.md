@@ -498,6 +498,14 @@ starts, one terminal line for every tier, and one line for final reset. The
 machine stream includes compact samples at the 50ms cadence; the human
 renderer may throttle those lines without losing them from the evidence file.
 
+The current owner-authorized `validateVin=false` external-source profile is a
+protocol/recovery diagnostic, not formal ADC acceptance. It emits live tier
+events and summary-boundary frames; the terminal summary is authoritative for
+capabilities, recovery, and aggregate tier evidence. It may omit device-side
+ADC sample frames because the device ADC is deliberately not used for this
+profile. Formal ADC acceptance remains a separate profile and must not be
+reported as passed by an external-source run.
+
 ### Terminal summary
 
 The terminal frame carries a structured summary even when a tier was

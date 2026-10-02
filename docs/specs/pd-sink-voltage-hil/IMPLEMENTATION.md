@@ -90,8 +90,8 @@ completed CLI acceptance.
 
 The owner-authorized external-source diagnostic record used for the current
 acceptance is kept locally under
-`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-postcommit`.
-It was generated from source SHA `c004902de8f4cf7fa5f7b5517fb895caa24d2c29`
+`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-pr-ready-2`.
+It was generated from source SHA `60eb5bdcda86eff0e7d42bd127629712ed8ab68a`
 and parses as `overall=external_source_pass`, `pd=default_verified`, `22/22`
 passing tiers, and a passing fixed 5V final reset. The directory is ignored
 local evidence, not a versioned PR artifact; a new run must use an empty

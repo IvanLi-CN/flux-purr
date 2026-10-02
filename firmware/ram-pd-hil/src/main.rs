@@ -850,7 +850,7 @@ mod device {
             || phy.read_interrupts().is_err()
             || phy.start_toggle(ToggleMode::Sink).is_err()
         {
-            return Err("fusb302b_initialization_failed");
+            return attach_failure(&mut phy, "fusb302b_initialization_failed");
         }
         let deadline = now_ms().saturating_add(ATTACH_TIMEOUT_MS);
         while now_ms() < deadline {
@@ -1513,12 +1513,14 @@ mod device {
             "capabilities_protocol_reset_waiting",
         );
         let wait_deadline = now_ms().saturating_add(CAPABILITIES_PROTOCOL_RESET_WAIT_MS);
+        let mut accepted = false;
         while now_ms() < wait_deadline {
             check_deadline(usb, cancel, deadline_ms)?;
             match receive_packet_with_probe(phy, message_id, source_message_id, |_| {}) {
                 ReceiveOutcome::Packet(packet) => {
-                    if let Ok(capabilities) =
-                        pd::decode_source_capabilities(packet.header(), packet.payload())
+                    if accepted
+                        && let Ok(capabilities) =
+                            pd::decode_source_capabilities(packet.header(), packet.payload())
                     {
                         emit_session_progress(
                             usb,
@@ -1539,6 +1541,7 @@ mod device {
                             sequence,
                             "capabilities_protocol_reset_accepted",
                         );
+                        accepted = true;
                     } else if pd::message_type(packet.header()) == 1
                         && pd::object_count(packet.header()) == 0
                     {
@@ -2065,6 +2068,38 @@ mod device {
             Ok(pending_packet) => pending_packet,
             Err(reason) => {
                 emit_session_progress(usb, request_id, &mut sequence, reason);
+                emit_session_progress(usb, request_id, &mut sequence, "attach_recovery_begin");
+                let mut phy = Fusb302::with_address(&mut measurements.i2c, I2C_ADDRESS);
+                let mut cleanup_cancel = CancelState::new();
+                let cleanup_deadline = now_ms().saturating_add(RECOVERY_TIMEOUT_MS);
+                let final_reset = reset_to_default(
+                    &mut phy,
+                    &mut measurements.adc,
+                    &mut measurements.vin,
+                    &measurements.vin_calibration,
+                    &measurements.pd_irq,
+                    false,
+                    validate_vin,
+                    usb,
+                    &mut cleanup_cancel,
+                    cleanup_deadline,
+                    request_id,
+                    &mut sequence,
+                    &mut message_id,
+                    &mut source_message_id,
+                    None,
+                    None,
+                )
+                .unwrap_or(ResetResult::FAILED);
+                emit_recovery_progress(
+                    usb,
+                    request_id,
+                    &mut sequence,
+                    pd::TOTAL_TIERS,
+                    final_reset,
+                );
+                result.final_reset = final_reset;
+                result.overall = "capability_discovery_failed";
                 return result;
             }
         };
@@ -2802,6 +2837,8 @@ mod tests {
         assert!(source.contains("soft_reset_header"));
         assert!(source.contains("capabilities_protocol_reset_accepted"));
         assert!(source.contains("capabilities_protocol_reset_begin"));
+        assert!(source.contains("let mut accepted = false"));
+        assert!(source.contains("if accepted\n                        && let Ok(capabilities)"));
         assert!(discovery.contains("capabilities_unavailable_after_protocol_reset"));
         assert!(query > 0);
     }
