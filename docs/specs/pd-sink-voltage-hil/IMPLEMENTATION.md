@@ -94,10 +94,9 @@ ladder through `21V`, but it did not receive a terminal summary and is not a
 completed CLI acceptance.
 
 The current-head external-source diagnostic record is kept locally under
-`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-pr-ready-final-3c6b6ecc-r2`.
-It was generated from source SHA
-`3c6b6eccc2660258482f9839ef5c2c9926eeb1bc`, build ID `3c6b6eccc2660258`, and
-the exact authorized port `/dev/cu.usbmodem21141401`. It parses as
+`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-pr-ready-current-head`.
+Its metadata records the source SHA and build ID of the current candidate, along
+with the exact authorized port `/dev/cu.usbmodem21141401`. It parses as
 `overall=external_source_pass`, `pd=default_verified`, `22/22` passing tiers,
 and a passing fixed 5V final reset. This is local evidence rather than a
 versioned PR artifact; the evidence directory records its own source SHA, USB
