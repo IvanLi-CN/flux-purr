@@ -1208,6 +1208,13 @@ fn read_identity(
 fn read_identity_from_serial(
     serial: &mut dyn SerialPort,
 ) -> Result<ObservedIdentity, Box<dyn std::error::Error + Send + Sync>> {
+    read_identity_from_serial_matching(serial, |_| true)
+}
+
+fn read_identity_from_serial_matching(
+    serial: &mut dyn SerialPort,
+    mut matches: impl FnMut(&ObservedIdentity) -> bool,
+) -> Result<ObservedIdentity, Box<dyn std::error::Error + Send + Sync>> {
     let deadline = Instant::now() + IDENTITY_TIMEOUT;
     let mut bytes = Vec::with_capacity(1024);
     let mut chunk = [0u8; 256];
@@ -1218,8 +1225,10 @@ fn read_identity_from_serial(
                     return Err("RAM bring-up response exceeded the JSONL frame limit".into());
                 }
                 bytes.extend_from_slice(&chunk[..count]);
-                if let Some(identity) = next_identity(&mut bytes) {
-                    return Ok(identity);
+                while let Some(identity) = next_identity(&mut bytes) {
+                    if matches(&identity) {
+                        return Ok(identity);
+                    }
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
@@ -3256,7 +3265,9 @@ fn load_ram_elf(
         })
     })?;
     let mut serial = connection.into_serial();
-    let identity = read_identity_from_serial(&mut serial)?;
+    let identity = read_identity_from_serial_matching(&mut serial, |identity| {
+        identity.build_id.as_deref() == Some(PRODUCT_BUILD_ID)
+    })?;
     Ok((identity, serial))
 }
 
