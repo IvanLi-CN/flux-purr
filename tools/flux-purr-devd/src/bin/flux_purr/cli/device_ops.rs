@@ -96,6 +96,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::RamRun { command } => execute_ram_run(command)?,
     };
 
+    let pd_hil_failed = ram_run::pd_hil_requires_nonzero(&payload);
     if cli.json {
         println!(
             "{}",
@@ -105,6 +106,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("{}", render_human(&payload)?);
     }
     drop(managed_devd);
+    if pd_hil_failed {
+        let overall = payload
+            .get("result")
+            .and_then(|result| result.get("overall"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(format!("PD HIL completed with overall={overall}").into());
+    }
     Ok(())
 }
 

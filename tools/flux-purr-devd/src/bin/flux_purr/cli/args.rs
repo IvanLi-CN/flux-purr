@@ -154,6 +154,16 @@ pub(crate) struct RamTestArgs {
     pub(crate) elf: Option<PathBuf>,
     #[arg(long)]
     pub(crate) reload: bool,
+    #[arg(
+        long,
+        help = "Local directory for PD HIL NDJSON evidence; defaults to a persistent system temp directory"
+    )]
+    pub(crate) evidence_dir: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Use external USB-C voltage evidence instead of VIN ADC validation"
+    )]
+    pub(crate) skip_vin_validation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -164,6 +174,7 @@ pub(crate) enum RamTestKind {
     Rgb,
     Buzzer,
     Fan,
+    PdSink,
 }
 
 impl RamTestKind {
@@ -175,6 +186,7 @@ impl RamTestKind {
             Self::Rgb => "test_rgb",
             Self::Buzzer => "test_buzzer",
             Self::Fan => "test_fan",
+            Self::PdSink => "test_pd_sink",
         }
     }
 }

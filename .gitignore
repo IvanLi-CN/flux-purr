@@ -15,6 +15,7 @@ web/test-results/
 firmware/target/
 firmware/target-*/
 firmware/ram-bringup/target/
+firmware/ram-pd-hil/target/
 
 # IDE / tools
 .vscode/

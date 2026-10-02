@@ -1453,8 +1453,18 @@ impl SerialSessionPort for Box<dyn serialport::SerialPort> {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) struct RawUsbSerialJtagPort {
+pub struct RawUsbSerialJtagPort {
     file: File,
+}
+
+#[cfg(target_os = "macos")]
+pub fn open_raw_usb_serial_jtag_port(port_path: &str) -> io::Result<RawUsbSerialJtagPort> {
+    File::options()
+        .read(true)
+        .write(true)
+        .custom_flags(MACOS_O_NONBLOCK)
+        .open(port_path)
+        .map(|file| RawUsbSerialJtagPort { file })
 }
 
 #[cfg(target_os = "macos")]
@@ -1949,20 +1959,15 @@ pub(crate) fn is_esp_usb_serial_jtag_port(port_path: &str) -> bool {
 pub(crate) fn open_serial_port(port_path: &str) -> Result<Box<dyn SerialSessionPort>, HttpError> {
     #[cfg(target_os = "macos")]
     if is_esp_usb_serial_jtag_port(port_path) {
-        let file = File::options()
-            .read(true)
-            .write(true)
-            .custom_flags(MACOS_O_NONBLOCK)
-            .open(port_path)
-            .map_err(|error| {
-                HttpError::new(
-                    StatusCode::BAD_GATEWAY,
-                    "serial_open_failed",
-                    &format!("Failed to open serial port: {error}"),
-                    true,
-                )
-            })?;
-        return Ok(Box::new(RawUsbSerialJtagPort { file }));
+        let port = open_raw_usb_serial_jtag_port(port_path).map_err(|error| {
+            HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "serial_open_failed",
+                &format!("Failed to open serial port: {error}"),
+                true,
+            )
+        })?;
+        return Ok(Box::new(port));
     }
 
     // USB Serial/JTAG does not use modem-control lines.  Explicit DTR/RTS writes

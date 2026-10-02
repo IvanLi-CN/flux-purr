@@ -278,6 +278,26 @@ _Avoid_: Requested Contract, VIN Reading, measured load current
 The minimum voltage, maximum voltage, and maximum current of the private PPS APDO that backs a Confirmed Active Contract. It is exposed to power policy so it can distinguish a continuous PPS adjustment from a request outside the current range; it does not expose the APDO object position.
 _Avoid_: APDO object position, Source Capabilities, requested voltage
 
+**PD HIL Session**:
+A bounded RAM bring-up session that discovers FUSB302B Source Capabilities, exercises exact Fixed PDO and PPS requests, samples the VIN Measurement Path, and returns the USB-C link to a verified attached fixed 5V recovery contract without interrupting VBUS. It is a validation surface, not a product Power Coordinator or a heater-power authority.
+_Avoid_: product PD session, production power request, measured load-current test
+
+**PD Test Tier**:
+One exact mode-and-voltage target in a PD HIL Session, together with the contractual current target, negotiation result, VIN hold evidence, and recovery result.
+_Avoid_: nearest supported voltage, fallback tier, voltage sweep without a contract boundary
+
+**Negotiated Current Target**:
+The operating current encoded in the RDO or PPS request after applying Source Capabilities and the HIL safety ceiling. It is a contractual current limit, not a measured VBUS load current.
+_Avoid_: current reading, source nameplate current, hardware over-current protection
+
+**VIN HIL Evidence**:
+The timestamped VIN Reading samples collected during a PD Test Tier's fixed hold interval. It verifies the device-side voltage observation only; it does not prove source-side current or power delivery.
+_Avoid_: VBUS current telemetry, power analyzer result, PD Contract
+
+**PD HIL Outcome**:
+The terminal classification of a PD Test Tier or session. Tier outcomes distinguish `pass`, `unsupported`, `negotiation_failed`, `measurement_failed`, and `recovery_failed`; session control outcomes such as cancellation, timeout, or port loss are recorded separately.
+_Avoid_: boolean-only test result, generic command error
+
 **Source Capabilities**:
 The Fixed PDOs and PPS APDOs most recently observed from the connected USB-C source. They describe what may be requested, not an established PD Contract.
 _Avoid_: PD Contract, source rating, requested contract
