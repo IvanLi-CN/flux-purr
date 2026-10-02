@@ -1350,6 +1350,21 @@ struct PdHilEvidence {
     transcript: BufWriter<File>,
 }
 
+fn prepare_pd_hil_evidence_directory(
+    directory: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let existed = directory.exists();
+    fs::create_dir_all(directory)?;
+    if existed && directory.read_dir()?.next().transpose()?.is_some() {
+        return Err(format!(
+            "PD HIL evidence directory must be empty before a run: {}",
+            directory.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
 impl PdHilEvidence {
     fn create(
         directory: &Path,
@@ -1357,7 +1372,7 @@ impl PdHilEvidence {
         identity: &UsbSerialIdentity,
         ram_identity: &ObservedIdentity,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        fs::create_dir_all(directory)?;
+        prepare_pd_hil_evidence_directory(directory)?;
         let events_path = directory.join("events.ndjson");
         let summary_path = directory.join("summary.json");
         let transcript_path = directory.join("transcript.log");
@@ -2455,6 +2470,7 @@ fn validate_pd_hil_policy(result: &serde_json::Map<String, Value>) -> Result<boo
         || policy.get("currentCeilingMa").and_then(Value::as_u64) != Some(5_000)
         || policy.get("minimumCurrentMa").and_then(Value::as_u64) != Some(3_000)
         || policy.get("recoveryMode").and_then(Value::as_str) != Some("fixed_5v_contract")
+        || policy.get("toleranceRule").and_then(Value::as_str) != Some("max(250mV,2.5%)")
     {
         return Err("result.policy does not match the approved PD HIL bounds".to_string());
     }
@@ -2601,18 +2617,41 @@ fn validate_pd_hil_tiers(
                 }
             }
             if !external_vin {
-                for field in [
+                let measured_fields = [
                     "minMeasuredVinMv",
                     "maxMeasuredVinMv",
                     "meanMeasuredVinMv",
                     "firstMeasuredVinMv",
                     "lastMeasuredVinMv",
-                ] {
+                ];
+                for field in measured_fields {
                     if tier.get(field).and_then(Value::as_u64).is_none() {
                         return Err(format!(
                             "result.tiers[{index}].{field} is required for ADC validation"
                         ));
                     }
+                }
+                let min = tier["minMeasuredVinMv"].as_u64().unwrap();
+                let max = tier["maxMeasuredVinMv"].as_u64().unwrap();
+                let mean = tier["meanMeasuredVinMv"].as_u64().unwrap();
+                let first = tier["firstMeasuredVinMv"].as_u64().unwrap();
+                let last = tier["lastMeasuredVinMv"].as_u64().unwrap();
+                if min > max
+                    || mean < min
+                    || mean > max
+                    || first < min
+                    || first > max
+                    || last < min
+                    || last > max
+                {
+                    return Err(format!(
+                        "result.tiers[{index}] contains incoherent ADC sample statistics"
+                    ));
+                }
+                if tier["invalidSampleCount"].as_u64().unwrap() > 3 {
+                    return Err(format!(
+                        "result.tiers[{index}].invalidSampleCount exceeds the ADC limit"
+                    ));
                 }
             }
             pass_count += 1;
@@ -2662,6 +2701,19 @@ fn validate_pd_hil_final_reset(
             .is_none_or(|count| count < 8)
         {
             return Err("result.finalReset.defaultSampleCount must be at least 8".to_string());
+        }
+        if !external_vin {
+            for field in ["defaultAdcMv", "defaultAdcRawCode"] {
+                if final_reset
+                    .get(field)
+                    .and_then(Value::as_u64)
+                    .is_none_or(|value| value == 0)
+                {
+                    return Err(format!(
+                        "result.finalReset.{field} is required for ADC validation"
+                    ));
+                }
+            }
         }
         let matrix_complete = result
             .get("tiers")
@@ -3206,6 +3258,7 @@ mod tests {
                     "currentCeilingMa": 5000,
                     "minimumCurrentMa": 3000,
                     "recoveryMode": "fixed_5v_contract",
+                    "toleranceRule": "max(250mV,2.5%)",
                 },
                 "sourceCapabilities": {
                     "count": 1,
@@ -3228,6 +3281,8 @@ mod tests {
                     "activeContract": {"mode": "fixed", "voltageMv": 5000, "currentMa": 3000},
                     "pendingRequest": null,
                     "defaultVbusMv": 5000,
+                    "defaultAdcMv": 418,
+                    "defaultAdcRawCode": 512,
                     "defaultSampleCount": 10,
                 },
             },
@@ -3307,6 +3362,7 @@ mod tests {
                     "currentCeilingMa": 5000,
                     "minimumCurrentMa": 3000,
                 "recoveryMode": "fixed_5v_contract",
+                    "toleranceRule": "max(250mV,2.5%)",
                 },
                 "sourceCapabilities": {
                     "count": 1,
@@ -3320,6 +3376,8 @@ mod tests {
                     "activeContract": {"mode": "fixed", "voltageMv": 5000, "currentMa": 3000},
                     "pendingRequest": null,
                     "defaultVbusMv": 5000,
+                    "defaultAdcMv": 418,
+                    "defaultAdcRawCode": 512,
                     "defaultSampleCount": 10,
                 },
             },

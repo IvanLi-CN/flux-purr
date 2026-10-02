@@ -84,6 +84,10 @@ jobs:
         if: needs.classify.outputs.kind == 'source'
         run: cargo test --locked -p flux-purr-ram-bringup --all-targets
 
+      - name: PD HIL firmware protocol tests
+        if: needs.classify.outputs.kind == 'source'
+        run: cargo test --locked --manifest-path firmware/ram-pd-hil/Cargo.toml
+
       - name: Setup Xtensa toolchain
         if: needs.classify.outputs.kind == 'source'
         uses: ./.github/actions/setup-xtensa
@@ -93,6 +97,10 @@ jobs:
       - name: RAM bring-up ELF build
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/build-ram-bringup.sh
+
+      - name: PD HIL RAM ELF build and safety gate
+        if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/build-ram-pd-hil.sh
 
       - name: RAM ELF safety checker
         if: needs.classify.outputs.kind == 'source'

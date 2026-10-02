@@ -88,13 +88,14 @@ recovery tier 23 and observed the fixed `5/9/12/15/20V` plateaus plus the PPS
 ladder through `21V`, but it did not receive a terminal summary and is not a
 completed CLI acceptance.
 
-The completed external-source diagnostic evidence is
-`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-reviewrepair`.
-The terminal summary parses as `overall=external_source_pass`,
-`pd=default_verified`, `22/22` passing tiers, and a passing fixed 5V final
-reset. The evidence contains the complete matrix, raw and decoded capability
-objects, per-tier contract/hold timing and sample counts, `events.ndjson`,
-`summary.json`, and `transcript.log`. The independent IsolaPurr record for
+The latest owner-authorized external-source diagnostic record is kept locally
+under `target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-final-recovered`.
+It was regenerated from the accepted source SHA and parses as
+`overall=external_source_pass`, `pd=default_verified`, `22/22` passing tiers,
+and a passing fixed 5V final reset. The directory is ignored local evidence,
+not a versioned PR artifact; a new run must use an empty directory and record
+its own source SHA, USB identity, command line, and complete file set before
+being cited for physical acceptance. The independent IsolaPurr record for
 device `856a141cdbd4`, `port_c`, reports `power_enabled=true`,
 `data_connected=true`, `status=ok`, and `5044mV` after the run. The
 external-source acceptance did not use ADC voltage validation.

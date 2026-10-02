@@ -959,7 +959,7 @@ mod device {
         let Some(last) = last else {
             return true;
         };
-        current != last
+        current == ((last + 1) & 0x07)
     }
 
     fn observe_source_message_id(packet: &PdPacket, last: &mut Option<u8>) -> bool {
@@ -2757,6 +2757,17 @@ mod tests {
 
         assert!(result.starts_with("{\"kind\":\"tier\""));
         assert!(result.len() < 512);
+    }
+
+    #[test]
+    fn source_message_id_accepts_only_the_next_modulo_eight_id() {
+        let source = include_str!("main.rs");
+        let helper = source
+            .split("fn source_message_id_is_fresh")
+            .nth(1)
+            .and_then(|value| value.split("fn observe_source_message_id").next())
+            .expect("source message-id freshness helper must remain present");
+        assert!(helper.contains("current == ((last + 1) & 0x07)"));
     }
 
     #[test]

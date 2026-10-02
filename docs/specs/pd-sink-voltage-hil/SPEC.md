@@ -616,8 +616,11 @@ redacted when the artifact leaves the local validation environment.
 - Maximum current is `min(sourceAdvertisedMaxMa, 5000)` with a `3000mA`
   minimum. It is a negotiated limit, never measured load current.
 - Final reset verifies an attached sink at Type-C default VBUS with a stable
-  fixed 5V recovery contract and no pending request; the candidate window is
-  `5000mV +/- 250mV` for `500ms`.
+  fixed 5V recovery contract and no pending request. For formal ADC acceptance,
+  the measured candidate window is `5000mV +/- 250mV` for `500ms`; an
+  external-source diagnostic records `defaultVbusMv=0` and relies on the
+  protocol/sample-count checks plus the operator's independent source-side
+  observation. That observation is never consumed or bound by the CLI.
 - Formal device VIN ADC evidence is required. External electrical measurement
   is optional independent evidence for formal runs and is the operator-side
   required voltage evidence for `validateVin=false` diagnostic runs; the CLI
