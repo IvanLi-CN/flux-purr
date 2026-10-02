@@ -178,6 +178,33 @@ fn renders_ram_response_details_and_button_states() {
 }
 
 #[test]
+fn renders_pd_hil_failure_without_claiming_a_voltage() {
+    let rendered = render_human(&json!({
+        "ok": false,
+        "firmwareKind": "ram_bringup",
+        "capability": "test_pd_sink",
+        "result": {
+            "detail": "pd_hil_host_failure",
+            "heater": "unknown",
+            "pd": "unknown",
+            "eeprom": "untouched",
+            "overall": "port_lost",
+            "policy": {"vinValidation": "adc"},
+            "tiers": [],
+            "finalReset": {
+                "status": "fail",
+                "activeContract": null,
+                "pendingRequest": null,
+                "defaultVbusMv": null,
+            },
+        },
+    }))
+    .unwrap();
+    assert!(rendered.contains("PD HIL SUMMARY overall=PORT_LOST"));
+    assert!(rendered.contains("vbusObservation=unknown"));
+}
+
+#[test]
 fn renders_ram_fan_voltage_warning_and_evidence() {
     let rendered = render_human(&json!({
         "ok": true,

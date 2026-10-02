@@ -35,6 +35,7 @@ const PD_HIL_ELF_RELATIVE_PATH: &str =
 const RAM_PROTOCOL_VERSION: &str = "flux-purr.usb.v1";
 const RAM_FRAMING: &str = "jsonl";
 const PD_HIL_CAPABILITY: &str = "test_pd_sink";
+const PD_HIL_MAX_SOURCE_PDOS: u64 = 7;
 
 #[cfg(target_os = "macos")]
 type ReconnectedPdHilSerial = RawUsbSerialJtagPort;
@@ -147,13 +148,20 @@ fn run_pd_hil(args: &RamTestArgs) -> Result<Value, Box<dyn std::error::Error + S
         .evidence_dir
         .as_deref()
         .ok_or("ram-run test pd-sink requires --evidence-dir")?;
-    let session = open_ram_session(
+    let validate_vin = !args.skip_vin_validation;
+    let session = match open_ram_session(
         &args.port,
         args.elf.as_deref(),
         args.reload,
         PD_HIL_CAPABILITY,
-    )?;
-    send_pd_hil_request(&args.port, session, evidence_dir, !args.skip_vin_validation)
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            let error = format!("PD HIL serial preflight failed: {error}");
+            return finish_pd_hil_preflight_failure(&args.port, evidence_dir, &error, validate_vin);
+        }
+    };
+    send_pd_hil_request(&args.port, session, evidence_dir, validate_vin)
 }
 
 struct RamSession {
@@ -1370,8 +1378,8 @@ impl PdHilEvidence {
     fn create(
         directory: &Path,
         port: &str,
-        identity: &UsbSerialIdentity,
-        ram_identity: &ObservedIdentity,
+        identity: Option<&UsbSerialIdentity>,
+        ram_identity: Option<&ObservedIdentity>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         prepare_pd_hil_evidence_directory(directory)?;
         let events_path = directory.join("events.ndjson");
@@ -1398,18 +1406,18 @@ impl PdHilEvidence {
             "kind": "metadata",
             "schemaVersion": 1,
             "port": port,
-            "usbIdentity": {
+            "usbIdentity": identity.map_or(Value::Null, |identity| serde_json::json!({
                 "vid": identity.vid,
                 "pid": identity.pid,
                 "serialNumber": identity.serial_number,
-            },
+            })),
             "buildId": PRODUCT_BUILD_ID,
             "protocolVersion": RAM_PROTOCOL_VERSION,
             "framing": RAM_FRAMING,
-            "ramIdentity": {
-                "resetReason": ram_identity.reset_reason,
-                "sourceSha": ram_identity.source_sha,
-            },
+            "ramIdentity": ram_identity.map_or(Value::Null, |identity| serde_json::json!({
+                "resetReason": identity.reset_reason,
+                "sourceSha": identity.source_sha,
+            })),
             "createdAtUnixMs": current_unix_millis(),
         }))?;
         Ok(evidence)
@@ -1532,7 +1540,18 @@ fn finish_pd_hil_evidence(
     Ok(summary)
 }
 
-fn pd_hil_failure_summary(request_id: &str, reason: &str) -> Value {
+fn pd_hil_failure_summary(request_id: &str, reason: &str, validate_vin: bool) -> Value {
+    let overall = if reason.contains("timed out") {
+        "global_timeout"
+    } else if reason.contains("serial")
+        || reason.contains("USB target")
+        || reason.contains("serial port")
+        || reason.contains("port")
+    {
+        "port_lost"
+    } else {
+        "capability_discovery_failed"
+    };
     serde_json::json!({
         "type": "pd_hil_failure",
         "requestId": request_id,
@@ -1541,10 +1560,29 @@ fn pd_hil_failure_summary(request_id: &str, reason: &str) -> Value {
         "ok": false,
         "result": {
             "detail": "pd_hil_host_failure",
-            "heater": "off",
+            "heater": "unknown",
             "pd": "unknown",
             "eeprom": "untouched",
-            "overall": "host_failure",
+            "overall": overall,
+            "schemaVersion": 1,
+            "controller": "fusb302b",
+            "policy": {
+                "vinValidation": if validate_vin { "adc" } else { "external_source" },
+            },
+            "sourceCapabilities": {
+                "count": 0,
+                "rawPdos": [],
+                "objects": [],
+            },
+            "tiers": [],
+            "finalReset": {
+                "status": "fail",
+                "pdProtocol": "unknown",
+                "activeContract": null,
+                "pendingRequest": null,
+                "defaultVbusMv": null,
+                "reason": "host_transport_failure",
+            },
             "reason": reason,
         },
     })
@@ -1656,7 +1694,8 @@ fn send_pd_hil_request(
         serial,
     } = session;
     let mut serial = Some(serial);
-    let mut evidence = PdHilEvidence::create(evidence_dir, port, &usb_identity, &identity)?;
+    let mut evidence =
+        PdHilEvidence::create(evidence_dir, port, Some(&usb_identity), Some(&identity))?;
     let deadline = Instant::now() + PD_HIL_COMMAND_TIMEOUT;
     let request_id = format!("pd-hil-{}", current_unix_millis());
     let request = build_pd_hil_request(&request_id, validate_vin);
@@ -1674,8 +1713,12 @@ fn send_pd_hil_request(
             "wire": request.trim_end(),
         }))?;
         let serial_port = serial.as_mut().expect("PD HIL serial must be present");
-        serial_port.write_all(request.as_bytes())?;
-        serial_port.flush()?;
+        serial_port
+            .write_all(request.as_bytes())
+            .map_err(|error| format!("PD HIL serial transport write failed: {error}"))?;
+        serial_port
+            .flush()
+            .map_err(|error| format!("PD HIL serial transport flush failed: {error}"))?;
 
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1687,7 +1730,11 @@ fn send_pd_hil_request(
                         let serial_port = serial
                             .as_mut()
                             .ok_or("PD HIL serial was closed before recovery")?;
-                        serial_port.set_timeout(remaining.min(Duration::from_millis(250)))?;
+                        serial_port
+                            .set_timeout(remaining.min(Duration::from_millis(250)))
+                            .map_err(|error| {
+                                format!("PD HIL serial transport timeout setup failed: {error}")
+                            })?;
                         serial_port.read(&mut chunk)
                     }
                     Err(error) => Err(std::io::Error::new(
@@ -1743,7 +1790,9 @@ fn send_pd_hil_request(
                         "port": port,
                     }))?;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    return Err(format!("PD HIL serial transport read failed: {error}").into());
+                }
             }
         }
         Err("PD HIL response timed out; no terminal summary was received".into())
@@ -1755,10 +1804,10 @@ fn send_pd_hil_request(
             let finalization = finish_pd_hil_evidence(
                 evidence,
                 evidence_dir,
-                pd_hil_failure_summary(&request_id, &message),
+                pd_hil_failure_summary(&request_id, &message, validate_vin),
             );
             match finalization {
-                Ok(_) => Err(message.into()),
+                Ok(summary) => Ok(summary),
                 Err(finalization_error) => Err(format!(
                     "{message}; PD HIL evidence finalization failed in {}: {finalization_error}",
                     evidence_dir.display()
@@ -1767,6 +1816,27 @@ fn send_pd_hil_request(
             }
         }
     }
+}
+
+fn finish_pd_hil_preflight_failure(
+    port: &str,
+    evidence_dir: &Path,
+    reason: &str,
+    validate_vin: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let request_id = format!("pd-hil-{}", current_unix_millis());
+    let mut evidence = PdHilEvidence::create(evidence_dir, port, None, None)?;
+    evidence.record(&serde_json::json!({
+        "kind": "preflight_error",
+        "requestId": request_id,
+        "error": reason,
+        "vinValidation": if validate_vin { "adc" } else { "external_source" },
+    }))?;
+    finish_pd_hil_evidence(
+        evidence,
+        evidence_dir,
+        pd_hil_failure_summary(&request_id, reason, validate_vin),
+    )
 }
 
 fn reopen_pd_hil_serial(
@@ -2285,6 +2355,12 @@ fn validate_pd_hil_summary(
         .get("count")
         .and_then(Value::as_u64)
         .ok_or_else(|| "result.sourceCapabilities.count is missing".to_string())?;
+    if capability_count > PD_HIL_MAX_SOURCE_PDOS {
+        return Err(format!(
+            "result.sourceCapabilities.count exceeds the {}-object PD limit",
+            PD_HIL_MAX_SOURCE_PDOS
+        ));
+    }
     let raw_pdos = source_capabilities
         .get("rawPdos")
         .and_then(Value::as_array)
@@ -2328,6 +2404,11 @@ fn validate_pd_hil_summary(
         ) {
             return Err(format!(
                 "result.sourceCapabilities.objects[{index}].mode is invalid"
+            ));
+        }
+        if object.get("position").and_then(Value::as_u64) != Some(index as u64 + 1) {
+            return Err(format!(
+                "result.sourceCapabilities.objects[{index}].position must be contiguous"
             ));
         }
         if object.get("raw") != raw_pdos.get(index) {
@@ -2626,6 +2707,76 @@ fn validate_pd_hil_tiers(
             return Err(format!(
                 "result.tiers[{index}].reason is required for a non-passing tier"
             ));
+        }
+        if status == "unsupported" {
+            if !matches!(
+                reason,
+                "outside_hil_envelope"
+                    | "no_exact_fixed_pdo"
+                    | "no_exact_pps_apdo"
+                    | "source_current_below_3000ma"
+            ) {
+                return Err(format!(
+                    "result.tiers[{index}].reason is not an approved unsupported reason"
+                ));
+            }
+            if reason == "outside_hil_envelope" {
+                return Err(format!(
+                    "result.tiers[{index}] cannot be outside the approved tier envelope"
+                ));
+            }
+            if tier.get("selectedObjectPosition").and_then(Value::as_u64) != Some(0)
+                || tier.get("contractConfirmed").and_then(Value::as_bool) != Some(false)
+                || tier.get("requestSentAtMs").and_then(Value::as_u64) != Some(0)
+                || tier.get("contractCurrentMa").and_then(Value::as_u64) != Some(0)
+            {
+                return Err(format!(
+                    "result.tiers[{index}] unsupported row must prove that no request was sent"
+                ));
+            }
+            let mode = tier.get("mode").and_then(Value::as_str).unwrap_or_default();
+            if (reason == "no_exact_fixed_pdo" && mode != "fixed")
+                || (reason == "no_exact_pps_apdo" && mode != "pps")
+            {
+                return Err(format!(
+                    "result.tiers[{index}].reason does not match its mode"
+                ));
+            }
+            let matching_objects = source_objects
+                .iter()
+                .filter(|object| {
+                    let object_mode = object.get("mode").and_then(Value::as_str);
+                    let min_mv = object.get("minMv").and_then(Value::as_u64);
+                    let max_mv = object.get("maxMv").and_then(Value::as_u64);
+                    (mode == "fixed"
+                        && object_mode == Some("fixed")
+                        && min_mv == Some(target_mv)
+                        && max_mv == Some(target_mv))
+                        || (mode == "pps"
+                            && object_mode == Some("pps")
+                            && min_mv.is_some_and(|min| min <= target_mv)
+                            && max_mv.is_some_and(|max| target_mv <= max))
+                })
+                .collect::<Vec<_>>();
+            if reason == "no_exact_fixed_pdo" || reason == "no_exact_pps_apdo" {
+                if !matching_objects.is_empty() {
+                    return Err(format!(
+                        "result.tiers[{index}] claims no matching source object"
+                    ));
+                }
+            } else if matching_objects.is_empty()
+                || matching_objects.iter().any(|object| {
+                    object
+                        .get("maxMa")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default()
+                        >= 3_000
+                })
+            {
+                return Err(format!(
+                    "result.tiers[{index}] current-limited reason lacks matching sub-3A objects"
+                ));
+            }
         }
         if status == "pass" {
             if tier.get("contractConfirmed").and_then(Value::as_bool) != Some(true) {
@@ -3400,7 +3551,7 @@ mod tests {
                 "sourceCapabilities": {
                     "count": 1,
                     "rawPdos": [123],
-                    "objects": [{"position": 1, "mode": "fixed", "minMv": 5000, "maxMv": 5000, "maxMa": 3000, "raw": 123}],
+                    "objects": [{"position": 1, "mode": "fixed", "minMv": 5000, "maxMv": 5000, "maxMa": 2500, "raw": 123}],
                 },
                 "tiers": (0..22).map(|index| serde_json::json!({
                     "mode": if index < 5 { "fixed" } else { "pps" },
@@ -3410,7 +3561,17 @@ mod tests {
                         5000 + (index - 5) * 1000
                     },
                     "status": "unsupported",
-                    "reason": "no_exact_fixed_pdo",
+                    "reason": if index == 0 {
+                        "source_current_below_3000ma"
+                    } else if index < 5 {
+                        "no_exact_fixed_pdo"
+                    } else {
+                        "no_exact_pps_apdo"
+                    },
+                    "selectedObjectPosition": 0,
+                    "contractConfirmed": false,
+                    "requestSentAtMs": 0,
+                    "contractCurrentMa": 0,
                 })).collect::<Vec<_>>(),
                 "finalReset": {
                     "status": "pass",
@@ -3612,6 +3773,28 @@ mod tests {
         let mut incomplete = summary;
         incomplete["result"]["tiers"][21]["status"] = Value::String("unsupported".to_string());
         assert!(validate_ram_success_response(&incomplete, PD_HIL_CAPABILITY).is_err());
+    }
+
+    #[test]
+    fn pd_hil_host_failure_summary_preserves_unknown_hardware_state() {
+        let summary = pd_hil_failure_summary("pd-hil-failure", "serial port timed out", false);
+
+        assert_eq!(summary["type"], "pd_hil_failure");
+        assert_eq!(summary["ok"], false);
+        assert_eq!(summary["result"]["overall"], "global_timeout");
+        assert_eq!(summary["result"]["heater"], "unknown");
+        assert_eq!(summary["result"]["pd"], "unknown");
+        assert_eq!(summary["result"]["eeprom"], "untouched");
+        assert_eq!(
+            summary["result"]["policy"]["vinValidation"],
+            "external_source"
+        );
+        assert_eq!(summary["result"]["finalReset"]["status"], "fail");
+        assert_eq!(
+            summary["result"]["finalReset"]["activeContract"],
+            Value::Null
+        );
+        assert_eq!(summary["result"]["tiers"].as_array().unwrap().len(), 0);
     }
 
     #[test]

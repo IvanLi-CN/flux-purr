@@ -206,14 +206,10 @@ fn render_pd_hil_summary(
         .unwrap_or("adc");
     let vbus_observation = if vin_validation == "external_source" {
         "unmeasured".to_string()
+    } else if let Some(default_vbus_mv) = final_reset.get("defaultVbusMv").and_then(Value::as_u64) {
+        format!("{default_vbus_mv}mV")
     } else {
-        format!(
-            "{}mV",
-            final_reset
-                .get("defaultVbusMv")
-                .and_then(Value::as_u64)
-                .unwrap_or_default()
-        )
+        "unknown".to_string()
     };
     Ok(format!(
         "PD HIL SUMMARY overall={} vinValidation={} pass={} unsupported={} negotiation_failed={} measurement_failed={} recovery_failed={} reset={} pd={} vbusObservation={} evidence={}",

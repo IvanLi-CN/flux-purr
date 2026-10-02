@@ -217,8 +217,8 @@ or `loadPower`.
 
 ### External-source diagnostic mode
 
-The host may request `validateVin=false` for a diagnostic run when an
-independent source-side voltage record is available. In this mode the device
+The host may request `validateVin=false` for a diagnostic run only when the
+operator will retain an independent source-side voltage record. In this mode the device
 does not use the VIN ADC during tier holds. It requires the negotiated PD
 contract, `VBUSOK`, a two-second hold, and the normal sample cadence, while the
 independent source record supplies the voltage judgment. Recovery ADC fields,
@@ -320,13 +320,17 @@ to `recovery_failed`.
   terminal cleanup boundary. It cancels pending work, prevents stale
   completion, preserves the attached CC/Rd session, re-applies the receive
   PHY, and negotiates a fixed 5V recovery contract. If the initial
-  advertisement window expires on a RAM-reloaded session, the sink sends one
-  bounded `Get_Source_Capabilities` query. If the source returns only GoodCRC,
-  the sink sends one numbered USB-PD Soft Reset using the inherited next sink
-  Message ID and waits for `Accept` followed by a fresh Source Capabilities
-  advertisement. After `Accept`, the sink resets its local Message ID to zero.
-  It must not use the local FUSB302B PD reset, restart Type-C toggle, or
-  withdraw CC/Rd.
+  advertisement window expires, the sink sends one bounded
+  `Get_Source_Capabilities` query. If the source returns only GoodCRC, a fresh
+  protocol session may trigger one numbered USB-PD Soft Reset using the current
+  sink Message ID and waits for `Accept` followed by a fresh Source
+  Capabilities advertisement. If
+  the attached session's Sink Message ID cannot be recovered
+  from the retained hardware boundary, the sink sends one USB-PD Hard Reset to
+  establish a fresh protocol epoch, waits for the source to return to the
+  default contract, and starts discovery from Message ID zero. It must not
+  guess a retained Message ID or use the local FUSB302B PD reset, restart
+  Type-C toggle, or withdraw CC/Rd.
 - Before every tier, Fixed or PPS, refresh Source Capabilities while the
   previous contract remains active, select only the exact requested object,
   and send the replacement request directly. A cached capability set must not
@@ -363,10 +367,12 @@ never replays the failed RDO and never substitutes a fixed 5V recovery request
 between tiers.
 
 The recovery path must never restart Type-C toggle. A RAM reload can leave the
-source in a PD message-id session that the new sink image cannot recover. After
-the initial advertisement window expires, the image sends one bounded
-`Get_Source_Capabilities` query. A GoodCRC-only response triggers one explicit
-numbered USB-PD Soft Reset using the inherited next sink Message ID. The image
+source in a PD message-id session that the new sink image cannot recover. At
+that retained-session boundary, the image sends one USB-PD Hard Reset, waits
+for the source to return to the default contract, and starts discovery from
+Message ID zero. For a fresh protocol session, the initial advertisement
+window may fall back to one bounded `Get_Source_Capabilities` query and, if the
+current sink Message ID is known, one numbered USB-PD Soft Reset. The image
 waits for `Accept`, resets its local Message ID to zero, and then waits for the
 source advertisement while CC/Rd remains asserted. The HIL evidence records
 the reset and the new capability boundary. A failure to receive the post-reset
@@ -614,9 +620,9 @@ Each run produces, at minimum:
   `holdFinishedAt` for every tier;
 - VIN sample statistics, ADC raw/calibrated evidence, and the configured
   tolerance rule for formal ADC runs;
-- an operator-retained independent source-side voltage record for
-  `validateVin=false` diagnostic runs, when available; the CLI does not create,
-  locate, parse, or machine-bind this record;
+- an operator-retained independent source-side voltage record for every
+  `validateVin=false` diagnostic run; the CLI does not create, locate, parse,
+  or machine-bind this record;
 - every tier status and reason, including unsupported rows;
 - capability-refresh records for every tier and final fixed 5V recovery
   verification in the formal profile; external-source diagnostics may rely on
@@ -627,9 +633,9 @@ Each run produces, at minimum:
 For formal ADC runs, the host must write an NDJSON event file containing the
 raw 50ms sample events and a final JSON summary beneath an explicit
 operator-selected evidence directory. An external-source diagnostic may omit
-device ADC sample events. The operator may retain the independent source-side
-voltage record beside the PD evidence; the CLI does not require or consume that
-record. The evidence directory is a local
+device ADC sample events. The operator must retain the independent source-side
+voltage record beside the PD evidence; the CLI does not require its path,
+consume it, or machine-bind that record. The evidence directory is a local
 artifact path, not a device write path. Sensitive serial identity data must be
 redacted when the artifact leaves the local validation environment.
 
@@ -642,7 +648,8 @@ redacted when the artifact leaves the local validation environment.
 - Final reset verifies an attached sink at Type-C default VBUS with a stable
   fixed 5V recovery contract and no pending request. For formal ADC acceptance,
   the measured candidate window is `5000mV +/- 250mV` for `500ms`; an
-  external-source diagnostic records `defaultVbusMv=0` and relies on the
+  external-source diagnostic records `defaultVbusMv=0` as an explicit
+  unmeasured sentinel and relies on the
   protocol/sample-count checks plus the operator's independent source-side
   observation. That observation is never consumed or bound by the CLI.
 - Formal device VIN ADC evidence is required. External electrical measurement

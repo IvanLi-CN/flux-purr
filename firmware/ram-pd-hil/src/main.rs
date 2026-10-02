@@ -729,33 +729,6 @@ mod device {
         emit_progress(usb, request_id, sequence, result.as_str());
     }
 
-    fn capture_pending_source_capabilities<I2C: embedded_hal::i2c::I2c>(
-        phy: &mut Fusb302<I2C>,
-    ) -> Option<PdPacket> {
-        // RAM loading does not reset the external FUSB302B. A product session
-        // may therefore have queued Source_Capabilities before this image
-        // starts. Capture that frame before init() flushes the hardware FIFO.
-        for _ in 0..4 {
-            let status = phy.read_status().ok()?;
-            if status.status0 & STATUS0_VBUSOK == 0
-                || status.status1 & STATUS1_RX_EMPTY != 0
-                || status.status0 & STATUS0_CRC_CHECK == 0
-                || status.status1a & STATUS1A_RXSOP == 0
-            {
-                return None;
-            }
-            let packet = phy.receive().ok().flatten()?;
-            if pd::decode_source_capabilities(packet.header(), packet.payload()).is_ok() {
-                super::rom_diag_hex_u32(
-                    b"ram_pd_hil_preinit_source_caps_header=0x",
-                    u32::from(packet.header()),
-                );
-                return Some(packet);
-            }
-        }
-        None
-    }
-
     fn existing_attachment_polarity<I2C: embedded_hal::i2c::I2c>(i2c: &mut I2C) -> Option<CcPin> {
         // The production PD service leaves the selected measurement switch
         // armed after Type-C attach. Read that retained hardware state before
@@ -780,10 +753,16 @@ mod device {
         Err(reason)
     }
 
+    fn reset_retained_pd_session<I2C: embedded_hal::i2c::I2c>(phy: &mut Fusb302<I2C>) -> bool {
+        // RAM takeover cannot recover the product sink's private Message ID
+        // counter from FUSB302 state. A hard reset is the only protocol
+        // boundary that resets both peers to Message ID 0 without guessing.
+        phy.flush_fifos().is_ok() && phy.transmit_hard_reset().is_ok()
+    }
+
     fn attach_sink(i2c: &mut I2cBus) -> Result<Option<PdPacket>, &'static str> {
         let retained_polarity = existing_attachment_polarity(&mut *i2c);
         let mut phy = Fusb302::with_address(&mut *i2c, I2C_ADDRESS);
-        let pending_source_capabilities = capture_pending_source_capabilities(&mut phy);
         let mut source_message_id = None;
 
         // RAM loading does not reset the external FUSB302B. If the production
@@ -800,15 +779,11 @@ mod device {
             if !configure_attached(&mut phy, polarity) {
                 return attach_failure(&mut phy, "fusb302b_attached_configuration_failed");
             }
-            if pending_source_capabilities.is_some() {
-                return Ok(pending_source_capabilities);
+            if !reset_retained_pd_session(&mut phy) {
+                return attach_failure(&mut phy, "fusb302b_retained_protocol_reset_failed");
             }
-            let mut message_id = 0;
-            return Ok(receive_packet(
-                &mut phy,
-                &mut message_id,
-                &mut source_message_id,
-            ));
+            delay_ms(PD_TX_SETTLE_MS);
+            return Ok(None);
         }
 
         if phy.init().is_err()
@@ -840,15 +815,11 @@ mod device {
             if !configure_attached(&mut phy, polarity) {
                 return attach_failure(&mut phy, "fusb302b_attached_configuration_failed");
             }
-            if pending_source_capabilities.is_some() {
-                return Ok(pending_source_capabilities);
+            if !reset_retained_pd_session(&mut phy) {
+                return attach_failure(&mut phy, "fusb302b_retained_protocol_reset_failed");
             }
-            let mut message_id = 0;
-            return Ok(receive_packet(
-                &mut phy,
-                &mut message_id,
-                &mut source_message_id,
-            ));
+            delay_ms(PD_TX_SETTLE_MS);
+            return Ok(None);
         }
 
         if phy.set_measure_cc(None).is_err()
@@ -876,9 +847,6 @@ mod device {
                         // source may advertise once during attach, and the
                         // FUSB302B receive FIFO is too small to defer this
                         // first read until the normal discovery window.
-                        if pending_source_capabilities.is_some() {
-                            return Ok(pending_source_capabilities);
-                        }
                         let mut message_id = 0;
                         return Ok(receive_packet(
                             &mut phy,
@@ -913,15 +881,11 @@ mod device {
                     continue;
                 }
                 if configure_attached(&mut phy, polarity) {
-                    if pending_source_capabilities.is_some() {
-                        return Ok(pending_source_capabilities);
+                    if !reset_retained_pd_session(&mut phy) {
+                        return attach_failure(&mut phy, "fusb302b_retained_protocol_reset_failed");
                     }
-                    let mut message_id = 0;
-                    return Ok(receive_packet(
-                        &mut phy,
-                        &mut message_id,
-                        &mut source_message_id,
-                    ));
+                    delay_ms(PD_TX_SETTLE_MS);
+                    return Ok(None);
                 }
             }
         }
@@ -1518,14 +1482,31 @@ mod device {
             sequence,
             "capabilities_protocol_reset_waiting",
         );
+        let mut accepted = false;
+        let mut reset_source_message_id = None;
         let wait_deadline = now_ms().saturating_add(CAPABILITIES_PROTOCOL_RESET_WAIT_MS);
         while now_ms() < wait_deadline {
             check_deadline(usb, cancel, deadline_ms)?;
-            match receive_packet_with_probe(phy, message_id, source_message_id, |_| {}) {
+            // Soft Reset is a new protocol epoch. Do not let an unsolicited
+            // pre-Accept Source_Capabilities frame consume the freshness
+            // boundary needed to recognize the peer's Accept.
+            match receive_packet_with_probe(phy, message_id, &mut reset_source_message_id, |_| {}) {
                 ReceiveOutcome::Packet(packet) => {
                     if let Ok(capabilities) =
                         pd::decode_source_capabilities(packet.header(), packet.payload())
                     {
+                        if !accepted {
+                            emit_session_progress(
+                                usb,
+                                request_id,
+                                sequence,
+                                "capabilities_after_protocol_reset_before_accept",
+                            );
+                            reset_source_message_id = None;
+                            delay_ms(5);
+                            continue;
+                        }
+                        *source_message_id = Some(pd::message_id(packet.header()));
                         emit_session_progress(
                             usb,
                             request_id,
@@ -1537,6 +1518,7 @@ mod device {
                     if pd::message_type(packet.header()) == 3
                         && pd::object_count(packet.header()) == 0
                     {
+                        accepted = true;
                         *message_id = 0;
                         *source_message_id = None;
                         emit_session_progress(
@@ -1545,6 +1527,7 @@ mod device {
                             sequence,
                             "capabilities_protocol_reset_accepted",
                         );
+                        reset_source_message_id = None;
                     } else if pd::message_type(packet.header()) == 1
                         && pd::object_count(packet.header()) == 0
                     {
@@ -1554,6 +1537,9 @@ mod device {
                             sequence,
                             "capabilities_protocol_reset_goodcrc",
                         );
+                    }
+                    if !accepted {
+                        reset_source_message_id = None;
                     }
                 }
                 ReceiveOutcome::HardReset => {
@@ -1568,6 +1554,7 @@ mod device {
                 ReceiveOutcome::SoftReset => {
                     return Err(StopReason::GlobalTimeout);
                 }
+                ReceiveOutcome::Empty if !accepted => reset_source_message_id = None,
                 ReceiveOutcome::Empty => {}
             }
             delay_ms(5);
@@ -2062,7 +2049,6 @@ mod device {
         let session_deadline = started.saturating_add(SESSION_TIMEOUT_MS);
         let mut sequence = 0u32;
         let mut cancel = CancelState::new();
-        let mut message_id = 0u8;
         let mut source_message_id = None;
         emit_session_progress(usb, request_id, &mut sequence, "preflight");
 
@@ -2074,6 +2060,9 @@ mod device {
                 return result;
             }
         };
+        // attach_sink hard-resets retained sessions before returning, so a
+        // fresh discovery starts with the protocol-defined Message ID 0.
+        let mut message_id = 0;
         let mut phy = Fusb302::with_address(&mut measurements.i2c, I2C_ADDRESS);
         emit_session_progress(usb, request_id, &mut sequence, "attached");
 
@@ -2879,5 +2868,7 @@ mod tests {
             .expect("attach must retain a cold-start reset fallback");
         assert!(retained < reset);
         assert!(attach.contains("ram_pd_hil_existing_session_reused"));
+        assert!(attach.contains("reset_retained_pd_session"));
+        assert!(attach.contains("fusb302b_retained_protocol_reset_failed"));
     }
 }
