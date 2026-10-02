@@ -1659,6 +1659,8 @@ fn send_pd_hil_request(
                         &mut evidence,
                         &mut summary_chunks,
                     )? {
+                        let mut value = value;
+                        enrich_pd_hil_source_capabilities(&mut value)?;
                         validate_ram_success_response(&value, PD_HIL_CAPABILITY)
                             .map_err(|error| format!("PD HIL summary is invalid: {error}"))?;
                         validate_pd_hil_identity(&value, &identity)?;
@@ -2273,7 +2275,7 @@ fn validate_pd_hil_summary(
             || !complete_matrix
             || final_reset.get("defaultVbusMv").and_then(Value::as_u64) != Some(0)
             || final_reset
-                .get("sampleCount")
+                .get("defaultSampleCount")
                 .and_then(Value::as_u64)
                 .is_none_or(|count| count < 8)
             || final_reset.get("reason").and_then(Value::as_str)
@@ -2299,6 +2301,65 @@ fn validate_pd_hil_summary(
         return Err("PD HIL summary requestId is missing".to_string());
     }
     Ok(())
+}
+
+fn enrich_pd_hil_source_capabilities(value: &mut Value) -> Result<(), String> {
+    let source_capabilities = value
+        .get_mut("result")
+        .and_then(Value::as_object_mut)
+        .and_then(|result| result.get_mut("sourceCapabilities"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "result.sourceCapabilities must be an object".to_string())?;
+    let raw_pdos = source_capabilities
+        .get("rawPdos")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "result.sourceCapabilities.rawPdos must be an array".to_string())?;
+    let objects = raw_pdos
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            let raw = raw
+                .as_u64()
+                .ok_or_else(|| format!("result.sourceCapabilities.rawPdos[{index}] is invalid"))?;
+            let raw = u32::try_from(raw).map_err(|_| {
+                format!("result.sourceCapabilities.rawPdos[{index}] is outside the u32 range")
+            })?;
+            decode_pd_hil_source_object(raw, index + 1)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    source_capabilities.insert("objects".to_string(), Value::Array(objects));
+    Ok(())
+}
+
+fn decode_pd_hil_source_object(raw: u32, position: usize) -> Result<Value, String> {
+    let (mode, min_mv, max_mv, max_ma) = match raw >> 30 {
+        0 => {
+            let voltage_mv = ((raw >> 10) & 0x03ff) * 50;
+            let max_ma = (raw & 0x03ff) * 10;
+            ("fixed", voltage_mv, voltage_mv, max_ma)
+        }
+        3 if ((raw >> 28) & 0x03) == 0 => {
+            let min_mv = ((raw >> 8) & 0xff) * 100;
+            let max_mv = ((raw >> 17) & 0xff) * 100;
+            let max_ma = (raw & 0x7f) * 50;
+            ("pps", min_mv, max_mv, max_ma)
+        }
+        object_type => {
+            return Err(format!(
+                "result.sourceCapabilities.rawPdos[{}] has unsupported PDO type {}",
+                position.saturating_sub(1),
+                object_type
+            ));
+        }
+    };
+    Ok(serde_json::json!({
+        "position": position,
+        "mode": mode,
+        "minMv": min_mv,
+        "maxMv": max_mv,
+        "maxMa": max_ma,
+        "raw": raw,
+    }))
 }
 
 fn validate_pd_hil_identity(value: &Value, identity: &ObservedIdentity) -> Result<(), String> {
@@ -2992,6 +3053,62 @@ mod tests {
     }
 
     #[test]
+    fn pd_hil_source_capabilities_are_decoded_from_raw_pdos_on_host() {
+        let fixed = (9_000u32 / 50 << 10) | (3_000u32 / 10);
+        let pps = (3u32 << 30) | (21_000u32 / 100 << 17) | (5_000u32 / 100 << 8) | (5_000u32 / 50);
+        assert_eq!(
+            decode_pd_hil_source_object(fixed, 1).unwrap(),
+            serde_json::json!({
+                "position": 1,
+                "mode": "fixed",
+                "minMv": 9000,
+                "maxMv": 9000,
+                "maxMa": 3000,
+                "raw": fixed,
+            })
+        );
+        assert_eq!(
+            decode_pd_hil_source_object(pps, 2).unwrap(),
+            serde_json::json!({
+                "position": 2,
+                "mode": "pps",
+                "minMv": 5000,
+                "maxMv": 21000,
+                "maxMa": 5000,
+                "raw": pps,
+            })
+        );
+
+        let mut summary = serde_json::json!({
+            "result": {
+                "sourceCapabilities": {
+                    "count": 2,
+                    "rawPdos": [fixed, pps],
+                    "objects": [],
+                },
+            },
+        });
+        enrich_pd_hil_source_capabilities(&mut summary).unwrap();
+        assert_eq!(
+            summary["result"]["sourceCapabilities"]["objects"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            summary["result"]["sourceCapabilities"]["objects"][1]["mode"],
+            "pps"
+        );
+    }
+
+    #[test]
+    fn pd_hil_source_capability_decoder_rejects_unsupported_pdo_types() {
+        let error = decode_pd_hil_source_object(1u32 << 30, 1).unwrap_err();
+        assert!(error.contains("unsupported PDO type 1"));
+    }
+
+    #[test]
     fn pd_hil_validation_accepts_unsupported_tiers_and_requires_nonzero_exit() {
         let summary = serde_json::json!({
             "type": "pd_hil_summary",
@@ -3137,7 +3254,7 @@ mod tests {
         external["result"]["finalReset"]["defaultVbusMv"] = 5990.into();
         assert!(validate_ram_success_response(&external, PD_HIL_CAPABILITY).is_err());
         external["result"]["finalReset"]["defaultVbusMv"] = 0.into();
-        external["result"]["finalReset"]["sampleCount"] = 10.into();
+        external["result"]["finalReset"]["defaultSampleCount"] = 10.into();
         external["result"]["finalReset"]["reason"] =
             Value::String("default_contract_confirmed_external_vin".to_string());
         assert!(validate_ram_success_response(&external, PD_HIL_CAPABILITY).is_ok());

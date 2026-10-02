@@ -104,7 +104,7 @@ mod device {
     const EMIT_SESSION_PROGRESS: bool = false;
     const EMIT_TIER_PROGRESS: bool = true;
     const EMIT_SAMPLE_PROGRESS: bool = false;
-    const EMIT_CAPABILITY_PROGRESS: bool = true;
+    const EMIT_CAPABILITY_PROGRESS: bool = false;
     const EMIT_RECOVERY_PROGRESS: bool = false;
     // ROM output is synchronous on the USB Serial/JTAG path. A packet trace in
     // the receive helper would delay Source_Capabilities -> Request beyond a
@@ -1068,10 +1068,6 @@ mod device {
         };
         if EMIT_ROM_PACKET_TRACE {
             super::rom_diag_hex_u32(b"ram_pd_hil_rx_header=0x", u32::from(packet.header()));
-        }
-        if !observe_source_message_id(&packet, source_message_id) {
-            emit_stage("capabilities_receive_stale_message");
-            return ReceiveOutcome::Empty;
         }
         emit_stage("capabilities_receive_returned");
         ReceiveOutcome::Packet(packet)
@@ -2302,11 +2298,7 @@ mod device {
         result
     }
 
-    fn write_tier_summary(
-        out: &mut String<32_768>,
-        tier: TierRecord,
-        external_source: bool,
-    ) -> core::fmt::Result {
+    fn write_tier_summary(out: &mut String<32_768>, tier: TierRecord) -> core::fmt::Result {
         out.push_str("{\"mode\":\"").map_err(|_| core::fmt::Error)?;
         out.push_str(tier.target.mode.as_str())
             .map_err(|_| core::fmt::Error)?;
@@ -2320,51 +2312,6 @@ mod device {
             .map_err(|_| core::fmt::Error)?;
         out.push_str(tier.reason).map_err(|_| core::fmt::Error)?;
         out.push_str("\"").map_err(|_| core::fmt::Error)?;
-        if external_source {
-            push_json_u32(
-                out,
-                ",\"sourceAdvertisedMaxMa\":",
-                u32::from(tier.source_max_ma),
-            )?;
-            push_json_u32(
-                out,
-                ",\"contractCurrentMa\":",
-                u32::from(tier.contract_current_ma),
-            )?;
-            push_json_u32(out, ",\"contractMv\":", u32::from(tier.contract_mv))?;
-            out.push_str(",\"contractConfirmed\":")
-                .map_err(|_| core::fmt::Error)?;
-            out.push_str(if tier.contract_confirmed {
-                "true"
-            } else {
-                "false"
-            })
-            .map_err(|_| core::fmt::Error)?;
-            push_json_u32(
-                out,
-                ",\"holdMs\":",
-                if tier.hold_started_ms == 0 || tier.hold_finished_ms == 0 {
-                    0
-                } else {
-                    tier.hold_finished_ms.saturating_sub(tier.hold_started_ms)
-                },
-            )?;
-            push_json_u32(out, ",\"sampleCount\":", u32::from(tier.sample_count))?;
-            push_json_u32(out, ",\"requestSentAtMs\":", tier.request_sent_ms)?;
-            push_json_u32(
-                out,
-                ",\"contractConfirmedAtMs\":",
-                tier.contract_confirmed_ms,
-            )?;
-            push_json_u32(out, ",\"holdStartedAtMs\":", tier.hold_started_ms)?;
-            push_json_u32(out, ",\"holdFinishedAtMs\":", tier.hold_finished_ms)?;
-            push_json_u32(
-                out,
-                ",\"invalidSampleCount\":",
-                u32::from(tier.invalid_sample_count),
-            )?;
-            return out.push('}').map_err(|_| core::fmt::Error);
-        }
         push_json_u32(
             out,
             ",\"sourceAdvertisedMaxMa\":",
@@ -2493,31 +2440,8 @@ mod device {
                 }
                 push_u32(out, result.source_capabilities.objects[index].raw)?;
             }
-            out.push_str("],\"objects\":[")
+            out.push_str("],\"objects\":[]}")
                 .map_err(|_| core::fmt::Error)?;
-            for index in 0..source_count {
-                if index != 0 {
-                    out.push(',').map_err(|_| core::fmt::Error)?;
-                }
-                let object = result.source_capabilities.objects[index];
-                out.push_str("{\"position\":")
-                    .map_err(|_| core::fmt::Error)?;
-                push_u32(out, u32::from(object.position))?;
-                out.push_str(",\"mode\":\"").map_err(|_| core::fmt::Error)?;
-                out.push_str(object.mode.as_str())
-                    .map_err(|_| core::fmt::Error)?;
-                out.push_str("\",\"minMv\":")
-                    .map_err(|_| core::fmt::Error)?;
-                push_u32(out, u32::from(object.min_mv))?;
-                out.push_str(",\"maxMv\":").map_err(|_| core::fmt::Error)?;
-                push_u32(out, u32::from(object.max_mv))?;
-                out.push_str(",\"maxMa\":").map_err(|_| core::fmt::Error)?;
-                push_u32(out, u32::from(object.max_ma))?;
-                out.push_str(",\"raw\":").map_err(|_| core::fmt::Error)?;
-                push_u32(out, object.raw)?;
-                out.push('}').map_err(|_| core::fmt::Error)?;
-            }
-            out.push_str("]}").map_err(|_| core::fmt::Error)?;
         }
         emit_stage("summary_capabilities_done");
         out.push_str(",\"tiers\":[").map_err(|_| core::fmt::Error)?;
@@ -2531,7 +2455,7 @@ mod device {
             if index != 0 {
                 out.push(',').map_err(|_| core::fmt::Error)?;
             }
-            write_tier_summary(out, result.tiers[index], !result.validate_vin)?;
+            write_tier_summary(out, result.tiers[index])?;
         }
         emit_stage("summary_tiers_done");
         let mut length_stage = String::<64>::new();

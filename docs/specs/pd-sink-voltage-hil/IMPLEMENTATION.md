@@ -23,10 +23,12 @@ the source is waiting for a PD response. After each tier reaches a terminal
 state, the queued start and terminal events are drained before the next PD
 request is sent. The live tier event carries the matrix position, mode, target,
 and status; the terminal summary retains the negotiated contract, hold timing,
-and sample evidence for every tier. Source Capabilities are retained in both
-raw and decoded-object form. The currently accepted external-source profile
-emits these live tier events and session-boundary frames, while the terminal
-summary remains authoritative for capabilities, recovery, and voltage evidence.
+and sample evidence for every tier. The compact device summary retains raw
+Source Capability PDO/APDO words; the host decodes them before terminal
+validation and writes the decoded objects into the returned summary and
+evidence. The currently accepted external-source profile emits live tier
+events and session-boundary frames, while the terminal summary remains
+authoritative for capabilities, recovery, and voltage evidence.
 Formal calibrated-ADC acceptance
 still requires the fuller capability/sample/recovery progress profile and is
 not claimed by the physical receipt below.
@@ -86,5 +88,5 @@ reset. The evidence contains the complete matrix, raw and decoded capability
 objects, per-tier contract/hold timing and sample counts, `events.ndjson`,
 `summary.json`, and `transcript.log`. The independent IsolaPurr record for
 device `856a141cdbd4`, `port_c`, reports `power_enabled=true`,
-`data_connected=true`, `status=ok`, and `5045mV` after the run. The
+`data_connected=true`, `status=ok`, and `5044mV` after the run. The
 external-source acceptance did not use ADC voltage validation.
