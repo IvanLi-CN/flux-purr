@@ -2398,15 +2398,7 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
         let control_started_ms = elapsed_ms;
         runtime_advance_heater_control_deadline(state, control_started_ms);
         runtime_apply_pending_tuning_preview(state);
-        let active_thermal_control_profile = active_thermal_control_profile(
-            &state.memory_config,
-            state.thermal_control_profile_preview,
-            &state.manual_pps_state,
-        );
-        let active_thermal_settings = active_thermal_control_profile
-            .filter(|_| state.calibration_runtime_state.mode != CalibrationMode::Off)
-            .map(|profile| profile.settings)
-            .unwrap_or_default();
+        let active_thermal_settings = runtime_heater_output_settings(state);
 
         let current_request_mv = state.heater_power_backend.pd_request_mv();
         let (rtd_sample, sensor_needs_redraw) =
@@ -2498,6 +2490,23 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
     }
 
     needs_redraw
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_heater_output_settings(state: &RuntimeLoopState) -> ThermalControlProfileSettings {
+    thermal_output_settings(
+        active_thermal_control_profile(
+            &state.memory_config,
+            state.thermal_control_profile_preview,
+            &state.manual_pps_state,
+        ),
+        production_thermal_controller(
+            state.power_state,
+            state.memory_config.thermal_profile_mode,
+            &state.manual_pps_state,
+        ),
+        state.calibration_runtime_state.mode,
+    )
 }
 
 #[cfg(target_arch = "xtensa")]

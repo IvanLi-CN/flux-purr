@@ -2,6 +2,7 @@
 
 ## Current coverage
 
+- The verified 5A production profile supplies the same effective global settings to the PID and heater-output adapter, including the adjustable working-voltage floor and current reserve. Normal heating and tuning use saved/preview settings even when calibration is off; 3A plant control retains default output settings and calibration retains its existing profile selection. A host regression covers these boundaries; device verification of this correction remains pending.
 - PID heater control, fan policy, fault latching, dashboard state projection, and frontpanel runtime synchronization are implemented.
 - Dashboard startup presentation uses explicit initializing, EEPROM-restore, ready, and initial-RTD-fault states so the first framebuffer cannot expose a numeric bring-up placeholder. PD readiness is represented separately as `POWER/WAIT`; the fixed post-display and pre-ADC delays are removed from the Dashboard path.
 - The async display SPI device owns CS through a drop guard, so a PD-service timeout cannot leave the panel selected. USB early-control emits `boot_stage=runtime_ready` only after the first UI and startup work have completed, before the runtime loop begins.

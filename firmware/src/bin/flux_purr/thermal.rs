@@ -34,6 +34,21 @@ pub(crate) enum ProductionThermalController {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn thermal_output_settings(
+    profile: Option<ThermalControlProfile>,
+    controller: ProductionThermalController,
+    calibration_mode: CalibrationMode,
+) -> ThermalControlProfileSettings {
+    profile
+        .filter(|_| {
+            controller == ProductionThermalController::Profile
+                || calibration_mode != CalibrationMode::Off
+        })
+        .map(|profile| profile.settings)
+        .unwrap_or_default()
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn production_thermal_controller(
     power_state: PowerState,
     mode: ThermalProfileMode,

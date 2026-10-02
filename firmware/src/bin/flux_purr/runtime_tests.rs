@@ -9408,6 +9408,40 @@ fn five_amp_normal_and_tuning_use_same_profile_controller() {
 }
 
 #[test]
+fn production_output_uses_five_amp_candidate_settings_without_changing_three_amp() {
+    let mut profile = production_test_profile(300);
+    profile.settings.auto_adjustable_working_floor_mv = 6_100;
+    profile.settings.heater_current_reserve_ma = 300;
+    for max_ma in [5_000, 3_250] {
+        let (power, manual_pps) = production_power_fixture(max_ma);
+        let kind = production_thermal_controller(power, ThermalProfileMode::Auto, &manual_pps);
+        let output = thermal_output_settings(Some(profile), kind, CalibrationMode::Off);
+        let expected = if max_ma == 5_000 {
+            profile.settings
+        } else {
+            ThermalControlProfileSettings::default()
+        };
+        assert_eq!(output, expected, "source current {max_ma}");
+    }
+    assert_eq!(
+        thermal_output_settings(
+            Some(profile),
+            ProductionThermalController::Plant,
+            CalibrationMode::ThermalPlant,
+        ),
+        profile.settings,
+    );
+    assert_eq!(
+        thermal_output_settings(
+            None,
+            ProductionThermalController::Profile,
+            CalibrationMode::Off
+        ),
+        ThermalControlProfileSettings::default(),
+    );
+}
+
+#[test]
 fn production_source_class_change_disarms_before_switching_controller() {
     let mut controller = HeaterController::new();
     let (first, disarmed) = controller.update_production_at(
