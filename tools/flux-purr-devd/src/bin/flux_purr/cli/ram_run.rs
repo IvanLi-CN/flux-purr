@@ -1225,10 +1225,8 @@ fn read_identity_from_serial_matching(
                     return Err("RAM bring-up response exceeded the JSONL frame limit".into());
                 }
                 bytes.extend_from_slice(&chunk[..count]);
-                while let Some(identity) = next_identity(&mut bytes) {
-                    if matches(&identity) {
-                        return Ok(identity);
-                    }
+                if let Some(identity) = next_matching_identity(&mut bytes, &mut matches) {
+                    return Ok(identity);
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
@@ -1237,6 +1235,18 @@ fn read_identity_from_serial_matching(
     }
     let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]);
     Err(format!("no identity frame received; serial output preview: {preview:?}").into())
+}
+
+fn next_matching_identity(
+    bytes: &mut Vec<u8>,
+    matches: &mut impl FnMut(&ObservedIdentity) -> bool,
+) -> Option<ObservedIdentity> {
+    while let Some(identity) = next_identity(bytes) {
+        if matches(&identity) {
+            return Some(identity);
+        }
+    }
+    None
 }
 
 fn next_identity(bytes: &mut Vec<u8>) -> Option<ObservedIdentity> {
@@ -1690,6 +1700,11 @@ fn hex_nibble(value: u8) -> Option<u8> {
     }
 }
 
+#[allow(
+    clippy::excessive_nesting,
+    clippy::too_many_lines,
+    reason = "The bounded PD HIL session keeps transport recovery and evidence finalization together"
+)]
 fn send_pd_hil_request(
     port: &str,
     session: RamSession,
@@ -2130,9 +2145,7 @@ fn print_ram_progress(value: &Value) {
 }
 
 fn print_pd_hil_progress(value: &Value) -> Option<String> {
-    let Some(result) = value.get("result").and_then(Value::as_object) else {
-        return None;
-    };
+    let result = value.get("result").and_then(Value::as_object)?;
     let line = match result.get("kind").and_then(Value::as_str) {
         Some("session") => Some(format!(
             "PD HIL SESSION stage={}",
@@ -2344,6 +2357,11 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
     Ok(())
 }
 
+#[allow(
+    clippy::excessive_nesting,
+    clippy::too_many_lines,
+    reason = "The summary validator keeps the externally visible acceptance contract in one path"
+)]
 fn validate_pd_hil_summary(
     value: &Value,
     result: &serde_json::Map<String, Value>,
@@ -2627,6 +2645,11 @@ fn validate_pd_hil_policy(result: &serde_json::Map<String, Value>) -> Result<boo
     Ok(vin_validation == "external_source")
 }
 
+#[allow(
+    clippy::excessive_nesting,
+    clippy::too_many_lines,
+    reason = "The tier validator checks the complete fixed/PPS matrix and its safety invariants"
+)]
 fn validate_pd_hil_tiers(
     result: &serde_json::Map<String, Value>,
     external_vin: bool,
@@ -2940,6 +2963,10 @@ fn validate_pd_hil_tiers(
     Ok((tiers.len(), pass_count, unsupported_count))
 }
 
+#[allow(
+    clippy::excessive_nesting,
+    reason = "The final-reset validator keeps ADC and external-source recovery checks together"
+)]
 fn validate_pd_hil_final_reset(
     result: &serde_json::Map<String, Value>,
     external_vin: bool,
@@ -3481,9 +3508,15 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::precedence,
+        clippy::too_many_lines,
+        reason = "The test constructs raw PD objects and a complete acceptance matrix"
+    )]
     fn pd_hil_source_capabilities_are_decoded_from_raw_pdos_on_host() {
-        let fixed = (9_000u32 / 50 << 10) | (3_000u32 / 10);
-        let pps = (3u32 << 30) | (21_000u32 / 100 << 17) | (5_000u32 / 100 << 8) | (5_000u32 / 50);
+        let fixed = ((9_000u32 / 50) << 10) | (3_000u32 / 10);
+        let pps =
+            (3u32 << 30) | ((21_000u32 / 100) << 17) | ((5_000u32 / 100) << 8) | (5_000u32 / 50);
         assert_eq!(
             decode_pd_hil_source_object(fixed, 1).unwrap(),
             serde_json::json!({
@@ -3617,6 +3650,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The test builds the full valid PD HIL matrix before mutating each failure case"
+    )]
     fn pd_hil_validation_accepts_only_a_complete_pass_matrix() {
         let fixed_targets = [5000, 9000, 12000, 15000, 20000];
         let source_objects = fixed_targets
