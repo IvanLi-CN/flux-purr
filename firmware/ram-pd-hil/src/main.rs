@@ -1502,6 +1502,9 @@ mod device {
             return Ok(None);
         }
         *message_id = (*message_id + 1) & 0x07;
+        // A Soft Reset establishes a new source Message ID epoch. Do not let
+        // the pre-reset freshness boundary discard the peer's Accept.
+        *source_message_id = None;
         emit_session_progress(
             usb,
             request_id,

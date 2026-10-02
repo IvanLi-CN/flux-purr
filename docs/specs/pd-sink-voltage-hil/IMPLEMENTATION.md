@@ -88,8 +88,8 @@ recovery tier 23 and observed the fixed `5/9/12/15/20V` plateaus plus the PPS
 ladder through `21V`, but it did not receive a terminal summary and is not a
 completed CLI acceptance.
 
-The owner-authorized external-source diagnostic record from the validated code
-candidate is kept locally under
+The owner-authorized external-source diagnostic record from the historical
+validated code candidate is kept locally under
 `target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-pr-ready-final-4675`.
 It was generated from source SHA `4675b95c216a933762600aef183c353778df35d3`
 and parses as `overall=external_source_pass`, `pd=default_verified`, `22/22`
@@ -100,3 +100,6 @@ and complete file set before being cited for physical acceptance. The
 independent IsolaPurr record for device `856a141cdbd4`, `port_c`, reports
 `power_enabled=true`, `data_connected=true`, `status=ok`, and `5044mV` after
 the run. The external-source acceptance did not use ADC voltage validation.
+This historical receipt is not acceptance evidence for a later PR head; the
+current head requires a new run with its own source SHA and exact authorized
+USB identity before physical acceptance can be claimed.

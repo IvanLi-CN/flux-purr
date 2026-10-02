@@ -164,6 +164,12 @@ control Message IDs are ignored as stale. Protocol Soft Reset and Hard Reset
 events are terminal negotiation evidence for the current tier rather than
 ordinary empty receives.
 
+The HIL freshness filter accepts a forward modulo-8 source Message ID distance
+of `1..=4`, matching the production FUSB302B policy, and rejects repeated or
+ambiguous older IDs. A Soft Reset starts a new source-ID epoch: its Accept is
+handled before applying the pre-reset freshness boundary, then the next Source
+Capabilities frame establishes the new epoch.
+
 Source capability absence, malformed packets, a changed source identity, or a
 stale capability set is not evidence of `unsupported`; it is a capability
 discovery or negotiation error and must be reported separately.

@@ -2304,6 +2304,7 @@ fn validate_pd_hil_summary(
                 | "global_timeout"
                 | "cancelled"
                 | "fail"
+                | "port_lost"
         )
     {
         return Err(
@@ -2335,7 +2336,8 @@ fn validate_pd_hil_summary(
             ));
         }
     }
-    let (tier_count, pass_count, unsupported_count) = validate_pd_hil_tiers(result, external_vin)?;
+    let (tier_count, pass_count, unsupported_count) =
+        validate_pd_hil_tiers(result, external_vin, objects)?;
     let (reset_status, final_reset) = validate_pd_hil_final_reset(result, external_vin)?;
     let complete_matrix =
         tier_count == 22 && pass_count == 22 && reset_status == "pass" && pd == "default_verified";
@@ -2498,6 +2500,7 @@ fn validate_pd_hil_overall(result: &serde_json::Map<String, Value>) -> Result<&s
             | "cancelled"
             | "global_timeout"
             | "capability_discovery_failed"
+            | "port_lost"
     ) {
         return Err(format!("result.overall has an invalid value: {overall:?}"));
     }
@@ -2537,6 +2540,7 @@ fn validate_pd_hil_policy(result: &serde_json::Map<String, Value>) -> Result<boo
 fn validate_pd_hil_tiers(
     result: &serde_json::Map<String, Value>,
     external_vin: bool,
+    source_objects: &[Value],
 ) -> Result<(usize, usize, usize), String> {
     let tiers = result
         .get("tiers")
@@ -2652,13 +2656,51 @@ fn validate_pd_hil_tiers(
                     "result.tiers[{index}].contractMv must equal targetMv"
                 ));
             }
-            if tier
+            let selected_position = tier
                 .get("selectedObjectPosition")
                 .and_then(Value::as_u64)
-                .is_none_or(|position| position == 0)
-            {
+                .filter(|position| *position > 0)
+                .ok_or_else(|| {
+                    format!(
+                        "result.tiers[{index}].selectedObjectPosition must identify the selected source object"
+                    )
+                })? as usize;
+            let selected_object = source_objects
+                .iter()
+                .find(|object| object.get("position").and_then(Value::as_u64) == Some(selected_position as u64))
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    format!(
+                        "result.tiers[{index}].selectedObjectPosition does not identify a source object"
+                    )
+                })?;
+            let selected_mode = selected_object
+                .get("mode")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("source object {selected_position} has no mode"))?;
+            let selected_min_mv = selected_object
+                .get("minMv")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("source object {selected_position} has no minMv"))?;
+            let selected_max_mv = selected_object
+                .get("maxMv")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("source object {selected_position} has no maxMv"))?;
+            let selected_max_ma = selected_object
+                .get("maxMa")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("source object {selected_position} has no maxMa"))?;
+            let mode_matches = (mode == "fixed"
+                && selected_mode == "fixed"
+                && selected_min_mv == target_mv
+                && selected_max_mv == target_mv)
+                || (mode == "pps"
+                    && selected_mode == "pps"
+                    && selected_min_mv <= target_mv
+                    && target_mv <= selected_max_mv);
+            if !mode_matches {
                 return Err(format!(
-                    "result.tiers[{index}].selectedObjectPosition must identify the selected source object"
+                    "result.tiers[{index}].selectedObjectPosition does not support the requested mode/target"
                 ));
             }
             let source_max_ma = tier
@@ -2674,6 +2716,11 @@ fn validate_pd_hil_tiers(
             if contract_current_ma != source_max_ma.min(5_000) || contract_current_ma < 3_000 {
                 return Err(format!(
                     "result.tiers[{index}] contractCurrentMa must equal min(sourceAdvertisedMaxMa, 5000) and be at least 3000"
+                ));
+            }
+            if selected_max_ma != source_max_ma {
+                return Err(format!(
+                    "result.tiers[{index}].sourceAdvertisedMaxMa does not match the selected source object"
                 ));
             }
             for field in [
@@ -3399,6 +3446,33 @@ mod tests {
 
     #[test]
     fn pd_hil_validation_accepts_only_a_complete_pass_matrix() {
+        let fixed_targets = [5000, 9000, 12000, 15000, 20000];
+        let source_objects = fixed_targets
+            .into_iter()
+            .enumerate()
+            .map(|(index, target)| {
+                serde_json::json!({
+                    "position": index + 1,
+                    "mode": "fixed",
+                    "minMv": target,
+                    "maxMv": target,
+                    "maxMa": 5000,
+                    "raw": 1000 + index,
+                })
+            })
+            .chain(std::iter::once(serde_json::json!({
+                "position": 6,
+                "mode": "pps",
+                "minMv": 5000,
+                "maxMv": 21000,
+                "maxMa": 5000,
+                "raw": 1006,
+            })))
+            .collect::<Vec<_>>();
+        let source_raw_pdos = source_objects
+            .iter()
+            .map(|object| object["raw"].clone())
+            .collect::<Vec<_>>();
         let tiers = (0..22)
             .map(|index| {
                 serde_json::json!({
@@ -3420,7 +3494,7 @@ mod tests {
                     },
                     "contractCurrentMa": 5000,
                     "sourceAdvertisedMaxMa": 5000,
-                    "selectedObjectPosition": 1,
+                    "selectedObjectPosition": if index < 5 { index + 1 } else { 6 },
                     "requestSentAtMs": 1,
                     "contractConfirmedAtMs": 2,
                     "holdStartedAtMs": 3,
@@ -3456,9 +3530,9 @@ mod tests {
                     "toleranceRule": "max(250mV,2.5%)",
                 },
                 "sourceCapabilities": {
-                    "count": 1,
-                    "rawPdos": [123],
-                    "objects": [{"position": 1, "mode": "fixed", "minMv": 5000, "maxMv": 5000, "maxMa": 3000, "raw": 123}],
+                    "count": source_objects.len(),
+                    "rawPdos": source_raw_pdos,
+                    "objects": source_objects,
                 },
                 "tiers": tiers,
                 "finalReset": {
@@ -3530,6 +3604,10 @@ mod tests {
         });
         assert!(validate_ram_success_response(&early_failure, PD_HIL_CAPABILITY).is_ok());
         assert!(pd_hil_requires_nonzero(&early_failure));
+
+        let mut port_lost = early_failure.clone();
+        port_lost["result"]["overall"] = Value::String("port_lost".to_string());
+        assert!(validate_ram_success_response(&port_lost, PD_HIL_CAPABILITY).is_ok());
 
         let mut incomplete = summary;
         incomplete["result"]["tiers"][21]["status"] = Value::String("unsupported".to_string());
