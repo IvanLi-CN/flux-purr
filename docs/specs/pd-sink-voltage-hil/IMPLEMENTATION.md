@@ -29,6 +29,12 @@ capabilities, recovery, and voltage evidence. Formal calibrated-ADC acceptance
 still requires the fuller capability/sample/recovery progress profile and is
 not claimed by the physical receipt below.
 
+The external source record is an operator-side observation retained beside the
+PD evidence. The CLI does not accept, parse, or machine-bind that record to a
+specific tier; `external_source_pass` therefore reports complete PD protocol
+and recovery evidence, while the independent voltage judgment remains a
+manual acceptance step.
+
 When a RAM reload leaves the attached source in the previous PD message-id
 session, capability discovery preserves any already-received advertisement. If
 the initial window expires without capabilities, the HIL image sends one

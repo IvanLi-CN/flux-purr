@@ -215,6 +215,8 @@ outcome. The CLI accepts it as a successful command only when the complete PD
 matrix and final recovery evidence validate; formal voltage acceptance still
 requires joining that result with the independent source record, and the
 calibrated device VIN ADC rules above remain a separate gate.
+The CLI does not accept, parse, or machine-bind the source record; the join is
+an operator-side acceptance step retained beside the PD evidence.
 
 ## Outcome Taxonomy
 

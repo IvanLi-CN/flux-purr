@@ -1181,7 +1181,7 @@ mod device {
     ) -> Result<ResetResult, StopReason> {
         let recovery_deadline = now_ms()
             .saturating_add(RECOVERY_TIMEOUT_MS)
-            .min(deadline_ms);
+            .max(deadline_ms);
         check_deadline(usb, cancel, recovery_deadline)?;
         emit_session_progress(usb, request_id, sequence, "recovery_prepare");
         if resynchronize && !resynchronize_attached(phy) {
@@ -1953,6 +1953,37 @@ mod device {
                     StopReason::Cancelled => "cancelled",
                     StopReason::GlobalTimeout => "recovery_failed",
                 };
+                let mut cleanup_cancel = CancelState::new();
+                let cleanup_deadline = now_ms().saturating_add(RECOVERY_TIMEOUT_MS);
+                let final_reset = reset_to_default(
+                    &mut phy,
+                    &mut measurements.adc,
+                    &mut measurements.vin,
+                    &measurements.vin_calibration,
+                    &measurements.pd_irq,
+                    true,
+                    validate_vin,
+                    usb,
+                    &mut cleanup_cancel,
+                    cleanup_deadline,
+                    request_id,
+                    &mut sequence,
+                    &mut message_id,
+                    None,
+                    None,
+                )
+                .unwrap_or(ResetResult::FAILED);
+                emit_recovery_progress(
+                    usb,
+                    request_id,
+                    &mut sequence,
+                    pd::TOTAL_TIERS,
+                    final_reset,
+                );
+                result.final_reset = final_reset;
+                if final_reset.status != "pass" {
+                    result.overall = "recovery_failed";
+                }
                 return result;
             }
         };
@@ -1960,7 +1991,28 @@ mod device {
         emit_recovery_progress(usb, request_id, &mut sequence, 0, initial_reset);
         if initial_reset.status != "pass" {
             result.overall = "recovery_failed";
-            result.final_reset = initial_reset;
+            let mut cleanup_cancel = CancelState::new();
+            let cleanup_deadline = now_ms().saturating_add(RECOVERY_TIMEOUT_MS);
+            let final_reset = reset_to_default(
+                &mut phy,
+                &mut measurements.adc,
+                &mut measurements.vin,
+                &measurements.vin_calibration,
+                &measurements.pd_irq,
+                true,
+                validate_vin,
+                usb,
+                &mut cleanup_cancel,
+                cleanup_deadline,
+                request_id,
+                &mut sequence,
+                &mut message_id,
+                None,
+                None,
+            )
+            .unwrap_or(ResetResult::FAILED);
+            emit_recovery_progress(usb, request_id, &mut sequence, pd::TOTAL_TIERS, final_reset);
+            result.final_reset = final_reset;
             return result;
         }
 
@@ -2091,6 +2143,8 @@ mod device {
             }
         }
 
+        let mut cleanup_cancel = CancelState::new();
+        let cleanup_deadline = now_ms().saturating_add(RECOVERY_TIMEOUT_MS);
         let final_reset = match reset_to_default(
             &mut phy,
             &mut measurements.adc,
@@ -2100,8 +2154,8 @@ mod device {
             true,
             validate_vin,
             usb,
-            &mut cancel,
-            session_deadline,
+            &mut cleanup_cancel,
+            cleanup_deadline,
             request_id,
             &mut sequence,
             &mut message_id,
