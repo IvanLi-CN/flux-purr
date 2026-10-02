@@ -55,6 +55,14 @@ preserving the current confirmed contract, then sends the exact replacement
 request directly. The session uses fixed 5V only for its initial boundary and
 its terminal recovery; it does not force a 5V request between tiers.
 
+The receive path keeps USB-PD Message ID domains separate. Source Capabilities
+establish the current source-message boundary when a refresh is decoded;
+control responses are accepted only when their Message ID is not a replay of
+the last source control frame. GoodCRC is excluded because its Message ID
+acknowledges the sink's transmitted frame and is not a source-message
+sequence. Soft Reset and Hard Reset are surfaced to the negotiation and hold
+state machines instead of being treated as ordinary empty receives.
+
 ## Design Gate
 
 The design decisions in `SPEC.md` are settled. The implementation is covered

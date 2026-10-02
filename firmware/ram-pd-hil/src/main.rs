@@ -959,8 +959,7 @@ mod device {
         let Some(last) = last else {
             return true;
         };
-        let delta = (current.wrapping_add(8).wrapping_sub(last)) & 0x07;
-        (1..=4).contains(&delta)
+        current != last
     }
 
     fn observe_source_message_id(packet: &PdPacket, last: &mut Option<u8>) -> bool {
@@ -1068,6 +1067,11 @@ mod device {
         };
         if EMIT_ROM_PACKET_TRACE {
             super::rom_diag_hex_u32(b"ram_pd_hil_rx_header=0x", u32::from(packet.header()));
+        }
+        let message_type = pd::message_type(packet.header());
+        if message_type != 1 && !observe_source_message_id(&packet, source_message_id) {
+            emit_stage("capabilities_receive_stale_message");
+            return ReceiveOutcome::Empty;
         }
         emit_stage("capabilities_receive_returned");
         ReceiveOutcome::Packet(packet)
@@ -1195,8 +1199,8 @@ mod device {
                 );
                 receive_progress_reported = true;
             }
-            if let ReceiveOutcome::Packet(packet) = packet {
-                match pd::message_type(packet.header()) {
+            match packet {
+                ReceiveOutcome::Packet(packet) => match pd::message_type(packet.header()) {
                     3 => {
                         accepted = true;
                         emit_session_progress(
@@ -1223,7 +1227,11 @@ mod device {
                         return Err(StopReason::GlobalTimeout);
                     }
                     _ => {}
+                },
+                ReceiveOutcome::SoftReset | ReceiveOutcome::HardReset => {
+                    return Err(StopReason::GlobalTimeout);
                 }
+                ReceiveOutcome::Empty => {}
             }
             delay_ms(2);
         }
@@ -1352,8 +1360,11 @@ mod device {
             let _ = pd_irq.is_low();
             for _ in 0..16 {
                 check_deadline(usb, cancel, recovery_deadline)?;
-                if receive_packet(phy, message_id, source_message_id).is_none() {
-                    break;
+                match receive_packet_with_probe(phy, message_id, source_message_id, |_| {}) {
+                    ReceiveOutcome::SoftReset | ReceiveOutcome::HardReset => {
+                        return Err(StopReason::GlobalTimeout);
+                    }
+                    ReceiveOutcome::Packet(_) | ReceiveOutcome::Empty => {}
                 }
             }
             if validate_vin {
@@ -1419,13 +1430,21 @@ mod device {
         let wait_deadline = now_ms().saturating_add(wait_ms);
         while now_ms() < wait_deadline {
             check_deadline(usb, cancel, deadline_ms)?;
-            if let Some(packet) = receive_packet(phy, message_id, source_message_id) {
-                if let Ok(capabilities) =
-                    pd::decode_source_capabilities(packet.header(), packet.payload())
-                {
-                    return Ok(Some((packet, capabilities)));
+            match receive_packet_with_probe(phy, message_id, source_message_id, |_| {}) {
+                ReceiveOutcome::Packet(packet) => {
+                    if let Ok(capabilities) =
+                        pd::decode_source_capabilities(packet.header(), packet.payload())
+                    {
+                        return Ok(Some((packet, capabilities)));
+                    }
+                    emit_session_progress(
+                        usb,
+                        request_id,
+                        sequence,
+                        "capabilities_pending_ignored",
+                    );
                 }
-                emit_session_progress(usb, request_id, sequence, "capabilities_pending_ignored");
+                ReceiveOutcome::SoftReset | ReceiveOutcome::HardReset | ReceiveOutcome::Empty => {}
             }
             delay_ms(5);
         }
@@ -1539,7 +1558,10 @@ mod device {
                     );
                     return Ok(None);
                 }
-                ReceiveOutcome::SoftReset | ReceiveOutcome::Empty => {}
+                ReceiveOutcome::SoftReset => {
+                    return Err(StopReason::GlobalTimeout);
+                }
+                ReceiveOutcome::Empty => {}
             }
             delay_ms(5);
         }
@@ -1738,6 +1760,7 @@ mod device {
                     if let Ok(capabilities) =
                         pd::decode_source_capabilities(packet.header(), packet.payload())
                     {
+                        *source_message_id = Some(pd::message_id(packet.header()));
                         emit_session_progress(
                             usb,
                             request_id,
@@ -1825,8 +1848,8 @@ mod device {
         let mut accepted = false;
         while now_ms() < negotiation_deadline {
             check_deadline(usb, cancel, session_deadline_ms)?;
-            if let Some(packet) = receive_packet(phy, message_id, source_message_id) {
-                match pd::message_type(packet.header()) {
+            match receive_packet_with_probe(phy, message_id, source_message_id, |_| {}) {
+                ReceiveOutcome::Packet(packet) => match pd::message_type(packet.header()) {
                     3 => accepted = true,
                     4 => {
                         tier.status = "negotiation_failed";
@@ -1850,7 +1873,13 @@ mod device {
                         return Ok(tier);
                     }
                     _ => {}
+                },
+                ReceiveOutcome::SoftReset | ReceiveOutcome::HardReset => {
+                    tier.status = "negotiation_failed";
+                    tier.reason = "pd_reset_during_negotiation";
+                    return Ok(tier);
                 }
+                ReceiveOutcome::Empty => {}
             }
             delay_ms(2);
         }
@@ -1885,13 +1914,27 @@ mod device {
 
             if now < next_sample {
                 let _ = pd_irq.is_low();
-                let _ = receive_packet(phy, message_id, source_message_id);
+                match receive_packet_with_probe(phy, message_id, source_message_id, |_| {}) {
+                    ReceiveOutcome::SoftReset | ReceiveOutcome::HardReset => {
+                        tier.status = "negotiation_failed";
+                        tier.reason = "pd_reset_during_hold";
+                        return Ok(tier);
+                    }
+                    ReceiveOutcome::Packet(_) | ReceiveOutcome::Empty => {}
+                }
                 delay_ms(1);
                 continue;
             }
             next_sample = now.saturating_add(pd::SAMPLE_INTERVAL_MS);
             let _ = pd_irq.is_low();
-            let _ = receive_packet(phy, message_id, source_message_id);
+            match receive_packet_with_probe(phy, message_id, source_message_id, |_| {}) {
+                ReceiveOutcome::SoftReset | ReceiveOutcome::HardReset => {
+                    tier.status = "negotiation_failed";
+                    tier.reason = "pd_reset_during_hold";
+                    return Ok(tier);
+                }
+                ReceiveOutcome::Packet(_) | ReceiveOutcome::Empty => {}
+            }
             let status_ok = phy
                 .read_status()
                 .is_ok_and(|status| status.status0 & STATUS0_VBUSOK != 0);
@@ -1952,7 +1995,6 @@ mod device {
                 }
                 _ => {
                     tier.invalid_sample_count = tier.invalid_sample_count.saturating_add(1);
-                    all_samples_in_range = false;
                     if validate_vin {
                         emit_sample_progress(
                             usb,
@@ -2298,7 +2340,11 @@ mod device {
         result
     }
 
-    fn write_tier_summary(out: &mut String<32_768>, tier: TierRecord) -> core::fmt::Result {
+    fn write_tier_summary(
+        out: &mut String<32_768>,
+        tier: TierRecord,
+        validate_vin: bool,
+    ) -> core::fmt::Result {
         out.push_str("{\"mode\":\"").map_err(|_| core::fmt::Error)?;
         out.push_str(tier.target.mode.as_str())
             .map_err(|_| core::fmt::Error)?;
@@ -2354,20 +2400,42 @@ mod device {
             ",\"invalidSampleCount\":",
             u32::from(tier.invalid_sample_count),
         )?;
-        push_json_u32(out, ",\"minMeasuredVinMv\":", u32::from(tier.min_mv))?;
-        push_json_u32(out, ",\"maxMeasuredVinMv\":", u32::from(tier.max_mv))?;
+        if validate_vin {
+            push_json_u32(out, ",\"minMeasuredVinMv\":", u32::from(tier.min_mv))?;
+            push_json_u32(out, ",\"maxMeasuredVinMv\":", u32::from(tier.max_mv))?;
+            push_json_u32(
+                out,
+                ",\"meanMeasuredVinMv\":",
+                if tier.sample_count == 0 {
+                    0
+                } else {
+                    tier.mean_mv / u32::from(tier.sample_count)
+                },
+            )?;
+            push_json_u32(out, ",\"firstMeasuredVinMv\":", u32::from(tier.first_mv))?;
+            push_json_u32(out, ",\"lastMeasuredVinMv\":", u32::from(tier.last_mv))?;
+        }
+        out.push('}').map_err(|_| core::fmt::Error)
+    }
+
+    fn write_adc_reset_fields(
+        out: &mut String<32_768>,
+        reset: ResetResult,
+        validate_vin: bool,
+    ) -> core::fmt::Result {
+        if validate_vin {
+            push_json_u32(out, ",\"defaultAdcMv\":", u32::from(reset.default_adc_mv))?;
+            push_json_u32(
+                out,
+                ",\"defaultAdcRawCode\":",
+                u32::from(reset.default_adc_raw_code),
+            )?;
+        }
         push_json_u32(
             out,
-            ",\"meanMeasuredVinMv\":",
-            if tier.sample_count == 0 {
-                0
-            } else {
-                tier.mean_mv / u32::from(tier.sample_count)
-            },
-        )?;
-        push_json_u32(out, ",\"firstMeasuredVinMv\":", u32::from(tier.first_mv))?;
-        push_json_u32(out, ",\"lastMeasuredVinMv\":", u32::from(tier.last_mv))?;
-        out.push('}').map_err(|_| core::fmt::Error)
+            ",\"defaultSampleCount\":",
+            u32::from(reset.sample_count),
+        )
     }
 
     fn push_u32(out: &mut String<32_768>, mut value: u32) -> core::fmt::Result {
@@ -2455,7 +2523,7 @@ mod device {
             if index != 0 {
                 out.push(',').map_err(|_| core::fmt::Error)?;
             }
-            write_tier_summary(out, result.tiers[index])?;
+            write_tier_summary(out, result.tiers[index], result.validate_vin)?;
         }
         emit_stage("summary_tiers_done");
         let mut length_stage = String::<64>::new();
@@ -2470,17 +2538,9 @@ mod device {
             out.push_str(
                 "\",\"pdProtocol\":\"fixed_5v\",\"activeContract\":null,\"pendingRequest\":null,\"defaultVbusMv\":",
             )
-            .map_err(|_| core::fmt::Error)?;
+                .map_err(|_| core::fmt::Error)?;
             push_u32(out, u32::from(result.final_reset.default_vbus_mv))?;
-            out.push_str(",\"defaultAdcMv\":")
-                .map_err(|_| core::fmt::Error)?;
-            push_u32(out, u32::from(result.final_reset.default_adc_mv))?;
-            out.push_str(",\"defaultAdcRawCode\":")
-                .map_err(|_| core::fmt::Error)?;
-            push_u32(out, u32::from(result.final_reset.default_adc_raw_code))?;
-            out.push_str(",\"defaultSampleCount\":")
-                .map_err(|_| core::fmt::Error)?;
-            push_u32(out, u32::from(result.final_reset.sample_count))?;
+            write_adc_reset_fields(out, result.final_reset, result.validate_vin)?;
             out.push_str(",\"reason\":\"")
                 .map_err(|_| core::fmt::Error)?;
             out.push_str(result.final_reset.reason)
@@ -2517,15 +2577,7 @@ mod device {
         out.push_str(",\"pendingRequest\":null,\"defaultVbusMv\":")
             .map_err(|_| core::fmt::Error)?;
         push_u32(out, u32::from(result.final_reset.default_vbus_mv))?;
-        out.push_str(",\"defaultAdcMv\":")
-            .map_err(|_| core::fmt::Error)?;
-        push_u32(out, u32::from(result.final_reset.default_adc_mv))?;
-        out.push_str(",\"defaultAdcRawCode\":")
-            .map_err(|_| core::fmt::Error)?;
-        push_u32(out, u32::from(result.final_reset.default_adc_raw_code))?;
-        out.push_str(",\"defaultSampleCount\":")
-            .map_err(|_| core::fmt::Error)?;
-        push_u32(out, u32::from(result.final_reset.sample_count))?;
+        write_adc_reset_fields(out, result.final_reset, result.validate_vin)?;
         out.push_str(",\"reason\":\"")
             .map_err(|_| core::fmt::Error)?;
         out.push_str(result.final_reset.reason)

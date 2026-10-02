@@ -1663,6 +1663,7 @@ fn send_pd_hil_request(
                         enrich_pd_hil_source_capabilities(&mut value)?;
                         validate_ram_success_response(&value, PD_HIL_CAPABILITY)
                             .map_err(|error| format!("PD HIL summary is invalid: {error}"))?;
+                        validate_pd_hil_request_mode(&value, validate_vin)?;
                         validate_pd_hil_identity(&value, &identity)?;
                         return Ok(value);
                     }
@@ -2256,7 +2257,7 @@ fn validate_pd_hil_summary(
         }
     }
     let (tier_count, pass_count, unsupported_count) = validate_pd_hil_tiers(result, external_vin)?;
-    let (reset_status, final_reset) = validate_pd_hil_final_reset(result)?;
+    let (reset_status, final_reset) = validate_pd_hil_final_reset(result, external_vin)?;
     let complete_matrix =
         tier_count == 22 && pass_count == 22 && reset_status == "pass" && pd == "default_verified";
     if overall == "pass"
@@ -2299,6 +2300,28 @@ fn validate_pd_hil_summary(
     }
     if value.get("requestId").and_then(Value::as_str).is_none() {
         return Err("PD HIL summary requestId is missing".to_string());
+    }
+    Ok(())
+}
+
+fn validate_pd_hil_request_mode(value: &Value, validate_vin: bool) -> Result<(), String> {
+    let result = value
+        .get("result")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "PD HIL summary result is missing".to_string())?;
+    let policy = result
+        .get("policy")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "result.policy must be an object".to_string())?;
+    let expected = if validate_vin {
+        "adc"
+    } else {
+        "external_source"
+    };
+    if policy.get("vinValidation").and_then(Value::as_str) != Some(expected) {
+        return Err(format!(
+            "result.policy.vinValidation does not match the request mode: expected {expected}"
+        ));
     }
     Ok(())
 }
@@ -2595,6 +2618,7 @@ fn validate_pd_hil_tiers(
 
 fn validate_pd_hil_final_reset(
     result: &serde_json::Map<String, Value>,
+    external_vin: bool,
 ) -> Result<(&str, &serde_json::Map<String, Value>), String> {
     let final_reset = result
         .get("finalReset")
@@ -2611,22 +2635,51 @@ fn validate_pd_hil_final_reset(
         return Err("result.finalReset must clear pendingRequest".to_string());
     }
     if reset_status == "pass" {
-        let active_contract = final_reset
-            .get("activeContract")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                "result.finalReset must record the stable fixed 5V recovery contract".to_string()
-            })?;
-        if active_contract.get("mode").and_then(Value::as_str) != Some("fixed")
-            || active_contract.get("voltageMv").and_then(Value::as_u64) != Some(5_000)
-            || active_contract
-                .get("currentMa")
-                .and_then(Value::as_u64)
-                .is_none_or(|value| value == 0)
+        if final_reset.get("pdProtocol").and_then(Value::as_str) != Some("fixed_5v") {
+            return Err("result.finalReset.pdProtocol must be fixed_5v".to_string());
+        }
+        let default_vbus_mv = final_reset
+            .get("defaultVbusMv")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "result.finalReset.defaultVbusMv is missing".to_string())?;
+        if (!external_vin && !(4_750..=5_250).contains(&default_vbus_mv))
+            || (external_vin && default_vbus_mv != 0)
         {
             return Err(
-                "result.finalReset.activeContract must be a nonzero fixed 5V contract".to_string(),
+                "result.finalReset.defaultVbusMv does not match the validation mode".to_string(),
             );
+        }
+        if final_reset
+            .get("defaultSampleCount")
+            .and_then(Value::as_u64)
+            .is_none_or(|count| count < 8)
+        {
+            return Err("result.finalReset.defaultSampleCount must be at least 8".to_string());
+        }
+        let matrix_complete = result
+            .get("tiers")
+            .and_then(Value::as_array)
+            .is_some_and(|tiers| tiers.len() == 22);
+        if matrix_complete {
+            let active_contract = final_reset
+                .get("activeContract")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    "result.finalReset must record the stable fixed 5V recovery contract"
+                        .to_string()
+                })?;
+            if active_contract.get("mode").and_then(Value::as_str) != Some("fixed")
+                || active_contract.get("voltageMv").and_then(Value::as_u64) != Some(5_000)
+                || active_contract
+                    .get("currentMa")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|value| value == 0)
+            {
+                return Err(
+                    "result.finalReset.activeContract must be a nonzero fixed 5V contract"
+                        .to_string(),
+                );
+            }
         }
     } else if final_reset.get("activeContract") != Some(&Value::Null) {
         return Err("failed result.finalReset must not claim an active contract".to_string());
@@ -3147,9 +3200,11 @@ mod tests {
                 })).collect::<Vec<_>>(),
                 "finalReset": {
                     "status": "pass",
+                    "pdProtocol": "fixed_5v",
                     "activeContract": {"mode": "fixed", "voltageMv": 5000, "currentMa": 3000},
                     "pendingRequest": null,
                     "defaultVbusMv": 5000,
+                    "defaultSampleCount": 10,
                 },
             },
         });
@@ -3237,9 +3292,11 @@ mod tests {
                 "tiers": tiers,
                 "finalReset": {
                     "status": "pass",
+                    "pdProtocol": "fixed_5v",
                     "activeContract": {"mode": "fixed", "voltageMv": 5000, "currentMa": 3000},
                     "pendingRequest": null,
                     "defaultVbusMv": 5000,
+                    "defaultSampleCount": 10,
                 },
             },
         });
@@ -3258,6 +3315,8 @@ mod tests {
         external["result"]["finalReset"]["reason"] =
             Value::String("default_contract_confirmed_external_vin".to_string());
         assert!(validate_ram_success_response(&external, PD_HIL_CAPABILITY).is_ok());
+        assert!(validate_pd_hil_request_mode(&external, false).is_ok());
+        assert!(validate_pd_hil_request_mode(&external, true).is_err());
         assert!(!pd_hil_requires_nonzero(&external));
 
         let mut incomplete = summary;

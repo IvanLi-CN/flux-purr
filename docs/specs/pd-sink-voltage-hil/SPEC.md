@@ -156,6 +156,14 @@ Before every request, the session evaluates the latest Source Capabilities:
    current and no less than 3A.
 5. Reject a target outside the HIL envelope without touching the bus.
 
+The PD receive contract keeps GoodCRC out of the source Message ID sequence:
+GoodCRC acknowledges the sink's transmitted frame and therefore cannot be
+used as freshness evidence for a source response. A decoded Source
+Capabilities refresh establishes the source-response boundary, and repeated
+control Message IDs are ignored as stale. Protocol Soft Reset and Hard Reset
+events are terminal negotiation evidence for the current tier rather than
+ordinary empty receives.
+
 Source capability absence, malformed packets, a changed source identity, or a
 stale capability set is not evidence of `unsupported`; it is a capability
 discovery or negotiation error and must be reported separately.
