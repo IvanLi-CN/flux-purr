@@ -55,12 +55,15 @@ evidence without substituting a zero reading for a measurement.
 
 When a RAM reload leaves the attached source in the previous PD message-id
 session, the HIL image cannot recover the product sink's private Sink Message
-ID counter from the retained FUSB302B state. It therefore issues one USB-PD
-Hard Reset at the retained-session boundary, waits for the source to return to
-the default contract, and starts fresh discovery from Message ID zero. A cold
-Type-C attach keeps the normal initial advertisement window and bounded
-`Get_Source_Capabilities` query. The image does not guess a retained Message
-ID, use the local FUSB302B PD reset, or restart Type-C toggle.
+ID counter from the retained FUSB302B state. It therefore clears only the
+local FUSB302B FIFOs at the retained-session boundary and enters the bounded
+USB-PD Soft Reset path during capability discovery. This preserves the
+attached VBUS that powers the target MCU; failure to receive `Accept` followed
+by fresh Source Capabilities is reported as capability-discovery/recovery
+failure. A cold Type-C attach keeps the normal initial advertisement window
+and bounded `Get_Source_Capabilities` query. The image does not guess an
+unrecoverable retained Message ID, send a USB-PD Hard Reset, use the local
+FUSB302B PD reset, or restart Type-C toggle.
 
 Before every Fixed and PPS tier, the image refreshes Source Capabilities while
 preserving the current confirmed contract, then sends the exact replacement

@@ -753,11 +753,13 @@ mod device {
         Err(reason)
     }
 
-    fn reset_retained_pd_session<I2C: embedded_hal::i2c::I2c>(phy: &mut Fusb302<I2C>) -> bool {
-        // RAM takeover cannot recover the product sink's private Message ID
-        // counter from FUSB302 state. A hard reset is the only protocol
-        // boundary that resets both peers to Message ID 0 without guessing.
-        phy.flush_fifos().is_ok() && phy.transmit_hard_reset().is_ok()
+    fn prepare_retained_pd_session<I2C: embedded_hal::i2c::I2c>(phy: &mut Fusb302<I2C>) -> bool {
+        // The target MCU is powered by the attached VBUS. A USB-PD Hard Reset
+        // would make the source remove that VBUS and reset the MCU before the
+        // RAM image can recover the session. Keep the power contract intact;
+        // capability discovery will use the bounded Soft Reset path if the
+        // retained Message ID state is not usable.
+        phy.flush_fifos().is_ok()
     }
 
     fn attach_sink(i2c: &mut I2cBus) -> Result<Option<PdPacket>, &'static str> {
@@ -779,7 +781,7 @@ mod device {
             if !configure_attached(&mut phy, polarity) {
                 return attach_failure(&mut phy, "fusb302b_attached_configuration_failed");
             }
-            if !reset_retained_pd_session(&mut phy) {
+            if !prepare_retained_pd_session(&mut phy) {
                 return attach_failure(&mut phy, "fusb302b_retained_protocol_reset_failed");
             }
             delay_ms(PD_TX_SETTLE_MS);
@@ -815,7 +817,7 @@ mod device {
             if !configure_attached(&mut phy, polarity) {
                 return attach_failure(&mut phy, "fusb302b_attached_configuration_failed");
             }
-            if !reset_retained_pd_session(&mut phy) {
+            if !prepare_retained_pd_session(&mut phy) {
                 return attach_failure(&mut phy, "fusb302b_retained_protocol_reset_failed");
             }
             delay_ms(PD_TX_SETTLE_MS);
@@ -881,7 +883,7 @@ mod device {
                     continue;
                 }
                 if configure_attached(&mut phy, polarity) {
-                    if !reset_retained_pd_session(&mut phy) {
+                    if !prepare_retained_pd_session(&mut phy) {
                         return attach_failure(&mut phy, "fusb302b_retained_protocol_reset_failed");
                     }
                     delay_ms(PD_TX_SETTLE_MS);
@@ -2890,7 +2892,15 @@ mod tests {
             .expect("attach must retain a cold-start reset fallback");
         assert!(retained < reset);
         assert!(attach.contains("ram_pd_hil_existing_session_reused"));
-        assert!(attach.contains("reset_retained_pd_session"));
+        assert!(attach.contains("prepare_retained_pd_session"));
         assert!(attach.contains("fusb302b_retained_protocol_reset_failed"));
+
+        let helper = source
+            .split("fn prepare_retained_pd_session")
+            .nth(1)
+            .and_then(|value| value.split("fn attach_sink").next())
+            .expect("retained-session preparation helper must remain present");
+        assert!(helper.contains("phy.flush_fifos"));
+        assert!(!helper.contains("transmit_hard_reset"));
     }
 }

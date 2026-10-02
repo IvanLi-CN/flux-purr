@@ -324,13 +324,13 @@ to `recovery_failed`.
   `Get_Source_Capabilities` query. If the source returns only GoodCRC, a fresh
   protocol session may trigger one numbered USB-PD Soft Reset using the current
   sink Message ID and waits for `Accept` followed by a fresh Source
-  Capabilities advertisement. If
-  the attached session's Sink Message ID cannot be recovered
-  from the retained hardware boundary, the sink sends one USB-PD Hard Reset to
-  establish a fresh protocol epoch, waits for the source to return to the
-  default contract, and starts discovery from Message ID zero. It must not
-  guess a retained Message ID or use the local FUSB302B PD reset, restart
-  Type-C toggle, or withdraw CC/Rd.
+  Capabilities advertisement. At a retained-session boundary, the sink may
+  clear only the local FUSB302B FIFOs before entering that bounded Soft Reset
+  path. If the peer does not accept the reset or advertise fresh capabilities,
+  the run reports capability-discovery/recovery failure while preserving VBUS.
+  It must not guess an unrecoverable retained Message ID, send a USB-PD Hard
+  Reset, use the local FUSB302B PD reset, restart Type-C toggle, or withdraw
+  CC/Rd.
 - Before every tier, Fixed or PPS, refresh Source Capabilities while the
   previous contract remains active, select only the exact requested object,
   and send the replacement request directly. A cached capability set must not
@@ -366,17 +366,16 @@ and the next request still starts from a fresh Source Capabilities boundary. It
 never replays the failed RDO and never substitutes a fixed 5V recovery request
 between tiers.
 
-The recovery path must never restart Type-C toggle. A RAM reload can leave the
-source in a PD message-id session that the new sink image cannot recover. At
-that retained-session boundary, the image sends one USB-PD Hard Reset, waits
-for the source to return to the default contract, and starts discovery from
-Message ID zero. For a fresh protocol session, the initial advertisement
-window may fall back to one bounded `Get_Source_Capabilities` query and, if the
-current sink Message ID is known, one numbered USB-PD Soft Reset. The image
+The recovery path must never restart Type-C toggle or remove the attached VBUS.
+A RAM reload can leave the source in a PD message-id session that the new sink
+image cannot recover. At that retained-session boundary, the image clears only
+the local FUSB302B FIFOs and enters one bounded USB-PD Soft Reset path. It
 waits for `Accept`, resets its local Message ID to zero, and then waits for the
-source advertisement while CC/Rd remains asserted. The HIL evidence records
-the reset and the new capability boundary. A failure to receive the post-reset
-advertisement is a capability-discovery failure.
+source advertisement while CC/Rd and VBUS remain asserted. The HIL evidence
+records the reset and the new capability boundary. A failure to receive the
+post-reset advertisement is a capability-discovery/recovery failure. A
+USB-PD Hard Reset, physical detachment, or VBUS decay to zero is not a valid
+RAM-session recovery mechanism because it can reset the target MCU.
 
 If the source is detached, the session reports the tier's negotiation failure,
 then treats a verified detached/default boundary as recovery success. It does
