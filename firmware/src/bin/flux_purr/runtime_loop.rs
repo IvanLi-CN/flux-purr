@@ -2266,8 +2266,13 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
         state.thermal_tuning.armed,
         state.thermal_tuning.phase,
         state.ui_state.heater_enabled,
-        state.latest_temp_c,
-        state.current_rtd_fault.is_none() && state.latest_temp_c.is_finite(),
+        (state.current_rtd_fault.is_none() && state.latest_temp_c.is_finite())
+            .then_some(state.latest_temp_c),
+        state
+            .thermal_tuning
+            .targets_c
+            .get(state.thermal_tuning.target_index)
+            .copied(),
     );
     state.tuning_was_armed_last_cycle = state.thermal_tuning.armed;
     fan_decision = tuning_cooldown_fan_decision(fan_decision, state.tuning_cooling_latched);

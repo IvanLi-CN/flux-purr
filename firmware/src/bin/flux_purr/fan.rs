@@ -581,15 +581,22 @@ pub(crate) fn tuning_cooling_requested(
     tuning_armed: bool,
     tuning_phase: flux_purr_firmware::thermal_tuning::ThermalTuningPhase,
     heater_enabled: bool,
-    temperature_c: f32,
-    temperature_valid: bool,
+    temperature_c: Option<f32>,
+    target_c: Option<i16>,
 ) -> bool {
     if tuning_armed
         && tuning_phase == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
     {
         return true;
     }
-    if heater_enabled || (temperature_valid && temperature_c <= 40.0) {
+    let temperature_released = temperature_c.is_some_and(|temp| {
+        if target_c == Some(60) {
+            temp < 35.0
+        } else {
+            temp <= 40.0
+        }
+    });
+    if heater_enabled || temperature_released {
         return false;
     }
     cooling_latched || (tuning_was_armed && !tuning_armed)

@@ -10513,79 +10513,40 @@ fn tuning_cooldown_preserves_safety_fan_provenance() {
 }
 
 #[test]
-fn tuning_cooling_continues_after_terminal_until_forty_degrees() {
-    assert!(tuning_cooling_requested(
-        false,
-        true,
-        false,
-        ThermalTuningPhase::Failed,
-        false,
-        55.0,
-        true,
-    ));
-    assert!(tuning_cooling_requested(
-        true,
-        false,
-        false,
-        ThermalTuningPhase::Failed,
-        false,
-        41.0,
-        true,
-    ));
-    assert!(!tuning_cooling_requested(
-        true,
-        false,
-        false,
-        ThermalTuningPhase::Failed,
-        false,
-        40.0,
-        true,
-    ));
-    assert!(tuning_cooling_requested(
-        true,
-        false,
-        false,
-        ThermalTuningPhase::Failed,
-        false,
-        40.4,
-        true,
-    ));
-    assert!(tuning_cooling_requested(
-        true,
-        false,
-        false,
-        ThermalTuningPhase::Failed,
-        false,
-        -1.0,
-        false,
-    ));
-    assert!(!tuning_cooling_requested(
-        true,
-        false,
-        false,
-        ThermalTuningPhase::Failed,
-        true,
-        55.0,
-        true,
-    ));
-    assert!(!tuning_cooling_requested(
-        false,
-        false,
-        false,
-        ThermalTuningPhase::Failed,
-        false,
-        55.0,
-        true,
-    ));
-    assert!(tuning_cooling_requested(
-        false,
-        false,
-        true,
-        ThermalTuningPhase::Cooldown,
-        false,
-        40.0,
-        true,
-    ));
+fn tuning_cooling_continues_after_terminal_until_target_cooldown_threshold() {
+    let terminal_request = |latched, was_armed, heater_enabled, temperature, target| {
+        tuning_cooling_requested(
+            latched,
+            was_armed,
+            false,
+            ThermalTuningPhase::Failed,
+            heater_enabled,
+            temperature,
+            target,
+        )
+    };
+    assert!(terminal_request(false, true, false, Some(55.0), Some(60)));
+    assert!(terminal_request(true, false, false, Some(41.0), Some(60)));
+    assert!(terminal_request(true, false, false, Some(35.01), Some(60)));
+    assert!(terminal_request(true, false, false, Some(35.0), Some(60)));
+    assert!(!terminal_request(true, false, false, Some(34.99), Some(60)));
+    assert!(terminal_request(true, false, false, None, Some(60)));
+    assert!(!terminal_request(true, false, true, Some(55.0), Some(60)));
+    assert!(!terminal_request(false, false, false, Some(55.0), Some(60)));
+    assert!(terminal_request(true, false, false, Some(40.01), Some(240)));
+    assert!(!terminal_request(true, false, false, Some(40.0), Some(240)));
+    assert!(!terminal_request(true, false, false, Some(35.0), None));
+    for temperature in [55.0, 40.0, 35.01, 35.0, 34.99] {
+        assert!(tuning_cooling_requested(
+            false,
+            false,
+            true,
+            ThermalTuningPhase::Cooldown,
+            false,
+            Some(temperature),
+            Some(60),
+        ));
+    }
 }
 
 #[test]

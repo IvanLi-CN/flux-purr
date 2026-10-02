@@ -71,7 +71,7 @@
 | 边界 | 外部主控调优方案（本合同内的“旧方案”） | 新固件主控 5A 调优 |
 | --- | --- | --- |
 | 选择与范围 | 无 `--engine` 时维持原 CLI；外部 runner 主控 5A full-batch | 仅显式 `--engine firmware`；资格范围为完整 `pps5a` 九目标，`pps3a` 不加热并失败 |
-| 策略与生产控制 | 主机执行当前主干的冷却、seed/插值、scout、batch compare、score、gate、预算和 hold confirm；设备生产闭环负责加热 | 除 [60°C 冷却起点合同](FIRMWARE-60C-COOLDOWN-CONTRACT.md) 明确批准的门槛差异外，固件策略对冻结的 5A 可观测向量保持决策一致；设备仍使用同一生产闭环，不能调用或复制外部 runner |
+| 策略与生产控制 | 主机执行当前主干的冷却、seed/插值、scout、batch compare、score、gate、预算和 hold confirm；设备生产闭环负责加热 | 固件策略对冻结的 5A 可观测向量保持决策一致，60°C 起点同为 `<=35°C`；全程全速冷却及终止后释放按 [60°C 冷却起点合同](FIRMWARE-60C-COOLDOWN-CONTRACT.md) 执行；设备仍使用同一生产闭环，不能调用或复制外部 runner |
 | 数据来源 | 外部 source client 的 VBUS/source telemetry 与设备状态均可进入原报告 | 仅设备本地温度、VIN、PPS 合同/请求和控制证据；外部 VBUS、物理电流/功率不得推断或补造，PPS 合同电流仅为安全 ceiling |
 | 命令输入 | `--source-id`、`--source-url` 等外部 source 参数保持有效 | 拒绝外部 source 参数；设备 tuning command/status/event stream 按 runId 和 sequence 读回 |
 | 报告 | 原四文件 preliminary bundle 和 `thermal-profile.accepted.json` 保持原义 | `thermal-tuning-v2` 五文件、完整 sample/ledger、trace/digest、可切换 trial 与二元资格结论 |
@@ -195,4 +195,4 @@ PID/profile 调优报告是本交付的正式审查证据，不是可随意裁�
 
 软件阶段完成的条件是 AC-01 至 AC-09、AC-11 和 AC-12 全部满足，并且所有变更已对照本合同和上位规范完成 review。AC-10 是单独的硬件验收门：在主人未提供精确端口和相应操作授权前，它保持未执行，不得以任何模拟结果替代。
 
-当前不存在阻塞软件设计的未决产品选择。固件 60°C 冷却起点的获准例外由 [独立交付合同](FIRMWARE-60C-COOLDOWN-CONTRACT.md) 限定；其它 PD 协议、调优策略或热端物理验收阈值变更仍须先更新长期 SPEC，并建立独立的交付合同。
+当前不存在阻塞软件设计的未决产品选择。固件 60°C 冷却起点及风扇边界由 [独立交付合同](FIRMWARE-60C-COOLDOWN-CONTRACT.md) 限定；其它 PD 协议、调优策略或热端物理验收阈值变更仍须先更新长期 SPEC，并建立独立的交付合同。

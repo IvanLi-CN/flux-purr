@@ -183,7 +183,8 @@ fn firmware_candidate(profile_value: Value, rows: &[Value]) -> ThermalCandidateP
             trial_index,
             candidate_id: candidate_id.clone(),
             candidate_hash: hash,
-            temperature_centi_c: 3_900,
+            // Cross the active cooldown gate before replaying unmodified historical samples.
+            temperature_centi_c: 3_400,
             vin_mv: 21_000,
             pps_contract: ThermalTuningPpsContract {
                 voltage_mv: 21_000,

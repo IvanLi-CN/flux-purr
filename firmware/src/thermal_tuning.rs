@@ -2312,13 +2312,7 @@ fn phase_transition_reason(phase: ThermalTuningPhase) -> &'static str {
 }
 
 fn cooldown_threshold_c(target_c: i16) -> i16 {
-    if target_c == 60 {
-        40
-    } else if target_c < 80 {
-        35
-    } else {
-        target_c - 40
-    }
+    if target_c < 80 { 35 } else { target_c - 40 }
 }
 
 fn histogram_percentile(histogram: &[u16; 1001], count: u32, percentile: f64) -> Option<u16> {
@@ -2827,11 +2821,11 @@ mod tests {
     }
 
     #[test]
-    fn firmware_60c_initial_and_retry_trials_start_at_40c() {
+    fn firmware_60c_initial_and_retry_trials_start_at_35c() {
         let mut runtime = ThermalTuningRuntime::new();
         runtime
             .start(ThermalTuningStart {
-                run_id: id("run-40c-cooldown"),
+                run_id: id("run-35c-cooldown"),
                 candidate_id: id("candidate-hold"),
                 candidate_hash: hash("hash-hold"),
                 power_class: ThermalTuningPowerClass::Pps5a,
@@ -2843,13 +2837,13 @@ mod tests {
             })
             .unwrap();
 
-        let mut cooling = sample(0, ThermalTuningPhase::Cooldown, 4_001);
+        let mut cooling = sample(0, ThermalTuningPhase::Cooldown, 3_501);
         cooling.heater_requested_output_permille = 0;
         cooling.heater_output_permille = 0;
         runtime.record_sample(cooling.clone()).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
         cooling.elapsed_ms = 300;
-        cooling.temperature_centi_c = 4_000;
+        cooling.temperature_centi_c = 3_500;
         runtime.record_sample(cooling).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Warmup);
         let first = runtime
@@ -2857,11 +2851,11 @@ mod tests {
             .iter()
             .find_map(|event| event.trial.as_ref())
             .unwrap();
-        assert_eq!(first.start_temperature_centi_c, Some(4_000));
-        assert_eq!(first.cooldown_threshold_centi_c, Some(4_000));
+        assert_eq!(first.start_temperature_centi_c, Some(3_500));
+        assert_eq!(first.cooldown_threshold_centi_c, Some(3_500));
 
         for (elapsed_ms, phase, temperature_centi_c) in [
-            (300, ThermalTuningPhase::Warmup, 4_000),
+            (300, ThermalTuningPhase::Warmup, 3_500),
             (1_300, ThermalTuningPhase::Approach, 4_500),
             (11_300, ThermalTuningPhase::Approach, 5_000),
             (12_000, ThermalTuningPhase::Hold, 5_990),
@@ -2879,10 +2873,10 @@ mod tests {
             .filter_map(|event| event.trial.as_ref())
             .find(|trial| trial.trial_index == 0 && trial.end_sequence.is_some())
             .unwrap();
-        assert_eq!(closed_first.start_temperature_centi_c, Some(4_000));
-        assert_eq!(closed_first.cooldown_threshold_centi_c, Some(4_000));
+        assert_eq!(closed_first.start_temperature_centi_c, Some(3_500));
+        assert_eq!(closed_first.cooldown_threshold_centi_c, Some(3_500));
 
-        let mut retry = sample(24_300, ThermalTuningPhase::Cooldown, 4_001);
+        let mut retry = sample(24_300, ThermalTuningPhase::Cooldown, 3_501);
         retry.trial_index = runtime.trial_index;
         retry.candidate_hash = runtime.candidate_hash.clone().unwrap();
         retry.heater_requested_output_permille = 0;
@@ -2890,7 +2884,7 @@ mod tests {
         runtime.record_sample(retry.clone()).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
         retry.elapsed_ms = 24_600;
-        retry.temperature_centi_c = 4_000;
+        retry.temperature_centi_c = 3_500;
         runtime.record_sample(retry).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Warmup);
         let retry_trial = runtime
@@ -2899,8 +2893,8 @@ mod tests {
             .filter_map(|event| event.trial.as_ref())
             .find(|trial| trial.trial_index == 1)
             .unwrap();
-        assert_eq!(retry_trial.start_temperature_centi_c, Some(4_000));
-        assert_eq!(retry_trial.cooldown_threshold_centi_c, Some(4_000));
+        assert_eq!(retry_trial.start_temperature_centi_c, Some(3_500));
+        assert_eq!(retry_trial.cooldown_threshold_centi_c, Some(3_500));
         assert_eq!(cooldown_threshold_c(80), 40);
         assert_eq!(cooldown_threshold_c(240), 200);
     }
