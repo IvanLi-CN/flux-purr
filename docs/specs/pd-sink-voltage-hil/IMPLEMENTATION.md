@@ -89,7 +89,7 @@ ladder through `21V`, but it did not receive a terminal summary and is not a
 completed CLI acceptance.
 
 The completed external-source diagnostic evidence is
-`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-candidate`.
+`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-reviewrepair`.
 The terminal summary parses as `overall=external_source_pass`,
 `pd=default_verified`, `22/22` passing tiers, and a passing fixed 5V final
 reset. The evidence contains the complete matrix, raw and decoded capability

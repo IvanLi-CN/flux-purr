@@ -1069,7 +1069,8 @@ mod device {
             super::rom_diag_hex_u32(b"ram_pd_hil_rx_header=0x", u32::from(packet.header()));
         }
         let message_type = pd::message_type(packet.header());
-        if message_type != 1 && !observe_source_message_id(&packet, source_message_id) {
+        let is_good_crc = message_type == 1 && pd::object_count(packet.header()) == 0;
+        if !is_good_crc && !observe_source_message_id(&packet, source_message_id) {
             emit_stage("capabilities_receive_stale_message");
             return ReceiveOutcome::Empty;
         }
@@ -1760,7 +1761,6 @@ mod device {
                     if let Ok(capabilities) =
                         pd::decode_source_capabilities(packet.header(), packet.payload())
                     {
-                        *source_message_id = Some(pd::message_id(packet.header()));
                         emit_session_progress(
                             usb,
                             request_id,

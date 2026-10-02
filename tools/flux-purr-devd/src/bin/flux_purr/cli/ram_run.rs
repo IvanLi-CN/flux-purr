@@ -4,13 +4,13 @@ use espflash::{
     connection::{Connection, Port, ResetAfterOperation, ResetBeforeOperation},
     target::Chip,
 };
-use flux_purr_devd::PRODUCT_BUILD_ID;
 use flux_purr_devd::serial::{
     ESP32S3_USB_SERIAL_JTAG_PID, ESP32S3_USB_SERIAL_JTAG_VID, SerialPortProcessLock,
     UsbSerialIdentity, serial_port_paths_match, serial_port_usb_identity_matches,
 };
 #[cfg(target_os = "macos")]
 use flux_purr_devd::serial::{RawUsbSerialJtagPort, open_raw_usb_serial_jtag_port};
+use flux_purr_devd::{PRODUCT_BUILD_ID, PRODUCT_SOURCE_SHA};
 use serialport::{FlowControl, SerialPort, SerialPortType, UsbPortInfo};
 use std::time::{Duration, Instant};
 
@@ -1278,6 +1278,13 @@ fn verify_ram_identity(
         return Err(format!(
             "RAM bring-up buildId mismatch: expected {PRODUCT_BUILD_ID}, got {:?}",
             identity.build_id
+        )
+        .into());
+    }
+    if op == PD_HIL_CAPABILITY && identity.source_sha.as_deref() != Some(PRODUCT_SOURCE_SHA) {
+        return Err(format!(
+            "PD HIL sourceSha mismatch: expected {PRODUCT_SOURCE_SHA}, got {:?}",
+            identity.source_sha
         )
         .into());
     }
@@ -2966,6 +2973,23 @@ mod tests {
         let mut mismatched = identity;
         mismatched.framing = Some("raw".to_string());
         assert!(verify_ram_identity(&mismatched, "test_fan").is_err());
+    }
+
+    #[test]
+    fn pd_hil_identity_requires_the_full_source_sha() {
+        let mut identity = ObservedIdentity {
+            firmware: ObservedFirmware::RamBringup,
+            build_id: Some(PRODUCT_BUILD_ID.to_string()),
+            source_sha: Some(PRODUCT_SOURCE_SHA.to_string()),
+            capabilities: vec![PD_HIL_CAPABILITY.to_string()],
+            protocol_version: Some(RAM_PROTOCOL_VERSION.to_string()),
+            framing: Some(RAM_FRAMING.to_string()),
+            reset_reason: None,
+        };
+        assert!(verify_ram_identity(&identity, PD_HIL_CAPABILITY).is_ok());
+
+        identity.source_sha = Some(format!("{}0", &PRODUCT_SOURCE_SHA[..39]));
+        assert!(verify_ram_identity(&identity, PD_HIL_CAPABILITY).is_err());
     }
 
     #[test]
