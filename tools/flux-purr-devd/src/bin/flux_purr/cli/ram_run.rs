@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 const IDENTITY_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-const PD_HIL_COMMAND_TIMEOUT: Duration = Duration::from_secs(240);
+const PD_HIL_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const PD_HIL_SERIAL_RECONNECT_ATTEMPTS: u16 = 300;
 const PD_HIL_SERIAL_RECONNECT_DELAY: Duration = Duration::from_millis(10);
 const PD_HIL_EVIDENCE_FLUSH_INTERVAL: usize = 32;
@@ -1339,7 +1339,9 @@ fn send_ram_request_until(
 struct PdHilEvidence {
     events_path: PathBuf,
     summary_path: PathBuf,
+    transcript_path: PathBuf,
     events: BufWriter<File>,
+    transcript: BufWriter<File>,
     events_since_flush: usize,
 }
 
@@ -1353,10 +1355,13 @@ impl PdHilEvidence {
         fs::create_dir_all(directory)?;
         let events_path = directory.join("events.ndjson");
         let summary_path = directory.join("summary.json");
+        let transcript_path = directory.join("transcript.log");
         let mut evidence = Self {
             events_path,
             summary_path,
+            transcript_path,
             events: BufWriter::new(File::create(directory.join("events.ndjson"))?),
+            transcript: BufWriter::new(File::create(directory.join("transcript.log"))?),
             events_since_flush: 0,
         };
         evidence.record(&serde_json::json!({
@@ -1391,12 +1396,23 @@ impl PdHilEvidence {
         Ok(())
     }
 
+    fn record_transcript(
+        &mut self,
+        line: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.transcript.write_all(line.as_bytes())?;
+        self.transcript.write_all(b"\n")?;
+        self.transcript.flush()?;
+        Ok(())
+    }
+
     fn finish(
         mut self,
         summary: &Value,
     ) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error + Send + Sync>> {
         self.record(summary)?;
         self.events.flush()?;
+        self.transcript.flush()?;
         let mut file = BufWriter::new(File::create(&self.summary_path)?);
         serde_json::to_writer_pretty(&mut file, summary)?;
         file.write_all(b"\n")?;
@@ -1410,6 +1426,54 @@ fn finish_pd_hil_evidence(
     evidence_dir: &Path,
     mut summary: Value,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut evidence = evidence;
+    let result = summary.get("result").and_then(Value::as_object);
+    let transcript_line = if summary.get("type").and_then(Value::as_str) == Some("pd_hil_failure") {
+        format!(
+            "PD HIL FAILURE reason={}",
+            result
+                .and_then(|result| result.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        )
+    } else {
+        let tier_count = result
+            .and_then(|result| result.get("tiers"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let pass_count = result
+            .and_then(|result| result.get("tiers"))
+            .and_then(Value::as_array)
+            .map_or(0, |tiers| {
+                tiers
+                    .iter()
+                    .filter(|tier| tier.get("status").and_then(Value::as_str) == Some("pass"))
+                    .count()
+            });
+        format!(
+            "PD HIL SUMMARY overall={} pass={} tiers={} reset={} pd={}",
+            result
+                .and_then(|result| result.get("overall"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_ascii_uppercase(),
+            pass_count,
+            tier_count,
+            result
+                .and_then(|result| result.get("finalReset"))
+                .and_then(Value::as_object)
+                .and_then(|reset| reset.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_ascii_uppercase(),
+            result
+                .and_then(|result| result.get("pd"))
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+        )
+    };
+    evidence.record_transcript(&transcript_line)?;
+    let transcript_path = evidence.transcript_path.clone();
     let (events_path, summary_path) = evidence.finish(&summary)?;
     let object = summary
         .as_object_mut()
@@ -1425,6 +1489,10 @@ fn finish_pd_hil_evidence(
     object.insert(
         "summaryPath".to_string(),
         Value::String(summary_path.display().to_string()),
+    );
+    object.insert(
+        "transcriptPath".to_string(),
+        Value::String(transcript_path.display().to_string()),
     );
     let mut summary_file = BufWriter::new(File::create(&summary_path)?);
     serde_json::to_writer_pretty(&mut summary_file, &summary)?;
@@ -1558,25 +1626,25 @@ fn send_pd_hil_request(
     } = session;
     let mut serial = Some(serial);
     let mut evidence = PdHilEvidence::create(evidence_dir, port, &usb_identity, &identity)?;
+    let deadline = Instant::now() + PD_HIL_COMMAND_TIMEOUT;
     let request_id = format!("pd-hil-{}", current_unix_millis());
     let request = build_pd_hil_request(&request_id, validate_vin);
-    evidence.record(&serde_json::json!({
-        "kind": "request",
-        "requestId": request_id,
-        "capability": PD_HIL_CAPABILITY,
-        "vinValidation": if validate_vin { "adc" } else { "external_source" },
-        "wire": request.trim_end(),
-    }))?;
-    let serial_port = serial.as_mut().expect("PD HIL serial must be present");
-    serial_port.write_all(request.as_bytes())?;
-    serial_port.flush()?;
-
-    let deadline = Instant::now() + PD_HIL_COMMAND_TIMEOUT;
     let mut bytes = Vec::with_capacity(1024);
     let mut chunk = [0u8; 256];
     let mut summary_chunks = PdHilSummaryChunks::default();
     let mut recovered_serial: Option<ReconnectedPdHilSerial> = None;
     let outcome: Result<Value, Box<dyn std::error::Error + Send + Sync>> = (|| {
+        evidence.record(&serde_json::json!({
+            "kind": "request",
+            "requestId": request_id,
+            "capability": PD_HIL_CAPABILITY,
+            "vinValidation": if validate_vin { "adc" } else { "external_source" },
+            "wire": request.trim_end(),
+        }))?;
+        let serial_port = serial.as_mut().expect("PD HIL serial must be present");
+        serial_port.write_all(request.as_bytes())?;
+        serial_port.flush()?;
+
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let read_result = if let Some(recovered_serial) = recovered_serial.as_mut() {
@@ -1750,7 +1818,9 @@ fn find_pd_hil_response(
             && matches_request
             && capability == Some(PD_HIL_CAPABILITY)
         {
-            print_pd_hil_progress(&value);
+            if let Some(line) = print_pd_hil_progress(&value) {
+                evidence.record_transcript(&line)?;
+            }
             if let Some(result) = value.get("result")
                 && let Some(summary) = summary_chunks.accept(result)?
             {
@@ -1909,25 +1979,25 @@ fn print_ram_progress(value: &Value) {
     }
 }
 
-fn print_pd_hil_progress(value: &Value) {
+fn print_pd_hil_progress(value: &Value) -> Option<String> {
     let Some(result) = value.get("result").and_then(Value::as_object) else {
-        return;
+        return None;
     };
-    match result.get("kind").and_then(Value::as_str) {
-        Some("session") => eprintln!(
+    let line = match result.get("kind").and_then(Value::as_str) {
+        Some("session") => Some(format!(
             "PD HIL SESSION stage={}",
             result
                 .get("stage")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
-        ),
-        Some("capabilities") => eprintln!(
+        )),
+        Some("capabilities") => Some(format!(
             "PD HIL CAPABILITIES count={}",
             result
                 .get("count")
                 .and_then(Value::as_u64)
                 .unwrap_or_default()
-        ),
+        )),
         Some("tier") => {
             let status = result
                 .get("status")
@@ -1947,7 +2017,7 @@ fn print_pd_hil_progress(value: &Value) {
                 let contract_mv = progress_number(result, "contractMv");
                 let contract_current_ma = progress_number(result, "contractCurrentMa");
                 let measured_vin_mv = progress_number(result, "measuredVinMv");
-                eprintln!(
+                Some(format!(
                     "PD HIL TIER {}/{} mode={} target={}mV status={} contract={}mV current={}mA vin={}mV",
                     index,
                     total,
@@ -1960,10 +2030,12 @@ fn print_pd_hil_progress(value: &Value) {
                     contract_mv,
                     contract_current_ma,
                     measured_vin_mv,
-                );
+                ))
+            } else {
+                None
             }
         }
-        Some("recovery") => eprintln!(
+        Some("recovery") => Some(format!(
             "PD HIL RESET tier={} status={} pd={} vbus={}mV reason={}",
             result
                 .get("index")
@@ -1980,11 +2052,15 @@ fn print_pd_hil_progress(value: &Value) {
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
             result.get("reason").and_then(Value::as_str).unwrap_or("-"),
-        ),
-        _ => {}
+        )),
+        _ => None,
+    };
+    if let Some(line) = line.as_deref() {
+        eprintln!("{line}");
     }
     let mut stderr = std::io::stderr();
     let _ = std::io::Write::flush(&mut stderr);
+    line
 }
 
 fn progress_number(result: &serde_json::Map<String, Value>, key: &str) -> String {
@@ -2130,7 +2206,22 @@ fn validate_pd_hil_summary(
     }
     let overall = validate_pd_hil_overall(result)?;
     let external_vin = validate_pd_hil_policy(result)?;
-    let (tier_count, pass_count, unsupported_count) = validate_pd_hil_tiers(result)?;
+    let source_capabilities = result
+        .get("sourceCapabilities")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "result.sourceCapabilities must be an object".to_string())?;
+    let capability_count = source_capabilities
+        .get("count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "result.sourceCapabilities.count is missing".to_string())?;
+    let raw_pdos = source_capabilities
+        .get("rawPdos")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "result.sourceCapabilities.rawPdos must be an array".to_string())?;
+    if capability_count == 0 || raw_pdos.len() != capability_count as usize {
+        return Err("result.sourceCapabilities is incomplete".to_string());
+    }
+    let (tier_count, pass_count, unsupported_count) = validate_pd_hil_tiers(result, external_vin)?;
     let (reset_status, final_reset) = validate_pd_hil_final_reset(result)?;
     let complete_matrix =
         tier_count == 22 && pass_count == 22 && reset_status == "pass" && pd == "default_verified";
@@ -2151,8 +2242,16 @@ fn validate_pd_hil_summary(
             "result.overall=external_source_pass lacks complete protocol evidence".to_string(),
         );
     }
-    if overall == "unsupported" && unsupported_count == 0 {
-        return Err("result.overall=unsupported has no unsupported tier".to_string());
+    if overall == "unsupported"
+        && (unsupported_count == 0
+            || tier_count != 22
+            || reset_status != "pass"
+            || pd != "default_verified")
+    {
+        return Err(
+            "result.overall=unsupported lacks the complete matrix and final recovery evidence"
+                .to_string(),
+        );
     }
     if value.get("requestId").and_then(Value::as_str).is_none() {
         return Err("PD HIL summary requestId is missing".to_string());
@@ -2231,6 +2330,7 @@ fn validate_pd_hil_policy(result: &serde_json::Map<String, Value>) -> Result<boo
 
 fn validate_pd_hil_tiers(
     result: &serde_json::Map<String, Value>,
+    external_vin: bool,
 ) -> Result<(usize, usize, usize), String> {
     let tiers = result
         .get("tiers")
@@ -2308,6 +2408,15 @@ fn validate_pd_hil_tiers(
                 "result.tiers[{index}] contains forbidden current evidence"
             ));
         }
+        let reason = tier
+            .get("reason")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("result.tiers[{index}].reason is missing"))?;
+        if status != "pass" && reason.is_empty() {
+            return Err(format!(
+                "result.tiers[{index}].reason is required for a non-passing tier"
+            ));
+        }
         if status == "pass" {
             if tier.get("contractConfirmed").and_then(Value::as_bool) != Some(true) {
                 return Err(format!(
@@ -2341,6 +2450,27 @@ fn validate_pd_hil_tiers(
                 return Err(format!(
                     "result.tiers[{index}].contractCurrentMa is below the approved minimum"
                 ));
+            }
+            if !external_vin {
+                for field in [
+                    "sourceAdvertisedMaxMa",
+                    "requestSentAtMs",
+                    "contractConfirmedAtMs",
+                    "holdStartedAtMs",
+                    "holdFinishedAtMs",
+                    "invalidSampleCount",
+                    "minMeasuredVinMv",
+                    "maxMeasuredVinMv",
+                    "meanMeasuredVinMv",
+                    "firstMeasuredVinMv",
+                    "lastMeasuredVinMv",
+                ] {
+                    if tier.get(field).and_then(Value::as_u64).is_none() {
+                        return Err(format!(
+                            "result.tiers[{index}].{field} is required for ADC validation"
+                        ));
+                    }
+                }
             }
             pass_count += 1;
         } else if status == "unsupported" {
@@ -2831,12 +2961,17 @@ mod tests {
                     "minimumCurrentMa": 3000,
                     "recoveryMode": "fixed_5v_contract",
                 },
-                "tiers": [{
-                    "mode": "fixed",
-                    "targetMv": 5000,
+                "sourceCapabilities": {"count": 1, "rawPdos": [123]},
+                "tiers": (0..22).map(|index| serde_json::json!({
+                    "mode": if index < 5 { "fixed" } else { "pps" },
+                    "targetMv": if index < 5 {
+                        [5000, 9000, 12000, 15000, 20000][index]
+                    } else {
+                        5000 + (index - 5) * 1000
+                    },
                     "status": "unsupported",
                     "reason": "no_exact_fixed_pdo",
-                }],
+                })).collect::<Vec<_>>(),
                 "finalReset": {
                     "status": "pass",
                     "activeContract": {"mode": "fixed", "voltageMv": 5000, "currentMa": 3000},
@@ -2847,6 +2982,18 @@ mod tests {
         });
         assert!(validate_ram_success_response(&summary, PD_HIL_CAPABILITY).is_ok());
         assert!(pd_hil_requires_nonzero(&summary));
+
+        let mut incomplete = summary.clone();
+        incomplete["result"]["tiers"] = Value::Array(
+            incomplete["result"]["tiers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .take(1)
+                .cloned()
+                .collect(),
+        );
+        assert!(validate_ram_success_response(&incomplete, PD_HIL_CAPABILITY).is_err());
 
         let mut forbidden_current = summary.clone();
         forbidden_current["result"]["tiers"][0]["measuredCurrentMa"] = 3000.into();
@@ -2865,6 +3012,7 @@ mod tests {
                         5000 + (index - 5) * 1000
                     },
                     "status": "pass",
+                    "reason": "test_pass",
                     "contractConfirmed": true,
                     "holdMs": 2000,
                     "sampleCount": 20,
@@ -2874,6 +3022,17 @@ mod tests {
                         5000 + (index - 5) * 1000
                     },
                     "contractCurrentMa": 3000,
+                    "sourceAdvertisedMaxMa": 5000,
+                    "requestSentAtMs": 1,
+                    "contractConfirmedAtMs": 2,
+                    "holdStartedAtMs": 3,
+                    "holdFinishedAtMs": 2003,
+                    "invalidSampleCount": 0,
+                    "minMeasuredVinMv": 5000,
+                    "maxMeasuredVinMv": 5000,
+                    "meanMeasuredVinMv": 5000,
+                    "firstMeasuredVinMv": 5000,
+                    "lastMeasuredVinMv": 5000,
                 })
             })
             .collect::<Vec<_>>();
@@ -2895,8 +3054,9 @@ mod tests {
                     "sampleIntervalMs": 50,
                     "currentCeilingMa": 5000,
                     "minimumCurrentMa": 3000,
-                    "recoveryMode": "fixed_5v_contract",
+                "recoveryMode": "fixed_5v_contract",
                 },
+                "sourceCapabilities": {"count": 1, "rawPdos": [123]},
                 "tiers": tiers,
                 "finalReset": {
                     "status": "pass",
@@ -2906,7 +3066,8 @@ mod tests {
                 },
             },
         });
-        assert!(validate_ram_success_response(&summary, PD_HIL_CAPABILITY).is_ok());
+        let validation = validate_ram_success_response(&summary, PD_HIL_CAPABILITY);
+        assert!(validation.is_ok(), "{validation:?}");
         assert!(!pd_hil_requires_nonzero(&summary));
 
         let mut external = summary.clone();

@@ -749,6 +749,14 @@ mod device {
         }
     }
 
+    fn attach_failure<I2C: embedded_hal::i2c::I2c>(
+        phy: &mut Fusb302<I2C>,
+        reason: &'static str,
+    ) -> Result<Option<PdPacket>, &'static str> {
+        let _ = phy.stop_toggle();
+        Err(reason)
+    }
+
     fn attach_sink(i2c: &mut I2cBus) -> Result<Option<PdPacket>, &'static str> {
         let retained_polarity = existing_attachment_polarity(&mut *i2c);
         let mut phy = Fusb302::with_address(&mut *i2c, I2C_ADDRESS);
@@ -766,7 +774,7 @@ mod device {
         {
             super::rom_diag_line(b"ram_pd_hil_existing_session_reused\n");
             if !configure_attached(&mut phy, polarity) {
-                return Err("fusb302b_attached_configuration_failed");
+                return attach_failure(&mut phy, "fusb302b_attached_configuration_failed");
             }
             if pending_source_capabilities.is_some() {
                 return Ok(pending_source_capabilities);
@@ -782,7 +790,7 @@ mod device {
             || phy.set_cc_pull(CcPin::Cc1, CcPull::Down).is_err()
             || phy.set_cc_pull(CcPin::Cc2, CcPull::Down).is_err()
         {
-            return Err("fusb302b_initialization_failed");
+            return attach_failure(&mut phy, "fusb302b_initialization_failed");
         }
 
         // A RAM reload can reset the FUSB302 while the source keeps CC/Rp and
@@ -802,7 +810,7 @@ mod device {
                 continue;
             }
             if !configure_attached(&mut phy, polarity) {
-                return Err("fusb302b_attached_configuration_failed");
+                return attach_failure(&mut phy, "fusb302b_attached_configuration_failed");
             }
             if pending_source_capabilities.is_some() {
                 return Ok(pending_source_capabilities);
@@ -822,7 +830,7 @@ mod device {
         while now_ms() < deadline {
             let status = match phy.read_status() {
                 Ok(status) => status,
-                Err(_) => return Err("fusb302b_status_read_failed"),
+                Err(_) => return attach_failure(&mut phy, "fusb302b_status_read_failed"),
             };
             if status.status0 & STATUS0_VBUSOK != 0 {
                 let polarity = match status.status1a & TOGSS_MASK {
@@ -842,7 +850,7 @@ mod device {
                         let mut message_id = 0;
                         return Ok(receive_packet(&mut phy, &mut message_id));
                     }
-                    return Err("fusb302b_attached_configuration_failed");
+                    return attach_failure(&mut phy, "fusb302b_attached_configuration_failed");
                 }
             }
             delay_ms(5);
@@ -877,7 +885,7 @@ mod device {
                 }
             }
         }
-        Err("typec_sink_attach_timeout")
+        attach_failure(&mut phy, "typec_sink_attach_timeout")
     }
 
     fn configure_attached<I2C: embedded_hal::i2c::I2c>(
@@ -1076,6 +1084,10 @@ mod device {
         message_id: &mut u8,
     ) -> Result<(), StopReason> {
         let request_payload = pd::request_data_object(selected);
+        if phy.flush_fifos().is_err() {
+            emit_session_progress(usb, request_id, sequence, "default_request_flush_failed");
+            return Err(StopReason::GlobalTimeout);
+        }
         let packet = PdPacket::new(
             SopType::Sop,
             pd::request_header(*message_id),
@@ -1614,6 +1626,15 @@ mod device {
         message_id: &mut u8,
     ) -> Result<pd::SourceCapabilities, StopReason> {
         check_deadline(usb, cancel, deadline_ms)?;
+        if phy.flush_fifos().is_err() {
+            emit_session_progress(
+                usb,
+                request_id,
+                sequence,
+                "capabilities_refresh_flush_failed",
+            );
+            return Err(StopReason::GlobalTimeout);
+        }
         let packet = PdPacket::new(
             SopType::Sop,
             pd::get_source_capabilities_header(*message_id),
@@ -1706,6 +1727,13 @@ mod device {
         emit_tier_progress(usb, request_id, sequence, index, "requesting", tier);
 
         let request_payload = pd::request_data_object(selected);
+        // Quarantine a late response from the preceding contract before the
+        // next Request is transmitted.
+        if phy.flush_fifos().is_err() {
+            tier.status = "negotiation_failed";
+            tier.reason = "request_flush_failed";
+            return Ok(tier);
+        }
         let packet = PdPacket::new(
             SopType::Sop,
             pd::request_header(*message_id),

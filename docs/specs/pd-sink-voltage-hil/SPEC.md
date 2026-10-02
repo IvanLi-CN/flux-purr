@@ -256,7 +256,9 @@ The session-level `overall` field is separate from tier outcomes:
 - `cancelled`, `global_timeout`, `port_lost`, or `capability_discovery_failed`:
   the session did not reach a normal complete matrix.
 
-The process exit code is non-zero for every overall value other than `pass`.
+The process exit code is non-zero for every overall value other than `pass` or
+`external_source_pass`; the latter is a successful protocol/recovery diagnostic
+but remains distinct from formal voltage `pass`.
 The machine summary remains available whenever the host received a terminal
 summary; a missing summary is itself a transport failure.
 
@@ -460,9 +462,11 @@ defaults are:
 - capability discovery: `3000ms`;
 - negotiation per supported tier: `3000ms`;
 - hold: exactly `2000ms`;
-- initial/final 5V recovery: `3000ms` each;
+- initial/final 5V recovery: bounded by the implementation's `60000ms`
+  recovery budget;
 - session deadline: `210s`, with a hard upper bound of `300s`;
-- host deadline: session deadline plus transport margin.
+- host deadline: session deadline plus the bounded recovery/transport margin;
+  the current host default is `300s`.
 
 The 210-second default covers the full 22-row matrix, capability refreshes, one
 initial recovery, one final recovery, and finalization. The implementation must
@@ -579,8 +583,9 @@ Each run produces, at minimum:
   `holdFinishedAt` for every tier;
 - VIN sample statistics, ADC raw/calibrated evidence, and the configured
   tolerance rule for formal ADC runs;
-- the independent source-side voltage record for `validateVin=false`
-  diagnostic runs;
+- an operator-retained independent source-side voltage record for
+  `validateVin=false` diagnostic runs, when available; the CLI does not create,
+  locate, parse, or machine-bind this record;
 - every tier status and reason, including unsupported rows;
 - capability-refresh records for every tier and final fixed 5V recovery
   verification;
@@ -589,8 +594,9 @@ Each run produces, at minimum:
 For formal ADC runs, the host must write an NDJSON event file containing the
 raw 50ms sample events and a final JSON summary beneath an explicit
 operator-selected evidence directory. An external-source diagnostic may omit
-device ADC sample events and must instead retain the independent source-side
-voltage record beside the PD evidence. The evidence directory is a local
+device ADC sample events. The operator may retain the independent source-side
+voltage record beside the PD evidence; the CLI does not require or consume that
+record. The evidence directory is a local
 artifact path, not a device write path. Sensitive serial identity data must be
 redacted when the artifact leaves the local validation environment.
 
@@ -604,8 +610,9 @@ redacted when the artifact leaves the local validation environment.
   fixed 5V recovery contract and no pending request; the candidate window is
   `5000mV +/- 250mV` for `500ms`.
 - Formal device VIN ADC evidence is required. External electrical measurement
-  is optional independent evidence for formal runs and is the required voltage
-  evidence for `validateVin=false` diagnostic runs.
+  is optional independent evidence for formal runs and is the operator-side
+  required voltage evidence for `validateVin=false` diagnostic runs; the CLI
+  does not consume or bind that record.
 - Initial setup and terminal cleanup use fixed 5V recovery; tiers transition
   directly through fresh Source Capabilities boundaries without an inserted 5V
   request.
