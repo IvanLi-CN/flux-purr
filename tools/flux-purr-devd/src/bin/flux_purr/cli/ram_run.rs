@@ -3056,7 +3056,12 @@ mod tests {
         };
         assert!(verify_ram_identity(&identity, PD_HIL_CAPABILITY).is_ok());
 
-        identity.source_sha = Some(format!("{}0", &PRODUCT_SOURCE_SHA[..39]));
+        let replacement = if PRODUCT_SOURCE_SHA.starts_with('0') {
+            '1'
+        } else {
+            '0'
+        };
+        identity.source_sha = Some(format!("{replacement}{}", &PRODUCT_SOURCE_SHA[1..]));
         assert!(verify_ram_identity(&identity, PD_HIL_CAPABILITY).is_err());
     }
 
