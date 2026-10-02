@@ -11,8 +11,10 @@ diagnostic mode it does not read the VIN ADC during tier holds; it keeps the
 heater low and EEPROM untouched.
 
 The host workflow is `ram-run test pd-sink`. It selects the dedicated ELF,
-requires an explicit local evidence directory, checks the exact USB identity
-throughout the session, prints live progress, writes `events.ndjson`,
+uses a persistent system temporary evidence directory when `--evidence-dir`
+is omitted, prints the resolved evidence path before serial preflight, checks
+the exact USB identity throughout the session, and prints live progress. It
+writes `events.ndjson`,
 `summary.json`, and `transcript.log`, validates the terminal contract, and accepts
 `external_source_pass` when the complete protocol matrix is valid. Incomplete
 or failing outcomes remain non-zero.

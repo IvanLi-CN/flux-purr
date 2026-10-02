@@ -466,9 +466,14 @@ individual tier fails:
 ```text
 flux-purr --json ram-run test pd-sink \
   --port <authorized-port> \
-  --elf <pd-hil-ram-elf> \
-  --evidence-dir <local-evidence-dir>
+  --elf <pd-hil-ram-elf>
 ```
+
+`--evidence-dir <local-evidence-dir>` is optional. When omitted, the CLI
+creates a unique persistent directory under the system temporary directory,
+prints its path before serial preflight, and records the same path in the
+terminal summary. An explicitly supplied directory must be empty before the
+run so previous evidence cannot be overwritten.
 
 Optional diagnostic selectors may run only `fixed`, only `pps`, or a bounded
 subset, but the acceptance run uses both complete matrices and the fixed
@@ -631,8 +636,8 @@ Each run produces, at minimum:
 - the terminal machine summary and the human CLI transcript.
 
 For formal ADC runs, the host must write an NDJSON event file containing the
-raw 50ms sample events and a final JSON summary beneath an explicit
-operator-selected evidence directory. An external-source diagnostic may omit
+raw 50ms sample events and a final JSON summary beneath the resolved evidence
+directory. An external-source diagnostic may omit
 device ADC sample events. The operator must retain the independent source-side
 voltage record beside the PD evidence; the CLI does not require its path,
 consume it, or machine-bind that record. The evidence directory is a local

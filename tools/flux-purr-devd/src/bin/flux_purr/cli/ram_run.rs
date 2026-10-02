@@ -144,10 +144,8 @@ fn run_ram_operation(
 }
 
 fn run_pd_hil(args: &RamTestArgs) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let evidence_dir = args
-        .evidence_dir
-        .as_deref()
-        .ok_or("ram-run test pd-sink requires --evidence-dir")?;
+    let evidence_dir = resolve_pd_hil_evidence_dir(args.evidence_dir.as_deref())?;
+    eprintln!("PD HIL evidence directory: {}", evidence_dir.display());
     let validate_vin = !args.skip_vin_validation;
     let session = match open_ram_session(
         &args.port,
@@ -158,10 +156,27 @@ fn run_pd_hil(args: &RamTestArgs) -> Result<Value, Box<dyn std::error::Error + S
         Ok(session) => session,
         Err(error) => {
             let error = format!("PD HIL serial preflight failed: {error}");
-            return finish_pd_hil_preflight_failure(&args.port, evidence_dir, &error, validate_vin);
+            return finish_pd_hil_preflight_failure(
+                &args.port,
+                &evidence_dir,
+                &error,
+                validate_vin,
+            );
         }
     };
-    send_pd_hil_request(&args.port, session, evidence_dir, validate_vin)
+    send_pd_hil_request(&args.port, session, &evidence_dir, validate_vin)
+}
+
+fn resolve_pd_hil_evidence_dir(
+    requested: Option<&Path>,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    match requested {
+        Some(path) => Ok(path.to_path_buf()),
+        None => Ok(tempfile::Builder::new()
+            .prefix("flux-purr-pd-hil-")
+            .tempdir()?
+            .keep()),
+    }
 }
 
 struct RamSession {
@@ -3621,6 +3636,18 @@ mod tests {
         let value: Value = serde_json::from_str(&request).expect("request should be JSON");
         assert_eq!(value["capability"], PD_HIL_CAPABILITY);
         assert_eq!(value["validateVin"], false);
+    }
+
+    #[test]
+    fn pd_hil_evidence_dir_defaults_to_a_persistent_system_temp_directory() {
+        let path = resolve_pd_hil_evidence_dir(None).unwrap();
+        assert!(path.exists());
+        assert!(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("flux-purr-pd-hil-"))
+        );
+        std::fs::remove_dir(path).unwrap();
     }
 
     #[test]

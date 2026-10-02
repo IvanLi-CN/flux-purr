@@ -154,7 +154,10 @@ pub(crate) struct RamTestArgs {
     pub(crate) elf: Option<PathBuf>,
     #[arg(long)]
     pub(crate) reload: bool,
-    #[arg(long, help = "Local directory for PD HIL NDJSON evidence")]
+    #[arg(
+        long,
+        help = "Local directory for PD HIL NDJSON evidence; defaults to a persistent system temp directory"
+    )]
     pub(crate) evidence_dir: Option<PathBuf>,
     #[arg(
         long,
