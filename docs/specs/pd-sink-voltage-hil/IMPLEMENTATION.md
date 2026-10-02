@@ -24,6 +24,11 @@ is still buffered on the serial stream, the loader consumes frames until the
 current `PRODUCT_BUILD_ID` is observed. This keeps a stale identity frame from
 being reported as the newly loaded RAM image.
 
+The RAM image emits its identity only after the USB, I2C, ADC, interrupt, and
+safe-output initialization has completed. The identity frame is therefore also
+the host-visible ready boundary; the host must not send the HIL request before
+receiving it, or startup can race the USB Serial/JTAG receive loop.
+
 Progress transport uses a bounded RAM queue and the USB Serial/JTAG
 non-blocking FIFO path. The device does not write progress synchronously while
 the source is waiting for a PD response. After each tier reaches a terminal

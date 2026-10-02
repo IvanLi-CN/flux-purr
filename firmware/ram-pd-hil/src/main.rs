@@ -2640,10 +2640,6 @@ mod device {
         let (usb_device, tokens) = PeripheralTokens::split(peripherals);
         let mut usb = UsbSerialJtag::new(usb_device);
         let reset_reason = "ram_boot";
-        let mut hello = String::<1024>::new();
-        let _ = protocol::write_identity(&mut hello, reset_reason);
-        super::rom_log_line(hello.as_bytes());
-
         let (mut outputs, mut measurements) = match Outputs::new(tokens) {
             Ok(value) => value,
             Err(()) => {
@@ -2652,6 +2648,12 @@ mod device {
             }
         };
         outputs.safe();
+        let mut hello = String::<1024>::new();
+        let _ = protocol::write_identity(&mut hello, reset_reason);
+        // Identity is also the host-side ready boundary: emit it only after
+        // every RAM peripheral is initialized and the receive loop can accept
+        // the next request without racing startup.
+        super::rom_log_line(hello.as_bytes());
         let mut line = [0u8; LINE_MAX];
         let mut length = 0usize;
         let mut discarding_line = false;
@@ -2849,6 +2851,26 @@ mod tests {
 
         assert!(tier_loop.contains("refresh_source_capabilities_before_request"));
         assert!(!tier_loop.contains("reset_to_default("));
+    }
+
+    #[test]
+    fn identity_is_emitted_after_ram_peripherals_are_ready() {
+        let source = include_str!("main.rs");
+        let run = source
+            .split("pub fn run() -> !")
+            .nth(1)
+            .expect("PD HIL run entrypoint must remain present");
+        let outputs_init = run
+            .find("Outputs::new(tokens)")
+            .expect("PD HIL must initialize RAM peripherals");
+        let outputs_safe = run
+            .find("outputs.safe();")
+            .expect("PD HIL must enter the safe output state");
+        let identity = run
+            .find("protocol::write_identity")
+            .expect("PD HIL must advertise its identity");
+        assert!(outputs_init < outputs_safe);
+        assert!(outputs_safe < identity);
     }
 
     #[test]
