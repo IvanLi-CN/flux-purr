@@ -88,15 +88,15 @@ recovery tier 23 and observed the fixed `5/9/12/15/20V` plateaus plus the PPS
 ladder through `21V`, but it did not receive a terminal summary and is not a
 completed CLI acceptance.
 
-The owner-authorized external-source diagnostic record used for the current
-acceptance is kept locally under
-`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-pr-ready-2`.
-It was generated from source SHA `60eb5bdcda86eff0e7d42bd127629712ed8ab68a`
+The owner-authorized external-source diagnostic record from the validated code
+candidate is kept locally under
+`target/pd-hil-evidence/direct-contract-sequence-buffered-20261002-pr-ready-final-4675`.
+It was generated from source SHA `4675b95c216a933762600aef183c353778df35d3`
 and parses as `overall=external_source_pass`, `pd=default_verified`, `22/22`
-passing tiers, and a passing fixed 5V final reset. The directory is ignored
-local evidence, not a versioned PR artifact; a new run must use an empty
-directory and record its own source SHA, USB identity, command line, and
-complete file set before being cited for physical acceptance. The independent
-IsolaPurr record for device `856a141cdbd4`, `port_c`, reports
-`power_enabled=true`, `data_connected=true`, `status=ok`, and `5045mV` after
+passing tiers, and a passing fixed 5V final reset. This is local evidence for
+the validated code candidate, not a versioned PR artifact; a new run must use
+an empty directory and record its own source SHA, USB identity, command line,
+and complete file set before being cited for physical acceptance. The
+independent IsolaPurr record for device `856a141cdbd4`, `port_c`, reports
+`power_enabled=true`, `data_connected=true`, `status=ok`, and `5044mV` after
 the run. The external-source acceptance did not use ADC voltage validation.
