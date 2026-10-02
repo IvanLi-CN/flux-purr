@@ -506,6 +506,12 @@ ADC sample frames because the device ADC is deliberately not used for this
 profile. Formal ADC acceptance remains a separate profile and must not be
 reported as passed by an external-source run.
 
+This diagnostic profile is also allowed to omit per-boundary live capability
+and recovery frames when emitting them would consume the USB/PD timing margin.
+The terminal summary remains required to carry the raw and decoded capability
+set, every tier's selected contract fields, and the final recovery result. The
+full formal profile retains the per-boundary live-frame requirement.
+
 ### Terminal summary
 
 The terminal frame carries a structured summary even when a tier was
@@ -593,7 +599,9 @@ Each run produces, at minimum:
 - the RAM image build ID, source SHA, board, protocol version, and exact
   authorized-port identity;
 - FUSB302B identity reads and the interrupt/I2C preflight result;
-- raw and decoded Source Capabilities for every capability boundary;
+- raw and decoded Source Capabilities for every capability boundary in the
+  formal profile; the external-source diagnostic retains the authoritative raw
+  and decoded set in its terminal summary;
 - the exact request fields and selected object position for every supported
   tier;
 - `requestSentAt`, `contractConfirmedAt`, `holdStartedAt`, and
@@ -605,7 +613,9 @@ Each run produces, at minimum:
   locate, parse, or machine-bind this record;
 - every tier status and reason, including unsupported rows;
 - capability-refresh records for every tier and final fixed 5V recovery
-  verification;
+  verification in the formal profile; external-source diagnostics may rely on
+  the terminal summary when live capability/recovery frames would threaten the
+  USB/PD timing margin;
 - the terminal machine summary and the human CLI transcript.
 
 For formal ADC runs, the host must write an NDJSON event file containing the

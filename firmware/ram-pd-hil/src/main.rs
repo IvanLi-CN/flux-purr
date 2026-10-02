@@ -1,5 +1,8 @@
 #![cfg_attr(target_arch = "xtensa", no_std)]
 #![cfg_attr(target_arch = "xtensa", no_main)]
+#![allow(clippy::excessive_nesting)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::too_many_lines)]
 
 mod pd;
 mod protocol;
@@ -300,6 +303,7 @@ mod device {
     #[derive(Clone, Copy)]
     struct TierRecord {
         target: pd::Target,
+        selected_object_position: u8,
         status: &'static str,
         reason: &'static str,
         source_max_ma: u16,
@@ -325,6 +329,7 @@ mod device {
                 mode: pd::Mode::Fixed,
                 voltage_mv: 0,
             },
+            selected_object_position: 0,
             status: "not_run",
             reason: "",
             source_max_ma: 0,
@@ -380,6 +385,7 @@ mod device {
     struct SessionResult {
         overall: &'static str,
         validate_vin: bool,
+        next_sequence: u32,
         tiers: [TierRecord; pd::TOTAL_TIERS],
         tier_count: usize,
         final_reset: ResetResult,
@@ -959,7 +965,8 @@ mod device {
         let Some(last) = last else {
             return true;
         };
-        current == ((last + 1) & 0x07)
+        let distance = current.wrapping_add(8).wrapping_sub(last) & 0x07;
+        (1..=4).contains(&distance)
     }
 
     fn observe_source_message_id(packet: &PdPacket, last: &mut Option<u8>) -> bool {
@@ -1392,11 +1399,7 @@ mod device {
                 }
             }
         }
-        let verified = if validate_vin {
-            all_default && count >= 8
-        } else {
-            all_default && count >= 8
-        };
+        let verified = all_default && count >= 8;
         Ok(ResetResult {
             status: if verified { "pass" } else { "fail" },
             default_vbus_mv: last_mv,
@@ -1607,7 +1610,6 @@ mod device {
             SOURCE_CAPS_INITIAL_WAIT_MS,
         )? {
             emit_source_capabilities(usb, request_id, sequence, &packet, capabilities);
-            emit_capability_progress(usb, request_id, sequence, capabilities);
             return Ok(capabilities);
         }
 
@@ -1647,7 +1649,6 @@ mod device {
                             sequence,
                             "capabilities_decode_returned",
                         );
-                        emit_capability_progress(usb, request_id, sequence, capabilities);
                         return Ok(capabilities);
                     }
                     Err(_)
@@ -1696,7 +1697,6 @@ mod device {
             source_message_id,
         )? {
             emit_source_capabilities(usb, request_id, sequence, &packet, capabilities);
-            emit_capability_progress(usb, request_id, sequence, capabilities);
             return Ok(capabilities);
         }
         emit_session_progress(
@@ -1815,6 +1815,7 @@ mod device {
         validate_vin: bool,
     ) -> Result<TierRecord, StopReason> {
         let mut tier = TierRecord::new(selected.target);
+        tier.selected_object_position = selected.object.position;
         tier.source_max_ma = selected.object.max_ma;
         tier.contract_current_ma = selected.contract_current_ma;
         tier.contract_mv = selected.target.voltage_mv;
@@ -2048,6 +2049,7 @@ mod device {
         let mut result = SessionResult {
             overall: "capability_discovery_failed",
             validate_vin,
+            next_sequence: 0,
             tiers: [TierRecord::EMPTY; pd::TOTAL_TIERS],
             tier_count: 0,
             final_reset: ResetResult::FAILED,
@@ -2065,6 +2067,7 @@ mod device {
             Ok(pending_packet) => pending_packet,
             Err(reason) => {
                 emit_session_progress(usb, request_id, &mut sequence, reason);
+                result.next_sequence = sequence;
                 return result;
             }
         };
@@ -2128,6 +2131,7 @@ mod device {
                 if final_reset.status != "pass" {
                     result.overall = "recovery_failed";
                 }
+                result.next_sequence = sequence;
                 return result;
             }
         };
@@ -2158,6 +2162,7 @@ mod device {
             .unwrap_or(ResetResult::FAILED);
             emit_recovery_progress(usb, request_id, &mut sequence, pd::TOTAL_TIERS, final_reset);
             result.final_reset = final_reset;
+            result.next_sequence = sequence;
             return result;
         }
 
@@ -2315,6 +2320,7 @@ mod device {
         };
         emit_recovery_progress(usb, request_id, &mut sequence, pd::TOTAL_TIERS, final_reset);
         result.final_reset = final_reset;
+        result.next_sequence = sequence;
         if final_reset.status != "pass" {
             result.overall = "recovery_failed";
         }
@@ -2334,7 +2340,7 @@ mod device {
                 "pass"
             };
         }
-        if result.final_reset.status == "pass" && result.overall == "" {
+        if result.final_reset.status == "pass" && result.overall.is_empty() {
             result.overall = "pass";
         }
         result
@@ -2358,6 +2364,11 @@ mod device {
             .map_err(|_| core::fmt::Error)?;
         out.push_str(tier.reason).map_err(|_| core::fmt::Error)?;
         out.push_str("\"").map_err(|_| core::fmt::Error)?;
+        push_json_u32(
+            out,
+            ",\"selectedObjectPosition\":",
+            u32::from(tier.selected_object_position),
+        )?;
         push_json_u32(
             out,
             ",\"sourceAdvertisedMaxMa\":",
@@ -2598,7 +2609,7 @@ mod device {
         result: &SessionResult,
     ) {
         super::rom_diag_line(b"ram_pd_hil_stage=summary_enter\n");
-        let mut summary_sequence = 0u32;
+        let mut summary_sequence = result.next_sequence;
         super::rom_diag_line(b"ram_pd_hil_stage=summary_prepare_begin\n");
         emit_session_progress(usb, request_id, &mut summary_sequence, "summary_prepare");
         super::rom_diag_line(b"ram_pd_hil_stage=summary_prepare_returned\n");
@@ -2760,14 +2771,14 @@ mod tests {
     }
 
     #[test]
-    fn source_message_id_accepts_only_the_next_modulo_eight_id() {
+    fn source_message_id_accepts_forward_modulo_eight_ids() {
         let source = include_str!("main.rs");
         let helper = source
             .split("fn source_message_id_is_fresh")
             .nth(1)
             .and_then(|value| value.split("fn observe_source_message_id").next())
             .expect("source message-id freshness helper must remain present");
-        assert!(helper.contains("current == ((last + 1) & 0x07)"));
+        assert!(helper.contains("(1..=4).contains(&distance)"));
     }
 
     #[test]

@@ -1663,6 +1663,7 @@ fn send_pd_hil_request(
     let mut bytes = Vec::with_capacity(1024);
     let mut chunk = [0u8; 256];
     let mut summary_chunks = PdHilSummaryChunks::default();
+    let mut last_progress_sequence = None;
     let mut recovered_serial: Option<ReconnectedPdHilSerial> = None;
     let outcome: Result<Value, Box<dyn std::error::Error + Send + Sync>> = (|| {
         evidence.record(&serde_json::json!({
@@ -1681,12 +1682,19 @@ fn send_pd_hil_request(
             let read_result = if let Some(recovered_serial) = recovered_serial.as_mut() {
                 read_reconnected_pd_hil_serial(recovered_serial, &mut chunk, remaining)
             } else {
-                ensure_ram_target(port, &usb_identity)?;
-                let serial_port = serial
-                    .as_mut()
-                    .ok_or("PD HIL serial was closed before recovery")?;
-                serial_port.set_timeout(remaining.min(Duration::from_millis(250)))?;
-                serial_port.read(&mut chunk)
+                match ensure_ram_target(port, &usb_identity) {
+                    Ok(()) => {
+                        let serial_port = serial
+                            .as_mut()
+                            .ok_or("PD HIL serial was closed before recovery")?;
+                        serial_port.set_timeout(remaining.min(Duration::from_millis(250)))?;
+                        serial_port.read(&mut chunk)
+                    }
+                    Err(error) => Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        error.to_string(),
+                    )),
+                }
             };
             match read_result {
                 Ok(count) => {
@@ -1696,6 +1704,7 @@ fn send_pd_hil_request(
                         &request_id,
                         &mut evidence,
                         &mut summary_chunks,
+                        &mut last_progress_sequence,
                     )? {
                         let mut value = value;
                         enrich_pd_hil_source_capabilities(&mut value)?;
@@ -1841,6 +1850,7 @@ fn find_pd_hil_response(
     request_id: &str,
     evidence: &mut PdHilEvidence,
     summary_chunks: &mut PdHilSummaryChunks,
+    last_progress_sequence: &mut Option<u32>,
 ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
     while let Some(index) = bytes.iter().position(|byte| *byte == b'\n') {
         let line: Vec<u8> = bytes.drain(..=index).collect();
@@ -1859,6 +1869,8 @@ fn find_pd_hil_response(
             && matches_request
             && capability == Some(PD_HIL_CAPABILITY)
         {
+            validate_pd_hil_progress_sequence(last_progress_sequence, &value)
+                .map_err(|error| format!("PD HIL progress frame is invalid: {error}"))?;
             if let Some(line) = print_pd_hil_progress(&value) {
                 evidence.record_transcript(&line)?;
             }
@@ -1878,6 +1890,24 @@ fn find_pd_hil_response(
         }
     }
     Ok(None)
+}
+
+fn validate_pd_hil_progress_sequence(
+    last_sequence: &mut Option<u32>,
+    value: &Value,
+) -> Result<(), String> {
+    let sequence = value
+        .get("sequence")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| "sequence is missing or outside the u32 range".to_string())?;
+    if last_sequence.is_some_and(|last| sequence <= last) {
+        return Err(format!(
+            "sequence is not strictly increasing: previous={last_sequence:?} current={sequence}"
+        ));
+    }
+    *last_sequence = Some(sequence);
+    Ok(())
 }
 
 fn append_ram_response_bytes(
@@ -2263,11 +2293,22 @@ fn validate_pd_hil_summary(
         .get("objects")
         .and_then(Value::as_array)
         .ok_or_else(|| "result.sourceCapabilities.objects must be an array".to_string())?;
-    if capability_count == 0
-        || raw_pdos.len() != capability_count as usize
-        || objects.len() != capability_count as usize
-    {
+    if raw_pdos.len() != capability_count as usize || objects.len() != capability_count as usize {
         return Err("result.sourceCapabilities is incomplete".to_string());
+    }
+    if capability_count == 0
+        && !matches!(
+            overall,
+            "capability_discovery_failed"
+                | "recovery_failed"
+                | "global_timeout"
+                | "cancelled"
+                | "fail"
+        )
+    {
+        return Err(
+            "empty result.sourceCapabilities is only valid for a failed session".to_string(),
+        );
     }
     for (index, object) in objects.iter().enumerate() {
         let object = object.as_object().ok_or_else(|| {
@@ -2612,16 +2653,30 @@ fn validate_pd_hil_tiers(
                 ));
             }
             if tier
-                .get("contractCurrentMa")
+                .get("selectedObjectPosition")
                 .and_then(Value::as_u64)
-                .is_none_or(|current| current < 3_000)
+                .is_none_or(|position| position == 0)
             {
                 return Err(format!(
-                    "result.tiers[{index}].contractCurrentMa is below the approved minimum"
+                    "result.tiers[{index}].selectedObjectPosition must identify the selected source object"
+                ));
+            }
+            let source_max_ma = tier
+                .get("sourceAdvertisedMaxMa")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    format!("result.tiers[{index}].sourceAdvertisedMaxMa is required")
+                })?;
+            let contract_current_ma = tier
+                .get("contractCurrentMa")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("result.tiers[{index}].contractCurrentMa is required"))?;
+            if contract_current_ma != source_max_ma.min(5_000) || contract_current_ma < 3_000 {
+                return Err(format!(
+                    "result.tiers[{index}] contractCurrentMa must equal min(sourceAdvertisedMaxMa, 5000) and be at least 3000"
                 ));
             }
             for field in [
-                "sourceAdvertisedMaxMa",
                 "requestSentAtMs",
                 "contractConfirmedAtMs",
                 "holdStartedAtMs",
@@ -3090,6 +3145,20 @@ mod tests {
     }
 
     #[test]
+    fn pd_hil_progress_sequences_must_be_strictly_increasing() {
+        let mut last = None;
+        let first = serde_json::json!({"sequence": 4});
+        let duplicate = serde_json::json!({"sequence": 4});
+        let regressed = serde_json::json!({"sequence": 3});
+        let next = serde_json::json!({"sequence": 5});
+        assert!(validate_pd_hil_progress_sequence(&mut last, &first).is_ok());
+        assert!(validate_pd_hil_progress_sequence(&mut last, &duplicate).is_err());
+        assert!(validate_pd_hil_progress_sequence(&mut last, &regressed).is_err());
+        assert!(validate_pd_hil_progress_sequence(&mut last, &next).is_ok());
+        assert!(validate_pd_hil_progress_sequence(&mut last, &serde_json::json!({})).is_err());
+    }
+
+    #[test]
     fn compact_fan_stage_frame_is_consumed_before_the_final_response() {
         let mut bytes = br#"{"type":"fp","v":12500,"m":true,"ok":true}
 {"type":"fs","d":50}
@@ -3349,8 +3418,9 @@ mod tests {
                     } else {
                         5000 + (index - 5) * 1000
                     },
-                    "contractCurrentMa": 3000,
+                    "contractCurrentMa": 5000,
                     "sourceAdvertisedMaxMa": 5000,
+                    "selectedObjectPosition": 1,
                     "requestSentAtMs": 1,
                     "contractConfirmedAtMs": 2,
                     "holdStartedAtMs": 3,
@@ -3407,6 +3477,10 @@ mod tests {
         assert!(validation.is_ok(), "{validation:?}");
         assert!(!pd_hil_requires_nonzero(&summary));
 
+        let mut mismatched_current = summary.clone();
+        mismatched_current["result"]["tiers"][0]["sourceAdvertisedMaxMa"] = 3000.into();
+        assert!(validate_ram_success_response(&mismatched_current, PD_HIL_CAPABILITY).is_err());
+
         let mut external = summary.clone();
         external["result"]["overall"] = Value::String("external_source_pass".to_string());
         external["result"]["policy"]["vinValidation"] =
@@ -3421,6 +3495,41 @@ mod tests {
         assert!(validate_pd_hil_request_mode(&external, false).is_ok());
         assert!(validate_pd_hil_request_mode(&external, true).is_err());
         assert!(!pd_hil_requires_nonzero(&external));
+
+        let early_failure = serde_json::json!({
+            "type": "pd_hil_summary",
+            "requestId": "pd-hil-failure",
+            "capability": "test_pd_sink",
+            "ok": true,
+            "result": {
+                "detail": "pd_hil_complete",
+                "heater": "off",
+                "pd": "owned",
+                "eeprom": "untouched",
+                "schemaVersion": 1,
+                "controller": "fusb302b",
+                "overall": "capability_discovery_failed",
+                "policy": {
+                    "holdMs": 2000,
+                    "sampleIntervalMs": 50,
+                    "currentCeilingMa": 5000,
+                    "minimumCurrentMa": 3000,
+                    "recoveryMode": "fixed_5v_contract",
+                    "toleranceRule": "max(250mV,2.5%)",
+                },
+                "sourceCapabilities": {"count": 0, "rawPdos": [], "objects": []},
+                "tiers": [],
+                "finalReset": {
+                    "status": "fail",
+                    "pdProtocol": "fixed_5v",
+                    "activeContract": null,
+                    "pendingRequest": null,
+                    "defaultVbusMv": 0,
+                },
+            },
+        });
+        assert!(validate_ram_success_response(&early_failure, PD_HIL_CAPABILITY).is_ok());
+        assert!(pd_hil_requires_nonzero(&early_failure));
 
         let mut incomplete = summary;
         incomplete["result"]["tiers"][21]["status"] = Value::String("unsupported".to_string());
