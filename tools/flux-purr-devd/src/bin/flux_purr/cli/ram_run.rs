@@ -2423,9 +2423,13 @@ fn validate_pd_hil_tiers(
                     "result.tiers[{index}].contractConfirmed must be true for a passing tier"
                 ));
             }
-            if tier.get("holdMs").and_then(Value::as_u64) != Some(2_000) {
+            if tier
+                .get("holdMs")
+                .and_then(Value::as_u64)
+                .is_none_or(|hold_ms| !(2_000..=2_250).contains(&hold_ms))
+            {
                 return Err(format!(
-                    "result.tiers[{index}].holdMs must be 2000 for a passing tier"
+                    "result.tiers[{index}].holdMs must be within the 2000ms hold window"
                 ));
             }
             if tier

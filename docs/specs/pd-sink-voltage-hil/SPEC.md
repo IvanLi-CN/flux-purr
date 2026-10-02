@@ -461,7 +461,8 @@ defaults are:
 
 - capability discovery: `3000ms`;
 - negotiation per supported tier: `3000ms`;
-- hold: exactly `2000ms`;
+- hold: at least `2000ms`; host validation accepts the bounded
+  `2000..2250ms` report window for millisecond tick/scheduling jitter;
 - initial/final 5V recovery: bounded by the implementation's `60000ms`
   recovery budget;
 - session deadline: `210s`, with a hard upper bound of `300s`;
