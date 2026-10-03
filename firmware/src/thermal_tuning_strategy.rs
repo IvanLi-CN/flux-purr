@@ -428,6 +428,7 @@ enum GateFailure {
 
 fn stability_gate_evidence(evidence: TuneEvidence) -> (GateFailure, f64) {
     if evidence.scout_hold_complete
+        && evidence.stable_window_verified
         && let Some(started) = evidence.stable_window_after_warmup_ms
         && started <= evidence.settle_limit_ms
     {
@@ -1117,6 +1118,19 @@ mod tests {
             first_band_exit_centi_c: None,
             deadline_temperature_centi_c: None,
         }
+    }
+
+    #[test]
+    fn unverified_timely_restart_keeps_the_broken_high_side_failure() {
+        let mut facts = evidence(80);
+        facts.scout_hold_complete = true;
+        facts.stable_window_after_warmup_ms = Some(18_252);
+        facts.settle_limit_ms = 30_000;
+        facts.first_band_observed = true;
+        facts.first_band_exit_centi_c = Some(8_155);
+        assert!(stability_gate_evidence(facts) == (GateFailure::BrokeHigh, 0.05));
+        facts.stable_window_verified = true;
+        assert!(stability_gate_evidence(facts) == (GateFailure::Other, 0.0));
     }
 
     #[test]

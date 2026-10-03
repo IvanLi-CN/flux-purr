@@ -13,6 +13,10 @@ use crate::thermal_tuning_strategy::{
     CurveClass, TuneEvidence, reseed_after_hold_confirm, tune_point,
 };
 
+#[cfg(test)]
+#[path = "thermal_tuning_unverified_window_tests.rs"]
+mod unverified_window_tests;
+
 pub const THERMAL_TUNING_TARGETS_C: [i16; 9] = [60, 80, 100, 120, 140, 160, 180, 220, 240];
 pub const THERMAL_TUNING_EXECUTION_ORDER_C: [i16; 9] = [60, 240, 140, 100, 80, 120, 180, 160, 220];
 pub const THERMAL_TUNING_MAX_TARGETS: usize = 9;
@@ -1043,8 +1047,8 @@ impl ThermalTuningRuntime {
         let mut evidence = TuneEvidence {
             target_c,
             tunable_stop: !self.near_target_evidence_overflow && !self.approach_curve_overflow,
-            full_speed_failed: settle_time_ms
-                .is_none_or(|value| value > u64::from(full_speed_limit_ms)),
+            full_speed_failed: self.stable_window_verified_at_ms.is_none()
+                || settle_time_ms.is_none_or(|value| value > u64::from(full_speed_limit_ms)),
             overshoot_c: f64::from(max_overshoot_centi_c.unwrap_or_default()) / 100.0,
             // No qualified-Hold samples cannot establish a low ripple. Match
             // the external strategy's missing-evidence sentinel so a failed
@@ -1330,7 +1334,13 @@ impl ThermalTuningRuntime {
                 .zip(self.max_hold_temperature_centi_c)
                 .is_none_or(|(min, max)| i32::from(max) - i32::from(min) <= 300);
         if gates_valid && let Some(timing) = &mut self.trial_timing {
-            timing.try_extend(elapsed_ms, timed_out);
+            let already_extended = timing.extended_at_ms.is_some();
+            if timing.try_extend(elapsed_ms, timed_out) && !already_extended {
+                // The failure classifier now observes the bound active deadline.
+                // Keep earlier band-entry/break facts and the original timing audit.
+                self.deadline_nearest_distance_ms = u64::MAX;
+                self.deadline_nearest_temperature_centi_c = None;
+            }
         }
     }
 
@@ -1698,14 +1708,15 @@ impl ThermalTuningRuntime {
             } else {
                 0
             };
+            if sign != 0 && self.approach_tail_first_sign == 0 {
+                self.approach_tail_first_sign = sign;
+            } else if sign != 0
+                && self.approach_tail_last_sign != 0
+                && self.approach_tail_last_sign != sign
+            {
+                self.approach_tail_sign_changes = self.approach_tail_sign_changes.saturating_add(1);
+            }
             if sign != 0 {
-                if self.approach_tail_first_sign == 0 {
-                    self.approach_tail_first_sign = sign;
-                } else if self.approach_tail_last_sign != 0 && self.approach_tail_last_sign != sign
-                {
-                    self.approach_tail_sign_changes =
-                        self.approach_tail_sign_changes.saturating_add(1);
-                }
                 self.approach_tail_last_sign = sign;
             }
             self.approach_tail_count = self.approach_tail_count.saturating_add(1);
@@ -1769,7 +1780,7 @@ impl ThermalTuningRuntime {
         if sample.elapsed_ms < warmup_exit {
             return;
         }
-        let limit_ms = if target_c > 150 { 5_000 } else { 10_000 };
+        let limit_ms = u64::from(self.active_settle_limit_ms(target_c));
         let deadline = warmup_exit.saturating_add(limit_ms);
         let distance = sample.elapsed_ms.abs_diff(deadline);
         if distance < self.deadline_nearest_distance_ms {
@@ -1844,6 +1855,7 @@ impl ThermalTuningRuntime {
         hold_p2p_centi_c: Option<u16>,
         settle_time_ms: Option<u64>,
     ) -> [f64; 11] {
+        let completed = completed && self.stable_window_verified_at_ms.is_some();
         let missing = 1.0e12;
         let limit_ms = f64::from(self.active_settle_limit_ms(target_c));
         let margin_ms = if target_c > 150 { 500.0 } else { 1_000.0 };
@@ -2908,7 +2920,7 @@ mod tests {
         profile
     }
 
-    fn sample(
+    pub(super) fn sample(
         elapsed_ms: u64,
         phase: ThermalTuningPhase,
         temperature_centi_c: i16,
@@ -3350,7 +3362,7 @@ mod tests {
         assert!(runtime.events.iter().all(|event| event.decision.is_none()));
     }
 
-    fn extended_floor_runtime() -> ThermalTuningRuntime {
+    pub(super) fn extended_floor_runtime() -> ThermalTuningRuntime {
         let mut profile = profile_with_targets(&[60]);
         let point = profile.points[0].as_mut().unwrap();
         point.approach_floor_power_permille = 100;
@@ -3712,6 +3724,7 @@ mod tests {
     #[test]
     fn eleven_component_score_uses_local_hold_and_approach_evidence() {
         let mut runtime = ThermalTuningRuntime::new();
+        runtime.stable_window_verified_at_ms = Some(14_000);
         runtime.trial_start_elapsed_ms = Some(0);
         runtime.first_band_elapsed_ms = Some(5_200);
         runtime.hold_output_histogram[300] = 3;
