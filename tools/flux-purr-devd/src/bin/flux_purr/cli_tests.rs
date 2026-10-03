@@ -3206,6 +3206,30 @@ fn parses_thermal_report_render_v2_command() {
     );
 }
 
+#[tokio::test]
+async fn thermal_report_render_does_not_start_or_validate_a_devd_connection() {
+    for explicit_endpoint in [false, true] {
+        let mut cli = Cli::parse_from([
+            "flux-purr",
+            "--devd",
+            "not-a-control-socket",
+            "thermal",
+            "report",
+            "render-v2",
+            "--input-dir",
+            "unused-input",
+        ]);
+        let managed = prepare_devd(&mut cli, false, explicit_endpoint)
+            .await
+            .unwrap();
+        assert!(
+            managed.is_none(),
+            "offline report rendering must not acquire hardware services"
+        );
+        assert_eq!(cli.devd, "not-a-control-socket");
+    }
+}
+
 #[test]
 fn parses_thermal_report_render_self_test_command() {
     let cli = Cli::try_parse_from([

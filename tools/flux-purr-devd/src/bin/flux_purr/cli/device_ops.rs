@@ -137,6 +137,14 @@ pub(crate) async fn prepare_devd(
     direct_flash_command: bool,
     explicit_devd_endpoint: bool,
 ) -> Result<Option<ManagedDevd>, Box<dyn std::error::Error + Send + Sync>> {
+    if matches!(
+        &cli.command,
+        Command::Thermal {
+            command: ThermalCommand::Report { .. }
+        }
+    ) {
+        return Ok(None);
+    }
     if direct_flash_command && explicit_devd_endpoint {
         return Err("flash and recover are direct-serial commands and do not accept --devd".into());
     }
