@@ -209,8 +209,14 @@ pub(crate) async fn run_firmware_tuning(
     let lease = create_lease(client, &resolved).await?;
     let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
     let mut statuses = Vec::new();
+    let mut identity_prepared = false;
     let mut profile_mode_prepared = false;
     let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
+        let identity =
+            request_leased(client, &resolved, &lease.lease_id, Method::GET, "/identity", None)
+                .await?;
+        record_device_identity(&input_dir, &run_id, &identity)?;
+        identity_prepared = true;
         let runtime = ensure_firmware_profile_mode(client, &resolved, &lease.lease_id).await?;
         journal.record_runtime(&run_id, None, &runtime)?;
         profile_mode_prepared = true;
@@ -422,6 +428,8 @@ pub(crate) async fn run_firmware_tuning(
             power_class: "pps5a",
             reason: if profile_mode_prepared {
                 "transport_or_runtime_failure"
+            } else if !identity_prepared {
+                "device_identity_not_confirmed"
             } else {
                 "profile_mode_not_confirmed"
             },
@@ -844,6 +852,62 @@ fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, io::Err
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("missing {field}")))
 }
 
+fn record_device_identity(input_dir: &Path, run_id: &str, identity: &Value) -> io::Result<()> {
+    for field in ["deviceId", "firmwareVersion", "gitSha", "buildId"] {
+        if required_string(identity, field)?.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("empty {field}"),
+            ));
+        }
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(input_dir.join("device-identity.json"))?;
+    serde_json::to_writer_pretty(
+        &mut file,
+        &json!({"runId": run_id, "receivedAtUnixMs": current_unix_millis(), "identity": identity}),
+    )
+    .map_err(io::Error::other)?;
+    file.sync_data()
+}
+
+fn report_device_identity(
+    input_dir: &Path,
+    run_id: &str,
+    selector: &str,
+) -> io::Result<(Value, Value)> {
+    let path = input_dir.join("device-identity.json");
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((
+                json!({"id": selector, "transport": "devd", "identity": null, "availability": "unavailable_device_identity"}),
+                json!({"version": null, "identity": null, "availability": "unavailable_device_identity"}),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let captured: Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if captured.get("runId").and_then(Value::as_str) != Some(run_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "device identity belongs to another run",
+        ));
+    }
+    let identity = captured.get("identity").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "recorded device identity missing",
+        )
+    })?;
+    Ok((
+        json!({"id": required_string(identity, "deviceId")?, "selector": selector, "transport": "devd", "identity": identity, "availability": "device_local"}),
+        json!({"version": required_string(identity, "firmwareVersion")?, "gitSha": required_string(identity, "gitSha")?, "buildId": required_string(identity, "buildId")?, "source": "device_identity", "availability": "device_local"}),
+    ))
+}
+
 fn render_unsupported_pps3a(
     device_id: &str,
     output_root: &PathBuf,
@@ -937,12 +1001,18 @@ fn render_host_failure(
         .unwrap_or_else(|| format!("firmware-failed-{}", current_unix_millis()));
     let input_dir = output_root.join(&run_id);
     fs::create_dir_all(&input_dir)?;
+    let (mut device, firmware) = report_device_identity(&input_dir, &run_id, device_id)?;
+    device["transport"] = json!(if no_device_command {
+        "host-preflight-no-device-command"
+    } else {
+        "device-command-unconfirmed"
+    });
     let bundle = json!({
         "schema": "thermal-tuning-v2",
         "runId": run_id,
         "engine": "firmware",
-        "device": {"id": device_id, "transport": if no_device_command { "host-preflight-no-device-command" } else { "device-command-unconfirmed" }},
-        "firmware": {"identity": null, "availability": if no_device_command { "device_not_queried" } else { "start_response_unavailable" }},
+        "device": device,
+        "firmware": firmware,
         "powerClass": power_class,
         "sourceClass": "unavailable",
         "ppsControlPolicyVersion": null,
@@ -1281,6 +1351,7 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         selected_targets,
         execution_order,
     } = input;
+    let (device, firmware) = report_device_identity(input_dir, run_id, device_id)?;
     let samples = collect_events(statuses, true);
     let ledger = collect_events(statuses, false);
     let (device_trace, device_trace_verification) = verify_device_trace(statuses);
@@ -1384,8 +1455,8 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         "schema": "thermal-tuning-v2",
         "runId": run_id,
         "engine": "firmware",
-        "device": {"id": device_id, "transport": "devd"},
-        "firmware": {"source": "device_identity", "identity": "device_reported"},
+        "device": device,
+        "firmware": firmware,
         "powerClass": "pps5a",
         "sourceClass": "device-local",
         "ppsControlPolicyVersion": pps_policy_version,
@@ -1884,13 +1955,14 @@ fn write_ndjson(
 mod tests {
     use super::super::{Cli, Command, ThermalCommand};
     use super::{
-        InterruptedRunInput, StatusJournal, build_report_runs, build_report_trial,
+        InterruptedRunInput, StatusJournal, V2Input, build_report_runs, build_report_trial,
         event_stream_caught_up, firmware_candidate_profile_hash, firmware_candidate_profile_value,
         firmware_host_watchdog, firmware_profile_mode_ready, firmware_read_command,
         firmware_start_command, is_confirmed_rejected_start, next_event_sequence,
-        render_host_failure, render_interrupted_run, render_unsupported_pps3a,
-        selected_execution_order, trial_events_for_target, validate_firmware_args,
-        validate_save_input, verified_saved_receipt, verify_device_trace,
+        record_device_identity, render_host_failure, render_interrupted_run,
+        render_unsupported_pps3a, report_device_identity, selected_execution_order,
+        trial_events_for_target, validate_firmware_args, validate_save_input,
+        verified_saved_receipt, verify_device_trace, write_v2_input,
     };
     use clap::Parser;
     use flux_purr_firmware::{
@@ -1899,6 +1971,91 @@ mod tests {
         thermal_tuning::{ThermalTuningEvent, digest_event_chain, hash_profile},
     };
     use serde_json::json;
+
+    #[test]
+    fn captured_identity_survives_standard_report_and_host_failure_rendering() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_root = dir.path().join("input");
+        let input_dir = input_root.join("identity-run");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        let identity = json!({
+            "deviceId": "288485681c38", "firmwareVersion": "0.27.6-dev.identity",
+            "gitSha": "0123456789abcdef0123456789abcdef01234567", "buildId": "build-identity",
+            "board": "esp32s3-frontpanel", "capabilities": ["thermal-tuning-v2"]
+        });
+        record_device_identity(&input_dir, "identity-run", &identity).unwrap();
+        let profile = json!({"points": []});
+        write_v2_input(V2Input {
+            input_dir: &input_dir,
+            device_id: "serial-selector",
+            run_id: "identity-run",
+            candidate_id: "candidate-identity",
+            candidate_hash: "sha256:identity",
+            candidate_profile: &profile,
+            statuses: &[],
+            host_interruption: None,
+            selected_targets: &[60],
+            execution_order: &[60],
+        })
+        .unwrap();
+        for failure in [false, true] {
+            let output_dir = dir
+                .path()
+                .join(if failure { "failed-report" } else { "report" });
+            if failure {
+                render_host_failure(super::HostFailureInput {
+                    device_id: "serial-selector",
+                    output_root: &input_root,
+                    bundle_dir: Some(output_dir.clone()),
+                    run_id: Some("identity-run"),
+                    power_class: "pps5a",
+                    reason: "start_not_confirmed",
+                    no_device_command: false,
+                    attempted_candidate: None,
+                    selected_targets: Some(&[60]),
+                })
+                .unwrap();
+            } else {
+                super::thermal_tuning_v2_report::render_v2_bundle(
+                    super::ThermalTuningV2ReportInput {
+                        input_dir: input_dir.clone(),
+                        output_dir: Some(output_dir.clone()),
+                    },
+                )
+                .unwrap();
+            }
+            let bundle: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(output_dir.join("run.bundle.json")).unwrap())
+                    .unwrap();
+            assert_eq!(bundle["device"]["id"], "288485681c38");
+            assert_eq!(bundle["device"]["selector"], "serial-selector");
+            assert_eq!(bundle["device"]["identity"], identity);
+            assert_eq!(bundle["firmware"]["version"], identity["firmwareVersion"]);
+            assert_eq!(bundle["firmware"]["gitSha"], identity["gitSha"]);
+            assert_eq!(bundle["firmware"]["buildId"], identity["buildId"]);
+        }
+    }
+
+    #[test]
+    fn report_identity_is_unavailable_without_capture_and_cannot_cross_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (device, firmware) = report_device_identity(dir.path(), "run-1", "selector").unwrap();
+        assert_eq!(device["identity"], serde_json::Value::Null);
+        assert_eq!(firmware["version"], serde_json::Value::Null);
+        assert_eq!(firmware["availability"], "unavailable_device_identity");
+        record_device_identity(
+            dir.path(),
+            "run-1",
+            &json!({
+                "deviceId": "device-1", "firmwareVersion": "version-1",
+                "gitSha": "git-1", "buildId": "build-1"
+            }),
+        )
+        .unwrap();
+        let error = report_device_identity(dir.path(), "run-2", "selector").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("another run"));
+    }
 
     #[test]
     fn firmware_tuning_requires_5a_mode_and_resolved_bank() {
@@ -2333,15 +2490,20 @@ mod tests {
 
     #[tokio::test]
     async fn transport_timeout_cancels_and_drains_retained_terminal_events() {
-        run_interrupted_transport_case(false).await;
+        run_interrupted_transport_case(false, true).await;
     }
 
     #[tokio::test]
     async fn transport_timeout_with_lost_events_remains_a_failed_trace_gap() {
-        run_interrupted_transport_case(true).await;
+        run_interrupted_transport_case(true, true).await;
     }
 
-    async fn run_interrupted_transport_case(trace_gap: bool) {
+    #[tokio::test]
+    async fn unavailable_device_identity_fails_before_any_tuning_command() {
+        run_interrupted_transport_case(false, false).await;
+    }
+
+    async fn run_interrupted_transport_case(trace_gap: bool, identity_available: bool) {
         use axum::{
             Json, Router,
             routing::{delete, get, post},
@@ -2376,6 +2538,14 @@ mod tests {
             }))
             .route("/api/v1/leases/test/heartbeat", post(|| async { Json(json!({})) }))
             .route("/api/v1/leases/test", delete(|| async { Json(json!({})) }))
+            .route("/api/v1/devices/bench/identity", get(move || async move {
+                Json(if identity_available {
+                    json!({"deviceId": "bench-identity", "firmwareVersion": "0.27.6-dev.capture",
+                        "gitSha": "0123456789abcdef0123456789abcdef01234567", "buildId": "captured-build"})
+                } else {
+                    json!({"deviceId": "bench-identity"})
+                })
+            }))
             .route("/api/v1/devices/bench/status", get(|| async {
                 Json(json!({"thermalProfileMode": "100w", "thermalProfileResolvedBank": "pps5a",
                     "currentTempC": 43.5, "heaterPhysicalOutputPercent": 0,
@@ -2443,6 +2613,18 @@ mod tests {
             .unwrap();
         server.abort();
         assert_eq!(rendered["ownerOutcome"], "failed");
+        if !identity_available {
+            assert!(commands.lock().unwrap().is_empty());
+            let bundle: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(report_dir.join("run.bundle.json")).unwrap())
+                    .unwrap();
+            assert_eq!(bundle["rejectionReason"], "device_identity_not_confirmed");
+            assert_eq!(
+                bundle["firmware"]["availability"],
+                "unavailable_device_identity"
+            );
+            return;
+        }
         let runtime_path = std::path::PathBuf::from(rendered["rawInputDir"].as_str().unwrap())
             .join("device-runtime-statuses.ndjson");
         let runtime_lines = std::fs::read_to_string(runtime_path).unwrap();
@@ -2463,6 +2645,8 @@ mod tests {
         let bundle: serde_json::Value =
             serde_json::from_slice(&std::fs::read(report_dir.join("run.bundle.json")).unwrap())
                 .unwrap();
+        assert_eq!(bundle["firmware"]["version"], "0.27.6-dev.capture");
+        assert_eq!(bundle["device"]["id"], "bench-identity");
         assert_eq!(
             bundle["deviceTraceVerification"]["verified"], !trace_gap,
             "cancel must retrieve the retained tail before rendering the failure report"
