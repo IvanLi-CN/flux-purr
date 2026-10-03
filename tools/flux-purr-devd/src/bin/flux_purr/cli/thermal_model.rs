@@ -105,12 +105,15 @@ pub(crate) async fn handle_thermal_command(
                     },
                 )
             }
-            ThermalReportCommand::RenderV2(args) => thermal_tuning_v2_report::render_v2_bundle(
-                thermal_tuning_v2_report::ThermalTuningV2ReportInput {
-                    input_dir: args.input_dir,
-                    output_dir: args.output_dir,
-                },
-            ),
+            ThermalReportCommand::RenderV2(args) => {
+                thermal_firmware::prepare_v2_device_journal(&args.input_dir)?;
+                thermal_tuning_v2_report::render_v2_bundle(
+                    thermal_tuning_v2_report::ThermalTuningV2ReportInput {
+                        input_dir: args.input_dir,
+                        output_dir: args.output_dir,
+                    },
+                )
+            }
         },
         ThermalCommand::Retune(args) => {
             thermal_retune::run_thermal_retune(client, default_devd, args).await

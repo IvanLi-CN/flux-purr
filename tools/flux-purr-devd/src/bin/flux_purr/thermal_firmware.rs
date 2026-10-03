@@ -1358,6 +1358,79 @@ struct V2Input<'a> {
     execution_order: &'a [i16],
 }
 
+pub(crate) fn prepare_v2_device_journal(
+    input_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if input_dir.join("run.bundle.json").exists() {
+        return Ok(());
+    }
+    let statuses: Vec<Value> = fs::read_to_string(input_dir.join("device-statuses.ndjson"))?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let first = statuses.first().ok_or("empty firmware device journal")?;
+    let run_id = required_string(first, "runId")?;
+    let candidate_id = required_string(first, "candidateId")?;
+    let mut selected_targets: Vec<i16> = serde_json::from_value(first["targetsC"].clone())?;
+    let execution_order = selected_targets.clone();
+    selected_targets.sort_unstable();
+    if selected_targets.is_empty()
+        || selected_targets.windows(2).any(|pair| pair[0] == pair[1])
+        || selected_targets
+            .iter()
+            .any(|target| !THERMAL_TUNING_TARGETS_C.contains(target))
+        || selected_execution_order(&selected_targets) != execution_order
+    {
+        return Err("journal target scope is not a frozen 5A execution scope".into());
+    }
+    validate_device_journal_identity(&statuses, first)?;
+    let last = statuses.last().ok_or("empty firmware device journal")?;
+    let candidate_profile = first
+        .get("candidateProfile")
+        .ok_or("journal seed profile missing")?;
+    let candidate_hash = required_string(last, "candidateHash")?;
+    let interrupted = !matches!(
+        last["terminalDisposition"].as_str(),
+        Some("failed" | "canceled" | "candidate_ready" | "passed")
+    );
+    write_v2_input(V2Input {
+        input_dir,
+        device_id: "unavailable_device_selector",
+        run_id,
+        candidate_id,
+        candidate_hash,
+        candidate_profile,
+        statuses: &statuses,
+        host_interruption: interrupted.then_some("host_process_stopped"),
+        selected_targets: &selected_targets,
+        execution_order: &execution_order,
+    })
+}
+
+fn validate_device_journal_identity(
+    statuses: &[Value],
+    first: &Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for status in statuses {
+        if status["runId"] != first["runId"]
+            || status["candidateId"] != first["candidateId"]
+            || status["targetsC"] != first["targetsC"]
+            || status["powerClass"] != "pps5a"
+        {
+            return Err("device journal mixes run identity, power class or target scope".into());
+        }
+        if let Some(profile) = status
+            .get("candidateProfile")
+            .filter(|value| !value.is_null())
+            && firmware_candidate_profile_hash(profile)?
+                != required_string(status, "candidateHash")?
+        {
+            return Err("device journal candidate profile hash does not match".into());
+        }
+    }
+    Ok(())
+}
+
 fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let V2Input {
         input_dir,
@@ -2512,6 +2585,101 @@ mod tests {
     #[tokio::test]
     async fn transport_timeout_cancels_and_drains_retained_terminal_events() {
         run_interrupted_transport_case(false, true, false).await;
+    }
+
+    #[test]
+    fn interrupted_device_journal_renders_retained_samples_without_inventing_a_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        let status = device_journal_fixture();
+        std::fs::write(
+            directory.path().join("device-statuses.ndjson"),
+            serde_json::to_string(&status).unwrap() + "\n",
+        )
+        .unwrap();
+        record_device_identity(
+            directory.path(),
+            "journal-run",
+            &json!({
+                "deviceId": "bench", "firmwareVersion": "0.27.6-dev.journal",
+                "gitSha": "0123456789abcdef0123456789abcdef01234567", "buildId": "journal-build"
+            }),
+        )
+        .unwrap();
+        super::prepare_v2_device_journal(directory.path()).unwrap();
+        let rendered =
+            super::thermal_tuning_v2_report::render_v2_bundle(super::ThermalTuningV2ReportInput {
+                input_dir: directory.path().to_path_buf(),
+                output_dir: None,
+            })
+            .unwrap();
+        let bundle: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("rendered/run.bundle.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rendered["ownerOutcome"], "failed");
+        assert_eq!(bundle["reviewDisposition"], "review_incomplete");
+        assert_eq!(bundle["hostInterruption"]["reason"], "host_process_stopped");
+        assert_eq!(
+            bundle["hostInterruption"]["lastDeviceTerminalDisposition"],
+            "running"
+        );
+        assert_eq!(bundle["firmware"]["version"], "0.27.6-dev.journal");
+        assert_eq!(bundle["eventCounts"]["sample"], 1);
+        let ledger =
+            std::fs::read_to_string(directory.path().join("rendered/decision-ledger.ndjson"))
+                .unwrap();
+        assert!(
+            ledger.trim().is_empty(),
+            "missing terminal events must remain missing"
+        );
+        let raw: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(directory.path().join("device-statuses.ndjson"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        assert_eq!(
+            raw, status,
+            "offline conversion must preserve the original device journal"
+        );
+    }
+
+    #[test]
+    fn offline_device_journal_rejects_mixed_runs_scope_and_candidate_hashes() {
+        let first = device_journal_fixture();
+        for field in [
+            "runId",
+            "candidateId",
+            "targetsC",
+            "powerClass",
+            "candidateHash",
+        ] {
+            let mut other = first.clone();
+            other[field] = json!("different");
+            assert!(
+                super::validate_device_journal_identity(&[first.clone(), other], &first).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    fn device_journal_fixture() -> serde_json::Value {
+        let (seed, _) = super::super::load_thermal_default_seed_candidate_profile("pps5a").unwrap();
+        let profile = super::materialize_firmware_seed_profile(seed).unwrap();
+        let hash = firmware_candidate_profile_hash(&profile).unwrap();
+        json!({
+            "runId": "journal-run", "candidateId": "journal-candidate", "candidateHash": hash,
+            "candidateProfile": profile, "powerClass": "pps5a", "targetsC": [60],
+            "terminalDisposition": "running", "reviewDisposition": "pending", "armed": true,
+            "trace": {"firstSequence": 0, "lastSequence": 0, "complete": false, "gap": false, "digest": "unconfirmed"},
+            "events": {"events": [{"sequence": 0, "elapsedMs": 0, "kind": "sample", "phase": "cooldown", "targetC": 60, "trialIndex": 0,
+                "reason": null, "trial": null, "decision": null, "sample": {
+                    "sequence": 0, "elapsedMs": 0, "targetC": 60, "trialIndex": 0, "candidateId": "journal-candidate", "candidateHash": hash,
+                    "temperatureCentiC": 3600, "vinMv": 12000, "ppsContract": {"voltageMv": 12000, "currentMa": 5000, "kind": "pps5a", "confirmed": true},
+                    "requestedMv": 12000, "ppsPowerCeilingMv": 21000, "heaterRequestedOutputPermille": 0, "heaterOutputPermille": 0,
+                    "measurementValid": true, "phase": "cooldown"
+                }}]}
+        })
     }
 
     #[tokio::test]

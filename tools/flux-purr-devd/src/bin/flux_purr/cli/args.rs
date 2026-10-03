@@ -1283,7 +1283,7 @@ pub(crate) struct ThermalLegacyReportArgs {
 pub(crate) struct ThermalTuningV2ReportArgs {
     #[arg(
         long = "input-dir",
-        help = "Directory containing run.bundle.json, samples.ndjson, thermal-profile.candidate.json and decision-ledger.ndjson."
+        help = "Prepared v2 input directory, or a firmware device journal containing device-statuses.ndjson and captured identity. Interrupted journals render as failed/incomplete without inventing terminal events."
     )]
     pub(crate) input_dir: PathBuf,
     #[arg(
