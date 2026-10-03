@@ -313,6 +313,12 @@ None
 
 ## Visual Evidence
 
+- 条件延长报告：真实诊断运行 `firmware-pps5a-1791049262325` 经标准 `render-v2` 生成，桌面 `1440×1000` 与移动 `393×852` 截图均经 owner 确认。60°C trial 6 显示原始 10 秒门槛、实际下限观察、条件触发、30 秒上限与独立 60 秒确认；诊断范围不构成默认九目标资格。两张截图仅验证报告呈现，未裁剪、未重绘。
+
+![Conditional extension report desktop](./assets/conditional-extension-desktop.png)
+
+![Conditional extension report mobile](./assets/conditional-extension-mobile.png)
+
 - 5A firmware tuning v2 报告的真实 HIL 失败记录：桌面与移动视图展示 `60°C` 试验的有效 Hold、稳定带和停热后数据。截图用于验证报告呈现，不代表该目标通过调优。
 
 ![5A firmware tuning v2 report desktop](./assets/firmware-tuning-v2-linked-charts-desktop.png)
