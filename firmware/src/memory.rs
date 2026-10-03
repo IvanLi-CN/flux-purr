@@ -1688,8 +1688,8 @@ impl ThermalPlantPersistence {
 impl ThermalPolicy {
     pub fn from_config(config: &MemoryConfig) -> Self {
         Self {
-            pps3a_profile: config.active_thermal_control_profile,
-            pps5a_profile: config.thermal_control_profile_pps5a,
+            pps3a_profile: canonical_profile_for_persistence(config.active_thermal_control_profile),
+            pps5a_profile: canonical_profile_for_persistence(config.thermal_control_profile_pps5a),
             mode: config.thermal_profile_mode,
         }
     }
@@ -1699,6 +1699,35 @@ impl ThermalPolicy {
         config.thermal_control_profile_pps5a = self.pps5a_profile;
         config.thermal_profile_mode = self.mode;
     }
+}
+
+fn canonical_profile_for_persistence(
+    mut profile: ThermalControlProfileConfig,
+) -> ThermalControlProfileConfig {
+    profile.sanitize();
+    if profile.points.iter().any(Option::is_some) {
+        // TCP3 stores these inherited values on each configured point. Keep
+        // the global fields only for the five values that are truly global;
+        // otherwise a verified readback cannot equal its canonical payload.
+        profile.settings.warmup_reenter_centi_c =
+            THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT;
+        profile.settings.hold_entry_centi_c = THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT;
+        profile.settings.hold_exit_centi_c = THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT;
+        profile.settings.hold_on_centi_c = THERMAL_CONTROL_PROFILE_HOLD_ON_CENTI_C_DEFAULT;
+        profile.settings.hold_off_centi_c = THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT;
+        profile.settings.overshoot_cutoff_centi_c =
+            THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT;
+        profile.settings.hold_kp_permille_per_c =
+            THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT;
+        profile.settings.hold_ki_permille_per_c_tick =
+            THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT;
+        profile.settings.hold_blend_ticks = THERMAL_CONTROL_PROFILE_HOLD_BLEND_TICKS_DEFAULT;
+        profile.settings.hold_reheat_power_permille =
+            THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT;
+        profile.settings.approach_lead_ticks = THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT;
+        profile.settings.hold_lead_ticks = THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT;
+    }
+    profile
 }
 
 impl UserPreferences {
@@ -6292,6 +6321,35 @@ mod tests {
             assert_eq!(decoded.sequence, index as u32 + 1);
             assert_eq!(&decoded.data, data);
         }
+    }
+
+    #[test]
+    fn fpr2_migration_preserves_nondefault_legacy_thermal_settings() {
+        let mut config = sample_config();
+        let settings = &mut config.active_thermal_control_profile.settings;
+        settings.temp_filter_alpha_permille = 700;
+        settings.warmup_reenter_centi_c = 1_000;
+        settings.hold_entry_centi_c = 12;
+        settings.hold_exit_centi_c = 60;
+        settings.hold_off_centi_c = 180;
+        settings.overshoot_cutoff_centi_c = 230;
+        settings.approach_max_ticks = 250;
+        settings.approach_min_power_ratio_permille = 500;
+        settings.hold_kp_permille_per_c = 20;
+        settings.hold_ki_permille_per_c_tick = 1;
+        settings.hold_blend_ticks = 3;
+        settings.hold_reheat_power_permille = 300;
+        settings.approach_lead_ticks = 5;
+        config.sanitize();
+        let data = PersistDomainData::ThermalPolicy(ThermalPolicy::from_config(&config));
+        let mut bytes = [0xffu8; FPR2_MAX_RECORD_SIZE];
+        let length = encode_persist_record(669, &data, &mut bytes).expect("migration fits");
+        let verified = decode_persist_record(&bytes[..length]).expect("migration decodes");
+        assert_eq!(verified.sequence, 669);
+        assert_eq!(
+            verified.data, data,
+            "the EEPROM writer requires exact readback equality"
+        );
     }
 
     #[test]
