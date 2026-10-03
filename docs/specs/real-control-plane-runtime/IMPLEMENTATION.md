@@ -107,7 +107,7 @@
 
 ## Remaining Gaps
 
-- Firmware tuning has no Web workbench or offline export yet. The firmware 5A decision strategy, complete failure-bundle behavior after transport/start errors, full-range event acknowledgement under sustained sampling, and authorized-device HIL are not validated; none of the new engine's passed outcomes may be treated as qualification evidence.
+- The independent firmware tuning Web workbench and offline five-file export are implemented. CLI and Web retain the same conditional timing facts and verify the device's quantized-score digest; a shared Rust/Web fixture and all 3,722 events of authorized diagnostic run `firmware-pps5a-1791049262325` verify serializer parity. That run completes a 60°C scout and separate sixty-second confirmation while retaining a failed diagnostic-only owner outcome. Complete default-scope qualification, safety HIL and a verified EEPROM save receipt remain outstanding; a diagnostic target pass cannot establish product qualification.
 - `pps5a` accepted EEPROM save 与 frozen baseline bundle 仍未完成；100W 路径虽已有 approach characterization current truth，但尚未形成 committed accepted bundle。
 - `/dev/cu.usbmodem2111401` 的受控真机验证已覆盖 DHCP 后 direct Chromium LAN pairing、bearer probe、lease、runtime write/readback/restore、设备重启后的显式 LAN reselect、DEVD USB bridge，以及 browser Web Serial 原生端口选择、同一 device ID 合并和 runtime write/readback/restore。mDNS TXT、SSE 长连接、竞争 lease、USB token reset 和全三 transport 连续切换仍未形成完整 HIL receipt，因此不得声称控制面验收已全部完成。
 - Web direct LAN 的显式 CIDR scan 由浏览器直接并发请求受限私有 IPv4 范围的匿名 `/health`；该面板不经过 `devd`，并以独立单元测试和 Storybook play 锁定范围限制、取消、结果选择、CIDR 本地偏好恢复、扫描面始终可见及无 DEVD 依赖。恢复的 CIDR 不会自动启动扫描，首次面板也不伪造地址或网段。native `devd`/CLI 的 mDNS 与 CIDR discovery 保持为另一条入口。

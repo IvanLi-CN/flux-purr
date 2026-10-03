@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ThermalTuningEvent } from './contracts'
 import { digestEventChain } from './thermal-tuning-device-digest'
+import fixture from './thermal-tuning-digest.fixture.json'
 
 describe('firmware event digest compatibility', () => {
   it('matches Rust safety and floating-point decision vectors regardless of received key order', async () => {
@@ -17,7 +18,7 @@ describe('firmware event digest compatibility', () => {
       decision: null,
     }
     expect(await digestEventChain([safety])).toBe(
-      '6c91f9e71b0dd2e548b43b5c3bcebfb52a3834567a05b88469af1ea934122f44'
+      '4ea3bc9c23cbf417bbcd6468998d28c493745c28305d92ead01274c3a2f4f9d3'
     )
     const decision: ThermalTuningEvent = {
       ...safety,
@@ -46,7 +47,13 @@ describe('firmware event digest compatibility', () => {
       },
     }
     expect(await digestEventChain([decision])).toBe(
-      '6ce5cc6485ed1f4d4a7d9e35e2ce766386da295efec80563c2eaa1ad47408b75'
+      '97d020d2c3f902b33a1d48b53e684e2c5e93d7bd76eb6138f249ccbc3e51e893'
+    )
+  })
+  it('matches the shared Rust serializer with conditional timing evidence', async () => {
+    const events: ThermalTuningEvent[] = JSON.parse(JSON.stringify(fixture))
+    expect(await digestEventChain(events)).toBe(
+      '76ee2a15a2e7bef6433ff8deb2e401a6ea483fbcbf1a1b0f5ed54e4eac9ed82b'
     )
   })
 })

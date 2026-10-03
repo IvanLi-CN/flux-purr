@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { ThermalTuningEvent, ThermalTuningStatus } from './contracts'
 import { digestEventChain } from './thermal-tuning-device-digest'
 import type { ThermalTuningRecording } from './thermal-tuning-recorder'
-import { exportThermalTuningV2 } from './thermal-tuning-v2-export'
+import { exportThermalTuningV2, timingGateValid } from './thermal-tuning-v2-export'
 
 const TARGETS = [60, 80, 100, 120, 140, 160, 180, 220, 240]
 const EXECUTION_ORDER = [60, 240, 140, 100, 80, 120, 180, 160, 220]
@@ -74,6 +74,41 @@ function recording(
 }
 
 describe('Web thermal-tuning-v2 export', () => {
+  it('requires bound floor evidence and a complete stable window for extended timing', () => {
+    const trial = {
+      targetC: 60,
+      canonicalCandidate: { point: { approachFloorPowerPermille: 100, holdPowerPermille: 100 } },
+      fullSpeedToStable: { settleTimeMs: 12_000, limitMs: 30_000 },
+      timing: {
+        policyVersion: 1,
+        originalLimitMs: 10_000,
+        extensionLimitMs: 30_000,
+        allowedApproachFloorPermille: 100,
+        effectiveApproachFloorPermille: 100,
+        floorObservedAtMs: 2_000,
+        extendedAtMs: 11_000,
+        warmupExitedAtMs: 1_000,
+        stableWindowStartedAtMs: 13_000,
+        stableWindowVerifiedAtMs: 23_000,
+      },
+    }
+    expect(timingGateValid(trial)).toBe(true)
+    for (const change of [
+      { floorObservedAtMs: null },
+      { extendedAtMs: 10_000 },
+      { stableWindowVerifiedAtMs: 22_999 },
+      { extensionLimitMs: 180_000 },
+      { effectiveApproachFloorPermille: 160 },
+      { floorObservedAtMs: 2_000.5 },
+      { floorObservedAtMs: -1 },
+      { stableWindowVerifiedAtMs: Number.MAX_SAFE_INTEGER + 1 },
+    ]) {
+      expect(timingGateValid({ ...trial, timing: { ...trial.timing, ...change } })).toBe(false)
+    }
+    expect(
+      timingGateValid({ ...trial, timing: { availability: 'mismatched_device_timing_evidence' } })
+    ).toBe(false)
+  })
   it('exports all five standard files for a failed device run', async () => {
     const events = [event(0, 'safety', 60)]
     events[0].reason = 'sensor_fault'

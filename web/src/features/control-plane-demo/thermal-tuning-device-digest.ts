@@ -38,10 +38,13 @@ const DEVICE_EVENT_FIELDS: Record<string, string[]> = {
     'purpose',
     'startSequence',
     'startElapsedMs',
+    'startTemperatureCentiC',
+    'cooldownThresholdCentiC',
     'endSequence',
     'endElapsedMs',
     'sampleStartSequence',
     'sampleEndSequence',
+    'timing',
   ],
   'event.trial.candidate': [
     'candidateId',
@@ -90,18 +93,42 @@ const DEVICE_EVENT_FIELDS: Record<string, string[]> = {
     'freeze',
     'prune',
     'stopReason',
+    'timing',
   ],
 }
+
+const TIMING_FIELDS = [
+  'policyVersion',
+  'originalLimitMs',
+  'extensionLimitMs',
+  'allowedApproachFloorPermille',
+  'effectiveApproachFloorPermille',
+  'floorObservedAtMs',
+  'extendedAtMs',
+  'warmupExitedAtMs',
+  'stableWindowStartedAtMs',
+  'stableWindowVerifiedAtMs',
+]
+DEVICE_EVENT_FIELDS['event.trial.timing'] = TIMING_FIELDS
+DEVICE_EVENT_FIELDS['event.decision.timing'] = TIMING_FIELDS
 
 export async function digestEventChain(events: ThermalTuningEvent[]) {
   let previous = ''
   for (const event of events) {
-    const encoded = textEncoder.encode(serializeDeviceValue(event, 'event'))
+    const score = event.decision?.score
+    const canonical = event.decision
+      ? { ...event, decision: { ...event.decision, score: Array(11).fill(0) } }
+      : event
+    const encoded = textEncoder.encode(serializeDeviceValue(canonical, 'event'))
     const bytes = encoded.length <= 4096 ? encoded : fallbackEventBytes(event)
     const prefix = textEncoder.encode(previous)
-    const combined = new Uint8Array(prefix.length + bytes.length)
+    const domain = textEncoder.encode('thermal-tuning-event-digest-v2')
+    const quantized = Array.isArray(score) ? scoreBytes(score) : new Uint8Array()
+    const combined = new Uint8Array(prefix.length + domain.length + bytes.length + quantized.length)
     combined.set(prefix)
-    combined.set(bytes, prefix.length)
+    combined.set(domain, prefix.length)
+    combined.set(bytes, prefix.length + domain.length)
+    combined.set(quantized, prefix.length + domain.length + bytes.length)
     previous = (await sha256Bytes(combined)).slice(7)
   }
   return previous
@@ -117,8 +144,29 @@ function serializeDeviceValue(value: unknown, path: string): string {
   }
   if (typeof value !== 'object') return JSON.stringify(value)
   const object = value as Record<string, unknown>
-  const keys = DEVICE_EVENT_FIELDS[path] ?? Object.keys(object)
+  const keys = (DEVICE_EVENT_FIELDS[path] ?? Object.keys(object)).filter(
+    (key) => key !== 'timing' || object[key] != null
+  )
   return `{${keys.map((key) => `${JSON.stringify(key)}:${serializeDeviceValue(object[key], `${path}.${key}`)}`).join(',')}}`
+}
+
+function scoreBytes(score: unknown[]) {
+  const label = textEncoder.encode('score-micros')
+  const bytes = new Uint8Array(label.length + 11 * 8)
+  bytes.set(label)
+  const view = new DataView(bytes.buffer)
+  for (let index = 0; index < 11; index++) {
+    const scaled = Number(score[index]) * 1_000_000
+    const value = !Number.isFinite(scaled)
+      ? -(1n << 63n)
+      : scaled >= Number((1n << 63n) - 1n)
+        ? (1n << 63n) - 1n
+        : scaled <= Number(-(1n << 63n))
+          ? -(1n << 63n)
+          : BigInt(scaled >= 0 ? Math.floor(scaled + 0.5) : Math.ceil(scaled - 0.5))
+    view.setBigInt64(label.length + index * 8, value, true)
+  }
+  return bytes
 }
 
 function fallbackEventBytes(event: ThermalTuningEvent) {

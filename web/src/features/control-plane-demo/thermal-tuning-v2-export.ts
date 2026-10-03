@@ -391,6 +391,17 @@ function buildTrial(
     settleTimeMs: result.settleTimeMs ?? null,
     limitMs: result.hardGateFullSpeedToStableMs ?? null,
   }
+  const trialTiming = asObject(trial.timing)
+  const decisionTiming = asObject(result.timing)
+  const timing =
+    trialTiming || decisionTiming
+      ? trialTiming != null &&
+        decisionTiming != null &&
+        Object.keys(trialTiming).length === Object.keys(decisionTiming).length &&
+        Object.keys(trialTiming).every((key) => trialTiming[key] === decisionTiming[key])
+        ? decisionTiming
+        : { availability: 'mismatched_device_timing_evidence' }
+      : null
   const metrics = {
     warmupRequestedOutputPermille: warmupRequest,
     phasePath,
@@ -400,6 +411,7 @@ function buildTrial(
     fullSpeedToStable,
   }
   return {
+    targetC: event.targetC,
     trialIndex: event.trialIndex,
     candidateId: candidate.candidateId ?? fallbackId,
     candidateHash: candidate.candidateHash ?? fallbackHash,
@@ -410,6 +422,11 @@ function buildTrial(
     maxOvershootC,
     holdPeakToPeakC,
     fullSpeedToStable,
+    timing,
+    cooldownGate: {
+      startTemperatureCentiC: trial.startTemperatureCentiC ?? null,
+      thresholdCentiC: trial.cooldownThresholdCentiC ?? null,
+    },
     firstSequence: first?.sequence ?? null,
     lastSequence: last?.sequence ?? null,
     sampleStartSequence: trial.sampleStartSequence ?? null,
@@ -561,6 +578,7 @@ function adoptedTrialPassesGate(run: ReturnType<typeof buildReportRun>) {
   if (!trial) return false
   const gate = trial.fullSpeedToStable
   return (
+    timingGateValid(trial) &&
     trial.warmupRequestedOutputPermille === 1_000 &&
     trial.metrics.phasePath.includes('approach -> hold') &&
     trial.maxOvershootC != null &&
@@ -571,6 +589,70 @@ function adoptedTrialPassesGate(run: ReturnType<typeof buildReportRun>) {
     typeof gate.settleTimeMs === 'number' &&
     typeof gate.limitMs === 'number' &&
     gate.settleTimeMs <= gate.limitMs
+  )
+}
+
+export function timingGateValid(trial: JsonObject) {
+  const timing = asObject(trial.timing)
+  if (trial.timing == null) return true
+  if (!timing) return false
+  const point = asObject(asObject(trial.canonicalCandidate)?.point)
+  const floor = numeric(point?.approachFloorPowerPermille)
+  const hold = numeric(point?.holdPowerPermille)
+  const target = numeric(trial.targetC)
+  const original = target != null && target <= 150 ? 10_000 : 5_000
+  const timestamp = (value: unknown) =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+  const timestampsValid = [
+    'warmupExitedAtMs',
+    'stableWindowStartedAtMs',
+    'stableWindowVerifiedAtMs',
+    'floorObservedAtMs',
+    'extendedAtMs',
+  ].every((key) => timing[key] == null || timestamp(timing[key]) != null)
+  const exit = timestamp(timing.warmupExitedAtMs)
+  const start = timestamp(timing.stableWindowStartedAtMs)
+  const verified = timestamp(timing.stableWindowVerifiedAtMs)
+  const observed = timestamp(timing.floorObservedAtMs)
+  const extended = timestamp(timing.extendedAtMs)
+  const gate = asObject(trial.fullSpeedToStable)
+  const extensionValid =
+    timing.extendedAtMs == null ||
+    (extended != null &&
+      observed != null &&
+      exit != null &&
+      observed >= exit &&
+      extended >= observed &&
+      extended - exit >= original &&
+      timing.effectiveApproachFloorPermille === timing.allowedApproachFloorPermille &&
+      Number(timing.allowedApproachFloorPermille) >= 100)
+  return (
+    timestampsValid &&
+    target != null &&
+    target >= -32_768 &&
+    target <= 32_767 &&
+    Number.isInteger(target) &&
+    timing.policyVersion === 1 &&
+    timing.originalLimitMs === original &&
+    timing.extensionLimitMs === original * 3 &&
+    floor != null &&
+    hold != null &&
+    Number.isInteger(floor) &&
+    Number.isInteger(hold) &&
+    floor >= 0 &&
+    floor <= 1_000 &&
+    hold >= 0 &&
+    hold <= 1_000 &&
+    timing.allowedApproachFloorPermille === Math.max(hold, 100) &&
+    timing.effectiveApproachFloorPermille === Math.max(floor, hold) &&
+    extensionValid &&
+    gate?.limitMs === (extended == null ? original : original * 3) &&
+    exit != null &&
+    start != null &&
+    verified != null &&
+    start >= exit &&
+    gate?.settleTimeMs === start - exit &&
+    verified - start >= 10_000
   )
 }
 

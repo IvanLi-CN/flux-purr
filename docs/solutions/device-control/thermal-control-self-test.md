@@ -272,7 +272,7 @@ Do not run default `0% / 25% / 50%` approach-only characterization inside the fl
 For candidate tuning:
 
 - warmup itself remains fixed at `100%`
-- firmware-owned full-speed timeout without a started stable window ends every scout, batch or confirmation stage immediately; only samples captured up to the hard boundary may be used as approach/early-coast evidence, and no controller Hold phase after that boundary may be used to qualify a candidate. The external runner's existing `TuningScout` collects a longer trace while reporting the failed gate; this capture exception is not the firmware engine's stopping policy
+- ordinary firmware-owned full-speed timeout without a started stable window ends scout, batch and confirmation stages at the original boundary. The approved conditional timing policy permits a finite exception only after actual allowed-floor output has been observed and the original longest deadline expires; both facts, the original failure and the cap remain bound to the same trial. The exception does not relax the stable band, ten-second stable window, overshoot, qualified Hold or sixty-second confirmation gates. Longer samples from the external runner's `TuningScout` remain external behavior and do not themselves qualify a firmware candidate.
 - if valid hold samples exist and hold p2p is above limit, do not let full-speed timeout hide hold ripple
 - high-temperature low-side deep hold drop must tune hold residency / sustain / lead instead of being classified as residual overshoot
 - source/runtime/sample-rate/measurement faults must not mutate the candidate

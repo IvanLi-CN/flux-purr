@@ -2138,6 +2138,23 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn web_digest_fixture_matches_shared_firmware_serializer() {
+        let events: Vec<ThermalTuningEvent> = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/src/features/control-plane-demo/thermal-tuning-digest.fixture.json"
+        )))
+        .unwrap();
+        assert_eq!(
+            digest_event_chain(&events[..1]).as_str(),
+            "4ea3bc9c23cbf417bbcd6468998d28c493745c28305d92ead01274c3a2f4f9d3"
+        );
+        assert_eq!(
+            digest_event_chain(&events).as_str(),
+            "76ee2a15a2e7bef6433ff8deb2e401a6ea483fbcbf1a1b0f5ed54e4eac9ed82b"
+        );
+    }
+
+    #[test]
     fn conditional_timing_requires_bound_floor_trigger_and_full_stable_window() {
         let mut trial = json!({
             "targetC": 60,
