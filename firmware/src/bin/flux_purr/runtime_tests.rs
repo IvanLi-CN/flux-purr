@@ -9680,13 +9680,6 @@ fn adjustable_pps_same_mode_voltage_changes_keep_heater_gate_active() {
 }
 
 #[test]
-fn adjustable_pps_same_mode_request_restores_an_active_gate_before_returning() {
-    assert!(should_restore_gate_after_adjustable_request(false, 100));
-    assert!(!should_restore_gate_after_adjustable_request(false, 0));
-    assert!(!should_restore_gate_after_adjustable_request(true, 100));
-}
-
-#[test]
 fn adjustable_pps_request_suppresses_sub_500mv_churn() {
     assert_eq!(
         heater_adjustable_request_mv(50, true, 10_000, 12_000, 6_100, 14_000),
@@ -12915,6 +12908,87 @@ fn automatic_pps_ticket_requires_the_exact_confirmed_contract() {
     assert_eq!(
         automatic_pps_ticket_decision(None, 100, 5_601, 20_000, 5_000),
         AutomaticPpsTicketDecision::Failed
+    );
+}
+
+#[test]
+fn automatic_pps_transition_never_freezes_or_replays_cached_pwm() {
+    let source = include_str!("tasks.rs");
+    for (start, end) in [
+        (
+            "pub(crate) async fn apply_pps_voltage_transition",
+            "fn finish_pps_voltage_transition",
+        ),
+        (
+            "fn finish_pps_voltage_transition",
+            "async fn complete_pending_automatic_pps",
+        ),
+        (
+            "async fn complete_pending_automatic_pps",
+            "fn pps_request_mv_for_context",
+        ),
+    ] {
+        let body = source
+            .split(start)
+            .nth(1)
+            .unwrap()
+            .split(end)
+            .next()
+            .unwrap();
+        assert!(
+            body.contains("apply_live_pps_gate("),
+            "{start} must write the current control frame before returning from a ticket boundary"
+        );
+    }
+    assert!(
+        !include_str!("power.rs").contains("gate_duty_percent:"),
+        "a pending voltage ticket must not retain a PWM command for later replay"
+    );
+}
+
+#[test]
+fn automatic_pps_live_gate_tracks_control_during_wait_and_confirmation() {
+    let (ready, _) = production_power_fixture(5_000);
+    let mut confirmed = ready.active.unwrap();
+    confirmed.voltage_mv = 12_500;
+    // Real HIL: the controller requests zero while a 13V -> 12.5V ticket
+    // is pending. Both the waiting and confirmed output must be zero.
+    for (outcome, voltage_bound_mv) in [
+        (None, 13_000),
+        (Some(TicketOutcome::Confirmed(confirmed)), 12_500),
+    ] {
+        assert_ne!(
+            automatic_pps_ticket_decision(outcome, 100, 129, 12_500, 5_000),
+            AutomaticPpsTicketDecision::Failed
+        );
+        assert_eq!(
+            live_pps_gate_duty_percent(0, true, false, 21_000, voltage_bound_mv, 100),
+            0
+        );
+    }
+    assert_eq!(
+        live_pps_gate_duty_percent(12, true, false, 21_000, 21_000, 100),
+        12
+    );
+    assert_eq!(
+        live_pps_gate_duty_percent(12, true, false, 21_000, 20_500, 100),
+        12
+    );
+    assert_eq!(
+        live_pps_gate_duty_percent(19, true, false, 21_000, 12_500, 100),
+        53
+    );
+    assert_eq!(
+        live_pps_gate_duty_percent(100, true, false, 21_000, 21_000, 50),
+        50
+    );
+    assert_eq!(
+        live_pps_gate_duty_percent(100, false, false, 21_000, 21_000, 100),
+        0
+    );
+    assert_eq!(
+        live_pps_gate_duty_percent(100, true, true, 21_000, 21_000, 100),
+        0
     );
 }
 

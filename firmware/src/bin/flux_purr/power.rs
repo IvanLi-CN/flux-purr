@@ -5,6 +5,26 @@ use super::*;
 pub(crate) const AUTOMATIC_PPS_TICKET_WAIT_MS: u64 = FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS + 500;
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn live_pps_gate_duty_percent(
+    duty_percent: u8,
+    heater_enabled: bool,
+    blank_heater: bool,
+    source_ceiling_mv: u16,
+    active_voltage_bound_mv: u16,
+    warmup_soft_start_percent: u8,
+) -> u8 {
+    if !heater_enabled || blank_heater {
+        return 0;
+    }
+    heater_physical_pwm_percent(
+        duty_percent,
+        source_ceiling_mv,
+        active_voltage_bound_mv,
+        warmup_soft_start_percent,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AutomaticPpsTicketDecision {
     Wait,
@@ -44,7 +64,6 @@ pub(crate) struct PendingAutomaticPpsTransition {
     pub(crate) request_mode: ch224q::AdjustableVoltageMode,
     pub(crate) mode_changed: bool,
     pub(crate) blank_heater: bool,
-    pub(crate) gate_duty_percent: u8,
     pub(crate) started_at_ms: u64,
 }
 

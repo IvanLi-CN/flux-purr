@@ -708,8 +708,50 @@ pub(crate) struct PpsVoltageTransition {
     mode_changed: bool,
     voltage_changed: bool,
     request_transition_pending: bool,
-    gate_duty_percent: u8,
     blank_heater: bool,
+}
+
+#[cfg(target_arch = "xtensa")]
+fn apply_live_pps_gate<PWM>(
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
+    blank_heater: bool,
+    active_voltage_bound_mv: u16,
+) where
+    PWM: SetDutyCycle,
+{
+    let Some(limits) = pps_operating_limits(context) else {
+        apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+        return;
+    };
+    let current_limit_ma =
+        effective_pps_current_limit_ma(limits.capability_max_ma, context.pd_observation);
+    let safe_max_mv = production_pps_request_ceiling_mv(
+        context.current_temp_c,
+        current_limit_ma,
+        context.active_thermal_settings.heater_current_reserve_ma,
+        limits.adjustable_max_mv,
+        context.preview_heater_curve,
+        context.memory_config,
+    );
+    let source_ceiling_mv = heater_source_request_ceiling_mv(
+        safe_max_mv,
+        limits.current_request_mv,
+        context.measured_heater_mv,
+        limits.adjustable_max_mv,
+    );
+    let duty_percent = live_pps_gate_duty_percent(
+        context.duty_percent,
+        context.heater_enabled && context.pd_observation.is_some(),
+        blank_heater,
+        source_ceiling_mv,
+        active_voltage_bound_mv,
+        context.warmup_soft_start_percent,
+    );
+    apply_heater_duty(
+        context.heater_pwm,
+        duty_percent,
+        context.last_physical_duty_percent,
+    );
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -772,7 +814,9 @@ where
         return None;
     }
     let HeaterPowerBackend::PpsMos {
-        capability_max_ma, ..
+        capability_max_ma,
+        current_request_mv,
+        ..
     } = *context.backend
     else {
         return Some(false);
@@ -792,18 +836,21 @@ where
     };
     match request_state {
         PdRequestState::Pending(ticket) => {
+            // Voltage negotiation must not suspend control of the MOS gate.
+            // The larger voltage bounds an upward transition before PS_RDY.
+            apply_live_pps_gate(
+                context,
+                request.blank_heater,
+                current_request_mv.max(request.request_mv),
+            );
             *context.pending_automatic_pps = Some(PendingAutomaticPpsTransition {
                 ticket,
                 request_mv: request.request_mv,
                 request_mode: request.request_mode,
                 mode_changed: request.mode_changed,
                 blank_heater: request.blank_heater,
-                gate_duty_percent: request.gate_duty_percent,
                 started_at_ms: context.now_ms,
             });
-            if request.blank_heater {
-                apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-            }
             return Some(false);
         }
         PdRequestState::Confirmed => {}
@@ -833,19 +880,9 @@ where
     else {
         return false;
     };
-    if context.heater_enabled
-        && context.pd_observation.is_some()
-        && should_restore_gate_after_adjustable_request(
-            request.blank_heater,
-            request.gate_duty_percent,
-        )
-    {
-        apply_heater_duty(
-            context.heater_pwm,
-            request.gate_duty_percent,
-            context.last_physical_duty_percent,
-        );
-    }
+    // Consume the current PID frame at the newly confirmed voltage, never the
+    // command from when this ticket was admitted.
+    apply_live_pps_gate(context, request.blank_heater, request.request_mv);
     *context.backend = HeaterPowerBackend::PpsMos {
         pps_min_mv,
         idle_request_mv,
@@ -879,7 +916,9 @@ where
     let pending = (*context.pending_automatic_pps)?;
     let outcome = context.pd_port.try_take_ticket(pending.ticket);
     let HeaterPowerBackend::PpsMos {
-        capability_max_ma, ..
+        capability_max_ma,
+        current_request_mv,
+        ..
     } = *context.backend
     else {
         return Some(false);
@@ -892,9 +931,11 @@ where
         capability_max_ma,
     );
     if decision == AutomaticPpsTicketDecision::Wait {
-        if pending.blank_heater {
-            apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-        }
+        apply_live_pps_gate(
+            context,
+            pending.blank_heater,
+            current_request_mv.max(pending.request_mv),
+        );
         return Some(false);
     }
     *context.pending_automatic_pps = None;
@@ -910,7 +951,6 @@ where
                 mode_changed: pending.mode_changed,
                 voltage_changed: true,
                 request_transition_pending: false,
-                gate_duty_percent: pending.gate_duty_percent,
                 blank_heater: pending.blank_heater,
             },
         )),
@@ -1017,7 +1057,6 @@ where
             mode_changed,
             voltage_changed,
             request_transition_pending,
-            gate_duty_percent,
             blank_heater,
         },
     )

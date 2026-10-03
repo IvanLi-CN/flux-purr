@@ -2222,14 +2222,6 @@ pub(crate) fn should_blank_heater_for_pps_range_change(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn should_restore_gate_after_adjustable_request(
-    blank_heater: bool,
-    gate_duty_percent: u8,
-) -> bool {
-    !blank_heater && gate_duty_percent > 0
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn pps_request_transition_ms(mode_changed: bool) -> u64 {
     if mode_changed {
         HEATER_PPS_LARGE_TRANSITION_MS
