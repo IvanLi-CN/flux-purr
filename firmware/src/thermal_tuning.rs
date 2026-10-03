@@ -1023,7 +1023,11 @@ impl ThermalTuningRuntime {
             full_speed_failed: settle_time_ms
                 .is_none_or(|value| value > u64::from(full_speed_limit_ms)),
             overshoot_c: f64::from(max_overshoot_centi_c.unwrap_or_default()) / 100.0,
-            hold_p2p_c: f64::from(hold_peak_to_peak_centi_c.unwrap_or_default()) / 100.0,
+            // No qualified-Hold samples cannot establish a low ripple. Match
+            // the external strategy's missing-evidence sentinel so a failed
+            // lower-band trial cannot claim the accelerated energy step.
+            hold_p2p_c: hold_peak_to_peak_centi_c
+                .map_or(f64::INFINITY, |value| f64::from(value) / 100.0),
             residual_c: self
                 .max_temperature_centi_c
                 .zip(self.first_hold_temperature_centi_c)
@@ -1218,6 +1222,11 @@ impl ThermalTuningRuntime {
         }
         let phase_changed =
             self.phase != ThermalTuningPhase::Cooldown && self.phase != checked.phase;
+        // Keep every startup control observation through the first full PWM
+        // sample. The normal 300ms recorder would hide a 100ms soft start.
+        let startup_evidence_due = self.phase != ThermalTuningPhase::Cooldown
+            && checked.phase == ThermalTuningPhase::Warmup
+            && !self.warmup_full_output;
         // Recording cadence must not postpone a hard deadline or a broken
         // in-flight stable window beyond the current control cycle.
         let deadline_check_due = self.warmup_exited_at_ms.is_some_and(|warmup_exit_ms| {
@@ -1234,6 +1243,7 @@ impl ThermalTuningRuntime {
                         > i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C))
         });
         if !phase_changed
+            && !startup_evidence_due
             && !deadline_check_due
             && self.last_live_sample_elapsed_ms.is_some_and(|last| {
                 checked.elapsed_ms.saturating_sub(last) < THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS
@@ -3018,6 +3028,43 @@ mod tests {
         let selected_point = selected.points[0].unwrap();
         assert_eq!(selected_point.brake_distance_centi_c, 1_400);
         assert_eq!(selected_point.approach_power_permille, 350);
+    }
+
+    #[test]
+    fn live_samples_retain_100ms_soft_start_before_full_output() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("run-soft-start"),
+                candidate_id: id("candidate-hold"),
+                candidate_hash: hash("hash-hold"),
+                power_class: ThermalTuningPowerClass::Pps5a,
+                targets: &[60],
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile_with_targets(&[60])),
+            })
+            .unwrap();
+        record_initial_cooldown(&mut runtime, 0);
+        for (elapsed_ms, output) in [(50, 0), (100, 500), (150, 1_000), (200, 1_000)] {
+            let mut warmup = sample(elapsed_ms, ThermalTuningPhase::Warmup, 3_400);
+            warmup.heater_output_permille = output;
+            runtime.record_live_sample(warmup).unwrap();
+        }
+        let outputs: std::vec::Vec<_> = runtime
+            .events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .sample
+                    .as_ref()
+                    .filter(|sample| sample.phase == ThermalTuningPhase::Warmup)
+                    .map(|sample| (sample.elapsed_ms, sample.heater_output_permille))
+            })
+            .collect();
+        assert_eq!(outputs, [(50, 0), (100, 500), (150, 1_000)]);
+        assert!(runtime.warmup_full_output);
     }
 
     #[test]

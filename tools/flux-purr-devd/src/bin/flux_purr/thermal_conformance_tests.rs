@@ -57,6 +57,26 @@ fn firmware_candidate_matches_external_late_window_hil_replays() {
 }
 
 #[test]
+fn firmware_candidate_matches_external_hard_deadline_hil_replays() {
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/thermal-60c-hard-deadline-replays.json"
+    ))
+    .unwrap();
+    for fixture in fixtures {
+        let profile = json!({"settings": fixture["settings"], "points": [fixture["point"]]});
+        let rows = fixture["samples"].as_array().unwrap();
+        let (expected, failure) =
+            external_candidate_with_stop(&profile, rows, "full_speed_to_stable_timeout");
+        let actual = firmware_candidate(profile, rows);
+        assert_eq!(
+            actual, expected,
+            "trial {} ({failure})",
+            fixture["sourceTrialIndex"]
+        );
+    }
+}
+
+#[test]
 fn firmware_hold_confirm_reseed_matches_external_35c_hil_replay() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/thermal-60c-hold-confirm-lower-band.json"
@@ -248,6 +268,27 @@ fn replay_samples(rows: &[Value]) -> Vec<ThermalReplayStageSample> {
 }
 
 fn external_candidate(profile_value: &Value, rows: &[Value]) -> (ThermalCandidatePoint, String) {
+    // Historical scouts captured beyond today's hard deadline. Compare both
+    // strategies with only the evidence the current runtime actually retained;
+    // a later qualified Hold cannot supply ripple to an already-stopped trial.
+    let (_, count) = replay_firmware_trials_and_capture(
+        profile_value.clone(),
+        rows,
+        ThermalTuningTrialPurpose::Scout,
+        1,
+    );
+    external_candidate_with_stop(
+        profile_value,
+        &rows[..count],
+        "full_speed_to_stable_timeout",
+    )
+}
+
+fn external_candidate_with_stop(
+    profile_value: &Value,
+    rows: &[Value],
+    stop_reason: &'static str,
+) -> (ThermalCandidatePoint, String) {
     let origin = rows[0][0].as_u64().unwrap();
     let samples: Vec<ThermalReplayStageSample> = rows
         .iter()
@@ -278,22 +319,21 @@ fn external_candidate(profile_value: &Value, rows: &[Value]) -> (ThermalCandidat
             sample.control_phase.as_deref(),
         );
     }
-    let valid_hold_start = samples
-        .iter()
-        .position(|sample| {
-            sample.control_phase_in_hold
-                && sample.current_temp_c >= 59.5
-                && (sample.current_temp_c - 60.0).abs() <= 3.0
-        })
-        .unwrap();
-    let valid_hold = &samples[valid_hold_start..];
+    let valid_hold_start = samples.iter().position(|sample| {
+        sample.control_phase_in_hold
+            && sample.current_temp_c >= 59.5
+            && (sample.current_temp_c - 60.0).abs() <= 3.0
+    });
+    let valid_hold = valid_hold_start
+        .map(|start| &samples[start..])
+        .unwrap_or(&[]);
     let max_temp = samples
         .iter()
         .map(|s| s.current_temp_c)
         .fold(f64::NEG_INFINITY, f64::max);
     let result = ThermalStageResult {
         target_temp_c: 60,
-        rise_time_ms: valid_hold[0].elapsed_ms,
+        rise_time_ms: valid_hold.first().map_or(0, |sample| sample.elapsed_ms),
         max_overshoot_c: (max_temp - 60.0).max(0.0),
         hold_peak_to_peak_c: valid_hold
             .iter()
@@ -304,7 +344,7 @@ fn external_candidate(profile_value: &Value, rows: &[Value]) -> (ThermalCandidat
                 .map(|s| s.current_temp_c)
                 .fold(f64::INFINITY, f64::min),
         sample_count: samples.len(),
-        stop_reason: "completed",
+        stop_reason,
         terminal_runtime_drop_reason: None,
         analysis: thermal_replay_stage_analysis(&samples, 60),
         guard: guard.finalize(),
@@ -359,6 +399,15 @@ fn replay_firmware_trials(
     purpose: ThermalTuningTrialPurpose,
     trial_count: u8,
 ) -> ThermalTuningRuntime {
+    replay_firmware_trials_and_capture(profile_value, rows, purpose, trial_count).0
+}
+
+fn replay_firmware_trials_and_capture(
+    profile_value: Value,
+    rows: &[Value],
+    purpose: ThermalTuningTrialPurpose,
+    trial_count: u8,
+) -> (ThermalTuningRuntime, usize) {
     let origin = rows[0][0].as_u64().unwrap();
     let mut wire_value = profile_value;
     wire_value["points"]
@@ -385,6 +434,7 @@ fn replay_firmware_trials(
         .unwrap();
     runtime.trial_purpose = purpose;
     let mut cursor = None;
+    let mut captured_rows = 0;
     // Drive both the scout and current batch through the real runtime so the
     // public profile contains the predicted candidate at its trial boundary.
     for trial_index in 0..trial_count {
@@ -414,13 +464,14 @@ fn replay_firmware_trials(
             phase: ThermalTuningPhase::Cooldown,
         };
         runtime.record_sample(cooling.clone()).unwrap();
-        for row in rows {
+        for (row_index, row) in rows.iter().enumerate() {
             cooling.elapsed_ms = offset + row[0].as_u64().unwrap() - origin;
             cooling.temperature_centi_c = row[1].as_i64().unwrap() as i16;
             cooling.heater_requested_output_permille = row[2].as_u64().unwrap() as u16;
             cooling.heater_output_permille = row[3].as_u64().unwrap() as u16;
             cooling.phase = serde_json::from_value(row[4].clone()).unwrap();
             runtime.record_sample(cooling.clone()).unwrap();
+            captured_rows = row_index + 1;
             loop {
                 let page = runtime.events_after(cursor);
                 if page.events.is_empty() {
@@ -433,5 +484,5 @@ fn replay_firmware_trials(
             }
         }
     }
-    runtime
+    (runtime, captured_rows)
 }

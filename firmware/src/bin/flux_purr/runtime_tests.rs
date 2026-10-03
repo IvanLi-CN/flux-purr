@@ -6387,15 +6387,15 @@ fn heater_control_saturates_when_far_below_target() {
 }
 
 #[test]
-fn warmup_soft_start_runs_once_per_arm_and_target_change() {
+fn warmup_soft_start_completes_in_100ms_per_arm_and_target_change() {
     let mut controller = HeaterController::new();
     let armed = controller.update_at(140, 25.0, true, None, 1_000);
     assert_eq!(armed.warmup_soft_start_percent, 0);
 
-    let mid_ramp = controller.update_at(140, 25.0, true, None, 1_500);
+    let mid_ramp = controller.update_at(140, 25.0, true, None, 1_050);
     assert_eq!(mid_ramp.warmup_soft_start_percent, 50);
 
-    let completed = controller.update_at(140, 25.0, true, None, 2_000);
+    let completed = controller.update_at(140, 25.0, true, None, 1_100);
     assert_eq!(completed.warmup_soft_start_percent, 100);
 
     let target_changed = controller.update_at(180, 25.0, true, None, 3_000);

@@ -1048,7 +1048,7 @@ pub(crate) const FAN_PWM_PERIOD_TICKS: u16 = 99;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const HEATER_PWM_PERIOD_TICKS: u16 = 1_599;
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const HEATER_WARMUP_SOFT_START_MS: u64 = 1_000;
+pub(crate) const HEATER_WARMUP_SOFT_START_MS: u64 = 100;
 // Timer2 keeps one clock divider for its lifetime. Cue pitch is selected with
 // the period register because ESP32-S3 can report a new timer prescaler in
 // CFG0 while the GPIO matrix continues emitting the previous carrier.
