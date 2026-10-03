@@ -95,6 +95,14 @@
   that APDO's `max_mv` unchanged with `100%` PWM until the `220C` cut-off; heater-curve data, nominal
   `R20/TCR`, and production-profile current reserve settings do not participate in this request.
 
+- The 5A profile controller uses monotonic elapsed time between actual control frames for its
+  temperature/slope filters, slope units, Hold integral and phase/blend duration. Profile ticks
+  retain their one-second meaning. The 50ms scheduling target is not a substitute for observed
+  elapsed time; delayed frames must not silently change these parameter meanings. The nominal
+  50ms response remains compatible. Disarm, target changes and source-controller changes reset
+  the profile clock so an inactive interval cannot accumulate PI state. This normalization does
+  not change the independent 3A plant controller, protected calibration or PD service.
+
 - HIL host 的 warmup 满功率门禁以 `heaterOutputPercent=100%` 的逻辑命令为主，并要求软启动结束后 `heaterPhysicalOutputPercent >= 99%`。PPS 安全上限更新期间允许物理 PWM 在逻辑命令仍为满功率时短暂落在 `95%..99%`，但该瞬态连续时间不得超过 `2s`；低于 `95%`、持续超过 `2s` 或逻辑命令下降必须拒绝进入候选路径。这样既不把受安全限幅的短暂过渡误判为调优失败，也不掩盖真实的持续欠功率。
 
 - heater 控制周期固定为 `50ms (20Hz)` 的真实单调时间目标，不得用主循环迭代次数或固定累加值虚构 elapsed time。每个周期聚合 `64` 次 RTD ADC conversion，并保留分数毫伏均值，因此 RTD 转换总频率为至少 `1280Hz`；`GPIO47` 在 PPS 与 fixed-PD fallback 全路径统一由 MCPWM 外设输出 `100Hz` PWM。PPS 高于有效 floor 时由受温度/电流合同限制的可调 PD 请求承担粗粒度功率控制并保持 `100%` PWM；PPS 已到 floor 或 bounded down-ramp 尚未到达 floor 时，PWM 必须按请求功率与当前电压等效功率之比连续延伸到 `0%`。每次首次 arm、目标切换或 `Approach -> Warmup` 回退进入预热时，物理 PWM 必须执行 `100ms` 线性软启动。首次进入 HOLD 后，PPS 必须锁定 Approach 建立的交接电压，由 PWM 对 PI 输出做快速响应；不得在 HOLD 内主动向下扫描 PPS。只有持续满 PWM、温度仍低于目标且升温率不足时，才允许以至少间隔 `2s`、单次最多 `500mV` 的步进上调 PPS。运行时 status 必须回显上一轮控制起点间隔 `heaterControlIntervalMs`、RTD 至功率写入完成的执行耗时 `heaterControlCycleMs`、滤波升温率 `heaterFilteredSlopeCPerS` 与 `heaterCoastActive`，供 HIL 判定实际节拍、coast 残余热及恢复供热时机。

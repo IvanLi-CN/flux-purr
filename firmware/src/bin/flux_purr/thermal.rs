@@ -529,14 +529,26 @@ pub(crate) fn control_cycles_from_profile_ticks(profile_ticks: u16) -> u16 {
 
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn scaled_filter_alpha_for_control_interval(alpha_per_profile_tick: f32) -> f32 {
-    let alpha = alpha_per_profile_tick.clamp(0.0, 1.0);
+    scaled_filter_alpha_for_elapsed(
+        alpha_per_profile_tick,
+        HEATER_CONTROL_INTERVAL_MS,
+        HEATER_PROFILE_TICK_MS,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn scaled_filter_alpha_for_elapsed(alpha: f32, elapsed_ms: u64, reference_ms: u64) -> f32 {
+    let alpha = alpha.clamp(0.0, 1.0);
     if alpha <= 0.0 {
         return 0.0;
     }
     if alpha >= 1.0 {
         return 1.0;
     }
-    let profile_fraction = HEATER_CONTROL_INTERVAL_MS as f32 / HEATER_PROFILE_TICK_MS as f32;
+    if elapsed_ms == reference_ms {
+        return alpha;
+    }
+    let profile_fraction = elapsed_ms as f32 / reference_ms as f32;
     (1.0 - (1.0 - alpha).powf(profile_fraction)).clamp(0.0, 1.0)
 }
 
@@ -708,6 +720,8 @@ pub(crate) struct HeaterController {
     pub(crate) previous_measured_temp_c: Option<f32>,
     pub(crate) phase: HeaterControlPhase,
     pub(crate) phase_ticks: u16,
+    pub(crate) phase_tick_remainder_ms: u64,
+    pub(crate) profile_last_control_at_ms: Option<u64>,
     pub(crate) recovering_from_hold: bool,
     pub(crate) duty_percent: u8,
     pub(crate) hold_entry_output_percent: u8,
@@ -737,6 +751,7 @@ pub(crate) struct ThermalPlantRuntimeInput {
 #[derive(Clone, Copy)]
 pub(crate) struct ThermalControlFrame {
     control_target: ThermalControlTarget,
+    elapsed_ms: u64,
     approach_max_cycles: u16,
     hold_blend_cycles: u16,
     hold_ki: f32,
@@ -763,9 +778,16 @@ pub(crate) struct ThermalControlFrame {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn control_cycle_parameters(target: ThermalControlTarget) -> (f32, u16, u16, f32) {
+pub(crate) fn control_cycle_parameters(
+    target: ThermalControlTarget,
+    elapsed_ms: u64,
+) -> (f32, u16, u16, f32) {
     (
-        scaled_filter_alpha_for_control_interval(target.settings.temp_filter_alpha),
+        scaled_filter_alpha_for_elapsed(
+            target.settings.temp_filter_alpha,
+            elapsed_ms,
+            HEATER_PROFILE_TICK_MS,
+        ),
         control_cycles_from_profile_ticks(u16::from(target.settings.approach_max_ticks)).max(1),
         control_cycles_from_profile_ticks(u16::from(target.hold_blend_ticks)).max(1),
         scaled_hold_ki_for_control_interval(target.hold_ki_permille_per_c_tick),
@@ -790,6 +812,8 @@ impl HeaterController {
             previous_measured_temp_c: None,
             phase: HeaterControlPhase::Warmup,
             phase_ticks: 0,
+            phase_tick_remainder_ms: 0,
+            profile_last_control_at_ms: None,
             recovering_from_hold: false,
             duty_percent: 0,
             hold_entry_output_percent: 0,
@@ -815,6 +839,8 @@ impl HeaterController {
         self.previous_measured_temp_c = None;
         self.phase = HeaterControlPhase::Warmup;
         self.phase_ticks = 0;
+        self.phase_tick_remainder_ms = 0;
+        self.profile_last_control_at_ms = None;
         self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
@@ -876,6 +902,8 @@ impl HeaterController {
         self.previous_measured_temp_c = None;
         self.phase = HeaterControlPhase::Warmup;
         self.phase_ticks = 0;
+        self.phase_tick_remainder_ms = 0;
+        self.profile_last_control_at_ms = None;
         self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
@@ -1054,6 +1082,7 @@ impl HeaterController {
             self.warmup_started_at_ms = Some(now_ms);
         }
         self.heater_was_enabled = true;
+        let elapsed_ms = self.profile_control_elapsed_ms(now_ms);
 
         let control_target = thermal_profile
             .map(|profile| profile.control_target(target_temp_c))
@@ -1063,6 +1092,7 @@ impl HeaterController {
             measured_temp_c,
             previous_measured_temp_c,
             control_target,
+            elapsed_ms,
         );
         let ThermalControlFrame {
             control_target,
@@ -1128,6 +1158,8 @@ impl HeaterController {
         self.reseed_measurement(measured_temp_c);
         self.phase = HeaterControlPhase::Warmup;
         self.phase_ticks = 0;
+        self.phase_tick_remainder_ms = 0;
+        self.profile_last_control_at_ms = None;
         self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
@@ -1167,6 +1199,7 @@ impl HeaterController {
             self.hold_coast_active = false;
             self.hold_coast_cooling_samples = 0;
             self.phase_ticks = 0;
+            self.phase_tick_remainder_ms = 0;
             self.hold_entry_output_percent = 0;
         }
     }
@@ -1225,7 +1258,9 @@ impl HeaterController {
             0.0
         };
         self.hold_integral_c = if frame.hold_ki > 0.0 {
-            (self.hold_integral_c + frame.hold_guard_error_c).clamp(0.0, integral_limit)
+            let elapsed_cycles = frame.elapsed_ms as f32 / HEATER_CONTROL_INTERVAL_MS as f32;
+            (self.hold_integral_c + frame.hold_guard_error_c * elapsed_cycles)
+                .clamp(0.0, integral_limit)
         } else {
             0.0
         };
@@ -1305,13 +1340,21 @@ impl HeaterController {
             let previous_phase = self.phase;
             self.phase = next_phase;
             self.phase_ticks = 0;
+            self.phase_tick_remainder_ms = 0;
             self.recovering_from_hold = previous_phase == HeaterControlPhase::Hold
                 && self.phase == HeaterControlPhase::Approach;
             if self.phase == HeaterControlPhase::Warmup {
                 self.warmup_started_at_ms = Some(now_ms);
             }
         } else {
-            self.phase_ticks = self.phase_ticks.saturating_add(1);
+            let phase_elapsed_ms = self
+                .phase_tick_remainder_ms
+                .saturating_add(frame.elapsed_ms);
+            let elapsed_cycles = phase_elapsed_ms / HEATER_CONTROL_INTERVAL_MS;
+            self.phase_tick_remainder_ms = phase_elapsed_ms % HEATER_CONTROL_INTERVAL_MS;
+            self.phase_ticks = self
+                .phase_ticks
+                .saturating_add(elapsed_cycles.min(u64::from(u16::MAX)) as u16);
             if self.phase != HeaterControlPhase::Approach {
                 self.recovering_from_hold = false;
             }
@@ -1388,9 +1431,10 @@ impl HeaterController {
         measured_temp_c: f32,
         previous_measured_temp_c: f32,
         control_target: ThermalControlTarget,
+        elapsed_ms: u64,
     ) -> ThermalControlFrame {
         let (filter_alpha, approach_max_cycles, hold_blend_cycles, hold_ki) =
-            control_cycle_parameters(control_target);
+            control_cycle_parameters(control_target, elapsed_ms);
         let error_c = f32::from(target_temp_c) - measured_temp_c;
         let previous_error_c = f32::from(target_temp_c) - previous_measured_temp_c;
         let last_filtered_temp_c = self.filtered_temp_c;
@@ -1399,11 +1443,17 @@ impl HeaterController {
             .unwrap_or(measured_temp_c);
         let instantaneous_slope_c_per_profile_tick = last_filtered_temp_c
             .map(|last| {
-                (filtered_temp_c - last)
-                    * (HEATER_PROFILE_TICK_MS as f32 / HEATER_CONTROL_INTERVAL_MS as f32)
+                (filtered_temp_c - last) * (HEATER_PROFILE_TICK_MS as f32 / elapsed_ms as f32)
             })
             .unwrap_or(0.0);
-        let slope_filter_alpha = filter_alpha.sqrt();
+        let nominal_slope_alpha =
+            scaled_filter_alpha_for_control_interval(control_target.settings.temp_filter_alpha)
+                .sqrt();
+        let slope_filter_alpha = scaled_filter_alpha_for_elapsed(
+            nominal_slope_alpha,
+            elapsed_ms,
+            HEATER_CONTROL_INTERVAL_MS,
+        );
         self.filtered_slope_c_per_profile_tick += slope_filter_alpha
             * (instantaneous_slope_c_per_profile_tick - self.filtered_slope_c_per_profile_tick);
         let filtered_slope_c_per_profile_tick = self.filtered_slope_c_per_profile_tick;
@@ -1463,6 +1513,7 @@ impl HeaterController {
         );
         ThermalControlFrame {
             control_target,
+            elapsed_ms,
             approach_max_cycles,
             hold_blend_cycles,
             hold_ki,
@@ -1493,6 +1544,8 @@ impl HeaterController {
         self.reseed_measurement(measured_temp_c);
         self.phase = HeaterControlPhase::Warmup;
         self.phase_ticks = 0;
+        self.phase_tick_remainder_ms = 0;
+        self.profile_last_control_at_ms = None;
         self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
@@ -1500,6 +1553,16 @@ impl HeaterController {
         self.hold_coast_active = false;
         self.hold_coast_cooling_samples = 0;
         self.warmup_started_at_ms = Some(now_ms);
+    }
+
+    fn profile_control_elapsed_ms(&mut self, now_ms: u64) -> u64 {
+        let elapsed_ms = self
+            .profile_last_control_at_ms
+            .and_then(|previous| now_ms.checked_sub(previous))
+            .filter(|elapsed| *elapsed > 0)
+            .unwrap_or(HEATER_CONTROL_INTERVAL_MS);
+        self.profile_last_control_at_ms = Some(now_ms);
+        elapsed_ms
     }
 
     pub(crate) fn apply_under_target_reheat_floor(

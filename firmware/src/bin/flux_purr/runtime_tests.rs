@@ -9441,6 +9441,81 @@ fn production_test_input(measured_temp_c: f32) -> ThermalPlantRuntimeInput {
 }
 
 #[test]
+fn profile_temperature_filter_preserves_one_second_semantics_at_real_cadence() {
+    let mut profile = production_test_profile(300);
+    profile.settings.temp_filter_alpha = 0.75;
+    for interval_ms in [50, 60, 100] {
+        let mut controller = HeaterController::new();
+        let mut now_ms = 0;
+        let mut snapshot = controller.update_at(240, 25.0, true, Some(profile), 0);
+        while now_ms < 1_000 {
+            now_ms = (now_ms + interval_ms).min(1_000);
+            snapshot = controller.update_at(240, 35.0, true, Some(profile), now_ms);
+        }
+        assert!(
+            (snapshot.filtered_temp_c - 32.5).abs() < 0.2,
+            "interval={interval_ms}ms, filtered={}",
+            snapshot.filtered_temp_c,
+        );
+    }
+}
+
+#[test]
+fn profile_slope_uses_elapsed_time_instead_of_assumed_fifty_ms() {
+    let mut profile = production_test_profile(300);
+    profile.settings.temp_filter_alpha = 1.0;
+    for interval_ms in [50, 60, 100] {
+        let mut controller = HeaterController::new();
+        controller.update_at(240, 25.0, true, Some(profile), 0);
+        let next_temp_c = 25.0 + interval_ms as f32 / 1_000.0;
+        let snapshot = controller.update_at(240, next_temp_c, true, Some(profile), interval_ms);
+        assert!(
+            (snapshot.filtered_slope_c_per_s - 1.0).abs() < 0.001,
+            "interval={interval_ms}ms, slope={}",
+            snapshot.filtered_slope_c_per_s,
+        );
+    }
+}
+
+#[test]
+fn profile_hold_integral_and_blend_time_follow_elapsed_seconds() {
+    let profile = production_test_profile(300);
+    for interval_ms in [50, 60, 100] {
+        let mut controller = HeaterController::new();
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.reseed_measurement(59.8);
+        controller.update_at(60, 59.8, true, Some(profile), 0);
+        let mut now_ms = 0;
+        while now_ms < 1_000 {
+            now_ms = (now_ms + interval_ms).min(1_000);
+            controller.update_at(60, 59.8, true, Some(profile), now_ms);
+        }
+        assert!(
+            (controller.hold_integral_c - 4.2).abs() < 0.02,
+            "interval={interval_ms}ms, integral={}",
+            controller.hold_integral_c,
+        );
+        assert_eq!(controller.phase_ticks, 21, "interval={interval_ms}ms");
+    }
+}
+
+#[test]
+fn profile_disarm_does_not_integrate_disabled_time_on_rearm() {
+    let mut controller = HeaterController::new();
+    let profile = production_test_profile(300);
+    controller.update_at(240, 25.0, true, Some(profile), 0);
+    controller.update_at(240, 35.0, true, Some(profile), 100);
+    controller.update_at(240, 35.0, false, Some(profile), 150);
+    let snapshot = controller.update_at(240, 36.0, true, Some(profile), 20_000);
+    let nominal_alpha = scaled_filter_alpha_for_control_interval(0.75);
+    assert!((snapshot.filtered_temp_c - (35.0 + nominal_alpha)).abs() < 0.01);
+    assert_eq!(snapshot.warmup_soft_start_percent, 0);
+    assert_eq!(controller.phase_ticks, 1);
+}
+
+#[test]
 fn production_controller_requires_a_verified_five_amp_source() {
     let (five_amp, five_amp_pps) = production_power_fixture(5_000);
     assert_eq!(
