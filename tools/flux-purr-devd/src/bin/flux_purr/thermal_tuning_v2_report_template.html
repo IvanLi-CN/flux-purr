@@ -61,7 +61,7 @@
     .chart-legend span::before{content:"";width:14px;border-top:3px solid var(--legend-color);flex:0 0 auto}
     canvas{display:block;width:100%;height:100%}
     canvas:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
-    .chart-crosshair{position:absolute;top:14px;bottom:58px;width:1px;background:#334b59;pointer-events:none;z-index:1}
+    .chart-crosshair{position:absolute;top:14px;bottom:74px;width:1px;background:#334b59;pointer-events:none;z-index:1}
     .chart-crosshair[hidden],.chart-tooltip[hidden]{display:none}
     .chart-tooltip{position:fixed;z-index:10;pointer-events:none;width:min(320px,calc(100vw - 24px));padding:10px 12px;border:1px solid #324957;border-radius:6px;background:#17232a;color:#fff;box-shadow:0 6px 20px #17232a30;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}
     .chart-tooltip strong{display:block;margin-bottom:6px;font-size:13px}
@@ -123,7 +123,7 @@
   <section class="section-head"><div><h2>设备本地响应</h2><p>图表直接使用样本事件；外部 VBUS/物理功率不被伪造。绿色 Hold 是控制器 phase，不等于已满足 qualified hold；资格仍由稳定带、10s 稳定窗和 12s/60s hold 指标判定。</p></div><div class="chart-toolbar"><div class="chart-range" aria-label="图表时间范围"><button type="button" id="trialRange" aria-pressed="true" onclick="setChartRange('trial')">试验</button><button type="button" id="fullRange" aria-pressed="false" onclick="setChartRange('full')">含停热后</button></div></div></section>
   <div class="no-trial" id="noTrial" hidden></div>
   <section class="chart-grid" id="chartGrid">
-    <article class="panel chart-panel wide"><div class="panel-title"><h3>温度 / 目标 / phase</h3><span>°C · local device sequence</span></div><div class="chart-legend"><span style="--legend-color:#b13d35">temperature</span><span style="--legend-color:#17232a">target</span><span style="--legend-color:#2d8a68">稳定带 ±1.5°C</span><span style="--legend-color:#d98b2b">Warmup</span><span style="--legend-color:#2f78a8">Approach</span><span style="--legend-color:#2d8a68">Hold (controller)</span><span style="--legend-color:#7966a8">Cooldown</span><span style="--legend-color:#69757c">Terminal</span></div><div class="chart-wrap"><canvas id="temperatureChart" tabindex="0" aria-label="温度图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
+    <article class="panel chart-panel wide"><div class="panel-title"><h3>温度 / 目标 / phase</h3><span>°C · local device sequence</span></div><div class="chart-legend"><span style="--legend-color:#b13d35">temperature</span><span style="--legend-color:#17232a">target</span><span style="--legend-color:#2d8a68">稳定带 ±1.5°C</span><span style="--legend-color:#d98b2b" data-phase="warmup">Warmup</span><span style="--legend-color:#2f78a8" data-phase="approach">Approach</span><span style="--legend-color:#2d8a68" data-phase="hold">Hold (controller)</span><span style="--legend-color:#7966a8" data-phase="cooldown">Cooldown</span><span style="--legend-color:#69757c" data-phase="terminal">Terminal</span></div><div class="chart-wrap"><canvas id="temperatureChart" tabindex="0" aria-label="温度图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>逻辑请求 / 最终 MOS PWM</h3><span>% · 0..100%</span></div><div class="chart-legend"><span style="--legend-color:#0c6590">logical request</span><span style="--legend-color:#b13d35">MOS PWM</span></div><div class="chart-wrap"><canvas id="controlChart" tabindex="0" aria-label="输出图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>VIN / PPS 合同与请求电压</h3><span>V · local evidence</span></div><div class="chart-legend"><span style="--legend-color:#16818b">VIN</span><span style="--legend-color:#936a08">PPS contract</span><span style="--legend-color:#0c6590">PPS request</span></div><div class="chart-wrap"><canvas id="voltageChart" tabindex="0" aria-label="电压图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>PPS 合同电流</h3><span>mA · safety ceiling · local evidence</span></div><div class="chart-legend"><span style="--legend-color:#936a08">PPS contract current</span></div><div class="chart-wrap"><canvas id="currentChart" tabindex="0" aria-label="电流上限图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
@@ -233,14 +233,17 @@ const PHASE_COLORS={warmup:'#d98b2b',approach:'#2f78a8',hold:'#2d8a68',cooldown:
 function phaseLabel(value){const phase=String(value||'unknown');if(phase.toLowerCase()==='hold')return 'Hold (controller)';return phase.replace(/(^|[_-])([a-z])/g,(_,prefix,letter)=>`${prefix}${letter.toUpperCase()}`);}
 function phaseSegments(samples){
   const segments=[];
+  const boundaries=phaseBoundaries(samples);
   for(const sample of samples){
     const phase=String(sample.phase||sample.pidPhase||'unknown');
     const elapsedMs=Number(sample.elapsedMs)||0;
     const last=segments[segments.length-1];
     if(last&&last.phase===phase){last.endIndex=sample._chartIndex;last.endElapsedMs=elapsedMs;}
     else {
-      if(last)last.endElapsedMs=elapsedMs;
-      segments.push({phase,startIndex:sample._chartIndex,endIndex:sample._chartIndex,startElapsedMs:elapsedMs,endElapsedMs:elapsedMs});
+      const boundary=last&&boundaries.find(item=>item.from===last.phase&&item.to===phase&&item.elapsedMs>=last.endElapsedMs&&item.elapsedMs<=elapsedMs);
+      const startElapsedMs=boundary?.elapsedMs??elapsedMs;
+      if(last)last.endElapsedMs=startElapsedMs;
+      segments.push({phase,startIndex:sample._chartIndex,endIndex:sample._chartIndex,startElapsedMs,endElapsedMs:elapsedMs});
     }
   }
   return segments;
@@ -267,6 +270,37 @@ function temperatureAxisMarkers(boundaries,top,plotH,lo,hi){
   for(let index=markers.length-1;index>=0;index--)markers[index].labelY=Math.min(markers[index].labelY,top+plotH,index<markers.length-1?markers[index+1].labelY-16:top+plotH);
   return markers;
 }
+function phaseTimeMarkers(ctx,boundaries,left,plotW,startT,spanT){
+  const markers=[];
+  for(const boundary of boundaries){
+    const label=`${((boundary.elapsedMs-startT)/1000).toFixed(2)}s`;
+    const width=ctx.measureText(label).width+8;
+    const x=left+(boundary.elapsedMs-startT)/spanT*plotW;
+    const labelX=Math.max(left+width/2,Math.min(left+plotW-width/2,x));
+    const row=markers.some(marker=>marker.row===0&&Math.abs(marker.labelX-labelX)<(marker.width+width)/2+6)?1:0;
+    markers.push({...boundary,x,labelX,label,width,row});
+  }
+  return markers;
+}
+function drawPhaseTimes(ctx,markers,height,plotBottom){
+  for(const marker of markers){
+    const labelY=height-12-marker.row*16;
+    ctx.strokeStyle=PHASE_COLORS[marker.to];ctx.fillStyle=PHASE_COLORS[marker.to];ctx.lineWidth=1;ctx.setLineDash([]);
+    ctx.beginPath();ctx.moveTo(marker.x,plotBottom);ctx.lineTo(marker.x,plotBottom+5);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(marker.x,labelY-10);ctx.lineTo(marker.labelX,labelY-5);ctx.stroke();
+    ctx.fillStyle='#fff';ctx.fillRect(marker.labelX-marker.width/2,labelY-8,marker.width,15);
+    ctx.fillStyle=PHASE_COLORS[marker.to];ctx.textAlign='center';ctx.fillText(marker.label,marker.labelX,labelY+4);
+  }
+}
+function renderPhaseDurations(samples){
+  const segments=phaseSegments(samples);
+  for(const element of document.querySelectorAll('[data-phase]')){
+    const phase=element.dataset.phase;
+    const own=segments.filter(segment=>segment.phase===phase);
+    const duration=own.reduce((sum,segment)=>sum+segment.endElapsedMs-segment.startElapsedMs,0);
+    element.textContent=`${phaseLabel(phase)} · ${own.length?(duration/1000).toFixed(1)+'s':'—'}`;
+  }
+}
 function drawPhaseBoundaries(ctx,boundaries,geometry,axisMarkers){
   const {left,plotW,startT,spanT,top,plotH}=geometry;
   for(const boundary of boundaries){
@@ -286,7 +320,7 @@ function drawPhaseBoundaries(ctx,boundaries,geometry,axisMarkers){
 }
 function drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height){
   if(!samples.length)return;
-  const bandTop=height-48,bandHeight=16;
+  const bandTop=height-62,bandHeight=16;
   const indexed=samples.map((sample,index)=>({...sample,_chartIndex:index}));
   for(const segment of phaseSegments(indexed)){
     const x1=left+((segment.startElapsedMs-startT)/spanT)*plotW;
@@ -295,7 +329,9 @@ function drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height){
     const color=PHASE_COLORS[segment.phase]||PHASE_COLORS.unknown;
     ctx.fillStyle=color+'33';ctx.fillRect(x1,bandTop,Math.max(2,x2-x1),bandHeight);
     ctx.strokeStyle=color;ctx.lineWidth=1;ctx.strokeRect(x1+.5,bandTop+.5,Math.max(1,x2-x1-1),bandHeight-1);
-    if(x2-x1>=44){ctx.fillStyle=color;ctx.font='10px ui-monospace,monospace';ctx.textAlign='center';ctx.fillText(phaseLabel(segment.phase),x1+(x2-x1)/2,bandTop+11);}
+    const label=`${phaseLabel(segment.phase)} · ${((segment.endElapsedMs-segment.startElapsedMs)/1000).toFixed(1)}s`;
+    ctx.font='10px ui-monospace,monospace';
+    if(ctx.measureText(label).width+8<=x2-x1){ctx.fillStyle=color;ctx.textAlign='center';ctx.fillText(label,x1+(x2-x1)/2,bandTop+11);}
   }
   ctx.fillStyle='#65747d';ctx.font='10px ui-monospace,monospace';ctx.textAlign='right';ctx.fillText('phase',left-8,bandTop+11);
 }
@@ -303,16 +339,20 @@ function drawChart(canvasId, samples, series, unit, options={}){
   const canvas=$(canvasId); const rect=canvas.getBoundingClientRect(); const width=Math.max(300,Math.floor(rect.width)); const height=Math.max(220,Math.floor(rect.height)); const dpr=window.devicePixelRatio||1;
   canvas.dataset.trialIndex=String(currentTrial().trialIndex??''); canvas.dataset.targetC=String(activeTarget); canvas.dataset.sampleCount=String(samples.length); canvas.dataset.sequenceRange=samples.length?`${samples[0].sequence}..${samples[samples.length-1].sequence}`:'empty';
   canvas.width=width*dpr; canvas.height=height*dpr; const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr); ctx.clearRect(0,0,width,height);
-  const points=series.flatMap(item=>item.data.map(Number).filter(Number.isFinite)); if(options.stableBand)points.push(...options.stableBand); const ymin=points.length?Math.min(...points):0; const ymax=points.length?Math.max(...points):1; const pad=Math.max((ymax-ymin)*.18,.5); const lo=unit==='%'?0:ymin-pad, hi=unit==='%'?100:ymax+pad; canvas.dataset.yRange=`${lo}..${hi}`; ctx.font='11px ui-monospace,monospace'; const tickLabels=Array.from({length:5},(_,i)=>{const value=hi-(hi-lo)*i/4;return `${unit==='%'?value.toFixed(0):chartNumber(value)}${unit}`;}); const boundaries=phaseBoundaries(samples); const axisLabels=options.phaseBand?boundaries.filter(item=>Number.isFinite(item.temperatureC)).map(item=>`${item.temperatureC.toFixed(2)}°C`):[]; const left=Math.max(54,Math.ceil(Math.max(...[...tickLabels,...axisLabels].map(label=>ctx.measureText(label).width)))+16),right=18,top=14,bottom=58; canvas.dataset.plotLeft=String(left); const plotW=width-left-right,plotH=height-top-bottom; const axisMarkers=options.phaseBand?temperatureAxisMarkers(boundaries,top,plotH,lo,hi):[];canvas.dataset.phaseBoundaries=JSON.stringify(boundaries);canvas.dataset.temperatureAxisMarkers=JSON.stringify(axisMarkers);
+  const points=series.flatMap(item=>item.data.map(Number).filter(Number.isFinite)); if(options.stableBand)points.push(...options.stableBand); const ymin=points.length?Math.min(...points):0; const ymax=points.length?Math.max(...points):1; const pad=Math.max((ymax-ymin)*.18,.5); const lo=unit==='%'?0:ymin-pad, hi=unit==='%'?100:ymax+pad; canvas.dataset.yRange=`${lo}..${hi}`; ctx.font='11px ui-monospace,monospace'; const tickLabels=Array.from({length:5},(_,i)=>{const value=hi-(hi-lo)*i/4;return `${unit==='%'?value.toFixed(0):chartNumber(value)}${unit}`;}); const boundaries=phaseBoundaries(samples); const axisLabels=options.phaseBand?boundaries.filter(item=>Number.isFinite(item.temperatureC)).map(item=>`${item.temperatureC.toFixed(2)}°C`):[]; const left=Math.max(54,Math.ceil(Math.max(...[...tickLabels,...axisLabels].map(label=>ctx.measureText(label).width)))+16),right=18,top=14,bottom=74; canvas.dataset.plotLeft=String(left); const plotW=width-left-right,plotH=height-top-bottom; const axisMarkers=options.phaseBand?temperatureAxisMarkers(boundaries,top,plotH,lo,hi):[];canvas.dataset.phaseBoundaries=JSON.stringify(boundaries);canvas.dataset.temperatureAxisMarkers=JSON.stringify(axisMarkers);
   const startT=Number(samples[0]?.elapsedMs)||0; const spanT=Math.max((Number(samples[samples.length-1]?.elapsedMs)||startT)-startT,1);canvas.dataset.startElapsedMs=String(startT);canvas.dataset.spanMs=String(spanT);canvas.dataset.plotWidth=String(plotW);
   if(options.stableBand){const upper=top+(1-(options.stableBand[1]-lo)/(hi-lo))*plotH;const lower=top+(1-(options.stableBand[0]-lo)/(hi-lo))*plotH;ctx.fillStyle='#2d8a6819';ctx.fillRect(left,upper,plotW,lower-upper);ctx.strokeStyle='#2d8a68';ctx.lineWidth=1;ctx.setLineDash([4,4]);for(const y of [upper,lower]){ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();}ctx.setLineDash([]);}
   ctx.strokeStyle='#e6ebee';ctx.lineWidth=1;ctx.fillStyle='#65747d';ctx.textAlign='right';
   for(let i=0;i<5;i++){const y=top+plotH*i/4;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();if(!axisMarkers.some(marker=>Math.abs(marker.labelY-y)<15))ctx.fillText(tickLabels[i],left-8,y+4);}
   ctx.textAlign='center';ctx.fillStyle='#65747d';
-  for(let i=0;i<5;i++){const x=left+plotW*i/4;ctx.fillText(`${(spanT*i/4/1000).toFixed(0)}s`,x,height-9);}
+  const timeMarkers=phaseTimeMarkers(ctx,boundaries,left,plotW,startT,spanT);canvas.dataset.phaseTimeMarkers=JSON.stringify(timeMarkers);
+  for(let i=0;i<5;i++){const x=left+plotW*i/4;const label=`${(spanT*i/4/1000).toFixed(0)}s`;const width=ctx.measureText(label).width;
+    if(!timeMarkers.some(marker=>marker.row===0&&Math.abs(marker.labelX-x)<(marker.width+width)/2+6))ctx.fillText(label,x,height-8);
+  }
   for(const item of series){ctx.strokeStyle=item.color;ctx.lineWidth=item.width||2;ctx.setLineDash(item.dash||[]);ctx.beginPath();item.data.forEach((value,index)=>{const sample=samples[index];const x=left+(((Number(sample?.elapsedMs)||startT)-startT)/spanT)*plotW;const y=top+(1-(value-lo)/(hi-lo))*plotH;if(index===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.stroke();ctx.setLineDash([]);}
   ctx.font='11px ui-monospace,monospace';drawPhaseBoundaries(ctx,boundaries,{left,plotW,startT,spanT,top,plotH},axisMarkers);
   if(options.phaseBand)drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height);
+  ctx.font='11px ui-monospace,monospace';drawPhaseTimes(ctx,timeMarkers,height,top+plotH);
 }
 function clearHover(){hoverSample=null;$('chartTooltip').hidden=true;for(const id of CHART_IDS){$(id).parentElement.querySelector('.chart-crosshair').hidden=true;}}
 function nearestSample(elapsedMs){
@@ -349,6 +389,7 @@ function renderCharts(){
   $('trialRange').setAttribute('aria-pressed',String(chartRange==='trial'));$('fullRange').setAttribute('aria-pressed',String(chartRange==='full'));
   const noTrial=$('noTrial'); const chartGrid=$('chartGrid');
   noTrial.hidden=samples.length>0; chartGrid.hidden=samples.length===0;
+  renderPhaseDurations(samples);
   if(!samples.length){noTrial.textContent=currentRun().executionStatus==='not_attempted'?'该目标尚未执行，没有候选试验曲线。':'该目标尚无候选试验样本；冷却和终止事件保留在原始记录中。';return;}
   drawChart('temperatureChart',samples,[{label:'temperature',color:'#b13d35',data:samples.map(s=>chartValue(s.temperatureCentiC)/100)},{label:'target',color:'#17232a',dash:[5,4],width:1,data:samples.map(()=>activeTarget)}],'°C',{phaseBand:true,stableBand:[activeTarget-1.5,activeTarget+1.5]});
   drawChart('controlChart',samples,[{label:'logical request',color:'#0c6590',data:samples.map(s=>chartValue(s.heaterRequestedOutputPermille)/10)},{label:'MOS PWM',color:'#b13d35',data:samples.map(s=>chartValue(s.heaterOutputPermille)/10)}],'%');

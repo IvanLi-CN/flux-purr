@@ -1093,7 +1093,7 @@ mod tests {
         );
         assert!(REPORT_TEMPLATE.contains("class=\"chart-legend\""));
         assert!(REPORT_TEMPLATE.contains("canvas.dataset.sampleCount=String(samples.length)"));
-        assert!(REPORT_TEMPLATE.contains("if(last)last.endElapsedMs=elapsedMs"));
+        assert!(REPORT_TEMPLATE.contains("if(last)last.endElapsedMs=startElapsedMs"));
         assert!(REPORT_TEMPLATE.contains("run.executionStatus||'—'"));
         assert!(REPORT_TEMPLATE.contains("run.blockedBy?.reason||run.stopReason||'—'"));
         assert!(REPORT_TEMPLATE.contains("new Date(BUNDLE.generatedAt).toLocaleString"));
