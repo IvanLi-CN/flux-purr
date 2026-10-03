@@ -14,6 +14,7 @@ use flux_purr_firmware::{
         THERMAL_TUNING_EXECUTION_ORDER_C, THERMAL_TUNING_TARGET_BUDGET_MS,
         THERMAL_TUNING_TARGETS_C, ThermalTuningEvent, digest_event_chain, hash_profile,
     },
+    thermal_tuning_limits::{ThermalTuningTimingEvidence, original_settle_limit_ms},
 };
 use reqwest::{Client, Method};
 use serde_json::{Value, json};
@@ -841,10 +842,11 @@ fn adopted_trial_passes_gates(trial: &Value) -> bool {
     let stable = trial.get("fullSpeedToStable").unwrap_or(&Value::Null);
     let settle = stable.get("settleTimeMs").and_then(Value::as_u64);
     let limit = stable.get("limitMs").and_then(Value::as_u64);
-    trial
-        .get("warmupRequestedOutputPermille")
-        .and_then(Value::as_u64)
-        .is_some_and(|value| value >= 995)
+    timing_gate_valid(trial)
+        && trial
+            .get("warmupRequestedOutputPermille")
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value >= 995)
         && trial
             .get("maxOvershootC")
             .and_then(Value::as_f64)
@@ -862,6 +864,62 @@ fn adopted_trial_passes_gates(trial: &Value) -> bool {
             .pointer("/metrics/phasePath")
             .and_then(Value::as_str)
             .is_some_and(|path| path.contains("approach") && path.contains("hold"))
+}
+
+fn timing_gate_valid(trial: &Value) -> bool {
+    let Some(value) = trial.get("timing").filter(|value| !value.is_null()) else {
+        // Historical records keep their original disposition; absent facts are
+        // never filled from the current policy.
+        return true;
+    };
+    let Ok(timing) = serde_json::from_value::<ThermalTuningTimingEvidence>(value.clone()) else {
+        return false;
+    };
+    let Some(target) = trial
+        .get("targetC")
+        .and_then(Value::as_i64)
+        .and_then(|target| i16::try_from(target).ok())
+    else {
+        return false;
+    };
+    let Some(point) = trial.pointer("/canonicalCandidate/point") else {
+        return false;
+    };
+    let Some(floor) = point
+        .get("approachFloorPowerPermille")
+        .and_then(Value::as_u64)
+    else {
+        return false;
+    };
+    let Some(hold) = point.get("holdPowerPermille").and_then(Value::as_u64) else {
+        return false;
+    };
+    let settle = timing
+        .warmup_exited_at_ms
+        .zip(timing.stable_window_started_at_ms)
+        .and_then(|(exit, start)| start.checked_sub(exit));
+    timing.policy_version == 1
+        && timing.original_limit_ms == original_settle_limit_ms(target)
+        && Some(timing.extension_limit_ms) == timing.original_limit_ms.checked_mul(3)
+        && floor <= 1_000
+        && hold <= 1_000
+        && timing.allowed_approach_floor_permille as u64 == hold.max(100)
+        && timing.effective_approach_floor_permille as u64 == floor.max(hold)
+        && (timing.extended_at_ms.is_none() || timing.valid_extension())
+        && trial
+            .pointer("/fullSpeedToStable/limitMs")
+            .and_then(Value::as_u64)
+            == Some(u64::from(timing.active_limit_ms()))
+        && trial
+            .pointer("/fullSpeedToStable/settleTimeMs")
+            .and_then(Value::as_u64)
+            == settle
+        && timing
+            .stable_window_started_at_ms
+            .zip(timing.stable_window_verified_at_ms)
+            .is_some_and(|(start, verified)| {
+                verified.checked_sub(start).is_some_and(|age| age >= 10_000)
+            })
 }
 
 fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, io::Error> {
@@ -1899,6 +1957,20 @@ fn build_report_trial(
         "stopReason": decision_record.get("stopReason").cloned().unwrap_or_else(|| json!(event.get("reason").and_then(Value::as_str).unwrap_or("device_terminal_failure")))
     });
     if let Some(object) = result.as_object_mut() {
+        let trial_timing = trial_record.get("timing").filter(|value| !value.is_null());
+        let decision_timing = decision_record
+            .get("timing")
+            .filter(|value| !value.is_null());
+        if let Some(timing) = decision_timing.or(trial_timing) {
+            object.insert(
+                "timing".to_string(),
+                if trial_timing == decision_timing {
+                    timing.clone()
+                } else {
+                    json!({"availability": "mismatched_device_timing_evidence"})
+                },
+            );
+        }
         if let Some(start) = trial_record.get("startSequence") {
             object.insert("trialStartSequence".to_string(), start.clone());
         }
@@ -2064,6 +2136,35 @@ mod tests {
         thermal_tuning::{ThermalTuningEvent, digest_event_chain, hash_profile},
     };
     use serde_json::json;
+
+    #[test]
+    fn conditional_timing_requires_bound_floor_trigger_and_full_stable_window() {
+        let mut trial = json!({
+            "targetC": 60,
+            "canonicalCandidate": {"point": {"approachFloorPowerPermille": 100, "holdPowerPermille": 100}},
+            "fullSpeedToStable": {"settleTimeMs": 12000, "limitMs": 30000},
+            "timing": {"policyVersion": 1, "originalLimitMs": 10000, "extensionLimitMs": 30000,
+                "allowedApproachFloorPermille": 100, "effectiveApproachFloorPermille": 100,
+                "floorObservedAtMs": 2000, "extendedAtMs": 11000, "warmupExitedAtMs": 1000,
+                "stableWindowStartedAtMs": 13000, "stableWindowVerifiedAtMs": 23000}
+        });
+        assert!(super::timing_gate_valid(&trial));
+        for (pointer, value) in [
+            ("/timing/floorObservedAtMs", serde_json::Value::Null),
+            ("/timing/extendedAtMs", json!(10000)),
+            ("/timing/stableWindowVerifiedAtMs", json!(22999)),
+            ("/timing/extensionLimitMs", json!(180000)),
+            ("/canonicalCandidate/point/holdPowerPermille", json!(135)),
+            ("/fullSpeedToStable/limitMs", json!(180000)),
+        ] {
+            let mut invalid = trial.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(!super::timing_gate_valid(&invalid), "{pointer}");
+        }
+        trial["timing"]["extendedAtMs"] = serde_json::Value::Null;
+        trial["fullSpeedToStable"]["limitMs"] = json!(10000);
+        assert!(super::timing_gate_valid(&trial)); // Other metric gates still reject 12s > 10s.
+    }
 
     #[test]
     fn captured_identity_survives_standard_report_and_host_failure_rendering() {

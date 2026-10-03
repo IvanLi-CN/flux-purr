@@ -5,9 +5,9 @@ use super::*;
 use flux_purr_firmware::{
     control_plane::ThermalControlProfileWire,
     thermal_tuning::{
-        ThermalTuningPhase, ThermalTuningPowerClass, ThermalTuningPpsContract,
-        ThermalTuningRuntime, ThermalTuningSample, ThermalTuningStart, ThermalTuningTrialPurpose,
-        TuningId, hash_profile,
+        ThermalTuningDecisionRecord, ThermalTuningPhase, ThermalTuningPowerClass,
+        ThermalTuningPpsContract, ThermalTuningRuntime, ThermalTuningSample, ThermalTuningStart,
+        ThermalTuningTrialPurpose, TuningId, hash_profile,
     },
 };
 
@@ -22,6 +22,13 @@ fn firmware_candidate_matches_external_lower_band_hil_replay() {
     let profile_value = json!({
         "settings": fixture["settings"], "points": [fixture["point"]]
     });
+    if conditional_replay_continues(
+        &profile_value,
+        fixture["samples"].as_array().unwrap(),
+        ThermalTuningTrialPurpose::Scout,
+    ) {
+        return;
+    }
     let (expected, failure_class) =
         external_candidate(&profile_value, fixture["samples"].as_array().unwrap());
     assert_eq!(failure_class, "missed_lower_band_before_limit");
@@ -44,6 +51,9 @@ fn firmware_candidate_matches_external_late_window_hil_replays() {
             "settings": fixture["settings"], "points": [fixture["point"]]
         });
         let rows = fixture["samples"].as_array().unwrap();
+        if conditional_replay_continues(&profile_value, rows, ThermalTuningTrialPurpose::Scout) {
+            continue;
+        }
         let (expected, failure_class) = external_candidate(&profile_value, rows);
         let actual = firmware_candidate(profile_value, rows);
         if actual != expected {
@@ -65,6 +75,9 @@ fn firmware_candidate_matches_external_hard_deadline_hil_replays() {
     for fixture in fixtures {
         let profile = json!({"settings": fixture["settings"], "points": [fixture["point"]]});
         let rows = fixture["samples"].as_array().unwrap();
+        if conditional_replay_continues(&profile, rows, ThermalTuningTrialPurpose::Scout) {
+            continue;
+        }
         let (expected, failure) =
             external_candidate_with_stop(&profile, rows, "full_speed_to_stable_timeout");
         let actual = firmware_candidate(profile, rows);
@@ -85,6 +98,9 @@ fn firmware_candidate_matches_external_100ms_startup_hil_replays() {
     for fixture in fixtures {
         let profile = json!({"settings": fixture["settings"], "points": [fixture["point"]]});
         let rows = fixture["samples"].as_array().unwrap();
+        if conditional_replay_continues(&profile, rows, ThermalTuningTrialPurpose::Scout) {
+            continue;
+        }
         let (expected, failure) =
             external_candidate_with_stop(&profile, rows, "full_speed_to_stable_timeout");
         let actual = firmware_candidate(profile, rows);
@@ -105,6 +121,9 @@ fn firmware_scores_match_external_100ms_startup_hil_replays() {
     for fixture in fixtures {
         let profile = json!({"settings": fixture["settings"], "points": [fixture["point"]]});
         let rows = fixture["samples"].as_array().unwrap();
+        if conditional_replay_continues(&profile, rows, ThermalTuningTrialPurpose::Scout) {
+            continue;
+        }
         let (_, _, stage) =
             external_candidate_and_stage(&profile, rows, "full_speed_to_stable_timeout");
         let dir = tempfile::tempdir().unwrap();
@@ -137,7 +156,7 @@ fn firmware_scores_match_external_100ms_startup_hil_replays() {
         let actual = decisions
             .first()
             .expect("replayed trial must close with a decision");
-        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        for (index, (actual, expected)) in actual.score.iter().zip(expected).enumerate() {
             assert!(
                 (actual - expected).abs() < 0.000_01,
                 "trial {} score {index}: firmware {actual}; external {expected}",
@@ -161,6 +180,9 @@ fn firmware_candidate_and_scores_match_external_80c_observed_time_hil_replays() 
     for fixture in fixtures {
         let profile = json!({"settings": fixture["settings"], "points": [fixture["point"]]});
         let rows = fixture["samples"].as_array().unwrap();
+        if conditional_replay_continues(&profile, rows, ThermalTuningTrialPurpose::Scout) {
+            continue;
+        }
         let (expected, failure, stage) =
             external_candidate_and_stage(&profile, rows, "full_speed_to_stable_timeout");
         assert_eq!(
@@ -188,7 +210,7 @@ fn firmware_candidate_and_scores_match_external_80c_observed_time_hil_replays() 
         let actual = decisions
             .first()
             .expect("trial must close at its real hard boundary");
-        for (index, (actual, expected)) in actual.iter().zip(expected_score).enumerate() {
+        for (index, (actual, expected)) in actual.score.iter().zip(expected_score).enumerate() {
             assert!(
                 (actual - expected).abs() < 0.000_01,
                 "80C trial {} score {index}: firmware {actual}; external {expected}",
@@ -241,6 +263,9 @@ fn firmware_hold_confirm_reseed_matches_external_35c_hil_replay() {
     assert_eq!(expected.approach_floor_power_permille, 180);
     assert_eq!(expected.approach_damping_exponent_permille, 3_910);
     assert_eq!(expected.approach_lead_ticks, 3);
+    if conditional_replay_continues(&profile_value, rows, ThermalTuningTrialPurpose::HoldConfirm) {
+        return;
+    }
     let runtime = replay_firmware_trials(
         profile_value,
         rows,
@@ -311,7 +336,19 @@ fn confirmation_reseed_high_and_low_side_vectors_match_external_strategy() {
         let mut point = fixture["point"].clone();
         point["targetTempC"] = json!(target);
         let profile = json!({"settings": fixture["settings"], "points": [point]});
-        let rows = rows.as_array().unwrap();
+        let mut dense = rows.as_array().unwrap().clone();
+        if stop == "completed" {
+            // This is a synthetic unit vector, not a captured HIL trace. Supply
+            // the continuous evidence that its completed classification requires.
+            dense = vec![dense[0].clone(), dense[1].clone()];
+            dense.extend(
+                (2_000..62_000)
+                    .step_by(300)
+                    .map(|elapsed| json!([elapsed, 6000, 100, 100, "hold"])),
+            );
+            dense.push(json!([62000, 6380, 0, 0, "hold"]));
+        }
+        let rows = dense.as_slice();
         let (expected, _) = external_confirmation_reseed(&profile, rows, stop);
         let runtime =
             replay_firmware_trials(profile, rows, ThermalTuningTrialPurpose::HoldConfirm, 1);
@@ -414,6 +451,51 @@ fn replay_samples(rows: &[Value]) -> Vec<ThermalReplayStageSample> {
             source_power_mw: None,
         })
         .collect()
+}
+
+// A truncated historical recording cannot manufacture the additional samples
+// required by the approved exception. Check its policy/identity facts separately
+// from original-deadline candidate/score comparisons. Fresh HIL and dense runtime
+// regressions exercise the eventual outcome; this helper never synthesizes a tail.
+fn conditional_replay_continues(
+    profile: &Value,
+    rows: &[Value],
+    purpose: ThermalTuningTrialPurpose,
+) -> bool {
+    let (runtime, _, decisions) =
+        replay_firmware_trials_and_capture_decisions(profile.clone(), rows, purpose, 1);
+    let timing = runtime
+        .current_timing_evidence()
+        .or_else(|| decisions.iter().find_map(|decision| decision.timing));
+    if !timing.is_some_and(|timing| timing.extended_at_ms.is_some()) {
+        return false;
+    }
+    let timing = timing.unwrap();
+    assert!(
+        timing.valid_extension(),
+        "historical prefix must prove both exception prerequisites"
+    );
+    assert_eq!(
+        timing.original_limit_ms,
+        if profile["points"][0]["targetTempC"].as_i64().unwrap() > 150 {
+            5_000
+        } else {
+            10_000
+        }
+    );
+    assert!(!runtime.save_confirmed);
+    assert_eq!(
+        runtime.accepted_target_mask, 0,
+        "a short historical prefix cannot qualify confirmation"
+    );
+    if purpose == ThermalTuningTrialPurpose::Scout {
+        assert_eq!(
+            candidate_point_from_runtime(runtime),
+            thermal_candidate_profile_from_value(profile.clone()).points[0],
+            "extension must retain the same candidate"
+        );
+    }
+    true
 }
 
 fn external_candidate(profile_value: &Value, rows: &[Value]) -> (ThermalCandidatePoint, String) {
@@ -581,7 +663,11 @@ fn replay_firmware_trials_and_capture_decisions(
     rows: &[Value],
     purpose: ThermalTuningTrialPurpose,
     trial_count: u8,
-) -> (ThermalTuningRuntime, usize, Vec<[f64; 11]>) {
+) -> (
+    ThermalTuningRuntime,
+    usize,
+    Vec<ThermalTuningDecisionRecord>,
+) {
     let origin = rows[0][0].as_u64().unwrap();
     let mut wire_value = profile_value;
     wire_value["points"]
@@ -655,13 +741,16 @@ fn replay_firmware_trials_and_capture_decisions(
                 decisions.extend(
                     page.events
                         .iter()
-                        .filter_map(|event| event.decision.as_ref().map(|decision| decision.score)),
+                        .filter_map(|event| event.decision.clone()),
                 );
                 cursor = page.next_sequence;
             }
             if runtime.trial_index != trial_index {
                 break;
             }
+        }
+        if runtime.phase != ThermalTuningPhase::Cooldown {
+            break;
         }
     }
     (runtime, captured_rows, decisions)

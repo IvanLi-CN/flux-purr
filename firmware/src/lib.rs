@@ -21,6 +21,7 @@ pub mod net_http;
 pub mod status_light;
 pub mod thermal_plant;
 pub mod thermal_tuning;
+pub mod thermal_tuning_limits;
 mod thermal_tuning_strategy;
 pub mod wifi_state;
 

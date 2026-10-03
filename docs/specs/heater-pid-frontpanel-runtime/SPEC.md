@@ -224,6 +224,10 @@ None
 
 ## 验收标准（Acceptance Criteria）
 
+- 固件主控 5A 调优的条件例外使用 `timing.policyVersion=1`：试验开始前绑定候选的 `allowedApproachFloorPermille=max(100, holdPowerPermille)`、`effectiveApproachFloorPermille=max(approachFloorPowerPermille, holdPowerPermille)`、原稳定窗口起点期限（≤150°C 为 `10_000ms`，更高目标为 `5_000ms`）及有限延长期限（分别为 `30_000ms`、`15_000ms`）。只有 effective floor 已到允许下限、真实 Approach 逻辑请求达到该下限（按生产整百分比输出舍入），且原期限未能完成时才触发；此前触底后又提高 Approach 请求不得沿用旧触底证据，保护性零输出不得算作触底。记录 `floorObservedAtMs`、`extendedAtMs`、`warmupExitedAtMs`、`stableWindowStartedAtMs` 和 `stableWindowVerifiedAtMs`，均为同一 run 的真实单调 elapsed 时间。候选身份、参数、目标和 Hold 入口不变，不修改外部 engine。
+- 原计时不重置，普通候选仍执行 `5s/10s` 门禁。符合条件的例外只允许稳定窗口在有限期限内开始，随后完整验证连续 `10s`、目标 `±1.5°C` 且至少 `3Hz`；重复时间戳不增加样本数量，超过 `1s` 的无样本间隙使未验证窗口失效。延长不豁免过冲 `<=3°C`、qualified Hold 峰峰值 `<=3°C`、`12s` scout、独立 `60s` confirm、原 `20min` target 预算或整轮 `180s` timeout。延长中的热指标越限立即结束该试验；传感器、供电、通信、背压和取消仍走安全停热路径。
+- scout、评分、候选比较、确认、seal、confirm-save 及 host 验收使用同一有限条件政策；报告必须保留原期限未达事实，显示原/有效期限、下限来源和实际触发证据。设备 closed trial 与 decision 的 timing 必须一致并受 trace digest 保护；主机校验候选 floor、政策版本、期限和完整窗口时间，不接受伪造上限。缺少 timing 的历史数据明确 unavailable，不按现行政策改判。完整 confirmation 不构成自动保存授权。参数依据及冻结基线差异见 [整改审计](REMEDIATION-AUDIT.md)。
+
 - Given 显示初始化完成但 EEPROM/首个 RTD 尚未就绪，When Dashboard 首帧提交，Then 左侧显示 `---.-°C`，右侧显示 `SET ---`、`PPS ---`、`FAN ---`，且不得出现 `300°C` 或其它伪造温度。
 - Given 固件刚启动，When EEPROM 配置已恢复且首个 RTD 样本有效，Then Dashboard 进入 `Ready`，左侧显示实际温度，右侧显示恢复后的 `SET/PPS/FAN`，其中 `FAN` 只会显示 `OFF/AUTO/RUN`。
 - Given 固件刚启动，When 首个 RTD 样本为 `SensorShort`、`SensorOpen` 或 `AdcReadFailed`，Then Dashboard 进入 `InitialRtdFault`，显示 `WARN/SENSOR` 与占位温度，heater 保持锁定；后续有效样本和用户重新 arm 前不得解除该锁定。
