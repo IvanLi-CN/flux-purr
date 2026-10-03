@@ -77,6 +77,26 @@ fn firmware_candidate_matches_external_hard_deadline_hil_replays() {
 }
 
 #[test]
+fn firmware_candidate_matches_external_100ms_startup_hil_replays() {
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/thermal-60c-100ms-startup-replays.json"
+    ))
+    .unwrap();
+    for fixture in fixtures {
+        let profile = json!({"settings": fixture["settings"], "points": [fixture["point"]]});
+        let rows = fixture["samples"].as_array().unwrap();
+        let (expected, failure) =
+            external_candidate_with_stop(&profile, rows, "full_speed_to_stable_timeout");
+        let actual = firmware_candidate(profile, rows);
+        assert_eq!(
+            actual, expected,
+            "100ms startup trial {} ({failure})",
+            fixture["sourceTrialIndex"]
+        );
+    }
+}
+
+#[test]
 fn firmware_hold_confirm_reseed_matches_external_35c_hil_replay() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/thermal-60c-hold-confirm-lower-band.json"
