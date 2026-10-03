@@ -148,6 +148,84 @@ fn firmware_scores_match_external_100ms_startup_hil_replays() {
 }
 
 #[test]
+fn firmware_candidate_and_scores_match_external_80c_observed_time_hil_replays() {
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/thermal-80c-observed-time-replays.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        fixtures.len(),
+        10,
+        "retain every closed trial from the completed run"
+    );
+    for fixture in fixtures {
+        let profile = json!({"settings": fixture["settings"], "points": [fixture["point"]]});
+        let rows = fixture["samples"].as_array().unwrap();
+        let (expected, failure, stage) =
+            external_candidate_and_stage(&profile, rows, "full_speed_to_stable_timeout");
+        assert_eq!(
+            firmware_candidate(profile.clone(), rows),
+            expected,
+            "80C trial {} ({failure}) candidate",
+            fixture["sourceTrialIndex"]
+        );
+        let (_, _, decisions) = replay_firmware_trials_and_capture_decisions(
+            profile,
+            rows,
+            ThermalTuningTrialPurpose::Scout,
+            1,
+        );
+        let expected_score = external_score_for_stage(&stage, rows, 80);
+        let live_score: [f64; 11] =
+            serde_json::from_value(fixture["sourceDecisionScore"].clone()).unwrap();
+        for (index, (actual, expected)) in live_score.iter().zip(expected_score).enumerate() {
+            assert!(
+                (actual - expected).abs() < 0.000_01,
+                "live 80C trial {} score {index}: device {actual}; external {expected}",
+                fixture["sourceTrialIndex"]
+            );
+        }
+        let actual = decisions
+            .first()
+            .expect("trial must close at its real hard boundary");
+        for (index, (actual, expected)) in actual.iter().zip(expected_score).enumerate() {
+            assert!(
+                (actual - expected).abs() < 0.000_01,
+                "80C trial {} score {index}: firmware {actual}; external {expected}",
+                fixture["sourceTrialIndex"]
+            );
+        }
+    }
+}
+
+fn external_score_for_stage(stage: &ThermalStageResult, rows: &[Value], target: i16) -> [f64; 11] {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("samples.ndjson");
+    let origin = rows[0][0].as_u64().unwrap();
+    let samples = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "targetTempC": target, "elapsedMs": row[0].as_u64().unwrap() - origin,
+                "phase": row[4], "status": {
+                    "currentTempC": row[1].as_f64().unwrap() / 100.0,
+                    "heaterOutputPercent": row[2].as_f64().unwrap() / 10.0,
+                    "heaterPhysicalOutputPercent": row[3].as_f64().unwrap() / 10.0,
+                }
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, samples).unwrap();
+    candidate_score(
+        &json!({"applied": [stage.to_value()], "files": {"samplesPath": path}}),
+        target,
+    )
+    .0
+}
+
+#[test]
 fn firmware_hold_confirm_reseed_matches_external_35c_hil_replay() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/thermal-60c-hold-confirm-lower-band.json"
@@ -385,8 +463,9 @@ fn external_candidate_and_stage(
         .collect();
     let host_profile = thermal_candidate_profile_from_value(profile_value.clone());
     let current = host_profile.points[0];
-    let mut stable = ThermalFullSpeedStableTracker::new(60);
-    let mut guard = ThermalApproachGuardTracker::new(60, current.hold_entry_centi_c);
+    let target = current.target_temp_c;
+    let mut stable = ThermalFullSpeedStableTracker::new(target);
+    let mut guard = ThermalApproachGuardTracker::new(target, current.hold_entry_centi_c);
     for sample in &samples {
         stable.observe(
             sample.current_temp_c,
@@ -401,8 +480,8 @@ fn external_candidate_and_stage(
     }
     let valid_hold_start = samples.iter().position(|sample| {
         sample.control_phase_in_hold
-            && sample.current_temp_c >= 59.5
-            && (sample.current_temp_c - 60.0).abs() <= 3.0
+            && sample.current_temp_c >= f64::from(target) - 0.5
+            && (sample.current_temp_c - f64::from(target)).abs() <= 3.0
     });
     let valid_hold = valid_hold_start
         .map(|start| &samples[start..])
@@ -412,9 +491,9 @@ fn external_candidate_and_stage(
         .map(|s| s.current_temp_c)
         .fold(f64::NEG_INFINITY, f64::max);
     let result = ThermalStageResult {
-        target_temp_c: 60,
+        target_temp_c: target,
         rise_time_ms: valid_hold.first().map_or(0, |sample| sample.elapsed_ms),
-        max_overshoot_c: (max_temp - 60.0).max(0.0),
+        max_overshoot_c: (max_temp - f64::from(target)).max(0.0),
         hold_peak_to_peak_c: valid_hold
             .iter()
             .map(|s| s.current_temp_c)
@@ -426,7 +505,7 @@ fn external_candidate_and_stage(
         sample_count: samples.len(),
         stop_reason,
         terminal_runtime_drop_reason: None,
-        analysis: thermal_replay_stage_analysis(&samples, 60),
+        analysis: thermal_replay_stage_analysis(&samples, target),
         guard: guard.finalize(),
         full_speed_to_stable: stable.finalize(),
     };
@@ -438,20 +517,20 @@ fn external_candidate_and_stage(
             })
         })
         .collect();
-    let evidence = stability_evidence_for_stage(&result.to_value(), &chart_samples, 60);
+    let evidence = stability_evidence_for_stage(&result.to_value(), &chart_samples, target);
     let failure_class = evidence["failureClass"].as_str().unwrap().to_owned();
     let predicted = apply_flagship_gate_nudge(
         &current,
         tune_thermal_candidate_point(current, &result),
         &evidence,
-        60,
+        target,
     );
-    let predicted = bound_low_temperature_candidate_step(&current, predicted, &evidence, 60);
+    let predicted = bound_low_temperature_candidate_step(&current, predicted, &evidence, target);
     let selected = select_evidence_specific_candidate(
         current,
         predicted,
-        hold_ripple_trim_candidate(current, &result, &evidence, 60),
-        conservative_high_side_candidate(current, &result, &evidence, 60),
+        hold_ripple_trim_candidate(current, &result, &evidence, target),
+        conservative_high_side_candidate(current, &result, &evidence, target),
         failure_class.clone(),
     );
     (
