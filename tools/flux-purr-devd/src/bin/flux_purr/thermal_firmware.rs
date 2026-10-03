@@ -173,6 +173,15 @@ pub(crate) async fn run_firmware_tuning(
     default_devd: &str,
     args: ThermalFlagshipTuneArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    run_firmware_tuning_until_interrupt(client, default_devd, args, tokio::signal::ctrl_c()).await
+}
+
+async fn run_firmware_tuning_until_interrupt(
+    client: &Client,
+    default_devd: &str,
+    args: ThermalFlagshipTuneArgs,
+    interrupt: impl std::future::Future<Output = io::Result<()>>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let selected_targets = validate_firmware_args(&args)?;
     let execution_order = selected_execution_order(&selected_targets);
     let resolved = resolve_target(args.target.clone(), default_devd)?;
@@ -211,7 +220,9 @@ pub(crate) async fn run_firmware_tuning(
     let mut statuses = Vec::new();
     let mut identity_prepared = false;
     let mut profile_mode_prepared = false;
-    let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
+    let mut interruption_reason = "transport_or_runtime_failure";
+    let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = tokio::select! {
+        result = async {
         let identity =
             request_leased(client, &resolved, &lease.lease_id, Method::GET, "/identity", None)
                 .await?;
@@ -383,8 +394,15 @@ pub(crate) async fn run_firmware_tuning(
             })?;
         rendered["rawInputDir"] = json!(input_dir);
         Ok(rendered)
-    }
-    .await;
+        } => result,
+        signal = interrupt => {
+            interruption_reason = "host_canceled";
+            Err(match signal {
+                Ok(()) => "firmware thermal tuning interrupted; cancel and trace drain requested".into(),
+                Err(error) => Box::new(error) as Box<dyn std::error::Error + Send + Sync>,
+            })
+        }
+    };
     if result.is_err() && profile_mode_prepared {
         match tokio::time::timeout(
             TERMINAL_DRAIN_TIMEOUT,
@@ -419,6 +437,7 @@ pub(crate) async fn run_firmware_tuning(
             statuses: &statuses,
             selected_targets: &selected_targets,
             execution_order: &execution_order,
+            reason: interruption_reason,
         }),
         Err(_) => render_host_failure(HostFailureInput {
             device_id: &resolved.device,
@@ -937,6 +956,7 @@ struct InterruptedRunInput<'a> {
     statuses: &'a [Value],
     selected_targets: &'a [i16],
     execution_order: &'a [i16],
+    reason: &'a str,
 }
 
 fn render_interrupted_run(
@@ -958,7 +978,7 @@ fn render_interrupted_run(
         candidate_hash,
         candidate_profile: input.candidate_profile,
         statuses: input.statuses,
-        host_interruption: Some("transport_or_runtime_failure"),
+        host_interruption: Some(input.reason),
         selected_targets: input.selected_targets,
         execution_order: input.execution_order,
     })?;
@@ -2464,6 +2484,7 @@ mod tests {
             statuses: &statuses,
             selected_targets: &[60],
             execution_order: &[60],
+            reason: "transport_or_runtime_failure",
         })
         .unwrap();
 
@@ -2490,20 +2511,29 @@ mod tests {
 
     #[tokio::test]
     async fn transport_timeout_cancels_and_drains_retained_terminal_events() {
-        run_interrupted_transport_case(false, true).await;
+        run_interrupted_transport_case(false, true, false).await;
     }
 
     #[tokio::test]
     async fn transport_timeout_with_lost_events_remains_a_failed_trace_gap() {
-        run_interrupted_transport_case(true, true).await;
+        run_interrupted_transport_case(true, true, false).await;
     }
 
     #[tokio::test]
     async fn unavailable_device_identity_fails_before_any_tuning_command() {
-        run_interrupted_transport_case(false, false).await;
+        run_interrupted_transport_case(false, false, false).await;
     }
 
-    async fn run_interrupted_transport_case(trace_gap: bool, identity_available: bool) {
+    #[tokio::test]
+    async fn ctrl_c_cancels_drains_reports_and_releases_the_lease() {
+        run_interrupted_transport_case(false, true, true).await;
+    }
+
+    async fn run_interrupted_transport_case(
+        trace_gap: bool,
+        identity_available: bool,
+        interrupt_requested: bool,
+    ) {
         use axum::{
             Json, Router,
             routing::{delete, get, post},
@@ -2515,6 +2545,10 @@ mod tests {
         let report_dir = directory.path().join("report");
         let commands = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
         let recorded_commands = commands.clone();
+        let (interrupt_sender, interrupt_receiver) = tokio::sync::oneshot::channel();
+        let interrupt_sender = Arc::new(Mutex::new(Some(interrupt_sender)));
+        let lease_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let released = lease_released.clone();
         let events: Vec<serde_json::Value> = (0..3)
             .map(|sequence| {
                 json!({
@@ -2537,7 +2571,13 @@ mod tests {
                 Json(json!({"leaseId": "test", "ttlMs": 10000}))
             }))
             .route("/api/v1/leases/test/heartbeat", post(|| async { Json(json!({})) }))
-            .route("/api/v1/leases/test", delete(|| async { Json(json!({})) }))
+            .route("/api/v1/leases/test", delete(move || {
+                let released = released.clone();
+                async move {
+                    released.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Json(json!({}))
+                }
+            }))
             .route("/api/v1/devices/bench/identity", get(move || async move {
                 Json(if identity_available {
                     json!({"deviceId": "bench-identity", "firmwareVersion": "0.27.6-dev.capture",
@@ -2555,16 +2595,25 @@ mod tests {
                 let commands = recorded_commands.clone();
                 let events = events.clone();
                 let digest = digest.clone();
+                let interrupt_sender = interrupt_sender.clone();
                 async move {
-                    let mut commands = commands.lock().unwrap();
-                    commands.push(command.clone());
-                    let canceled = commands.iter().any(|command| command["op"] == "cancel");
-                    if command["op"] == "read" && !canceled
-                        && commands.iter().filter(|command| command["op"] == "read").count() > 1 {
+                    let (canceled, reads, start) = {
+                        let mut commands = commands.lock().unwrap();
+                        commands.push(command.clone());
+                        (
+                            commands.iter().any(|command| command["op"] == "cancel"),
+                            commands.iter().filter(|command| command["op"] == "read").count(),
+                            commands.iter().find(|command| command["op"] == "start").unwrap().clone(),
+                        )
+                    };
+                    if command["op"] == "read" && !canceled && reads > 1 {
+                        if interrupt_requested {
+                            interrupt_sender.lock().unwrap().take().unwrap().send(()).unwrap();
+                            std::future::pending::<()>().await;
+                        }
                         return (axum::http::StatusCode::GATEWAY_TIMEOUT,
                             Json(json!({"error": {"code": "usb_response_timeout", "retryable": true}})));
                     }
-                    let start = commands.iter().find(|command| command["op"] == "start").unwrap();
                     let next = if command["op"] == "read" {
                         command["afterSequence"].as_u64().map_or(0, |sequence| sequence + 1)
                     } else { 0 };
@@ -2608,10 +2657,23 @@ mod tests {
         else {
             panic!("expected firmware tune command");
         };
-        let rendered = super::run_firmware_tuning(&reqwest::Client::new(), &base, args)
-            .await
-            .unwrap();
+        let interrupt = async move {
+            if interrupt_requested {
+                interrupt_receiver.await.map_err(std::io::Error::other)
+            } else {
+                std::future::pending().await
+            }
+        };
+        let rendered = super::run_firmware_tuning_until_interrupt(
+            &reqwest::Client::new(),
+            &base,
+            args,
+            interrupt,
+        )
+        .await
+        .unwrap();
         server.abort();
+        assert!(lease_released.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(rendered["ownerOutcome"], "failed");
         if !identity_available {
             assert!(commands.lock().unwrap().is_empty());
@@ -2647,6 +2709,14 @@ mod tests {
                 .unwrap();
         assert_eq!(bundle["firmware"]["version"], "0.27.6-dev.capture");
         assert_eq!(bundle["device"]["id"], "bench-identity");
+        assert_eq!(
+            bundle["hostInterruption"]["reason"],
+            if interrupt_requested {
+                "host_canceled"
+            } else {
+                "transport_or_runtime_failure"
+            },
+        );
         assert_eq!(
             bundle["deviceTraceVerification"]["verified"], !trace_gap,
             "cancel must retrieve the retained tail before rendering the failure report"
