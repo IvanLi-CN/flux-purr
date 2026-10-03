@@ -97,6 +97,57 @@ fn firmware_candidate_matches_external_100ms_startup_hil_replays() {
 }
 
 #[test]
+fn firmware_scores_match_external_100ms_startup_hil_replays() {
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/thermal-60c-100ms-startup-replays.json"
+    ))
+    .unwrap();
+    for fixture in fixtures {
+        let profile = json!({"settings": fixture["settings"], "points": [fixture["point"]]});
+        let rows = fixture["samples"].as_array().unwrap();
+        let (_, _, stage) =
+            external_candidate_and_stage(&profile, rows, "full_speed_to_stable_timeout");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("samples.ndjson");
+        let origin = rows[0][0].as_u64().unwrap();
+        let samples = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "targetTempC": 60,
+                    "elapsedMs": row[0].as_u64().unwrap() - origin,
+                    "phase": row[4],
+                    "status": {"currentTempC": row[1].as_f64().unwrap() / 100.0,
+                        "heaterOutputPercent": row[2].as_f64().unwrap() / 10.0,
+                        "heaterPhysicalOutputPercent": row[3].as_f64().unwrap() / 10.0}
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, samples).unwrap();
+        let summary = json!({"applied": [stage.to_value()], "files": {"samplesPath": path}});
+        let expected = candidate_score(&summary, 60).0;
+        let (_, _, decisions) = replay_firmware_trials_and_capture_decisions(
+            profile,
+            rows,
+            ThermalTuningTrialPurpose::Scout,
+            1,
+        );
+        let actual = decisions
+            .first()
+            .expect("replayed trial must close with a decision");
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() < 0.000_01,
+                "trial {} score {index}: firmware {actual}; external {expected}",
+                fixture["sourceTrialIndex"]
+            );
+        }
+    }
+}
+
+#[test]
 fn firmware_hold_confirm_reseed_matches_external_35c_hil_replay() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/thermal-60c-hold-confirm-lower-band.json"
@@ -309,6 +360,15 @@ fn external_candidate_with_stop(
     rows: &[Value],
     stop_reason: &'static str,
 ) -> (ThermalCandidatePoint, String) {
+    let (point, failure, _) = external_candidate_and_stage(profile_value, rows, stop_reason);
+    (point, failure)
+}
+
+fn external_candidate_and_stage(
+    profile_value: &Value,
+    rows: &[Value],
+    stop_reason: &'static str,
+) -> (ThermalCandidatePoint, String, ThermalStageResult) {
     let origin = rows[0][0].as_u64().unwrap();
     let samples: Vec<ThermalReplayStageSample> = rows
         .iter()
@@ -394,7 +454,11 @@ fn external_candidate_with_stop(
         conservative_high_side_candidate(current, &result, &evidence, 60),
         failure_class.clone(),
     );
-    (selected.map_or(current, |(_, point)| point), failure_class)
+    (
+        selected.map_or(current, |(_, point)| point),
+        failure_class,
+        result,
+    )
 }
 
 fn firmware_candidate(profile_value: Value, rows: &[Value]) -> ThermalCandidatePoint {
@@ -428,6 +492,17 @@ fn replay_firmware_trials_and_capture(
     purpose: ThermalTuningTrialPurpose,
     trial_count: u8,
 ) -> (ThermalTuningRuntime, usize) {
+    let (runtime, count, _) =
+        replay_firmware_trials_and_capture_decisions(profile_value, rows, purpose, trial_count);
+    (runtime, count)
+}
+
+fn replay_firmware_trials_and_capture_decisions(
+    profile_value: Value,
+    rows: &[Value],
+    purpose: ThermalTuningTrialPurpose,
+    trial_count: u8,
+) -> (ThermalTuningRuntime, usize, Vec<[f64; 11]>) {
     let origin = rows[0][0].as_u64().unwrap();
     let mut wire_value = profile_value;
     wire_value["points"]
@@ -455,6 +530,7 @@ fn replay_firmware_trials_and_capture(
     runtime.trial_purpose = purpose;
     let mut cursor = None;
     let mut captured_rows = 0;
+    let mut decisions = Vec::new();
     // Drive both the scout and current batch through the real runtime so the
     // public profile contains the predicted candidate at its trial boundary.
     for trial_index in 0..trial_count {
@@ -497,6 +573,11 @@ fn replay_firmware_trials_and_capture(
                 if page.events.is_empty() {
                     break;
                 }
+                decisions.extend(
+                    page.events
+                        .iter()
+                        .filter_map(|event| event.decision.as_ref().map(|decision| decision.score)),
+                );
                 cursor = page.next_sequence;
             }
             if runtime.trial_index != trial_index {
@@ -504,5 +585,5 @@ fn replay_firmware_trials_and_capture(
             }
         }
     }
-    (runtime, captured_rows)
+    (runtime, captured_rows, decisions)
 }
