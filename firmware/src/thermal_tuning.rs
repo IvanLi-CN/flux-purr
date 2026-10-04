@@ -3466,6 +3466,30 @@ mod tests {
         assert!(runtime.events.iter().all(|event| event.decision.is_none()));
     }
 
+    #[test]
+    fn deadline_coast_preserves_bound_floor_evidence_in_the_live_trial() {
+        let mut profile = profile_with_targets(&[60]);
+        let point = profile.points[0].as_mut().unwrap();
+        point.approach_floor_power_permille = 100;
+        point.hold_power_permille = 60;
+        let mut runtime = started_runtime_with_profile(profile);
+        let candidate_hash = runtime.candidate_hash.clone().unwrap();
+        record_current_trial_sample(&mut runtime, 0, ThermalTuningPhase::Warmup, 3_400);
+        for (elapsed_ms, request) in [(1_000, 100), (5_000, 100), (11_000, 0)] {
+            let mut observed = sample(elapsed_ms, ThermalTuningPhase::Approach, 5_500);
+            observed.candidate_hash = candidate_hash.clone();
+            observed.heater_requested_output_permille = request;
+            observed.heater_output_permille = request;
+            runtime.record_sample(observed).unwrap();
+        }
+        assert!(runtime.armed);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Approach);
+        assert_eq!(runtime.trial_index, 0);
+        assert_eq!(runtime.candidate_hash.as_ref(), Some(&candidate_hash));
+        assert!(runtime.trial_timing.unwrap().valid_extension());
+        assert!(runtime.events.iter().all(|event| event.decision.is_none()));
+    }
+
     pub(super) fn extended_floor_runtime() -> ThermalTuningRuntime {
         let mut profile = profile_with_targets(&[60]);
         let point = profile.points[0].as_mut().unwrap();

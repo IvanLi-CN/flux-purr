@@ -60,7 +60,11 @@ impl ThermalTuningTimingEvidence {
             && requested_permille == rounded_floor
         {
             self.floor_observed_at_ms.get_or_insert(elapsed_ms);
-        } else {
+        } else if requested_permille != 0 {
+            // A protective coast cannot create floor evidence, but neither
+            // does it raise this unchanged candidate above its allowed floor.
+            // Preserve a real witness; nonzero requests away from the floor
+            // still invalidate it before the original deadline.
             self.floor_observed_at_ms = None;
         }
     }
