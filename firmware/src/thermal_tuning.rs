@@ -1236,6 +1236,13 @@ impl ThermalTuningRuntime {
         if self
             .first_hold_elapsed_ms
             .is_some_and(|started| sample_elapsed_ms.saturating_sub(started) >= required_hold_ms)
+            // Hold duration is a minimum, not a stable-window cutoff. A
+            // timely window may finish its ten seconds after the deadline.
+            // Invalid thermal facts still reject at the original Hold bound.
+            && (self.stable_window_verified_at_ms.is_some()
+                || !self.warmup_full_output
+                || self.warmup_full_output_invalid
+                || self.thermal_gate_failed())
         {
             self.finish_trial(sample_elapsed_ms)?;
         }
@@ -1348,13 +1355,16 @@ impl ThermalTuningRuntime {
         self.trial_timing
             .as_ref()
             .is_some_and(|timing| timing.extended_at_ms.is_some())
-            && (self
-                .max_temperature_centi_c
-                .is_some_and(|value| value > self.targets_c[self.target_index] * 100 + 300)
-                || self
-                    .min_hold_temperature_centi_c
-                    .zip(self.max_hold_temperature_centi_c)
-                    .is_some_and(|(min, max)| i32::from(max) - i32::from(min) > 300))
+            && self.thermal_gate_failed()
+    }
+
+    fn thermal_gate_failed(&self) -> bool {
+        self.max_temperature_centi_c
+            .is_some_and(|value| value > self.targets_c[self.target_index] * 100 + 300)
+            || self
+                .min_hold_temperature_centi_c
+                .zip(self.max_hold_temperature_centi_c)
+                .is_some_and(|(min, max)| i32::from(max) - i32::from(min) > 300)
     }
 
     fn validate_sample(&mut self, sample: &ThermalTuningSample) -> Result<i16, ThermalTuningError> {
@@ -3403,6 +3413,137 @@ mod tests {
         assert!(!decision.freeze);
         assert!(decision.timing.unwrap().valid_extension());
         assert!(!runtime.save_confirmed);
+    }
+
+    #[test]
+    fn ordinary_scout_waits_for_a_timely_restarted_stable_window() {
+        let mut runtime = started_single_target_runtime();
+        record_current_trial_sample(&mut runtime, 0, ThermalTuningPhase::Warmup, 3_400);
+        for elapsed_ms in (1_000..=8_800).step_by(300) {
+            let temperature = if elapsed_ms == 1_000 { 6_000 } else { 6_170 };
+            let phase = if elapsed_ms == 1_000 {
+                ThermalTuningPhase::Approach
+            } else {
+                ThermalTuningPhase::Hold
+            };
+            record_current_trial_sample(&mut runtime, elapsed_ms, phase, temperature);
+        }
+        record_dense_hold(&mut runtime, 9_100, 13_300, 6_000);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Hold);
+        assert_eq!(runtime.trial_index, 0);
+        assert!(runtime.events.iter().all(|event| event.decision.is_none()));
+        assert_eq!(runtime.stable_window_started_at_ms, Some(9_100));
+        assert_eq!(runtime.stable_window_verified_at_ms, None);
+        assert_eq!(runtime.trial_timing.unwrap().extended_at_ms, None);
+
+        record_dense_hold(&mut runtime, 13_600, 19_000, 6_000);
+        record_current_trial_sample(&mut runtime, 19_100, ThermalTuningPhase::Hold, 6_000);
+        let decision = runtime
+            .events
+            .iter()
+            .find_map(|event| event.decision.as_ref())
+            .unwrap();
+        assert_eq!(decision.disposition.as_str(), "passed");
+        assert_eq!(decision.settle_time_ms, Some(8_100));
+        assert_eq!(decision.hard_gate_full_speed_to_stable_ms, 10_000);
+        assert_eq!(
+            runtime.trial_purpose,
+            ThermalTuningTrialPurpose::HoldConfirm
+        );
+        assert!(!runtime.save_confirmed);
+    }
+
+    fn extended_scout_after_minimum_hold(window_start_ms: u64) -> ThermalTuningRuntime {
+        let mut runtime = extended_floor_runtime();
+        for elapsed_ms in (13_000..window_start_ms).step_by(300) {
+            let temperature = if elapsed_ms == 13_000 { 6_000 } else { 6_170 };
+            record_current_trial_sample(
+                &mut runtime,
+                elapsed_ms,
+                ThermalTuningPhase::Hold,
+                temperature,
+            );
+        }
+        record_current_trial_sample(
+            &mut runtime,
+            window_start_ms,
+            ThermalTuningPhase::Hold,
+            6_000,
+        );
+        assert_eq!(runtime.phase, ThermalTuningPhase::Hold);
+        assert_eq!(runtime.trial_index, 0);
+        assert_eq!(runtime.stable_window_started_at_ms, Some(window_start_ms));
+        assert_eq!(runtime.stable_window_verified_at_ms, None);
+        runtime
+    }
+
+    #[test]
+    fn extended_scout_waits_for_the_same_window_beyond_minimum_hold() {
+        let mut runtime = extended_scout_after_minimum_hold(20_200);
+        let candidate_hash = runtime.candidate_hash.clone();
+        record_dense_hold(&mut runtime, 20_500, 25_000, 6_000);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Hold);
+        assert_eq!(runtime.trial_index, 0);
+        assert!(runtime.events.iter().all(|event| event.decision.is_none()));
+
+        record_dense_hold(&mut runtime, 25_300, 30_100, 6_000);
+        record_current_trial_sample(&mut runtime, 30_200, ThermalTuningPhase::Hold, 6_000);
+        let decision = runtime
+            .events
+            .iter()
+            .find_map(|event| event.decision.as_ref())
+            .unwrap();
+        assert_eq!(decision.disposition.as_str(), "passed");
+        assert_eq!(decision.settle_time_ms, Some(19_200));
+        assert_eq!(
+            decision.timing.unwrap().stable_window_verified_at_ms,
+            Some(30_200)
+        );
+        assert_eq!(decision.hard_gate_full_speed_to_stable_ms, 30_000);
+        assert_eq!(runtime.candidate_hash, candidate_hash);
+        assert_eq!(
+            runtime.trial_purpose,
+            ThermalTuningTrialPurpose::HoldConfirm
+        );
+        assert!(!runtime.save_confirmed);
+    }
+
+    #[test]
+    fn waiting_scout_still_stops_when_its_window_breaks_after_the_cap() {
+        let mut runtime = extended_scout_after_minimum_hold(30_500);
+        record_current_trial_sample(&mut runtime, 30_800, ThermalTuningPhase::Hold, 6_000);
+        record_current_trial_sample(&mut runtime, 31_100, ThermalTuningPhase::Hold, 6_000);
+        record_current_trial_sample(&mut runtime, 31_200, ThermalTuningPhase::Hold, 6_170);
+        let decision = runtime
+            .events
+            .iter()
+            .find_map(|event| event.decision.as_ref())
+            .unwrap();
+        assert_eq!(decision.disposition.as_str(), "rejected");
+        assert_eq!(
+            decision.stop_reason,
+            "full-speed-to-stable budget exhausted"
+        );
+        assert_eq!(decision.timing.unwrap().stable_window_verified_at_ms, None);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+        assert_eq!(runtime.target_started_elapsed_ms, 0);
+    }
+
+    #[test]
+    fn waiting_scout_still_disarms_on_invalid_measurements() {
+        let mut runtime = extended_scout_after_minimum_hold(20_200);
+        record_dense_hold(&mut runtime, 20_500, 25_000, 6_000);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Hold);
+        assert_eq!(runtime.trial_index, 0);
+        let mut invalid = sample(25_300, ThermalTuningPhase::Hold, 6_000);
+        invalid.candidate_hash = runtime.candidate_hash.clone().unwrap();
+        invalid.measurement_valid = false;
+        assert_eq!(
+            runtime.record_sample(invalid),
+            Err(ThermalTuningError::InvalidTransition)
+        );
+        assert!(!runtime.armed);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Failed);
     }
 
     #[test]
