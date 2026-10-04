@@ -1318,9 +1318,9 @@ fn serial_exchange_timeout_error(
     if matches!(retry_policy, SerialRetryPolicy::PreparationProbe) && application_frame_seen {
         return HttpError::new(
             StatusCode::BAD_GATEWAY,
-            "startup_busy",
-            "The firmware returned application frames but did not reach runtime_ready before the preparation probe deadline.",
-            true,
+            "application_protocol_mismatch",
+            "The firmware returned application frames but no response matched the preparation request.",
+            false,
         );
     }
     HttpError::new(
@@ -1587,7 +1587,9 @@ pub(crate) fn serial_line_is_application_frame(line: &[u8]) -> bool {
         if frame
             .get("type")
             .and_then(Value::as_str)
-            .is_some_and(|frame_type| frame_type != "request")
+            .is_some_and(|frame_type| {
+                matches!(frame_type, "response" | "status" | "identity" | "error")
+            })
         {
             return true;
         }
@@ -2477,9 +2479,7 @@ impl DirectUsbSession {
             }
         }
         if application_frame_seen {
-            return Err(
-                "startup_busy: application frames were received without a matching response".into(),
-            );
+            return Err("application_protocol_mismatch: application frames were received without a matching response".into());
         }
         Err("timed out waiting for a matching USB JSONL response".into())
     }

@@ -3258,6 +3258,9 @@ fn serial_activity_detection_keeps_legacy_application_frames_alive() {
     assert!(serial_line_is_application_frame(
         br#"{"type":"status","requestId":null,"status":{"mode":"idle"}}"#,
     ));
+    assert!(!serial_line_is_application_frame(
+        br#"{"type":"log","message":"old firmware boot log"}"#,
+    ));
     assert!(serial_line_is_application_frame(
         br#"{"requestId":"snapshot-1","capacity":8192,"chunkMax":32}"#,
     ));
