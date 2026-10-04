@@ -71,6 +71,13 @@ pub(crate) fn reseed_after_hold_confirm(
     if !evidence.tunable_stop {
         return previous;
     }
+    // Firmware-only high-temperature exception: use the complete confirmation
+    // evidence before the frozen parsed-stage projection drops its band facts.
+    if evidence.target_c > 150
+        && let Some(conservative) = conservative_high_side_candidate(previous, evidence)
+    {
+        return conservative;
+    }
     // The frozen external confirmation path tunes parsed stage metrics/guard,
     // then applies a separate confirmation nudge from the full audit analysis.
     // Its parsed stage has no curve/hold analysis. Preserve that projection
@@ -705,7 +712,7 @@ fn conservative_high_side_candidate(
     previous: ThermalControlProfilePointConfig,
     evidence: TuneEvidence,
 ) -> Option<ThermalControlProfilePointConfig> {
-    if evidence.target_c > 150 {
+    if evidence.target_c > 240 {
         return None;
     }
     let severity_c = evidence
@@ -1227,6 +1234,123 @@ mod tests {
         assert!(tuned.brake_distance_centi_c < previous.brake_distance_centi_c);
         assert!(tuned.approach_power_permille > previous.approach_power_permille);
         assert!(tuned.approach_floor_power_permille > previous.approach_floor_power_permille);
+    }
+
+    fn high_temperature_point(target_c: i16) -> ThermalControlProfilePointConfig {
+        ThermalControlProfilePointConfig {
+            brake_distance_centi_c: 839,
+            approach_power_permille: 667,
+            approach_floor_power_permille: 600,
+            approach_damping_exponent_permille: 1_834,
+            approach_tail_window_centi_c: 167,
+            approach_lead_ticks: 6,
+            hold_power_permille: 600,
+            hold_reheat_power_permille: 600,
+            hold_entry_centi_c: 270,
+            hold_exit_centi_c: 258,
+            hold_on_centi_c: 20,
+            hold_off_centi_c: 67,
+            overshoot_cutoff_centi_c: 140,
+            hold_kp_permille_per_c: 12,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 1,
+            hold_lead_ticks: 6,
+            ..point(target_c)
+        }
+    }
+
+    fn high_temperature_failure(target_c: i16) -> TuneEvidence {
+        TuneEvidence {
+            // A slow Approach classification must not override measured high-side failure.
+            curve_class: CurveClass::Underpowered,
+            overshoot_c: 2.63,
+            hold_p2p_c: 3.73,
+            residual_c: 3.73,
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(target_c * 100 + 151),
+            settle_limit_ms: 15_000,
+            ..evidence(target_c)
+        }
+    }
+
+    #[test]
+    fn high_temperature_band_failure_uses_bounded_energy_trim_for_trial_and_confirmation() {
+        for target_c in [160, 180, 220, 240] {
+            let previous = high_temperature_point(target_c);
+            let facts = high_temperature_failure(target_c);
+            let expected = ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 1_139,
+                approach_power_permille: 580,
+                approach_floor_power_permille: 500,
+                hold_power_permille: 550,
+                hold_reheat_power_permille: 550,
+                hold_entry_centi_c: 370,
+                hold_exit_centi_c: 338,
+                hold_kp_permille_per_c: 8,
+                overshoot_cutoff_centi_c: 107,
+                ..previous
+            };
+            assert_eq!(tune_point(previous, facts), expected);
+            assert_eq!(reseed_after_hold_confirm(previous, facts), expected);
+            // The effective floor is still constrained by the production Hold baseline.
+            assert_eq!(
+                expected
+                    .approach_floor_power_permille
+                    .max(expected.hold_power_permille)
+                    .max(100),
+                550
+            );
+        }
+    }
+
+    #[test]
+    fn high_temperature_lower_miss_keeps_acceleration_and_does_not_trim_energy() {
+        let previous = high_temperature_point(160);
+        let facts = TuneEvidence {
+            first_band_observed: false,
+            first_band_exit_centi_c: None,
+            deadline_temperature_centi_c: Some(15_700),
+            ..high_temperature_failure(160)
+        };
+        assert!(conservative_high_side_candidate(previous, facts).is_none());
+        let tuned = tune_point(previous, facts);
+        assert!(tuned.approach_floor_power_permille >= previous.approach_floor_power_permille);
+        assert!(tuned.approach_power_permille >= previous.approach_power_permille);
+    }
+
+    #[test]
+    fn high_temperature_trim_requires_high_side_and_thermal_failure_within_scope() {
+        let previous = high_temperature_point(160);
+        let facts = high_temperature_failure(160);
+        let no_high_side = TuneEvidence {
+            first_band_exit_centi_c: None,
+            deadline_temperature_centi_c: None,
+            ..facts
+        };
+        assert!(conservative_high_side_candidate(previous, no_high_side).is_none());
+        let no_thermal_failure = TuneEvidence {
+            overshoot_c: 3.0,
+            hold_p2p_c: 3.0,
+            residual_c: 3.0,
+            ..facts
+        };
+        assert!(conservative_high_side_candidate(previous, no_thermal_failure).is_none());
+        let safety_failure = TuneEvidence {
+            tunable_stop: false,
+            ..facts
+        };
+        assert_eq!(tune_point(previous, safety_failure), previous);
+        assert_eq!(
+            reseed_after_hold_confirm(previous, safety_failure),
+            previous
+        );
+        assert!(
+            conservative_high_side_candidate(
+                high_temperature_point(250),
+                high_temperature_failure(250)
+            )
+            .is_none()
+        );
     }
 
     #[test]

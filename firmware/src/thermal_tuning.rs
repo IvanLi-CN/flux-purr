@@ -4183,6 +4183,119 @@ mod tests {
     }
 
     #[test]
+    fn high_temperature_local_band_exit_trims_the_next_preview_candidate() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.candidate_profile = Some(profile_with_targets(&[160]));
+        let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+        for (elapsed, phase, temperature) in [
+            (0, ThermalTuningPhase::Warmup, 12_000),
+            (1_000, ThermalTuningPhase::Approach, 15_900),
+            (2_000, ThermalTuningPhase::Hold, 15_990),
+            (3_000, ThermalTuningPhase::Hold, 16_263),
+        ] {
+            runtime.update_trial_metrics(&sample(elapsed, phase, temperature), 160);
+        }
+        runtime.mutate_candidate_for_failure(160, Some(263), Some(373), None, 15_000);
+        let tuned = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(
+            tuned.brake_distance_centi_c,
+            previous.brake_distance_centi_c + 300
+        );
+        assert_eq!(
+            tuned.approach_floor_power_permille,
+            previous.approach_floor_power_permille - 100
+        );
+        assert_eq!(tuned.hold_power_permille, previous.hold_power_permille - 50);
+        assert!(tuned.approach_power_permille < previous.approach_power_permille);
+        assert_eq!(tuned.warmup_power_permille, 1_000);
+        assert!(runtime.preview_update_pending);
+        assert!(runtime.preview_receipt.is_none());
+        assert_eq!(
+            runtime.candidate_hash,
+            hash_profile(&runtime.candidate_profile.unwrap())
+        );
+    }
+
+    #[test]
+    fn captured_160c_high_and_low_prefixes_select_different_candidate_directions() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/thermal-160c-high-low-replays.json"
+        ))
+        .unwrap();
+        for fixture in fixtures.as_array().unwrap() {
+            let wire: ThermalTuningCandidatePoint =
+                serde_json::from_value(fixture["point"].clone()).unwrap();
+            let mut profile = profile_with_targets(&[160]);
+            let previous = profile.points[0].as_mut().unwrap();
+            macro_rules! copy_fields {
+                ($($field:ident),+ $(,)?) => { $(previous.$field = wire.$field;)+ };
+            }
+            copy_fields!(
+                brake_distance_centi_c,
+                warmup_power_permille,
+                warmup_reenter_centi_c,
+                approach_power_permille,
+                approach_floor_power_permille,
+                approach_damping_exponent_permille,
+                approach_tail_window_centi_c,
+                hold_power_permille,
+                hold_reheat_power_permille,
+                hold_entry_centi_c,
+                hold_exit_centi_c,
+                hold_on_centi_c,
+                hold_off_centi_c,
+                overshoot_cutoff_centi_c,
+                hold_kp_permille_per_c,
+                hold_ki_permille_per_c_tick,
+                hold_blend_ticks,
+                approach_lead_ticks,
+                hold_lead_ticks
+            );
+            let previous = *previous;
+            let decision = &fixture["decision"];
+            let captured: ThermalTuningTimingEvidence =
+                serde_json::from_value(decision["timing"].clone()).unwrap();
+            let mut runtime = ThermalTuningRuntime::new();
+            runtime.candidate_profile = Some(profile);
+            runtime.trial_timing = Some(ThermalTuningTimingEvidence::for_point(previous));
+            runtime.trial_purpose = serde_json::from_value(decision["purpose"].clone()).unwrap();
+            for row in fixture["samples"].as_array().unwrap() {
+                let elapsed = row[0].as_u64().unwrap();
+                if captured.extended_at_ms.is_some_and(|at| elapsed >= at) {
+                    runtime.trial_timing.as_mut().unwrap().extended_at_ms = captured.extended_at_ms;
+                }
+                let phase = serde_json::from_value(row[1].clone()).unwrap();
+                let mut observed = sample(elapsed, phase, row[2].as_i64().unwrap() as i16);
+                observed.heater_requested_output_permille = row[3].as_u64().unwrap() as u16;
+                observed.heater_output_permille = row[4].as_u64().unwrap() as u16;
+                runtime.update_trial_metrics(&observed, 160);
+            }
+            runtime.mutate_candidate_for_failure(
+                160,
+                decision["maxOvershootCentiC"]
+                    .as_u64()
+                    .map(|value| value as u16),
+                decision["holdPeakToPeakCentiC"]
+                    .as_u64()
+                    .map(|value| value as u16),
+                decision["settleTimeMs"].as_u64(),
+                decision["hardGateFullSpeedToStableMs"].as_u64().unwrap() as u32,
+            );
+            let tuned = runtime.candidate_profile.unwrap().points[0].unwrap();
+            if fixture["side"] == "high" {
+                assert_eq!(tuned.approach_floor_power_permille, 500);
+                assert_eq!(tuned.hold_power_permille, 550);
+                assert_eq!(tuned.brake_distance_centi_c, 1_139);
+            } else {
+                assert!(
+                    tuned.approach_floor_power_permille >= previous.approach_floor_power_permille
+                );
+                assert!(tuned.hold_power_permille >= previous.hold_power_permille);
+            }
+        }
+    }
+
+    #[test]
     fn controller_hold_analysis_keeps_entry_before_qualification_timer() {
         let mut runtime = ThermalTuningRuntime::new();
         runtime.candidate_profile = Some(profile_with_targets(&[60]));

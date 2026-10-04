@@ -211,6 +211,7 @@ None
 
 ### 固件主控 5A 调优
 
+- firmware engine 在 `160/180/220/240°C` 上具有明确的冻结策略例外：热指标任一（过冲、qualified Hold 峰峰值、入口余热）超过 `3°C` 且设备温度证实高侧越带/高侧未入带时，优先使用既有保守减能候选，不由 `Underpowered` 标签反向增加请求。scout/batch 与确认失败的 reseed 都先检查这一完整高侧证据；未命中时继续原确认投影和修正。通常配置 floor/ceiling 各减 `100‰`、Hold/reheat 各减 `50‰`、brake 加 `3°C`，严重度至少 `20°C` 时沿用 `180‰`/`5°C` 变换，全部边界和截止约束保留。effective floor 仍由生产路径计算并绑定 trial；holdEntry/holdExit 的曲线调整不改变固定物理入口。低侧、缺失证据、安全失败及 `<=150°C` 不因这个例外改变。外部主控策略保持冻结；这些高侧输入须验证有意差异，不宣称与外部逐值一致。完整稳定窗口、条件延长前提、热指标、独立 `60s` 确认和持久化身份门禁全部保留。
 - `thermal tune --engine firmware` 只支持 `pps5a`。默认资格范围为 `60 / 80 / 100 / 120 / 140 / 160 / 180 / 220 / 240°C` 九个同等级目标，实际执行顺序为 `60, 240, 140, 100, 80, 120, 180, 160, 220`；缩小范围的诊断/复测不能产生默认资格通过结论。`pps3a` 不运行调优、不加热、不生成候选或保存，必须留下五文件失败审计；3A 调优属于独立后续范围。
 - 固件调优只在有效 `pps5a` PowerState、可用 thermal model、无标定/preview 互斥及有效安全状态下启动。热控运行循环和前面板显示分别持有 PowerState 订阅；显示刷新不得消费热控的变更通知，调优采样的合同必须来自热控订阅的最新完整状态。候选仅在安全 trial boundary 通过既有 RAM preview 生效，5A 正常加热与调优均使用同一 point-local profile 控制器；PPS/PWM 映射及所有保护保持现行路径。不得另建调优专用加热状态机、功率公式、隐藏输出限幅或改变 `thermal_plant_auto` 单次受保护瞬态语义。
 - 固件调优和加热控制必须把 PD 请求的 `Pending` 与终态失败分开处理。已接纳的请求必须保留并消费 ticket；在 PD 的 `WaitingForAccept` / `WaitingForPsRdy` 窗口内不得把缺少 ready observation 直接记为 `pd_contract_lost`，也不得重复提交同一请求。等待期间物理 PWM 必须保持安全关闭，调用方使用不超过 PD 请求超时加裕量的有界等待；只有 `Confirmed`、`Rejected`、`TimedOut`、`TransportFault`、`Detached`、`Superseded` 或明确的供电状态失效才能结束该等待。确认后必须校验电压、电流和 PPS 模式与请求完全一致，失败或超时不得产生调优通过结论。

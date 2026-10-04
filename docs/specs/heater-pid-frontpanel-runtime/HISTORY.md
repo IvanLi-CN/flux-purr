@@ -20,6 +20,8 @@ Commit `b9970102` enforces that boundary and prevents the report-sampling cadenc
 
 ## Production startup and missing-Hold projection
 
+Firmware tuning's approved high-temperature exception extends the existing conservative high-side candidate transform to 160–240°C and gives it precedence on failed confirmation as well as trial tuning. Earlier 160°C traces combined genuine upper-band failure with an Underpowered curve label, but the conservative branch excluded targets above 150°C, allowing repeated request increases. The exception retains measured-high-side eligibility and all acceptance gates; it does not change the frozen external runner or production PID equations. It is an intentional strategy difference and is verified separately from baseline conformance.
+
 The physical Approach→Hold entry is decoupled from the candidate's curve parameter. The observed 160°C trial entered controller Hold at 157.49°C because `holdEntryCentiC=270` also widened phase admission. Production control and tuning observation now share the existing target −0.5°C / ±3°C physical gate. Curve shaping, coast protection and blending retain their parameter semantics; no new slope or stored-energy gate is introduced. This supersedes the profile-dependent phase-entry interpretation above. Historical device records retain their actual early transitions and cannot prove the corrected behavior.
 
 The production heater soft-start requirement is 100ms for normal heating and firmware tuning alike, replacing the former one-second duration in the shared adapter. The tuning recorder preserves startup observations until full physical output so a sub-300ms ramp remains auditable. The thermal-plant calibration transient remains independent.
