@@ -221,6 +221,7 @@ describe('Web thermal-tuning-v2 export', () => {
     for (const targetC of TARGETS) {
       const trial = event(events.length, 'candidate_trial', targetC)
       trial.trial = {
+        purpose: 'hold_confirm',
         startSequence: trial.sequence,
         endSequence: trial.sequence + 4,
         sampleStartSequence: trial.sequence + 1,
@@ -256,6 +257,7 @@ describe('Web thermal-tuning-v2 export', () => {
       }
       const decision = event(events.length, 'decision', targetC)
       decision.decision = {
+        purpose: 'hold_confirm',
         disposition: 'adopted',
         maxOvershootCentiC: 120,
         holdPeakToPeakCentiC: 150,
@@ -303,6 +305,23 @@ describe('Web thermal-tuning-v2 export', () => {
       bundle.reportRuns.every((run: { reviewOutcome: string }) => run.reviewOutcome === 'passed')
     ).toBe(true)
     expect(bundle.deviceTraceVerification.verified).toBe(true)
+
+    const firstTrial = events.find((item) => item.trial != null)?.trial
+    const firstDecision = events.find((item) => item.decision != null)?.decision
+    if (!firstTrial || !firstDecision) throw new Error('missing qualification fixture')
+    firstTrial.purpose = 'scout'
+    firstDecision.purpose = 'scout'
+    captured.status.trace.digest = await digestEventChain(events)
+    const invalid = await exportThermalTuningV2(captured, 'device-1', 'web_serial')
+    const invalidBundle = JSON.parse(invalid.files['run.bundle.json'])
+    expect(invalidBundle.deviceTraceVerification.verified).toBe(true)
+    expect(invalid.ownerOutcome).toBe('failed')
+    expect(invalidBundle.reportRuns[0].reviewOutcome).toBe('failed')
+    expect(invalidBundle.reportRuns[0].trials[0].disposition).toBe('adopted')
+    expect(invalidBundle.reportRuns[0].trials[0].metrics.holdConfirmSeconds).toBeNull()
+    firstTrial.purpose = 'hold_confirm'
+    firstDecision.purpose = 'hold_confirm'
+    captured.status.trace.digest = await digestEventChain(events)
 
     captured.status.saveReceipt = null
     expect((await exportThermalTuningV2(captured, 'device-1', 'web_serial')).ownerOutcome).toBe(

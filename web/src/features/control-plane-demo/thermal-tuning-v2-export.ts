@@ -244,7 +244,9 @@ function buildReportRun(
   const trials = [...trialsByIndex.values()]
     .sort((left, right) => (left.trialIndex ?? 0) - (right.trialIndex ?? 0))
     .map((event) => buildTrial(event, samples, ledger, fallbackId, fallbackHash))
-  const adopted = trials.find((trial) => trial.disposition === 'adopted')
+  const adopted = trials.find(
+    (trial) => trial.disposition === 'adopted' && trial.reviewOutcome === 'passed'
+  )
   const summary = adopted ?? trials.at(-1)
   return {
     targetC,
@@ -407,16 +409,22 @@ function buildTrial(
     phasePath,
     maxOvershootC,
     holdPeakToPeakC,
-    holdConfirmSeconds: result.holdConfirm === true ? 60 : null,
+    holdConfirmSeconds:
+      trial.purpose === 'hold_confirm' &&
+      result.purpose === 'hold_confirm' &&
+      result.holdConfirm === true
+        ? 60
+        : null,
     fullSpeedToStable,
   }
-  return {
+  const report = {
     targetC: event.targetC,
     trialIndex: event.trialIndex,
+    trialPurpose: trial.purpose ?? null,
     candidateId: candidate.candidateId ?? fallbackId,
     candidateHash: candidate.candidateHash ?? fallbackHash,
     disposition,
-    reviewOutcome: disposition === 'adopted' ? 'passed' : 'failed',
+    reviewOutcome: 'failed',
     metrics,
     warmupRequestedOutputPermille: warmupRequest,
     maxOvershootC,
@@ -447,6 +455,8 @@ function buildTrial(
     canonicalCandidate: candidate,
     stopReason: result.stopReason ?? event.reason ?? 'device_terminal_failure',
   }
+  if (disposition === 'adopted' && trialPassesGates(report)) report.reviewOutcome = 'passed'
+  return report
 }
 
 async function verifyDeviceTrace(recording: ThermalTuningRecording, events: ThermalTuningEvent[]) {
@@ -574,10 +584,16 @@ function fullProfileAvailable(value: unknown) {
 }
 
 function adoptedTrialPassesGate(run: ReturnType<typeof buildReportRun>) {
-  const trial = run.trials.find((item) => item.disposition === 'adopted')
-  if (!trial) return false
+  const trial = run.trials.find(
+    (item) => item.disposition === 'adopted' && item.reviewOutcome === 'passed'
+  )
+  return trial != null && trialPassesGates(trial)
+}
+
+function trialPassesGates(trial: ReturnType<typeof buildTrial>): boolean {
   const gate = trial.fullSpeedToStable
   return (
+    trial.trialPurpose === 'hold_confirm' &&
     timingGateValid(trial) &&
     trial.warmupRequestedOutputPermille === 1_000 &&
     trial.metrics.phasePath.includes('approach -> hold') &&

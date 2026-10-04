@@ -24,11 +24,12 @@ pub const THERMAL_TUNING_EVENT_CAPACITY: usize = 256;
 // Samples carry the full local PPS/control evidence and must fit one bounded
 // JSONL response. Six events keep the largest sample-only page below the
 // shared LAN 6 KiB body envelope while letting USB hosts drain the live stream
-// faster than the runtime produces samples at its 300 ms cadence.
+// faster than the runtime produces samples at its 200 ms cadence.
 pub const THERMAL_TUNING_EVENT_PAGE_SIZE: usize = 6;
 pub const THERMAL_TUNING_HOLD_CONFIRM_MS: u64 = 60_000;
 pub const THERMAL_TUNING_SCOUT_HOLD_MS: u64 = 12_000;
-pub const THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS: u64 = 300;
+// Leave control-cycle scheduling margin below the required 333ms sample span.
+pub const THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS: u64 = 200;
 pub const THERMAL_TUNING_STABLE_WINDOW_MS: u64 = 10_000;
 pub const THERMAL_TUNING_STABLE_BAND_CENTI_C: i16 = 150;
 pub const THERMAL_TUNING_TARGET_BUDGET_MS: u64 = 20 * 60 * 1_000;
@@ -640,9 +641,10 @@ impl ThermalTuningRuntime {
         let scout_hold_complete = self.first_hold_elapsed_ms.is_some_and(|started| {
             elapsed_ms.saturating_sub(started) >= THERMAL_TUNING_SCOUT_HOLD_MS
         });
-        let hold_confirm = self.first_hold_elapsed_ms.is_some_and(|started| {
-            elapsed_ms.saturating_sub(started) >= THERMAL_TUNING_HOLD_CONFIRM_MS
-        });
+        let hold_confirm = self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm
+            && self.first_hold_elapsed_ms.is_some_and(|started| {
+                elapsed_ms.saturating_sub(started) >= THERMAL_TUNING_HOLD_CONFIRM_MS
+            });
         let budget_available = self
             .current_elapsed_ms
             .saturating_sub(self.target_started_elapsed_ms)
@@ -1268,7 +1270,7 @@ impl ThermalTuningRuntime {
         let phase_changed =
             self.phase != ThermalTuningPhase::Cooldown && self.phase != checked.phase;
         // Keep every startup control observation through the first full PWM
-        // sample. The normal 300ms recorder would hide a 100ms soft start.
+        // sample. The normal 200ms recorder would hide a 100ms soft start.
         let startup_evidence_due = self.phase != ThermalTuningPhase::Cooldown
             && checked.phase == ThermalTuningPhase::Warmup
             && !self.warmup_full_output;
@@ -3225,7 +3227,7 @@ mod tests {
                 .iter()
                 .filter(|event| event.kind == ThermalTuningEventKind::Sample)
                 .count(),
-            4
+            6
         );
 
         let mut invalid = sample(1_050, ThermalTuningPhase::Warmup, 7_000);
@@ -3446,6 +3448,72 @@ mod tests {
         assert_eq!(decision.disposition.as_str(), "passed");
         assert_eq!(decision.settle_time_ms, Some(8_100));
         assert_eq!(decision.hard_gate_full_speed_to_stable_ms, 10_000);
+        assert_eq!(
+            runtime.trial_purpose,
+            ThermalTuningTrialPurpose::HoldConfirm
+        );
+        assert!(!runtime.save_confirmed);
+    }
+
+    #[test]
+    fn live_recording_verifies_stability_with_observed_control_intervals() {
+        for control_interval_ms in [68, 83, 96] {
+            let mut runtime = started_single_target_runtime();
+            record_current_trial_sample(&mut runtime, 0, ThermalTuningPhase::Warmup, 3_400);
+            runtime
+                .record_live_sample(sample(1_000, ThermalTuningPhase::Approach, 5_900))
+                .unwrap();
+            for elapsed_ms in (1_068..=20_000).step_by(control_interval_ms) {
+                let temperature = if elapsed_ms < 9_000 { 6_170 } else { 6_000 };
+                runtime
+                    .record_live_sample(sample(elapsed_ms, ThermalTuningPhase::Hold, temperature))
+                    .unwrap();
+                if runtime.phase == ThermalTuningPhase::Cooldown {
+                    break;
+                }
+            }
+            assert_eq!(
+                runtime.phase,
+                ThermalTuningPhase::Cooldown,
+                "control interval {control_interval_ms}ms must not starve the stable recorder"
+            );
+            let decision = runtime
+                .events
+                .iter()
+                .find_map(|event| event.decision.as_ref())
+                .unwrap();
+            assert_eq!(decision.disposition.as_str(), "passed");
+            let timing = decision.timing.unwrap();
+            let window_ms = timing.stable_window_verified_at_ms.unwrap()
+                - timing.stable_window_started_at_ms.unwrap();
+            assert!((10_000..=11_000).contains(&window_ms));
+        }
+    }
+
+    #[test]
+    fn long_scout_cannot_claim_independent_confirmation() {
+        let mut runtime = extended_floor_runtime();
+        for elapsed_ms in (13_000..=75_000).step_by(340) {
+            record_current_trial_sample(&mut runtime, elapsed_ms, ThermalTuningPhase::Hold, 6_000);
+        }
+        assert_eq!(runtime.phase, ThermalTuningPhase::Hold);
+        assert!(runtime.stable_window_verified_at_ms.is_none());
+        for elapsed_ms in (75_040..=85_000).step_by(200) {
+            record_current_trial_sample(&mut runtime, elapsed_ms, ThermalTuningPhase::Hold, 6_000);
+            if runtime.phase == ThermalTuningPhase::Cooldown {
+                break;
+            }
+        }
+        let decision = runtime
+            .events
+            .iter()
+            .find_map(|event| event.decision.as_ref())
+            .unwrap();
+        assert_eq!(decision.purpose, ThermalTuningTrialPurpose::Scout);
+        assert_eq!(decision.disposition.as_str(), "passed");
+        assert!(!decision.hold_confirm);
+        assert!(!decision.freeze);
+        assert_eq!(runtime.accepted_target_mask, 0);
         assert_eq!(
             runtime.trial_purpose,
             ThermalTuningTrialPurpose::HoldConfirm

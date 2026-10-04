@@ -842,7 +842,8 @@ fn adopted_trial_passes_gates(trial: &Value) -> bool {
     let stable = trial.get("fullSpeedToStable").unwrap_or(&Value::Null);
     let settle = stable.get("settleTimeMs").and_then(Value::as_u64);
     let limit = stable.get("limitMs").and_then(Value::as_u64);
-    timing_gate_valid(trial)
+    trial.get("trialPurpose").and_then(Value::as_str) == Some("hold_confirm")
+        && timing_gate_valid(trial)
         && trial
             .get("warmupRequestedOutputPermille")
             .and_then(Value::as_u64)
@@ -1784,9 +1785,10 @@ fn build_report_runs(
                     .and_then(Value::as_i64)
                     .unwrap_or(i64::MAX)
             });
-            let adopted = trials
-                .iter()
-                .find(|trial| trial.get("disposition").and_then(Value::as_str) == Some("adopted"));
+            let adopted = trials.iter().find(|trial| {
+                trial.get("disposition").and_then(Value::as_str) == Some("adopted")
+                    && trial.get("reviewOutcome").and_then(Value::as_str) == Some("passed")
+            });
             let summary_trial = adopted.or_else(|| trials.last());
             let review_outcome = if adopted.is_some() {
                 "passed"
@@ -1915,20 +1917,25 @@ fn build_report_trial(
         .get("hardGateFullSpeedToStableMs")
         .cloned()
         .unwrap_or(Value::Null);
+    let independent_confirmation = trial_record.get("purpose").and_then(Value::as_str)
+        == Some("hold_confirm")
+        && decision_record.get("purpose").and_then(Value::as_str) == Some("hold_confirm");
     let metrics = json!({
         "warmupRequestedOutputPermille": warmup_request,
         "phasePath": phases,
         "maxOvershootC": decision_record.get("maxOvershootCentiC").and_then(Value::as_f64).map(|value| value / 100.0),
         "holdPeakToPeakC": decision_record.get("holdPeakToPeakCentiC").and_then(Value::as_f64).map(|value| value / 100.0),
-        "holdConfirmSeconds": if decision_record.get("holdConfirm").and_then(Value::as_bool) == Some(true) { json!(60) } else { Value::Null },
+        "holdConfirmSeconds": if independent_confirmation && decision_record.get("holdConfirm").and_then(Value::as_bool) == Some(true) { json!(60) } else { Value::Null },
         "fullSpeedToStable": {"settleTimeMs": settle_time, "limitMs": limit_ms}
     });
     let mut result = json!({
+        "targetC": target,
         "trialIndex": trial_index,
+        "trialPurpose": trial_record.get("purpose").cloned().unwrap_or(Value::Null),
         "candidateId": candidate.get("candidateId").cloned().unwrap_or_else(|| json!(fallback_candidate_id)),
         "candidateHash": candidate.get("candidateHash").cloned().unwrap_or_else(|| json!(fallback_candidate_hash)),
         "disposition": disposition,
-        "reviewOutcome": if disposition == "adopted" { "passed" } else { "failed" },
+        "reviewOutcome": "failed",
         "metrics": metrics,
         "warmupRequestedOutputPermille": warmup_request,
         "maxOvershootC": decision_record.get("maxOvershootCentiC").and_then(Value::as_f64).map(|value| value / 100.0),
@@ -1977,6 +1984,9 @@ fn build_report_trial(
         if let Some(end) = trial_record.get("endSequence") {
             object.insert("trialEndSequence".to_string(), end.clone());
         }
+    }
+    if disposition == "adopted" && adopted_trial_passes_gates(&result) {
+        result["reviewOutcome"] = json!("passed");
     }
     result
 }
@@ -2417,6 +2427,7 @@ mod tests {
                 "adoptedTrialIndex": 1,
                 "trials": [{
                     "trialIndex": 1,
+                    "trialPurpose": "hold_confirm",
                     "disposition": "adopted",
                     "warmupRequestedOutputPermille": 1000,
                     "maxOvershootC": 1.2,
@@ -2478,6 +2489,9 @@ mod tests {
         assert!(validate_save_input(&invalid, &candidate).is_err());
         invalid = bundle.clone();
         invalid["reportRuns"][0]["trials"][0]["metrics"]["holdConfirmSeconds"] = json!(12);
+        assert!(validate_save_input(&invalid, &candidate).is_err());
+        invalid = bundle.clone();
+        invalid["reportRuns"][0]["trials"][0]["trialPurpose"] = json!("scout");
         assert!(validate_save_input(&invalid, &candidate).is_err());
         invalid = bundle.clone();
         invalid["targetSet"]["selectedC"] = json!([60]);
@@ -3042,6 +3056,52 @@ mod tests {
         assert_eq!(runs[0]["reviewOutcome"], "failed");
         assert_eq!(runs[0]["reviewPassed"], false);
         assert_eq!(runs[0]["trialCount"], 0);
+    }
+
+    #[test]
+    fn elapsed_scout_cannot_be_reported_as_independent_confirmation() {
+        let samples = vec![
+            json!({"sequence": 1, "targetC": 60, "trialIndex": 0, "phase": "warmup", "elapsedMs": 1000, "heaterRequestedOutputPermille": 1000}),
+            json!({"sequence": 2, "targetC": 60, "trialIndex": 0, "phase": "approach", "elapsedMs": 2000, "heaterRequestedOutputPermille": 400}),
+            json!({"sequence": 3, "targetC": 60, "trialIndex": 0, "phase": "hold", "elapsedMs": 82000, "heaterRequestedOutputPermille": 400}),
+        ];
+        let ledger = vec![
+            json!({"kind": "candidate_trial", "targetC": 60, "trialIndex": 0, "trial": {"purpose": "scout", "sampleStartSequence": 1, "sampleEndSequence": 3}}),
+            json!({"kind": "decision", "targetC": 60, "trialIndex": 0, "decision": {"purpose": "scout", "disposition": "adopted", "holdConfirm": true, "maxOvershootCentiC": 100, "holdPeakToPeakCentiC": 100, "settleTimeMs": 1000, "hardGateFullSpeedToStableMs": 10000}}),
+        ];
+        let runs = build_report_runs(&[60], &samples, &ledger, "candidate-1", "hash-1");
+        assert_eq!(runs[0]["reviewOutcome"], "failed");
+        assert_eq!(runs[0]["reviewPassed"], false);
+        assert!(runs[0]["adoptedTrialIndex"].is_null());
+        let trial = &runs[0]["trials"][0];
+        assert_eq!(
+            trial["disposition"], "adopted",
+            "retain the device's incorrect raw fact"
+        );
+        assert_eq!(trial["reviewOutcome"], "failed");
+        assert!(trial["metrics"]["holdConfirmSeconds"].is_null());
+    }
+
+    #[test]
+    fn confirmed_trial_projection_preserves_bound_target_and_timing() {
+        let timing = json!({"policyVersion": 1, "originalLimitMs": 10000, "extensionLimitMs": 30000,
+            "allowedApproachFloorPermille": 100, "effectiveApproachFloorPermille": 100,
+            "floorObservedAtMs": 2000, "extendedAtMs": 11000, "warmupExitedAtMs": 1000,
+            "stableWindowStartedAtMs": 13000, "stableWindowVerifiedAtMs": 73000});
+        let samples = vec![
+            json!({"sequence": 1, "targetC": 60, "trialIndex": 1, "phase": "warmup", "elapsedMs": 0, "heaterRequestedOutputPermille": 1000}),
+            json!({"sequence": 2, "targetC": 60, "trialIndex": 1, "phase": "approach", "elapsedMs": 1000, "heaterRequestedOutputPermille": 100}),
+            json!({"sequence": 3, "targetC": 60, "trialIndex": 1, "phase": "hold", "elapsedMs": 73000, "heaterRequestedOutputPermille": 100}),
+        ];
+        let ledger = vec![
+            json!({"kind": "candidate_trial", "targetC": 60, "trialIndex": 1, "trial": {"purpose": "hold_confirm", "sampleStartSequence": 1, "sampleEndSequence": 3, "timing": timing, "candidate": {"point": {"approachFloorPowerPermille": 100, "holdPowerPermille": 100}}}}),
+            json!({"kind": "decision", "targetC": 60, "trialIndex": 1, "decision": {"purpose": "hold_confirm", "disposition": "adopted", "holdConfirm": true, "maxOvershootCentiC": 100, "holdPeakToPeakCentiC": 100, "settleTimeMs": 12000, "hardGateFullSpeedToStableMs": 30000, "timing": timing}}),
+        ];
+        let runs = build_report_runs(&[60], &samples, &ledger, "candidate-1", "hash-1");
+        assert_eq!(runs[0]["reviewOutcome"], "passed");
+        assert_eq!(runs[0]["adoptedTrialIndex"], 1);
+        assert_eq!(runs[0]["trials"][0]["targetC"], 60);
+        assert!(super::adopted_trial_passes_gates(&runs[0]["trials"][0]));
     }
 
     #[test]
