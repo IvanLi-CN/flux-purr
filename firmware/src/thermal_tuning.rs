@@ -1293,12 +1293,19 @@ impl ThermalTuningRuntime {
         // in-flight stable window beyond the current control cycle.
         let deadline_check_due = self.warmup_exited_at_ms.is_some_and(|warmup_exit_ms| {
             let limit_ms = u64::from(self.active_settle_limit_ms(checked.target_c));
-            checked.elapsed_ms >= warmup_exit_ms.saturating_add(limit_ms)
-                && self.stable_window_verified_at_ms.is_none()
-                && (self.stable_window_started_at_ms.is_none()
-                    || (i32::from(checked.temperature_centi_c) - i32::from(checked.target_c) * 100)
-                        .abs()
-                        > i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C))
+            let first_original_check_due = self.trial_timing.as_ref().is_some_and(|timing| {
+                timing.original_deadline_observed_at_ms.is_none()
+                    && checked.elapsed_ms
+                        >= warmup_exit_ms.saturating_add(u64::from(timing.original_limit_ms))
+            });
+            first_original_check_due
+                || (checked.elapsed_ms >= warmup_exit_ms.saturating_add(limit_ms)
+                    && self.stable_window_verified_at_ms.is_none()
+                    && (self.stable_window_started_at_ms.is_none()
+                        || (i32::from(checked.temperature_centi_c)
+                            - i32::from(checked.target_c) * 100)
+                            .abs()
+                            > i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C)))
         });
         if !phase_changed
             && !startup_evidence_due
@@ -1357,9 +1364,11 @@ impl ThermalTuningRuntime {
                 .min_hold_temperature_centi_c
                 .zip(self.max_hold_temperature_centi_c)
                 .is_none_or(|(min, max)| i32::from(max) - i32::from(min) <= 300);
-        if gates_valid && let Some(timing) = &mut self.trial_timing {
+        if let Some(timing) = &mut self.trial_timing {
             let already_extended = timing.extended_at_ms.is_some();
-            if timing.try_extend(elapsed_ms, timed_out) && !already_extended {
+            if timing.try_extend(elapsed_ms, timed_out && gates_valid, self.phase)
+                && !already_extended
+            {
                 // The failure classifier now observes the bound active deadline.
                 // Keep earlier band-entry/break facts and the original timing audit.
                 self.deadline_nearest_distance_ms = u64::MAX;
@@ -3464,6 +3473,34 @@ mod tests {
         assert_eq!(runtime.phase, ThermalTuningPhase::Approach);
         assert_eq!(runtime.trial_index, 0);
         assert!(runtime.events.iter().all(|event| event.decision.is_none()));
+    }
+
+    #[test]
+    fn a_hold_window_break_cannot_obtain_a_retrospective_approach_extension() {
+        let mut profile = profile_with_targets(&[60]);
+        let point = profile.points[0].as_mut().unwrap();
+        point.approach_floor_power_permille = 100;
+        point.hold_power_permille = 60;
+        let mut runtime = started_runtime_with_profile(profile);
+        record_current_trial_sample(&mut runtime, 0, ThermalTuningPhase::Warmup, 3_400);
+        for elapsed in [1_000, 2_000] {
+            let mut observed = sample(elapsed, ThermalTuningPhase::Approach, 5_500);
+            observed.candidate_hash = runtime.candidate_hash.clone().unwrap();
+            observed.heater_requested_output_permille = 100;
+            runtime.record_sample(observed).unwrap();
+        }
+        record_dense_hold(&mut runtime, 3_000, 10_800, 6_000);
+        record_current_trial_sample(&mut runtime, 11_000, ThermalTuningPhase::Hold, 6_000);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Hold);
+        record_current_trial_sample(&mut runtime, 12_000, ThermalTuningPhase::Hold, 6_170);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+        let decision = runtime
+            .events
+            .iter()
+            .find_map(|event| event.decision.as_ref())
+            .unwrap();
+        assert_eq!(decision.disposition.as_str(), "rejected");
+        assert!(decision.timing.unwrap().extended_at_ms.is_none());
     }
 
     #[test]

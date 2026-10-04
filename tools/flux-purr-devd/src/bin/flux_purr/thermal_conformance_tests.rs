@@ -15,7 +15,7 @@ use flux_purr_firmware::{
 // are synthesized; strategy analysis uses the recorded logical request. MOS PWM
 // remains an independent runtime sample and does not become a power estimate.
 #[test]
-fn firmware_candidates_and_scores_match_external_160c_live_rtd_replays() {
+fn firmware_160c_scores_match_external_and_candidates_respect_approved_high_side_delta() {
     let fixtures: Vec<Value> = serde_json::from_str(include_str!(
         "../../../tests/fixtures/thermal-160c-live-rtd-replays.json"
     ))
@@ -29,8 +29,36 @@ fn firmware_candidates_and_scores_match_external_160c_live_rtd_replays() {
             rows,
             ThermalTuningTrialPurpose::Scout
         ));
-        let (expected, failure, stage) =
+        let (external, failure, stage) =
             external_candidate_and_stage(&profile, rows, "full_speed_to_stable_timeout");
+        // The approved 160–240C strategy deliberately uses the conservative
+        // branch for these high-side failures. Keep exact external score and
+        // unaffected-candidate comparisons; assert the four full golden
+        // vectors separately instead of claiming universal external parity.
+        let golden = match fixture["sourceTrialIndex"].as_u64().unwrap() {
+            0 => Some((1259, 580, 660)),
+            6 => Some((1079, 760, 840)),
+            9 => Some((1199, 840, 920)),
+            12 => Some((1319, 900, 980)),
+            _ => None,
+        };
+        let expected = if let Some((brake, floor, ceiling)) = golden {
+            assert_eq!(failure, "stable_window_broke_high");
+            let mut point = thermal_candidate_profile_from_value(profile.clone()).points[0];
+            point.brake_distance_centi_c = brake;
+            point.approach_floor_power_permille = floor;
+            point.approach_power_permille = ceiling;
+            point.hold_power_permille = 550;
+            point.hold_reheat_power_permille = 550;
+            point.hold_entry_centi_c = 370;
+            point.hold_exit_centi_c = 338;
+            point.overshoot_cutoff_centi_c = 107;
+            point.hold_kp_permille_per_c = 8;
+            assert_ne!(point, external, "high-side exception must not accelerate");
+            point
+        } else {
+            external
+        };
         let actual = firmware_candidate(profile.clone(), rows);
         if actual != expected {
             differences.push(format!(

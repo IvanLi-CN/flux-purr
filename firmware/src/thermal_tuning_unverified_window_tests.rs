@@ -28,7 +28,11 @@ fn captured_runtime(fixture: &serde_json::Value) -> ThermalTuningRuntime {
         sample.heater_requested_output_permille = row[2].as_u64().unwrap() as u16;
         sample.heater_output_permille = row[3].as_u64().unwrap() as u16;
         runtime.update_trial_metrics(&sample, 80);
+        runtime.phase = sample.phase;
         runtime.maybe_extend_trial(sample.elapsed_ms, 80);
+        if runtime.full_speed_to_stable_timed_out(sample.elapsed_ms, 80) {
+            break;
+        }
     }
     runtime
 }
@@ -41,15 +45,11 @@ fn captured_unverified_windows_remain_failed_for_candidate_search() {
     .unwrap();
     for fixture in fixtures.as_array().unwrap() {
         let runtime = captured_runtime(fixture);
-        assert!(runtime.trial_timing.unwrap().valid_extension());
+        assert!(!runtime.trial_timing.unwrap().valid_extension());
         assert_eq!(runtime.stable_window_verified_at_ms, None);
-        let started =
-            runtime.stable_window_started_at_ms.unwrap() - runtime.warmup_exited_at_ms.unwrap();
-        assert_eq!(
-            started,
-            fixture["decision"]["settleTimeMs"].as_u64().unwrap()
-        );
-        assert!(started < 30_000);
+        let started = runtime
+            .stable_window_started_at_ms
+            .map(|start| start - runtime.warmup_exited_at_ms.unwrap());
         let evidence = runtime.candidate_failure_evidence(
             80,
             Some(fixture["decision"]["maxOvershootCentiC"].as_u64().unwrap() as u16),
@@ -58,7 +58,7 @@ fn captured_unverified_windows_remain_failed_for_candidate_search() {
                     .as_u64()
                     .unwrap() as u16,
             ),
-            Some(started),
+            started,
             runtime.active_settle_limit_ms(80),
         );
         assert!(
@@ -70,19 +70,16 @@ fn captured_unverified_windows_remain_failed_for_candidate_search() {
 }
 
 #[test]
-fn captured_extended_window_break_is_classified_from_the_actual_high_side() {
+fn captured_legacy_tail_cannot_supply_band_evidence_after_the_new_stop() {
     let fixtures: serde_json::Value = serde_json::from_str(include_str!(
         "thermal_tuning_unverified_window.fixture.json"
     ))
     .unwrap();
     for fixture in fixtures.as_array().unwrap() {
         let runtime = captured_runtime(fixture);
-        assert!(runtime.first_band_elapsed_ms.is_some());
-        assert!(
-            runtime
-                .first_band_exit_centi_c
-                .is_some_and(|value| value > 8_150)
-        );
+        assert!(runtime.first_band_elapsed_ms.is_none());
+        assert!(runtime.first_band_exit_centi_c.is_none());
+        assert_eq!(runtime.active_settle_limit_ms(80), 10_000);
     }
 }
 

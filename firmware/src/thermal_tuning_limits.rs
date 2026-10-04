@@ -2,13 +2,15 @@
 use serde::{Deserialize, Serialize};
 
 use crate::memory::ThermalControlProfilePointConfig;
+use crate::thermal_tuning::ThermalTuningPhase;
 
 #[cfg(test)]
 #[path = "thermal_tuning_limits_tests.rs"]
 mod tests;
 
 pub const TRIAL_TIMEOUT_MS: u64 = 180_000;
-pub const TIMING_POLICY_VERSION: u8 = 1;
+pub const TIMING_POLICY_VERSION: u8 = 2;
+pub const EXTENSION_FLOOR_PERMILLE: u16 = 100;
 
 pub const fn original_settle_limit_ms(target_c: i16) -> u32 {
     if target_c > 150 { 5_000 } else { 10_000 }
@@ -22,11 +24,21 @@ pub struct ThermalTuningTimingEvidence {
     pub extension_limit_ms: u32,
     pub allowed_approach_floor_permille: u16,
     pub effective_approach_floor_permille: u16,
+    #[serde(default, skip_serializing_if = "floor_not_recorded")]
+    pub configured_approach_floor_permille: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_deadline_observed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_deadline_phase: Option<ThermalTuningPhase>,
     pub floor_observed_at_ms: Option<u64>,
     pub extended_at_ms: Option<u64>,
     pub warmup_exited_at_ms: Option<u64>,
     pub stable_window_started_at_ms: Option<u64>,
     pub stable_window_verified_at_ms: Option<u64>,
+}
+
+fn floor_not_recorded(value: &u16) -> bool {
+    *value == 0
 }
 
 impl ThermalTuningTimingEvidence {
@@ -39,10 +51,13 @@ impl ThermalTuningTimingEvidence {
             policy_version: TIMING_POLICY_VERSION,
             original_limit_ms,
             extension_limit_ms: original_limit_ms * 3,
-            allowed_approach_floor_permille: point.hold_power_permille.max(100),
+            allowed_approach_floor_permille: EXTENSION_FLOOR_PERMILLE,
             effective_approach_floor_permille: point
                 .approach_floor_power_permille
                 .max(point.hold_power_permille),
+            configured_approach_floor_permille: point.approach_floor_power_permille,
+            original_deadline_observed_at_ms: None,
+            original_deadline_phase: None,
             floor_observed_at_ms: None,
             extended_at_ms: None,
             warmup_exited_at_ms: None,
@@ -55,9 +70,9 @@ impl ThermalTuningTimingEvidence {
         if self.extended_at_ms.is_some() {
             return;
         }
-        let rounded_floor = ((self.effective_approach_floor_permille + 5) / 10) * 10;
-        if self.effective_approach_floor_permille == self.allowed_approach_floor_permille
-            && requested_permille == rounded_floor
+        if self.configured_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
+            && self.effective_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
+            && requested_permille == EXTENSION_FLOOR_PERMILLE
         {
             self.floor_observed_at_ms.get_or_insert(elapsed_ms);
         } else if requested_permille != 0 {
@@ -69,11 +84,36 @@ impl ThermalTuningTimingEvidence {
         }
     }
 
-    pub fn try_extend(&mut self, elapsed_ms: u64, original_timed_out: bool) -> bool {
+    pub fn try_extend(
+        &mut self,
+        elapsed_ms: u64,
+        original_timed_out: bool,
+        phase: ThermalTuningPhase,
+    ) -> bool {
         if self.extended_at_ms.is_some() {
             return true;
         }
-        if !original_timed_out || self.floor_observed_at_ms.is_none() {
+        let Some(deadline_ms) = self
+            .warmup_exited_at_ms
+            .and_then(|exit| exit.checked_add(u64::from(self.original_limit_ms)))
+        else {
+            return false;
+        };
+        if elapsed_ms < deadline_ms || self.original_deadline_observed_at_ms.is_some() {
+            return false;
+        }
+        // Bind even a rejected decision or an in-flight ordinary window. A
+        // later Hold break or floor touch cannot reopen this original check.
+        self.original_deadline_observed_at_ms = Some(elapsed_ms);
+        self.original_deadline_phase = Some(phase);
+        if !original_timed_out
+            || phase != ThermalTuningPhase::Approach
+            || self.configured_approach_floor_permille != EXTENSION_FLOOR_PERMILLE
+            || self.effective_approach_floor_permille != EXTENSION_FLOOR_PERMILLE
+            || self
+                .floor_observed_at_ms
+                .is_none_or(|floor| floor >= deadline_ms)
+        {
             return false;
         }
         self.extended_at_ms = Some(elapsed_ms);
@@ -92,12 +132,16 @@ impl ThermalTuningTimingEvidence {
         self.policy_version == TIMING_POLICY_VERSION
             && matches!(self.original_limit_ms, 5_000 | 10_000)
             && Some(self.extension_limit_ms) == self.original_limit_ms.checked_mul(3)
-            && self.effective_approach_floor_permille == self.allowed_approach_floor_permille
-            && self.allowed_approach_floor_permille >= 100
+            && self.configured_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
+            && self.effective_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
+            && self.allowed_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
+            && self.original_deadline_phase == Some(ThermalTuningPhase::Approach)
+            && self.original_deadline_observed_at_ms == self.extended_at_ms
             && matches!(
                 (self.floor_observed_at_ms, self.extended_at_ms, self.warmup_exited_at_ms),
                 (Some(floor), Some(extended), Some(exit))
-                    if floor >= exit && floor <= extended
+                    if floor >= exit
+                        && exit.checked_add(u64::from(self.original_limit_ms)).is_some_and(|deadline| floor < deadline)
                         && extended.checked_sub(exit).is_some_and(|age| age >= u64::from(self.original_limit_ms))
             )
     }

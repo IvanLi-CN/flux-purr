@@ -230,16 +230,19 @@ function renderTrialTabs(){
   const timing=trial.timing; const point=trial.canonicalCandidate?.point||{};
   const logicalRatio=value=>value!=null&&Number.isFinite(Number(value))?`${num(Number(value)/10,1)}% (${value}‰)`:'unavailable';
   const relativeTiming=value=>value!=null&&timing?.warmupExitedAtMs!=null?ms(Number(value)-Number(timing.warmupExitedAtMs)):'unavailable';
+  const timingKnown=timing?.policyVersion===1||timing?.policyVersion===2;
   const timingFacts=[
     ['Approach floor / ceiling',point.approachFloorPowerPermille!=null&&point.approachPowerPermille!=null?`${logicalRatio(point.approachFloorPowerPermille)} / ${logicalRatio(point.approachPowerPermille)}`:'unavailable'],
-    ['effective / allowed floor',timing?.policyVersion===1?`${logicalRatio(timing.effectiveApproachFloorPermille)} / ${logicalRatio(timing.allowedApproachFloorPermille)}`:'unavailable'],
-    ['allowed floor source',timing?.policyVersion===1?`max(100‰, Hold ${logicalRatio(point.holdPowerPermille)})`:'unavailable'],
+    ['effective / allowed floor',timingKnown?`${logicalRatio(timing.effectiveApproachFloorPermille)} / ${logicalRatio(timing.allowedApproachFloorPermille)}`:'unavailable'],
+    ['allowed floor source',timing?.policyVersion===2?'fixed 100‰ · policy 2':timing?.policyVersion===1?`max(100‰, Hold ${logicalRatio(point.holdPowerPermille)}) · historical policy 1`:'unavailable'],
     ['floor observed after Warmup',relativeTiming(timing?.floorObservedAtMs)],
-    ['original deadline',timing?.policyVersion===1?ms(timing.originalLimitMs):'unavailable'],
+    ['original deadline',timingKnown?ms(timing.originalLimitMs):'unavailable'],
+    ['first original-deadline check',timing?.policyVersion===2?`${relativeTiming(timing.originalDeadlineObservedAtMs)} · ${timing.originalDeadlinePhase??'unavailable'}`:'unavailable'],
+    ['sample evidence verification',timing?.policyVersion===2?(trial.timingEvidenceVerification?.verified===true?'verified':`failed · ${(trial.timingEvidenceVerification?.reasons||['unavailable']).join(', ')}`):'historical · not policy 2 qualification'],
     ['extension trigger after Warmup',relativeTiming(timing?.extendedAtMs)],
-    ['finite extension cap',timing?.policyVersion===1?ms(timing.extensionLimitMs):'unavailable'],
+    ['finite extension cap',timingKnown?ms(timing.extensionLimitMs):'unavailable'],
     ['extra wait to stable-window start',timing?.extendedAtMs!=null&&gate.settleTimeMs!=null?ms(Math.max(0,Number(gate.settleTimeMs)-Number(timing.originalLimitMs))):'unavailable'],
-    ['timing disposition',timing?.policyVersion===1?(timing.extendedAtMs==null?'ordinary · original deadline retained':'conditional extension · original deadline exceeded'):'unavailable'],
+    ['timing disposition',timingKnown?(timing.extendedAtMs==null?'ordinary · original deadline retained':'conditional extension · original deadline exceeded'):'unavailable'],
     ['recorded stable verification span',timing?.stableWindowStartedAtMs!=null&&timing?.stableWindowVerifiedAtMs!=null?ms(Number(timing.stableWindowVerifiedAtMs)-Number(timing.stableWindowStartedAtMs)):'unavailable']
   ];
   $('trialSummary').innerHTML=[['disposition',trial.disposition],['stop reason',trial.stopReason||'—'],['trial duration',ms(trialDuration)],['cooldown start',centiC(cooldown.startTemperatureCentiC)],['start limit',centiC(cooldown.thresholdCentiC)],['warmup',percent(trial.warmupRequestedOutputPermille)],['trial overshoot',degrees(trial.maxOvershootC)],['hold p2p',degrees(trial.holdPeakToPeakC)],['stable band',`${num(activeTarget-1.5)}..${num(activeTarget+1.5)}°C`],['stable verified',gate.settleTimeMs==null?'no / 10.00s window':`${ms(gate.settleTimeMs)} / ${ms(gate.limitMs)} gate`],['qualified Hold',`${ms(holdDuration)} / ${confirm?'60.00s confirm':'12.00s scout'}`],['60s confirm',`${seconds(trial.metrics?.holdConfirmSeconds)} / 60s`],['post-stop peak',postPeak==null?'unavailable':`${num(postPeak)}°C (${num(postPeak-activeTarget)}°C above target)`],['post-stop samples',String(after.length)],['sample range',`${trial.firstSequence??'—'}..${trial.lastSequence??'—'}`],...timingFacts].map(([label,value])=>`<div class="metric"><label>${esc(label)}</label><strong>${esc(value)}</strong></div>`).join('');

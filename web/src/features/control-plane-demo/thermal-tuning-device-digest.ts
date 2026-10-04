@@ -103,6 +103,9 @@ const TIMING_FIELDS = [
   'extensionLimitMs',
   'allowedApproachFloorPermille',
   'effectiveApproachFloorPermille',
+  'configuredApproachFloorPermille',
+  'originalDeadlineObservedAtMs',
+  'originalDeadlinePhase',
   'floorObservedAtMs',
   'extendedAtMs',
   'warmupExitedAtMs',
@@ -144,9 +147,15 @@ function serializeDeviceValue(value: unknown, path: string): string {
   }
   if (typeof value !== 'object') return JSON.stringify(value)
   const object = value as Record<string, unknown>
-  const keys = (DEVICE_EVENT_FIELDS[path] ?? Object.keys(object)).filter(
-    (key) => key !== 'timing' || object[key] != null
-  )
+  const keys = (DEVICE_EVENT_FIELDS[path] ?? Object.keys(object)).filter((key) => {
+    if (key === 'timing') return object[key] != null
+    if (path.endsWith('.timing')) {
+      if (key === 'configuredApproachFloorPermille') return Number(object[key] ?? 0) !== 0
+      if (key === 'originalDeadlineObservedAtMs' || key === 'originalDeadlinePhase')
+        return object[key] != null
+    }
+    return true
+  })
   return `{${keys.map((key) => `${JSON.stringify(key)}:${serializeDeviceValue(object[key], `${path}.${key}`)}`).join(',')}}`
 }
 

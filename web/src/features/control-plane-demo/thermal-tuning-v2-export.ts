@@ -431,6 +431,7 @@ function buildTrial(
     holdPeakToPeakC,
     fullSpeedToStable,
     timing,
+    timingEvidenceVerification: verifyTimingSamples(timing, event.targetC, trialSamples),
     cooldownGate: {
       startTemperatureCentiC: trial.startTemperatureCentiC ?? null,
       thresholdCentiC: trial.cooldownThresholdCentiC ?? null,
@@ -610,7 +611,7 @@ function trialPassesGates(trial: ReturnType<typeof buildTrial>): boolean {
 
 export function timingGateValid(trial: JsonObject) {
   const timing = asObject(trial.timing)
-  if (trial.timing == null) return true
+  if (trial.timing == null) return false
   if (!timing) return false
   const point = asObject(asObject(trial.canonicalCandidate)?.point)
   const floor = numeric(point?.approachFloorPowerPermille)
@@ -625,6 +626,7 @@ export function timingGateValid(trial: JsonObject) {
     'stableWindowVerifiedAtMs',
     'floorObservedAtMs',
     'extendedAtMs',
+    'originalDeadlineObservedAtMs',
   ].every((key) => timing[key] == null || timestamp(timing[key]) != null)
   const exit = timestamp(timing.warmupExitedAtMs)
   const start = timestamp(timing.stableWindowStartedAtMs)
@@ -638,17 +640,20 @@ export function timingGateValid(trial: JsonObject) {
       observed != null &&
       exit != null &&
       observed >= exit &&
-      extended >= observed &&
+      observed < exit + original &&
       extended - exit >= original &&
-      timing.effectiveApproachFloorPermille === timing.allowedApproachFloorPermille &&
-      Number(timing.allowedApproachFloorPermille) >= 100)
+      timing.originalDeadlineObservedAtMs === extended &&
+      timing.originalDeadlinePhase === 'approach' &&
+      timing.configuredApproachFloorPermille === 100 &&
+      timing.effectiveApproachFloorPermille === 100 &&
+      timing.allowedApproachFloorPermille === 100)
   return (
     timestampsValid &&
     target != null &&
     target >= -32_768 &&
     target <= 32_767 &&
     Number.isInteger(target) &&
-    timing.policyVersion === 1 &&
+    timing.policyVersion === 2 &&
     timing.originalLimitMs === original &&
     timing.extensionLimitMs === original * 3 &&
     floor != null &&
@@ -659,9 +664,11 @@ export function timingGateValid(trial: JsonObject) {
     floor <= 1_000 &&
     hold >= 0 &&
     hold <= 1_000 &&
-    timing.allowedApproachFloorPermille === Math.max(hold, 100) &&
+    timing.allowedApproachFloorPermille === 100 &&
+    timing.configuredApproachFloorPermille === floor &&
     timing.effectiveApproachFloorPermille === Math.max(floor, hold) &&
     extensionValid &&
+    asObject(trial.timingEvidenceVerification)?.verified === true &&
     gate?.limitMs === (extended == null ? original : original * 3) &&
     exit != null &&
     start != null &&
@@ -670,6 +677,104 @@ export function timingGateValid(trial: JsonObject) {
     gate?.settleTimeMs === start - exit &&
     verified - start >= 10_000
   )
+}
+
+export function verifyTimingSamples(
+  timing: JsonObject | null,
+  target: unknown,
+  samples: JsonObject[]
+) {
+  const reasons: string[] = []
+  if (!timing || timing.policyVersion !== 2)
+    return { verified: false, source: 'trial_samples', reasons: ['unsupported_timing_policy'] }
+  const exit = numeric(timing.warmupExitedAtMs)
+  const deadline = exit == null ? null : exit + Number(timing.originalLimitMs)
+  const firstCheck =
+    deadline == null ? undefined : samples.find((sample) => Number(sample.elapsedMs) >= deadline)
+  if (
+    (firstCheck?.elapsedMs ?? null) !== (timing.originalDeadlineObservedAtMs ?? null) ||
+    (firstCheck?.phase ?? null) !== (timing.originalDeadlinePhase ?? null)
+  )
+    reasons.push('first_original_deadline_check_mismatch')
+  const extended = numeric(timing.extendedAtMs)
+  if (extended != null) {
+    const witness = samples.find((sample) => sample.elapsedMs === timing.floorObservedAtMs)
+    if (
+      witness?.phase !== 'approach' ||
+      witness.heaterRequestedOutputPermille !== 100 ||
+      witness.measurementValid !== true
+    )
+      reasons.push('missing_real_100_permille_floor_sample')
+    let stableStart: number | null = null
+    let lastTime: number | null = null
+    for (const sample of samples) {
+      const time = numeric(sample.elapsedMs)
+      if (time == null) continue
+      if (time > extended) break
+      if (
+        sample.phase === 'approach' &&
+        timing.floorObservedAtMs != null &&
+        time >= Number(timing.floorObservedAtMs) &&
+        sample.heaterRequestedOutputPermille !== 0 &&
+        sample.heaterRequestedOutputPermille !== 100
+      )
+        reasons.push('floor_request_raised_before_deadline')
+      if (exit == null || time < exit) continue
+      if (lastTime != null && time - lastTime > 1_000) stableStart = null
+      lastTime = time
+      if (
+        sample.measurementValid === true &&
+        typeof sample.temperatureCentiC === 'number' &&
+        Math.abs(sample.temperatureCentiC - Number(target) * 100) <= 150
+      )
+        stableStart ??= time
+      else stableStart = null
+    }
+    if (stableStart != null && deadline != null && stableStart <= deadline)
+      reasons.push('timely_stable_window_at_original_deadline')
+    if (
+      timing.configuredApproachFloorPermille !== 100 ||
+      timing.effectiveApproachFloorPermille !== 100 ||
+      timing.allowedApproachFloorPermille !== 100 ||
+      timing.originalDeadlinePhase !== 'approach' ||
+      timing.originalDeadlineObservedAtMs !== extended ||
+      exit == null ||
+      deadline == null ||
+      Number(timing.floorObservedAtMs) < exit ||
+      timing.floorObservedAtMs == null ||
+      Number(timing.floorObservedAtMs) >= deadline ||
+      extended < deadline
+    )
+      reasons.push('invalid_fixed_floor_extension_identity')
+  }
+  const start = numeric(timing.stableWindowStartedAtMs)
+  const verified = numeric(timing.stableWindowVerifiedAtMs)
+  const window =
+    start == null || verified == null
+      ? []
+      : samples.filter(
+          (sample) => Number(sample.elapsedMs) >= start && Number(sample.elapsedMs) <= verified
+        )
+  const times = [...new Set(window.map((sample) => Number(sample.elapsedMs)))]
+  if (
+    start == null ||
+    verified == null ||
+    verified - start < 10_000 ||
+    times[0] !== start ||
+    times.at(-1) !== verified ||
+    (times.length - 1) * 1_000 < (verified - start) * 3 ||
+    times.some(
+      (time, index) => index > 0 && (time - times[index - 1] > 1_000 || time <= times[index - 1])
+    ) ||
+    window.some(
+      (sample) =>
+        sample.measurementValid !== true ||
+        typeof sample.temperatureCentiC !== 'number' ||
+        Math.abs(sample.temperatureCentiC - Number(target) * 100) > 150
+    )
+  )
+    reasons.push('stable_window_not_verified_from_samples')
+  return { verified: reasons.length === 0, source: 'trial_samples', reasons }
 }
 
 function asObject(value: unknown): JsonObject | null {

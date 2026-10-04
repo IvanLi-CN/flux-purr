@@ -3,7 +3,11 @@ import { describe, expect, it } from 'vitest'
 import type { ThermalTuningEvent, ThermalTuningStatus } from './contracts'
 import { digestEventChain } from './thermal-tuning-device-digest'
 import type { ThermalTuningRecording } from './thermal-tuning-recorder'
-import { exportThermalTuningV2, timingGateValid } from './thermal-tuning-v2-export'
+import {
+  exportThermalTuningV2,
+  timingGateValid,
+  verifyTimingSamples,
+} from './thermal-tuning-v2-export'
 
 const TARGETS = [60, 80, 100, 120, 140, 160, 180, 220, 240]
 const EXECUTION_ORDER = [60, 240, 140, 100, 80, 120, 180, 160, 220]
@@ -79,12 +83,16 @@ describe('Web thermal-tuning-v2 export', () => {
       targetC: 60,
       canonicalCandidate: { point: { approachFloorPowerPermille: 100, holdPowerPermille: 100 } },
       fullSpeedToStable: { settleTimeMs: 12_000, limitMs: 30_000 },
+      timingEvidenceVerification: { verified: true },
       timing: {
-        policyVersion: 1,
+        policyVersion: 2,
         originalLimitMs: 10_000,
         extensionLimitMs: 30_000,
         allowedApproachFloorPermille: 100,
         effectiveApproachFloorPermille: 100,
+        configuredApproachFloorPermille: 100,
+        originalDeadlineObservedAtMs: 11_000,
+        originalDeadlinePhase: 'approach',
         floorObservedAtMs: 2_000,
         extendedAtMs: 11_000,
         warmupExitedAtMs: 1_000,
@@ -99,6 +107,10 @@ describe('Web thermal-tuning-v2 export', () => {
       { stableWindowVerifiedAtMs: 22_999 },
       { extensionLimitMs: 180_000 },
       { effectiveApproachFloorPermille: 160 },
+      { configuredApproachFloorPermille: 225 },
+      { originalDeadlineObservedAtMs: 12_000 },
+      { originalDeadlinePhase: 'hold' },
+      { policyVersion: 1 },
       { floorObservedAtMs: 2_000.5 },
       { floorObservedAtMs: -1 },
       { stableWindowVerifiedAtMs: Number.MAX_SAFE_INTEGER + 1 },
@@ -107,6 +119,63 @@ describe('Web thermal-tuning-v2 export', () => {
     }
     expect(
       timingGateValid({ ...trial, timing: { availability: 'mismatched_device_timing_evidence' } })
+    ).toBe(false)
+    const samples = [
+      {
+        elapsedMs: 1_000,
+        phase: 'approach',
+        heaterRequestedOutputPermille: 110,
+        temperatureCentiC: 5_000,
+        measurementValid: true,
+      },
+      {
+        elapsedMs: 2_000,
+        phase: 'approach',
+        heaterRequestedOutputPermille: 100,
+        temperatureCentiC: 5_300,
+        measurementValid: true,
+      },
+      {
+        elapsedMs: 11_000,
+        phase: 'approach',
+        heaterRequestedOutputPermille: 100,
+        temperatureCentiC: 5_800,
+        measurementValid: true,
+      },
+    ]
+    for (let time = 13_000; time <= 23_000; time += 250)
+      samples.push({
+        elapsedMs: time,
+        phase: 'hold',
+        heaterRequestedOutputPermille: 100,
+        temperatureCentiC: 6_000,
+        measurementValid: true,
+      })
+    expect(verifyTimingSamples(trial.timing, 60, samples).verified).toBe(true)
+    for (const change of [
+      { elapsedMs: 11_001 },
+      { phase: 'hold' },
+      { temperatureCentiC: 6_000 },
+      { heaterRequestedOutputPermille: 225 },
+    ]) {
+      expect(
+        verifyTimingSamples(trial.timing, 60, [
+          samples[0],
+          samples[1],
+          { ...samples[2], ...change },
+          ...samples.slice(3),
+        ]).verified
+      ).toBe(false)
+    }
+    expect(verifyTimingSamples(trial.timing, 60, [samples[0], samples[2]]).verified).toBe(false)
+    expect(
+      verifyTimingSamples(trial.timing, 60, [
+        samples[0],
+        samples[1],
+        samples[2],
+        samples[3],
+        samples[samples.length - 1],
+      ]).verified
     ).toBe(false)
   })
   it('exports all five standard files for a failed device run', async () => {
@@ -219,22 +288,44 @@ describe('Web thermal-tuning-v2 export', () => {
   it('qualifies only a nine-target saved run with full receipts and trial evidence', async () => {
     const events: ThermalTuningEvent[] = []
     for (const targetC of TARGETS) {
+      const base = TARGETS.indexOf(targetC) * 80_000
+      const original = targetC <= 150 ? 10_000 : 5_000
+      const timing = {
+        policyVersion: 2,
+        originalLimitMs: original,
+        extensionLimitMs: original * 3,
+        configuredApproachFloorPermille: 100,
+        allowedApproachFloorPermille: 100,
+        effectiveApproachFloorPermille: 100,
+        floorObservedAtMs: null,
+        extendedAtMs: null,
+        warmupExitedAtMs: base + 1_000,
+        stableWindowStartedAtMs: base + 2_000,
+        stableWindowVerifiedAtMs: base + 12_000,
+        originalDeadlineObservedAtMs: base + 1_000 + original,
+        originalDeadlinePhase: 'hold',
+      }
       const trial = event(events.length, 'candidate_trial', targetC)
+      trial.elapsedMs = base
       trial.trial = {
         purpose: 'hold_confirm',
         startSequence: trial.sequence,
-        endSequence: trial.sequence + 4,
+        endSequence: null,
         sampleStartSequence: trial.sequence + 1,
-        sampleEndSequence: trial.sequence + 3,
+        sampleEndSequence: null,
+        timing,
         candidate: {
           candidateId: 'candidate-web-1',
           candidateHash: CANDIDATE_HASH,
           powerClass: 'pps5a',
+          point: { approachFloorPowerPermille: 100, holdPowerPermille: 100 },
         },
       }
       events.push(trial)
-      for (const [phaseIndex, phase] of (['warmup', 'approach', 'hold'] as const).entries()) {
+      for (let elapsed = 0; elapsed <= 62_000; elapsed += 250) {
+        const phase = elapsed < 1_000 ? 'warmup' : elapsed < 2_000 ? 'approach' : 'hold'
         const sample = event(events.length, 'sample', targetC)
+        sample.elapsedMs = base + elapsed
         sample.phase = phase
         sample.sample = {
           sequence: sample.sequence,
@@ -243,27 +334,31 @@ describe('Web thermal-tuning-v2 export', () => {
           trialIndex: 0,
           candidateId: 'candidate-web-1',
           candidateHash: CANDIDATE_HASH,
-          temperatureCentiC: targetC * 100 + phaseIndex,
+          temperatureCentiC: targetC * 100 + (phase === 'hold' ? 0 : -200),
           vinMv: 11_800,
           ppsContract: { voltageMv: 12_000, currentMa: 5_000, kind: 'pps5a', confirmed: true },
           requestedMv: 10_000,
           ppsPowerCeilingMv: 12_000,
-          heaterRequestedOutputPermille: phase === 'warmup' ? 1_000 : 420,
+          heaterRequestedOutputPermille: phase === 'warmup' ? 1_000 : 100,
           heaterOutputPermille: phase === 'warmup' ? 960 : 410,
           measurementValid: true,
           phase,
         }
         events.push(sample)
       }
+      trial.trial.sampleEndSequence = events.at(-1)?.sequence ?? null
+      trial.trial.endSequence = events.length
       const decision = event(events.length, 'decision', targetC)
+      decision.elapsedMs = base + 62_000
       decision.decision = {
         purpose: 'hold_confirm',
         disposition: 'adopted',
         maxOvershootCentiC: 120,
         holdPeakToPeakCentiC: 150,
-        settleTimeMs: 8_000,
-        hardGateFullSpeedToStableMs: 12_000,
+        settleTimeMs: 1_000,
+        hardGateFullSpeedToStableMs: original,
         holdConfirm: true,
+        timing,
       }
       events.push(decision)
     }

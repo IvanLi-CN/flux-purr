@@ -869,9 +869,8 @@ fn adopted_trial_passes_gates(trial: &Value) -> bool {
 
 fn timing_gate_valid(trial: &Value) -> bool {
     let Some(value) = trial.get("timing").filter(|value| !value.is_null()) else {
-        // Historical records keep their original disposition; absent facts are
-        // never filled from the current policy.
-        return true;
+        // Retain the device disposition, but do not qualify absent policy facts.
+        return false;
     };
     let Ok(timing) = serde_json::from_value::<ThermalTuningTimingEvidence>(value.clone()) else {
         return false;
@@ -899,14 +898,19 @@ fn timing_gate_valid(trial: &Value) -> bool {
         .warmup_exited_at_ms
         .zip(timing.stable_window_started_at_ms)
         .and_then(|(exit, start)| start.checked_sub(exit));
-    timing.policy_version == 1
+    timing.policy_version == 2
         && timing.original_limit_ms == original_settle_limit_ms(target)
         && Some(timing.extension_limit_ms) == timing.original_limit_ms.checked_mul(3)
         && floor <= 1_000
         && hold <= 1_000
-        && timing.allowed_approach_floor_permille as u64 == hold.max(100)
+        && timing.allowed_approach_floor_permille == 100
+        && timing.configured_approach_floor_permille as u64 == floor
         && timing.effective_approach_floor_permille as u64 == floor.max(hold)
         && (timing.extended_at_ms.is_none() || timing.valid_extension())
+        && trial
+            .pointer("/timingEvidenceVerification/verified")
+            .and_then(Value::as_bool)
+            == Some(true)
         && trial
             .pointer("/fullSpeedToStable/limitMs")
             .and_then(Value::as_u64)
@@ -921,6 +925,152 @@ fn timing_gate_valid(trial: &Value) -> bool {
             .is_some_and(|(start, verified)| {
                 verified.checked_sub(start).is_some_and(|age| age >= 10_000)
             })
+}
+
+fn verify_timing_samples(
+    timing: &ThermalTuningTimingEvidence,
+    target: i16,
+    samples: &[&Value],
+) -> Value {
+    let mut reasons = Vec::new();
+    let deadline = timing
+        .warmup_exited_at_ms
+        .and_then(|exit| exit.checked_add(u64::from(timing.original_limit_ms)));
+    let first_check = deadline.and_then(|deadline| {
+        samples.iter().find(|sample| {
+            sample
+                .get("elapsedMs")
+                .and_then(Value::as_u64)
+                .is_some_and(|time| time >= deadline)
+        })
+    });
+    let recorded_phase = timing
+        .original_deadline_phase
+        .and_then(|phase| serde_json::to_value(phase).ok());
+    if first_check
+        .and_then(|sample| sample.get("elapsedMs"))
+        .and_then(Value::as_u64)
+        != timing.original_deadline_observed_at_ms
+        || first_check
+            .and_then(|sample| sample.get("phase"))
+            .and_then(Value::as_str)
+            != recorded_phase.as_ref().and_then(Value::as_str)
+    {
+        reasons.push("first_original_deadline_check_mismatch");
+    }
+    if let Some(extended) = timing.extended_at_ms {
+        let witness = samples.iter().find(|sample| {
+            sample.get("elapsedMs").and_then(Value::as_u64) == timing.floor_observed_at_ms
+        });
+        if witness.is_none_or(|sample| {
+            sample.get("phase").and_then(Value::as_str) != Some("approach")
+                || sample
+                    .get("heaterRequestedOutputPermille")
+                    .and_then(Value::as_u64)
+                    != Some(100)
+                || sample.get("measurementValid").and_then(Value::as_bool) != Some(true)
+        }) {
+            reasons.push("missing_real_100_permille_floor_sample");
+        }
+        let mut stable_start = None;
+        let mut last_time: Option<u64> = None;
+        for sample in samples {
+            let Some(time) = sample.get("elapsedMs").and_then(Value::as_u64) else {
+                continue;
+            };
+            if time > extended {
+                break;
+            }
+            if sample.get("phase").and_then(Value::as_str) == Some("approach")
+                && timing
+                    .floor_observed_at_ms
+                    .is_some_and(|floor| time >= floor)
+                && !matches!(
+                    sample
+                        .get("heaterRequestedOutputPermille")
+                        .and_then(Value::as_u64),
+                    Some(0 | 100)
+                )
+            {
+                reasons.push("floor_request_raised_before_deadline");
+            }
+            if timing.warmup_exited_at_ms.is_none_or(|exit| time < exit) {
+                continue;
+            }
+            if last_time.is_some_and(|last| time.saturating_sub(last) > 1_000) {
+                stable_start = None;
+            }
+            last_time = Some(time);
+            if sample.get("measurementValid").and_then(Value::as_bool) == Some(true)
+                && sample
+                    .get("temperatureCentiC")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|temp| temp.abs_diff(i64::from(target) * 100) <= 150)
+            {
+                stable_start.get_or_insert(time);
+            } else {
+                stable_start = None;
+            }
+        }
+        if stable_start
+            .zip(deadline)
+            .is_some_and(|(start, deadline)| start <= deadline)
+        {
+            reasons.push("timely_stable_window_at_original_deadline");
+        }
+        if !timing.valid_extension() {
+            reasons.push("invalid_fixed_floor_extension_identity");
+        }
+    }
+    if !stable_window_samples_valid(timing, target, samples) {
+        reasons.push("stable_window_not_verified_from_samples");
+    }
+    json!({"verified": timing.policy_version == 2 && reasons.is_empty(),
+        "source": "trial_samples", "reasons": reasons})
+}
+
+fn stable_window_samples_valid(
+    timing: &ThermalTuningTimingEvidence,
+    target: i16,
+    samples: &[&Value],
+) -> bool {
+    let window = timing
+        .stable_window_started_at_ms
+        .zip(timing.stable_window_verified_at_ms);
+    let mut window_times = Vec::new();
+    let mut window_samples_valid = true;
+    if let Some((start, verified)) = window {
+        for sample in samples {
+            let Some(time) = sample.get("elapsedMs").and_then(Value::as_u64) else {
+                continue;
+            };
+            if time < start || time > verified {
+                continue;
+            }
+            window_samples_valid &= sample.get("measurementValid").and_then(Value::as_bool)
+                == Some(true)
+                && sample
+                    .get("temperatureCentiC")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|temp| temp.abs_diff(i64::from(target) * 100) <= 150);
+            if window_times.last() != Some(&time) {
+                window_times.push(time);
+            }
+        }
+        window_samples_valid &= window_times.first() == Some(&start)
+            && window_times.last() == Some(&verified)
+            && verified.checked_sub(start).is_some_and(|duration| {
+                duration >= 10_000
+                    && (window_times.len().saturating_sub(1) as u64).saturating_mul(1_000)
+                        >= duration.saturating_mul(3)
+            })
+            && window_times
+                .windows(2)
+                .all(|pair| pair[1].checked_sub(pair[0]).is_some_and(|gap| gap <= 1_000));
+    } else {
+        window_samples_valid = false;
+    }
+    window_samples_valid
 }
 
 fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, io::Error> {
@@ -1985,6 +2135,13 @@ fn build_report_trial(
             object.insert("trialEndSequence".to_string(), end.clone());
         }
     }
+    if let Some(timing) = result
+        .get("timing")
+        .and_then(|value| serde_json::from_value::<ThermalTuningTimingEvidence>(value.clone()).ok())
+    {
+        result["timingEvidenceVerification"] =
+            verify_timing_samples(&timing, target, &sample_values);
+    }
     if disposition == "adopted" && adopted_trial_passes_gates(&result) {
         result["reviewOutcome"] = json!("passed");
     }
@@ -2165,13 +2322,35 @@ mod tests {
     }
 
     #[test]
+    fn fixed_floor_timing_digest_matches_web() {
+        let mut values: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/src/features/control-plane-demo/thermal-tuning-digest.fixture.json"
+        )))
+        .unwrap();
+        let timing = &mut values[1]["decision"]["timing"];
+        timing["policyVersion"] = json!(2);
+        timing["configuredApproachFloorPermille"] = json!(100);
+        timing["originalDeadlineObservedAtMs"] = json!(11000);
+        timing["originalDeadlinePhase"] = json!("approach");
+        let events: Vec<ThermalTuningEvent> = serde_json::from_value(values).unwrap();
+        assert_eq!(
+            digest_event_chain(&events).as_str(),
+            "ed0fa77d928f38f1b346a5f5d1c31737a590ba1ea53e06eacd5c468988ef27fb"
+        );
+    }
+
+    #[test]
     fn conditional_timing_requires_bound_floor_trigger_and_full_stable_window() {
         let mut trial = json!({
             "targetC": 60,
             "canonicalCandidate": {"point": {"approachFloorPowerPermille": 100, "holdPowerPermille": 100}},
             "fullSpeedToStable": {"settleTimeMs": 12000, "limitMs": 30000},
-            "timing": {"policyVersion": 1, "originalLimitMs": 10000, "extensionLimitMs": 30000,
+            "timingEvidenceVerification": {"verified": true},
+            "timing": {"policyVersion": 2, "originalLimitMs": 10000, "extensionLimitMs": 30000,
                 "allowedApproachFloorPermille": 100, "effectiveApproachFloorPermille": 100,
+                "configuredApproachFloorPermille": 100, "originalDeadlineObservedAtMs": 11000,
+                "originalDeadlinePhase": "approach",
                 "floorObservedAtMs": 2000, "extendedAtMs": 11000, "warmupExitedAtMs": 1000,
                 "stableWindowStartedAtMs": 13000, "stableWindowVerifiedAtMs": 23000}
         });
@@ -2181,6 +2360,11 @@ mod tests {
             ("/timing/extendedAtMs", json!(10000)),
             ("/timing/stableWindowVerifiedAtMs", json!(22999)),
             ("/timing/extensionLimitMs", json!(180000)),
+            ("/timing/policyVersion", json!(1)),
+            ("/timing/configuredApproachFloorPermille", json!(225)),
+            ("/timing/originalDeadlinePhase", json!("hold")),
+            ("/timing/originalDeadlineObservedAtMs", json!(12000)),
+            ("/timingEvidenceVerification/verified", json!(false)),
             ("/canonicalCandidate/point/holdPowerPermille", json!(135)),
             ("/fullSpeedToStable/limitMs", json!(180000)),
         ] {
@@ -2426,13 +2610,22 @@ mod tests {
                 "reviewPassed": true,
                 "adoptedTrialIndex": 1,
                 "trials": [{
+                    "targetC": target,
                     "trialIndex": 1,
                     "trialPurpose": "hold_confirm",
                     "disposition": "adopted",
                     "warmupRequestedOutputPermille": 1000,
                     "maxOvershootC": 1.2,
                     "holdPeakToPeakC": 1.8,
-                    "fullSpeedToStable": {"settleTimeMs": 7000, "limitMs": 10000},
+                    "canonicalCandidate": {"point": {"approachFloorPowerPermille": 100, "holdPowerPermille": 100}},
+                    "timingEvidenceVerification": {"verified": true},
+                    "timing": {"policyVersion": 2, "originalLimitMs": super::original_settle_limit_ms(*target),
+                        "extensionLimitMs": super::original_settle_limit_ms(*target) * 3,
+                        "allowedApproachFloorPermille": 100, "effectiveApproachFloorPermille": 100,
+                        "configuredApproachFloorPermille": 100,
+                        "floorObservedAtMs": null, "extendedAtMs": null, "warmupExitedAtMs": 1000,
+                        "stableWindowStartedAtMs": 4000, "stableWindowVerifiedAtMs": 14000},
+                    "fullSpeedToStable": {"settleTimeMs": 3000, "limitMs": super::original_settle_limit_ms(*target)},
                     "metrics": {"holdConfirmSeconds": 60, "phasePath": "warmup -> approach -> hold"}
                 }]
             }))
@@ -3084,17 +3277,28 @@ mod tests {
 
     #[test]
     fn confirmed_trial_projection_preserves_bound_target_and_timing() {
-        let timing = json!({"policyVersion": 1, "originalLimitMs": 10000, "extensionLimitMs": 30000,
+        let timing = json!({"policyVersion": 2, "originalLimitMs": 10000, "extensionLimitMs": 30000,
             "allowedApproachFloorPermille": 100, "effectiveApproachFloorPermille": 100,
+            "configuredApproachFloorPermille": 100, "originalDeadlineObservedAtMs": 11000,
+            "originalDeadlinePhase": "approach",
             "floorObservedAtMs": 2000, "extendedAtMs": 11000, "warmupExitedAtMs": 1000,
-            "stableWindowStartedAtMs": 13000, "stableWindowVerifiedAtMs": 73000});
-        let samples = vec![
+            "stableWindowStartedAtMs": 13000, "stableWindowVerifiedAtMs": 23000});
+        let mut samples = vec![
             json!({"sequence": 1, "targetC": 60, "trialIndex": 1, "phase": "warmup", "elapsedMs": 0, "heaterRequestedOutputPermille": 1000}),
-            json!({"sequence": 2, "targetC": 60, "trialIndex": 1, "phase": "approach", "elapsedMs": 1000, "heaterRequestedOutputPermille": 100}),
-            json!({"sequence": 3, "targetC": 60, "trialIndex": 1, "phase": "hold", "elapsedMs": 73000, "heaterRequestedOutputPermille": 100}),
+            json!({"sequence": 2, "targetC": 60, "trialIndex": 1, "phase": "approach", "elapsedMs": 1000, "heaterRequestedOutputPermille": 110, "temperatureCentiC": 5000, "measurementValid": true}),
+            json!({"sequence": 3, "targetC": 60, "trialIndex": 1, "phase": "approach", "elapsedMs": 2000, "heaterRequestedOutputPermille": 100, "temperatureCentiC": 5300, "measurementValid": true}),
+            json!({"sequence": 4, "targetC": 60, "trialIndex": 1, "phase": "approach", "elapsedMs": 11000, "heaterRequestedOutputPermille": 100, "temperatureCentiC": 5800, "measurementValid": true}),
         ];
+        for time in (13000..=73000).step_by(250) {
+            samples.push(
+                json!({"sequence": samples.len() + 1, "targetC": 60, "trialIndex": 1,
+                "phase": "hold", "elapsedMs": time, "heaterRequestedOutputPermille": 100,
+                "temperatureCentiC": 6000, "measurementValid": true}),
+            );
+        }
+        let sample_end = samples.len();
         let ledger = vec![
-            json!({"kind": "candidate_trial", "targetC": 60, "trialIndex": 1, "trial": {"purpose": "hold_confirm", "sampleStartSequence": 1, "sampleEndSequence": 3, "timing": timing, "candidate": {"point": {"approachFloorPowerPermille": 100, "holdPowerPermille": 100}}}}),
+            json!({"kind": "candidate_trial", "targetC": 60, "trialIndex": 1, "trial": {"purpose": "hold_confirm", "sampleStartSequence": 1, "sampleEndSequence": sample_end, "timing": timing, "candidate": {"point": {"approachFloorPowerPermille": 100, "holdPowerPermille": 100}}}}),
             json!({"kind": "decision", "targetC": 60, "trialIndex": 1, "decision": {"purpose": "hold_confirm", "disposition": "adopted", "holdConfirm": true, "maxOvershootCentiC": 100, "holdPeakToPeakCentiC": 100, "settleTimeMs": 12000, "hardGateFullSpeedToStableMs": 30000, "timing": timing}}),
         ];
         let runs = build_report_runs(&[60], &samples, &ledger, "candidate-1", "hash-1");
@@ -3102,6 +3306,19 @@ mod tests {
         assert_eq!(runs[0]["adoptedTrialIndex"], 1);
         assert_eq!(runs[0]["trials"][0]["targetC"], 60);
         assert!(super::adopted_trial_passes_gates(&runs[0]["trials"][0]));
+        for (sample_index, field, value) in [
+            (2, "heaterRequestedOutputPermille", json!(225)),
+            (2, "measurementValid", json!(false)),
+            (3, "phase", json!("hold")),
+            (3, "temperatureCentiC", json!(6000)),
+            (5, "temperatureCentiC", json!(6200)),
+        ] {
+            let mut changed = samples.clone();
+            changed[sample_index][field] = value;
+            let runs = build_report_runs(&[60], &changed, &ledger, "candidate-1", "hash-1");
+            assert_eq!(runs[0]["reviewOutcome"], "failed", "{field}");
+            assert_eq!(runs[0]["trials"][0]["disposition"], "adopted");
+        }
     }
 
     #[test]

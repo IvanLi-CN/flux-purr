@@ -56,4 +56,22 @@ describe('firmware event digest compatibility', () => {
       '76ee2a15a2e7bef6433ff8deb2e401a6ea483fbcbf1a1b0f5ed54e4eac9ed82b'
     )
   })
+  it('matches Rust policy 2 bytes without changing historical policy 1 digests', async () => {
+    const events: ThermalTuningEvent[] = JSON.parse(JSON.stringify(fixture))
+    const timing = events[1].decision?.timing
+    if (!timing || typeof timing !== 'object') throw new Error('missing timing fixture')
+    Object.assign(timing, {
+      policyVersion: 2,
+      configuredApproachFloorPermille: 100,
+      originalDeadlineObservedAtMs: 11_000,
+      originalDeadlinePhase: 'approach',
+    })
+    expect(await digestEventChain(events)).toBe(
+      'ed0fa77d928f38f1b346a5f5d1c31737a590ba1ea53e06eacd5c468988ef27fb'
+    )
+    Object.assign(timing, { originalDeadlinePhase: 'hold' })
+    expect(await digestEventChain(events)).not.toBe(
+      'ed0fa77d928f38f1b346a5f5d1c31737a590ba1ea53e06eacd5c468988ef27fb'
+    )
+  })
 })
