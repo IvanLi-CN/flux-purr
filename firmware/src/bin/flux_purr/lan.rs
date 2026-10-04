@@ -347,6 +347,7 @@ fn process_prepare_flash(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     active_profile: Option<ThermalControlProfile>,
 ) -> (bool, UsbFrame) {
+    let already_active = flash_preparation::is_active();
     flash_preparation::start_hold();
     context.ui_state.heater_enabled = false;
     if let Some(ticket) = context.manual_pps.pending_power_ticket.take() {
@@ -359,7 +360,8 @@ fn process_prepare_flash(
         context.calibration_runtime_state,
         context.manual_pps,
     );
-    if !context.fan_command.enabled
+    if !already_active
+        && !context.fan_command.enabled
         && let PdRequestState::Pending(ticket) = context.pd_port.restore_automatic_idle_contract()
     {
         context.pd_port.discard_ticket(ticket);

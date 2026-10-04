@@ -9,7 +9,9 @@ use std::io::{Read, Write};
 const DIRECT_SERIAL_LOCK_TIMEOUT: Duration = Duration::from_secs(180);
 const DIRECT_ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 const DIRECT_ROM_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
-const DIRECT_FLASH_PREPARATION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const DIRECT_FLASH_PREPARATION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const DIRECT_FLASH_LIVENESS_ATTEMPTS: u8 = 3;
+const DIRECT_FLASH_LIVENESS_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DirectFlashPreparationDecision {
@@ -85,47 +87,57 @@ fn direct_flash_liveness_probe(
     port: &str,
     identity: &UsbSerialIdentity,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let identity_result = direct_flash_liveness_request(session, port, identity, "get_identity");
-    match identity_result {
-        Ok(result) => {
-            let payload = result
-                .get("identity")
-                .cloned()
-                .ok_or("application liveness response did not include identity")?;
-            let _: Identity = serde_json::from_value(payload)
-                .map_err(|error| format!("invalid identity liveness response: {error}"))?;
-            Ok(())
-        }
-        Err(identity_error)
-            if direct_preparation_error_is_startup_busy(identity_error.as_ref()) =>
-        {
-            Err(identity_error)
-        }
-        Err(identity_error)
-            if direct_preparation_error_may_be_unresponsive(identity_error.as_ref()) =>
-        {
-            let status_result =
-                direct_flash_liveness_request(session, port, identity, "get_status");
-            match status_result {
-                Ok(result) => result
-                    .get("status")
-                    .map(|_| ())
-                    .ok_or_else(|| "application liveness response did not include status".into()),
-                Err(status_error)
-                    if direct_preparation_error_is_startup_busy(status_error.as_ref()) =>
-                {
-                    Err(status_error)
-                }
-                Err(status_error)
-                    if direct_preparation_error_may_be_unresponsive(status_error.as_ref()) =>
-                {
-                    Err(identity_error)
-                }
-                Err(status_error) => Err(status_error),
+    let mut last_error: Option<Box<dyn std::error::Error + Send + Sync>> = None;
+    for attempt in 0..DIRECT_FLASH_LIVENESS_ATTEMPTS {
+        let identity_result =
+            direct_flash_liveness_request(session, port, identity, "get_identity");
+        match identity_result {
+            Ok(result) => {
+                let payload = result
+                    .get("identity")
+                    .cloned()
+                    .ok_or("application liveness response did not include identity")?;
+                let _: Identity = serde_json::from_value(payload)
+                    .map_err(|error| format!("invalid identity liveness response: {error}"))?;
+                return Ok(());
             }
+            Err(identity_error)
+                if direct_preparation_error_is_startup_busy(identity_error.as_ref()) =>
+            {
+                return Err(identity_error);
+            }
+            Err(identity_error)
+                if direct_preparation_error_may_be_unresponsive(identity_error.as_ref()) =>
+            {
+                let status_result =
+                    direct_flash_liveness_request(session, port, identity, "get_status");
+                match status_result {
+                    Ok(result) => {
+                        if result.get("status").is_some() {
+                            return Ok(());
+                        }
+                        return Err("application liveness response did not include status".into());
+                    }
+                    Err(status_error)
+                        if direct_preparation_error_is_startup_busy(status_error.as_ref()) =>
+                    {
+                        return Err(status_error);
+                    }
+                    Err(status_error)
+                        if direct_preparation_error_may_be_unresponsive(status_error.as_ref()) =>
+                    {
+                        last_error = Some(identity_error);
+                    }
+                    Err(status_error) => return Err(status_error),
+                }
+            }
+            Err(identity_error) => return Err(identity_error),
         }
-        Err(identity_error) => Err(identity_error),
+        if attempt + 1 < DIRECT_FLASH_LIVENESS_ATTEMPTS {
+            std::thread::sleep(DIRECT_FLASH_LIVENESS_RETRY_DELAY);
+        }
     }
+    Err(last_error.unwrap_or_else(|| "application liveness probe failed".into()))
 }
 
 fn direct_flash_liveness_request(
@@ -314,6 +326,12 @@ pub(crate) fn direct_flash_preparation(
     ensure_direct_usb_identity(&args.port, Some(&identity))?;
     let mut session = DirectUsbSession::open(&args.port, Some(&identity))
         .map_err(|error| format!("failed to open raw USB preparation session: {error}"))?;
+    direct_flash_liveness_probe(&mut session, &args.port, &identity).map_err(|error| {
+        format!(
+            "flash preparation application probe failed on {}: {error}",
+            args.port
+        )
+    })?;
     let status = direct_flash_preparation_request(
         &mut session,
         &args.port,
