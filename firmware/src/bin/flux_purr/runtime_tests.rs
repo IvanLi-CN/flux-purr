@@ -12945,6 +12945,54 @@ fn tuning_failure_identifies_the_interlock_that_disarmed_heating() {
 }
 
 #[test]
+fn tuning_pd_failure_context_retains_actual_failure_and_contracts() {
+    let (mut power, _) = production_power_fixture(5_000);
+    power.protocol = PowerProtocol::WaitingForPsRdy;
+    power.failure = Some(PowerFailure::CapabilityInvalidated);
+    power.requested = Some(PdContractRequest::pps(18_500, 5_000).unwrap());
+    let context = tuning_pd_failure_context(power, Some(10), Some(100), 250, "power");
+    assert_eq!(
+        context[0].as_str(),
+        "pd:power p=wait_ps_rdy f=capability_invalidated available=1 age_ms=150"
+    );
+    let active = power.active.unwrap();
+    assert_eq!(
+        context[1].as_str(),
+        format!(
+            "pd:power a={}/5000 r=18500/5000 ticket=1 at_ms=250",
+            active.voltage_mv
+        )
+    );
+
+    let absent = tuning_pd_failure_context(PowerState::unavailable(), None, None, 250, "sample");
+    assert_eq!(
+        absent[0].as_str(),
+        "pd:sample p=unknown f=unavailable available=0"
+    );
+    assert_eq!(
+        absent[1].as_str(),
+        "pd:sample a=none r=none ticket=0 at_ms=250"
+    );
+}
+
+#[test]
+fn tuning_pd_failure_context_preserves_full_width_wait_age() {
+    let power = PowerState {
+        protocol: PowerProtocol::WaitingForAccept,
+        available: true,
+        failure: Some(PowerFailure::CapabilityInvalidated),
+        ..PowerState::unavailable()
+    };
+    let context = tuning_pd_failure_context(power, Some(0), None, u64::MAX, "interlock");
+    assert_eq!(
+        context[0].as_str(),
+        "pd:interlock p=wait_accept f=capability_invalidated available=1 age_ms=18446744073709551615"
+    );
+    assert!(context[0].len() <= flux_purr_firmware::thermal_tuning::THERMAL_TUNING_REASON_MAX_LEN);
+    assert!(context[1].ends_with("at_ms=18446744073709551615"));
+}
+
+#[test]
 fn tuning_waits_for_an_admitted_pd_request_instead_of_failing_at_first_missing_snapshot() {
     let request = PdContractRequest::pps(12_500, 5_000).unwrap();
     let pending = PowerState {

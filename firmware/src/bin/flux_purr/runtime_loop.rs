@@ -270,7 +270,7 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
                 &state.manual_pps_state,
             ) == ProductionThermalController::Profile;
             if !profile_ready {
-                state.thermal_tuning.fail("pps5a_source_lost");
+                runtime_fail_tuning_pd(state, "pps5a_source_lost", "ready", elapsed_ms);
                 state.thermal_control_profile_preview = None;
             } else if state.tuning_heater_rearm_pending
                 && state.pd_contract_ready
@@ -285,7 +285,7 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
             state.tuning_heater_rearm_pending = false;
         }
         Some(TuningPdWaitDecision::Fail(reason)) => {
-            state.thermal_tuning.fail(reason);
+            runtime_fail_tuning_pd(state, reason, "power", elapsed_ms);
             state.thermal_control_profile_preview = None;
             state.tuning_pd_wait_started_ms = None;
             state.tuning_heater_rearm_pending = false;
@@ -302,6 +302,90 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
     }
 
     needs_redraw
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn tuning_pd_failure_context(
+    power: PowerState,
+    wait_started_ms: Option<u64>,
+    ticket_started_ms: Option<u64>,
+    now_ms: u64,
+    site: &str,
+) -> [flux_purr_firmware::thermal_tuning::TuningReason; 2] {
+    use core::fmt::Write;
+    use flux_purr_firmware::thermal_tuning::TuningReason;
+
+    let protocol = match power.protocol {
+        PowerProtocol::Unknown => "unknown",
+        PowerProtocol::Detached => "detached",
+        PowerProtocol::Discovering => "discovering",
+        PowerProtocol::WaitingForAccept => "wait_accept",
+        PowerProtocol::WaitingForPsRdy => "wait_ps_rdy",
+        PowerProtocol::Ready => "ready",
+        PowerProtocol::Fault => "fault",
+    };
+    let failure = match power.failure {
+        None => "none",
+        Some(PowerFailure::Unavailable) => "unavailable",
+        Some(PowerFailure::Detached) => "detached",
+        Some(PowerFailure::Reset) => "reset",
+        Some(PowerFailure::RequestTimeout) => "request_timeout",
+        Some(PowerFailure::TransportFault) => "transport_fault",
+        Some(PowerFailure::CapabilityInvalidated) => "capability_invalidated",
+    };
+    let mut state = TuningReason::new();
+    let _ = write!(
+        state,
+        "pd:{site} p={protocol} f={failure} available={}",
+        u8::from(power.available),
+    );
+    if let Some(started) = ticket_started_ms.or(wait_started_ms) {
+        let _ = write!(state, " age_ms={}", now_ms.saturating_sub(started));
+    }
+    let mut contracts = TuningReason::new();
+    let _ = write!(contracts, "pd:{site} a=");
+    if let Some(active) = power.active {
+        let _ = write!(
+            contracts,
+            "{}/{}",
+            active.voltage_mv, active.operating_current_ma
+        );
+    } else {
+        let _ = contracts.push_str("none");
+    }
+    let _ = contracts.push_str(" r=");
+    if let Some(requested) = power.requested {
+        let _ = write!(
+            contracts,
+            "{}/{}",
+            requested.voltage_mv(),
+            requested.operating_current_ma()
+        );
+    } else {
+        let _ = contracts.push_str("none");
+    }
+    let _ = write!(
+        contracts,
+        " ticket={} at_ms={now_ms}",
+        u8::from(ticket_started_ms.is_some())
+    );
+    [state, contracts]
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_fail_tuning_pd(state: &mut RuntimeLoopState, reason: &str, site: &str, now_ms: u64) {
+    let facts = tuning_pd_failure_context(
+        state.power_state,
+        state.tuning_pd_wait_started_ms,
+        state
+            .pending_automatic_pps
+            .map(|request| request.started_at_ms),
+        now_ms,
+        site,
+    );
+    state
+        .thermal_tuning
+        .fail_with_context(reason, &[facts[0].as_str(), facts[1].as_str()]);
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1617,6 +1701,7 @@ fn runtime_hold_heater_for_flash(state: &mut RuntimeLoopState) -> bool {
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn runtime_reconcile_heater_arming(
     state: &mut RuntimeLoopState,
+    elapsed_ms: u64,
     calibration_live_rtd_temp_c: Option<f32>,
     thermal_plant_was_running: bool,
 ) -> (bool, bool) {
@@ -1692,14 +1777,19 @@ pub(crate) async fn runtime_reconcile_heater_arming(
             || state.heater_controller.fault_latched().is_some()
             || state.current_rtd_fault.is_some())
     {
-        state.thermal_tuning.fail(tuning_interlock_reason(
+        let reason = tuning_interlock_reason(
             state.pd_contract_ready || state.tuning_pd_wait_started_ms.is_some(),
             model_allowed,
             persistence_locked,
             state.cooling_disabled_lock_latched,
             state.heater_controller.fault_latched().is_some(),
             state.current_rtd_fault.is_some(),
-        ));
+        );
+        if reason == "pd_contract_lost" {
+            runtime_fail_tuning_pd(state, reason, "interlock", elapsed_ms);
+        } else {
+            state.thermal_tuning.fail(reason);
+        }
         state.thermal_control_profile_preview = None;
     }
     (force_output_off, needs_redraw)
@@ -2509,6 +2599,7 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
         let (force_thermal_plant_output_off, arming_needs_redraw) =
             runtime_reconcile_heater_arming(
                 state,
+                elapsed_ms,
                 calibration_live_rtd_temp_c,
                 thermal_plant_was_running,
             )
@@ -2634,7 +2725,7 @@ fn runtime_record_thermal_tuning_sample(
         return false;
     }
     let Some(observation) = state.last_pd_observation else {
-        state.thermal_tuning.fail("pd_contract_lost");
+        runtime_fail_tuning_pd(state, "pd_contract_lost", "sample", elapsed_ms);
         state.ui_state.heater_enabled = false;
         return true;
     };

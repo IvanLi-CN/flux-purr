@@ -2290,6 +2290,23 @@ impl ThermalTuningRuntime {
         );
     }
 
+    /// Retain caller facts before the canonical failure without changing its meaning.
+    pub fn fail_with_context(&mut self, reason: &str, context: &[&str]) {
+        for fact in context {
+            self.push_event(
+                ThermalTuningEventKind::Safety,
+                self.targets_c.get(self.target_index).copied(),
+                Some(self.trial_index),
+                None,
+                Some(fact),
+            );
+        }
+        self.fail(reason);
+        if self.trace_gap {
+            self.review_disposition = ThermalTuningReviewDisposition::ReviewIncomplete;
+        }
+    }
+
     fn reset_for_run(&mut self) {
         self.phase = ThermalTuningPhase::Idle;
         self.terminal_disposition = ThermalTuningTerminalDisposition::Running;
@@ -4926,6 +4943,66 @@ mod tests {
             runtime.terminal_disposition,
             ThermalTuningTerminalDisposition::Failed
         );
+    }
+
+    #[test]
+    fn caller_failure_context_precedes_canonical_disarmed_failure() {
+        let mut runtime = started_single_target_runtime();
+        let before = runtime.trace().last_sequence.unwrap();
+        let digest_before = runtime.trace().digest;
+        runtime.fail_with_context(
+            "pd_contract_lost",
+            &[
+                "pd:power p=fault f=reset",
+                "pd:power a=none r=none ticket=0",
+            ],
+        );
+        let tail = &runtime.events[runtime.events.len() - 3..];
+        assert_eq!(tail[0].sequence, before + 1);
+        assert_eq!(tail[0].reason.as_deref(), Some("pd:power p=fault f=reset"));
+        assert_eq!(
+            tail[1].reason.as_deref(),
+            Some("pd:power a=none r=none ticket=0")
+        );
+        assert_eq!(tail[2].reason.as_deref(), Some("pd_contract_lost"));
+        assert!(
+            tail.iter()
+                .all(|event| event.kind == ThermalTuningEventKind::Safety)
+        );
+        assert!(!runtime.armed);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Failed);
+        assert_eq!(
+            runtime.review_disposition,
+            ThermalTuningReviewDisposition::Complete
+        );
+        assert!(runtime.trace().complete);
+        assert_ne!(runtime.trace().digest, digest_before);
+        let digest = runtime.trace().digest;
+        runtime.recompute_trace_digest();
+        assert_eq!(runtime.trace().digest, digest);
+    }
+
+    #[test]
+    fn caller_failure_context_overflow_stays_review_incomplete() {
+        let mut runtime = started_single_target_runtime();
+        while runtime.events.len() < THERMAL_TUNING_EVENT_CAPACITY - 1 {
+            runtime.push_phase_transition_event("retained unacknowledged event");
+        }
+        runtime.fail_with_context(
+            "pd_contract_lost",
+            &[
+                "pd:power p=fault f=reset",
+                "pd:power a=none r=none ticket=0",
+            ],
+        );
+        assert!(!runtime.armed);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Failed);
+        assert_eq!(
+            runtime.review_disposition,
+            ThermalTuningReviewDisposition::ReviewIncomplete
+        );
+        assert!(runtime.trace().gap);
+        assert!(!runtime.trace().complete);
     }
 
     #[test]
