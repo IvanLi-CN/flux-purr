@@ -6741,9 +6741,9 @@ fn heater_control_requires_actual_margin_before_entering_hold() {
         ],
     };
 
-    let snapshot = controller.update(180, 179.6, true, Some(profile));
+    let snapshot = controller.update(180, 179.4, true, Some(profile));
     assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
-    assert!(snapshot.error_c > 0.2);
+    assert!(snapshot.error_c > 0.5);
 }
 
 #[test]
@@ -7333,6 +7333,8 @@ fn heater_hold_coasts_after_predictive_cut_until_temperature_is_falling() {
     };
 
     let entered_hold = controller.update(60, 59.4, true, Some(profile));
+    assert_eq!(entered_hold.phase, HeaterControlPhase::Approach);
+    let entered_hold = controller.update(60, 59.5, true, Some(profile));
     assert_eq!(entered_hold.phase, HeaterControlPhase::Hold);
     assert!(controller.hold_coast_active);
     assert_eq!(entered_hold.duty_percent, 0);
@@ -7374,7 +7376,7 @@ fn heater_hold_coasts_when_projection_crosses_target_with_nonzero_approach_power
     controller.filtered_temp_c = Some(132.57);
     controller.previous_filtered_temp_c = Some(131.97);
     controller.filtered_slope_c_per_profile_tick = 2.4;
-    controller.previous_measured_temp_c = Some(138.0);
+    controller.previous_measured_temp_c = Some(139.2);
 
     let profile = ThermalControlProfile {
         settings: ThermalControlProfileSettings {
@@ -7416,7 +7418,7 @@ fn heater_hold_coasts_when_projection_crosses_target_with_nonzero_approach_power
         ],
     };
 
-    let snapshot = controller.update(140, 138.6, true, Some(profile));
+    let snapshot = controller.update(140, 139.5, true, Some(profile));
 
     assert_eq!(snapshot.phase, HeaterControlPhase::Hold);
     assert!(controller.hold_coast_active);
@@ -7448,7 +7450,7 @@ fn heater_hold_coasts_when_projection_crosses_target_with_nonzero_approach_power
 }
 
 #[test]
-fn heater_hold_does_not_coast_below_target_just_because_previous_output_was_zero() {
+fn heater_approach_under_temperature_cannot_enter_hold_after_zero_output() {
     let mut controller = HeaterController::new();
     controller.last_target_temp_c = 180;
     controller.phase = HeaterControlPhase::Approach;
@@ -7501,7 +7503,7 @@ fn heater_hold_does_not_coast_below_target_just_because_previous_output_was_zero
 
     let snapshot = controller.update(180, 178.3, true, Some(profile));
 
-    assert_eq!(snapshot.phase, HeaterControlPhase::Hold);
+    assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
     assert!(!controller.hold_coast_active);
     assert!(snapshot.duty_percent > 0);
 }
@@ -8032,7 +8034,7 @@ fn heater_approach_accepts_previous_sample_within_measurement_margin() {
     controller.filtered_temp_c = Some(135.05222);
     controller.previous_filtered_temp_c = Some(134.72865);
     controller.filtered_slope_c_per_profile_tick = 1.29428;
-    controller.previous_measured_temp_c = Some(137.5);
+    controller.previous_measured_temp_c = Some(139.0);
 
     let profile = ThermalControlProfile {
         settings: ThermalControlProfileSettings {
@@ -8074,7 +8076,7 @@ fn heater_approach_accepts_previous_sample_within_measurement_margin() {
         ],
     };
 
-    let snapshot = controller.update(140, 138.56143, true, Some(profile));
+    let snapshot = controller.update(140, 139.56143, true, Some(profile));
 
     assert_eq!(snapshot.phase, HeaterControlPhase::Hold);
 }
@@ -8436,7 +8438,7 @@ fn heater_hold_prediction_does_not_zero_output_while_plate_is_still_well_below_t
 }
 
 #[test]
-fn heater_hold_entry_does_not_coast_far_below_target_after_zero_output_approach_sample() {
+fn heater_approach_does_not_enter_hold_far_below_target_after_zero_output() {
     let mut controller = HeaterController::new();
     controller.last_target_temp_c = 60;
     controller.phase = HeaterControlPhase::Approach;
@@ -8489,12 +8491,13 @@ fn heater_hold_entry_does_not_coast_far_below_target_after_zero_output_approach_
 
     let snapshot = controller.update(60, 57.99, true, Some(profile));
 
-    assert_eq!(snapshot.phase, HeaterControlPhase::Hold);
+    assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
     assert!(snapshot.error_c > 2.0);
     assert!(snapshot.control_error_c > 2.5);
     assert!(snapshot.filtered_slope_c_per_s > 0.0);
     assert!(!controller.hold_coast_active);
-    assert!(snapshot.duty_percent > 0);
+    // Existing predictive coast may request zero while phase stays Approach.
+    assert_eq!(snapshot.duty_percent, 0);
 }
 
 #[test]
@@ -9438,6 +9441,67 @@ fn production_test_input(measured_temp_c: f32) -> ThermalPlantRuntimeInput {
         max_power_mw: 65_000.0,
         now_ms: 3_000,
     }
+}
+
+#[test]
+fn production_hold_entry_cannot_be_widened_by_candidate_or_timeout() {
+    for target in [60, 160] {
+        for curve_entry in [20, 270, 420] {
+            for phase_ticks in [0, u16::MAX] {
+                let mut profile = production_test_profile(667);
+                profile.settings.temp_filter_alpha = 1.0;
+                let point = profile.points[0].as_mut().unwrap();
+                point.target_temp_c = target;
+                point.hold_entry_centi_c = curve_entry;
+                point.approach_lead_ticks = 0;
+                point.hold_lead_ticks = 0;
+                let measured = f32::from(target) - 2.51;
+                let mut controller = HeaterController::new();
+                controller.last_target_temp_c = target;
+                controller.heater_was_enabled = true;
+                controller.phase = HeaterControlPhase::Approach;
+                controller.phase_ticks = phase_ticks;
+                controller.filtered_temp_c = Some(measured);
+                controller.previous_filtered_temp_c = Some(measured);
+                controller.previous_measured_temp_c = Some(measured);
+                let under = controller.update_at(target, measured, true, Some(profile), 3_000);
+                assert_eq!(under.phase, HeaterControlPhase::Approach);
+
+                // Neither a narrow nor a wide curve entry changes this gate.
+                let admitted_temp = f32::from(target) - 0.5;
+                controller.filtered_temp_c = Some(admitted_temp);
+                controller.previous_filtered_temp_c = Some(admitted_temp);
+                controller.previous_measured_temp_c = Some(admitted_temp);
+                let admitted =
+                    controller.update_at(target, admitted_temp, true, Some(profile), 3_050);
+                assert_eq!(admitted.phase, HeaterControlPhase::Hold);
+            }
+        }
+    }
+}
+
+#[test]
+fn hold_entry_curve_parameter_still_shapes_approach_output() {
+    let mut outputs = [0; 2];
+    for (index, curve_entry) in [100, 420].into_iter().enumerate() {
+        let mut profile = production_test_profile(667);
+        profile.settings.temp_filter_alpha = 1.0;
+        let point = profile.points[0].as_mut().unwrap();
+        point.hold_entry_centi_c = curve_entry;
+        point.hold_power_permille = 100;
+        point.approach_lead_ticks = 0;
+        let mut controller = HeaterController::new();
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(54.0);
+        controller.previous_filtered_temp_c = Some(54.0);
+        controller.previous_measured_temp_c = Some(54.0);
+        let output = controller.update_at(60, 54.0, true, Some(profile), 3_000);
+        assert_eq!(output.phase, HeaterControlPhase::Approach);
+        outputs[index] = output.duty_percent;
+    }
+    assert_ne!(outputs[0], outputs[1]);
 }
 
 #[test]

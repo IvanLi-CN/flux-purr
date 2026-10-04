@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::adapters::pd::{FUSB302B_PD_ABSOLUTE_MAX_MV, FUSB302B_PD_ABSOLUTE_MIN_MV};
+use crate::heater_phase::hold_entry_ready;
 use crate::memory::{ThermalControlProfileConfig, ThermalControlProfilePointConfig};
 use crate::thermal_tuning_limits::{
     TRIAL_TIMEOUT_MS, ThermalTuningTimingEvidence, original_settle_limit_ms,
@@ -33,8 +34,6 @@ pub const THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS: u64 = 200;
 pub const THERMAL_TUNING_STABLE_WINDOW_MS: u64 = 10_000;
 pub const THERMAL_TUNING_STABLE_BAND_CENTI_C: i16 = 150;
 pub const THERMAL_TUNING_TARGET_BUDGET_MS: u64 = 20 * 60 * 1_000;
-const THERMAL_TUNING_HOLD_ENTRY_BELOW_CENTI_C: i32 = 50;
-const THERMAL_TUNING_HOLD_ENTRY_BAND_CENTI_C: i32 = 300;
 const THERMAL_TUNING_APPROACH_TRACE_CAPACITY: usize = 256;
 pub const THERMAL_TUNING_ID_MAX_LEN: usize = 48;
 pub const THERMAL_TUNING_REASON_MAX_LEN: usize = 96;
@@ -1497,10 +1496,7 @@ impl ThermalTuningRuntime {
                     .get_or_insert(sample.temperature_centi_c);
                 let target_centi_c = i32::from(expected_target) * 100;
                 let temperature_centi_c = i32::from(sample.temperature_centi_c);
-                if temperature_centi_c >= target_centi_c - THERMAL_TUNING_HOLD_ENTRY_BELOW_CENTI_C
-                    && (temperature_centi_c - target_centi_c).abs()
-                        <= THERMAL_TUNING_HOLD_ENTRY_BAND_CENTI_C
-                {
+                if hold_entry_ready((target_centi_c - temperature_centi_c) as f32 / 100.0) {
                     self.first_hold_elapsed_ms.get_or_insert(sample.elapsed_ms);
                 }
             }
@@ -1574,12 +1570,7 @@ impl ThermalTuningRuntime {
         if sample.phase == ThermalTuningPhase::Approach
             || (sample.phase == ThermalTuningPhase::Hold && self.saw_approach)
         {
-            let hold_entry = self
-                .candidate_profile
-                .as_ref()
-                .and_then(|profile| candidate_point(profile, target_c))
-                .map_or(150, |point| point.hold_entry_centi_c);
-            self.hold_threshold_crossed |= error_centi_c <= i32::from(hold_entry);
+            self.hold_threshold_crossed |= hold_entry_ready(error_centi_c as f32 / 100.0);
         }
         if self.first_hold_temperature_centi_c.is_none()
             && sample.phase != ThermalTuningPhase::Hold

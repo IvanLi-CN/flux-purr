@@ -1,5 +1,7 @@
 #[allow(unused_imports)]
 use super::*;
+#[cfg(any(target_arch = "xtensa", test))]
+use flux_purr_firmware::heater_phase::{HOLD_ENTRY_BELOW_C, hold_entry_ready};
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1336,19 +1338,18 @@ impl HeaterController {
                 }
             }
             HeaterControlPhase::Approach => {
-                let timeout_hold_ready = self.phase_ticks >= frame.approach_max_cycles
-                    && frame.error_c <= frame.hold_entry_gate_c
-                    && frame.hold_state_ready;
+                let timeout_hold_ready =
+                    self.phase_ticks >= frame.approach_max_cycles && frame.hold_state_ready;
                 let reenter_warmup = frame.error_c
                     >= frame.brake_distance_c + frame.control_target.warmup_reenter_error_c;
-                let approach_hold_ready = frame.approach_control_error_c <= frame.hold_entry_gate_c
-                    && frame.error_c <= frame.hold_entry_gate_c
-                    && frame.previous_error_c <= frame.hold_entry_gate_c + 0.5;
+                let approach_hold_ready = frame.approach_control_error_c <= HOLD_ENTRY_BELOW_C
+                    && frame.previous_error_c <= HOLD_ENTRY_BELOW_C + 0.5;
                 if reenter_warmup {
                     next_phase = HeaterControlPhase::Warmup;
-                } else if approach_hold_ready
-                    || frame.actual_crossed_target_ready
-                    || timeout_hold_ready
+                } else if hold_entry_ready(frame.error_c)
+                    && (approach_hold_ready
+                        || frame.actual_crossed_target_ready
+                        || timeout_hold_ready)
                 {
                     next_phase = HeaterControlPhase::Hold;
                 }
