@@ -4105,9 +4105,9 @@ mod tests {
         };
         let mut out = [0u8; USB_LINE_MAX_LEN];
         let json = write_usb_frame(&frame, &mut out).expect("flash preparation response fits");
-        assert!(json.contains(r#"\"flashPreparation\""#));
-        assert!(json.contains(r#"\"pdFixedOrDefault\":true"#));
-        assert!(!json.contains(r#"\"pd_fixed_or_default\""#));
+        assert!(json.contains(r#""flashPreparation""#));
+        assert!(json.contains(r#""pdFixedOrDefault":true"#));
+        assert!(!json.contains(r#""pd_fixed_or_default""#));
         assert_eq!(parse_usb_frame(json).unwrap(), frame);
     }
 
