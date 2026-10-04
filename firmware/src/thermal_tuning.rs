@@ -1514,7 +1514,9 @@ impl ThermalTuningRuntime {
             self.hold_error_sum_centi_c = self.hold_error_sum_centi_c.saturating_add(
                 i64::from(expected_target) * 100 - i64::from(sample.temperature_centi_c),
             );
-            let output = usize::from(sample.heater_output_permille).min(1_000);
+            // Candidate powers and the external analyzer use the PID logical
+            // request. PPS voltage compensation must not alter that domain.
+            let output = usize::from(sample.heater_requested_output_permille).min(1_000);
             self.hold_output_histogram[output] =
                 self.hold_output_histogram[output].saturating_add(1);
             self.hold_output_count = self.hold_output_count.saturating_add(1);
@@ -1590,7 +1592,7 @@ impl ThermalTuningRuntime {
     }
 
     fn record_near_target_evidence(&mut self, sample: &ThermalTuningSample) {
-        let output = usize::from(sample.heater_output_permille).min(1_000);
+        let output = usize::from(sample.heater_requested_output_permille).min(1_000);
         if self.approach_output_histogram[output] == u16::MAX {
             self.near_target_evidence_overflow = true;
         } else {
@@ -4027,6 +4029,31 @@ mod tests {
             .record_sample(sample(200, ThermalTuningPhase::Warmup, 3_200))
             .unwrap();
         assert!(runtime.warmup_full_output_invalid);
+    }
+
+    #[test]
+    fn strategy_statistics_ignore_pps_pwm_for_the_same_logical_requests() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.candidate_profile = Some(profile_with_targets(&[60]));
+        for (elapsed_ms, phase, temp, requested, pwm) in [
+            (1_000, ThermalTuningPhase::Approach, 5_300, 680, 710),
+            (1_250, ThermalTuningPhase::Approach, 5_400, 760, 950),
+            (1_500, ThermalTuningPhase::Hold, 6_000, 300, 600),
+            (1_750, ThermalTuningPhase::Hold, 6_010, 400, 900),
+        ] {
+            let mut measured = sample(elapsed_ms, phase, temp);
+            measured.heater_requested_output_permille = requested;
+            measured.heater_output_permille = pwm;
+            runtime.update_trial_metrics(&measured, 60);
+        }
+        let evidence = runtime.candidate_failure_evidence(60, Some(10), Some(10), None, 10_000);
+        assert_eq!(evidence.approach_median_output_permille, Some(760));
+        assert_eq!(evidence.hold_median_output_permille, Some(400));
+        assert_eq!(evidence.hold_p90_output_permille, Some(400));
+        assert_eq!(
+            runtime.trial_score(60, false, Some(10), Some(10), None)[9],
+            0.0
+        );
     }
 
     #[test]

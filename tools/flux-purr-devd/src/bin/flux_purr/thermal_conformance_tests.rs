@@ -12,7 +12,66 @@ use flux_purr_firmware::{
 };
 
 // Captured after the physical fan repair. No external current/power measurements
-// are synthesized; this comparison uses temperature, control phase and MOS PWM.
+// are synthesized; strategy analysis uses the recorded logical request. MOS PWM
+// remains an independent runtime sample and does not become a power estimate.
+#[test]
+fn firmware_candidates_and_scores_match_external_160c_live_rtd_replays() {
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/thermal-160c-live-rtd-replays.json"
+    ))
+    .unwrap();
+    let mut differences = Vec::new();
+    for fixture in fixtures {
+        let profile = json!({"settings": fixture["settings"], "points": [fixture["point"]]});
+        let rows = fixture["samples"].as_array().unwrap();
+        assert!(!conditional_replay_continues(
+            &profile,
+            rows,
+            ThermalTuningTrialPurpose::Scout
+        ));
+        let (expected, failure, stage) =
+            external_candidate_and_stage(&profile, rows, "full_speed_to_stable_timeout");
+        let actual = firmware_candidate(profile.clone(), rows);
+        if actual != expected {
+            differences.push(format!(
+                "trial {} ({failure}): firmware {actual:?}; external {expected:?}",
+                fixture["sourceTrialIndex"]
+            ));
+        }
+        let (_, _, decisions) = replay_firmware_trials_and_capture_decisions(
+            profile.clone(),
+            rows,
+            ThermalTuningTrialPurpose::Scout,
+            1,
+        );
+        let actual_score = decisions[0].score;
+        let expected_score = external_score_for_stage(&stage, rows, 160);
+        let live_score: [f64; 11] =
+            serde_json::from_value(fixture["sourceDecisionScore"].clone()).unwrap();
+        for (dimension, (actual, expected)) in
+            actual_score.into_iter().zip(expected_score).enumerate()
+        {
+            if (actual - expected).abs() > 0.001 {
+                differences.push(format!(
+                    "trial {} score[{dimension}]: firmware {actual}; external {expected}",
+                    fixture["sourceTrialIndex"]
+                ));
+            }
+        }
+        for (dimension, (actual, expected)) in
+            live_score.into_iter().zip(expected_score).enumerate()
+        {
+            if (actual - expected).abs() > 0.001 {
+                differences.push(format!(
+                    "trial {} live score[{dimension}]: device {actual}; external {expected}",
+                    fixture["sourceTrialIndex"]
+                ));
+            }
+        }
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
 #[test]
 fn firmware_candidate_matches_external_lower_band_hil_replay() {
     let fixture: Value = serde_json::from_str(include_str!(
@@ -192,18 +251,31 @@ fn firmware_candidate_and_scores_match_external_80c_observed_time_hil_replays() 
             fixture["sourceTrialIndex"]
         );
         let (_, _, decisions) = replay_firmware_trials_and_capture_decisions(
-            profile,
+            profile.clone(),
             rows,
             ThermalTuningTrialPurpose::Scout,
             1,
         );
         let expected_score = external_score_for_stage(&stage, rows, 80);
+        // Historical firmware used physical PWM for output statistics. Retain
+        // that original score as evidence, independently of the corrected
+        // logical-request comparison below; do not rewrite captured fixtures.
+        let mut historical_rows = rows.clone();
+        for row in &mut historical_rows {
+            row[2] = row[3].clone();
+        }
+        let (_, _, historical_stage) = external_candidate_and_stage(
+            &profile,
+            &historical_rows,
+            "full_speed_to_stable_timeout",
+        );
+        let historical_score = external_score_for_stage(&historical_stage, &historical_rows, 80);
         let live_score: [f64; 11] =
             serde_json::from_value(fixture["sourceDecisionScore"].clone()).unwrap();
-        for (index, (actual, expected)) in live_score.iter().zip(expected_score).enumerate() {
+        for (index, (actual, expected)) in live_score.iter().zip(historical_score).enumerate() {
             assert!(
                 (actual - expected).abs() < 0.000_01,
-                "live 80C trial {} score {index}: device {actual}; external {expected}",
+                "historical 80C trial {} score {index}: device {actual}; MOS projection {expected}",
                 fixture["sourceTrialIndex"]
             );
         }
@@ -443,7 +515,7 @@ fn replay_samples(rows: &[Value]) -> Vec<ThermalReplayStageSample> {
         .map(|row| ThermalReplayStageSample {
             elapsed_ms: row[0].as_u64().unwrap() - origin,
             current_temp_c: row[1].as_f64().unwrap() / 100.0,
-            heater_output_percent: (row[3].as_u64().unwrap() / 10) as u8,
+            heater_output_percent: (row[2].as_u64().unwrap() / 10) as u8,
             control_phase: Some(row[4].as_str().unwrap().to_owned()),
             control_phase_in_hold: row[4] == "hold",
             source_voltage_mv: None,
@@ -535,7 +607,7 @@ fn external_candidate_and_stage(
         .map(|row| ThermalReplayStageSample {
             elapsed_ms: row[0].as_u64().unwrap() - origin,
             current_temp_c: row[1].as_f64().unwrap() / 100.0,
-            heater_output_percent: (row[3].as_u64().unwrap() / 10) as u8,
+            heater_output_percent: (row[2].as_u64().unwrap() / 10) as u8,
             control_phase: Some(row[4].as_str().unwrap().to_owned()),
             control_phase_in_hold: row[4] == "hold",
             source_voltage_mv: None,
