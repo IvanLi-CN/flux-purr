@@ -1388,6 +1388,23 @@ pub(crate) async fn save_heater_curve(
     Ok(Json(device.heater_curve.clone()))
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct DeviceEventHistoryQuery {
+    pub tail: Option<usize>,
+}
+
+pub(crate) async fn device_event_history(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<DeviceEventHistoryQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let events = device_event_backlog(&state, &device_id)?;
+    let start = events.len().saturating_sub(query.tail.unwrap_or(20));
+    Ok(Json(
+        json!({"device": device_id, "events": &events[start..]}),
+    ))
+}
+
 pub(crate) async fn device_events(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,

@@ -183,6 +183,51 @@ fn device_event_backlog_replays_existing_bounded_events() {
 }
 
 #[tokio::test]
+async fn monitor_history_retains_reset_evidence_beyond_device_list_limit() {
+    let state = AppState::test();
+    state.emit(event(
+        "mock-fp-lab-01",
+        "serial",
+        "boot reset",
+        json!({"line": "reset_reason=cpu_mwdt0"}),
+    ));
+    for index in 0..40 {
+        state.emit(event(
+            "mock-fp-lab-01",
+            "serial",
+            "boot stage",
+            json!({"stage": index}),
+        ));
+    }
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/devices/mock-fp-lab-01/events/history?tail=80")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(body["events"].as_array().unwrap().len(), 41);
+    assert_eq!(
+        body["events"][0]["payload"]["line"],
+        "reset_reason=cpu_mwdt0"
+    );
+    let empty = device_event_history(
+        State(state),
+        AxumPath("mock-fp-lab-01".into()),
+        Query(DeviceEventHistoryQuery { tail: Some(0) }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(empty["events"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn list_devices_trims_inline_event_backlog_for_polling_clients() {
     let state = AppState::test();
     {

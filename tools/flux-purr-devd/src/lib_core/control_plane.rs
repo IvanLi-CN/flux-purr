@@ -348,6 +348,10 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/devices/{device_id}/network", get(device_network))
         .route("/api/v1/devices/{device_id}/status", get(device_status))
         .route("/api/v1/devices/{device_id}/events", get(device_events))
+        .route(
+            "/api/v1/devices/{device_id}/events/history",
+            get(device_event_history),
+        )
         .route("/api/v1/devices/{device_id}/wifi", put(configure_wifi))
         .route(
             "/api/v1/devices/{device_id}/runtime",
