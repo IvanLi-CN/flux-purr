@@ -2260,14 +2260,22 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
             output_level: FanOutputLevel::Medium,
         };
     }
+    let tuning_temperature = tuning_temperature_evidence(
+        state.latest_display_temp_c,
+        state.current_rtd_fault.is_some(),
+        state.control_measurement_guarded,
+        state.rtd_control_measurement_guard.last_accepted_at_ms,
+        state.last_control_ms,
+    );
     state.tuning_cooling_latched = tuning_cooling_requested(
         state.tuning_cooling_latched,
         state.tuning_was_armed_last_cycle,
         state.thermal_tuning.armed,
         state.thermal_tuning.phase,
         state.ui_state.heater_enabled,
-        (state.current_rtd_fault.is_none() && state.latest_temp_c.is_finite())
-            .then_some(state.latest_temp_c),
+        tuning_temperature
+            .cooldown_admission_ready
+            .then_some(state.latest_display_temp_c),
         state
             .thermal_tuning
             .targets_c
@@ -2667,6 +2675,13 @@ fn runtime_record_thermal_tuning_sample(
         state.ui_state.heater_enabled = false;
         return true;
     };
+    let temperature = tuning_temperature_evidence(
+        state.latest_display_temp_c,
+        state.current_rtd_fault.is_some(),
+        state.control_measurement_guarded,
+        state.rtd_control_measurement_guard.last_accepted_at_ms,
+        elapsed_ms,
+    );
     let sample = flux_purr_firmware::thermal_tuning::ThermalTuningSample {
         sequence: state.thermal_tuning.events.len() as u32 + 1,
         elapsed_ms,
@@ -2674,7 +2689,7 @@ fn runtime_record_thermal_tuning_sample(
         trial_index: state.thermal_tuning.trial_index,
         candidate_id,
         candidate_hash,
-        temperature_centi_c: (state.latest_temp_c * 100.0).round() as i16,
+        temperature_centi_c: temperature.temperature_centi_c,
         vin_mv: state.latest_vin_mv,
         pps_contract: flux_purr_firmware::thermal_tuning::ThermalTuningPpsContract {
             voltage_mv: observation.contract_voltage_mv.unwrap_or_default(),
@@ -2689,11 +2704,15 @@ fn runtime_record_thermal_tuning_sample(
         pps_power_ceiling_mv: u32::from(adjustable_max_mv),
         heater_requested_output_permille: u16::from(requested_duty_percent).saturating_mul(10),
         heater_output_permille: u16::from(state.last_heater_duty).saturating_mul(10),
-        measurement_valid: state.current_rtd_fault.is_none() && state.latest_temp_c.is_finite(),
+        measurement_valid: temperature.measurement_valid,
         phase,
     };
     let phase_before = state.thermal_tuning.phase;
-    if state.thermal_tuning.record_live_sample(sample).is_err() {
+    if state
+        .thermal_tuning
+        .record_live_sample_with_cooldown_admission(sample, temperature.cooldown_admission_ready)
+        .is_err()
+    {
         state.ui_state.heater_enabled = false;
         return true;
     }

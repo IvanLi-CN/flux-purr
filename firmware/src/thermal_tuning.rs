@@ -1177,15 +1177,20 @@ impl ThermalTuningRuntime {
         self.deadline_nearest_temperature_centi_c = None;
     }
 
-    pub fn record_sample(
+    pub fn record_sample(&mut self, sample: ThermalTuningSample) -> Result<(), ThermalTuningError> {
+        self.record_sample_with_cooldown_admission(sample, true)
+    }
+
+    fn record_sample_with_cooldown_admission(
         &mut self,
         mut sample: ThermalTuningSample,
+        cooldown_admission_ready: bool,
     ) -> Result<(), ThermalTuningError> {
         let origin_ms = self.sample_clock_origin_ms.unwrap_or(0);
         sample.elapsed_ms = sample.elapsed_ms.saturating_sub(origin_ms);
         let expected_target = self.validate_sample(&sample)?;
         if self.phase == ThermalTuningPhase::Cooldown {
-            return self.record_cooldown_sample(sample, expected_target);
+            return self.record_cooldown_sample(sample, expected_target, cooldown_admission_ready);
         }
         self.update_trial_metrics(&sample, expected_target);
         let mut sample = sample;
@@ -1255,6 +1260,17 @@ impl ThermalTuningRuntime {
         &mut self,
         sample: ThermalTuningSample,
     ) -> Result<(), ThermalTuningError> {
+        self.record_live_sample_with_cooldown_admission(sample, true)
+    }
+
+    /// Record the live RTD fact even when the production measurement guard
+    /// retains an earlier control temperature. Only a current accepted
+    /// measurement may admit a new trial; the ordinary budget still runs.
+    pub fn record_live_sample_with_cooldown_admission(
+        &mut self,
+        sample: ThermalTuningSample,
+        cooldown_admission_ready: bool,
+    ) -> Result<(), ThermalTuningError> {
         let mut checked = sample.clone();
         checked.elapsed_ms = checked
             .elapsed_ms
@@ -1295,7 +1311,7 @@ impl ThermalTuningRuntime {
             return Ok(());
         }
         let previous_phase = self.phase;
-        self.record_sample(sample)?;
+        self.record_sample_with_cooldown_admission(sample, cooldown_admission_ready)?;
         self.last_live_sample_elapsed_ms = if self.phase == previous_phase {
             Some(checked.elapsed_ms)
         } else {
@@ -1411,6 +1427,7 @@ impl ThermalTuningRuntime {
         &mut self,
         mut sample: ThermalTuningSample,
         expected_target: i16,
+        cooldown_admission_ready: bool,
     ) -> Result<(), ThermalTuningError> {
         if sample.heater_output_permille != 0 || sample.heater_requested_output_permille != 0 {
             self.fail("cooldown_output_not_zero");
@@ -1446,7 +1463,7 @@ impl ThermalTuningRuntime {
             );
             return self.advance_target();
         }
-        if cooled && trial_power_ready && self.armed {
+        if cooled && trial_power_ready && cooldown_admission_ready && self.armed {
             self.phase = ThermalTuningPhase::Warmup;
             self.reset_trial_metrics();
             self.trial_start_temperature_centi_c = Some(start_temperature_centi_c);
@@ -3013,6 +3030,71 @@ mod tests {
         cooling.pps_contract.voltage_mv = 21_000;
         runtime.record_sample(cooling).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Warmup);
+    }
+
+    #[test]
+    fn cooldown_requires_current_accepted_temperature_without_pausing_budget() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("run-current-temperature"),
+                candidate_id: id("candidate-hold"),
+                candidate_hash: hash("hash-hold"),
+                power_class: ThermalTuningPowerClass::Pps5a,
+                targets: &[60],
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile_with_targets(&[60])),
+            })
+            .unwrap();
+        for (elapsed_ms, temperature_centi_c) in [(0, 4_307), (300, 3_454)] {
+            let mut observed = sample(
+                elapsed_ms,
+                ThermalTuningPhase::Cooldown,
+                temperature_centi_c,
+            );
+            observed.heater_requested_output_permille = 0;
+            observed.heater_output_permille = 0;
+            runtime
+                .record_live_sample_with_cooldown_admission(observed, false)
+                .unwrap();
+            assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+        }
+        assert!(!runtime.events.iter().any(|event| event.trial.is_some()));
+        assert_eq!(runtime.current_elapsed_ms, 300);
+        let temperatures: std::vec::Vec<_> = runtime
+            .events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .sample
+                    .as_ref()
+                    .map(|sample| sample.temperature_centi_c)
+            })
+            .collect();
+        assert_eq!(temperatures, [4_307, 3_454]);
+
+        let mut accepted = sample(600, ThermalTuningPhase::Cooldown, 3_454);
+        accepted.heater_requested_output_permille = 0;
+        accepted.heater_output_permille = 0;
+        let mut exhausted = runtime.clone();
+        let mut pending = accepted.clone();
+        pending.elapsed_ms = THERMAL_TUNING_TARGET_BUDGET_MS;
+        exhausted
+            .record_live_sample_with_cooldown_admission(pending, false)
+            .unwrap();
+        assert!(!exhausted.armed);
+        assert!(exhausted.events.iter().any(|event| {
+            event.reason.as_deref() == Some("target_budget_exhausted_during_cooldown")
+        }));
+        assert!(!exhausted.events.iter().any(|event| event.trial.is_some()));
+
+        runtime
+            .record_live_sample_with_cooldown_admission(accepted, true)
+            .unwrap();
+        assert_eq!(runtime.phase, ThermalTuningPhase::Warmup);
+        assert_eq!(runtime.trial_start_temperature_centi_c, Some(3_454));
     }
 
     #[test]

@@ -2,6 +2,32 @@
 use super::*;
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TuningTemperatureEvidence {
+    pub(crate) temperature_centi_c: i16,
+    pub(crate) measurement_valid: bool,
+    pub(crate) cooldown_admission_ready: bool,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn tuning_temperature_evidence(
+    live_rtd_temp_c: f32,
+    sensor_fault: bool,
+    control_guarded: bool,
+    control_accepted_at_ms: Option<u64>,
+    sample_elapsed_ms: u64,
+) -> TuningTemperatureEvidence {
+    let measurement_valid = !sensor_fault && live_rtd_temp_c.is_finite();
+    TuningTemperatureEvidence {
+        temperature_centi_c: (live_rtd_temp_c * 100.0).round() as i16,
+        measurement_valid,
+        cooldown_admission_ready: measurement_valid
+            && !control_guarded
+            && control_accepted_at_ms == Some(sample_elapsed_ms),
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn active_thermal_control_profile(
     memory_config: &MemoryConfig,
     preview: Option<ThermalControlProfile>,

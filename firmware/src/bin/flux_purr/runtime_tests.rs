@@ -10740,6 +10740,61 @@ fn overtemp_threshold_uses_unrounded_temperature() {
 }
 
 #[test]
+fn tuning_temperature_retains_live_rtd_when_control_is_guarded() {
+    // The captured run retained 34.54C in control while current RTD was 43.07C.
+    let reading = tuning_temperature_evidence(43.07, false, true, Some(641_814), 641_920);
+    assert_eq!(reading.temperature_centi_c, 4_307);
+    assert!(reading.measurement_valid);
+    assert!(!reading.cooldown_admission_ready);
+
+    let unaccepted_cold = tuning_temperature_evidence(34.54, false, false, Some(641_814), 641_920);
+    assert!(!unaccepted_cold.cooldown_admission_ready);
+    let accepted_cold = tuning_temperature_evidence(34.54, false, false, Some(641_920), 641_920);
+    assert_eq!(accepted_cold.temperature_centi_c, 3_454);
+    assert!(accepted_cold.cooldown_admission_ready);
+}
+
+#[test]
+fn tuning_temperature_faults_do_not_reuse_the_retained_display_reading() {
+    for (temp_c, fault) in [(34.54, true), (f32::NAN, false), (f32::INFINITY, false)] {
+        let reading = tuning_temperature_evidence(temp_c, fault, false, Some(10), 10);
+        assert!(!reading.measurement_valid);
+        assert!(!reading.cooldown_admission_ready);
+    }
+}
+
+#[test]
+fn tuning_temperature_guard_cannot_release_terminal_cooling() {
+    for (live_temp_c, guarded, accepted_at_ms) in [
+        (43.07, true, Some(641_814)),
+        (34.54, true, Some(641_814)),
+        (34.54, false, Some(641_814)),
+    ] {
+        let reading =
+            tuning_temperature_evidence(live_temp_c, false, guarded, accepted_at_ms, 641_920);
+        assert!(tuning_cooling_requested(
+            true,
+            false,
+            false,
+            ThermalTuningPhase::Canceled,
+            false,
+            reading.cooldown_admission_ready.then_some(live_temp_c),
+            Some(60),
+        ));
+    }
+    let reading = tuning_temperature_evidence(34.54, false, false, Some(641_920), 641_920);
+    assert!(!tuning_cooling_requested(
+        true,
+        false,
+        false,
+        ThermalTuningPhase::Canceled,
+        false,
+        reading.cooldown_admission_ready.then_some(34.54),
+        Some(60),
+    ));
+}
+
+#[test]
 fn raw_rtd_overtemp_bypasses_the_control_slew_guard() {
     let mut measurement_guard = RtdControlMeasurementGuard::default();
     measurement_guard.reseed(140.0, 0);
