@@ -83,6 +83,9 @@ pub(crate) const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 pub(crate) const ESPFLASH_USB_RESET_RETRY_DELAY: Duration = Duration::from_secs(1);
 pub(crate) const FRONT_PANEL_PRESET_COUNT: usize = 10;
 pub(crate) const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
+pub(crate) const FLASH_PREPARATION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const DEFAULT_FLASH_PREPARATION_TIMEOUT_SECONDS: u64 = 600;
+pub(crate) const MAX_FLASH_PREPARATION_TIMEOUT_SECONDS: u64 = 7200;
 pub(crate) const LEASE_REAPER_INTERVAL: Duration = Duration::from_secs(1);
 // Opening an ESP32-S3 USB Serial/JTAG port can reset the device. Read-only
 // requests are idempotent and must remain alive through USB enumeration,
@@ -115,6 +118,7 @@ pub(crate) static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub(crate) enum SerialRetryPolicy {
     ReadOnly,
     SingleShot,
+    PreparationProbe,
 }
 
 #[cfg(unix)]

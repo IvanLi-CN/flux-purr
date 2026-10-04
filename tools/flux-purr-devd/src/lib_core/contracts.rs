@@ -1119,6 +1119,16 @@ pub struct FlashRequest {
     pub artifact: FirmwareArtifact,
     pub dry_run: bool,
     pub confirm: Option<String>,
+    #[serde(default)]
+    pub prepare_timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlashPreparationStatus {
+    pub heating: bool,
+    pub cooling: bool,
+    pub pd_fixed_or_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1215,6 +1225,8 @@ pub struct FirmwareOperationRequest {
     pub confirm: Option<String>,
     #[serde(default)]
     pub allow_downgrade: bool,
+    #[serde(default)]
+    pub prepare_timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1222,6 +1234,8 @@ pub struct FirmwareOperationRequest {
 pub(crate) struct LocalFirmwareUpdateRequest {
     pub(crate) port: String,
     pub(crate) artifact_id: String,
+    #[serde(default)]
+    pub(crate) prepare_timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

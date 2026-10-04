@@ -107,6 +107,7 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
         state.last_pd_status_log_key = pd_status_log_key(current_pd_observation);
     }
     state.last_pd_observation = current_pd_observation;
+    update_pd_fixed_vin_stability(state, current_pd_observation);
     needs_redraw |= apply_pd_contract_observation(
         current_pd_observation,
         &mut state.pd_contract_ready,
@@ -118,6 +119,34 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
     );
 
     needs_redraw
+}
+
+#[cfg(target_arch = "xtensa")]
+fn update_pd_fixed_vin_stability(
+    state: &mut RuntimeLoopState,
+    observation: Option<PdStatusObservation>,
+) {
+    let elapsed_ms = Instant::now()
+        .as_millis()
+        .saturating_sub(state.runtime_started_ms);
+    let Some(observation) = observation
+        .filter(|_| {
+            state.latest_vin_sample_at_ms.is_some_and(|sample_at_ms| {
+                elapsed_ms.saturating_sub(sample_at_ms) <= FLASH_PREPARATION_VIN_SAMPLE_MAX_AGE_MS
+            })
+        })
+        .filter(|observation| pd_fixed_vin_is_within_tolerance(*observation, state.latest_vin_mv))
+    else {
+        state.pd_fixed_vin_stable_since_ms = None;
+        return;
+    };
+    match state.pd_fixed_vin_stable_since_ms {
+        Some((target_mv, _)) if target_mv == observation.contract.voltage_mv => {}
+        _ => {
+            state.pd_fixed_vin_stable_since_ms =
+                Some((observation.contract.voltage_mv, elapsed_ms));
+        }
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -201,6 +230,8 @@ pub(crate) async fn runtime_process_usb_control_line(
             latest_rtd_raw_adc_max_mv: state.latest_rtd_raw_adc_max_mv,
             latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
             latest_vin_mv: state.latest_vin_mv,
+            latest_vin_sample_at_ms: state.latest_vin_sample_at_ms,
+            pd_fixed_vin_stable_since_ms: state.pd_fixed_vin_stable_since_ms,
             last_heater_duty: heater_duty_for_control,
             heater_control_timing: state.heater_control_timing,
             persistence_log_sink: &mut state.transport.persistence_log_sink,
@@ -483,6 +514,8 @@ pub(crate) async fn runtime_process_lan_control(
             latest_rtd_raw_adc_max_mv: state.latest_rtd_raw_adc_max_mv,
             latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
             latest_vin_mv: state.latest_vin_mv,
+            latest_vin_sample_at_ms: state.latest_vin_sample_at_ms,
+            pd_fixed_vin_stable_since_ms: state.pd_fixed_vin_stable_since_ms,
             last_heater_duty: heater_duty_for_control,
             heater_control_timing: state.heater_control_timing,
             persistence_log_sink: &mut state.transport.persistence_log_sink,
@@ -1112,6 +1145,11 @@ pub(crate) async fn runtime_read_heater_sensors(
             raw_adc_mv,
         );
         state.latest_vin_raw_adc_mv = raw_adc_mv;
+        state.latest_vin_sample_at_ms = Some(
+            Instant::now()
+                .as_millis()
+                .saturating_sub(state.runtime_started_ms),
+        );
         if state.latest_vin_mv != vin_mv {
             state.latest_vin_mv = vin_mv;
             needs_redraw = true;
@@ -1374,6 +1412,13 @@ pub(crate) fn runtime_update_calibration_job(
     current_pd_observation: Option<PdStatusObservation>,
     calibration_live_rtd_temp_c: Option<f32>,
 ) -> bool {
+    if flash_preparation::is_active() {
+        calibration_job_canceled(
+            &mut state.calibration_runtime_state,
+            &mut state.manual_pps_state,
+        );
+        return false;
+    }
     update_calibration_runtime_state(
         &mut state.calibration_runtime_state,
         &state.manual_pps_state,
@@ -1423,6 +1468,25 @@ pub(crate) async fn runtime_reconcile_heater_arming(
     calibration_live_rtd_temp_c: Option<f32>,
     thermal_plant_was_running: bool,
 ) -> (bool, bool) {
+    if flash_preparation::is_active() {
+        let mut needs_redraw = false;
+        if state.ui_state.heater_enabled || state.ui_state.heater_output_percent != 0 {
+            state.ui_state.heater_enabled = false;
+            state.ui_state.heater_output_percent = 0;
+            needs_redraw = true;
+        }
+        state.calibration_runtime_state.heater_enabled = false;
+        if let Some(ticket) = state.manual_pps_state.pending_power_ticket.take() {
+            state.pd_port.discard_ticket(ticket);
+        }
+        state.manual_pps_state.pending_power_request_mv = None;
+        state.manual_pps_state.clear();
+        HeaterPwmGate::force_off();
+        if state.last_heater_duty != 0 {
+            apply_heater_duty(&mut state.heater_pwm, 0, &mut state.last_heater_duty);
+        }
+        return (true, needs_redraw);
+    }
     let calibration_output_temp_c = thermal_plant_calibration_temperature_c(
         state.calibration_runtime_state,
         calibration_live_rtd_temp_c,
@@ -1875,6 +1939,10 @@ pub(crate) async fn runtime_force_heater_safe_off(
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
+    let cooling_was_enabled = state.fan_command.enabled
+        || state
+            .last_fan_command
+            .is_some_and(|command| command.enabled);
     let mut fan_decision = fan_policy_decision_with_modes(
         state.latest_display_temp_i16,
         elapsed_ms,
@@ -1924,6 +1992,13 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
         state.fan_command,
         &mut state.last_fan_command,
     );
+    if flash_preparation::is_active()
+        && cooling_was_enabled
+        && !state.fan_command.enabled
+        && let PdRequestState::Pending(ticket) = state.pd_port.restore_automatic_idle_contract()
+    {
+        state.pd_port.discard_ticket(ticket);
+    }
     let persistence_locked = state.ui_state.persistence_locked();
     sync_frontpanel_runtime_state(
         &mut state.ui_state,
@@ -2114,7 +2189,9 @@ pub(crate) async fn runtime_persist_and_update_safety(
 ) -> bool {
     let active_thermal_settings = state.active_thermal_settings;
     let mut needs_redraw = false;
-    runtime_commit_deferred_memory(state, elapsed_ms).await;
+    if !flash_preparation::is_active() {
+        runtime_commit_deferred_memory(state, elapsed_ms).await;
+    }
 
     needs_redraw |= runtime_reconcile_persistence_and_cooling(state);
 

@@ -64,7 +64,7 @@ pub(crate) static PD_SERVICE_SNAPSHOT: BlockingMutex<
     RefCell<PdServiceSnapshot>,
 > = BlockingMutex::new(RefCell::new(PdServiceSnapshot::unavailable()));
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 pub(crate) fn source_supports_fusb302b_idle_pps(
     capabilities: ch224q::AdjustablePowerCapabilities,
 ) -> bool {
@@ -78,15 +78,13 @@ pub(crate) fn source_supports_fusb302b_idle_pps(
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn automatic_idle_contract_is_confirmed(
     observation: PdStatusObservation,
-    capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+    _capabilities: Option<ch224q::AdjustablePowerCapabilities>,
 ) -> bool {
-    (observation.contract.kind == ContractKind::Pps
-        && observation.contract.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
-        && observation.contract.current_ma >= MIN_HEATER_CONTRACT_MA)
-        || (observation.contract.kind == ContractKind::Fixed
-            && observation.contract.voltage_mv <= FUSB302B_INITIAL_PPS_REQUEST_MV
-            && observation.contract.current_ma >= MIN_HEATER_CONTRACT_MA
-            && !capabilities.is_some_and(source_supports_fusb302b_idle_pps))
+    observation.contract.kind == ContractKind::Fixed
+        && observation.contract.voltage_mv >= FUSB302B_PD_ABSOLUTE_MIN_MV
+        && observation.contract.voltage_mv <= FUSB302B_FIXED_MAX_MV
+        && observation.contract.current_ma
+            >= standby_current_for_voltage(observation.contract.voltage_mv)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -329,6 +327,11 @@ async fn process_pd_command(
     command: PdServiceCommand,
     replacing_pending: bool,
 ) -> PdCommandProgress {
+    if flash_preparation::is_active() && !matches!(command, PdServiceCommand::AutomaticIdle { .. })
+    {
+        let ticket = pd_service_command_ticket(command);
+        return PdCommandProgress::Done(ticket, TicketOutcome::Rejected);
+    }
     match command {
         PdServiceCommand::AutomaticIdle { ticket } => {
             match runtime
@@ -598,6 +601,28 @@ async fn process_pd_service_work(
             }
         }
         None => {
+            if flash_preparation::is_active()
+                && let Some((ticket, operation)) = pending_to_retry
+                && !matches!(operation, PendingPdOperation::Idle)
+            {
+                runtime
+                    .abort_pending_operation(i2c, PdTimestamp::now())
+                    .await;
+                *pending = None;
+                return Some((ticket, TicketOutcome::Superseded));
+            }
+            if let Some((ticket, PendingPdOperation::Idle)) = pending_to_retry {
+                match runtime
+                    .advance_automatic_idle_transition(i2c, PdTimestamp::now())
+                    .await
+                {
+                    PdContractRequestState::Failed => {
+                        *pending = None;
+                        return Some((ticket, TicketOutcome::Rejected));
+                    }
+                    PdContractRequestState::Confirmed | PdContractRequestState::Pending => {}
+                }
+            }
             if let Some(completion) =
                 retry_deferred_contract_request(runtime, i2c, pending_to_retry).await
             {

@@ -171,8 +171,8 @@ or supported by the production `flux-purr` firmware artifact.
 - `mcu-agentd` remains available for selector inspection and diagnostics. It is not a firmware installation path.
 - Typical diagnostic flow:
   - `source /Users/ivan/export-esp.sh`
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release` (FUSB302B production idle policy: `12 V` PPS + real control-plane transport)
-  - FUSB302B automatic idle policy is fixed at `12 V` PPS when the Source advertises a usable APDO; voltage-specific Cargo build targets are not part of the product firmware
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release` (FUSB302B production idle policy: lowest adequate Fixed PDO, normally `5 V`, plus real control-plane transport)
+  - FUSB302B startup and complete idle prefer the lowest adequate Fixed PDO using the conservative standby budget; a live PPS contract descends in bounded steps before the final Fixed request. Voltage-specific Cargo build targets are not part of the product firmware
   - `mcu-agentd --non-interactive config validate`
   - `mcu-agentd --non-interactive selector get esp32s3_frontpanel`
   - if selector is missing, `mcu-agentd --non-interactive selector list esp32s3_frontpanel`

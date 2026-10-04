@@ -72,6 +72,9 @@
 - USB JSONL 的完整响应必须保留到发送完成；运行态 response writer 状态必须驻留在 runtime transport 中，端点背压时每轮最多填充一个非阻塞 USB packet。ESP32-S3 USB Serial/JTAG FIFO 自动提交完整 64-byte packet，只有最终短 packet 显式尝试 flush；每次成功写入或 flush 后返回主循环，在当前响应完成或明确失败前停止接收下一条请求。USB 背压、诊断输出或客户端停止读取不得阻塞 Front Panel、LED、热控、PD service 或 executor。
 - `TIMG0` watchdog 在第一个异步启动阶段前由独立 supervisor 启用，启动期间使用 boot-stage heartbeat，进入 `runtime_ready` 后切换为 Front Panel runtime 与 PD service 的单调心跳门控。supervisor 只在相应阶段要求的心跳自上次 feed 后推进时喂狗；任一任务、正常 executor 或 supervisor 停滞都必须停止 feed 并在硬件超时后复位。watchdog reset reason 必须沿既有 USB/U0 reset diagnostics 暴露，且 heater permit 在复位前后保持 fail-closed。
 - `hello` 必须返回 protocol version、framing、identity 和 capabilities。
+- `flash_preparation` capability 的 USB JSONL 请求为 `prepare_flash`、`get_flash_preparation` 与 `cancel_flash_preparation`。成功响应必须包含 `flashPreparation` 对象及 `heating`、`cooling`、`pdFixedOrDefault` 三个布尔字段；响应描述同一时刻已应用的硬件状态，不能用 ACK 代替。
+- `prepare_flash` 必须幂等建立无自动过期的 RAM 保持：清除并结算加热、手动 PPS、校准、热测试和输出启动意图，立即关断实际 heater PWM，允许安全冷却完成，并阻止新意图与旧请求重放。保持只由 `cancel_flash_preparation` 或 reset 解除；取消后不恢复旧请求，也不写 EEPROM 或删除校准结果。
+- `pdFixedOrDefault=true` 只可在没有加热/冷却、没有冲突待执行意图、已确认的 Fixed 合同或有独立来源证明的 Type-C 默认供电时返回。FUSB302B 的 Fixed 合同还必须有新鲜 VIN 样本，在 `max(250mV, 目标电压的 2.5%)` 内连续稳定至少 `500ms`；PPS、旧观察、未确认 RDO、陈旧样本和故障均为 false。
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。
 - `wifi_state_v2` capability 表示设备支持版本化 WiFi 事实。`NetworkSummary` 必须包含 `configurationGeneration`、单调 `transitionSequence` 与有限安全枚举 `failureCode`；未知或畸形 snapshot 必须在 adapter 边界拒绝，不能由 `devd` 或 Web 猜测补齐。
 - WiFi 状态由硬件无关的 `no_std` 状态机唯一发布。已配置设备对外只发布 `connecting|connected|error`；未配置设备发布 `disabled`。保存动作本身不是设备网络状态，Web 的提交 loading 只能表示等待设备事实，不能发布额外的“临时失败”状态。
@@ -97,6 +100,7 @@
 - devd 未显式传入 `--serial-port` 时必须保持 `AppConfig.serial_port=None`，不得从环境变量、用户配置、模板、示例或硬编码默认值隐式选择设备；`None` 表示没有固定 USB 目标，而不是关闭发现。daemon 必须枚举全部符合项目 USB 身份规则的串口作为未验证候选，但不得自动打开、租用、探测或选择其中任何端口。候选在固件 identity probe 成功前只能显示 transport locator，`identity.deviceId` 与 `identity.hostname` 必须为空；只有 operator 明确选择后才允许进入连接与身份验证流程。
 - devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
 - `flux-purr` CLI 必须为 status/runtime/wifi/monitor 等 devd-backed 操作自动创建、heartbeat 和释放 lease，支持 human 输出与 `--json` 输出，不要求用户手填 `leaseId`。固件操作由 `firmware-update-and-developer-flash` topic 管理：一般用户 `update` 使用显式 `--port`、本地已发布 bundle 与本地 CBOR control socket；开发者 `flash`/`recover` 使用显式 `--port`，直接串口执行且不创建或连接 devd。
+- CLI 与 devd 的 `update`、`flash`、`recover` 必须在 artifact/确认/授权/锁定之后、任何 ROM 探测、reset、erase 或 write 之前共享同一 flash-preparation admission。在线但未就绪时按 `prepareTimeoutSeconds`（默认 `600`，范围 `1..=7200`）轮询并在超时失败；同一现存且 identity 匹配的精确串口连续三次无应用帧才可返回 `application_unresponsive` 并仅跳过 PD 等待。无响应旁路不自动豁免 EEPROM 备份；端口消失、占用、身份变化、打开失败或字段不兼容直接阻断。
 - `flux-purr pd pps set --volts <decimal> --amps <decimal> --device|--hardware` 与 `flux-purr pd pps clear --device|--hardware` 必须通过 lease 写 runtime contract；`--volts` 只接受 `0.1V` 步进、必须落在硬件 `5V~28V` 边界内且不高于实时 source capability，`--amps` 只接受 `0.05A` 步进且不高于 source capability。
 - `flux-purr hardware` 必须把 USB 设备记忆写入 OS 用户配置目录，`FLUX_PURR_HOME` 可覆盖；LAN record 使用独立字段持久化 base URL、hostname、last IPv4 和 redacted token。
 - 默认 `required` pairing policy 下，WiFi Info 进入时必须生成并显示新四位码；离开该页立即使 code 失效。每个窗口最多五次失败，成功返回 EEPROM 稳定 token；只有 USB/devd token-reset 可清除 token 和全部 LAN lease。HTTP v1 必须预留 `optional`（无 code claim）和 `unavailable`（无 claim、匿名基础只读）策略，前端和 CLI 不得把当前 default 当作唯一可能。

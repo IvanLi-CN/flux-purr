@@ -49,6 +49,8 @@
 - 每段声明实际长度、SHA-256 和 ESP ROM MD5；未知字段、路径穿越、重复、缺段、重叠、越界或 hash 不一致均 fail closed。
 - update 的当前 partition-table SHA-256 必须精确匹配 bundle layout；不存在配置复制或迁移路径。
 - update 仅适用于可验证 Flux Purr runtime；烧录前必须停热并取得有效温度 `<=40°C`。它不得保全、迁移或验证 MCU 内部配置分区。
+- Native devd update/install/recovery 在进入 ROM、复位、擦除或写入前必须执行在线 `flash_preparation` 门禁。固件 capability 存在时，主机轮询 `heating`、`cooling`、`pdFixedOrDefault` 三个实际状态字段；在线未就绪在 `prepareTimeoutSeconds`（默认 `600`，范围 `1..=7200`）耗尽时失败，连续三次同一精确端口无应用帧才可仅跳过 PD 等待。旧固件、空片或不兼容应用不能提供该 capability 时，流程必须报告不兼容或要求主人手动下载模式，不能假装已完成准备。
+- `pdFixedOrDefault` 必须来自已确认的 Fixed 或有来源、预算和稳定 VIN 证据的 Type-C 默认供电；PPS、陈旧状态、未确认 RDO、故障和单次 5V 读数均不能放行。在线无响应旁路不改变 EEPROM 备份、精确端口、身份和 ROM 安全门禁。
 - install/recovery 允许无 Flux 身份并全擦 MCU internal Flash；不得提出、推断或执行任何 PCB/加热器物理连接确认或限制。
 - `get_install_status` 的 `setupReason` 在 commissioning 已完成时可以为 `null`；devd 必须按可选字段解码。固件维护目标必须保留已授权 native serial candidate，即使运行时 identity 的 capability 列表不包含 `flash`。
 - Secure Boot、Flash Encryption、Secure Download Mode、未知安全响应、非 ESP32-S3 或非 4 MiB Flash 一律阻止。

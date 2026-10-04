@@ -40,6 +40,8 @@ pub(crate) struct ControlLineContext<'a, 'i, 'e> {
     pub(crate) latest_rtd_raw_adc_max_mv: u16,
     pub(crate) latest_vin_raw_adc_mv: u16,
     pub(crate) latest_vin_mv: u32,
+    pub(crate) latest_vin_sample_at_ms: Option<u64>,
+    pub(crate) pd_fixed_vin_stable_since_ms: Option<(u16, u64)>,
     pub(crate) last_heater_duty: u8,
     pub(crate) heater_control_timing: HeaterControlTiming,
     pub(crate) persistence_log_sink: &'a mut dyn PersistenceLogSink,
@@ -174,12 +176,45 @@ pub(crate) async fn dispatch_control_frame(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn process_flash_preparation_request(
+    context: &mut ControlLineContext<'_, '_, '_>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    op: UsbRequestOp,
+    active_profile: Option<ThermalControlProfile>,
+) -> Option<(bool, UsbFrame)> {
+    match op {
+        UsbRequestOp::PrepareFlash => {
+            Some(process_prepare_flash(context, request_id, active_profile))
+        }
+        UsbRequestOp::GetFlashPreparation => Some((
+            false,
+            flash_preparation_response(context, request_id, active_profile),
+        )),
+        UsbRequestOp::CancelFlashPreparation => {
+            flash_preparation::clear_hold();
+            context.ui_state.heater_enabled = false;
+            HeaterPwmGate::force_off();
+            Some((
+                true,
+                flash_preparation_response(context, request_id, active_profile),
+            ))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 pub(crate) async fn process_request_frame(
     context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     op: UsbRequestOp,
     active_profile: Option<ThermalControlProfile>,
 ) -> (bool, UsbFrame) {
+    if let Some(response) =
+        process_flash_preparation_request(context, request_id.clone(), op, active_profile)
+    {
+        return response;
+    }
     match op {
         UsbRequestOp::GetIdentity => (
             false,
@@ -269,7 +304,71 @@ pub(crate) async fn process_request_frame(
             ),
         ),
         UsbRequestOp::SetLogLevel => (false, usb_response(request_id, UsbResponsePayload::Ack)),
+        _ => unreachable!("flash preparation requests were handled before dispatch"),
     }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn flash_preparation_response(
+    context: &ControlLineContext<'_, '_, '_>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    active_profile: Option<ThermalControlProfile>,
+) -> UsbFrame {
+    let status_context = control_runtime_status_context(
+        context,
+        active_profile,
+        *context.manual_pps,
+        context.heater_controller.fault_latched(),
+        *context.attention_pending_after_fault_clear,
+    );
+    usb_response(
+        request_id,
+        UsbResponsePayload::FlashPreparation(flash_preparation_status(
+            context.ui_state,
+            context.calibration_runtime_state,
+            &status_context,
+            context.pd_fixed_vin_stable_since_ms,
+            context.latest_vin_sample_at_ms,
+        )),
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn flash_preparation_blocked_response(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    message: &'static str,
+) -> UsbFrame {
+    usb_error_response(request_id, "flash_preparation_active", message)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn process_prepare_flash(
+    context: &mut ControlLineContext<'_, '_, '_>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    active_profile: Option<ThermalControlProfile>,
+) -> (bool, UsbFrame) {
+    flash_preparation::start_hold();
+    context.ui_state.heater_enabled = false;
+    if let Some(ticket) = context.manual_pps.pending_power_ticket.take() {
+        context.pd_port.discard_ticket(ticket);
+    }
+    context.manual_pps.pending_power_request_mv = None;
+    context.manual_pps.clear();
+    calibration_job_canceled(context.calibration_runtime_state, context.manual_pps);
+    disarm_calibration_after_transient_input_change(
+        context.calibration_runtime_state,
+        context.manual_pps,
+    );
+    if !context.fan_command.enabled
+        && let PdRequestState::Pending(ticket) = context.pd_port.restore_automatic_idle_contract()
+    {
+        context.pd_port.discard_ticket(ticket);
+    }
+    HeaterPwmGate::force_off();
+    (
+        true,
+        flash_preparation_response(context, request_id, active_profile),
+    )
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -277,6 +376,15 @@ pub(crate) fn process_complete_setup(
     context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame) {
+    if flash_preparation::is_active() {
+        return (
+            false,
+            flash_preparation_blocked_response(
+                request_id,
+                "Setup completion is locked while flash preparation is active.",
+            ),
+        );
+    }
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -341,6 +449,15 @@ pub(crate) fn process_reset_persistence(
     context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame) {
+    if flash_preparation::is_active() {
+        return (
+            false,
+            flash_preparation_blocked_response(
+                request_id,
+                "Persistence reset is locked while flash preparation is active.",
+            ),
+        );
+    }
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -576,6 +693,15 @@ pub(crate) fn process_runtime_config_frame(
     mut config: RuntimeConfigCommand,
     active_profile: Option<ThermalControlProfile>,
 ) -> (bool, UsbFrame) {
+    if flash_preparation::is_active() {
+        return (
+            false,
+            flash_preparation_blocked_response(
+                request_id,
+                "Runtime configuration is locked while flash preparation is active.",
+            ),
+        );
+    }
     if context.ui_state.persistence_locked()
         && (config.heater_enabled == Some(true)
             || config.manual_pps_enabled == Some(true)
@@ -688,6 +814,15 @@ pub(crate) fn process_buzzer_test_frame(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: BuzzerTestCommand,
 ) -> (bool, UsbFrame) {
+    if flash_preparation::is_active() && command.op != BuzzerTestOp::Status {
+        return (
+            false,
+            flash_preparation_blocked_response(
+                request_id,
+                "Buzzer tests are locked while flash preparation is active.",
+            ),
+        );
+    }
     if !command.is_valid() {
         return (
             false,
@@ -763,6 +898,15 @@ pub(crate) async fn process_calibration_config_frame(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: CalibrationConfigCommand,
 ) -> (bool, UsbFrame) {
+    if flash_preparation::is_active() {
+        return (
+            false,
+            flash_preparation_blocked_response(
+                request_id,
+                "Calibration configuration is locked while flash preparation is active.",
+            ),
+        );
+    }
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -860,6 +1004,15 @@ pub(crate) fn process_calibration_job_frame(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: CalibrationJobCommandWire,
 ) -> (bool, UsbFrame) {
+    if flash_preparation::is_active() {
+        return (
+            false,
+            flash_preparation_blocked_response(
+                request_id,
+                "Calibration jobs are locked while flash preparation is active.",
+            ),
+        );
+    }
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -901,6 +1054,15 @@ pub(crate) fn process_thermal_plant_run_frame(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     after_sample: u8,
 ) -> (bool, UsbFrame) {
+    if flash_preparation::is_active() {
+        return (
+            false,
+            flash_preparation_blocked_response(
+                request_id,
+                "Thermal plant tests are locked while flash preparation is active.",
+            ),
+        );
+    }
     (
         false,
         usb_response(
@@ -924,6 +1086,15 @@ pub(crate) fn process_heater_curve_config_frame(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: HeaterCurveConfigCommand,
 ) -> (bool, UsbFrame) {
+    if flash_preparation::is_active() {
+        return (
+            false,
+            flash_preparation_blocked_response(
+                request_id,
+                "Heater curve configuration is locked while flash preparation is active.",
+            ),
+        );
+    }
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -950,6 +1121,15 @@ pub(crate) async fn process_heater_curve_save_frame(
     context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame) {
+    if flash_preparation::is_active() {
+        return (
+            false,
+            flash_preparation_blocked_response(
+                request_id,
+                "Heater curve writes are locked while flash preparation is active.",
+            ),
+        );
+    }
     if context.ui_state.persistence_locked() {
         return (
             false,
@@ -1061,6 +1241,15 @@ pub(crate) async fn process_eeprom_maintenance_frame(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: EepromMaintenanceCommand,
 ) -> (bool, UsbFrame) {
+    if flash_preparation::is_active() && raw_eeprom_operation_mutates(command.op) {
+        return (
+            false,
+            flash_preparation_blocked_response(
+                request_id,
+                "EEPROM writes are locked while flash preparation is active.",
+            ),
+        );
+    }
     if context.last_heater_duty != 0 {
         return (
             false,
@@ -1270,6 +1459,7 @@ pub(crate) fn lan_frame_response(
             UsbResponsePayload::CalibrationJob(value) => lan_json_response(value),
             UsbResponsePayload::ThermalPlantRun(value) => lan_json_response(value),
             UsbResponsePayload::HeaterCurve(value) => lan_json_response(value),
+            UsbResponsePayload::FlashPreparation(value) => lan_json_response(value),
             UsbResponsePayload::EepromBytes(_) => (
                 404,
                 lan_error_json(

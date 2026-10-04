@@ -4,7 +4,10 @@
 //! module deliberately keeps Flux Purr's product-specific contract policy,
 //! RDO encoding, and timing independent of that transport.
 
-use super::pd::{Contract, ContractKind, SourceCapabilities};
+use super::pd::{
+    Contract, ContractKind, FUSB302B_PD_ABSOLUTE_MIN_MV, FUSB302B_PPS_MIN_MV, SourceCapabilities,
+    standby_current_for_voltage,
+};
 
 const PD_HEADER_REQUEST: u16 = 2;
 const PD_HEADER_ACCEPT: u16 = 3;
@@ -15,6 +18,21 @@ const PD_HEADER_SPEC_REV_30: u16 = 0b10 << 6;
 const PPS_RDO_VOLTAGE_STEP_MV: u16 = 20;
 const PPS_RDO_CURRENT_STEP_MA: u16 = 50;
 const PPS_KEEPALIVE_INTERVAL_MS: u64 = 5_000;
+
+pub const PPS_TO_FIXED_STEP_MV: u16 = 500;
+pub const PPS_TO_FIXED_INTERVAL_MS: u64 = 500;
+
+pub const fn next_pps_to_fixed_voltage(current_mv: u16, target_mv: u16) -> Option<u16> {
+    if current_mv <= target_mv {
+        return None;
+    }
+    let step_mv = current_mv.saturating_sub(PPS_TO_FIXED_STEP_MV);
+    Some(if step_mv < target_mv {
+        target_mv
+    } else {
+        step_mv
+    })
+}
 
 pub const SOURCE_CAPS_INITIAL_WAIT_MS: u64 = 400;
 pub const SOURCE_CAPS_RETRY_INTERVAL_MS: u64 = 5_000;
@@ -86,6 +104,7 @@ pub struct SinkPolicy {
     requested_mv: u16,
     preferred_ma: u16,
     requested_mode: Option<crate::adapters::pd::PdContractRequestMode>,
+    idle_standby: bool,
     pending_contract: Contract,
     active_contract: Contract,
     source_capabilities: SourceCapabilities,
@@ -101,6 +120,7 @@ impl SinkPolicy {
             requested_mv,
             preferred_ma,
             requested_mode: None,
+            idle_standby: false,
             pending_contract: Contract::none(),
             active_contract: Contract::none(),
             source_capabilities: SourceCapabilities::empty(),
@@ -109,12 +129,22 @@ impl SinkPolicy {
         }
     }
 
+    pub const fn new_standby(requested_mv: u16, preferred_ma: u16) -> Self {
+        let mut policy = Self::new(requested_mv, preferred_ma);
+        policy.idle_standby = true;
+        policy
+    }
+
     pub const fn phase(self) -> SinkPhase {
         self.phase
     }
 
     pub const fn active_contract(self) -> Contract {
         self.active_contract
+    }
+
+    pub const fn pending_contract(self) -> Contract {
+        self.pending_contract
     }
 
     pub fn source_capabilities(self) -> Option<SourceCapabilities> {
@@ -134,6 +164,7 @@ impl SinkPolicy {
         }
         let contract = self.source_capabilities.select_exact_contract(request)?;
         let rdo = request_data_object(contract)?;
+        self.idle_standby = false;
         self.requested_mv = request.voltage_mv;
         self.preferred_ma = request.operating_current_ma;
         self.requested_mode = Some(request.mode);
@@ -152,11 +183,29 @@ impl SinkPolicy {
     }
 
     pub fn pending_automatic_idle_contract_matches(&self) -> bool {
-        self.source_capabilities_received
-            && self
+        if !self.source_capabilities_received || !self.idle_standby {
+            return false;
+        }
+        match self.pending_contract.kind {
+            ContractKind::Fixed => self
                 .source_capabilities
-                .select_fusb302b_contract(self.default_requested_mv, self.preferred_ma)
-                .is_some_and(|contract| contract == self.pending_contract)
+                .select_fusb302b_standby_contract(FUSB302B_PD_ABSOLUTE_MIN_MV)
+                .is_some_and(|contract| contract == self.pending_contract),
+            ContractKind::Pps => {
+                self.source_capabilities
+                    .supports_contract(self.pending_contract)
+                    && self.pending_contract.current_ma
+                        <= standby_current_for_voltage(self.pending_contract.voltage_mv)
+            }
+            ContractKind::None => false,
+        }
+    }
+
+    pub fn standby_contract(&self) -> Option<Contract> {
+        self.source_capabilities_received.then(|| {
+            self.source_capabilities
+                .select_fusb302b_standby_contract(FUSB302B_PD_ABSOLUTE_MIN_MV)
+        })?
     }
 
     /// Retain an exact PPS request while a Fixed-to-PPS transition refreshes
@@ -169,6 +218,7 @@ impl SinkPolicy {
         self.requested_mv = request.voltage_mv;
         self.preferred_ma = request.operating_current_ma;
         self.requested_mode = Some(request.mode);
+        self.idle_standby = false;
         true
     }
 
@@ -252,24 +302,45 @@ impl SinkPolicy {
     }
 
     fn begin_request(&mut self, capabilities: SourceCapabilities) -> Option<[u8; 4]> {
-        let contract = match self.requested_mode {
-            Some(crate::adapters::pd::PdContractRequestMode::Pps) => {
-                let request = crate::adapters::pd::PdContractRequest::pps(
-                    self.requested_mv,
-                    self.preferred_ma,
-                )
-                .ok()?;
-                capabilities.select_exact_contract(request)?
+        let contract = if self.idle_standby {
+            let standby =
+                capabilities.select_fusb302b_standby_contract(FUSB302B_PD_ABSOLUTE_MIN_MV)?;
+            if self.active_contract.kind == ContractKind::Pps
+                && self.active_contract.voltage_mv > standby.voltage_mv
+            {
+                let target_mv = standby.voltage_mv.max(FUSB302B_PPS_MIN_MV);
+                let pps_step =
+                    match next_pps_to_fixed_voltage(self.active_contract.voltage_mv, target_mv) {
+                        Some(step_mv) => capabilities
+                            .select_fusb302b_standby_pps_step(self.active_contract, step_mv),
+                        None => None,
+                    };
+                pps_step.unwrap_or(standby)
+            } else {
+                standby
             }
-            Some(crate::adapters::pd::PdContractRequestMode::Fixed) => {
-                let request = crate::adapters::pd::PdContractRequest::fixed(
-                    self.requested_mv,
-                    self.preferred_ma,
-                )
-                .ok()?;
-                capabilities.select_exact_contract(request)?
+        } else {
+            match self.requested_mode {
+                Some(crate::adapters::pd::PdContractRequestMode::Pps) => {
+                    let request = crate::adapters::pd::PdContractRequest::pps(
+                        self.requested_mv,
+                        self.preferred_ma,
+                    )
+                    .ok()?;
+                    capabilities.select_exact_contract(request)?
+                }
+                Some(crate::adapters::pd::PdContractRequestMode::Fixed) => {
+                    let request = crate::adapters::pd::PdContractRequest::fixed(
+                        self.requested_mv,
+                        self.preferred_ma,
+                    )
+                    .ok()?;
+                    capabilities.select_exact_contract(request)?
+                }
+                None => {
+                    capabilities.select_fusb302b_contract(self.requested_mv, self.preferred_ma)?
+                }
             }
-            None => capabilities.select_fusb302b_contract(self.requested_mv, self.preferred_ma)?,
         };
         let rdo = request_data_object(contract)?;
         self.pending_contract = contract;
@@ -295,6 +366,7 @@ impl SinkPolicy {
             return false;
         }
         self.requested_mv = requested_mv;
+        self.idle_standby = false;
         self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Pps);
         true
     }
@@ -303,6 +375,7 @@ impl SinkPolicy {
         let contract = self.select_pps_contract(requested_mv)?;
         self.requested_mv = requested_mv;
         self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Pps);
+        self.idle_standby = false;
         let rdo = request_data_object(contract)?;
         self.pending_contract = contract;
         self.phase = SinkPhase::WaitingForAccept;
@@ -310,20 +383,41 @@ impl SinkPolicy {
     }
 
     /// Restore the startup policy after a manual or thermal override ends.
-    /// This prefers the configured PPS idle voltage and uses the bounded fixed
-    /// PDO fallback only when the live capabilities provide no usable APDO.
+    /// Idle is always a Fixed contract so the MCU can stop servicing PD before
+    /// a ROM download. The runtime may use a bounded PPS descent first.
     pub fn request_automatic_idle_contract(&mut self) -> Option<[u8; 4]> {
+        self.request_automatic_idle_fixed_contract()
+    }
+
+    pub fn request_automatic_idle_fixed_contract(&mut self) -> Option<[u8; 4]> {
         if !self.source_capabilities_received {
             return None;
         }
-        self.requested_mv = self.default_requested_mv;
-        self.requested_mode = None;
+        self.requested_mv = FUSB302B_PD_ABSOLUTE_MIN_MV;
+        self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Fixed);
+        self.idle_standby = true;
         self.begin_request(self.source_capabilities)
     }
 
+    pub fn request_automatic_idle_pps_step(&mut self, requested_mv: u16) -> Option<[u8; 4]> {
+        if !self.source_capabilities_received {
+            return None;
+        }
+        let contract = self
+            .source_capabilities
+            .select_fusb302b_standby_pps_step(self.active_contract, requested_mv)?;
+        self.requested_mv = requested_mv;
+        self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Pps);
+        self.idle_standby = true;
+        self.pending_contract = contract;
+        self.phase = SinkPhase::WaitingForAccept;
+        request_data_object(contract)
+    }
+
     pub fn prepare_automatic_idle_refresh(&mut self) {
-        self.requested_mv = self.default_requested_mv;
-        self.requested_mode = None;
+        self.requested_mv = FUSB302B_PD_ABSOLUTE_MIN_MV;
+        self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Fixed);
+        self.idle_standby = true;
     }
 
     /// Move a PPS session to an exact fixed PDO before releasing a terminal
@@ -339,6 +433,7 @@ impl SinkPolicy {
         let rdo = request_data_object(contract)?;
         self.pending_contract = contract;
         self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Fixed);
+        self.idle_standby = false;
         self.phase = SinkPhase::WaitingForAccept;
         Some(rdo)
     }
@@ -377,11 +472,13 @@ impl SinkPolicy {
     /// Type-C attachment. The physical CC relationship belongs to the PHY and
     /// must not be reconstructed by the policy engine.
     pub fn on_received_protocol_reset(&mut self) {
+        let idle_standby = self.idle_standby;
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
         self.source_message_id = None;
         self.requested_mv = self.default_requested_mv;
         self.requested_mode = None;
+        self.idle_standby = idle_standby;
         self.source_capabilities = SourceCapabilities::empty();
         self.source_capabilities_received = false;
         self.phase = SinkPhase::WaitingForSourceCapabilities;
@@ -433,11 +530,13 @@ impl SinkPolicy {
     }
 
     pub fn on_detach_or_reset(&mut self) {
+        let idle_standby = self.idle_standby;
         self.pending_contract = Contract::none();
         self.active_contract = Contract::none();
         self.source_message_id = None;
         self.requested_mv = self.default_requested_mv;
         self.requested_mode = None;
+        self.idle_standby = idle_standby;
         self.source_capabilities = SourceCapabilities::empty();
         self.source_capabilities_received = false;
         self.phase = SinkPhase::Detached;
@@ -672,9 +771,10 @@ mod tests {
     }
 
     #[test]
-    fn automatic_idle_restore_returns_a_twenty_volt_override_to_twelve_volt_pps() {
+    fn automatic_idle_restore_steps_a_twenty_volt_override_toward_fixed() {
         let mut policy = SinkPolicy::new(12_000, 5_000);
         let source = [
+            ((5_000_u32 / 50) << 10) | (1_000_u32 / 10),
             ((20_000_u32 / 50) << 10) | (5_000_u32 / 10),
             PPS_APDO_5V_TO_21V_5A,
         ];
@@ -690,13 +790,16 @@ mod tests {
 
         assert!(policy.request_automatic_idle_contract().is_some());
         assert_eq!(policy.pending_contract.kind, ContractKind::Pps);
-        assert_eq!(policy.pending_contract.voltage_mv, 12_000);
+        assert_eq!(policy.pending_contract.voltage_mv, 19_500);
     }
 
     #[test]
     fn automatic_idle_replaces_a_superseded_pending_pps_contract() {
         let mut policy = SinkPolicy::new(12_000, 5_000);
-        let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);
+        let _ = policy.on_source_capabilities(&[
+            ((5_000_u32 / 50) << 10) | (1_000_u32 / 10),
+            PPS_APDO_5V_TO_21V_5A,
+        ]);
         policy.on_control_message(3, 0);
         policy.on_control_message(6, 0);
         let _ = policy.request_pps_voltage(20_000);
@@ -706,8 +809,28 @@ mod tests {
 
         assert!(policy.request_automatic_idle_contract().is_some());
         assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
-        assert_eq!(policy.pending_contract.voltage_mv, 12_000);
-        assert!(policy.pending_automatic_idle_contract_matches());
+        assert_eq!(policy.pending_contract.kind, ContractKind::Pps);
+        assert_eq!(policy.pending_contract.voltage_mv, 11_500);
+    }
+
+    #[test]
+    fn automatic_idle_uses_fixed_when_the_pps_floor_is_reached() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        let source = [
+            ((5_000_u32 / 50) << 10) | (1_000_u32 / 10),
+            PPS_APDO_5V_TO_21V_5A,
+        ];
+        let _ = policy.on_source_capabilities(&source);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        let _ = policy.request_pps_voltage(5_500);
+        policy.on_control_message(3, 1);
+        policy.on_control_message(6, 1);
+
+        assert_eq!(policy.active_contract().kind, ContractKind::Pps);
+        assert!(policy.request_automatic_idle_contract().is_some());
+        assert_eq!(policy.pending_contract.kind, ContractKind::Fixed);
+        assert_eq!(policy.pending_contract.voltage_mv, 5_000);
     }
 
     #[test]

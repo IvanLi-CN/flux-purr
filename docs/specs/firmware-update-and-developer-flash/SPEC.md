@@ -13,6 +13,7 @@
 - Interface: `flux-purr update --port <serial-port> --bundle <local.fluxpurr-fw> [--devd <local-control-socket>]`.
 - Interface: `flux-purr flash --port <serial-port> [--elf <local-elf>] [--skip-backup --confirm NO_EEPROM_BACKUP]`.
 - Interface: `flux-purr recover --port <serial-port> --elf <local-elf> --confirm ERASE`.
+- Interface: `flux-purr flash-preparation start|status|cancel --port <serial-port>`.
 
 ## Requirements
 
@@ -42,6 +43,9 @@
 - After a successful archive write, the system MUST directly delete regular `.fpbk` files in the dedicated directory without reading, decrypting, or migrating their contents. It MUST remove malformed generated `.bin` files and oldest valid generated `.bin` archives until both the archive count is at most `100` and total archive bytes are at most `10 MiB`.
 - Backup permission, durability, or verification failure MUST block `flash` unless the Developer provides both `--skip-backup` and `--confirm NO_EEPROM_BACKUP`. `update` and `recover` MUST never automatically create this archive.
 - The paired bypass MUST skip ROM-mode probing and EEPROM snapshot/archive creation and proceed directly to espflash on the supplied Explicit Serial Port. It MUST NOT require a detected or proven ROM download mode and MUST remain available when application firmware is stopped, incompatible, or lacks the snapshot protocol.
+- Before ROM probing, reset, erase, EEPROM snapshot, or image write, `flash`, `recover`, and `update` MUST use the firmware `flash_preparation` capability on the exact supplied port. `prepare_flash` is idempotent and establishes a RAM hold that clears heater intent, cancels queued calibration/manual PPS/test work, and prevents stale intent replay. The host MUST poll `get_flash_preparation` until `heating=false`, `cooling=false`, and `pdFixedOrDefault=true`.
+- The preparation status is an applied-state snapshot with exactly those three boolean fields; an acknowledgement is not readiness. A Fixed contract is accepted only with a fresh VIN observation inside `max(250mV, 2.5% of target)` after the required dwell. A responsive device that remains unready until `prepareTimeoutSeconds` (default `600`, range `1..=7200`) fails before reset/write and reports the last status. Only three consecutive application-frame timeouts or serial I/O failures on the same still-present, identity-matching port may classify the application as unresponsive and skip the PD wait; that classification never skips the normal EEPROM backup requirement.
+- Direct CLI preparation reuses one non-resetting raw serial session for identity, prepare/status/cancel, and EEPROM snapshot operations. `cancel` explicitly releases the RAM hold; reset also clears it. Port disappearance, identity change, open failure, or unsupported/missing fields blocks the operation and never selects a replacement port.
 
 ### REQ-FUDF-005
 
@@ -85,6 +89,12 @@
 - The acceptance suite runs Unix mode checks locally and current-user Windows DACL checks in the Windows DEVD job, including platform-portable fake-flash fixtures.
 - covers: `REQ-FUDF-004`
 - Pass condition: successful normal Developer flash creates a verified raw `8192`-byte `.bin` before espflash; failed permission or backup verification blocks by default; legacy `.fpbk` cleanup does not read contents; the explicit paired bypass is auditable and reaches espflash without a ROM probe or EEPROM snapshot; retention never exceeds either bound; `update` and `recover` create no archive.
+
+### VER-FUDF-007
+
+- Method: fake application serial, clock, EEPROM, ROM, and espflash fixtures.
+- covers: preparation admission, unresponsive classification, exact-port identity retention, and the backup boundary.
+- Pass condition: an online but unready device never reaches reset/write; a same-port application-unresponsive result skips only PD waiting; a responsive old device still requires the paired backup bypass; ROM retry and post-backup recheck return to the same preparation gate.
 
 ### VER-FUDF-005
 

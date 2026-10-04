@@ -999,7 +999,7 @@ fn fusb302b_idle_restore_requires_an_apdo_that_covers_twelve_volts() {
 }
 
 #[test]
-fn automatic_idle_restore_never_confirms_a_fixed_twenty_volt_contract() {
+fn automatic_idle_restore_requires_a_confirmed_fixed_contract() {
     let observation = |voltage_mv| PdStatusObservation {
         status_raw: FUSB302B_STATUS0_VBUSOK,
         status: Status::from_register(FUSB302B_STATUS0_VBUSOK),
@@ -1013,7 +1013,7 @@ fn automatic_idle_restore_never_confirms_a_fixed_twenty_volt_contract() {
         observation(12_000),
         None
     ));
-    assert!(!automatic_idle_contract_is_confirmed(
+    assert!(automatic_idle_contract_is_confirmed(
         observation(20_000),
         None
     ));
@@ -1037,6 +1037,43 @@ fn automatic_idle_restore_rejects_a_low_current_twelve_volt_contract() {
     assert!(!automatic_idle_contract_is_confirmed(
         observation(ContractKind::Fixed),
         None
+    ));
+}
+
+#[test]
+fn flash_preparation_vin_readiness_requires_fixed_voltage_tolerance_and_dwell() {
+    let observation = PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: Status::from_register(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 1_000,
+        contract_voltage_mv: Some(5_000),
+        contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
+    };
+
+    assert_eq!(pd_fixed_vin_tolerance_mv(5_000), 250);
+    assert!(pd_fixed_vin_is_within_tolerance(observation, 5_250));
+    assert!(!pd_fixed_vin_is_within_tolerance(observation, 5_251));
+    assert!(!pd_fixed_vin_is_stable(
+        observation,
+        5_000,
+        Some((5_000, 1_000)),
+        Some(1_450),
+        1_499
+    ));
+    assert!(pd_fixed_vin_is_stable(
+        observation,
+        5_000,
+        Some((5_000, 1_000)),
+        Some(1_450),
+        1_500
+    ));
+    assert!(!pd_fixed_vin_is_stable(
+        observation,
+        5_000,
+        Some((12_000, 1_000)),
+        Some(1_450),
+        1_500,
     ));
 }
 

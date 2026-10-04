@@ -14,6 +14,8 @@ pub(crate) mod eeprom;
 pub(crate) mod eeprom_snapshot;
 #[path = "fan.rs"]
 pub(crate) mod fan;
+#[path = "flash_preparation.rs"]
+pub(crate) mod flash_preparation;
 #[path = "frontpanel.rs"]
 pub(crate) mod frontpanel;
 #[path = "lan.rs"]
@@ -53,6 +55,8 @@ pub(crate) use eeprom::*;
 pub(crate) use eeprom_snapshot::*;
 #[allow(unused_imports)]
 pub(crate) use fan::*;
+#[allow(unused_imports)]
+pub(crate) use flash_preparation::*;
 #[allow(unused_imports)]
 pub(crate) use frontpanel::*;
 #[allow(unused_imports)]

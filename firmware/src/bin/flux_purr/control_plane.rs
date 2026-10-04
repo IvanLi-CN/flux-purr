@@ -273,6 +273,81 @@ pub(crate) fn usb_runtime_status(
     usb_runtime_status_with_calibration(ui_state, memory_config, calibration, context)
 }
 
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+#[allow(dead_code)]
+pub(crate) fn flash_preparation_status(
+    ui_state: &FrontPanelUiState,
+    calibration: &CalibrationRuntimeState,
+    context: &UsbRuntimeStatusContext,
+    pd_fixed_vin_stable_since_ms: Option<(u16, u64)>,
+    vin_sample_at_ms: Option<u64>,
+) -> FlashPreparationStatus {
+    let heating = ui_state.heater_enabled
+        || context.heater_physical_output_percent != 0
+        || context.manual_pps.enabled
+        || calibration.heater_enabled;
+    let cooling = context.fan_command.enabled;
+    let pd_fixed_or_default = !context.manual_pps.enabled
+        && context.last_pd_observation.is_some_and(|observation| {
+            automatic_idle_contract_is_confirmed(observation, None)
+                && pd_fixed_vin_is_stable(
+                    observation,
+                    context.vin_mv,
+                    pd_fixed_vin_stable_since_ms,
+                    vin_sample_at_ms,
+                    context.elapsed_ms,
+                )
+        });
+    FlashPreparationStatus {
+        heating,
+        cooling,
+        pd_fixed_or_default,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const FLASH_PREPARATION_VIN_STABLE_MS: u64 = 500;
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const FLASH_PREPARATION_VIN_SAMPLE_MAX_AGE_MS: u64 = 500;
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn pd_fixed_vin_tolerance_mv(target_mv: u16) -> u32 {
+    u32::from(target_mv)
+        .saturating_mul(25)
+        .checked_div(1_000)
+        .unwrap_or(0)
+        .max(250)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn pd_fixed_vin_is_within_tolerance(
+    observation: PdStatusObservation,
+    measured_vin_mv: u32,
+) -> bool {
+    observation.contract.kind == ContractKind::Fixed
+        && measured_vin_mv != 0
+        && measured_vin_mv.abs_diff(u32::from(observation.contract.voltage_mv))
+            <= pd_fixed_vin_tolerance_mv(observation.contract.voltage_mv)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn pd_fixed_vin_is_stable(
+    observation: PdStatusObservation,
+    measured_vin_mv: u32,
+    stable_since: Option<(u16, u64)>,
+    sample_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    pd_fixed_vin_is_within_tolerance(observation, measured_vin_mv)
+        && sample_at_ms.is_some_and(|sample_at_ms| {
+            now_ms.saturating_sub(sample_at_ms) <= FLASH_PREPARATION_VIN_SAMPLE_MAX_AGE_MS
+        })
+        && stable_since.is_some_and(|(target_mv, since_ms)| {
+            target_mv == observation.contract.voltage_mv
+                && now_ms.saturating_sub(since_ms) >= FLASH_PREPARATION_VIN_STABLE_MS
+        })
+}
+
 #[cfg(test)]
 pub(crate) fn usb_runtime_status(
     ui_state: &FrontPanelUiState,
@@ -3102,6 +3177,8 @@ pub(crate) fn usb_mutating_request_id(
                     | UsbRequestOp::CloseLanPairingWindow
                     | UsbRequestOp::SetLogLevel
                     | UsbRequestOp::ClearLanPairingToken
+                    | UsbRequestOp::PrepareFlash
+                    | UsbRequestOp::CancelFlashPreparation
             ) =>
         {
             Some(request_id)
@@ -3315,6 +3392,18 @@ pub(crate) fn usb_early_request_response(
             "Runtime status is not available until hardware initialization completes.",
             true,
         ),
+        UsbRequestOp::GetFlashPreparation => usb_response(
+            request_id,
+            UsbResponsePayload::FlashPreparation(FlashPreparationStatus::default()),
+        ),
+        UsbRequestOp::PrepareFlash | UsbRequestOp::CancelFlashPreparation => {
+            usb_error_response_with_retryable(
+                request_id,
+                "startup_busy",
+                "Flash preparation is unavailable until hardware initialization completes.",
+                true,
+            )
+        }
     }
 }
 
@@ -3630,5 +3719,21 @@ pub(crate) fn usb_recovery_request_response(
             "LAN pairing reset is unavailable because hardware bring-up did not complete.",
             true,
         ),
+        UsbRequestOp::GetFlashPreparation => usb_response(
+            request_id,
+            UsbResponsePayload::FlashPreparation(FlashPreparationStatus {
+                heating: false,
+                cooling: true,
+                pd_fixed_or_default: false,
+            }),
+        ),
+        UsbRequestOp::PrepareFlash | UsbRequestOp::CancelFlashPreparation => {
+            usb_error_response_with_retryable(
+                request_id,
+                "hardware_bringup_failed",
+                "Flash preparation is unavailable because hardware bring-up did not complete.",
+                true,
+            )
+        }
     }
 }

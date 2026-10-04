@@ -3,6 +3,51 @@ use std::process::ExitStatus;
 use tempfile::tempdir;
 
 #[test]
+fn flash_preparation_admission_requires_every_ready_field() {
+    assert!(flash_preparation_status_ready(FlashPreparationStatus {
+        heating: false,
+        cooling: false,
+        pd_fixed_or_default: true,
+    }));
+    for status in [
+        FlashPreparationStatus {
+            heating: true,
+            cooling: false,
+            pd_fixed_or_default: true,
+        },
+        FlashPreparationStatus {
+            heating: false,
+            cooling: true,
+            pd_fixed_or_default: true,
+        },
+        FlashPreparationStatus {
+            heating: false,
+            cooling: false,
+            pd_fixed_or_default: false,
+        },
+    ] {
+        assert!(!flash_preparation_status_ready(status));
+    }
+}
+
+#[test]
+fn flash_preparation_timeout_uses_default_and_enforces_bounds() {
+    assert_eq!(
+        validate_flash_preparation_timeout(None).unwrap(),
+        DEFAULT_FLASH_PREPARATION_TIMEOUT_SECONDS
+    );
+    assert_eq!(validate_flash_preparation_timeout(Some(1)).unwrap(), 1);
+    assert_eq!(
+        validate_flash_preparation_timeout(Some(7_200)).unwrap(),
+        7_200
+    );
+    for timeout in [Some(0), Some(7_201)] {
+        let error = validate_flash_preparation_timeout(timeout).unwrap_err();
+        assert_eq!(error.error.code, "invalid_prepare_timeout_seconds");
+    }
+}
+
+#[test]
 fn local_control_endpoint_rejects_network_transports() {
     assert!(validate_local_control_endpoint("http://127.0.0.1:30080").is_err());
     assert!(validate_local_control_endpoint("tcp:127.0.0.1:30080").is_err());
@@ -2712,16 +2757,18 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
         inner.devices.insert(native.id.clone(), native);
     }
     let lease = state.lease_device("serial-test").unwrap();
+    let request = |artifact: FirmwareArtifact, dry_run: bool, confirm: Option<&str>| FlashRequest {
+        lease_id: lease.lease_id.clone(),
+        artifact,
+        dry_run,
+        confirm: confirm.map(str::to_owned),
+        prepare_timeout_seconds: None,
+    };
 
     let without_dry_run = flash_device(
         State(state.clone()),
         AxumPath("serial-test".to_string()),
-        Json(FlashRequest {
-            lease_id: lease.lease_id.clone(),
-            artifact: artifact.clone(),
-            dry_run: false,
-            confirm: None,
-        }),
+        Json(request(artifact.clone(), false, None)),
     )
     .await
     .unwrap_err();
@@ -2731,12 +2778,7 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
     let dry_run = flash_device(
         State(state.clone()),
         AxumPath("serial-test".to_string()),
-        Json(FlashRequest {
-            lease_id: lease.lease_id.clone(),
-            artifact: artifact.clone(),
-            dry_run: true,
-            confirm: None,
-        }),
+        Json(request(artifact.clone(), true, None)),
     )
     .await
     .unwrap()
@@ -2762,12 +2804,7 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
     let changed_without_dry_run = flash_device(
         State(state.clone()),
         AxumPath("serial-test".to_string()),
-        Json(FlashRequest {
-            lease_id: lease.lease_id.clone(),
-            artifact: changed_artifact,
-            dry_run: false,
-            confirm: Some("FLASH".to_string()),
-        }),
+        Json(request(changed_artifact, false, Some("FLASH"))),
     )
     .await
     .unwrap_err();
@@ -2777,12 +2814,7 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
     let without_confirm = flash_device(
         State(state.clone()),
         AxumPath("serial-test".to_string()),
-        Json(FlashRequest {
-            lease_id: lease.lease_id.clone(),
-            artifact: artifact.clone(),
-            dry_run: false,
-            confirm: None,
-        }),
+        Json(request(artifact.clone(), false, None)),
     )
     .await
     .unwrap_err();
@@ -2792,12 +2824,7 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
     let flash_disabled = flash_device(
         State(state.clone()),
         AxumPath("serial-test".to_string()),
-        Json(FlashRequest {
-            lease_id: lease.lease_id,
-            artifact,
-            dry_run: false,
-            confirm: Some("FLASH".to_string()),
-        }),
+        Json(request(artifact, false, Some("FLASH"))),
     )
     .await
     .unwrap_err();
@@ -2814,6 +2841,7 @@ fn legacy_flash_dry_run_approval_binds_port_and_usb_identity() {
         artifact: test_artifact_with_file(directory.path(), "firmware.bin", b"firmware-image"),
         dry_run: true,
         confirm: None,
+        prepare_timeout_seconds: None,
     };
     let identity = UsbSerialIdentity {
         vid: ESP32S3_USB_SERIAL_JTAG_VID,
@@ -3223,6 +3251,22 @@ fn usb_response_decoder_marks_startup_busy_retryable() {
 
     assert_eq!(error.status, StatusCode::BAD_GATEWAY);
     assert!(is_retryable_startup_busy(&error));
+}
+
+#[test]
+fn serial_activity_detection_keeps_legacy_application_frames_alive() {
+    assert!(serial_line_is_application_frame(
+        br#"{"type":"status","requestId":null,"status":{"mode":"idle"}}"#,
+    ));
+    assert!(serial_line_is_application_frame(
+        br#"{"requestId":"snapshot-1","capacity":8192,"chunkMax":32}"#,
+    ));
+    assert!(serial_line_is_application_frame(
+        br#"{"error":"legacy firmware error"}"#,
+    ));
+    assert!(!serial_line_is_application_frame(
+        br#"{"type":"request","requestId":"queued","op":"get_identity"}"#,
+    ));
 }
 
 #[test]
@@ -3793,6 +3837,7 @@ fn firmware_preflight_digest_binds_usb_identity() {
         approval_token: None,
         confirm: None,
         allow_downgrade: false,
+        prepare_timeout_seconds: None,
     };
     let first = UsbSerialIdentity {
         vid: 0x303a,
@@ -4274,6 +4319,7 @@ async fn recovery_preflight_allows_hot_or_foreign_mock_without_physical_confirma
             approval_token: None,
             confirm: None,
             allow_downgrade: false,
+            prepare_timeout_seconds: None,
         }),
     )
     .await
@@ -4345,6 +4391,7 @@ async fn update_preflight_blocks_active_heater_and_high_temperature() {
             approval_token: None,
             confirm: None,
             allow_downgrade: false,
+            prepare_timeout_seconds: None,
         }),
     )
     .await

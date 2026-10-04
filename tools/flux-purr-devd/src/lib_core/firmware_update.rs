@@ -112,11 +112,26 @@ pub(crate) async fn local_firmware_update(
         &identity.firmware_version,
         &status,
     )?;
-    let serial_rpc =
-        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
-    let serial_lock = take_cached_serial_process_lock(&state.serial_sessions, &port)?
-        .ok_or_else(|| HttpError::internal("native update lost its serial session lock"))?;
-    ensure_native_serial_identity(&port, &usb_identity)?;
+    if !identity
+        .capabilities
+        .iter()
+        .any(|capability| capability == "flash_preparation")
+    {
+        return Err(HttpError::forbidden(
+            "flash_preparation_unsupported",
+            "The connected firmware does not expose the flash preparation capability.",
+        ));
+    }
+    let prepare_timeout_seconds =
+        validate_flash_preparation_timeout(payload.prepare_timeout_seconds)?;
+    let (serial_rpc, serial_lock) = prepare_local_update_transport(
+        &state,
+        &target,
+        &port,
+        &usb_identity,
+        prepare_timeout_seconds,
+    )
+    .await?;
     let probe = probe_native_rom_security_with_locks(
         &state,
         &port,
@@ -166,6 +181,24 @@ pub(crate) async fn local_firmware_update(
         "artifactId": bundle.bundle_sha256,
         "outcome": outcome,
     })))
+}
+
+async fn prepare_local_update_transport(
+    state: &AppState,
+    target: &DeviceRecord,
+    port: &str,
+    usb_identity: &UsbSerialIdentity,
+    prepare_timeout_seconds: u64,
+) -> Result<(tokio::sync::OwnedMutexGuard<()>, SerialPortProcessLock), HttpError> {
+    let admission =
+        serial_flash_preparation_gate(state, target, usb_identity, prepare_timeout_seconds).await?;
+    emit_flash_preparation_admission(state, &target.id, "firmware_update", None, admission);
+    let serial_rpc =
+        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
+    let serial_lock = take_cached_serial_process_lock(&state.serial_sessions, port)?
+        .ok_or_else(|| HttpError::internal("native update lost its serial session lock"))?;
+    ensure_native_serial_identity(port, usb_identity)?;
+    Ok((serial_rpc, serial_lock))
 }
 
 pub(crate) fn validate_local_update_request(
@@ -592,34 +625,9 @@ pub(crate) async fn prepare_firmware_operation(
     }
     refresh_operation_facts(state, device_id, payload, &mut prepared, progress).await?;
     if prepared.transport == DeviceTransport::NativeSerial {
-        let serial_rpc = progress.require(
-            acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
-        )?;
-        let serial_lock = if payload.operation == FirmwareOperation::Update {
-            let cached = progress.require(take_cached_serial_process_lock(
-                &state.serial_sessions,
-                &prepared.port_path,
-            ))?;
-            cached.ok_or_else(|| {
-                progress.fail(HttpError::internal(
-                    "native update lost its serial session lock",
-                ))
-            })?
-        } else {
-            progress.require(drop_cached_serial_session(
-                &state.serial_sessions,
-                &prepared.port_path,
-            ))?;
-            progress.require(
-                acquire_serial_process_lock(&prepared.port_path, ESPFLASH_COMMAND_TIMEOUT).await,
-            )?
-        };
-        if let Some(usb_identity) = prepared.usb_identity.as_ref() {
-            progress.require(ensure_native_serial_identity(
-                &prepared.port_path,
-                usb_identity,
-            ))?;
-        }
+        let (serial_rpc, serial_lock) =
+            prepare_native_firmware_transport(state, device_id, payload, &prepared, progress)
+                .await?;
         prepared.serial_lock = Some(serial_lock);
         prepared.serial_rpc = Some(serial_rpc);
     }
@@ -650,6 +658,54 @@ pub(crate) async fn prepare_firmware_operation(
         progress.stage_completed("chip_flash_security", json!({}));
     }
     Ok(prepared)
+}
+
+async fn prepare_native_firmware_transport(
+    state: &AppState,
+    device_id: &str,
+    payload: &FirmwareOperationRequest,
+    prepared: &PreparedFirmwareOperation,
+    progress: &mut FirmwareOperationProgress,
+) -> Result<(tokio::sync::OwnedMutexGuard<()>, SerialPortProcessLock), HttpError> {
+    let usb_identity = prepared.usb_identity.as_ref().ok_or_else(|| {
+        progress.fail(HttpError::internal(
+            "native firmware operation is missing USB identity",
+        ))
+    })?;
+    let timeout_seconds = progress.require(validate_flash_preparation_timeout(
+        payload.prepare_timeout_seconds,
+    ))?;
+    let admission = progress.require(
+        serial_flash_preparation_gate(state, &prepared.target, usb_identity, timeout_seconds).await,
+    )?;
+    emit_flash_preparation_admission(state, device_id, "firmware_operation", None, admission);
+    let serial_rpc = progress.require(
+        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
+    )?;
+    let serial_lock = if payload.operation == FirmwareOperation::Update {
+        let cached = progress.require(take_cached_serial_process_lock(
+            &state.serial_sessions,
+            &prepared.port_path,
+        ))?;
+        cached.ok_or_else(|| {
+            progress.fail(HttpError::internal(
+                "native update lost its serial session lock",
+            ))
+        })?
+    } else {
+        progress.require(drop_cached_serial_session(
+            &state.serial_sessions,
+            &prepared.port_path,
+        ))?;
+        progress.require(
+            acquire_serial_process_lock(&prepared.port_path, ESPFLASH_COMMAND_TIMEOUT).await,
+        )?
+    };
+    progress.require(ensure_native_serial_identity(
+        &prepared.port_path,
+        usb_identity,
+    ))?;
+    Ok((serial_rpc, serial_lock))
 }
 
 pub(crate) fn load_operation_bundle(
@@ -744,6 +800,16 @@ pub(crate) async fn refresh_operation_facts(
             prepared.transport,
             identity,
         ))?;
+        if !identity
+            .capabilities
+            .iter()
+            .any(|capability| capability == "flash_preparation")
+        {
+            return Err(progress.fail(HttpError::forbidden(
+                "flash_preparation_unsupported",
+                "The connected firmware does not expose the flash preparation capability.",
+            )));
+        }
     }
     update_operation_device(state, device_id, prepared, identity)?;
     progress.require(validate_update_runtime_facts(

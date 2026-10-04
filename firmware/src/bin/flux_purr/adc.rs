@@ -641,6 +641,8 @@ pub(crate) struct Fusb302bRuntime {
     pub(crate) awaiting_vbus_restore: bool,
     pub(crate) request_rejected: bool,
     pub(crate) request_timed_out: bool,
+    pub(crate) idle_transition_target_mv: Option<u16>,
+    pub(crate) idle_transition_last_step_at_ms: Option<u64>,
     // A local I2C fault has already withdrawn authorization. Avoid immediately
     // repeating a multi-transfer recovery on every 5ms service turn.
     pub(crate) transport_recovery_not_before_ms: Option<u64>,
@@ -706,7 +708,7 @@ pub(crate) enum PdContractRequestState {
 impl Fusb302bRuntime {
     pub(crate) const fn new() -> Self {
         Self {
-            policy: fusb302b::SinkPolicy::new(
+            policy: fusb302b::SinkPolicy::new_standby(
                 FUSB302B_INITIAL_PPS_REQUEST_MV,
                 MAX_HEATER_CONTRACT_MA,
             ),
@@ -729,6 +731,8 @@ impl Fusb302bRuntime {
             awaiting_vbus_restore: false,
             request_rejected: false,
             request_timed_out: false,
+            idle_transition_target_mv: None,
+            idle_transition_last_step_at_ms: None,
             transport_recovery_not_before_ms: None,
             vbus_status_observed: false,
             vbus_status_raw: 0,
@@ -753,6 +757,8 @@ impl Fusb302bRuntime {
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
         self.retry_fail_recovery_pending = false;
+        self.idle_transition_target_mv = None;
+        self.idle_transition_last_step_at_ms = None;
         self.vbus_status_observed = false;
         self.vbus_status_raw = 0;
     }
@@ -842,6 +848,8 @@ impl Fusb302bRuntime {
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
         self.retry_fail_recovery_pending = false;
+        self.idle_transition_target_mv = None;
+        self.idle_transition_last_step_at_ms = None;
         self.clear_vbus_low_interlock();
         if !fusb302b_flush_receive_fifo(i2c).await {
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
@@ -999,6 +1007,8 @@ impl Fusb302bRuntime {
         self.pps_keepalive_pending_at_ms = None;
         self.request_rejected = false;
         self.request_timed_out = false;
+        self.idle_transition_target_mv = None;
+        self.idle_transition_last_step_at_ms = None;
         let now_ms = now.as_millis();
         let request_inflight = matches!(
             self.policy.phase(),
@@ -1072,6 +1082,8 @@ impl Fusb302bRuntime {
         self.partial_rx_started_at_ms = None;
         self.request_rejected = false;
         self.request_timed_out = false;
+        self.idle_transition_target_mv = None;
+        self.idle_transition_last_step_at_ms = None;
         if !fusb302b_flush_receive_fifo(i2c).await {
             let _ = self
                 .recover_transient_transport_fault(
@@ -1144,6 +1156,16 @@ impl Fusb302bRuntime {
         let now_ms = now.as_millis();
         if replace_pending {
             self.policy.cancel_pending_request();
+            self.idle_transition_target_mv = None;
+            self.idle_transition_last_step_at_ms = None;
+            let active = self.policy.active_contract();
+            let standby_target_mv = self
+                .policy
+                .standby_contract()
+                .map_or(FUSB302B_PD_ABSOLUTE_MIN_MV, |contract| contract.voltage_mv);
+            if active.kind == ContractKind::Pps && active.voltage_mv > standby_target_mv {
+                self.idle_transition_target_mv = Some(standby_target_mv);
+            }
             self.policy.prepare_automatic_idle_refresh();
             return self.refresh_source_capabilities(i2c, now, true, true).await;
         }
@@ -1157,14 +1179,43 @@ impl Fusb302bRuntime {
             self.policy.cancel_pending_request();
         }
         let active = self.policy.active_contract();
-        if active.kind == ContractKind::Pps
-            && active.voltage_mv == FUSB302B_INITIAL_PPS_REQUEST_MV
-            && active.current_ma >= MIN_HEATER_CONTRACT_MA
+        let Some(standby_contract) = self.policy.standby_contract() else {
+            return PdContractRequestState::Failed;
+        };
+        if active.kind == ContractKind::Fixed
+            && active.voltage_mv == standby_contract.voltage_mv
+            && active.current_ma >= standby_contract.current_ma
         {
+            self.idle_transition_target_mv = None;
+            self.idle_transition_last_step_at_ms = None;
             return PdContractRequestState::Confirmed;
         }
-        let Some(rdo) = self.policy.request_automatic_idle_contract() else {
-            return PdContractRequestState::Failed;
+        self.idle_transition_target_mv = (active.kind == ContractKind::Pps
+            && active.voltage_mv > standby_contract.voltage_mv)
+            .then_some(standby_contract.voltage_mv);
+        self.idle_transition_last_step_at_ms = None;
+        let rdo = if let Some(target_mv) = self.idle_transition_target_mv {
+            match fusb302b::next_pps_to_fixed_voltage(
+                active.voltage_mv,
+                target_mv.max(FUSB302B_PPS_MIN_MV),
+            ) {
+                Some(step_mv) => {
+                    self.idle_transition_last_step_at_ms = Some(now_ms);
+                    match self.policy.request_automatic_idle_pps_step(step_mv) {
+                        Some(rdo) => rdo,
+                        None => return PdContractRequestState::Failed,
+                    }
+                }
+                None => match self.policy.request_automatic_idle_fixed_contract() {
+                    Some(rdo) => rdo,
+                    None => return PdContractRequestState::Failed,
+                },
+            }
+        } else {
+            match self.policy.request_automatic_idle_fixed_contract() {
+                Some(rdo) => rdo,
+                None => return PdContractRequestState::Failed,
+            }
         };
         let header = fusb302b::request_header(self.next_message_id);
         if let Err(fault) = self.transmit(i2c, header, &rdo).await {
@@ -1174,6 +1225,70 @@ impl Fusb302bRuntime {
             return PdContractRequestState::Failed;
         }
         self.last_request_at_ms = Some(now_ms);
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
+        PdContractRequestState::Pending
+    }
+
+    pub(crate) async fn advance_automatic_idle_transition(
+        &mut self,
+        i2c: &mut PdI2c<'_>,
+        now: PdTimestamp,
+    ) -> PdContractRequestState {
+        let Some(target_mv) = self.idle_transition_target_mv else {
+            return PdContractRequestState::Confirmed;
+        };
+        if !matches!(self.policy.phase(), SinkPhase::Ready) {
+            return PdContractRequestState::Pending;
+        }
+        let active = self.policy.active_contract();
+        if active.kind == ContractKind::Fixed
+            && active.voltage_mv == target_mv
+            && active.current_ma >= self.policy.standby_contract().map_or(0, |c| c.current_ma)
+        {
+            self.idle_transition_target_mv = None;
+            self.idle_transition_last_step_at_ms = None;
+            return PdContractRequestState::Confirmed;
+        }
+        let now_ms = now.as_millis();
+        if self
+            .idle_transition_last_step_at_ms
+            .is_some_and(|last| now_ms.saturating_sub(last) < fusb302b::PPS_TO_FIXED_INTERVAL_MS)
+        {
+            return PdContractRequestState::Pending;
+        }
+        if active.kind != ContractKind::Pps {
+            return PdContractRequestState::Failed;
+        }
+        let next_floor = target_mv.max(FUSB302B_PPS_MIN_MV);
+        let Some(step_mv) = fusb302b::next_pps_to_fixed_voltage(active.voltage_mv, next_floor)
+        else {
+            let Some(rdo) = self.policy.request_automatic_idle_fixed_contract() else {
+                return PdContractRequestState::Failed;
+            };
+            if self
+                .transmit(i2c, fusb302b::request_header(self.next_message_id), &rdo)
+                .await
+                .is_err()
+            {
+                return PdContractRequestState::Failed;
+            }
+            self.last_request_at_ms = Some(now_ms);
+            self.idle_transition_last_step_at_ms = Some(now_ms);
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
+            return PdContractRequestState::Pending;
+        };
+        let Some(rdo) = self.policy.request_automatic_idle_pps_step(step_mv) else {
+            return PdContractRequestState::Failed;
+        };
+        if self
+            .transmit(i2c, fusb302b::request_header(self.next_message_id), &rdo)
+            .await
+            .is_err()
+        {
+            return PdContractRequestState::Failed;
+        }
+        self.last_request_at_ms = Some(now_ms);
+        self.idle_transition_last_step_at_ms = Some(now_ms);
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
         PdContractRequestState::Pending
     }
@@ -1559,6 +1674,11 @@ impl Fusb302bRuntime {
                     .await;
             }
             self.last_request_at_ms = Some(now_ms);
+            if self.idle_transition_target_mv.is_some()
+                && self.policy.pending_contract().kind == ContractKind::Pps
+            {
+                self.idle_transition_last_step_at_ms = Some(now_ms);
+            }
             self.last_source_capabilities_request_at_ms = None;
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
         } else if self.policy.phase() == SinkPhase::Ready {

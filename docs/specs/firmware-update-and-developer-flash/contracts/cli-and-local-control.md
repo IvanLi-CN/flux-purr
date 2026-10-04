@@ -7,6 +7,7 @@
 | 一般用户 | `flux-purr update --port <serial-port> --bundle <local.fluxpurr-fw> [--devd <local-control-socket>]` | 本地 `.fluxpurr-fw`，且命中随 host-tools/Web 发布的 SHA-256 完整性清单 | ELF、BIN、artifact ID、manifest path、URL、自动选端口 |
 | 开发者 | `flux-purr flash --port <serial-port> [--elf <local-elf>] [--skip-backup --confirm NO_EEPROM_BACKUP]` | 本地 ELF；缺省为 `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr` | Bundle、artifact ID、manifest path、URL、`--devd`、HTTP/devd |
 | 开发者 | `flux-purr recover --port <serial-port> --elf <local-elf> --confirm ERASE` | 本地 ELF | Bundle、artifact ID、manifest path、URL、`--devd`、HTTP/devd |
+| 开发者 | `flux-purr flash-preparation start|status|cancel --port <serial-port>` | 已授权的精确串口 | 自动选择端口、`--devd`、HTTP/devd |
 
 `--port` is required for every firmware operation above. A supplied path is the entire target identity: discovery, remembered defaults, interactive selection, and re-enumeration replacement are forbidden. Any unsupported flag fails during argument parsing before a serial operation, child process, or network operation begins.
 
@@ -33,7 +34,9 @@ The protocol is a versioned, length-prefixed CBOR stream over the native endpoin
 
 ## Developer Flash Execution
 
-`flash` and `recover` link only the local serial/ROM flashing implementation required for their operation. They do not start devd, open a control socket, create a lease, call HTTP, or accept any endpoint string. `flash` performs only the image-required MCU erase/write work; `recover` is the only command permitted to request an MCU full erase.
+`flash` and `recover` link only the local serial/ROM flashing implementation required for their operation. They do not start devd, open a control socket, create a lease, call HTTP, or accept any endpoint string. `flash` performs only the image-required MCU erase/write work; `recover` is the only command permitted to request an MCU full erase. Both paths first pass the online flash-preparation gate, and recheck it after a normal EEPROM backup before any ROM probe or write.
+
+`flash-preparation start` sends an idempotent `prepare_flash` request and waits for the three applied fields `heating`, `cooling`, and `pdFixedOrDefault`; `status` reads the same snapshot and `cancel` releases the RAM hold. The direct CLI keeps one raw serial descriptor across these requests and the backup session. A responsive but unready target fails at the configured deadline; only three consecutive timeout or serial-I/O probes on the same present, identity-matching port classify the application as unresponsive and bypass the PD wait.
 
 The Developer backup preflight runs while the application protocol remains available. It finishes before any ROM reset. A board that cannot serve the backup protocol requires the explicit skip confirmation or `recover`; the tool must not silently treat an unavailable EEPROM snapshot as a successful backup.
 
