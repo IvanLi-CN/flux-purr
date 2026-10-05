@@ -1865,7 +1865,10 @@ impl ThermalTuningRuntime {
             && sample.elapsed_ms.saturating_sub(stable_start) >= THERMAL_TUNING_STABLE_WINDOW_MS
             && sampling_sufficient
         {
-            self.stable_window_verified_at_ms = Some(sample.elapsed_ms);
+            // Keep the first complete witness. Later Hold samples may leave
+            // the absolute band; they belong to the separate hold p2p gate.
+            self.stable_window_verified_at_ms
+                .get_or_insert(sample.elapsed_ms);
         }
     }
 
@@ -4828,6 +4831,28 @@ mod tests {
             .collect();
         assert_eq!(elapsed, [0, 50, 100]);
         assert_eq!(runtime.current_elapsed_ms, 100);
+    }
+
+    #[test]
+    fn verified_window_keeps_its_first_witness_during_later_hold_excursions() {
+        // The 240C confirmation's early 10s window is valid, but later Hold
+        // leaves the absolute band while staying inside its separate p2p gate.
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.warmup_exited_at_ms = Some(1_000);
+        for elapsed_ms in (1_000..=11_000).step_by(250) {
+            runtime
+                .update_stable_window(&sample(elapsed_ms, ThermalTuningPhase::Hold, 23_950), 240);
+        }
+        assert_eq!(runtime.stable_window_started_at_ms, Some(1_000));
+        assert_eq!(runtime.stable_window_verified_at_ms, Some(11_000));
+        for (elapsed_ms, temperature) in [(11_250, 24_000), (11_500, 23_830), (11_750, 23_950)] {
+            runtime.update_stable_window(
+                &sample(elapsed_ms, ThermalTuningPhase::Hold, temperature),
+                240,
+            );
+        }
+        assert_eq!(runtime.stable_window_started_at_ms, Some(1_000));
+        assert_eq!(runtime.stable_window_verified_at_ms, Some(11_000));
     }
 
     #[test]
