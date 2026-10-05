@@ -858,9 +858,6 @@ fn conservative_high_side_candidate(
         .overshoot_c
         .max(evidence.hold_p2p_c)
         .max(evidence.residual_c);
-    if severity_c <= 3.0 {
-        return None;
-    }
     let upper = i32::from(evidence.target_c) * 100 + 150;
     let broke_high = evidence
         .first_band_exit_centi_c
@@ -873,6 +870,15 @@ fn conservative_high_side_candidate(
                 temperature > upper
             });
     if !broke_high && !missed_upper_band {
+        return None;
+    }
+    // An unverified upper-band break is a failed stability gate even when
+    // overshoot and p2p remain below their separate 3C hard limits. The
+    // firmware high-temperature exception must outrank Underpowered here.
+    // A later exit after a verified window does not create this exception.
+    let high_temperature_window_failure =
+        evidence.target_c > 150 && evidence.full_speed_failed && !evidence.stable_window_verified;
+    if severity_c <= 3.0 && !high_temperature_window_failure {
         return None;
     }
 
@@ -1739,7 +1745,7 @@ mod tests {
     }
 
     #[test]
-    fn high_temperature_trim_requires_high_side_and_thermal_failure_within_scope() {
+    fn high_temperature_trim_requires_high_side_and_a_failed_gate_within_scope() {
         let previous = high_temperature_point(160);
         let facts = high_temperature_failure(160);
         let no_high_side = TuneEvidence {
@@ -1749,6 +1755,8 @@ mod tests {
         };
         assert!(conservative_high_side_candidate(previous, no_high_side).is_none());
         let no_thermal_failure = TuneEvidence {
+            full_speed_failed: false,
+            stable_window_verified: true,
             overshoot_c: 3.0,
             hold_p2p_c: 3.0,
             residual_c: 3.0,
@@ -1771,6 +1779,66 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn unverified_high_temperature_upper_exit_trims_even_below_thermal_hard_limits() {
+        // Captured 160C scout 3: the window breaks at 161.71C while the
+        // Underpowered classification otherwise raises the floor 700 -> 760.
+        let previous = ThermalControlProfilePointConfig {
+            brake_distance_centi_c: 801,
+            approach_floor_power_permille: 700,
+            approach_power_permille: 780,
+            hold_power_permille: 449,
+            hold_reheat_power_permille: 494,
+            ..high_temperature_point(160)
+        };
+        for target_c in [160, 180, 220, 240] {
+            let previous = ThermalControlProfilePointConfig {
+                target_temp_c: target_c,
+                ..previous
+            };
+            let facts = TuneEvidence {
+                curve_class: CurveClass::Underpowered,
+                overshoot_c: 1.60,
+                hold_p2p_c: 1.67,
+                residual_c: 1.67,
+                first_band_observed: true,
+                first_band_exit_centi_c: Some(target_c * 100 + 171),
+                ..evidence(target_c)
+            };
+            for tuned in [
+                tune_point(previous, facts),
+                reseed_after_hold_confirm(previous, facts),
+            ] {
+                assert_eq!(tuned.approach_floor_power_permille, 600);
+                assert_eq!(tuned.approach_power_permille, 680);
+                assert_eq!(tuned.hold_power_permille, 399);
+                assert_eq!(tuned.hold_reheat_power_permille, 444);
+                assert_eq!(tuned.brake_distance_centi_c, 1101);
+            }
+            let missed_upper = TuneEvidence {
+                first_band_observed: false,
+                first_band_exit_centi_c: None,
+                deadline_temperature_centi_c: Some(target_c * 100 + 171),
+                ..facts
+            };
+            assert!(tune_point(previous, missed_upper).approach_floor_power_permille < 700);
+            let verified = TuneEvidence {
+                full_speed_failed: false,
+                stable_window_verified: true,
+                ..facts
+            };
+            assert!(conservative_high_side_candidate(previous, verified).is_none());
+        }
+        let low_target = TuneEvidence {
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(10_171),
+            overshoot_c: 1.71,
+            hold_p2p_c: 1.71,
+            ..evidence(100)
+        };
+        assert!(conservative_high_side_candidate(point(100), low_target).is_none());
     }
 
     #[test]
