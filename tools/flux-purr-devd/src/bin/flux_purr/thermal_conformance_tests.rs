@@ -127,6 +127,30 @@ fn firmware_candidate_matches_external_lower_band_hil_replay() {
 }
 
 #[test]
+fn policy2_60c_overshoot_replay_selects_the_frozen_reduced_energy_candidate() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/thermal-60c-policy2-overshoot.json"
+    ))
+    .unwrap();
+    let profile = json!({"settings": fixture["settings"], "points": [fixture["point"]]});
+    let rows = fixture["samples"].as_array().unwrap();
+    let previous = thermal_candidate_profile_from_value(profile.clone()).points[0];
+    let (expected, failure) =
+        external_candidate_with_stop(&profile, rows, "full_speed_to_stable_timeout");
+    let actual = firmware_candidate(profile, rows);
+    assert_eq!(failure, "stable_window_broke_high");
+    assert_eq!(actual, expected);
+    assert!(actual.brake_distance_centi_c > previous.brake_distance_centi_c);
+    assert!(actual.approach_power_permille < previous.approach_power_permille);
+    assert!(actual.approach_floor_power_permille < previous.approach_floor_power_permille);
+    assert_eq!(actual.brake_distance_centi_c, 1_400);
+    assert_eq!(actual.approach_power_permille, 350);
+    assert_eq!(actual.approach_floor_power_permille, 100);
+    assert_eq!(actual.hold_power_permille, 100);
+    assert_eq!(actual.hold_reheat_power_permille, 120);
+}
+
+#[test]
 fn firmware_candidate_matches_external_late_window_hil_replays() {
     let fixtures: Vec<Value> = serde_json::from_str(include_str!(
         "../../../tests/fixtures/thermal-60c-late-window-replays.json"
