@@ -9444,6 +9444,26 @@ fn production_test_input(measured_temp_c: f32) -> ThermalPlantRuntimeInput {
 }
 
 #[test]
+fn production_point_local_zero_leads_survive_profile_materialization() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    config.settings.approach_lead_ticks = 7;
+    config.settings.hold_lead_ticks = 6;
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 60;
+    point.approach_lead_ticks = 0;
+    point.hold_lead_ticks = 0;
+    config.sanitize();
+    let preview = ThermalControlProfile::from_saved_config(&config).unwrap();
+    let effective = preview.control_target(60);
+    assert_eq!(effective.approach_lead_ticks, 0);
+    assert_eq!(effective.hold_lead_ticks, 0);
+}
+
+#[test]
 fn production_hold_entry_cannot_be_widened_by_candidate_or_timeout() {
     for target in [60, 160] {
         for curve_entry in [20, 270, 420] {

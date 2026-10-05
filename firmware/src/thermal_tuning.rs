@@ -878,9 +878,10 @@ impl ThermalTuningRuntime {
 
     fn install_candidate_profile(
         &mut self,
-        profile: ThermalControlProfileConfig,
+        mut profile: ThermalControlProfileConfig,
         seed_source: &str,
     ) -> Result<(), ThermalTuningError> {
+        profile.sanitize();
         let hash = hash_profile(&profile).ok_or(ThermalTuningError::CandidateProfileRequired)?;
         self.candidate_profile = Some(profile);
         self.candidate_hash = Some(hash);
@@ -1022,6 +1023,7 @@ impl ThermalTuningRuntime {
             return;
         };
         *point = tuned;
+        profile.sanitize();
         if let Some(hash) = hash_profile(profile) {
             self.candidate_hash = Some(hash);
             self.preview_update_pending = true;
@@ -2046,6 +2048,7 @@ impl ThermalTuningRuntime {
             .find(|point| point.target_temp_c == target)
             .ok_or(ThermalTuningError::CandidateProfileRequired)?;
         *point = seeded;
+        profile.sanitize();
         self.candidate_hash = hash_profile(profile);
         self.preview_update_pending = true;
         self.preview_receipt = None;
@@ -2194,7 +2197,11 @@ impl ThermalTuningRuntime {
     }
 
     pub fn record_preview_applied(&mut self) -> Result<(), ThermalTuningError> {
-        let applied_hash = self.candidate_profile.as_ref().and_then(hash_profile);
+        let applied_hash = self.candidate_profile.as_ref().and_then(|profile| {
+            let mut effective = *profile;
+            effective.sanitize();
+            hash_profile(&effective)
+        });
         if !self.armed || applied_hash.as_ref() != self.candidate_hash.as_ref() {
             self.fail("candidate_preview_hash_mismatch");
             return Err(ThermalTuningError::IdentityMismatch);
@@ -4221,6 +4228,72 @@ mod tests {
     }
 
     #[test]
+    fn candidate_preview_identity_uses_the_bounded_production_profile() {
+        let mut runtime = ThermalTuningRuntime::new();
+        let mut profile = profile_with_targets(&[60]);
+        profile.points[0]
+            .as_mut()
+            .unwrap()
+            .approach_damping_exponent_permille = 4_050;
+        runtime
+            .install_candidate_profile(profile, "predicted_from_scout")
+            .unwrap();
+        let mut effective = runtime.candidate_profile.unwrap();
+        effective.sanitize();
+        assert_eq!(runtime.candidate_profile, Some(effective));
+        assert_eq!(runtime.candidate_hash, hash_profile(&effective));
+    }
+
+    #[test]
+    fn preview_receipt_rejects_an_unbounded_profile_identity() {
+        let mut runtime = ThermalTuningRuntime::new();
+        let mut profile = profile_with_targets(&[60]);
+        profile.points[0]
+            .as_mut()
+            .unwrap()
+            .approach_damping_exponent_permille = 4_050;
+        runtime.candidate_profile = Some(profile);
+        runtime.candidate_hash = hash_profile(&profile);
+        runtime.armed = true;
+        assert_eq!(
+            runtime.record_preview_applied(),
+            Err(ThermalTuningError::IdentityMismatch)
+        );
+        assert!(!runtime.armed);
+        assert!(runtime.preview_receipt.is_none());
+    }
+
+    #[test]
+    fn high_side_candidate_mutation_bounds_damping_before_hashing() {
+        let mut runtime = ThermalTuningRuntime::new();
+        let mut profile = profile_with_targets(&[60]);
+        profile.points[0]
+            .as_mut()
+            .unwrap()
+            .approach_damping_exponent_permille = 4_000;
+        runtime
+            .install_candidate_profile(profile, "initial")
+            .unwrap();
+        for (elapsed, phase, temperature) in [
+            (0, ThermalTuningPhase::Warmup, 3_500),
+            (1_000, ThermalTuningPhase::Approach, 5_850),
+            (2_000, ThermalTuningPhase::Hold, 5_950),
+            (3_000, ThermalTuningPhase::Hold, 6_153),
+        ] {
+            runtime.update_trial_metrics(&sample(elapsed, phase, temperature), 60);
+        }
+        runtime.mutate_candidate_for_failure(60, Some(153), Some(203), None, 10_000);
+        let effective = runtime.candidate_profile.unwrap();
+        assert_eq!(
+            effective.points[0]
+                .unwrap()
+                .approach_damping_exponent_permille,
+            4_000
+        );
+        assert_eq!(runtime.candidate_hash, hash_profile(&effective));
+    }
+
+    #[test]
     fn local_trial_samples_select_conservative_high_side_candidate() {
         let mut runtime = ThermalTuningRuntime::new();
         runtime.candidate_profile = Some(profile_with_targets(&[60]));
@@ -4721,7 +4794,8 @@ mod tests {
 
     #[test]
     fn save_receipt_binds_eeprom_generation_and_verified_bank_hash() {
-        let profile = profile_with_targets(&THERMAL_TUNING_EXECUTION_ORDER_C);
+        let mut profile = profile_with_targets(&THERMAL_TUNING_EXECUTION_ORDER_C);
+        profile.sanitize();
         let candidate_hash = hash_profile(&profile).unwrap();
         let mut runtime = ThermalTuningRuntime::new();
         runtime
@@ -4766,7 +4840,8 @@ mod tests {
 
     #[test]
     fn save_rejects_delivered_but_unacknowledged_events() {
-        let profile = profile_with_targets(&THERMAL_TUNING_EXECUTION_ORDER_C);
+        let mut profile = profile_with_targets(&THERMAL_TUNING_EXECUTION_ORDER_C);
+        profile.sanitize();
         let candidate_hash = hash_profile(&profile).unwrap();
         let mut runtime = ThermalTuningRuntime::new();
         runtime

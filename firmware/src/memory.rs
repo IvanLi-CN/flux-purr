@@ -1153,16 +1153,12 @@ fn sanitize_thermal_profile_point(
             settings.hold_blend_ticks,
             THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX,
         ),
-        approach_lead_ticks: default_or_min(
-            point.approach_lead_ticks,
-            settings.approach_lead_ticks,
-            THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX,
-        ),
-        hold_lead_ticks: default_or_min(
-            point.hold_lead_ticks,
-            settings.hold_lead_ticks,
-            THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX,
-        ),
+        approach_lead_ticks: point
+            .approach_lead_ticks
+            .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
+        hold_lead_ticks: point
+            .hold_lead_ticks
+            .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
     }
 }
 
@@ -5544,6 +5540,25 @@ mod tests {
         );
         assert_eq!(expected.hold_ki_permille_per_c_tick, 1);
         assert_eq!(expected.hold_reheat_power_permille, 390);
+        assert_eq!(expected.approach_lead_ticks, 0);
+        assert_eq!(expected.hold_lead_ticks, 0);
+    }
+
+    #[test]
+    fn legacy_point_without_lead_fields_inherits_settings_once() {
+        let settings = ThermalControlProfileSettingsConfig {
+            approach_lead_ticks: 7,
+            hold_lead_ticks: 6,
+            ..ThermalControlProfileSettingsConfig::default()
+        };
+        let values = decode_profile_hold(
+            &[0; THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY],
+            0,
+            THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY,
+            &settings,
+        );
+        assert_eq!(values.approach_lead_ticks, 7);
+        assert_eq!(values.hold_lead_ticks, 6);
     }
 
     #[test]
