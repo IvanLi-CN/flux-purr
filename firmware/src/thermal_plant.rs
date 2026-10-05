@@ -37,6 +37,45 @@ pub fn control_target_temperature_c(target_temp_c: f32) -> f32 {
     target_temp_c
 }
 
+/// Passive heat loss fitted from the calibration cooling trace, in model units.
+/// This is an estimate, not an electrical power measurement.
+pub fn natural_cooling_loss_mw(
+    model: ThermalPlantProjection,
+    temperature_c: f32,
+    ambient_c: f32,
+) -> f32 {
+    let temperature_k = (temperature_c + 273.15).max(1.0);
+    let ambient_k = (ambient_c + 273.15).max(1.0);
+    let temperature_k2 = temperature_k * temperature_k;
+    let ambient_k2 = ambient_k * ambient_k;
+    (model.convection_mw_per_c * (temperature_c - ambient_c).max(0.0)
+        + model.radiation_mw_per_k4
+            * (temperature_k2 * temperature_k2 - ambient_k2 * ambient_k2).max(0.0))
+    .max(0.0)
+}
+
+pub fn natural_cooling_rate_c_per_s(
+    model: ThermalPlantProjection,
+    temperature_c: f32,
+    ambient_c: f32,
+) -> Option<f32> {
+    if !temperature_c.is_finite()
+        || !ambient_c.is_finite()
+        || !model.thermal_capacity_mj_per_c.is_finite()
+        || model.thermal_capacity_mj_per_c <= 0.0
+        || !model.convection_mw_per_c.is_finite()
+        || model.convection_mw_per_c < 0.0
+        || !model.radiation_mw_per_k4.is_finite()
+        || model.radiation_mw_per_k4 < 0.0
+        || model.transport_delay_ms > 60_000
+    {
+        return None;
+    }
+    let rate =
+        -natural_cooling_loss_mw(model, temperature_c, ambient_c) / model.thermal_capacity_mj_per_c;
+    rate.is_finite().then_some(rate)
+}
+
 impl ThermalPlantController {
     pub const fn new() -> Self {
         Self {
@@ -61,15 +100,8 @@ impl ThermalPlantController {
         let dt_s = dt_s.clamp(0.001, 1.0);
         let max_power_mw = max_power_mw.max(0.0);
         let control_target_temp_c = control_target_temperature_c(target_temp_c);
-        let target_k = (control_target_temp_c + 273.15).max(1.0);
-        let ambient_k = (ambient_temp_c + 273.15).max(1.0);
-        let target_k2 = target_k * target_k;
-        let ambient_k2 = ambient_k * ambient_k;
-        let loss_feedforward_mw = (model.convection_mw_per_c
-            * (control_target_temp_c - ambient_temp_c).max(0.0)
-            + model.radiation_mw_per_k4
-                * (target_k2 * target_k2 - ambient_k2 * ambient_k2).max(0.0))
-        .max(0.0);
+        let loss_feedforward_mw =
+            natural_cooling_loss_mw(model, control_target_temp_c, ambient_temp_c);
         let delay_s = model.transport_delay_ms as f32 / 1_000.0;
         let error_c = control_target_temp_c - current_temp_c;
         let predicted_error_c = error_c - delay_s * slope_c_per_s;

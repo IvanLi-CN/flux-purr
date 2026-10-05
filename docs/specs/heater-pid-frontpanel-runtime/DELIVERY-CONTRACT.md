@@ -55,7 +55,7 @@
 | 模型与门禁 | 两类生产加热都仅在有效 physical thermal plant model 存在时允许。3A 继续使用 `Ctheta*dT/dt = Ph - kc*(T-Ta) - kr*(Tk^4-TaK^4)` 和 `sat(Ploss(T) + Kp*(e-tau_d*dT/dt) + Ki*integral(e))` 的 plant PI，保留 `Pmax(T)` 饱和与 anti-windup。已核实的 5A PPS source 使用现有 point-local profile 控制器；其输出仍受既有 PPS/PWM、温度相关电阻和电流安全边界限制。两者控制目标均为请求温度，不得使用隐藏 target offset。`Pmax(T)` 是建模上限而非实测功率。 |
 | 节拍与采样 | 控制循环固定为真实单调 `50 ms (20 Hz)`；每周期聚合 `64` 次 RTD conversion，采样总频率至少 `1280 Hz`。PWM 固定为 `100 Hz`，并回显控制间隔、周期耗时、滤波升温率和 coast 状态。 |
 | Warmup | 首次 arm、目标切换或 `Approach -> Warmup` 回退均执行 `100 ms` 线性软启动。warmup 内逻辑输出固定 `100%`，沿温度/电流合同允许的 PPS 上限运行；不得用 profile 中的较低功率把它变成慢爬坡。 |
-| Approach 与 Hold | warmup 退出距离取静态 brake distance 与“滤波升温斜率 × approach lead”的较大值。首次进入 hold 后锁定 approach 建立的 PPS 电压，由 PWM 作快速 PI 调节；hold 内不主动下扫 PPS。预测 coast 只能满足既有滤波/原始温度/误差四项门禁后退出。 |
+| Approach 与 Hold | 普通5A与内部调优共用自然冷却模型辅助的生产 profile 路径，制动、预测及补热恢复按 [自然冷却控制合同](NATURAL-COOLING-CONTROL.md) 执行。首次进入 Hold 后仍锁定 PPS 电压，由 PWM 快速 PI 调节；Hold 不主动下扫 PPS。物理入口与资格门禁保持固定。 |
 | 执行器映射 | PPS 提供粗粒度功率控制；PPS 高于工作 floor 时保持 `100%` PWM，达到 floor 或 bounded down-ramp 时，PWM 按请求功率与当前电压等效功率连续补偿至 `0..100%`。持续满 PWM 且升温不足时，才允许至少间隔 `2 s`、每次最多 `500 mV` 上调 PPS。 |
 | 参数与 profile | 运行时按目标温区选择完整 point-local 参数：brake、warmup reentry、approach、hold、PI、blend、lead 与各阈值。`settings` 只承载规定的全局字段。任何 preview/save 必须把当前目标的 effective point 和 settings 完整、可读回地 materialize。 |
 | 物理模型标定 | `thermal_plant_auto` 是独立单次事务：选择覆盖 `20V / >=3A` 的一个 PPS APDO，使用该 APDO `max_mv` 与 `100%` PWM 加热到 `220C`，立即断开 MOS，在保持合同下被动冷却至 `80C`，由同一 trace 拟合并原子激活。它不进入 Approach/Hold，也不生成 PID candidate。 |

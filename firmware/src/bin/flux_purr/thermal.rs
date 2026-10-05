@@ -756,6 +756,9 @@ pub(crate) struct HeaterController {
     pub(crate) hold_integral_c: f32,
     pub(crate) hold_coast_active: bool,
     pub(crate) hold_coast_cooling_samples: u8,
+    pub(crate) coast_cooling_elapsed_ms: u64,
+    pub(crate) coast_cooling_reference_c: Option<f32>,
+    pub(crate) natural_cooling_input: Option<ThermalPlantRuntimeInput>,
     pub(crate) heater_was_enabled: bool,
     pub(crate) warmup_started_at_ms: Option<u64>,
     pub(crate) thermal_plant_controller: ThermalPlantController,
@@ -803,6 +806,9 @@ pub(crate) struct ThermalControlFrame {
     hold_exit_error_c: f32,
     brake_distance_c: f32,
     warmup_handoff_error_c: f32,
+    natural_cooling_rate_c_per_s: Option<f32>,
+    natural_cooling_delay_s: f32,
+    natural_cooling_feedforward_percent: u8,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -848,6 +854,9 @@ impl HeaterController {
             hold_integral_c: 0.0,
             hold_coast_active: false,
             hold_coast_cooling_samples: 0,
+            coast_cooling_elapsed_ms: 0,
+            coast_cooling_reference_c: None,
+            natural_cooling_input: None,
             heater_was_enabled: false,
             warmup_started_at_ms: None,
             thermal_plant_controller: ThermalPlantController::new(),
@@ -896,6 +905,8 @@ impl HeaterController {
             self.production_controller = Some(kind);
         }
         let heater_enabled = input.heater_enabled && !disarm_for_source_change;
+        self.natural_cooling_input =
+            (kind == ProductionThermalController::Profile).then_some(input);
         let snapshot = match kind {
             ProductionThermalController::Plant => {
                 self.update_thermal_plant_at(ThermalPlantRuntimeInput {
@@ -919,6 +930,8 @@ impl HeaterController {
         self.previous_filtered_temp_c = Some(measured_temp_c);
         self.filtered_slope_c_per_profile_tick = 0.0;
         self.previous_measured_temp_c = Some(measured_temp_c);
+        self.coast_cooling_reference_c = None;
+        self.coast_cooling_elapsed_ms = 0;
     }
 
     pub(crate) fn latch_fault(&mut self, reason: HeaterFaultReason) -> bool {
@@ -1214,9 +1227,35 @@ impl HeaterController {
         measured_temp_c: f32,
         previous_measured_temp_c: f32,
     ) {
-        let cooling = measured_temp_c + 0.05 < previous_measured_temp_c
-            && frame.error_c >= frame.control_target.hold_on_error_c.max(0.05)
-            && frame.control_error_c >= frame.control_target.hold_on_error_c.max(0.05);
+        // Compare raw temperatures across a real time window. A fixed drop
+        // per control frame never triggers at a fast cadence during slow cooling.
+        if !self.hold_coast_active {
+            self.hold_coast_cooling_samples = 0;
+            self.coast_cooling_reference_c = None;
+            self.coast_cooling_elapsed_ms = 0;
+            return;
+        }
+        if measured_temp_c > previous_measured_temp_c + 0.05 {
+            self.coast_cooling_reference_c = None;
+            self.coast_cooling_elapsed_ms = 0;
+        }
+        let reference = *self
+            .coast_cooling_reference_c
+            .get_or_insert(previous_measured_temp_c);
+        self.coast_cooling_elapsed_ms = self
+            .coast_cooling_elapsed_ms
+            .saturating_add(frame.elapsed_ms);
+        let raw_cooling =
+            measured_temp_c + 0.05 < reference && measured_temp_c <= previous_measured_temp_c;
+        let model_predicts_low = frame.natural_cooling_rate_c_per_s.is_some_and(|rate| {
+            frame.error_c - rate * frame.natural_cooling_delay_s
+                >= frame.control_target.hold_on_error_c.max(0.05)
+        });
+        let cooling = raw_cooling
+            && self.coast_cooling_elapsed_ms >= 100
+            && ((frame.error_c >= frame.control_target.hold_on_error_c.max(0.05)
+                && frame.control_error_c >= frame.control_target.hold_on_error_c.max(0.05))
+                || model_predicts_low);
         if self.hold_coast_active && cooling {
             self.hold_coast_cooling_samples = self.hold_coast_cooling_samples.saturating_add(1);
         } else {
@@ -1229,7 +1268,11 @@ impl HeaterController {
             self.hold_coast_cooling_samples = 0;
             self.phase_ticks = 0;
             self.phase_tick_remainder_ms = 0;
-            self.hold_entry_output_percent = 0;
+            // Replace predicted passive loss immediately, then blend toward
+            // the same profile PI. No extra one-second ramp from zero on recovery.
+            self.hold_entry_output_percent = frame.natural_cooling_feedforward_percent;
+            self.coast_cooling_reference_c = None;
+            self.coast_cooling_elapsed_ms = 0;
         }
     }
 
@@ -1295,7 +1338,9 @@ impl HeaterController {
         };
         let requested_permille = self.hold_requested_permille(frame, base_permille);
         let pi_percent = percent_from_permille(requested_permille.clamp(0.0, 1_000.0) as u16);
-        if frame.hold_guard_error_c > 0.0 && self.phase_ticks < frame.hold_blend_cycles {
+        if (frame.hold_guard_error_c > 0.0 || frame.natural_cooling_rate_c_per_s.is_some())
+            && self.phase_ticks < frame.hold_blend_cycles
+        {
             let blend_ratio = f32::from(self.phase_ticks.saturating_add(1))
                 / f32::from(frame.hold_blend_cycles.max(1));
             ((f32::from(self.hold_entry_output_percent)
@@ -1414,6 +1459,8 @@ impl HeaterController {
                 || zero_output_ready
                 || projection_ready);
         self.hold_coast_cooling_samples = 0;
+        self.coast_cooling_reference_c = None;
+        self.coast_cooling_elapsed_ms = 0;
         if frame.actual_crossed_target_ready {
             self.filtered_temp_c = Some(measured_temp_c);
             self.previous_filtered_temp_c = Some(measured_temp_c);
@@ -1453,6 +1500,83 @@ impl HeaterController {
         };
     }
 
+    fn natural_cooling_guidance(
+        &self,
+        target_temp_c: i16,
+        measured_temp_c: f32,
+        target: ThermalControlTarget,
+        slope_c_per_s: f32,
+    ) -> (Option<f32>, f32, u8, f32) {
+        let rate = self.natural_cooling_input.and_then(|input| {
+            flux_purr_firmware::thermal_plant::natural_cooling_rate_c_per_s(
+                input.model,
+                measured_temp_c,
+                input.ambient_temp_c,
+            )
+        });
+        let input = self.natural_cooling_input.filter(|_| rate.is_some());
+        let delay_s = input.map_or(0.0, |input| input.model.transport_delay_ms as f32 / 1000.0);
+        let feedforward = input
+            .filter(|input| input.max_power_mw.is_finite() && input.max_power_mw > 0.0)
+            .map_or(0, |input| {
+                let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+                    input.model,
+                    f32::from(target_temp_c),
+                    input.ambient_temp_c,
+                );
+                percent_from_permille(
+                    (loss / input.max_power_mw * 1000.0)
+                        .clamp(0.0, f32::from(target.hold_power_permille))
+                        as u16,
+                )
+            });
+        // Observed net heating plus fitted loss estimates heat still in flight.
+        let model_brake = (slope_c_per_s - rate.unwrap_or(0.0)).max(0.0) * delay_s;
+        let brake = target
+            .brake_distance_c
+            .max(target.hold_entry_error_c + 0.1)
+            .max(model_brake.min(target.brake_distance_c + target.warmup_reenter_error_c));
+        (rate, delay_s, feedforward, brake)
+    }
+
+    fn hold_guard_error(error_c: f32, predicted_error_c: f32, target: ThermalControlTarget) -> f32 {
+        if error_c < 0.0 {
+            return error_c;
+        }
+        let lag_allowance = target
+            .hold_on_error_c
+            .max(0.05)
+            .min(target.hold_entry_error_c.max(0.05));
+        predicted_error_c.max(0.0).min(error_c + lag_allowance)
+    }
+
+    fn filter_profile_measurement(
+        &mut self,
+        measured_temp_c: f32,
+        filter_alpha: f32,
+        nominal_alpha: f32,
+        elapsed_ms: u64,
+    ) -> (f32, f32) {
+        let previous = self.filtered_temp_c;
+        let filtered = previous
+            .map(|last| last + filter_alpha * (measured_temp_c - last))
+            .unwrap_or(measured_temp_c);
+        let instantaneous_slope = previous
+            .map(|last| (filtered - last) * (HEATER_PROFILE_TICK_MS as f32 / elapsed_ms as f32))
+            .unwrap_or(0.0);
+        let nominal_slope_alpha = scaled_filter_alpha_for_control_interval(nominal_alpha).sqrt();
+        let slope_alpha = scaled_filter_alpha_for_elapsed(
+            nominal_slope_alpha,
+            elapsed_ms,
+            HEATER_CONTROL_INTERVAL_MS,
+        );
+        self.filtered_slope_c_per_profile_tick +=
+            slope_alpha * (instantaneous_slope - self.filtered_slope_c_per_profile_tick);
+        self.previous_filtered_temp_c = previous;
+        self.filtered_temp_c = Some(filtered);
+        (filtered, self.filtered_slope_c_per_profile_tick)
+    }
+
     fn measure_control_frame(
         &mut self,
         target_temp_c: i16,
@@ -1465,31 +1589,27 @@ impl HeaterController {
             control_cycle_parameters(control_target, elapsed_ms);
         let error_c = f32::from(target_temp_c) - measured_temp_c;
         let previous_error_c = f32::from(target_temp_c) - previous_measured_temp_c;
-        let last_filtered_temp_c = self.filtered_temp_c;
-        let filtered_temp_c = last_filtered_temp_c
-            .map(|previous| previous + filter_alpha * (measured_temp_c - previous))
-            .unwrap_or(measured_temp_c);
-        let instantaneous_slope_c_per_profile_tick = last_filtered_temp_c
-            .map(|last| {
-                (filtered_temp_c - last) * (HEATER_PROFILE_TICK_MS as f32 / elapsed_ms as f32)
-            })
-            .unwrap_or(0.0);
-        let nominal_slope_alpha =
-            scaled_filter_alpha_for_control_interval(control_target.settings.temp_filter_alpha)
-                .sqrt();
-        let slope_filter_alpha = scaled_filter_alpha_for_elapsed(
-            nominal_slope_alpha,
+        let (filtered_temp_c, filtered_slope_c_per_profile_tick) = self.filter_profile_measurement(
+            measured_temp_c,
+            filter_alpha,
+            control_target.settings.temp_filter_alpha,
             elapsed_ms,
-            HEATER_CONTROL_INTERVAL_MS,
         );
-        self.filtered_slope_c_per_profile_tick += slope_filter_alpha
-            * (instantaneous_slope_c_per_profile_tick - self.filtered_slope_c_per_profile_tick);
-        let filtered_slope_c_per_profile_tick = self.filtered_slope_c_per_profile_tick;
-        self.previous_filtered_temp_c = last_filtered_temp_c;
-        self.filtered_temp_c = Some(filtered_temp_c);
         let control_error_c = f32::from(target_temp_c) - filtered_temp_c;
+        let (
+            natural_cooling_rate_c_per_s,
+            natural_cooling_delay_s,
+            natural_cooling_feedforward_percent,
+            brake_distance_c,
+        ) = self.natural_cooling_guidance(
+            target_temp_c,
+            measured_temp_c,
+            control_target,
+            filtered_slope_c_per_profile_tick,
+        );
         let approach_projected_temp_c = filtered_temp_c
-            + (filtered_slope_c_per_profile_tick * f32::from(control_target.approach_lead_ticks));
+            + filtered_slope_c_per_profile_tick
+                * f32::from(control_target.approach_lead_ticks).max(natural_cooling_delay_s);
         let hold_projected_temp_c = filtered_temp_c
             + (filtered_slope_c_per_profile_tick * f32::from(control_target.hold_lead_ticks));
         let approach_control_error_c = f32::from(target_temp_c) - approach_projected_temp_c;
@@ -1510,17 +1630,8 @@ impl HeaterController {
         let hold_state_ready = control_error_c <= control_target.hold_exit_error_c;
         let actual_crossed_target_ready =
             error_c <= 0.0 && previous_error_c <= 0.0 && approach_control_error_c <= 0.0;
-        let hold_guard_error_c = if error_c >= 0.0 {
-            let filter_lag_allowance_c = control_target
-                .hold_on_error_c
-                .max(0.05)
-                .min(hold_entry_gate_c);
-            hold_control_error_c
-                .max(0.0)
-                .min(error_c + filter_lag_allowance_c)
-        } else {
-            error_c
-        };
+        let hold_guard_error_c =
+            Self::hold_guard_error(error_c, hold_control_error_c, control_target);
         let hold_reenter_error_c = control_target
             .hold_exit_error_c
             .max(control_target.hold_on_error_c)
@@ -1529,9 +1640,6 @@ impl HeaterController {
             && error_c <= control_target.hold_exit_error_c
             && control_error_c <= control_target.hold_exit_error_c;
         let hold_exit_error_c = error_c;
-        let brake_distance_c = control_target
-            .brake_distance_c
-            .max(control_target.hold_entry_error_c + 0.1);
         let warmup_handoff_error_c = warmup_handoff_error_c(
             brake_distance_c,
             control_target.warmup_reenter_error_c,
@@ -1564,6 +1672,9 @@ impl HeaterController {
             hold_exit_error_c,
             brake_distance_c,
             warmup_handoff_error_c,
+            natural_cooling_rate_c_per_s,
+            natural_cooling_delay_s,
+            natural_cooling_feedforward_percent,
         }
     }
 

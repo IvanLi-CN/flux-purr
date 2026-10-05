@@ -1,0 +1,38 @@
+{
+  "sequence": 0,
+  "elapsedMs": 300,
+  "kind": "sample",
+  "phase": "cooldown",
+  "targetC": 60,
+  "trialIndex": 0,
+  "sample": {
+    "sequence": 0,
+    "elapsedMs": 300,
+    "targetC": 60,
+    "trialIndex": 0,
+    "candidateId": "candidate-fan",
+    "candidateHash": "hash-fan",
+    "temperatureCentiC": 3500,
+    "vinMv": 21000,
+    "ppsContract": {
+      "voltageMv": 21000,
+      "currentMa": 5000,
+      "kind": "pps5a",
+      "confirmed": true
+    },
+    "requestedMv": 21000,
+    "ppsPowerCeilingMv": 21000,
+    "heaterRequestedOutputPermille": 0,
+    "heaterOutputPermille": 0,
+    "measurementValid": true,
+    "phase": "cooldown",
+    "fan": {
+      "enabled": true,
+      "pwmPermille": 0,
+      "outputLevel": "high"
+    }
+  },
+  "reason": null,
+  "trial": null,
+  "decision": null
+}

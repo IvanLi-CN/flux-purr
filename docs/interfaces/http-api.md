@@ -217,6 +217,18 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
 
 The calibration state machine uses the current valid RTD measurement directly for transient sampling, the `220C` cutoff, and the passive-cooling endpoint. Guarded control temperature remains a production PID input only. There is no separate `225C` calibration failure threshold; once the live measurement first reaches `220C`, logical duty and physical PWM are cleared in that control cycle. The selected calibration-owned PPS contract remains unchanged through passive cooling so PD renegotiation cannot disturb the RTD trace, and is cleared only after the model transaction completes, is canceled, or fails. General sensor and absolute-overtemperature protections remain authoritative.
 
+### Firmware thermal tuning sample fan evidence
+
+The optional `sample.fan` object in firmware tuning events contains `enabled`,
+`pwmPermille`, and `outputLevel` (`off|low|medium|high|limited`). It records the
+applied production command, not measured RPM. With enable asserted, the inverse
+fan regulator PWM at `0‰` requests full speed; disabled enable requests stop.
+The device event digest includes these fields in that order. Historical events
+without the object retain their digest and export as unavailable fan evidence.
+CLI and Web preserve the object in `samples.ndjson` and use the shared HTML
+renderer for the linked fan chart. See the
+[control contract](../specs/heater-pid-frontpanel-runtime/NATURAL-COOLING-CONTROL.md).
+
 ### `FirmwareArtifact`
 
 ```json

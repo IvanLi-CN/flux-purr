@@ -224,6 +224,14 @@ pub struct ThermalTuningPpsContract {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThermalTuningFanSample {
+    pub enabled: bool,
+    pub pwm_permille: u16,
+    pub output_level: crate::fan_policy::FanOutputLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThermalTuningSample {
     pub sequence: u32,
     pub elapsed_ms: u64,
@@ -240,6 +248,8 @@ pub struct ThermalTuningSample {
     pub heater_output_permille: u16,
     pub measurement_valid: bool,
     pub phase: ThermalTuningPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan: Option<ThermalTuningFanSample>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -364,6 +374,7 @@ pub struct ThermalTuningRuntime {
     pub events: Vec<ThermalTuningEvent, THERMAL_TUNING_EVENT_CAPACITY>,
     pub candidate_profile: Option<ThermalControlProfileConfig>,
     batch_current_profile: Option<ThermalControlProfileConfig>,
+    proposed_points: Vec<ThermalControlProfilePointConfig, 32>,
     batch_predicted_profile: Option<ThermalControlProfileConfig>,
     batch_current_score: Option<[f64; 11]>,
     batch_current_confirmable: bool,
@@ -462,6 +473,7 @@ impl ThermalTuningRuntime {
             events: Vec::new(),
             candidate_profile: None,
             batch_current_profile: None,
+            proposed_points: Vec::new(),
             batch_predicted_profile: None,
             batch_current_score: None,
             batch_current_confirmable: false,
@@ -832,6 +844,7 @@ impl ThermalTuningRuntime {
             < THERMAL_TUNING_TARGET_BUDGET_MS
             && self.trial_index < u8::MAX
         {
+            let previous = self.candidate_profile;
             self.mutate_candidate_for_failure(
                 target_c,
                 max_overshoot_centi_c,
@@ -839,6 +852,9 @@ impl ThermalTuningRuntime {
                 settle_time_ms,
                 full_speed_limit_ms,
             );
+            if !self.record_fresh_proposal(previous) {
+                return self.exhaust_candidate_search(target_c);
+            }
             self.seed_source = bounded_reason("evidence_adjustment");
             return self.schedule_trial(ThermalTuningTrialPurpose::Scout, "cooling before retry");
         }
@@ -910,6 +926,9 @@ impl ThermalTuningRuntime {
             full_speed_limit_ms,
         );
         let predicted = self.candidate_profile.filter(|profile| *profile != current);
+        if predicted.is_none() || !self.record_fresh_proposal(Some(current)) {
+            return self.exhaust_candidate_search(target_c);
+        }
         self.batch_current_profile = Some(current);
         self.batch_predicted_profile = predicted;
         self.batch_current_score = None;
@@ -919,6 +938,49 @@ impl ThermalTuningRuntime {
             ThermalTuningTrialPurpose::BatchCurrent,
             "cooling before current candidate comparison",
         )
+    }
+
+    fn record_fresh_proposal(&mut self, previous: Option<ThermalControlProfileConfig>) -> bool {
+        let target = self.targets_c[self.target_index];
+        let point = self.candidate_profile.and_then(|profile| {
+            profile
+                .points
+                .into_iter()
+                .flatten()
+                .find(|point| point.target_temp_c == target)
+        });
+        let previous_point = previous.and_then(|profile| {
+            profile
+                .points
+                .into_iter()
+                .flatten()
+                .find(|point| point.target_temp_c == target)
+        });
+        let Some(point) = point else {
+            return false;
+        };
+        if Some(point) == previous_point || self.proposed_points.contains(&point) {
+            return false;
+        }
+        if let Some(previous) = previous_point
+            && !self.proposed_points.contains(&previous)
+            && self.proposed_points.push(previous).is_err()
+        {
+            return false;
+        }
+        self.proposed_points.push(point).is_ok()
+    }
+
+    fn exhaust_candidate_search(&mut self, target_c: i16) -> Result<(), ThermalTuningError> {
+        self.failed_target_mask |= target_bit(target_c);
+        self.push_event(
+            ThermalTuningEventKind::Decision,
+            Some(target_c),
+            Some(self.trial_index),
+            None,
+            Some("candidate_search_exhausted_no_distinct_safe_proposal"),
+        );
+        self.advance_target()
     }
 
     fn finish_candidate_batch(
@@ -1967,6 +2029,7 @@ impl ThermalTuningRuntime {
         }
         while self.target_index + 1 < self.targets_c.len() {
             self.target_index += 1;
+            self.proposed_points.clear();
             self.trial_index = 0;
             self.trial_purpose = ThermalTuningTrialPurpose::Scout;
             self.batch_current_profile = None;
@@ -2788,8 +2851,47 @@ pub fn digest_event_chain(events: &[ThermalTuningEvent]) -> TuningHash {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn no_op_and_cyclic_candidate_proposals_are_not_reheated() {
+        let mut runtime = started_single_target_runtime();
+        let original = runtime.candidate_profile.unwrap();
+        assert!(!runtime.record_fresh_proposal(Some(original)));
+        let mut changed = original;
+        changed.points[0].as_mut().unwrap().hold_kp_permille_per_c += 1;
+        runtime.candidate_profile = Some(changed);
+        assert!(runtime.record_fresh_proposal(Some(original)));
+        runtime.candidate_profile = Some(original);
+        assert!(!runtime.record_fresh_proposal(Some(changed)));
+        runtime.exhaust_candidate_search(60).unwrap();
+        assert!(!runtime.armed);
+        assert!(runtime.events.iter().any(|event| event.reason.as_deref()
+            == Some("candidate_search_exhausted_no_distinct_safe_proposal")));
+    }
     use super::*;
     use crate::memory::{ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig};
+
+    #[test]
+    fn fan_sample_digest_matches_web_and_binds_applied_command() {
+        let (event, _) = serde_json_core::from_slice::<ThermalTuningEvent>(include_bytes!(
+            "../../web/src/features/control-plane-demo/thermal-tuning-fan.fixture.json"
+        ))
+        .unwrap();
+        let expected = digest_event_chain(&[event.clone()]);
+        assert_eq!(
+            expected.as_str(),
+            "966de02dc5498cccd6d899bb359104a1e1e83a0ec4d7dca65da7fd9dc6546ea6"
+        );
+        let mut altered = event;
+        altered
+            .sample
+            .as_mut()
+            .unwrap()
+            .fan
+            .as_mut()
+            .unwrap()
+            .enabled = false;
+        assert_ne!(expected, digest_event_chain(&[altered]));
+    }
 
     #[test]
     fn canonical_candidate_hash_matches_web_wire_fixture() {
@@ -3009,6 +3111,7 @@ mod tests {
             },
             measurement_valid: true,
             phase,
+            fan: None,
         }
     }
 
@@ -5034,6 +5137,7 @@ mod tests {
             heater_output_permille: 0,
             measurement_valid: true,
             phase: ThermalTuningPhase::Warmup,
+            fan: None,
         };
         assert_eq!(
             runtime.record_sample(sample),

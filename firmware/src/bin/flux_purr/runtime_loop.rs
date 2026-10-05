@@ -2712,6 +2712,17 @@ fn runtime_apply_pending_tuning_preview(state: &mut RuntimeLoopState) {
 }
 
 #[cfg(target_arch = "xtensa")]
+fn tuning_fan_sample(
+    command: FanHardwareCommand,
+) -> flux_purr_firmware::thermal_tuning::ThermalTuningFanSample {
+    flux_purr_firmware::thermal_tuning::ThermalTuningFanSample {
+        enabled: command.enabled,
+        pwm_permille: command.pwm_permille,
+        output_level: fan_output_level_for_command(command),
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 fn runtime_record_thermal_tuning_sample(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
@@ -2797,6 +2808,7 @@ fn runtime_record_thermal_tuning_sample(
         heater_output_permille: u16::from(state.last_heater_duty).saturating_mul(10),
         measurement_valid: temperature.measurement_valid,
         phase,
+        fan: Some(tuning_fan_sample(state.fan_command)),
     };
     let phase_before = state.thermal_tuning.phase;
     if state

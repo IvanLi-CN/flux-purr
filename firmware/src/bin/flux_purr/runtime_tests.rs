@@ -1,6 +1,116 @@
 use super::*;
 use flux_purr_firmware::thermal_tuning::ThermalTuningPhase;
 
+#[test]
+fn heater_coast_releases_on_smooth_cooling_at_fast_control_cadence() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    config.settings.temp_filter_alpha_permille = 750;
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 240;
+    point.hold_on_centi_c = 11;
+    point.hold_exit_centi_c = 160;
+    point.hold_entry_centi_c = 150;
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    for interval_ms in [20, 50, 100] {
+        let mut controller = HeaterController::new();
+        controller.last_target_temp_c = 240;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.hold_coast_active = true;
+        controller.filtered_temp_c = Some(240.5);
+        controller.previous_measured_temp_c = Some(240.5);
+        controller.filtered_slope_c_per_profile_tick = -0.5;
+        let mut recovered = false;
+        for now_ms in (interval_ms..=3_000).step_by(interval_ms as usize) {
+            let snapshot = controller.update_at(
+                240,
+                240.5 - now_ms as f32 * 0.0005,
+                true,
+                Some(profile),
+                now_ms,
+            );
+            recovered |= !snapshot.coast_active && snapshot.duty_percent > 0;
+        }
+        assert!(
+            recovered,
+            "coast never recovers at {interval_ms} ms cadence"
+        );
+    }
+}
+
+#[test]
+fn heater_profile_uses_calibrated_cooling_for_braking_and_early_recovery() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 240;
+    point.brake_distance_centi_c = 150;
+    point.warmup_reenter_centi_c = 1000;
+    point.hold_power_permille = 1000;
+    point.overshoot_cutoff_centi_c = 300;
+    point.hold_off_centi_c = 100;
+    config.points[1..].fill(None);
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    let input = ThermalPlantRuntimeInput {
+        target_temp_c: 240,
+        measured_temp_c: 236.0,
+        ambient_temp_c: 25.0,
+        heater_enabled: true,
+        max_power_mw: 100_000.0,
+        now_ms: 50,
+        model: flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 100.0,
+            radiation_mw_per_k4: 0.0,
+            thermal_capacity_mj_per_c: 10_000.0,
+            transport_delay_ms: 2000,
+        },
+    };
+    let mut calibrated = HeaterController::new();
+    calibrated.production_controller = Some(ProductionThermalController::Profile);
+    calibrated.last_target_temp_c = 240;
+    calibrated.filtered_temp_c = Some(235.9);
+    calibrated.previous_measured_temp_c = Some(235.9);
+    calibrated.filtered_slope_c_per_profile_tick = 2.0;
+    let mut legacy = calibrated;
+    let plain = legacy.update_at(240, 236.0, true, Some(profile), 50);
+    let (modelled, _) =
+        calibrated.update_production_at(ProductionThermalController::Profile, input, Some(profile));
+    assert_eq!(plain.phase, HeaterControlPhase::Warmup);
+    assert_eq!(modelled.phase, HeaterControlPhase::Approach);
+
+    calibrated.phase = HeaterControlPhase::Hold;
+    calibrated.hold_coast_active = true;
+    calibrated.filtered_temp_c = Some(240.7);
+    calibrated.previous_measured_temp_c = Some(240.7);
+    calibrated.filtered_slope_c_per_profile_tick = -0.5;
+    let mut recovery = None;
+    for tick in 1..=10 {
+        let (snapshot, _) = calibrated.update_production_at(
+            ProductionThermalController::Profile,
+            ThermalPlantRuntimeInput {
+                measured_temp_c: 240.7 - tick as f32 * 0.025,
+                now_ms: 50 + tick * 50,
+                ..input
+            },
+            Some(profile),
+        );
+        if !snapshot.coast_active && snapshot.duty_percent > 0 {
+            recovery = Some(snapshot);
+            break;
+        }
+    }
+    let recovery =
+        recovery.expect("modelled loss must recover before the plate falls below target");
+    assert!(recovery.error_c < 0.0);
+    assert!(recovery.duty_percent >= 20 && recovery.duty_percent < 100);
+}
+
 fn pps_source_capability(min_mv: u16, max_mv: u16, max_ma: u16) -> u32 {
     (0b11 << 30)
         | (u32::from(max_mv / 100) << 17)

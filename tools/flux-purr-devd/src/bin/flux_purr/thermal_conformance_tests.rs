@@ -847,6 +847,7 @@ fn replay_firmware_trials_and_capture_decisions(
             heater_output_permille: 0,
             measurement_valid: true,
             phase: ThermalTuningPhase::Cooldown,
+            fan: None,
         };
         runtime.record_sample(cooling.clone()).unwrap();
         for (row_index, row) in rows.iter().enumerate() {

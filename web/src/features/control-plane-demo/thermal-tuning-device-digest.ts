@@ -30,8 +30,10 @@ const DEVICE_EVENT_FIELDS: Record<string, string[]> = {
     'heaterOutputPermille',
     'measurementValid',
     'phase',
+    'fan',
   ],
   'event.sample.ppsContract': ['voltageMv', 'currentMa', 'kind', 'confirmed'],
+  'event.sample.fan': ['enabled', 'pwmPermille', 'outputLevel'],
   'event.trial': [
     'candidate',
     'trialIndex',
@@ -149,6 +151,7 @@ function serializeDeviceValue(value: unknown, path: string): string {
   const object = value as Record<string, unknown>
   const keys = (DEVICE_EVENT_FIELDS[path] ?? Object.keys(object)).filter((key) => {
     if (key === 'timing') return object[key] != null
+    if (path === 'event.sample' && key === 'fan') return object[key] != null
     if (path.endsWith('.timing')) {
       if (key === 'configuredApproachFloorPermille') return Number(object[key] ?? 0) !== 0
       if (key === 'originalDeadlineObservedAtMs' || key === 'originalDeadlinePhase')

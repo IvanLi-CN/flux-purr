@@ -2,8 +2,17 @@ import { describe, expect, it } from 'vitest'
 import type { ThermalTuningEvent } from './contracts'
 import { digestEventChain } from './thermal-tuning-device-digest'
 import fixture from './thermal-tuning-digest.fixture.json'
+import fanFixture from './thermal-tuning-fan.fixture.json'
 
 describe('firmware event digest compatibility', () => {
+  it('matches Rust fan sample bytes and binds the applied fan command', async () => {
+    const event: ThermalTuningEvent = JSON.parse(JSON.stringify(fanFixture))
+    const expected = '966de02dc5498cccd6d899bb359104a1e1e83a0ec4d7dca65da7fd9dc6546ea6'
+    expect(await digestEventChain([event])).toBe(expected)
+    if (!event.sample?.fan) throw new Error('missing fan sample fixture')
+    event.sample.fan.enabled = false
+    expect(await digestEventChain([event])).not.toBe(expected)
+  })
   it('matches Rust safety and floating-point decision vectors regardless of received key order', async () => {
     const safety: ThermalTuningEvent = {
       sequence: 0,

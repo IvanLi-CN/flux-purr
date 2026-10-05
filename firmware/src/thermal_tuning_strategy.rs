@@ -60,8 +60,42 @@ pub(crate) fn tune_point(
     if let Some(conservative) = conservative_high_side_candidate(previous, evidence) {
         return conservative;
     }
+    if let Some(recovery) = hold_recovery_candidate(previous, evidence) {
+        return recovery;
+    }
     let predicted = tune_base_point(previous, evidence);
     apply_stability_gate(previous, predicted, evidence)
+}
+
+fn hold_recovery_candidate(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> Option<ThermalControlProfilePointConfig> {
+    let lower_band = i32::from(evidence.target_c) * 100 - 150;
+    if !evidence.first_band_observed
+        || evidence.hold_sample_count < 3
+        || evidence.overshoot_c > 3.0
+        || evidence
+            .first_band_exit_centi_c
+            .is_none_or(|temperature| i32::from(temperature) >= lower_band)
+        || evidence
+            .hold_median_output_permille
+            .is_none_or(|output| output > 100)
+    {
+        return None;
+    }
+    // The approach already reached the band. A low-side exit while Hold is
+    // mostly off is a recovery problem, not evidence for more Approach energy.
+    let mut point = previous;
+    point.hold_on_centi_c = previous.hold_on_centi_c.saturating_sub(5).max(5);
+    point.hold_reheat_power_permille = previous
+        .hold_reheat_power_permille
+        .saturating_add(80)
+        .max(previous.hold_power_permille)
+        .min(1000);
+    point.hold_kp_permille_per_c = previous.hold_kp_permille_per_c.saturating_add(20).min(1000);
+    point.hold_blend_ticks = 1;
+    Some(point)
 }
 
 pub(crate) fn reseed_after_hold_confirm(
@@ -77,6 +111,9 @@ pub(crate) fn reseed_after_hold_confirm(
         && let Some(conservative) = conservative_high_side_candidate(previous, evidence)
     {
         return conservative;
+    }
+    if let Some(recovery) = hold_recovery_candidate(previous, evidence) {
+        return recovery;
     }
     // The frozen external confirmation path tunes parsed stage metrics/guard,
     // then applies a separate confirmation nudge from the full audit analysis.
@@ -1069,6 +1106,36 @@ fn step_toward(current: u16, target: u16, step: u16, min: u16, max: u16) -> u16 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saturated_240c_low_hold_exit_changes_recovery_not_approach() {
+        let mut previous = point(240);
+        previous.brake_distance_centi_c = 150;
+        previous.approach_floor_power_permille = 1000;
+        previous.approach_power_permille = 1000;
+        previous.hold_power_permille = 1000;
+        previous.hold_reheat_power_permille = 1000;
+        previous.hold_on_centi_c = 11;
+        previous.hold_kp_permille_per_c = 15;
+        let facts = TuneEvidence {
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(23827),
+            hold_sample_count: 20,
+            hold_median_output_permille: Some(0),
+            overshoot_c: 0.73,
+            under_c: 1.73,
+            curve_class: CurveClass::Underpowered,
+            ..evidence(240)
+        };
+        let next = tune_point(previous, facts);
+        assert_ne!(next, previous);
+        assert_eq!(
+            next.approach_power_permille,
+            previous.approach_power_permille
+        );
+        assert_eq!(next.brake_distance_centi_c, previous.brake_distance_centi_c);
+        assert!(next.hold_on_centi_c < previous.hold_on_centi_c);
+        assert!(next.hold_kp_permille_per_c > previous.hold_kp_permille_per_c);
+    }
     use super::*;
 
     fn point(target_c: i16) -> ThermalControlProfilePointConfig {

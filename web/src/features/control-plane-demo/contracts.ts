@@ -266,6 +266,7 @@ export interface ThermalTuningSample {
   heaterOutputPermille: number
   measurementValid: boolean
   phase: ThermalTuningPhase
+  fan?: { enabled: boolean; pwmPermille: number; outputLevel: FanOutputLevel }
 }
 
 export interface ThermalTuningEvent {
