@@ -127,6 +127,7 @@
     <article class="panel chart-panel"><div class="panel-title"><h3>逻辑请求 / 最终 MOS PWM</h3><span>% · 0..100%</span></div><div class="chart-legend"><span style="--legend-color:#0c6590">logical request</span><span style="--legend-color:#b13d35">MOS PWM</span></div><div class="chart-wrap"><canvas id="controlChart" tabindex="0" aria-label="输出图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>VIN / PPS 合同与请求电压</h3><span>V · local evidence</span></div><div class="chart-legend"><span style="--legend-color:#16818b">VIN</span><span style="--legend-color:#936a08">PPS contract</span><span style="--legend-color:#0c6590">PPS request</span></div><div class="chart-wrap"><canvas id="voltageChart" tabindex="0" aria-label="电压图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
     <article class="panel chart-panel"><div class="panel-title"><h3>PPS 合同电流</h3><span>mA · safety ceiling · local evidence</span></div><div class="chart-legend"><span style="--legend-color:#936a08">PPS contract current</span></div><div class="chart-wrap"><canvas id="currentChart" tabindex="0" aria-label="电流上限图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
+    <article class="panel chart-panel"><div class="panel-title"><h3>风扇使能 / PWM 信号</h3><span>% · applied command · 无转速反馈</span></div><div class="chart-legend"><span style="--legend-color:#2d8a68">使能（100%=开）</span><span style="--legend-color:#7966a8">PWM 信号（0%=全速调压）</span></div><p class="muted" id="fanEvidence"></p><div class="chart-wrap"><canvas id="fanChart" tabindex="0" aria-label="风扇命令图，使用左右方向键检查采样"></canvas><div class="chart-crosshair" hidden></div></div></article>
   </section>
   <div class="chart-tooltip" id="chartTooltip" role="tooltip" hidden></div>
 
@@ -151,7 +152,7 @@ let activeTrialIndex=null;
 let chartRange='trial';
 let chartSamples=[];
 let hoverSample=null;
-const CHART_IDS=['temperatureChart','controlChart','voltageChart','currentChart'];
+const CHART_IDS=['temperatureChart','controlChart','voltageChart','currentChart','fanChart'];
 const $=id=>document.getElementById(id);
 const esc=value=>String(value??'—').replace(/[&<>\"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[char]));
 const num=(value,digits=2)=>value!=null&&Number.isFinite(Number(value))?Number(value).toFixed(digits):'—';
@@ -367,7 +368,7 @@ function drawChart(canvasId, samples, series, unit, options={}){
   for(let i=0;i<5;i++){const x=left+plotW*i/4;const label=`${(spanT*i/4/1000).toFixed(0)}s`;const width=ctx.measureText(label).width;
     if(!timeMarkers.some(marker=>marker.row===0&&Math.abs(marker.labelX-x)<(marker.width+width)/2+6))ctx.fillText(label,x,height-8);
   }
-  for(const item of series){ctx.strokeStyle=item.color;ctx.lineWidth=item.width||2;ctx.setLineDash(item.dash||[]);ctx.beginPath();item.data.forEach((value,index)=>{const sample=samples[index];const x=left+(((Number(sample?.elapsedMs)||startT)-startT)/spanT)*plotW;const y=top+(1-(value-lo)/(hi-lo))*plotH;if(index===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.stroke();ctx.setLineDash([]);}
+  for(const item of series){ctx.strokeStyle=item.color;ctx.lineWidth=item.width||2;ctx.setLineDash(item.dash||[]);ctx.beginPath();let previousY=null;item.data.forEach((value,index)=>{if(!Number.isFinite(value)){previousY=null;return;}const sample=samples[index];const x=left+(((Number(sample?.elapsedMs)||startT)-startT)/spanT)*plotW;const y=top+(1-(value-lo)/(hi-lo))*plotH;if(previousY==null)ctx.moveTo(x,y);else{if(item.step)ctx.lineTo(x,previousY);ctx.lineTo(x,y);}previousY=y;});ctx.stroke();ctx.setLineDash([]);}
   ctx.font='11px ui-monospace,monospace';drawPhaseBoundaries(ctx,boundaries,{left,plotW,startT,spanT,top,plotH},axisMarkers);
   if(options.phaseBand)drawPhaseBand(ctx,samples,left,plotW,startT,spanT,height);
   ctx.font='11px ui-monospace,monospace';drawPhaseTimes(ctx,timeMarkers,height,top+plotH);
@@ -385,6 +386,7 @@ function showHover(sample,clientX,clientY){
   for(const id of CHART_IDS){const canvas=$(id);const line=canvas.parentElement.querySelector('.chart-crosshair');const left=Number(canvas.dataset.plotLeft)||54;const x=left+(Number(sample.elapsedMs)-Number(canvas.dataset.startElapsedMs))/Number(canvas.dataset.spanMs)*Number(canvas.dataset.plotWidth);line.style.left=`${x}px`;line.dataset.sequence=String(sample.sequence);line.hidden=false;}
   const tooltip=$('chartTooltip');const trialStart=Number(samplesForTrial()[0]?.elapsedMs)||Number(sample.elapsedMs);
   const rows=[['phase',sample.phase??sample.pidPhase??'unavailable'],['temperature',sampleValue(sample.temperatureCentiC,100,'°C')],['target',`${activeTarget} °C`],['stable band',`${num(activeTarget-1.5)}..${num(activeTarget+1.5)} °C`],['logical request',sampleValue(sample.heaterRequestedOutputPermille,10,'%')],['MOS PWM',sampleValue(sample.heaterOutputPermille,10,'%')],['VIN',sampleValue(sample.vinMv,1000,'V')],['PPS contract',sampleValue(sample.ppsContractMv,1000,'V')],['PPS request',sampleValue(sample.ppsRequestedMv,1000,'V')],['PPS current ceiling',sampleValue(sample.ppsContractMa,1,'mA')]];
+  rows.push(['fan enable',sample.fan?String(sample.fan.enabled):'unavailable'],['fan PWM signal',sampleValue(sample.fan?.pwmPermille,10,'%')],['fan command level',sample.fan?.outputLevel??'unavailable']);
   tooltip.innerHTML=`<strong>+${ms(Number(sample.elapsedMs)-trialStart)} · sequence ${esc(sample.sequence)}</strong><dl>${rows.map(([key,value])=>`<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl>`;
   tooltip.dataset.sequence=String(sample.sequence);tooltip.hidden=false;
   const x=Math.min(clientX+14,window.innerWidth-tooltip.offsetWidth-12);const y=Math.min(clientY+14,window.innerHeight-tooltip.offsetHeight-12);
@@ -413,6 +415,9 @@ function renderCharts(){
   drawChart('controlChart',samples,[{label:'logical request',color:'#0c6590',data:samples.map(s=>chartValue(s.heaterRequestedOutputPermille)/10)},{label:'MOS PWM',color:'#b13d35',data:samples.map(s=>chartValue(s.heaterOutputPermille)/10)}],'%');
   drawChart('voltageChart',samples,[{label:'VIN',color:'#16818b',data:samples.map(s=>chartValue(s.vinMv)/1000)},{label:'PPS contract',color:'#936a08',data:samples.map(s=>chartValue(s.ppsContractMv)/1000)},{label:'PPS request',color:'#0c6590',data:samples.map(s=>chartValue(s.ppsRequestedMv)/1000)}],'V');
   drawChart('currentChart',samples,[{label:'PPS contract current',color:'#936a08',data:samples.map(s=>chartValue(s.ppsContractMa))}],'mA');
+  const fanCount=samples.filter(s=>s.fan!=null).length;
+  $('fanEvidence').textContent=fanCount?`${fanCount}/${samples.length} 个样本含已施加命令。使能关闭时停转；使能开启且 PWM=0‰ 为全速命令。命令不能证明实际转速。`:'该记录未采集风扇命令，数据 unavailable；没有补造历史样本。';
+  drawChart('fanChart',samples,[{color:'#2d8a68',step:true,data:samples.map(s=>s.fan?(s.fan.enabled?100:0):NaN)},{color:'#7966a8',step:true,dash:[5,3],data:samples.map(s=>chartValue(s.fan?.pwmPermille)/10)}],'%');
 }
 function renderLedger(){
   const trial=currentTrial(); const trialIndex=Number(trial.trialIndex??currentRun().adoptedTrialIndex??0); const rows=LEDGER.filter(item=>Number(item.targetC)===activeTarget&&Number(item.trialIndex)===trialIndex).sort((a,b)=>Number(a.sequence)-Number(b.sequence));
