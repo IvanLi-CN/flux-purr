@@ -64,6 +64,9 @@ pub(crate) fn tune_point(
     if let Some(recovery) = saturated_hold_ripple_candidate(previous, evidence) {
         return recovery;
     }
+    if let Some(recovery) = hold_reheat_headroom_candidate(previous, evidence) {
+        return recovery;
+    }
     if let Some(recovery) = hold_recovery_candidate(previous, evidence) {
         return recovery;
     }
@@ -145,6 +148,51 @@ fn hold_recovery_candidate(
     Some(point)
 }
 
+fn hold_reheat_headroom_candidate(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> Option<ThermalControlProfilePointConfig> {
+    let lower_band = i32::from(evidence.target_c) * 100 - 150;
+    if evidence.target_c < 180
+        || !evidence.first_band_observed
+        || evidence.hold_sample_count < 3
+        || evidence.hold_off_sample_count < 3
+        || evidence.overshoot_c > 1.5
+        || evidence.hold_p2p_c > 3.0
+        || evidence
+            .first_hold_after_warmup_ms
+            .is_none_or(|time| time > evidence.settle_limit_ms)
+        || evidence
+            .first_band_exit_centi_c
+            .is_none_or(|temperature| i32::from(temperature) >= lower_band)
+        || evidence
+            .approach_median_output_permille
+            .is_none_or(|value| value < 900)
+        || evidence
+            .hold_median_output_permille
+            .is_none_or(|value| !(101..950).contains(&value))
+        || evidence
+            .hold_p90_output_permille
+            .is_none_or(|value| value >= 1000)
+        || previous.approach_floor_power_permille < 900
+        || previous.hold_reheat_power_permille >= 1000
+    {
+        return None;
+    }
+    // Timely physical Hold followed by a low-band exit is not a missing
+    // Approach handoff. Preserve the smaller sustaining baseline and restore
+    // only the low-side reheat headroom lost by a ripple trim.
+    let mut point = previous;
+    point.hold_reheat_power_permille = point
+        .hold_reheat_power_permille
+        .saturating_add(80)
+        .min(1000);
+    point.hold_on_centi_c = point.hold_on_centi_c.saturating_sub(5).max(5);
+    point.hold_lead_ticks = point.hold_lead_ticks.saturating_sub(1);
+    point.hold_blend_ticks = 1;
+    Some(point)
+}
+
 pub(crate) fn reseed_after_hold_confirm(
     previous: ThermalControlProfilePointConfig,
     evidence: TuneEvidence,
@@ -160,6 +208,9 @@ pub(crate) fn reseed_after_hold_confirm(
         return conservative;
     }
     if let Some(recovery) = saturated_hold_ripple_candidate(previous, evidence) {
+        return recovery;
+    }
+    if let Some(recovery) = hold_reheat_headroom_candidate(previous, evidence) {
         return recovery;
     }
     if let Some(recovery) = hold_recovery_candidate(previous, evidence) {
@@ -1157,6 +1208,100 @@ fn step_toward(current: u16, target: u16, step: u16, min: u16, max: u16) -> u16 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn low_band_exit_after_saturated_approach_restores_reheat_headroom() {
+        // Captured 240C scout after the 1000 -> 900 Hold trim. Approach
+        // remains full, but Hold loses its window at 238.46C after coasting.
+        let mut previous = point(240);
+        previous.brake_distance_centi_c = 150;
+        previous.warmup_reenter_centi_c = 1000;
+        previous.approach_floor_power_permille = 1000;
+        previous.approach_power_permille = 1000;
+        previous.approach_damping_exponent_permille = 100;
+        previous.approach_tail_window_centi_c = 0;
+        previous.hold_power_permille = 900;
+        previous.hold_reheat_power_permille = 900;
+        previous.hold_on_centi_c = 6;
+        previous.hold_off_centi_c = 80;
+        previous.hold_kp_permille_per_c = 15;
+        previous.hold_entry_centi_c = 150;
+        previous.hold_exit_centi_c = 160;
+        previous.hold_ki_permille_per_c_tick = 1;
+        previous.hold_blend_ticks = 1;
+        previous.overshoot_cutoff_centi_c = 180;
+        previous.hold_lead_ticks = 5;
+        let facts = TuneEvidence {
+            hold_p2p_c: 1.52,
+            residual_c: 0.32,
+            under_c: 1.54,
+            hold_sample_count: 22,
+            hold_off_sample_count: 4,
+            first_hold_error_c: Some(0.34),
+            hold_median_output_permille: Some(910),
+            hold_p90_output_permille: Some(920),
+            approach_median_output_permille: Some(1000),
+            first_hold_after_warmup_ms: Some(1073),
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(23846),
+            settle_limit_ms: 5000,
+            curve_class: CurveClass::OnCurve,
+            ..evidence(240)
+        };
+        let next = tune_point(previous, facts);
+        assert!(next.hold_reheat_power_permille > previous.hold_reheat_power_permille);
+        assert_eq!(next.hold_power_permille, previous.hold_power_permille);
+        assert_eq!(next.approach_floor_power_permille, 1000);
+        assert_eq!(next.brake_distance_centi_c, 150);
+        assert!(next.hold_on_centi_c < previous.hold_on_centi_c);
+        assert!(next.hold_lead_ticks < previous.hold_lead_ticks);
+        assert_eq!(next.hold_reheat_power_permille, 980);
+        assert_eq!(reseed_after_hold_confirm(previous, facts), next);
+        assert_eq!(
+            tune_point(
+                previous,
+                TuneEvidence {
+                    curve_class: CurveClass::Underpowered,
+                    ..facts
+                }
+            ),
+            next
+        );
+        for unavailable in [
+            TuneEvidence {
+                first_band_observed: false,
+                ..facts
+            },
+            TuneEvidence {
+                hold_off_sample_count: 0,
+                ..facts
+            },
+            TuneEvidence {
+                overshoot_c: 3.1,
+                ..facts
+            },
+            TuneEvidence {
+                hold_p90_output_permille: None,
+                ..facts
+            },
+            TuneEvidence {
+                first_hold_after_warmup_ms: Some(6000),
+                ..facts
+            },
+        ] {
+            assert!(hold_reheat_headroom_candidate(previous, unavailable).is_none());
+        }
+        assert_eq!(
+            tune_point(
+                previous,
+                TuneEvidence {
+                    tunable_stop: false,
+                    ..facts
+                }
+            ),
+            previous
+        );
+    }
+
     #[test]
     fn saturated_hold_confirmation_uses_distinct_ripple_recovery() {
         // Captured 240C confirmation: the approach established a window in
