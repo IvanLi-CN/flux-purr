@@ -1043,6 +1043,12 @@ impl ThermalStageResult {
 }
 
 pub(crate) fn thermal_profile_package_from_value(imported: Value) -> Value {
+    if imported.get("schema").and_then(Value::as_str) == Some("thermal-tuning-v2") {
+        return imported
+            .pointer("/profile/value")
+            .cloned()
+            .unwrap_or(Value::Null);
+    }
     imported
         .get("profile")
         .cloned()

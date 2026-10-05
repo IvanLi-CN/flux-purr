@@ -206,7 +206,7 @@ async fn run_firmware_tuning_until_interrupt(
     let candidate_id = format!("{run_id}-candidate");
     let seed_profile = if let Some(path) = args.seed_profile_file.as_ref() {
         let imported: Value = serde_json::from_slice(&fs::read(path)?)?;
-        thermal_candidate_profile_from_value(imported)
+        parse_firmware_seed_profile(imported)?
     } else {
         let (profile, _) = load_thermal_default_seed_candidate_profile("pps5a")?;
         profile
@@ -1463,6 +1463,34 @@ fn firmware_candidate_profile_value(profile: &Value) -> Value {
     Value::Object(std::mem::take(object))
 }
 
+fn parse_firmware_seed_profile(
+    imported: Value,
+) -> Result<ThermalCandidateProfile, Box<dyn std::error::Error + Send + Sync>> {
+    if imported.get("schema").and_then(Value::as_str) == Some("thermal-tuning-v2")
+        && imported.get("powerClass").and_then(Value::as_str) != Some("pps5a")
+    {
+        return Err("firmware seed export requires pps5a power class".into());
+    }
+    let is_export = imported.get("schema").and_then(Value::as_str) == Some("thermal-tuning-v2");
+    let mut profile = super::thermal_profile_package_from_value(imported);
+    let points = profile.get("points").and_then(Value::as_array);
+    if !profile.get("settings").is_some_and(Value::is_object)
+        || !points.is_some_and(|points| {
+            points
+                .iter()
+                .any(|point| point.get("targetTempC").is_some_and(Value::is_number))
+        })
+    {
+        return Err("firmware seed requires explicit settings and target points".into());
+    }
+    if is_export {
+        // V2 points are complete wire values: explicit zero is not legacy inheritance.
+        let settings = super::thermal_candidate_settings_from_value(&profile["settings"]);
+        profile["settings"] = super::thermal_candidate_settings_to_value(settings);
+    }
+    Ok(thermal_candidate_profile_from_value(profile))
+}
+
 fn materialize_firmware_seed_profile(
     seed: ThermalCandidateProfile,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -2303,6 +2331,35 @@ mod tests {
         thermal_tuning::{ThermalTuningEvent, digest_event_chain, hash_profile},
     };
     use serde_json::json;
+
+    #[test]
+    fn firmware_seed_export_keeps_parameters_and_hash() {
+        let (seed, _) = super::super::load_thermal_default_seed_candidate_profile("pps5a").unwrap();
+        let value = super::materialize_firmware_seed_profile(seed).unwrap();
+        let exported = json!({
+            "schema": "thermal-tuning-v2", "powerClass": "pps5a",
+            "profile": {"bank": "pps5a", "source": "candidate", "value": value}
+        });
+        let imported = super::parse_firmware_seed_profile(exported).unwrap();
+        let materialized = super::materialize_firmware_seed_profile(imported).unwrap();
+        assert_eq!(materialized, value);
+        assert_eq!(
+            firmware_candidate_profile_hash(&materialized).unwrap(),
+            firmware_candidate_profile_hash(&value).unwrap()
+        );
+    }
+
+    #[test]
+    fn firmware_seed_rejects_missing_or_wrong_class_export_without_defaults() {
+        for invalid in [
+            json!({}),
+            json!({"profile": {"bank": "pps5a", "value": {}}}),
+            json!({"schema": "thermal-tuning-v2", "powerClass": "pps3a"}),
+            json!({"schema": "thermal-tuning-v2", "powerClass": "pps5a"}),
+        ] {
+            assert!(super::parse_firmware_seed_profile(invalid).is_err());
+        }
+    }
 
     #[test]
     fn web_digest_fixture_matches_shared_firmware_serializer() {

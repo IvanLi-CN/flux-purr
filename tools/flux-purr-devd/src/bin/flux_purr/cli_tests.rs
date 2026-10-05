@@ -514,6 +514,25 @@ fn thermal_profile_preview_unwraps_runtime_wrapper() {
 }
 
 #[test]
+fn thermal_candidate_profile_imports_v2_export_without_replacing_seed() {
+    let mut profile = default_thermal_candidate_profile();
+    profile["points"][0]["brakeDistanceCentiC"] = json!(1480);
+    profile["points"][0]["approachFloorPowerPermille"] = json!(100);
+    let imported = json!({
+        "schema": "thermal-tuning-v2",
+        "powerClass": "pps5a",
+        "profile": { "bank": "pps5a", "source": "candidate", "value": profile.clone() }
+    });
+    assert_eq!(
+        thermal_profile_package_from_value(imported.clone()),
+        profile
+    );
+    let parsed = thermal_candidate_profile_from_value(imported);
+    assert_eq!(parsed.points[0].brake_distance_centi_c, 1480);
+    assert_eq!(parsed.points[0].approach_floor_power_permille, 100);
+}
+
+#[test]
 fn thermal_control_readback_rejects_any_effective_parameter_mismatch() {
     let profile = default_thermal_candidate_profile();
     let expected = thermal_heater_parameters_value(60, Some(&profile), "preview");
