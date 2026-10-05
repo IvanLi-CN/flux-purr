@@ -20,6 +20,7 @@ pub(crate) struct TuneEvidence {
     pub under_c: f64,
     pub over_c: f64,
     pub hold_sample_count: u32,
+    pub hold_off_sample_count: u32,
     pub hold_threshold_crossed: bool,
     pub hold_mean_error_c: Option<f64>,
     pub hold_max_below_c: Option<f64>,
@@ -60,11 +61,57 @@ pub(crate) fn tune_point(
     if let Some(conservative) = conservative_high_side_candidate(previous, evidence) {
         return conservative;
     }
+    if let Some(recovery) = saturated_hold_ripple_candidate(previous, evidence) {
+        return recovery;
+    }
     if let Some(recovery) = hold_recovery_candidate(previous, evidence) {
         return recovery;
     }
     let predicted = tune_base_point(previous, evidence);
     apply_stability_gate(previous, predicted, evidence)
+}
+
+fn saturated_hold_ripple_candidate(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> Option<ThermalControlProfilePointConfig> {
+    let lower_band = i32::from(evidence.target_c) * 100 - 150;
+    if !evidence.first_band_observed
+        || !evidence.stable_window_verified
+        || evidence.full_speed_failed
+        || evidence.hold_sample_count < 3
+        || evidence.hold_off_sample_count < 3
+        || evidence.hold_off_sample_count.saturating_mul(20) < evidence.hold_sample_count
+        || !(0.5..=3.0).contains(&evidence.overshoot_c)
+        || !(3.0..=4.0).contains(&evidence.hold_p2p_c)
+        || evidence.hold_p2p_c == 3.0
+        || evidence
+            .first_band_exit_centi_c
+            .is_none_or(|temperature| i32::from(temperature) >= lower_band)
+        || evidence
+            .hold_median_output_permille
+            .is_none_or(|value| value < 900)
+        || evidence
+            .hold_p90_output_permille
+            .is_none_or(|value| value < 950)
+        || previous.hold_power_permille < 900
+        || previous.hold_reheat_power_permille < 900
+    {
+        return None;
+    }
+    // The approach reached its window on time and Hold crossed both sides.
+    // Full-output/cutoff ripple needs an earlier, smaller recovery pulse;
+    // increasing an already saturated Approach cannot correct that cycle.
+    let mut point = previous;
+    point.hold_power_permille = point.hold_power_permille.saturating_sub(100).max(700);
+    point.hold_reheat_power_permille = point
+        .hold_reheat_power_permille
+        .saturating_sub(100)
+        .max(point.hold_power_permille);
+    point.hold_lead_ticks = point.hold_lead_ticks.saturating_sub(1);
+    point.hold_on_centi_c = point.hold_on_centi_c.saturating_sub(5).max(5);
+    point.hold_blend_ticks = 1;
+    (point != previous).then_some(point)
 }
 
 fn hold_recovery_candidate(
@@ -112,6 +159,9 @@ pub(crate) fn reseed_after_hold_confirm(
     {
         return conservative;
     }
+    if let Some(recovery) = saturated_hold_ripple_candidate(previous, evidence) {
+        return recovery;
+    }
     if let Some(recovery) = hold_recovery_candidate(previous, evidence) {
         return recovery;
     }
@@ -124,6 +174,7 @@ pub(crate) fn reseed_after_hold_confirm(
         under_c: 0.0,
         over_c: 0.0,
         hold_sample_count: 0,
+        hold_off_sample_count: 0,
         hold_mean_error_c: None,
         hold_max_below_c: None,
         first_hold_error_c: None,
@@ -1107,6 +1158,89 @@ fn step_toward(current: u16, target: u16, step: u16, min: u16, max: u16) -> u16 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn saturated_hold_confirmation_uses_distinct_ripple_recovery() {
+        // Captured 240C confirmation: the approach established a window in
+        // 792ms; Hold alternated full output and cutoff, then broke low.
+        let mut previous = point(240);
+        previous.brake_distance_centi_c = 150;
+        previous.warmup_reenter_centi_c = 1000;
+        previous.approach_floor_power_permille = 1000;
+        previous.approach_power_permille = 1000;
+        previous.approach_damping_exponent_permille = 100;
+        previous.approach_tail_window_centi_c = 0;
+        previous.hold_power_permille = 1000;
+        previous.hold_reheat_power_permille = 1000;
+        previous.hold_on_centi_c = 11;
+        previous.hold_off_centi_c = 80;
+        previous.hold_kp_permille_per_c = 15;
+        previous.hold_entry_centi_c = 150;
+        previous.hold_exit_centi_c = 160;
+        previous.hold_ki_permille_per_c_tick = 1;
+        previous.hold_blend_ticks = 1;
+        previous.overshoot_cutoff_centi_c = 180;
+        previous.hold_lead_ticks = 6;
+        let facts = TuneEvidence {
+            overshoot_c: 1.26,
+            hold_p2p_c: 3.16,
+            under_c: 1.90,
+            over_c: 1.26,
+            hold_sample_count: 268,
+            hold_off_sample_count: 51,
+            hold_median_output_permille: Some(1000),
+            hold_p90_output_permille: Some(1000),
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(23808),
+            stable_window_after_warmup_ms: Some(792),
+            stable_window_verified: true,
+            scout_hold_complete: true,
+            full_speed_failed: false,
+            ..evidence(240)
+        };
+        let next = reseed_after_hold_confirm(previous, facts);
+        assert_ne!(next, previous);
+        assert_eq!(next.brake_distance_centi_c, previous.brake_distance_centi_c);
+        assert_eq!(
+            next.approach_power_permille,
+            previous.approach_power_permille
+        );
+        assert_eq!(next.approach_floor_power_permille, 1000);
+        assert!(next.hold_power_permille < previous.hold_power_permille);
+        assert!(next.hold_lead_ticks < previous.hold_lead_ticks);
+        assert!(next.hold_on_centi_c < previous.hold_on_centi_c);
+        assert_eq!(tune_point(previous, facts), next);
+        for unavailable in [
+            TuneEvidence {
+                full_speed_failed: true,
+                ..facts
+            },
+            TuneEvidence {
+                overshoot_c: 0.0,
+                ..facts
+            },
+            TuneEvidence {
+                hold_p90_output_permille: None,
+                ..facts
+            },
+            TuneEvidence {
+                hold_off_sample_count: 0,
+                ..facts
+            },
+        ] {
+            assert!(saturated_hold_ripple_candidate(previous, unavailable).is_none());
+        }
+        assert_eq!(
+            reseed_after_hold_confirm(
+                previous,
+                TuneEvidence {
+                    tunable_stop: false,
+                    ..facts
+                }
+            ),
+            previous
+        );
+    }
+
+    #[test]
     fn saturated_240c_low_hold_exit_changes_recovery_not_approach() {
         let mut previous = point(240);
         previous.brake_distance_centi_c = 150;
@@ -1174,6 +1308,7 @@ mod tests {
             under_c: 0.0,
             over_c: 0.0,
             hold_sample_count: 0,
+            hold_off_sample_count: 0,
             hold_threshold_crossed: false,
             hold_mean_error_c: None,
             hold_max_below_c: None,

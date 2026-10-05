@@ -1140,6 +1140,7 @@ impl ThermalTuningRuntime {
                     f64::from(i32::from(maximum) - i32::from(target_c) * 100).max(0.0) / 100.0
                 }),
             hold_sample_count: self.hold_output_count,
+            hold_off_sample_count: u32::from(self.hold_output_histogram[0]),
             hold_threshold_crossed: self.hold_threshold_crossed,
             hold_mean_error_c,
             hold_max_below_c: self.min_controller_hold_temperature_centi_c.map(|minimum| {

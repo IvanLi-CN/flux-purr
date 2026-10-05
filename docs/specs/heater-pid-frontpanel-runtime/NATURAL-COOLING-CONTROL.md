@@ -18,6 +18,8 @@
 
 外部 runner 的候选策略保持冻结。固件 engine 的有意例外包括既有高温高侧保守变换，以及 Hold 恢复变换：真实曾进入稳定带、随后低侧离带、至少三个 Hold 样本、Hold 逻辑请求中位数 ≤100‰、过冲 ≤3°C 时，优先减小 holdOn 5 centi°C（下界5）、提高 reheat 80‰（上界1000）、提高 Hold Kp 20（上界1000）、blend 取1。该输入不能被 Approach 的 Underpowered 分类覆盖。高侧保守保护与非热故障拒绝仍优先。此例外覆盖 scout 与确认失败，不声称与冻结旧策略逐值一致。
 
+已在原性能门槛内建立并验证稳定窗口，但 Hold 发生双侧波动时，满输出不能直接当作 Approach 供热不足。若首次离带为低侧、至少三个 Hold 样本，零逻辑输出至少三个样本且占比≥5%，过冲在0.5–3°C、峰峰值大于3°C且不超过4°C、Hold 请求中位数≥900‰及p90≥950‰，且当前 Hold/reheat 均≥900‰，则仅修正保温参数：Hold 基线减100‰（下界700）、reheat减100‰且不低于基线、holdLead减1（下界0）、holdOn减5 centi°C（下界5）、blend取1。预热、Approach、物理阶段入口和通过门槛不变。该分支覆盖短试验与确认失败；缺失证据、单纯持续低温、性能门槛失败或非热故障不能触发。高侧保护仍优先，完整点去重仍在生产sanitize之后执行。
+
 每目标保存最多32个提议点的完整参数。候选在生产 sanitize 后若与当前相同、已被提议过或记录容量耗尽，则结束该目标并记录 `candidate_search_exhausted_no_distinct_safe_proposal`；保持 accepted-target blocking，禁止重复加热等待20分钟预算耗尽。原 current/predicted 比较仍保留；搜索耗尽不等于硬件无可行参数。
 
 ## 风扇采样与标准报告
