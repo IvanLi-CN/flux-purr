@@ -59,7 +59,7 @@ fn heater_profile_uses_calibrated_cooling_for_braking_and_early_recovery() {
     let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
     let input = ThermalPlantRuntimeInput {
         target_temp_c: 240,
-        measured_temp_c: 236.0,
+        measured_temp_c: 237.0,
         ambient_temp_c: 25.0,
         heater_enabled: true,
         max_power_mw: 100_000.0,
@@ -74,11 +74,11 @@ fn heater_profile_uses_calibrated_cooling_for_braking_and_early_recovery() {
     let mut calibrated = HeaterController::new();
     calibrated.production_controller = Some(ProductionThermalController::Profile);
     calibrated.last_target_temp_c = 240;
-    calibrated.filtered_temp_c = Some(235.9);
-    calibrated.previous_measured_temp_c = Some(235.9);
+    calibrated.filtered_temp_c = Some(236.9);
+    calibrated.previous_measured_temp_c = Some(236.9);
     calibrated.filtered_slope_c_per_profile_tick = 2.0;
     let mut legacy = calibrated;
-    let plain = legacy.update_at(240, 236.0, true, Some(profile), 50);
+    let plain = legacy.update_at(240, 237.0, true, Some(profile), 50);
     let (modelled, _) =
         calibrated.update_production_at(ProductionThermalController::Profile, input, Some(profile));
     assert_eq!(plain.phase, HeaterControlPhase::Warmup);
@@ -109,6 +109,46 @@ fn heater_profile_uses_calibrated_cooling_for_braking_and_early_recovery() {
         recovery.expect("modelled loss must recover before the plate falls below target");
     assert!(recovery.error_c < 0.0);
     assert!(recovery.duty_percent >= 20 && recovery.duty_percent < 100);
+}
+
+#[test]
+fn heater_cooling_brake_does_not_double_count_loss_in_observed_net_slope() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 240;
+    point.brake_distance_centi_c = 150;
+    point.warmup_reenter_centi_c = 1000;
+    point.hold_entry_centi_c = 150;
+    point.approach_lead_ticks = 0;
+    config.points[1..].fill(None);
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    let mut controller = HeaterController::new();
+    controller.production_controller = Some(ProductionThermalController::Profile);
+    controller.last_target_temp_c = 240;
+    controller.filtered_temp_c = Some(231.7);
+    controller.previous_measured_temp_c = Some(231.7);
+    controller.filtered_slope_c_per_profile_tick = 1.0;
+    let input = ThermalPlantRuntimeInput {
+        target_temp_c: 240,
+        measured_temp_c: 231.725,
+        ambient_temp_c: 25.0,
+        heater_enabled: true,
+        max_power_mw: 100_000.0,
+        now_ms: 50,
+        model: flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 139.1813,
+            radiation_mw_per_k4: 4.397_830_7e-7,
+            thermal_capacity_mj_per_c: 13_996.655,
+            transport_delay_ms: 1950,
+        },
+    };
+    let (snapshot, _) =
+        controller.update_production_at(ProductionThermalController::Profile, input, Some(profile));
+    assert_eq!(snapshot.phase, HeaterControlPhase::Warmup);
 }
 
 fn pps_source_capability(min_mv: u16, max_mv: u16, max_ma: u16) -> u32 {

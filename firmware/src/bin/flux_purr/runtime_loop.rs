@@ -2546,13 +2546,26 @@ pub(crate) async fn runtime_reconcile_network_and_status(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn runtime_apply_tuning_cooling_boundary(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
+    if state.thermal_tuning.armed
+        && state.thermal_tuning.phase
+            == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
+        && state.fan_command != FanHardwareCommand::from_profile(FanVoltageProfile::Full)
+    {
+        // Apply the shared cooling policy before the first recorded cooldown sample.
+        return runtime_update_fan_and_ui(state, elapsed_ms);
+    }
+    false
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
     let elapsed_ms = elapsed_ms.max(
         Instant::now()
             .as_millis()
             .saturating_sub(state.runtime_started_ms),
     );
-    let mut needs_redraw = false;
+    let mut needs_redraw = runtime_apply_tuning_cooling_boundary(state, elapsed_ms);
     if elapsed_ms >= state.next_control_deadline_ms {
         let control_started_ms = elapsed_ms;
         runtime_advance_heater_control_deadline(state, control_started_ms);

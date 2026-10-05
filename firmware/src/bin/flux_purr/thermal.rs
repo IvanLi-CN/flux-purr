@@ -1530,8 +1530,18 @@ impl HeaterController {
                         as u16,
                 )
             });
-        // Observed net heating plus fitted loss estimates heat still in flight.
-        let model_brake = (slope_c_per_s - rate.unwrap_or(0.0)).max(0.0) * delay_s;
+        // Net rise already includes loss. Infer delayed heat, then subtract the
+        // passive loss expected over that delay instead of counting it twice.
+        let future_rate = input.and_then(|input| {
+            flux_purr_firmware::thermal_plant::natural_cooling_rate_c_per_s(
+                input.model,
+                measured_temp_c + slope_c_per_s.max(0.0) * delay_s * 0.5,
+                input.ambient_temp_c,
+            )
+        });
+        let delayed_heat_rate = (slope_c_per_s - rate.unwrap_or(0.0)).max(0.0);
+        let model_brake =
+            (delayed_heat_rate + future_rate.or(rate).unwrap_or(0.0)).max(0.0) * delay_s;
         let brake = target
             .brake_distance_c
             .max(target.hold_entry_error_c + 0.1)
