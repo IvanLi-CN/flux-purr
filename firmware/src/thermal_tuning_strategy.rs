@@ -173,15 +173,15 @@ fn hold_reheat_headroom_candidate(
             .is_none_or(|value| !(101..950).contains(&value))
         || evidence
             .hold_p90_output_permille
-            .is_none_or(|value| value >= 1000)
+            .is_none_or(|value| value > 1000)
         || previous.approach_floor_power_permille < 900
-        || previous.hold_reheat_power_permille >= 1000
     {
         return None;
     }
     // Timely physical Hold followed by a low-band exit is not a missing
     // Approach handoff. Preserve the smaller sustaining baseline and restore
-    // only the low-side reheat headroom lost by a ripple trim.
+    // only the low-side reheat headroom lost by a ripple trim. A PI peak
+    // at full output does not exhaust the configured base or lead headroom.
     let mut point = previous;
     point.hold_reheat_power_permille = point
         .hold_reheat_power_permille
@@ -190,7 +190,7 @@ fn hold_reheat_headroom_candidate(
     point.hold_on_centi_c = point.hold_on_centi_c.saturating_sub(5).max(5);
     point.hold_lead_ticks = point.hold_lead_ticks.saturating_sub(1);
     point.hold_blend_ticks = 1;
-    Some(point)
+    (point != previous).then_some(point)
 }
 
 pub(crate) fn reseed_after_hold_confirm(
@@ -1208,6 +1208,79 @@ fn step_toward(current: u16, target: u16, step: u16, min: u16, max: u16) -> u16 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saturated_pi_peak_does_not_hide_configured_reheat_or_timing_headroom() {
+        // Captured 240C scout: physical Hold starts after 2343ms, then
+        // coasting and delayed recovery break the band at 238.42C.
+        let mut previous = point(240);
+        previous.brake_distance_centi_c = 150;
+        previous.warmup_reenter_centi_c = 1000;
+        previous.approach_floor_power_permille = 1000;
+        previous.approach_power_permille = 1000;
+        previous.approach_damping_exponent_permille = 100;
+        previous.approach_tail_window_centi_c = 0;
+        previous.hold_power_permille = 900;
+        previous.hold_reheat_power_permille = 980;
+        previous.hold_on_centi_c = 5;
+        previous.hold_off_centi_c = 80;
+        previous.hold_kp_permille_per_c = 15;
+        previous.hold_entry_centi_c = 150;
+        previous.hold_exit_centi_c = 160;
+        previous.hold_ki_permille_per_c_tick = 1;
+        previous.hold_blend_ticks = 1;
+        previous.overshoot_cutoff_centi_c = 180;
+        previous.hold_lead_ticks = 4;
+        let facts = TuneEvidence {
+            overshoot_c: 0.06,
+            hold_p2p_c: 1.94,
+            residual_c: 0.5,
+            under_c: 1.72,
+            over_c: 0.06,
+            hold_sample_count: 11,
+            hold_off_sample_count: 4,
+            first_hold_error_c: Some(0.44),
+            hold_median_output_permille: Some(810),
+            hold_p90_output_permille: Some(1000),
+            approach_median_output_permille: Some(1000),
+            first_hold_after_warmup_ms: Some(2343),
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(23842),
+            settle_limit_ms: 5000,
+            curve_class: CurveClass::OnCurve,
+            ..evidence(240)
+        };
+        let mut expected = previous;
+        expected.hold_reheat_power_permille = 1000;
+        expected.hold_lead_ticks = 3;
+        assert_eq!(tune_point(previous, facts), expected);
+        assert_eq!(reseed_after_hold_confirm(previous, facts), expected);
+        let mut earlier = expected;
+        earlier.hold_lead_ticks = 2;
+        assert_eq!(tune_point(expected, facts), earlier);
+        expected.hold_lead_ticks = 0;
+        assert!(hold_reheat_headroom_candidate(expected, facts).is_none());
+        assert!(
+            hold_reheat_headroom_candidate(
+                previous,
+                TuneEvidence {
+                    hold_p90_output_permille: None,
+                    ..facts
+                }
+            )
+            .is_none()
+        );
+        assert_eq!(
+            tune_point(
+                previous,
+                TuneEvidence {
+                    tunable_stop: false,
+                    ..facts
+                }
+            ),
+            previous
+        );
+    }
+
     #[test]
     fn low_band_exit_after_saturated_approach_restores_reheat_headroom() {
         // Captured 240C scout after the 1000 -> 900 Hold trim. Approach
