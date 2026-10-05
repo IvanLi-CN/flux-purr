@@ -1215,7 +1215,8 @@ impl HeaterController {
         previous_measured_temp_c: f32,
     ) {
         let cooling = measured_temp_c + 0.05 < previous_measured_temp_c
-            && frame.error_c >= frame.control_target.hold_on_error_c.max(0.05);
+            && frame.error_c >= frame.control_target.hold_on_error_c.max(0.05)
+            && frame.control_error_c >= frame.control_target.hold_on_error_c.max(0.05);
         if self.hold_coast_active && cooling {
             self.hold_coast_cooling_samples = self.hold_coast_cooling_samples.saturating_add(1);
         } else {
@@ -1524,9 +1525,8 @@ impl HeaterController {
             .hold_exit_error_c
             .max(control_target.hold_on_error_c)
             .max(hold_entry_gate_c + HEATER_HOLD_PHASE_HYSTERESIS_C);
-        let approach_coast_gate_c = hold_entry_gate_c.max(control_target.hold_exit_error_c) + 1.0;
         let approach_predictive_coast_ready = approach_control_error_c <= 0.0
-            && error_c <= approach_coast_gate_c
+            && error_c <= control_target.hold_exit_error_c
             && control_error_c <= control_target.hold_exit_error_c;
         let hold_exit_error_c = error_c;
         let brake_distance_c = control_target

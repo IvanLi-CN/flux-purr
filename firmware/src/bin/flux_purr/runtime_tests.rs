@@ -6834,6 +6834,19 @@ fn heater_control_hold_reapplies_small_power_near_target_without_waiting_for_lar
         let measured = 99.95 - (step as f32 * 0.06);
         near_target = controller.update_at(100, measured, true, None, now_ms);
     }
+    assert!(near_target.coast_active);
+    assert_eq!(near_target.duty_percent, 0);
+    // Continue real cooling observations until the filtered low-error gate
+    // catches up, without simulating a large temperature drop.
+    for step in 13..=24 {
+        now_ms += HEATER_CONTROL_INTERVAL_MS;
+        let measured = 99.95 - (step as f32 * 0.06);
+        near_target = controller.update_at(100, measured, true, None, now_ms);
+        if near_target.duty_percent > 0 {
+            break;
+        }
+    }
+    assert!(near_target.error_c < 1.5);
     assert!(matches!(
         near_target.phase,
         HeaterControlPhase::Approach | HeaterControlPhase::Hold
@@ -7360,6 +7373,9 @@ fn heater_hold_coasts_after_predictive_cut_until_temperature_is_falling() {
     controller.filtered_slope_c_per_profile_tick = -0.5;
     controller.previous_measured_temp_c = Some(59.6);
     let falling_under_target = controller.update(60, 59.4, true, Some(profile));
+    assert!(falling_under_target.coast_active);
+    assert_eq!(falling_under_target.duty_percent, 0);
+    let falling_under_target = controller.update(60, 59.3, true, Some(profile));
     assert!(!controller.hold_coast_active);
     assert!(falling_under_target.duty_percent > 0);
     assert_eq!(controller.phase_ticks, 0);
@@ -7445,6 +7461,9 @@ fn heater_hold_coasts_when_projection_crosses_target_with_nonzero_approach_power
     controller.filtered_slope_c_per_profile_tick = -0.5;
     controller.previous_measured_temp_c = Some(139.6);
     let falling_under_target = controller.update(140, 139.4, true, Some(profile));
+    assert!(falling_under_target.coast_active);
+    assert_eq!(falling_under_target.duty_percent, 0);
+    let falling_under_target = controller.update(140, 139.3, true, Some(profile));
     assert!(!controller.hold_coast_active);
     assert!(falling_under_target.duty_percent > 0);
 }
@@ -7855,6 +7874,66 @@ fn heater_approach_uses_hold_base_without_inheriting_reheat_floor() {
     assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
     assert!(snapshot.duty_percent >= 38);
     assert!(snapshot.duty_percent < 52);
+}
+
+#[test]
+fn heater_coast_release_requires_filtered_low_error() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    config.settings.temp_filter_alpha_permille = 1;
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 60;
+    point.hold_on_centi_c = 30;
+    point.hold_exit_centi_c = 500;
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    let mut controller = HeaterController::new();
+    controller.last_target_temp_c = 60;
+    controller.phase = HeaterControlPhase::Hold;
+    controller.hold_coast_active = true;
+    controller.filtered_temp_c = Some(60.5);
+    controller.previous_measured_temp_c = Some(59.8);
+    controller.filtered_slope_c_per_profile_tick = -0.5;
+    controller.update_at(60, 59.6, true, Some(profile), 1_000);
+    let snapshot = controller.update_at(60, 59.4, true, Some(profile), 2_000);
+    assert!(snapshot.filtered_temp_c > 59.7);
+    assert!(
+        snapshot.coast_active,
+        "filtered low-error gate has not been met"
+    );
+    assert_eq!(snapshot.duty_percent, 0);
+}
+
+#[test]
+fn heater_approach_coast_requires_actual_hold_exit_error() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    config.settings.temp_filter_alpha_permille = 1;
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 140;
+    point.hold_entry_centi_c = 50;
+    point.hold_exit_centi_c = 100;
+    point.approach_lead_ticks = 5;
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    let mut controller = HeaterController::new();
+    controller.last_target_temp_c = 140;
+    controller.phase = HeaterControlPhase::Approach;
+    controller.filtered_temp_c = Some(139.3);
+    controller.previous_measured_temp_c = Some(139.3);
+    controller.filtered_slope_c_per_profile_tick = 1.0;
+    let snapshot = controller.update_at(140, 138.5, true, Some(profile), 1_000);
+    assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
+    assert!(snapshot.control_error_c <= 1.0);
+    assert!(snapshot.error_c > 1.0);
+    assert!(
+        snapshot.duty_percent > 0,
+        "actual holdExit gate has not been met"
+    );
 }
 
 #[test]
