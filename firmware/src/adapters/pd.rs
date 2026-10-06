@@ -611,7 +611,7 @@ impl SourceCapabilities {
         })?;
         let voltage_mv = requested_mv.clamp(
             apdo.min_mv.max(FUSB302B_PPS_MIN_MV),
-            apdo.max_mv.min(FUSB302B_FIXED_MAX_MV),
+            apdo.max_mv.min(FUSB302B_PPS_MAX_MV),
         );
         if voltage_mv >= active.voltage_mv {
             return None;

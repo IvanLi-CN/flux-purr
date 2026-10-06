@@ -801,6 +801,58 @@ mod tests {
         assert_eq!(policy.phase(), SinkPhase::Ready);
     }
 
+    fn assert_bounded_idle_descent(start_mv: u16) {
+        let mut policy = SinkPolicy::new(12_000, 3_000);
+        let apdo = (0b11_u32 << 30)
+            | ((u32::from(start_mv) / 100) << 17)
+            | ((5_000_u32 / 100) << 8)
+            | (3_000_u32 / 50);
+        let _ = policy.on_source_capabilities(&[((5_000_u32 / 50) << 10) | (1_000_u32 / 10), apdo]);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert!(policy.request_pps_voltage(start_mv).is_some());
+        policy.on_control_message(3, 1);
+        policy.on_control_message(6, 1);
+        assert_eq!(policy.active_contract().voltage_mv, start_mv);
+
+        let mut current_mv = start_mv;
+        while let Some(step_mv) = next_pps_to_fixed_voltage(current_mv, FUSB302B_PPS_MIN_MV) {
+            let rdo = if current_mv == start_mv {
+                policy.request_automatic_idle_contract()
+            } else {
+                policy.request_automatic_idle_pps_step(step_mv)
+            }
+            .expect("the live APDO covers every bounded descent step");
+            let encoded = u32::from_le_bytes(rdo);
+            let encoded_mv = ((encoded >> 9) & 0x0fff) * 20;
+            assert_eq!(encoded_mv, u32::from(step_mv));
+            assert!(u32::from(current_mv) - encoded_mv <= u32::from(PPS_TO_FIXED_STEP_MV));
+            assert_eq!((encoded >> 28) & 0x07, 2);
+            assert_eq!((encoded & 0x7f) * 50, 3_000);
+            assert_eq!(policy.active_contract().voltage_mv, current_mv);
+            policy.on_control_message(3, 2);
+            assert_eq!(policy.active_contract().voltage_mv, current_mv);
+            policy.on_control_message(6, 2);
+            assert_eq!(policy.active_contract().voltage_mv, step_mv);
+            current_mv = step_mv;
+        }
+        assert_eq!(current_mv, FUSB302B_PPS_MIN_MV);
+        assert!(policy.request_automatic_idle_fixed_contract().is_some());
+        assert_eq!(policy.active_contract().kind, ContractKind::Pps);
+        policy.on_control_message(3, 3);
+        policy.on_control_message(6, 3);
+        assert_eq!(policy.active_contract().kind, ContractKind::Fixed);
+        assert_eq!(policy.active_contract().voltage_mv, 5_000);
+        assert_eq!(policy.active_contract().current_ma, 1_000);
+    }
+
+    #[test]
+    fn idle_descent_encodes_bounded_steps_above_twenty_volts_on_the_live_apdo() {
+        for start_mv in [21_000_u16, 25_500] {
+            assert_bounded_idle_descent(start_mv);
+        }
+    }
+
     #[test]
     fn automatic_idle_restore_steps_a_twenty_volt_override_toward_fixed() {
         let mut policy = SinkPolicy::new(12_000, 5_000);
