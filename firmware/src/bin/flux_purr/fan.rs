@@ -5,6 +5,37 @@ use super::*;
 pub(crate) const FAN_WORKING_CONTRACT_MV: u16 = 12_000;
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FanWorkingPowerAdmission {
+    Confirmed,
+    WaitForHeating,
+    RequestCooling,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn fan_working_power_admission(
+    snapshot: PdServiceSnapshot,
+    fan_was_enabled: bool,
+    heater_enabled: bool,
+    manual_pps_enabled: bool,
+) -> FanWorkingPowerAdmission {
+    let observation = if fan_was_enabled {
+        snapshot.observation
+    } else {
+        snapshot.settled_observation()
+    };
+    if fan_working_contract_confirmed(observation, heater_enabled) {
+        FanWorkingPowerAdmission::Confirmed
+    } else if heater_enabled || manual_pps_enabled {
+        // The heating owner is confirming its supply. A cooling Idle must
+        // not supersede that fresh start; keep the fan off until it is ready.
+        FanWorkingPowerAdmission::WaitForHeating
+    } else {
+        FanWorkingPowerAdmission::RequestCooling
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn fan_working_contract_confirmed(
     observation: Option<PdStatusObservation>,
     heater_working: bool,

@@ -1902,10 +1902,17 @@ fn runtime_confirm_fan_power(
     {
         state.fan_working_power_ticket = None;
     }
+    let admission = fan_working_power_admission(
+        state.pd_port.snapshot(),
+        state.fan_command.enabled,
+        state.ui_state.heater_enabled,
+        state.manual_pps_state.enabled,
+    );
     if !matches!(fan_decision.state, FanPolicyState::Disabled)
-        && !fan_working_contract_confirmed(state.last_pd_observation, state.ui_state.heater_enabled)
+        && admission != FanWorkingPowerAdmission::Confirmed
     {
-        if state.fan_working_power_ticket.is_none()
+        if admission == FanWorkingPowerAdmission::RequestCooling
+            && state.fan_working_power_ticket.is_none()
             && elapsed_ms >= state.fan_working_next_attempt_ms
         {
             state.fan_working_next_attempt_ms = elapsed_ms.saturating_add(500);

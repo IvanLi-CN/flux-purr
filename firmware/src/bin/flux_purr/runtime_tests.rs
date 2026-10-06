@@ -1234,6 +1234,64 @@ fn ordinary_heater_start_survives_fixed_to_pps_accept_and_ps_rdy() {
 }
 
 #[test]
+fn fan_start_waits_for_heating_and_does_not_preempt_its_working_request() {
+    let (mut policy, source) = standby_policy_for_heater_start();
+    let request = PdContractRequest::pps(12_000, 3_000).unwrap();
+    assert!(policy.request_contract(request).is_some());
+    let pending = PdServiceSnapshot {
+        observation: fusb302b_contract_observation(
+            policy.phase(),
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            source,
+        ),
+        transition_pending: true,
+        service_available: true,
+        ..PdServiceSnapshot::unavailable()
+    };
+    assert_eq!(
+        fan_working_power_admission(pending, false, true, false),
+        FanWorkingPowerAdmission::WaitForHeating
+    );
+    assert_eq!(
+        fan_working_power_admission(pending, false, false, true),
+        FanWorkingPowerAdmission::WaitForHeating
+    );
+    policy.on_control_message(3, 2);
+    policy.on_control_message(6, 3);
+    let working = PdServiceSnapshot {
+        observation: fusb302b_contract_observation(
+            policy.phase(),
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            source,
+        ),
+        transition_pending: false,
+        ..pending
+    };
+    assert_eq!(
+        fan_working_power_admission(working, false, true, false),
+        FanWorkingPowerAdmission::Confirmed
+    );
+    let adjusting = PdServiceSnapshot {
+        transition_pending: true,
+        ..working
+    };
+    assert_eq!(
+        fan_working_power_admission(adjusting, true, true, false),
+        FanWorkingPowerAdmission::Confirmed
+    );
+    assert_eq!(
+        fan_working_power_admission(adjusting, false, true, false),
+        FanWorkingPowerAdmission::WaitForHeating
+    );
+    assert_eq!(
+        fan_working_power_admission(pending, false, false, false),
+        FanWorkingPowerAdmission::RequestCooling
+    );
+}
+
+#[test]
 fn ordinary_heater_start_discards_intent_on_real_loss_and_never_replays_it() {
     let (mut policy, source) = standby_policy_for_heater_start();
     let request = PdContractRequest::pps(12_000, 3_000).unwrap();
