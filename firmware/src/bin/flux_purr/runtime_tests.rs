@@ -1128,6 +1128,36 @@ fn ordinary_idle_replaces_cooling_fixed_with_lowest_adequate_fixed() {
 }
 
 #[test]
+fn ordinary_heater_restart_requires_exact_live_working_pps_confirmation() {
+    let request = PdContractRequest::pps(12_000, 3_000).unwrap();
+    let observation = |kind, mv, ma| PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: ma,
+        contract_voltage_mv: Some(mv),
+        contract: Contract::observed(kind, mv, ma),
+    };
+    assert!(!working_pps_request_confirmed(None, request));
+    assert!(!working_pps_request_confirmed(
+        Some(observation(ContractKind::Fixed, 12_000, 3_000)),
+        request
+    ));
+    assert!(!working_pps_request_confirmed(
+        Some(observation(ContractKind::Pps, 5_000, 3_000)),
+        request
+    ));
+    assert!(!working_pps_request_confirmed(
+        Some(observation(ContractKind::Pps, 12_000, 1_000)),
+        request
+    ));
+    assert!(working_pps_request_confirmed(
+        Some(observation(ContractKind::Pps, 12_000, 3_000)),
+        request
+    ));
+}
+
+#[test]
 fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
     let mut backend = HeaterPowerBackend::PpsMos {
         pps_min_mv: 5_500,

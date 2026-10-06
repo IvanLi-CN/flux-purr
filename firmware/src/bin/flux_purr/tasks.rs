@@ -35,6 +35,19 @@ pub(crate) fn working_fixed_contract_confirmed(
         && observation.is_some_and(|observation| observation.current_ma >= MIN_HEATER_CONTRACT_MA)
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn working_pps_request_confirmed(
+    observation: Option<PdStatusObservation>,
+    request: PdContractRequest,
+) -> bool {
+    observation.is_some_and(|observation| {
+        observation.status.pd_active
+            && observation.contract.kind == ContractKind::Pps
+            && observation.contract.voltage_mv == request.voltage_mv()
+            && observation.contract.current_ma >= request.operating_current_ma()
+    })
+}
+
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_heater_power_output<PWM>(
     mut context: HeaterPowerOutputContext<'_, PWM>,
@@ -706,10 +719,17 @@ where
     let Ok(request_contract) = PdContractRequest::pps(request.request_mv, capability_max_ma) else {
         return Some(fallback_from_adjustable_request(context).await);
     };
-    match context
-        .pd_port
-        .request_pps_contract_for(PowerIntentOwner::AutomaticThermal, request_contract)
-    {
+    let request_state = if working_pps_request_confirmed(
+        context.pd_port.snapshot().observation,
+        request_contract,
+    ) {
+        PdRequestState::Confirmed
+    } else {
+        context
+            .pd_port
+            .request_pps_contract_for(PowerIntentOwner::AutomaticThermal, request_contract)
+    };
+    match request_state {
         PdRequestState::Pending(ticket) => {
             context.pd_port.discard_ticket(ticket);
             if request.blank_heater {
