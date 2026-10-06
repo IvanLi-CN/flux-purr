@@ -44,9 +44,9 @@ Source MessageID is a three-bit sequence, not an identity for an entire contract
 
 ### Power-preserving recovery
 
-For this PPS source, automatic GoodCRC and locally initiated headers use PD 3.0; PD 2.0 can prevent usable APDO advertisement. An active PPS request is renewed every five seconds. A missing reply to an unchanged renewal bounds the probe state without discarding a still-confirmed supply; real VBUS loss, a sustained VIN mismatch, transport fault, or protocol reset still revokes authorization and turns heating off.
+For this PPS source, automatic GoodCRC and locally initiated headers use PD 3.0; PD 2.0 can prevent usable APDO advertisement. An active PPS request is renewed every five seconds. A missing reply to an unchanged renewal bounds the probe state without discarding a still-confirmed supply; real VBUS loss, transport fault, or protocol reset still revokes authorization and turns heating off. VIN measurements do not confirm or invalidate a contract: PPS current limiting can lower delivered voltage while the accepted request remains valid.
 
-A late Source Capabilities response alone is not grounds for a Sink Soft or Hard Reset. Local `RETRY_FAIL`, request timeout, and partial receive faults clear contract authorization, preserve Rd and the CC session, flush the affected FIFO, and retry bounded capability discovery. Reinitializing the PHY or restarting CC toggling during such recovery can remove the same VBUS that powers the MCU. Low-VBUS handling uses the controller's evidence and a short continuous confirmation before withdrawing Rd; a transient voltage transition is not sufficient.
+A late Source Capabilities response alone is not grounds for a Sink Soft or Hard Reset. Local `RETRY_FAIL`, request timeout, and partial receive faults clear contract authorization, preserve Rd and the CC session, flush the affected FIFO, and retry bounded capability discovery. Reinitializing the PHY or restarting CC toggling during such recovery can remove the same VBUS that powers the MCU. Any observed low VBUS immediately interlocks heating; a controller-reported transition starts a short continuous-low confirmation before entering the VBUS-restore wait. That wait retains Rd and the configured CC/RX session, then resumes bounded capability discovery after VBUS returns.
 
 ### Manual PPS release
 

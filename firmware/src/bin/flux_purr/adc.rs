@@ -1007,10 +1007,6 @@ impl Fusb302bRuntime {
         self.policy.active_contract()
     }
 
-    pub(crate) fn pending_contract(&self) -> Contract {
-        self.policy.pending_contract()
-    }
-
     pub(crate) fn confirmed_active_contract(&self) -> Option<ConfirmedActiveContract> {
         self.policy.confirmed_active_contract()
     }

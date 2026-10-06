@@ -2,13 +2,6 @@
 use super::*;
 
 #[cfg(target_arch = "xtensa")]
-fn request_idle_restore_fire_and_forget(pd_port: &PdPort) {
-    if let PdRequestState::Pending(ticket) = pd_port.restore_automatic_idle_contract() {
-        pd_port.discard_ticket(ticket);
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
 fn await_working_fixed_contract(pd_port: &PdPort, request_mv: u16) -> bool {
     if working_fixed_contract_confirmed(pd_port.snapshot().settled_observation(), request_mv) {
         return true;

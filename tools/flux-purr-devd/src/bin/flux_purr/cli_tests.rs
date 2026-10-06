@@ -6094,10 +6094,13 @@ fn direct_flash_archives_before_invoking_espflash() {
 
 #[test]
 fn direct_flash_reports_missing_snapshot_port_before_any_firmware_write() {
-    fn missing_snapshot(_port: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    fn missing_snapshot(
+        _port: &str,
+        _expected: Option<&UsbSerialIdentity>,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         Err(std::io::Error::from(std::io::ErrorKind::NotFound).into())
     }
-    fn no_rom_mode(_port: &str) -> bool {
+    fn no_rom_mode(_port: &str, _expected: Option<&UsbSerialIdentity>) -> bool {
         false
     }
 
@@ -6135,11 +6138,12 @@ fn direct_flash_probes_rom_only_after_application_snapshot_times_out() {
 
     fn no_application_response(
         _port: &str,
+        _expected: Option<&UsbSerialIdentity>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         SNAPSHOT_ATTEMPTED.store(true, Ordering::SeqCst);
         Err(io::Error::new(io::ErrorKind::TimedOut, "no USB JSONL response").into())
     }
-    fn rom_probe(_port: &str) -> bool {
+    fn rom_probe(_port: &str, _expected: Option<&UsbSerialIdentity>) -> bool {
         assert!(SNAPSHOT_ATTEMPTED.load(Ordering::SeqCst));
         true
     }
