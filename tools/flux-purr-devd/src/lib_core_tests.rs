@@ -4604,3 +4604,60 @@ async fn install_status_endpoint_rejects_non_native_transports() {
 
     assert_eq!(error.error.code, "native_serial_required");
 }
+
+#[tokio::test]
+async fn setup_completion_requires_a_lease_and_native_transport() {
+    let state = AppState::test();
+    let error = complete_device_setup(
+        State(state.clone()),
+        AxumPath("mock-fp-lab-01".into()),
+        Query(LeaseQuery { lease_id: None }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error.code, "lease_required");
+    let lease = state.lease_device("mock-fp-lab-01").unwrap();
+    let error = complete_device_setup(
+        State(state),
+        AxumPath("mock-fp-lab-01".into()),
+        Query(LeaseQuery {
+            lease_id: Some(lease.lease_id),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error.code, "native_serial_required");
+}
+
+#[test]
+fn setup_completion_requires_a_persisted_healthy_generation() {
+    let before: InstallStatus = serde_json::from_value(json!({
+        "layoutId":"flux-purr.esp32s3fh4r2.factory","layoutVersion":1,
+        "partitionTableSha256":"sha256:test","persistenceSource":"eeprom",
+        "recordState":"valid","recordSequence":4,"commissioningRequired":true,
+        "setupReason":"explicit_reset","sensorState":"ready","heaterLocked":true
+    }))
+    .unwrap();
+    let mut after = before.clone();
+    after.commissioning_required = false;
+    after.heater_locked = false;
+    assert!(!setup_completion_is_persisted(&before, &after));
+    after.record_sequence = 5;
+    assert!(setup_completion_is_persisted(&before, &after));
+    for (field, value) in [
+        ("recordState", json!("corrupt")),
+        ("persistenceSource", json!("none")),
+        ("commissioningRequired", json!(true)),
+        ("heaterLocked", json!(true)),
+        ("persistenceFaultAttentionPending", json!(true)),
+    ] {
+        let mut value_after = serde_json::to_value(&after).unwrap();
+        value_after[field] = value;
+        let rejected = serde_json::from_value(value_after).unwrap();
+        assert!(
+            !setup_completion_is_persisted(&before, &rejected),
+            "{field}"
+        );
+    }
+    assert!(setup_completion_is_persisted(&after, &after));
+}

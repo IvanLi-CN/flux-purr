@@ -1,5 +1,7 @@
 # ADC 校准控制面实现状态
 
+用户 ADC 校准是可选输入。缺省激活槽位为 gain=1、offset=0，用户样本保持为空；首次设置不依赖人工两点样本，完成设置不修改校准样本或槽位。
+
 ## Coverage
 
 - 固件 `MemoryConfig` 已改为保存 channel-centered calibration state：共享样本、`slots.a` / `slots.b` 与 `active_slot`。

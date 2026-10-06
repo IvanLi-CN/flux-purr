@@ -655,6 +655,25 @@ pub(crate) async fn device_network(
     Ok(Json(target.network))
 }
 
+pub(crate) async fn complete_device_setup(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<InstallStatus>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        device(&state_lock, &device_id)?.clone()
+    };
+    if target.transport != DeviceTransport::NativeSerial {
+        return Err(HttpError::bad_request(
+            "native_serial_required",
+            "Setup completion requires an active USB/devd lease.",
+        ));
+    }
+    serial_complete_setup(&state, &target).await.map(Json)
+}
+
 pub(crate) async fn device_status(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,

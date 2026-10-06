@@ -8,6 +8,10 @@ Source of truth for this implementation scope:
 
 ## Shared Models
 
+### First setup
+
+`GET /api/v1/devices/{deviceId}/install-status` returns the USB install-status contract. `POST /api/v1/devices/{deviceId}/setup/complete?lease_id=<lease-id>` is available only through an active native serial lease and sends the existing `complete_setup` USB request once. It returns `InstallStatus` only after a healthy persisted EEPROM generation confirms commissioning completion, with a six-second readback deadline. Missing user ADC samples are valid and remain empty; factory/default correction applies without creating artificial calibration points. Repository CLI exposes `setup status` and `setup complete` with an explicit `--device` or `--hardware` target.
+
 All transports expose the same domain model. Field names use `camelCase` on HTTP/JSON.
 
 ### `Identity`

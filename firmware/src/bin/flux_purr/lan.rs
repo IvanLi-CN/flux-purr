@@ -395,29 +395,7 @@ pub(crate) fn process_complete_setup(
     }
     let sensor_ready =
         context.current_rtd_fault.is_none() && context.latest_status_temp_c.is_finite();
-    let calibration_ready = flux_purr_firmware::memory::adc_calibration_fit(
-        &context.memory_config.adc_calibration,
-        flux_purr_firmware::memory::AdcCalibrationChannel::Rtd,
-    )
-    .sample_count
-        >= 2
-        && flux_purr_firmware::memory::adc_calibration_fit(
-            &context.memory_config.adc_calibration,
-            flux_purr_firmware::memory::AdcCalibrationChannel::Vin,
-        )
-        .sample_count
-            >= 2
-        && context
-            .memory_config
-            .active_heater_curve
-            .points
-            .iter()
-            .flatten()
-            .count()
-            >= 2;
-    let result = context
-        .memory_config
-        .complete_setup(sensor_ready, calibration_ready);
+    let result = context.memory_config.complete_setup(sensor_ready);
     let response = match result {
         Ok(()) => {
             *context.memory_commit_due_ms =
@@ -435,7 +413,7 @@ pub(crate) fn process_complete_setup(
             usb_error_response(
                 request_id,
                 "calibration_required",
-                "Calibration is required before setup completion.",
+                "A heater resistance curve is required before setup completion; user ADC calibration is optional.",
             )
         }
     };

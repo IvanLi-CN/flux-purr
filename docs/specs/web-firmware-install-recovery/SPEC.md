@@ -99,6 +99,7 @@ The installation engines MUST implement the following shared artifact, target an
 - Browser `GET_SECURITY_INFO`：接受恰好 20 字节的完整安全记录，或不少于 24 字节的完整 ROM/扩展响应；后者只解释协议定义的前 20 字节并忽略 ROM transport trailer 与后续扩展。少于 20 字节、21–23 字节截断响应、未知安全位或任一安全功能启用时：`blocked`，不得尝试写入。
 - 写入已完成但 runtime 未在时限内重连：`write_complete_unverified`，不得宣称成功。
 - 空白或损坏 persistence：写入安全默认，`commissioningRequired=true`；旧有效 record 缺少该 TLV 时视为已完成。
+- 首次设置以传感器正常和至少两个有效加热电阻曲线点为完成条件。用户 RTD/VIN ADC 校准不是必填项；未校准时保留空样本及缺省槽位校正，不伪造人工校准点。普通加热仍独立要求有效绑定热模型及原保护门禁。仓库 CLI/devd 的显式 setup-complete 操作必须保持 native USB lease，并在有限时限内回读确认 EEPROM 已提交解锁状态。
 
 ## 接口契约（Interfaces & Contracts）
 

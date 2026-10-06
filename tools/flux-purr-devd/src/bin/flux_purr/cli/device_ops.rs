@@ -65,6 +65,26 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::Status(selector) => {
             request_device_read(&client, resolve_target(selector, &cli.devd)?, "/status").await?
         }
+        Command::Setup { command } => match command {
+            SetupCommand::Status(selector) => {
+                request_device_read(
+                    &client,
+                    resolve_target(selector, &cli.devd)?,
+                    "/install-status",
+                )
+                .await?
+            }
+            SetupCommand::Complete(selector) => {
+                request_with_lease(
+                    &client,
+                    resolve_target(selector, &cli.devd)?,
+                    Method::POST,
+                    "/setup/complete",
+                    None,
+                )
+                .await?
+            }
+        },
         Command::Runtime { command } => {
             execute_runtime_command(&client, &cli.devd, command).await?
         }

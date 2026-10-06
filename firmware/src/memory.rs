@@ -681,15 +681,11 @@ impl Default for MemoryConfig {
 }
 
 impl MemoryConfig {
-    pub fn complete_setup(
-        &mut self,
-        sensor_ready: bool,
-        calibration_ready: bool,
-    ) -> Result<(), SetupCompletionError> {
+    pub fn complete_setup(&mut self, sensor_ready: bool) -> Result<(), SetupCompletionError> {
         if !sensor_ready {
             return Err(SetupCompletionError::SensorNotReady);
         }
-        if !calibration_ready {
+        if self.active_heater_curve.points.iter().flatten().count() < 2 {
             return Err(SetupCompletionError::CalibrationRequired);
         }
         self.commissioning_required = false;
@@ -5617,14 +5613,22 @@ mod tests {
         assert!(MemoryConfig::default().commissioning_required);
         let mut setup = MemoryConfig::default();
         assert_eq!(
-            setup.complete_setup(false, true),
+            setup.complete_setup(false),
             Err(SetupCompletionError::SensorNotReady)
         );
         assert_eq!(
-            setup.complete_setup(true, false),
+            setup.complete_setup(true),
             Err(SetupCompletionError::CalibrationRequired)
         );
-        setup.complete_setup(true, true).unwrap();
+        setup.active_heater_curve.points[0] = Some(HeaterCurvePoint {
+            temp_centi_c: 0,
+            resistance_milliohms: 3_000,
+        });
+        setup.active_heater_curve.points[1] = Some(HeaterCurvePoint {
+            temp_centi_c: 10_000,
+            resistance_milliohms: 4_000,
+        });
+        setup.complete_setup(true).unwrap();
         assert!(!setup.commissioning_required);
         setup.reset_for_commissioning();
         assert!(setup.commissioning_required);
@@ -5670,6 +5674,45 @@ mod tests {
 
         let legacy = decode_memory_record(&bytes[..payload_start + output]).unwrap();
         assert!(!legacy.config.commissioning_required);
+    }
+
+    #[test]
+    fn setup_completion_preserves_absent_user_adc_calibration_and_defaults() {
+        let mut config = MemoryConfig::default();
+        let original_adc = config.adc_calibration;
+        config.active_heater_curve.points[0] = Some(HeaterCurvePoint {
+            temp_centi_c: 0,
+            resistance_milliohms: 3_000,
+        });
+        assert_eq!(
+            config.complete_setup(true),
+            Err(SetupCompletionError::CalibrationRequired)
+        );
+        assert!(config.commissioning_required);
+        config.active_heater_curve.points[1] = Some(HeaterCurvePoint {
+            temp_centi_c: 10_000,
+            resistance_milliohms: 4_000,
+        });
+        config.complete_setup(true).unwrap();
+        assert_eq!(config.adc_calibration, original_adc);
+        assert!(!config.commissioning_required);
+        let record = MemoryRecord {
+            sequence: 1,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).unwrap();
+        let restored = decode_memory_record(&bytes[..len]).unwrap().config;
+        assert!(!restored.commissioning_required);
+        assert_eq!(restored.adc_calibration, original_adc);
+        assert_eq!(
+            adc_calibration_fit(&restored.adc_calibration, AdcCalibrationChannel::Rtd).sample_count,
+            0
+        );
+        assert_eq!(
+            adc_calibration_fit(&restored.adc_calibration, AdcCalibrationChannel::Vin).sample_count,
+            0
+        );
     }
 
     #[test]

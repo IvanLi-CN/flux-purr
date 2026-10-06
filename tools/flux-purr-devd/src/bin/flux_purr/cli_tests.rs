@@ -14,6 +14,36 @@ use axum::{
     routing::{delete, get, post, put},
 };
 
+#[test]
+fn setup_cli_exposes_explicit_status_and_completion_targets() {
+    let status =
+        Cli::try_parse_from(["flux-purr", "setup", "status", "--device", "test-device"]).unwrap();
+    assert!(matches!(
+        status.command,
+        Command::Setup {
+            command: SetupCommand::Status(_)
+        }
+    ));
+    let complete =
+        Cli::try_parse_from(["flux-purr", "setup", "complete", "--device", "test-device"]).unwrap();
+    assert!(matches!(
+        complete.command,
+        Command::Setup {
+            command: SetupCommand::Complete(_)
+        }
+    ));
+    assert!(
+        resolve_target(
+            TargetSelector {
+                device: None,
+                hardware: None
+            },
+            DEFAULT_DEVD_ENDPOINT
+        )
+        .is_err()
+    );
+}
+
 struct SnapshotFixtureReader {
     bytes: VecDeque<u8>,
     would_block_once: bool,

@@ -164,6 +164,68 @@ pub(crate) async fn serial_clear_lan_pairing(
     Ok(())
 }
 
+pub(crate) fn setup_completion_is_persisted(before: &InstallStatus, after: &InstallStatus) -> bool {
+    !after.commissioning_required
+        && !after.heater_locked
+        && !after.persistence_fault_attention_pending
+        && after.persistence_source == "eeprom"
+        && after.record_state == "valid"
+        && (!before.commissioning_required || after.record_sequence > before.record_sequence)
+}
+
+pub(crate) async fn serial_complete_setup(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<InstallStatus, HttpError> {
+    let before = serial_request_payload::<InstallStatus>(
+        state,
+        target,
+        "get_install_status",
+        "install_status",
+    )
+    .await?;
+    let request_id = format!("devd-{}-complete-setup", now_millis());
+    let request = serde_json::to_string(&UsbRequestWire {
+        frame_type: "request",
+        request_id: &request_id,
+        op: "complete_setup",
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB setup request"))?;
+    serial_exchange(
+        state,
+        &target.id,
+        native_port_path(target)?,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await?;
+    tokio::time::timeout(Duration::from_secs(6), async {
+        loop {
+            let after = serial_request_payload::<InstallStatus>(
+                state,
+                target,
+                "get_install_status",
+                "install_status",
+            )
+            .await?;
+            if setup_completion_is_persisted(&before, &after) {
+                return Ok(after);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        HttpError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "setup_persistence_unverified",
+            "Setup completion was not confirmed in a healthy EEPROM record.",
+            false,
+        )
+    })?
+}
+
 pub(crate) async fn serial_lan_pairing_code(
     state: &AppState,
     target: &DeviceRecord,

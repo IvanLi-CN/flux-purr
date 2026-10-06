@@ -345,6 +345,10 @@ pub fn app(state: AppState) -> Router {
             "/api/v1/devices/{device_id}/install-status",
             get(device_install_status),
         )
+        .route(
+            "/api/v1/devices/{device_id}/setup/complete",
+            post(complete_device_setup),
+        )
         .route("/api/v1/devices/{device_id}/network", get(device_network))
         .route("/api/v1/devices/{device_id}/status", get(device_status))
         .route("/api/v1/devices/{device_id}/events", get(device_events))

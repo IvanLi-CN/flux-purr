@@ -21,6 +21,10 @@ pub(crate) enum Command {
     },
     Identity(TargetSelector),
     Status(TargetSelector),
+    Setup {
+        #[command(subcommand)]
+        command: SetupCommand,
+    },
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
@@ -197,6 +201,15 @@ impl RamTestKind {
 pub(crate) struct RamExitArgs {
     #[arg(long)]
     pub(crate) port: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SetupCommand {
+    Status(TargetSelector),
+    #[command(
+        about = "Complete first setup and verify EEPROM persistence; user ADC calibration is optional."
+    )]
+    Complete(TargetSelector),
 }
 
 #[derive(Debug, Subcommand)]
