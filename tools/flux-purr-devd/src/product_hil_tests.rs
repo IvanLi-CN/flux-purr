@@ -350,7 +350,50 @@ impl ProductObserver<'_> {
         Ok(())
     }
 
-    async fn heat_and_cool(&mut self) -> Result<(), String> {
+    async fn verify_ordinary_pps_exit(&mut self) -> Result<(), String> {
+        record(self.file, self.started, "phase", json!("ordinaryPpsExit"));
+        self.runtime(json!({"manualPpsEnabled": true, "manualPpsMv": 12000, "manualPpsMa": 3000}))
+            .await?;
+        let (status, _) = self.observe(5).await?;
+        if status["pdContractKind"] != "pps" {
+            return Err("ordinary manual PPS did not start".into());
+        }
+        self.runtime(json!({"manualPpsEnabled": false})).await?;
+        self.ready(40).await?;
+        let (status, preparation) = self.read().await?;
+        validate_ready_snapshot(&status, &preparation)?;
+        let source_mv = self.source_voltage()?;
+        record(
+            self.file,
+            self.started,
+            "ordinaryPpsExitPassed",
+            json!({"status": status, "preparation": preparation, "sourceMv": source_mv}),
+        );
+        Ok(())
+    }
+
+    async fn stop_hil_heating(&mut self, prepare: bool) -> Result<(), String> {
+        if prepare {
+            self.preparation("prepare_flash").await?;
+        } else {
+            self.runtime(json!({"heaterEnabled": false, "manualPpsEnabled": false,
+                "calibration": {"mode": "off", "heaterEnabled": false}}))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn heat_and_cool(&mut self, prepare: bool) -> Result<(), String> {
+        record(
+            self.file,
+            self.started,
+            "phase",
+            json!(if prepare {
+                "preparationHeatCool"
+            } else {
+                "ordinaryHeatCool"
+            }),
+        );
         // The 21V case exercises PPS current limiting with the cold heater as
         // a load. This temporary manual-output fixture does not persist a
         // thermal model or claim ordinary production heater arming.
@@ -396,17 +439,38 @@ impl ProductObserver<'_> {
         if !heated {
             return Err("no physical heat observed".into());
         }
-        self.preparation("prepare_flash").await?;
+        self.stop_hil_heating(prepare).await?;
         let (status, _) = self.read().await?;
         if status["heaterPhysicalOutputPercent"] != 0 {
-            return Err("prepare failed to stop actual heat".into());
+            return Err("stop failed to revoke actual heat".into());
         }
+        self.await_natural_cooling().await?;
+        let (status, preparation) = self.read().await?;
+        validate_ready_snapshot(&status, &preparation)?;
+        let source_mv = self.source_voltage()?;
+        record(
+            self.file,
+            self.started,
+            if prepare {
+                "preparationCoolingPassed"
+            } else {
+                "ordinaryCoolingPassed"
+            },
+            json!({"status": status, "preparation": preparation, "sourceMv": source_mv}),
+        );
+        if prepare {
+            self.preparation("cancel_flash_preparation").await?;
+        }
+        Ok(())
+    }
+
+    async fn await_natural_cooling(&mut self) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(240);
         let mut cooled = false;
         loop {
             let (status, preparation) = self.read().await?;
             if status["heaterPhysicalOutputPercent"] != 0 {
-                return Err("heat replayed while preparation active".into());
+                return Err("heat replayed during cooling".into());
             }
             cooled |= status["fanEnabled"] == true;
             validate_cooling_snapshot(&status, &preparation)?;
@@ -415,24 +479,27 @@ impl ProductObserver<'_> {
                 && preparation["cooling"] == false
                 && status["fanEnabled"] == false
                 && status["pdContractKind"] == "fixed"
+                && status["pdContractMv"] == 5000
+                && status["pdContractCurrentMa"] == 1000
             {
                 break;
             }
             if Instant::now() >= deadline {
-                return Err("cooling preparation did not finish".into());
+                return Err("natural cooling did not finish in Fixed 5V".into());
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         if !cooled {
             return Err("no physical cooling observed".into());
         }
-        self.preparation("cancel_flash_preparation").await?;
         Ok(())
     }
 
     async fn exercise_product(&mut self) -> Result<(), String> {
+        self.verify_ordinary_pps_exit().await?;
+        self.heat_and_cool(false).await?;
         self.verify_preparation_hold().await?;
-        self.heat_and_cool().await?;
+        self.heat_and_cool(true).await?;
         self.wifi_idle_load().await?;
         record(
             self.file,

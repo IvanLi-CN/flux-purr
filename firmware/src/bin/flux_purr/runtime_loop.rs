@@ -1430,29 +1430,6 @@ fn runtime_hold_heater_for_flash(state: &mut RuntimeLoopState) -> bool {
             .thermal_plant_completion_disarm_pending = false;
         let _ = state.manual_pps_state.consume_automatic_restore_pending();
     }
-    if let Some(ticket) = state.flash_idle_power_ticket
-        && state.pd_port.try_take_ticket(ticket).is_some()
-    {
-        state.flash_idle_power_ticket = None;
-    }
-    let needs_cooling = state.latest_display_temp_i16 > 40
-        || !matches!(state.fan_policy_state, FanPolicyState::Disabled);
-    let fixed_confirmed = state
-        .last_pd_observation
-        .is_some_and(|observation| automatic_idle_contract_is_confirmed(observation, None));
-    let now_ms = Instant::now()
-        .as_millis()
-        .saturating_sub(state.runtime_started_ms);
-    if !needs_cooling
-        && !fixed_confirmed
-        && state.flash_idle_power_ticket.is_none()
-        && now_ms >= state.flash_idle_next_attempt_ms
-    {
-        state.flash_idle_next_attempt_ms = now_ms.saturating_add(500);
-        if let PdRequestState::Pending(ticket) = state.pd_port.restore_automatic_idle_contract() {
-            state.flash_idle_power_ticket = Some(ticket);
-        }
-    }
     needs_redraw
 }
 
@@ -1464,9 +1441,6 @@ pub(crate) async fn runtime_reconcile_heater_arming(
 ) -> (bool, bool) {
     if flash_preparation::is_active() {
         return (true, runtime_hold_heater_for_flash(state));
-    }
-    if let Some(ticket) = state.flash_idle_power_ticket.take() {
-        state.pd_port.discard_ticket(ticket);
     }
     let calibration_output_temp_c = thermal_plant_calibration_temperature_c(
         state.calibration_runtime_state,
@@ -1946,10 +1920,6 @@ fn runtime_confirm_fan_power(
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
-    let cooling_was_enabled = state.fan_command.enabled
-        || state
-            .last_fan_command
-            .is_some_and(|command| command.enabled);
     let mut fan_decision = fan_policy_decision_with_modes(
         state.latest_display_temp_i16,
         elapsed_ms,
@@ -2012,14 +1982,7 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
         state.fan_command,
         &mut state.last_fan_command,
     );
-    if flash_preparation::is_active()
-        && cooling_was_enabled
-        && !state.fan_command.enabled
-        && matches!(state.fan_policy_state, FanPolicyState::Disabled)
-        && let PdRequestState::Pending(ticket) = state.pd_port.restore_automatic_idle_contract()
-    {
-        state.pd_port.discard_ticket(ticket);
-    }
+    runtime_restore_idle_power(state, elapsed_ms);
     let persistence_locked = state.ui_state.persistence_locked();
     sync_frontpanel_runtime_state(
         &mut state.ui_state,
@@ -2037,6 +2000,91 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
         ),
         elapsed_ms,
     )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) struct CompleteIdleInput {
+    pub(crate) heater_enabled: bool,
+    pub(crate) physical_duty_percent: u8,
+    pub(crate) manual_pps: ManualPpsState,
+    pub(crate) calibration: CalibrationRuntimeState,
+    pub(crate) fan_state: FanPolicyState,
+    pub(crate) fan_enabled: bool,
+    pub(crate) fan_power_pending: bool,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn complete_idle_power_allowed(input: CompleteIdleInput) -> bool {
+    !input.heater_enabled
+        && input.physical_duty_percent == 0
+        && !input.manual_pps.enabled
+        && input.manual_pps.pending_power_ticket.is_none()
+        && input.calibration.mode == CalibrationMode::Off
+        && !input.calibration.pps_enabled
+        && !input.calibration.heater_enabled
+        && input.calibration.job.status != CalibrationJobStatus::Running
+        && !input.calibration.immediate_heater_disarm_pending
+        && !input.calibration.thermal_plant_completion_disarm_pending
+        && matches!(input.fan_state, FanPolicyState::Disabled)
+        && !input.fan_enabled
+        && !input.fan_power_pending
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn preferred_idle_contract_confirmed(
+    observation: Option<PdStatusObservation>,
+    source: SourceCapabilitiesView,
+) -> bool {
+    let preferred_mv = source
+        .fixed
+        .into_iter()
+        .flatten()
+        .filter(|(mv, ma)| {
+            *mv >= FUSB302B_PD_ABSOLUTE_MIN_MV
+                && *mv <= FUSB302B_FIXED_MAX_MV
+                && *ma >= standby_current_for_voltage(*mv)
+        })
+        .map(|(mv, _)| mv)
+        .min();
+    observation.is_some_and(|observation| {
+        automatic_idle_contract_is_confirmed(observation, None)
+            && Some(observation.contract.voltage_mv) == preferred_mv
+    })
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_restore_idle_power(state: &mut RuntimeLoopState, elapsed_ms: u64) {
+    let idle = complete_idle_power_allowed(CompleteIdleInput {
+        heater_enabled: state.ui_state.heater_enabled,
+        physical_duty_percent: state.last_heater_duty,
+        manual_pps: state.manual_pps_state,
+        calibration: state.calibration_runtime_state,
+        fan_state: state.fan_policy_state,
+        fan_enabled: state.fan_command.enabled,
+        fan_power_pending: state.fan_working_power_ticket.is_some(),
+    });
+    if !idle {
+        if let Some(ticket) = state.idle_power_ticket.take() {
+            state.pd_port.discard_ticket(ticket);
+        }
+        state.idle_next_attempt_ms = elapsed_ms;
+        return;
+    }
+    if let Some(ticket) = state.idle_power_ticket
+        && state.pd_port.try_take_ticket(ticket).is_some()
+    {
+        state.idle_power_ticket = None;
+    }
+    let confirmed = preferred_idle_contract_confirmed(
+        state.pd_port.snapshot().observation,
+        state.power_state.source_capabilities,
+    );
+    if !confirmed && state.idle_power_ticket.is_none() && elapsed_ms >= state.idle_next_attempt_ms {
+        state.idle_next_attempt_ms = elapsed_ms.saturating_add(500);
+        if let PdRequestState::Pending(ticket) = state.pd_port.restore_automatic_idle_contract() {
+            state.idle_power_ticket = Some(ticket);
+        }
+    }
 }
 
 #[cfg(target_arch = "xtensa")]

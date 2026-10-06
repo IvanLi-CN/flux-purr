@@ -154,8 +154,8 @@ macro_rules! build_runtime_loop_state {
         };
         let fan_working_power_ticket = None;
         let fan_working_next_attempt_ms = 0;
-        let flash_idle_power_ticket = None;
-        let flash_idle_next_attempt_ms = 0;
+        let idle_power_ticket = None;
+        let idle_next_attempt_ms = 0;
         assemble_runtime_loop!(
             runtime_mode,
             display,
@@ -221,8 +221,8 @@ macro_rules! build_runtime_loop_state {
             last_fan_command,
             fan_working_power_ticket,
             fan_working_next_attempt_ms,
-            flash_idle_power_ticket,
-            flash_idle_next_attempt_ms,
+            idle_power_ticket,
+            idle_next_attempt_ms,
             last_raw_state,
             fan_command,
             buzzer,

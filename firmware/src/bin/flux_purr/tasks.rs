@@ -9,8 +9,14 @@ fn request_idle_restore_fire_and_forget(pd_port: &PdPort) {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn await_idle_restore(pd_port: &PdPort) -> bool {
-    match pd_port.restore_automatic_idle_contract() {
+fn await_working_fixed_contract(pd_port: &PdPort, request_mv: u16) -> bool {
+    if working_fixed_contract_confirmed(pd_port.snapshot().observation, request_mv) {
+        return true;
+    }
+    let Ok(request) = PdContractRequest::fixed(request_mv, MIN_HEATER_CONTRACT_MA) else {
+        return false;
+    };
+    match pd_port.request_fixed_contract(request) {
         PdRequestState::Confirmed => true,
         PdRequestState::Pending(ticket) => {
             pd_port.discard_ticket(ticket);
@@ -18,6 +24,15 @@ fn await_idle_restore(pd_port: &PdPort) -> bool {
         }
         PdRequestState::Failed => false,
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn working_fixed_contract_confirmed(
+    observation: Option<PdStatusObservation>,
+    request_mv: u16,
+) -> bool {
+    pd_observation_confirms_fixed_contract(observation, request_mv)
+        && observation.is_some_and(|observation| observation.current_ma >= MIN_HEATER_CONTRACT_MA)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -55,6 +70,18 @@ where
             || *context.last_physical_duty_percent != previous_duty_percent;
     }
     reset_backend_after_manual_pps_restore(&mut context);
+    if automatic_heater_power_is_idle(
+        context.heater_enabled,
+        context.duty_percent,
+        context.manual_pps.enabled,
+    ) {
+        // The runtime owns standby and fan-only supply. Forget cached working
+        // power so the next heating intent confirms its supply before PWM.
+        reset_automatic_heater_backend(context.backend);
+        context.hold_pps_governor.reset();
+        apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+        return false;
+    }
     match *context.backend {
         HeaterPowerBackend::FixedPdPwmFallback { .. } => {
             apply_fixed_pd_backend(context, manual_pps_active).await
@@ -177,14 +204,28 @@ pub(crate) fn reset_backend_after_manual_pps_restore<PWM>(
     if !context.manual_pps.consume_automatic_restore_pending() {
         return;
     }
-    match *context.backend {
+    reset_automatic_heater_backend(context.backend);
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_heater_power_is_idle(
+    heater_enabled: bool,
+    duty_percent: u8,
+    manual_pps_enabled: bool,
+) -> bool {
+    !heater_enabled && duty_percent == 0 && !manual_pps_enabled
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn reset_automatic_heater_backend(backend: &mut HeaterPowerBackend) {
+    match *backend {
         HeaterPowerBackend::FixedPdPwmFallback {
             reason,
             fixed_request,
             terminal_fixed_pd_disarmed,
             ..
         } => {
-            *context.backend = HeaterPowerBackend::FixedPdPwmFallback {
+            *backend = HeaterPowerBackend::FixedPdPwmFallback {
                 reason,
                 fixed_request_confirmed: false,
                 fixed_request,
@@ -199,7 +240,7 @@ pub(crate) fn reset_backend_after_manual_pps_restore<PWM>(
             capability_max_ma,
             ..
         } => {
-            *context.backend = HeaterPowerBackend::PpsMos {
+            *backend = HeaterPowerBackend::PpsMos {
                 pps_min_mv,
                 idle_request_mv,
                 pps_max_mv,
@@ -272,7 +313,7 @@ where
         } => {
             if !fixed_request_confirmed && !manual_pps_active {
                 apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
-                if !await_idle_restore(pd_port) {
+                if !await_working_fixed_contract(pd_port, fixed_request.millivolts()) {
                     return false;
                 }
                 *backend = HeaterPowerBackend::FixedPdPwmFallback {
@@ -600,14 +641,8 @@ where
     PWM: SetDutyCycle,
 {
     apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-    let fixed_request_confirmed = match context.pd_port.restore_automatic_idle_contract() {
-        PdRequestState::Confirmed => true,
-        PdRequestState::Pending(ticket) => {
-            context.pd_port.discard_ticket(ticket);
-            false
-        }
-        PdRequestState::Failed => false,
-    };
+    let fixed_request_confirmed =
+        await_working_fixed_contract(context.pd_port, ch224q::VoltageRequest::V12.millivolts());
     *context.backend = HeaterPowerBackend::FixedPdPwmFallback {
         reason: HeaterPowerBackendReason::AdjustableRequestFailed,
         fixed_request_confirmed,

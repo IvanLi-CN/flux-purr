@@ -1039,6 +1039,131 @@ fn automatic_idle_restore_rejects_a_low_current_twelve_volt_contract() {
     ));
 }
 
+fn complete_idle_input() -> CompleteIdleInput {
+    CompleteIdleInput {
+        heater_enabled: false,
+        physical_duty_percent: 0,
+        manual_pps: ManualPpsState::default(),
+        calibration: CalibrationRuntimeState::default(),
+        fan_state: FanPolicyState::Disabled,
+        fan_enabled: false,
+        fan_power_pending: false,
+    }
+}
+
+#[test]
+fn complete_idle_excludes_armed_zero_pwm_pulse_gaps_and_pending_work() {
+    assert!(complete_idle_power_allowed(complete_idle_input()));
+    let mut armed = complete_idle_input();
+    armed.heater_enabled = true;
+    assert!(!complete_idle_power_allowed(armed));
+    let mut physical = complete_idle_input();
+    physical.physical_duty_percent = 1;
+    assert!(!complete_idle_power_allowed(physical));
+    let mut manual = complete_idle_input();
+    manual.manual_pps.enabled = true;
+    assert!(!complete_idle_power_allowed(manual));
+    let mut calibration = complete_idle_input();
+    calibration.calibration.mode = CalibrationMode::HeaterCurve;
+    assert!(!complete_idle_power_allowed(calibration));
+    let mut job = complete_idle_input();
+    job.calibration.job.status = CalibrationJobStatus::Running;
+    assert!(!complete_idle_power_allowed(job));
+    let mut disarm = complete_idle_input();
+    disarm.calibration.immediate_heater_disarm_pending = true;
+    assert!(!complete_idle_power_allowed(disarm));
+    let mut pulse = complete_idle_input();
+    pulse.fan_state = FanPolicyState::HeatingGuardPulse {
+        duty_percent: 20,
+        pwm_permille: 500,
+    };
+    assert!(!complete_idle_power_allowed(pulse));
+    let mut fan = complete_idle_input();
+    fan.fan_enabled = true;
+    assert!(!complete_idle_power_allowed(fan));
+    let mut pending_fan = complete_idle_input();
+    pending_fan.fan_power_pending = true;
+    assert!(!complete_idle_power_allowed(pending_fan));
+}
+
+#[test]
+fn ordinary_idle_replaces_cooling_fixed_with_lowest_adequate_fixed() {
+    let observation = |mv, ma| PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: ma,
+        contract_voltage_mv: Some(mv),
+        contract: Contract::observed(ContractKind::Fixed, mv, ma),
+    };
+    let mut source = SourceCapabilitiesView::default();
+    source.fixed[0] = Some((5_000, 1_000));
+    source.fixed[1] = Some((12_000, 3_000));
+    assert!(!preferred_idle_contract_confirmed(
+        Some(observation(12_000, 420)),
+        source
+    ));
+    assert!(preferred_idle_contract_confirmed(
+        Some(observation(5_000, 1_000)),
+        source
+    ));
+    assert!(!preferred_idle_contract_confirmed(None, source));
+    assert!(!working_fixed_contract_confirmed(
+        Some(observation(12_000, 420)),
+        12_000
+    ));
+    assert!(working_fixed_contract_confirmed(
+        Some(observation(12_000, 3_000)),
+        12_000
+    ));
+    source.fixed[0] = Some((5_000, 500));
+    assert!(preferred_idle_contract_confirmed(
+        Some(observation(12_000, 420)),
+        source
+    ));
+    assert!(!preferred_idle_contract_confirmed(
+        Some(observation(5_000, 1_000)),
+        source
+    ));
+}
+
+#[test]
+fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
+    let mut backend = HeaterPowerBackend::PpsMos {
+        pps_min_mv: 5_500,
+        idle_request_mv: 12_000,
+        pps_max_mv: 21_000,
+        adjustable_max_mv: 21_000,
+        capability_max_ma: 3_000,
+        current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+        current_request_mv: 21_000,
+        settle_until_ms: Some(10_000),
+        next_request_at_ms: 10_000,
+        current_limit_fixed_pwm_active: true,
+        current_limit_fixed_request_confirmed: true,
+        terminal_fixed_pd_disarmed: false,
+    };
+    assert!(automatic_heater_power_is_idle(false, 0, false));
+    assert!(!automatic_heater_power_is_idle(true, 0, false));
+    assert!(!automatic_heater_power_is_idle(false, 0, true));
+    assert!(!automatic_heater_power_is_idle(false, 1, false));
+    reset_automatic_heater_backend(&mut backend);
+    let HeaterPowerBackend::PpsMos {
+        current_mode,
+        settle_until_ms,
+        next_request_at_ms,
+        current_limit_fixed_request_confirmed,
+        ..
+    } = backend
+    else {
+        panic!("PPS capability must be retained for the next heating intent");
+    };
+    assert_eq!(current_mode, None);
+    assert_eq!(settle_until_ms, None);
+    assert_eq!(next_request_at_ms, 0);
+    assert!(!current_limit_fixed_request_confirmed);
+}
+
 #[test]
 fn flash_preparation_readiness_does_not_depend_on_vin_measurements() {
     let observation = PdStatusObservation {
