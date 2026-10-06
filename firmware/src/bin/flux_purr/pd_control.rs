@@ -2,6 +2,9 @@
 use super::*;
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+use core::fmt::Write as _;
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn fusb302b_degraded_reason() -> &'static str {
     match FUSB302B_DIAGNOSTIC.load(Ordering::Relaxed) {
         FUSB302B_DIAG_WAITING_CC_ATTACH => "pd_fusb_cc_attach_pending",
@@ -27,6 +30,34 @@ pub(crate) fn fusb302b_degraded_reason() -> &'static str {
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn fusb302b_identity_degraded_reason()
+-> heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }> {
+    let diagnostic = FUSB302B_IDENTITY_DIAGNOSTIC.load(Ordering::Acquire);
+    let mut reason = error_code_string(match diagnostic {
+        FUSB302B_IDENTITY_DIAG_I2C_ERROR => "pd_fusb_identity_i2c_error",
+        FUSB302B_IDENTITY_DIAG_ID_MISMATCH => "pd_fusb_identity_mismatch",
+        FUSB302B_IDENTITY_DIAG_UNSUPPORTED_ID => "pd_fusb_identity_unsupported_id",
+        FUSB302B_IDENTITY_DIAG_STATUS_INVALID => "pd_fusb_identity_status_invalid",
+        _ => "pd_contract_unavailable",
+    });
+    if diagnostic == FUSB302B_IDENTITY_DIAG_ID_MISMATCH {
+        let _ = write!(
+            reason,
+            "_{:02x}_{:02x}",
+            FUSB302B_IDENTITY_FIRST_ID.load(Ordering::Acquire),
+            FUSB302B_IDENTITY_SECOND_ID.load(Ordering::Acquire),
+        );
+    } else if diagnostic == FUSB302B_IDENTITY_DIAG_UNSUPPORTED_ID {
+        let _ = write!(
+            reason,
+            "_{:02x}",
+            FUSB302B_IDENTITY_SECOND_ID.load(Ordering::Acquire),
+        );
+    }
+    reason
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const fn fusb302b_protocol_fault_code(fault: u8) -> Option<&'static str> {
     match fault {
         FUSB302B_PROTOCOL_FAULT_VBUS_LOW => Some("pd_fusb_vbus_low"),
@@ -41,7 +72,6 @@ pub(crate) const fn fusb302b_protocol_fault_code(fault: u8) -> Option<&'static s
         FUSB302B_PROTOCOL_FAULT_TRANSMIT_IO => Some("pd_fusb_transmit_io_error"),
         FUSB302B_PROTOCOL_FAULT_CONFIGURATION_IO => Some("pd_fusb_configuration_io_error"),
         FUSB302B_PROTOCOL_FAULT_PROTECTION => Some("pd_fusb_protection"),
-        FUSB302B_PROTOCOL_FAULT_STALE_CONTRACT_VIN => Some("pd_fusb_stale_contract_vin"),
         FUSB302B_PROTOCOL_FAULT_READ_INTERRUPTS_IO => Some("pd_fusb_read_interrupts_io_error"),
         FUSB302B_PROTOCOL_FAULT_READ_STATUS_IO => Some("pd_fusb_read_status_io_error"),
         FUSB302B_PROTOCOL_FAULT_RX_FIFO_FLUSH_IO => Some("pd_fusb_rx_fifo_flush_io_error"),
@@ -969,111 +999,6 @@ where
     }
 
     needs_redraw
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const FUSB302B_STALE_CONTRACT_VIN_CONFIRM_MS: u64 = 100;
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const FUSB302B_STALE_CONTRACT_VIN_DEFICIT_MV: u32 = 2_000;
-#[cfg(any(target_arch = "xtensa", test))]
-#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-pub(crate) const FUSB302B_STALE_CONTRACT_VIN_SETTLE_GRACE_MS: u64 = 500;
-
-#[cfg(any(target_arch = "xtensa", test))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct PdContractVinGuard {
-    mismatch_since_ms: Option<u64>,
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-impl PdContractVinGuard {
-    pub(crate) fn observe(
-        &mut self,
-        observation: Option<PdStatusObservation>,
-        measured_vin_mv: Option<u32>,
-        now_ms: u64,
-        suspended: bool,
-    ) -> bool {
-        if suspended {
-            self.mismatch_since_ms = None;
-            return false;
-        }
-        let mismatch = match (observation, measured_vin_mv) {
-            (Some(observation), Some(measured_vin_mv))
-                if observation.contract != Contract::none() =>
-            {
-                u32::from(observation.contract.voltage_mv).saturating_sub(measured_vin_mv)
-                    >= FUSB302B_STALE_CONTRACT_VIN_DEFICIT_MV
-            }
-            _ => false,
-        };
-        if !mismatch {
-            self.mismatch_since_ms = None;
-            return false;
-        }
-
-        let started = *self.mismatch_since_ms.get_or_insert(now_ms);
-        now_ms.saturating_sub(started) >= FUSB302B_STALE_CONTRACT_VIN_CONFIRM_MS
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-pub(crate) struct PdContractVinContext<'a, PWM> {
-    pub(crate) pd_port: &'a PdPort,
-    pub(crate) last_pd_observation: &'a mut Option<PdStatusObservation>,
-    pub(crate) pd_contract_ready: &'a mut bool,
-    pub(crate) ui_state: &'a mut FrontPanelUiState,
-    pub(crate) calibration_runtime_state: &'a mut CalibrationRuntimeState,
-    pub(crate) manual_pps_state: &'a mut ManualPpsState,
-    pub(crate) heater_pwm: &'a mut PWM,
-    pub(crate) last_heater_duty: &'a mut u8,
-}
-
-#[cfg(target_arch = "xtensa")]
-pub(crate) fn reconcile_pd_contract_with_vin<PWM>(
-    guard: &mut PdContractVinGuard,
-    observation: Option<PdStatusObservation>,
-    measured_vin_mv: Option<u32>,
-    now_ms: u64,
-    context: PdContractVinContext<'_, PWM>,
-) -> bool
-where
-    PWM: SetDutyCycle,
-{
-    let PdContractVinContext {
-        pd_port,
-        last_pd_observation,
-        pd_contract_ready,
-        ui_state,
-        calibration_runtime_state,
-        manual_pps_state,
-        heater_pwm,
-        last_heater_duty,
-    } = context;
-    if !guard.observe(
-        observation,
-        measured_vin_mv,
-        now_ms,
-        pd_port.stale_contract_vin_guard_suspended(now_ms),
-    ) {
-        return false;
-    }
-
-    // A measured VIN deficit invalidates only the cached contract. The
-    // controller remains attached and will rediscover capabilities through the
-    // existing bounded policy path; no VBUS state is inferred across power
-    // loss, and no CC toggle is started here.
-    pd_port.interlock_after_stale_contract(now_ms);
-    *last_pd_observation = None;
-    apply_pd_contract_observation(
-        None,
-        pd_contract_ready,
-        ui_state,
-        calibration_runtime_state,
-        manual_pps_state,
-        heater_pwm,
-        last_heater_duty,
-    )
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

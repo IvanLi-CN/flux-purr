@@ -462,7 +462,6 @@ export interface FlashRequest {
   artifact: FirmwareArtifactManifest
   dryRun: boolean
   confirm?: 'FLASH'
-  prepareTimeoutSeconds?: number
 }
 
 export interface FlashResult {

@@ -1,4 +1,17 @@
-# ESP32-S3 Startup Fault Isolation
+---
+title: ESP32-S3 Startup and Control-Plane Fault Isolation
+module: firmware
+problem_type: runtime_failure
+component: pd_and_usb_runtime
+tags: [esp32-s3, pd, pps, usb, recovery]
+status: active
+related_specs:
+  - ../../specs/firmware-runtime-modules/SPEC.md
+  - ../../specs/fusb302b-dual-pd-sink/SPEC.md
+  - ../../specs/real-control-plane-runtime/SPEC.md
+---
+
+# ESP32-S3 Startup and Control-Plane Fault Isolation
 
 ## Context
 
@@ -17,6 +30,8 @@ ESP32-S3 firmware can reboot or appear unresponsive during early peripheral brin
 - Keep FUSB302B service on an independent bounded cadence during display I/O, EEPROM chunks, control commands, ADC sampling, and runtime UI work. The PD task must use an immediate try-lock on a physically shared I2C bus: if EEPROM owns the bus, it skips that turn rather than waiting or consuming queued commands, then retries on the next tick. A failed observation removes heater output but does not claim a physical VBUS loss unless the controller reports the explicit powered-detach evidence. A reported low-VBUS transition still requires a short continuous confirmation before withdrawing Rd, so source voltage transitions cannot become a CC restart loop.
 - Keep the complete FUSB302B protocol task on the normal Embassy executor and let that task own its fixed cadence timer. Do not run protocol polling, recovery, or physical I2C transactions in an `InterruptExecutor`: the deep protocol call chain can overwrite the guarded ProCPU stack and reset the MCU while the external PD source remains powered.
 - For the validated FUSB302BMPX PPS target, configure automatic GoodCRC and locally initiated PD headers with the explicit PD 3.0 revision path. Leaving the sink on Rev20 can make a PPS source omit usable APDOs, leaving the Device on a stale or fixed-only contract even though the source supports PPS.
+- Separate protocol contract state from measured input voltage. An accepted PPS request can remain valid while source current limiting lowers VBUS. A VIN deficit cannot revoke the contract, stop heat, or start PD recovery. Use protocol events and the PHY's real VBUS status for those decisions; correlate independent source telemetry when diagnosing a loaded PPS run. Keep VIN calibration unchanged during contract and idle-power acceptance.
+- Distinguish USB packet submission from acknowledgement. With ESP32-S3 USB Serial/JTAG, `flush_tx_nb` submits the short packet by writing `WR_DONE`; calling it again while waiting can submit an empty packet and prevent completion. Submit once and then poll `serial_in_ep_data_free` without writing `WR_DONE`. A timed-out recovery marker must retain its offset and retry through bounded nonblocking steps while the host is absent. Do not resume command intake until the marker completes or replay a failed mutation.
 - Promote a persisted thermal-plant transaction only when its raw trace and physical projection are complete and valid. Structurally framed records with invalid projections must decode without an active heater model.
 - Emit stage-local reset and panic evidence over the available recovery transport. Correlate the last completed stage with the fault before changing unrelated subsystems.
 - Emit a runtime-ready marker only after the first UI and all remaining startup work complete, immediately before entering the runtime loop. This gives a log-based reboot-loop check an unambiguous terminal startup stage.
@@ -26,3 +41,11 @@ ESP32-S3 firmware can reboot or appear unresponsive during early peripheral brin
 - Run host persistence and binary tests after changing the decode ownership model.
 - Build the exact Xtensa target to prove async display and timeout type compatibility.
 - On an owner-authorized exact serial port, verify that a software reset reaches runtime, uptime increases over a delayed status read, and no panic or reset loop is observed.
+- Exercise USB recovery with a fake that acknowledges asynchronously, including a partial marker while the host is absent beyond the ordinary response timeout. On hardware, close all host descriptors, wait, reconnect to the same exact authorized port, and verify increasing uptime and fresh identity/status. A test that makes every flush complete immediately cannot catch repeated short-packet submission.
+
+## References
+
+- [PD contract and recovery boundary](../../specs/fusb302b-dual-pd-sink/SPEC.md)
+- [USB bounded-response contract](../../specs/real-control-plane-runtime/SPEC.md)
+- `firmware/src/bin/flux_purr/runtime_tests.rs`: VIN authority and asynchronous USB acknowledgement regressions.
+- `tools/flux-purr-devd/src/product_hil_tests.rs`: product PPS current-limit, idle-power, and host-disconnect HIL fixtures.

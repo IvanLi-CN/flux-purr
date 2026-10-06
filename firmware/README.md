@@ -122,7 +122,8 @@
   - the default firmware build includes the `buzzer-test` feature and advertises `buzzer_test` over native USB JSONL for controlled module-level audio testing. It submits production cue IDs and fixed feedback-arbitration scenarios to the same real-time task and `BuzzerArbiter`; repeating ordinary feedback re-enters the arbiter after each complete production pattern, `protection_alarm --repeat` uses the normal one-second `ProtectionAlarmCadence`, and `attention_reminder` uses its normal ten-second cadence. The optional `buzzer-observe` feature adds bounded MCPWM timer2 readback and PCNT measurements of GPIO48 pad edges, so the logical cue output, configured carrier, and emitted digital carrier can be compared directly. The test path is interlocked while heating, a real thermal fault, a fault latch, or thermal attention is active. Neither feature exposes raw PWM control
 - PD policy:
   - the production artifact targets `FUSB302BMPX`; it performs two stable Device ID reads plus a readable status-bank check before selecting the controller
-  - an unreadable, conflicting, or non-FUSB identity becomes `unknown`; no CH224Q probe, guessed PD write, or startup wait is performed
+  - accepted FUSB302 Device ID forms (`0x8x`, including the observed `0x81`, and `0x9x`) use one shared PPS/PD 3.0 policy path; the identity check only rejects invalid or colliding I2C responders
+  - an unreadable, conflicting, or unsupported identity becomes `unknown`; no CH224Q probe, guessed PD write, or startup wait is performed
   - PD negotiation runs in a dedicated normal-executor Embassy task. The task owns its `5ms` cadence timer, FUSB302B policy, and physical PD I2C transactions; it processes at most one mailbox request before each poll and publishes snapshots. The Front Panel task never polls or mutates PD state. `Accept + PS_RDY` is required before a contract is usable, and it never arms heating automatically
   - until the contract is ready, the Dashboard shows `POWER/WAIT` with real sensor data while GPIO47 remains at `0%`
 - Historical `fan-cycle` smoke-test behavior remains documented in `s3-fan-cycle-bringup`; it is no longer the active runtime contract for the default `flux-purr` artifact.
@@ -171,7 +172,7 @@ or supported by the production `flux-purr` firmware artifact.
 - `mcu-agentd` remains available for selector inspection and diagnostics. It is not a firmware installation path.
 - Typical diagnostic flow:
   - `source /Users/ivan/export-esp.sh`
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release` (FUSB302B production idle policy: lowest adequate Fixed PDO, normally `5 V`, plus real control-plane transport)
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release` (FUSB302 production idle policy: lowest adequate Fixed PDO, normally `5 V`, plus real control-plane transport)
   - FUSB302B startup and complete idle prefer the lowest adequate Fixed PDO using the conservative standby budget; a live PPS contract descends in bounded steps before the final Fixed request. Voltage-specific Cargo build targets are not part of the product firmware
   - `mcu-agentd --non-interactive config validate`
   - `mcu-agentd --non-interactive selector get esp32s3_frontpanel`

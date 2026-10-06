@@ -1,7 +1,5 @@
 use super::*;
 
-pub(crate) const DEFAULT_FLASH_PREPARATION_TIMEOUT_SECONDS: u64 = 600;
-
 #[derive(Debug, Parser)]
 #[command(name = "flux-purr", version = flux_purr_devd::PRODUCT_VERSION)]
 #[command(about = "Flux Purr CLI for USB/devd hardware workflows")]
@@ -58,10 +56,6 @@ pub(crate) enum Command {
     Update(UpdateArgs),
     Flash(FlashArgs),
     Recover(RecoverArgs),
-    FlashPreparation {
-        #[command(subcommand)]
-        command: FlashPreparationCommand,
-    },
     Eeprom {
         #[command(subcommand)]
         command: EepromCommand,
@@ -1518,8 +1512,6 @@ pub(crate) struct UpdateArgs {
     pub(crate) port: String,
     #[arg(long, value_name = "BUNDLE")]
     pub(crate) bundle: PathBuf,
-    #[arg(long, default_value_t = DEFAULT_FLASH_PREPARATION_TIMEOUT_SECONDS, value_parser = clap::value_parser!(u64).range(1..=7200))]
-    pub(crate) prepare_timeout_seconds: u64,
 }
 
 #[derive(Debug, Args)]
@@ -1543,8 +1535,6 @@ pub(crate) struct FlashArgs {
         help = "Keep the device in its current ROM download mode by skipping reset before and after flash"
     )]
     pub(crate) keep_download_mode: bool,
-    #[arg(long, default_value_t = DEFAULT_FLASH_PREPARATION_TIMEOUT_SECONDS, value_parser = clap::value_parser!(u64).range(1..=7200))]
-    pub(crate) prepare_timeout_seconds: u64,
 }
 
 #[derive(Debug, Args)]
@@ -1555,21 +1545,6 @@ pub(crate) struct RecoverArgs {
     pub(crate) elf: PathBuf,
     #[arg(long)]
     pub(crate) confirm: String,
-    #[arg(long, default_value_t = DEFAULT_FLASH_PREPARATION_TIMEOUT_SECONDS, value_parser = clap::value_parser!(u64).range(1..=7200))]
-    pub(crate) prepare_timeout_seconds: u64,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum FlashPreparationCommand {
-    Start(FlashPreparationArgs),
-    Status(FlashPreparationArgs),
-    Cancel(FlashPreparationArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct FlashPreparationArgs {
-    #[arg(long, value_name = "SERIAL_PORT")]
-    pub(crate) port: String,
 }
 
 #[derive(Debug, Args)]

@@ -267,7 +267,7 @@ An atomic USB-C power request with an explicit contract mode, voltage, and opera
 _Avoid_: PD Contract, VIN Reading, required power
 
 **PD Contract**:
-The USB-C power agreement reported by the Device.
+The USB-C power agreement established through protocol exchange and reported by the Device. A VIN Reading or ADC calibration is a separate measurement and neither establishes nor invalidates this agreement. PPS current limiting may lower delivered voltage without canceling the accepted PD Contract.
 _Avoid_: PD Request, VIN Reading
 
 **Requested Contract**:
@@ -355,7 +355,7 @@ The Device operation that stops heating and waits for cooling to finish and for 
 _Avoid_: flash completion, download mode, heater-stop acknowledgement
 
 **Flash Readiness**:
-The Device-confirmed condition in which heating and fan output are off and the attached supply is verified as a Fixed PD Contract or ordinary Type-C default power.
+The Device-confirmed condition in which heating and fan output are off, conflicting power intent is absent, and the supply is a protocol-confirmed Fixed PD Contract or positively established ordinary Type-C default power. VIN measurement and ADC calibration are not prerequisites for this explicit device-side state.
 _Avoid_: command acknowledgement, missing PD status, firmware health
 
 **EEPROM-Only Persistence**:

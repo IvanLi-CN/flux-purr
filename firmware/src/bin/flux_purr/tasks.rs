@@ -27,6 +27,10 @@ pub(crate) async fn apply_heater_power_output<PWM>(
 where
     PWM: SetDutyCycle,
 {
+    if flash_preparation::is_active() {
+        apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+        return false;
+    }
     let manual_pps_active = context.manual_pps.enabled;
     let _ = release_terminal_fixed_pd_disarm_for_manual_pps(context.backend, manual_pps_active);
     if context.backend.terminal_fixed_pd_disarmed() {

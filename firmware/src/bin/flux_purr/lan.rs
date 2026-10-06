@@ -40,8 +40,6 @@ pub(crate) struct ControlLineContext<'a, 'i, 'e> {
     pub(crate) latest_rtd_raw_adc_max_mv: u16,
     pub(crate) latest_vin_raw_adc_mv: u16,
     pub(crate) latest_vin_mv: u32,
-    pub(crate) latest_vin_sample_at_ms: Option<u64>,
-    pub(crate) pd_fixed_vin_stable_since_ms: Option<(u16, u64)>,
     pub(crate) last_heater_duty: u8,
     pub(crate) heater_control_timing: HeaterControlTiming,
     pub(crate) persistence_log_sink: &'a mut dyn PersistenceLogSink,
@@ -327,8 +325,6 @@ fn flash_preparation_response(
             context.ui_state,
             context.calibration_runtime_state,
             &status_context,
-            context.pd_fixed_vin_stable_since_ms,
-            context.latest_vin_sample_at_ms,
         )),
     )
 }
@@ -347,7 +343,6 @@ fn process_prepare_flash(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     active_profile: Option<ThermalControlProfile>,
 ) -> (bool, UsbFrame) {
-    let already_active = flash_preparation::is_active();
     flash_preparation::start_hold();
     context.ui_state.heater_enabled = false;
     if let Some(ticket) = context.manual_pps.pending_power_ticket.take() {
@@ -355,17 +350,7 @@ fn process_prepare_flash(
     }
     context.manual_pps.pending_power_request_mv = None;
     context.manual_pps.clear();
-    calibration_job_canceled(context.calibration_runtime_state, context.manual_pps);
-    disarm_calibration_after_transient_input_change(
-        context.calibration_runtime_state,
-        context.manual_pps,
-    );
-    if !already_active
-        && !context.fan_command.enabled
-        && let PdRequestState::Pending(ticket) = context.pd_port.restore_automatic_idle_contract()
-    {
-        context.pd_port.discard_ticket(ticket);
-    }
+    cancel_calibration_for_flash_preparation(context.calibration_runtime_state, context.manual_pps);
     HeaterPwmGate::force_off();
     (
         true,

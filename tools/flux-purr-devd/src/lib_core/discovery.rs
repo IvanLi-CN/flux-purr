@@ -7,21 +7,8 @@ pub(crate) async fn execute_flash(
     artifact_id: &str,
     port_path: &str,
     usb_identity: &UsbSerialIdentity,
-    prepare_timeout_seconds: u64,
 ) -> Result<Json<FlashResult>, HttpError> {
     require_usb_serial_identity(port_path, Some(usb_identity))?;
-    let target = {
-        let state_lock = state.lock()?;
-        state_lock
-            .devices
-            .get(device_id)
-            .cloned()
-            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
-    };
-    let preparation =
-        serial_flash_preparation_gate(state, &target, usb_identity, prepare_timeout_seconds)
-            .await?;
-    emit_flash_preparation_admission(state, device_id, "flash", Some(artifact_id), preparation);
     state.emit(event(
         device_id,
         "flash",

@@ -35,8 +35,6 @@ pub(crate) async fn flash_device(
     require_flash_dry_run(&state, &device_id, &dry_run_approval, &artifact_id)?;
     require_flash_confirmation(&state, &device_id, &payload.confirm, &artifact_id)?;
     require_real_flash_enabled(&state, &device_id, &artifact_id)?;
-    let prepare_timeout_seconds =
-        validate_flash_preparation_timeout(payload.prepare_timeout_seconds)?;
     let usb_identity = usb_identity.as_ref().ok_or_else(|| {
         HttpError::forbidden(
             "authorized_port_identity_required",
@@ -50,7 +48,6 @@ pub(crate) async fn flash_device(
         &artifact_id,
         &port_path,
         usb_identity,
-        prepare_timeout_seconds,
     )
     .await
 }

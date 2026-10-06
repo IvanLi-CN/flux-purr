@@ -2496,7 +2496,6 @@ pub(crate) struct ThermalPlantDisarmContext<'a, PWM> {
     pub(crate) hold_pps_governor: &'a mut HoldPpsGovernor,
     pub(crate) ui_state: &'a mut FrontPanelUiState,
     pub(crate) last_heater_duty: &'a mut u8,
-    pub(crate) measured_vin_mv: u32,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2540,7 +2539,6 @@ where
         hold_pps_governor,
         ui_state,
         last_heater_duty,
-        measured_vin_mv,
     } = context;
     if !latch_terminal_fixed_pd_disarm(calibration_runtime_state, backend) {
         clear_terminal_disarm_power_ticket();
@@ -2576,9 +2574,9 @@ where
         return true;
     }
 
-    if !terminal_idle_voltage_confirmed(measured_vin_mv) {
-        // A source may acknowledge the request before VBUS reaches the idle
-        // voltage. Keep the terminal lock active until VIN confirms it.
+    if !terminal_idle_contract_confirmed(pd_port.snapshot().observation) {
+        // Only the fresh protocol-confirmed Fixed observation completes
+        // disarm. Neither an ACK nor a measured voltage proves a contract.
         return true;
     }
 
@@ -2588,8 +2586,8 @@ where
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn terminal_idle_voltage_confirmed(measured_vin_mv: u32) -> bool {
-    measured_vin_mv.abs_diff(u32::from(FUSB302B_INITIAL_PPS_REQUEST_MV)) <= 1_000
+pub(crate) fn terminal_idle_contract_confirmed(observation: Option<PdStatusObservation>) -> bool {
+    observation.is_some_and(|observation| automatic_idle_contract_is_confirmed(observation, None))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

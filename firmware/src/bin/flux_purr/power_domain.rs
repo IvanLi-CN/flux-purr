@@ -73,6 +73,7 @@ pub(crate) struct PowerTicket {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PowerAdmissionError {
     Busy,
+    FlashPreparationActive,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -218,6 +219,7 @@ pub(crate) enum PowerCommand {
     },
     Idle {
         ticket: PowerTicket,
+        minimum_mv: u16,
     },
 }
 
@@ -226,6 +228,7 @@ pub(crate) enum PowerCommand {
 pub(crate) enum PdServiceCommand {
     AutomaticIdle {
         ticket: PowerTicket,
+        minimum_mv: u16,
     },
     Contract {
         request: PdContractRequest,
@@ -584,6 +587,9 @@ impl PowerCoordinatorClient {
         owner: PowerIntentOwner,
         request: PdContractRequest,
     ) -> Result<PowerTicket, PowerAdmissionError> {
+        if flash_preparation::is_active() {
+            return Err(PowerAdmissionError::FlashPreparationActive);
+        }
         let Some(ticket) = self.next_ticket(Some(owner)) else {
             return Err(PowerAdmissionError::Busy);
         };
@@ -601,6 +607,9 @@ impl PowerCoordinatorClient {
     }
 
     pub(crate) fn refresh_capabilities(&self) -> Result<PowerTicket, PowerAdmissionError> {
+        if flash_preparation::is_active() {
+            return Err(PowerAdmissionError::FlashPreparationActive);
+        }
         let Some(ticket) = self.next_ticket(None) else {
             return Err(PowerAdmissionError::Busy);
         };
@@ -614,11 +623,18 @@ impl PowerCoordinatorClient {
     }
 
     pub(crate) fn idle(&self) -> Result<PowerTicket, PowerAdmissionError> {
+        self.idle_at_minimum(FUSB302B_PD_ABSOLUTE_MIN_MV)
+    }
+
+    pub(crate) fn idle_at_minimum(
+        &self,
+        minimum_mv: u16,
+    ) -> Result<PowerTicket, PowerAdmissionError> {
         let Some(ticket) = self.next_ticket(None) else {
             return Err(PowerAdmissionError::Busy);
         };
         POWER_COMMANDS
-            .try_send(PowerCommand::Idle { ticket })
+            .try_send(PowerCommand::Idle { ticket, minimum_mv })
             .map(|()| ticket)
             .map_err(|_| {
                 Self::release_ticket_slot(ticket);
@@ -729,7 +745,7 @@ pub(crate) fn take_pd_service_command_cancelled(command: PdServiceCommand) -> bo
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn pd_service_command_ticket(command: PdServiceCommand) -> PowerTicket {
     match command {
-        PdServiceCommand::AutomaticIdle { ticket }
+        PdServiceCommand::AutomaticIdle { ticket, .. }
         | PdServiceCommand::Contract { ticket, .. }
         | PdServiceCommand::RefreshCapabilities { ticket } => ticket,
     }
@@ -752,8 +768,13 @@ fn power_command_details(
             ticket,
         } => (ticket, Some(owner), false, false, Some(request)),
         PowerCommand::RefreshCapabilities { ticket } => (ticket, None, true, false, None),
-        PowerCommand::Idle { ticket } => (ticket, None, false, true, None),
+        PowerCommand::Idle { ticket, .. } => (ticket, None, false, true, None),
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn power_command_allowed_during_preparation(command: PowerCommand, preparing: bool) -> bool {
+    !preparing || matches!(command, PowerCommand::Idle { .. })
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -774,7 +795,9 @@ fn power_pd_command(
         (PowerCommand::RefreshCapabilities { .. }, None) => {
             PdServiceCommand::RefreshCapabilities { ticket }
         }
-        (PowerCommand::Idle { .. }, None) => PdServiceCommand::AutomaticIdle { ticket },
+        (PowerCommand::Idle { minimum_mv, .. }, None) => {
+            PdServiceCommand::AutomaticIdle { ticket, minimum_mv }
+        }
         _ => return None,
     };
     Some((ticket, owner, refresh, idle, pd_command))
@@ -902,6 +925,11 @@ fn dispatch_power_command(
     command: PowerCommand,
     coordinator: &mut PowerCoordinatorState,
 ) -> Option<PowerIntentOwner> {
+    if !power_command_allowed_during_preparation(command, flash_preparation::is_active()) {
+        let (ticket, _, _, _, _) = power_command_details(command);
+        signal_ticket(ticket, TicketOutcome::Rejected);
+        return None;
+    }
     let (_, new_owner, new_refresh, new_idle, _) = power_command_details(command);
     if let Some(deferred) = coordinator.deferred {
         let (deferred_ticket, deferred_owner, _, _, _) = power_command_details(deferred);
@@ -1637,6 +1665,7 @@ mod tests {
             },
         };
         let idle = PowerCommand::Idle {
+            minimum_mv: FUSB302B_PD_ABSOLUTE_MIN_MV,
             ticket: PowerTicket {
                 owner: None,
                 sequence: 14,
@@ -1684,6 +1713,46 @@ mod tests {
             ),
             None,
         );
+    }
+
+    #[test]
+    fn flash_preparation_rejects_stale_requests_without_losing_idle_progress() {
+        let idle_ticket = PowerTicket {
+            owner: None,
+            sequence: 40,
+            result_slot: 0,
+        };
+        let stale_ticket = PowerTicket {
+            owner: Some(PowerIntentOwner::AutomaticThermal),
+            sequence: 39,
+            result_slot: 1,
+        };
+        let request = PowerCommand::Request {
+            owner: PowerIntentOwner::AutomaticThermal,
+            request: PdContractRequest::pps(5_500, 3_000).unwrap(),
+            ticket: stale_ticket,
+        };
+        assert!(!power_command_allowed_during_preparation(request, true));
+        assert!(!power_command_allowed_during_preparation(
+            PowerCommand::RefreshCapabilities {
+                ticket: stale_ticket
+            },
+            true,
+        ));
+        assert!(power_command_allowed_during_preparation(request, false));
+        assert!(power_command_allowed_during_preparation(
+            PowerCommand::Idle {
+                ticket: idle_ticket,
+                minimum_mv: 12_000
+            },
+            true,
+        ));
+        let pending = Some((idle_ticket, PendingPdOperation::Idle));
+        assert!(matches!(
+            pending_after_pd_terminal(pending, stale_ticket),
+            Some((ticket, PendingPdOperation::Idle)) if ticket == idle_ticket
+        ));
+        assert!(pending_after_pd_terminal(pending, idle_ticket).is_none());
     }
 
     #[test]

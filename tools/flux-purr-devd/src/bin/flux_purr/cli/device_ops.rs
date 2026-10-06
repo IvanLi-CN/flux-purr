@@ -1,30 +1,19 @@
 use super::*;
+
+#[cfg(test)]
+#[path = "../product_flash_hil_tests.rs"]
+mod product_flash_hil;
+#[cfg(target_os = "macos")]
+use flux_purr_devd::serial::open_raw_usb_serial_jtag_port;
 use flux_purr_devd::serial::{
-    DirectUsbSession, SerialPortProcessLock, UsbSerialIdentity, serial_port_usb_identity,
+    SerialPortProcessLock, UsbSerialIdentity, serial_port_usb_identity,
     serial_port_usb_identity_matches,
 };
-use flux_purr_devd::{FlashPreparationStatus, Identity};
 use std::io::{Read, Write};
 
 const DIRECT_SERIAL_LOCK_TIMEOUT: Duration = Duration::from_secs(180);
 const DIRECT_ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 const DIRECT_ROM_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
-const DIRECT_FLASH_PREPARATION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const DIRECT_FLASH_LIVENESS_ATTEMPTS: u8 = 3;
-const DIRECT_FLASH_LIVENESS_RETRY_DELAY: Duration = Duration::from_millis(200);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DirectFlashPreparationDecision {
-    Ready(FlashPreparationStatus),
-    ApplicationUnresponsive,
-}
-
-fn direct_preparation_decision_name(decision: DirectFlashPreparationDecision) -> &'static str {
-    match decision {
-        DirectFlashPreparationDecision::Ready(_) => "ready",
-        DirectFlashPreparationDecision::ApplicationUnresponsive => "application_unresponsive",
-    }
-}
 
 fn acquire_direct_serial_lock(
     port: &str,
@@ -51,313 +40,9 @@ fn ensure_direct_usb_identity(
     Err("authorized USB target changed or disappeared; no replacement port will be selected".into())
 }
 
-fn direct_flash_preparation_request(
-    session: &mut DirectUsbSession,
-    port: &str,
-    identity: &UsbSerialIdentity,
-    op: &str,
-) -> Result<FlashPreparationStatus, Box<dyn std::error::Error + Send + Sync>> {
-    let request_id = format!(
-        "cli-{op}-{}",
-        UNIX_EPOCH.elapsed().unwrap_or_default().as_millis()
-    );
-    let request = json!({
-        "type": "request",
-        "requestId": request_id,
-        "op": op,
-    })
-    .to_string();
-    let result = session
-        .request(
-            &request_id,
-            &request,
-            DIRECT_FLASH_PREPARATION_PROBE_TIMEOUT,
-            Some(identity),
-        )
-        .map_err(|error| format!("flash preparation request failed on {port}: {error}"))?;
-    let payload = result
-        .get("flashPreparation")
-        .ok_or("firmware does not expose flash_preparation or returned no status")?;
-    serde_json::from_value(payload.clone())
-        .map_err(|error| format!("invalid flashPreparation response: {error}").into())
-}
-
-fn direct_flash_liveness_probe(
-    session: &mut DirectUsbSession,
-    port: &str,
-    identity: &UsbSerialIdentity,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut last_error: Option<Box<dyn std::error::Error + Send + Sync>> = None;
-    for attempt in 0..DIRECT_FLASH_LIVENESS_ATTEMPTS {
-        let identity_result =
-            direct_flash_liveness_request(session, port, identity, "get_identity");
-        match identity_result {
-            Ok(result) => {
-                let payload = result
-                    .get("identity")
-                    .cloned()
-                    .ok_or("application liveness response did not include identity")?;
-                let _: Identity = serde_json::from_value(payload)
-                    .map_err(|error| format!("invalid identity liveness response: {error}"))?;
-                return Ok(());
-            }
-            Err(identity_error)
-                if direct_preparation_error_is_startup_busy(identity_error.as_ref()) =>
-            {
-                return Err(identity_error);
-            }
-            Err(identity_error)
-                if direct_preparation_error_may_be_unresponsive(identity_error.as_ref()) =>
-            {
-                let status_result =
-                    direct_flash_liveness_request(session, port, identity, "get_status");
-                match status_result {
-                    Ok(result) => {
-                        if result.get("status").is_some() {
-                            return Ok(());
-                        }
-                        return Err("application liveness response did not include status".into());
-                    }
-                    Err(status_error)
-                        if direct_preparation_error_is_startup_busy(status_error.as_ref()) =>
-                    {
-                        return Err(status_error);
-                    }
-                    Err(status_error)
-                        if direct_preparation_error_may_be_unresponsive(status_error.as_ref()) =>
-                    {
-                        last_error = Some(identity_error);
-                    }
-                    Err(status_error) => return Err(status_error),
-                }
-            }
-            Err(identity_error) => return Err(identity_error),
-        }
-        if attempt + 1 < DIRECT_FLASH_LIVENESS_ATTEMPTS {
-            std::thread::sleep(DIRECT_FLASH_LIVENESS_RETRY_DELAY);
-        }
-    }
-    Err(last_error.unwrap_or_else(|| "application liveness probe failed".into()))
-}
-
-fn direct_flash_liveness_request(
-    session: &mut DirectUsbSession,
-    port: &str,
-    identity: &UsbSerialIdentity,
-    op: &str,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let request_id = format!(
-        "cli-{op}-liveness-{}",
-        UNIX_EPOCH.elapsed().unwrap_or_default().as_millis()
-    );
-    let request = json!({
-        "type": "request",
-        "requestId": request_id,
-        "op": op,
-    })
-    .to_string();
-    let result = session
-        .request(
-            &request_id,
-            &request,
-            DIRECT_FLASH_PREPARATION_PROBE_TIMEOUT,
-            Some(identity),
-        )
-        .map_err(|error| format!("application liveness probe failed on {port}: {error}"))?;
-    Ok(result)
-}
-
-fn direct_flash_preparation_gate(
-    port: &str,
-    identity: Option<&UsbSerialIdentity>,
-    timeout_seconds: u64,
-) -> Result<DirectFlashPreparationDecision, Box<dyn std::error::Error + Send + Sync>> {
-    let identity = identity.ok_or("flash preparation requires a stable USB target identity")?;
-    let mut session = DirectUsbSession::open(port, Some(identity))
-        .map_err(|error| format!("failed to open raw USB preparation session: {error}"))?;
-    direct_flash_preparation_gate_on_session(&mut session, port, identity, timeout_seconds)
-}
-
-fn direct_flash_preparation_gate_on_session(
-    session: &mut DirectUsbSession,
-    port: &str,
-    identity: &UsbSerialIdentity,
-    timeout_seconds: u64,
-) -> Result<DirectFlashPreparationDecision, Box<dyn std::error::Error + Send + Sync>> {
-    let deadline = StdInstant::now() + Duration::from_secs(timeout_seconds);
-    let mut no_response_probes = 0_u8;
-    let mut op = "prepare_flash";
-    loop {
-        match direct_flash_preparation_request(session, port, identity, op) {
-            Ok(status) => {
-                no_response_probes = 0;
-                if !status.heating && !status.cooling && status.pd_fixed_or_default {
-                    return Ok(DirectFlashPreparationDecision::Ready(status));
-                }
-                op = "get_flash_preparation";
-                if StdInstant::now() >= deadline {
-                    return Err(format!(
-                        "flash preparation timed out with status heating={} cooling={} pdFixedOrDefault={}",
-                        status.heating, status.cooling, status.pd_fixed_or_default
-                    )
-                    .into());
-                }
-                std::thread::sleep(
-                    Duration::from_secs(2)
-                        .min(deadline.saturating_duration_since(StdInstant::now())),
-                );
-            }
-            Err(error) if direct_preparation_error_is_startup_busy(error.as_ref()) => {
-                no_response_probes = 0;
-                direct_flash_preparation_wait(
-                    deadline,
-                    Duration::from_secs(2),
-                    "flash preparation timed out while the application was starting",
-                )?;
-            }
-            Err(error) if direct_preparation_error_may_be_unresponsive(error.as_ref()) => {
-                if direct_retry_after_liveness_probe(
-                    session,
-                    port,
-                    identity,
-                    deadline,
-                    &mut no_response_probes,
-                )? {
-                    return Ok(DirectFlashPreparationDecision::ApplicationUnresponsive);
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-fn direct_retry_after_liveness_probe(
-    session: &mut DirectUsbSession,
-    port: &str,
-    identity: &UsbSerialIdentity,
-    deadline: StdInstant,
-    no_response_probes: &mut u8,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    ensure_direct_usb_identity(port, Some(identity))?;
-    let liveness = direct_flash_liveness_probe(session, port, identity);
-    if liveness.is_ok() {
-        *no_response_probes = 0;
-        direct_flash_preparation_wait(
-            deadline,
-            Duration::from_secs(2),
-            "flash preparation timed out with a responsive application",
-        )?;
-        return Ok(false);
-    }
-    let liveness_error = liveness.expect_err("liveness result was checked as an error");
-    if direct_preparation_error_is_startup_busy(liveness_error.as_ref()) {
-        *no_response_probes = 0;
-        direct_flash_preparation_wait(
-            deadline,
-            Duration::from_secs(2),
-            "flash preparation timed out while the application was starting",
-        )?;
-        return Ok(false);
-    }
-    if !direct_preparation_error_may_be_unresponsive(liveness_error.as_ref()) {
-        return Err(liveness_error);
-    }
-    *no_response_probes = no_response_probes.saturating_add(1);
-    if *no_response_probes >= 3 {
-        return Ok(true);
-    }
-    direct_flash_preparation_wait(
-        deadline,
-        Duration::from_millis(200),
-        "flash preparation timed out before the application-unresponsive probe threshold",
-    )?;
-    Ok(false)
-}
-
-fn direct_flash_preparation_wait(
-    deadline: StdInstant,
-    delay: Duration,
-    timeout_message: &'static str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if StdInstant::now() >= deadline {
-        return Err(timeout_message.into());
-    }
-    std::thread::sleep(delay.min(deadline.saturating_duration_since(StdInstant::now())));
-    Ok(())
-}
-
-fn direct_preparation_error_may_be_unresponsive(error: &dyn std::error::Error) -> bool {
-    let error = error.to_string().to_ascii_lowercase();
-    error.contains("timed out") || error.contains("serial i/o failed")
-}
-
-fn direct_preparation_error_is_startup_busy(error: &dyn std::error::Error) -> bool {
-    error
-        .to_string()
-        .to_ascii_lowercase()
-        .contains("startup_busy")
-}
-
-fn direct_flash_preparation_test_bypass(
-    _port: &str,
-    _identity: Option<&UsbSerialIdentity>,
-    _timeout_seconds: u64,
-) -> Result<DirectFlashPreparationDecision, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(DirectFlashPreparationDecision::Ready(
-        FlashPreparationStatus {
-            heating: false,
-            cooling: false,
-            pd_fixed_or_default: true,
-        },
-    ))
-}
-
-pub(crate) fn direct_flash_preparation(
-    command: FlashPreparationCommand,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let (action, args) = match command {
-        FlashPreparationCommand::Start(args) => ("start", args),
-        FlashPreparationCommand::Status(args) => ("status", args),
-        FlashPreparationCommand::Cancel(args) => ("cancel", args),
-    };
-    validate_serial_port(&args.port)?;
-    let identity = capture_direct_usb_identity(&args.port)?;
-    let _serial_lock = acquire_direct_serial_lock(&args.port)?;
-    ensure_direct_usb_identity(&args.port, Some(&identity))?;
-    let mut session = DirectUsbSession::open(&args.port, Some(&identity))
-        .map_err(|error| format!("failed to open raw USB preparation session: {error}"))?;
-    direct_flash_liveness_probe(&mut session, &args.port, &identity).map_err(|error| {
-        format!(
-            "flash preparation application probe failed on {}: {error}",
-            args.port
-        )
-    })?;
-    let status = direct_flash_preparation_request(
-        &mut session,
-        &args.port,
-        &identity,
-        match action {
-            "start" => "prepare_flash",
-            "status" => "get_flash_preparation",
-            "cancel" => "cancel_flash_preparation",
-            _ => unreachable!(),
-        },
-    )?;
-    Ok(json!({
-        "ok": true,
-        "operation": "flash_preparation",
-        "action": action,
-        "port": args.port,
-        "flashPreparation": status,
-    }))
-}
-
 pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cli = Cli::parse();
-    let direct_flash_command = matches!(
-        &cli.command,
-        Command::Flash(_) | Command::Recover(_) | Command::FlashPreparation { .. }
-    );
+    let direct_flash_command = matches!(&cli.command, Command::Flash(_) | Command::Recover(_));
     let direct_ram_command = matches!(&cli.command, Command::RamRun { .. });
     let explicit_devd_endpoint = devd_flag_was_supplied();
     let managed_devd = if direct_ram_command {
@@ -401,7 +86,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::Update(args) => update_from_local_bundle(&client, &cli.devd, args).await?,
         Command::Flash(args) => direct_flash(args).await?,
         Command::Recover(args) => direct_recover(args).await?,
-        Command::FlashPreparation { command } => direct_flash_preparation(command)?,
         Command::Eeprom { command } => handle_eeprom_command(&client, &cli.devd, command).await?,
         Command::Monitor(args) => {
             monitor_once(
@@ -774,7 +458,6 @@ pub(crate) async fn update_from_local_bundle(
         Some(json!({
             "port": args.port,
             "artifactId": bundle.bundle_sha256,
-            "prepareTimeoutSeconds": args.prepare_timeout_seconds,
         })),
     )
     .await
@@ -792,121 +475,30 @@ pub(crate) fn direct_flash_with_program(
     program: &Path,
     require_real_flash_enablement: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    #[cfg(not(test))]
-    {
-        direct_flash_with_program_live(args, program, require_real_flash_enablement)
-    }
-
-    #[cfg(test)]
-    {
-        let usb_identity = { None };
-        let backup_directory = if args.skip_backup {
-            None
-        } else {
-            Some(developer_backup_directory()?)
-        };
+    let usb_identity = {
         #[cfg(test)]
-        let preparation_gate = direct_flash_preparation_test_bypass;
+        {
+            None
+        }
         #[cfg(not(test))]
-        let preparation_gate = direct_flash_preparation_gate;
-        direct_flash_with_program_inner_guarded(
-            args,
-            program,
-            require_real_flash_enablement,
-            read_eeprom_snapshot,
-            detect_rom_download_mode,
-            backup_directory.as_deref(),
-            DirectFlashTestHooks {
-                usb_identity,
-                preparation_gate,
-            },
-        )
-    }
-}
-
-#[cfg(not(test))]
-fn direct_flash_with_program_live(
-    args: FlashArgs,
-    program: &Path,
-    require_real_flash_enablement: bool,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    validate_serial_port(&args.port)?;
-    if args.skip_backup && args.confirm.as_deref() != Some("NO_EEPROM_BACKUP") {
-        return Err("--skip-backup requires --confirm NO_EEPROM_BACKUP".into());
-    }
-    let elf = args.elf.unwrap_or_else(default_release_elf);
-    validate_local_elf(&elf)?;
-    let partition_table = embedded_partition_table()?;
-    if require_real_flash_enablement {
-        ensure_real_flash_enabled()?;
-    }
-    let usb_identity = capture_direct_usb_identity(&args.port)?;
+        {
+            Some(capture_direct_usb_identity(&args.port)?)
+        }
+    };
     let backup_directory = if args.skip_backup {
         None
     } else {
         Some(developer_backup_directory()?)
     };
-    let _serial_lock = acquire_direct_serial_lock(&args.port)?;
-    ensure_direct_usb_identity(&args.port, Some(&usb_identity))?;
-    let mut session = DirectUsbSession::open(&args.port, Some(&usb_identity))
-        .map_err(|error| format!("failed to open raw USB flash session: {error}"))?;
-    let preparation = direct_flash_preparation_gate_on_session(
-        &mut session,
-        &args.port,
-        &usb_identity,
-        args.prepare_timeout_seconds,
-    )?;
-    let backup_path = if args.skip_backup {
-        None
-    } else {
-        let snapshot = match read_eeprom_snapshot_with_session(
-            &mut session,
-            &args.port,
-            Some(&usb_identity),
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) if snapshot_error_may_be_rom_mode(error.as_ref()) => {
-                drop(session);
-                ensure_direct_usb_identity(&args.port, Some(&usb_identity))?;
-                if detect_rom_download_mode(&args.port, Some(&usb_identity)) {
-                    return Err(
-                        "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
-                            .into(),
-                    );
-                }
-                return Err(error);
-            }
-            Err(error) => return Err(error),
-        };
-        let directory = backup_directory.ok_or("developer backup directory is unavailable")?;
-        Some(developer_backup::write_atomic(&directory, &snapshot)?)
-    };
-    ensure_direct_usb_identity(&args.port, Some(&usb_identity))?;
-    let preparation_after_backup = direct_flash_preparation_gate_on_session(
-        &mut session,
-        &args.port,
-        &usb_identity,
-        args.prepare_timeout_seconds,
-    )?;
-    drop(session);
-    let espflash = direct_elf_flash_with_reset_fallback(
+    direct_flash_with_program_inner_guarded(
+        args,
         program,
-        &args.port,
-        partition_table.path(),
-        &elf,
-        args.keep_download_mode,
-        Some(&usb_identity),
-    )?;
-    Ok(json!({
-        "ok": true,
-        "operation": "flash",
-        "port": args.port,
-        "elf": elf,
-        "backup": backup_path,
-        "espflash": espflash,
-        "preparation": direct_preparation_decision_name(preparation_after_backup),
-        "preparationBeforeBackup": direct_preparation_decision_name(preparation),
-    }))
+        require_real_flash_enablement,
+        read_eeprom_snapshot,
+        detect_rom_download_mode,
+        backup_directory.as_deref(),
+        usb_identity.as_ref(),
+    )
 }
 
 pub(crate) type SnapshotReader = fn(
@@ -931,23 +523,8 @@ pub(crate) fn direct_flash_with_program_inner(
         snapshot_reader,
         rom_probe,
         backup_directory,
-        DirectFlashTestHooks {
-            usb_identity: None,
-            preparation_gate: direct_flash_preparation_test_bypass,
-        },
+        None,
     )
-}
-
-pub(crate) type DirectPreparationGate =
-    fn(
-        &str,
-        Option<&UsbSerialIdentity>,
-        u64,
-    ) -> Result<DirectFlashPreparationDecision, Box<dyn std::error::Error + Send + Sync>>;
-
-struct DirectFlashTestHooks {
-    usb_identity: Option<UsbSerialIdentity>,
-    preparation_gate: DirectPreparationGate,
 }
 
 fn direct_flash_with_program_inner_guarded(
@@ -957,12 +534,8 @@ fn direct_flash_with_program_inner_guarded(
     snapshot_reader: SnapshotReader,
     rom_probe: RomProbe,
     backup_directory: Option<&Path>,
-    hooks: DirectFlashTestHooks,
+    usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let DirectFlashTestHooks {
-        usb_identity,
-        preparation_gate,
-    } = hooks;
     validate_serial_port(&args.port)?;
     if args.skip_backup && args.confirm.as_deref() != Some("NO_EEPROM_BACKUP") {
         return Err("--skip-backup requires --confirm NO_EEPROM_BACKUP".into());
@@ -974,27 +547,16 @@ fn direct_flash_with_program_inner_guarded(
         ensure_real_flash_enabled()?;
     }
     let _serial_lock = acquire_direct_serial_lock(&args.port)?;
-    ensure_direct_usb_identity(&args.port, usb_identity.as_ref())?;
-    let preparation = preparation_gate(
-        &args.port,
-        usb_identity.as_ref(),
-        args.prepare_timeout_seconds,
-    )?;
-    if !args.skip_backup && rom_probe(&args.port, usb_identity.as_ref()) {
-        return Err(
-            "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
-                .into(),
-        );
-    }
+    ensure_direct_usb_identity(&args.port, usb_identity)?;
     let backup_path = if args.skip_backup {
         None
     } else {
-        ensure_direct_usb_identity(&args.port, usb_identity.as_ref())?;
-        let snapshot = match snapshot_reader(&args.port, usb_identity.as_ref()) {
+        ensure_direct_usb_identity(&args.port, usb_identity)?;
+        let snapshot = match snapshot_reader(&args.port, usb_identity) {
             Ok(snapshot) => snapshot,
             Err(error) if snapshot_error_may_be_rom_mode(error.as_ref()) => {
-                ensure_direct_usb_identity(&args.port, usb_identity.as_ref())?;
-                if rom_probe(&args.port, usb_identity.as_ref()) {
+                ensure_direct_usb_identity(&args.port, usb_identity)?;
+                if rom_probe(&args.port, usb_identity) {
                     return Err(
                         "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
                             .into(),
@@ -1007,22 +569,17 @@ fn direct_flash_with_program_inner_guarded(
         let directory = backup_directory.ok_or("developer backup directory is unavailable")?;
         Some(developer_backup::write_atomic(directory, &snapshot)?)
     };
-    ensure_direct_usb_identity(&args.port, usb_identity.as_ref())?;
-    let preparation_after_backup = preparation_gate(
-        &args.port,
-        usb_identity.as_ref(),
-        args.prepare_timeout_seconds,
-    )?;
+    ensure_direct_usb_identity(&args.port, usb_identity)?;
     let espflash = direct_elf_flash_with_reset_fallback(
         program,
         &args.port,
         partition_table.path(),
         &elf,
         args.keep_download_mode,
-        usb_identity.as_ref(),
+        usb_identity,
     )?;
     Ok(
-        json!({"ok": true, "operation": "flash", "port": args.port, "elf": elf, "backup": backup_path, "espflash": espflash, "preparation": direct_preparation_decision_name(preparation_after_backup), "preparationBeforeBackup": direct_preparation_decision_name(preparation)}),
+        json!({"ok": true, "operation": "flash", "port": args.port, "elf": elf, "backup": backup_path, "espflash": espflash}),
     )
 }
 
@@ -1039,11 +596,6 @@ pub(crate) async fn direct_recover(
     ensure_real_flash_enabled()?;
     let _serial_lock = acquire_direct_serial_lock(&args.port)?;
     ensure_direct_usb_identity(&args.port, Some(&usb_identity))?;
-    let preparation = direct_flash_preparation_gate(
-        &args.port,
-        Some(&usb_identity),
-        args.prepare_timeout_seconds,
-    )?;
     let program = resolve_espflash_program();
     let erase_args = direct_erase_flash_args(&args.port);
     let erase_diagnostics =
@@ -1052,7 +604,7 @@ pub(crate) async fn direct_recover(
     let flash_diagnostics =
         run_guarded_espflash_command(&program, &flash_args, &args.port, Some(&usb_identity))?;
     Ok(
-        json!({"ok": true, "operation": "recover", "port": args.port, "elf": args.elf, "eeprom": "untouched", "preparation": direct_preparation_decision_name(preparation), "espflash": {"erase": erase_diagnostics, "flash": flash_diagnostics}}),
+        json!({"ok": true, "operation": "recover", "port": args.port, "elf": args.elf, "eeprom": "untouched", "espflash": {"erase": erase_diagnostics, "flash": flash_diagnostics}}),
     )
 }
 
@@ -1439,30 +991,25 @@ pub(crate) fn developer_backup_directory()
     Ok(flux_purr_devd::user_config_dir()?.join("developer-flash-backups"))
 }
 
-#[allow(dead_code)]
 pub(crate) fn read_eeprom_snapshot(
     port: &str,
     expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    match read_eeprom_snapshot_protocol(port, expected_usb_identity) {
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
+    let mut serial = open_snapshot_serial(port)?;
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
+    // Finish a partial request left by a prior serial client without changing
+    // termios or resetting the target. Request IDs discard its response.
+    serial.write_all(b"\n")?;
+    match read_eeprom_snapshot_protocol_from_io(&mut *serial, port, expected_usb_identity) {
         Ok(snapshot) => Ok(snapshot),
         Err(error) if snapshot_protocol_compatibility_fallback(error.as_ref()) => {
-            read_legacy_eeprom_snapshot(port, expected_usb_identity)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn read_eeprom_snapshot_with_session(
-    session: &mut DirectUsbSession,
-    port: &str,
-    expected_usb_identity: Option<&UsbSerialIdentity>,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    match read_eeprom_snapshot_protocol_with_session(session, port, expected_usb_identity) {
-        Ok(snapshot) => Ok(snapshot),
-        Err(error) if snapshot_protocol_compatibility_fallback(error.as_ref()) => {
-            read_legacy_eeprom_snapshot_with_session(session, port, expected_usb_identity)
+            read_legacy_eeprom_snapshot_from_io(
+                &mut *serial,
+                port,
+                expected_usb_identity,
+                &mut StdInstant::now,
+            )
         }
         Err(error) => Err(error),
     }
@@ -1474,53 +1021,24 @@ pub(crate) fn snapshot_protocol_compatibility_fallback(error: &dyn std::error::E
         .contains("none matched the EEPROM snapshot request")
 }
 
-#[allow(dead_code)]
-pub(crate) fn read_eeprom_snapshot_protocol(
+fn read_eeprom_snapshot_protocol_from_io<S: Read + Write + ?Sized>(
+    serial: &mut S,
     port: &str,
     expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    const SNAPSHOT_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+    const SNAPSHOT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
     ensure_direct_usb_identity(port, expected_usb_identity)?;
-    let mut serial = serialport::new(port, 115_200)
-        .timeout(Duration::from_secs(2))
-        .open()?;
-    ensure_direct_usb_identity(port, expected_usb_identity)?;
-    read_eeprom_snapshot_protocol_from_io(
-        &mut *serial,
-        port,
-        expected_usb_identity,
-        SNAPSHOT_SESSION_TIMEOUT,
-    )
-}
-
-#[allow(dead_code)]
-pub(crate) fn read_eeprom_snapshot_protocol_with_session(
-    session: &mut DirectUsbSession,
-    port: &str,
-    expected_usb_identity: Option<&UsbSerialIdentity>,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    read_eeprom_snapshot_protocol_from_io(
-        session.port_mut(),
-        port,
-        expected_usb_identity,
-        Duration::from_secs(30),
-    )
-}
-
-fn read_eeprom_snapshot_protocol_from_io<R: Read + Write + ?Sized>(
-    serial: &mut R,
-    port: &str,
-    expected_usb_identity: Option<&UsbSerialIdentity>,
-    session_timeout: Duration,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    let deadline = StdInstant::now() + session_timeout;
     let session_id = format!("snapshot-{}", current_unix_millis());
     let open =
         json!({"op":"eeprom_snapshot_open","requestId":session_id,"capacity":8192,"chunkMax":32});
     ensure_direct_usb_identity(port, expected_usb_identity)?;
     write_snapshot_request(serial, &open)?;
     ensure_direct_usb_identity(port, expected_usb_identity)?;
-    let open_response = read_snapshot_response(serial, &session_id, deadline)?;
+    let open_response = read_snapshot_response(
+        serial,
+        &session_id,
+        StdInstant::now() + SNAPSHOT_RESPONSE_TIMEOUT,
+    )?;
     if open_response.get("capacity").and_then(Value::as_u64) != Some(8192)
         || open_response.get("chunkMax").and_then(Value::as_u64) != Some(32)
     {
@@ -1534,7 +1052,11 @@ fn read_eeprom_snapshot_protocol_from_io<R: Read + Write + ?Sized>(
             &json!({"op":"eeprom_snapshot_read","requestId":session_id,"offset":offset,"length":32}),
         )?;
         ensure_direct_usb_identity(port, expected_usb_identity)?;
-        let response = read_snapshot_response(serial, &session_id, deadline)?;
+        let response = read_snapshot_response(
+            serial,
+            &session_id,
+            StdInstant::now() + SNAPSHOT_RESPONSE_TIMEOUT,
+        )?;
         if response.get("offset").and_then(Value::as_u64) != Some(u64::from(offset)) {
             return Err("snapshot response returned an unexpected offset".into());
         }
@@ -1560,52 +1082,29 @@ fn read_eeprom_snapshot_protocol_from_io<R: Read + Write + ?Sized>(
         &json!({"op":"eeprom_snapshot_close","requestId":session_id,"sha256":digest}),
     )?;
     ensure_direct_usb_identity(port, expected_usb_identity)?;
-    let response = read_snapshot_response(serial, &session_id, deadline)?;
+    let response = read_snapshot_response(
+        serial,
+        &session_id,
+        StdInstant::now() + SNAPSHOT_RESPONSE_TIMEOUT,
+    )?;
     if response.get("sha256").and_then(Value::as_str) != Some(digest.as_str()) {
         return Err("EEPROM snapshot hash verification failed".into());
     }
     Ok(snapshot)
 }
 
-#[allow(dead_code)]
-pub(crate) fn read_legacy_eeprom_snapshot(
+pub(crate) fn read_legacy_eeprom_snapshot_from_io<S, C>(
+    serial: &mut S,
     port: &str,
     expected_usb_identity: Option<&UsbSerialIdentity>,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    now: &mut C,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>
+where
+    S: Read + Write + ?Sized,
+    C: FnMut() -> StdInstant,
+{
+    const LEGACY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
     ensure_direct_usb_identity(port, expected_usb_identity)?;
-    let mut serial = serialport::new(port, 115_200)
-        .timeout(Duration::from_secs(2))
-        .open()?;
-    ensure_direct_usb_identity(port, expected_usb_identity)?;
-    read_legacy_eeprom_snapshot_from_io(
-        &mut *serial,
-        port,
-        expected_usb_identity,
-        Duration::from_secs(30),
-    )
-}
-
-#[allow(dead_code)]
-pub(crate) fn read_legacy_eeprom_snapshot_with_session(
-    session: &mut DirectUsbSession,
-    port: &str,
-    expected_usb_identity: Option<&UsbSerialIdentity>,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    read_legacy_eeprom_snapshot_from_io(
-        session.port_mut(),
-        port,
-        expected_usb_identity,
-        Duration::from_secs(30),
-    )
-}
-
-fn read_legacy_eeprom_snapshot_from_io<R: Read + Write + ?Sized>(
-    serial: &mut R,
-    port: &str,
-    expected_usb_identity: Option<&UsbSerialIdentity>,
-    session_timeout: Duration,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    let deadline = StdInstant::now() + session_timeout;
     let session_id = format!("eeprom-legacy-{}", current_unix_millis());
     let mut image = Vec::with_capacity(EEPROM_CAPACITY_BYTES);
 
@@ -1621,7 +1120,8 @@ fn read_legacy_eeprom_snapshot_from_io<R: Read + Write + ?Sized>(
         ensure_direct_usb_identity(port, expected_usb_identity)?;
         write_snapshot_request(serial, &request)?;
         ensure_direct_usb_identity(port, expected_usb_identity)?;
-        let response = read_snapshot_response(serial, &session_id, deadline)?;
+        let deadline = now() + LEGACY_RESPONSE_TIMEOUT;
+        let response = read_snapshot_response_with_clock(serial, &session_id, deadline, now)?;
         let bytes = response
             .get("result")
             .and_then(|result| result.get("eeprom_bytes"))
@@ -1646,13 +1146,32 @@ fn read_legacy_eeprom_snapshot_from_io<R: Read + Write + ?Sized>(
     Ok(image)
 }
 
-pub(crate) fn write_snapshot_request<W: Write + ?Sized>(
-    serial: &mut W,
+pub(crate) fn write_snapshot_request<S: Write + ?Sized>(
+    serial: &mut S,
     value: &Value,
 ) -> io::Result<()> {
     serial.write_all(serde_json::to_string(value).unwrap().as_bytes())?;
     serial.write_all(b"\n")?;
     serial.flush()
+}
+
+trait SnapshotSerial: Read + Write {}
+
+impl<T: Read + Write> SnapshotSerial for T {}
+
+fn open_snapshot_serial(
+    port: &str,
+) -> Result<Box<dyn SnapshotSerial>, Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(target_os = "macos")]
+    if port.starts_with("/dev/cu.usbmodem") {
+        return Ok(Box::new(open_raw_usb_serial_jtag_port(port)?));
+    }
+
+    Ok(Box::new(
+        serialport::new(port, 115_200)
+            .timeout(Duration::from_secs(2))
+            .open()?,
+    ))
 }
 
 #[derive(Debug, Default)]
@@ -1752,14 +1271,27 @@ pub(crate) fn read_snapshot_response<R: Read + ?Sized>(
     request_id: &str,
     deadline: StdInstant,
 ) -> io::Result<Value> {
+    read_snapshot_response_with_clock(serial, request_id, deadline, &mut StdInstant::now)
+}
+
+fn read_snapshot_response_with_clock<R, C>(
+    serial: &mut R,
+    request_id: &str,
+    deadline: StdInstant,
+    now: &mut C,
+) -> io::Result<Value>
+where
+    R: Read + ?Sized,
+    C: FnMut() -> StdInstant,
+{
     let mut observation = SnapshotResponseObservation::default();
     loop {
-        if StdInstant::now() >= deadline {
+        if now() >= deadline {
             return Err(snapshot_timeout_error(&observation));
         }
         let mut bytes = Vec::new();
         loop {
-            if StdInstant::now() >= deadline {
+            if now() >= deadline {
                 return Err(snapshot_timeout_error(&observation));
             }
             let mut byte = [0_u8; 1];
@@ -1771,7 +1303,7 @@ pub(crate) fn read_snapshot_response<R: Read + ?Sized>(
                     if matches!(
                         error.kind(),
                         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                    ) && StdInstant::now() < deadline =>
+                    ) && now() < deadline =>
                 {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -1789,24 +1321,31 @@ pub(crate) fn read_snapshot_response<R: Read + ?Sized>(
         if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
             observation.nonempty_lines = observation.nonempty_lines.saturating_add(1);
         }
-        let value = match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) => {
-                observation.json_lines = observation.json_lines.saturating_add(1);
-                value
+        // Firmware boot/log output can share a line with a JSONL frame. Match
+        // the correlated object, as the devd response decoder does, rather
+        // than treating its surrounding text as an absent application.
+        for (offset, byte) in bytes.iter().enumerate() {
+            if *byte != b'{' {
+                continue;
             }
-            Err(_) => continue,
-        };
-        if value.get("requestId").and_then(Value::as_str) != Some(request_id) {
-            continue;
+            let mut frames =
+                serde_json::Deserializer::from_slice(&bytes[offset..]).into_iter::<Value>();
+            let Some(Ok(value)) = frames.next() else {
+                continue;
+            };
+            observation.json_lines = observation.json_lines.saturating_add(1);
+            if value.get("requestId").and_then(Value::as_str) != Some(request_id) {
+                continue;
+            }
+            if value.get("ok").and_then(Value::as_bool) != Some(true) {
+                let error_code = value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                return Err(snapshot_rejection_error(error_code));
+            }
+            return Ok(value);
         }
-        if value.get("ok").and_then(Value::as_bool) != Some(true) {
-            let error_code = value
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            return Err(snapshot_rejection_error(error_code));
-        }
-        return Ok(value);
     }
 }
 

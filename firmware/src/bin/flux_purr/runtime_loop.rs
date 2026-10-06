@@ -86,6 +86,12 @@ fn power_state_observation(state: PowerState) -> Option<PdStatusObservation> {
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
     let mut needs_redraw = false;
+    // Display I/O consumes the same watch receiver while keeping the physical
+    // heater interlock current. Its notification can already be consumed when
+    // this loop resumes, so refresh the cached state independently of changed().
+    if let Some(latest) = state.power_state_subscription.try_get() {
+        state.power_state = latest;
+    }
     let power_state = state.power_state;
     let current_pd_observation = power_state_observation(power_state);
     if current_pd_observation.is_none() {
@@ -107,7 +113,6 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
         state.last_pd_status_log_key = pd_status_log_key(current_pd_observation);
     }
     state.last_pd_observation = current_pd_observation;
-    update_pd_fixed_vin_stability(state, current_pd_observation);
     needs_redraw |= apply_pd_contract_observation(
         current_pd_observation,
         &mut state.pd_contract_ready,
@@ -119,34 +124,6 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState) -> bool {
     );
 
     needs_redraw
-}
-
-#[cfg(target_arch = "xtensa")]
-fn update_pd_fixed_vin_stability(
-    state: &mut RuntimeLoopState,
-    observation: Option<PdStatusObservation>,
-) {
-    let elapsed_ms = Instant::now()
-        .as_millis()
-        .saturating_sub(state.runtime_started_ms);
-    let Some(observation) = observation
-        .filter(|_| {
-            state.latest_vin_sample_at_ms.is_some_and(|sample_at_ms| {
-                elapsed_ms.saturating_sub(sample_at_ms) <= FLASH_PREPARATION_VIN_SAMPLE_MAX_AGE_MS
-            })
-        })
-        .filter(|observation| pd_fixed_vin_is_within_tolerance(*observation, state.latest_vin_mv))
-    else {
-        state.pd_fixed_vin_stable_since_ms = None;
-        return;
-    };
-    match state.pd_fixed_vin_stable_since_ms {
-        Some((target_mv, _)) if target_mv == observation.contract.voltage_mv => {}
-        _ => {
-            state.pd_fixed_vin_stable_since_ms =
-                Some((observation.contract.voltage_mv, elapsed_ms));
-        }
-    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -230,8 +207,6 @@ pub(crate) async fn runtime_process_usb_control_line(
             latest_rtd_raw_adc_max_mv: state.latest_rtd_raw_adc_max_mv,
             latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
             latest_vin_mv: state.latest_vin_mv,
-            latest_vin_sample_at_ms: state.latest_vin_sample_at_ms,
-            pd_fixed_vin_stable_since_ms: state.pd_fixed_vin_stable_since_ms,
             last_heater_duty: heater_duty_for_control,
             heater_control_timing: state.heater_control_timing,
             persistence_log_sink: &mut state.transport.persistence_log_sink,
@@ -251,7 +226,6 @@ pub(crate) async fn runtime_process_usb_control_line(
         hold_pps_governor: &mut state.hold_pps_governor,
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
-        measured_vin_mv: state.latest_vin_mv,
     });
     let _ = usb_start_response_frame(
         &mut state.transport.usb_response_writer,
@@ -376,42 +350,29 @@ pub(crate) async fn runtime_process_usb_input(
     }
     #[cfg(feature = "web_serial")]
     if state.transport.usb_transport_faulted {
-        if state.transport.usb_recovery_marker_failed {
-            return RuntimeUsbInputOutcome {
-                needs_redraw,
-                control_command_processed,
-                response_pending: true,
-            };
-        }
-        if !state.transport.usb_recovery_marker_failed
-            && state.transport.usb_recovery_writer.is_complete()
+        if state.transport.usb_recovery_writer.is_complete()
             && !usb_start_transport_recovery(
                 &mut state.transport.usb_recovery_writer,
                 state.transport.usb_tx_buf,
                 Instant::now().as_millis(),
             )
         {
-            state.transport.usb_recovery_marker_failed = true;
+            return RuntimeUsbInputOutcome {
+                needs_redraw,
+                control_command_processed,
+                response_pending: true,
+            };
         }
-        if !state.transport.usb_recovery_marker_failed {
-            match usb_pump_recovery_response(
+        if matches!(
+            usb_pump_recovery_response(
                 &mut state.transport.usb_serial,
                 &mut state.transport.usb_recovery_writer,
                 state.transport.usb_tx_buf,
                 Instant::now().as_millis(),
-            ) {
-                UsbResponsePumpOutcome::Idle => {
-                    state.transport.usb_transport_faulted = false;
-                }
-                UsbResponsePumpOutcome::Fault => {
-                    state.transport.usb_recovery_marker_failed = true;
-                }
-                UsbResponsePumpOutcome::Pending => {}
-            }
-        }
-        if state.transport.usb_recovery_marker_failed {
-            warn!("USB recovery marker failed; retaining terminal transport fault");
-            state.transport.usb_recovery_writer.abort();
+            ),
+            UsbResponsePumpOutcome::Idle
+        ) {
+            state.transport.usb_transport_faulted = false;
         }
         return RuntimeUsbInputOutcome {
             needs_redraw,
@@ -514,8 +475,6 @@ pub(crate) async fn runtime_process_lan_control(
             latest_rtd_raw_adc_max_mv: state.latest_rtd_raw_adc_max_mv,
             latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
             latest_vin_mv: state.latest_vin_mv,
-            latest_vin_sample_at_ms: state.latest_vin_sample_at_ms,
-            pd_fixed_vin_stable_since_ms: state.pd_fixed_vin_stable_since_ms,
             last_heater_duty: heater_duty_for_control,
             heater_control_timing: state.heater_control_timing,
             persistence_log_sink: &mut state.transport.persistence_log_sink,
@@ -532,7 +491,6 @@ pub(crate) async fn runtime_process_lan_control(
         hold_pps_governor: &mut state.hold_pps_governor,
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
-        measured_vin_mv: state.latest_vin_mv,
     });
     let network_summary = flux_purr_firmware::net::lan_network_summary().await;
     let (control_needs_redraw, response) = result;
@@ -590,7 +548,6 @@ async fn runtime_flush_persistence_logs(state: &mut RuntimeLoopState) -> bool {
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 fn runtime_mark_usb_transport_fault(state: &mut RuntimeLoopState) {
     state.transport.usb_transport_faulted = true;
-    state.transport.usb_recovery_marker_failed = false;
     state.transport.usb_recovery_writer.abort();
 }
 
@@ -726,7 +683,6 @@ pub(crate) async fn runtime_reconcile_network_state(
         hold_pps_governor: &mut state.hold_pps_governor,
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
-        measured_vin_mv: state.latest_vin_mv,
     });
     needs_redraw
 }
@@ -1145,31 +1101,10 @@ pub(crate) async fn runtime_read_heater_sensors(
             raw_adc_mv,
         );
         state.latest_vin_raw_adc_mv = raw_adc_mv;
-        state.latest_vin_sample_at_ms = Some(
-            Instant::now()
-                .as_millis()
-                .saturating_sub(state.runtime_started_ms),
-        );
         if state.latest_vin_mv != vin_mv {
             state.latest_vin_mv = vin_mv;
             needs_redraw = true;
         }
-        needs_redraw |= reconcile_pd_contract_with_vin(
-            &mut state.pd_contract_vin_guard,
-            state.last_pd_observation,
-            Some(vin_mv),
-            PdTimestamp::now().as_millis(),
-            PdContractVinContext {
-                pd_port: &state.pd_port,
-                last_pd_observation: &mut state.last_pd_observation,
-                pd_contract_ready: &mut state.pd_contract_ready,
-                ui_state: &mut state.ui_state,
-                calibration_runtime_state: &mut state.calibration_runtime_state,
-                manual_pps_state: &mut state.manual_pps_state,
-                heater_pwm: &mut state.heater_pwm,
-                last_heater_duty: &mut state.last_heater_duty,
-            },
-        );
         info!(
             "vin sample raw_code={=u16} raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
             raw_code, raw_adc_mv, corrected_adc_mv, vin_mv,
@@ -1413,10 +1348,14 @@ pub(crate) fn runtime_update_calibration_job(
     calibration_live_rtd_temp_c: Option<f32>,
 ) -> bool {
     if flash_preparation::is_active() {
-        calibration_job_canceled(
-            &mut state.calibration_runtime_state,
-            &mut state.manual_pps_state,
-        );
+        if state.calibration_runtime_state.mode != CalibrationMode::Off
+            || state.calibration_runtime_state.job.status == CalibrationJobStatus::Running
+        {
+            cancel_calibration_for_flash_preparation(
+                &mut state.calibration_runtime_state,
+                &mut state.manual_pps_state,
+            );
+        }
         return false;
     }
     update_calibration_runtime_state(
@@ -1463,29 +1402,69 @@ pub(crate) fn runtime_update_calibration_job(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn runtime_hold_heater_for_flash(state: &mut RuntimeLoopState) -> bool {
+    let mut needs_redraw = false;
+    if state.ui_state.heater_enabled || state.ui_state.heater_output_percent != 0 {
+        state.ui_state.heater_enabled = false;
+        state.ui_state.heater_output_percent = 0;
+        needs_redraw = true;
+    }
+    state.calibration_runtime_state.heater_enabled = false;
+    if let Some(ticket) = state.manual_pps_state.pending_power_ticket.take() {
+        state.pd_port.discard_ticket(ticket);
+    }
+    state.manual_pps_state.pending_power_request_mv = None;
+    state.manual_pps_state.clear();
+    HeaterPwmGate::force_off();
+    if state.last_heater_duty != 0 {
+        apply_heater_duty(&mut state.heater_pwm, 0, &mut state.last_heater_duty);
+    }
+    if terminal_idle_contract_confirmed(state.last_pd_observation) {
+        state
+            .calibration_runtime_state
+            .immediate_heater_disarm_pending = false;
+        state
+            .calibration_runtime_state
+            .thermal_plant_completion_disarm_pending = false;
+        let _ = state.manual_pps_state.consume_automatic_restore_pending();
+    }
+    if let Some(ticket) = state.flash_idle_power_ticket
+        && state.pd_port.try_take_ticket(ticket).is_some()
+    {
+        state.flash_idle_power_ticket = None;
+    }
+    let needs_cooling = state.latest_display_temp_i16 > 40
+        || !matches!(state.fan_policy_state, FanPolicyState::Disabled);
+    let fixed_confirmed = state
+        .last_pd_observation
+        .is_some_and(|observation| automatic_idle_contract_is_confirmed(observation, None));
+    let now_ms = Instant::now()
+        .as_millis()
+        .saturating_sub(state.runtime_started_ms);
+    if !needs_cooling
+        && !fixed_confirmed
+        && state.flash_idle_power_ticket.is_none()
+        && now_ms >= state.flash_idle_next_attempt_ms
+    {
+        state.flash_idle_next_attempt_ms = now_ms.saturating_add(500);
+        if let PdRequestState::Pending(ticket) = state.pd_port.restore_automatic_idle_contract() {
+            state.flash_idle_power_ticket = Some(ticket);
+        }
+    }
+    needs_redraw
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn runtime_reconcile_heater_arming(
     state: &mut RuntimeLoopState,
     calibration_live_rtd_temp_c: Option<f32>,
     thermal_plant_was_running: bool,
 ) -> (bool, bool) {
     if flash_preparation::is_active() {
-        let mut needs_redraw = false;
-        if state.ui_state.heater_enabled || state.ui_state.heater_output_percent != 0 {
-            state.ui_state.heater_enabled = false;
-            state.ui_state.heater_output_percent = 0;
-            needs_redraw = true;
-        }
-        state.calibration_runtime_state.heater_enabled = false;
-        if let Some(ticket) = state.manual_pps_state.pending_power_ticket.take() {
-            state.pd_port.discard_ticket(ticket);
-        }
-        state.manual_pps_state.pending_power_request_mv = None;
-        state.manual_pps_state.clear();
-        HeaterPwmGate::force_off();
-        if state.last_heater_duty != 0 {
-            apply_heater_duty(&mut state.heater_pwm, 0, &mut state.last_heater_duty);
-        }
-        return (true, needs_redraw);
+        return (true, runtime_hold_heater_for_flash(state));
+    }
+    if let Some(ticket) = state.flash_idle_power_ticket.take() {
+        state.pd_port.discard_ticket(ticket);
     }
     let calibration_output_temp_c = thermal_plant_calibration_temperature_c(
         state.calibration_runtime_state,
@@ -1507,7 +1486,6 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         hold_pps_governor: &mut state.hold_pps_governor,
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
-        measured_vin_mv: state.latest_vin_mv,
     });
     if state.calibration_runtime_state.mode != CalibrationMode::Off
         && state.calibration_runtime_state.heater_enabled
@@ -1938,6 +1916,33 @@ pub(crate) async fn runtime_force_heater_safe_off(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn runtime_confirm_fan_power(
+    state: &mut RuntimeLoopState,
+    fan_decision: &mut FanPolicyDecision,
+    elapsed_ms: u64,
+) {
+    if let Some(ticket) = state.fan_working_power_ticket
+        && state.pd_port.try_take_ticket(ticket).is_some()
+    {
+        state.fan_working_power_ticket = None;
+    }
+    if !matches!(fan_decision.state, FanPolicyState::Disabled)
+        && !fan_working_contract_confirmed(state.last_pd_observation, state.ui_state.heater_enabled)
+    {
+        if state.fan_working_power_ticket.is_none()
+            && elapsed_ms >= state.fan_working_next_attempt_ms
+        {
+            state.fan_working_next_attempt_ms = elapsed_ms.saturating_add(500);
+            if let PdRequestState::Pending(ticket) = state.pd_port.request_cooling_contract() {
+                state.fan_working_power_ticket = Some(ticket);
+            }
+        }
+        fan_decision.command = FanHardwareCommand::disabled();
+        fan_decision.output_level = FanOutputLevel::Off;
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
     let cooling_was_enabled = state.fan_command.enabled
         || state
@@ -1983,6 +1988,19 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
             output_level: fan_output_level_for_command(command),
         };
     }
+    if flash_preparation::is_active()
+        && state.latest_display_temp_i16 > 40
+        && matches!(fan_decision.state, FanPolicyState::Disabled)
+    {
+        fan_decision = FanPolicyDecision {
+            state: FanPolicyState::PostHeatMedium,
+            command: FanPolicyState::PostHeatMedium.command(elapsed_ms),
+            display_state: FanDisplayState::Auto,
+            source: FanPolicySource::Safety,
+            output_level: FanOutputLevel::Medium,
+        };
+    }
+    runtime_confirm_fan_power(state, &mut fan_decision, elapsed_ms);
     state.fan_policy_state = fan_decision.state;
     state.fan_command = fan_decision.command;
     state.heater_enabled_last_cycle = state.ui_state.heater_enabled;
@@ -1995,6 +2013,7 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
     if flash_preparation::is_active()
         && cooling_was_enabled
         && !state.fan_command.enabled
+        && matches!(state.fan_policy_state, FanPolicyState::Disabled)
         && let PdRequestState::Pending(ticket) = state.pd_port.restore_automatic_idle_contract()
     {
         state.pd_port.discard_ticket(ticket);
@@ -2252,7 +2271,6 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
                     hold_pps_governor: &mut state.hold_pps_governor,
                     ui_state: &mut state.ui_state,
                     last_heater_duty: &mut state.last_heater_duty,
-                    measured_vin_mv: state.latest_vin_mv,
                 });
                 apply_fan_output(
                     &mut state.fan_enable,

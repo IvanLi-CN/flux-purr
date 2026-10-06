@@ -1004,7 +1004,7 @@ pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize =
 pub(crate) const USB_CONTROL_TX_PACKET_LEN: usize = 64;
 #[cfg(target_arch = "xtensa")]
 pub(crate) const USB_CONTROL_TX_PACKET_BUDGET: usize = 128;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 // Runtime responses are emitted cooperatively, one USB packet per loop turn.
 // Keep the deadline bounded, but long enough for the largest response buffer
 // to drain without aborting a valid JSONL frame.

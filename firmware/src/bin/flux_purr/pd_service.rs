@@ -5,19 +5,12 @@ use super::*;
 pub(crate) const PD_SERVICE_TICK_MS: u64 = 5;
 
 #[cfg(target_arch = "xtensa")]
-static PD_INTERLOCK_PENDING: AtomicU8 = AtomicU8::new(0);
-
-#[cfg(target_arch = "xtensa")]
-static PD_INTERLOCK_LATCHED: AtomicU8 = AtomicU8::new(0);
-
-#[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy)]
 pub(crate) struct PdServiceSnapshot {
     pub(crate) observation: Option<PdStatusObservation>,
     pub(crate) capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     pub(crate) controller: ControllerKind,
     pub(crate) service_available: bool,
-    pub(crate) stale_contract_vin_guard_suspended: bool,
     pub(crate) published_at_ms: u64,
 }
 
@@ -38,7 +31,6 @@ impl PdServiceSnapshot {
             capabilities: None,
             controller: ControllerKind::Unknown,
             service_available: false,
-            stale_contract_vin_guard_suspended: false,
             published_at_ms: 0,
         }
     }
@@ -122,8 +114,6 @@ impl PdServiceClient {
     }
 
     pub(crate) fn mark_starting_fusb302b() -> Self {
-        PD_INTERLOCK_PENDING.store(0, Ordering::Release);
-        PD_INTERLOCK_LATCHED.store(0, Ordering::Release);
         PD_SERVICE_REQUIRED.store(1, Ordering::Release);
         PD_SERVICE_SNAPSHOT.lock(|snapshot| {
             *snapshot.borrow_mut() = PdServiceSnapshot {
@@ -137,8 +127,6 @@ impl PdServiceClient {
     }
 
     pub(crate) fn mark_unavailable() -> Self {
-        PD_INTERLOCK_PENDING.store(0, Ordering::Release);
-        PD_INTERLOCK_LATCHED.store(0, Ordering::Release);
         PD_SERVICE_REQUIRED.store(0, Ordering::Release);
         PD_SERVICE_SNAPSHOT.lock(|snapshot| {
             *snapshot.borrow_mut() = PdServiceSnapshot::unavailable();
@@ -160,24 +148,6 @@ impl PdServiceClient {
 
     pub(crate) fn controller_kind(&self) -> ControllerKind {
         self.snapshot().controller
-    }
-
-    pub(crate) fn stale_contract_vin_guard_suspended(&self, _now_ms: u64) -> bool {
-        self.snapshot().stale_contract_vin_guard_suspended
-    }
-
-    pub(crate) fn interlock_after_stale_contract(&self, _now_ms: u64) {
-        let snapshot = self.snapshot();
-        if snapshot.service_available {
-            PD_INTERLOCK_LATCHED.store(1, Ordering::Release);
-            PD_INTERLOCK_PENDING.store(1, Ordering::Release);
-        }
-        PD_SERVICE_SNAPSHOT.lock(|current| {
-            let mut current = current.borrow_mut();
-            current.observation = None;
-            current.stale_contract_vin_guard_suspended = false;
-        });
-        HeaterPwmGate::force_off();
     }
 
     fn submit_request(&self, request: PdContractRequest) -> PdRequestState {
@@ -203,7 +173,14 @@ impl PdServiceClient {
         if !snapshot.service_available || snapshot.controller != ControllerKind::Fusb302b {
             return PdRequestState::Failed;
         }
-        match PowerCoordinatorClient::new().idle() {
+        match PowerCoordinatorClient::new().idle_at_minimum(FUSB302B_PD_ABSOLUTE_MIN_MV) {
+            Ok(ticket) => PdRequestState::Pending(ticket),
+            Err(_) => PdRequestState::Failed,
+        }
+    }
+
+    pub(crate) fn request_cooling_contract(&self) -> PdRequestState {
+        match PowerCoordinatorClient::new().idle_at_minimum(FAN_WORKING_CONTRACT_MV) {
             Ok(ticket) => PdRequestState::Pending(ticket),
             Err(_) => PdRequestState::Failed,
         }
@@ -294,8 +271,6 @@ fn pd_status_observation(runtime: &Fusb302bRuntime) -> Option<PdStatusObservatio
 #[cfg(target_arch = "xtensa")]
 fn publish_pd_snapshot(runtime: &Fusb302bRuntime, observation: Option<PdStatusObservation>) {
     let now_ms = PdTimestamp::now().as_millis();
-    let interlock_latched = PD_INTERLOCK_LATCHED.load(Ordering::Acquire) != 0;
-    let observation = (!interlock_latched).then_some(observation).flatten();
     let ready = startup_pd_contract_ready(observation);
     PD_SERVICE_SNAPSHOT.lock(|snapshot| {
         *snapshot.borrow_mut() = PdServiceSnapshot {
@@ -305,7 +280,6 @@ fn publish_pd_snapshot(runtime: &Fusb302bRuntime, observation: Option<PdStatusOb
                 .and_then(fusb302b_adjustable_power_capabilities),
             controller: ControllerKind::Fusb302b,
             service_available: runtime.service_available(),
-            stale_contract_vin_guard_suspended: runtime.stale_contract_vin_guard_suspended(now_ms),
             published_at_ms: now_ms,
         };
     });
@@ -333,7 +307,8 @@ async fn process_pd_command(
         return PdCommandProgress::Done(ticket, TicketOutcome::Rejected);
     }
     match command {
-        PdServiceCommand::AutomaticIdle { ticket } => {
+        PdServiceCommand::AutomaticIdle { ticket, minimum_mv } => {
+            runtime.policy.set_standby_minimum_mv(minimum_mv);
             match runtime
                 .request_automatic_idle_contract(i2c, PdTimestamp::now(), replacing_pending)
                 .await
@@ -581,9 +556,14 @@ async fn process_pd_service_work(
         select_pd_service_work(*pending, PD_SERVICE_COMMANDS.try_receive().ok());
     match command {
         Some(command) => {
+            if flash_preparation::is_active()
+                && !matches!(command, PdServiceCommand::AutomaticIdle { .. })
+            {
+                return Some((pd_service_command_ticket(command), TicketOutcome::Rejected));
+            }
             if take_pd_service_command_cancelled(command) {
                 let ticket = pd_service_command_ticket(command);
-                if pending.is_some() {
+                if pending.is_some_and(|(pending_ticket, _)| pending_ticket == ticket) {
                     runtime
                         .abort_pending_operation(i2c, PdTimestamp::now())
                         .await;
@@ -636,15 +616,6 @@ async fn process_pd_service_work(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn consume_pd_interlock(runtime: &mut Fusb302bRuntime) {
-    if PD_INTERLOCK_PENDING.swap(0, Ordering::Acquire) != 0 {
-        runtime.interlock_after_stale_contract(PdTimestamp::now().as_millis());
-        PD_INTERLOCK_LATCHED.store(0, Ordering::Release);
-        HeaterPwmGate::force_off();
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
 async fn publish_pd_service_turn(
     runtime: &Fusb302bRuntime,
     observation: Option<PdStatusObservation>,
@@ -667,10 +638,18 @@ async fn publish_pd_service_turn(
     }
     if let Some((ticket, outcome)) = terminal {
         publish_pd_service_terminal(state, ticket, outcome).await;
-        None
+        pending_after_pd_terminal(pending, ticket)
     } else {
         pending
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn pending_after_pd_terminal<T>(
+    pending: Option<(PowerTicket, T)>,
+    completed: PowerTicket,
+) -> Option<(PowerTicket, T)> {
+    pending.filter(|(ticket, _)| *ticket != completed)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -679,7 +658,6 @@ async fn run_pd_service_turn(
     runtime: &mut Fusb302bRuntime,
     pending: &mut Option<(PowerTicket, PendingPdOperation)>,
 ) {
-    consume_pd_interlock(runtime);
     let terminal_override = process_pd_service_work(runtime, i2c, pending).await;
     // A request flood must never turn the command mailbox into a second
     // unbounded work queue. Poll once on every service turn regardless of

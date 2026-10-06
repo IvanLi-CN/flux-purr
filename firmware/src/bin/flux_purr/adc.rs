@@ -777,29 +777,12 @@ impl Fusb302bRuntime {
         self.vbus_low_interlocked = true;
     }
 
-    pub(crate) fn interlock_after_stale_contract(&mut self, now_ms: u64) {
-        self.clear_contract_authorization(now_ms);
-        self.record_protocol_fault(FUSB302B_PROTOCOL_FAULT_STALE_CONTRACT_VIN);
-        self.clear_vbus_low_interlock();
-        self.awaiting_vbus_restore = false;
-        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-    }
-
     fn record_protocol_fault(&self, fault: u8) {
         FUSB302B_LAST_PROTOCOL_FAULT.store(fault, Ordering::Release);
     }
 
     fn record_i2c_error(&self, error: u8) {
         FUSB302B_LAST_I2C_ERROR.store(error, Ordering::Release);
-    }
-
-    pub(crate) fn stale_contract_vin_guard_suspended(&self, now_ms: u64) -> bool {
-        matches!(
-            self.policy.phase(),
-            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-        ) || self.last_request_at_ms.is_some_and(|last| {
-            now_ms.saturating_sub(last) < FUSB302B_STALE_CONTRACT_VIN_SETTLE_GRACE_MS
-        })
     }
 
     pub(crate) async fn initialize(&mut self, i2c: &mut PdI2c<'_>) -> bool {
@@ -1150,11 +1133,29 @@ impl Fusb302bRuntime {
         now: PdTimestamp,
         replace_pending: bool,
     ) -> PdContractRequestState {
+        let now_ms = now.as_millis();
+        if self.policy.pending_automatic_idle_contract_matches()
+            && self.idle_transition_target_mv.is_none_or(|target_mv| {
+                self.policy
+                    .standby_contract()
+                    .is_some_and(|contract| contract.voltage_mv == target_mv)
+            })
+        {
+            // An equivalent Idle supersedes only the ticket. Keep the current
+            // Accept/PS_RDY exchange and bounded PPS ramp intact.
+            return PdContractRequestState::Pending;
+        }
         self.pps_keepalive_pending_at_ms = None;
         self.request_rejected = false;
         self.request_timed_out = false;
-        let now_ms = now.as_millis();
         if replace_pending {
+            let reuse_confirmed_pps = self.policy.phase() == SinkPhase::Ready
+                && self
+                    .policy
+                    .confirmed_active_contract()
+                    .is_some_and(|active| {
+                        active.mode == PdContractRequestMode::Pps && active.pps_range.is_some()
+                    });
             self.policy.cancel_pending_request();
             self.idle_transition_target_mv = None;
             self.idle_transition_last_step_at_ms = None;
@@ -1166,8 +1167,12 @@ impl Fusb302bRuntime {
             if active.kind == ContractKind::Pps && active.voltage_mv > standby_target_mv {
                 self.idle_transition_target_mv = Some(standby_target_mv);
             }
-            self.policy.prepare_automatic_idle_refresh();
-            return self.refresh_source_capabilities(i2c, now, true, true).await;
+            if !reuse_confirmed_pps {
+                self.policy.prepare_automatic_idle_refresh();
+                return self.refresh_source_capabilities(i2c, now, true, true).await;
+            }
+            // A confirmed PPS contract already identifies the live APDO.
+            // Descend on that session without a discovery exchange or RX flush.
         }
         if matches!(
             self.policy.phase(),
@@ -1195,10 +1200,10 @@ impl Fusb302bRuntime {
             .then_some(standby_contract.voltage_mv);
         self.idle_transition_last_step_at_ms = None;
         let rdo = if let Some(target_mv) = self.idle_transition_target_mv {
-            match fusb302b::next_pps_to_fixed_voltage(
-                active.voltage_mv,
-                target_mv.max(FUSB302B_PPS_MIN_MV),
-            ) {
+            let Some(floor_mv) = self.policy.standby_pps_floor_mv() else {
+                return PdContractRequestState::Failed;
+            };
+            match fusb302b::next_pps_to_fixed_voltage(active.voltage_mv, floor_mv.max(target_mv)) {
                 Some(step_mv) => {
                     self.idle_transition_last_step_at_ms = Some(now_ms);
                     match self.policy.request_automatic_idle_pps_step(step_mv) {
@@ -1259,7 +1264,10 @@ impl Fusb302bRuntime {
         if active.kind != ContractKind::Pps {
             return PdContractRequestState::Failed;
         }
-        let next_floor = target_mv.max(FUSB302B_PPS_MIN_MV);
+        let Some(next_floor) = self.policy.standby_pps_floor_mv() else {
+            return PdContractRequestState::Failed;
+        };
+        let next_floor = next_floor.max(target_mv);
         let Some(step_mv) = fusb302b::next_pps_to_fixed_voltage(active.voltage_mv, next_floor)
         else {
             let Some(rdo) = self.policy.request_automatic_idle_fixed_contract() else {

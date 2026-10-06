@@ -2,6 +2,27 @@
 use super::*;
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const FAN_WORKING_CONTRACT_MV: u16 = 12_000;
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn fan_working_contract_confirmed(
+    observation: Option<PdStatusObservation>,
+    heater_working: bool,
+) -> bool {
+    observation.is_some_and(|observation| {
+        observation.status.pd_active
+            && if heater_working {
+                observation.contract.voltage_mv >= FUSB302B_PPS_MIN_MV
+            } else {
+                observation.contract.kind == ContractKind::Fixed
+                    && observation.contract.voltage_mv >= FAN_WORKING_CONTRACT_MV
+                    && observation.contract.current_ma
+                        >= standby_current_for_voltage(observation.contract.voltage_mv)
+            }
+    })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn approach_sustain_floor_permille(
     control_target: ThermalControlTarget,
     error_c: f32,
@@ -1376,8 +1397,6 @@ pub(crate) const FUSB302B_PROTOCOL_FAULT_CONFIGURATION_IO: u8 = 9;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const FUSB302B_PROTOCOL_FAULT_PROTECTION: u8 = 10;
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const FUSB302B_PROTOCOL_FAULT_STALE_CONTRACT_VIN: u8 = 11;
-#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const FUSB302B_PROTOCOL_FAULT_READ_INTERRUPTS_IO: u8 = 12;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const FUSB302B_PROTOCOL_FAULT_READ_STATUS_IO: u8 = 13;
@@ -1406,6 +1425,16 @@ pub(crate) const FUSB302B_I2C_ERROR_EXECUTION_INCOMPLETE: u8 = 7;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const FUSB302B_I2C_ERROR_OTHER: u8 = 8;
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const FUSB302B_IDENTITY_DIAG_NONE: u8 = 0;
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const FUSB302B_IDENTITY_DIAG_I2C_ERROR: u8 = 1;
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const FUSB302B_IDENTITY_DIAG_ID_MISMATCH: u8 = 2;
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const FUSB302B_IDENTITY_DIAG_UNSUPPORTED_ID: u8 = 3;
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const FUSB302B_IDENTITY_DIAG_STATUS_INVALID: u8 = 4;
+#[cfg(any(target_arch = "xtensa", test))]
 #[cfg(target_arch = "xtensa")]
 pub(crate) const FUSB302B_PARTIAL_RX_TIMEOUT_MS: u64 = 250;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1419,3 +1448,10 @@ pub(crate) static FUSB302B_LAST_PROTOCOL_FAULT: AtomicU8 =
     AtomicU8::new(FUSB302B_PROTOCOL_FAULT_NONE);
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) static FUSB302B_LAST_I2C_ERROR: AtomicU8 = AtomicU8::new(FUSB302B_I2C_ERROR_NONE);
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) static FUSB302B_IDENTITY_DIAGNOSTIC: AtomicU8 =
+    AtomicU8::new(FUSB302B_IDENTITY_DIAG_NONE);
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) static FUSB302B_IDENTITY_FIRST_ID: AtomicU8 = AtomicU8::new(u8::MAX);
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) static FUSB302B_IDENTITY_SECOND_ID: AtomicU8 = AtomicU8::new(u8::MAX);

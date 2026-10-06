@@ -12,7 +12,7 @@
 
 ## Related Changes
 
-- None.
+- The former VIN contract interlock carried ADC-derived authority into the PD Service. Its removal restores the sampling/PD ownership boundary; provenance and behavior evidence are recorded in [the PD sink history](../fusb302b-dual-pd-sink/HISTORY.md).
 
 ## References
 

@@ -1,7 +1,5 @@
 pub(crate) use super::*;
 
-use std::cell::Cell;
-
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 #[cfg(windows)]
@@ -83,266 +81,6 @@ where
     )
     .await?;
     extract_usb_payload(result, payload_key)
-}
-
-pub(crate) async fn serial_flash_preparation_request(
-    state: &AppState,
-    target: &DeviceRecord,
-    op: &'static str,
-    expected_usb_identity: &UsbSerialIdentity,
-) -> Result<FlashPreparationStatus, HttpError> {
-    let port_path = native_port_path(target)?;
-    let request_id = format!("devd-{}-{op}", now_millis());
-    let request = serde_json::to_string(&UsbRequestWire {
-        frame_type: "request",
-        request_id: &request_id,
-        op,
-    })
-    .map_err(|_| HttpError::internal("failed to encode flash preparation request"))?;
-    let result = serial_exchange_with_identity(
-        state,
-        &target.id,
-        port_path,
-        request_id,
-        request,
-        SerialRetryPolicy::PreparationProbe,
-        Some(expected_usb_identity.clone()),
-    )
-    .await?;
-    extract_usb_payload(result, "flashPreparation")
-}
-
-pub(crate) async fn serial_flash_preparation_liveness_probe(
-    state: &AppState,
-    target: &DeviceRecord,
-    expected_usb_identity: &UsbSerialIdentity,
-) -> Result<(), HttpError> {
-    let identity_result = serial_flash_preparation_liveness_request(
-        state,
-        target,
-        expected_usb_identity,
-        "get_identity",
-    )
-    .await;
-    match identity_result {
-        Ok(result) => {
-            let _: Identity = extract_usb_payload(result, "identity")?;
-            Ok(())
-        }
-        Err(identity_error) if identity_error.error.code == "startup_busy" => Err(identity_error),
-        Err(identity_error)
-            if preparation_error_may_be_application_unresponsive(&identity_error) =>
-        {
-            let status_result = serial_flash_preparation_liveness_request(
-                state,
-                target,
-                expected_usb_identity,
-                "get_status",
-            )
-            .await;
-            match status_result {
-                Ok(result) => {
-                    let _: Value = extract_usb_payload(result, "status")?;
-                    Ok(())
-                }
-                Err(status_error) if status_error.error.code == "startup_busy" => Err(status_error),
-                Err(status_error)
-                    if preparation_error_may_be_application_unresponsive(&status_error) =>
-                {
-                    Err(identity_error)
-                }
-                Err(status_error) => Err(status_error),
-            }
-        }
-        Err(identity_error) => Err(identity_error),
-    }
-}
-
-async fn serial_flash_preparation_liveness_request(
-    state: &AppState,
-    target: &DeviceRecord,
-    expected_usb_identity: &UsbSerialIdentity,
-    op: &'static str,
-) -> Result<Value, HttpError> {
-    let port_path = native_port_path(target)?;
-    let request_id = format!("devd-{}-{op}-liveness", now_millis());
-    let request = serde_json::to_string(&UsbRequestWire {
-        frame_type: "request",
-        request_id: &request_id,
-        op,
-    })
-    .map_err(|_| HttpError::internal("failed to encode USB liveness request"))?;
-    serial_exchange_with_identity(
-        state,
-        &target.id,
-        port_path,
-        request_id,
-        request,
-        SerialRetryPolicy::PreparationProbe,
-        Some(expected_usb_identity.clone()),
-    )
-    .await
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FlashPreparationAdmission {
-    Ready(FlashPreparationStatus),
-    ApplicationUnresponsive,
-}
-
-pub(crate) fn emit_flash_preparation_admission(
-    state: &AppState,
-    device_id: &str,
-    operation: &str,
-    artifact_id: Option<&str>,
-    admission: FlashPreparationAdmission,
-) {
-    let decision = match admission {
-        FlashPreparationAdmission::Ready(_) => "ready",
-        FlashPreparationAdmission::ApplicationUnresponsive => "application_unresponsive",
-    };
-    let payload = artifact_id.map_or_else(
-        || json!({ "decision": decision }),
-        |artifact_id| json!({ "artifactId": artifact_id, "decision": decision }),
-    );
-    state.emit(event(
-        device_id,
-        operation,
-        "flash preparation admission completed",
-        payload,
-    ));
-}
-
-pub(crate) fn flash_preparation_status_ready(status: FlashPreparationStatus) -> bool {
-    !status.heating && !status.cooling && status.pd_fixed_or_default
-}
-
-pub(crate) fn validate_flash_preparation_timeout(
-    timeout_seconds: Option<u64>,
-) -> Result<u64, HttpError> {
-    let timeout_seconds = timeout_seconds.unwrap_or(DEFAULT_FLASH_PREPARATION_TIMEOUT_SECONDS);
-    if !(1..=MAX_FLASH_PREPARATION_TIMEOUT_SECONDS).contains(&timeout_seconds) {
-        return Err(HttpError::bad_request(
-            "invalid_prepare_timeout_seconds",
-            "prepareTimeoutSeconds must be between 1 and 7200 seconds.",
-        ));
-    }
-    Ok(timeout_seconds)
-}
-
-pub(crate) async fn serial_flash_preparation_gate(
-    state: &AppState,
-    target: &DeviceRecord,
-    expected_usb_identity: &UsbSerialIdentity,
-    timeout_seconds: u64,
-) -> Result<FlashPreparationAdmission, HttpError> {
-    let timeout_seconds = validate_flash_preparation_timeout(Some(timeout_seconds))?;
-    let port_path = native_port_path(target)?;
-    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
-    let mut op = "prepare_flash";
-    let mut no_response_probes = 0_u8;
-    let mut last_status = None;
-
-    loop {
-        require_usb_serial_identity(&port_path, Some(expected_usb_identity))?;
-        match serial_flash_preparation_request(state, target, op, expected_usb_identity).await {
-            Ok(status) => {
-                no_response_probes = 0;
-                last_status = Some(status);
-                if flash_preparation_status_ready(status) {
-                    return Ok(FlashPreparationAdmission::Ready(status));
-                }
-                op = "get_flash_preparation";
-                wait_for_flash_preparation_retry(deadline, Duration::from_secs(2), last_status)
-                    .await?;
-            }
-            Err(error) if error.error.code == "startup_busy" => {
-                no_response_probes = 0;
-                wait_for_flash_preparation_retry(deadline, Duration::from_secs(2), last_status)
-                    .await?;
-            }
-            Err(error) if preparation_error_may_be_application_unresponsive(&error) => {
-                if retry_after_preparation_liveness_probe(
-                    state,
-                    target,
-                    expected_usb_identity,
-                    &port_path,
-                    deadline,
-                    last_status,
-                    &mut no_response_probes,
-                )
-                .await?
-                {
-                    return Ok(FlashPreparationAdmission::ApplicationUnresponsive);
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-async fn retry_after_preparation_liveness_probe(
-    state: &AppState,
-    target: &DeviceRecord,
-    expected_usb_identity: &UsbSerialIdentity,
-    port_path: &str,
-    deadline: Instant,
-    last_status: Option<FlashPreparationStatus>,
-    no_response_probes: &mut u8,
-) -> Result<bool, HttpError> {
-    require_usb_serial_identity(port_path, Some(expected_usb_identity))?;
-    let liveness =
-        serial_flash_preparation_liveness_probe(state, target, expected_usb_identity).await;
-    if liveness.is_ok() {
-        *no_response_probes = 0;
-        wait_for_flash_preparation_retry(deadline, Duration::from_secs(2), last_status).await?;
-        return Ok(false);
-    }
-    let liveness_error = liveness.expect_err("liveness result was checked as an error");
-    if liveness_error.error.code == "startup_busy" {
-        *no_response_probes = 0;
-        wait_for_flash_preparation_retry(deadline, Duration::from_secs(2), last_status).await?;
-        return Ok(false);
-    }
-    if !preparation_error_may_be_application_unresponsive(&liveness_error) {
-        return Err(liveness_error);
-    }
-    *no_response_probes = no_response_probes.saturating_add(1);
-    if *no_response_probes >= 3 {
-        return Ok(true);
-    }
-    wait_for_flash_preparation_retry(deadline, Duration::from_millis(200), last_status).await?;
-    Ok(false)
-}
-
-fn preparation_error_may_be_application_unresponsive(error: &HttpError) -> bool {
-    matches!(
-        error.error.code.as_str(),
-        "usb_response_timeout" | "serial_io_failed"
-    )
-}
-
-fn flash_preparation_timeout(status: Option<FlashPreparationStatus>) -> HttpError {
-    let mut error = HttpError::new(
-        StatusCode::GATEWAY_TIMEOUT,
-        "flash_preparation_timeout",
-        "The device remained responsive but did not reach the flash preparation state before the deadline.",
-        false,
-    );
-    error.error.details = Some(json!({ "lastStatus": status }));
-    error
-}
-
-async fn wait_for_flash_preparation_retry(
-    deadline: Instant,
-    delay: Duration,
-    last_status: Option<FlashPreparationStatus>,
-) -> Result<(), HttpError> {
-    if Instant::now() >= deadline {
-        return Err(flash_preparation_timeout(last_status));
-    }
-    tokio::time::sleep(delay.min(deadline.saturating_duration_since(Instant::now()))).await;
-    Ok(())
 }
 
 pub(crate) async fn serial_wifi_config(
@@ -1236,7 +974,6 @@ pub(crate) fn serial_exchange_blocking(
     // `startup_busy` is the one explicit signal that a status request needs a
     // retry after the observable runtime-ready marker.
     let mut retry_after_runtime_ready = false;
-    let application_frame_seen = Cell::new(false);
     let mut read_buf = [0_u8; 256];
     let mut line = Vec::new();
     let mut discarding_overlong_line = false;
@@ -1255,7 +992,6 @@ pub(crate) fn serial_exchange_blocking(
                         request,
                         deadline,
                         expected_usb_identity: expected_usb_identity.as_ref(),
-                        application_frame_seen: &application_frame_seen,
                     },
                     &read_buf[..read],
                     &mut line,
@@ -1305,30 +1041,12 @@ pub(crate) fn serial_exchange_blocking(
     // port can reset the MCU; JSONL newline framing and request-id matching let
     // the next RPC discard any stale partial response without reopening it.
     store_serial_session(&mut serial_sessions, port_path, session);
-    Err(serial_exchange_timeout_error(
-        retry_policy,
-        application_frame_seen.get(),
-    ))
-}
-
-fn serial_exchange_timeout_error(
-    retry_policy: SerialRetryPolicy,
-    application_frame_seen: bool,
-) -> HttpError {
-    if matches!(retry_policy, SerialRetryPolicy::PreparationProbe) && application_frame_seen {
-        return HttpError::new(
-            StatusCode::BAD_GATEWAY,
-            "application_protocol_mismatch",
-            "The firmware returned application frames but no response matched the preparation request.",
-            false,
-        );
-    }
-    HttpError::new(
+    Err(HttpError::new(
         StatusCode::GATEWAY_TIMEOUT,
         "usb_response_timeout",
         "Timed out waiting for a matching USB JSONL response.",
         true,
-    )
+    ))
 }
 
 fn reopen_serial_request_with_identity(
@@ -1453,7 +1171,6 @@ pub(crate) fn serial_rpc_timeout(retry_policy: SerialRetryPolicy) -> Duration {
     match retry_policy {
         SerialRetryPolicy::ReadOnly => SERIAL_READ_ONLY_RPC_TIMEOUT,
         SerialRetryPolicy::SingleShot => SERIAL_RPC_TIMEOUT,
-        SerialRetryPolicy::PreparationProbe => FLASH_PREPARATION_PROBE_TIMEOUT,
     }
 }
 
@@ -1575,6 +1292,7 @@ pub(crate) fn serial_line_finished(
     false
 }
 
+#[cfg(test)]
 pub(crate) fn serial_line_is_application_frame(line: &[u8]) -> bool {
     for (offset, byte) in line.iter().enumerate() {
         if *byte != b'{' {
@@ -1621,7 +1339,6 @@ pub(crate) struct SerialResponseLineContext<'a> {
     request: &'a str,
     deadline: Instant,
     expected_usb_identity: Option<&'a UsbSerialIdentity>,
-    application_frame_seen: &'a Cell<bool>,
 }
 
 pub(crate) enum SerialChunkResult {
@@ -1679,9 +1396,6 @@ pub(crate) fn process_serial_response_line(
         // reset. Keep the fd open until the runtime-ready marker arrives.
         return Ok((session, SerialLineAction::Continue(true)));
     }
-    if serial_line_is_application_frame(line) {
-        context.application_frame_seen.set(true);
-    }
     if should_retry_request_after_runtime_ready(
         retry_after_runtime_ready,
         line,
@@ -1698,19 +1412,12 @@ pub(crate) fn process_serial_response_line(
         return Ok((session, SerialLineAction::Continue(false)));
     }
     let action = match decode_usb_response_line(line, context.request_id) {
-        Ok(Some(payload)) => {
-            context.application_frame_seen.set(true);
-            SerialLineAction::Response(payload)
-        }
+        Ok(Some(payload)) => SerialLineAction::Response(payload),
         Ok(None) => SerialLineAction::Continue(retry_after_runtime_ready),
         Err(error) if is_retryable_startup_busy(&error) && Instant::now() < context.deadline => {
-            context.application_frame_seen.set(true);
             SerialLineAction::Continue(true)
         }
-        Err(error) => {
-            context.application_frame_seen.set(true);
-            SerialLineAction::Failure(error)
-        }
+        Err(error) => SerialLineAction::Failure(error),
     };
     Ok((session, action))
 }
@@ -2406,123 +2113,6 @@ pub(crate) fn write_serial_request(
     let restore_result = port.finish_write();
     write_result.map_err(serial_io_http_error)?;
     restore_result
-}
-
-/// A raw, non-resetting USB JSONL session for direct CLI preparation calls.
-/// The caller owns the process lock and keeps this object alive across all
-/// prepare/status/cancel requests.
-pub struct DirectUsbSession {
-    port_path: String,
-    port: Box<dyn SerialSessionPort>,
-}
-
-impl DirectUsbSession {
-    pub fn open(
-        port_path: &str,
-        expected_usb_identity: Option<&UsbSerialIdentity>,
-    ) -> Result<Self, String> {
-        if !serial_port_path_is_present(port_path) {
-            return Err(format!(
-                "authorized serial port is unavailable: {port_path}"
-            ));
-        }
-        require_usb_serial_identity(port_path, expected_usb_identity)
-            .map_err(|error| error.error.message)?;
-        let port = open_serial_port(port_path).map_err(|error| error.error.message)?;
-        Ok(Self {
-            port_path: port_path.to_string(),
-            port,
-        })
-    }
-
-    pub fn request(
-        &mut self,
-        request_id: &str,
-        request: &str,
-        timeout: Duration,
-        expected_usb_identity: Option<&UsbSerialIdentity>,
-    ) -> Result<Value, String> {
-        write_serial_request(&mut *self.port, request).map_err(|error| error.error.message)?;
-        let deadline = Instant::now() + timeout;
-        let mut read_buf = [0_u8; 256];
-        let mut line = Vec::new();
-        let mut discarding_overlong_line = false;
-        let mut application_frame_seen = false;
-        while Instant::now() < deadline {
-            let (response, frame_seen) = match self.port.read(&mut read_buf) {
-                Ok(0) => {
-                    std::thread::sleep(SERIAL_READ_TIMEOUT);
-                    (None, false)
-                }
-                Ok(read) => decode_direct_usb_response_chunk(
-                    &read_buf[..read],
-                    &mut line,
-                    &mut discarding_overlong_line,
-                    request_id,
-                )?,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    std::thread::sleep(SERIAL_READ_TIMEOUT);
-                    (None, false)
-                }
-                Err(error) => return Err(format!("serial I/O failed: {error}")),
-            };
-            application_frame_seen |= frame_seen;
-            if let Some(response) = response {
-                require_usb_serial_identity(&self.port_path, expected_usb_identity)
-                    .map_err(|error| error.error.message)?;
-                return Ok(response);
-            }
-        }
-        if application_frame_seen {
-            return Err("application_protocol_mismatch: application frames were received without a matching response".into());
-        }
-        Err("timed out waiting for a matching USB JSONL response".into())
-    }
-
-    /// Borrow the already-open raw descriptor for protocols that need more
-    /// than one JSONL exchange, such as the EEPROM snapshot session.
-    pub fn port_mut(&mut self) -> &mut dyn SerialSessionPort {
-        &mut *self.port
-    }
-}
-
-fn decode_direct_usb_response_chunk(
-    bytes: &[u8],
-    line: &mut Vec<u8>,
-    discarding_overlong_line: &mut bool,
-    request_id: &str,
-) -> Result<(Option<Value>, bool), String> {
-    let mut application_frame_seen = false;
-    for byte in bytes {
-        if !serial_line_finished(line, discarding_overlong_line, *byte) {
-            continue;
-        }
-        application_frame_seen |= serial_line_is_application_frame(line);
-        let response = decode_usb_response_line(line, request_id)
-            .map_err(|error| format!("{}: {}", error.error.code, error.error.message))?;
-        line.clear();
-        if response.is_some() {
-            return Ok((response, application_frame_seen));
-        }
-    }
-    Ok((None, application_frame_seen))
-}
-
-/// Exchange one JSONL request on a raw, non-resetting USB descriptor.
-pub fn direct_usb_request(
-    port_path: &str,
-    request_id: &str,
-    request: &str,
-    timeout: Duration,
-    expected_usb_identity: Option<&UsbSerialIdentity>,
-) -> Result<Value, String> {
-    let mut session = DirectUsbSession::open(port_path, expected_usb_identity)?;
-    session.request(request_id, request, timeout, expected_usb_identity)
 }
 
 pub(crate) fn validate_serial_request_len(request: &str) -> Result<(), HttpError> {

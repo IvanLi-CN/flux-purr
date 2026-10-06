@@ -2,50 +2,8 @@ use super::*;
 use std::process::ExitStatus;
 use tempfile::tempdir;
 
-#[test]
-fn flash_preparation_admission_requires_every_ready_field() {
-    assert!(flash_preparation_status_ready(FlashPreparationStatus {
-        heating: false,
-        cooling: false,
-        pd_fixed_or_default: true,
-    }));
-    for status in [
-        FlashPreparationStatus {
-            heating: true,
-            cooling: false,
-            pd_fixed_or_default: true,
-        },
-        FlashPreparationStatus {
-            heating: false,
-            cooling: true,
-            pd_fixed_or_default: true,
-        },
-        FlashPreparationStatus {
-            heating: false,
-            cooling: false,
-            pd_fixed_or_default: false,
-        },
-    ] {
-        assert!(!flash_preparation_status_ready(status));
-    }
-}
-
-#[test]
-fn flash_preparation_timeout_uses_default_and_enforces_bounds() {
-    assert_eq!(
-        validate_flash_preparation_timeout(None).unwrap(),
-        DEFAULT_FLASH_PREPARATION_TIMEOUT_SECONDS
-    );
-    assert_eq!(validate_flash_preparation_timeout(Some(1)).unwrap(), 1);
-    assert_eq!(
-        validate_flash_preparation_timeout(Some(7_200)).unwrap(),
-        7_200
-    );
-    for timeout in [Some(0), Some(7_201)] {
-        let error = validate_flash_preparation_timeout(timeout).unwrap_err();
-        assert_eq!(error.error.code, "invalid_prepare_timeout_seconds");
-    }
-}
+#[path = "product_hil_tests.rs"]
+mod product_hil;
 
 #[test]
 fn local_control_endpoint_rejects_network_transports() {
@@ -2762,7 +2720,6 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
         artifact,
         dry_run,
         confirm: confirm.map(str::to_owned),
-        prepare_timeout_seconds: None,
     };
 
     let without_dry_run = flash_device(
@@ -2841,7 +2798,6 @@ fn legacy_flash_dry_run_approval_binds_port_and_usb_identity() {
         artifact: test_artifact_with_file(directory.path(), "firmware.bin", b"firmware-image"),
         dry_run: true,
         confirm: None,
-        prepare_timeout_seconds: None,
     };
     let identity = UsbSerialIdentity {
         vid: ESP32S3_USB_SERIAL_JTAG_VID,
@@ -3840,7 +3796,6 @@ fn firmware_preflight_digest_binds_usb_identity() {
         approval_token: None,
         confirm: None,
         allow_downgrade: false,
-        prepare_timeout_seconds: None,
     };
     let first = UsbSerialIdentity {
         vid: 0x303a,
@@ -4322,7 +4277,6 @@ async fn recovery_preflight_allows_hot_or_foreign_mock_without_physical_confirma
             approval_token: None,
             confirm: None,
             allow_downgrade: false,
-            prepare_timeout_seconds: None,
         }),
     )
     .await
@@ -4394,7 +4348,6 @@ async fn update_preflight_blocks_active_heater_and_high_temperature() {
             approval_token: None,
             confirm: None,
             allow_downgrade: false,
-            prepare_timeout_seconds: None,
         }),
     )
     .await
