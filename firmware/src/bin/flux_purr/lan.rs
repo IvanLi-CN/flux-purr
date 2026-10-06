@@ -1698,27 +1698,14 @@ pub(crate) async fn process_eeprom_maintenance_frame(
             context.manual_pps,
             context.memory_commit_due_ms,
         );
-        let idle_confirmed = match context.pd_port.restore_automatic_idle_contract() {
-            PdRequestState::Confirmed => true,
-            PdRequestState::Pending(ticket) => {
-                let confirmed = matches!(
-                    context.pd_port.try_take_ticket(ticket),
-                    Some(TicketOutcome::Confirmed(_))
-                );
-                if !confirmed {
-                    context.pd_port.discard_ticket(ticket);
-                }
-                confirmed
-            }
-            PdRequestState::Failed => false,
-        };
+        let idle_confirmed = await_eeprom_power_disarm(context.pd_port).await;
         if !idle_confirmed {
             return (
                 false,
                 usb_error_response(
                     request_id,
                     "eeprom_power_disarm_failed",
-                    "EEPROM maintenance could not restore fixed PD.",
+                    "EEPROM maintenance could not confirm the automatic idle power contract within 5 seconds.",
                 ),
             );
         }

@@ -136,6 +136,45 @@ pub(crate) const fn raw_eeprom_operation_mutates(op: EepromMaintenanceOp) -> boo
     matches!(op, EepromMaintenanceOp::Write | EepromMaintenanceOp::Erase)
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const EEPROM_POWER_DISARM_TIMEOUT_MS: u64 = 5_000;
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn eeprom_power_disarm_result(
+    confirmation: Option<bool>,
+    elapsed_ms: u64,
+) -> Option<bool> {
+    if elapsed_ms > EEPROM_POWER_DISARM_TIMEOUT_MS {
+        return Some(false);
+    }
+    confirmation.or_else(|| (elapsed_ms >= EEPROM_POWER_DISARM_TIMEOUT_MS).then_some(false))
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+pub(crate) async fn await_eeprom_power_disarm(pd_port: &PdPort) -> bool {
+    let ticket = match pd_port.restore_automatic_idle_contract() {
+        PdRequestState::Confirmed => return true,
+        PdRequestState::Failed => return false,
+        PdRequestState::Pending(ticket) => ticket,
+    };
+    let started_ms = Instant::now().as_millis();
+    loop {
+        let confirmation = pd_port
+            .try_take_ticket(ticket)
+            .map(|outcome| matches!(outcome, TicketOutcome::Confirmed(_)));
+        if let Some(confirmed) = eeprom_power_disarm_result(
+            confirmation,
+            Instant::now().as_millis().saturating_sub(started_ms),
+        ) {
+            if confirmation.is_none() {
+                pd_port.discard_ticket(ticket);
+            }
+            return confirmed;
+        }
+        EmbassyTimer::after_millis(10).await;
+    }
+}
+
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn begin_mutating_eeprom_maintenance(
     ui_state: &mut FrontPanelUiState,

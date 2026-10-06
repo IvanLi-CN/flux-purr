@@ -4,6 +4,7 @@
 
 - Implementation: firmware uses the external M24C64 as its only persistent configuration store.
 - Lifecycle: active.
+- Raw maintenance retains pending automatic-idle power tickets until confirmation or a five-second caller timeout. EEPROM writes begin only after confirmation; failed or expired requests retain the maintenance lock. Focused regressions cover delayed confirmation, explicit rejection and timeout boundaries.
 
 ## Implementation Coverage
 

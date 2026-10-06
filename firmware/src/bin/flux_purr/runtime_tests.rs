@@ -6442,6 +6442,30 @@ fn non_blank_eeprom_without_a_valid_record_is_incompatible() {
 }
 
 #[test]
+fn eeprom_maintenance_waits_for_delayed_power_confirmation() {
+    assert_eq!(eeprom_power_disarm_result(None, 0), None);
+    assert_eq!(eeprom_power_disarm_result(None, 200), None);
+    assert_eq!(eeprom_power_disarm_result(Some(true), 250), Some(true));
+}
+
+#[test]
+fn eeprom_maintenance_rejects_failed_or_expired_power_confirmation() {
+    assert_eq!(eeprom_power_disarm_result(Some(false), 250), Some(false));
+    assert_eq!(
+        eeprom_power_disarm_result(None, EEPROM_POWER_DISARM_TIMEOUT_MS - 1),
+        None
+    );
+    assert_eq!(
+        eeprom_power_disarm_result(None, EEPROM_POWER_DISARM_TIMEOUT_MS),
+        Some(false)
+    );
+    assert_eq!(
+        eeprom_power_disarm_result(Some(true), EEPROM_POWER_DISARM_TIMEOUT_MS + 1),
+        Some(false)
+    );
+}
+
+#[test]
 fn raw_eeprom_maintenance_locks_writes_and_clears_erased_runtime_state() {
     let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
     let mut config = MemoryConfig {
