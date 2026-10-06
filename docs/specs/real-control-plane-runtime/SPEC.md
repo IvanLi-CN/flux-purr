@@ -76,7 +76,9 @@
 - `TIMG0` watchdog 在第一个异步启动阶段前由独立 supervisor 启用，启动期间使用 boot-stage heartbeat，进入 `runtime_ready` 后切换为 Front Panel runtime 与 PD service 的单调心跳门控。supervisor 只在相应阶段要求的心跳自上次 feed 后推进时喂狗；任一任务、正常 executor 或 supervisor 停滞都必须停止 feed 并在硬件超时后复位。watchdog reset reason 必须沿既有 USB/U0 reset diagnostics 暴露，且 heater permit 在复位前后保持 fail-closed。
 - `hello` 必须返回 protocol version、framing、identity 和 capabilities。
 - `flash_preparation` capability 的 USB JSONL 请求为 `prepare_flash`、`get_flash_preparation` 与 `cancel_flash_preparation`。成功响应必须包含 `flashPreparation` 对象及 `heating`、`cooling`、`pdFixedOrDefault` 三个布尔字段；响应描述同一时刻已应用的硬件状态，不能用 ACK 代替。
+- 运行态尚未初始化时，三个 preparation 请求均返回可重试的 `startup_busy`；硬件初始化失败时均返回可重试的 `hardware_bringup_failed`。没有实际输出快照时不得构造成功的 preparation 状态。
 - `prepare_flash` 必须幂等建立无自动过期的 RAM 保持：清除并结算加热、手动 PPS、校准、热测试和输出启动意图，立即关断实际 heater PWM，允许安全冷却完成，并阻止新意图与旧请求重放。保持只由 `cancel_flash_preparation` 或 reset 解除；取消后不恢复旧请求，也不写 EEPROM 或删除校准结果。
+- 必要冷却的风扇工作电源 ticket 可继续结算；尚未结算时，即使实际 heater/fan 已关闭且仍观察到旧 Fixed 合同，也必须返回 `pdFixedOrDefault=false`。
 - `pdFixedOrDefault=true` 只可在没有加热/冷却、没有冲突待执行意图、已有新鲜协议确认的 Fixed 合同或有真实 attach epoch 与有效 Rp 预算证明的 Type-C 默认供电时返回。Fixed 合同由关联的 RDO、`Accept` 与 `PS_RDY` 确认；VIN 读数、ADC 校准、样本新鲜度、电压容差和测量稳定时长均不参与本操作的 Fixed 判断、就绪判定或解除完成判定。PPS、旧协议观察、未确认 RDO 和故障均为 false；5V VIN、MCU 重启或缺失 PD 元数据不能证明 Type-C 默认供电，尚无该独立证明能力时也必须返回 false。
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。
 - `wifi_state_v2` capability 表示设备支持版本化 WiFi 事实。`NetworkSummary` 必须包含 `configurationGeneration`、单调 `transitionSequence` 与有限安全枚举 `failureCode`；未知或畸形 snapshot 必须在 adapter 边界拒绝，不能由 `devd` 或 Web 猜测补齐。

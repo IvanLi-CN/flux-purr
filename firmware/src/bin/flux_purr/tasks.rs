@@ -1585,6 +1585,7 @@ pub(crate) struct UsbRuntimeStatusContext {
     #[cfg(test)]
     pub(crate) calibration: CalibrationRuntimeState,
     pub(crate) fan_command: FanHardwareCommand,
+    pub(crate) fan_working_power_pending: bool,
     pub(crate) current_rtd_fault: Option<HeaterFaultReason>,
     pub(crate) heater_fault_latched: Option<HeaterFaultReason>,
     pub(crate) attention_pending_after_fault_clear: bool,

@@ -290,6 +290,7 @@ pub(crate) fn flash_preparation_status(
         && ui_state.fan_policy_source == FanPolicySource::Idle
         && calibration.mode == CalibrationMode::Off
         && context.manual_pps.pending_power_ticket.is_none()
+        && !context.fan_working_power_pending
         && !context.manual_pps.enabled
         && context
             .last_pd_observation
@@ -3388,18 +3389,14 @@ pub(crate) fn usb_early_request_response(
             "Runtime status is not available until hardware initialization completes.",
             true,
         ),
-        UsbRequestOp::GetFlashPreparation => usb_response(
+        UsbRequestOp::PrepareFlash
+        | UsbRequestOp::GetFlashPreparation
+        | UsbRequestOp::CancelFlashPreparation => usb_error_response_with_retryable(
             request_id,
-            UsbResponsePayload::FlashPreparation(FlashPreparationStatus::default()),
+            "startup_busy",
+            "Flash preparation is unavailable until hardware initialization completes.",
+            true,
         ),
-        UsbRequestOp::PrepareFlash | UsbRequestOp::CancelFlashPreparation => {
-            usb_error_response_with_retryable(
-                request_id,
-                "startup_busy",
-                "Flash preparation is unavailable until hardware initialization completes.",
-                true,
-            )
-        }
     }
 }
 
@@ -3715,21 +3712,13 @@ pub(crate) fn usb_recovery_request_response(
             "LAN pairing reset is unavailable because hardware bring-up did not complete.",
             true,
         ),
-        UsbRequestOp::GetFlashPreparation => usb_response(
+        UsbRequestOp::PrepareFlash
+        | UsbRequestOp::GetFlashPreparation
+        | UsbRequestOp::CancelFlashPreparation => usb_error_response_with_retryable(
             request_id,
-            UsbResponsePayload::FlashPreparation(FlashPreparationStatus {
-                heating: false,
-                cooling: true,
-                pd_fixed_or_default: false,
-            }),
+            "hardware_bringup_failed",
+            "Flash preparation is unavailable because hardware bring-up did not complete.",
+            true,
         ),
-        UsbRequestOp::PrepareFlash | UsbRequestOp::CancelFlashPreparation => {
-            usb_error_response_with_retryable(
-                request_id,
-                "hardware_bringup_failed",
-                "Flash preparation is unavailable because hardware bring-up did not complete.",
-                true,
-            )
-        }
     }
 }

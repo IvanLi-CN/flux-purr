@@ -1068,6 +1068,31 @@ fn flash_preparation_readiness_does_not_depend_on_vin_measurements() {
 }
 
 #[test]
+fn flash_preparation_waits_for_pending_fan_power_before_reporting_fixed_ready() {
+    let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    let calibration = CalibrationRuntimeState::default();
+    let mut context = test_usb_runtime_status_context();
+    context.last_pd_observation = Some(PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: Status::from_register(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 1_000,
+        contract_voltage_mv: Some(5_000),
+        contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
+    });
+    assert!(flash_preparation_status(&ui_state, &calibration, &context).pd_fixed_or_default);
+
+    context.fan_working_power_pending = true;
+    let pending = flash_preparation_status(&ui_state, &calibration, &context);
+    assert!(!pending.heating);
+    assert!(!pending.cooling);
+    assert!(!pending.pd_fixed_or_default);
+
+    context.fan_working_power_pending = false;
+    assert!(flash_preparation_status(&ui_state, &calibration, &context).pd_fixed_or_default);
+}
+
+#[test]
 fn capability_refresh_ticket_always_settles_when_detached_or_faulted() {
     assert_eq!(
         refresh_terminal_outcome(SinkPhase::Detached, true, false, false),
@@ -1552,6 +1577,7 @@ fn test_usb_runtime_status_context() -> UsbRuntimeStatusContext {
         manual_pps: ManualPpsState::default(),
         calibration: CalibrationRuntimeState::default(),
         fan_command: FanHardwareCommand::disabled(),
+        fan_working_power_pending: false,
         heater_physical_output_percent: 0,
         current_rtd_fault: None,
         heater_fault_latched: None,
@@ -2277,6 +2303,39 @@ fn recovery_usb_control_reports_fault_status_when_bringup_fails() {
             );
         }
         other => panic!("unexpected recovery status response: {other:?}"),
+    }
+}
+
+#[test]
+fn flash_preparation_queries_do_not_fabricate_outputs_before_runtime_is_available() {
+    let memory_config = MemoryConfig::default();
+    for (phase, expected_error) in [
+        (UsbRecoveryPhase::BeforePersistentState, "startup_busy"),
+        (UsbRecoveryPhase::RuntimeFault, "hardware_bringup_failed"),
+    ] {
+        for op in [
+            "prepare_flash",
+            "get_flash_preparation",
+            "cancel_flash_preparation",
+        ] {
+            let request = format!(
+                "{{\"type\":\"request\",\"requestId\":\"prep-unavailable\",\"op\":\"{op}\"}}"
+            );
+            let response = usb_recovery_response_for_phase(&request, &memory_config, 0, phase);
+            match response {
+                UsbFrame::Response {
+                    request_id,
+                    ok: false,
+                    result: None,
+                    error: Some(error),
+                } => {
+                    assert_eq!(request_id.as_str(), "prep-unavailable");
+                    assert_eq!(error.code.as_str(), expected_error);
+                    assert!(error.retryable);
+                }
+                other => panic!("unexpected unavailable preparation response: {other:?}"),
+            }
+        }
     }
 }
 
