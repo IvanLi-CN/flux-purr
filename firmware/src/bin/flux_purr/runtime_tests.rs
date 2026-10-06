@@ -9878,6 +9878,38 @@ fn production_controller_requires_a_verified_five_amp_source() {
 }
 
 #[test]
+fn five_amp_model_approach_responds_to_damping_without_a_power_plateau() {
+    let mut outputs = [0; 2];
+    for (index, damping) in [1_000, 4_000].into_iter().enumerate() {
+        let mut profile = production_test_profile(900);
+        profile.settings.temp_filter_alpha = 1.0;
+        let point = profile.points[0].as_mut().unwrap();
+        point.approach_damping_exponent_permille = damping;
+        point.approach_lead_ticks = 0;
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(ProductionThermalController::Profile);
+        controller.phase = HeaterControlPhase::Approach;
+        controller.heater_was_enabled = true;
+        controller.last_target_temp_c = 60;
+        controller.filtered_temp_c = Some(52.0);
+        controller.previous_filtered_temp_c = Some(52.0);
+        controller.previous_measured_temp_c = Some(52.0);
+        let mut input = production_test_input(52.0);
+        input.model.transport_delay_ms = 1_950;
+        input.max_power_mw = 100_000.0;
+        outputs[index] = controller
+            .update_production_at(ProductionThermalController::Profile, input, Some(profile))
+            .0
+            .duty_percent;
+    }
+    assert!(
+        outputs[0] > outputs[1],
+        "damping must shape live Approach: {outputs:?}"
+    );
+    assert!(outputs[1] >= 10);
+}
+
+#[test]
 fn five_amp_model_approach_ignores_profile_floor_and_ceiling() {
     let mut normal = HeaterController::new();
     normal.production_controller = Some(ProductionThermalController::Profile);
@@ -9906,10 +9938,15 @@ fn five_amp_model_approach_ignores_profile_floor_and_ceiling() {
     changed_candidate.filtered_temp_c = Some(54.0);
     changed_candidate.previous_filtered_temp_c = Some(53.9);
     changed_candidate.previous_measured_temp_c = Some(54.0);
+    let mut changed_profile = production_test_profile(900);
+    changed_profile.points[0]
+        .as_mut()
+        .unwrap()
+        .approach_floor_power_permille = 800;
     let (changed_output, _) = changed_candidate.update_production_at(
         ProductionThermalController::Profile,
         input,
-        Some(production_test_profile(900)),
+        Some(changed_profile),
     );
     assert_eq!(normal_output.duty_percent, changed_output.duty_percent);
     let normal_pwm = heater_physical_pwm_percent(normal_output.duty_percent, 21_000, 21_000, 100);

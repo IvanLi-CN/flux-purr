@@ -101,6 +101,25 @@ describe('Web thermal-tuning-v2 export', () => {
       },
     }
     expect(timingGateValid(trial)).toBe(true)
+    const modelTrial = {
+      ...trial,
+      canonicalCandidate: { point: { approachFloorPowerPermille: 420, holdPowerPermille: 650 } },
+      timing: {
+        ...trial.timing,
+        policyVersion: 3,
+        configuredApproachFloorPermille: 420,
+        modelApproachFloorPermille: 100,
+      },
+    }
+    expect(timingGateValid(modelTrial)).toBe(true)
+    for (const change of [
+      { modelApproachFloorPermille: null },
+      { effectiveApproachFloorPermille: 650 },
+      { policyVersion: 2 },
+    ])
+      expect(timingGateValid({ ...modelTrial, timing: { ...modelTrial.timing, ...change } })).toBe(
+        false
+      )
     for (const change of [
       { floorObservedAtMs: null },
       { extendedAtMs: 10_000 },
@@ -152,6 +171,7 @@ describe('Web thermal-tuning-v2 export', () => {
         measurementValid: true,
       })
     expect(verifyTimingSamples(trial.timing, 60, samples).verified).toBe(true)
+    expect(verifyTimingSamples(modelTrial.timing, 60, samples).verified).toBe(true)
     for (const change of [
       { elapsedMs: 11_001 },
       { phase: 'hold' },

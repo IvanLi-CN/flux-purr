@@ -10,6 +10,7 @@ mod tests;
 
 pub const TRIAL_TIMEOUT_MS: u64 = 180_000;
 pub const TIMING_POLICY_VERSION: u8 = 2;
+pub const MODEL_APPROACH_TIMING_POLICY_VERSION: u8 = 3;
 pub const EXTENSION_FLOOR_PERMILLE: u16 = 100;
 
 pub const fn original_settle_limit_ms(target_c: i16) -> u32 {
@@ -26,6 +27,8 @@ pub struct ThermalTuningTimingEvidence {
     pub effective_approach_floor_permille: u16,
     #[serde(default, skip_serializing_if = "floor_not_recorded")]
     pub configured_approach_floor_permille: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_approach_floor_permille: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_deadline_observed_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,6 +59,7 @@ impl ThermalTuningTimingEvidence {
                 .approach_floor_power_permille
                 .max(point.hold_power_permille),
             configured_approach_floor_permille: point.approach_floor_power_permille,
+            model_approach_floor_permille: None,
             original_deadline_observed_at_ms: None,
             original_deadline_phase: None,
             floor_observed_at_ms: None,
@@ -66,14 +70,38 @@ impl ThermalTuningTimingEvidence {
         }
     }
 
+    pub fn for_model_point(point: ThermalControlProfilePointConfig) -> Self {
+        Self {
+            policy_version: MODEL_APPROACH_TIMING_POLICY_VERSION,
+            effective_approach_floor_permille: EXTENSION_FLOOR_PERMILLE,
+            model_approach_floor_permille: Some(EXTENSION_FLOOR_PERMILLE),
+            ..Self::for_point(point)
+        }
+    }
+
+    pub fn supported_policy(&self) -> bool {
+        match self.policy_version {
+            TIMING_POLICY_VERSION => self.model_approach_floor_permille.is_none(),
+            MODEL_APPROACH_TIMING_POLICY_VERSION => {
+                self.model_approach_floor_permille == Some(EXTENSION_FLOOR_PERMILLE)
+                    && self.effective_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
+            }
+            _ => false,
+        }
+    }
+
+    fn floor_eligible(&self) -> bool {
+        self.supported_policy()
+            && self.effective_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
+            && (self.policy_version == MODEL_APPROACH_TIMING_POLICY_VERSION
+                || self.configured_approach_floor_permille == EXTENSION_FLOOR_PERMILLE)
+    }
+
     pub fn observe_approach_request(&mut self, elapsed_ms: u64, requested_permille: u16) {
         if self.extended_at_ms.is_some() {
             return;
         }
-        if self.configured_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
-            && self.effective_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
-            && requested_permille == EXTENSION_FLOOR_PERMILLE
-        {
+        if self.floor_eligible() && requested_permille == EXTENSION_FLOOR_PERMILLE {
             self.floor_observed_at_ms.get_or_insert(elapsed_ms);
         } else if requested_permille != 0 {
             // A protective coast cannot create floor evidence, but neither
@@ -108,8 +136,7 @@ impl ThermalTuningTimingEvidence {
         self.original_deadline_phase = Some(phase);
         if !original_timed_out
             || phase != ThermalTuningPhase::Approach
-            || self.configured_approach_floor_permille != EXTENSION_FLOOR_PERMILLE
-            || self.effective_approach_floor_permille != EXTENSION_FLOOR_PERMILLE
+            || !self.floor_eligible()
             || self
                 .floor_observed_at_ms
                 .is_none_or(|floor| floor >= deadline_ms)
@@ -129,11 +156,9 @@ impl ThermalTuningTimingEvidence {
     }
 
     pub fn valid_extension(&self) -> bool {
-        self.policy_version == TIMING_POLICY_VERSION
+        self.floor_eligible()
             && matches!(self.original_limit_ms, 5_000 | 10_000)
             && Some(self.extension_limit_ms) == self.original_limit_ms.checked_mul(3)
-            && self.configured_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
-            && self.effective_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
             && self.allowed_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
             && self.original_deadline_phase == Some(ThermalTuningPhase::Approach)
             && self.original_deadline_observed_at_ms == self.extended_at_ms

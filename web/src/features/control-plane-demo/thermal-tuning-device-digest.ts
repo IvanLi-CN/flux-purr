@@ -106,6 +106,7 @@ const TIMING_FIELDS = [
   'allowedApproachFloorPermille',
   'effectiveApproachFloorPermille',
   'configuredApproachFloorPermille',
+  'modelApproachFloorPermille',
   'originalDeadlineObservedAtMs',
   'originalDeadlinePhase',
   'floorObservedAtMs',
@@ -154,6 +155,7 @@ function serializeDeviceValue(value: unknown, path: string): string {
     if (path === 'event.sample' && key === 'fan') return object[key] != null
     if (path.endsWith('.timing')) {
       if (key === 'configuredApproachFloorPermille') return Number(object[key] ?? 0) !== 0
+      if (key === 'modelApproachFloorPermille') return object[key] != null
       if (key === 'originalDeadlineObservedAtMs' || key === 'originalDeadlinePhase')
         return object[key] != null
     }

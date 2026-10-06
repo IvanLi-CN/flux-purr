@@ -5,6 +5,22 @@ import fixture from './thermal-tuning-digest.fixture.json'
 import fanFixture from './thermal-tuning-fan.fixture.json'
 
 describe('firmware event digest compatibility', () => {
+  it('binds the model floor while retaining the unused candidate floor identity', async () => {
+    const events: ThermalTuningEvent[] = JSON.parse(JSON.stringify(fixture))
+    const timing = events[1].decision?.timing
+    if (!timing || typeof timing !== 'object') throw new Error('missing timing fixture')
+    Object.assign(timing, {
+      policyVersion: 3,
+      configuredApproachFloorPermille: 420,
+      modelApproachFloorPermille: 100,
+      originalDeadlineObservedAtMs: 11_000,
+      originalDeadlinePhase: 'approach',
+    })
+    const expected = '598383346ab2f5d316bd0e9358ff7a1bcce4503dddc317bfb5df6e36773aa01a'
+    expect(await digestEventChain(events)).toBe(expected)
+    Object.assign(timing, { modelApproachFloorPermille: 200 })
+    expect(await digestEventChain(events)).not.toBe(expected)
+  })
   it('matches Rust fan sample bytes and binds the applied fan command', async () => {
     const event: ThermalTuningEvent = JSON.parse(JSON.stringify(fanFixture))
     const expected = '966de02dc5498cccd6d899bb359104a1e1e83a0ec4d7dca65da7fd9dc6546ea6'

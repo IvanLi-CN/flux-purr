@@ -2444,7 +2444,7 @@ impl ThermalTuningRuntime {
                 .flatten()
                 .find(|point| point.target_temp_c == target)
                 .copied()
-                .map(ThermalTuningTimingEvidence::for_point)
+                .map(ThermalTuningTimingEvidence::for_model_point)
         });
         let record = ThermalTuningTrialRecord {
             candidate: self.candidate_snapshot(target_c),

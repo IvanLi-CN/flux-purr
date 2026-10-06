@@ -609,6 +609,23 @@ function trialPassesGates(trial: ReturnType<typeof buildTrial>): boolean {
   )
 }
 
+function supportedTimingPolicy(timing: JsonObject) {
+  return (
+    (timing.policyVersion === 2 && timing.modelApproachFloorPermille == null) ||
+    (timing.policyVersion === 3 &&
+      timing.modelApproachFloorPermille === 100 &&
+      timing.effectiveApproachFloorPermille === 100)
+  )
+}
+
+function timingFloorEligible(timing: JsonObject) {
+  return (
+    supportedTimingPolicy(timing) &&
+    timing.effectiveApproachFloorPermille === 100 &&
+    (timing.policyVersion === 3 || timing.configuredApproachFloorPermille === 100)
+  )
+}
+
 export function timingGateValid(trial: JsonObject) {
   const timing = asObject(trial.timing)
   if (trial.timing == null) return false
@@ -644,8 +661,7 @@ export function timingGateValid(trial: JsonObject) {
       extended - exit >= original &&
       timing.originalDeadlineObservedAtMs === extended &&
       timing.originalDeadlinePhase === 'approach' &&
-      timing.configuredApproachFloorPermille === 100 &&
-      timing.effectiveApproachFloorPermille === 100 &&
+      timingFloorEligible(timing) &&
       timing.allowedApproachFloorPermille === 100)
   return (
     timestampsValid &&
@@ -653,7 +669,7 @@ export function timingGateValid(trial: JsonObject) {
     target >= -32_768 &&
     target <= 32_767 &&
     Number.isInteger(target) &&
-    timing.policyVersion === 2 &&
+    supportedTimingPolicy(timing) &&
     timing.originalLimitMs === original &&
     timing.extensionLimitMs === original * 3 &&
     floor != null &&
@@ -666,7 +682,8 @@ export function timingGateValid(trial: JsonObject) {
     hold <= 1_000 &&
     timing.allowedApproachFloorPermille === 100 &&
     timing.configuredApproachFloorPermille === floor &&
-    timing.effectiveApproachFloorPermille === Math.max(floor, hold) &&
+    timing.effectiveApproachFloorPermille ===
+      (timing.policyVersion === 3 ? 100 : Math.max(floor, hold)) &&
     extensionValid &&
     asObject(trial.timingEvidenceVerification)?.verified === true &&
     gate?.limitMs === (extended == null ? original : original * 3) &&
@@ -685,7 +702,7 @@ export function verifyTimingSamples(
   samples: JsonObject[]
 ) {
   const reasons: string[] = []
-  if (!timing || timing.policyVersion !== 2)
+  if (!timing || !supportedTimingPolicy(timing))
     return { verified: false, source: 'trial_samples', reasons: ['unsupported_timing_policy'] }
   const exit = numeric(timing.warmupExitedAtMs)
   const deadline = exit == null ? null : exit + Number(timing.originalLimitMs)
@@ -733,8 +750,7 @@ export function verifyTimingSamples(
     if (stableStart != null && deadline != null && stableStart <= deadline)
       reasons.push('timely_stable_window_at_original_deadline')
     if (
-      timing.configuredApproachFloorPermille !== 100 ||
-      timing.effectiveApproachFloorPermille !== 100 ||
+      !timingFloorEligible(timing) ||
       timing.allowedApproachFloorPermille !== 100 ||
       timing.originalDeadlinePhase !== 'approach' ||
       timing.originalDeadlineObservedAtMs !== extended ||

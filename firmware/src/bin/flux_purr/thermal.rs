@@ -1150,11 +1150,6 @@ impl HeaterController {
         self.advance_phase(&frame, now_ms);
 
         if previous_phase != self.phase {
-            if self.phase == HeaterControlPhase::Approach {
-                // Approach owns a fresh model trajectory. Do not carry PI
-                // state from Warmup or a previous Hold re-entry into it.
-                self.thermal_plant_controller.reset();
-            }
             self.update_hold_transition(&frame, measured_temp_c);
         }
         self.update_coast_state(&frame, measured_temp_c, previous_measured_temp_c);
@@ -1333,30 +1328,34 @@ impl HeaterController {
         })
     }
 
-    fn calculate_model_approach_duty(&mut self, frame: &ThermalControlFrame) -> Option<u8> {
+    fn calculate_model_approach_duty(&self, frame: &ThermalControlFrame) -> Option<u8> {
         let input = self.natural_cooling_input?;
         if !self.model_approach_available() {
             return None;
         }
-        let max_power_mw = input.max_power_mw;
-        let output = self
-            .thermal_plant_controller
-            .update(ThermalPlantControlInput {
-                model: input.model,
-                target_temp_c: f32::from(input.target_temp_c),
-                current_temp_c: frame.filtered_temp_c,
-                ambient_temp_c: input.ambient_temp_c,
-                slope_c_per_s: frame.filtered_slope_c_per_profile_tick,
-                dt_s: (frame.elapsed_ms as f32 / 1_000.0).clamp(0.001, 1.0),
-                max_power_mw,
-            });
+        // Reserve energy already in flight before shaping the remaining rise.
+        // The 3A PI has its own rate cap; importing it here would make candidate
+        // damping ineffective and create a constant-power Approach plateau.
+        let horizon_s = frame
+            .natural_cooling_delay_s
+            .max(f32::from(frame.control_target.approach_lead_ticks))
+            .max(0.1);
+        let remaining_c = (frame.error_c.min(frame.control_error_c)
+            - frame.filtered_slope_c_per_profile_tick.max(0.0) * horizon_s
+            - 0.5)
+            .max(0.0);
+        let span_c = (frame.brake_distance_c - 0.5).max(0.1);
+        let ratio = (remaining_c / span_c).clamp(0.0, 1.0);
+        let desired_rise_c_per_s =
+            remaining_c / horizon_s * ratio.powf(frame.control_target.approach_damping_exponent);
+        let loss_mw = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+            input.model,
+            f32::from(input.target_temp_c),
+            input.ambient_temp_c,
+        );
+        let requested_mw = loss_mw + input.model.thermal_capacity_mj_per_c * desired_rise_c_per_s;
         let requested_permille =
-            (output.requested_power_mw * 1_000.0 / max_power_mw).clamp(0.0, 1_000.0);
-        let requested_permille = if frame.error_c > 0.0 {
-            requested_permille.max(100.0)
-        } else {
-            requested_permille
-        };
+            (requested_mw * 1_000.0 / input.max_power_mw).clamp(100.0, 1_000.0);
         Some(percent_from_permille(requested_permille as u16))
     }
 

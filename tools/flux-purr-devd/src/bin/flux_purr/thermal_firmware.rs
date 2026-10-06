@@ -897,14 +897,19 @@ fn timing_gate_valid(trial: &Value) -> bool {
         .warmup_exited_at_ms
         .zip(timing.stable_window_started_at_ms)
         .and_then(|(exit, start)| start.checked_sub(exit));
-    timing.policy_version == 2
+    timing.supported_policy()
         && timing.original_limit_ms == original_settle_limit_ms(target)
         && Some(timing.extension_limit_ms) == timing.original_limit_ms.checked_mul(3)
         && floor <= 1_000
         && hold <= 1_000
         && timing.allowed_approach_floor_permille == 100
         && timing.configured_approach_floor_permille as u64 == floor
-        && timing.effective_approach_floor_permille as u64 == floor.max(hold)
+        && timing.effective_approach_floor_permille as u64
+            == if timing.model_approach_floor_permille.is_some() {
+                100
+            } else {
+                floor.max(hold)
+            }
         && (timing.extended_at_ms.is_none() || timing.valid_extension())
         && trial
             .pointer("/timingEvidenceVerification/verified")
@@ -1024,7 +1029,7 @@ fn verify_timing_samples(
     if !stable_window_samples_valid(timing, target, samples) {
         reasons.push("stable_window_not_verified_from_samples");
     }
-    json!({"verified": timing.policy_version == 2 && reasons.is_empty(),
+    json!({"verified": timing.supported_policy() && reasons.is_empty(),
         "source": "trial_samples", "reasons": reasons})
 }
 
@@ -2544,6 +2549,26 @@ mod tests {
     }
 
     #[test]
+    fn model_floor_timing_digest_matches_web() {
+        let mut values: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/src/features/control-plane-demo/thermal-tuning-digest.fixture.json"
+        )))
+        .unwrap();
+        let timing = &mut values[1]["decision"]["timing"];
+        timing["policyVersion"] = json!(3);
+        timing["configuredApproachFloorPermille"] = json!(420);
+        timing["modelApproachFloorPermille"] = json!(100);
+        timing["originalDeadlineObservedAtMs"] = json!(11000);
+        timing["originalDeadlinePhase"] = json!("approach");
+        let events: Vec<ThermalTuningEvent> = serde_json::from_value(values).unwrap();
+        assert_eq!(
+            digest_event_chain(&events).as_str(),
+            "598383346ab2f5d316bd0e9358ff7a1bcce4503dddc317bfb5df6e36773aa01a"
+        );
+    }
+
+    #[test]
     fn conditional_timing_requires_bound_floor_trigger_and_full_stable_window() {
         let mut trial = json!({
             "targetC": 60,
@@ -2558,6 +2583,15 @@ mod tests {
                 "stableWindowStartedAtMs": 13000, "stableWindowVerifiedAtMs": 23000}
         });
         assert!(super::timing_gate_valid(&trial));
+        let mut model_trial = trial.clone();
+        model_trial["canonicalCandidate"]["point"]["approachFloorPowerPermille"] = json!(420);
+        model_trial["canonicalCandidate"]["point"]["holdPowerPermille"] = json!(650);
+        model_trial["timing"]["policyVersion"] = json!(3);
+        model_trial["timing"]["configuredApproachFloorPermille"] = json!(420);
+        model_trial["timing"]["modelApproachFloorPermille"] = json!(100);
+        assert!(super::timing_gate_valid(&model_trial));
+        model_trial["timing"]["modelApproachFloorPermille"] = serde_json::Value::Null;
+        assert!(!super::timing_gate_valid(&model_trial));
         for (pointer, value) in [
             ("/timing/floorObservedAtMs", serde_json::Value::Null),
             ("/timing/extendedAtMs", json!(10000)),

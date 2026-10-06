@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn model_floor_binds_the_actual_law_without_adopting_unused_profile_bounds() {
+    let mut timing = ThermalTuningTimingEvidence::for_model_point(point(420, 650));
+    assert_eq!(timing.policy_version, 3);
+    assert_eq!(timing.configured_approach_floor_permille, 420);
+    assert_eq!(timing.effective_approach_floor_permille, 100);
+    timing.warmup_exited_at_ms = Some(1_000);
+    timing.observe_approach_request(5_000, 100);
+    assert!(timing.try_extend(11_000, true, ThermalTuningPhase::Approach));
+    assert!(timing.valid_extension());
+
+    for mutate in [0, 1, 2] {
+        let mut invalid = timing;
+        match mutate {
+            0 => invalid.model_approach_floor_permille = None,
+            1 => invalid.effective_approach_floor_permille = 650,
+            _ => invalid.policy_version = 2,
+        }
+        assert!(!invalid.valid_extension());
+    }
+}
+
+#[test]
+fn model_extension_still_requires_an_unraised_real_floor_before_the_deadline() {
+    for requests in [&[0][..], &[100, 140][..]] {
+        let mut timing = ThermalTuningTimingEvidence::for_model_point(point(420, 650));
+        timing.warmup_exited_at_ms = Some(1_000);
+        for (index, request) in requests.iter().enumerate() {
+            timing.observe_approach_request(2_000 + index as u64 * 1_000, *request);
+        }
+        assert!(!timing.try_extend(11_000, true, ThermalTuningPhase::Approach));
+    }
+}
+
+#[test]
 fn fixed_floor_does_not_adopt_the_candidate_hold_baseline() {
     for (floor, hold, request) in [(225, 225, 230), (420, 510, 510), (313, 338, 340)] {
         let mut timing = ThermalTuningTimingEvidence::for_point(point(floor, hold));

@@ -231,15 +231,15 @@ function renderTrialTabs(){
   const timing=trial.timing; const point=trial.canonicalCandidate?.point||{};
   const logicalRatio=value=>value!=null&&Number.isFinite(Number(value))?`${num(Number(value)/10,1)}% (${value}‰)`:'unavailable';
   const relativeTiming=value=>value!=null&&timing?.warmupExitedAtMs!=null?ms(Number(value)-Number(timing.warmupExitedAtMs)):'unavailable';
-  const timingKnown=timing?.policyVersion===1||timing?.policyVersion===2;
+  const timingKnown=[1,2,3].includes(timing?.policyVersion);
   const timingFacts=[
     ['Approach floor / ceiling',point.approachFloorPowerPermille!=null&&point.approachPowerPermille!=null?`${logicalRatio(point.approachFloorPowerPermille)} / ${logicalRatio(point.approachPowerPermille)}`:'unavailable'],
     ['effective / allowed floor',timingKnown?`${logicalRatio(timing.effectiveApproachFloorPermille)} / ${logicalRatio(timing.allowedApproachFloorPermille)}`:'unavailable'],
-    ['allowed floor source',timing?.policyVersion===2?'fixed 100‰ · policy 2':timing?.policyVersion===1?`max(100‰, Hold ${logicalRatio(point.holdPowerPermille)}) · historical policy 1`:'unavailable'],
+    ['allowed floor source',timing?.policyVersion===3?'model control · fixed 100‰ · policy 3':timing?.policyVersion===2?'fixed 100‰ · policy 2':timing?.policyVersion===1?`max(100‰, Hold ${logicalRatio(point.holdPowerPermille)}) · historical policy 1`:'unavailable'],
     ['floor observed after Warmup',relativeTiming(timing?.floorObservedAtMs)],
     ['original deadline',timingKnown?ms(timing.originalLimitMs):'unavailable'],
-    ['first original-deadline check',timing?.policyVersion===2?`${relativeTiming(timing.originalDeadlineObservedAtMs)} · ${timing.originalDeadlinePhase??'unavailable'}`:'unavailable'],
-    ['sample evidence verification',timing?.policyVersion===2?(trial.timingEvidenceVerification?.verified===true?'verified':`failed · ${(trial.timingEvidenceVerification?.reasons||['unavailable']).join(', ')}`):'historical · not policy 2 qualification'],
+    ['first original-deadline check',[2,3].includes(timing?.policyVersion)?`${relativeTiming(timing.originalDeadlineObservedAtMs)} · ${timing.originalDeadlinePhase??'unavailable'}`:'unavailable'],
+    ['sample evidence verification',[2,3].includes(timing?.policyVersion)?(trial.timingEvidenceVerification?.verified===true?'verified':`failed · ${(trial.timingEvidenceVerification?.reasons||['unavailable']).join(', ')}`):'historical · not current timing qualification'],
     ['extension trigger after Warmup',relativeTiming(timing?.extendedAtMs)],
     ['finite extension cap',timingKnown?ms(timing.extensionLimitMs):'unavailable'],
     ['extra wait to stable-window start',timing?.extendedAtMs!=null&&gate.settleTimeMs!=null?ms(Math.max(0,Number(gate.settleTimeMs)-Number(timing.originalLimitMs))):'unavailable'],
