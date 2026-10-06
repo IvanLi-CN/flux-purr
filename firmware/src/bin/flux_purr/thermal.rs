@@ -1150,13 +1150,20 @@ impl HeaterController {
         self.advance_phase(&frame, now_ms);
 
         if previous_phase != self.phase {
+            if self.phase == HeaterControlPhase::Approach {
+                // Approach owns a fresh model trajectory. Do not carry PI
+                // state from Warmup or a previous Hold re-entry into it.
+                self.thermal_plant_controller.reset();
+            }
             self.update_hold_transition(&frame, measured_temp_c);
         }
         self.update_coast_state(&frame, measured_temp_c, previous_measured_temp_c);
         let duty_percent = self.calculate_duty_percent(&frame);
         let predictive_coast_active = self.hold_coast_active
             || (self.phase == HeaterControlPhase::Approach && approach_predictive_coast_ready);
-        let duty_percent = if predictive_coast_active {
+        let model_approach_active =
+            self.phase == HeaterControlPhase::Approach && self.model_approach_available();
+        let duty_percent = if predictive_coast_active || model_approach_active {
             duty_percent
         } else {
             self.apply_under_target_reheat_floor(
@@ -1292,9 +1299,12 @@ impl HeaterController {
         }
     }
 
-    fn calculate_approach_duty(&self, frame: &ThermalControlFrame) -> u8 {
+    fn calculate_approach_duty(&mut self, frame: &ThermalControlFrame) -> u8 {
         if frame.approach_predictive_coast_ready {
             return 0;
+        }
+        if let Some(duty_percent) = self.calculate_model_approach_duty(frame) {
+            return duty_percent;
         }
         let target = frame.control_target;
         let span = (frame.brake_distance_c - target.hold_entry_error_c).max(0.1);
@@ -1308,6 +1318,46 @@ impl HeaterController {
             (sustain_floor + ((approach_ceiling - sustain_floor) * shaped_ratio))
                 .clamp(0.0, 1_000.0) as u16,
         )
+    }
+
+    fn model_approach_available(&self) -> bool {
+        self.natural_cooling_input.is_some_and(|input| {
+            input.max_power_mw.is_finite()
+                && input.max_power_mw > 0.0
+                && flux_purr_firmware::thermal_plant::natural_cooling_rate_c_per_s(
+                    input.model,
+                    input.measured_temp_c,
+                    input.ambient_temp_c,
+                )
+                .is_some()
+        })
+    }
+
+    fn calculate_model_approach_duty(&mut self, frame: &ThermalControlFrame) -> Option<u8> {
+        let input = self.natural_cooling_input?;
+        if !self.model_approach_available() {
+            return None;
+        }
+        let max_power_mw = input.max_power_mw;
+        let output = self
+            .thermal_plant_controller
+            .update(ThermalPlantControlInput {
+                model: input.model,
+                target_temp_c: f32::from(input.target_temp_c),
+                current_temp_c: frame.filtered_temp_c,
+                ambient_temp_c: input.ambient_temp_c,
+                slope_c_per_s: frame.filtered_slope_c_per_profile_tick,
+                dt_s: (frame.elapsed_ms as f32 / 1_000.0).clamp(0.001, 1.0),
+                max_power_mw,
+            });
+        let requested_permille =
+            (output.requested_power_mw * 1_000.0 / max_power_mw).clamp(0.0, 1_000.0);
+        let requested_permille = if frame.error_c > 0.0 {
+            requested_permille.max(100.0)
+        } else {
+            requested_permille
+        };
+        Some(percent_from_permille(requested_permille as u16))
     }
 
     fn calculate_hold_duty(&mut self, frame: &ThermalControlFrame) -> u8 {

@@ -9878,7 +9878,7 @@ fn production_controller_requires_a_verified_five_amp_source() {
 }
 
 #[test]
-fn five_amp_normal_and_tuning_use_same_profile_controller() {
+fn five_amp_model_approach_ignores_profile_floor_and_ceiling() {
     let mut normal = HeaterController::new();
     normal.production_controller = Some(ProductionThermalController::Profile);
     normal.phase = HeaterControlPhase::Approach;
@@ -9896,6 +9896,7 @@ fn five_amp_normal_and_tuning_use_same_profile_controller() {
         tuning.update_production_at(ProductionThermalController::Profile, input, Some(profile));
     assert!(!normal_disarmed && !tuning_disarmed);
     assert_eq!(normal_output, tuning_output);
+    assert!(normal_output.duty_percent >= 10);
 
     let mut changed_candidate = HeaterController::new();
     changed_candidate.production_controller = Some(ProductionThermalController::Profile);
@@ -9910,10 +9911,10 @@ fn five_amp_normal_and_tuning_use_same_profile_controller() {
         input,
         Some(production_test_profile(900)),
     );
-    assert_ne!(normal_output.duty_percent, changed_output.duty_percent);
+    assert_eq!(normal_output.duty_percent, changed_output.duty_percent);
     let normal_pwm = heater_physical_pwm_percent(normal_output.duty_percent, 21_000, 21_000, 100);
     let changed_pwm = heater_physical_pwm_percent(changed_output.duty_percent, 21_000, 21_000, 100);
-    assert_ne!(normal_pwm, changed_pwm);
+    assert_eq!(normal_pwm, changed_pwm);
 }
 
 #[test]
