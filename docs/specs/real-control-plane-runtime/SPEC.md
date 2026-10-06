@@ -56,6 +56,13 @@
 
 ### MUST
 
+- Wi-Fi driver configuration and its synchronous startup phase MUST wait for the
+  existing shared I2C transaction owner to release the bus and execute under that
+  same mutex. The mutex MUST be released before any asynchronous start-event
+  wait; association, DHCP and retry delays MUST leave it available to PD and
+  EEPROM. Driver event ordering, transition timeouts and genuine I2C fault
+  handling retain their existing contracts.
+
 - Runtime status MUST expose the shared thermal plant state (`missing|active|invalid`), active
   transaction identity, projection validity, and heater lock reason. Automatic model calibration
   MUST store a complete physically valid transient transaction directly as `active`; no candidate,

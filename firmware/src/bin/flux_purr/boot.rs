@@ -200,6 +200,8 @@ pub(crate) struct BootSystem {
     pd_contract_ready: bool,
     buzzer_realtime_spawner: embassy_executor::SendSpawner,
     eeprom_i2c: I2c<'static>,
+    #[cfg(feature = "net_http")]
+    shared_i2c: &'static SharedI2cBus,
     pd_task_i2c: Option<PdI2c<'static>>,
     pd_port: PdPort,
     power_state_subscription: PowerStateSubscription<'static>,
@@ -1124,14 +1126,25 @@ impl BootRuntimeState {
         let usb_serial = &mut self.system.usb_serial;
         let wifi = self.wifi.take().expect("Wi-Fi token initialized with ADC");
         #[cfg(feature = "web_serial")]
-        let result =
-            flux_purr_firmware::net::spawn(spawner, wifi, &self.memory.memory_config, |stage| {
+        let result = flux_purr_firmware::net::spawn(
+            spawner,
+            wifi,
+            &self.memory.memory_config,
+            self.system.shared_i2c,
+            |stage| {
                 let _ = usb_write_bytes_bounded(usb_serial, stage);
-            })
-            .await;
+            },
+        )
+        .await;
         #[cfg(not(feature = "web_serial"))]
-        let result =
-            flux_purr_firmware::net::spawn(spawner, wifi, &self.memory.memory_config, |_| {}).await;
+        let result = flux_purr_firmware::net::spawn(
+            spawner,
+            wifi,
+            &self.memory.memory_config,
+            self.system.shared_i2c,
+            |_| {},
+        )
+        .await;
         result
     }
 
@@ -1442,6 +1455,8 @@ pub(crate) fn initialize_boot_system(
             pd_contract_ready: false,
             buzzer_realtime_spawner,
             eeprom_i2c,
+            #[cfg(feature = "net_http")]
+            shared_i2c: i2c_bus,
             pd_task_i2c: Some(pd_task_i2c),
             pd_port: PdServiceClient::new(),
             power_state_subscription: PdServiceClient::new()

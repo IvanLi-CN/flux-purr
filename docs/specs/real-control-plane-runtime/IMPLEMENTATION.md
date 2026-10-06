@@ -4,7 +4,8 @@
 
 ## Current Status
 
-- FUSB302B pending-to-ready transitions discard pre-ready heater arm intent; an operator must explicitly arm heating after power readiness.
+- Fresh working-start intent survives ordinary Fixed-to-working negotiation while physical heat remains off until working power is confirmed. Contract loss, stale status, faults and explicit cancellation discard it without replay.
+- `net::start_wifi_driver` uses the production `async_start::after_resource_idle` helper and the initialized shared I2C0 mutex to serialize configuration and the synchronous first poll of `WifiController::start_async` with ongoing PD/EEPROM transactions. The original future remains responsible for driver start events and timeout results after the mutex is released. Five native regressions cover exclusion, bus availability during event waits, results/errors and cancellation; product HIL covers cold first-radio activation under protocol-confirmed Fixed 5V and independent source telemetry.
 - Implementation: Web + browser Web Serial + `devd` + CLI + USB JSONL + firmware `net_http` runtime 已覆盖 identity、network、status、runtime mutation、artifact verify、flash dry-run、real flash 与 monitor event 的真实传输路径
 - Lifecycle: active
 - Catalog note: direct firmware HTTP 默认随 ESP32-S3 runtime 构建；LAN 保持可信私网边界，初始 WiFi 配置、firmware flash 与 token reset 仍仅限 USB 配置通路（Browser Web Serial 或 native `devd`）

@@ -42,12 +42,15 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embedded_io_async::Write;
-use esp_hal::{peripherals::WIFI, rng::Rng};
+use esp_hal::{Async, i2c::master::I2c, peripherals::WIFI, rng::Rng};
 use esp_radio::{
     Controller as RadioController, init as radio_init,
     wifi::{self, ClientConfig, ModeConfig, WifiController, WifiDevice, WifiEvent},
 };
 use heapless::{String, Vec};
+
+/// The already initialized I2C0 bus shared with the PD service and EEPROM.
+pub type SharedI2cBus = Mutex<CriticalSectionRawMutex, I2c<'static, Async>>;
 use serde::Serialize;
 use static_cell::StaticCell;
 
@@ -516,6 +519,7 @@ pub async fn spawn<F>(
     spawner: &Spawner,
     wifi_peripheral: WIFI<'static>,
     memory: &MemoryConfig,
+    shared_i2c: &'static SharedI2cBus,
     mut report_stage: F,
 ) -> Result<(), LanStartupError>
 where
@@ -561,7 +565,7 @@ where
     let controller = WIFI_CONTROLLER.init(controller);
 
     spawner
-        .spawn(wifi_task(controller, stack))
+        .spawn(wifi_task(controller, stack, shared_i2c))
         .map_err(|_| LanStartupError::WifiTaskCapacity)?;
     spawner
         .spawn(network_task(runner))
@@ -701,18 +705,26 @@ async fn finish_wifi_disconnect(controller: &mut WifiController<'static>) {
 }
 
 #[embassy_executor::task]
-async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stack<'static>) {
-    wifi_task_inner(controller, stack).await;
+async fn wifi_task(
+    controller: &'static mut WifiController<'static>,
+    stack: Stack<'static>,
+    shared_i2c: &'static SharedI2cBus,
+) {
+    wifi_task_inner(controller, stack, shared_i2c).await;
 }
 
-async fn wifi_task_inner(controller: &'static mut WifiController<'static>, stack: Stack<'static>) {
+async fn wifi_task_inner(
+    controller: &'static mut WifiController<'static>,
+    stack: Stack<'static>,
+    shared_i2c: &'static SharedI2cBus,
+) {
     let mut retry_pending = false;
     loop {
         let config = WIFI_CONFIG.lock().await.clone();
         if !prepare_wifi_connection(controller, &config, &mut retry_pending).await {
             continue;
         }
-        if !start_wifi_driver(controller, stack, &config).await {
+        if !start_wifi_driver(controller, stack, &config, shared_i2c).await {
             continue;
         }
         let _ = publish_wifi_event(&config, ProvisioningEvent::DriverConfigured, None).await;
@@ -766,6 +778,7 @@ async fn start_wifi_driver(
     controller: &mut WifiController<'static>,
     stack: Stack<'static>,
     config: &WifiRuntimeConfig,
+    shared_i2c: &SharedI2cBus,
 ) -> bool {
     let client = ModeConfig::Client(
         ClientConfig::default()
@@ -773,17 +786,23 @@ async fn start_wifi_driver(
             .with_password(alloc::string::String::from(config.password.as_str())),
     );
     stack.set_config_v4(net_config(config).ipv4);
-    let driver_configured = controller.set_config(&client).is_ok();
-    let driver_started = driver_configured
-        && (matches!(controller.is_started(), Ok(true))
-            || matches!(
-                with_timeout(
-                    Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
-                    controller.start_async(),
-                )
-                .await,
-                Ok(Ok(()))
-            ));
+    // start_async calls the synchronous radio start on its first poll. Let an
+    // in-flight I2C transaction finish before that call blocks this executor;
+    // release the bus before waiting for the driver's asynchronous start event.
+    let driver_started = crate::async_start::after_resource_idle(shared_i2c.lock(), || async {
+        let driver_configured = controller.set_config(&client).is_ok();
+        driver_configured
+            && (matches!(controller.is_started(), Ok(true))
+                || matches!(
+                    with_timeout(
+                        Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
+                        controller.start_async(),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ))
+    })
+    .await;
     if driver_started {
         return true;
     }

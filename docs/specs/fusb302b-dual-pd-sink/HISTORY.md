@@ -20,6 +20,8 @@
 
 ## Evidence Disposition
 
+- First Wi-Fi activation at Fixed 5V exposed an executor scheduling overlap: an isolated product diagnostic recorded the synchronous radio start taking `31,794us` during an in-flight PD I2C transaction, which failed after `38,902us` against its existing `10ms` deadline. The HAL recorded one software deadline timeout and zero hardware timeouts; source telemetry retained Fixed 5V. The driver paths predate the idle-power implementation. Wi-Fi startup now coordinates its synchronous first poll through the existing shared bus and releases ownership before asynchronous event waiting; the timeout and fault protection remain intact. Raw diagnosis and candidate validation are retained under `target/usb-host-recovery-20261006/`.
+
 - VIN-interlock removal evidence is recorded under `target/vin-contract-removal-20261006/`: normal flash and the PPS `21V@3A` current-limit load observations passed, with persisted calibration unchanged. The full product sequence failed in the Wi-Fi stage and cannot establish current-candidate HIL acceptance; failure and original-port recovery are retained in the same evidence set.
 
 - Historical protocol-only candidate evidence is recorded under `target/product-hil-20261006-protocol-only/`. It uses the original calibration without VIN writes, reaches and restores Fixed 5V after real heating/cooling and Wi-Fi load, preserves the three preparation fields, and completes the ROM dwell and normal-flash write checks with independent IsolaPurr `port_c` Fixed 5V observations. That candidate still contained the general VIN contract interlock and does not validate its removal or PPS current-limit heating.
