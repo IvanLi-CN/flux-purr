@@ -13515,6 +13515,35 @@ fn tuning_waits_for_working_pps_after_a_ready_fixed_idle_contract() {
 }
 
 #[test]
+fn newly_armed_tuning_reconciles_power_before_its_first_control_sample() {
+    // The start command runs after the loop's initial PD snapshot. This wiring
+    // guard covers the device-only call site that host state fixtures cannot
+    // construct (hardware/watch receivers live inside RuntimeLoopState).
+    let source = include_str!("runtime_loop.rs");
+    let control = source
+        .split("pub(crate) async fn runtime_control_heater")
+        .nth(1)
+        .and_then(|source| source.split("fn runtime_heater_output_settings").next())
+        .unwrap();
+    let readiness = control
+        .find("runtime_apply_pd_snapshot(state, elapsed_ms)")
+        .unwrap();
+    assert!(
+        readiness
+            < control
+                .find("runtime_apply_tuning_cooling_boundary")
+                .unwrap()
+    );
+    assert!(readiness < control.find("runtime_update_heater_controller").unwrap());
+    assert!(
+        readiness
+            < control
+                .find("runtime_record_thermal_tuning_sample")
+                .unwrap()
+    );
+}
+
+#[test]
 fn automatic_pps_ticket_requires_the_exact_confirmed_contract() {
     let (ready, _) = production_power_fixture(5_000);
     let active = ready.active.unwrap();

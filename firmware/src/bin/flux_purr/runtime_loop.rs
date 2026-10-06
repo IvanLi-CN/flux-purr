@@ -2575,7 +2575,15 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
             .as_millis()
             .saturating_sub(state.runtime_started_ms),
     );
-    let mut needs_redraw = runtime_apply_tuning_cooling_boundary(state, elapsed_ms);
+    // Input can arm tuning after this iteration's first PD snapshot. Establish
+    // its wait barrier before control or sampling can consume the Fixed idle
+    // observation; otherwise the first sample disarms the just-started run.
+    let mut needs_redraw = if state.thermal_tuning.armed {
+        runtime_apply_pd_snapshot(state, elapsed_ms)
+    } else {
+        false
+    };
+    needs_redraw |= runtime_apply_tuning_cooling_boundary(state, elapsed_ms);
     if elapsed_ms >= state.next_control_deadline_ms {
         let control_started_ms = elapsed_ms;
         runtime_advance_heater_control_deadline(state, control_started_ms);
