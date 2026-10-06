@@ -10,7 +10,7 @@ fn request_idle_restore_fire_and_forget(pd_port: &PdPort) {
 
 #[cfg(target_arch = "xtensa")]
 fn await_working_fixed_contract(pd_port: &PdPort, request_mv: u16) -> bool {
-    if working_fixed_contract_confirmed(pd_port.snapshot().observation, request_mv) {
+    if working_fixed_contract_confirmed(pd_port.snapshot().settled_observation(), request_mv) {
         return true;
     }
     let Ok(request) = PdContractRequest::fixed(request_mv, MIN_HEATER_CONTRACT_MA) else {
@@ -720,7 +720,7 @@ where
         return Some(fallback_from_adjustable_request(context).await);
     };
     let request_state = if working_pps_request_confirmed(
-        context.pd_port.snapshot().observation,
+        context.pd_port.snapshot().settled_observation(),
         request_contract,
     ) {
         PdRequestState::Confirmed

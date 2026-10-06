@@ -2574,7 +2574,7 @@ where
         return true;
     }
 
-    if !terminal_idle_contract_confirmed(pd_port.snapshot().observation) {
+    if !terminal_idle_contract_confirmed(pd_port.snapshot().settled_observation()) {
         // Only the fresh protocol-confirmed Fixed observation completes
         // disarm. Neither an ACK nor a measured voltage proves a contract.
         return true;

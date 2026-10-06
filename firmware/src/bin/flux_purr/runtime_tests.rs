@@ -318,7 +318,7 @@ fn pd_i2c_timeout_stays_short_while_transport_recovery_is_rate_limited() {
 }
 
 #[test]
-fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
+fn fusb302b_heater_observation_retains_confirmed_contract_during_negotiation() {
     let contract = Contract::observed(ContractKind::Pps, 20_000, 3_000);
 
     assert!(fusb302b_status_confirms_active_contract(
@@ -326,12 +326,12 @@ fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
         contract,
         FUSB302B_STATUS0_VBUSOK,
     ));
-    assert!(!fusb302b_status_confirms_active_contract(
+    assert!(fusb302b_status_confirms_active_contract(
         SinkPhase::WaitingForPsRdy,
         contract,
         FUSB302B_STATUS0_VBUSOK,
     ));
-    assert!(!fusb302b_status_confirms_active_contract(
+    assert!(fusb302b_status_confirms_active_contract(
         SinkPhase::WaitingForAccept,
         contract,
         FUSB302B_STATUS0_VBUSOK,
@@ -1125,6 +1125,212 @@ fn ordinary_idle_replaces_cooling_fixed_with_lowest_adequate_fixed() {
         Some(observation(5_000, 1_000)),
         source
     ));
+}
+
+fn standby_policy_for_heater_start() -> (fusb302b::SinkPolicy, SourceCapabilities) {
+    let pdos = [
+        (100 << 10) | 100,
+        (240 << 10) | 300,
+        pps_source_capability(5_500, 21_000, 3_000),
+    ];
+    let source = SourceCapabilities::from_pdos(&pdos);
+    let mut policy = fusb302b::SinkPolicy::new_standby(12_000, 3_000);
+    assert!(policy.on_source_capabilities(&pdos).is_some());
+    policy.on_control_message(3, 0);
+    policy.on_control_message(6, 1);
+    assert_eq!(policy.active_contract().voltage_mv, 5_000);
+    (policy, source)
+}
+
+#[test]
+fn ordinary_heater_start_survives_fixed_to_pps_accept_and_ps_rdy() {
+    let (mut policy, source) = standby_policy_for_heater_start();
+    let request = PdContractRequest::pps(12_000, 3_000).unwrap();
+    let mut ui = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    ui.heater_enabled = true;
+    let mut calibration = CalibrationRuntimeState::default();
+    let mut manual = ManualPpsState::default();
+    let mut ready = true;
+    assert!(policy.request_contract(request).is_some());
+    for phase in [
+        SinkPhase::WaitingForAccept,
+        SinkPhase::WaitingForPsRdy,
+        SinkPhase::Ready,
+    ] {
+        assert_eq!(policy.phase(), phase);
+        let observation = fusb302b_contract_observation(
+            policy.phase(),
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            source,
+        );
+        let power = PowerState::from_observation(
+            policy.phase(),
+            observation,
+            Some(source),
+            true,
+            Some(request),
+        );
+        reconcile_pd_contract_intent(
+            power.observation(),
+            &mut ready,
+            &mut ui,
+            &mut calibration,
+            &mut manual,
+            false,
+        );
+        ui.heater_enabled = reconcile_runtime_heater_enabled(
+            ui.heater_enabled,
+            calibration,
+            None,
+            false,
+            false,
+            true,
+            ready,
+        );
+        assert!(
+            ui.heater_enabled,
+            "normal {phase:?} discarded the fresh startup intent"
+        );
+        let mut idle = complete_idle_input();
+        idle.heater_enabled = ui.heater_enabled;
+        assert!(
+            !complete_idle_power_allowed(idle),
+            "Idle competed with the working request"
+        );
+        let snapshot = PdServiceSnapshot {
+            observation,
+            transition_pending: phase != SinkPhase::Ready,
+            service_available: true,
+            ..PdServiceSnapshot::unavailable()
+        };
+        let working = working_pps_request_confirmed(snapshot.settled_observation(), request);
+        assert_eq!(
+            working,
+            phase == SinkPhase::Ready,
+            "PWM must wait for the new working contract"
+        );
+        let terminal = pending_terminal_outcome(
+            PdServiceTerminalContext {
+                phase,
+                request_timed_out: false,
+                request_rejected: false,
+                diagnostic_request_timed_out: false,
+                refresh_pending: false,
+                observation,
+                source_capabilities: Some(source),
+            },
+            PendingPdOperation::Contract { request },
+        );
+        assert_eq!(terminal.is_some(), phase == SinkPhase::Ready);
+        if phase == SinkPhase::WaitingForAccept {
+            assert_eq!(observation.unwrap().contract.voltage_mv, 5_000);
+            policy.on_control_message(3, 2);
+        } else if phase == SinkPhase::WaitingForPsRdy {
+            assert_eq!(observation.unwrap().contract.voltage_mv, 5_000);
+            policy.on_control_message(6, 3);
+        }
+    }
+}
+
+#[test]
+fn ordinary_heater_start_discards_intent_on_real_loss_and_never_replays_it() {
+    let (mut policy, source) = standby_policy_for_heater_start();
+    let request = PdContractRequest::pps(12_000, 3_000).unwrap();
+    assert!(policy.request_contract(request).is_some());
+    let mut ui = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    ui.heater_enabled = true;
+    ui.heater_output_percent = 50;
+    let mut calibration = CalibrationRuntimeState::default();
+    let mut manual = ManualPpsState::default();
+    let mut ready = true;
+    let lost = fusb302b_contract_observation(policy.phase(), policy.active_contract(), 0, source);
+    assert!(lost.is_none());
+    assert!(reconcile_pd_contract_intent(
+        lost,
+        &mut ready,
+        &mut ui,
+        &mut calibration,
+        &mut manual,
+        true
+    ));
+    assert!(!ready && !ui.heater_enabled);
+    assert_eq!(ui.heater_output_percent, 0);
+    policy.on_control_message(3, 2);
+    policy.on_control_message(6, 3);
+    let recovered = fusb302b_contract_observation(
+        policy.phase(),
+        policy.active_contract(),
+        FUSB302B_STATUS0_VBUSOK,
+        source,
+    );
+    reconcile_pd_contract_intent(
+        recovered,
+        &mut ready,
+        &mut ui,
+        &mut calibration,
+        &mut manual,
+        false,
+    );
+    assert!(ready && !ui.heater_enabled);
+    for phase in [
+        SinkPhase::Detached,
+        SinkPhase::Fault,
+        SinkPhase::WaitingForSourceCapabilities,
+    ] {
+        assert!(
+            fusb302b_contract_observation(
+                phase,
+                policy.active_contract(),
+                FUSB302B_STATUS0_VBUSOK,
+                source
+            )
+            .is_none()
+        );
+    }
+    assert!(
+        fusb302b_contract_observation(
+            SinkPhase::Ready,
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            SourceCapabilities::empty()
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn flash_preparation_cannot_use_old_fixed_while_a_transition_is_pending() {
+    let (policy, source) = standby_policy_for_heater_start();
+    let observation = fusb302b_contract_observation(
+        policy.phase(),
+        policy.active_contract(),
+        FUSB302B_STATUS0_VBUSOK,
+        source,
+    );
+    let ui = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    let calibration = CalibrationRuntimeState::default();
+    let context = test_usb_runtime_status_context();
+    let snapshot = PdServiceSnapshot {
+        observation,
+        transition_pending: true,
+        service_available: true,
+        ..PdServiceSnapshot::unavailable()
+    };
+    assert!(snapshot.observation.is_some());
+    assert!(!flash_preparation_status(&ui, &calibration, &context, snapshot).pd_fixed_or_default);
+    assert!(
+        flash_preparation_status(
+            &ui,
+            &calibration,
+            &context,
+            PdServiceSnapshot {
+                transition_pending: false,
+                ..snapshot
+            }
+        )
+        .pd_fixed_or_default
+    );
 }
 
 #[test]

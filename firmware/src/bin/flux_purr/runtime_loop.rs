@@ -2076,7 +2076,7 @@ fn runtime_restore_idle_power(state: &mut RuntimeLoopState, elapsed_ms: u64) {
         state.idle_power_ticket = None;
     }
     let confirmed = preferred_idle_contract_confirmed(
-        state.pd_port.snapshot().observation,
+        state.pd_port.snapshot().settled_observation(),
         state.power_state.source_capabilities,
     );
     if !confirmed && state.idle_power_ticket.is_none() && elapsed_ms >= state.idle_next_attempt_ms {

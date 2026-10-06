@@ -294,7 +294,7 @@ pub(crate) fn flash_preparation_status(
         && !context.fan_working_power_pending
         && !context.manual_pps.enabled
         && pd_snapshot
-            .observation
+            .settled_observation()
             .is_some_and(|observation| automatic_idle_contract_is_confirmed(observation, None));
     FlashPreparationStatus {
         heating,

@@ -9,6 +9,7 @@ pub(crate) const PD_SERVICE_TICK_MS: u64 = 5;
 #[derive(Clone, Copy)]
 pub(crate) struct PdServiceSnapshot {
     pub(crate) observation: Option<PdStatusObservation>,
+    pub(crate) transition_pending: bool,
     pub(crate) capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     pub(crate) controller: ControllerKind,
     pub(crate) service_available: bool,
@@ -29,6 +30,7 @@ impl PdServiceSnapshot {
     pub(crate) const fn unavailable() -> Self {
         Self {
             observation: None,
+            transition_pending: false,
             capabilities: None,
             controller: ControllerKind::Unknown,
             service_available: false,
@@ -47,6 +49,14 @@ impl PdServiceSnapshot {
             }
         } else {
             self
+        }
+    }
+
+    pub(crate) fn settled_observation(self) -> Option<PdStatusObservation> {
+        if self.transition_pending {
+            None
+        } else {
+            self.observation
         }
     }
 }
@@ -238,27 +248,28 @@ pub(crate) fn fusb302b_status_confirms_active_contract(
     contract: Contract,
     status0: u8,
 ) -> bool {
-    phase == SinkPhase::Ready
-        && contract != Contract::none()
+    matches!(
+        phase,
+        SinkPhase::Ready | SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+    ) && contract != Contract::none()
         && status0 & FUSB302B_STATUS0_VBUSOK != 0
 }
 
-#[cfg(target_arch = "xtensa")]
-fn pd_status_observation(runtime: &Fusb302bRuntime) -> Option<PdStatusObservation> {
-    if !runtime.service_available() || runtime.request_timed_out || !runtime.vbus_status_observed()
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn fusb302b_contract_observation(
+    phase: SinkPhase,
+    contract: Contract,
+    status_raw: u8,
+    source: SourceCapabilities,
+) -> Option<PdStatusObservation> {
+    // Only the previously confirmed contract survives normal negotiation.
+    // Requested power never raises this envelope, and changed capabilities
+    // must still cover it before the service can authorize any output.
+    if !fusb302b_status_confirms_active_contract(phase, contract, status_raw)
+        || !source.supports_contract(contract)
     {
         return None;
     }
-    let contract = runtime.active_contract();
-    if !fusb302b_status_confirms_active_contract(
-        runtime.policy.phase(),
-        contract,
-        runtime.vbus_status_raw(),
-    ) {
-        return None;
-    }
-
-    let status_raw = runtime.vbus_status_raw();
     Some(PdStatusObservation {
         status_raw,
         status: fusb302b_status_projection(status_raw),
@@ -270,12 +281,31 @@ fn pd_status_observation(runtime: &Fusb302bRuntime) -> Option<PdStatusObservatio
 }
 
 #[cfg(target_arch = "xtensa")]
+fn pd_status_observation(runtime: &Fusb302bRuntime) -> Option<PdStatusObservation> {
+    if !runtime.service_available() || runtime.request_timed_out || !runtime.vbus_status_observed()
+    {
+        return None;
+    }
+    fusb302b_contract_observation(
+        runtime.policy.phase(),
+        runtime.active_contract(),
+        runtime.vbus_status_raw(),
+        runtime.source_capabilities()?,
+    )
+}
+
+#[cfg(target_arch = "xtensa")]
 fn publish_pd_snapshot(runtime: &Fusb302bRuntime, observation: Option<PdStatusObservation>) {
     let now_ms = PdTimestamp::now().as_millis();
     let ready = startup_pd_contract_ready(observation);
     PD_SERVICE_SNAPSHOT.lock(|snapshot| {
         *snapshot.borrow_mut() = PdServiceSnapshot {
             observation,
+            transition_pending: runtime.source_capabilities_refresh_pending
+                || matches!(
+                    runtime.policy.phase(),
+                    SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+                ),
             capabilities: runtime
                 .source_capabilities()
                 .and_then(fusb302b_adjustable_power_capabilities),

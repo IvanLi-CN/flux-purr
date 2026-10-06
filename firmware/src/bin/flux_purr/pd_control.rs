@@ -944,6 +944,45 @@ pub(crate) fn disarm_stale_heater_arm_after_pd_transition(
     was_armed
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn reconcile_pd_contract_intent(
+    observation: Option<PdStatusObservation>,
+    pd_contract_ready: &mut bool,
+    ui_state: &mut FrontPanelUiState,
+    calibration_runtime_state: &mut CalibrationRuntimeState,
+    manual_pps_state: &mut ManualPpsState,
+    physical_output_active: bool,
+) -> bool {
+    let current_pd_contract_ready = startup_pd_contract_ready(observation);
+    let mut needs_redraw = *pd_contract_ready != current_pd_contract_ready;
+    if needs_redraw {
+        let pd_was_ready = *pd_contract_ready;
+        *pd_contract_ready = current_pd_contract_ready;
+        if current_pd_contract_ready {
+            needs_redraw |= disarm_stale_heater_arm_after_pd_transition(
+                pd_was_ready,
+                current_pd_contract_ready,
+                ui_state,
+                calibration_runtime_state,
+            );
+        }
+    }
+
+    if !current_pd_contract_ready
+        && (ui_state.heater_enabled
+            || calibration_runtime_state.heater_enabled
+            || physical_output_active
+            || ui_state.heater_output_percent != 0)
+    {
+        ui_state.heater_enabled = false;
+        ui_state.heater_output_percent = 0;
+        calibration_runtime_state.heater_enabled = false;
+        manual_pps_state.fail(ManualPpsError::PdNotReady);
+        needs_redraw = true;
+    }
+    needs_redraw
+}
+
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn apply_pd_contract_observation<PWM>(
     observation: Option<PdStatusObservation>,
@@ -957,47 +996,23 @@ pub(crate) fn apply_pd_contract_observation<PWM>(
 where
     PWM: SetDutyCycle,
 {
-    let current_pd_contract_ready = startup_pd_contract_ready(observation);
-    let mut needs_redraw = false;
-    if *pd_contract_ready != current_pd_contract_ready {
-        let pd_was_ready = *pd_contract_ready;
-        *pd_contract_ready = current_pd_contract_ready;
-        needs_redraw = true;
-        if current_pd_contract_ready {
-            if disarm_stale_heater_arm_after_pd_transition(
-                pd_was_ready,
-                current_pd_contract_ready,
-                ui_state,
-                calibration_runtime_state,
-            ) {
-                info!(
-                    "PD contract became ready; discarded pre-ready heater arm and require a new explicit arm"
-                );
-            }
-            info!("PD contract became ready; released startup heater interlock");
-        } else {
-            info!("PD contract became unavailable; heater interlocked");
-        }
+    let previous_pd_ready = *pd_contract_ready;
+    let needs_redraw = reconcile_pd_contract_intent(
+        observation,
+        pd_contract_ready,
+        ui_state,
+        calibration_runtime_state,
+        manual_pps_state,
+        *last_heater_duty != 0,
+    );
+    if previous_pd_ready != *pd_contract_ready {
+        info!("PD contract readiness -> {=bool}", *pd_contract_ready);
     }
-
-    if !current_pd_contract_ready
-        && (ui_state.heater_enabled
-            || calibration_runtime_state.heater_enabled
-            || *last_heater_duty != 0
-            || ui_state.heater_output_percent != 0)
-    {
-        // A stale observation must never leave GPIO47 powered while the
-        // protocol state is unavailable. The next explicit arm is required
-        // after a later contract recovery.
-        ui_state.heater_enabled = false;
-        ui_state.heater_output_percent = 0;
-        calibration_runtime_state.heater_enabled = false;
-        manual_pps_state.fail(ManualPpsError::PdNotReady);
+    if !*pd_contract_ready {
+        // Genuine unavailable or stale power still drops both intent and PWM;
+        // normal negotiation carries the previous confirmed supply instead.
         apply_heater_duty(heater_pwm, 0, last_heater_duty);
-        needs_redraw = true;
-        info!("PD contract interlock -> heater output zero");
     }
-
     needs_redraw
 }
 
