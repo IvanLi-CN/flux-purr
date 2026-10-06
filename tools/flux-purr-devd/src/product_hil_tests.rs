@@ -496,6 +496,7 @@ impl ProductObserver<'_> {
     }
 
     async fn exercise_product(&mut self) -> Result<(), String> {
+        self.prepare_ordinary_sequence().await?;
         self.verify_ordinary_pps_exit().await?;
         self.heat_and_cool(false).await?;
         self.verify_preparation_hold().await?;
@@ -508,6 +509,34 @@ impl ProductObserver<'_> {
             json!(true),
         );
         Ok(())
+    }
+
+    async fn prepare_ordinary_sequence(&mut self) -> Result<(), String> {
+        // Required cooling uses Normal and product_sequence restores the
+        // original mode. A previous run can leave a warm plate.
+        self.cool_warm_plate().await?;
+        self.runtime(json!({"manualPpsEnabled": false, "postHeatCoolingMode": "normal"}))
+            .await?;
+        self.ready(40).await
+    }
+
+    async fn cool_warm_plate(&mut self) -> Result<(), String> {
+        let (status, _) = self.read().await?;
+        if status["currentTempC"].as_f64().unwrap_or(100.0) <= 40.0 {
+            return Ok(());
+        }
+        self.runtime(json!({"postHeatCoolingMode": "on"})).await?;
+        let deadline = Instant::now() + Duration::from_secs(240);
+        loop {
+            let (status, _) = self.read().await?;
+            if status["currentTempC"].as_f64().unwrap_or(100.0) <= 40.0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err("warm plate did not cool before the ordinary HIL phase".into());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 
     async fn read(&mut self) -> Result<(Value, Value), String> {
