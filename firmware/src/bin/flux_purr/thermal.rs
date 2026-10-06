@@ -1295,9 +1295,6 @@ impl HeaterController {
     }
 
     fn calculate_approach_duty(&mut self, frame: &ThermalControlFrame) -> u8 {
-        if frame.approach_predictive_coast_ready {
-            return 0;
-        }
         if let Some(duty_percent) = self.calculate_model_approach_duty(frame) {
             return duty_percent;
         }
@@ -1306,7 +1303,8 @@ impl HeaterController {
         let ratio =
             ((frame.approach_guard_error_c - target.hold_entry_error_c) / span).clamp(0.0, 1.0);
         let shaped_ratio = ratio.powf(target.approach_damping_exponent);
-        let sustain_floor = f32::from(approach_sustain_floor_permille(target, frame.error_c));
+        let sustain_floor =
+            f32::from(approach_sustain_floor_permille(target, frame.error_c).max(100));
         let approach_ceiling =
             f32::from(target.approach_power_permille.min(1_000)).max(sustain_floor);
         percent_from_permille(
@@ -1776,7 +1774,7 @@ impl HeaterController {
         let floor_permille = match self.phase {
             HeaterControlPhase::Warmup => return duty_percent,
             HeaterControlPhase::Approach => {
-                approach_sustain_floor_permille(control_target, error_c)
+                approach_sustain_floor_permille(control_target, error_c).max(100)
             }
             HeaterControlPhase::Hold => {
                 if hold_control_error_c <= 0.0 {

@@ -8193,7 +8193,7 @@ fn heater_approach_predictive_coast_cuts_power_once_actual_error_is_hold_ready()
 
     let snapshot = controller.update(100, 99.4, true, Some(profile));
     assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
-    assert_eq!(snapshot.duty_percent, 0);
+    assert!(snapshot.duty_percent >= 10);
 }
 
 #[test]
@@ -8725,8 +8725,8 @@ fn heater_approach_does_not_enter_hold_far_below_target_after_zero_output() {
     assert!(snapshot.control_error_c > 2.5);
     assert!(snapshot.filtered_slope_c_per_s > 0.0);
     assert!(!controller.hold_coast_active);
-    // Existing predictive coast may request zero while phase stays Approach.
-    assert_eq!(snapshot.duty_percent, 0);
+    // Predictive coast must not bypass the normal Approach positive-power floor.
+    assert!(snapshot.duty_percent >= 10);
 }
 
 #[test]
