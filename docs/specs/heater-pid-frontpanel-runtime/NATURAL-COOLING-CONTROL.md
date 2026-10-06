@@ -44,4 +44,6 @@
 
 `--seed-profile-file` 支持普通 profile 与标准 `thermal-profile.candidate.json`。v2 导出从 `profile.value` 读取完整点值，显式零提前量不能触发旧字段继承；往返物化必须保持参数与摘要。错误功率类别、缺失 settings 或目标点的输入在取得设备 lease 前拒绝，不能静默替换为默认 seed。
 
+v2 seed 按完整 wire profile 导入，保留 settings 与各 point 的独立值、整数精度和显式零。导出必须覆盖有序九目标；不能插值补齐缺失目标，不能重新从首个 point 构造 settings。非规范参数、错误 bank 或携带不匹配 `candidateHash` 的文件在取得 lease 前拒绝。普通旧格式 profile 保留既有继承与九目标物化路径。
+
 候选导出只能携带与 `candidateHash` 一致的完整参数。中断时若只取得当前摘要而未取得对应参数，`profile.value` 为 null、`profile.source` 为 `unavailable_matching_candidate_profile`，不能借用旧候选或启动 seed 的参数补齐。原始日志保留已取得的历史参数与采样；缺失当前参数不能形成可保存候选。
