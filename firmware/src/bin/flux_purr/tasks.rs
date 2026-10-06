@@ -89,6 +89,7 @@ where
         context.heater_enabled,
         context.duty_percent,
         context.manual_pps.enabled,
+        context.tuning_power_stage,
     ) {
         // The runtime owns standby and fan-only supply. Forget cached working
         // power so the next heating intent confirms its supply before PWM.
@@ -281,8 +282,9 @@ pub(crate) fn automatic_heater_power_is_idle(
     heater_enabled: bool,
     duty_percent: u8,
     manual_pps_enabled: bool,
+    tuning_power_stage: bool,
 ) -> bool {
-    !heater_enabled && duty_percent == 0 && !manual_pps_enabled
+    !heater_enabled && duty_percent == 0 && !manual_pps_enabled && !tuning_power_stage
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

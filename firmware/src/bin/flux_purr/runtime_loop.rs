@@ -193,7 +193,9 @@ pub(crate) fn tuning_pd_wait_decision(
         return TuningPdWaitDecision::Fail("pd_request_failed");
     }
     if power_state.protocol == PowerProtocol::Ready
-        && power_state.active.is_some()
+        && power_state.active.is_some_and(|active| {
+            active.mode == PdContractRequestMode::Pps && active.operating_current_ma >= 5_000
+        })
         && ticket_started_ms.is_none()
     {
         return TuningPdWaitDecision::Ready;
@@ -203,6 +205,10 @@ pub(crate) fn tuning_pd_wait_decision(
         PowerProtocol::WaitingForAccept | PowerProtocol::WaitingForPsRdy
     ) && power_state.requested.is_some())
         || ticket_started_ms.is_some()
+        || (power_state.protocol == PowerProtocol::Ready
+            && power_state
+                .active
+                .is_some_and(|active| active.mode == PdContractRequestMode::Fixed))
     {
         if ticket_started_ms
             .or(wait_started_ms)
@@ -1986,7 +1992,8 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         tuning_power_stage: state.thermal_tuning.armed
             && state.thermal_tuning.phase
                 == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
-            && !force_output_off,
+            && state.current_rtd_fault.is_none()
+            && !state.ui_state.persistence_locked(),
         control_phase: pid_snapshot.phase,
         initial_profile_approach: state.heater_controller.initial_profile_approach(),
         control_error_c: pid_snapshot.error_c,
@@ -2281,7 +2288,7 @@ fn runtime_confirm_fan_power(
         fan_decision,
         state.pd_port.snapshot(),
         state.fan_command.enabled,
-        state.ui_state.heater_enabled,
+        state.ui_state.heater_enabled || state.thermal_tuning.armed,
         state.manual_pps_state.enabled,
     );
     if !matches!(fan_decision.state, FanPolicyState::Disabled)
@@ -2407,6 +2414,7 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) struct CompleteIdleInput {
     pub(crate) heater_enabled: bool,
+    pub(crate) thermal_tuning_active: bool,
     pub(crate) physical_duty_percent: u8,
     pub(crate) manual_pps: ManualPpsState,
     pub(crate) calibration: CalibrationRuntimeState,
@@ -2418,6 +2426,7 @@ pub(crate) struct CompleteIdleInput {
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn complete_idle_power_allowed(input: CompleteIdleInput) -> bool {
     !input.heater_enabled
+        && !input.thermal_tuning_active
         && input.physical_duty_percent == 0
         && !input.manual_pps.enabled
         && input.manual_pps.pending_power_ticket.is_none()
@@ -2458,6 +2467,7 @@ pub(crate) fn preferred_idle_contract_confirmed(
 fn runtime_restore_idle_power(state: &mut RuntimeLoopState, elapsed_ms: u64) {
     let idle = complete_idle_power_allowed(CompleteIdleInput {
         heater_enabled: state.ui_state.heater_enabled,
+        thermal_tuning_active: state.thermal_tuning.armed,
         physical_duty_percent: state.last_heater_duty,
         manual_pps: state.manual_pps_state,
         calibration: state.calibration_runtime_state,

@@ -1191,20 +1191,35 @@ fn process_thermal_tuning_start(
     );
     let calibration_conflict = context.calibration_runtime_state.mode != CalibrationMode::Off
         || context.thermal_control_profile_preview.is_some();
-    let response = match context.thermal_tuning.start_at(
-        ThermalTuningStart {
-            run_id,
-            candidate_id,
-            candidate_hash,
-            power_class,
-            targets: targets.as_slice(),
-            pps_ready,
-            thermal_model_available: model_available,
-            calibration_conflict,
-            candidate_profile: candidate_profile_config,
-        },
-        context.elapsed_ms,
-    ) {
+    let prepare_power = !pps_ready
+        && context.manual_pps.has_matching_pps_apdo(20_000, 5_000)
+        && !context.manual_pps.enabled
+        && resolve_thermal_profile_bank(
+            context.memory_config.thermal_profile_mode,
+            context.manual_pps,
+        ) == ThermalProfileBank::Pps5a
+        && context.last_pd_observation.is_some_and(|observation| {
+            observation.status.pd_active && observation.contract.kind == ContractKind::Fixed
+        });
+    let start = ThermalTuningStart {
+        run_id,
+        candidate_id,
+        candidate_hash,
+        power_class,
+        targets: targets.as_slice(),
+        pps_ready,
+        thermal_model_available: model_available,
+        calibration_conflict,
+        candidate_profile: candidate_profile_config,
+    };
+    let result = if prepare_power {
+        context
+            .thermal_tuning
+            .start_preparing_power_at(start, context.elapsed_ms)
+    } else {
+        context.thermal_tuning.start_at(start, context.elapsed_ms)
+    };
+    let response = match result {
         Ok(()) => {
             context.ui_state.heater_enabled = false;
             usb_response(

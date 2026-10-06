@@ -1215,6 +1215,7 @@ fn automatic_idle_restore_rejects_a_low_current_twelve_volt_contract() {
 fn complete_idle_input() -> CompleteIdleInput {
     CompleteIdleInput {
         heater_enabled: false,
+        thermal_tuning_active: false,
         physical_duty_percent: 0,
         manual_pps: ManualPpsState::default(),
         calibration: CalibrationRuntimeState::default(),
@@ -1227,6 +1228,9 @@ fn complete_idle_input() -> CompleteIdleInput {
 #[test]
 fn complete_idle_excludes_armed_zero_pwm_pulse_gaps_and_pending_work() {
     assert!(complete_idle_power_allowed(complete_idle_input()));
+    let mut tuning = complete_idle_input();
+    tuning.thermal_tuning_active = true;
+    assert!(!complete_idle_power_allowed(tuning));
     let mut armed = complete_idle_input();
     armed.heater_enabled = true;
     assert!(!complete_idle_power_allowed(armed));
@@ -1732,10 +1736,11 @@ fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
         current_limit_fixed_request_confirmed: true,
         terminal_fixed_pd_disarmed: false,
     };
-    assert!(automatic_heater_power_is_idle(false, 0, false));
-    assert!(!automatic_heater_power_is_idle(true, 0, false));
-    assert!(!automatic_heater_power_is_idle(false, 0, true));
-    assert!(!automatic_heater_power_is_idle(false, 1, false));
+    assert!(automatic_heater_power_is_idle(false, 0, false, false));
+    assert!(!automatic_heater_power_is_idle(true, 0, false, false));
+    assert!(!automatic_heater_power_is_idle(false, 0, true, false));
+    assert!(!automatic_heater_power_is_idle(false, 1, false, false));
+    assert!(!automatic_heater_power_is_idle(false, 0, false, true));
     reset_automatic_heater_backend(&mut backend);
     let HeaterPowerBackend::PpsMos {
         current_mode,
@@ -13483,6 +13488,29 @@ fn tuning_waits_for_an_admitted_pd_request_instead_of_failing_at_first_missing_s
     assert_eq!(
         tuning_pd_wait_decision(ready, Some(100), 15_421, Some(9_920), false),
         TuningPdWaitDecision::Fail("pd_request_timeout")
+    );
+}
+
+#[test]
+fn tuning_waits_for_working_pps_after_a_ready_fixed_idle_contract() {
+    let (mut idle, _) = production_power_fixture(5_000);
+    let active = idle.active.as_mut().unwrap();
+    active.mode = PdContractRequestMode::Fixed;
+    active.voltage_mv = 5_000;
+    active.operating_current_ma = 1_000;
+    assert_eq!(
+        tuning_pd_wait_decision(idle, None, 100, None, false),
+        TuningPdWaitDecision::Wait,
+        "Fixed idle power does not qualify a PPS5A trial"
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(idle, Some(100), 5_601, None, false),
+        TuningPdWaitDecision::Fail("pd_request_timeout")
+    );
+    let (ready, _) = production_power_fixture(5_000);
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 300, None, false),
+        TuningPdWaitDecision::Ready
     );
 }
 

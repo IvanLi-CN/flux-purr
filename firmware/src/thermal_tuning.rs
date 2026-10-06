@@ -550,6 +550,26 @@ impl ThermalTuningRuntime {
         request: ThermalTuningStart<'_>,
         started_at_ms: u64,
     ) -> Result<(), ThermalTuningError> {
+        self.start_inner(request, started_at_ms, false)
+    }
+
+    /// Begin only the disarmed cooling/power preparation stage. The caller
+    /// must verify the matching 5A APDO and bound the PPS confirmation wait;
+    /// unconfirmed contracts still cannot be recorded or admit Warmup.
+    pub fn start_preparing_power_at(
+        &mut self,
+        request: ThermalTuningStart<'_>,
+        started_at_ms: u64,
+    ) -> Result<(), ThermalTuningError> {
+        self.start_inner(request, started_at_ms, true)
+    }
+
+    fn start_inner(
+        &mut self,
+        request: ThermalTuningStart<'_>,
+        started_at_ms: u64,
+        prepare_power: bool,
+    ) -> Result<(), ThermalTuningError> {
         let ThermalTuningStart {
             run_id,
             candidate_id,
@@ -599,7 +619,7 @@ impl ThermalTuningRuntime {
                 return Err(ThermalTuningError::InvalidTargets);
             }
         }
-        if !pps_ready {
+        if !pps_ready && !prepare_power {
             self.fail("pps_contract_unavailable");
             return Err(ThermalTuningError::InvalidTransition);
         }
@@ -625,7 +645,11 @@ impl ThermalTuningRuntime {
         self.armed = true;
         self.preview_update_pending = true;
         self.reset_trial_metrics();
-        self.push_phase_transition_event("cooling before first trial");
+        self.push_phase_transition_event(if pps_ready {
+            "cooling before first trial"
+        } else {
+            "preparing PPS5A working power before first trial"
+        });
         Ok(())
     }
 
@@ -3627,6 +3651,39 @@ mod tests {
 
     fn started_single_target_runtime() -> ThermalTuningRuntime {
         started_runtime_with_profile(profile_with_targets(&[60]))
+    }
+
+    #[test]
+    fn fixed_idle_preparation_never_admits_an_unconfirmed_trial() {
+        let request = || ThermalTuningStart {
+            run_id: id("run-preparing-power"),
+            candidate_id: id("candidate-hold"),
+            candidate_hash: hash("hash-hold"),
+            power_class: ThermalTuningPowerClass::Pps5a,
+            targets: &[60],
+            pps_ready: false,
+            thermal_model_available: true,
+            calibration_conflict: false,
+            candidate_profile: Some(profile_with_targets(&[60])),
+        };
+        let mut strict = ThermalTuningRuntime::new();
+        assert!(strict.start(request()).is_err());
+        assert!(!strict.armed);
+
+        let mut preparing = ThermalTuningRuntime::new();
+        preparing.start_preparing_power_at(request(), 0).unwrap();
+        assert_eq!(preparing.phase, ThermalTuningPhase::Cooldown);
+        let mut unconfirmed = sample(0, ThermalTuningPhase::Cooldown, 3_400);
+        unconfirmed.heater_requested_output_permille = 0;
+        unconfirmed.heater_output_permille = 0;
+        unconfirmed.pps_contract.confirmed = false;
+        assert!(preparing.record_sample(unconfirmed).is_err());
+        assert!(!preparing.armed);
+
+        let mut confirmed = ThermalTuningRuntime::new();
+        confirmed.start_preparing_power_at(request(), 0).unwrap();
+        record_initial_cooldown(&mut confirmed, 0);
+        assert_eq!(confirmed.phase, ThermalTuningPhase::Warmup);
     }
 
     fn started_runtime_with_profile(profile: ThermalControlProfileConfig) -> ThermalTuningRuntime {
