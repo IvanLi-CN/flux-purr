@@ -4,7 +4,8 @@ use super::*;
 #[cfg(target_arch = "xtensa")]
 pub(crate) const PD_SERVICE_TICK_MS: u64 = 5;
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) struct PdServiceSnapshot {
     pub(crate) observation: Option<PdStatusObservation>,
@@ -23,9 +24,9 @@ pub(crate) enum PdRequestState {
     Failed,
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 impl PdServiceSnapshot {
-    const fn unavailable() -> Self {
+    pub(crate) const fn unavailable() -> Self {
         Self {
             observation: None,
             capabilities: None,
@@ -35,7 +36,7 @@ impl PdServiceSnapshot {
         }
     }
 
-    fn with_fresh_observation(self, now_ms: u64) -> Self {
+    pub(crate) fn with_fresh_observation(self, now_ms: u64) -> Self {
         if self
             .observation
             .is_some_and(|_| !pd_snapshot_is_fresh(self.published_at_ms, now_ms))

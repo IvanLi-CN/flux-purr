@@ -327,6 +327,7 @@ fn flash_preparation_response(
             context.ui_state,
             context.calibration_runtime_state,
             &status_context,
+            context.pd_port.snapshot(),
         )),
     )
 }

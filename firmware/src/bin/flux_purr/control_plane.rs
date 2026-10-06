@@ -277,6 +277,7 @@ pub(crate) fn flash_preparation_status(
     ui_state: &FrontPanelUiState,
     calibration: &CalibrationRuntimeState,
     context: &UsbRuntimeStatusContext,
+    pd_snapshot: PdServiceSnapshot,
 ) -> FlashPreparationStatus {
     let heating = ui_state.heater_enabled
         || context.heater_physical_output_percent != 0
@@ -292,8 +293,8 @@ pub(crate) fn flash_preparation_status(
         && context.manual_pps.pending_power_ticket.is_none()
         && !context.fan_working_power_pending
         && !context.manual_pps.enabled
-        && context
-            .last_pd_observation
+        && pd_snapshot
+            .observation
             .is_some_and(|observation| automatic_idle_contract_is_confirmed(observation, None));
     FlashPreparationStatus {
         heating,

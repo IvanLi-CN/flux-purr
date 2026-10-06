@@ -1043,7 +1043,7 @@ fn automatic_idle_restore_rejects_a_low_current_twelve_volt_contract() {
 fn flash_preparation_readiness_does_not_depend_on_vin_measurements() {
     let observation = PdStatusObservation {
         status_raw: FUSB302B_STATUS0_VBUSOK,
-        status: Status::from_register(FUSB302B_STATUS0_VBUSOK),
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
         current_raw: 0,
         current_ma: 1_000,
         contract_voltage_mv: Some(5_000),
@@ -1055,9 +1055,14 @@ fn flash_preparation_readiness_does_not_depend_on_vin_measurements() {
     let mut context = test_usb_runtime_status_context();
     context.last_pd_observation = Some(observation);
     context.elapsed_ms = 1_500;
+    let snapshot = PdServiceSnapshot {
+        observation: Some(observation),
+        service_available: true,
+        ..PdServiceSnapshot::unavailable()
+    };
     for vin_mv in [0, 4_000, 5_000, 6_589, 21_121] {
         context.vin_mv = vin_mv;
-        let readiness = flash_preparation_status(&ui_state, &calibration, &context);
+        let readiness = flash_preparation_status(&ui_state, &calibration, &context, snapshot);
         assert!(!readiness.heating);
         assert!(!readiness.cooling);
         assert!(
@@ -1074,22 +1079,71 @@ fn flash_preparation_waits_for_pending_fan_power_before_reporting_fixed_ready() 
     let mut context = test_usb_runtime_status_context();
     context.last_pd_observation = Some(PdStatusObservation {
         status_raw: FUSB302B_STATUS0_VBUSOK,
-        status: Status::from_register(FUSB302B_STATUS0_VBUSOK),
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
         current_raw: 0,
         current_ma: 1_000,
         contract_voltage_mv: Some(5_000),
         contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
     });
-    assert!(flash_preparation_status(&ui_state, &calibration, &context).pd_fixed_or_default);
+    let snapshot = PdServiceSnapshot {
+        observation: context.last_pd_observation,
+        service_available: true,
+        ..PdServiceSnapshot::unavailable()
+    };
+    assert!(
+        flash_preparation_status(&ui_state, &calibration, &context, snapshot).pd_fixed_or_default
+    );
 
     context.fan_working_power_pending = true;
-    let pending = flash_preparation_status(&ui_state, &calibration, &context);
+    let pending = flash_preparation_status(&ui_state, &calibration, &context, snapshot);
     assert!(!pending.heating);
     assert!(!pending.cooling);
     assert!(!pending.pd_fixed_or_default);
 
     context.fan_working_power_pending = false;
-    assert!(flash_preparation_status(&ui_state, &calibration, &context).pd_fixed_or_default);
+    assert!(
+        flash_preparation_status(&ui_state, &calibration, &context, snapshot).pd_fixed_or_default
+    );
+}
+
+#[test]
+fn flash_preparation_rejects_expired_service_snapshot_even_with_cached_fixed_power() {
+    let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    let calibration = CalibrationRuntimeState::default();
+    let mut context = test_usb_runtime_status_context();
+    context.last_pd_observation = Some(PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 1_000,
+        contract_voltage_mv: Some(5_000),
+        contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
+    });
+    let snapshot = PdServiceSnapshot {
+        observation: context.last_pd_observation,
+        service_available: true,
+        published_at_ms: 1_000,
+        ..PdServiceSnapshot::unavailable()
+    };
+    assert!(
+        flash_preparation_status(
+            &ui_state,
+            &calibration,
+            &context,
+            snapshot.with_fresh_observation(1_000 + PD_SNAPSHOT_MAX_AGE_MS),
+        )
+        .pd_fixed_or_default
+    );
+    let expired = flash_preparation_status(
+        &ui_state,
+        &calibration,
+        &context,
+        snapshot.with_fresh_observation(1_001 + PD_SNAPSHOT_MAX_AGE_MS),
+    );
+    assert!(!expired.heating);
+    assert!(!expired.cooling);
+    assert!(!expired.pd_fixed_or_default);
+    assert!(context.last_pd_observation.is_some());
 }
 
 #[test]
