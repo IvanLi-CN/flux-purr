@@ -14,6 +14,8 @@
 
 ## Firmware trial stopping boundary
 
+The owner authorizes warmer firmware-only high-temperature starts after reviewing recorded Warmup segments. The >160°C boundary retains160°C at its previous120°C start, while180/220/240°C use150/200/220°C respectively. The >200°C tier takes precedence; exactly200°C stays in the target−30°C tier. Trial metadata preserves historical thresholds and actual phase durations. This replaces the uniform target−40°C rule only above160°C; the frozen external runner and all physical acceptance gates remain unchanged.
+
 The extension contract fixes qualification at a real 100‰ logical floor. Candidate Hold baselines cannot raise that boundary. Policy `2` replaces policy `1`'s universal Hold-derived eligibility and retrospective activation after entering Hold; the first original-deadline check binds the decision. Historical records retain their actual policy and device decisions. This correction does not remove protection, change production Hold parameters, reset budgets or infer a hardware limit from one candidate.
 
 The firmware engine's ordinary hard stage boundary applies to scout, both batch candidates and hold confirmation. The [approved conditional policy](FIRMWARE-TUNING-REMEDIATION-CONTRACT.md) is a bounded exception for an observed allowed-floor candidate after its original deadline expires; it retains all other physical qualification and safety gates. The external runner's longer `TuningScout` capture is retained as external behavior and does not govern firmware stopping. Production controller Hold remains a profile-dependent control phase; physical stable-window and qualified-hold gates govern acceptance independently.

@@ -2617,7 +2617,15 @@ fn phase_transition_reason(phase: ThermalTuningPhase) -> &'static str {
 }
 
 fn cooldown_threshold_c(target_c: i16) -> i16 {
-    if target_c < 80 { 35 } else { target_c - 40 }
+    if target_c < 80 {
+        35
+    } else if target_c > 200 {
+        target_c - 20
+    } else if target_c > 160 {
+        target_c - 30
+    } else {
+        target_c - 40
+    }
 }
 
 fn histogram_percentile(histogram: &[u16; 1001], count: u32, percentile: f64) -> Option<u16> {
@@ -3304,7 +3312,79 @@ mod tests {
         assert_eq!(retry_trial.start_temperature_centi_c, Some(3_500));
         assert_eq!(retry_trial.cooldown_threshold_centi_c, Some(3_500));
         assert_eq!(cooldown_threshold_c(80), 40);
-        assert_eq!(cooldown_threshold_c(240), 200);
+        assert_eq!(cooldown_threshold_c(240), 220);
+    }
+
+    #[test]
+    fn high_temperature_cooldown_keeps_strict_160_and_200_boundaries() {
+        for (target, threshold) in [
+            (160, 120),
+            (161, 131),
+            (180, 150),
+            (200, 170),
+            (201, 181),
+            (220, 200),
+            (240, 220),
+        ] {
+            assert_eq!(cooldown_threshold_c(target), threshold);
+        }
+    }
+
+    #[test]
+    fn every_high_temperature_trial_waits_for_and_records_its_cooldown_boundary() {
+        for (target, threshold) in [(160, 12_000), (180, 15_000), (220, 20_000), (240, 22_000)] {
+            let mut runtime = ThermalTuningRuntime::new();
+            runtime
+                .start(ThermalTuningStart {
+                    run_id: id("run-high-temperature-cooldown"),
+                    candidate_id: id("candidate-hold"),
+                    candidate_hash: hash("hash-hold"),
+                    power_class: ThermalTuningPowerClass::Pps5a,
+                    targets: &[target],
+                    pps_ready: true,
+                    thermal_model_available: true,
+                    calibration_conflict: false,
+                    candidate_profile: Some(profile_with_targets(&[target])),
+                })
+                .unwrap();
+            for purpose in [
+                ThermalTuningTrialPurpose::Scout,
+                ThermalTuningTrialPurpose::BatchCurrent,
+                ThermalTuningTrialPurpose::BatchPredicted,
+                ThermalTuningTrialPurpose::HoldConfirm,
+            ] {
+                if purpose != ThermalTuningTrialPurpose::Scout {
+                    runtime
+                        .schedule_trial(purpose, "cooling before test trial")
+                        .unwrap();
+                }
+                let mut cooling = sample(
+                    runtime.current_elapsed_ms + 300,
+                    ThermalTuningPhase::Cooldown,
+                    threshold + 1,
+                );
+                cooling.target_c = target;
+                cooling.trial_index = runtime.trial_index;
+                cooling.candidate_hash = runtime.candidate_hash.clone().unwrap();
+                cooling.heater_requested_output_permille = 0;
+                cooling.heater_output_permille = 0;
+                runtime.record_sample(cooling.clone()).unwrap();
+                assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+                cooling.elapsed_ms += 300;
+                cooling.temperature_centi_c = threshold;
+                runtime.record_sample(cooling).unwrap();
+                assert_eq!(runtime.phase, ThermalTuningPhase::Warmup);
+                let trial = runtime
+                    .events
+                    .iter()
+                    .rev()
+                    .find_map(|event| event.trial.as_ref())
+                    .unwrap();
+                assert_eq!(trial.purpose, purpose);
+                assert_eq!(trial.start_temperature_centi_c, Some(threshold));
+                assert_eq!(trial.cooldown_threshold_centi_c, Some(threshold));
+            }
+        }
     }
 
     #[test]
