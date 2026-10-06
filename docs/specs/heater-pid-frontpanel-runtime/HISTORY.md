@@ -12,7 +12,11 @@
 
 - It locally supersedes older heater/fan runtime wording in `frontpanel-ui-contract` and `frontpanel-input-interaction`; those topics retain their visual and input contracts.
 
-## Firmware trial stopping boundary
+## Braking-first model Approach
+
+The owner fixes the normal tuning minimum at 5% and requires an immediate minimum-power request at Warmup-to-Approach entry. The former loss-plus-nonnegative-rise law cannot reduce output below the complete target-loss estimate and does not implement this braking trajectory. Policy 4 binds the 50-permille law and preserves original deadlines, conditional-extension prerequisites, physical Hold entry and independent confirmation. Policy 3 remains the historical 100-permille model policy; old evidence is not rewritten. The 50% reserve relative to stable Hold average is an observed margin, not guaranteed by the fixed 5% floor at 60°C.
+
+## Historical firmware trial stopping boundary
 
 The owner authorizes warmer firmware-only high-temperature starts after reviewing recorded Warmup segments. The >160°C boundary retains160°C at its previous120°C start, while180/220/240°C use150/200/220°C respectively. The >200°C tier takes precedence; exactly200°C stays in the target−30°C tier. Trial metadata preserves historical thresholds and actual phase durations. This replaces the uniform target−40°C rule only above160°C; the frozen external runner and all physical acceptance gates remain unchanged.
 
