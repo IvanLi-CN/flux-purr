@@ -1706,13 +1706,22 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
     let effective_candidate_profile = statuses
         .iter()
         .rev()
+        .filter(|status| {
+            status.get("candidateHash").and_then(Value::as_str) == Some(candidate_hash)
+        })
         .find_map(|status| {
             status
                 .get("candidateProfile")
-                .filter(|value| !value.is_null())
+                .filter(|value| profile_matches_hash(value, candidate_hash))
         })
-        .unwrap_or(candidate_profile)
-        .clone();
+        .or_else(|| {
+            profile_matches_hash(candidate_profile, candidate_hash).then_some(candidate_profile)
+        });
+    let profile_source = if effective_candidate_profile.is_some() {
+        "device_reported"
+    } else {
+        "unavailable_matching_candidate_profile"
+    };
     let save_receipt = statuses
         .iter()
         .rev()
@@ -1727,7 +1736,9 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
                 .filter(|value| !value.is_null())
         })
         .cloned();
-    let candidate_state = if verified_saved_receipt(
+    let candidate_state = if effective_candidate_profile.is_none() {
+        "rejected"
+    } else if verified_saved_receipt(
         run_id,
         candidate_id,
         candidate_hash,
@@ -1803,6 +1814,7 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
             "candidateId": candidate_id,
             "candidateHash": candidate_hash,
             "powerClass": "pps5a",
+            "profileAvailability": profile_source,
             "promotionState": candidate_state
         },
         "referenceComparison": {
@@ -1828,7 +1840,7 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
             "previewReceipt": preview_receipt,
             "saveReceipt": save_receipt
         },
-        "profile": {"bank": "pps5a", "source": "device_reported", "value": effective_candidate_profile}
+        "profile": {"bank": "pps5a", "source": profile_source, "value": effective_candidate_profile}
     });
     fs::write(
         input_dir.join("run.bundle.json"),
@@ -1845,6 +1857,10 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         serde_json::to_vec(&statuses)?,
     )?;
     Ok(())
+}
+
+fn profile_matches_hash(profile: &Value, candidate_hash: &str) -> bool {
+    firmware_candidate_profile_hash(profile).ok().as_deref() == Some(candidate_hash)
 }
 
 fn verified_saved_receipt(
@@ -2358,6 +2374,61 @@ mod tests {
             json!({"schema": "thermal-tuning-v2", "powerClass": "pps5a"}),
         ] {
             assert!(super::parse_firmware_seed_profile(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn interrupted_export_never_pairs_stale_profile_with_current_hash() {
+        let first = device_journal_fixture();
+        let mut profile = first["candidateProfile"].clone();
+        profile["points"][0]["approachPowerPermille"] = json!(282);
+        let hash = firmware_candidate_profile_hash(&profile).unwrap();
+        assert_ne!(hash, first["candidateHash"]);
+        for current_profile_received in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut current = first.clone();
+            current["candidateHash"] = json!(hash);
+            if current_profile_received {
+                current["candidateProfile"] = profile.clone();
+            } else {
+                current.as_object_mut().unwrap().remove("candidateProfile");
+            }
+            write_v2_input(V2Input {
+                input_dir: dir.path(),
+                device_id: "bench",
+                run_id: "journal-run",
+                candidate_id: "journal-candidate",
+                candidate_hash: &hash,
+                candidate_profile: &first["candidateProfile"],
+                statuses: &[first.clone(), current],
+                host_interruption: Some("transport_or_runtime_failure"),
+                selected_targets: &[60],
+                execution_order: &[60],
+            })
+            .unwrap();
+            let exported: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(dir.path().join("thermal-profile.candidate.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(exported["candidateHash"], hash);
+            if current_profile_received {
+                assert_eq!(exported["profile"]["value"], profile);
+                assert_eq!(exported["profile"]["source"], "device_reported");
+            } else {
+                assert!(exported["profile"]["value"].is_null());
+                assert_eq!(
+                    exported["profile"]["source"],
+                    "unavailable_matching_candidate_profile"
+                );
+            }
+            let rendered = super::thermal_tuning_v2_report::render_v2_bundle(
+                super::ThermalTuningV2ReportInput {
+                    input_dir: dir.path().to_path_buf(),
+                    output_dir: Some(dir.path().join("report")),
+                },
+            )
+            .unwrap();
+            assert_eq!(rendered["ownerOutcome"], "failed");
         }
     }
 

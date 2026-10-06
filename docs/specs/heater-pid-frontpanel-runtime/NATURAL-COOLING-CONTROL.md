@@ -43,3 +43,5 @@
 稳定窗口证据保留首次完成的连续10秒区间：开始时间和首次验证完成时间一经验证不再被后续 Hold 样本改写。后续60秒保温继续独立积累过冲和峰峰值，不能把后续离开绝对稳定带的样本纳入此前已验证的窗口，也不能用固定窗口掩盖后续保温门禁失败。标准报告从该明确区间的真实样本复核证据；设备 adopted 与报告资格通过分别保留。
 
 `--seed-profile-file` 支持普通 profile 与标准 `thermal-profile.candidate.json`。v2 导出从 `profile.value` 读取完整点值，显式零提前量不能触发旧字段继承；往返物化必须保持参数与摘要。错误功率类别、缺失 settings 或目标点的输入在取得设备 lease 前拒绝，不能静默替换为默认 seed。
+
+候选导出只能携带与 `candidateHash` 一致的完整参数。中断时若只取得当前摘要而未取得对应参数，`profile.value` 为 null、`profile.source` 为 `unavailable_matching_candidate_profile`，不能借用旧候选或启动 seed 的参数补齐。原始日志保留已取得的历史参数与采样；缺失当前参数不能形成可保存候选。
