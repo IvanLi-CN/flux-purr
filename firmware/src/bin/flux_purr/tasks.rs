@@ -60,7 +60,11 @@ where
         return false;
     }
     let manual_pps_active = context.manual_pps.enabled;
-    let _ = release_terminal_fixed_pd_disarm_for_manual_pps(context.backend, manual_pps_active);
+    let _ = release_terminal_fixed_pd_disarm_for_new_work(
+        context.backend,
+        context.heater_enabled,
+        manual_pps_active,
+    );
     if context.backend.terminal_fixed_pd_disarmed() {
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
         return false;

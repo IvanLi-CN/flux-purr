@@ -16,7 +16,7 @@ pub(crate) struct PdServiceSnapshot {
     pub(crate) published_at_ms: u64,
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PdRequestState {

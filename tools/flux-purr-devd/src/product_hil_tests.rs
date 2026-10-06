@@ -337,6 +337,24 @@ impl ProductObserver<'_> {
             }
         }
         self.preparation("cancel_flash_preparation").await?;
+
+        // Exceed the Coordinator's six result slots before admitting new work.
+        // Every ready/cancel cycle must consume its terminal Idle reply.
+        for cycle in 0..12 {
+            self.preparation("prepare_flash").await?;
+            self.ready(3).await?;
+            self.preparation("cancel_flash_preparation").await?;
+            let (status, _) = self.read().await?;
+            if status["heaterPhysicalOutputPercent"] != 0 {
+                return Err("repeated cancellation replayed heat".into());
+            }
+            record(
+                self.file,
+                self.started,
+                "preparationCyclePassed",
+                json!(cycle),
+            );
+        }
         self.runtime(json!({"manualPpsEnabled": true, "manualPpsMv": 12000, "manualPpsMa": 3000}))
             .await?;
         let (status, _) = self.observe(5).await?;

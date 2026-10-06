@@ -491,7 +491,7 @@ fn terminal_disarm_does_not_block_runtime_on_a_pd_ticket() {
         "runtime-loop disarm must poll ticket completion instead of awaiting the PD actor"
     );
     assert!(
-        disarm.contains("try_take_ticket"),
+        eeprom.contains("pd_port.try_take_ticket(ticket)"),
         "runtime-loop disarm must use the non-blocking ticket facade"
     );
     assert!(
@@ -12279,8 +12279,9 @@ fn manual_pps_calibration_releases_terminal_disarm_without_enabling_the_heater()
         terminal_fixed_pd_disarmed: true,
     };
 
-    assert!(release_terminal_fixed_pd_disarm_for_manual_pps(
+    assert!(release_terminal_fixed_pd_disarm_for_new_work(
         &mut backend,
+        false,
         true
     ));
     assert!(matches!(
@@ -12307,8 +12308,9 @@ fn manual_pps_releases_terminal_disarm_after_fixed_pd_fallback() {
         terminal_fixed_pd_disarmed: true,
     };
 
-    assert!(release_terminal_fixed_pd_disarm_for_manual_pps(
+    assert!(release_terminal_fixed_pd_disarm_for_new_work(
         &mut backend,
+        false,
         true
     ));
     assert_eq!(

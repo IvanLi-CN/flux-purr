@@ -1421,15 +1421,16 @@ fn runtime_hold_heater_for_flash(state: &mut RuntimeLoopState) -> bool {
     if state.last_heater_duty != 0 {
         apply_heater_duty(&mut state.heater_pwm, 0, &mut state.last_heater_duty);
     }
-    if terminal_idle_contract_confirmed(state.last_pd_observation) {
-        state
-            .calibration_runtime_state
-            .immediate_heater_disarm_pending = false;
-        state
-            .calibration_runtime_state
-            .thermal_plant_completion_disarm_pending = false;
-        let _ = state.manual_pps_state.consume_automatic_restore_pending();
-    }
+    needs_redraw |= disarm_pending_thermal_plant_output(ThermalPlantDisarmContext {
+        calibration_runtime_state: &mut state.calibration_runtime_state,
+        backend: &mut state.heater_power_backend,
+        manual_pps: &mut state.manual_pps_state,
+        pd_port: &state.pd_port,
+        heater_pwm: &mut state.heater_pwm,
+        hold_pps_governor: &mut state.hold_pps_governor,
+        ui_state: &mut state.ui_state,
+        last_heater_duty: &mut state.last_heater_duty,
+    });
     needs_redraw
 }
 
