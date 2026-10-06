@@ -1207,14 +1207,24 @@ mod tests {
 
         fn settle(&self, outcome: TicketOutcome) {
             for (slot, reply) in self.replies.borrow_mut().iter_mut().enumerate() {
-                if let Some(current) = reply {
-                    if release_discarded_ticket_slot(&self.discarded, &self.slots, slot) {
-                        *reply = None;
-                    } else {
-                        current.outcome = Some(outcome);
-                    }
-                }
+                self.settle_reply(slot, reply, outcome);
             }
+        }
+
+        fn settle_reply(
+            &self,
+            slot: usize,
+            reply: &mut Option<DisarmReply>,
+            outcome: TicketOutcome,
+        ) {
+            let Some(current) = reply else {
+                return;
+            };
+            if release_discarded_ticket_slot(&self.discarded, &self.slots, slot) {
+                *reply = None;
+                return;
+            }
+            current.outcome = Some(outcome);
         }
     }
 
@@ -1447,118 +1457,128 @@ mod tests {
             ),
         ];
         assert!(matches!(backends[1], HeaterPowerBackend::PpsMos { .. }));
-        for mut backend in backends {
-            let port = DisarmPortHarness::new();
-            let mut calibration = CalibrationRuntimeState::default();
-            let mut manual = ManualPpsState::default();
-            cancel_calibration_for_flash_preparation(&mut calibration, &mut manual);
-            assert!(latch_terminal_fixed_pd_disarm(&calibration, &mut backend));
-            let mut ticket = None;
-            assert!(!reconcile_terminal_disarm_power(
-                &mut calibration,
-                &mut manual,
-                &mut ticket,
-                &port,
-                true,
-                false
-            ));
-            port.settle(TicketOutcome::Confirmed(port.confirmed));
-            assert!(reconcile_terminal_disarm_power(
-                &mut calibration,
-                &mut manual,
-                &mut ticket,
-                &port,
-                true,
-                false
-            ));
-            assert!(!release_terminal_fixed_pd_disarm_for_new_work(
-                &mut backend,
-                false,
-                false
-            ));
-            assert!(backend.terminal_fixed_pd_disarmed());
-            assert!(release_terminal_fixed_pd_disarm_for_new_work(
-                &mut backend,
-                true,
-                false
-            ));
-            assert!(!backend.terminal_fixed_pd_disarmed());
-            assert!(!manual.enabled);
-            assert!(!working_fixed_contract_confirmed(
-                port.snapshot().settled_observation(),
-                20_000
-            ));
-            match backend {
-                HeaterPowerBackend::FixedPdPwmFallback {
-                    fixed_request_confirmed,
-                    ..
-                } => assert!(!fixed_request_confirmed),
-                HeaterPowerBackend::PpsMos {
-                    current_mode,
-                    current_limit_fixed_request_confirmed,
-                    ..
-                } => {
-                    assert!(current_mode.is_none());
-                    assert!(!current_limit_fixed_request_confirmed);
-                }
+        for backend in backends {
+            let (calibration, manual, snapshot) = assert_preparation_cancel_rearms_backend(backend);
+            assert_cancelled_arm_negotiates_working_pps(calibration, manual, snapshot);
+        }
+    }
+
+    fn assert_preparation_cancel_rearms_backend(
+        mut backend: HeaterPowerBackend,
+    ) -> (CalibrationRuntimeState, ManualPpsState, PdServiceSnapshot) {
+        let port = DisarmPortHarness::new();
+        let mut calibration = CalibrationRuntimeState::default();
+        let mut manual = ManualPpsState::default();
+        cancel_calibration_for_flash_preparation(&mut calibration, &mut manual);
+        assert!(latch_terminal_fixed_pd_disarm(&calibration, &mut backend));
+        let mut ticket = None;
+        assert!(!reconcile_terminal_disarm_power(
+            &mut calibration,
+            &mut manual,
+            &mut ticket,
+            &port,
+            true,
+            false
+        ));
+        port.settle(TicketOutcome::Confirmed(port.confirmed));
+        assert!(reconcile_terminal_disarm_power(
+            &mut calibration,
+            &mut manual,
+            &mut ticket,
+            &port,
+            true,
+            false
+        ));
+        assert!(!release_terminal_fixed_pd_disarm_for_new_work(
+            &mut backend,
+            false,
+            false
+        ));
+        assert!(backend.terminal_fixed_pd_disarmed());
+        assert!(release_terminal_fixed_pd_disarm_for_new_work(
+            &mut backend,
+            true,
+            false
+        ));
+        assert!(!backend.terminal_fixed_pd_disarmed());
+        assert!(!manual.enabled);
+        assert!(!working_fixed_contract_confirmed(
+            port.snapshot().settled_observation(),
+            20_000
+        ));
+        match backend {
+            HeaterPowerBackend::FixedPdPwmFallback {
+                fixed_request_confirmed,
+                ..
+            } => assert!(!fixed_request_confirmed),
+            HeaterPowerBackend::PpsMos {
+                current_mode,
+                current_limit_fixed_request_confirmed,
+                ..
+            } => {
+                assert!(current_mode.is_none());
+                assert!(!current_limit_fixed_request_confirmed);
             }
-            let pdos = [
-                (100 << 10) | 100,
-                pps_source_capability(5_500, 21_000, 3_000),
-            ];
-            let source = SourceCapabilities::from_pdos(&pdos);
-            let mut policy = fusb302b::SinkPolicy::new_standby(12_000, 3_000);
-            policy.on_source_capabilities(&pdos).unwrap();
-            policy.on_control_message(3, 0);
-            policy.on_control_message(6, 1);
-            let request = PdContractRequest::pps(12_000, 3_000).unwrap();
-            policy.request_contract(request).unwrap();
-            let mut ui = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
-            ui.heater_enabled = true; // Fresh ordinary intent after cancellation.
-            let mut ready = true;
-            for phase in [
-                SinkPhase::WaitingForAccept,
-                SinkPhase::WaitingForPsRdy,
-                SinkPhase::Ready,
-            ] {
-                assert_eq!(policy.phase(), phase);
-                let observation = fusb302b_contract_observation(
-                    phase,
-                    policy.active_contract(),
-                    FUSB302B_STATUS0_VBUSOK,
-                    source,
-                );
-                let state = PowerState::from_observation(
-                    phase,
-                    observation,
-                    Some(source),
-                    true,
-                    Some(request),
-                );
-                reconcile_pd_contract_intent(
-                    state.observation(),
-                    &mut ready,
-                    &mut ui,
-                    &mut calibration,
-                    &mut manual,
-                    false,
-                );
-                assert!(ui.heater_enabled);
-                assert!(!manual.enabled);
-                let snapshot = PdServiceSnapshot {
-                    observation,
-                    transition_pending: phase != SinkPhase::Ready,
-                    ..port.snapshot()
-                };
-                assert_eq!(
-                    working_pps_request_confirmed(snapshot.settled_observation(), request),
-                    phase == SinkPhase::Ready
-                );
-                if phase == SinkPhase::WaitingForAccept {
-                    policy.on_control_message(3, 2);
-                } else if phase == SinkPhase::WaitingForPsRdy {
-                    policy.on_control_message(6, 3);
-                }
+        }
+        (calibration, manual, port.snapshot())
+    }
+
+    fn assert_cancelled_arm_negotiates_working_pps(
+        mut calibration: CalibrationRuntimeState,
+        mut manual: ManualPpsState,
+        idle_snapshot: PdServiceSnapshot,
+    ) {
+        let pdos = [
+            (100 << 10) | 100,
+            pps_source_capability(5_500, 21_000, 3_000),
+        ];
+        let source = SourceCapabilities::from_pdos(&pdos);
+        let mut policy = fusb302b::SinkPolicy::new_standby(12_000, 3_000);
+        policy.on_source_capabilities(&pdos).unwrap();
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 1);
+        let request = PdContractRequest::pps(12_000, 3_000).unwrap();
+        policy.request_contract(request).unwrap();
+        let mut ui = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        ui.heater_enabled = true; // Fresh ordinary intent after cancellation.
+        let mut ready = true;
+        for phase in [
+            SinkPhase::WaitingForAccept,
+            SinkPhase::WaitingForPsRdy,
+            SinkPhase::Ready,
+        ] {
+            assert_eq!(policy.phase(), phase);
+            let observation = fusb302b_contract_observation(
+                phase,
+                policy.active_contract(),
+                FUSB302B_STATUS0_VBUSOK,
+                source,
+            );
+            let state =
+                PowerState::from_observation(phase, observation, Some(source), true, Some(request));
+            reconcile_pd_contract_intent(
+                state.observation(),
+                &mut ready,
+                &mut ui,
+                &mut calibration,
+                &mut manual,
+                false,
+            );
+            assert!(ui.heater_enabled);
+            assert!(!manual.enabled);
+            let snapshot = PdServiceSnapshot {
+                observation,
+                transition_pending: phase != SinkPhase::Ready,
+                ..idle_snapshot
+            };
+            assert_eq!(
+                working_pps_request_confirmed(snapshot.settled_observation(), request),
+                phase == SinkPhase::Ready
+            );
+            if phase == SinkPhase::WaitingForAccept {
+                policy.on_control_message(3, 2);
+            } else if phase == SinkPhase::WaitingForPsRdy {
+                policy.on_control_message(6, 3);
             }
         }
     }
