@@ -1911,16 +1911,13 @@ fn runtime_confirm_fan_power(
         state.manual_pps_state.enabled,
     );
     if !matches!(fan_decision.state, FanPolicyState::Disabled)
-        && admission != FanWorkingPowerAdmission::Confirmed
+        && admission == FanWorkingPowerAdmission::RequestCooling
+        && state.fan_working_power_ticket.is_none()
+        && elapsed_ms >= state.fan_working_next_attempt_ms
     {
-        if admission == FanWorkingPowerAdmission::RequestCooling
-            && state.fan_working_power_ticket.is_none()
-            && elapsed_ms >= state.fan_working_next_attempt_ms
-        {
-            state.fan_working_next_attempt_ms = elapsed_ms.saturating_add(500);
-            if let PdRequestState::Pending(ticket) = state.pd_port.request_cooling_contract() {
-                state.fan_working_power_ticket = Some(ticket);
-            }
+        state.fan_working_next_attempt_ms = elapsed_ms.saturating_add(500);
+        if let PdRequestState::Pending(ticket) = state.pd_port.request_cooling_contract() {
+            state.fan_working_power_ticket = Some(ticket);
         }
     }
 }
