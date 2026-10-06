@@ -1,5 +1,8 @@
 use crate::memory::ThermalPlantProjection;
 
+/// Positive minimum of the shared 5A braking-first Approach law.
+pub const FIVE_AMP_APPROACH_MIN_PERMILLE: u16 = 50;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThermalPlantControlOutput {
     pub requested_power_mw: f32,

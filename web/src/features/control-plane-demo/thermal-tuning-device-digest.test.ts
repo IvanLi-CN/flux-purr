@@ -5,6 +5,24 @@ import fixture from './thermal-tuning-digest.fixture.json'
 import fanFixture from './thermal-tuning-fan.fixture.json'
 
 describe('firmware event digest compatibility', () => {
+  it('binds braking-first policy 4 without reinterpreting the historical model floor', async () => {
+    const events: ThermalTuningEvent[] = JSON.parse(JSON.stringify(fixture))
+    const timing = events[1].decision?.timing
+    if (!timing || typeof timing !== 'object') throw new Error('missing timing fixture')
+    Object.assign(timing, {
+      policyVersion: 4,
+      configuredApproachFloorPermille: 420,
+      modelApproachFloorPermille: 50,
+      allowedApproachFloorPermille: 50,
+      effectiveApproachFloorPermille: 50,
+      originalDeadlineObservedAtMs: 11_000,
+      originalDeadlinePhase: 'approach',
+    })
+    const expected = 'a6e67f9f78498c1589641dbfa3a7b4b49ea48bb475f7b2d20fe8e5986fa51e97'
+    expect(await digestEventChain(events)).toBe(expected)
+    Object.assign(timing, { policyVersion: 3 })
+    expect(await digestEventChain(events)).not.toBe(expected)
+  })
   it('binds the model floor while retaining the unused candidate floor identity', async () => {
     const events: ThermalTuningEvent[] = JSON.parse(JSON.stringify(fixture))
     const timing = events[1].decision?.timing

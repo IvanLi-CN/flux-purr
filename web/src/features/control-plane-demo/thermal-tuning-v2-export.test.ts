@@ -112,6 +112,20 @@ describe('Web thermal-tuning-v2 export', () => {
       },
     }
     expect(timingGateValid(modelTrial)).toBe(true)
+    const brakingTrial = {
+      ...modelTrial,
+      timing: {
+        ...modelTrial.timing,
+        policyVersion: 4,
+        modelApproachFloorPermille: 50,
+        allowedApproachFloorPermille: 50,
+        effectiveApproachFloorPermille: 50,
+      },
+    }
+    expect(timingGateValid(brakingTrial)).toBe(true)
+    expect(
+      timingGateValid({ ...brakingTrial, timing: { ...brakingTrial.timing, policyVersion: 3 } })
+    ).toBe(false)
     for (const change of [
       { modelApproachFloorPermille: null },
       { effectiveApproachFloorPermille: 650 },
@@ -172,6 +186,22 @@ describe('Web thermal-tuning-v2 export', () => {
       })
     expect(verifyTimingSamples(trial.timing, 60, samples).verified).toBe(true)
     expect(verifyTimingSamples(modelTrial.timing, 60, samples).verified).toBe(true)
+    const brakingSamples = samples.map((sample) => ({
+      ...sample,
+      heaterRequestedOutputPermille:
+        sample.phase === 'approach' && sample.elapsedMs >= 2_000
+          ? 50
+          : sample.heaterRequestedOutputPermille,
+    }))
+    expect(verifyTimingSamples(brakingTrial.timing, 60, brakingSamples).verified).toBe(true)
+    expect(verifyTimingSamples(brakingTrial.timing, 60, samples).verified).toBe(false)
+    expect(
+      verifyTimingSamples(brakingTrial.timing, 60, [
+        ...brakingSamples.slice(0, 2),
+        { ...brakingSamples[2], heaterRequestedOutputPermille: 100 },
+        ...brakingSamples.slice(3),
+      ]).verified
+    ).toBe(false)
     for (const change of [
       { elapsedMs: 11_001 },
       { phase: 'hold' },

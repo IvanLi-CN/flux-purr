@@ -9910,6 +9910,66 @@ fn five_amp_model_approach_responds_to_damping_without_a_power_plateau() {
 }
 
 #[test]
+fn five_amp_braking_approach_entry_immediately_requests_five_percent() {
+    for target in [60, 160, 240] {
+        for interval_ms in [20, 50, 100] {
+            let temperature = f32::from(target) - 8.0;
+            let mut profile = production_test_profile(900);
+            profile.points[0].as_mut().unwrap().target_temp_c = target;
+            let mut controller = HeaterController::new();
+            controller.production_controller = Some(ProductionThermalController::Profile);
+            controller.last_target_temp_c = target;
+            controller.heater_was_enabled = true;
+            controller.filtered_temp_c = Some(temperature);
+            controller.previous_measured_temp_c = Some(temperature);
+            controller.profile_last_control_at_ms = Some(3_000 - interval_ms);
+            let mut input = production_test_input(temperature);
+            input.target_temp_c = target;
+            let (output, disarmed) = controller.update_production_at(
+                ProductionThermalController::Profile,
+                input,
+                Some(profile),
+            );
+            assert!(!disarmed);
+            assert_eq!(output.phase, HeaterControlPhase::Approach);
+            assert_eq!(output.duty_percent, 5, "target={target}, dt={interval_ms}");
+        }
+    }
+}
+
+#[test]
+fn five_amp_braking_approach_can_request_less_than_passive_loss_and_reheat() {
+    let mut outputs = [0; 2];
+    for (index, slope) in [2.0, -0.3].into_iter().enumerate() {
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(ProductionThermalController::Profile);
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(58.0);
+        controller.previous_measured_temp_c = Some(58.0);
+        controller.filtered_slope_c_per_profile_tick = slope;
+        let mut profile = production_test_profile(900);
+        profile.points[0].as_mut().unwrap().approach_lead_ticks = 0;
+        let mut input = production_test_input(58.0);
+        input.model.convection_mw_per_c = 300.0;
+        input.model.transport_delay_ms = 2_000;
+        let (output, _) = controller.update_production_at(
+            ProductionThermalController::Profile,
+            input,
+            Some(profile),
+        );
+        assert_eq!(output.phase, HeaterControlPhase::Approach);
+        outputs[index] = output.duty_percent;
+    }
+    assert_eq!(outputs[0], 5, "rising plate must brake below passive loss");
+    assert!(
+        outputs[1] > outputs[0],
+        "falling plate must regain heat: {outputs:?}"
+    );
+}
+
+#[test]
 fn five_amp_model_approach_ignores_profile_floor_and_ceiling() {
     let mut normal = HeaterController::new();
     normal.production_controller = Some(ProductionThermalController::Profile);
@@ -9928,7 +9988,7 @@ fn five_amp_model_approach_ignores_profile_floor_and_ceiling() {
         tuning.update_production_at(ProductionThermalController::Profile, input, Some(profile));
     assert!(!normal_disarmed && !tuning_disarmed);
     assert_eq!(normal_output, tuning_output);
-    assert!(normal_output.duty_percent >= 10);
+    assert!(normal_output.duty_percent >= 5);
 
     let mut changed_candidate = HeaterController::new();
     changed_candidate.production_controller = Some(ProductionThermalController::Profile);

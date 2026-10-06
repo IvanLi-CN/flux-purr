@@ -3660,12 +3660,13 @@ mod tests {
         for elapsed_ms in [1_000, 5_000, 11_000] {
             let mut observed = sample(elapsed_ms, ThermalTuningPhase::Approach, 5_500);
             observed.candidate_hash = runtime.candidate_hash.clone().unwrap();
-            observed.heater_requested_output_permille = 100;
+            observed.heater_requested_output_permille = 50;
             observed.heater_output_permille = 170;
             runtime.record_sample(observed).unwrap();
         }
         assert_eq!(runtime.phase, ThermalTuningPhase::Approach);
         assert_eq!(runtime.trial_index, 0);
+        assert_eq!(runtime.trial_timing.unwrap().policy_version, 4);
         assert!(runtime.events.iter().all(|event| event.decision.is_none()));
     }
 
@@ -3706,7 +3707,7 @@ mod tests {
         let mut runtime = started_runtime_with_profile(profile);
         let candidate_hash = runtime.candidate_hash.clone().unwrap();
         record_current_trial_sample(&mut runtime, 0, ThermalTuningPhase::Warmup, 3_400);
-        for (elapsed_ms, request) in [(1_000, 100), (5_000, 100), (11_000, 0)] {
+        for (elapsed_ms, request) in [(1_000, 50), (5_000, 50), (11_000, 0)] {
             let mut observed = sample(elapsed_ms, ThermalTuningPhase::Approach, 5_500);
             observed.candidate_hash = candidate_hash.clone();
             observed.heater_requested_output_permille = request;
@@ -3731,7 +3732,7 @@ mod tests {
         for elapsed_ms in (1_000..=12_000).step_by(300) {
             let mut observed = sample(elapsed_ms, ThermalTuningPhase::Approach, 5_500);
             observed.candidate_hash = runtime.candidate_hash.clone().unwrap();
-            observed.heater_requested_output_permille = 100;
+            observed.heater_requested_output_permille = 50;
             runtime.record_sample(observed).unwrap();
         }
         assert_eq!(runtime.phase, ThermalTuningPhase::Approach);

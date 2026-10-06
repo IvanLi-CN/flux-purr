@@ -609,20 +609,30 @@ function trialPassesGates(trial: ReturnType<typeof buildTrial>): boolean {
   )
 }
 
+function timingPolicyFloor(timing: JsonObject) {
+  if (timing.policyVersion === 4) return 50
+  if (timing.policyVersion === 2 || timing.policyVersion === 3) return 100
+  return null
+}
+
 function supportedTimingPolicy(timing: JsonObject) {
+  const floor = timingPolicyFloor(timing)
   return (
-    (timing.policyVersion === 2 && timing.modelApproachFloorPermille == null) ||
-    (timing.policyVersion === 3 &&
-      timing.modelApproachFloorPermille === 100 &&
-      timing.effectiveApproachFloorPermille === 100)
+    floor != null &&
+    timing.allowedApproachFloorPermille === floor &&
+    ((timing.policyVersion === 2 && timing.modelApproachFloorPermille == null) ||
+      ((timing.policyVersion === 3 || timing.policyVersion === 4) &&
+        timing.modelApproachFloorPermille === floor &&
+        timing.effectiveApproachFloorPermille === floor))
   )
 }
 
 function timingFloorEligible(timing: JsonObject) {
   return (
     supportedTimingPolicy(timing) &&
-    timing.effectiveApproachFloorPermille === 100 &&
-    (timing.policyVersion === 3 || timing.configuredApproachFloorPermille === 100)
+    timing.effectiveApproachFloorPermille === timingPolicyFloor(timing) &&
+    (timing.modelApproachFloorPermille != null ||
+      timing.configuredApproachFloorPermille === timingPolicyFloor(timing))
   )
 }
 
@@ -662,7 +672,7 @@ export function timingGateValid(trial: JsonObject) {
       timing.originalDeadlineObservedAtMs === extended &&
       timing.originalDeadlinePhase === 'approach' &&
       timingFloorEligible(timing) &&
-      timing.allowedApproachFloorPermille === 100)
+      timing.allowedApproachFloorPermille === timingPolicyFloor(timing))
   return (
     timestampsValid &&
     target != null &&
@@ -680,10 +690,12 @@ export function timingGateValid(trial: JsonObject) {
     floor <= 1_000 &&
     hold >= 0 &&
     hold <= 1_000 &&
-    timing.allowedApproachFloorPermille === 100 &&
+    timing.allowedApproachFloorPermille === timingPolicyFloor(timing) &&
     timing.configuredApproachFloorPermille === floor &&
     timing.effectiveApproachFloorPermille ===
-      (timing.policyVersion === 3 ? 100 : Math.max(floor, hold)) &&
+      (timing.modelApproachFloorPermille != null
+        ? timingPolicyFloor(timing)
+        : Math.max(floor, hold)) &&
     extensionValid &&
     asObject(trial.timingEvidenceVerification)?.verified === true &&
     gate?.limitMs === (extended == null ? original : original * 3) &&
@@ -718,10 +730,10 @@ export function verifyTimingSamples(
     const witness = samples.find((sample) => sample.elapsedMs === timing.floorObservedAtMs)
     if (
       witness?.phase !== 'approach' ||
-      witness.heaterRequestedOutputPermille !== 100 ||
+      witness.heaterRequestedOutputPermille !== timingPolicyFloor(timing) ||
       witness.measurementValid !== true
     )
-      reasons.push('missing_real_100_permille_floor_sample')
+      reasons.push(`missing_real_${timingPolicyFloor(timing)}_permille_floor_sample`)
     let stableStart: number | null = null
     let lastTime: number | null = null
     for (const sample of samples) {
@@ -733,7 +745,7 @@ export function verifyTimingSamples(
         timing.floorObservedAtMs != null &&
         time >= Number(timing.floorObservedAtMs) &&
         sample.heaterRequestedOutputPermille !== 0 &&
-        sample.heaterRequestedOutputPermille !== 100
+        sample.heaterRequestedOutputPermille !== timingPolicyFloor(timing)
       )
         reasons.push('floor_request_raised_before_deadline')
       if (exit == null || time < exit) continue
@@ -751,7 +763,7 @@ export function verifyTimingSamples(
       reasons.push('timely_stable_window_at_original_deadline')
     if (
       !timingFloorEligible(timing) ||
-      timing.allowedApproachFloorPermille !== 100 ||
+      timing.allowedApproachFloorPermille !== timingPolicyFloor(timing) ||
       timing.originalDeadlinePhase !== 'approach' ||
       timing.originalDeadlineObservedAtMs !== extended ||
       exit == null ||

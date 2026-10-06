@@ -3,20 +3,22 @@ use super::*;
 #[test]
 fn model_floor_binds_the_actual_law_without_adopting_unused_profile_bounds() {
     let mut timing = ThermalTuningTimingEvidence::for_model_point(point(420, 650));
-    assert_eq!(timing.policy_version, 3);
+    assert_eq!(timing.policy_version, 4);
     assert_eq!(timing.configured_approach_floor_permille, 420);
-    assert_eq!(timing.effective_approach_floor_permille, 100);
+    assert_eq!(timing.effective_approach_floor_permille, 50);
+    assert_eq!(timing.allowed_approach_floor_permille, 50);
     timing.warmup_exited_at_ms = Some(1_000);
-    timing.observe_approach_request(5_000, 100);
+    timing.observe_approach_request(5_000, 50);
     assert!(timing.try_extend(11_000, true, ThermalTuningPhase::Approach));
     assert!(timing.valid_extension());
 
-    for mutate in [0, 1, 2] {
+    for mutate in [0, 1, 2, 3] {
         let mut invalid = timing;
         match mutate {
             0 => invalid.model_approach_floor_permille = None,
             1 => invalid.effective_approach_floor_permille = 650,
-            _ => invalid.policy_version = 2,
+            2 => invalid.policy_version = 3,
+            _ => invalid.allowed_approach_floor_permille = 100,
         }
         assert!(!invalid.valid_extension());
     }
@@ -24,7 +26,7 @@ fn model_floor_binds_the_actual_law_without_adopting_unused_profile_bounds() {
 
 #[test]
 fn model_extension_still_requires_an_unraised_real_floor_before_the_deadline() {
-    for requests in [&[0][..], &[100, 140][..]] {
+    for requests in [&[0][..], &[100][..], &[50, 140][..]] {
         let mut timing = ThermalTuningTimingEvidence::for_model_point(point(420, 650));
         timing.warmup_exited_at_ms = Some(1_000);
         for (index, request) in requests.iter().enumerate() {
@@ -32,6 +34,20 @@ fn model_extension_still_requires_an_unraised_real_floor_before_the_deadline() {
         }
         assert!(!timing.try_extend(11_000, true, ThermalTuningPhase::Approach));
     }
+}
+
+#[test]
+fn historical_model_policy_keeps_its_one_hundred_permille_floor() {
+    let mut timing = ThermalTuningTimingEvidence::for_point(point(420, 650));
+    timing.policy_version = 3;
+    timing.model_approach_floor_permille = Some(100);
+    timing.effective_approach_floor_permille = 100;
+    timing.warmup_exited_at_ms = Some(1_000);
+    timing.observe_approach_request(5_000, 50);
+    assert!(!timing.floor_eligible() || timing.floor_observed_at_ms.is_none());
+    timing.observe_approach_request(8_000, 100);
+    assert!(timing.try_extend(11_000, true, ThermalTuningPhase::Approach));
+    assert!(timing.valid_extension());
 }
 
 #[test]

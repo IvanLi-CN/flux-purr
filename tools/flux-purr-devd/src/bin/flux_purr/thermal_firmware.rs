@@ -902,11 +902,10 @@ fn timing_gate_valid(trial: &Value) -> bool {
         && Some(timing.extension_limit_ms) == timing.original_limit_ms.checked_mul(3)
         && floor <= 1_000
         && hold <= 1_000
-        && timing.allowed_approach_floor_permille == 100
         && timing.configured_approach_floor_permille as u64 == floor
         && timing.effective_approach_floor_permille as u64
             == if timing.model_approach_floor_permille.is_some() {
-                100
+                u64::from(timing.allowed_approach_floor_permille)
             } else {
                 floor.max(hold)
             }
@@ -971,10 +970,14 @@ fn verify_timing_samples(
                 || sample
                     .get("heaterRequestedOutputPermille")
                     .and_then(Value::as_u64)
-                    != Some(100)
+                    != Some(u64::from(timing.allowed_approach_floor_permille))
                 || sample.get("measurementValid").and_then(Value::as_bool) != Some(true)
         }) {
-            reasons.push("missing_real_100_permille_floor_sample");
+            reasons.push(if timing.allowed_approach_floor_permille == 50 {
+                "missing_real_50_permille_floor_sample"
+            } else {
+                "missing_real_100_permille_floor_sample"
+            });
         }
         let mut stable_start = None;
         let mut last_time: Option<u64> = None;
@@ -989,12 +992,12 @@ fn verify_timing_samples(
                 && timing
                     .floor_observed_at_ms
                     .is_some_and(|floor| time >= floor)
-                && !matches!(
-                    sample
-                        .get("heaterRequestedOutputPermille")
-                        .and_then(Value::as_u64),
-                    Some(0 | 100)
-                )
+                && sample
+                    .get("heaterRequestedOutputPermille")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|request| {
+                        request != 0 && request != u64::from(timing.allowed_approach_floor_permille)
+                    })
             {
                 reasons.push("floor_request_raised_before_deadline");
             }
@@ -2590,6 +2593,18 @@ mod tests {
         model_trial["timing"]["configuredApproachFloorPermille"] = json!(420);
         model_trial["timing"]["modelApproachFloorPermille"] = json!(100);
         assert!(super::timing_gate_valid(&model_trial));
+        let mut braking_trial = model_trial.clone();
+        braking_trial["timing"]["policyVersion"] = json!(4);
+        for key in [
+            "modelApproachFloorPermille",
+            "allowedApproachFloorPermille",
+            "effectiveApproachFloorPermille",
+        ] {
+            braking_trial["timing"][key] = json!(50);
+        }
+        assert!(super::timing_gate_valid(&braking_trial));
+        braking_trial["timing"]["policyVersion"] = json!(3);
+        assert!(!super::timing_gate_valid(&braking_trial));
         model_trial["timing"]["modelApproachFloorPermille"] = serde_json::Value::Null;
         assert!(!super::timing_gate_valid(&model_trial));
         for (pointer, value) in [
@@ -2612,6 +2627,65 @@ mod tests {
         trial["timing"]["extendedAtMs"] = serde_json::Value::Null;
         trial["fullSpeedToStable"]["limitMs"] = json!(10000);
         assert!(super::timing_gate_valid(&trial)); // Other metric gates still reject 12s > 10s.
+    }
+
+    #[test]
+    fn braking_floor_timing_digest_matches_web() {
+        let mut values: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/src/features/control-plane-demo/thermal-tuning-digest.fixture.json"
+        )))
+        .unwrap();
+        let timing = &mut values[1]["decision"]["timing"];
+        timing["policyVersion"] = json!(4);
+        timing["configuredApproachFloorPermille"] = json!(420);
+        for key in [
+            "modelApproachFloorPermille",
+            "allowedApproachFloorPermille",
+            "effectiveApproachFloorPermille",
+        ] {
+            timing[key] = json!(50);
+        }
+        timing["originalDeadlineObservedAtMs"] = json!(11000);
+        timing["originalDeadlinePhase"] = json!("approach");
+        let events: Vec<ThermalTuningEvent> = serde_json::from_value(values).unwrap();
+        assert_eq!(
+            digest_event_chain(&events).as_str(),
+            "a6e67f9f78498c1589641dbfa3a7b4b49ea48bb475f7b2d20fe8e5986fa51e97"
+        );
+    }
+
+    #[test]
+    fn braking_timing_verifies_real_five_percent_floor_and_rejects_raised_requests() {
+        let timing: flux_purr_firmware::thermal_tuning_limits::ThermalTuningTimingEvidence =
+            serde_json::from_value(json!({"policyVersion": 4, "originalLimitMs": 10000,
+                "extensionLimitMs": 30000, "allowedApproachFloorPermille": 50,
+                "effectiveApproachFloorPermille": 50, "modelApproachFloorPermille": 50,
+                "configuredApproachFloorPermille": 420, "originalDeadlineObservedAtMs": 11000,
+                "originalDeadlinePhase": "approach", "floorObservedAtMs": 2000,
+                "extendedAtMs": 11000, "warmupExitedAtMs": 1000,
+                "stableWindowStartedAtMs": 13000, "stableWindowVerifiedAtMs": 23000}))
+            .unwrap();
+        let mut samples = vec![
+            json!({"elapsedMs": 1000, "phase": "approach", "heaterRequestedOutputPermille": 110, "temperatureCentiC": 5000, "measurementValid": true}),
+            json!({"elapsedMs": 2000, "phase": "approach", "heaterRequestedOutputPermille": 50, "temperatureCentiC": 5300, "measurementValid": true}),
+            json!({"elapsedMs": 11000, "phase": "approach", "heaterRequestedOutputPermille": 50, "temperatureCentiC": 5800, "measurementValid": true}),
+        ];
+        for time in (13000..=23000).step_by(250) {
+            samples.push(
+                json!({"elapsedMs": time, "phase": "hold", "heaterRequestedOutputPermille": 100,
+                "temperatureCentiC": 6000, "measurementValid": true}),
+            );
+        }
+        let verify = |samples: &[serde_json::Value]| {
+            super::verify_timing_samples(&timing, 60, &samples.iter().collect::<Vec<_>>())
+        };
+        assert_eq!(verify(&samples)["verified"], true);
+        samples[1]["heaterRequestedOutputPermille"] = json!(100);
+        assert_eq!(verify(&samples)["verified"], false);
+        samples[1]["heaterRequestedOutputPermille"] = json!(50);
+        samples[2]["heaterRequestedOutputPermille"] = json!(100);
+        assert_eq!(verify(&samples)["verified"], false);
     }
 
     #[test]

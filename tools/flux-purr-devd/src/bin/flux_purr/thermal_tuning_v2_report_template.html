@@ -235,7 +235,7 @@ function renderTrialTabs(){
   const timingFacts=[
     ['Approach floor / ceiling',point.approachFloorPowerPermille!=null&&point.approachPowerPermille!=null?`${logicalRatio(point.approachFloorPowerPermille)} / ${logicalRatio(point.approachPowerPermille)}`:'unavailable'],
     ['effective / allowed floor',timingKnown?`${logicalRatio(timing.effectiveApproachFloorPermille)} / ${logicalRatio(timing.allowedApproachFloorPermille)}`:'unavailable'],
-    ['allowed floor source',timing?.policyVersion===3?'model control · fixed 100‰ · policy 3':timing?.policyVersion===2?'fixed 100‰ · policy 2':timing?.policyVersion===1?`max(100‰, Hold ${logicalRatio(point.holdPowerPermille)}) · historical policy 1`:'unavailable'],
+    ['allowed floor source',timing?.policyVersion===4?'braking model · fixed 50‰ · policy 4':timing?.policyVersion===3?'model control · fixed 100‰ · historical policy 3':timing?.policyVersion===2?'fixed 100‰ · policy 2':timing?.policyVersion===1?`max(100‰, Hold ${logicalRatio(point.holdPowerPermille)}) · historical policy 1`:'unavailable'],
     ['floor observed after Warmup',relativeTiming(timing?.floorObservedAtMs)],
     ['original deadline',timingKnown?ms(timing.originalLimitMs):'unavailable'],
     ['first original-deadline check',[2,3].includes(timing?.policyVersion)?`${relativeTiming(timing.originalDeadlineObservedAtMs)} · ${timing.originalDeadlinePhase??'unavailable'}`:'unavailable'],

@@ -1153,7 +1153,9 @@ impl HeaterController {
             self.update_hold_transition(&frame, measured_temp_c);
         }
         self.update_coast_state(&frame, measured_temp_c, previous_measured_temp_c);
-        let duty_percent = self.calculate_duty_percent(&frame);
+        let entered_approach = previous_phase == HeaterControlPhase::Warmup
+            && self.phase == HeaterControlPhase::Approach;
+        let duty_percent = self.calculate_duty_percent(&frame, entered_approach);
         let predictive_coast_active = self.hold_coast_active
             || (self.phase == HeaterControlPhase::Approach && approach_predictive_coast_ready);
         let model_approach_active =
@@ -1278,7 +1280,11 @@ impl HeaterController {
         }
     }
 
-    fn calculate_duty_percent(&mut self, frame: &ThermalControlFrame) -> u8 {
+    fn calculate_duty_percent(
+        &mut self,
+        frame: &ThermalControlFrame,
+        entered_approach: bool,
+    ) -> u8 {
         if self.hold_coast_active
             || frame.hold_guard_error_c <= -frame.control_target.overshoot_cutoff_c
         {
@@ -1289,12 +1295,21 @@ impl HeaterController {
             HeaterControlPhase::Warmup => {
                 percent_from_permille(frame.control_target.warmup_power_permille)
             }
-            HeaterControlPhase::Approach => self.calculate_approach_duty(frame),
+            HeaterControlPhase::Approach => self.calculate_approach_duty(frame, entered_approach),
             HeaterControlPhase::Hold => self.calculate_hold_duty(frame),
         }
     }
 
-    fn calculate_approach_duty(&mut self, frame: &ThermalControlFrame) -> u8 {
+    fn calculate_approach_duty(
+        &mut self,
+        frame: &ThermalControlFrame,
+        entered_approach: bool,
+    ) -> u8 {
+        if entered_approach && self.model_approach_available() {
+            return percent_from_permille(
+                flux_purr_firmware::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE,
+            );
+        }
         if let Some(duty_percent) = self.calculate_model_approach_duty(frame) {
             return duty_percent;
         }
@@ -1331,9 +1346,9 @@ impl HeaterController {
         if !self.model_approach_available() {
             return None;
         }
-        // Reserve energy already in flight before shaping the remaining rise.
-        // The 3A PI has its own rate cap; importing it here would make candidate
-        // damping ineffective and create a constant-power Approach plateau.
+        // First reserve heat in flight, then brake the observed net rise.
+        // Signed correction is essential: loss feedforward must not become
+        // an implicit sustaining floor while the plate still has momentum.
         let horizon_s = frame
             .natural_cooling_delay_s
             .max(f32::from(frame.control_target.approach_lead_ticks))
@@ -1348,12 +1363,17 @@ impl HeaterController {
             remaining_c / horizon_s * ratio.powf(frame.control_target.approach_damping_exponent);
         let loss_mw = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
             input.model,
-            f32::from(input.target_temp_c),
+            input.measured_temp_c,
             input.ambient_temp_c,
         );
-        let requested_mw = loss_mw + input.model.thermal_capacity_mj_per_c * desired_rise_c_per_s;
-        let requested_permille =
-            (requested_mw * 1_000.0 / input.max_power_mw).clamp(100.0, 1_000.0);
+        let braking_rise_c_per_s = desired_rise_c_per_s
+            + frame.natural_cooling_delay_s / horizon_s
+                * (desired_rise_c_per_s - frame.filtered_slope_c_per_profile_tick);
+        let requested_mw = loss_mw + input.model.thermal_capacity_mj_per_c * braking_rise_c_per_s;
+        let requested_permille = (requested_mw * 1_000.0 / input.max_power_mw).clamp(
+            f32::from(flux_purr_firmware::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE),
+            1_000.0,
+        );
         Some(percent_from_permille(requested_permille as u16))
     }
 

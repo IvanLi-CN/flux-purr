@@ -11,6 +11,7 @@ mod tests;
 pub const TRIAL_TIMEOUT_MS: u64 = 180_000;
 pub const TIMING_POLICY_VERSION: u8 = 2;
 pub const MODEL_APPROACH_TIMING_POLICY_VERSION: u8 = 3;
+pub const BRAKING_APPROACH_TIMING_POLICY_VERSION: u8 = 4;
 pub const EXTENSION_FLOOR_PERMILLE: u16 = 100;
 
 pub const fn original_settle_limit_ms(target_c: i16) -> u32 {
@@ -72,19 +73,38 @@ impl ThermalTuningTimingEvidence {
 
     pub fn for_model_point(point: ThermalControlProfilePointConfig) -> Self {
         Self {
-            policy_version: MODEL_APPROACH_TIMING_POLICY_VERSION,
-            effective_approach_floor_permille: EXTENSION_FLOOR_PERMILLE,
-            model_approach_floor_permille: Some(EXTENSION_FLOOR_PERMILLE),
+            policy_version: BRAKING_APPROACH_TIMING_POLICY_VERSION,
+            allowed_approach_floor_permille: crate::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE,
+            effective_approach_floor_permille: crate::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE,
+            model_approach_floor_permille: Some(
+                crate::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE,
+            ),
             ..Self::for_point(point)
         }
     }
 
+    pub fn required_floor_permille(&self) -> Option<u16> {
+        match self.policy_version {
+            TIMING_POLICY_VERSION | MODEL_APPROACH_TIMING_POLICY_VERSION => {
+                Some(EXTENSION_FLOOR_PERMILLE)
+            }
+            BRAKING_APPROACH_TIMING_POLICY_VERSION => {
+                Some(crate::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE)
+            }
+            _ => None,
+        }
+    }
+
     pub fn supported_policy(&self) -> bool {
+        if self.required_floor_permille() != Some(self.allowed_approach_floor_permille) {
+            return false;
+        }
         match self.policy_version {
             TIMING_POLICY_VERSION => self.model_approach_floor_permille.is_none(),
-            MODEL_APPROACH_TIMING_POLICY_VERSION => {
-                self.model_approach_floor_permille == Some(EXTENSION_FLOOR_PERMILLE)
-                    && self.effective_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
+            MODEL_APPROACH_TIMING_POLICY_VERSION | BRAKING_APPROACH_TIMING_POLICY_VERSION => {
+                self.model_approach_floor_permille == Some(self.allowed_approach_floor_permille)
+                    && self.effective_approach_floor_permille
+                        == self.allowed_approach_floor_permille
             }
             _ => false,
         }
@@ -92,16 +112,16 @@ impl ThermalTuningTimingEvidence {
 
     fn floor_eligible(&self) -> bool {
         self.supported_policy()
-            && self.effective_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
-            && (self.policy_version == MODEL_APPROACH_TIMING_POLICY_VERSION
-                || self.configured_approach_floor_permille == EXTENSION_FLOOR_PERMILLE)
+            && self.effective_approach_floor_permille == self.allowed_approach_floor_permille
+            && (self.model_approach_floor_permille.is_some()
+                || self.configured_approach_floor_permille == self.allowed_approach_floor_permille)
     }
 
     pub fn observe_approach_request(&mut self, elapsed_ms: u64, requested_permille: u16) {
         if self.extended_at_ms.is_some() {
             return;
         }
-        if self.floor_eligible() && requested_permille == EXTENSION_FLOOR_PERMILLE {
+        if self.floor_eligible() && requested_permille == self.allowed_approach_floor_permille {
             self.floor_observed_at_ms.get_or_insert(elapsed_ms);
         } else if requested_permille != 0 {
             // A protective coast cannot create floor evidence, but neither
@@ -159,7 +179,6 @@ impl ThermalTuningTimingEvidence {
         self.floor_eligible()
             && matches!(self.original_limit_ms, 5_000 | 10_000)
             && Some(self.extension_limit_ms) == self.original_limit_ms.checked_mul(3)
-            && self.allowed_approach_floor_permille == EXTENSION_FLOOR_PERMILLE
             && self.original_deadline_phase == Some(ThermalTuningPhase::Approach)
             && self.original_deadline_observed_at_ms == self.extended_at_ms
             && matches!(
