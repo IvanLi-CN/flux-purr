@@ -4,7 +4,7 @@
 
 Firmware `0.27.6-dev.7cf64a9` was built from signed commit `7cf64a98ad39b4a51b8210e9e954ecc804d8fb8c`. ELF SHA-256 is `6e6744cccc06f08a94af5c91a6911345abb35a37bced51585650cc6c268b2f4d`; application size is 2,028,240 of 2,097,152 bytes. The repository CLI reported a successful flash with espflash exit code zero on the exact authorized serial port. Separate USB-C off/on commands on the authorized IsolaPurr source exited manual download mode. The original serial path returned, and application identity confirmed the same version and source SHA. Readback confirmed PPS 12V/5A, an active calibrated model, `100w/pps5a`, HOT=LOW and idle zero output.
 
-The explicitly authorized backup bypass created no EEPROM archive; EEPROM health is unknown. No PD code changed and no tuning candidate was saved. Warmup, physical Hold admission, original deadlines, finite conditional caps, stable-window duration and independent confirmation gates retain their existing rules.
+The explicitly authorized backup bypass created no EEPROM archive; EEPROM health was unknown at flash time. No PD code changed and no tuning candidate was saved during flashing. Warmup, physical Hold admission, original deadlines, finite conditional caps, stable-window duration and independent confirmation gates retain their existing rules.
 
 ## 60°C diagnostic evidence
 
@@ -42,8 +42,16 @@ The full-scope 60°C confirmation's final 50 seconds have a time-weighted mean r
 
 The complete event sequence is `0..15233`, with 14,969 samples and no gap. Device digest `53079f1da4aa0f84233eaabd6567ac86fffec948179be3fc30162ba375f8533b` and report trace digest `sha256:16c9f0b1a05272e6be44c83ad6be510853475ab3be4fdc7dbdede79470c83afa` verify. All five file digests verify; self-bundle verification nulls only its own digest while preserving the renderer's numeric spellings.
 
-Candidate `firmware-pps5a-1791288579769-candidate` has hash `sha256:0e948394efffce83b4fadf0edf8f046c0a2f31aea79bd1b9083feadb0efe9280` and a matching RAM preview receipt. The device terminal is `candidate_ready`, review is complete, and every target review passes. Overall `ownerOutcome=failed` remains accurate under the locked report contract because there is no EEPROM save/readback receipt. Persistence requires the separate, identity-bound second confirmation; no candidate was automatically saved.
+Candidate `firmware-pps5a-1791288579769-candidate` has hash `sha256:0e948394efffce83b4fadf0edf8f046c0a2f31aea79bd1b9083feadb0efe9280` and a matching RAM preview receipt. Before explicit save confirmation, the device terminal was `candidate_ready`, review was complete, and every target review passed. The preliminary report's `ownerOutcome=failed` accurately records the missing EEPROM save/readback receipt. No candidate was automatically saved.
 
 Post-run readback confirms idle mode, heater disabled, zero logical/physical output, retained candidate RAM preview and 12V/5A fallback. At 47.84°C the full-voltage fan command remains active. The thermal control-loop computation takes 43ms while the measured update interval is 70ms; those values describe different quantities.
 
-Final readback at 36.28°C confirms zero heater output and the fan released after crossing the terminal 40°C threshold. Uptime advances to 4,527 seconds with no observed restart; the matching candidate remains in RAM awaiting its separate save confirmation.
+Pre-save readback at 36.28°C confirms zero heater output and the fan released after crossing the terminal 40°C threshold. Uptime advances to 4,527 seconds with no observed restart; the matching candidate was retained in RAM awaiting its separate save confirmation.
+
+## Verified EEPROM persistence
+
+The owner's explicit save confirmation authorizes the same complete candidate through the repository CLI `thermal confirm-firmware-save`. The standard sequence rechecks the device candidate identity and trace, seals and acknowledges the candidate, writes the `pps5a` bank, verifies EEPROM readback and acknowledges the save event. The save receipt reports bank revision `310`, `atomic=true` and `readbackVerified=true`; its bank hash equals the candidate hash above.
+
+The final standard report is `firmware/target/hil-braking-approach-saved-bundle/index.html`. Candidate promotion state, device terminal and owner outcome are respectively `saved`, `passed` and `passed`. The original 14,969 samples are unchanged; seal/save append device events through sequence `15235`. Device digest `8e9e1ef04ebff844db9e325527ecdfa7ca727c244754af2e3691f23bd9188670` and report trace digest `sha256:5c06c5efdc8a42b8ae267f1187869d926c35f589f552f16f5e9d13ca1f4b20fb` verify, as do all five file digests and all nine target timing checks.
+
+Independent post-save status reports `thermalControlProfilePreview=false`, `thermalControl.profileSource=saved`, `100w/pps5a` and no persistence fault attention. The active 220°C point matches the candidate's saved parameters. The heater remains disabled with zero logical/physical output at 34.21°C, PPS remains 12V/5A, and uptime advances to 7,285 seconds. This verifies the saved bank and active production source without another heating run or restart.
