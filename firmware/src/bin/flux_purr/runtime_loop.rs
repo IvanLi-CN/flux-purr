@@ -1903,7 +1903,8 @@ fn runtime_confirm_fan_power(
     {
         state.fan_working_power_ticket = None;
     }
-    let admission = fan_working_power_admission(
+    let admission = gate_fan_decision_on_working_power(
+        fan_decision,
         state.pd_port.snapshot(),
         state.fan_command.enabled,
         state.ui_state.heater_enabled,
@@ -1921,8 +1922,6 @@ fn runtime_confirm_fan_power(
                 state.fan_working_power_ticket = Some(ticket);
             }
         }
-        fan_decision.command = FanHardwareCommand::disabled();
-        fan_decision.output_level = FanOutputLevel::Off;
     }
 }
 

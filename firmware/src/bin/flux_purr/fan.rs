@@ -19,15 +19,18 @@ pub(crate) fn fan_working_power_admission(
     heater_enabled: bool,
     manual_pps_enabled: bool,
 ) -> FanWorkingPowerAdmission {
-    let observation = if fan_was_enabled {
-        snapshot.observation
-    } else {
-        snapshot.settled_observation()
-    };
-    if fan_working_contract_confirmed(observation, heater_enabled) {
+    // A fresh active contract already sufficient for cooling remains usable
+    // during negotiation. A pending target never enlarges that envelope.
+    let observation =
+        if fan_was_enabled || fan_working_contract_confirmed(snapshot.observation, false) {
+            snapshot.observation
+        } else {
+            snapshot.settled_observation()
+        };
+    if fan_working_contract_confirmed(observation, heater_enabled || manual_pps_enabled) {
         FanWorkingPowerAdmission::Confirmed
     } else if heater_enabled || manual_pps_enabled {
-        // The heating owner is confirming its supply. A cooling Idle must
+        // The working owner is confirming its supply. A cooling Idle must
         // not supersede that fresh start; keep the fan off until it is ready.
         FanWorkingPowerAdmission::WaitForHeating
     } else {
@@ -38,19 +41,41 @@ pub(crate) fn fan_working_power_admission(
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn fan_working_contract_confirmed(
     observation: Option<PdStatusObservation>,
-    heater_working: bool,
+    working_owner_active: bool,
 ) -> bool {
     observation.is_some_and(|observation| {
         observation.status.pd_active
-            && if heater_working {
+            && if working_owner_active {
                 observation.contract.voltage_mv >= FUSB302B_PPS_MIN_MV
             } else {
-                observation.contract.kind == ContractKind::Fixed
-                    && observation.contract.voltage_mv >= FAN_WORKING_CONTRACT_MV
+                observation.contract.voltage_mv >= FAN_WORKING_CONTRACT_MV
                     && observation.contract.current_ma
                         >= standby_current_for_voltage(observation.contract.voltage_mv)
             }
     })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn gate_fan_decision_on_working_power(
+    decision: &mut FanPolicyDecision,
+    snapshot: PdServiceSnapshot,
+    fan_was_enabled: bool,
+    heater_enabled: bool,
+    manual_pps_enabled: bool,
+) -> FanWorkingPowerAdmission {
+    let admission = fan_working_power_admission(
+        snapshot,
+        fan_was_enabled,
+        heater_enabled,
+        manual_pps_enabled,
+    );
+    if !matches!(decision.state, FanPolicyState::Disabled)
+        && admission != FanWorkingPowerAdmission::Confirmed
+    {
+        decision.command = FanHardwareCommand::disabled();
+        decision.output_level = FanOutputLevel::Off;
+    }
+    admission
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

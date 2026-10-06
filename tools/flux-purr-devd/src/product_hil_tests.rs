@@ -457,6 +457,10 @@ impl ProductObserver<'_> {
         if !heated {
             return Err("no physical heat observed".into());
         }
+        if !prepare {
+            self.verify_cooling_with_retained_manual_pps(heating_mv)
+                .await?;
+        }
         self.stop_hil_heating(prepare).await?;
         let (status, _) = self.read().await?;
         if status["heaterPhysicalOutputPercent"] != 0 {
@@ -479,6 +483,42 @@ impl ProductObserver<'_> {
         if prepare {
             self.preparation("cancel_flash_preparation").await?;
         }
+        Ok(())
+    }
+
+    async fn verify_cooling_with_retained_manual_pps(
+        &mut self,
+        heating_mv: u16,
+    ) -> Result<(), String> {
+        self.runtime(json!({"heaterEnabled": false, "calibration": {"heaterEnabled": false}}))
+            .await?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut cooling_samples = 0;
+        loop {
+            let (status, preparation) = self.read().await?;
+            if status["heaterPhysicalOutputPercent"] != 0
+                || status["manualPpsEnabled"] != true
+                || status["pdContractKind"] != "pps"
+                || status["pdContractMv"] != heating_mv
+                || preparation["pdFixedOrDefault"] != false
+            {
+                return Err("retained manual PPS cooling changed power or replayed heat".into());
+            }
+            cooling_samples += usize::from(status["fanEnabled"] == true);
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        if cooling_samples < 4 {
+            return Err("confirmed manual PPS blocked post-heat cooling".into());
+        }
+        record(
+            self.file,
+            self.started,
+            "retainedManualPpsCoolingPassed",
+            json!(cooling_samples),
+        );
         Ok(())
     }
 

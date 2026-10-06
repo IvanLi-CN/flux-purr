@@ -1283,12 +1283,134 @@ fn fan_start_waits_for_heating_and_does_not_preempt_its_working_request() {
     );
     assert_eq!(
         fan_working_power_admission(adjusting, false, true, false),
-        FanWorkingPowerAdmission::WaitForHeating
+        FanWorkingPowerAdmission::Confirmed
     );
     assert_eq!(
         fan_working_power_admission(pending, false, false, false),
         FanWorkingPowerAdmission::RequestCooling
     );
+}
+
+#[test]
+fn confirmed_manual_pps_preserves_post_heat_and_forced_fan_commands() {
+    let (mut policy, source) = standby_policy_for_heater_start();
+    assert!(
+        policy
+            .request_contract(PdContractRequest::pps(12_000, 3_000).unwrap())
+            .is_some()
+    );
+    for phase in [
+        SinkPhase::WaitingForAccept,
+        SinkPhase::WaitingForPsRdy,
+        SinkPhase::Ready,
+    ] {
+        assert_eq!(policy.phase(), phase);
+        let snapshot = PdServiceSnapshot {
+            observation: fusb302b_contract_observation(
+                phase,
+                policy.active_contract(),
+                FUSB302B_STATUS0_VBUSOK,
+                source,
+            ),
+            transition_pending: phase != SinkPhase::Ready,
+            service_available: true,
+            ..PdServiceSnapshot::unavailable()
+        };
+        for mut decision in manual_pps_cooling_decisions() {
+            let wanted = decision.command;
+            let admission =
+                gate_fan_decision_on_working_power(&mut decision, snapshot, false, false, true);
+            if phase == SinkPhase::Ready {
+                assert_eq!(admission, FanWorkingPowerAdmission::Confirmed);
+                assert_eq!(decision.command, wanted);
+                assert!(decision.command.enabled);
+            } else {
+                assert_eq!(admission, FanWorkingPowerAdmission::WaitForHeating);
+                assert!(!decision.command.enabled);
+                assert_eq!(decision.output_level, FanOutputLevel::Off);
+            }
+        }
+        if phase == SinkPhase::WaitingForAccept {
+            policy.on_control_message(3, 2);
+        } else if phase == SinkPhase::WaitingForPsRdy {
+            policy.on_control_message(6, 3);
+        }
+    }
+}
+
+fn manual_pps_cooling_decisions() -> [FanPolicyDecision; 3] {
+    let post_heat = fan_policy_decision_with_modes(
+        55,
+        1_000,
+        false,
+        true,
+        PostHeatCoolingMode::Normal,
+        HeatingFanGuardMode::Off,
+        (FanPolicyState::Disabled, false),
+    );
+    let forced = |temp| {
+        let state = overtemp_forced_fan_state(temp, true).unwrap();
+        let command = state.command(1_000);
+        FanPolicyDecision {
+            state,
+            command,
+            display_state: FanDisplayState::Safe,
+            source: FanPolicySource::Safety,
+            output_level: fan_output_level_for_command(command),
+        }
+    };
+    [post_heat, forced(220), forced(50)]
+}
+
+#[test]
+fn fan_only_retains_fresh_pps_during_transition_but_rejects_stale_or_standby_power() {
+    let (mut policy, source) = standby_policy_for_heater_start();
+    let standby = PdServiceSnapshot {
+        observation: fusb302b_contract_observation(
+            policy.phase(),
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            source,
+        ),
+        service_available: true,
+        published_at_ms: 1_000,
+        ..PdServiceSnapshot::unavailable()
+    };
+    let mut decision = manual_pps_cooling_decisions()[0];
+    assert_eq!(
+        gate_fan_decision_on_working_power(&mut decision, standby, false, false, false),
+        FanWorkingPowerAdmission::RequestCooling
+    );
+    assert!(!decision.command.enabled);
+    assert!(
+        policy
+            .request_contract(PdContractRequest::pps(12_000, 3_000).unwrap())
+            .is_some()
+    );
+    policy.on_control_message(3, 2);
+    policy.on_control_message(6, 3);
+    let working = PdServiceSnapshot {
+        observation: fusb302b_contract_observation(
+            policy.phase(),
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            source,
+        ),
+        transition_pending: true,
+        ..standby
+    };
+    let mut decision = manual_pps_cooling_decisions()[0];
+    assert_eq!(
+        gate_fan_decision_on_working_power(&mut decision, working, false, false, false),
+        FanWorkingPowerAdmission::Confirmed
+    );
+    assert!(decision.command.enabled);
+    let expired = working.with_fresh_observation(1_001 + PD_SNAPSHOT_MAX_AGE_MS);
+    assert_eq!(
+        gate_fan_decision_on_working_power(&mut decision, expired, true, false, false),
+        FanWorkingPowerAdmission::RequestCooling
+    );
+    assert!(!decision.command.enabled);
 }
 
 #[test]
@@ -12399,7 +12521,7 @@ fn terminal_disarm_requires_protocol_confirmed_fixed_power() {
 }
 
 #[test]
-fn cooling_waits_for_working_fixed_power_and_preserves_heating_power() {
+fn cooling_waits_for_working_power_and_retains_confirmed_pps() {
     let observation = |kind, mv, ma| PdStatusObservation {
         status_raw: FUSB302B_STATUS0_VBUSOK,
         status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
@@ -12413,7 +12535,7 @@ fn cooling_waits_for_working_fixed_power_and_preserves_heating_power() {
         Some(observation(ContractKind::Fixed, 5_000, 1_000)),
         false
     ));
-    assert!(!fan_working_contract_confirmed(
+    assert!(fan_working_contract_confirmed(
         Some(observation(ContractKind::Pps, 12_000, 3_000)),
         false
     ));
