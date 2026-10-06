@@ -34,8 +34,8 @@ must not be silently inserted into the normal host flash path.
   does not prove that an earlier PPS contract has disappeared.
 - Normal post-heat cooling continues until temperature is at most 40°C and
   then for another 30 seconds. Safety-forced cooling can keep the fan running.
-- The external 3V3 rail and FUSB302B VDD depend on VBUS. Full product load and
-  ROM-write stability at Fixed 5V require separately authorized HIL evidence.
+- Full product load and ROM-write stability at Fixed 5V require separately
+  authorized HIL evidence.
 
 ## Decision
 
@@ -179,6 +179,10 @@ product claims for the original device configuration.
 - Firmware tests cover complete idle versus zero-duty/HOLD, pending output
   intent, PPS-to-Fixed timing, low-current Fixed selection, and work-supply
   confirmation before heater or fan enable.
+- A targeted selection regression verifies the lowest adequate higher Fixed
+  fallback when advertised 5V capability is insufficient. This case is accepted
+  through the regression; an unavailable physical source configuration is
+  recorded as a hardware coverage limit rather than a product-HIL blocker.
 - Device protocol tests cover idempotent `prepare_flash`, status snapshots,
   cancellation, queued-request rejection, cooling, stale PPS prevention, and
   the three applied fields. Fixed selection, readiness, and preparation-disarm
@@ -187,9 +191,12 @@ product claims for the original device configuration.
   EEPROM backup boundaries, the paired backup bypass, ROM diagnostics, and
   the absence of host preparation commands, timeout arguments, or automatic
   preparation requests.
-- Separately authorized HIL covers the full product load at Fixed 5V, higher
-  Fixed fallback, retained CC/Rd through MCU reset, cooling followed by PPS
-  descent, and an actual ROM write. It does not write VIN calibration or require
-  an ADC calibration step. Final runtime restoration must retain the preferred
-  Fixed contract under the advertised source capabilities. No MCU operation is
-  authorized by this ADR itself.
+- Separately authorized HIL covers display/Wi-Fi load at Fixed 5V,
+  cooling followed by PPS descent, and three actual product
+  writes with normal EEPROM backup. It includes at least 15 seconds in ROM
+  before writing while the external source continues to supply Fixed 5V.
+  Evidence consists of device identity, protocol state, applied outputs, source
+  protocol/VBUS telemetry, and backup/write logs. It does not write VIN
+  calibration or require an ADC calibration step. Final runtime restoration
+  must retain the preferred Fixed contract under the advertised source
+  capabilities. No MCU operation is authorized by this ADR itself.
