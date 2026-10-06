@@ -6,6 +6,13 @@
 - Lifecycle: active.
 - Raw maintenance retains pending automatic-idle power tickets until confirmation or a five-second caller timeout. EEPROM writes begin only after confirmation; failed or expired requests retain the maintenance lock. Focused regressions cover delayed confirmation, explicit rejection and timeout boundaries.
 
+## Hardware Evidence
+
+- Firmware `0.27.6-dev.71edd81` completed the repository CLI EEPROM erase operation and readback verification of all 8192 erased bytes. The flashed ELF SHA-256 is `aa38fb2a117abfd1ffcaf6ca72c6a791f40cc533d73e58d5d3ef9cbefcb9e940`; no EEPROM backup was created, as explicitly authorized.
+- A cold start confirmed missing thermal model, empty heater curve, inactive saved tuning profile, and empty user ADC calibration samples. A fresh protected heating/natural-cooling calibration then persisted transaction `1346525729` with 102 ordered samples and a bound heater curve. Natural-cooling samples have zero heater duty; all 172 captured runtime observations have the fan disabled.
+- Install-status readback retains `commissioningRequired=true`, `sensorState=ready` and `heaterLocked=true`. Setup completion currently requires two user ADC samples on each channel, even when valid factory eFuse calibration is active. The firmware tuner therefore rejected startup as `thermal_model_unavailable` before collecting any tuning samples. EEPROM maintenance and fresh thermal calibration are verified; tuning from a fully erased EEPROM is not yet qualified.
+- Local private evidence is retained under `firmware/target/hil-calibration-only/`. Its calibration-only seed and provenance use the fresh transaction rather than a historical tuning profile.
+
 ## Implementation Coverage
 
 - `firmware/src/memory.rs` owns the FPR2 header, domain models, fixed layout, TLV codec, CRC validation, and legacy FPM1 decode compatibility.
