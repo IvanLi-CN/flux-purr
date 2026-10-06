@@ -26,8 +26,7 @@ confirmation and a fresh status observation.
 - Private `PD_SERVICE_STATE` semantic state and non-lossy terminal reports,
   carrying one `TicketOutcome` per accepted ticket.
 - `PD_SERVICE_SNAPSHOT` with observation, capabilities, controller kind,
-  service availability, stale-VIN guard state, pending operation, and
-  publication time.
+  service availability, and publication time.
 - `PD_HEATER_PERMIT` only while a fresh status observation confirms the active
   contract and VBUSOK. The last confirmed contract remains available during a
   pending renegotiation unless a failure invalidates it.
@@ -75,8 +74,10 @@ A confirmed active contract plus a fresh hardware status read is required
 before heat is permitted. During renegotiation that confirmed contract remains
 separate from the requested contract until the new one is confirmed. An
 I2C-busy turn publishes no observation, revokes the physical permit, and does
-not count as a PD heartbeat. Stale-contract handling latches the interlock and
-clears the observation. Source loss, reset, timeout, transport fault, or
+not count as a PD heartbeat. An expired snapshot revokes heater permission.
+VIN measurements do not enter this service and cannot invalidate Fixed or PPS
+contracts; normal PPS current-limit voltage reduction is not a contract-loss
+event. Source loss, reset, timeout, transport fault, or
 invalidated capabilities clears the active/requested contract and requires a
 new heater request; no failed request is replayed automatically.
 

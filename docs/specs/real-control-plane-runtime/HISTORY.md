@@ -12,6 +12,32 @@
 
 - 热模型校准曾采用 source-independent 的双锚点流程。该历史记录保留用于解释 `0x36/0x37`；当前实现改用单次瞬态轨迹，旧记录仅可解码，不迁移为 active，也不解锁加热。
 
+## USB host absence and framing recovery
+
+- `ed24191c462f64cd3346132e0a3980a61b43884f` retained a terminal
+  transport fault after a recovery marker deadline to prevent request intake
+  before JSONL resynchronization. With no host reading deferred persistence
+  diagnostics, both the original frame and the marker could expire; subsequent
+  connections then had no path back to request intake despite a running MCU.
+- Recovery retains the marker offset across host absence and continues bounded
+  non-blocking packet steps until the marker completes. Ordinary response
+  deadlines, mutation request history, and the prohibition on intake before
+  resynchronization remain active. The regression exercises a partially sent
+  marker, host absence beyond two deadlines, and one complete marker after the
+  host returns without duplicated bytes.
+
+
+- The Serial/JTAG HAL's `flush_tx_nb` writes `WR_DONE` on every call. Repeating
+  it after a short packet was acknowledged can submit a new empty packet rather
+  than observe completion. A register-behavior regression reproduced repeated
+  submissions and passed after separating one-time submission from read-only
+  completion polling for responses and recovery markers.
+- Removing the terminal marker timeout alone did not pass the physical
+  same-port reconnect HIL. Ten Wi-Fi on/off cycles passed, but reconnect after
+  host absence still timed out. Clearing macOS `HUPCL` also failed the minimal
+  reconnect control, and the original termios settings were restored. These
+  observations do not establish physical acceptance of the corrected writer.
+
 ## 2026-08-25
 
 - Live Web Serial 恢复曾沿用全局 `devd` 自动轮询；daemon 不可达时，这条直连路由会被错误带入 `live-devd-unavailable` 诊断上下文。路由现在先依据当前请求或已记住的 transport 隔离 discovery：Web Serial 保留原身份路由并等待 operator 的显式连接动作，未指定 transport 与 Bridge 继续使用既有 devd 行为。这样未完成 Web Serial identity probe 的浏览器状态不会升级为另一种传输，也不会把 daemon 占位伪装成目标设备。
@@ -261,3 +287,15 @@
 - Browser Web Serial 的成功状态会结算先前的同通道失败反馈；“最近操作”不再能在已连接 target 旁保留过期的 `Web Serial unavailable`，也不会替换其它通道或运行操作的反馈。
 - Web Serial 成功 probe 在 transport 层立即保存最小身份，而不是等待页面的后续 effect；已记忆通道在页面重挂载后仍与同一设备的 LAN/Bridge 通道合并。DEVD bootstrap/unavailable 不是控制目标，不会再向无关页面写入租约重连反馈。
 - DEVD 设备列表刷新失败时，保留的不可用占位曾与旧的模拟 target ID 一起返回，使 live 页面误回退到添加设备页。占位现作为只读诊断当前目标保持 Dashboard 上下文；它持续禁用写入，且不会进入设备卡片或连接方式列表。
+
+
+## Short-packet reconnect evidence
+
+The writer with one-time short-packet submission passed the same-port product
+reconnect control after 25 seconds with no host descriptors: uptime advanced
+from 63 to 91 seconds and the Device remained on Fixed 5V with heat and fan off.
+The VM-built source-equivalent ELF also completed normal Developer flash with
+an 8192-byte private EEPROM archive. Candidate manifests, failed controls,
+normal-write results and final acceptance runs are retained under
+`target/usb-host-recovery-20261006/`; acceptance is bound to the candidate card,
+not inferred from these earlier observations.

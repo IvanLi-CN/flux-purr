@@ -1,9 +1,15 @@
 use super::*;
+
+#[cfg(test)]
+#[path = "../product_flash_hil_tests.rs"]
+mod product_flash_hil;
+#[cfg(target_os = "macos")]
+use flux_purr_devd::serial::open_raw_usb_serial_jtag_port;
 use flux_purr_devd::serial::{
     SerialPortProcessLock, UsbSerialIdentity, serial_port_usb_identity,
     serial_port_usb_identity_matches,
 };
-use std::io::Read;
+use std::io::{Read, Write};
 
 const DIRECT_SERIAL_LOCK_TIMEOUT: Duration = Duration::from_secs(180);
 const DIRECT_ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
@@ -542,12 +548,6 @@ fn direct_flash_with_program_inner_guarded(
     }
     let _serial_lock = acquire_direct_serial_lock(&args.port)?;
     ensure_direct_usb_identity(&args.port, usb_identity)?;
-    if !args.skip_backup && rom_probe(&args.port, usb_identity) {
-        return Err(
-            "EEPROM backup preflight blocked: the Device is in ESP32-S3 ROM download mode and cannot serve the application EEPROM snapshot protocol. To proceed intentionally without a backup, use --skip-backup --confirm NO_EEPROM_BACKUP; firmware was not written."
-                .into(),
-        );
-    }
     let backup_path = if args.skip_backup {
         None
     } else {
@@ -995,10 +995,21 @@ pub(crate) fn read_eeprom_snapshot(
     port: &str,
     expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    match read_eeprom_snapshot_protocol(port, expected_usb_identity) {
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
+    let mut serial = open_snapshot_serial(port)?;
+    ensure_direct_usb_identity(port, expected_usb_identity)?;
+    // Finish a partial request left by a prior serial client without changing
+    // termios or resetting the target. Request IDs discard its response.
+    serial.write_all(b"\n")?;
+    match read_eeprom_snapshot_protocol_from_io(&mut *serial, port, expected_usb_identity) {
         Ok(snapshot) => Ok(snapshot),
         Err(error) if snapshot_protocol_compatibility_fallback(error.as_ref()) => {
-            read_legacy_eeprom_snapshot(port, expected_usb_identity)
+            read_legacy_eeprom_snapshot_from_io(
+                &mut *serial,
+                port,
+                expected_usb_identity,
+                &mut StdInstant::now,
+            )
         }
         Err(error) => Err(error),
     }
@@ -1010,24 +1021,24 @@ pub(crate) fn snapshot_protocol_compatibility_fallback(error: &dyn std::error::E
         .contains("none matched the EEPROM snapshot request")
 }
 
-pub(crate) fn read_eeprom_snapshot_protocol(
+fn read_eeprom_snapshot_protocol_from_io<S: Read + Write + ?Sized>(
+    serial: &mut S,
     port: &str,
     expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    const SNAPSHOT_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+    const SNAPSHOT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
     ensure_direct_usb_identity(port, expected_usb_identity)?;
-    let mut serial = serialport::new(port, 115_200)
-        .timeout(Duration::from_secs(2))
-        .open()?;
-    ensure_direct_usb_identity(port, expected_usb_identity)?;
-    let deadline = StdInstant::now() + SNAPSHOT_SESSION_TIMEOUT;
     let session_id = format!("snapshot-{}", current_unix_millis());
     let open =
         json!({"op":"eeprom_snapshot_open","requestId":session_id,"capacity":8192,"chunkMax":32});
     ensure_direct_usb_identity(port, expected_usb_identity)?;
-    write_snapshot_request(&mut *serial, &open)?;
+    write_snapshot_request(serial, &open)?;
     ensure_direct_usb_identity(port, expected_usb_identity)?;
-    let open_response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
+    let open_response = read_snapshot_response(
+        serial,
+        &session_id,
+        StdInstant::now() + SNAPSHOT_RESPONSE_TIMEOUT,
+    )?;
     if open_response.get("capacity").and_then(Value::as_u64) != Some(8192)
         || open_response.get("chunkMax").and_then(Value::as_u64) != Some(32)
     {
@@ -1037,11 +1048,15 @@ pub(crate) fn read_eeprom_snapshot_protocol(
     for offset in (0..8192_u32).step_by(32) {
         ensure_direct_usb_identity(port, expected_usb_identity)?;
         write_snapshot_request(
-            &mut *serial,
+            serial,
             &json!({"op":"eeprom_snapshot_read","requestId":session_id,"offset":offset,"length":32}),
         )?;
         ensure_direct_usb_identity(port, expected_usb_identity)?;
-        let response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
+        let response = read_snapshot_response(
+            serial,
+            &session_id,
+            StdInstant::now() + SNAPSHOT_RESPONSE_TIMEOUT,
+        )?;
         if response.get("offset").and_then(Value::as_u64) != Some(u64::from(offset)) {
             return Err("snapshot response returned an unexpected offset".into());
         }
@@ -1063,28 +1078,33 @@ pub(crate) fn read_eeprom_snapshot_protocol(
     let digest = format!("sha256:{:x}", Sha256::digest(&snapshot));
     ensure_direct_usb_identity(port, expected_usb_identity)?;
     write_snapshot_request(
-        &mut *serial,
+        serial,
         &json!({"op":"eeprom_snapshot_close","requestId":session_id,"sha256":digest}),
     )?;
     ensure_direct_usb_identity(port, expected_usb_identity)?;
-    let response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
+    let response = read_snapshot_response(
+        serial,
+        &session_id,
+        StdInstant::now() + SNAPSHOT_RESPONSE_TIMEOUT,
+    )?;
     if response.get("sha256").and_then(Value::as_str) != Some(digest.as_str()) {
         return Err("EEPROM snapshot hash verification failed".into());
     }
     Ok(snapshot)
 }
 
-pub(crate) fn read_legacy_eeprom_snapshot(
+pub(crate) fn read_legacy_eeprom_snapshot_from_io<S, C>(
+    serial: &mut S,
     port: &str,
     expected_usb_identity: Option<&UsbSerialIdentity>,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    const LEGACY_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+    now: &mut C,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>
+where
+    S: Read + Write + ?Sized,
+    C: FnMut() -> StdInstant,
+{
+    const LEGACY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
     ensure_direct_usb_identity(port, expected_usb_identity)?;
-    let mut serial = serialport::new(port, 115_200)
-        .timeout(Duration::from_secs(2))
-        .open()?;
-    ensure_direct_usb_identity(port, expected_usb_identity)?;
-    let deadline = StdInstant::now() + LEGACY_SESSION_TIMEOUT;
     let session_id = format!("eeprom-legacy-{}", current_unix_millis());
     let mut image = Vec::with_capacity(EEPROM_CAPACITY_BYTES);
 
@@ -1098,9 +1118,10 @@ pub(crate) fn read_legacy_eeprom_snapshot(
             "length": length,
         });
         ensure_direct_usb_identity(port, expected_usb_identity)?;
-        write_snapshot_request(&mut *serial, &request)?;
+        write_snapshot_request(serial, &request)?;
         ensure_direct_usb_identity(port, expected_usb_identity)?;
-        let response = read_snapshot_response(&mut *serial, &session_id, deadline)?;
+        let deadline = now() + LEGACY_RESPONSE_TIMEOUT;
+        let response = read_snapshot_response_with_clock(serial, &session_id, deadline, now)?;
         let bytes = response
             .get("result")
             .and_then(|result| result.get("eeprom_bytes"))
@@ -1125,13 +1146,32 @@ pub(crate) fn read_legacy_eeprom_snapshot(
     Ok(image)
 }
 
-pub(crate) fn write_snapshot_request(
-    serial: &mut dyn serialport::SerialPort,
+pub(crate) fn write_snapshot_request<S: Write + ?Sized>(
+    serial: &mut S,
     value: &Value,
 ) -> io::Result<()> {
     serial.write_all(serde_json::to_string(value).unwrap().as_bytes())?;
     serial.write_all(b"\n")?;
     serial.flush()
+}
+
+trait SnapshotSerial: Read + Write {}
+
+impl<T: Read + Write> SnapshotSerial for T {}
+
+fn open_snapshot_serial(
+    port: &str,
+) -> Result<Box<dyn SnapshotSerial>, Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(target_os = "macos")]
+    if port.starts_with("/dev/cu.usbmodem") {
+        return Ok(Box::new(open_raw_usb_serial_jtag_port(port)?));
+    }
+
+    Ok(Box::new(
+        serialport::new(port, 115_200)
+            .timeout(Duration::from_secs(2))
+            .open()?,
+    ))
 }
 
 #[derive(Debug, Default)]
@@ -1231,14 +1271,27 @@ pub(crate) fn read_snapshot_response<R: Read + ?Sized>(
     request_id: &str,
     deadline: StdInstant,
 ) -> io::Result<Value> {
+    read_snapshot_response_with_clock(serial, request_id, deadline, &mut StdInstant::now)
+}
+
+fn read_snapshot_response_with_clock<R, C>(
+    serial: &mut R,
+    request_id: &str,
+    deadline: StdInstant,
+    now: &mut C,
+) -> io::Result<Value>
+where
+    R: Read + ?Sized,
+    C: FnMut() -> StdInstant,
+{
     let mut observation = SnapshotResponseObservation::default();
     loop {
-        if StdInstant::now() >= deadline {
+        if now() >= deadline {
             return Err(snapshot_timeout_error(&observation));
         }
         let mut bytes = Vec::new();
         loop {
-            if StdInstant::now() >= deadline {
+            if now() >= deadline {
                 return Err(snapshot_timeout_error(&observation));
             }
             let mut byte = [0_u8; 1];
@@ -1246,7 +1299,20 @@ pub(crate) fn read_snapshot_response<R: Read + ?Sized>(
                 Ok(1) if byte[0] == b'\n' => break,
                 Ok(1) => push_snapshot_response_byte(&mut bytes, byte[0])?,
                 Ok(_) => continue,
-                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) && now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) =>
+                {
                     return Err(snapshot_timeout_error(&observation));
                 }
                 Err(error) => return Err(error),
@@ -1255,24 +1321,31 @@ pub(crate) fn read_snapshot_response<R: Read + ?Sized>(
         if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
             observation.nonempty_lines = observation.nonempty_lines.saturating_add(1);
         }
-        let value = match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) => {
-                observation.json_lines = observation.json_lines.saturating_add(1);
-                value
+        // Firmware boot/log output can share a line with a JSONL frame. Match
+        // the correlated object, as the devd response decoder does, rather
+        // than treating its surrounding text as an absent application.
+        for (offset, byte) in bytes.iter().enumerate() {
+            if *byte != b'{' {
+                continue;
             }
-            Err(_) => continue,
-        };
-        if value.get("requestId").and_then(Value::as_str) != Some(request_id) {
-            continue;
+            let mut frames =
+                serde_json::Deserializer::from_slice(&bytes[offset..]).into_iter::<Value>();
+            let Some(Ok(value)) = frames.next() else {
+                continue;
+            };
+            observation.json_lines = observation.json_lines.saturating_add(1);
+            if value.get("requestId").and_then(Value::as_str) != Some(request_id) {
+                continue;
+            }
+            if value.get("ok").and_then(Value::as_bool) != Some(true) {
+                let error_code = value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                return Err(snapshot_rejection_error(error_code));
+            }
+            return Ok(value);
         }
-        if value.get("ok").and_then(Value::as_bool) != Some(true) {
-            let error_code = value
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            return Err(snapshot_rejection_error(error_code));
-        }
-        return Ok(value);
     }
 }
 

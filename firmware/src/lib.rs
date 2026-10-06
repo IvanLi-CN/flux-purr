@@ -3,6 +3,7 @@
 extern crate alloc;
 
 pub mod adapters;
+pub mod async_start;
 pub mod board;
 pub mod buzzer;
 #[cfg(feature = "buzzer-test")]

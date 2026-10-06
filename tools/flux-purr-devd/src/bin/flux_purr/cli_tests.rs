@@ -1,4 +1,5 @@
 use super::*;
+
 use flux_purr_devd::serial::UsbSerialIdentity;
 use std::collections::VecDeque;
 use std::sync::{
@@ -5866,7 +5867,7 @@ fn direct_flash_archives_before_invoking_espflash() {
         Ok(vec![0xa5; developer_backup::EEPROM_SNAPSHOT_BYTES])
     }
     fn fixture_rom_probe(_port: &str, _expected: Option<&UsbSerialIdentity>) -> bool {
-        false
+        panic!("a responsive application must be backed up before any espflash probe")
     }
 
     let directory = tempfile::tempdir().unwrap();
@@ -5963,6 +5964,104 @@ fn direct_flash_blocks_espflash_when_backup_directory_is_unavailable() {
 
     assert!(!error.to_string().is_empty());
     assert!(!calls.exists());
+}
+
+#[test]
+fn legacy_eeprom_backup_accepts_a_responsive_transfer_longer_than_thirty_seconds() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct SlowEepromSerial {
+        request: Vec<u8>,
+        response: VecDeque<u8>,
+        elapsed: Rc<Cell<Duration>>,
+        response_started: bool,
+        next_offset: u64,
+    }
+    impl SlowEepromSerial {
+        fn accept_byte(&mut self, byte: u8) {
+            if byte != b'\n' {
+                self.request.push(byte);
+                return;
+            }
+            let request: Value = serde_json::from_slice(&self.request).unwrap();
+            assert_eq!(request["type"], "eeprom_maintenance");
+            assert_eq!(request["op"], "read");
+            assert_eq!(request["offset"], self.next_offset);
+            assert_eq!(request["length"], EEPROM_CHUNK_BYTES);
+            self.next_offset += EEPROM_CHUNK_BYTES as u64;
+            let mut response = serde_json::to_vec(&json!({
+                "requestId": request["requestId"],
+                "ok": true,
+                "result": { "eeprom_bytes": vec![0xa5; EEPROM_CHUNK_BYTES] },
+            }))
+            .unwrap();
+            response.push(b'\n');
+            self.response.extend(response);
+            self.response_started = false;
+            self.request.clear();
+        }
+    }
+    impl Write for SlowEepromSerial {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            for byte in bytes {
+                self.accept_byte(*byte);
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Read for SlowEepromSerial {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            if !self.response_started {
+                self.elapsed
+                    .set(self.elapsed.get() + Duration::from_millis(500));
+                self.response_started = true;
+            }
+            bytes[0] = self
+                .response
+                .pop_front()
+                .expect("every request gets a response");
+            Ok(1)
+        }
+    }
+
+    let elapsed = Rc::new(Cell::new(Duration::ZERO));
+    let mut serial = SlowEepromSerial {
+        request: Vec::new(),
+        response: VecDeque::new(),
+        elapsed: elapsed.clone(),
+        response_started: false,
+        next_offset: 0,
+    };
+    let started = StdInstant::now();
+    let image =
+        read_legacy_eeprom_snapshot_from_io(&mut serial, "/dev/cu.fixture", None, &mut || {
+            started + elapsed.get()
+        })
+        .unwrap();
+
+    assert_eq!(image, vec![0xa5; EEPROM_CAPACITY_BYTES]);
+    assert_eq!(elapsed.get(), Duration::from_secs(128));
+    assert_eq!(serial.next_offset, EEPROM_CAPACITY_BYTES as u64);
+}
+
+#[test]
+fn eeprom_snapshot_matches_a_response_beside_serial_logs_and_stale_frames() {
+    let mut serial = SnapshotFixtureReader::from_bytes(
+        b"partial boot log {\"ok\":true,\"requestId\":\"stale\"}{\"ok\":true,\"requestId\":\"snapshot-test\",\"capacity\":8192,\"chunkMax\":32} trailing log\n",
+    );
+    let response = read_snapshot_response(
+        &mut serial,
+        "snapshot-test",
+        StdInstant::now() + Duration::from_millis(100),
+    )
+    .unwrap();
+    assert_eq!(response["capacity"], 8192);
+    assert_eq!(response["chunkMax"], 32);
 }
 
 #[test]

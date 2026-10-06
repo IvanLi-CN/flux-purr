@@ -167,6 +167,28 @@ fn pd_service_does_not_feed_control_elapsed_time_into_protocol_deadlines() {
 }
 
 #[test]
+fn runtime_pd_snapshot_refreshes_after_display_consumes_a_notification() {
+    let runtime_loop = include_str!("runtime_loop.rs");
+    let snapshot = runtime_loop
+        .split("pub(crate) fn runtime_apply_pd_snapshot")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("pub(crate) async fn runtime_process_usb_snapshot_line")
+                .next()
+        })
+        .unwrap();
+    let refresh = snapshot
+        .find("state.power_state_subscription.try_get()")
+        .unwrap();
+    let observation = snapshot
+        .find("power_state_observation(power_state)")
+        .unwrap();
+    assert!(refresh < observation);
+    assert!(snapshot[refresh..observation].contains("state.power_state = latest"));
+}
+
+#[test]
 fn pd_service_is_owned_by_an_independent_normal_task() {
     let source = RUNTIME_IMPLEMENTATION;
     let support = include_str!("support.rs");
@@ -296,7 +318,7 @@ fn pd_i2c_timeout_stays_short_while_transport_recovery_is_rate_limited() {
 }
 
 #[test]
-fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
+fn fusb302b_heater_observation_retains_confirmed_contract_during_negotiation() {
     let contract = Contract::observed(ContractKind::Pps, 20_000, 3_000);
 
     assert!(fusb302b_status_confirms_active_contract(
@@ -304,12 +326,12 @@ fn fusb302b_heater_observation_requires_ready_contract_and_vbus() {
         contract,
         FUSB302B_STATUS0_VBUSOK,
     ));
-    assert!(!fusb302b_status_confirms_active_contract(
+    assert!(fusb302b_status_confirms_active_contract(
         SinkPhase::WaitingForPsRdy,
         contract,
         FUSB302B_STATUS0_VBUSOK,
     ));
-    assert!(!fusb302b_status_confirms_active_contract(
+    assert!(fusb302b_status_confirms_active_contract(
         SinkPhase::WaitingForAccept,
         contract,
         FUSB302B_STATUS0_VBUSOK,
@@ -459,7 +481,7 @@ fn terminal_disarm_does_not_block_runtime_on_a_pd_ticket() {
         .nth(1)
         .and_then(|source| {
             source
-                .split("pub(crate) fn terminal_idle_voltage_confirmed")
+                .split("pub(crate) fn terminal_idle_contract_confirmed")
                 .next()
         })
         .expect("terminal disarm helper must remain present");
@@ -469,7 +491,7 @@ fn terminal_disarm_does_not_block_runtime_on_a_pd_ticket() {
         "runtime-loop disarm must poll ticket completion instead of awaiting the PD actor"
     );
     assert!(
-        disarm.contains("try_take_ticket"),
+        eeprom.contains("pd_port.try_take_ticket(ticket)"),
         "runtime-loop disarm must use the non-blocking ticket facade"
     );
     assert!(
@@ -585,9 +607,10 @@ fn fusb302b_received_resets_do_not_request_cc_reinitialization() {
 #[test]
 fn fusb302b_pps_transport_uses_pd30_revision() {
     assert!(RUNTIME_IMPLEMENTATION.contains(
-        "pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {\n    PhyConfig {\n        pd_revision: PdRevision::Rev30,"
+        "pub(crate) const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {\n    PhyConfig {"
     ));
-    assert!(!RUNTIME_IMPLEMENTATION.contains("pd_revision: PdRevision::Rev20"));
+    assert!(RUNTIME_IMPLEMENTATION.contains("pd_revision: PdRevision::Rev30"));
+    assert!(!RUNTIME_IMPLEMENTATION.contains("PdHeaderRevision"));
 }
 
 #[test]
@@ -651,61 +674,37 @@ fn fusb302b_vbus_restore_requires_a_bounded_confirmation_window() {
 }
 
 #[test]
-fn stale_pd_contract_requires_continuous_measured_vin_deficit() {
-    let contract = Contract::observed(ContractKind::Pps, 12_000, 5_000);
-    let observation = PdStatusObservation {
-        status_raw: 1 << 3,
-        status: Status::from_register(1 << 3),
-        current_raw: 0,
-        current_ma: contract.current_ma,
-        contract_voltage_mv: Some(contract.voltage_mv),
-        contract,
-    };
-    let mut guard = PdContractVinGuard::default();
+fn vin_sampling_has_no_pd_or_heater_authority() {
+    let boot = include_str!("boot.rs");
+    let runtime = include_str!("runtime_loop.rs");
+    let initial_sample = boot
+        .split("async fn initialize_initial_vin")
+        .nth(1)
+        .and_then(|source| source.split("fn initialize_safety").next())
+        .expect("initial VIN sampler must remain present");
+    let runtime_sample = runtime
+        .split("async fn runtime_read_heater_sensors")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("async fn runtime_process_frontpanel_input")
+                .next()
+        })
+        .expect("runtime sensor sampler must remain present");
 
-    assert!(!guard.observe(Some(observation), Some(5_000), 1_000, false));
-    assert!(!guard.observe(Some(observation), Some(5_000), 1_099, false));
-    assert!(guard.observe(Some(observation), Some(5_000), 1_100, false));
-    assert!(!guard.observe(Some(observation), Some(11_000), 1_101, false));
-    assert!(!guard.observe(Some(observation), Some(5_000), 1_200, false));
-    assert!(guard.observe(Some(observation), Some(5_000), 1_300, false));
-}
-
-#[test]
-fn stale_pd_contract_does_not_infer_loss_without_a_vin_sample() {
-    let contract = Contract::observed(ContractKind::Fixed, 20_000, 3_000);
-    let observation = PdStatusObservation {
-        status_raw: 1 << 3,
-        status: Status::from_register(1 << 3),
-        current_raw: 0,
-        current_ma: contract.current_ma,
-        contract_voltage_mv: Some(contract.voltage_mv),
-        contract,
-    };
-    let mut guard = PdContractVinGuard::default();
-
-    assert!(!guard.observe(Some(observation), None, 2_000, false));
-    assert!(!guard.observe(Some(observation), None, 2_500, false));
-    assert!(!guard.observe(None, Some(5_000), 3_000, false));
-}
-
-#[test]
-fn stale_pd_contract_guard_waits_out_pd_request_settling() {
-    let contract = Contract::observed(ContractKind::Pps, 20_000, 3_000);
-    let observation = PdStatusObservation {
-        status_raw: 1 << 3,
-        status: Status::from_register(1 << 3),
-        current_raw: 0,
-        current_ma: contract.current_ma,
-        contract_voltage_mv: Some(contract.voltage_mv),
-        contract,
-    };
-    let mut guard = PdContractVinGuard::default();
-
-    assert!(!guard.observe(Some(observation), Some(5_000), 4_000, true));
-    assert!(!guard.observe(Some(observation), Some(5_000), 4_500, true));
-    assert!(!guard.observe(Some(observation), Some(5_000), 4_599, false));
-    assert!(guard.observe(Some(observation), Some(5_000), 4_699, false));
+    for sampler in [initial_sample, runtime_sample] {
+        for authority in [
+            "pd_port",
+            "pd_contract_ready",
+            "last_pd_observation",
+            "heater_pwm",
+        ] {
+            assert!(
+                !sampler.contains(authority),
+                "VIN sampling must not access PD or heater authority: {authority}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -999,7 +998,7 @@ fn fusb302b_idle_restore_requires_an_apdo_that_covers_twelve_volts() {
 }
 
 #[test]
-fn automatic_idle_restore_never_confirms_a_fixed_twenty_volt_contract() {
+fn automatic_idle_restore_requires_a_confirmed_fixed_contract() {
     let observation = |voltage_mv| PdStatusObservation {
         status_raw: FUSB302B_STATUS0_VBUSOK,
         status: Status::from_register(FUSB302B_STATUS0_VBUSOK),
@@ -1013,7 +1012,7 @@ fn automatic_idle_restore_never_confirms_a_fixed_twenty_volt_contract() {
         observation(12_000),
         None
     ));
-    assert!(!automatic_idle_contract_is_confirmed(
+    assert!(automatic_idle_contract_is_confirmed(
         observation(20_000),
         None
     ));
@@ -1038,6 +1037,654 @@ fn automatic_idle_restore_rejects_a_low_current_twelve_volt_contract() {
         observation(ContractKind::Fixed),
         None
     ));
+}
+
+fn complete_idle_input() -> CompleteIdleInput {
+    CompleteIdleInput {
+        heater_enabled: false,
+        physical_duty_percent: 0,
+        manual_pps: ManualPpsState::default(),
+        calibration: CalibrationRuntimeState::default(),
+        fan_state: FanPolicyState::Disabled,
+        fan_enabled: false,
+        fan_power_pending: false,
+    }
+}
+
+#[test]
+fn complete_idle_excludes_armed_zero_pwm_pulse_gaps_and_pending_work() {
+    assert!(complete_idle_power_allowed(complete_idle_input()));
+    let mut armed = complete_idle_input();
+    armed.heater_enabled = true;
+    assert!(!complete_idle_power_allowed(armed));
+    let mut physical = complete_idle_input();
+    physical.physical_duty_percent = 1;
+    assert!(!complete_idle_power_allowed(physical));
+    let mut manual = complete_idle_input();
+    manual.manual_pps.enabled = true;
+    assert!(!complete_idle_power_allowed(manual));
+    let mut calibration = complete_idle_input();
+    calibration.calibration.mode = CalibrationMode::HeaterCurve;
+    assert!(!complete_idle_power_allowed(calibration));
+    let mut job = complete_idle_input();
+    job.calibration.job.status = CalibrationJobStatus::Running;
+    assert!(!complete_idle_power_allowed(job));
+    let mut disarm = complete_idle_input();
+    disarm.calibration.immediate_heater_disarm_pending = true;
+    assert!(!complete_idle_power_allowed(disarm));
+    let mut pulse = complete_idle_input();
+    pulse.fan_state = FanPolicyState::HeatingGuardPulse {
+        duty_percent: 20,
+        pwm_permille: 500,
+    };
+    assert!(!complete_idle_power_allowed(pulse));
+    let mut fan = complete_idle_input();
+    fan.fan_enabled = true;
+    assert!(!complete_idle_power_allowed(fan));
+    let mut pending_fan = complete_idle_input();
+    pending_fan.fan_power_pending = true;
+    assert!(!complete_idle_power_allowed(pending_fan));
+}
+
+#[test]
+fn ordinary_idle_replaces_cooling_fixed_with_lowest_adequate_fixed() {
+    let observation = |mv, ma| PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: ma,
+        contract_voltage_mv: Some(mv),
+        contract: Contract::observed(ContractKind::Fixed, mv, ma),
+    };
+    let mut source = SourceCapabilitiesView::default();
+    source.fixed[0] = Some((5_000, 1_000));
+    source.fixed[1] = Some((12_000, 3_000));
+    assert!(!preferred_idle_contract_confirmed(
+        Some(observation(12_000, 420)),
+        source
+    ));
+    assert!(preferred_idle_contract_confirmed(
+        Some(observation(5_000, 1_000)),
+        source
+    ));
+    assert!(!preferred_idle_contract_confirmed(None, source));
+    assert!(!working_fixed_contract_confirmed(
+        Some(observation(12_000, 420)),
+        12_000
+    ));
+    assert!(working_fixed_contract_confirmed(
+        Some(observation(12_000, 3_000)),
+        12_000
+    ));
+    source.fixed[0] = Some((5_000, 500));
+    assert!(preferred_idle_contract_confirmed(
+        Some(observation(12_000, 420)),
+        source
+    ));
+    assert!(!preferred_idle_contract_confirmed(
+        Some(observation(5_000, 1_000)),
+        source
+    ));
+}
+
+fn standby_policy_for_heater_start() -> (fusb302b::SinkPolicy, SourceCapabilities) {
+    let pdos = [
+        (100 << 10) | 100,
+        (240 << 10) | 300,
+        pps_source_capability(5_500, 21_000, 3_000),
+    ];
+    let source = SourceCapabilities::from_pdos(&pdos);
+    let mut policy = fusb302b::SinkPolicy::new_standby(12_000, 3_000);
+    assert!(policy.on_source_capabilities(&pdos).is_some());
+    policy.on_control_message(3, 0);
+    policy.on_control_message(6, 1);
+    assert_eq!(policy.active_contract().voltage_mv, 5_000);
+    (policy, source)
+}
+
+#[test]
+fn ordinary_heater_start_survives_fixed_to_pps_accept_and_ps_rdy() {
+    let (mut policy, source) = standby_policy_for_heater_start();
+    let request = PdContractRequest::pps(12_000, 3_000).unwrap();
+    let mut ui = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    ui.heater_enabled = true;
+    let mut calibration = CalibrationRuntimeState::default();
+    let mut manual = ManualPpsState::default();
+    let mut ready = true;
+    assert!(policy.request_contract(request).is_some());
+    for phase in [
+        SinkPhase::WaitingForAccept,
+        SinkPhase::WaitingForPsRdy,
+        SinkPhase::Ready,
+    ] {
+        assert_eq!(policy.phase(), phase);
+        let observation = fusb302b_contract_observation(
+            policy.phase(),
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            source,
+        );
+        let power = PowerState::from_observation(
+            policy.phase(),
+            observation,
+            Some(source),
+            true,
+            Some(request),
+        );
+        reconcile_pd_contract_intent(
+            power.observation(),
+            &mut ready,
+            &mut ui,
+            &mut calibration,
+            &mut manual,
+            false,
+        );
+        ui.heater_enabled = reconcile_runtime_heater_enabled(
+            ui.heater_enabled,
+            calibration,
+            None,
+            false,
+            false,
+            true,
+            ready,
+        );
+        assert!(
+            ui.heater_enabled,
+            "normal {phase:?} discarded the fresh startup intent"
+        );
+        let mut idle = complete_idle_input();
+        idle.heater_enabled = ui.heater_enabled;
+        assert!(
+            !complete_idle_power_allowed(idle),
+            "Idle competed with the working request"
+        );
+        let snapshot = PdServiceSnapshot {
+            observation,
+            transition_pending: phase != SinkPhase::Ready,
+            service_available: true,
+            ..PdServiceSnapshot::unavailable()
+        };
+        let working = working_pps_request_confirmed(snapshot.settled_observation(), request);
+        assert_eq!(
+            working,
+            phase == SinkPhase::Ready,
+            "PWM must wait for the new working contract"
+        );
+        let terminal = pending_terminal_outcome(
+            PdServiceTerminalContext {
+                phase,
+                request_timed_out: false,
+                request_rejected: false,
+                diagnostic_request_timed_out: false,
+                refresh_pending: false,
+                observation,
+                source_capabilities: Some(source),
+            },
+            PendingPdOperation::Contract { request },
+        );
+        assert_eq!(terminal.is_some(), phase == SinkPhase::Ready);
+        if phase == SinkPhase::WaitingForAccept {
+            assert_eq!(observation.unwrap().contract.voltage_mv, 5_000);
+            policy.on_control_message(3, 2);
+        } else if phase == SinkPhase::WaitingForPsRdy {
+            assert_eq!(observation.unwrap().contract.voltage_mv, 5_000);
+            policy.on_control_message(6, 3);
+        }
+    }
+}
+
+#[test]
+fn fan_start_waits_for_heating_and_does_not_preempt_its_working_request() {
+    let (mut policy, source) = standby_policy_for_heater_start();
+    let request = PdContractRequest::pps(12_000, 3_000).unwrap();
+    assert!(policy.request_contract(request).is_some());
+    let pending = PdServiceSnapshot {
+        observation: fusb302b_contract_observation(
+            policy.phase(),
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            source,
+        ),
+        transition_pending: true,
+        service_available: true,
+        ..PdServiceSnapshot::unavailable()
+    };
+    assert_eq!(
+        fan_working_power_admission(pending, false, true, false),
+        FanWorkingPowerAdmission::WaitForHeating
+    );
+    assert_eq!(
+        fan_working_power_admission(pending, false, false, true),
+        FanWorkingPowerAdmission::WaitForHeating
+    );
+    policy.on_control_message(3, 2);
+    policy.on_control_message(6, 3);
+    let working = PdServiceSnapshot {
+        observation: fusb302b_contract_observation(
+            policy.phase(),
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            source,
+        ),
+        transition_pending: false,
+        ..pending
+    };
+    assert_eq!(
+        fan_working_power_admission(working, false, true, false),
+        FanWorkingPowerAdmission::Confirmed
+    );
+    let adjusting = PdServiceSnapshot {
+        transition_pending: true,
+        ..working
+    };
+    assert_eq!(
+        fan_working_power_admission(adjusting, true, true, false),
+        FanWorkingPowerAdmission::Confirmed
+    );
+    assert_eq!(
+        fan_working_power_admission(adjusting, false, true, false),
+        FanWorkingPowerAdmission::Confirmed
+    );
+    assert_eq!(
+        fan_working_power_admission(pending, false, false, false),
+        FanWorkingPowerAdmission::RequestCooling
+    );
+}
+
+#[test]
+fn confirmed_manual_pps_preserves_post_heat_and_forced_fan_commands() {
+    let (mut policy, source) = standby_policy_for_heater_start();
+    assert!(
+        policy
+            .request_contract(PdContractRequest::pps(12_000, 3_000).unwrap())
+            .is_some()
+    );
+    for phase in [
+        SinkPhase::WaitingForAccept,
+        SinkPhase::WaitingForPsRdy,
+        SinkPhase::Ready,
+    ] {
+        assert_eq!(policy.phase(), phase);
+        let snapshot = PdServiceSnapshot {
+            observation: fusb302b_contract_observation(
+                phase,
+                policy.active_contract(),
+                FUSB302B_STATUS0_VBUSOK,
+                source,
+            ),
+            transition_pending: phase != SinkPhase::Ready,
+            service_available: true,
+            ..PdServiceSnapshot::unavailable()
+        };
+        for mut decision in manual_pps_cooling_decisions() {
+            let wanted = decision.command;
+            let admission =
+                gate_fan_decision_on_working_power(&mut decision, snapshot, false, false, true);
+            if phase == SinkPhase::Ready {
+                assert_eq!(admission, FanWorkingPowerAdmission::Confirmed);
+                assert_eq!(decision.command, wanted);
+                assert!(decision.command.enabled);
+            } else {
+                assert_eq!(admission, FanWorkingPowerAdmission::WaitForHeating);
+                assert!(!decision.command.enabled);
+                assert_eq!(decision.output_level, FanOutputLevel::Off);
+            }
+        }
+        if phase == SinkPhase::WaitingForAccept {
+            policy.on_control_message(3, 2);
+        } else if phase == SinkPhase::WaitingForPsRdy {
+            policy.on_control_message(6, 3);
+        }
+    }
+}
+
+fn manual_pps_cooling_decisions() -> [FanPolicyDecision; 3] {
+    let post_heat = fan_policy_decision_with_modes(
+        55,
+        1_000,
+        false,
+        true,
+        PostHeatCoolingMode::Normal,
+        HeatingFanGuardMode::Off,
+        (FanPolicyState::Disabled, false),
+    );
+    let forced = |temp| {
+        let state = overtemp_forced_fan_state(temp, true).unwrap();
+        let command = state.command(1_000);
+        FanPolicyDecision {
+            state,
+            command,
+            display_state: FanDisplayState::Safe,
+            source: FanPolicySource::Safety,
+            output_level: fan_output_level_for_command(command),
+        }
+    };
+    [post_heat, forced(220), forced(50)]
+}
+
+#[test]
+fn fan_only_retains_fresh_pps_during_transition_but_rejects_stale_or_standby_power() {
+    let (mut policy, source) = standby_policy_for_heater_start();
+    let standby = PdServiceSnapshot {
+        observation: fusb302b_contract_observation(
+            policy.phase(),
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            source,
+        ),
+        service_available: true,
+        published_at_ms: 1_000,
+        ..PdServiceSnapshot::unavailable()
+    };
+    let mut decision = manual_pps_cooling_decisions()[0];
+    assert_eq!(
+        gate_fan_decision_on_working_power(&mut decision, standby, false, false, false),
+        FanWorkingPowerAdmission::RequestCooling
+    );
+    assert!(!decision.command.enabled);
+    assert!(
+        policy
+            .request_contract(PdContractRequest::pps(12_000, 3_000).unwrap())
+            .is_some()
+    );
+    policy.on_control_message(3, 2);
+    policy.on_control_message(6, 3);
+    let working = PdServiceSnapshot {
+        observation: fusb302b_contract_observation(
+            policy.phase(),
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            source,
+        ),
+        transition_pending: true,
+        ..standby
+    };
+    let mut decision = manual_pps_cooling_decisions()[0];
+    assert_eq!(
+        gate_fan_decision_on_working_power(&mut decision, working, false, false, false),
+        FanWorkingPowerAdmission::Confirmed
+    );
+    assert!(decision.command.enabled);
+    let expired = working.with_fresh_observation(1_001 + PD_SNAPSHOT_MAX_AGE_MS);
+    assert_eq!(
+        gate_fan_decision_on_working_power(&mut decision, expired, true, false, false),
+        FanWorkingPowerAdmission::RequestCooling
+    );
+    assert!(!decision.command.enabled);
+}
+
+#[test]
+fn ordinary_heater_start_discards_intent_on_real_loss_and_never_replays_it() {
+    let (mut policy, source) = standby_policy_for_heater_start();
+    let request = PdContractRequest::pps(12_000, 3_000).unwrap();
+    assert!(policy.request_contract(request).is_some());
+    let mut ui = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    ui.heater_enabled = true;
+    ui.heater_output_percent = 50;
+    let mut calibration = CalibrationRuntimeState::default();
+    let mut manual = ManualPpsState::default();
+    let mut ready = true;
+    let lost = fusb302b_contract_observation(policy.phase(), policy.active_contract(), 0, source);
+    assert!(lost.is_none());
+    assert!(reconcile_pd_contract_intent(
+        lost,
+        &mut ready,
+        &mut ui,
+        &mut calibration,
+        &mut manual,
+        true
+    ));
+    assert!(!ready && !ui.heater_enabled);
+    assert_eq!(ui.heater_output_percent, 0);
+    policy.on_control_message(3, 2);
+    policy.on_control_message(6, 3);
+    let recovered = fusb302b_contract_observation(
+        policy.phase(),
+        policy.active_contract(),
+        FUSB302B_STATUS0_VBUSOK,
+        source,
+    );
+    reconcile_pd_contract_intent(
+        recovered,
+        &mut ready,
+        &mut ui,
+        &mut calibration,
+        &mut manual,
+        false,
+    );
+    assert!(ready && !ui.heater_enabled);
+    for phase in [
+        SinkPhase::Detached,
+        SinkPhase::Fault,
+        SinkPhase::WaitingForSourceCapabilities,
+    ] {
+        assert!(
+            fusb302b_contract_observation(
+                phase,
+                policy.active_contract(),
+                FUSB302B_STATUS0_VBUSOK,
+                source
+            )
+            .is_none()
+        );
+    }
+    assert!(
+        fusb302b_contract_observation(
+            SinkPhase::Ready,
+            policy.active_contract(),
+            FUSB302B_STATUS0_VBUSOK,
+            SourceCapabilities::empty()
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn flash_preparation_cannot_use_old_fixed_while_a_transition_is_pending() {
+    let (policy, source) = standby_policy_for_heater_start();
+    let observation = fusb302b_contract_observation(
+        policy.phase(),
+        policy.active_contract(),
+        FUSB302B_STATUS0_VBUSOK,
+        source,
+    );
+    let ui = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    let calibration = CalibrationRuntimeState::default();
+    let context = test_usb_runtime_status_context();
+    let snapshot = PdServiceSnapshot {
+        observation,
+        transition_pending: true,
+        service_available: true,
+        ..PdServiceSnapshot::unavailable()
+    };
+    assert!(snapshot.observation.is_some());
+    assert!(!flash_preparation_status(&ui, &calibration, &context, snapshot).pd_fixed_or_default);
+    assert!(
+        flash_preparation_status(
+            &ui,
+            &calibration,
+            &context,
+            PdServiceSnapshot {
+                transition_pending: false,
+                ..snapshot
+            }
+        )
+        .pd_fixed_or_default
+    );
+}
+
+#[test]
+fn ordinary_heater_restart_requires_exact_live_working_pps_confirmation() {
+    let request = PdContractRequest::pps(12_000, 3_000).unwrap();
+    let observation = |kind, mv, ma| PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: ma,
+        contract_voltage_mv: Some(mv),
+        contract: Contract::observed(kind, mv, ma),
+    };
+    assert!(!working_pps_request_confirmed(None, request));
+    assert!(!working_pps_request_confirmed(
+        Some(observation(ContractKind::Fixed, 12_000, 3_000)),
+        request
+    ));
+    assert!(!working_pps_request_confirmed(
+        Some(observation(ContractKind::Pps, 5_000, 3_000)),
+        request
+    ));
+    assert!(!working_pps_request_confirmed(
+        Some(observation(ContractKind::Pps, 12_000, 1_000)),
+        request
+    ));
+    assert!(working_pps_request_confirmed(
+        Some(observation(ContractKind::Pps, 12_000, 3_000)),
+        request
+    ));
+}
+
+#[test]
+fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
+    let mut backend = HeaterPowerBackend::PpsMos {
+        pps_min_mv: 5_500,
+        idle_request_mv: 12_000,
+        pps_max_mv: 21_000,
+        adjustable_max_mv: 21_000,
+        capability_max_ma: 3_000,
+        current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+        current_request_mv: 21_000,
+        settle_until_ms: Some(10_000),
+        next_request_at_ms: 10_000,
+        current_limit_fixed_pwm_active: true,
+        current_limit_fixed_request_confirmed: true,
+        terminal_fixed_pd_disarmed: false,
+    };
+    assert!(automatic_heater_power_is_idle(false, 0, false));
+    assert!(!automatic_heater_power_is_idle(true, 0, false));
+    assert!(!automatic_heater_power_is_idle(false, 0, true));
+    assert!(!automatic_heater_power_is_idle(false, 1, false));
+    reset_automatic_heater_backend(&mut backend);
+    let HeaterPowerBackend::PpsMos {
+        current_mode,
+        settle_until_ms,
+        next_request_at_ms,
+        current_limit_fixed_request_confirmed,
+        ..
+    } = backend
+    else {
+        panic!("PPS capability must be retained for the next heating intent");
+    };
+    assert_eq!(current_mode, None);
+    assert_eq!(settle_until_ms, None);
+    assert_eq!(next_request_at_ms, 0);
+    assert!(!current_limit_fixed_request_confirmed);
+}
+
+#[test]
+fn flash_preparation_readiness_does_not_depend_on_vin_measurements() {
+    let observation = PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 1_000,
+        contract_voltage_mv: Some(5_000),
+        contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
+    };
+
+    let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    let calibration = CalibrationRuntimeState::default();
+    let mut context = test_usb_runtime_status_context();
+    context.last_pd_observation = Some(observation);
+    context.elapsed_ms = 1_500;
+    let snapshot = PdServiceSnapshot {
+        observation: Some(observation),
+        service_available: true,
+        ..PdServiceSnapshot::unavailable()
+    };
+    for vin_mv in [0, 4_000, 5_000, 6_589, 21_121] {
+        context.vin_mv = vin_mv;
+        let readiness = flash_preparation_status(&ui_state, &calibration, &context, snapshot);
+        assert!(!readiness.heating);
+        assert!(!readiness.cooling);
+        assert!(
+            readiness.pd_fixed_or_default,
+            "VIN {vin_mv} changed protocol readiness"
+        );
+    }
+}
+
+#[test]
+fn flash_preparation_waits_for_pending_fan_power_before_reporting_fixed_ready() {
+    let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    let calibration = CalibrationRuntimeState::default();
+    let mut context = test_usb_runtime_status_context();
+    context.last_pd_observation = Some(PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 1_000,
+        contract_voltage_mv: Some(5_000),
+        contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
+    });
+    let snapshot = PdServiceSnapshot {
+        observation: context.last_pd_observation,
+        service_available: true,
+        ..PdServiceSnapshot::unavailable()
+    };
+    assert!(
+        flash_preparation_status(&ui_state, &calibration, &context, snapshot).pd_fixed_or_default
+    );
+
+    context.fan_working_power_pending = true;
+    let pending = flash_preparation_status(&ui_state, &calibration, &context, snapshot);
+    assert!(!pending.heating);
+    assert!(!pending.cooling);
+    assert!(!pending.pd_fixed_or_default);
+
+    context.fan_working_power_pending = false;
+    assert!(
+        flash_preparation_status(&ui_state, &calibration, &context, snapshot).pd_fixed_or_default
+    );
+}
+
+#[test]
+fn flash_preparation_rejects_expired_service_snapshot_even_with_cached_fixed_power() {
+    let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    let calibration = CalibrationRuntimeState::default();
+    let mut context = test_usb_runtime_status_context();
+    context.last_pd_observation = Some(PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 1_000,
+        contract_voltage_mv: Some(5_000),
+        contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
+    });
+    let snapshot = PdServiceSnapshot {
+        observation: context.last_pd_observation,
+        service_available: true,
+        published_at_ms: 1_000,
+        ..PdServiceSnapshot::unavailable()
+    };
+    assert!(
+        flash_preparation_status(
+            &ui_state,
+            &calibration,
+            &context,
+            snapshot.with_fresh_observation(1_000 + PD_SNAPSHOT_MAX_AGE_MS),
+        )
+        .pd_fixed_or_default
+    );
+    let expired = flash_preparation_status(
+        &ui_state,
+        &calibration,
+        &context,
+        snapshot.with_fresh_observation(1_001 + PD_SNAPSHOT_MAX_AGE_MS),
+    );
+    assert!(!expired.heating);
+    assert!(!expired.cooling);
+    assert!(!expired.pd_fixed_or_default);
+    assert!(context.last_pd_observation.is_some());
 }
 
 #[test]
@@ -1095,9 +1742,15 @@ fn fusb302b_identity_requires_stable_family_id_and_readable_status() {
         Some(0),
         Some(0)
     ));
+    assert!(fusb302b_identity_is_stable(
+        Some(0x81),
+        Some(0x81),
+        Some(0),
+        Some(0)
+    ));
     assert!(!fusb302b_identity_is_stable(
-        Some(0x81),
-        Some(0x81),
+        Some(0x71),
+        Some(0x71),
         Some(0),
         Some(0)
     ));
@@ -1488,6 +2141,10 @@ impl UsbControlTx for FakeUsbTx {
         self.pending.clear();
         Ok(())
     }
+
+    fn poll_flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+        Err(UsbTxError::WouldBlock)
+    }
 }
 
 fn test_usb_runtime_status_context() -> UsbRuntimeStatusContext {
@@ -1515,6 +2172,7 @@ fn test_usb_runtime_status_context() -> UsbRuntimeStatusContext {
         manual_pps: ManualPpsState::default(),
         calibration: CalibrationRuntimeState::default(),
         fan_command: FanHardwareCommand::disabled(),
+        fan_working_power_pending: false,
         heater_physical_output_percent: 0,
         current_rtd_fault: None,
         heater_fault_latched: None,
@@ -1557,6 +2215,10 @@ fn usb_write_bytes_stops_on_hard_tx_error() {
         fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
             Ok(())
         }
+
+        fn poll_flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
     }
 
     assert!(!usb_write_bytes_bounded(&mut FailingUsbTx, b"x"));
@@ -1577,6 +2239,10 @@ fn usb_write_bytes_returns_without_retrying_a_busy_endpoint() {
         fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
             Err(UsbTxError::WouldBlock)
         }
+
+        fn poll_flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Err(UsbTxError::WouldBlock)
+        }
     }
 
     let mut tx = DelayedUsbTx { write_attempts: 0 };
@@ -1595,6 +2261,10 @@ fn usb_response_pump_promotes_hard_tx_failure_to_transport_fault() {
         }
 
         fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
+
+        fn poll_flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
             Ok(())
         }
     }
@@ -1634,6 +2304,10 @@ fn usb_recovery_writer_resumes_after_a_partial_hard_failure() {
         fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
             Ok(())
         }
+
+        fn poll_flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
     }
 
     let payload = [b'r'; 96];
@@ -1663,18 +2337,111 @@ fn usb_recovery_writer_resumes_after_a_partial_hard_failure() {
 }
 
 #[test]
-fn usb_recovery_writer_times_out_instead_of_renewing_forever() {
-    let payload = [b'r'; 96];
+fn usb_short_packet_ack_is_polled_without_resubmitting_an_empty_packet() {
+    #[derive(Default)]
+    struct AsyncPacketTx {
+        bytes: std::vec::Vec<u8>,
+        acknowledged: bool,
+        submissions: usize,
+    }
+
+    impl UsbControlTx for AsyncPacketTx {
+        fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
+            self.bytes.push(byte);
+            Ok(())
+        }
+
+        fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            // WR_DONE submits a packet, including a zero-length packet when
+            // the previous packet was already consumed by the USB host.
+            self.submissions += 1;
+            self.acknowledged = false;
+            Err(UsbTxError::WouldBlock)
+        }
+
+        fn poll_flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            if self.acknowledged {
+                Ok(())
+            } else {
+                Err(UsbTxError::WouldBlock)
+            }
+        }
+    }
+
+    for recovery in [false, true] {
+        let payload = b"short response\n";
+        let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+        tx_buf[..payload.len()].copy_from_slice(payload);
+        let mut writer = UsbResponseWriter::new(payload);
+        let mut tx = AsyncPacketTx::default();
+        let pump = if recovery {
+            usb_pump_recovery_response::<AsyncPacketTx>
+        } else {
+            usb_pump_response::<AsyncPacketTx>
+        };
+
+        assert_eq!(
+            pump(&mut tx, &mut writer, &tx_buf, 0),
+            UsbResponsePumpOutcome::Pending
+        );
+        assert_eq!(
+            pump(&mut tx, &mut writer, &tx_buf, 1),
+            UsbResponsePumpOutcome::Pending
+        );
+        assert_eq!(
+            pump(&mut tx, &mut writer, &tx_buf, 2),
+            UsbResponsePumpOutcome::Pending
+        );
+        assert_eq!(
+            tx.submissions, 1,
+            "an absent host must not cause repeated submissions"
+        );
+        tx.acknowledged = true;
+        assert_eq!(
+            pump(&mut tx, &mut writer, &tx_buf, 3),
+            UsbResponsePumpOutcome::Idle
+        );
+        assert_eq!(tx.submissions, 1);
+        assert_eq!(tx.bytes, payload);
+    }
+}
+
+#[test]
+fn usb_recovery_writer_resumes_after_host_absence_exceeds_the_response_deadline() {
+    let payload = USB_TRANSPORT_FAULT_MARKER;
     let mut writer = UsbResponseWriter::default();
     writer.start(payload.len(), 10);
     let mut tx = FakeUsbTx::new(64);
-    let tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+    let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+    tx_buf[..payload.len()].copy_from_slice(payload);
+
+    assert_eq!(
+        usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, 0),
+        UsbResponsePumpOutcome::Pending
+    );
+    assert_eq!(tx.sent, payload[..64]);
+    tx.capacity = 0;
 
     assert_eq!(
         usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, 10),
-        UsbResponsePumpOutcome::Fault
+        UsbResponsePumpOutcome::Pending
     );
+    assert!(!writer.is_complete());
+    assert_eq!(tx.sent, payload[..64]);
+    assert_eq!(
+        usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, 20_000),
+        UsbResponsePumpOutcome::Pending
+    );
+    tx.capacity = 64;
+    for now_ms in 20_001..20_010 {
+        if usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, now_ms)
+            == UsbResponsePumpOutcome::Idle
+        {
+            break;
+        }
+    }
     assert!(writer.is_complete());
+    assert_eq!(tx.sent, payload);
 }
 
 #[test]
@@ -1697,6 +2464,10 @@ fn deferred_persistence_log_enters_recovery_after_a_partial_hard_failure() {
         }
 
         fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
+
+        fn poll_flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
             Ok(())
         }
     }
@@ -1728,6 +2499,10 @@ fn deferred_persistence_log_hard_failure_enters_transport_recovery() {
         }
 
         fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
+
+        fn poll_flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
             Ok(())
         }
     }
@@ -1866,6 +2641,10 @@ fn usb_response_write_uses_nonblocking_transport_calls() {
         }
 
         fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+            Ok(())
+        }
+
+        fn poll_flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
             Ok(())
         }
     }
@@ -2119,6 +2898,39 @@ fn recovery_usb_control_reports_fault_status_when_bringup_fails() {
             );
         }
         other => panic!("unexpected recovery status response: {other:?}"),
+    }
+}
+
+#[test]
+fn flash_preparation_queries_do_not_fabricate_outputs_before_runtime_is_available() {
+    let memory_config = MemoryConfig::default();
+    for (phase, expected_error) in [
+        (UsbRecoveryPhase::BeforePersistentState, "startup_busy"),
+        (UsbRecoveryPhase::RuntimeFault, "hardware_bringup_failed"),
+    ] {
+        for op in [
+            "prepare_flash",
+            "get_flash_preparation",
+            "cancel_flash_preparation",
+        ] {
+            let request = format!(
+                "{{\"type\":\"request\",\"requestId\":\"prep-unavailable\",\"op\":\"{op}\"}}"
+            );
+            let response = usb_recovery_response_for_phase(&request, &memory_config, 0, phase);
+            match response {
+                UsbFrame::Response {
+                    request_id,
+                    ok: false,
+                    result: None,
+                    error: Some(error),
+                } => {
+                    assert_eq!(request_id.as_str(), "prep-unavailable");
+                    assert_eq!(error.code.as_str(), expected_error);
+                    assert!(error.retryable);
+                }
+                other => panic!("unexpected unavailable preparation response: {other:?}"),
+            }
+        }
     }
 }
 
@@ -10515,10 +11327,6 @@ fn fusb302b_protocol_fault_snapshot_codes_map_faults() {
         Some("pd_fusb_pending_request_timeout")
     );
     assert_eq!(
-        fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_STALE_CONTRACT_VIN),
-        Some("pd_fusb_stale_contract_vin")
-    );
-    assert_eq!(
         fusb302b_protocol_fault_code(FUSB302B_PROTOCOL_FAULT_READ_INTERRUPTS_IO),
         Some("pd_fusb_read_interrupts_io_error")
     );
@@ -11221,8 +12029,7 @@ fn runtime_control_input_is_bounded_before_the_next_pd_service() {
     assert!(normalized_source.contains("usb_transport_faulted=true"));
     assert!(normalized_source.contains("usb_start_transport_recovery"));
     assert!(normalized_source.contains("usb_pump_recovery_response"));
-    assert!(normalized_source.contains("usb_recovery_marker_failed=true"));
-    assert!(normalized_source.contains("retainingterminaltransportfault"));
+    assert!(!normalized_source.contains("usb_recovery_marker_failed"));
     assert!(
         !normalized_source.contains("ifusb_pump_response(&mutstate.transport.usb_serial,return")
     );
@@ -11337,11 +12144,9 @@ fn runtime_pd_service_interlocks_stale_heater_output_in_the_high_priority_path()
         .find("async fn runtime_control_heater")
         .expect("runtime loop must retain thermal control scheduling");
 
-    assert!(
-        source.contains("PD_INTERLOCK_LATCHED")
-            && source.contains("PD_INTERLOCK_PENDING")
-            && source.contains("PD_INTERLOCK_PENDING.swap")
-    );
+    let pd_service_source = include_str!("pd_service.rs");
+    assert!(pd_service_source.contains("HeaterPwmGate::force_off()"));
+    assert!(pd_service_source.contains("pd_snapshot_is_fresh"));
     assert!(pd_service < control_tick);
     assert!(source.contains("PD_HEATER_PERMIT"));
 }
@@ -11596,8 +12401,9 @@ fn manual_pps_calibration_releases_terminal_disarm_without_enabling_the_heater()
         terminal_fixed_pd_disarmed: true,
     };
 
-    assert!(release_terminal_fixed_pd_disarm_for_manual_pps(
+    assert!(release_terminal_fixed_pd_disarm_for_new_work(
         &mut backend,
+        false,
         true
     ));
     assert!(matches!(
@@ -11624,8 +12430,9 @@ fn manual_pps_releases_terminal_disarm_after_fixed_pd_fallback() {
         terminal_fixed_pd_disarmed: true,
     };
 
-    assert!(release_terminal_fixed_pd_disarm_for_manual_pps(
+    assert!(release_terminal_fixed_pd_disarm_for_new_work(
         &mut backend,
+        false,
         true
     ));
     assert_eq!(
@@ -11680,17 +12487,100 @@ fn fusb302b_retries_manual_pps_when_the_active_contract_is_fixed() {
 }
 
 #[test]
-fn terminal_disarm_waits_for_measured_idle_voltage() {
-    let fixed_mv = u32::from(FUSB302B_INITIAL_PPS_REQUEST_MV);
-    assert!(!terminal_idle_voltage_confirmed(
-        fixed_mv.saturating_add(9_000)
+fn terminal_disarm_requires_protocol_confirmed_fixed_power() {
+    let observation = PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 1_000,
+        contract_voltage_mv: Some(5_000),
+        contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
+    };
+    assert!(terminal_idle_contract_confirmed(Some(observation)));
+    assert!(!terminal_idle_contract_confirmed(None));
+    assert!(!terminal_idle_contract_confirmed(Some(
+        PdStatusObservation {
+            contract: Contract::observed(ContractKind::Pps, 5_000, 1_000),
+            ..observation
+        }
+    )));
+    assert!(!terminal_idle_contract_confirmed(Some(
+        PdStatusObservation {
+            contract: Contract::observed(ContractKind::Fixed, 5_000, 900),
+            ..observation
+        }
+    )));
+    assert!(terminal_idle_contract_confirmed(Some(
+        PdStatusObservation {
+            contract: Contract::observed(ContractKind::Fixed, 9_000, 560),
+            contract_voltage_mv: Some(9_000),
+            current_ma: 560,
+            ..observation
+        }
+    )));
+}
+
+#[test]
+fn cooling_waits_for_working_power_and_retains_confirmed_pps() {
+    let observation = |kind, mv, ma| PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: ma,
+        contract_voltage_mv: Some(mv),
+        contract: Contract::observed(kind, mv, ma),
+    };
+    assert!(!fan_working_contract_confirmed(None, false));
+    assert!(!fan_working_contract_confirmed(
+        Some(observation(ContractKind::Fixed, 5_000, 1_000)),
+        false
     ));
-    assert!(!terminal_idle_voltage_confirmed(
-        fixed_mv.saturating_add(3_000)
+    assert!(fan_working_contract_confirmed(
+        Some(observation(ContractKind::Pps, 12_000, 3_000)),
+        false
     ));
-    assert!(terminal_idle_voltage_confirmed(
-        fixed_mv.saturating_add(450)
+    assert!(!fan_working_contract_confirmed(
+        Some(observation(ContractKind::Fixed, 12_000, 410)),
+        false
     ));
+    assert!(fan_working_contract_confirmed(
+        Some(observation(ContractKind::Fixed, 12_000, 420)),
+        false
+    ));
+    assert!(fan_working_contract_confirmed(
+        Some(observation(ContractKind::Pps, 21_000, 3_000)),
+        true
+    ));
+    assert!(!fan_working_contract_confirmed(
+        Some(observation(ContractKind::Fixed, 5_000, 1_000)),
+        true
+    ));
+}
+
+#[test]
+fn flash_preparation_cancels_manual_calibration_without_replaying_it() {
+    for mode in [
+        CalibrationMode::VinAdc,
+        CalibrationMode::RtdAdc,
+        CalibrationMode::HeaterCurve,
+    ] {
+        let mut calibration = CalibrationRuntimeState {
+            mode,
+            heater_enabled: true,
+            pps_enabled: true,
+            pps_mv: Some(8_000),
+            pps_ma: Some(3_000),
+            target_adc_mv: Some(1_000),
+            ..CalibrationRuntimeState::default()
+        };
+        let mut manual_pps = ManualPpsState::default();
+        cancel_calibration_for_flash_preparation(&mut calibration, &mut manual_pps);
+        assert_eq!(calibration.mode, CalibrationMode::Off);
+        assert!(!calibration.heater_enabled);
+        assert!(!calibration.pps_enabled);
+        assert!(calibration.target_adc_mv.is_none());
+        assert!(calibration.immediate_heater_disarm_pending);
+    }
 }
 
 #[test]

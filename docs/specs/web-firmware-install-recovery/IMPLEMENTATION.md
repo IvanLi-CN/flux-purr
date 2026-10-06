@@ -10,6 +10,8 @@
 
 ## Coverage / rollout summary
 
+- Layout, bundle, update/recovery identity and persistence contracts are defined in the topic contract files. Hardware evidence remains engine- and candidate-specific; historical readiness checklists do not establish acceptance for a different CLI, firmware or port.
+
 - `flux-purr-bundle` 生成确定性四文件 bundle v2；Rust 与 Browser 校验器共享 schema、布局和 fixtures，发布清单提供无签名 SHA-256 完整性信任。
 - 固件构建身份与 `commissioningRequired` 已持久化，USB JSONL 提供 `get_install_status` 供写后身份、布局和 setup 状态验收。
 - `get_install_status` 的 `setupReason` 在 commissioning 已完成时按合同返回 `null`，devd 以可选字段解码；`GET /api/v1/devices/{deviceId}/install-status` 以 active exact-port lease 代理该只读 USB JSONL 请求。固件维护目标以已授权 native serial candidate 的 devd 能力为准，不因运行时 identity 不声明 `flash` 而在写后丢失目标。

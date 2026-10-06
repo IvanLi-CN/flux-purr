@@ -31,7 +31,6 @@ macro_rules! build_runtime_loop_state {
             last_persisted_memory_config,
             last_pd_observation,
             last_pd_status_log_key,
-            pd_contract_vin_guard,
             active_thermal_settings,
             manual_pps_state,
             last_fusb302b_power_capabilities,
@@ -142,7 +141,6 @@ macro_rules! build_runtime_loop_state {
             #[cfg(feature = "web_serial")]
             usb_recovery_writer: UsbResponseWriter::default(),
             #[cfg(feature = "web_serial")]
-            usb_recovery_marker_failed: false,
             #[cfg(feature = "web_serial")]
             usb_rx_overflowed: false,
             #[cfg(feature = "web_serial")]
@@ -154,6 +152,10 @@ macro_rules! build_runtime_loop_state {
             #[cfg(not(feature = "web_serial"))]
             persistence_log_sink,
         };
+        let fan_working_power_ticket = None;
+        let fan_working_next_attempt_ms = 0;
+        let idle_power_ticket = None;
+        let idle_next_attempt_ms = 0;
         assemble_runtime_loop!(
             runtime_mode,
             display,
@@ -202,7 +204,6 @@ macro_rules! build_runtime_loop_state {
             latest_rtd_raw_adc_max_mv,
             latest_vin_raw_adc_mv,
             latest_vin_mv,
-            pd_contract_vin_guard,
             rtd_pps_transition_guard,
             rtd_control_measurement_guard,
             control_measurement_guarded,
@@ -218,6 +219,10 @@ macro_rules! build_runtime_loop_state {
             fan_policy_state,
             heater_enabled_last_cycle,
             last_fan_command,
+            fan_working_power_ticket,
+            fan_working_next_attempt_ms,
+            idle_power_ticket,
+            idle_next_attempt_ms,
             last_raw_state,
             fan_command,
             buzzer,

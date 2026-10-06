@@ -139,13 +139,11 @@ pub(crate) fn populate_status_contract(
         if matches!(pd_state, PdState::Ready) && !status.pd_performance_guaranteed {
             Some(error_code_string("pd_contract_below_20v"))
         } else if !matches!(pd_state, PdState::Ready) {
-            Some(error_code_string(
-                if context.pd_controller == ControllerKind::Fusb302b {
-                    fusb302b_degraded_reason()
-                } else {
-                    "pd_contract_unavailable"
-                },
-            ))
+            if context.pd_controller == ControllerKind::Fusb302b {
+                Some(error_code_string(fusb302b_degraded_reason()))
+            } else {
+                Some(fusb302b_identity_degraded_reason())
+            }
         } else {
             None
         };
@@ -271,6 +269,38 @@ pub(crate) fn usb_runtime_status(
     context: UsbRuntimeStatusContext,
 ) -> Box<ControlPlaneStatus> {
     usb_runtime_status_with_calibration(ui_state, memory_config, calibration, context)
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+#[allow(dead_code)]
+pub(crate) fn flash_preparation_status(
+    ui_state: &FrontPanelUiState,
+    calibration: &CalibrationRuntimeState,
+    context: &UsbRuntimeStatusContext,
+    pd_snapshot: PdServiceSnapshot,
+) -> FlashPreparationStatus {
+    let heating = ui_state.heater_enabled
+        || context.heater_physical_output_percent != 0
+        || context.manual_pps.enabled
+        || calibration.heater_enabled
+        || calibration.immediate_heater_disarm_pending
+        || calibration.thermal_plant_completion_disarm_pending;
+    let cooling = context.fan_command.enabled;
+    let pd_fixed_or_default = !heating
+        && !cooling
+        && ui_state.fan_policy_source == FanPolicySource::Idle
+        && calibration.mode == CalibrationMode::Off
+        && context.manual_pps.pending_power_ticket.is_none()
+        && !context.fan_working_power_pending
+        && !context.manual_pps.enabled
+        && pd_snapshot
+            .settled_observation()
+            .is_some_and(|observation| automatic_idle_contract_is_confirmed(observation, None));
+    FlashPreparationStatus {
+        heating,
+        cooling,
+        pd_fixed_or_default,
+    }
 }
 
 #[cfg(test)]
@@ -761,6 +791,20 @@ pub(crate) fn disarm_calibration_after_transient_input_change(
         manual_pps.clear();
     }
     calibration.immediate_heater_disarm_pending = true;
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn cancel_calibration_for_flash_preparation(
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+) {
+    calibration_job_canceled(calibration, manual_pps);
+    disarm_calibration_after_transient_input_change(calibration, manual_pps);
+    calibration.mode = CalibrationMode::Off;
+    calibration.target_adc_mv = None;
+    calibration.model_target_temp_c = None;
+    calibration.stable = false;
+    calibration.stability_error_mv = None;
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2717,8 +2761,11 @@ pub(crate) fn usb_pump_recovery_response<T: UsbControlTx>(
         return UsbResponsePumpOutcome::Idle;
     }
     if writer.is_expired(now_ms) {
-        writer.abort();
-        return UsbResponsePumpOutcome::Fault;
+        // A missing host is temporary backpressure, not a terminal runtime
+        // fault. Keep the framing marker's offset so a later reader resumes
+        // the same marker without replaying its prefix or the failed command.
+        // Each pump still performs at most one non-blocking packet.
+        writer.deadline_ms = now_ms.saturating_add(USB_CONTROL_RESPONSE_TIMEOUT_MS);
     }
     match writer.step(tx, tx_buf) {
         Ok(true) => UsbResponsePumpOutcome::Idle,
@@ -2736,6 +2783,7 @@ pub(crate) struct UsbResponseWriter {
     offset: usize,
     packet_len: usize,
     flush_pending: bool,
+    flush_submitted: bool,
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -2752,6 +2800,7 @@ impl UsbResponseWriter {
         self.offset = 0;
         self.packet_len = 0;
         self.flush_pending = false;
+        self.flush_submitted = false;
     }
 
     pub(crate) fn abort(&mut self) {
@@ -2760,6 +2809,7 @@ impl UsbResponseWriter {
         self.offset = 0;
         self.packet_len = 0;
         self.flush_pending = false;
+        self.flush_submitted = false;
     }
 
     pub(crate) fn is_complete(&self) -> bool {
@@ -2782,11 +2832,19 @@ impl UsbResponseWriter {
             return Err(UsbTxError::Other);
         }
         if self.flush_pending {
-            match tx.flush_tx_nb() {
+            let result = if self.flush_submitted {
+                tx.poll_flush_tx_nb()
+            } else {
+                let result = tx.flush_tx_nb();
+                self.flush_submitted = result != Err(UsbTxError::Other);
+                result
+            };
+            match result {
                 Ok(()) => {
                     let complete = self.offset == self.response_len;
                     self.packet_len = 0;
                     self.flush_pending = false;
+                    self.flush_submitted = false;
                     self.response_len = self.response_len.saturating_mul(usize::from(!complete));
                     Ok(complete)
                 }
@@ -2847,6 +2905,8 @@ pub(crate) enum UsbTxError {
 pub(crate) trait UsbControlTx {
     fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError>;
     fn flush_tx_nb(&mut self) -> Result<(), UsbTxError>;
+    /// Poll a submitted packet without submitting another (possibly empty) one.
+    fn poll_flush_tx_nb(&mut self) -> Result<(), UsbTxError>;
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -2863,6 +2923,19 @@ impl UsbControlTx for RawUsbSerialJtag {
             nb::Error::WouldBlock => UsbTxError::WouldBlock,
             nb::Error::Other(_) => UsbTxError::Other,
         })
+    }
+
+    fn poll_flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+        if esp_hal::peripherals::USB_DEVICE::regs()
+            .ep1_conf()
+            .read()
+            .serial_in_ep_data_free()
+            .bit_is_set()
+        {
+            Ok(())
+        } else {
+            Err(UsbTxError::WouldBlock)
+        }
     }
 }
 
@@ -3102,6 +3175,8 @@ pub(crate) fn usb_mutating_request_id(
                     | UsbRequestOp::CloseLanPairingWindow
                     | UsbRequestOp::SetLogLevel
                     | UsbRequestOp::ClearLanPairingToken
+                    | UsbRequestOp::PrepareFlash
+                    | UsbRequestOp::CancelFlashPreparation
             ) =>
         {
             Some(request_id)
@@ -3313,6 +3388,14 @@ pub(crate) fn usb_early_request_response(
             request_id,
             "startup_busy",
             "Runtime status is not available until hardware initialization completes.",
+            true,
+        ),
+        UsbRequestOp::PrepareFlash
+        | UsbRequestOp::GetFlashPreparation
+        | UsbRequestOp::CancelFlashPreparation => usb_error_response_with_retryable(
+            request_id,
+            "startup_busy",
+            "Flash preparation is unavailable until hardware initialization completes.",
             true,
         ),
     }
@@ -3628,6 +3711,14 @@ pub(crate) fn usb_recovery_request_response(
             request_id,
             "hardware_bringup_failed",
             "LAN pairing reset is unavailable because hardware bring-up did not complete.",
+            true,
+        ),
+        UsbRequestOp::PrepareFlash
+        | UsbRequestOp::GetFlashPreparation
+        | UsbRequestOp::CancelFlashPreparation => usb_error_response_with_retryable(
+            request_id,
+            "hardware_bringup_failed",
+            "Flash preparation is unavailable because hardware bring-up did not complete.",
             true,
         ),
     }

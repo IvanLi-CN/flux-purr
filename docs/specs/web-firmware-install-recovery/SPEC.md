@@ -2,7 +2,7 @@
 
 > 当前有效规范以本文为准；实现覆盖与当前状态见 `./IMPLEMENTATION.md`，关键演进原因见 `./HISTORY.md`。
 
-## 背景 / 问题陈述
+## Context and Scope
 
 - Web 控制台现有 Web Serial 仅承载运行时 JSONL，更新页的烧录能力只来自本机 `flux-purr-devd`。
 - DIY 场景中的目标可能是空片、来自其他设备的 ESP32-S3，或运行非 Flux Purr 固件，不能依赖运行时身份完成首次安装或恢复。
@@ -40,7 +40,11 @@
 - 未经主人精确端口授权的任何串口、复位、擦除或烧录操作。
 - GitHub Release 正式发布与 PR merge。
 
-## 需求（Requirements）
+## Requirements
+
+### REQ-WEB-FIRMWARE-INSTALL
+
+The installation engines MUST implement the following shared artifact, target and transaction boundaries.
 
 ### MUST
 
@@ -49,6 +53,8 @@
 - 每段声明实际长度、SHA-256 和 ESP ROM MD5；未知字段、路径穿越、重复、缺段、重叠、越界或 hash 不一致均 fail closed。
 - update 的当前 partition-table SHA-256 必须精确匹配 bundle layout；不存在配置复制或迁移路径。
 - update 仅适用于可验证 Flux Purr runtime；烧录前必须停热并取得有效温度 `<=40°C`。它不得保全、迁移或验证 MCU 内部配置分区。
+- Native devd update/install/recovery 保留 artifact、lease、精确端口、身份、ROM/security 和真实写入检查；它们不自动调用或要求设备 `flash_preparation` capability，也不增加 host preparation timeout。固件的显式 `prepare_flash`、status、cancel 操作属于独立 USB 协议；旧固件或空片不会因为缺少该 capability 被 host 自动判为不兼容。
+- `update` 的既有有效温度 `<=40°C` 检查仍独立执行，且不由设备 preparation 字段或单次 PD 读数替代。
 - install/recovery 允许无 Flux 身份并全擦 MCU internal Flash；不得提出、推断或执行任何 PCB/加热器物理连接确认或限制。
 - `get_install_status` 的 `setupReason` 在 commissioning 已完成时可以为 `null`；devd 必须按可选字段解码。固件维护目标必须保留已授权 native serial candidate，即使运行时 identity 的 capability 列表不包含 `flash`。
 - Secure Boot、Flash Encryption、Secure Download Mode、未知安全响应、非 ESP32-S3 或非 4 MiB Flash 一律阻止。
@@ -117,7 +123,14 @@
 - [`contracts/firmware-release-catalog.schema.json`](./contracts/firmware-release-catalog.schema.json)
 - [`contracts/firmware-integrity-catalog.schema.json`](./contracts/firmware-integrity-catalog.schema.json)
 
-## 验收标准（Acceptance Criteria）
+## Verification
+
+### VER-WEB-FIRMWARE-INSTALL
+
+- Covers: REQ-WEB-FIRMWARE-INSTALL
+- Method: bundle/security/serial fixture suites, Web checks and separately authorized engine-specific HIL.
+- Pass condition: both engines enforce the artifact and transaction boundaries and report the observed write/runtime outcome accurately.
+
 
 - Given 合法与恶意 ZIP fixtures，When 两个 validator 校验，Then 只接受四文件、三段完整、hash 正确、无路径风险且不超过 8 MiB 的 bundle；一般用户 update 还必须命中完整性清单。
 - Given devd 可用或不可用，When 打开固件工作台，Then 默认选择 devd 或回退 Browser，并可在 preflight 前手动切换。
@@ -130,20 +143,6 @@
 - Given Browser 写入后 USB CDC 正在重新枚举或原端口短暂占用，When 运行时验证，Then 只对原授权对象或同一 origin 已授权集合中唯一精确匹配的 `0x303A:0x1001` 对象有界重试，并记录当前重连/请求/读取阶段；Given 匹配存在歧义或总时限耗尽，Then 清理读写锁、关闭端口并返回 `write_complete_unverified`。
 - Given Browser 打开发布版本选择器，When 读取目录并选择版本，Then 只请求同源 `releases-manifest.json` 和清单中的精确 bundle 路径；Given Vite 开发模式中 GitHub 暂时不可用，Then 仍列出已打包和本地产物。
 - Given 任一 Demo 入口（`demo=true`、`uiDemo=firmware-workspace` 或发布 public demo），When 选择发布版本或演示本地包、运行预检并开始更新，Then UI 显示确定性的模拟阶段与事务结果，且没有业务网络请求、devd 请求、跨源资源请求、浏览器串口调用或系统文件选择器。
-
-## 验收清单（Acceptance checklist）
-
-- [x] 核心路径的长期行为已被明确描述。
-- [x] 关键边界/错误场景已被覆盖。
-- [x] 外部合同已拆分并链接。
-- [x] 真机授权边界保持不变。
-
-## 实现前置条件（Definition of Ready）
-
-- [x] ESP32-S3FH4R2 layout、bundle 与状态机冻结。
-- [x] update/recovery 的身份和 persistence 语义冻结。
-- [x] transport 优先级、channel 和 downgrade 选择冻结。
-- [x] devd HIL 已在主人给出的单一精确串口与明确全擦授权下执行；授权不延伸到任何重新枚举的端口。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 

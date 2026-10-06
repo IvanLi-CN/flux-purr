@@ -280,7 +280,7 @@ task remain independent owners of their own service or physical boundary.
   `RefreshCapabilities`; protocol-object selection and exact RDO encoding stay
   private to this service.
 - Publishes: `PD_SERVICE_SNAPSHOT` containing observation, capabilities,
-  controller kind, service availability, stale-VIN guard state, and publication
+  controller kind, service availability, and publication
   time; it also sets or clears `PD_HEATER_PERMIT` and reports terminal ticket
   outcomes.
 - Communication: private command channel capacity `1`, at most one command per
@@ -293,8 +293,8 @@ task remain independent owners of their own service or physical boundary.
   unavailable or stale.
 - Safety: a ready contract plus a fresh hardware status read is required before
   permitting heat; an I2C-busy turn publishes no observation and is not counted
-  as a PD heartbeat; stale-contract handling latches an interlock and clears the
-  observation.
+  as a PD heartbeat; an expired snapshot revokes heater permission. VIN
+  measurements cannot invalidate Fixed/PPS contracts or initiate PD recovery.
 
 ### Shared I2C Bus and Heater PWM Gate
 

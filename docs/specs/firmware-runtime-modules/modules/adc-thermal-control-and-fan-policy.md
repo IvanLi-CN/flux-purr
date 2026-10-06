@@ -32,6 +32,9 @@ control deadline.
 ## Control Authority
 
 Computation only. `runtime_loop` decides when to apply the result.
+VIN acquisition updates measurement state without accessing PD contract state
+or physical heater-control authority. Measured voltage deficits and normal
+PPS current limiting cannot revoke a confirmed contract.
 
 ## Boundary Classification
 

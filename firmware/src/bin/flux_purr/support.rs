@@ -105,8 +105,9 @@ pub(crate) use flux_purr_firmware::adapters::pd::{
 };
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::adapters::pd::{
-    FUSB302B_PPS_MIN_MV, GUARANTEED_HEATER_MIN_MV, MAX_HEATER_CONTRACT_MA, MAX_SOURCE_PDOS,
-    MIN_HEATER_CONTRACT_MA,
+    FUSB302B_FIXED_MAX_MV, FUSB302B_PD_ABSOLUTE_MIN_MV, FUSB302B_PPS_MIN_MV,
+    GUARANTEED_HEATER_MIN_MV, MAX_HEATER_CONTRACT_MA, MAX_SOURCE_PDOS, MIN_HEATER_CONTRACT_MA,
+    standby_current_for_voltage,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::board::s3_frontpanel;
@@ -132,6 +133,8 @@ pub(crate) use flux_purr_firmware::buzzer_test::{
 pub(crate) use flux_purr_firmware::control_plane::BuzzerTestOp;
 #[cfg(any(test, all(target_arch = "xtensa", feature = "web_serial")))]
 pub(crate) use flux_purr_firmware::control_plane::EepromMaintenanceOp;
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) use flux_purr_firmware::control_plane::FlashPreparationStatus;
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 pub(crate) use flux_purr_firmware::control_plane::LanPairingCode;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -1001,7 +1004,7 @@ pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize =
 pub(crate) const USB_CONTROL_TX_PACKET_LEN: usize = 64;
 #[cfg(target_arch = "xtensa")]
 pub(crate) const USB_CONTROL_TX_PACKET_BUDGET: usize = 128;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 // Runtime responses are emitted cooperatively, one USB packet per loop turn.
 // Keep the deadline bounded, but long enough for the largest response buffer
 // to drain without aborting a valid JSONL frame.

@@ -33,7 +33,9 @@ The protocol is a versioned, length-prefixed CBOR stream over the native endpoin
 
 ## Developer Flash Execution
 
-`flash` and `recover` link only the local serial/ROM flashing implementation required for their operation. They do not start devd, open a control socket, create a lease, call HTTP, or accept any endpoint string. `flash` performs only the image-required MCU erase/write work; `recover` is the only command permitted to request an MCU full erase.
+`flash` and `recover` link only the local serial/ROM flashing implementation required for their operation. They do not start devd, open a control socket, create a lease, call HTTP, or accept any endpoint string. `flash` performs only the image-required MCU erase/write work; `recover` is the only command permitted to request an MCU full erase. Both paths retain the artifact, exact-port, identity, confirmation, and documented EEPROM backup boundaries; they do not call the device `flash_preparation` operations.
+
+The firmware-side `prepare_flash`, `get_flash_preparation`, and `cancel_flash_preparation` operations are outside this CLI contract. The CLI has no preparation command, preparation timeout, or `application_unresponsive` bypass.
 
 The Developer backup preflight runs while the application protocol remains available. It finishes before any ROM reset. A board that cannot serve the backup protocol requires the explicit skip confirmation or `recover`; the tool must not silently treat an unavailable EEPROM snapshot as a successful backup.
 

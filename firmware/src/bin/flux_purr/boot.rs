@@ -32,8 +32,6 @@ pub(crate) struct RuntimeTransportState {
     #[cfg(feature = "web_serial")]
     pub(crate) usb_recovery_writer: UsbResponseWriter,
     #[cfg(feature = "web_serial")]
-    pub(crate) usb_recovery_marker_failed: bool,
-    #[cfg(feature = "web_serial")]
     pub(crate) usb_rx_overflowed: bool,
     #[cfg(feature = "web_serial")]
     pub(crate) usb_recent_mutating_request_ids: heapless::Deque<
@@ -97,7 +95,6 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) latest_rtd_raw_adc_max_mv: u16,
     pub(crate) latest_vin_raw_adc_mv: u16,
     pub(crate) latest_vin_mv: u32,
-    pub(crate) pd_contract_vin_guard: PdContractVinGuard,
     pub(crate) rtd_pps_transition_guard: RtdPpsTransitionGuard,
     pub(crate) rtd_control_measurement_guard: RtdControlMeasurementGuard,
     pub(crate) control_measurement_guarded: bool,
@@ -113,6 +110,10 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) fan_policy_state: FanPolicyState,
     pub(crate) heater_enabled_last_cycle: bool,
     pub(crate) last_fan_command: Option<FanHardwareCommand>,
+    pub(crate) fan_working_power_ticket: Option<PowerTicket>,
+    pub(crate) fan_working_next_attempt_ms: u64,
+    pub(crate) idle_power_ticket: Option<PowerTicket>,
+    pub(crate) idle_next_attempt_ms: u64,
     pub(crate) last_raw_state: FrontPanelRawState,
     pub(crate) fan_command: FanHardwareCommand,
     pub(crate) buzzer: BuzzerRuntime,
@@ -199,6 +200,8 @@ pub(crate) struct BootSystem {
     pd_contract_ready: bool,
     buzzer_realtime_spawner: embassy_executor::SendSpawner,
     eeprom_i2c: I2c<'static>,
+    #[cfg(feature = "net_http")]
+    shared_i2c: &'static SharedI2cBus,
     pd_task_i2c: Option<PdI2c<'static>>,
     pd_port: PdPort,
     power_state_subscription: PowerStateSubscription<'static>,
@@ -359,7 +362,6 @@ pub(crate) struct BootRuntimeState {
     last_persisted_memory_config: MemoryConfig,
     last_pd_observation: Option<PdStatusObservation>,
     last_pd_status_log_key: Option<PdStatusLogKey>,
-    pd_contract_vin_guard: PdContractVinGuard,
     active_thermal_settings: ThermalControlProfileSettings,
     manual_pps_state: ManualPpsState,
     last_fusb302b_power_capabilities: Option<ch224q::AdjustablePowerCapabilities>,
@@ -557,7 +559,6 @@ impl BootRuntimeState {
                 memory_commit_due_ms: None,
                 last_pd_observation: None,
                 last_pd_status_log_key: None,
-                pd_contract_vin_guard: PdContractVinGuard::default(),
                 active_thermal_settings: ThermalControlProfileSettings::default(),
                 manual_pps_state: ManualPpsState::default(),
                 last_fusb302b_power_capabilities: None,
@@ -857,22 +858,6 @@ impl BootRuntimeState {
                 "vin initial raw_code={=u16} raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
                 raw_code, raw_adc_mv, corrected_adc_mv, vin_mv,
             );
-            let _ = reconcile_pd_contract_with_vin(
-                &mut self.pd_contract_vin_guard,
-                self.last_pd_observation,
-                Some(vin_mv),
-                PdTimestamp::now().as_millis(),
-                PdContractVinContext {
-                    pd_port: &self.system.pd_port,
-                    last_pd_observation: &mut self.last_pd_observation,
-                    pd_contract_ready: &mut self.system.pd_contract_ready,
-                    ui_state: &mut self.ui_state,
-                    calibration_runtime_state: &mut self.calibration_runtime_state,
-                    manual_pps_state: &mut self.manual_pps_state,
-                    heater_pwm: &mut self.heater_pwm,
-                    last_heater_duty: &mut self.last_heater_duty,
-                },
-            );
         }
         self.adc1 = Some(adc1);
         self.vin_adc_pin = Some(vin_adc_pin);
@@ -1141,14 +1126,25 @@ impl BootRuntimeState {
         let usb_serial = &mut self.system.usb_serial;
         let wifi = self.wifi.take().expect("Wi-Fi token initialized with ADC");
         #[cfg(feature = "web_serial")]
-        let result =
-            flux_purr_firmware::net::spawn(spawner, wifi, &self.memory.memory_config, |stage| {
+        let result = flux_purr_firmware::net::spawn(
+            spawner,
+            wifi,
+            &self.memory.memory_config,
+            self.system.shared_i2c,
+            |stage| {
                 let _ = usb_write_bytes_bounded(usb_serial, stage);
-            })
-            .await;
+            },
+        )
+        .await;
         #[cfg(not(feature = "web_serial"))]
-        let result =
-            flux_purr_firmware::net::spawn(spawner, wifi, &self.memory.memory_config, |_| {}).await;
+        let result = flux_purr_firmware::net::spawn(
+            spawner,
+            wifi,
+            &self.memory.memory_config,
+            self.system.shared_i2c,
+            |_| {},
+        )
+        .await;
         result
     }
 
@@ -1459,6 +1455,8 @@ pub(crate) fn initialize_boot_system(
             pd_contract_ready: false,
             buzzer_realtime_spawner,
             eeprom_i2c,
+            #[cfg(feature = "net_http")]
+            shared_i2c: i2c_bus,
             pd_task_i2c: Some(pd_task_i2c),
             pd_port: PdServiceClient::new(),
             power_state_subscription: PdServiceClient::new()
@@ -1590,7 +1588,7 @@ async fn wait_for_initial_pd_contract(
     while startup_pd_service_should_continue(
         fusb302b_present,
         startup_pd_contract_ready(observation),
-        power_state.available,
+        system.pd_port.snapshot().service_available,
         pd_runtime_elapsed_ms(pd_runtime_started_ms, Instant::now().as_millis()),
     ) {
         match select(

@@ -9,6 +9,9 @@ pub const FUSB302B_PPS_MAX_MV: u16 = FUSB302B_PD_ABSOLUTE_MAX_MV;
 pub const GUARANTEED_HEATER_MIN_MV: u16 = 20_000;
 pub const MIN_HEATER_CONTRACT_MA: u16 = 3_000;
 pub const MAX_HEATER_CONTRACT_MA: u16 = 5_000;
+/// Conservative policy budget for idle and flash-preparation supply.
+pub const STANDBY_POWER_MW: u32 = 5_000;
+pub const STANDBY_CURRENT_STEP_MA: u16 = 10;
 pub const MAX_SOURCE_PDOS: usize = 7;
 pub const PD_FIXED_VOLTAGE_STEP_MV: u16 = 50;
 pub const PD_FIXED_CURRENT_STEP_MA: u16 = 10;
@@ -113,6 +116,22 @@ impl Contract {
 
     pub fn clamp_heater_power_mw(self, requested_mw: u32) -> u32 {
         requested_mw.min(self.power_mw())
+    }
+}
+
+/// Return the smallest 10 mA aligned current that can provide the standby
+/// budget at a fixed voltage.
+pub const fn standby_current_for_voltage(voltage_mv: u16) -> u16 {
+    if voltage_mv == 0 {
+        return MAX_HEATER_CONTRACT_MA;
+    }
+    let required_ma = (STANDBY_POWER_MW * 1_000).div_ceil(voltage_mv as u32);
+    let aligned =
+        required_ma.div_ceil(STANDBY_CURRENT_STEP_MA as u32) * STANDBY_CURRENT_STEP_MA as u32;
+    if aligned > MAX_HEATER_CONTRACT_MA as u32 {
+        MAX_HEATER_CONTRACT_MA
+    } else {
+        aligned as u16
     }
 }
 
@@ -515,6 +534,100 @@ impl SourceCapabilities {
             })
     }
 
+    /// Select the lowest adequate Fixed PDO for idle and flash preparation.
+    /// PPS APDOs are intentionally ignored because the MCU may enter ROM
+    /// download mode immediately after this contract is confirmed.
+    pub fn select_fusb302b_standby_contract(self, requested_mv: u16) -> Option<Contract> {
+        let requested_mv = requested_mv.clamp(FUSB302B_PD_ABSOLUTE_MIN_MV, FUSB302B_FIXED_MAX_MV);
+        self.fixed
+            .into_iter()
+            .flatten()
+            .filter(|pdo| {
+                pdo.voltage_mv >= requested_mv
+                    && pdo.voltage_mv <= FUSB302B_FIXED_MAX_MV
+                    && pdo.max_ma >= standby_current_for_voltage(pdo.voltage_mv)
+            })
+            .map(|pdo| Contract {
+                kind: ContractKind::Fixed,
+                object_position: pdo.object_position,
+                voltage_mv: pdo.voltage_mv,
+                current_ma: standby_current_for_voltage(pdo.voltage_mv),
+            })
+            .min_by_key(|contract| (contract.voltage_mv, contract.current_ma))
+    }
+
+    /// Select a bounded PPS transition contract for idle descent. PPS RDOs
+    /// use 50mA units, so the 10mA standby budget is conservatively represented
+    /// by the largest protocol value that stays within the budget.
+    pub fn select_fusb302b_standby_pps_contract(self, requested_mv: u16) -> Option<Contract> {
+        let requested_mv = requested_mv.clamp(FUSB302B_PPS_MIN_MV, FUSB302B_FIXED_MAX_MV);
+        let requested_ma = standby_current_for_voltage(requested_mv) / PD_PPS_CURRENT_STEP_MA
+            * PD_PPS_CURRENT_STEP_MA;
+        let mut best: Option<(PpsApdo, Contract)> = None;
+        for apdo in self.pps.into_iter().flatten() {
+            if apdo.min_mv > requested_mv || apdo.max_mv < requested_mv {
+                continue;
+            }
+            let current_ma =
+                apdo.max_ma.min(requested_ma) / PD_PPS_CURRENT_STEP_MA * PD_PPS_CURRENT_STEP_MA;
+            if current_ma == 0 {
+                continue;
+            }
+            let candidate = Contract {
+                kind: ContractKind::Pps,
+                object_position: apdo.object_position,
+                voltage_mv: requested_mv,
+                current_ma,
+            };
+            if best.is_none_or(|(current_apdo, current)| {
+                pps_candidate_is_better(
+                    apdo,
+                    candidate.current_ma,
+                    current_apdo,
+                    current.current_ma,
+                )
+            }) {
+                best = Some((apdo, candidate));
+            }
+        }
+        best.map(|(_, contract)| contract)
+    }
+
+    /// Select a bounded standby PPS step on the currently active APDO. The
+    /// requested voltage is clamped to that APDO's legal range; when the APDO
+    /// cannot descend any further, the caller can finish with a Fixed PDO.
+    pub fn select_fusb302b_standby_pps_step(
+        self,
+        active: Contract,
+        requested_mv: u16,
+    ) -> Option<Contract> {
+        if active.kind != ContractKind::Pps {
+            return None;
+        }
+        let apdo = self.pps.into_iter().flatten().find(|apdo| {
+            apdo.object_position == active.object_position
+                && apdo.min_mv <= active.voltage_mv
+                && apdo.max_mv >= active.voltage_mv
+        })?;
+        let voltage_mv = requested_mv.clamp(
+            apdo.min_mv.max(FUSB302B_PPS_MIN_MV),
+            apdo.max_mv.min(FUSB302B_PPS_MAX_MV),
+        );
+        if voltage_mv >= active.voltage_mv {
+            return None;
+        }
+        // Retain the confirmed APDO current envelope throughout the voltage
+        // transition. The 5W standby budget applies to the final Fixed RDO.
+        let current_ma =
+            apdo.max_ma.min(active.current_ma) / PD_PPS_CURRENT_STEP_MA * PD_PPS_CURRENT_STEP_MA;
+        (current_ma > 0).then_some(Contract {
+            kind: ContractKind::Pps,
+            object_position: apdo.object_position,
+            voltage_mv,
+            current_ma,
+        })
+    }
+
     /// Return whether a previously negotiated contract is still represented by
     /// the source capability object at the same position.
     pub fn supports_contract(self, contract: Contract) -> bool {
@@ -771,6 +884,100 @@ mod tests {
     fn rejects_contracts_below_three_amps() {
         let capabilities = SourceCapabilities::from_pdos(&[fixed_pdo(20_000, 2_500)]);
         assert_eq!(capabilities.select_fusb302b_contract(20_000, 5_000), None);
+    }
+
+    #[test]
+    fn standby_current_uses_a_ten_milliamp_aligned_five_watt_budget() {
+        assert_eq!(standby_current_for_voltage(5_000), 1_000);
+        assert_eq!(standby_current_for_voltage(9_000), 560);
+        assert_eq!(standby_current_for_voltage(20_000), 250);
+    }
+
+    #[test]
+    fn standby_selection_prefers_five_volts_and_skips_underpowered_fixed_pdos() {
+        let capabilities = SourceCapabilities::from_pdos(&[
+            fixed_pdo(5_000, 500),
+            fixed_pdo(9_000, 3_000),
+            fixed_pdo(12_000, 3_000),
+        ]);
+        let contract = capabilities
+            .select_fusb302b_standby_contract(5_000)
+            .expect("an adequate fixed fallback");
+        assert_eq!(contract.kind, ContractKind::Fixed);
+        assert_eq!(contract.voltage_mv, 9_000);
+        assert_eq!(contract.current_ma, 560);
+    }
+
+    #[test]
+    fn standby_pps_transition_uses_the_bounded_budget_and_apdo_limit() {
+        let capabilities = SourceCapabilities::from_pdos(&[
+            pps_pdo(5_500, 21_000, 900),
+            pps_pdo(5_500, 21_000, 5_000),
+        ]);
+        let contract = capabilities
+            .select_fusb302b_standby_pps_contract(12_000)
+            .expect("a PPS APDO should cover the descent step");
+        assert_eq!(contract.kind, ContractKind::Pps);
+        assert_eq!(contract.voltage_mv, 12_000);
+        assert_eq!(contract.current_ma, 400);
+        assert!(contract.current_ma.is_multiple_of(PD_PPS_CURRENT_STEP_MA));
+        assert!(contract.power_mw() <= 5_000);
+    }
+
+    #[test]
+    fn standby_pps_step_stops_at_the_active_apdo_floor_before_fixed_fallback() {
+        let capabilities = SourceCapabilities::from_pdos(&[
+            fixed_pdo(5_000, 3_000),
+            pps_pdo(9_000, 20_000, 3_000),
+        ]);
+        let active = Contract {
+            kind: ContractKind::Pps,
+            object_position: 2,
+            voltage_mv: 9_000,
+            current_ma: 3_000,
+        };
+        assert_eq!(
+            capabilities.select_fusb302b_standby_pps_step(active, 8_500),
+            None
+        );
+        let active = Contract {
+            voltage_mv: 20_000,
+            ..active
+        };
+        assert_eq!(
+            capabilities
+                .select_fusb302b_standby_pps_step(active, 8_500)
+                .map(|contract| contract.voltage_mv),
+            Some(9_000)
+        );
+    }
+
+    #[test]
+    fn standby_pps_step_retains_the_confirmed_current_envelope() {
+        let capabilities = SourceCapabilities::from_pdos(&[
+            fixed_pdo(5_000, 3_000),
+            pps_pdo(5_000, 21_000, 3_000),
+        ]);
+        let active = capabilities
+            .select_exact_contract(PdContractRequest::pps(12_000, 3_000).unwrap())
+            .unwrap();
+        let step = capabilities
+            .select_fusb302b_standby_pps_step(active, 11_500)
+            .unwrap();
+        assert_eq!(step.voltage_mv, 11_500);
+        assert_eq!(step.current_ma, 3_000);
+        assert_eq!(step.object_position, active.object_position);
+        let lower = Contract {
+            current_ma: 1_000,
+            ..active
+        };
+        assert_eq!(
+            capabilities
+                .select_fusb302b_standby_pps_step(lower, 11_500)
+                .unwrap()
+                .current_ma,
+            1_000
+        );
     }
 
     #[test]

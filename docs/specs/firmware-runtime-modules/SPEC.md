@@ -44,7 +44,7 @@
 - A replacement command MUST establish a fresh protocol transaction boundary before the PD service sends a new RDO, and stale control responses from the replaced transaction MUST NOT complete the replacement ticket. Application facades MUST submit owner requests through the coordinator rather than reuse a service snapshot ticket or report an active contract as already acquired.
 - A terminal report whose ticket no longer matches the coordinator's in-flight ticket MUST NOT publish its attached state projection. A superseded command still queued in the private service mailbox MUST be discarded without touching PD policy or physical authorization.
 - A capability-refresh ticket MUST remain pending while its capability response has led to an unresolved `Accept`/`PS_RDY` transaction; only a settled protocol state may publish its terminal result. A timed-out refresh MUST publish `TimedOut`, never a success derived from cached capabilities.
-- The documentation MUST distinguish a PD request command from a PD status snapshot and from the heater PWM interlock.
+- The documentation MUST distinguish a PD request command from a PD status snapshot and from the heater PWM interlock. VIN sampling MUST have no PD or physical heater-control authority; neither a measured voltage deficit nor normal PPS current limiting invalidates a confirmed contract.
 - Shared power state MUST distinguish requested and confirmed active contracts, include protocol availability/phase and source capabilities, and describe replay plus event-driven updates without consumer polling.
 - Bounded cross-module transports MUST identify their capacities and loss semantics; ticket terminal results MUST not be coalesced with latest-value state.
 

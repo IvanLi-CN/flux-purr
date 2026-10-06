@@ -2,6 +2,9 @@ use super::*;
 use std::process::ExitStatus;
 use tempfile::tempdir;
 
+#[path = "product_hil_tests.rs"]
+mod product_hil;
+
 #[test]
 fn local_control_endpoint_rejects_network_transports() {
     assert!(validate_local_control_endpoint("http://127.0.0.1:30080").is_err());
@@ -2712,16 +2715,17 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
         inner.devices.insert(native.id.clone(), native);
     }
     let lease = state.lease_device("serial-test").unwrap();
+    let request = |artifact: FirmwareArtifact, dry_run: bool, confirm: Option<&str>| FlashRequest {
+        lease_id: lease.lease_id.clone(),
+        artifact,
+        dry_run,
+        confirm: confirm.map(str::to_owned),
+    };
 
     let without_dry_run = flash_device(
         State(state.clone()),
         AxumPath("serial-test".to_string()),
-        Json(FlashRequest {
-            lease_id: lease.lease_id.clone(),
-            artifact: artifact.clone(),
-            dry_run: false,
-            confirm: None,
-        }),
+        Json(request(artifact.clone(), false, None)),
     )
     .await
     .unwrap_err();
@@ -2731,12 +2735,7 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
     let dry_run = flash_device(
         State(state.clone()),
         AxumPath("serial-test".to_string()),
-        Json(FlashRequest {
-            lease_id: lease.lease_id.clone(),
-            artifact: artifact.clone(),
-            dry_run: true,
-            confirm: None,
-        }),
+        Json(request(artifact.clone(), true, None)),
     )
     .await
     .unwrap()
@@ -2762,12 +2761,7 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
     let changed_without_dry_run = flash_device(
         State(state.clone()),
         AxumPath("serial-test".to_string()),
-        Json(FlashRequest {
-            lease_id: lease.lease_id.clone(),
-            artifact: changed_artifact,
-            dry_run: false,
-            confirm: Some("FLASH".to_string()),
-        }),
+        Json(request(changed_artifact, false, Some("FLASH"))),
     )
     .await
     .unwrap_err();
@@ -2777,12 +2771,7 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
     let without_confirm = flash_device(
         State(state.clone()),
         AxumPath("serial-test".to_string()),
-        Json(FlashRequest {
-            lease_id: lease.lease_id.clone(),
-            artifact: artifact.clone(),
-            dry_run: false,
-            confirm: None,
-        }),
+        Json(request(artifact.clone(), false, None)),
     )
     .await
     .unwrap_err();
@@ -2792,12 +2781,7 @@ async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
     let flash_disabled = flash_device(
         State(state.clone()),
         AxumPath("serial-test".to_string()),
-        Json(FlashRequest {
-            lease_id: lease.lease_id,
-            artifact,
-            dry_run: false,
-            confirm: Some("FLASH".to_string()),
-        }),
+        Json(request(artifact, false, Some("FLASH"))),
     )
     .await
     .unwrap_err();
@@ -3223,6 +3207,25 @@ fn usb_response_decoder_marks_startup_busy_retryable() {
 
     assert_eq!(error.status, StatusCode::BAD_GATEWAY);
     assert!(is_retryable_startup_busy(&error));
+}
+
+#[test]
+fn serial_activity_detection_keeps_legacy_application_frames_alive() {
+    assert!(serial_line_is_application_frame(
+        br#"{"type":"status","requestId":null,"status":{"mode":"idle"}}"#,
+    ));
+    assert!(!serial_line_is_application_frame(
+        br#"{"type":"log","message":"old firmware boot log"}"#,
+    ));
+    assert!(serial_line_is_application_frame(
+        br#"{"requestId":"snapshot-1","capacity":8192,"chunkMax":32}"#,
+    ));
+    assert!(serial_line_is_application_frame(
+        br#"{"error":"legacy firmware error"}"#,
+    ));
+    assert!(!serial_line_is_application_frame(
+        br#"{"type":"request","requestId":"queued","op":"get_identity"}"#,
+    ));
 }
 
 #[test]

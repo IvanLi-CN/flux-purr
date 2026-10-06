@@ -2496,7 +2496,6 @@ pub(crate) struct ThermalPlantDisarmContext<'a, PWM> {
     pub(crate) hold_pps_governor: &'a mut HoldPpsGovernor,
     pub(crate) ui_state: &'a mut FrontPanelUiState,
     pub(crate) last_heater_duty: &'a mut u8,
-    pub(crate) measured_vin_mv: u32,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2517,11 +2516,82 @@ fn store_terminal_disarm_power_ticket(ticket: PowerTicket) {
     });
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) trait TerminalDisarmPowerPort {
+    fn snapshot(&self) -> PdServiceSnapshot;
+    fn restore_idle_contract(&self, cooling_required: bool) -> PdRequestState;
+    fn try_take_ticket(&self, ticket: PowerTicket) -> Option<TicketOutcome>;
+    fn discard_ticket(&self, ticket: PowerTicket);
+}
+
 #[cfg(target_arch = "xtensa")]
-fn clear_terminal_disarm_power_ticket() {
-    TERMINAL_DISARM_POWER_TICKET.lock(|ticket| {
-        *ticket.borrow_mut() = None;
-    });
+impl TerminalDisarmPowerPort for PdPort {
+    fn snapshot(&self) -> PdServiceSnapshot {
+        PdPort::snapshot(self)
+    }
+
+    fn restore_idle_contract(&self, cooling_required: bool) -> PdRequestState {
+        if cooling_required {
+            PdPort::request_cooling_contract(self)
+        } else {
+            PdPort::restore_automatic_idle_contract(self)
+        }
+    }
+
+    fn try_take_ticket(&self, ticket: PowerTicket) -> Option<TicketOutcome> {
+        PdPort::try_take_ticket(self, ticket)
+    }
+
+    fn discard_ticket(&self, ticket: PowerTicket) {
+        PdPort::discard_ticket(self, ticket);
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn reconcile_terminal_disarm_power(
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+    pending_ticket: &mut Option<PowerTicket>,
+    pd_port: &impl TerminalDisarmPowerPort,
+    preparation_active: bool,
+    cooling_required: bool,
+) -> bool {
+    if !calibration.immediate_heater_disarm_pending {
+        if let Some(ticket) = pending_ticket.take() {
+            pd_port.discard_ticket(ticket);
+        }
+        return false;
+    }
+
+    let idle_confirmed = match *pending_ticket {
+        Some(ticket) => match pd_port.try_take_ticket(ticket) {
+            Some(outcome) => {
+                *pending_ticket = None;
+                matches!(outcome, TicketOutcome::Confirmed(_))
+            }
+            None => false,
+        },
+        None => match pd_port.restore_idle_contract(cooling_required) {
+            PdRequestState::Confirmed => true,
+            PdRequestState::Pending(ticket) => {
+                *pending_ticket = Some(ticket);
+                false
+            }
+            PdRequestState::Failed => false,
+        },
+    };
+    if !idle_confirmed
+        || !terminal_idle_contract_confirmed(pd_port.snapshot().settled_observation())
+    {
+        return false;
+    }
+
+    calibration.immediate_heater_disarm_pending = false;
+    if preparation_active {
+        calibration.thermal_plant_completion_disarm_pending = false;
+    }
+    let _ = manual_pps.consume_automatic_restore_pending();
+    true
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2540,10 +2610,17 @@ where
         hold_pps_governor,
         ui_state,
         last_heater_duty,
-        measured_vin_mv,
     } = context;
+    let mut pending_ticket = take_terminal_disarm_power_ticket();
     if !latch_terminal_fixed_pd_disarm(calibration_runtime_state, backend) {
-        clear_terminal_disarm_power_ticket();
+        let _ = reconcile_terminal_disarm_power(
+            calibration_runtime_state,
+            manual_pps,
+            &mut pending_ticket,
+            pd_port,
+            flash_preparation::is_active(),
+            ui_state.fan_policy_source != FanPolicySource::Idle,
+        );
         return false;
     }
 
@@ -2552,44 +2629,23 @@ where
     ui_state.heater_enabled = false;
     ui_state.heater_output_percent = 0;
 
-    let idle_confirmed = match take_terminal_disarm_power_ticket() {
-        Some(ticket) => match pd_port.try_take_ticket(ticket) {
-            Some(TicketOutcome::Confirmed(_)) => true,
-            Some(_) => false,
-            None => {
-                store_terminal_disarm_power_ticket(ticket);
-                false
-            }
-        },
-        None => match pd_port.restore_automatic_idle_contract() {
-            PdRequestState::Confirmed => true,
-            PdRequestState::Pending(ticket) => {
-                store_terminal_disarm_power_ticket(ticket);
-                false
-            }
-            PdRequestState::Failed => false,
-        },
-    };
-    if !idle_confirmed {
-        // Keep both the disarm latch and the PPS backend lock until the
-        // independent PD task restores its automatic idle contract.
-        return true;
+    let _ = reconcile_terminal_disarm_power(
+        calibration_runtime_state,
+        manual_pps,
+        &mut pending_ticket,
+        pd_port,
+        flash_preparation::is_active(),
+        ui_state.fan_policy_source != FanPolicySource::Idle,
+    );
+    if let Some(ticket) = pending_ticket {
+        store_terminal_disarm_power_ticket(ticket);
     }
-
-    if !terminal_idle_voltage_confirmed(measured_vin_mv) {
-        // A source may acknowledge the request before VBUS reaches the idle
-        // voltage. Keep the terminal lock active until VIN confirms it.
-        return true;
-    }
-
-    calibration_runtime_state.immediate_heater_disarm_pending = false;
-    let _ = manual_pps.consume_automatic_restore_pending();
     true
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn terminal_idle_voltage_confirmed(measured_vin_mv: u32) -> bool {
-    measured_vin_mv.abs_diff(u32::from(FUSB302B_INITIAL_PPS_REQUEST_MV)) <= 1_000
+pub(crate) fn terminal_idle_contract_confirmed(observation: Option<PdStatusObservation>) -> bool {
+    observation.is_some_and(|observation| automatic_idle_contract_is_confirmed(observation, None))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2617,11 +2673,12 @@ pub(crate) fn latch_terminal_fixed_pd_disarm(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn release_terminal_fixed_pd_disarm_for_manual_pps(
+pub(crate) fn release_terminal_fixed_pd_disarm_for_new_work(
     backend: &mut HeaterPowerBackend,
+    heater_enabled: bool,
     manual_pps_active: bool,
 ) -> bool {
-    if !manual_pps_active {
+    if !heater_enabled && !manual_pps_active {
         return false;
     }
 
@@ -2637,8 +2694,8 @@ pub(crate) fn release_terminal_fixed_pd_disarm_for_manual_pps(
             idle_request_mv,
             ..
         } if *terminal_fixed_pd_disarmed => {
-            // A new manual PPS request is an explicit, non-heating re-arm. It
-            // may renegotiate the source while the heater output remains at zero.
+            // A fresh heater or manual PPS intent re-arms negotiation. Clearing
+            // this latch does not confirm working power or enable physical PWM.
             *terminal_fixed_pd_disarmed = false;
             *current_mode = None;
             *current_request_mv = *idle_request_mv;
@@ -2653,8 +2710,7 @@ pub(crate) fn release_terminal_fixed_pd_disarm_for_manual_pps(
             fixed_request_confirmed,
             ..
         } if *terminal_fixed_pd_disarmed => {
-            // Leave fallback ready to request fixed PD again if the manual PPS
-            // override is later cleared.
+            // A fresh intent must confirm working Fixed power again.
             *terminal_fixed_pd_disarmed = false;
             *fixed_request_confirmed = false;
             true

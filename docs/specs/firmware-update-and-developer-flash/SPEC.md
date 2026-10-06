@@ -42,6 +42,8 @@
 - After a successful archive write, the system MUST directly delete regular `.fpbk` files in the dedicated directory without reading, decrypting, or migrating their contents. It MUST remove malformed generated `.bin` files and oldest valid generated `.bin` archives until both the archive count is at most `100` and total archive bytes are at most `10 MiB`.
 - Backup permission, durability, or verification failure MUST block `flash` unless the Developer provides both `--skip-backup` and `--confirm NO_EEPROM_BACKUP`. `update` and `recover` MUST never automatically create this archive.
 - The paired bypass MUST skip ROM-mode probing and EEPROM snapshot/archive creation and proceed directly to espflash on the supplied Explicit Serial Port. It MUST NOT require a detected or proven ROM download mode and MUST remain available when application firmware is stopped, incompatible, or lacks the snapshot protocol.
+- Before ROM probing, reset, erase, EEPROM snapshot, or image write, the host MUST complete its artifact, confirmation, exact-port, identity, and EEPROM backup checks. Direct `flash` and `recover` do not require a firmware `flash_preparation` capability and do not poll device preparation state.
+- Firmware MAY expose the explicit `prepare_flash`, `get_flash_preparation`, and `cancel_flash_preparation` operations for device-side or separately authorized callers. Those operations establish and report a device RAM hold, but they are not an automatic host flash admission gate. Missing capability, an old application, or an application timeout does not create a host-side preparation timeout or an automatic `application_unresponsive` classification.
 
 ### REQ-FUDF-005
 
@@ -85,6 +87,12 @@
 - The acceptance suite runs Unix mode checks locally and current-user Windows DACL checks in the Windows DEVD job, including platform-portable fake-flash fixtures.
 - covers: `REQ-FUDF-004`
 - Pass condition: successful normal Developer flash creates a verified raw `8192`-byte `.bin` before espflash; failed permission or backup verification blocks by default; legacy `.fpbk` cleanup does not read contents; the explicit paired bypass is auditable and reaches espflash without a ROM probe or EEPROM snapshot; retention never exceeds either bound; `update` and `recover` create no archive.
+
+### VER-FUDF-007
+
+- Method: fake application serial, clock, EEPROM, ROM, and espflash fixtures.
+- covers: exact-port identity retention, EEPROM backup boundaries, and the separation between host flashing and the optional device preparation protocol.
+- Pass condition: direct host flashing performs the documented artifact/identity/backup checks without issuing a preparation request or applying a preparation timeout; the explicit paired backup bypass remains limited to ROM probing and EEPROM snapshot/archive work.
 
 ### VER-FUDF-005
 

@@ -31,7 +31,7 @@ pub const BUILD_ID_MAX_LEN: usize = 48;
 pub const GIT_SHA_MAX_LEN: usize = 40;
 pub const HOSTNAME_MAX_LEN: usize = 64;
 pub const CAPABILITY_MAX_LEN: usize = 24;
-pub const CAPABILITY_COUNT_MAX: usize = 13;
+pub const CAPABILITY_COUNT_MAX: usize = 16;
 // The bound includes the terminating JSONL newline. Consumers that store only
 // frame content must use USB_LINE_CONTENT_MAX_LEN instead.
 pub const USB_LINE_MAX_LEN: usize = 8 * 1024;
@@ -143,6 +143,7 @@ impl Identity {
         push_str(&mut capabilities, "calibration");
         push_str(&mut capabilities, "thermal_plant_run");
         push_str(&mut capabilities, "install_status");
+        push_str(&mut capabilities, "flash_preparation");
         #[cfg(feature = "web_serial")]
         {
             push_str(&mut capabilities, "usb_jsonl");
@@ -327,6 +328,17 @@ pub struct ControlPlaneStatus {
     pub thermal_plant_model: ThermalPlantRuntimeWire,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
     pub network: NetworkSummary,
+}
+
+/// Snapshot returned by the flash-preparation admission protocol. The fields
+/// describe applied hardware state at the time of the response; an accepted
+/// request alone is not a readiness signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FlashPreparationStatus {
+    pub heating: bool,
+    pub cooling: bool,
+    pub pd_fixed_or_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2585,6 +2597,9 @@ pub enum UsbRequestOp {
     GetHeaterCurve,
     SetLogLevel,
     ClearLanPairingToken,
+    PrepareFlash,
+    GetFlashPreparation,
+    CancelFlashPreparation,
 }
 
 impl UsbRequestOp {
@@ -2604,6 +2619,9 @@ impl UsbRequestOp {
             Self::GetHeaterCurve => "get_heater_curve",
             Self::SetLogLevel => "set_log_level",
             Self::ClearLanPairingToken => "clear_lan_pairing_token",
+            Self::PrepareFlash => "prepare_flash",
+            Self::GetFlashPreparation => "get_flash_preparation",
+            Self::CancelFlashPreparation => "cancel_flash_preparation",
         }
     }
 }
@@ -2664,6 +2682,8 @@ pub enum UsbResponsePayload {
     ThermalPlantRun(ThermalPlantRunSnapshotWire),
     HeaterCurve(HeaterCurveStateWire),
     EepromBytes(Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>),
+    #[serde(rename = "flashPreparation")]
+    FlashPreparation(FlashPreparationStatus),
     Ack,
 }
 
@@ -3150,6 +3170,9 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
         Some("get_heater_curve") => Ok(UsbRequestOp::GetHeaterCurve),
         Some("set_log_level") => Ok(UsbRequestOp::SetLogLevel),
         Some("clear_lan_pairing_token") => Ok(UsbRequestOp::ClearLanPairingToken),
+        Some("prepare_flash") => Ok(UsbRequestOp::PrepareFlash),
+        Some("get_flash_preparation") => Ok(UsbRequestOp::GetFlashPreparation),
+        Some("cancel_flash_preparation") => Ok(UsbRequestOp::CancelFlashPreparation),
         _ => Err(UsbFrameError::MalformedJson),
     }
 }
@@ -4043,6 +4066,49 @@ mod tests {
                 op: UsbRequestOp::GetStatus,
             }
         );
+    }
+
+    #[test]
+    fn parses_flash_preparation_request_operations() {
+        for (op, expected) in [
+            ("prepare_flash", UsbRequestOp::PrepareFlash),
+            ("get_flash_preparation", UsbRequestOp::GetFlashPreparation),
+            (
+                "cancel_flash_preparation",
+                UsbRequestOp::CancelFlashPreparation,
+            ),
+        ] {
+            let line = std::format!(r#"{{"type":"request","requestId":"flash-1","op":"{op}"}}"#);
+            assert_eq!(
+                parse_usb_frame(&line).unwrap(),
+                UsbFrame::Request {
+                    request_id: string("flash-1"),
+                    op: expected,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn flash_preparation_response_round_trips_all_admission_fields() {
+        let frame = UsbFrame::Response {
+            request_id: string("flash-status"),
+            ok: true,
+            result: Some(UsbResponsePayload::FlashPreparation(
+                FlashPreparationStatus {
+                    heating: false,
+                    cooling: false,
+                    pd_fixed_or_default: true,
+                },
+            )),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&frame, &mut out).expect("flash preparation response fits");
+        assert!(json.contains(r#""flashPreparation""#));
+        assert!(json.contains(r#""pdFixedOrDefault":true"#));
+        assert!(!json.contains(r#""pd_fixed_or_default""#));
+        assert_eq!(parse_usb_frame(json).unwrap(), frame);
     }
 
     #[test]

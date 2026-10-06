@@ -1292,6 +1292,37 @@ pub(crate) fn serial_line_finished(
     false
 }
 
+#[cfg(test)]
+pub(crate) fn serial_line_is_application_frame(line: &[u8]) -> bool {
+    for (offset, byte) in line.iter().enumerate() {
+        if *byte != b'{' {
+            continue;
+        }
+        let mut frames = serde_json::Deserializer::from_slice(&line[offset..]).into_iter::<Value>();
+        let Some(Ok(frame)) = frames.next() else {
+            continue;
+        };
+        if frame
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|frame_type| {
+                matches!(frame_type, "response" | "status" | "identity" | "error")
+            })
+        {
+            return true;
+        }
+        if frame.get("error").is_some()
+            || (frame.get("requestId").is_some()
+                && ["ok", "result", "capacity", "offset", "sha256"]
+                    .iter()
+                    .any(|key| frame.get(*key).is_some()))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) enum SerialLineAction {
     Continue(bool),
     Response(Value),
@@ -1435,7 +1466,7 @@ pub(crate) struct SerialSession {
     port: Box<dyn SerialSessionPort>,
 }
 
-pub(crate) trait SerialSessionPort: Read + Write + Send {
+pub trait SerialSessionPort: Read + Write + Send {
     fn begin_write(&mut self) -> Result<(), HttpError>;
     fn finish_write(&mut self) -> Result<(), HttpError>;
 }

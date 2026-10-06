@@ -72,6 +72,10 @@ _Avoid_: Fan Output
 The Device-reported physical fan state and intensity.
 _Avoid_: Active Cooling
 
+**Idle Operation**:
+The Device condition in which heating is disarmed, heater and fan output are off, and no manual PPS, calibration, or thermal-test operation is active or pending. A zero-output interval within an active operation is not Idle Operation.
+_Avoid_: zero-duty tick, HOLD pause, fan pulse gap
+
 ## Audible Feedback
 
 **Buzzer Cue**:
@@ -263,7 +267,7 @@ An atomic USB-C power request with an explicit contract mode, voltage, and opera
 _Avoid_: PD Contract, VIN Reading, required power
 
 **PD Contract**:
-The USB-C power agreement reported by the Device.
+The USB-C power agreement established through protocol exchange and reported by the Device. A VIN Reading or ADC calibration is a separate measurement and neither establishes nor invalidates this agreement. PPS current limiting may lower delivered voltage without canceling the accepted PD Contract.
 _Avoid_: PD Request, VIN Reading
 
 **Requested Contract**:
@@ -346,12 +350,20 @@ _Avoid_: detected port, default port, serial candidate
 A local `.fluxpurr-fw` product-release artifact whose signature, integrity, and Hardware Profile compatibility have been verified before update.
 _Avoid_: development ELF, arbitrary firmware file, firmware URL
 
+**Flash Preparation**:
+The Device operation that stops heating and waits for cooling to finish and for a supply state that can remain established while the MCU is unavailable.
+_Avoid_: flash completion, download mode, heater-stop acknowledgement
+
+**Flash Readiness**:
+The Device-confirmed condition in which heating and fan output are off, conflicting power intent is absent, and the supply is a protocol-confirmed Fixed PD Contract or positively established ordinary Type-C default power. VIN measurement and ADC calibration are not prerequisites for this explicit device-side state.
+_Avoid_: command acknowledgement, missing PD status, firmware health
+
 **EEPROM-Only Persistence**:
 The rule that Device configuration with cross-reboot meaning is stored only in the external M24C64 EEPROM, never in MCU internal Flash or NVS.
 _Avoid_: Flash fallback, NVS fallback, mirrored configuration
 
 **Developer EEPROM Backup**:
-An encrypted local archive of the external EEPROM created and verified by default before a Developer firmware flash. It is not Device persistence and is never created by a General User firmware update.
+A private, verified local archive of the external EEPROM created by default before a Developer firmware flash. It is host recovery material rather than Device persistence and is not created by a General User firmware update.
 _Avoid_: Flash fallback, update backup, Device configuration copy
 
 **EEPROM_REQUIRED**:

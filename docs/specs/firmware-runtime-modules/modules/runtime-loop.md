@@ -41,6 +41,14 @@ control cycle, project UI state, and decide when to redraw the front panel.
    state.
 6. Flush the display when redraw is pending.
 
+USB transport recovery pauses request intake until its framing marker is
+complete. A missing host does not terminate recovery: the marker retains its
+offset across deadlines and resumes in bounded non-blocking packet steps when
+the host returns. PD, heater safety, fan updates, and the heartbeat continue
+while intake is paused; failed mutations are never replayed. A short packet is
+submitted once; later writer steps poll completion without submitting empty
+packets.
+
 ## Control Authority
 
 This is the sole consumer of `CONTROL_MAILBOX` and the only executor for

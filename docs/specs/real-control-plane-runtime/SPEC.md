@@ -5,8 +5,9 @@
 ## Related ADRs
 
 - [ADR 0003: Transport-scoped WiFi provisioning](../../adr/0003-transport-scoped-wifi-provisioning.md)
+- [ADR 0016: Flash preparation and Fixed idle power](../../adr/0016-flash-preparation-and-fixed-idle-power.md)
 
-## 背景 / 问题陈述
+## Context and Scope
 
 - PR #27 已把 Web、native USB daemon、USB CDC、WiFi provisioning、firmware flashing 与 monitoring 的长期架构沉淀到 `docs/solutions/device-control/web-native-wifi-bridge-console.md`。
 - `web-control-plane-demo` 只冻结 mock-first Web demo，不代表真实 transport、daemon、USB CDC、WiFi HTTP 或真实 flashing 已交付。
@@ -49,9 +50,18 @@
 - host power actions。
 - 用户认证、多租户 fleet 管理和远端云服务。
 
-## 需求（Requirements）
+## Requirements
+
+### REQ-RCP-TRANSPORT
 
 ### MUST
+
+- Wi-Fi driver configuration and its synchronous startup phase MUST wait for the
+  existing shared I2C transaction owner to release the bus and execute under that
+  same mutex. The mutex MUST be released before any asynchronous start-event
+  wait; association, DHCP and retry delays MUST leave it available to PD and
+  EEPROM. Driver event ordering, transition timeouts and genuine I2C fault
+  handling retain their existing contracts.
 
 - Runtime status MUST expose the shared thermal plant state (`missing|active|invalid`), active
   transaction identity, projection validity, and heater lock reason. Automatic model calibration
@@ -69,9 +79,15 @@
 
 - 所有 transport 暴露同一领域模型：`Identity`、`NetworkSummary`、`Status`、`FirmwareArtifact`、`ApiError`。
 - USB serial frame 使用 newline-delimited JSON；需要响应的 request 必须带 `request_id`。
-- USB JSONL 的完整响应必须保留到发送完成；运行态 response writer 状态必须驻留在 runtime transport 中，端点背压时每轮最多填充一个非阻塞 USB packet。ESP32-S3 USB Serial/JTAG FIFO 自动提交完整 64-byte packet，只有最终短 packet 显式尝试 flush；每次成功写入或 flush 后返回主循环，在当前响应完成或明确失败前停止接收下一条请求。USB 背压、诊断输出或客户端停止读取不得阻塞 Front Panel、LED、热控、PD service 或 executor。
+- USB JSONL 的完整响应必须保留到发送完成；运行态 response writer 状态必须驻留在 runtime transport 中，端点背压时每轮最多填充一个非阻塞 USB packet。ESP32-S3 USB Serial/JTAG FIFO 自动提交完整 64-byte packet，只有最终短 packet 显式提交一次，之后必须只读取发送完成状态，不得在等待 host 接收时重复提交空 packet；每次成功写入或 flush 后返回主循环，在当前响应完成或明确失败前停止接收下一条请求。USB 背压、诊断输出或客户端停止读取不得阻塞 Front Panel、LED、热控、PD service 或 executor。
 - `TIMG0` watchdog 在第一个异步启动阶段前由独立 supervisor 启用，启动期间使用 boot-stage heartbeat，进入 `runtime_ready` 后切换为 Front Panel runtime 与 PD service 的单调心跳门控。supervisor 只在相应阶段要求的心跳自上次 feed 后推进时喂狗；任一任务、正常 executor 或 supervisor 停滞都必须停止 feed 并在硬件超时后复位。watchdog reset reason 必须沿既有 USB/U0 reset diagnostics 暴露，且 heater permit 在复位前后保持 fail-closed。
 - `hello` 必须返回 protocol version、framing、identity 和 capabilities。
+- `flash_preparation` capability 的 USB JSONL 请求为 `prepare_flash`、`get_flash_preparation` 与 `cancel_flash_preparation`。成功响应必须包含 `flashPreparation` 对象及 `heating`、`cooling`、`pdFixedOrDefault` 三个布尔字段；响应描述同一时刻已应用的硬件状态，不能用 ACK 代替。
+- 运行态尚未初始化时，三个 preparation 请求均返回可重试的 `startup_busy`；硬件初始化失败时均返回可重试的 `hardware_bringup_failed`。没有实际输出快照时不得构造成功的 preparation 状态。
+- `prepare_flash` 必须幂等建立无自动过期的 RAM 保持：清除并结算加热、手动 PPS、校准、热测试和输出启动意图，立即关断实际 heater PWM，允许安全冷却完成，并阻止新意图与旧请求重放。保持只由 `cancel_flash_preparation` 或 reset 解除；取消后不恢复旧请求，也不写 EEPROM 或删除校准结果。
+- 必要冷却的风扇工作电源 ticket 可继续结算；尚未结算时，即使实际 heater/fan 已关闭且仍观察到旧 Fixed 合同，也必须返回 `pdFixedOrDefault=false`。
+- preparation 查询使用 PD Service 现有的新鲜度投影；停止发布后过期的 Fixed 观察必须返回未就绪，不能仅凭运行循环缓存的合同放行。
+- `pdFixedOrDefault=true` 只可在没有加热/冷却、没有冲突待执行意图、已有新鲜协议确认的 Fixed 合同或有真实 attach epoch 与有效 Rp 预算证明的 Type-C 默认供电时返回。Fixed 合同由关联的 RDO、`Accept` 与 `PS_RDY` 确认；VIN 读数、ADC 校准、样本新鲜度、电压容差和测量稳定时长均不参与本操作的 Fixed 判断、就绪判定或解除完成判定。PPS、旧协议观察、未确认 RDO 和故障均为 false；5V VIN、MCU 重启或缺失 PD 元数据不能证明 Type-C 默认供电，尚无该独立证明能力时也必须返回 false。
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。
 - `wifi_state_v2` capability 表示设备支持版本化 WiFi 事实。`NetworkSummary` 必须包含 `configurationGeneration`、单调 `transitionSequence` 与有限安全枚举 `failureCode`；未知或畸形 snapshot 必须在 adapter 边界拒绝，不能由 `devd` 或 Web 猜测补齐。
 - WiFi 状态由硬件无关的 `no_std` 状态机唯一发布。已配置设备对外只发布 `connecting|connected|error`；未配置设备发布 `disabled`。保存动作本身不是设备网络状态，Web 的提交 loading 只能表示等待设备事实，不能发布额外的“临时失败”状态。
@@ -97,6 +113,7 @@
 - devd 未显式传入 `--serial-port` 时必须保持 `AppConfig.serial_port=None`，不得从环境变量、用户配置、模板、示例或硬编码默认值隐式选择设备；`None` 表示没有固定 USB 目标，而不是关闭发现。daemon 必须枚举全部符合项目 USB 身份规则的串口作为未验证候选，但不得自动打开、租用、探测或选择其中任何端口。候选在固件 identity probe 成功前只能显示 transport locator，`identity.deviceId` 与 `identity.hostname` 必须为空；只有 operator 明确选择后才允许进入连接与身份验证流程。
 - devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
 - `flux-purr` CLI 必须为 status/runtime/wifi/monitor 等 devd-backed 操作自动创建、heartbeat 和释放 lease，支持 human 输出与 `--json` 输出，不要求用户手填 `leaseId`。固件操作由 `firmware-update-and-developer-flash` topic 管理：一般用户 `update` 使用显式 `--port`、本地已发布 bundle 与本地 CBOR control socket；开发者 `flash`/`recover` 使用显式 `--port`，直接串口执行且不创建或连接 devd。
+- CLI 与 devd 的 `update`、`flash`、`recover` 必须在 artifact/确认/授权/锁定之后执行各自既有的精确端口、身份、ROM、安全和 EEPROM 备份边界。它们不自动调用或要求设备 `flash_preparation` capability，也没有 host preparation timeout 或 `application_unresponsive` 旁路；设备侧 `prepare_flash`、status、cancel 仍是独立的 USB 操作。
 - `flux-purr pd pps set --volts <decimal> --amps <decimal> --device|--hardware` 与 `flux-purr pd pps clear --device|--hardware` 必须通过 lease 写 runtime contract；`--volts` 只接受 `0.1V` 步进、必须落在硬件 `5V~28V` 边界内且不高于实时 source capability，`--amps` 只接受 `0.05A` 步进且不高于 source capability。
 - `flux-purr hardware` 必须把 USB 设备记忆写入 OS 用户配置目录，`FLUX_PURR_HOME` 可覆盖；LAN record 使用独立字段持久化 base URL、hostname、last IPv4 和 redacted token。
 - 默认 `required` pairing policy 下，WiFi Info 进入时必须生成并显示新四位码；离开该页立即使 code 失效。每个窗口最多五次失败，成功返回 EEPROM 稳定 token；只有 USB/devd token-reset 可清除 token 和全部 LAN lease。HTTP v1 必须预留 `optional`（无 code claim）和 `unavailable`（无 claim、匿名基础只读）策略，前端和 CLI 不得把当前 default 当作唯一可能。
@@ -160,7 +177,7 @@
 
 - `flux-purr devices`：列出 `devd` 当前可见设备。
 - `flux-purr identity --device <id>|--hardware <saved-id>`：通过 leased identity endpoint 读取设备身份。
-- `flux-purr status --device <id>|--hardware <saved-id>`：通过 leased status endpoint 读取状态，包括热失控待确认的 `faultAttentionPending`。
+- `flux-purr status --device <id>|--hardware <saved-id>`：通过 leased status endpoint 读取状态，包括热失控告警确认状态的 `faultAttentionPending`。
 - `flux-purr runtime get|set`：读取或部分更新目标温度、preset、主动散热与 heater hold，并支持显式发送 `faultAttentionAcknowledged=true` 确认热失控告警。
 - `flux-purr pd pps set|clear`：设置或清除调试用手动 PPS 覆盖；设置路径要求 source status 已回报 PPS capability，且电压在硬件 `5V~28V` 与 capability 交集内，请求电流在 APDO current capability 内。
 - `flux-purr thermal profile preview|clear-preview|save|clear-saved`：通过 leased runtime endpoint 设置或清除 RAM thermal control profile preview；save/clear-saved 的 `--profile-mode 65w|100w` 总是显式下发对应 bank。`--profile-mode auto` 必须先应用 auto mode 并从同一 leased runtime 请求回读 resolved bank，再向该 bank 执行 save/clear-saved；不得使用切换 mode 前的旧 status 推断持久化 bank。
@@ -199,7 +216,7 @@
 - `status` / `log` / `error`：device-origin async frame。
 - USB JSONL 单帧上限为 `8 KiB`（包含换行）。firmware、native `devd` 与 Browser Web Serial 必须使用同一上限；该容量必须容纳完整 9 点、point-local 的 thermal profile preview/save 请求，超限请求必须在 transport 边界明确拒绝。`save` 必须保留所提供的每一个 `1..=10` point，不得按 profile bank 投影、插值重建或静默丢弃温度点。
 - firmware response 发送必须是非阻塞、可让出 executor 的 packet writer；response 未完成时不得读取下一条 USB request。EEPROM persistence diagnostics 必须延迟到当前 JSONL response 完整发送之后，禁止插入 response frame；诊断 writer 的 packet 发送必须有界，硬 TX 错误或 deadline 必须进入同一 transport recovery，不得无限重试或继续消费新的 request。诊断或 recovery marker 部分写入失败后必须从已写入 offset 继续，不能重复发送前缀。
-- response 发生硬 TX 错误或 bounded timeout 后，firmware 必须进入 transport fault/recovery 状态，停止消费新的 request；恢复时先使用可续传 writer 发送换行和明确的 `usb_transport_fault` error marker，完成 JSONL framing resync 后才恢复 request intake。接收端超过 `8 KiB` 的 JSONL 行必须丢弃到下一个换行并返回 `frame_too_large`，不得执行超长前缀后的合法 JSON 后缀。
+- response 发生硬 TX 错误或 bounded timeout 后，firmware 必须进入 transport fault/recovery 状态，停止消费新的 request；恢复时先使用可续传 writer 发送换行和明确的 `usb_transport_fault` error marker，完成 JSONL framing resync 后才恢复 request intake。主机离线超过 response deadline 时，恢复 marker 保留已发送 offset；每轮仍只执行有界非阻塞 packet step，主机重连后续传并恢复请求读取，不得永久锁死 USB，也不得重放失败的 mutation。接收端超过 `8 KiB` 的 JSONL 行必须丢弃到下一个换行并返回 `frame_too_large`，不得执行超长前缀后的合法 JSON 后缀。
 - 对可能改变设备状态的 USB request，firmware 必须保留最近已成功执行的、容量有界的 `request_id` 历史。只有 mutating response 成功后才记录 ID；同一 ID 在该历史中再次出现必须返回不可重试的 `request_replayed` error，不得再次执行 EEPROM write/erase、配置、校准或控制动作；设备重启后该内存去重记录可以清空。
 
 ### Browser Web Serial
@@ -213,7 +230,13 @@
 - Direct Web Serial 还必须支持 calibration live control、calibration auto-job read/write、ADC calibration samples/A-B slots/active-slot 与 heater curve preview/save，以保证 calibration workbench 的 transport parity。
 - Given direct Web Serial target remains selected but its in-memory browser client is no longer connected, When a calibration or runtime read/write is requested, Then Web may silently reuse the single already-authorized browser port with an identity check against the last confirmed device, but must not open the chooser or switch transport; when no unique authorized port exists it must stop with an actionable reconnect state.
 
-## 验收标准（Acceptance Criteria）
+## Verification
+
+### VER-RCP-TRANSPORT
+
+- covers: `REQ-RCP-TRANSPORT`
+- Method: firmware, host transport and fake serial tests; authorized product HIL for physical USB, Wi-Fi and programming behavior. USB recovery includes a partial marker, host absence beyond response deadlines, same-port reconnection and no mutation replay.
+
 
 - Given 无硬件环境，When 运行 host tests，Then USB frame parsing、request ID matching、redaction、runtime config、status adapter、lease expiry、bounded buffer、artifact verify 与 serial authorization guard 均通过。
 - Given devd mock target，When 创建 lease 并 heartbeat，Then lease 未过期前 mutating endpoint 成功，过期后返回 conflict/expired error。
@@ -311,7 +334,7 @@
 - `assets/web-dashboard-manual-pps-request-current.png`：Vite Web App demo Dashboard 高级 PPS 面板显示两行 voltage/current request 控制、capability 动态范围、Apply/Clear 与请求电流说明。
 - `assets/lan-pairing-desktop-success.png`：mock-only Chromium desktop 配对成功态，包含手动 HTTP 地址、四位码和稳定设备名；两个输入与提交按钮均为 36px 高。
 - `assets/lan-pairing-mobile-success.png`：mock-only Chromium mobile 配对成功态，确认输入和提交控件在窄视口换行、均为 36px 高且无重叠。
-- `assets/lan-pairing-lease-progress-desktop.png`：mock-only Storybook `App/LanPairingPanel/Chromium Pairing` 的桌面配对已完成、控制租约待确认状态；UI 不把领取 token 误报为已可控制设备。`source_type=storybook_canvas`，`target_program=mock-only`，`capture_scope=component`，`requested_viewport=desktop-storybook-default`，`viewport_strategy=storybook-viewport`，`margin_policy=require_margin`，`evidence_surface=component`，`sensitive_exclusion=fixture-only-address-and-code`，`story_id_or_title=App/LanPairingPanel/Chromium Pairing`，`bound_commit=8b5bfb3d2a4c75607a057cfb91055a1bd550fa07`，`trim_result=blocked-unsafe-to-crop-original-component-margin-retained`，`submission_gate=owner-approved`。
+- `assets/lan-pairing-lease-progress-desktop.png`：mock-only Storybook `App/LanPairingPanel/Chromium Pairing` 的桌面配对已完成、控制租约取得中状态；UI 不把领取 token 误报为已可控制设备。`source_type=storybook_canvas`，`target_program=mock-only`，`capture_scope=component`，`requested_viewport=desktop-storybook-default`，`viewport_strategy=storybook-viewport`，`margin_policy=require_margin`，`evidence_surface=component`，`sensitive_exclusion=fixture-only-address-and-code`，`story_id_or_title=App/LanPairingPanel/Chromium Pairing`，`bound_commit=8b5bfb3d2a4c75607a057cfb91055a1bd550fa07`，`trim_result=blocked-unsafe-to-crop-original-component-margin-retained`，`submission_gate=owner-approved`。
 - `assets/lan-pairing-lease-progress-mobile.png`：mock-only Storybook `App/LanPairingPanel/Mobile Chromium Pairing` 的同一状态，故事把组件容器绑定为 `393px`，play 同时验证控件宽度不超过容器。`source_type=storybook_canvas`，`target_program=mock-only`，`capture_scope=component`，`requested_viewport=393px-component-container`，`viewport_strategy=component-container`，`margin_policy=require_margin`，`evidence_surface=component`，`sensitive_exclusion=fixture-only-address-and-code`，`story_id_or_title=App/LanPairingPanel/Mobile Chromium Pairing`，`bound_commit=8b5bfb3d2a4c75607a057cfb91055a1bd550fa07`，`trim_result=blocked-unsafe-to-crop-original-component-margin-retained`，`submission_gate=owner-approved`。
 - `assets/lan-pairing-required-prompt-desktop.png`：mock-only Storybook `App/LanPairingPanel/Required Pairing Prompt`。设备匿名 `/health` 已成功连接后才出现四位码对话框；对话框显示已连接 IP 地址和设备 ID，四位码未出现在连接前的表单中。`source_type=storybook_canvas`，`target_program=mock-only`，`capture_scope=element`，`requested_viewport=desktop-storybook-default`，`viewport_strategy=storybook-viewport`，`margin_policy=require_margin`，`evidence_surface=component`，`state=required-pairing-after-anonymous-health`，`evidence_note=IP-address-and-device-ID-are-bound-to-the-connected-target`，`sensitive_exclusion=fixture-only-address-and-device-id-no-token-or-code`，`story_id_or_title=App/LanPairingPanel/Required Pairing Prompt`，`trim_result=already-within-target-margin`，`submission_gate=owner-approved`。
 - `assets/lan-pairing-protocol-error.png`：mock-only Storybook `App/LanPairingPanel/Pairing Response Invalid`。设备匿名连接已完成，claim/probe 的成功响应无法解析时，具体协议错误显示在包含 IP 与设备 ID 的当前配对对话框内；背景不出现通用“无法连接”状态。`source_type=storybook_canvas`，`target_program=mock-only`，`capture_scope=element`，`requested_viewport=desktop-storybook-default`，`viewport_strategy=storybook-viewport`，`margin_policy=require_margin`，`evidence_surface=component`，`state=pairing-success-response-invalid`，`evidence_note=claim-or-probe-protocol-failure-remains-actionable-inside-the-current-pairing-dialog`，`sensitive_exclusion=fixture-only-private-address-device-id-and-code-no-token`，`story_id_or_title=App/LanPairingPanel/Pairing Response Invalid`，`bound_commit=8b5bfb3d2a4c75607a057cfb91055a1bd550fa07`，`trim_result=padded-capture-background-to-target-margin`，`submission_gate=owner-approved`。

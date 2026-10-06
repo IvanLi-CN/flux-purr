@@ -73,6 +73,7 @@ pub(crate) struct PowerTicket {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PowerAdmissionError {
     Busy,
+    FlashPreparationActive,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -218,6 +219,7 @@ pub(crate) enum PowerCommand {
     },
     Idle {
         ticket: PowerTicket,
+        minimum_mv: u16,
     },
 }
 
@@ -226,6 +228,7 @@ pub(crate) enum PowerCommand {
 pub(crate) enum PdServiceCommand {
     AutomaticIdle {
         ticket: PowerTicket,
+        minimum_mv: u16,
     },
     Contract {
         request: PdContractRequest,
@@ -584,6 +587,9 @@ impl PowerCoordinatorClient {
         owner: PowerIntentOwner,
         request: PdContractRequest,
     ) -> Result<PowerTicket, PowerAdmissionError> {
+        if flash_preparation::is_active() {
+            return Err(PowerAdmissionError::FlashPreparationActive);
+        }
         let Some(ticket) = self.next_ticket(Some(owner)) else {
             return Err(PowerAdmissionError::Busy);
         };
@@ -601,6 +607,9 @@ impl PowerCoordinatorClient {
     }
 
     pub(crate) fn refresh_capabilities(&self) -> Result<PowerTicket, PowerAdmissionError> {
+        if flash_preparation::is_active() {
+            return Err(PowerAdmissionError::FlashPreparationActive);
+        }
         let Some(ticket) = self.next_ticket(None) else {
             return Err(PowerAdmissionError::Busy);
         };
@@ -614,11 +623,18 @@ impl PowerCoordinatorClient {
     }
 
     pub(crate) fn idle(&self) -> Result<PowerTicket, PowerAdmissionError> {
+        self.idle_at_minimum(FUSB302B_PD_ABSOLUTE_MIN_MV)
+    }
+
+    pub(crate) fn idle_at_minimum(
+        &self,
+        minimum_mv: u16,
+    ) -> Result<PowerTicket, PowerAdmissionError> {
         let Some(ticket) = self.next_ticket(None) else {
             return Err(PowerAdmissionError::Busy);
         };
         POWER_COMMANDS
-            .try_send(PowerCommand::Idle { ticket })
+            .try_send(PowerCommand::Idle { ticket, minimum_mv })
             .map(|()| ticket)
             .map_err(|_| {
                 Self::release_ticket_slot(ticket);
@@ -729,7 +745,7 @@ pub(crate) fn take_pd_service_command_cancelled(command: PdServiceCommand) -> bo
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn pd_service_command_ticket(command: PdServiceCommand) -> PowerTicket {
     match command {
-        PdServiceCommand::AutomaticIdle { ticket }
+        PdServiceCommand::AutomaticIdle { ticket, .. }
         | PdServiceCommand::Contract { ticket, .. }
         | PdServiceCommand::RefreshCapabilities { ticket } => ticket,
     }
@@ -752,8 +768,13 @@ fn power_command_details(
             ticket,
         } => (ticket, Some(owner), false, false, Some(request)),
         PowerCommand::RefreshCapabilities { ticket } => (ticket, None, true, false, None),
-        PowerCommand::Idle { ticket } => (ticket, None, false, true, None),
+        PowerCommand::Idle { ticket, .. } => (ticket, None, false, true, None),
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn power_command_allowed_during_preparation(command: PowerCommand, preparing: bool) -> bool {
+    !preparing || matches!(command, PowerCommand::Idle { .. })
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -774,7 +795,9 @@ fn power_pd_command(
         (PowerCommand::RefreshCapabilities { .. }, None) => {
             PdServiceCommand::RefreshCapabilities { ticket }
         }
-        (PowerCommand::Idle { .. }, None) => PdServiceCommand::AutomaticIdle { ticket },
+        (PowerCommand::Idle { minimum_mv, .. }, None) => {
+            PdServiceCommand::AutomaticIdle { ticket, minimum_mv }
+        }
         _ => return None,
     };
     Some((ticket, owner, refresh, idle, pd_command))
@@ -902,6 +925,11 @@ fn dispatch_power_command(
     command: PowerCommand,
     coordinator: &mut PowerCoordinatorState,
 ) -> Option<PowerIntentOwner> {
+    if !power_command_allowed_during_preparation(command, flash_preparation::is_active()) {
+        let (ticket, _, _, _, _) = power_command_details(command);
+        signal_ticket(ticket, TicketOutcome::Rejected);
+        return None;
+    }
     let (_, new_owner, new_refresh, new_idle, _) = power_command_details(command);
     if let Some(deferred) = coordinator.deferred {
         let (deferred_ticket, deferred_owner, _, _, _) = power_command_details(deferred);
@@ -1123,6 +1151,437 @@ pub(crate) fn spawn_power_coordinator(spawner: Spawner) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::cell::RefCell;
+
+    #[derive(Clone, Copy)]
+    struct DisarmReply {
+        ticket: PowerTicket,
+        outcome: Option<TicketOutcome>,
+    }
+
+    struct DisarmPortHarness {
+        snapshot: core::cell::Cell<PdServiceSnapshot>,
+        slots: AtomicU8,
+        discarded: AtomicU8,
+        replies: RefCell<[Option<DisarmReply>; POWER_TICKET_SLOT_COUNT]>,
+        sequence: core::cell::Cell<u32>,
+        confirmed: ConfirmedActiveContract,
+    }
+
+    impl DisarmPortHarness {
+        fn new() -> Self {
+            let pdos = [
+                (100 << 10) | 100,
+                pps_source_capability(5_500, 21_000, 3_000),
+            ];
+            let source = SourceCapabilities::from_pdos(&pdos);
+            let mut policy = fusb302b::SinkPolicy::new_standby(12_000, 3_000);
+            policy.on_source_capabilities(&pdos).unwrap();
+            policy.on_control_message(3, 0);
+            policy.on_control_message(6, 1);
+            let observation = fusb302b_contract_observation(
+                policy.phase(),
+                policy.active_contract(),
+                FUSB302B_STATUS0_VBUSOK,
+                source,
+            )
+            .unwrap();
+            Self {
+                snapshot: core::cell::Cell::new(PdServiceSnapshot {
+                    observation: Some(observation),
+                    service_available: true,
+                    controller: ControllerKind::Fusb302b,
+                    ..PdServiceSnapshot::unavailable()
+                }),
+                slots: AtomicU8::new(0),
+                discarded: AtomicU8::new(0),
+                replies: RefCell::new([None; POWER_TICKET_SLOT_COUNT]),
+                sequence: core::cell::Cell::new(0),
+                confirmed: ConfirmedActiveContract::from_private_contract(
+                    policy.active_contract(),
+                    source,
+                )
+                .unwrap(),
+            }
+        }
+
+        fn settle(&self, outcome: TicketOutcome) {
+            for (slot, reply) in self.replies.borrow_mut().iter_mut().enumerate() {
+                self.settle_reply(slot, reply, outcome);
+            }
+        }
+
+        fn settle_reply(
+            &self,
+            slot: usize,
+            reply: &mut Option<DisarmReply>,
+            outcome: TicketOutcome,
+        ) {
+            let Some(current) = reply else {
+                return;
+            };
+            if release_discarded_ticket_slot(&self.discarded, &self.slots, slot) {
+                *reply = None;
+                return;
+            }
+            current.outcome = Some(outcome);
+        }
+    }
+
+    impl TerminalDisarmPowerPort for DisarmPortHarness {
+        fn snapshot(&self) -> PdServiceSnapshot {
+            self.snapshot.get()
+        }
+
+        fn restore_idle_contract(&self, _cooling_required: bool) -> PdRequestState {
+            let Some(result_slot) = reserve_ticket_slot(&self.slots) else {
+                return PdRequestState::Failed;
+            };
+            self.sequence.set(self.sequence.get() + 1);
+            let ticket = PowerTicket {
+                owner: None,
+                sequence: self.sequence.get(),
+                result_slot,
+            };
+            self.replies.borrow_mut()[result_slot] = Some(DisarmReply {
+                ticket,
+                outcome: None,
+            });
+            PdRequestState::Pending(ticket)
+        }
+
+        fn try_take_ticket(&self, ticket: PowerTicket) -> Option<TicketOutcome> {
+            let mut replies = self.replies.borrow_mut();
+            let reply = replies[ticket.result_slot]?;
+            assert_eq!(reply.ticket, ticket);
+            let outcome = reply.outcome?;
+            replies[ticket.result_slot] = None;
+            release_ticket_slot(&self.slots, ticket.result_slot);
+            Some(outcome)
+        }
+
+        fn discard_ticket(&self, ticket: PowerTicket) {
+            if self.try_take_ticket(ticket).is_none() {
+                self.discarded
+                    .fetch_or(1 << ticket.result_slot, Ordering::Release);
+            }
+        }
+    }
+
+    #[test]
+    fn preparation_disarm_keeps_ticket_until_terminal_and_fresh_settled_fixed() {
+        let port = DisarmPortHarness::new();
+        let mut calibration = CalibrationRuntimeState {
+            immediate_heater_disarm_pending: true,
+            thermal_plant_completion_disarm_pending: true,
+            ..Default::default()
+        };
+        let mut manual = ManualPpsState {
+            automatic_restore_pending: true,
+            ..Default::default()
+        };
+        let mut ticket = None;
+        assert!(!reconcile_terminal_disarm_power(
+            &mut calibration,
+            &mut manual,
+            &mut ticket,
+            &port,
+            true,
+            false
+        ));
+        let original = ticket.unwrap();
+        // A cached ready Fixed precedes Coordinator consumption of the new Idle.
+        for _ in 0..12 {
+            assert!(!reconcile_terminal_disarm_power(
+                &mut calibration,
+                &mut manual,
+                &mut ticket,
+                &port,
+                true,
+                false
+            ));
+            assert_eq!(ticket, Some(original));
+            assert!(calibration.immediate_heater_disarm_pending);
+        }
+        for snapshot in [
+            PdServiceSnapshot {
+                transition_pending: true,
+                ..port.snapshot()
+            },
+            port.snapshot()
+                .with_fresh_observation(PD_SNAPSHOT_MAX_AGE_MS + 1),
+        ] {
+            port.snapshot.set(snapshot);
+            port.settle(TicketOutcome::Confirmed(port.confirmed));
+            assert!(!reconcile_terminal_disarm_power(
+                &mut calibration,
+                &mut manual,
+                &mut ticket,
+                &port,
+                true,
+                false
+            ));
+            assert!(ticket.is_none());
+            assert_eq!(port.slots.load(Ordering::Acquire), 0);
+            assert!(calibration.immediate_heater_disarm_pending);
+            assert!(calibration.thermal_plant_completion_disarm_pending);
+            assert!(manual.automatic_restore_pending);
+            assert!(!reconcile_terminal_disarm_power(
+                &mut calibration,
+                &mut manual,
+                &mut ticket,
+                &port,
+                true,
+                false
+            ));
+        }
+        port.snapshot.set(DisarmPortHarness::new().snapshot());
+        port.settle(TicketOutcome::Confirmed(port.confirmed));
+        assert!(reconcile_terminal_disarm_power(
+            &mut calibration,
+            &mut manual,
+            &mut ticket,
+            &port,
+            true,
+            false
+        ));
+        assert!(!calibration.immediate_heater_disarm_pending);
+        assert!(!calibration.thermal_plant_completion_disarm_pending);
+        assert!(!manual.automatic_restore_pending);
+        assert!(ticket.is_none());
+    }
+
+    #[test]
+    fn repeated_preparation_disarm_reclaims_all_six_result_slots() {
+        let port = DisarmPortHarness::new();
+        let mut calibration = CalibrationRuntimeState::default();
+        let mut manual = ManualPpsState::default();
+        let mut ticket = None;
+        for _ in 0..24 {
+            cancel_calibration_for_flash_preparation(&mut calibration, &mut manual);
+            assert!(!reconcile_terminal_disarm_power(
+                &mut calibration,
+                &mut manual,
+                &mut ticket,
+                &port,
+                true,
+                false
+            ));
+            for outcome in [
+                TicketOutcome::Rejected,
+                TicketOutcome::Superseded,
+                TicketOutcome::TimedOut,
+            ] {
+                port.settle(outcome);
+                assert!(!reconcile_terminal_disarm_power(
+                    &mut calibration,
+                    &mut manual,
+                    &mut ticket,
+                    &port,
+                    true,
+                    false
+                ));
+                assert!(ticket.is_none());
+                assert_eq!(port.slots.load(Ordering::Acquire), 0);
+                assert!(!reconcile_terminal_disarm_power(
+                    &mut calibration,
+                    &mut manual,
+                    &mut ticket,
+                    &port,
+                    true,
+                    false
+                ));
+            }
+            port.settle(TicketOutcome::Confirmed(port.confirmed));
+            assert!(reconcile_terminal_disarm_power(
+                &mut calibration,
+                &mut manual,
+                &mut ticket,
+                &port,
+                true,
+                false
+            ));
+            assert_eq!(port.slots.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn superseded_disarm_discards_pending_reply_instead_of_forgetting_it() {
+        let port = DisarmPortHarness::new();
+        let mut calibration = CalibrationRuntimeState {
+            immediate_heater_disarm_pending: true,
+            ..Default::default()
+        };
+        let mut manual = ManualPpsState::default();
+        let mut ticket = None;
+        assert!(!reconcile_terminal_disarm_power(
+            &mut calibration,
+            &mut manual,
+            &mut ticket,
+            &port,
+            false,
+            false
+        ));
+        calibration.immediate_heater_disarm_pending = false;
+        assert!(!reconcile_terminal_disarm_power(
+            &mut calibration,
+            &mut manual,
+            &mut ticket,
+            &port,
+            false,
+            false
+        ));
+        assert!(ticket.is_none());
+        port.settle(TicketOutcome::Superseded);
+        assert_eq!(port.slots.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn preparation_cancel_allows_fresh_ordinary_heating_without_manual_pps() {
+        let backends = [
+            HeaterPowerBackend::FixedPdPwmFallback {
+                reason: HeaterPowerBackendReason::NoPps20vCapability,
+                fixed_request: ch224q::VoltageRequest::V20,
+                fixed_request_confirmed: true,
+                terminal_fixed_pd_disarmed: false,
+            },
+            select_heater_power_backend(
+                Some(ch224q::AdjustablePowerCapabilities {
+                    pps_covers_20v: true,
+                    pps_min_mv: Some(5_500),
+                    pps_max_mv: Some(21_000),
+                    pps_max_ma: Some(3_000),
+                    ..Default::default()
+                }),
+                Some(Status::default()),
+            ),
+        ];
+        assert!(matches!(backends[1], HeaterPowerBackend::PpsMos { .. }));
+        for backend in backends {
+            let (calibration, manual, snapshot) = assert_preparation_cancel_rearms_backend(backend);
+            assert_cancelled_arm_negotiates_working_pps(calibration, manual, snapshot);
+        }
+    }
+
+    fn assert_preparation_cancel_rearms_backend(
+        mut backend: HeaterPowerBackend,
+    ) -> (CalibrationRuntimeState, ManualPpsState, PdServiceSnapshot) {
+        let port = DisarmPortHarness::new();
+        let mut calibration = CalibrationRuntimeState::default();
+        let mut manual = ManualPpsState::default();
+        cancel_calibration_for_flash_preparation(&mut calibration, &mut manual);
+        assert!(latch_terminal_fixed_pd_disarm(&calibration, &mut backend));
+        let mut ticket = None;
+        assert!(!reconcile_terminal_disarm_power(
+            &mut calibration,
+            &mut manual,
+            &mut ticket,
+            &port,
+            true,
+            false
+        ));
+        port.settle(TicketOutcome::Confirmed(port.confirmed));
+        assert!(reconcile_terminal_disarm_power(
+            &mut calibration,
+            &mut manual,
+            &mut ticket,
+            &port,
+            true,
+            false
+        ));
+        assert!(!release_terminal_fixed_pd_disarm_for_new_work(
+            &mut backend,
+            false,
+            false
+        ));
+        assert!(backend.terminal_fixed_pd_disarmed());
+        assert!(release_terminal_fixed_pd_disarm_for_new_work(
+            &mut backend,
+            true,
+            false
+        ));
+        assert!(!backend.terminal_fixed_pd_disarmed());
+        assert!(!manual.enabled);
+        assert!(!working_fixed_contract_confirmed(
+            port.snapshot().settled_observation(),
+            20_000
+        ));
+        match backend {
+            HeaterPowerBackend::FixedPdPwmFallback {
+                fixed_request_confirmed,
+                ..
+            } => assert!(!fixed_request_confirmed),
+            HeaterPowerBackend::PpsMos {
+                current_mode,
+                current_limit_fixed_request_confirmed,
+                ..
+            } => {
+                assert!(current_mode.is_none());
+                assert!(!current_limit_fixed_request_confirmed);
+            }
+        }
+        (calibration, manual, port.snapshot())
+    }
+
+    fn assert_cancelled_arm_negotiates_working_pps(
+        mut calibration: CalibrationRuntimeState,
+        mut manual: ManualPpsState,
+        idle_snapshot: PdServiceSnapshot,
+    ) {
+        let pdos = [
+            (100 << 10) | 100,
+            pps_source_capability(5_500, 21_000, 3_000),
+        ];
+        let source = SourceCapabilities::from_pdos(&pdos);
+        let mut policy = fusb302b::SinkPolicy::new_standby(12_000, 3_000);
+        policy.on_source_capabilities(&pdos).unwrap();
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 1);
+        let request = PdContractRequest::pps(12_000, 3_000).unwrap();
+        policy.request_contract(request).unwrap();
+        let mut ui = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        ui.heater_enabled = true; // Fresh ordinary intent after cancellation.
+        let mut ready = true;
+        for phase in [
+            SinkPhase::WaitingForAccept,
+            SinkPhase::WaitingForPsRdy,
+            SinkPhase::Ready,
+        ] {
+            assert_eq!(policy.phase(), phase);
+            let observation = fusb302b_contract_observation(
+                phase,
+                policy.active_contract(),
+                FUSB302B_STATUS0_VBUSOK,
+                source,
+            );
+            let state =
+                PowerState::from_observation(phase, observation, Some(source), true, Some(request));
+            reconcile_pd_contract_intent(
+                state.observation(),
+                &mut ready,
+                &mut ui,
+                &mut calibration,
+                &mut manual,
+                false,
+            );
+            assert!(ui.heater_enabled);
+            assert!(!manual.enabled);
+            let snapshot = PdServiceSnapshot {
+                observation,
+                transition_pending: phase != SinkPhase::Ready,
+                ..idle_snapshot
+            };
+            assert_eq!(
+                working_pps_request_confirmed(snapshot.settled_observation(), request),
+                phase == SinkPhase::Ready
+            );
+            if phase == SinkPhase::WaitingForAccept {
+                policy.on_control_message(3, 2);
+            } else if phase == SinkPhase::WaitingForPsRdy {
+                policy.on_control_message(6, 3);
+            }
+        }
+    }
 
     struct CoordinatorHarness {
         service_available: bool,
@@ -1637,6 +2096,7 @@ mod tests {
             },
         };
         let idle = PowerCommand::Idle {
+            minimum_mv: FUSB302B_PD_ABSOLUTE_MIN_MV,
             ticket: PowerTicket {
                 owner: None,
                 sequence: 14,
@@ -1684,6 +2144,46 @@ mod tests {
             ),
             None,
         );
+    }
+
+    #[test]
+    fn flash_preparation_rejects_stale_requests_without_losing_idle_progress() {
+        let idle_ticket = PowerTicket {
+            owner: None,
+            sequence: 40,
+            result_slot: 0,
+        };
+        let stale_ticket = PowerTicket {
+            owner: Some(PowerIntentOwner::AutomaticThermal),
+            sequence: 39,
+            result_slot: 1,
+        };
+        let request = PowerCommand::Request {
+            owner: PowerIntentOwner::AutomaticThermal,
+            request: PdContractRequest::pps(5_500, 3_000).unwrap(),
+            ticket: stale_ticket,
+        };
+        assert!(!power_command_allowed_during_preparation(request, true));
+        assert!(!power_command_allowed_during_preparation(
+            PowerCommand::RefreshCapabilities {
+                ticket: stale_ticket
+            },
+            true,
+        ));
+        assert!(power_command_allowed_during_preparation(request, false));
+        assert!(power_command_allowed_during_preparation(
+            PowerCommand::Idle {
+                ticket: idle_ticket,
+                minimum_mv: 12_000
+            },
+            true,
+        ));
+        let pending = Some((idle_ticket, PendingPdOperation::Idle));
+        assert!(matches!(
+            pending_after_pd_terminal(pending, stale_ticket),
+            Some((ticket, PendingPdOperation::Idle)) if ticket == idle_ticket
+        ));
+        assert!(pending_after_pd_terminal(pending, idle_ticket).is_none());
     }
 
     #[test]

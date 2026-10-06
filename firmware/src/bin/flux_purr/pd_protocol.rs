@@ -177,37 +177,95 @@ pub(crate) fn fusb302b_identity_is_stable(
 ) -> bool {
     matches!((first_id, second_id, status0, status1), (Some(first), Some(second), Some(status0), Some(status1))
         if first == second
-            && first & 0xf0 == 0x90
+            && fusb302b::is_fusb302_device_id(first)
             && status0 != u8::MAX
             && status1 != u8::MAX)
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn detect_pd_controller(i2c: &mut PdI2c<'_>) -> DetectedPdController {
-    let first = {
-        let mut phy = Fusb302::new(&mut *i2c);
-        phy.device_id().await.ok()
-    };
-    let second = {
-        let mut phy = Fusb302::new(&mut *i2c);
-        phy.device_id().await.ok()
-    };
-    let (Some(first), Some(second)) = (first, second) else {
-        return DetectedPdController::Unknown;
-    };
-    if first != second || !first.is_fusb302b_family() {
-        return DetectedPdController::Unknown;
-    }
+const FUSB302B_IDENTITY_PROBE_ATTEMPTS: u8 = 3;
+
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_IDENTITY_PROBE_RETRY_DELAY_MS: u64 = 10;
+
+#[cfg(target_arch = "xtensa")]
+async fn confirm_fusb302b_identity_status(i2c: &mut PdI2c<'_>, first: u8, second: u8) -> bool {
     let status = {
         let mut phy = Fusb302::new(&mut *i2c);
-        phy.read_status().await.ok()
+        match phy.read_status().await {
+            Ok(value) => Some(value),
+            Err(error) => {
+                FUSB302B_LAST_I2C_ERROR.store(fusb302b_i2c_error_kind(error), Ordering::Release);
+                FUSB302B_IDENTITY_DIAGNOSTIC
+                    .store(FUSB302B_IDENTITY_DIAG_I2C_ERROR, Ordering::Release);
+                None
+            }
+        }
     };
     let (status0, status1) = status
         .map(|status| (Some(status.status0), Some(status.status1)))
         .unwrap_or((None, None));
-    if fusb302b_identity_is_stable(Some(first.bits()), Some(second.bits()), status0, status1) {
-        DetectedPdController::Fusb302b(first.bits())
-    } else {
-        DetectedPdController::Unknown
+    if fusb302b_identity_is_stable(Some(first), Some(second), status0, status1) {
+        FUSB302B_IDENTITY_DIAGNOSTIC.store(FUSB302B_IDENTITY_DIAG_NONE, Ordering::Release);
+        return true;
     }
+    FUSB302B_IDENTITY_DIAGNOSTIC.store(FUSB302B_IDENTITY_DIAG_STATUS_INVALID, Ordering::Release);
+    false
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) async fn detect_pd_controller(i2c: &mut PdI2c<'_>) -> DetectedPdController {
+    FUSB302B_IDENTITY_DIAGNOSTIC.store(FUSB302B_IDENTITY_DIAG_NONE, Ordering::Release);
+    FUSB302B_IDENTITY_FIRST_ID.store(u8::MAX, Ordering::Release);
+    FUSB302B_IDENTITY_SECOND_ID.store(u8::MAX, Ordering::Release);
+    for attempt in 0..FUSB302B_IDENTITY_PROBE_ATTEMPTS {
+        let first = {
+            let mut phy = Fusb302::new(&mut *i2c);
+            match phy.device_id().await {
+                Ok(value) => {
+                    FUSB302B_IDENTITY_FIRST_ID.store(value.bits(), Ordering::Release);
+                    Some(value)
+                }
+                Err(error) => {
+                    FUSB302B_LAST_I2C_ERROR
+                        .store(fusb302b_i2c_error_kind(error), Ordering::Release);
+                    FUSB302B_IDENTITY_DIAGNOSTIC
+                        .store(FUSB302B_IDENTITY_DIAG_I2C_ERROR, Ordering::Release);
+                    None
+                }
+            }
+        };
+        let second = {
+            let mut phy = Fusb302::new(&mut *i2c);
+            match phy.device_id().await {
+                Ok(value) => {
+                    FUSB302B_IDENTITY_SECOND_ID.store(value.bits(), Ordering::Release);
+                    Some(value)
+                }
+                Err(error) => {
+                    FUSB302B_LAST_I2C_ERROR
+                        .store(fusb302b_i2c_error_kind(error), Ordering::Release);
+                    FUSB302B_IDENTITY_DIAGNOSTIC
+                        .store(FUSB302B_IDENTITY_DIAG_I2C_ERROR, Ordering::Release);
+                    None
+                }
+            }
+        };
+
+        if let (Some(first), Some(second)) = (first, second) {
+            if first != second {
+                FUSB302B_IDENTITY_DIAGNOSTIC
+                    .store(FUSB302B_IDENTITY_DIAG_ID_MISMATCH, Ordering::Release);
+            } else if !fusb302b::is_fusb302_device_id(first.bits()) {
+                FUSB302B_IDENTITY_DIAGNOSTIC
+                    .store(FUSB302B_IDENTITY_DIAG_UNSUPPORTED_ID, Ordering::Release);
+            } else if confirm_fusb302b_identity_status(i2c, first.bits(), second.bits()).await {
+                return DetectedPdController::Fusb302b(first.bits());
+            }
+        }
+        if attempt + 1 < FUSB302B_IDENTITY_PROBE_ATTEMPTS {
+            EmbassyTimer::after_millis(FUSB302B_IDENTITY_PROBE_RETRY_DELAY_MS).await;
+        }
+    }
+    DetectedPdController::Unknown
 }
