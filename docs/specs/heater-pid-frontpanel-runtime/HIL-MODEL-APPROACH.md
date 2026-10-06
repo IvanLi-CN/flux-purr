@@ -14,4 +14,6 @@ The captured Approach request stayed at 290 permille over 48.03–55.02°C befor
 
 The shared 5A production state machine derives Approach energy from remaining predicted temperature error and calibrated passive loss/capacity, with point-local lead and damping. Timing policy 3 binds the actual model floor and preserves the original bounded conditional-extension criteria; historical policy 2 evidence is not rewritten. Regressions cover damping influence, independence from profile floor/ceiling, a real unraised floor witness, mixed-policy rejection and Rust/Web digest parity.
 
+Firmware `0.27.6-dev.d9dad02` was built from commit `d9dad02e`; ELF SHA-256 is `0d249202229fab620175e22de24cbce31c63b91773fd44d33a21bf61ee280f6b`. Its application size is 2,027,904 of 2,097,152 bytes. The authorized no-backup flash attempt reached only the connection phase and failed with USB `Broken pipe`; neither successful write nor verification was confirmed. A manual download-mode transition is required before retrying the same exact port.
+
 Corrected-artifact flash, startup identity, 60°C independent confirmation and default nine-target qualification remain required. Software checks and the failed initial-artifact run cannot establish those outcomes.
