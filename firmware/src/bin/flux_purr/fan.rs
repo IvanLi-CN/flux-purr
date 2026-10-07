@@ -1074,7 +1074,7 @@ pub(crate) fn accept_rtd_control_sample_after_pps_transition(
 ) -> Option<f32> {
     let (accept_control_sample, reseed_filter) = transition_guard.observe(request_mv, now_ms);
     if reseed_filter {
-        heater_controller.reseed_measurement(last_control_temp_c);
+        heater_controller.reseed_measurement_after_pps_step(last_control_temp_c);
         measurement_guard.reseed(last_control_temp_c, now_ms);
     }
     let was_guarded = measurement_guard.guarded;

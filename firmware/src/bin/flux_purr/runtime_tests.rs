@@ -11835,6 +11835,98 @@ fn heater_controller_reseed_clears_measurement_slope_without_changing_phase() {
 }
 
 #[test]
+fn pps_measurement_reseed_does_not_erase_observed_approach_heat_in_flight() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(54.32);
+        controller.previous_measured_temp_c = Some(54.32);
+        controller.filtered_slope_c_per_profile_tick = 2.0;
+        controller.profile_last_control_at_ms = Some(3_000);
+        let mut profile = production_test_profile(54);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 60;
+        point.brake_distance_centi_c = 1_238;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(54.32);
+        input.target_temp_c = 60;
+        input.now_ms = 3_050;
+        input.ambient_temp_c = 33.08;
+        input.max_power_mw = 100_000.0;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 137.1277,
+            radiation_mw_per_k4: 5.4832304e-7,
+            thermal_capacity_mj_per_c: 22_173.453,
+            transport_delay_ms: 2_650,
+        };
+        controller.natural_cooling_input = Some(input);
+        let mut uninterrupted = controller;
+        assert_eq!(
+            uninterrupted
+                .update_production_at(kind, input, Some(profile))
+                .0
+                .duty_percent,
+            5
+        );
+        let mut transition = RtdPpsTransitionGuard::new(19_000);
+        let mut measurement = RtdControlMeasurementGuard::default();
+        measurement.reseed(54.32, 3_000);
+        assert_eq!(
+            accept_rtd_control_sample_after_pps_transition(
+                &mut transition,
+                &mut controller,
+                &mut measurement,
+                54.32,
+                18_500,
+                3_050,
+                53.0,
+            ),
+            None,
+            "a power-step ADC offset remains rejected"
+        );
+        let snapshot = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
+        assert!(snapshot.filtered_slope_c_per_s > 0.0);
+        assert_eq!(
+            snapshot.duty_percent, 5,
+            "bank={bank:?}: a PPS step is not physical deceleration"
+        );
+    }
+}
+
+#[test]
+fn pps_reseed_preserves_only_valid_rising_model_approach_velocity() {
+    let mut controller = HeaterController::new();
+    controller.heater_was_enabled = true;
+    controller.phase = HeaterControlPhase::Approach;
+    controller.natural_cooling_input = Some(production_test_input(54.32));
+    for slope in [-1.0, 0.0, f32::NAN, f32::INFINITY] {
+        controller.filtered_slope_c_per_profile_tick = slope;
+        controller.approach_cooling_samples = 2;
+        controller.reseed_measurement_after_pps_step(54.32);
+        assert_eq!(controller.filtered_slope_c_per_profile_tick, 0.0);
+        assert_eq!(controller.approach_cooling_samples, 0);
+    }
+    for phase in [HeaterControlPhase::Warmup, HeaterControlPhase::Hold] {
+        controller.phase = phase;
+        controller.filtered_slope_c_per_profile_tick = 2.0;
+        controller.reseed_measurement_after_pps_step(54.32);
+        assert_eq!(controller.filtered_slope_c_per_profile_tick, 0.0);
+    }
+    controller.phase = HeaterControlPhase::Approach;
+    controller.natural_cooling_input = None;
+    controller.filtered_slope_c_per_profile_tick = 2.0;
+    controller.reseed_measurement_after_pps_step(54.32);
+    assert_eq!(controller.filtered_slope_c_per_profile_tick, 0.0);
+}
+
+#[test]
 fn rtd_fractional_millivolts_preserve_oversampled_temperature_resolution() {
     let lower_temp = pt1000_temperature_c_from_resistance(
         rtd_resistance_ohms_from_fractional_mv(900.0).unwrap(),

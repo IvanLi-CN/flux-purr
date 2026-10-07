@@ -944,6 +944,25 @@ impl HeaterController {
         self.reset_approach_cooling_evidence();
     }
 
+    pub(crate) fn reseed_measurement_after_pps_step(&mut self, measured_temp_c: f32) {
+        // A voltage step invalidates the ADC filter's temperature origin, not
+        // a trusted positive thermal velocity. Erasing that velocity invents
+        // deceleration and lets the model restore heat while the plate rises.
+        // Negative velocity cannot survive a reset as cooling evidence.
+        let rising_slope = if self.heater_was_enabled
+            && self.fault_latched.is_none()
+            && self.phase == HeaterControlPhase::Approach
+            && self.model_approach_available()
+            && self.filtered_slope_c_per_profile_tick.is_finite()
+        {
+            self.filtered_slope_c_per_profile_tick.max(0.0)
+        } else {
+            0.0
+        };
+        self.reseed_measurement(measured_temp_c);
+        self.filtered_slope_c_per_profile_tick = rising_slope;
+    }
+
     pub(crate) fn latch_fault(&mut self, reason: HeaterFaultReason) -> bool {
         self.clear_approach_braking();
         let changed = self.fault_latched != Some(reason);
