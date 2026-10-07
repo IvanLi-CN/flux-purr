@@ -21,6 +21,7 @@ pub(crate) struct TuneEvidence {
     pub over_c: f64,
     pub hold_sample_count: u32,
     pub hold_off_sample_count: u32,
+    pub hold_entry_output_permille: Option<u16>,
     pub hold_threshold_crossed: bool,
     pub hold_mean_error_c: Option<f64>,
     pub hold_max_below_c: Option<f64>,
@@ -93,7 +94,7 @@ pub(crate) fn bounded_failure_alternative(
         return None;
     }
     let hold_observed = evidence.first_band_observed && evidence.hold_sample_count >= 3;
-    if high && hold_observed && evidence.hold_off_sample_count == evidence.hold_sample_count {
+    if high && hold_observed && hold_off_after_entry(evidence) {
         return coasting_failure_alternative(previous, attempt);
     }
     let step = attempt / 4 + 1;
@@ -198,7 +199,7 @@ fn coasting_high_side_candidate(
         || evidence.stable_window_verified
         || !evidence.first_band_observed
         || evidence.hold_sample_count < 3
-        || evidence.hold_off_sample_count != evidence.hold_sample_count
+        || !hold_off_after_entry(evidence)
         || evidence.first_band_exit_centi_c.is_none_or(|temperature| {
             i32::from(temperature) <= i32::from(evidence.target_c) * 100 + 150
         })
@@ -212,6 +213,14 @@ fn coasting_high_side_candidate(
         .saturating_add(step)
         .min(4_000);
     (point != previous).then_some(point)
+}
+
+fn hold_off_after_entry(evidence: TuneEvidence) -> bool {
+    evidence.hold_off_sample_count == evidence.hold_sample_count
+        || (evidence
+            .hold_entry_output_permille
+            .is_some_and(|output| (1..=50).contains(&output))
+            && evidence.hold_off_sample_count.saturating_add(1) == evidence.hold_sample_count)
 }
 
 fn saturated_hold_ripple_candidate(
@@ -369,6 +378,7 @@ pub(crate) fn reseed_after_hold_confirm(
         over_c: 0.0,
         hold_sample_count: 0,
         hold_off_sample_count: 0,
+        hold_entry_output_permille: None,
         hold_mean_error_c: None,
         hold_max_below_c: None,
         first_hold_error_c: None,
@@ -1803,6 +1813,7 @@ mod tests {
             over_c: 0.0,
             hold_sample_count: 0,
             hold_off_sample_count: 0,
+            hold_entry_output_permille: None,
             hold_threshold_crossed: false,
             hold_mean_error_c: None,
             hold_max_below_c: None,
@@ -2047,6 +2058,70 @@ mod tests {
             )
             .unwrap();
             assert_eq!(tuned.approach_damping_exponent_permille, 1_000 + step);
+        }
+    }
+
+    #[test]
+    fn captured_single_low_hold_entry_pulse_still_corrects_approach_heat() {
+        let previous = ThermalControlProfilePointConfig {
+            brake_distance_centi_c: 1_553,
+            approach_damping_exponent_permille: 2_000,
+            approach_power_permille: 1_000,
+            approach_floor_power_permille: 50,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 50,
+            hold_reheat_power_permille: 50,
+            hold_kp_permille_per_c: 21,
+            hold_ki_permille_per_c_tick: 1,
+            hold_off_centi_c: 5,
+            overshoot_cutoff_centi_c: 25,
+            hold_blend_ticks: 4,
+            hold_lead_ticks: 4,
+            ..point(60)
+        };
+        // ac83f9d trial 3: one 50-permille entrance sample, then fifteen
+        // zero requests while stored heat carries temperature above band.
+        let facts = TuneEvidence {
+            overshoot_c: 1.93,
+            hold_p2p_c: 2.40,
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(6_153),
+            hold_sample_count: 16,
+            hold_off_sample_count: 15,
+            hold_entry_output_permille: Some(50),
+            ..evidence(60)
+        };
+        let expected = ThermalControlProfilePointConfig {
+            approach_damping_exponent_permille: 2_250,
+            ..previous
+        };
+        assert_eq!(tune_point(previous, facts), expected);
+        assert_eq!(reseed_after_hold_confirm(previous, facts), expected);
+        let alternative = bounded_failure_alternative(previous, facts, 0).unwrap();
+        assert_eq!(alternative.approach_damping_exponent_permille, 2_100);
+        assert_eq!(
+            alternative.hold_power_permille,
+            previous.hold_power_permille
+        );
+        for unavailable in [
+            TuneEvidence {
+                hold_entry_output_permille: None,
+                ..facts
+            },
+            TuneEvidence {
+                hold_entry_output_permille: Some(0),
+                ..facts
+            },
+            TuneEvidence {
+                hold_entry_output_permille: Some(51),
+                ..facts
+            },
+            TuneEvidence {
+                hold_off_sample_count: 14,
+                ..facts
+            },
+        ] {
+            assert!(coasting_high_side_candidate(previous, unavailable).is_none());
         }
     }
 

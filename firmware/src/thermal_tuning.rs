@@ -415,6 +415,7 @@ pub struct ThermalTuningRuntime {
     approach_curve_last_elapsed_ms: Option<u64>,
     hold_output_histogram: [u16; 1001],
     hold_output_count: u32,
+    hold_entry_output_permille: Option<u16>,
     approach_output_histogram: [u16; 1001],
     approach_output_count: u32,
     approach_slopes_c_per_s: Vec<f64, THERMAL_TUNING_APPROACH_TRACE_CAPACITY>,
@@ -516,6 +517,7 @@ impl ThermalTuningRuntime {
             approach_curve_last_elapsed_ms: None,
             hold_output_histogram: [0; 1001],
             hold_output_count: 0,
+            hold_entry_output_permille: None,
             approach_output_histogram: [0; 1001],
             approach_output_count: 0,
             approach_slopes_c_per_s: Vec::new(),
@@ -1241,6 +1243,7 @@ impl ThermalTuningRuntime {
                 }),
             hold_sample_count: self.hold_output_count,
             hold_off_sample_count: u32::from(self.hold_output_histogram[0]),
+            hold_entry_output_permille: self.hold_entry_output_permille,
             hold_threshold_crossed: self.hold_threshold_crossed,
             hold_mean_error_c,
             hold_max_below_c: self.min_controller_hold_temperature_centi_c.map(|minimum| {
@@ -1325,6 +1328,7 @@ impl ThermalTuningRuntime {
         self.approach_curve_last_elapsed_ms = None;
         self.hold_output_histogram = [0; 1001];
         self.hold_output_count = 0;
+        self.hold_entry_output_permille = None;
         self.approach_output_histogram = [0; 1001];
         self.approach_output_count = 0;
         self.approach_slopes_c_per_s.clear();
@@ -1689,6 +1693,7 @@ impl ThermalTuningRuntime {
             // Candidate powers and the external analyzer use the PID logical
             // request. PPS voltage compensation must not alter that domain.
             let output = usize::from(sample.heater_requested_output_permille).min(1_000);
+            self.hold_entry_output_permille.get_or_insert(output as u16);
             self.hold_output_histogram[output] =
                 self.hold_output_histogram[output].saturating_add(1);
             self.hold_output_count = self.hold_output_count.saturating_add(1);
@@ -4415,6 +4420,35 @@ mod tests {
                         && decision.hold_peak_to_peak_centi_c == Some(161)
                 })
         }));
+    }
+
+    #[test]
+    fn hold_entry_request_is_retained_without_hiding_later_supply() {
+        for (entry, later) in [(50, 0), (0, 50), (51, 0), (50, 50)] {
+            let mut runtime = started_single_target_runtime();
+            runtime
+                .record_sample(sample(0, ThermalTuningPhase::Warmup, 3_500))
+                .unwrap();
+            runtime
+                .record_sample(sample(1_000, ThermalTuningPhase::Approach, 5_000))
+                .unwrap();
+            for (elapsed, temperature, output) in [
+                (2_000, 5_953, entry),
+                (2_200, 5_990, later),
+                (2_400, 6_160, 0),
+            ] {
+                let mut observation = sample(elapsed, ThermalTuningPhase::Hold, temperature);
+                observation.heater_requested_output_permille = output;
+                runtime.record_sample(observation).unwrap();
+            }
+            let facts = runtime.candidate_failure_evidence(60, Some(160), Some(207), None, 10_000);
+            assert_eq!(facts.hold_entry_output_permille, Some(entry));
+            assert_eq!(facts.hold_sample_count, 3);
+            assert_eq!(
+                facts.hold_off_sample_count,
+                u32::from(entry == 0) + u32::from(later == 0) + 1
+            );
+        }
     }
 
     #[test]
