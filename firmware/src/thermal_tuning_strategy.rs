@@ -93,6 +93,9 @@ pub(crate) fn bounded_failure_alternative(
         return None;
     }
     let hold_observed = evidence.first_band_observed && evidence.hold_sample_count >= 3;
+    if high && hold_observed && evidence.hold_off_sample_count == evidence.hold_sample_count {
+        return coasting_failure_alternative(previous, attempt);
+    }
     let step = attempt / 4 + 1;
     let channel = attempt % 4;
     let mut point = previous;
@@ -161,6 +164,26 @@ pub(crate) fn bounded_failure_alternative(
                 .saturating_sub(100 * step)
                 .max(100)
         }
+    }
+    (point != previous).then_some(point)
+}
+
+fn coasting_failure_alternative(
+    previous: ThermalControlProfilePointConfig,
+    attempt: u16,
+) -> Option<ThermalControlProfilePointConfig> {
+    let step = attempt / 4 + 1;
+    let mut point = previous;
+    if attempt.is_multiple_of(2) {
+        point.approach_damping_exponent_permille = previous
+            .approach_damping_exponent_permille
+            .saturating_add(100 * step)
+            .min(4_000);
+    } else {
+        point.brake_distance_centi_c = previous
+            .brake_distance_centi_c
+            .saturating_add(40 * step)
+            .min(5_000);
     }
     (point != previous).then_some(point)
 }
@@ -1663,6 +1686,39 @@ mod tests {
             hold_blend_ticks: 12,
             approach_lead_ticks: 0,
             hold_lead_ticks: 0,
+        }
+    }
+
+    #[test]
+    fn coasting_failure_alternatives_change_damping_before_unused_hold_feedback() {
+        let previous = point(60);
+        let facts = TuneEvidence {
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(6_175),
+            hold_sample_count: 14,
+            hold_off_sample_count: 14,
+            ..evidence(60)
+        };
+        let first = bounded_failure_alternative(previous, facts, 0).unwrap();
+        assert_eq!(first.approach_damping_exponent_permille, 1_100);
+        let expected = ThermalControlProfilePointConfig {
+            approach_damping_exponent_permille: 1_100,
+            ..previous
+        };
+        assert_eq!(first, expected);
+        for attempt in 0..32 {
+            let next = bounded_failure_alternative(previous, facts, attempt).unwrap();
+            assert_eq!(next.hold_power_permille, previous.hold_power_permille);
+            assert_eq!(
+                next.hold_reheat_power_permille,
+                previous.hold_reheat_power_permille
+            );
+            assert_eq!(next.hold_kp_permille_per_c, previous.hold_kp_permille_per_c);
+            assert!(next.brake_distance_centi_c >= previous.brake_distance_centi_c);
+            assert!(
+                next.approach_damping_exponent_permille
+                    >= previous.approach_damping_exponent_permille
+            );
         }
     }
 

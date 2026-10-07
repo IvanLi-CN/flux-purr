@@ -2142,8 +2142,10 @@ impl ThermalTuningRuntime {
             // Failed windows use the complete valid prefix, not the first
             // exit's quantization noise. Qualification remains independent.
             score[4] = if self.first_band_elapsed_ms.is_some() {
-                1.0 - (self.longest_stable_span_ms as f64 / THERMAL_TUNING_STABLE_WINDOW_MS as f64)
-                    .min(1.0)
+                let ranked_span_ms = self.longest_stable_span_ms
+                    / THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS
+                    * THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS;
+                1.0 - (ranked_span_ms as f64 / THERMAL_TUNING_STABLE_WINDOW_MS as f64).min(1.0)
             } else {
                 progress_base + temperature_gap_c.min(5.0)
             };
@@ -4587,6 +4589,24 @@ mod tests {
         predicted[10] = 1.0e12;
         assert!(score_precedes(&predicted, &current));
         assert!(!score_precedes(&current, &predicted));
+    }
+
+    #[test]
+    fn failed_rank_does_not_trade_lower_excursion_for_six_ms_sample_jitter() {
+        // Real 39d62c7 trial 4/5: the better trace loses six milliseconds
+        // at sampled band endpoints, well below the 200ms recording cadence.
+        let mut scores = std::vec::Vec::new();
+        for (span, excursion, overshoot, p2p) in [(3_644, 25, 175, 215), (3_638, 10, 160, 203)] {
+            let mut runtime = started_single_target_runtime();
+            runtime.first_band_elapsed_ms = Some(1_000);
+            runtime.first_band_exit_centi_c = Some(6_150 + excursion as i16);
+            runtime.longest_stable_span_ms = span;
+            runtime.max_band_excursion_centi_c = excursion;
+            scores.push(runtime.trial_score(60, false, Some(overshoot), Some(p2p), None));
+            assert!(runtime.stable_window_verified_at_ms.is_none());
+        }
+        assert_eq!(scores[0][4], scores[1][4]);
+        assert!(score_precedes(&scores[1], &scores[0]));
     }
 
     #[test]
