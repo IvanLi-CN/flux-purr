@@ -11021,7 +11021,7 @@ fn tuning_cooldown_preserves_safety_fan_provenance() {
 }
 
 #[test]
-fn tuning_cooling_continues_after_terminal_until_target_cooldown_threshold() {
+fn tuning_cooling_continues_after_terminal_until_strict_35c_for_every_target() {
     let terminal_request = |latched, was_armed, heater_enabled, temperature, target| {
         tuning_cooling_requested(
             latched,
@@ -11042,8 +11042,19 @@ fn tuning_cooling_continues_after_terminal_until_target_cooldown_threshold() {
     assert!(!terminal_request(true, false, true, Some(55.0), Some(60)));
     assert!(!terminal_request(false, false, false, Some(55.0), Some(60)));
     assert!(terminal_request(true, false, false, Some(40.01), Some(240)));
-    assert!(!terminal_request(true, false, false, Some(40.0), Some(240)));
-    assert!(!terminal_request(true, false, false, Some(35.0), None));
+    for target in [Some(60), Some(220), Some(240), None] {
+        for temperature in [40.0, 37.25, 35.01, 35.0] {
+            assert!(terminal_request(
+                true,
+                false,
+                false,
+                Some(temperature),
+                target
+            ));
+        }
+        assert!(!terminal_request(true, false, false, Some(34.99), target));
+        assert!(terminal_request(true, false, false, None, target));
+    }
     for temperature in [55.0, 40.0, 35.01, 35.0, 34.99] {
         assert!(tuning_cooling_requested(
             false,

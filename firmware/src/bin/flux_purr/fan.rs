@@ -582,20 +582,16 @@ pub(crate) fn tuning_cooling_requested(
     tuning_phase: flux_purr_firmware::thermal_tuning::ThermalTuningPhase,
     heater_enabled: bool,
     temperature_c: Option<f32>,
-    target_c: Option<i16>,
+    _target_c: Option<i16>,
 ) -> bool {
     if tuning_armed
         && tuning_phase == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
     {
         return true;
     }
-    let temperature_released = temperature_c.is_some_and(|temp| {
-        if target_c == Some(60) {
-            temp < 35.0
-        } else {
-            temp <= 40.0
-        }
-    });
+    // Terminal cooling belongs to the whole run. A pruned final target must
+    // not select ordinary post-heat's warmer release temperature.
+    let temperature_released = temperature_c.is_some_and(|temp| temp < 35.0);
     if heater_enabled || temperature_released {
         return false;
     }
