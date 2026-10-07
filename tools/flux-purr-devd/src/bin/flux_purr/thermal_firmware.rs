@@ -561,6 +561,18 @@ fn firmware_profile_mode(power_class: &str) -> &'static str {
     }
 }
 
+fn require_firmware_automatic_power(
+    status: &Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if status.get("manualPpsEnabled").and_then(Value::as_bool) != Some(false) {
+        return Err(
+            "firmware tuning requires manualPpsEnabled=false; stop heating and clear the manual PPS override before starting"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 async fn ensure_firmware_profile_mode(
     client: &Client,
     resolved: &ResolvedUsbTarget,
@@ -568,6 +580,7 @@ async fn ensure_firmware_profile_mode(
     power_class: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let status = request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
+    require_firmware_automatic_power(&status)?;
     if firmware_profile_mode_ready(&status, power_class) {
         return Ok(status);
     }
@@ -587,6 +600,7 @@ async fn ensure_firmware_profile_mode(
     loop {
         let status =
             request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
+        require_firmware_automatic_power(&status)?;
         if firmware_profile_mode_ready(&status, power_class) {
             return Ok(status);
         }
@@ -2424,6 +2438,21 @@ mod tests {
         thermal_tuning::{ThermalTuningEvent, digest_event_chain, hash_profile},
     };
     use serde_json::json;
+
+    #[test]
+    fn firmware_tuning_requires_confirmed_automatic_power_before_mode_changes() {
+        for status in [
+            json!({"manualPpsEnabled": true, "manualPpsMv": 21000}),
+            json!({}),
+            json!({"manualPpsEnabled": null}),
+        ] {
+            let error = super::require_firmware_automatic_power(&status).unwrap_err();
+            assert!(error.to_string().contains("manualPpsEnabled=false"));
+        }
+        assert!(
+            super::require_firmware_automatic_power(&json!({"manualPpsEnabled": false})).is_ok()
+        );
+    }
 
     #[test]
     fn firmware_seed_export_keeps_parameters_and_hash() {
