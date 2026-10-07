@@ -927,7 +927,8 @@ impl HeaterController {
     }
 
     pub(crate) fn reseed_measurement(&mut self, measured_temp_c: f32) {
-        self.approach_braking_remaining_ms = 0;
+        // PPS steps and accepted RTD guard recovery reseed the measurement
+        // filter during an active Approach. They do not cancel heat in flight.
         self.filtered_temp_c = Some(measured_temp_c);
         self.previous_filtered_temp_c = Some(measured_temp_c);
         self.filtered_slope_c_per_profile_tick = 0.0;
@@ -1089,6 +1090,7 @@ impl HeaterController {
         target_temp_c: i16,
         measured_temp_c: f32,
     ) -> HeaterPidSnapshot {
+        self.approach_braking_remaining_ms = 0;
         self.reseed_measurement(measured_temp_c);
         self.phase = HeaterControlPhase::Warmup;
         self.phase_ticks = 0;
@@ -1659,6 +1661,7 @@ impl HeaterController {
     }
 
     fn reset_for_target_change(&mut self, measured_temp_c: f32, now_ms: u64) {
+        self.approach_braking_remaining_ms = 0;
         self.reseed_measurement(measured_temp_c);
         self.phase = HeaterControlPhase::Warmup;
         self.phase_ticks = 0;

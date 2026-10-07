@@ -10080,6 +10080,68 @@ fn braking_approach_waits_for_calibrated_heat_in_flight_before_reheating() {
 }
 
 #[test]
+fn braking_approach_survives_rtd_reseeds_during_pps_steps() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let mut controller = HeaterController::new();
+        let kind = ProductionThermalController::Profile(bank);
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.filtered_temp_c = Some(44.26);
+        controller.previous_measured_temp_c = Some(44.26);
+        controller.filtered_slope_c_per_profile_tick = 2.0;
+        controller.profile_last_control_at_ms = Some(2_950);
+        let mut profile = production_test_profile(900);
+        let point = profile.points[0].as_mut().unwrap();
+        point.brake_distance_centi_c = 1_553;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(44.71);
+        input.model.transport_delay_ms = 3_400;
+        let mut transition = RtdPpsTransitionGuard::new(21_000);
+        let mut measurement = RtdControlMeasurementGuard::default();
+        measurement.reseed(44.71, input.now_ms);
+        assert_eq!(
+            controller
+                .update_production_at(kind, input, Some(profile))
+                .0
+                .duty_percent,
+            5
+        );
+        // Runtime changes the PPS request and reseeds the RTD filter about
+        // 300ms after entry. Filter resets cannot discard heat in flight.
+        for offset in (50..3_400).step_by(50) {
+            input.now_ms = 3_000 + offset;
+            let request_mv = if offset < 300 { 21_000 } else { 20_500 };
+            let accepted = accept_rtd_control_sample_after_pps_transition(
+                &mut transition,
+                &mut controller,
+                &mut measurement,
+                input.measured_temp_c,
+                request_mv,
+                input.now_ms,
+                input.measured_temp_c,
+            );
+            if let Some(temp_c) = accepted {
+                input.measured_temp_c = temp_c;
+            }
+            let snapshot = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
+            assert_eq!(snapshot.duty_percent, 5, "bank={bank:?}, offset={offset}");
+        }
+        input.now_ms = 6_400;
+        assert!(
+            controller
+                .update_production_at(kind, input, Some(profile))
+                .0
+                .duty_percent
+                > 5
+        );
+    }
+}
+
+#[test]
 fn five_amp_model_approach_ignores_profile_floor_and_ceiling() {
     let mut normal = HeaterController::new();
     normal.production_controller = Some(ProductionThermalController::Profile(
