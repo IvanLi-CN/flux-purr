@@ -72,15 +72,20 @@ fn heater_profile_uses_calibrated_cooling_for_braking_and_early_recovery() {
         },
     };
     let mut calibrated = HeaterController::new();
-    calibrated.production_controller = Some(ProductionThermalController::Profile);
+    calibrated.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
     calibrated.last_target_temp_c = 240;
     calibrated.filtered_temp_c = Some(236.9);
     calibrated.previous_measured_temp_c = Some(236.9);
     calibrated.filtered_slope_c_per_profile_tick = 2.0;
     let mut legacy = calibrated;
     let plain = legacy.update_at(240, 237.0, true, Some(profile), 50);
-    let (modelled, _) =
-        calibrated.update_production_at(ProductionThermalController::Profile, input, Some(profile));
+    let (modelled, _) = calibrated.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+        input,
+        Some(profile),
+    );
     assert_eq!(plain.phase, HeaterControlPhase::Warmup);
     assert_eq!(modelled.phase, HeaterControlPhase::Approach);
 
@@ -92,7 +97,7 @@ fn heater_profile_uses_calibrated_cooling_for_braking_and_early_recovery() {
     let mut recovery = None;
     for tick in 1..=10 {
         let (snapshot, _) = calibrated.update_production_at(
-            ProductionThermalController::Profile,
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
             ThermalPlantRuntimeInput {
                 measured_temp_c: 240.7 - tick as f32 * 0.025,
                 now_ms: 50 + tick * 50,
@@ -127,7 +132,9 @@ fn heater_cooling_brake_does_not_double_count_loss_in_observed_net_slope() {
     config.points[1..].fill(None);
     let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
     let mut controller = HeaterController::new();
-    controller.production_controller = Some(ProductionThermalController::Profile);
+    controller.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
     controller.last_target_temp_c = 240;
     controller.filtered_temp_c = Some(231.7);
     controller.previous_measured_temp_c = Some(231.7);
@@ -146,8 +153,11 @@ fn heater_cooling_brake_does_not_double_count_loss_in_observed_net_slope() {
             transport_delay_ms: 1950,
         },
     };
-    let (snapshot, _) =
-        controller.update_production_at(ProductionThermalController::Profile, input, Some(profile));
+    let (snapshot, _) = controller.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+        input,
+        Some(profile),
+    );
     assert_eq!(snapshot.phase, HeaterControlPhase::Warmup);
 }
 
@@ -3774,6 +3784,7 @@ fn runtime_status_reports_rtd_batch_extrema() {
     );
 
     assert_eq!(status.rtd_raw_adc_mv, 900);
+    assert_eq!(status.rtd_divider_supply_mv, Some(RTD_DIVIDER_SUPPLY_MV));
     assert_eq!(status.rtd_raw_adc_min_mv, 899);
     assert_eq!(status.rtd_raw_adc_max_mv, 902);
     assert_eq!(status.rtd_raw_adc_spread_mv, 3);
@@ -9029,13 +9040,15 @@ fn hold_pps_governor_keeps_the_approach_voltage_when_headroom_is_sufficient() {
 #[test]
 fn profile_first_approach_downramps_pps_but_hold_recovery_keeps_the_handoff() {
     let mut controller = HeaterController::new();
-    controller.production_controller = Some(ProductionThermalController::Profile);
+    controller.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
     controller.phase = HeaterControlPhase::Approach;
     assert!(controller.initial_profile_approach());
     controller.recovering_from_hold = true;
     assert!(!controller.initial_profile_approach());
     controller.recovering_from_hold = false;
-    controller.production_controller = Some(ProductionThermalController::Plant);
+    controller.production_controller = Some(ProductionThermalController::Unavailable);
     assert!(!controller.initial_profile_approach());
     let mut governor = HoldPpsGovernor::new();
     let input = HoldPpsRequestInput {
@@ -9858,16 +9871,20 @@ fn profile_disarm_does_not_integrate_disabled_time_on_rearm() {
 }
 
 #[test]
-fn production_controller_requires_a_verified_five_amp_source() {
+fn production_controller_requires_the_selected_bank_current() {
     let (five_amp, five_amp_pps) = production_power_fixture(5_000);
     assert_eq!(
         production_thermal_controller(five_amp, ThermalProfileMode::Auto, &five_amp_pps),
-        ProductionThermalController::Profile
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a)
     );
     let (three_amp, three_amp_pps) = production_power_fixture(3_250);
     assert_eq!(
+        production_thermal_controller(three_amp, ThermalProfileMode::W65, &three_amp_pps),
+        ProductionThermalController::Profile(ThermalProfileBank::Pps3a)
+    );
+    assert_eq!(
         production_thermal_controller(three_amp, ThermalProfileMode::W100, &three_amp_pps),
-        ProductionThermalController::Plant
+        ProductionThermalController::Unavailable
     );
     assert_eq!(
         production_thermal_controller(
@@ -9875,7 +9892,7 @@ fn production_controller_requires_a_verified_five_amp_source() {
             ThermalProfileMode::W100,
             &five_amp_pps
         ),
-        ProductionThermalController::Plant
+        ProductionThermalController::Unavailable
     );
     let negotiating = PowerState {
         protocol: PowerProtocol::WaitingForAccept,
@@ -9883,7 +9900,7 @@ fn production_controller_requires_a_verified_five_amp_source() {
     };
     assert_eq!(
         production_thermal_controller(negotiating, ThermalProfileMode::Auto, &five_amp_pps),
-        ProductionThermalController::Plant
+        ProductionThermalController::Unavailable
     );
     let continuous = PowerState {
         requested: Some(PdContractRequest::pps(20_100, 5_000).unwrap()),
@@ -9891,7 +9908,7 @@ fn production_controller_requires_a_verified_five_amp_source() {
     };
     assert_eq!(
         production_thermal_controller(continuous, ThermalProfileMode::Auto, &five_amp_pps),
-        ProductionThermalController::Profile
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a)
     );
     assert_eq!(
         production_thermal_controller(
@@ -9902,7 +9919,7 @@ fn production_controller_requires_a_verified_five_amp_source() {
             ThermalProfileMode::Auto,
             &five_amp_pps
         ),
-        ProductionThermalController::Plant
+        ProductionThermalController::Unavailable
     );
 }
 
@@ -9916,7 +9933,9 @@ fn five_amp_model_approach_responds_to_damping_without_a_power_plateau() {
         point.approach_damping_exponent_permille = damping;
         point.approach_lead_ticks = 0;
         let mut controller = HeaterController::new();
-        controller.production_controller = Some(ProductionThermalController::Profile);
+        controller.production_controller = Some(ProductionThermalController::Profile(
+            ThermalProfileBank::Pps5a,
+        ));
         controller.phase = HeaterControlPhase::Approach;
         controller.heater_was_enabled = true;
         controller.last_target_temp_c = 60;
@@ -9927,7 +9946,11 @@ fn five_amp_model_approach_responds_to_damping_without_a_power_plateau() {
         input.model.transport_delay_ms = 1_950;
         input.max_power_mw = 100_000.0;
         outputs[index] = controller
-            .update_production_at(ProductionThermalController::Profile, input, Some(profile))
+            .update_production_at(
+                ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+                input,
+                Some(profile),
+            )
             .0
             .duty_percent;
     }
@@ -9946,7 +9969,9 @@ fn five_amp_braking_approach_entry_immediately_requests_five_percent() {
             let mut profile = production_test_profile(900);
             profile.points[0].as_mut().unwrap().target_temp_c = target;
             let mut controller = HeaterController::new();
-            controller.production_controller = Some(ProductionThermalController::Profile);
+            controller.production_controller = Some(ProductionThermalController::Profile(
+                ThermalProfileBank::Pps5a,
+            ));
             controller.last_target_temp_c = target;
             controller.heater_was_enabled = true;
             controller.filtered_temp_c = Some(temperature);
@@ -9955,7 +9980,7 @@ fn five_amp_braking_approach_entry_immediately_requests_five_percent() {
             let mut input = production_test_input(temperature);
             input.target_temp_c = target;
             let (output, disarmed) = controller.update_production_at(
-                ProductionThermalController::Profile,
+                ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
                 input,
                 Some(profile),
             );
@@ -9971,7 +9996,9 @@ fn five_amp_braking_approach_can_request_less_than_passive_loss_and_reheat() {
     let mut outputs = [0; 2];
     for (index, slope) in [2.0, -0.3].into_iter().enumerate() {
         let mut controller = HeaterController::new();
-        controller.production_controller = Some(ProductionThermalController::Profile);
+        controller.production_controller = Some(ProductionThermalController::Profile(
+            ThermalProfileBank::Pps5a,
+        ));
         controller.last_target_temp_c = 60;
         controller.heater_was_enabled = true;
         controller.phase = HeaterControlPhase::Approach;
@@ -9984,7 +10011,7 @@ fn five_amp_braking_approach_can_request_less_than_passive_loss_and_reheat() {
         input.model.convection_mw_per_c = 300.0;
         input.model.transport_delay_ms = 2_000;
         let (output, _) = controller.update_production_at(
-            ProductionThermalController::Profile,
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
             input,
             Some(profile),
         );
@@ -9999,9 +10026,65 @@ fn five_amp_braking_approach_can_request_less_than_passive_loss_and_reheat() {
 }
 
 #[test]
+fn braking_approach_waits_for_calibrated_heat_in_flight_before_reheating() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(ProductionThermalController::Profile(bank));
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.filtered_temp_c = Some(44.26);
+        controller.previous_measured_temp_c = Some(44.26);
+        controller.filtered_slope_c_per_profile_tick = 2.0;
+        controller.profile_last_control_at_ms = Some(2_950);
+        let mut profile = production_test_profile(900);
+        let point = profile.points[0].as_mut().unwrap();
+        point.brake_distance_centi_c = 1_553;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(44.71);
+        input.model.transport_delay_ms = 3_400;
+        input.model.thermal_capacity_mj_per_c = 22_564.195;
+        let kind = ProductionThermalController::Profile(bank);
+        let first = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(first.phase, HeaterControlPhase::Approach);
+        assert_eq!(first.duty_percent, 5);
+        // Captured 0e50 entry rebounds to 100% after 320ms; a held sensor
+        // reading must not erase the warmup energy still in transit.
+        for offset in (50..3_400).step_by(50) {
+            input.now_ms = 3_000 + offset;
+            let snapshot = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
+            assert_eq!(snapshot.duty_percent, 5, "bank={bank:?}, offset={offset}");
+        }
+        input.now_ms = 6_400;
+        let resumed = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert!(
+            resumed.duty_percent > 5,
+            "a real remaining deficit must regain model heat"
+        );
+        controller.update_production_at(
+            kind,
+            ThermalPlantRuntimeInput {
+                heater_enabled: false,
+                ..input
+            },
+            Some(profile),
+        );
+        assert_eq!(controller.approach_braking_remaining_ms, 0);
+    }
+}
+
+#[test]
 fn five_amp_model_approach_ignores_profile_floor_and_ceiling() {
     let mut normal = HeaterController::new();
-    normal.production_controller = Some(ProductionThermalController::Profile);
+    normal.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
     normal.phase = HeaterControlPhase::Approach;
     normal.heater_was_enabled = true;
     normal.last_target_temp_c = 60;
@@ -10011,16 +10094,24 @@ fn five_amp_model_approach_ignores_profile_floor_and_ceiling() {
     let mut tuning = normal;
     let profile = production_test_profile(300);
     let input = production_test_input(54.5);
-    let (normal_output, normal_disarmed) =
-        normal.update_production_at(ProductionThermalController::Profile, input, Some(profile));
-    let (tuning_output, tuning_disarmed) =
-        tuning.update_production_at(ProductionThermalController::Profile, input, Some(profile));
+    let (normal_output, normal_disarmed) = normal.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+        input,
+        Some(profile),
+    );
+    let (tuning_output, tuning_disarmed) = tuning.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+        input,
+        Some(profile),
+    );
     assert!(!normal_disarmed && !tuning_disarmed);
     assert_eq!(normal_output, tuning_output);
     assert!(normal_output.duty_percent >= 5);
 
     let mut changed_candidate = HeaterController::new();
-    changed_candidate.production_controller = Some(ProductionThermalController::Profile);
+    changed_candidate.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
     changed_candidate.phase = HeaterControlPhase::Approach;
     changed_candidate.heater_was_enabled = true;
     changed_candidate.last_target_temp_c = 60;
@@ -10033,7 +10124,7 @@ fn five_amp_model_approach_ignores_profile_floor_and_ceiling() {
         .unwrap()
         .approach_floor_power_permille = 800;
     let (changed_output, _) = changed_candidate.update_production_at(
-        ProductionThermalController::Profile,
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
         input,
         Some(changed_profile),
     );
@@ -10044,7 +10135,7 @@ fn five_amp_model_approach_ignores_profile_floor_and_ceiling() {
 }
 
 #[test]
-fn production_output_uses_five_amp_candidate_settings_without_changing_three_amp() {
+fn production_output_uses_candidate_settings_for_both_power_classes() {
     let mut profile = production_test_profile(300);
     profile.settings.auto_adjustable_working_floor_mv = 6_100;
     profile.settings.heater_current_reserve_ma = 300;
@@ -10052,17 +10143,12 @@ fn production_output_uses_five_amp_candidate_settings_without_changing_three_amp
         let (power, manual_pps) = production_power_fixture(max_ma);
         let kind = production_thermal_controller(power, ThermalProfileMode::Auto, &manual_pps);
         let output = thermal_output_settings(Some(profile), kind, CalibrationMode::Off);
-        let expected = if max_ma == 5_000 {
-            profile.settings
-        } else {
-            ThermalControlProfileSettings::default()
-        };
-        assert_eq!(output, expected, "source current {max_ma}");
+        assert_eq!(output, profile.settings, "source current {max_ma}");
     }
     assert_eq!(
         thermal_output_settings(
             Some(profile),
-            ProductionThermalController::Plant,
+            ProductionThermalController::Unavailable,
             CalibrationMode::ThermalPlant,
         ),
         profile.settings,
@@ -10070,7 +10156,7 @@ fn production_output_uses_five_amp_candidate_settings_without_changing_three_amp
     assert_eq!(
         thermal_output_settings(
             None,
-            ProductionThermalController::Profile,
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
             CalibrationMode::Off
         ),
         ThermalControlProfileSettings::default(),
@@ -10116,14 +10202,14 @@ fn adc_conversion_polling_yields_when_slow_and_preserves_errors() {
 fn production_source_class_change_disarms_before_switching_controller() {
     let mut controller = HeaterController::new();
     let (first, disarmed) = controller.update_production_at(
-        ProductionThermalController::Plant,
+        ProductionThermalController::Profile(ThermalProfileBank::Pps3a),
         production_test_input(30.0),
         None,
     );
     assert!(!disarmed);
     assert!(first.duty_percent > 0);
     let (switched, disarmed) = controller.update_production_at(
-        ProductionThermalController::Profile,
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
         production_test_input(31.0),
         Some(production_test_profile(900)),
     );
@@ -10133,7 +10219,7 @@ fn production_source_class_change_disarms_before_switching_controller() {
 }
 
 #[test]
-fn three_amp_production_matches_the_plant_controller() {
+fn both_power_classes_use_the_same_calibrated_profile_control() {
     let mut direct = HeaterController::new();
     let mut selected = HeaterController::new();
     for (index, temperature_c) in [30.0, 40.0, 56.0, 59.7, 60.2].into_iter().enumerate() {
@@ -10141,9 +10227,13 @@ fn three_amp_production_matches_the_plant_controller() {
             now_ms: index as u64 * 50,
             ..production_test_input(temperature_c)
         };
-        let baseline = direct.update_thermal_plant_at(input);
+        let (baseline, _) = direct.update_production_at(
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+            input,
+            Some(production_test_profile(900)),
+        );
         let (actual, disarmed) = selected.update_production_at(
-            ProductionThermalController::Plant,
+            ProductionThermalController::Profile(ThermalProfileBank::Pps3a),
             input,
             Some(production_test_profile(900)),
         );
@@ -11485,34 +11575,6 @@ fn heater_controller_reseed_clears_measurement_slope_without_changing_phase() {
     assert_eq!(controller.previous_filtered_temp_c, Some(52.0));
     assert_eq!(controller.filtered_slope_c_per_profile_tick, 0.0);
     assert_eq!(controller.previous_measured_temp_c, Some(52.0));
-}
-
-#[test]
-fn thermal_plant_filters_single_sample_slope_before_delay_prediction() {
-    let mut controller = HeaterController::new();
-    let model = flux_purr_firmware::memory::ThermalPlantProjection {
-        convection_mw_per_c: 0.0,
-        radiation_mw_per_k4: 0.0,
-        thermal_capacity_mj_per_c: 42_000.0,
-        transport_delay_ms: 10_000,
-    };
-    let input = |measured_temp_c, heater_enabled, now_ms| ThermalPlantRuntimeInput {
-        target_temp_c: 60,
-        measured_temp_c,
-        ambient_temp_c: 30.0,
-        heater_enabled,
-        model,
-        max_power_mw: 100_000.0,
-        now_ms,
-    };
-
-    controller.update_thermal_plant_at(input(30.0, true, 0));
-    let snapshot = controller.update_thermal_plant_at(input(31.0, true, 50));
-
-    assert!((snapshot.filtered_slope_c_per_s - 0.375).abs() < 0.001);
-    assert!(snapshot.control_error_c > 0.0);
-    assert!(snapshot.duty_percent >= 70);
-    assert_eq!(snapshot.phase, HeaterControlPhase::Warmup);
 }
 
 #[test]
@@ -13676,12 +13738,14 @@ fn automatic_pps_live_gate_tracks_control_during_wait_and_confirmation() {
 #[test]
 fn tuning_power_wait_resumes_profile_without_a_false_source_change() {
     let mut controller = HeaterController::new();
-    controller.production_controller = Some(ProductionThermalController::Profile);
+    controller.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
     let paused = pause_tuning_profile_controller(&mut controller, 60, 34.0, 129);
     assert_eq!(paused.duty_percent, 0);
     assert_eq!(controller.production_controller, None);
     let (_, disarm) = controller.update_production_at(
-        ProductionThermalController::Profile,
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
         production_test_input(34.0),
         Some(production_test_profile(300)),
     );

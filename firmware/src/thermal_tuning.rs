@@ -6,7 +6,9 @@ use sha2::{Digest, Sha256};
 
 use crate::adapters::pd::{FUSB302B_PD_ABSOLUTE_MAX_MV, FUSB302B_PD_ABSOLUTE_MIN_MV};
 use crate::heater_phase::hold_entry_ready;
-use crate::memory::{ThermalControlProfileConfig, ThermalControlProfilePointConfig};
+use crate::memory::{
+    ThermalControlProfileConfig, ThermalControlProfilePointConfig, ThermalProfileBank,
+};
 use crate::thermal_tuning_limits::{
     TRIAL_TIMEOUT_MS, ThermalTuningTimingEvidence, original_settle_limit_ms,
 };
@@ -71,6 +73,22 @@ pub struct ThermalTuningSaveConfirmation<'a> {
 pub enum ThermalTuningPowerClass {
     Pps3a,
     Pps5a,
+}
+
+impl ThermalTuningPowerClass {
+    pub const fn required_current_ma(self) -> u16 {
+        match self {
+            Self::Pps3a => 3_000,
+            Self::Pps5a => 5_000,
+        }
+    }
+
+    pub const fn profile_bank(self) -> ThermalProfileBank {
+        match self {
+            Self::Pps3a => ThermalProfileBank::Pps3a,
+            Self::Pps5a => ThermalProfileBank::Pps5a,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -598,10 +616,6 @@ impl ThermalTuningRuntime {
         self.candidate_hash = Some(candidate_hash);
         self.candidate_profile = candidate_profile;
         self.seed_source = bounded_reason("initial_candidate");
-        if power_class != ThermalTuningPowerClass::Pps5a {
-            self.fail("pps3a_not_supported");
-            return Err(ThermalTuningError::InvalidPowerClass);
-        }
         if targets.is_empty() || targets.len() > THERMAL_TUNING_MAX_TARGETS {
             self.fail("invalid_target_scope");
             return Err(ThermalTuningError::InvalidTargets);
@@ -1568,7 +1582,8 @@ impl ThermalTuningRuntime {
         if !self.armed {
             return Err(ThermalTuningError::NotRunning);
         }
-        if sample.pps_contract.kind != ThermalTuningPowerClass::Pps5a
+        if Some(sample.pps_contract.kind) != self.power_class
+            || sample.pps_contract.current_ma < sample.pps_contract.kind.required_current_ma()
             || !sample.pps_contract.confirmed
             || !sample.measurement_valid
         {
@@ -2345,7 +2360,7 @@ impl ThermalTuningRuntime {
             candidate_id: self.candidate_id.clone().unwrap_or_default(),
             candidate_hash: self.candidate_hash.clone().unwrap_or_default(),
             power_class,
-            bank: ThermalTuningPowerClass::Pps5a,
+            bank: power_class,
             bank_revision,
             bank_hash,
             atomic: true,
@@ -2895,6 +2910,8 @@ fn score_precedes(left: &[f64; 11], right: &[f64; 11]) -> bool {
 
 pub fn hash_profile(profile: &ThermalControlProfileConfig) -> Option<TuningHash> {
     let mut hasher = Sha256::new();
+    // Retain the wire hash encoding for historical evidence. This hashes only
+    // profile content; run identity, power class and bank are checked separately.
     hasher.update(b"thermal-tuning-v2/candidate/pps5a");
     for value in [
         profile.settings.temp_filter_alpha_permille,
@@ -5356,48 +5373,53 @@ mod tests {
 
     #[test]
     fn save_receipt_binds_eeprom_generation_and_verified_bank_hash() {
-        let mut profile = profile_with_targets(&THERMAL_TUNING_EXECUTION_ORDER_C);
-        profile.sanitize();
-        let candidate_hash = hash_profile(&profile).unwrap();
-        let mut runtime = ThermalTuningRuntime::new();
-        runtime
-            .start(ThermalTuningStart {
-                run_id: id("run-save"),
-                candidate_id: id("candidate-save"),
-                candidate_hash: candidate_hash.clone(),
-                power_class: ThermalTuningPowerClass::Pps5a,
-                targets: &THERMAL_TUNING_EXECUTION_ORDER_C,
-                pps_ready: true,
-                thermal_model_available: true,
-                calibration_conflict: false,
-                candidate_profile: Some(profile),
-            })
-            .unwrap();
-        runtime.record_preview_applied().unwrap();
-        runtime.sealed = true;
-        runtime.armed = false;
-        runtime.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
-        let delivered = runtime.events_after(None).next_sequence;
-        runtime.events_after(delivered);
-        let receipt = runtime
-            .confirm_save(ThermalTuningSaveConfirmation {
-                run_id: "run-save",
-                candidate_id: "candidate-save",
-                candidate_hash: candidate_hash.as_str(),
-                power_class: ThermalTuningPowerClass::Pps5a,
-                readback_verified: true,
-                bank_revision: 17,
-                bank_hash: candidate_hash.clone(),
-            })
-            .unwrap();
-        assert_eq!(receipt.bank_revision, 17);
-        assert_eq!(receipt.bank_hash, candidate_hash);
-        assert_eq!(receipt.bank, ThermalTuningPowerClass::Pps5a);
-        assert!(receipt.atomic && receipt.readback_verified);
-        assert_eq!(
-            runtime.terminal_disposition,
-            ThermalTuningTerminalDisposition::Passed
-        );
+        for power_class in [
+            ThermalTuningPowerClass::Pps3a,
+            ThermalTuningPowerClass::Pps5a,
+        ] {
+            let mut profile = profile_with_targets(&THERMAL_TUNING_EXECUTION_ORDER_C);
+            profile.sanitize();
+            let candidate_hash = hash_profile(&profile).unwrap();
+            let mut runtime = ThermalTuningRuntime::new();
+            runtime
+                .start(ThermalTuningStart {
+                    run_id: id("run-save"),
+                    candidate_id: id("candidate-save"),
+                    candidate_hash: candidate_hash.clone(),
+                    power_class,
+                    targets: &THERMAL_TUNING_EXECUTION_ORDER_C,
+                    pps_ready: true,
+                    thermal_model_available: true,
+                    calibration_conflict: false,
+                    candidate_profile: Some(profile),
+                })
+                .unwrap();
+            runtime.record_preview_applied().unwrap();
+            runtime.sealed = true;
+            runtime.armed = false;
+            runtime.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
+            let delivered = runtime.events_after(None).next_sequence;
+            runtime.events_after(delivered);
+            let receipt = runtime
+                .confirm_save(ThermalTuningSaveConfirmation {
+                    run_id: "run-save",
+                    candidate_id: "candidate-save",
+                    candidate_hash: candidate_hash.as_str(),
+                    power_class,
+                    readback_verified: true,
+                    bank_revision: 17,
+                    bank_hash: candidate_hash.clone(),
+                })
+                .unwrap();
+            assert_eq!(receipt.bank_revision, 17);
+            assert_eq!(receipt.bank_hash, candidate_hash);
+            assert_eq!(receipt.bank, power_class);
+            assert!(receipt.atomic && receipt.readback_verified);
+            assert_eq!(
+                runtime.terminal_disposition,
+                ThermalTuningTerminalDisposition::Passed
+            );
+        }
     }
 
     #[test]
@@ -5452,26 +5474,60 @@ mod tests {
     }
 
     #[test]
-    fn rejects_pps3a_without_arming() {
+    fn admits_pps3a_with_the_same_disarmed_preparation() {
         let mut runtime = ThermalTuningRuntime::new();
+        let mut profile = profile_with_targets(&THERMAL_TUNING_EXECUTION_ORDER_C);
+        profile.sanitize();
         let result = runtime.start(ThermalTuningStart {
             run_id: id("run-3a"),
             candidate_id: id("candidate-3a"),
-            candidate_hash: hash("hash-3a"),
+            candidate_hash: hash_profile(&profile).unwrap(),
             power_class: ThermalTuningPowerClass::Pps3a,
-            targets: &THERMAL_TUNING_TARGETS_C,
+            targets: &THERMAL_TUNING_EXECUTION_ORDER_C,
             pps_ready: true,
             thermal_model_available: true,
             calibration_conflict: false,
-            candidate_profile: None,
+            candidate_profile: Some(profile),
         });
-        assert_eq!(result, Err(ThermalTuningError::InvalidPowerClass));
-        assert!(!runtime.armed);
-        assert_eq!(runtime.phase, ThermalTuningPhase::Failed);
+        assert_eq!(result, Ok(()));
+        assert!(runtime.armed);
+        assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
         assert_eq!(
             runtime.terminal_disposition,
-            ThermalTuningTerminalDisposition::Failed
+            ThermalTuningTerminalDisposition::Running
         );
+    }
+
+    #[test]
+    fn three_amp_sampling_requires_its_confirmed_current_and_run_identity() {
+        for current_ma in [3_000, 2_999] {
+            let mut profile = profile_with_targets(&[60]);
+            profile.sanitize();
+            let candidate_hash = hash_profile(&profile).unwrap();
+            let mut runtime = ThermalTuningRuntime::new();
+            runtime
+                .start(ThermalTuningStart {
+                    run_id: id("run-3a"),
+                    candidate_id: id("candidate-hold"),
+                    candidate_hash: candidate_hash.clone(),
+                    power_class: ThermalTuningPowerClass::Pps3a,
+                    targets: &[60],
+                    pps_ready: true,
+                    thermal_model_available: true,
+                    calibration_conflict: false,
+                    candidate_profile: Some(profile),
+                })
+                .unwrap();
+            let mut observed = sample(300, ThermalTuningPhase::Cooldown, 3_400);
+            observed.candidate_hash = candidate_hash;
+            observed.pps_contract.kind = ThermalTuningPowerClass::Pps3a;
+            observed.pps_contract.current_ma = current_ma;
+            observed.heater_requested_output_permille = 0;
+            observed.heater_output_permille = 0;
+            let result = runtime.record_sample(observed);
+            assert_eq!(result.is_ok(), current_ma == 3_000);
+            assert_eq!(runtime.armed, current_ma == 3_000);
+        }
     }
 
     #[test]

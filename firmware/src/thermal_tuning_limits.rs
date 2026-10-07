@@ -74,11 +74,9 @@ impl ThermalTuningTimingEvidence {
     pub fn for_model_point(point: ThermalControlProfilePointConfig) -> Self {
         Self {
             policy_version: BRAKING_APPROACH_TIMING_POLICY_VERSION,
-            allowed_approach_floor_permille: crate::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE,
-            effective_approach_floor_permille: crate::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE,
-            model_approach_floor_permille: Some(
-                crate::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE,
-            ),
+            allowed_approach_floor_permille: crate::thermal_plant::APPROACH_MIN_PERMILLE,
+            effective_approach_floor_permille: crate::thermal_plant::APPROACH_MIN_PERMILLE,
+            model_approach_floor_permille: Some(crate::thermal_plant::APPROACH_MIN_PERMILLE),
             ..Self::for_point(point)
         }
     }
@@ -89,7 +87,7 @@ impl ThermalTuningTimingEvidence {
                 Some(EXTENSION_FLOOR_PERMILLE)
             }
             BRAKING_APPROACH_TIMING_POLICY_VERSION => {
-                Some(crate::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE)
+                Some(crate::thermal_plant::APPROACH_MIN_PERMILLE)
             }
             _ => None,
         }

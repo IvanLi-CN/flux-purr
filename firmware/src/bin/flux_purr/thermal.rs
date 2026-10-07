@@ -57,8 +57,15 @@ pub(crate) fn resolve_thermal_profile_bank(
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProductionThermalController {
-    Plant,
-    Profile,
+    Unavailable,
+    Profile(ThermalProfileBank),
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl ProductionThermalController {
+    pub(crate) const fn is_profile(self) -> bool {
+        matches!(self, Self::Profile(_))
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -68,10 +75,7 @@ pub(crate) fn thermal_output_settings(
     calibration_mode: CalibrationMode,
 ) -> ThermalControlProfileSettings {
     profile
-        .filter(|_| {
-            controller == ProductionThermalController::Profile
-                || calibration_mode != CalibrationMode::Off
-        })
+        .filter(|_| controller.is_profile() || calibration_mode != CalibrationMode::Off)
         .map(|profile| profile.settings)
         .unwrap_or_default()
 }
@@ -89,16 +93,22 @@ pub(crate) fn production_thermal_controller(
             .is_some_and(|request| pps_adjustment_is_continuous(power_state, request)),
         _ => false,
     };
+    let bank = resolve_thermal_profile_bank(mode, manual_pps);
+    let required_ma = match bank {
+        ThermalProfileBank::Pps3a => 3_000,
+        ThermalProfileBank::Pps5a => 5_000,
+    };
     if contract_continuous
         && power_state.available
         && power_state.failure.is_none()
-        && power_state.active.is_some()
-        && manual_pps.has_matching_pps_apdo(20_000, 5_000)
-        && resolve_thermal_profile_bank(mode, manual_pps) == ThermalProfileBank::Pps5a
+        && power_state.active.is_some_and(|active| {
+            active.mode == PdContractRequestMode::Pps && active.operating_current_ma >= required_ma
+        })
+        && manual_pps.has_matching_pps_apdo(20_000, required_ma)
     {
-        ProductionThermalController::Profile
+        ProductionThermalController::Profile(bank)
     } else {
-        ProductionThermalController::Plant
+        ProductionThermalController::Unavailable
     }
 }
 
@@ -759,9 +769,9 @@ pub(crate) struct HeaterController {
     pub(crate) coast_cooling_elapsed_ms: u64,
     pub(crate) coast_cooling_reference_c: Option<f32>,
     pub(crate) natural_cooling_input: Option<ThermalPlantRuntimeInput>,
+    pub(crate) approach_braking_remaining_ms: u64,
     pub(crate) heater_was_enabled: bool,
     pub(crate) warmup_started_at_ms: Option<u64>,
-    pub(crate) thermal_plant_controller: ThermalPlantController,
     pub(crate) production_controller: Option<ProductionThermalController>,
 }
 
@@ -831,7 +841,8 @@ pub(crate) fn control_cycle_parameters(
 #[cfg(any(target_arch = "xtensa", test))]
 impl HeaterController {
     pub(crate) fn initial_profile_approach(&self) -> bool {
-        self.production_controller == Some(ProductionThermalController::Profile)
+        self.production_controller
+            .is_some_and(ProductionThermalController::is_profile)
             && self.phase == HeaterControlPhase::Approach
             && !self.recovering_from_hold
     }
@@ -857,9 +868,9 @@ impl HeaterController {
             coast_cooling_elapsed_ms: 0,
             coast_cooling_reference_c: None,
             natural_cooling_input: None,
+            approach_braking_remaining_ms: 0,
             heater_was_enabled: false,
             warmup_started_at_ms: None,
-            thermal_plant_controller: ThermalPlantController::new(),
             production_controller: None,
         }
     }
@@ -869,6 +880,7 @@ impl HeaterController {
     }
 
     pub(crate) fn clear_fault_latch(&mut self) {
+        self.approach_braking_remaining_ms = 0;
         self.fault_latched = None;
         self.filtered_temp_c = None;
         self.previous_filtered_temp_c = None;
@@ -886,7 +898,6 @@ impl HeaterController {
         self.hold_coast_cooling_samples = 0;
         self.heater_was_enabled = false;
         self.warmup_started_at_ms = None;
-        self.thermal_plant_controller.reset();
         self.production_controller = None;
     }
 
@@ -901,31 +912,22 @@ impl HeaterController {
             self.production_controller.is_some() && changed && input.heater_enabled;
         if changed {
             self.reset_disabled_output(input.target_temp_c, input.measured_temp_c);
-            self.thermal_plant_controller.reset();
             self.production_controller = Some(kind);
         }
-        let heater_enabled = input.heater_enabled && !disarm_for_source_change;
-        self.natural_cooling_input =
-            (kind == ProductionThermalController::Profile).then_some(input);
-        let snapshot = match kind {
-            ProductionThermalController::Plant => {
-                self.update_thermal_plant_at(ThermalPlantRuntimeInput {
-                    heater_enabled,
-                    ..input
-                })
-            }
-            ProductionThermalController::Profile => self.update_at(
-                input.target_temp_c,
-                input.measured_temp_c,
-                heater_enabled,
-                profile,
-                input.now_ms,
-            ),
-        };
+        let heater_enabled = input.heater_enabled && !disarm_for_source_change && kind.is_profile();
+        self.natural_cooling_input = kind.is_profile().then_some(input);
+        let snapshot = self.update_at(
+            input.target_temp_c,
+            input.measured_temp_c,
+            heater_enabled,
+            profile,
+            input.now_ms,
+        );
         (snapshot, disarm_for_source_change)
     }
 
     pub(crate) fn reseed_measurement(&mut self, measured_temp_c: f32) {
+        self.approach_braking_remaining_ms = 0;
         self.filtered_temp_c = Some(measured_temp_c);
         self.previous_filtered_temp_c = Some(measured_temp_c);
         self.filtered_slope_c_per_profile_tick = 0.0;
@@ -935,6 +937,7 @@ impl HeaterController {
     }
 
     pub(crate) fn latch_fault(&mut self, reason: HeaterFaultReason) -> bool {
+        self.approach_braking_remaining_ms = 0;
         let changed = self.fault_latched != Some(reason);
         self.fault_latched = Some(reason);
         self.filtered_temp_c = None;
@@ -953,124 +956,7 @@ impl HeaterController {
         self.hold_coast_cooling_samples = 0;
         self.heater_was_enabled = false;
         self.warmup_started_at_ms = None;
-        self.thermal_plant_controller.reset();
         changed
-    }
-
-    #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-    pub(crate) fn update_thermal_plant_at(
-        &mut self,
-        input: ThermalPlantRuntimeInput,
-    ) -> HeaterPidSnapshot {
-        let ThermalPlantRuntimeInput {
-            target_temp_c,
-            measured_temp_c,
-            ambient_temp_c,
-            heater_enabled,
-            model,
-            max_power_mw,
-            now_ms,
-        } = input;
-        if !heater_enabled || self.fault_latched.is_some() {
-            return self.reset_thermal_plant_output(target_temp_c, measured_temp_c);
-        }
-        if measured_temp_c >= f32::from(HEATER_HARD_CUTOFF_TEMP_C) {
-            self.latch_fault(HeaterFaultReason::OverTemp);
-            return self.update_thermal_plant_at(ThermalPlantRuntimeInput {
-                target_temp_c,
-                measured_temp_c,
-                ambient_temp_c,
-                heater_enabled: false,
-                model,
-                max_power_mw,
-                now_ms,
-            });
-        }
-        if !self.heater_was_enabled || self.last_target_temp_c != target_temp_c {
-            self.thermal_plant_controller.reset();
-            self.reseed_measurement(measured_temp_c);
-            self.warmup_started_at_ms = Some(now_ms);
-        }
-        self.heater_was_enabled = true;
-        self.last_target_temp_c = target_temp_c;
-        let previous = self.filtered_temp_c.unwrap_or(measured_temp_c);
-        let filtered_temp_c = previous + 0.75 * (measured_temp_c - previous);
-        let raw_slope_c_per_s =
-            (filtered_temp_c - previous) * (1_000.0 / HEATER_CONTROL_INTERVAL_MS as f32);
-        let slope_c_per_s = self.filtered_slope_c_per_profile_tick
-            + THERMAL_PLANT_SLOPE_FILTER_ALPHA
-                * (raw_slope_c_per_s - self.filtered_slope_c_per_profile_tick);
-        self.filtered_slope_c_per_profile_tick = slope_c_per_s;
-        self.previous_filtered_temp_c = self.filtered_temp_c;
-        self.filtered_temp_c = Some(filtered_temp_c);
-        let output = self
-            .thermal_plant_controller
-            .update(ThermalPlantControlInput {
-                model,
-                target_temp_c: f32::from(target_temp_c),
-                current_temp_c: filtered_temp_c,
-                ambient_temp_c,
-                slope_c_per_s,
-                dt_s: HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0,
-                max_power_mw,
-            });
-        let duty_percent = if max_power_mw <= 0.0 {
-            0
-        } else {
-            round_to_u16_nonnegative(output.requested_power_mw * 100.0 / max_power_mw).min(100)
-                as u8
-        };
-        self.duty_percent = duty_percent;
-        let error_c = f32::from(target_temp_c) - measured_temp_c;
-        let phase = if error_c.abs() <= 1.5 {
-            HeaterControlPhase::Hold
-        } else if error_c <= 3.0 {
-            HeaterControlPhase::Approach
-        } else {
-            HeaterControlPhase::Warmup
-        };
-        self.phase = phase;
-        HeaterPidSnapshot {
-            duty_percent,
-            warmup_soft_start_percent: if phase == HeaterControlPhase::Warmup {
-                self.warmup_started_at_ms
-                    .map(|started_at_ms| {
-                        (now_ms.saturating_sub(started_at_ms).saturating_mul(100)
-                            / HEATER_WARMUP_SOFT_START_MS)
-                            .min(100) as u8
-                    })
-                    .unwrap_or(100)
-            } else {
-                100
-            },
-            error_c,
-            control_error_c: output.predicted_error_c,
-            filtered_temp_c,
-            filtered_slope_c_per_s: slope_c_per_s,
-            coast_active: duty_percent == 0 && slope_c_per_s > 0.0,
-            phase,
-        }
-    }
-
-    fn reset_thermal_plant_output(
-        &mut self,
-        target_temp_c: i16,
-        measured_temp_c: f32,
-    ) -> HeaterPidSnapshot {
-        self.thermal_plant_controller.reset();
-        self.reseed_measurement(measured_temp_c);
-        self.duty_percent = 0;
-        self.heater_was_enabled = false;
-        HeaterPidSnapshot {
-            duty_percent: 0,
-            warmup_soft_start_percent: 0,
-            error_c: f32::from(target_temp_c) - measured_temp_c,
-            control_error_c: f32::from(target_temp_c) - measured_temp_c,
-            filtered_temp_c: measured_temp_c,
-            filtered_slope_c_per_s: 0.0,
-            coast_active: false,
-            phase: HeaterControlPhase::Warmup,
-        }
     }
 
     #[cfg(test)]
@@ -1148,6 +1034,9 @@ impl HeaterController {
 
         let previous_phase = self.phase;
         self.advance_phase(&frame, now_ms);
+        if self.phase != HeaterControlPhase::Approach {
+            self.approach_braking_remaining_ms = 0;
+        }
 
         if previous_phase != self.phase {
             self.update_hold_transition(&frame, measured_temp_c);
@@ -1306,9 +1195,23 @@ impl HeaterController {
         entered_approach: bool,
     ) -> u8 {
         if entered_approach && self.model_approach_available() {
-            return percent_from_permille(
-                flux_purr_firmware::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE,
-            );
+            // The Warmup input still travels through the calibrated delay.
+            // A one-frame minimum followed by a fresh error-driven request
+            // can restore full power before that heat has reached the sensor.
+            self.approach_braking_remaining_ms = self
+                .natural_cooling_input
+                .map_or(0, |input| u64::from(input.model.transport_delay_ms));
+            return percent_from_permille(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
+        }
+        if self.approach_braking_remaining_ms > 0 {
+            self.approach_braking_remaining_ms = self
+                .approach_braking_remaining_ms
+                .saturating_sub(frame.elapsed_ms);
+            if self.approach_braking_remaining_ms > 0 {
+                return percent_from_permille(
+                    flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE,
+                );
+            }
         }
         if let Some(duty_percent) = self.calculate_model_approach_duty(frame) {
             return duty_percent;
@@ -1371,7 +1274,7 @@ impl HeaterController {
                 * (desired_rise_c_per_s - frame.filtered_slope_c_per_profile_tick);
         let requested_mw = loss_mw + input.model.thermal_capacity_mj_per_c * braking_rise_c_per_s;
         let requested_permille = (requested_mw * 1_000.0 / input.max_power_mw).clamp(
-            f32::from(flux_purr_firmware::thermal_plant::FIVE_AMP_APPROACH_MIN_PERMILLE),
+            f32::from(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE),
             1_000.0,
         );
         Some(percent_from_permille(requested_permille as u16))

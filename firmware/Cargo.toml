@@ -22,6 +22,7 @@ web_serial = []
 buzzer-test = ["web_serial"]
 buzzer-observe = ["buzzer-test"]
 fan-observe = ["web_serial"]
+rtd-supply-3208mv = []
 hil-eeprom-commit-fault = []
 net_http = [
     "web_serial",

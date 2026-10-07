@@ -57,6 +57,7 @@ pub(crate) fn populate_status_measurements(
     status.fan_policy_source = ui_state.fan_policy_source;
     status.fan_output_level = ui_state.fan_output_level;
     status.rtd_raw_adc_mv = context.latest_rtd_raw_adc_mv;
+    status.rtd_divider_supply_mv = Some(RTD_DIVIDER_SUPPLY_MV);
     status.rtd_raw_adc_min_mv = context.latest_rtd_raw_adc_min_mv;
     status.rtd_raw_adc_max_mv = context.latest_rtd_raw_adc_max_mv;
     status.rtd_raw_adc_spread_mv = context

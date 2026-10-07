@@ -269,6 +269,8 @@ pub struct ControlPlaneStatus {
     pub current_ma: u32,
     pub board_temp_centi: i32,
     pub rtd_raw_adc_mv: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtd_divider_supply_mv: Option<u16>,
     #[serde(default)]
     pub rtd_raw_adc_min_mv: u16,
     #[serde(default)]
@@ -586,6 +588,7 @@ impl ControlPlaneStatus {
                 current_ma: status.current_ma,
                 board_temp_centi: status.board_temp_centi,
                 rtd_raw_adc_mv: status.rtd_raw_adc_mv,
+                rtd_divider_supply_mv: None,
                 rtd_raw_adc_min_mv: 0,
                 rtd_raw_adc_max_mv: 0,
                 rtd_raw_adc_spread_mv: 0,

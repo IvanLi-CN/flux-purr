@@ -130,7 +130,7 @@ pub(crate) fn tuning_pps_transition_decision(
         && !blank_heater
         && !cooldown
         && request.is_some_and(|request| {
-            request.operating_current_ma() >= 5_000
+            request.operating_current_ma() >= 3_000
                 && pps_adjustment_is_continuous(power_state, request)
         })
     {
@@ -194,7 +194,7 @@ pub(crate) fn tuning_pd_wait_decision(
     }
     if power_state.protocol == PowerProtocol::Ready
         && power_state.active.is_some_and(|active| {
-            active.mode == PdContractRequestMode::Pps && active.operating_current_ma >= 5_000
+            active.mode == PdContractRequestMode::Pps && active.operating_current_ma >= 3_000
         })
         && ticket_started_ms.is_none()
     {
@@ -274,9 +274,10 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
                 state.power_state,
                 state.memory_config.thermal_profile_mode,
                 &state.manual_pps_state,
-            ) == ProductionThermalController::Profile;
+            )
+            .is_profile();
             if !profile_ready {
-                runtime_fail_tuning_pd(state, "pps5a_source_lost", "ready", elapsed_ms);
+                runtime_fail_tuning_pd(state, "pps_source_class_lost", "ready", elapsed_ms);
                 state.thermal_control_profile_preview = None;
             } else if state.tuning_heater_rearm_pending
                 && state.pd_contract_ready
@@ -1888,14 +1889,12 @@ fn runtime_production_pid_snapshot(
             elapsed_ms,
         );
     }
-    if state.thermal_tuning.armed
-        && state.tuning_pd_wait_started_ms.is_none()
-        && kind != ProductionThermalController::Profile
+    if state.thermal_tuning.armed && state.tuning_pd_wait_started_ms.is_none() && !kind.is_profile()
     {
-        state.thermal_tuning.fail("pps5a_source_lost");
+        state.thermal_tuning.fail("pps_source_class_lost");
         state.ui_state.heater_enabled = false;
     }
-    let profile = if kind == ProductionThermalController::Profile {
+    let profile = if kind.is_profile() {
         active_thermal_control_profile(
             &state.memory_config,
             state.thermal_control_profile_preview,

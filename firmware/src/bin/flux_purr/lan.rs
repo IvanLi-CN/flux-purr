@@ -1165,6 +1165,19 @@ fn process_thermal_tuning_start(
             ),
         );
     }
+    let expected_bank = power_class.profile_bank();
+    if command.candidate_profile.as_ref().is_some_and(|candidate| {
+        candidate.bank.map(ThermalProfileBank::from) != Some(expected_bank)
+    }) {
+        return (
+            false,
+            usb_error_response(
+                request_id,
+                "candidate_bank_mismatch",
+                "Candidate bank must match the requested power class.",
+            ),
+        );
+    }
     let candidate_profile_wire = command
         .candidate_profile
         .and_then(|profile_command| profile_command.profile);
@@ -1174,13 +1187,13 @@ fn process_thermal_tuning_start(
     });
     let pps_ready = context.last_pd_observation.is_some_and(|observation| {
         observation.contract_voltage_mv.is_some()
-            && observation.current_ma >= 5_000
+            && observation.current_ma >= power_class.required_current_ma()
             && observation.status.pd_active
             && observation.contract.kind == ContractKind::Pps
     }) && resolve_thermal_profile_bank(
         context.memory_config.thermal_profile_mode,
         context.manual_pps,
-    ) == ThermalProfileBank::Pps5a;
+    ) == expected_bank;
     // The tuning start gate must match the production heater gate. A valid
     // thermal projection alone is insufficient when commissioning, the
     // persisted resistance curve, or the selected PPS APDO is not ready.
@@ -1192,12 +1205,14 @@ fn process_thermal_tuning_start(
     let calibration_conflict = context.calibration_runtime_state.mode != CalibrationMode::Off
         || context.thermal_control_profile_preview.is_some();
     let prepare_power = !pps_ready
-        && context.manual_pps.has_matching_pps_apdo(20_000, 5_000)
+        && context
+            .manual_pps
+            .has_matching_pps_apdo(20_000, power_class.required_current_ma())
         && !context.manual_pps.enabled
         && resolve_thermal_profile_bank(
             context.memory_config.thermal_profile_mode,
             context.manual_pps,
-        ) == ThermalProfileBank::Pps5a
+        ) == expected_bank
         && context.last_pd_observation.is_some_and(|observation| {
             observation.status.pd_active && observation.contract.kind == ContractKind::Fixed
         });
@@ -1303,9 +1318,16 @@ async fn persist_thermal_tuning_candidate(
     command: flux_purr_firmware::control_plane::ThermalTuningCommand,
     candidate_profile: ThermalControlProfileConfig,
 ) -> UsbFrame {
-    *context
-        .memory_config
-        .thermal_profile_mut(ThermalProfileBank::Pps5a) = candidate_profile;
+    let Some(power_class) = context.thermal_tuning.power_class else {
+        context.ui_state.heater_enabled = false;
+        return usb_error_response(
+            request_id,
+            "power_class_required",
+            "Saved tuning requires a bound power class.",
+        );
+    };
+    let bank = power_class.profile_bank();
+    *context.memory_config.thermal_profile_mut(bank) = candidate_profile;
     let changed_domains = PersistDomainMask::THERMAL;
     if let Err(error) = commit_memory_config_now(
         context.eeprom_i2c,
@@ -1347,9 +1369,7 @@ async fn persist_thermal_tuning_candidate(
         changed_domains,
     );
     let bank_hash = flux_purr_firmware::thermal_tuning::hash_profile(
-        context
-            .last_persisted_memory_config
-            .thermal_profile(ThermalProfileBank::Pps5a),
+        context.last_persisted_memory_config.thermal_profile(bank),
     )
     .unwrap_or_default();
     let bank_revision = *context.memory_sequence;
@@ -1491,7 +1511,7 @@ fn thermal_tuning_error_code(
 ) -> &'static str {
     use flux_purr_firmware::thermal_tuning::ThermalTuningError;
     match error {
-        ThermalTuningError::InvalidPowerClass => "pps3a_not_supported",
+        ThermalTuningError::InvalidPowerClass => "invalid_power_class",
         ThermalTuningError::InvalidTargets => "invalid_target_scope",
         ThermalTuningError::AlreadyRunning => "tuning_busy",
         ThermalTuningError::NotRunning => "tuning_not_running",
