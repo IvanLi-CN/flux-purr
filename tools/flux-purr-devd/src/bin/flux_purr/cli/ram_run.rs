@@ -32,9 +32,12 @@ const RAM_ELF_RELATIVE_PATH: &str =
     "firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup";
 const PD_HIL_ELF_RELATIVE_PATH: &str =
     "firmware/ram-pd-hil/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-pd-hil";
+const FAN_PD_ELF_RELATIVE_PATH: &str =
+    "firmware/ram-fan-pd/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-fan-pd";
 const RAM_PROTOCOL_VERSION: &str = "flux-purr.usb.v1";
 const RAM_FRAMING: &str = "jsonl";
 const PD_HIL_CAPABILITY: &str = "test_pd_sink";
+const FAN_PD_CAPABILITY: &str = "test_fan_pd";
 const PD_HIL_MAX_SOURCE_PDOS: u64 = 7;
 
 #[cfg(target_os = "macos")]
@@ -54,6 +57,8 @@ enum ObservedFirmware {
 struct IdentityBody {
     #[serde(default)]
     firmware_kind: Option<String>,
+    #[serde(default)]
+    image_kind: Option<String>,
     #[serde(default)]
     build_id: Option<String>,
     #[serde(default)]
@@ -76,6 +81,8 @@ struct IdentityFrame {
     #[serde(default)]
     firmware_kind: Option<String>,
     #[serde(default)]
+    image_kind: Option<String>,
+    #[serde(default)]
     identity: Option<IdentityBody>,
     #[serde(default)]
     protocol_version: Option<String>,
@@ -88,6 +95,7 @@ struct ObservedIdentity {
     firmware: ObservedFirmware,
     build_id: Option<String>,
     source_sha: Option<String>,
+    image_kind: Option<String>,
     capabilities: Vec<String>,
     protocol_version: Option<String>,
     framing: Option<String>,
@@ -118,6 +126,23 @@ pub(crate) fn execute_ram_run(
             run_interactive_buttons(&args.port, args.elf.as_deref(), args.reload)
         }
         RamRunCommand::Test(args) if args.test == RamTestKind::PdSink => run_pd_hil(&args),
+        RamRunCommand::Test(args)
+            if args.test == RamTestKind::FanPd && !args.skip_vin_validation =>
+        {
+            run_fan_pd(&args)
+        }
+        RamRunCommand::Test(args) if args.test == RamTestKind::Fan && !args.skip_vin_validation => {
+            eprintln!(
+                "WARNING: ram-run test fan leaves PD untouched; use ram-run test fan-pd to negotiate a PD contract."
+            );
+            run_ram_operation(
+                &args.port,
+                args.elf.as_deref(),
+                args.reload,
+                args.test.op(),
+                None,
+            )
+        }
         RamRunCommand::Test(args) if args.skip_vin_validation => {
             Err("--skip-vin-validation is only valid with 'ram-run test pd-sink'".into())
         }
@@ -141,6 +166,21 @@ fn run_ram_operation(
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let mut session = open_ram_session(port, elf, reload, op)?;
     send_ram_request(&mut session.serial, op, color)
+}
+
+fn run_fan_pd(args: &RamTestArgs) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut session = open_ram_session(
+        &args.port,
+        args.elf.as_deref(),
+        args.reload,
+        FAN_PD_CAPABILITY,
+    )?;
+    send_ram_request_until(
+        &mut session.serial,
+        FAN_PD_CAPABILITY,
+        None,
+        Instant::now() + PD_HIL_COMMAND_TIMEOUT,
+    )
 }
 
 fn run_pd_hil(args: &RamTestArgs) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -203,6 +243,7 @@ fn open_ram_session(
     let matching_ram = observed.as_ref().is_some_and(|(identity, _)| {
         identity.firmware == ObservedFirmware::RamBringup
             && identity.build_id.as_deref() == Some(PRODUCT_BUILD_ID)
+            && (op != FAN_PD_CAPABILITY || identity.image_kind.as_deref() == Some("fan_pd"))
             && identity
                 .capabilities
                 .iter()
@@ -626,6 +667,8 @@ fn default_ram_elf() -> PathBuf {
 fn default_ram_elf_for(op: &str) -> PathBuf {
     if op == PD_HIL_CAPABILITY {
         flux_purr_repo_root().join(PD_HIL_ELF_RELATIVE_PATH)
+    } else if op == FAN_PD_CAPABILITY {
+        flux_purr_repo_root().join(FAN_PD_ELF_RELATIVE_PATH)
     } else {
         default_ram_elf()
     }
@@ -1293,6 +1336,7 @@ fn parse_identity_line(line: &[u8]) -> Option<ObservedIdentity> {
         firmware,
         build_id: body.build_id,
         source_sha: body.git_sha,
+        image_kind: frame.image_kind.or(body.image_kind),
         capabilities: body.capabilities,
         protocol_version: frame.protocol_version.or(body.protocol_version),
         framing: frame.framing.or(body.framing),
@@ -1324,12 +1368,17 @@ fn verify_ram_identity(
         )
         .into());
     }
-    if op == PD_HIL_CAPABILITY && identity.source_sha.as_deref() != Some(PRODUCT_SOURCE_SHA) {
+    if matches!(op, PD_HIL_CAPABILITY | FAN_PD_CAPABILITY)
+        && identity.source_sha.as_deref() != Some(PRODUCT_SOURCE_SHA)
+    {
         return Err(format!(
-            "PD HIL sourceSha mismatch: expected {PRODUCT_SOURCE_SHA}, got {:?}",
+            "RAM PD image sourceSha mismatch: expected {PRODUCT_SOURCE_SHA}, got {:?}",
             identity.source_sha
         )
         .into());
+    }
+    if op == FAN_PD_CAPABILITY && identity.image_kind.as_deref() != Some("fan_pd") {
+        return Err("fan-pd identity does not advertise imageKind=fan_pd".into());
     }
     if !identity
         .capabilities
@@ -1365,6 +1414,8 @@ fn send_ram_request_until(
     serial.flush()?;
     let mut bytes = Vec::with_capacity(1024);
     let mut fan_power_seen = false;
+    let mut summary_chunks = PdHilSummaryChunks::default();
+    let mut last_progress_sequence = None;
     let mut chunk = [0u8; 256];
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1372,9 +1423,14 @@ fn send_ram_request_until(
         match serial.read(&mut chunk) {
             Ok(count) => {
                 append_ram_response_bytes(&mut bytes, &chunk[..count])?;
-                if let Some(value) =
-                    find_ram_response(&mut bytes, op, &request_id, &mut fan_power_seen)?
-                {
+                if let Some(value) = find_ram_response(
+                    &mut bytes,
+                    op,
+                    &request_id,
+                    &mut fan_power_seen,
+                    &mut summary_chunks,
+                    &mut last_progress_sequence,
+                )? {
                     return Ok(value);
                 }
             }
@@ -2136,6 +2192,8 @@ fn find_ram_response(
     op: &str,
     request_id: &str,
     fan_power_seen: &mut bool,
+    summary_chunks: &mut PdHilSummaryChunks,
+    last_progress_sequence: &mut Option<u32>,
 ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
     while let Some(index) = bytes.iter().position(|byte| *byte == b'\n') {
         let line: Vec<u8> = bytes.drain(..=index).collect();
@@ -2148,6 +2206,15 @@ fn find_ram_response(
             && value.get("requestId").and_then(Value::as_str) == Some(request_id)
         {
             print_ram_progress(&value);
+            if op == FAN_PD_CAPABILITY {
+                validate_pd_hil_progress_sequence(last_progress_sequence, &value)
+                    .map_err(|error| format!("fan-pd progress frame is invalid: {error}"))?;
+            }
+            if op == FAN_PD_CAPABILITY
+                && let Some(summary) = accept_fan_pd_summary_progress(summary_chunks, &value, op)?
+            {
+                return Ok(Some(summary));
+            }
             if value
                 .get("result")
                 .and_then(Value::as_object)
@@ -2171,6 +2238,20 @@ fn find_ram_response(
             print_ram_fan_stage_progress(&value);
             continue;
         }
+        if op == FAN_PD_CAPABILITY
+            && value.get("type").and_then(Value::as_str) == Some("fan_pd_summary")
+            && value.get("firmwareKind").and_then(Value::as_str) == Some("ram_bringup")
+            && value.get("imageKind").and_then(Value::as_str) == Some("fan_pd")
+            && value.get("capability").and_then(Value::as_str) == Some(op)
+            && value.get("requestId").and_then(Value::as_str) == Some(request_id)
+        {
+            if value.get("ok").and_then(Value::as_bool) == Some(true) {
+                validate_ram_success_response(&value, op)
+                    .map_err(|error| format!("RAM fan-pd summary for {op} is invalid: {error}"))?;
+                return Ok(Some(value));
+            }
+            return Err(format!("RAM bring-up rejected {op}: {value}").into());
+        }
         if value.get("type").and_then(Value::as_str) != Some("response")
             || value.get("firmwareKind").and_then(Value::as_str) != Some("ram_bringup")
             || value.get("capability").and_then(Value::as_str) != Some(op)
@@ -2186,6 +2267,33 @@ fn find_ram_response(
         return Err(format!("RAM bring-up rejected {op}: {value}").into());
     }
     Ok(None)
+}
+
+fn accept_fan_pd_summary_chunk(
+    summary_chunks: &mut PdHilSummaryChunks,
+    result: &Value,
+    op: &str,
+) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(summary) = summary_chunks.accept(result)? else {
+        return Ok(None);
+    };
+    if summary.get("type").and_then(Value::as_str) != Some("fan_pd_summary") {
+        return Err("fan-pd summary chunk did not reconstruct a fan-pd summary".into());
+    }
+    validate_ram_success_response(&summary, op)
+        .map_err(|error| format!("RAM fan-pd summary for {op} is invalid: {error}"))?;
+    Ok(Some(summary))
+}
+
+fn accept_fan_pd_summary_progress(
+    summary_chunks: &mut PdHilSummaryChunks,
+    value: &Value,
+    op: &str,
+) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(result) = value.get("result") else {
+        return Ok(None);
+    };
+    accept_fan_pd_summary_chunk(summary_chunks, result, op)
 }
 
 fn print_ram_progress(value: &Value) {
@@ -2238,6 +2346,29 @@ fn print_ram_progress(value: &Value) {
                 duty_percent,
                 duration_ms / 1_000
             );
+        }
+        Some("contract") => {
+            let mode = result.get("mode").and_then(Value::as_str).unwrap_or("-");
+            let voltage_mv = result
+                .get("voltageMv")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            let current_ma = result
+                .get("currentMa")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            let gate = result
+                .get("powerGate")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            eprintln!(
+                "RAM FAN PD CONTRACT: mode={mode} voltage={voltage_mv}mV current={current_ma}mA gate={gate}"
+            );
+            if result.get("warning").and_then(Value::as_bool) == Some(true) {
+                eprintln!(
+                    "RAM FAN PD POWER WARNING: negotiated voltage is at or below 13V; test will finish as power_degraded"
+                );
+            }
         }
         _ => {}
     }
@@ -2377,6 +2508,8 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
     require_result_string_value(result, "eeprom", "untouched")?;
     if op == PD_HIL_CAPABILITY {
         validate_pd_hil_summary(value, result)?;
+    } else if op == FAN_PD_CAPABILITY {
+        validate_fan_pd_summary(value, result)?;
     } else {
         require_result_string_value(result, "pd", "untouched")?;
     }
@@ -2447,11 +2580,168 @@ pub(crate) fn validate_ram_success_response(value: &Value, op: &str) -> Result<(
                 return Err("result.power.voltageOk must be a boolean".to_string());
             }
         }
-        PD_HIL_CAPABILITY => {}
+        PD_HIL_CAPABILITY | FAN_PD_CAPABILITY => {}
         "exit" => {
             require_result_string_value(result, "detail", "safe_exit")?;
         }
         _ => return Err(format!("unsupported RAM capability: {op}")),
+    }
+    Ok(())
+}
+
+fn validate_fan_pd_summary(
+    value: &Value,
+    result: &serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    if result.get("detail").and_then(Value::as_str) != Some("fan_pd_complete") {
+        return Err("result.detail must be fan_pd_complete".to_string());
+    }
+    if !matches!(
+        result.get("pd").and_then(Value::as_str),
+        Some("owned" | "default_verified")
+    ) {
+        return Err("result.pd must identify PD ownership or verified recovery".to_string());
+    }
+    if result.get("schemaVersion").and_then(Value::as_u64) != Some(1)
+        || result.get("controller").and_then(Value::as_str) != Some("fusb302b")
+    {
+        return Err("fan-pd summary schema/controller is invalid".to_string());
+    }
+    let overall = require_result_string(result, "overall")?;
+    if !matches!(
+        overall,
+        "pass" | "power_degraded" | "negotiation_failed" | "fan_stage_failed" | "recovery_failed"
+    ) {
+        return Err(format!("result.overall has an invalid value: {overall:?}"));
+    }
+    validate_fan_pd_policy_selection(result)?;
+    validate_fan_pd_stages_and_recovery(result, overall)?;
+    if value.get("requestId").and_then(Value::as_str).is_none() {
+        return Err("fan-pd summary requestId is missing".to_string());
+    }
+    Ok(())
+}
+
+fn validate_fan_pd_policy_selection(result: &serde_json::Map<String, Value>) -> Result<(), String> {
+    let policy = result
+        .get("policy")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "result.policy must be an object".to_string())?;
+    if policy.get("preferredMv") != Some(&serde_json::json!([15_000, 18_000, 20_000]))
+        || policy.get("currentCeilingMa").and_then(Value::as_u64) != Some(5_000)
+        || policy.get("powerGateMv").and_then(Value::as_u64) != Some(13_000)
+        || policy.get("recoveryMode").and_then(Value::as_str) != Some("fixed_5v_contract")
+    {
+        return Err("result.policy does not match the fixed fan-pd contract".to_string());
+    }
+    let source = result
+        .get("sourceCapabilities")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "result.sourceCapabilities must be an object".to_string())?;
+    let count = source
+        .get("count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "result.sourceCapabilities.count is missing".to_string())?;
+    let raw_pdos = source
+        .get("rawPdos")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "result.sourceCapabilities.rawPdos must be an array".to_string())?;
+    if count > PD_HIL_MAX_SOURCE_PDOS || raw_pdos.len() != count as usize {
+        return Err("result.sourceCapabilities is incomplete".to_string());
+    }
+    let selection = result
+        .get("selection")
+        .ok_or_else(|| "result.selection is missing".to_string())?;
+    if let Some(selection) = selection.as_object() {
+        if !matches!(
+            selection.get("mode").and_then(Value::as_str),
+            Some("fixed" | "pps")
+        ) {
+            return Err("result.selection.mode is invalid".to_string());
+        }
+        let target_mv = selection
+            .get("targetMv")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "result.selection.targetMv is missing".to_string())?;
+        if !(5_000..=20_000).contains(&target_mv) {
+            return Err("result.selection.targetMv is outside the fan-pd range".to_string());
+        }
+        let current_ma = selection
+            .get("contractCurrentMa")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "result.selection.contractCurrentMa is missing".to_string())?;
+        if !(1..=5_000).contains(&current_ma) {
+            return Err("result.selection.contractCurrentMa is invalid".to_string());
+        }
+        if selection.get("contractConfirmed").and_then(Value::as_bool) == Some(true) {
+            let advertised = selection
+                .get("sourceAdvertisedMaxMa")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "result.selection.sourceAdvertisedMaxMa is missing".to_string())?;
+            if advertised == 0 || current_ma != advertised.min(5_000) {
+                return Err(
+                    "result.selection current does not match the advertised 5A ceiling".to_string(),
+                );
+            }
+        }
+    } else if !selection.is_null() {
+        return Err("result.selection must be an object or null".to_string());
+    }
+    Ok(())
+}
+
+fn validate_fan_pd_stages_and_recovery(
+    result: &serde_json::Map<String, Value>,
+    overall: &str,
+) -> Result<(), String> {
+    let stages = result
+        .get("stages")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "result.stages must be an object".to_string())?;
+    if stages.get("ok").and_then(Value::as_bool).is_none()
+        || stages.get("effect").and_then(Value::as_str)
+            != Some("fan_50_percent_5s_100_percent_5s_0_percent_5s")
+    {
+        return Err("result.stages is incomplete".to_string());
+    }
+    let final_reset = result
+        .get("finalReset")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "result.finalReset must be an object".to_string())?;
+    let reset_status = final_reset
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "result.finalReset.status is missing".to_string())?;
+    if !matches!(reset_status, "pass" | "fail")
+        || final_reset.get("pendingRequest") != Some(&Value::Null)
+        || final_reset.get("pdProtocol").and_then(Value::as_str) != Some("fixed_5v")
+    {
+        return Err("result.finalReset does not prove a fixed 5V recovery attempt".to_string());
+    }
+    if reset_status == "pass" {
+        let active = final_reset
+            .get("activeContract")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "result.finalReset.activeContract is missing".to_string())?;
+        if active.get("mode").and_then(Value::as_str) != Some("fixed")
+            || active.get("voltageMv").and_then(Value::as_u64) != Some(5_000)
+            || active
+                .get("currentMa")
+                .and_then(Value::as_u64)
+                .is_none_or(|current| current == 0)
+        {
+            return Err(
+                "result.finalReset.activeContract is not a valid fixed 5V contract".to_string(),
+            );
+        }
+    } else if final_reset.get("activeContract") != Some(&Value::Null) {
+        return Err("failed result.finalReset must not claim an active contract".to_string());
+    }
+    if overall == "power_degraded" && result.get("warning").and_then(Value::as_bool) != Some(true) {
+        return Err("power_degraded result must carry a power warning".to_string());
+    }
+    if reset_status == "fail" && overall != "recovery_failed" {
+        return Err("recovery failure must override the prior fan-pd result".to_string());
     }
     Ok(())
 }
@@ -3318,6 +3608,15 @@ pub(crate) fn pd_hil_requires_nonzero(value: &Value) -> bool {
             .is_some_and(|overall| !matches!(overall, "pass" | "external_source_pass"))
 }
 
+pub(crate) fn fan_pd_requires_nonzero(value: &Value) -> bool {
+    value.get("capability").and_then(Value::as_str) == Some(FAN_PD_CAPABILITY)
+        && value
+            .get("result")
+            .and_then(|result| result.get("overall"))
+            .and_then(Value::as_str)
+            .is_some_and(|overall| overall != "pass")
+}
+
 fn validate_button_result(result: &serde_json::Map<String, Value>) -> Result<(), String> {
     let detail = require_result_string(result, "detail")?;
     if !matches!(
@@ -3575,11 +3874,102 @@ mod tests {
     }
 
     #[test]
+    fn fan_pd_identity_requires_the_dedicated_image_kind() {
+        let fan = ObservedIdentity {
+            firmware: ObservedFirmware::RamBringup,
+            build_id: Some(PRODUCT_BUILD_ID.to_string()),
+            source_sha: Some(PRODUCT_SOURCE_SHA.to_string()),
+            image_kind: Some("fan_pd".to_string()),
+            capabilities: vec![FAN_PD_CAPABILITY.to_string()],
+            protocol_version: Some(RAM_PROTOCOL_VERSION.to_string()),
+            framing: Some(RAM_FRAMING.to_string()),
+            reset_reason: None,
+        };
+        assert_eq!(fan.image_kind.as_deref(), Some("fan_pd"));
+        assert!(verify_ram_identity(&fan, FAN_PD_CAPABILITY).is_ok());
+        let mut wrong = fan.clone();
+        wrong.image_kind = Some("pd_hil".to_string());
+        assert!(verify_ram_identity(&wrong, FAN_PD_CAPABILITY).is_err());
+    }
+
+    #[test]
+    fn fan_pd_summary_validates_power_gate_and_recovery_contract() {
+        let value = serde_json::json!({
+            "type": "fan_pd_summary",
+            "requestId": "fan-1",
+            "firmwareKind": "ram_bringup",
+            "imageKind": "fan_pd",
+            "capability": FAN_PD_CAPABILITY,
+            "ok": true,
+            "result": {
+                "detail": "fan_pd_complete",
+                "heater": "off",
+                "pd": "default_verified",
+                "eeprom": "untouched",
+                "schemaVersion": 1,
+                "controller": "fusb302b",
+                "overall": "pass",
+                "warning": false,
+                "powerGate": "pass",
+                "policy": {
+                    "preferredMv": [15000, 18000, 20000],
+                    "currentCeilingMa": 5000,
+                    "powerGateMv": 13000,
+                    "recoveryMode": "fixed_5v_contract"
+                },
+                "sourceCapabilities": {"count": 1, "rawPdos": [123]},
+                "selection": {
+                    "mode": "fixed",
+                    "targetMv": 15000,
+                    "contractMv": 15000,
+                    "sourceAdvertisedMaxMa": 4500,
+                    "contractCurrentMa": 4500,
+                    "contractConfirmed": true,
+                    "powerGate": "pass",
+                    "warning": false
+                },
+                "stages": {"ok": true, "effect": "fan_50_percent_5s_100_percent_5s_0_percent_5s"},
+                "finalReset": {
+                    "status": "pass",
+                    "pdProtocol": "fixed_5v",
+                    "activeContract": {"mode": "fixed", "voltageMv": 5000, "currentMa": 500},
+                    "pendingRequest": null,
+                    "defaultVbusMv": 0,
+                    "defaultContractCurrentMa": 500,
+                    "reason": "default_contract_confirmed_external_vin"
+                }
+            }
+        });
+        assert_eq!(
+            validate_ram_success_response(&value, FAN_PD_CAPABILITY),
+            Ok(()),
+            "fan-pd fixture should validate"
+        );
+        assert!(!fan_pd_requires_nonzero(&value));
+        let mut degraded = value.clone();
+        degraded["result"]["overall"] = serde_json::json!("power_degraded");
+        degraded["result"]["warning"] = serde_json::json!(true);
+        degraded["result"]["powerGate"] = serde_json::json!("degraded");
+        degraded["result"]["selection"]["powerGate"] = serde_json::json!("degraded");
+        degraded["result"]["selection"]["warning"] = serde_json::json!(true);
+        assert!(validate_ram_success_response(&degraded, FAN_PD_CAPABILITY).is_ok());
+        assert!(fan_pd_requires_nonzero(&degraded));
+        let mut recovery_failed = value;
+        recovery_failed["result"]["overall"] = serde_json::json!("recovery_failed");
+        recovery_failed["result"]["pd"] = serde_json::json!("owned");
+        recovery_failed["result"]["finalReset"]["status"] = serde_json::json!("fail");
+        recovery_failed["result"]["finalReset"]["activeContract"] = Value::Null;
+        assert!(validate_ram_success_response(&recovery_failed, FAN_PD_CAPABILITY).is_ok());
+        assert!(fan_pd_requires_nonzero(&recovery_failed));
+    }
+
+    #[test]
     fn ram_identity_requires_the_declared_protocol_and_framing() {
         let identity = ObservedIdentity {
             firmware: ObservedFirmware::RamBringup,
             build_id: Some(PRODUCT_BUILD_ID.to_string()),
             source_sha: Some("test-source-sha".to_string()),
+            image_kind: None,
             capabilities: vec!["test_fan".to_string()],
             protocol_version: Some(RAM_PROTOCOL_VERSION.to_string()),
             framing: Some(RAM_FRAMING.to_string()),
@@ -3598,6 +3988,7 @@ mod tests {
             firmware: ObservedFirmware::RamBringup,
             build_id: Some(PRODUCT_BUILD_ID.to_string()),
             source_sha: Some(PRODUCT_SOURCE_SHA.to_string()),
+            image_kind: None,
             capabilities: vec![PD_HIL_CAPABILITY.to_string()],
             protocol_version: Some(RAM_PROTOCOL_VERSION.to_string()),
             framing: Some(RAM_FRAMING.to_string()),
@@ -3675,9 +4066,18 @@ mod tests {
 "#,
         );
         let mut fan_power_seen = false;
-        let response = find_ram_response(&mut bytes, "test_fan", "ram-1", &mut fan_power_seen)
-            .unwrap()
-            .expect("final response should be returned");
+        let mut summary_chunks = PdHilSummaryChunks::default();
+        let mut last_progress_sequence = None;
+        let response = find_ram_response(
+            &mut bytes,
+            "test_fan",
+            "ram-1",
+            &mut fan_power_seen,
+            &mut summary_chunks,
+            &mut last_progress_sequence,
+        )
+        .unwrap()
+        .expect("final response should be returned");
         assert_eq!(response["result"]["detail"], "fan_ready");
         assert!(bytes.is_empty());
     }

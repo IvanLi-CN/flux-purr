@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 embedded-hal = "1.0.0"
+flux-purr-pd-sink-core = { path = "../pd-sink-core" }
 fusb302 = "0.1.0"
 heapless = "0.8.0"
 nb = "1.1.0"

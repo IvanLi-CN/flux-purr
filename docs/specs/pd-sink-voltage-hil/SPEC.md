@@ -24,6 +24,11 @@ validates the PD controller, protocol policy boundary, VIN ADC path, and
 recovery sequence without enabling the heater, fan, RGB, display, buttons, or
 buzzer.
 
+The standalone `pd-fan-test` image may link the transport-neutral
+`flux-purr-pd-sink-core` wire library, but it does not link this HIL executable
+or inherit this matrix, 3A threshold, VIN hold acceptance, or evidence
+workflow.
+
 ## Scope
 
 ### In scope

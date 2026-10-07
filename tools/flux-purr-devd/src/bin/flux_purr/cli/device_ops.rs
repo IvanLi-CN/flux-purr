@@ -103,6 +103,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     let pd_hil_failed = ram_run::pd_hil_requires_nonzero(&payload);
+    let fan_pd_failed = ram_run::fan_pd_requires_nonzero(&payload);
     if cli.json {
         println!(
             "{}",
@@ -119,6 +120,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         return Err(format!("PD HIL completed with overall={overall}").into());
+    }
+    if fan_pd_failed {
+        let overall = payload
+            .get("result")
+            .and_then(|result| result.get("overall"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(format!("fan-pd completed with overall={overall}").into());
     }
     Ok(())
 }

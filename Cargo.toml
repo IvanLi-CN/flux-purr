@@ -2,7 +2,9 @@
 resolver = "3"
 members = [
   "firmware",
+  "firmware/pd-sink-core",
   "firmware/ram-bringup",
+  "firmware/ram-fan-pd",
   "firmware/ram-pd-hil",
   "tools/flux-purr-devd",
   "tools/rust-style-check",

@@ -1,0 +1,13 @@
+[package]
+name = "flux-purr-pd-sink-core"
+version = "0.1.0"
+edition = "2024"
+description = "Shared no-std USB-PD sink wire codec for Flux Purr RAM images"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]

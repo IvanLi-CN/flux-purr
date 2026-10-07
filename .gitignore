@@ -16,6 +16,7 @@ firmware/target/
 firmware/target-*/
 firmware/ram-bringup/target/
 firmware/ram-pd-hil/target/
+firmware/ram-fan-pd/target/
 
 # IDE / tools
 .vscode/

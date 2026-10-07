@@ -8,3 +8,8 @@ USB-C VBUS path before returning its terminal summary.
 
 The image is intentionally separate from `ram-bringup`: existing bring-up
 capabilities retain their `pd=untouched` contract.
+
+The image may link the transport-neutral `flux-purr-pd-sink-core` crate, but it
+does not contain or dispatch the standalone `ram-fan-pd` session. Its complete
+voltage matrix, 3A minimum, VIN hold acceptance, and evidence contract remain
+independent.
