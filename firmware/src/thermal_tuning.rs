@@ -2079,6 +2079,7 @@ impl ThermalTuningRuntime {
         let overshoot_c = overshoot_centi_c.map(|value| f64::from(value) / 100.0);
         let hold_p2p_c = hold_p2p_centi_c.map(|value| f64::from(value) / 100.0);
         let settle_ms = settle_time_ms.map(|value| value as f64);
+        let verified_settle_ms = self.stable_window_verified_at_ms.and(settle_ms);
         let metric_gate = completed
             && overshoot_c.is_some_and(|value| value <= 3.0)
             && hold_p2p_c.is_some_and(|value| value <= 3.0)
@@ -2088,7 +2089,7 @@ impl ThermalTuningRuntime {
         } else {
             1.0 + overshoot_c.map_or(3.0, |value| (value - 3.0).max(0.0))
                 + hold_p2p_c.map_or(3.0, |value| (value - 3.0).max(0.0))
-                + settle_ms.map_or(2.0, |value| {
+                + verified_settle_ms.map_or(2.0, |value| {
                     ((value - limit_ms).max(0.0) / 1_000.0).min(5.0)
                 })
         };
@@ -2144,17 +2145,21 @@ impl ThermalTuningRuntime {
                 .unwrap_or(missing),
         ];
         if !completed {
-            // Failed windows use the complete valid prefix, not the first
-            // exit's quantization noise. Qualification remains independent.
+            // First reduce the complete prefix's violation. A faster entry
+            // cannot make a longer truncated, unstable span more feasible.
             score[4] = if self.first_band_elapsed_ms.is_some() {
+                f64::from(self.max_band_excursion_centi_c) / 100.0
+            } else {
+                progress_base + temperature_gap_c.min(5.0)
+            };
+            score[5] = if self.first_band_elapsed_ms.is_some() {
                 let ranked_span_ms = self.longest_stable_span_ms
                     / THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS
                     * THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS;
                 1.0 - (ranked_span_ms as f64 / THERMAL_TUNING_STABLE_WINDOW_MS as f64).min(1.0)
             } else {
-                progress_base + temperature_gap_c.min(5.0)
+                1.0
             };
-            score[5] = f64::from(self.max_band_excursion_centi_c) / 100.0;
             score[6] = overshoot_c.unwrap_or(missing);
             score[7] = hold_p2p_c.unwrap_or(missing);
             score[8] = settle_ms.unwrap_or(missing);
@@ -4639,8 +4644,38 @@ mod tests {
             scores.push(runtime.trial_score(60, false, Some(overshoot), Some(p2p), None));
             assert!(runtime.stable_window_verified_at_ms.is_none());
         }
-        assert_eq!(scores[0][4], scores[1][4]);
+        assert_eq!(scores[0][5], scores[1][5]);
         assert!(score_precedes(&scores[1], &scores[0]));
+    }
+
+    #[test]
+    fn failed_rank_prefers_lower_excursion_over_fast_unstable_band_entry() {
+        // 8f32f34 trial 4/5: stronger damping reaches the band later,
+        // so a truncated partial span must not reward the hotter point.
+        let mut scores = std::vec::Vec::new();
+        for (span, excursion, overshoot, p2p) in [(4_175, 15, 165, 211), (3_658, 6, 156, 202)] {
+            let mut runtime = started_single_target_runtime();
+            runtime.first_band_elapsed_ms = Some(1_000);
+            runtime.first_band_exit_centi_c = Some(6_150 + excursion as i16);
+            runtime.longest_stable_span_ms = span;
+            runtime.max_band_excursion_centi_c = excursion;
+            scores.push(runtime.trial_score(60, false, Some(overshoot), Some(p2p), None));
+            assert!(runtime.stable_window_verified_at_ms.is_none());
+        }
+        assert!(score_precedes(&scores[1], &scores[0]));
+        assert!(!score_precedes(&scores[0], &scores[1]));
+    }
+
+    #[test]
+    fn unverified_band_restart_cannot_improve_the_timing_gate_score() {
+        let mut runtime = started_single_target_runtime();
+        runtime.first_band_elapsed_ms = Some(1_000);
+        runtime.max_band_excursion_centi_c = 2;
+        runtime.longest_stable_span_ms = 3_738;
+        let broken = runtime.trial_score(60, false, Some(152), Some(210), None);
+        let just_restarted = runtime.trial_score(60, false, Some(152), Some(210), Some(10_010));
+        assert_eq!(broken[2], just_restarted[2]);
+        assert!(runtime.stable_window_verified_at_ms.is_none());
     }
 
     #[test]

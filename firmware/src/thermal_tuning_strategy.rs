@@ -206,7 +206,7 @@ fn coasting_high_side_candidate(
     {
         return None;
     }
-    let step = round_positive((evidence.overshoot_c - 1.5).max(0.5) * 500.0).clamp(250, 1_000);
+    let step = round_positive((evidence.overshoot_c - 1.5).max(0.5) * 1_000.0).clamp(500, 1_000);
     let mut point = previous;
     point.approach_damping_exponent_permille = previous
         .approach_damping_exponent_permille
@@ -2048,7 +2048,7 @@ mod tests {
             ..previous
         };
         assert!(coasting_high_side_candidate(saturated, facts).is_none());
-        for (overshoot_c, step) in [(1.59, 250), (2.24, 370), (20.0, 1_000)] {
+        for (overshoot_c, step) in [(1.59, 500), (2.24, 740), (20.0, 1_000)] {
             let tuned = coasting_high_side_candidate(
                 previous,
                 TuneEvidence {
@@ -2092,7 +2092,7 @@ mod tests {
             ..evidence(60)
         };
         let expected = ThermalControlProfilePointConfig {
-            approach_damping_exponent_permille: 2_250,
+            approach_damping_exponent_permille: 2_500,
             ..previous
         };
         assert_eq!(tune_point(previous, facts), expected);
