@@ -79,7 +79,7 @@
 | 报告 | 原四文件 preliminary bundle 和 `thermal-profile.accepted.json` 保持原义 | `thermal-tuning-v2` 五文件、完整 sample/ledger、trace/digest、可切换 trial 与二元资格结论 |
 | 候选与持久化 | 原审查候选快照不等于已保存 bank | candidate、RAM preview receipt、seal、二次 confirm-save、EEPROM bank generation/hash/readback receipt 严格分离 |
 
-无法由设备本地事实映射的外部 source 判定不得伪造为等价向量；应保留 unavailable 与失败原因。若保持已冻结 5A 决策需要改变策略、生产控制或 PD/PPS 语义，必须先给出 A（现有本地事实适配）与 B（改变合同）的差异、风险和验收影响，停止在当前 PR 静默修改。`pps3a` 调优本身只可在明确新请求后进入独立任务和 PR。
+无法由设备本地事实映射的外部 source 判定不得伪造为等价向量；应保留 unavailable 与失败原因。固件失败候选比较与有界搜索按[自然冷却搜索合同](NATURAL-COOLING-CONTROL.md#搜索合同)允许偏离外部冻结向量：使用整段稳定进展，重复提议后检查同一失败方向的有效参数余量；不改变生产控制律、PD或资格门槛。其余已冻结5A决策若需改变策略、生产控制或PD/PPS语义，必须先说明差异、风险和验收影响，停止在当前PR静默修改。`pps3a`调优本身只可在明确新请求后进入独立任务和PR。
 
 ### 热控的两类操作
 
