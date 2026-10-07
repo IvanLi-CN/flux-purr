@@ -11,7 +11,7 @@ use crate::thermal_tuning_limits::{
     TRIAL_TIMEOUT_MS, ThermalTuningTimingEvidence, original_settle_limit_ms,
 };
 use crate::thermal_tuning_strategy::{
-    CurveClass, TuneEvidence, reseed_after_hold_confirm, tune_point,
+    CurveClass, TuneEvidence, bounded_failure_alternative, reseed_after_hold_confirm, tune_point,
 };
 
 #[cfg(test)]
@@ -400,6 +400,8 @@ pub struct ThermalTuningRuntime {
     trial_timing: Option<ThermalTuningTimingEvidence>,
     stable_window_sample_count: u32,
     stable_window_last_sample_ms: Option<u64>,
+    longest_stable_span_ms: u64,
+    max_band_excursion_centi_c: u16,
     approach_curve_samples: Vec<ThermalCurveSample, THERMAL_TUNING_APPROACH_TRACE_CAPACITY>,
     approach_curve_closed: bool,
     approach_curve_overflow: bool,
@@ -499,6 +501,8 @@ impl ThermalTuningRuntime {
             trial_timing: None,
             stable_window_sample_count: 0,
             stable_window_last_sample_ms: None,
+            longest_stable_span_ms: 0,
+            max_band_excursion_centi_c: 0,
             approach_curve_samples: Vec::new(),
             approach_curve_closed: false,
             approach_curve_overflow: false,
@@ -868,15 +872,13 @@ impl ThermalTuningRuntime {
             < THERMAL_TUNING_TARGET_BUDGET_MS
             && self.trial_index < u8::MAX
         {
-            let previous = self.candidate_profile;
-            self.mutate_candidate_for_failure(
+            if !self.prepare_fresh_failure_proposal(
                 target_c,
                 max_overshoot_centi_c,
                 hold_peak_to_peak_centi_c,
                 settle_time_ms,
                 full_speed_limit_ms,
-            );
-            if !self.record_fresh_proposal(previous) {
+            ) {
                 return self.exhaust_candidate_search(target_c);
             }
             self.seed_source = bounded_reason("evidence_adjustment");
@@ -942,15 +944,17 @@ impl ThermalTuningRuntime {
         let current = self
             .candidate_profile
             .ok_or(ThermalTuningError::CandidateProfileRequired)?;
-        self.mutate_candidate_for_failure(
+        if !self.prepare_fresh_failure_proposal(
             target_c,
             overshoot_centi_c,
             hold_p2p_centi_c,
             settle_time_ms,
             full_speed_limit_ms,
-        );
+        ) {
+            return self.exhaust_candidate_search(target_c);
+        }
         let predicted = self.candidate_profile.filter(|profile| *profile != current);
-        if predicted.is_none() || !self.record_fresh_proposal(Some(current)) {
+        if predicted.is_none() {
             return self.exhaust_candidate_search(target_c);
         }
         self.batch_current_profile = Some(current);
@@ -983,7 +987,12 @@ impl ThermalTuningRuntime {
         let Some(point) = point else {
             return false;
         };
-        if Some(point) == previous_point || self.proposed_points.contains(&point) {
+        if previous_point.is_some_and(|previous| same_effective_search_point(previous, point))
+            || self
+                .proposed_points
+                .iter()
+                .any(|previous| same_effective_search_point(*previous, point))
+        {
             return false;
         }
         if let Some(previous) = previous_point
@@ -993,6 +1002,73 @@ impl ThermalTuningRuntime {
             return false;
         }
         self.proposed_points.push(point).is_ok()
+    }
+
+    fn prepare_fresh_failure_proposal(
+        &mut self,
+        target_c: i16,
+        overshoot: Option<u16>,
+        hold_p2p: Option<u16>,
+        settle_time_ms: Option<u64>,
+        full_speed_limit_ms: u32,
+    ) -> bool {
+        let Some(original) = self.candidate_profile else {
+            return false;
+        };
+        self.mutate_candidate_for_failure(
+            target_c,
+            overshoot,
+            hold_p2p,
+            settle_time_ms,
+            full_speed_limit_ms,
+        );
+        if self.record_fresh_proposal(Some(original)) {
+            return true;
+        }
+        let Some(index) = original
+            .points
+            .iter()
+            .position(|point| point.is_some_and(|point| point.target_temp_c == target_c))
+        else {
+            return false;
+        };
+        let previous = original.points[index].unwrap();
+        let evidence = self.candidate_failure_evidence(
+            target_c,
+            overshoot,
+            hold_p2p,
+            settle_time_ms,
+            full_speed_limit_ms,
+        );
+        for attempt in 0..32 {
+            let Some(point) = bounded_failure_alternative(previous, evidence, attempt) else {
+                continue;
+            };
+            let mut alternative = original;
+            alternative.points[index] = Some(point);
+            alternative.sanitize();
+            self.candidate_profile = Some(alternative);
+            if !self.record_fresh_proposal(Some(original)) {
+                continue;
+            }
+            if self
+                .install_candidate_profile(alternative, "distinct_same_run_failure_proposal")
+                .is_err()
+            {
+                return false;
+            }
+            self.push_event(
+                ThermalTuningEventKind::Decision,
+                Some(target_c),
+                Some(self.trial_index),
+                None,
+                Some("repeated_proposal_replaced_by_distinct_effective_point"),
+            );
+            return true;
+        }
+        self.candidate_profile = Some(original);
+        self.candidate_hash = hash_profile(&original);
+        false
     }
 
     fn exhaust_candidate_search(&mut self, target_c: i16) -> Result<(), ThermalTuningError> {
@@ -1234,6 +1310,8 @@ impl ThermalTuningRuntime {
         self.trial_timing = None;
         self.stable_window_sample_count = 0;
         self.stable_window_last_sample_ms = None;
+        self.longest_stable_span_ms = 0;
+        self.max_band_excursion_centi_c = 0;
         self.approach_curve_samples.clear();
         self.approach_curve_closed = false;
         self.approach_curve_overflow = false;
@@ -1884,6 +1962,9 @@ impl ThermalTuningRuntime {
         let sampling_sufficient = u64::from(self.stable_window_sample_count.saturating_sub(1))
             .saturating_mul(1_000)
             >= window_duration.saturating_mul(3);
+        if sampling_sufficient {
+            self.longest_stable_span_ms = self.longest_stable_span_ms.max(window_duration);
+        }
         let full_speed_limit_ms = u64::from(self.active_settle_limit_ms(expected_target));
         if stable_start.saturating_sub(warmup_exit) <= full_speed_limit_ms
             && sample.elapsed_ms.saturating_sub(stable_start) >= THERMAL_TUNING_STABLE_WINDOW_MS
@@ -1920,6 +2001,14 @@ impl ThermalTuningRuntime {
         } else if self.first_band_exit_centi_c.is_none() && !(lower..=upper).contains(&temperature)
         {
             self.first_band_exit_centi_c = Some(sample.temperature_centi_c);
+        }
+        if self.first_band_elapsed_ms.is_some() {
+            self.max_band_excursion_centi_c = self.max_band_excursion_centi_c.max(
+                (lower - temperature)
+                    .max(temperature - upper)
+                    .max(0)
+                    .min(i32::from(u16::MAX)) as u16,
+            );
         }
     }
 
@@ -2035,7 +2124,7 @@ impl ThermalTuningRuntime {
             .hold_output_percentile(0.5)
             .zip(self.hold_output_percentile(0.9))
             .map_or(missing, |(median, p90)| (p90 - median).abs());
-        [
+        let mut score = [
             0.0,
             if completed { 0.0 } else { 1.0 },
             gate_penalty,
@@ -2048,7 +2137,22 @@ impl ThermalTuningRuntime {
             hold_spread,
             self.approach_curve_mean_abs_error_c(target_c)
                 .unwrap_or(missing),
-        ]
+        ];
+        if !completed {
+            // Failed windows use the complete valid prefix, not the first
+            // exit's quantization noise. Qualification remains independent.
+            score[4] = if self.first_band_elapsed_ms.is_some() {
+                1.0 - (self.longest_stable_span_ms as f64 / THERMAL_TUNING_STABLE_WINDOW_MS as f64)
+                    .min(1.0)
+            } else {
+                progress_base + temperature_gap_c.min(5.0)
+            };
+            score[5] = f64::from(self.max_band_excursion_centi_c) / 100.0;
+            score[6] = overshoot_c.unwrap_or(missing);
+            score[7] = hold_p2p_c.unwrap_or(missing);
+            score[8] = settle_ms.unwrap_or(missing);
+        }
+        score
     }
 
     pub fn advance_target(&mut self) -> Result<(), ThermalTuningError> {
@@ -2754,6 +2858,19 @@ fn candidate_point(
         approach_lead_ticks: point.approach_lead_ticks,
         hold_lead_ticks: point.hold_lead_ticks,
     })
+}
+
+fn same_effective_search_point(
+    mut left: ThermalControlProfilePointConfig,
+    mut right: ThermalControlProfilePointConfig,
+) -> bool {
+    // The calibrated 5A model ignores these legacy profile clamps. Changing
+    // them alone must not consume another physical experiment.
+    left.approach_floor_power_permille = 0;
+    left.approach_power_permille = 0;
+    right.approach_floor_power_permille = 0;
+    right.approach_power_permille = 0;
+    left == right
 }
 
 fn score_precedes(left: &[f64; 11], right: &[f64; 11]) -> bool {
@@ -4470,6 +4587,95 @@ mod tests {
         predicted[10] = 1.0e12;
         assert!(score_precedes(&predicted, &current));
         assert!(!score_precedes(&current, &predicted));
+    }
+
+    #[test]
+    fn captured_failed_rank_prefers_the_longer_calibration_only_window() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_failed_rank.fixture.json")).unwrap();
+        let mut scores = std::vec::Vec::new();
+        for trial in fixture["trials"].as_array().unwrap() {
+            let mut runtime = started_single_target_runtime();
+            runtime.warmup_exited_at_ms = trial["warmupExitMs"].as_u64();
+            runtime.trial_start_elapsed_ms = runtime.warmup_exited_at_ms;
+            for row in trial["samples"].as_array().unwrap() {
+                let observed = sample(
+                    row[0].as_u64().unwrap(),
+                    serde_json::from_value(row[2].clone()).unwrap(),
+                    row[1].as_i64().unwrap() as i16,
+                );
+                runtime.update_stable_window(&observed, 60);
+                runtime.update_stability_evidence(&observed, 60);
+            }
+            assert!(runtime.stable_window_verified_at_ms.is_none());
+            let score = runtime.trial_score(
+                60,
+                false,
+                Some(trial["overshootCentiC"].as_u64().unwrap() as u16),
+                Some(trial["holdP2pCentiC"].as_u64().unwrap() as u16),
+                None,
+            );
+            assert!(score[1] > 0.0);
+            scores.push(score);
+        }
+        assert!(score_precedes(&scores[1], &scores[0]));
+    }
+
+    #[test]
+    fn repeated_high_side_proposal_searches_remaining_effective_parameters() {
+        let mut runtime = started_single_target_runtime();
+        runtime.first_band_elapsed_ms = Some(5_000);
+        runtime.first_band_exit_centi_c = Some(6_159);
+        runtime.min_controller_hold_temperature_centi_c = Some(5_950);
+        runtime.max_controller_hold_temperature_centi_c = Some(6_159);
+        runtime.first_hold_temperature_centi_c = Some(5_950);
+        runtime.max_temperature_centi_c = Some(6_159);
+        runtime.hold_output_count = 10;
+        let original = runtime.candidate_profile;
+        runtime.mutate_candidate_for_failure(60, Some(159), Some(209), None, 10_000);
+        assert!(runtime.record_fresh_proposal(original));
+        let already_proposed = runtime.candidate_profile;
+        runtime.candidate_profile = original;
+        runtime
+            .prepare_candidate_batch(60, Some(159), Some(209), None, 10_000)
+            .unwrap();
+        assert!(runtime.armed);
+        assert_ne!(runtime.batch_predicted_profile, already_proposed);
+        assert_eq!(
+            runtime.trial_purpose,
+            ThermalTuningTrialPurpose::BatchCurrent
+        );
+    }
+
+    #[test]
+    fn failed_window_progress_rejects_sparse_or_interrupted_samples() {
+        for interval in [500, 1_100] {
+            let mut runtime = started_single_target_runtime();
+            runtime.warmup_exited_at_ms = Some(0);
+            for elapsed in (0..=9_900).step_by(interval) {
+                runtime.update_stable_window(&sample(elapsed, ThermalTuningPhase::Hold, 6_000), 60);
+            }
+            assert_eq!(runtime.longest_stable_span_ms, 0);
+            assert!(runtime.stable_window_verified_at_ms.is_none());
+        }
+        let mut runtime = started_single_target_runtime();
+        runtime.warmup_exited_at_ms = Some(0);
+        for elapsed in [0, 300, 600, 900, 2_001, 2_301, 2_601] {
+            runtime.update_stable_window(&sample(elapsed, ThermalTuningPhase::Hold, 6_000), 60);
+        }
+        assert_eq!(runtime.longest_stable_span_ms, 900);
+    }
+
+    #[test]
+    fn legacy_approach_clamps_alone_are_not_distinct_model_proposals() {
+        let mut runtime = started_single_target_runtime();
+        let original = runtime.candidate_profile.unwrap();
+        let point = runtime.candidate_profile.as_mut().unwrap().points[0]
+            .as_mut()
+            .unwrap();
+        point.approach_power_permille += 10;
+        point.approach_floor_power_permille += 10;
+        assert!(!runtime.record_fresh_proposal(Some(original)));
     }
 
     #[test]

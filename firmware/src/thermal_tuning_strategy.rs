@@ -74,6 +74,94 @@ pub(crate) fn tune_point(
     apply_stability_gate(previous, predicted, evidence)
 }
 
+pub(crate) fn bounded_failure_alternative(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+    attempt: u16,
+) -> Option<ThermalControlProfilePointConfig> {
+    if !evidence.tunable_stop || attempt >= 32 {
+        return None;
+    }
+    let (failure, _) = stability_gate_evidence(evidence);
+    let high = matches!(failure, GateFailure::BrokeHigh | GateFailure::MissedHigh)
+        || evidence.overshoot_c > 3.0;
+    let low = !high && matches!(failure, GateFailure::BrokeLow | GateFailure::MissedLow);
+    if !high && !low {
+        return None;
+    }
+    let hold_observed = evidence.first_band_observed && evidence.hold_sample_count >= 3;
+    let step = attempt / 4 + 1;
+    let channel = attempt % 4;
+    let mut point = previous;
+    match (high, hold_observed, channel) {
+        (true, true, 0) => {
+            point.hold_power_permille = previous
+                .hold_power_permille
+                .saturating_sub(20 * step)
+                .max(50)
+                .min(previous.hold_power_permille)
+        }
+        (true, true, 1) => {
+            point.hold_kp_permille_per_c = previous
+                .hold_kp_permille_per_c
+                .saturating_sub(2 * step)
+                .max(8)
+                .min(previous.hold_kp_permille_per_c)
+        }
+        (true, _, 2) | (true, false, 0) => {
+            point.brake_distance_centi_c = previous
+                .brake_distance_centi_c
+                .saturating_add(40 * step)
+                .min(5_000)
+        }
+        (true, _, _) => {
+            point.approach_damping_exponent_permille = previous
+                .approach_damping_exponent_permille
+                .saturating_add(100 * step)
+                .min(4_000)
+        }
+        (false, true, 0) => {
+            point.hold_reheat_power_permille = previous
+                .hold_reheat_power_permille
+                .saturating_add(40 * step)
+                .min(1_000)
+        }
+        (false, true, 1) => {
+            point.hold_kp_permille_per_c = previous
+                .hold_kp_permille_per_c
+                .saturating_add(4 * step)
+                .min(1_000)
+                .max(previous.hold_kp_permille_per_c)
+        }
+        (false, true, 2) => {
+            point.hold_power_permille = previous
+                .hold_power_permille
+                .saturating_add(40 * step)
+                .min(1_000)
+        }
+        (false, true, _) => {
+            point.hold_on_centi_c = previous
+                .hold_on_centi_c
+                .saturating_sub(5 * step)
+                .max(5)
+                .min(previous.hold_on_centi_c)
+        }
+        (false, false, 0 | 2) => {
+            point.brake_distance_centi_c = previous
+                .brake_distance_centi_c
+                .saturating_sub(40 * step)
+                .max(100)
+        }
+        (false, false, _) => {
+            point.approach_damping_exponent_permille = previous
+                .approach_damping_exponent_permille
+                .saturating_sub(100 * step)
+                .max(100)
+        }
+    }
+    (point != previous).then_some(point)
+}
+
 fn saturated_hold_ripple_candidate(
     previous: ThermalControlProfilePointConfig,
     evidence: TuneEvidence,
@@ -1044,6 +1132,28 @@ fn apply_overshoot(
     point.approach_floor_power_permille = point
         .approach_floor_power_permille
         .max(equilibrium.saturating_sub(30));
+    apply_overshoot_equilibrium(point, previous, evidence, equilibrium);
+    if evidence.target_c <= 120
+        && evidence.residual_c > 5.0
+        && evidence
+            .approach_median_slope_c_per_s
+            .is_some_and(|slope| slope > 2.0)
+    {
+        point.warmup_power_permille = point
+            .warmup_power_permille
+            .saturating_sub(250)
+            .max(point.approach_power_permille);
+    }
+    point.hold_blend_ticks = point.hold_blend_ticks.saturating_sub(3).max(1);
+    point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+}
+
+fn apply_overshoot_equilibrium(
+    point: &mut ThermalControlProfilePointConfig,
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+    equilibrium: u16,
+) {
     let equilibrium_ready = !evidence.full_speed_failed || evidence.hold_sample_count >= 120;
     let equilibrium_observed = equilibrium_ready
         && (evidence.hold_max_below_c.is_some_and(|value| value >= 0.3)
@@ -1080,19 +1190,6 @@ fn apply_overshoot(
             1_000,
         );
     }
-    if evidence.target_c <= 120
-        && evidence.residual_c > 5.0
-        && evidence
-            .approach_median_slope_c_per_s
-            .is_some_and(|slope| slope > 2.0)
-    {
-        point.warmup_power_permille = point
-            .warmup_power_permille
-            .saturating_sub(250)
-            .max(point.approach_power_permille);
-    }
-    point.hold_blend_ticks = point.hold_blend_ticks.saturating_sub(3).max(1);
-    point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
 }
 
 fn apply_hold_ripple(
@@ -1518,6 +1615,75 @@ mod tests {
             hold_blend_ticks: 12,
             approach_lead_ticks: 0,
             hold_lead_ticks: 0,
+        }
+    }
+
+    #[test]
+    fn distinct_failure_alternatives_preserve_direction_and_missing_hold() {
+        let previous = point(60);
+        for high in [true, false] {
+            let facts = TuneEvidence {
+                first_band_observed: true,
+                first_band_exit_centi_c: Some(if high { 6_160 } else { 5_840 }),
+                hold_sample_count: 0,
+                overshoot_c: 0.0,
+                ..evidence(60)
+            };
+            for attempt in 0..32 {
+                let alternative = bounded_failure_alternative(previous, facts, attempt).unwrap();
+                assert_eq!(
+                    alternative.hold_power_permille,
+                    previous.hold_power_permille
+                );
+                assert_eq!(
+                    alternative.hold_reheat_power_permille,
+                    previous.hold_reheat_power_permille
+                );
+                if high {
+                    assert!(alternative.brake_distance_centi_c >= previous.brake_distance_centi_c);
+                    assert!(
+                        alternative.approach_damping_exponent_permille
+                            >= previous.approach_damping_exponent_permille
+                    );
+                } else {
+                    assert!(alternative.brake_distance_centi_c <= previous.brake_distance_centi_c);
+                    assert!(
+                        alternative.approach_damping_exponent_permille
+                            <= previous.approach_damping_exponent_permille
+                    );
+                }
+            }
+            assert!(
+                bounded_failure_alternative(
+                    previous,
+                    TuneEvidence {
+                        tunable_stop: false,
+                        ..facts
+                    },
+                    0
+                )
+                .is_none()
+            );
+            assert!(bounded_failure_alternative(previous, facts, 32).is_none());
+        }
+    }
+
+    #[test]
+    fn saturated_failure_alternatives_do_not_reverse_or_fabricate_progress() {
+        let mut previous = point(60);
+        previous.brake_distance_centi_c = 5_000;
+        previous.approach_damping_exponent_permille = 4_000;
+        previous.hold_power_permille = 40;
+        previous.hold_kp_permille_per_c = 4;
+        let facts = TuneEvidence {
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(6_160),
+            hold_sample_count: 3,
+            overshoot_c: 0.0,
+            ..evidence(60)
+        };
+        for attempt in 0..32 {
+            assert!(bounded_failure_alternative(previous, facts, attempt).is_none());
         }
     }
 
