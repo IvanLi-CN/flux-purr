@@ -436,6 +436,8 @@ pub struct ThermalTuningRuntime {
     hold_entry_output_permille: Option<u16>,
     approach_output_histogram: [u16; 1001],
     approach_output_count: u32,
+    model_approach_sample_count: u32,
+    model_approach_floor_only: bool,
     approach_slopes_c_per_s: Vec<f64, THERMAL_TUNING_APPROACH_TRACE_CAPACITY>,
     near_target_evidence_overflow: bool,
     previous_sample_at_ms: Option<u64>,
@@ -538,6 +540,8 @@ impl ThermalTuningRuntime {
             hold_entry_output_permille: None,
             approach_output_histogram: [0; 1001],
             approach_output_count: 0,
+            model_approach_sample_count: 0,
+            model_approach_floor_only: true,
             approach_slopes_c_per_s: Vec::new(),
             near_target_evidence_overflow: false,
             previous_sample_at_ms: None,
@@ -1271,6 +1275,8 @@ impl ThermalTuningRuntime {
                 self.approach_output_count,
                 0.5,
             ),
+            approach_floor_only: self.model_approach_sample_count >= 3
+                && self.model_approach_floor_only,
             approach_median_slope_c_per_s: slopes.get(slope_index).copied(),
             curve_class: self.strategy_curve_class(target_c),
             first_hold_after_warmup_ms: self
@@ -1345,6 +1351,8 @@ impl ThermalTuningRuntime {
         self.hold_entry_output_permille = None;
         self.approach_output_histogram = [0; 1001];
         self.approach_output_count = 0;
+        self.model_approach_sample_count = 0;
+        self.model_approach_floor_only = true;
         self.approach_slopes_c_per_s.clear();
         self.near_target_evidence_overflow = false;
         self.previous_sample_at_ms = None;
@@ -1679,6 +1687,10 @@ impl ThermalTuningRuntime {
         self.update_strategy_evidence(sample, expected_target);
         match sample.phase {
             ThermalTuningPhase::Approach => {
+                self.model_approach_sample_count =
+                    self.model_approach_sample_count.saturating_add(1);
+                self.model_approach_floor_only &= sample.heater_requested_output_permille
+                    == crate::thermal_plant::APPROACH_MIN_PERMILLE;
                 self.saw_approach = true;
                 self.warmup_exited_at_ms.get_or_insert(sample.elapsed_ms);
             }
@@ -4728,6 +4740,93 @@ mod tests {
             scores.push(score);
         }
         assert!(score_precedes(&scores[1], &scores[0]));
+    }
+
+    #[test]
+    fn captured_floor_only_coast_search_changes_braking_not_unused_damping() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_floor_coast.fixture.json")).unwrap();
+        let mut runtime = started_single_target_runtime();
+        let mut profile = runtime.candidate_profile.unwrap();
+        let point = profile.points[0].as_mut().unwrap();
+        point.brake_distance_centi_c = 1_318;
+        point.approach_damping_exponent_permille = 1_050;
+        point.approach_lead_ticks = 1;
+        point.approach_floor_power_permille = 100;
+        point.approach_power_permille = 920;
+        point.hold_power_permille = 54;
+        point.hold_reheat_power_permille = 54;
+        point.hold_kp_permille_per_c = 23;
+        point.hold_ki_permille_per_c_tick = 1;
+        point.hold_blend_ticks = 3;
+        point.hold_lead_ticks = 3;
+        point.hold_on_centi_c = 30;
+        point.hold_off_centi_c = 5;
+        point.hold_entry_centi_c = 90;
+        point.hold_exit_centi_c = 200;
+        point.overshoot_cutoff_centi_c = 80;
+        point.approach_tail_window_centi_c = 0;
+        point.warmup_power_permille = 1_000;
+        point.warmup_reenter_centi_c = 400;
+        let previous = *point;
+        runtime.candidate_profile = Some(profile);
+        for row in fixture["samples"].as_array().unwrap() {
+            let mut observed = sample(
+                row[0].as_u64().unwrap(),
+                serde_json::from_value(row[2].clone()).unwrap(),
+                row[1].as_i64().unwrap() as i16,
+            );
+            observed.heater_requested_output_permille = row[3].as_u64().unwrap() as u16;
+            observed.heater_output_permille = row[4].as_u64().unwrap() as u16;
+            runtime.update_trial_metrics(&observed, 60);
+        }
+        let facts = runtime.candidate_failure_evidence(60, Some(170), Some(212), None, 10_000);
+        assert_eq!(facts.hold_sample_count, 15);
+        assert_eq!(facts.hold_off_sample_count, 15);
+        assert!(facts.first_band_exit_centi_c.is_some_and(|t| t > 6_150));
+        assert!(!facts.stable_window_verified);
+        assert!(facts.approach_floor_only);
+        let proposed = tune_point(previous, facts);
+        assert!(proposed.brake_distance_centi_c > previous.brake_distance_centi_c);
+        assert_eq!(
+            proposed,
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: proposed.brake_distance_centi_c,
+                ..previous
+            }
+        );
+        assert_eq!(reseed_after_hold_confirm(previous, facts), proposed);
+    }
+
+    #[test]
+    fn floor_only_evidence_requires_actual_approach_and_resets_per_trial() {
+        for nonfloor in [0, 51, 1_000] {
+            let mut runtime = started_single_target_runtime();
+            let mut warmup = sample(0, ThermalTuningPhase::Warmup, 3_500);
+            warmup.heater_requested_output_permille = 1_000;
+            runtime.update_trial_metrics(&warmup, 60);
+            for elapsed in [200, 400, 600] {
+                let mut observed = sample(elapsed, ThermalTuningPhase::Approach, 5_000);
+                observed.heater_requested_output_permille = 50;
+                runtime.update_trial_metrics(&observed, 60);
+                let facts = runtime.candidate_failure_evidence(60, None, None, None, 10_000);
+                assert_eq!(facts.approach_floor_only, elapsed == 600);
+            }
+            let mut different = sample(800, ThermalTuningPhase::Approach, 5_050);
+            different.heater_requested_output_permille = nonfloor;
+            runtime.update_trial_metrics(&different, 60);
+            assert!(
+                !runtime
+                    .candidate_failure_evidence(60, None, None, None, 10_000)
+                    .approach_floor_only
+            );
+            runtime.reset_trial_metrics();
+            assert!(
+                !runtime
+                    .candidate_failure_evidence(60, None, None, None, 10_000)
+                    .approach_floor_only
+            );
+        }
     }
 
     #[test]

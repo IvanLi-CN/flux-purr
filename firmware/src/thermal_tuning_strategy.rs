@@ -29,6 +29,7 @@ pub(crate) struct TuneEvidence {
     pub hold_median_output_permille: Option<u16>,
     pub hold_p90_output_permille: Option<u16>,
     pub approach_median_output_permille: Option<u16>,
+    pub approach_floor_only: bool,
     pub approach_median_slope_c_per_s: Option<f64>,
     pub curve_class: CurveClass,
     pub first_hold_after_warmup_ms: Option<u64>,
@@ -122,6 +123,9 @@ pub(crate) fn bounded_failure_alternative(
     }
     let hold_observed = evidence.first_band_observed && evidence.hold_sample_count >= 3;
     if high && hold_observed && hold_off_after_entry(evidence) {
+        if evidence.target_c <= 150 && evidence.approach_floor_only {
+            return earlier_braking_candidate(previous, 40 * (attempt + 1));
+        }
         return coasting_failure_alternative(previous, attempt);
     }
     let step = attempt / 4 + 1;
@@ -233,12 +237,34 @@ fn coasting_high_side_candidate(
     {
         return None;
     }
+    if evidence.approach_floor_only {
+        // Damping cannot reduce a model request already clamped to its minimum.
+        // Remove stored Warmup energy through the existing braking channel.
+        let step = round_positive((evidence.overshoot_c - 1.5).max(0.5) * 100.0).clamp(40, 100);
+        // Keep this classified failure at its bound; falling through would
+        // change unused channels and fabricate an effective proposal.
+        return Some(earlier_braking_candidate(previous, step).unwrap_or(previous));
+    }
     let step = round_positive((evidence.overshoot_c - 1.5).max(0.5) * 1_000.0).clamp(500, 1_000);
     let mut point = previous;
     point.approach_damping_exponent_permille = previous
         .approach_damping_exponent_permille
         .saturating_add(step)
         .min(4_000);
+    (point != previous).then_some(point)
+}
+
+fn earlier_braking_candidate(
+    previous: ThermalControlProfilePointConfig,
+    step_centi_c: u16,
+) -> Option<ThermalControlProfilePointConfig> {
+    let point = ThermalControlProfilePointConfig {
+        brake_distance_centi_c: previous
+            .brake_distance_centi_c
+            .saturating_add(step_centi_c)
+            .min(5_000),
+        ..previous
+    };
     (point != previous).then_some(point)
 }
 
@@ -1886,6 +1912,7 @@ mod tests {
             hold_median_output_permille: None,
             hold_p90_output_permille: None,
             approach_median_output_permille: None,
+            approach_floor_only: false,
             approach_median_slope_c_per_s: None,
             curve_class: CurveClass::Insufficient,
             first_hold_after_warmup_ms: None,
@@ -2042,6 +2069,43 @@ mod tests {
             first_band_exit_centi_c: Some(target_c * 100 + 151),
             settle_limit_ms: 15_000,
             ..evidence(target_c)
+        }
+    }
+
+    #[test]
+    fn floor_only_coast_alternatives_use_remaining_braking_without_fake_progress() {
+        let previous = ThermalControlProfilePointConfig {
+            brake_distance_centi_c: 1_318,
+            approach_damping_exponent_permille: 1_050,
+            ..point(60)
+        };
+        let facts = TuneEvidence {
+            overshoot_c: 1.7,
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(6_151),
+            hold_sample_count: 15,
+            hold_off_sample_count: 15,
+            approach_floor_only: true,
+            ..evidence(60)
+        };
+        for attempt in 0..32 {
+            let alternative = bounded_failure_alternative(previous, facts, attempt).unwrap();
+            assert_eq!(
+                alternative,
+                ThermalControlProfilePointConfig {
+                    brake_distance_centi_c: 1_318 + 40 * (attempt + 1),
+                    ..previous
+                }
+            );
+        }
+        let saturated = ThermalControlProfilePointConfig {
+            brake_distance_centi_c: 5_000,
+            ..previous
+        };
+        assert_eq!(tune_point(saturated, facts), saturated);
+        assert_eq!(reseed_after_hold_confirm(saturated, facts), saturated);
+        for attempt in 0..32 {
+            assert!(bounded_failure_alternative(saturated, facts, attempt).is_none());
         }
     }
 
