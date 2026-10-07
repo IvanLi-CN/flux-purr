@@ -75,7 +75,34 @@ pub(crate) fn tune_point(
         return recovery;
     }
     let predicted = tune_base_point(previous, evidence);
-    apply_stability_gate(previous, predicted, evidence)
+    let proposed = apply_stability_gate(previous, predicted, evidence);
+    preserve_unobserved_low_side_hold(previous, proposed, evidence)
+}
+
+fn preserve_unobserved_low_side_hold(
+    previous: ThermalControlProfilePointConfig,
+    mut proposed: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> ThermalControlProfilePointConfig {
+    let (failure, _) = stability_gate_evidence(evidence);
+    if evidence.hold_sample_count == 0
+        && matches!(failure, GateFailure::MissedLow | GateFailure::BrokeLow)
+    {
+        // A pre-Hold deficit only supports Approach feedback. Changing unused
+        // Hold settings invents progress and prevents the distinct-point search.
+        proposed.hold_power_permille = previous.hold_power_permille;
+        proposed.hold_reheat_power_permille = previous.hold_reheat_power_permille;
+        proposed.hold_entry_centi_c = previous.hold_entry_centi_c;
+        proposed.hold_exit_centi_c = previous.hold_exit_centi_c;
+        proposed.hold_on_centi_c = previous.hold_on_centi_c;
+        proposed.hold_off_centi_c = previous.hold_off_centi_c;
+        proposed.hold_kp_permille_per_c = previous.hold_kp_permille_per_c;
+        proposed.hold_ki_permille_per_c_tick = previous.hold_ki_permille_per_c_tick;
+        proposed.hold_blend_ticks = previous.hold_blend_ticks;
+        proposed.hold_lead_ticks = previous.hold_lead_ticks;
+        proposed.overshoot_cutoff_centi_c = previous.overshoot_cutoff_centi_c;
+    }
+    proposed
 }
 
 pub(crate) fn bounded_failure_alternative(
@@ -396,7 +423,7 @@ pub(crate) fn reseed_after_hold_confirm(
     } else {
         reseed_low_temperature_hold(&mut point, evidence, failure);
     }
-    point
+    preserve_unobserved_low_side_hold(previous, point, evidence)
 }
 
 fn reseed_high_temperature_hold(
@@ -1696,6 +1723,44 @@ mod tests {
             hold_blend_ticks: 12,
             approach_lead_ticks: 0,
             hold_lead_ticks: 0,
+        }
+    }
+
+    #[test]
+    fn missing_high_temperature_hold_does_not_invent_hold_feedback() {
+        let mut previous = point(240);
+        previous.brake_distance_centi_c = 150;
+        previous.approach_damping_exponent_permille = 100;
+        previous.hold_power_permille = 838;
+        previous.hold_reheat_power_permille = 838;
+        previous.hold_kp_permille_per_c = 30;
+        previous.hold_ki_permille_per_c_tick = 1;
+        let facts = TuneEvidence {
+            approach_median_output_permille: Some(1_000),
+            approach_median_slope_c_per_s: Some(0.2),
+            curve_class: CurveClass::Underpowered,
+            settle_limit_ms: 5_000,
+            deadline_temperature_centi_c: Some(23_700),
+            ..evidence(240)
+        };
+        for next in [
+            tune_point(previous, facts),
+            reseed_after_hold_confirm(previous, facts),
+        ] {
+            assert_eq!(next.hold_power_permille, previous.hold_power_permille);
+            assert_eq!(
+                next.hold_reheat_power_permille,
+                previous.hold_reheat_power_permille
+            );
+            assert_eq!(next.hold_kp_permille_per_c, previous.hold_kp_permille_per_c);
+            assert_eq!(next.hold_on_centi_c, previous.hold_on_centi_c);
+            assert_eq!(next.hold_off_centi_c, previous.hold_off_centi_c);
+            assert_eq!(next.hold_entry_centi_c, previous.hold_entry_centi_c);
+            assert_eq!(next.hold_exit_centi_c, previous.hold_exit_centi_c);
+            assert_eq!(
+                next.overshoot_cutoff_centi_c,
+                previous.overshoot_cutoff_centi_c
+            );
         }
     }
 

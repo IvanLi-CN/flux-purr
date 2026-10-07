@@ -62,7 +62,9 @@ fn heater_profile_uses_calibrated_cooling_for_braking_and_early_recovery() {
         measured_temp_c: 237.0,
         ambient_temp_c: 25.0,
         heater_enabled: true,
-        max_power_mw: 100_000.0,
+        // Observed rise exceeds the nominal calibrated rise, so live model
+        // prediction must still brake early after candidate correction.
+        max_power_mw: 25_000.0,
         now_ms: 50,
         model: flux_purr_firmware::memory::ThermalPlantProjection {
             convection_mw_per_c: 100.0,
@@ -10076,6 +10078,68 @@ fn braking_approach_waits_for_calibrated_heat_in_flight_before_reheating() {
             Some(profile),
         );
         assert_eq!(controller.approach_braking_remaining_ms, 0);
+    }
+}
+
+#[test]
+fn calibrated_brake_feedback_moves_the_shared_high_temperature_handoff() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 240;
+        controller.heater_was_enabled = true;
+        controller.filtered_temp_c = Some(237.75);
+        controller.previous_measured_temp_c = Some(237.75);
+        controller.filtered_slope_c_per_profile_tick = 0.9;
+        controller.profile_last_control_at_ms = Some(2_950);
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 240;
+        point.brake_distance_centi_c = 150;
+        point.hold_entry_centi_c = 90;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(237.8);
+        input.target_temp_c = 240;
+        input.ambient_temp_c = 33.9;
+        input.max_power_mw = 73_909.95;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 119.58163,
+            radiation_mw_per_k4: 6.174697e-7,
+            thermal_capacity_mj_per_c: 22_564.195,
+            transport_delay_ms: 3_400,
+        };
+        // The fresh calibrated distance is 2.30C. Same-run feedback reduced
+        // it to 1.50C, but the uncorrected dynamic model masks that change.
+        let mut baseline = controller;
+        let mut initial_profile = profile;
+        initial_profile.points[0]
+            .as_mut()
+            .unwrap()
+            .brake_distance_centi_c = 230;
+        assert_eq!(
+            baseline
+                .update_production_at(kind, input, Some(initial_profile))
+                .0
+                .phase,
+            HeaterControlPhase::Approach,
+            "the fresh calibrated point retains model-guided braking"
+        );
+        let first = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(first.phase, HeaterControlPhase::Warmup, "bank={bank:?}");
+        assert_eq!(first.duty_percent, 100);
+        input.now_ms += 500;
+        input.measured_temp_c = 238.4;
+        controller.update_production_at(kind, input, Some(profile));
+        input.now_ms += 500;
+        input.measured_temp_c = 238.7;
+        let entry = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(entry.phase, HeaterControlPhase::Approach);
+        assert_eq!(entry.duty_percent, 5);
     }
 }
 

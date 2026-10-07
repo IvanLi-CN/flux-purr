@@ -4773,6 +4773,40 @@ mod tests {
     }
 
     #[test]
+    fn missing_240c_hold_searches_braking_instead_of_unused_hold_settings() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.targets_c.push(240).unwrap();
+        let mut original = profile_with_targets(&[240]);
+        let point = original.points[0].as_mut().unwrap();
+        point.brake_distance_centi_c = 150;
+        point.approach_power_permille = 1_000;
+        point.approach_floor_power_permille = 1_000;
+        point.approach_damping_exponent_permille = 100;
+        point.hold_power_permille = 838;
+        point.hold_reheat_power_permille = 838;
+        point.overshoot_cutoff_centi_c = 300;
+        original.sanitize();
+        runtime.candidate_profile = Some(original);
+        runtime.candidate_hash = hash_profile(&original);
+        runtime.deadline_nearest_temperature_centi_c = Some(23_700);
+        runtime.approach_output_count = 8;
+        runtime.approach_output_histogram[1_000] = 8;
+        runtime.approach_slopes_c_per_s.push(0.2).unwrap();
+        assert!(runtime.prepare_fresh_failure_proposal(240, Some(0), None, None, 5_000));
+        let before = original.points[0].unwrap();
+        let after = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert!(after.brake_distance_centi_c < before.brake_distance_centi_c);
+        assert_eq!(after.hold_power_permille, before.hold_power_permille);
+        assert_eq!(
+            after.hold_reheat_power_permille,
+            before.hold_reheat_power_permille
+        );
+        assert_eq!(after.hold_kp_permille_per_c, before.hold_kp_permille_per_c);
+        assert!(runtime.events.iter().any(|event| event.reason.as_deref()
+            == Some("repeated_proposal_replaced_by_distinct_effective_point")));
+    }
+
+    #[test]
     fn legacy_approach_clamps_alone_are_not_distinct_model_proposals() {
         let mut runtime = started_single_target_runtime();
         let original = runtime.candidate_profile.unwrap();

@@ -1564,10 +1564,28 @@ impl HeaterController {
         let delayed_heat_rate = (slope_c_per_s - rate.unwrap_or(0.0)).max(0.0);
         let model_brake =
             (delayed_heat_rate + future_rate.or(rate).unwrap_or(0.0)).max(0.0) * delay_s;
-        let brake = target
-            .brake_distance_c
-            .max(target.hold_entry_error_c + 0.1)
-            .max(model_brake.min(target.brake_distance_c + target.warmup_reenter_error_c));
+        // Keep live environmental prediction, but apply the candidate's braking
+        // correction relative to a calibration-only full-power reference. An
+        // uncorrected model maximum would mask every lower-distance proposal.
+        let corrected_model_brake = input
+            .filter(|input| input.max_power_mw.is_finite() && input.max_power_mw > 0.0)
+            .map_or(model_brake, |input| {
+                let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+                    input.model,
+                    f32::from(target_temp_c),
+                    input.ambient_temp_c,
+                );
+                let full_power_rise =
+                    ((input.max_power_mw - loss) / input.model.thermal_capacity_mj_per_c).max(0.0);
+                let reference_brake = ((full_power_rise * delay_s + HOLD_ENTRY_BELOW_C) * 100.0)
+                    .round()
+                    .clamp(100.0, 5_000.0)
+                    / 100.0;
+                model_brake + target.brake_distance_c - reference_brake
+            });
+        let brake = target.brake_distance_c.max(HOLD_ENTRY_BELOW_C + 0.1).max(
+            corrected_model_brake.min(target.brake_distance_c + target.warmup_reenter_error_c),
+        );
         (rate, delay_s, feedforward, brake)
     }
 
