@@ -770,6 +770,9 @@ pub(crate) struct HeaterController {
     pub(crate) coast_cooling_reference_c: Option<f32>,
     pub(crate) natural_cooling_input: Option<ThermalPlantRuntimeInput>,
     pub(crate) approach_braking_remaining_ms: u64,
+    pub(crate) approach_cooling_reference_c: Option<f32>,
+    pub(crate) approach_cooling_elapsed_ms: u64,
+    pub(crate) approach_cooling_samples: u8,
     pub(crate) heater_was_enabled: bool,
     pub(crate) warmup_started_at_ms: Option<u64>,
     pub(crate) production_controller: Option<ProductionThermalController>,
@@ -869,6 +872,9 @@ impl HeaterController {
             coast_cooling_reference_c: None,
             natural_cooling_input: None,
             approach_braking_remaining_ms: 0,
+            approach_cooling_reference_c: None,
+            approach_cooling_elapsed_ms: 0,
+            approach_cooling_samples: 0,
             heater_was_enabled: false,
             warmup_started_at_ms: None,
             production_controller: None,
@@ -880,7 +886,7 @@ impl HeaterController {
     }
 
     pub(crate) fn clear_fault_latch(&mut self) {
-        self.approach_braking_remaining_ms = 0;
+        self.clear_approach_braking();
         self.fault_latched = None;
         self.filtered_temp_c = None;
         self.previous_filtered_temp_c = None;
@@ -935,10 +941,11 @@ impl HeaterController {
         self.previous_measured_temp_c = Some(measured_temp_c);
         self.coast_cooling_reference_c = None;
         self.coast_cooling_elapsed_ms = 0;
+        self.reset_approach_cooling_evidence();
     }
 
     pub(crate) fn latch_fault(&mut self, reason: HeaterFaultReason) -> bool {
-        self.approach_braking_remaining_ms = 0;
+        self.clear_approach_braking();
         let changed = self.fault_latched != Some(reason);
         self.fault_latched = Some(reason);
         self.filtered_temp_c = None;
@@ -1036,7 +1043,7 @@ impl HeaterController {
         let previous_phase = self.phase;
         self.advance_phase(&frame, now_ms);
         if self.phase != HeaterControlPhase::Approach {
-            self.approach_braking_remaining_ms = 0;
+            self.clear_approach_braking();
         }
 
         if previous_phase != self.phase {
@@ -1090,7 +1097,7 @@ impl HeaterController {
         target_temp_c: i16,
         measured_temp_c: f32,
     ) -> HeaterPidSnapshot {
-        self.approach_braking_remaining_ms = 0;
+        self.clear_approach_braking();
         self.reseed_measurement(measured_temp_c);
         self.phase = HeaterControlPhase::Warmup;
         self.phase_ticks = 0;
@@ -1203,13 +1210,19 @@ impl HeaterController {
             self.approach_braking_remaining_ms = self
                 .natural_cooling_input
                 .map_or(0, |input| u64::from(input.model.transport_delay_ms));
+            self.reset_approach_cooling_evidence();
+            self.approach_cooling_reference_c = self
+                .natural_cooling_input
+                .map(|input| input.measured_temp_c);
             return percent_from_permille(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
         }
         if self.approach_braking_remaining_ms > 0 {
             self.approach_braking_remaining_ms = self
                 .approach_braking_remaining_ms
                 .saturating_sub(frame.elapsed_ms);
-            if self.approach_braking_remaining_ms > 0 {
+            if self.approach_cooling_confirmed(frame) {
+                self.clear_approach_braking();
+            } else if self.approach_braking_remaining_ms > 0 {
                 return percent_from_permille(
                     flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE,
                 );
@@ -1231,6 +1244,43 @@ impl HeaterController {
             (sustain_floor + ((approach_ceiling - sustain_floor) * shaped_ratio))
                 .clamp(0.0, 1_000.0) as u16,
         )
+    }
+
+    fn reset_approach_cooling_evidence(&mut self) {
+        self.approach_cooling_reference_c = None;
+        self.approach_cooling_elapsed_ms = 0;
+        self.approach_cooling_samples = 0;
+    }
+
+    fn clear_approach_braking(&mut self) {
+        self.approach_braking_remaining_ms = 0;
+        self.reset_approach_cooling_evidence();
+    }
+
+    fn approach_cooling_confirmed(&mut self, frame: &ThermalControlFrame) -> bool {
+        let Some(input) = self.natural_cooling_input else {
+            return false;
+        };
+        let measured_c = input.measured_temp_c;
+        let reference_c = *self.approach_cooling_reference_c.get_or_insert(measured_c);
+        if frame.previous_error_c - frame.error_c > 0.05 {
+            self.reset_approach_cooling_evidence();
+            self.approach_cooling_reference_c = Some(measured_c);
+            return false;
+        }
+        self.approach_cooling_elapsed_ms = self
+            .approach_cooling_elapsed_ms
+            .saturating_add(frame.elapsed_ms);
+        let cooling = self.approach_cooling_elapsed_ms >= 100
+            && measured_c + 0.15 < reference_c
+            && frame.error_c >= frame.previous_error_c
+            && frame.filtered_slope_c_per_profile_tick <= -0.02;
+        self.approach_cooling_samples = if cooling {
+            self.approach_cooling_samples.saturating_add(1)
+        } else {
+            0
+        };
+        self.approach_cooling_samples >= 2
     }
 
     fn model_approach_available(&self) -> bool {
@@ -1661,7 +1711,7 @@ impl HeaterController {
     }
 
     fn reset_for_target_change(&mut self, measured_temp_c: f32, now_ms: u64) {
-        self.approach_braking_remaining_ms = 0;
+        self.clear_approach_braking();
         self.reseed_measurement(measured_temp_c);
         self.phase = HeaterControlPhase::Warmup;
         self.phase_ticks = 0;

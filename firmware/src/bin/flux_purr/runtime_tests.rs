@@ -10080,6 +10080,86 @@ fn braking_approach_waits_for_calibrated_heat_in_flight_before_reheating() {
 }
 
 #[test]
+fn braking_approach_recovers_heat_after_a_confirmed_high_temperature_decline() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 240;
+        controller.heater_was_enabled = true;
+        controller.filtered_temp_c = Some(237.5);
+        controller.previous_measured_temp_c = Some(237.5);
+        controller.filtered_slope_c_per_profile_tick = 0.5;
+        controller.profile_last_control_at_ms = Some(2_950);
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 240;
+        point.brake_distance_centi_c = 230;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(237.8);
+        input.target_temp_c = 240;
+        input.ambient_temp_c = 33.9;
+        input.max_power_mw = 100_000.0;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 119.58163,
+            radiation_mw_per_k4: 6.174697e-7,
+            thermal_capacity_mj_per_c: 22_564.195,
+            transport_delay_ms: 3_400,
+        };
+        let first = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(first.phase, HeaterControlPhase::Approach);
+        assert_eq!(first.duty_percent, 5);
+        // The captured 240C prefix peaks, then loses temperature while the
+        // unconditional delay timer still refuses model heat. A sustained
+        // physical decline must allow recovery without waiting for 3.4s.
+        let mut last = first;
+        for (offset, temperature) in [
+            (300, 237.9),
+            (600, 238.05),
+            (900, 238.1),
+            (1_200, 238.0),
+            (1_500, 237.7),
+            (1_800, 237.4),
+            (2_100, 237.2),
+        ] {
+            input.now_ms = 3_000 + offset;
+            input.measured_temp_c = temperature;
+            last = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            assert_eq!(last.phase, HeaterControlPhase::Approach);
+            assert!(last.duty_percent >= 5);
+            if offset == 1_200 {
+                assert_eq!(last.duty_percent, 5, "one declining sample is not evidence");
+            }
+            if offset == 1_500 {
+                let mut reseeded = controller;
+                let mut shifted = input;
+                shifted.measured_temp_c -= 0.6;
+                reseeded.reseed_measurement(shifted.measured_temp_c);
+                for elapsed in [100, 200, 300] {
+                    shifted.now_ms = input.now_ms + elapsed;
+                    assert_eq!(
+                        reseeded
+                            .update_production_at(kind, shifted, Some(profile))
+                            .0
+                            .duty_percent,
+                        5,
+                        "an RTD reseed offset must rebuild cooling evidence"
+                    );
+                }
+            }
+        }
+        assert!(
+            last.duty_percent > 5,
+            "bank={bank:?}: cooling must recover heat"
+        );
+    }
+}
+
+#[test]
 fn braking_approach_survives_rtd_reseeds_during_pps_steps() {
     for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
         let mut controller = HeaterController::new();
