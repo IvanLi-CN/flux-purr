@@ -1633,7 +1633,10 @@ impl ThermalTuningRuntime {
         let start_temperature_centi_c = sample.temperature_centi_c;
         let cooled = i32::from(sample.temperature_centi_c)
             <= i32::from(cooldown_threshold_c(expected_target)) * 100;
-        let trial_power_ready = u32::from(sample.requested_mv) == sample.pps_power_ceiling_mv
+        // Cooldown intentionally restores the request to the idle voltage. The
+        // settled contract, rather than the pending request, is the safety
+        // evidence that the next warmup can raise power to the ceiling.
+        let trial_power_ready = sample.pps_contract.confirmed
             && u32::from(sample.pps_contract.voltage_mv) == sample.pps_power_ceiling_mv;
         self.push_event(
             ThermalTuningEventKind::Sample,
@@ -3308,7 +3311,7 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_waits_for_confirmed_trial_voltage_before_warmup() {
+    fn cooldown_accepts_idle_request_when_trial_contract_is_confirmed() {
         let mut runtime = ThermalTuningRuntime::new();
         runtime
             .start(ThermalTuningStart {
@@ -3328,11 +3331,11 @@ mod tests {
         cooling.heater_requested_output_permille = 0;
         cooling.heater_output_permille = 0;
         cooling.requested_mv = 12_000;
+        cooling.pps_contract.voltage_mv = 12_000;
         runtime.record_sample(cooling.clone()).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
 
         cooling.elapsed_ms = 300;
-        cooling.requested_mv = 21_000;
         cooling.pps_contract.voltage_mv = 12_000;
         runtime.record_sample(cooling.clone()).unwrap();
         assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
