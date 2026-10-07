@@ -55,6 +55,9 @@ pub(crate) fn tune_point(
     if !evidence.tunable_stop {
         return previous;
     }
+    if let Some(damped) = coasting_high_side_candidate(previous, evidence) {
+        return damped;
+    }
     if let Some(trimmed) = hold_ripple_trim_candidate(previous, evidence) {
         return trimmed;
     }
@@ -159,6 +162,32 @@ pub(crate) fn bounded_failure_alternative(
                 .max(100)
         }
     }
+    (point != previous).then_some(point)
+}
+
+fn coasting_high_side_candidate(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> Option<ThermalControlProfilePointConfig> {
+    if !evidence.tunable_stop
+        || evidence.target_c > 150
+        || !evidence.full_speed_failed
+        || evidence.stable_window_verified
+        || !evidence.first_band_observed
+        || evidence.hold_sample_count < 3
+        || evidence.hold_off_sample_count != evidence.hold_sample_count
+        || evidence.first_band_exit_centi_c.is_none_or(|temperature| {
+            i32::from(temperature) <= i32::from(evidence.target_c) * 100 + 150
+        })
+    {
+        return None;
+    }
+    let step = round_positive((evidence.overshoot_c - 1.5).max(0.5) * 500.0).clamp(250, 1_000);
+    let mut point = previous;
+    point.approach_damping_exponent_permille = previous
+        .approach_damping_exponent_permille
+        .saturating_add(step)
+        .min(4_000);
     (point != previous).then_some(point)
 }
 
@@ -287,6 +316,9 @@ pub(crate) fn reseed_after_hold_confirm(
 ) -> ThermalControlProfilePointConfig {
     if !evidence.tunable_stop {
         return previous;
+    }
+    if let Some(damped) = coasting_high_side_candidate(previous, evidence) {
+        return damped;
     }
     // Firmware-only high-temperature exception: use the complete confirmation
     // evidence before the frozen parsed-stage projection drops its band facts.
@@ -430,7 +462,11 @@ fn reseed_low_temperature_hold(
         .hold_reheat_power_permille
         .saturating_sub(trim / 2)
         .max(point.hold_power_permille);
-    point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+    point.hold_kp_permille_per_c = point
+        .hold_kp_permille_per_c
+        .saturating_sub(4)
+        .max(8)
+        .min(point.hold_kp_permille_per_c);
     point.hold_blend_ticks = point.hold_blend_ticks.saturating_sub(1).max(1);
     point.overshoot_cutoff_centi_c = point.overshoot_cutoff_centi_c.saturating_sub(40).max(80);
     point.hold_off_centi_c = point
@@ -990,12 +1026,20 @@ fn conservative_high_side_candidate(
         .saturating_sub(trim)
         .max(point.approach_floor_power_permille.saturating_add(80))
         .min(1_000);
-    point.hold_power_permille = point.hold_power_permille.saturating_sub(trim / 2).max(100);
+    point.hold_power_permille = point
+        .hold_power_permille
+        .saturating_sub(trim / 2)
+        .max(100)
+        .min(previous.hold_power_permille);
     point.hold_reheat_power_permille = point
         .hold_reheat_power_permille
         .saturating_sub(trim / 2)
         .max(point.hold_power_permille);
-    point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+    point.hold_kp_permille_per_c = point
+        .hold_kp_permille_per_c
+        .saturating_sub(4)
+        .max(8)
+        .min(previous.hold_kp_permille_per_c);
     point.overshoot_cutoff_centi_c = point
         .overshoot_cutoff_centi_c
         .saturating_sub(40)
@@ -1145,7 +1189,11 @@ fn apply_overshoot(
             .max(point.approach_power_permille);
     }
     point.hold_blend_ticks = point.hold_blend_ticks.saturating_sub(3).max(1);
-    point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+    point.hold_kp_permille_per_c = point
+        .hold_kp_permille_per_c
+        .saturating_sub(4)
+        .max(8)
+        .min(previous.hold_kp_permille_per_c);
 }
 
 fn apply_overshoot_equilibrium(
@@ -1862,6 +1910,118 @@ mod tests {
             first_band_exit_centi_c: Some(target_c * 100 + 151),
             settle_limit_ms: 15_000,
             ..evidence(target_c)
+        }
+    }
+
+    #[test]
+    fn captured_coasting_high_side_feedback_changes_only_effective_damping() {
+        let previous = ThermalControlProfilePointConfig {
+            brake_distance_centi_c: 1_553,
+            hold_power_permille: 50,
+            hold_reheat_power_permille: 50,
+            hold_kp_permille_per_c: 21,
+            ..point(60)
+        };
+        // Calibration-only 60C: all physical Hold samples request zero,
+        // yet stored Approach heat carries the trace above the upper band.
+        let facts = TuneEvidence {
+            overshoot_c: 4.96,
+            hold_p2p_c: 5.18,
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(6_161),
+            hold_sample_count: 13,
+            hold_off_sample_count: 13,
+            ..evidence(60)
+        };
+        let expected = ThermalControlProfilePointConfig {
+            approach_damping_exponent_permille: 2_000,
+            ..previous
+        };
+        assert_eq!(tune_point(previous, facts), expected);
+        assert_eq!(reseed_after_hold_confirm(previous, facts), expected);
+        for unavailable in [
+            TuneEvidence {
+                tunable_stop: false,
+                ..facts
+            },
+            TuneEvidence {
+                target_c: 160,
+                ..facts
+            },
+            TuneEvidence {
+                full_speed_failed: false,
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+            TuneEvidence {
+                first_band_observed: false,
+                ..facts
+            },
+            TuneEvidence {
+                first_band_exit_centi_c: Some(5_840),
+                ..facts
+            },
+            TuneEvidence {
+                hold_sample_count: 2,
+                hold_off_sample_count: 2,
+                ..facts
+            },
+            TuneEvidence {
+                hold_off_sample_count: 12,
+                ..facts
+            },
+        ] {
+            assert!(coasting_high_side_candidate(previous, unavailable).is_none());
+        }
+        let saturated = ThermalControlProfilePointConfig {
+            approach_damping_exponent_permille: 4_000,
+            ..previous
+        };
+        assert!(coasting_high_side_candidate(saturated, facts).is_none());
+        for (overshoot_c, step) in [(1.59, 250), (2.24, 370), (20.0, 1_000)] {
+            let tuned = coasting_high_side_candidate(
+                previous,
+                TuneEvidence {
+                    overshoot_c,
+                    ..facts
+                },
+            )
+            .unwrap();
+            assert_eq!(tuned.approach_damping_exponent_permille, 1_000 + step);
+        }
+    }
+
+    #[test]
+    fn high_side_trim_never_raises_calibration_only_hold_or_gain() {
+        let facts = TuneEvidence {
+            overshoot_c: 4.96,
+            hold_p2p_c: 5.18,
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(6_161),
+            ..evidence(60)
+        };
+        for baseline in [40, 50, 92, 100, 150] {
+            for gain in [4, 8, 21] {
+                let previous = ThermalControlProfilePointConfig {
+                    hold_power_permille: baseline,
+                    hold_reheat_power_permille: baseline,
+                    hold_kp_permille_per_c: gain,
+                    ..point(60)
+                };
+                for next in [
+                    tune_point(previous, facts),
+                    reseed_after_hold_confirm(previous, facts),
+                ] {
+                    assert!(next.hold_power_permille <= previous.hold_power_permille);
+                    assert!(next.hold_reheat_power_permille <= previous.hold_reheat_power_permille);
+                    assert!(next.hold_reheat_power_permille >= next.hold_power_permille);
+                    assert!(next.hold_kp_permille_per_c <= previous.hold_kp_permille_per_c);
+                    assert!(next.brake_distance_centi_c > previous.brake_distance_centi_c);
+                }
+            }
         }
     }
 
