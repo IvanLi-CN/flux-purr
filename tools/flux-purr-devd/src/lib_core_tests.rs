@@ -3230,6 +3230,32 @@ fn usb_response_decoder_extracts_buzzer_test_payload() {
 }
 
 #[test]
+fn usb_response_decoder_preserves_rtd_divider_supply() {
+    for supply_mv in [3_328, 3_208] {
+        let mut status = serde_json::to_value(mock_status(&native_placeholder_network())).unwrap();
+        status["rtdDividerSupplyMv"] = json!(supply_mv);
+        let frame = format!(
+            r#"{{"type":"response","requestId":"rtd-supply","ok":true,"result":{{"status":{}}}}}"#,
+            serde_json::to_string(&status).unwrap()
+        );
+        let payload = decode_usb_response_line(frame.as_bytes(), "rtd-supply")
+            .unwrap()
+            .unwrap();
+        let decoded = extract_usb_payload::<ControlPlaneStatus>(payload, "status").unwrap();
+        assert_eq!(decoded.rtd_divider_supply_mv, Some(supply_mv));
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["rtdDividerSupplyMv"],
+            supply_mv
+        );
+    }
+    let legacy: ControlPlaneStatus = serde_json::from_value(
+        serde_json::to_value(mock_status(&native_placeholder_network())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(legacy.rtd_divider_supply_mv, None);
+}
+
+#[test]
 fn usb_response_decoder_preserves_adc_diagnostics() {
     let payload = decode_usb_response_line(
             br#"{"type":"response","requestId":"status-adc","ok":true,"result":{"status":{"mode":"sampling","uptimeSeconds":12,"currentTempC":31.5,"targetTempC":240,"heaterEnabled":false,"heaterOutputPercent":0,"activeCoolingEnabled":false,"fanDisplayState":"OFF","fanEnabled":false,"fanPwmPermille":0,"voltageMv":20000,"currentMa":0,"boardTempCenti":3150,"adcDiagnostics":{"calibrationSource":"efuse","efuseVersion":1,"attenuationDb":6,"initCode":1850,"referenceCode":1600,"referenceMv":850,"rtdRawCodeMean":2100,"rtdRawCodeMin":2098,"rtdRawCodeMax":2102,"rtdRawCodeSpread":4,"vinRawCodeMean":1800},"pdRequestMv":20000,"pdContractMv":20000,"pdState":"ready","frontpanelKey":null,"network":{"state":"idle","dns":[],"wifiRssi":null}}}}"#,

@@ -677,6 +677,7 @@ pub(crate) fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
         current_ma: 840,
         board_temp_centi: 3_840,
         rtd_raw_adc_mv: Some(1_123),
+        rtd_divider_supply_mv: None,
         rtd_raw_adc_min_mv: Some(1_122),
         rtd_raw_adc_max_mv: Some(1_124),
         rtd_raw_adc_spread_mv: Some(2),
@@ -769,6 +770,7 @@ pub(crate) fn native_placeholder_status(network: &NetworkSummary) -> ControlPlan
         current_ma: 0,
         board_temp_centi: -100,
         rtd_raw_adc_mv: None,
+        rtd_divider_supply_mv: None,
         rtd_raw_adc_min_mv: None,
         rtd_raw_adc_max_mv: None,
         rtd_raw_adc_spread_mv: None,
@@ -1105,6 +1107,8 @@ pub struct ControlPlaneStatus {
     pub board_temp_centi: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtd_raw_adc_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtd_divider_supply_mv: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtd_raw_adc_min_mv: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
