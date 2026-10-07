@@ -2,6 +2,7 @@
 
 ## Target profile
 
+- RTD-divider excitation is a board electrical input: default builds use `3328mV`; `--features rtd-supply-3208mv` uses `3208mV`. Runtime status reports `rtdDividerSupplyMv` for artifact/board verification. This does not replace ADC eFuse calibration or invent user calibration points. Both board images run the same heating and tuning controller; source current and the per-device model remain independent inputs.
 - Default architecture intent: `ESP32-S3FH4R2`
 - Current bring-up board profile: `S3 frontpanel GC9D01 display baseline`
 - Runtime style:

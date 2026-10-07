@@ -13,7 +13,7 @@
 - 60°C 调优终止后，MOS 保持断开、风扇维持全速至有效测温 `<35°C`；恰好 `35°C` 时仍全速，无效测温不得释放冷却锁存。新的正常加热开始时切回既有加热风扇策略。其它目标的终止后风扇释放门槛保持 `<=40°C`。
 - 单目标 `20min` 预算仍从 cooldown 开始，覆盖所有试验、重试、PPS 准备和 hold confirm；不得增加独立轮次上限或重置预算。
 - 候选生成、seed/插值、评分、hard gate、accepted-target blocking、生产 PID/profile 选择、preview 和 EEPROM 保存保持不变。过冲 `<=3°C`、hold p2p `<=3°C`、full-speed-to-stable 和 `60s` hold 门槛均不得放宽。
-- 不修改 PD/PPS 协议或 PowerState 语义；`pps3a` 仍不得加热或产生调优候选。
+- 不修改PD/PPS协议或PowerState语义；`pps3a`与`pps5a`按统一生产控制器及各自电流/bank边界执行相同调优流程。
 
 ## 证据与验收
 

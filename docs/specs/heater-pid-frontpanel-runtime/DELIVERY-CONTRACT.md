@@ -44,42 +44,42 @@
 
 “旧方案”只在本合同中指 `origin/main@d86a4eddccfc9d31cbe9b9cb2f2d597b8b525278` 的外部主控 `flux-purr thermal tune` 5A full-batch 调优：主机经 devd 和外部 bench source 安排 scout、离线 retune、candidate batch、60 秒 hold confirm 和四文件 preliminary review bundle。无 `--engine` 的 CLI 默认行为、外部 source 参数和 source telemetry 仍属于该方案。脱离本合同，不得单独用“旧方案”作为实现或验收基线，须写全“外部主控调优方案”并指向该主干基线。
 
-`ff4bf3876f548bc4ba6ac1e2cb87259f0d132422` 仅是独立的生产热控闭环兼容性锚点，不是“旧方案”的调优策略或报告基线。其 3A plant PI、物理模型门禁和共用安全/执行器边界仍作为兼容依据；5A 控制器选择遵循 [source-class thermal controller decision](../../adr/0015-source-class-thermal-controller-selection.md)，不要求与该锚点的 5A plant PI 输出逐值相同。
+`ff4bf3876f548bc4ba6ac1e2cb87259f0d132422` 仅是共用安全/执行器兼容锚点，不是“旧方案”的调优策略或报告基线。生产控制按[统一控制器决定](../../adr/0017-unified-production-thermal-controller.md)执行：3A与5A共同使用现有Warmup/Approach/Hold控制律，不保留原3A plant PI输出兼容要求。
 
-共用生产边界包含：物理 thermal plant 模型门禁、50 ms 单调控制节拍、PPS 电压/PWM 映射、100 ms warmup 软启动、传感器/过温/供电保护，以及独立的 `thermal_plant_auto` 受保护瞬态和原子激活。3A plant PI 保留其热平衡、预测、饱和和 anti-windup；5A point-local 控制器保留其 warmup/approach/hold、有效参数和 PI 语义。
+共用生产边界包含：物理thermal plant模型门禁、50ms单调控制节拍、PPS电压/PWM映射、100ms warmup软启动、传感器/过温/供电保护，以及独立的`thermal_plant_auto`受保护瞬态和原子激活。两类电源共享point-local控制器的warmup/approach/hold、有效参数和PI语义，电源类仅选择实际电流上限与独立bank。
 
 生产控制兼容行为如下，调优实现必须逐项保留：
 
 | 部分 | 固定行为 |
 | --- | --- |
-| 模型与门禁 | 两类生产加热都仅在有效 physical thermal plant model 存在时允许。3A 继续使用 `Ctheta*dT/dt = Ph - kc*(T-Ta) - kr*(Tk^4-TaK^4)` 和 `sat(Ploss(T) + Kp*(e-tau_d*dT/dt) + Ki*integral(e))` 的 plant PI，保留 `Pmax(T)` 饱和与 anti-windup。已核实的 5A PPS source 使用现有 point-local profile 控制器；其输出仍受既有 PPS/PWM、温度相关电阻和电流安全边界限制。两者控制目标均为请求温度，不得使用隐藏 target offset。`Pmax(T)` 是建模上限而非实测功率。 |
+| 模型与门禁 | 两类生产加热都仅在有效physical thermal plant model存在时允许，共用现有point-local profile控制器。源能力、温度相关电阻和电流安全边界限制实际可用供热。两者控制目标均为请求温度，不得使用隐藏target offset。`Pmax(T)`是建模上限而非实测功率。 |
 | 节拍与采样 | 控制循环固定为真实单调 `50 ms (20 Hz)`；每周期聚合 `64` 次 RTD conversion，采样总频率至少 `1280 Hz`。PWM 固定为 `100 Hz`，并回显控制间隔、周期耗时、滤波升温率和 coast 状态。 |
 | Warmup | 首次 arm、目标切换或 `Approach -> Warmup` 回退均执行 `100 ms` 线性软启动。warmup 内逻辑输出固定 `100%`，沿温度/电流合同允许的 PPS 上限运行；不得用 profile 中的较低功率把它变成慢爬坡。 |
-| Approach 与 Hold | 普通5A与内部调优共用自然冷却模型辅助的生产 profile 路径，制动、预测及补热恢复按 [自然冷却控制合同](NATURAL-COOLING-CONTROL.md) 执行。首次进入 Hold 后仍锁定 PPS 电压，由 PWM 快速 PI 调节；Hold 不主动下扫 PPS。物理入口与资格门禁保持固定。 |
+| Approach 与 Hold | 普通3A/5A与内部调优共用自然冷却模型辅助的生产profile路径，制动、预测及补热恢复按[自然冷却控制合同](NATURAL-COOLING-CONTROL.md)执行。首次进入Hold后仍锁定PPS电压，由PWM快速PI调节；Hold不主动下扫PPS。物理入口与资格门禁保持固定。 |
 | 执行器映射 | PPS 提供粗粒度功率控制；PPS 高于工作 floor 时保持 `100%` PWM，达到 floor 或 bounded down-ramp 时，PWM 按请求功率与当前电压等效功率连续补偿至 `0..100%`。持续满 PWM 且升温不足时，才允许至少间隔 `2 s`、每次最多 `500 mV` 上调 PPS。 |
 | 参数与 profile | 运行时按目标温区选择完整 point-local 参数：brake、warmup reentry、approach、hold、PI、blend、lead 与各阈值。`settings` 只承载规定的全局字段。任何 preview/save 必须把当前目标的 effective point 和 settings 完整、可读回地 materialize。 |
 | 物理模型标定 | `thermal_plant_auto` 是独立单次事务：选择覆盖 `20V / >=3A` 的一个 PPS APDO，使用该 APDO `max_mv` 与 `100%` PWM 加热到 `220C`，立即断开 MOS，在保持合同下被动冷却至 `80C`，由同一 trace 拟合并原子激活。它不进入 Approach/Hold，也不生成 PID candidate。 |
 | 安全边界 | PPS/AVS capability、current reserve、传感器故障、EEPROM/thermal-model lock、绝对过温、合同丢失和 terminal disarm 始终优先于控制输出；任何安全拒绝都保持 heater 停用并留下可观察原因。 |
 
-生产闭环没有一套独立的“自动调参控制器”。新 `thermal tune --engine firmware` 只能在闭环之外基于运行证据搜索 point-local 参数、写入 RAM preview、让正常 5A 生产闭环执行试验，并在通过验收后保存；它不能接管或复制生产控制。
+生产闭环没有一套独立的“自动调参控制器”。新 `thermal tune --engine firmware` 只能在闭环之外基于运行证据搜索 point-local 参数、写入 RAM preview、让共享生产闭环执行试验，并在通过验收后保存；它不能接管或复制生产控制。
 
 1. 调优 orchestration 只能生成候选、安排试验、收集证据并请求 preview/save；每一轮真实加热必须调用生产兼容锚点的同一条控制路径。不得新增第二个 heater state machine、第二套功率公式、隐藏 PID 常量、专供调优的输出限幅，或用 host 推断温度来取代固件控制决策。
-2. 5A 正常加热与 5A 调优必须共同选择既有 profile 控制器，使 effective parameters 真正进入同一生产路径；这是相对于生产锚点的明确算法选择差异。3A plant PI、PD 独立 5 ms 服务、PPS/PWM 映射、调度、保护和 `thermal_plant_auto` 不得被此选择修改。切换电源类别前必须停热并重置控制器状态，不得在一次 armed 运行中热切换。
-3. 本交付的固件调优只解析到 `pps5a` bank；`pps3a` 请求不得加热、生成候选或保存，只能生成失败审计。既有 profile preview/save 操作仍按 selected mode 使用 `pps3a` 或 `pps5a`，不得因本交付被削弱。固件调优的 5A 有效 point 和 settings 必须完整 materialize 并由 status 逐字段读回；不得借用另一个 bank、旧 preview 或隐藏残留。
-4. 除上述已批准的 5A 控制器选择外，任何需要修改生产算法、PD/PPS 语义或 3A 路径的请求仍须先更新长期 SPEC、列出与 `ff4bf387…` 的精确差异，并取得主人明确确认。
+2. 3A/5A普通加热和调优共同选择既有profile控制器，使effective parameters真正进入同一生产路径；清退独立3A plant PI。PD独立5ms服务、PPS/PWM映射、调度、保护和`thermal_plant_auto`保持。切换电源类别前必须停热并重置，不得在armed运行中热切换。
+3. 固件调优按请求类别使用`pps3a`或`pps5a` bank，分别验证完整九目标、独立确认、preview与EEPROM readback。有效point和settings必须完整materialize并由status逐字段读回；不得借用另一bank、另一Device、新运行之前的历史候选或隐藏残留。两组可通过各自精确串口与独立devd会话同时运行。
+4. 统一生产控制是主人明确要求的行为；其余生产控制律、PD/PPS语义、温度/时间/保存门槛的变更仍须另行研判与确认。
 
 ### 两种调优 engine 的固定差异
 
-| 边界 | 外部主控调优方案（本合同内的“旧方案”） | 新固件主控 5A 调优 |
+| 边界 | 外部主控调优方案（本合同内的“旧方案”） | 新固件主控调优 |
 | --- | --- | --- |
-| 选择与范围 | 无 `--engine` 时维持原 CLI；外部 runner 主控 5A full-batch | 仅显式 `--engine firmware`；资格范围为完整 `pps5a` 九目标，`pps3a` 不加热并失败 |
+| 选择与范围 | 无`--engine`时维持原CLI；外部runner主控5A full-batch | 仅显式`--engine firmware`；按实际供电类别独立完成`pps3a`或`pps5a`完整九目标 |
 | 策略与生产控制 | 主机执行当前主干的冷却、seed/插值、scout、batch compare、score、gate、预算和 hold confirm；设备生产闭环负责加热 | 固件策略对冻结的 5A 可观测向量保持决策一致，60°C 起点同为 `<=35°C`；全程全速冷却及终止后释放按 [60°C 冷却起点合同](FIRMWARE-60C-COOLDOWN-CONTRACT.md) 执行；设备仍使用同一生产闭环，不能调用或复制外部 runner |
 | 数据来源 | 外部 source client 的 VBUS/source telemetry 与设备状态均可进入原报告 | 仅设备本地温度、VIN、PPS 合同/请求和控制证据；外部 VBUS、物理电流/功率不得推断或补造，PPS 合同电流仅为安全 ceiling |
 | 命令输入 | `--source-id`、`--source-url` 等外部 source 参数保持有效 | 拒绝外部 source 参数；设备 tuning command/status/event stream 按 runId 和 sequence 读回 |
 | 报告 | 原四文件 preliminary bundle 和 `thermal-profile.accepted.json` 保持原义 | `thermal-tuning-v2` 五文件、完整 sample/ledger、trace/digest、可切换 trial 与二元资格结论 |
 | 候选与持久化 | 原审查候选快照不等于已保存 bank | candidate、RAM preview receipt、seal、二次 confirm-save、EEPROM bank generation/hash/readback receipt 严格分离 |
 
-无法由设备本地事实映射的外部 source 判定不得伪造为等价向量；应保留 unavailable 与失败原因。固件失败候选比较与有界搜索按[自然冷却搜索合同](NATURAL-COOLING-CONTROL.md#搜索合同)允许偏离外部冻结向量：使用整段稳定进展，重复提议后检查同一失败方向的有效参数余量；不改变生产控制律、PD或资格门槛。其余已冻结5A决策若需改变策略、生产控制或PD/PPS语义，必须先说明差异、风险和验收影响，停止在当前PR静默修改。`pps3a`调优本身只可在明确新请求后进入独立任务和PR。
+无法由设备本地事实映射的外部 source 判定不得伪造为等价向量；应保留 unavailable 与失败原因。固件失败候选比较与有界搜索按[自然冷却搜索合同](NATURAL-COOLING-CONTROL.md#搜索合同)允许偏离外部冻结向量：使用整段稳定进展，重复提议后检查同一失败方向的有效参数余量；不改变生产控制律、PD或资格门槛。其余已冻结5A决策若需改变策略、生产控制或PD/PPS语义，必须先说明差异、风险和验收影响，停止在当前PR静默修改。两类电源调优属于同一功能和验收范围，不得建立另一套3A控制器。
 
 ### 热控的两类操作
 
@@ -182,7 +182,7 @@ PID/profile 调优报告是本交付的正式审查证据，不是可随意裁�
 | AC-09 | 修改后的 Web、firmware 和 devd 通过与变更面匹配的质量门。 | `bun run check:web`、`bun run check:web:build`、`bun run check:storybook`、`bun run check:firmware:fmt`、相关 firmware/devd tests，以及 `git diff --check`。重型或全量验证按共享测试机流程执行。 |
 | AC-10 | 真实热端验收只在明确硬件授权后进行，并以主题 SPEC 的温度、过冲、稳定性、功率资格、故障和报告要求判定。 | 授权端口记录、HIL 原始遥测与 canonical report bundle；软件通过本身不替代此项。 |
 | AC-11 | 调优报告满足本合同第 6 节的五文件、数据完整性、展示、结果分类、指标和持久化语义；完整报告的 sequence/digest 覆盖全部 sample 与 decision 事件，不完整报告明确 `trace_gap/review_incomplete`，且不存在 candidate/saved profile 混淆或失败事实被隐藏。 | complete 与 review-incomplete canonical bundle fixtures、报告渲染/解析测试、schema assertions 和人工 review。 |
-| AC-12 | 3A 在相同模型/电源/温度输入下保持 plant PI 输出、`Pmax(T)` 饱和与安全结果；5A 正常加热与调优使用同一 profile 控制器，preview/save/clear 的有效 point/settings 可改变可观测逻辑请求和最终 MOS 输出；有效模型门禁、PD/PPS、电流、传感器、过温和标定保护保持有效。5A 不要求与旧 plant PI 逐值同输出，电源类别不得在 armed 状态热切换。 | 3A 基线 fixture、5A 正常/调优路径和候选参数差异测试、故障/合同丢失/源类别切换测试、执行器边界断言及授权 HIL。 |
+| AC-12 | 3A和5A在相同模型/电源/温度输入下共用profile控制律；普通加热与调优使用同一控制器，preview/save/clear 的有效 point/settings 可改变可观测逻辑请求和最终 MOS 输出；有效模型门禁、PD/PPS、电流、传感器、过温和标定保护保持有效。5A 不要求与旧 plant PI 逐值同输出，电源类别不得在 armed 状态热切换。 | 两类电源的共享控制律fixture、正常/调优路径和候选参数差异测试、故障/合同丢失/源类别切换测试、执行器边界断言及授权 HIL。 |
 
 ## 关键经验
 

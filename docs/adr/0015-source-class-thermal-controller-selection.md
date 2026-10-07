@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0017](0017-unified-production-thermal-controller.md). The source-class split below describes the superseded decision, not the current heating contract.
 
 ## Context
 
