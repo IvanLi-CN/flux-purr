@@ -186,29 +186,29 @@ async fn run_firmware_tuning_until_interrupt(
     let selected_targets = validate_firmware_args(&args)?;
     let execution_order = selected_execution_order(&selected_targets);
     let resolved = resolve_target(args.target.clone(), default_devd)?;
-    let pps3a_rejected = args.profile_mode == ThermalProfileMode::W65;
+    let power_class = if args.profile_mode == ThermalProfileMode::W65 {
+        "pps3a"
+    } else {
+        "pps5a"
+    };
     if args.dry_run {
         return Ok(json!({
             "ok": true,
             "engine": "firmware",
-            "powerClass": if pps3a_rejected { "pps3a" } else { "pps5a" },
-            "targetsC": if pps3a_rejected { Vec::new() } else { execution_order.clone() },
-            "diagnosticOnly": pps3a_rejected || selected_targets.len() != THERMAL_TUNING_TARGETS_C.len(),
+            "powerClass": power_class,
+            "targetsC": execution_order,
+            "diagnosticOnly": selected_targets.len() != THERMAL_TUNING_TARGETS_C.len(),
             "device": resolved.device,
             "dryRun": true
         }));
     }
-    if pps3a_rejected {
-        return render_unsupported_pps3a(&resolved.device, &args.output_root, args.bundle_dir);
-    }
-
-    let run_id = format!("firmware-pps5a-{}", current_unix_millis());
+    let run_id = format!("firmware-{power_class}-{}", current_unix_millis());
     let candidate_id = format!("{run_id}-candidate");
     let candidate_profile = if let Some(path) = args.seed_profile_file.as_ref() {
         let imported: Value = serde_json::from_slice(&fs::read(path)?)?;
-        parse_firmware_seed_profile(imported)?
+        parse_firmware_seed_profile(imported, power_class)?
     } else {
-        let (profile, _) = load_thermal_default_seed_candidate_profile("pps5a")?;
+        let (profile, _) = load_thermal_default_seed_candidate_profile(power_class)?;
         materialize_firmware_seed_profile(profile)?
     };
     let candidate_hash = firmware_candidate_profile_hash(&candidate_profile)?;
@@ -228,7 +228,7 @@ async fn run_firmware_tuning_until_interrupt(
                 .await?;
         record_device_identity(&input_dir, &run_id, &identity)?;
         identity_prepared = true;
-        let runtime = ensure_firmware_profile_mode(client, &resolved, &lease.lease_id).await?;
+        let runtime = ensure_firmware_profile_mode(client, &resolved, &lease.lease_id, power_class).await?;
         journal.record_runtime(&run_id, None, &runtime)?;
         profile_mode_prepared = true;
         let start = match request_leased(
@@ -238,6 +238,7 @@ async fn run_firmware_tuning_until_interrupt(
             Method::POST,
             "/thermal-tuning",
             Some(firmware_start_command(
+                power_class,
                 &run_id,
                 &candidate_id,
                 &candidate_hash,
@@ -262,6 +263,7 @@ async fn run_firmware_tuning_until_interrupt(
                 match rejected {
                     Ok(status)
                         if is_confirmed_rejected_start(
+                            power_class,
                             &status,
                             &run_id,
                             &candidate_id,
@@ -285,7 +287,7 @@ async fn run_firmware_tuning_until_interrupt(
                             output_root: &args.output_root,
                             bundle_dir: args.bundle_dir.clone(),
                             run_id: Some(&run_id),
-                            power_class: "pps5a",
+                            power_class,
                             reason: "start_not_confirmed",
                             no_device_command: false,
                             attempted_candidate: Some((
@@ -444,7 +446,7 @@ async fn run_firmware_tuning_until_interrupt(
             output_root: &args.output_root,
             bundle_dir: args.bundle_dir,
             run_id: Some(&run_id),
-            power_class: "pps5a",
+            power_class,
             reason: if profile_mode_prepared {
                 "transport_or_runtime_failure"
             } else if !identity_prepared {
@@ -542,25 +544,35 @@ fn require_disarmed_run(
     Ok(())
 }
 
-fn firmware_profile_mode_ready(status: &Value) -> bool {
-    status.get("thermalProfileMode").and_then(Value::as_str) == Some("100w")
+fn firmware_profile_mode_ready(status: &Value, power_class: &str) -> bool {
+    status.get("thermalProfileMode").and_then(Value::as_str)
+        == Some(firmware_profile_mode(power_class))
         && status
             .get("thermalProfileResolvedBank")
             .and_then(Value::as_str)
-            == Some("pps5a")
+            == Some(power_class)
+}
+
+fn firmware_profile_mode(power_class: &str) -> &'static str {
+    if power_class == "pps3a" {
+        "65w"
+    } else {
+        "100w"
+    }
 }
 
 async fn ensure_firmware_profile_mode(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
+    power_class: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let status = request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
-    if firmware_profile_mode_ready(&status) {
+    if firmware_profile_mode_ready(&status, power_class) {
         return Ok(status);
     }
     if status.get("heaterEnabled").and_then(Value::as_bool) != Some(false) {
-        return Err("heater must be off before selecting the 5A profile mode".into());
+        return Err("heater must be off before selecting the requested profile mode".into());
     }
     request_leased(
         client,
@@ -568,21 +580,21 @@ async fn ensure_firmware_profile_mode(
         lease_id,
         Method::PUT,
         "/runtime",
-        Some(json!({"thermalProfileMode": "100w"})),
+        Some(json!({"thermalProfileMode": firmware_profile_mode(power_class)})),
     )
     .await?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let status =
             request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
-        if firmware_profile_mode_ready(&status) {
+        if firmware_profile_mode_ready(&status, power_class) {
             return Ok(status);
         }
         if status.get("heaterEnabled").and_then(Value::as_bool) != Some(false) {
-            return Err("heater became armed while selecting the 5A profile mode".into());
+            return Err("heater became armed while selecting the requested profile mode".into());
         }
         if Instant::now() >= deadline {
-            return Err("5A profile mode readback timed out".into());
+            return Err("profile mode readback timed out".into());
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -603,6 +615,7 @@ pub(crate) async fn confirm_firmware_save(
     let run_id = required_string(&bundle, "runId")?;
     let candidate_id = required_string(&candidate, "candidateId")?;
     let candidate_hash = required_string(&candidate, "candidateHash")?;
+    let power_class = required_power_class(&bundle)?;
     validate_save_input(&bundle, &candidate)?;
     let resolved = resolve_target(args.target, default_devd)?;
     let lease = create_lease(client, &resolved).await?;
@@ -624,6 +637,7 @@ pub(crate) async fn confirm_firmware_save(
         if current.get("runId").and_then(Value::as_str) != Some(run_id)
             || current.get("candidateId").and_then(Value::as_str) != Some(candidate_id)
             || current.get("candidateHash").and_then(Value::as_str) != Some(candidate_hash)
+            || current.get("powerClass").and_then(Value::as_str) != Some(power_class)
             || current.get("terminalDisposition").and_then(Value::as_str) != Some("candidate_ready")
             || current.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
         {
@@ -671,7 +685,7 @@ pub(crate) async fn confirm_firmware_save(
                 "runId": run_id,
                 "candidateId": candidate_id,
                 "candidateHash": candidate_hash,
-                "powerClass": "pps5a"
+                "powerClass": power_class
             })),
         )
         .await?;
@@ -738,15 +752,20 @@ fn validate_save_input(
     let run_id = required_string(bundle, "runId")?;
     let candidate_id = required_string(candidate, "candidateId")?;
     let candidate_hash = required_string(candidate, "candidateHash")?;
-    if !default_5a_scope_passed(bundle)
+    let power_class = required_power_class(bundle)?;
+    if !default_scope_passed(bundle)
         || bundle.get("terminalDisposition").and_then(Value::as_str) != Some("candidate_ready")
         || bundle
             .pointer("/deviceTraceVerification/verified")
             .and_then(Value::as_bool)
             != Some(true)
         || candidate.get("runId").and_then(Value::as_str) != Some(run_id)
-        || candidate.pointer("/profile/bank").and_then(Value::as_str) != Some("pps5a")
-        || candidate.get("powerClass").and_then(Value::as_str) != Some("pps5a")
+        || candidate.pointer("/profile/bank").and_then(Value::as_str) != Some(power_class)
+        || candidate.get("powerClass").and_then(Value::as_str) != Some(power_class)
+        || candidate
+            .pointer("/promotion/previewReceipt/powerClass")
+            .and_then(Value::as_str)
+            != Some(power_class)
         || bundle
             .pointer("/candidate/candidateId")
             .and_then(Value::as_str)
@@ -780,13 +799,23 @@ fn validate_save_input(
     Ok(())
 }
 
-fn default_5a_scope_passed(bundle: &Value) -> bool {
+fn required_power_class(value: &Value) -> Result<&str, Box<dyn std::error::Error + Send + Sync>> {
+    let power_class = required_string(value, "powerClass")?;
+    if !matches!(power_class, "pps3a" | "pps5a") {
+        return Err("unsupported thermal power class".into());
+    }
+    Ok(power_class)
+}
+
+fn default_scope_passed(bundle: &Value) -> bool {
+    let Ok(power_class) = required_power_class(bundle) else {
+        return false;
+    };
     let Ok(physical) = parse_thermal_targets(Some(FIRMWARE_PHYSICAL_TARGETS_C)) else {
         return false;
     };
     if bundle.get("schema").and_then(Value::as_str) != Some("thermal-tuning-v2")
         || bundle.get("engine").and_then(Value::as_str) != Some("firmware")
-        || bundle.get("powerClass").and_then(Value::as_str) != Some("pps5a")
         || bundle.pointer("/targetSet/physicalC") != Some(&json!(physical))
         || bundle.pointer("/targetSet/selectedC") != Some(&json!(physical))
         || bundle.pointer("/targetSet/executionOrderC")
@@ -794,7 +823,7 @@ fn default_5a_scope_passed(bundle: &Value) -> bool {
         || bundle
             .pointer("/qualificationScope/kind")
             .and_then(Value::as_str)
-            != Some("default-pps5a-full-batch")
+            != Some(format!("default-{power_class}-full-batch").as_str())
         || bundle
             .pointer("/qualificationScope/diagnosticOnly")
             .and_then(Value::as_bool)
@@ -1143,6 +1172,7 @@ fn report_device_identity(
     ))
 }
 
+#[cfg(test)]
 fn render_unsupported_pps3a(
     device_id: &str,
     output_root: &PathBuf,
@@ -1334,6 +1364,7 @@ fn next_event_sequence(status: &Value) -> Option<u64> {
 }
 
 fn is_confirmed_rejected_start(
+    power_class: &str,
     status: &Value,
     run_id: &str,
     candidate_id: &str,
@@ -1342,7 +1373,7 @@ fn is_confirmed_rejected_start(
     status.get("runId").and_then(Value::as_str) == Some(run_id)
         && status.get("candidateId").and_then(Value::as_str) == Some(candidate_id)
         && status.get("candidateHash").and_then(Value::as_str) == Some(candidate_hash)
-        && status.get("powerClass").and_then(Value::as_str) == Some("pps5a")
+        && status.get("powerClass").and_then(Value::as_str) == Some(power_class)
         && status.get("terminalDisposition").and_then(Value::as_str) == Some("failed")
         && status.get("armed").and_then(Value::as_bool) == Some(false)
 }
@@ -1356,6 +1387,7 @@ fn firmware_read_command(run_id: &str, after_sequence: Option<u64>) -> Value {
 }
 
 fn firmware_start_command(
+    power_class: &str,
     run_id: &str,
     candidate_id: &str,
     candidate_hash: &str,
@@ -1367,11 +1399,11 @@ fn firmware_start_command(
         "runId": run_id,
         "candidateId": candidate_id,
         "candidateHash": candidate_hash,
-        "powerClass": "pps5a",
+        "powerClass": power_class,
         "targetsC": execution_order,
         "candidateProfile": {
             "op": "preview",
-            "bank": "pps5a",
+            "bank": power_class,
             "profile": candidate_profile
         }
     })
@@ -1472,16 +1504,17 @@ fn firmware_candidate_profile_value(profile: &Value) -> Value {
 
 fn parse_firmware_seed_profile(
     imported: Value,
+    power_class: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     if imported.get("schema").and_then(Value::as_str) == Some("thermal-tuning-v2")
-        && imported.get("powerClass").and_then(Value::as_str) != Some("pps5a")
+        && imported.get("powerClass").and_then(Value::as_str) != Some(power_class)
     {
-        return Err("firmware seed export requires pps5a power class".into());
+        return Err("firmware seed export requires the requested power class".into());
     }
     let is_export = imported.get("schema").and_then(Value::as_str) == Some("thermal-tuning-v2");
     let declared_hash = imported.get("candidateHash").cloned();
-    if is_export && imported.pointer("/profile/bank").and_then(Value::as_str) != Some("pps5a") {
-        return Err("firmware seed export requires pps5a profile bank".into());
+    if is_export && imported.pointer("/profile/bank").and_then(Value::as_str) != Some(power_class) {
+        return Err("firmware seed export requires the requested profile bank".into());
     }
     let mut profile = super::thermal_profile_package_from_value(imported);
     let points = profile.get("points").and_then(Value::as_array);
@@ -1510,7 +1543,7 @@ fn parse_firmware_seed_profile(
             .map(|point| point.target_temp_c)
             .collect();
         if targets != THERMAL_TUNING_TARGETS_C {
-            return Err("firmware seed export requires the complete ordered 5A target set".into());
+            return Err("firmware seed export requires the complete ordered target set".into());
         }
         let mut config: ThermalControlProfileConfig = wire.into();
         config.sanitize();
@@ -1656,7 +1689,7 @@ pub(crate) fn prepare_v2_device_journal(
             .any(|target| !THERMAL_TUNING_TARGETS_C.contains(target))
         || selected_execution_order(&selected_targets) != execution_order
     {
-        return Err("journal target scope is not a frozen 5A execution scope".into());
+        return Err("journal target scope is not the frozen execution scope".into());
     }
     validate_device_journal_identity(&statuses, first)?;
     let last = statuses.last().ok_or("empty firmware device journal")?;
@@ -1686,11 +1719,12 @@ fn validate_device_journal_identity(
     statuses: &[Value],
     first: &Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let power_class = required_power_class(first)?;
     for status in statuses {
         if status["runId"] != first["runId"]
             || status["candidateId"] != first["candidateId"]
             || status["targetsC"] != first["targetsC"]
-            || status["powerClass"] != "pps5a"
+            || status["powerClass"] != power_class
         {
             return Err("device journal mixes run identity, power class or target scope".into());
         }
@@ -1719,6 +1753,9 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         selected_targets,
         execution_order,
     } = input;
+    let first = statuses.first().ok_or("empty firmware device journal")?;
+    let power_class = required_power_class(first)?;
+    validate_device_journal_identity(statuses, first)?;
     let (device, firmware) = report_device_identity(input_dir, run_id, device_id)?;
     let samples = collect_events(statuses, true);
     let ledger = collect_events(statuses, false);
@@ -1777,6 +1814,7 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
     let candidate_state = if effective_candidate_profile.is_none() {
         "rejected"
     } else if verified_saved_receipt(
+        power_class,
         run_id,
         candidate_id,
         candidate_hash,
@@ -1836,12 +1874,12 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         "engine": "firmware",
         "device": device,
         "firmware": firmware,
-        "powerClass": "pps5a",
+        "powerClass": power_class,
         "sourceClass": "device-local",
         "ppsControlPolicyVersion": pps_policy_version,
         "ppsVoltageBounds": pps_voltage_bounds,
         "targetSet": {"physicalC": targets, "selectedC": selected_targets, "executionOrderC": execution_order},
-        "qualificationScope": {"kind": if selected_targets.len() == targets.len() { "default-pps5a-full-batch" } else { "diagnostic-retest" }, "targetCount": selected_targets.len(), "diagnosticOnly": selected_targets.len() != targets.len()},
+        "qualificationScope": {"kind": if selected_targets.len() == targets.len() { format!("default-{power_class}-full-batch") } else { "diagnostic-retest".to_string() }, "targetCount": selected_targets.len(), "diagnosticOnly": selected_targets.len() != targets.len()},
         "terminalDisposition": terminal,
         "reviewDisposition": if host_interruption.is_some() { json!("review_incomplete") } else { statuses.last().and_then(|status| status.get("reviewDisposition")).cloned().unwrap_or_else(|| json!("review_incomplete")) },
         "hostInterruption": host_interruption.map(|reason| json!({"reason": reason, "lastDeviceTerminalDisposition": device_terminal, "deviceState": "unconfirmed"})),
@@ -1851,7 +1889,7 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         "candidate": {
             "candidateId": candidate_id,
             "candidateHash": candidate_hash,
-            "powerClass": "pps5a",
+            "powerClass": power_class,
             "profileAvailability": profile_source,
             "promotionState": candidate_state
         },
@@ -1872,13 +1910,13 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         "runId": run_id,
         "candidateId": candidate_id,
         "candidateHash": candidate_hash,
-        "powerClass": "pps5a",
+        "powerClass": power_class,
         "promotion": {
             "state": candidate_state,
             "previewReceipt": preview_receipt,
             "saveReceipt": save_receipt
         },
-        "profile": {"bank": "pps5a", "source": profile_source, "value": effective_candidate_profile}
+        "profile": {"bank": power_class, "source": profile_source, "value": effective_candidate_profile}
     });
     fs::write(
         input_dir.join("run.bundle.json"),
@@ -1902,6 +1940,7 @@ fn profile_matches_hash(profile: &Value, candidate_hash: &str) -> bool {
 }
 
 fn verified_saved_receipt(
+    power_class: &str,
     run_id: &str,
     candidate_id: &str,
     candidate_hash: &str,
@@ -1915,9 +1954,9 @@ fn verified_saved_receipt(
         receipt.get("runId").and_then(Value::as_str) == Some(run_id)
             && receipt.get("candidateId").and_then(Value::as_str) == Some(candidate_id)
             && receipt.get("candidateHash").and_then(Value::as_str) == Some(candidate_hash)
-            && receipt.get("powerClass").and_then(Value::as_str) == Some("pps5a")
+            && receipt.get("powerClass").and_then(Value::as_str) == Some(power_class)
     }) && preview.get("ramAppliedHash").and_then(Value::as_str) == Some(candidate_hash)
-        && save.get("bank").and_then(Value::as_str) == Some("pps5a")
+        && save.get("bank").and_then(Value::as_str) == Some(power_class)
         && save.get("bankHash").and_then(Value::as_str) == Some(candidate_hash)
         && save.get("atomic").and_then(Value::as_bool) == Some(true)
         && save.get("readbackVerified").and_then(Value::as_bool) == Some(true)
@@ -2092,7 +2131,7 @@ fn build_report_trial(
         json!({
             "candidateId": fallback_candidate_id,
             "candidateHash": fallback_candidate_hash,
-            "powerClass": "pps5a"
+            "powerClass": null
         })
     });
     let decision = ledger.iter().find(|item| {
@@ -2394,7 +2433,7 @@ mod tests {
             "schema": "thermal-tuning-v2", "powerClass": "pps5a",
             "profile": {"bank": "pps5a", "source": "candidate", "value": value}
         });
-        let materialized = super::parse_firmware_seed_profile(exported).unwrap();
+        let materialized = super::parse_firmware_seed_profile(exported, "pps5a").unwrap();
         assert_eq!(materialized, value);
         assert_eq!(
             firmware_candidate_profile_hash(&materialized).unwrap(),
@@ -2416,7 +2455,7 @@ mod tests {
             "schema": "thermal-tuning-v2", "powerClass": "pps5a", "candidateHash": hash,
             "profile": {"bank": "pps5a", "source": "device_reported", "value": value}
         });
-        let materialized = super::parse_firmware_seed_profile(exported).unwrap();
+        let materialized = super::parse_firmware_seed_profile(exported, "pps5a").unwrap();
         assert_eq!(materialized, value);
         assert_eq!(
             firmware_candidate_profile_hash(&materialized).unwrap(),
@@ -2444,7 +2483,7 @@ mod tests {
             .unwrap()
             .remove("candidateHash");
         for invalid in [stale, wrong_bank, missing_target] {
-            assert!(super::parse_firmware_seed_profile(invalid).is_err());
+            assert!(super::parse_firmware_seed_profile(invalid, "pps5a").is_err());
         }
     }
 
@@ -2456,7 +2495,7 @@ mod tests {
             json!({"schema": "thermal-tuning-v2", "powerClass": "pps3a"}),
             json!({"schema": "thermal-tuning-v2", "powerClass": "pps5a"}),
         ] {
-            assert!(super::parse_firmware_seed_profile(invalid).is_err());
+            assert!(super::parse_firmware_seed_profile(invalid, "pps5a").is_err());
         }
     }
 
@@ -2708,7 +2747,7 @@ mod tests {
             candidate_id: "candidate-identity",
             candidate_hash: "sha256:identity",
             candidate_profile: &profile,
-            statuses: &[],
+            statuses: &[json!({"runId": "identity-run", "candidateId": "candidate-identity", "powerClass": "pps5a", "targetsC": [60]})],
             host_interruption: None,
             selected_targets: &[60],
             execution_order: &[60],
@@ -2774,19 +2813,53 @@ mod tests {
     }
 
     #[test]
-    fn firmware_tuning_requires_5a_mode_and_resolved_bank() {
-        assert!(!firmware_profile_mode_ready(&json!({
-            "thermalProfileMode": "65w",
-            "thermalProfileResolvedBank": "pps3a"
-        })));
-        assert!(!firmware_profile_mode_ready(&json!({
-            "thermalProfileMode": "100w",
-            "thermalProfileResolvedBank": "pps3a"
-        })));
-        assert!(firmware_profile_mode_ready(&json!({
-            "thermalProfileMode": "100w",
-            "thermalProfileResolvedBank": "pps5a"
-        })));
+    fn firmware_tuning_requires_matching_mode_and_resolved_bank() {
+        assert!(!firmware_profile_mode_ready(
+            &json!({
+                "thermalProfileMode": "65w",
+                "thermalProfileResolvedBank": "pps3a"
+            }),
+            "pps5a"
+        ));
+        assert!(!firmware_profile_mode_ready(
+            &json!({
+                "thermalProfileMode": "100w",
+                "thermalProfileResolvedBank": "pps3a"
+            }),
+            "pps5a"
+        ));
+        assert!(firmware_profile_mode_ready(
+            &json!({
+                "thermalProfileMode": "100w",
+                "thermalProfileResolvedBank": "pps5a"
+            }),
+            "pps5a"
+        ));
+        assert!(firmware_profile_mode_ready(
+            &json!({
+                "thermalProfileMode": "65w", "thermalProfileResolvedBank": "pps3a"
+            }),
+            "pps3a"
+        ));
+        assert!(!firmware_profile_mode_ready(
+            &json!({
+                "thermalProfileMode": "100w", "thermalProfileResolvedBank": "pps5a"
+            }),
+            "pps3a"
+        ));
+    }
+
+    #[test]
+    fn three_amp_seed_export_cannot_cross_the_requested_class() {
+        let (seed, _) = super::super::load_thermal_default_seed_candidate_profile("pps3a").unwrap();
+        let profile = super::materialize_firmware_seed_profile(seed).unwrap();
+        let export = json!({"schema": "thermal-tuning-v2", "powerClass": "pps3a",
+            "profile": {"bank": "pps3a", "value": profile}});
+        assert_eq!(
+            super::parse_firmware_seed_profile(export.clone(), "pps3a").unwrap(),
+            profile
+        );
+        assert!(super::parse_firmware_seed_profile(export, "pps5a").is_err());
     }
 
     #[test]
@@ -2894,6 +2967,7 @@ mod tests {
             "bankHash": "hash-1", "atomic": true, "readbackVerified": true
         });
         assert!(verified_saved_receipt(
+            "pps5a",
             "run-1",
             "candidate-1",
             "hash-1",
@@ -2902,6 +2976,7 @@ mod tests {
         ));
         save["bankHash"] = json!("other");
         assert!(!verified_saved_receipt(
+            "pps5a",
             "run-1",
             "candidate-1",
             "hash-1",
@@ -2966,12 +3041,22 @@ mod tests {
             "promotion": {
                 "previewReceipt": {
                     "runId": "run-1", "candidateId": "candidate-1",
-                    "candidateHash": "hash-1", "ramAppliedHash": "hash-1"
+                    "candidateHash": "hash-1", "ramAppliedHash": "hash-1", "powerClass": "pps5a"
                 },
                 "saveReceipt": null
             }
         });
         assert!(validate_save_input(&bundle, &candidate).is_ok());
+        let mut three_amp_bundle = bundle.clone();
+        three_amp_bundle["powerClass"] = json!("pps3a");
+        three_amp_bundle["qualificationScope"]["kind"] = json!("default-pps3a-full-batch");
+        let mut three_amp_candidate = candidate.clone();
+        three_amp_candidate["powerClass"] = json!("pps3a");
+        three_amp_candidate["profile"]["bank"] = json!("pps3a");
+        three_amp_candidate["promotion"]["previewReceipt"]["powerClass"] = json!("pps3a");
+        assert!(validate_save_input(&three_amp_bundle, &three_amp_candidate).is_ok());
+        assert!(validate_save_input(&three_amp_bundle, &candidate).is_err());
+        assert!(validate_save_input(&bundle, &three_amp_candidate).is_err());
         let mut invalid = bundle.clone();
         invalid["deviceTraceVerification"]["verified"] = json!(false);
         assert!(validate_save_input(&invalid, &candidate).is_err());
@@ -3036,6 +3121,7 @@ mod tests {
     #[test]
     fn firmware_start_preserves_recursive_target_order() {
         let command = firmware_start_command(
+            "pps5a",
             "run-1",
             "candidate-1",
             "hash-1",
@@ -3054,8 +3140,17 @@ mod tests {
         let selected = [60, 100, 240];
         let order = selected_execution_order(&selected);
         assert_eq!(order, [60, 240, 100]);
-        let command = firmware_start_command("run-1", "candidate-1", "hash-1", &json!({}), &order);
+        let command = firmware_start_command(
+            "pps3a",
+            "run-1",
+            "candidate-1",
+            "hash-1",
+            &json!({}),
+            &order,
+        );
         assert_eq!(command["targetsC"], json!([60, 240, 100]));
+        assert_eq!(command["powerClass"], "pps3a");
+        assert_eq!(command["candidateProfile"]["bank"], "pps3a");
     }
 
     #[test]
@@ -3159,6 +3254,7 @@ mod tests {
         let output_root = dir.path().join("input");
         let report_dir = dir.path().join("report");
         let statuses = vec![json!({
+            "runId": "run-1", "candidateId": "candidate-1", "powerClass": "pps5a", "targetsC": [60],
             "terminalDisposition": "running",
             "reviewDisposition": "pending",
             "candidateHash": "hash-device",
@@ -3808,6 +3904,7 @@ mod tests {
             "armed": false
         });
         assert!(is_confirmed_rejected_start(
+            "pps5a",
             &status,
             "run-1",
             "candidate-1",
@@ -3815,6 +3912,7 @@ mod tests {
         ));
         status["candidateHash"] = json!("other-hash");
         assert!(!is_confirmed_rejected_start(
+            "pps5a",
             &status,
             "run-1",
             "candidate-1",
@@ -3823,6 +3921,7 @@ mod tests {
         status["candidateHash"] = json!("hash-1");
         status["armed"] = json!(true);
         assert!(!is_confirmed_rejected_start(
+            "pps5a",
             &status,
             "run-1",
             "candidate-1",

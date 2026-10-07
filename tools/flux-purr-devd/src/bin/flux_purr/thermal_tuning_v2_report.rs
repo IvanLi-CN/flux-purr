@@ -188,7 +188,6 @@ fn candidate_promotion_verified(bundle: &Value, candidate: &Value) -> bool {
             .pointer("/candidate/promotionState")
             .and_then(Value::as_str)
             != Some("saved")
-        || candidate.pointer("/profile/bank").and_then(Value::as_str) != Some("pps5a")
     {
         return false;
     }
@@ -206,7 +205,9 @@ fn candidate_promotion_verified(bundle: &Value, candidate: &Value) -> bool {
             != bundle
                 .pointer("/candidate/candidateHash")
                 .and_then(Value::as_str)
-        || power_class != Some("pps5a")
+        || !matches!(power_class, Some("pps3a" | "pps5a"))
+        || candidate.pointer("/profile/bank").and_then(Value::as_str) != power_class
+        || candidate.get("powerClass").and_then(Value::as_str) != power_class
     {
         return false;
     }
@@ -222,7 +223,7 @@ fn candidate_promotion_verified(bundle: &Value, candidate: &Value) -> bool {
         }
     }
     preview.get("ramAppliedHash").and_then(Value::as_str) == candidate_hash
-        && save.get("bank").and_then(Value::as_str) == Some("pps5a")
+        && save.get("bank").and_then(Value::as_str) == power_class
         && save.get("bankRevision").and_then(Value::as_u64).is_some()
         && save.get("bankHash").and_then(Value::as_str) == candidate_hash
         && save.get("atomic").and_then(Value::as_bool) == Some(true)
@@ -1239,6 +1240,7 @@ mod tests {
                     "previewReceipt": {"runId": "mock-run", "candidateId": "candidate-60", "candidateHash": "sha256:mock", "powerClass": "pps5a", "ramAppliedHash": "sha256:mock"},
                     "saveReceipt": {"runId": "mock-run", "candidateId": "candidate-60", "candidateHash": "sha256:mock", "powerClass": "pps5a", "bank": "pps5a", "bankRevision": 1, "bankHash": "sha256:mock", "atomic": true, "readbackVerified": true}
                 },
+                "powerClass": "pps5a",
                 "profile": {"bank": "pps5a", "targetC": 60}
             }))
             .unwrap(),
