@@ -1110,10 +1110,14 @@ pub(crate) const RTD_REFERENCE_RESISTOR_OHMS: f32 = 2_490.0;
 // R17 = 31.6 kOhm and R16 = 10 kOhm set the TPS62933 3V3 rail to
 // 0.8 V * (1 + 31.6 / 10) = 3.328 V nominal. This is the divider's circuit
 // model, not a measured rail value or an ADC calibration parameter.
-#[cfg(not(feature = "rtd-supply-3208mv"))]
+#[cfg(all(feature = "rtd-supply-3208mv", feature = "rtd-supply-3340mv"))]
+compile_error!("Select only one board RTD divider supply");
+#[cfg(not(any(feature = "rtd-supply-3208mv", feature = "rtd-supply-3340mv")))]
 pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_328;
 #[cfg(feature = "rtd-supply-3208mv")]
 pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_208;
+#[cfg(all(feature = "rtd-supply-3340mv", not(feature = "rtd-supply-3208mv")))]
+pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_340;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_SHORT_FAULT_MAX_MV: u16 = 150;
 #[cfg(any(target_arch = "xtensa", test))]
