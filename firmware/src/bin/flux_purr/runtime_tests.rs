@@ -10224,6 +10224,57 @@ fn braking_approach_recovers_heat_after_a_confirmed_high_temperature_decline() {
 }
 
 #[test]
+fn braking_approach_recovers_despite_noise_within_a_net_cooling_window() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 240;
+        controller.heater_was_enabled = true;
+        controller.filtered_temp_c = Some(238.4);
+        controller.previous_measured_temp_c = Some(238.4);
+        controller.filtered_slope_c_per_profile_tick = 0.5;
+        controller.profile_last_control_at_ms = Some(2_950);
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 240;
+        point.brake_distance_centi_c = 230;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(238.5);
+        input.target_temp_c = 240;
+        input.model.transport_delay_ms = 3_400;
+        assert_eq!(
+            controller
+                .update_production_at(kind, input, Some(profile))
+                .0
+                .duty_percent,
+            5
+        );
+        // Small bounces remain below the observation-window reference. They
+        // must not erase the net decline, as happened in the 240C HIL trace.
+        for (offset, temperature) in [
+            (50, 238.42),
+            (100, 238.49),
+            (150, 238.30),
+            (200, 238.38),
+            (250, 238.22),
+            (300, 238.29),
+            (350, 238.10),
+        ] {
+            input.now_ms = 3_000 + offset;
+            input.measured_temp_c = temperature;
+            controller.update_production_at(kind, input, Some(profile));
+        }
+        assert_eq!(controller.phase, HeaterControlPhase::Approach);
+        assert_eq!(controller.approach_braking_remaining_ms, 0, "bank={bank:?}");
+        assert!(
+            controller.duty_percent > 5,
+            "net cooling must recover model heat"
+        );
+    }
+}
+
+#[test]
 fn braking_approach_survives_rtd_reseeds_during_pps_steps() {
     for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
         let mut controller = HeaterController::new();

@@ -1263,7 +1263,10 @@ impl HeaterController {
         };
         let measured_c = input.measured_temp_c;
         let reference_c = *self.approach_cooling_reference_c.get_or_insert(measured_c);
-        if frame.previous_error_c - frame.error_c > 0.05 {
+        // Test the net observation-window decline, not a monotonic per-frame
+        // sequence. ADC noise can bounce while the plate is still cooling.
+        // A new peak starts a new window; PPS reseeds clear it separately.
+        if measured_c > reference_c + 0.05 {
             self.reset_approach_cooling_evidence();
             self.approach_cooling_reference_c = Some(measured_c);
             return false;
@@ -1273,7 +1276,6 @@ impl HeaterController {
             .saturating_add(frame.elapsed_ms);
         let cooling = self.approach_cooling_elapsed_ms >= 100
             && measured_c + 0.15 < reference_c
-            && frame.error_c >= frame.previous_error_c
             && frame.filtered_slope_c_per_profile_tick <= -0.02;
         self.approach_cooling_samples = if cooling {
             self.approach_cooling_samples.saturating_add(1)
