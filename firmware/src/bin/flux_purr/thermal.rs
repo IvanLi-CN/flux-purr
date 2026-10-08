@@ -771,13 +771,9 @@ pub(crate) struct HeaterController {
     pub(crate) coast_cooling_elapsed_ms: u64,
     pub(crate) coast_cooling_reference_c: Option<f32>,
     pub(crate) natural_cooling_input: Option<ThermalPlantRuntimeInput>,
-    pub(crate) approach_braking_remaining_ms: u64,
-    pub(crate) approach_cooling_reference_c: Option<f32>,
-    pub(crate) approach_cooling_elapsed_ms: u64,
-    pub(crate) approach_cooling_validated_decline_c: f32,
-    pub(crate) approach_cooling_previous_temp_c: Option<f32>,
-    pub(crate) approach_cooling_previous_at_ms: Option<u64>,
-    pub(crate) approach_cooling_samples: u8,
+    pub(crate) applied_heat: flux_purr_firmware::thermal_trajectory::AppliedHeatHistory,
+    pub(crate) approach_trajectory:
+        Option<flux_purr_firmware::thermal_trajectory::TemperatureTrajectory>,
     pub(crate) heater_was_enabled: bool,
     pub(crate) warmup_started_at_ms: Option<u64>,
     pub(crate) production_controller: Option<ProductionThermalController>,
@@ -879,25 +875,21 @@ impl HeaterController {
             coast_cooling_elapsed_ms: 0,
             coast_cooling_reference_c: None,
             natural_cooling_input: None,
-            approach_braking_remaining_ms: 0,
-            approach_cooling_reference_c: None,
-            approach_cooling_elapsed_ms: 0,
-            approach_cooling_validated_decline_c: 0.0,
-            approach_cooling_previous_temp_c: None,
-            approach_cooling_previous_at_ms: None,
-            approach_cooling_samples: 0,
+            applied_heat: flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new(),
+            approach_trajectory: None,
             heater_was_enabled: false,
             warmup_started_at_ms: None,
             production_controller: None,
         }
     }
 
-    pub(crate) const fn fault_latched(self) -> Option<HeaterFaultReason> {
+    pub(crate) const fn fault_latched(&self) -> Option<HeaterFaultReason> {
         self.fault_latched
     }
 
     pub(crate) fn clear_fault_latch(&mut self) {
         self.clear_approach_braking();
+        self.applied_heat = flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new();
         self.fault_latched = None;
         self.filtered_temp_c = None;
         self.previous_filtered_temp_c = None;
@@ -935,6 +927,7 @@ impl HeaterController {
         }
         let heater_enabled = input.heater_enabled && !disarm_for_source_change && kind.is_profile();
         self.natural_cooling_input = kind.is_profile().then_some(input);
+        self.applied_heat.configure(input.model.transport_delay_ms);
         let snapshot = self.update_at(
             input.target_temp_c,
             input.measured_temp_c,
@@ -955,7 +948,6 @@ impl HeaterController {
         self.pps_measurement_anchor_pending = false;
         self.coast_cooling_reference_c = None;
         self.coast_cooling_elapsed_ms = 0;
-        self.reset_approach_cooling_evidence();
     }
 
     pub(crate) fn reseed_measurement_after_pps_step(&mut self, measured_temp_c: f32) {
@@ -972,27 +964,17 @@ impl HeaterController {
         } else {
             0.0
         };
-        // Retain only intervals already observed inside a stable PPS epoch.
-        // Absolute origins, pending intervals, negative slope and confirmation
-        // count must be rebuilt; voltage-induced offsets never add cooling.
-        let validated_cooling = (model_approach && self.approach_braking_remaining_ms > 0)
-            .then_some((
-                self.approach_cooling_validated_decline_c,
-                self.approach_cooling_elapsed_ms,
-            ));
+        // The observer origin changes, never the trajectory or applied heat.
         self.reseed_measurement(measured_temp_c);
         self.filtered_slope_c_per_profile_tick = rising_slope;
         // The held control value still belongs to the old voltage epoch.
         // Only the first accepted new-epoch sample can establish its origin.
         self.pps_measurement_anchor_pending = true;
-        if let Some((decline_c, elapsed_ms)) = validated_cooling {
-            self.approach_cooling_validated_decline_c = decline_c;
-            self.approach_cooling_elapsed_ms = elapsed_ms;
-        }
     }
 
     pub(crate) fn latch_fault(&mut self, reason: HeaterFaultReason) -> bool {
         self.clear_approach_braking();
+        self.applied_heat = flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new();
         let changed = self.fault_latched != Some(reason);
         self.fault_latched = Some(reason);
         self.filtered_temp_c = None;
@@ -1153,6 +1135,7 @@ impl HeaterController {
         measured_temp_c: f32,
     ) -> HeaterPidSnapshot {
         self.clear_approach_braking();
+        self.applied_heat = flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new();
         self.reseed_measurement(measured_temp_c);
         self.phase = HeaterControlPhase::Warmup;
         self.phase_ticks = 0;
@@ -1262,37 +1245,8 @@ impl HeaterController {
         frame: &ThermalControlFrame,
         entered_approach: bool,
     ) -> u8 {
-        if entered_approach && self.model_approach_available() {
-            // The Warmup input still travels through the calibrated delay.
-            // A one-frame minimum followed by a fresh error-driven request
-            // can restore full power before that heat has reached the sensor.
-            self.approach_braking_remaining_ms = self
-                .natural_cooling_input
-                .map_or(0, |input| u64::from(input.model.transport_delay_ms));
-            self.reset_approach_cooling_evidence();
-            if let Some(input) = self
-                .natural_cooling_input
-                .filter(|input| input.measurement_accepted)
-            {
-                self.anchor_approach_cooling_epoch(input.measured_temp_c, input.now_ms);
-            }
-            return percent_from_permille(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
-        }
-        if self.approach_braking_remaining_ms > 0 {
-            self.approach_braking_remaining_ms = self
-                .approach_braking_remaining_ms
-                .saturating_sub(frame.elapsed_ms);
-            if self.approach_cooling_confirmed(frame) {
-                self.clear_approach_braking();
-            } else if self.approach_braking_remaining_ms > 0 {
-                return percent_from_permille(
-                    flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE,
-                );
-            } else {
-                self.clear_approach_braking();
-            }
-        }
-        if let Some(duty_percent) = self.calculate_model_approach_duty(frame) {
+        if let Some(duty_percent) = self.calculate_trajectory_approach_duty(frame, entered_approach)
+        {
             return duty_percent;
         }
         let target = frame.control_target;
@@ -1310,77 +1264,8 @@ impl HeaterController {
         )
     }
 
-    fn reset_approach_cooling_epoch(&mut self) {
-        self.approach_cooling_reference_c = None;
-        self.approach_cooling_previous_temp_c = None;
-        self.approach_cooling_previous_at_ms = None;
-        self.approach_cooling_samples = 0;
-    }
-
-    fn anchor_approach_cooling_epoch(&mut self, measured_c: f32, now_ms: u64) {
-        self.approach_cooling_reference_c = Some(measured_c);
-        self.approach_cooling_previous_temp_c = Some(measured_c);
-        self.approach_cooling_previous_at_ms = Some(now_ms);
-        self.approach_cooling_samples = 0;
-    }
-
-    fn reset_approach_cooling_evidence(&mut self) {
-        self.reset_approach_cooling_epoch();
-        self.approach_cooling_elapsed_ms = 0;
-        self.approach_cooling_validated_decline_c = 0.0;
-    }
-
     fn clear_approach_braking(&mut self) {
-        self.approach_braking_remaining_ms = 0;
-        self.reset_approach_cooling_evidence();
-    }
-
-    fn approach_cooling_confirmed(&mut self, frame: &ThermalControlFrame) -> bool {
-        let Some(input) = self.natural_cooling_input else {
-            return false;
-        };
-        if !input.measurement_accepted {
-            // No temperature delta or time interval may straddle a wait or a
-            // rejected observation. Sensor recovery still clears all evidence.
-            self.reset_approach_cooling_epoch();
-            return false;
-        }
-        let measured_c = input.measured_temp_c;
-        let (Some(previous_c), Some(previous_at_ms), Some(reference_c)) = (
-            self.approach_cooling_previous_temp_c,
-            self.approach_cooling_previous_at_ms,
-            self.approach_cooling_reference_c,
-        ) else {
-            self.anchor_approach_cooling_epoch(measured_c, input.now_ms);
-            return false;
-        };
-        // Test the net observation-window decline, not a monotonic per-frame
-        // sequence. ADC noise can bounce while the plate is still cooling.
-        // A new peak clears every epoch's evidence, not only the local window.
-        if measured_c > reference_c + 0.05 {
-            self.reset_approach_cooling_evidence();
-            self.anchor_approach_cooling_epoch(measured_c, input.now_ms);
-            return false;
-        }
-        let elapsed_ms = input.now_ms.saturating_sub(previous_at_ms);
-        if elapsed_ms == 0 {
-            return false;
-        }
-        self.approach_cooling_previous_temp_c = Some(measured_c);
-        self.approach_cooling_previous_at_ms = Some(input.now_ms);
-        self.approach_cooling_validated_decline_c += previous_c - measured_c;
-        self.approach_cooling_elapsed_ms =
-            self.approach_cooling_elapsed_ms.saturating_add(elapsed_ms);
-        let cooling = self.approach_cooling_elapsed_ms >= 100
-            && self.approach_cooling_validated_decline_c > 0.15
-            && measured_c < reference_c
-            && frame.filtered_slope_c_per_profile_tick <= -0.02;
-        self.approach_cooling_samples = if cooling {
-            self.approach_cooling_samples.saturating_add(1)
-        } else {
-            0
-        };
-        self.approach_cooling_samples >= 2
+        self.approach_trajectory = None;
     }
 
     fn model_approach_available(&self) -> bool {
@@ -1401,40 +1286,52 @@ impl HeaterController {
             .is_none_or(|input| input.measurement_accepted)
     }
 
-    fn calculate_model_approach_duty(&self, frame: &ThermalControlFrame) -> Option<u8> {
+    fn calculate_trajectory_approach_duty(
+        &mut self,
+        frame: &ThermalControlFrame,
+        entered_approach: bool,
+    ) -> Option<u8> {
+        use flux_purr_firmware::thermal_trajectory::{TemperatureTrajectory, TrajectoryPlant};
         let input = self.natural_cooling_input?;
         if !self.model_approach_available() {
             return None;
         }
-        // First reserve heat in flight, then brake the observed net rise.
-        // Signed correction is essential: loss feedforward must not become
-        // an implicit sustaining floor while the plate still has momentum.
+        let plant = TrajectoryPlant {
+            model: input.model,
+            ambient_c: input.ambient_temp_c,
+            max_power_mw: input.max_power_mw,
+        };
+        let predicted = self.applied_heat.forecast(
+            input.now_ms,
+            input.measured_temp_c,
+            frame.filtered_slope_c_per_profile_tick,
+            plant,
+        );
+        if entered_approach || self.approach_trajectory.is_none() {
+            self.approach_trajectory = Some(TemperatureTrajectory::new(
+                input.now_ms,
+                predicted.temperature_c,
+            ));
+        }
+        if entered_approach {
+            return Some(percent_from_permille(
+                flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE,
+            ));
+        }
         let horizon_s = frame
             .natural_cooling_delay_s
             .max(f32::from(frame.control_target.approach_lead_ticks))
-            .max(0.1);
-        let remaining_c = (frame.error_c.min(frame.control_error_c)
-            - frame.filtered_slope_c_per_profile_tick.max(0.0) * horizon_s
-            - 0.5)
-            .max(0.0);
-        let span_c = (frame.brake_distance_c - 0.5).max(0.1);
-        let ratio = (remaining_c / span_c).clamp(0.0, 1.0);
-        let desired_rise_c_per_s =
-            remaining_c / horizon_s * ratio.powf(frame.control_target.approach_damping_exponent);
-        let loss_mw = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
-            input.model,
-            input.measured_temp_c,
-            input.ambient_temp_c,
+            .max(0.4);
+        let reference = self.approach_trajectory.as_mut()?.advance(
+            input.now_ms,
+            f32::from(input.target_temp_c),
+            horizon_s,
+            frame.control_target.approach_damping_exponent,
+            plant,
         );
-        let braking_rise_c_per_s = desired_rise_c_per_s
-            + frame.natural_cooling_delay_s / horizon_s
-                * (desired_rise_c_per_s - frame.filtered_slope_c_per_profile_tick);
-        let requested_mw = loss_mw + input.model.thermal_capacity_mj_per_c * braking_rise_c_per_s;
-        let requested_permille = (requested_mw * 1_000.0 / input.max_power_mw).clamp(
-            f32::from(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE),
-            1_000.0,
-        );
-        Some(percent_from_permille(requested_permille as u16))
+        Some(percent_from_permille(
+            TemperatureTrajectory::request_permille(reference, predicted, horizon_s, plant),
+        ))
     }
 
     fn calculate_hold_duty(&mut self, frame: &ThermalControlFrame) -> u8 {
@@ -1875,6 +1772,7 @@ impl HeaterController {
     }
 
     fn reset_for_target_change(&mut self, measured_temp_c: f32, now_ms: u64) {
+        self.applied_heat = flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new();
         self.clear_approach_braking();
         self.reseed_measurement(measured_temp_c);
         self.phase = HeaterControlPhase::Warmup;

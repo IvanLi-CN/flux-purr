@@ -1,5 +1,7 @@
 # Heater PID frontpanel runtime history
 
+The Operator approves explicit temperature/rate tracking after the audit establishes that Approach used instantaneous final-target error and a fixed minimum-power wait. ADR-0018 records the reference/tracker boundary, delayed applied-power history, unchanged qualification gates and fresh-calibration-only initialization. The shared controller replaces the obsolete braking timer/decline-release state with feasible reference generation and applied-input prediction; guarded measurement/epoch regressions remain. A regression reproduces high-loss minimum-power waiting and passes with predictive tracking; exact-artifact qualification remains required.
+
 ## Eight-target qualification scope
 
 The owner removed240°C from tuning to avoid repeated high-temperature attempts. The highest tuning endpoint is220°C; recursive execution and accepted-bound interpolation use that endpoint. Existing nine-target evidence remains historical and is not rewritten as an eight-target run. This is a tuning-scope change, not a production temperature cap or a change to the protected220°C plant calibration.

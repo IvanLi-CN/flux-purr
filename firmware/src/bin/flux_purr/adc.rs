@@ -285,28 +285,28 @@ where
     for _ in 0..total_samples {
         let sample = read_adc_sample(adc, pin, curve).await;
 
-        if let Some(sample) = sample {
-            if discarded_valid_samples < RTD_SETTLE_DISCARD_SAMPLE_COUNT {
-                discarded_valid_samples = discarded_valid_samples.saturating_add(1);
-                // Yield between groups of discarded conversions too, so the
-                // fast-ready path cannot monopolize the executor for the prefix.
-                if discarded_valid_samples.is_multiple_of(samples_per_phase) {
-                    embassy_futures::yield_now().await;
-                }
-            } else {
-                sum_mv = sum_mv.saturating_add(u32::from(sample.calibrated_mv));
-                sum_raw_code = sum_raw_code.saturating_add(u32::from(sample.raw_code));
-                min_mv = min_mv.min(sample.calibrated_mv);
-                max_mv = max_mv.max(sample.calibrated_mv);
-                min_raw_code = min_raw_code.min(sample.raw_code);
-                max_raw_code = max_raw_code.max(sample.raw_code);
-                valid_samples = valid_samples.saturating_add(1);
-                wait_for_adc_phase_if_needed(
-                    valid_samples.is_multiple_of(samples_per_phase)
-                        && valid_samples < RTD_SAMPLE_COUNT,
-                )
-                .await;
+        let Some(sample) = sample else {
+            continue;
+        };
+        if discarded_valid_samples < RTD_SETTLE_DISCARD_SAMPLE_COUNT {
+            discarded_valid_samples = discarded_valid_samples.saturating_add(1);
+            // Yield between groups of discarded conversions too, so the
+            // fast-ready path cannot monopolize the executor for the prefix.
+            if discarded_valid_samples.is_multiple_of(samples_per_phase) {
+                embassy_futures::yield_now().await;
             }
+        } else {
+            sum_mv = sum_mv.saturating_add(u32::from(sample.calibrated_mv));
+            sum_raw_code = sum_raw_code.saturating_add(u32::from(sample.raw_code));
+            min_mv = min_mv.min(sample.calibrated_mv);
+            max_mv = max_mv.max(sample.calibrated_mv);
+            min_raw_code = min_raw_code.min(sample.raw_code);
+            max_raw_code = max_raw_code.max(sample.raw_code);
+            valid_samples = valid_samples.saturating_add(1);
+            wait_for_adc_phase_if_needed(
+                valid_samples.is_multiple_of(samples_per_phase) && valid_samples < RTD_SAMPLE_COUNT,
+            )
+            .await;
         }
     }
 

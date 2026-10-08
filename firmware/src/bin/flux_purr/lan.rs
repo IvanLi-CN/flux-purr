@@ -228,28 +228,7 @@ pub(crate) async fn process_request_frame(
                 UsbResponsePayload::Identity(Box::new(hardware_identity())),
             ),
         ),
-        UsbRequestOp::GetInstallStatus => (
-            false,
-            usb_response(
-                request_id,
-                UsbResponsePayload::InstallStatus(InstallStatus::from_runtime(
-                    InstallRuntimeSnapshot {
-                        config: context.memory_config,
-                        persistence_source: context.persistence_source,
-                        record_state: context.persistence_record_state,
-                        record_sequence: *context.memory_sequence,
-                        sensor_ready: context.current_rtd_fault.is_none()
-                            && context.latest_status_temp_c.is_finite(),
-                        heater_fault_latched: context.heater_controller.fault_latched().is_some(),
-                        persistence_locked: context.ui_state.persistence_locked(),
-                        last_persistence_fault: context.ui_state.persistence_fault.clone(),
-                        persistence_fault_attention_pending: context
-                            .ui_state
-                            .persistence_fault_attention_pending,
-                    },
-                )),
-            ),
-        ),
+        UsbRequestOp::GetInstallStatus => process_install_status(context, request_id),
         UsbRequestOp::CompleteSetup => process_complete_setup(context, request_id),
         UsbRequestOp::ResetPersistence => process_reset_persistence(context, request_id),
         UsbRequestOp::GetNetwork
@@ -314,6 +293,35 @@ pub(crate) async fn process_request_frame(
         UsbRequestOp::SetLogLevel => (false, usb_response(request_id, UsbResponsePayload::Ack)),
         _ => unreachable!("flash preparation requests were handled before dispatch"),
     }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn process_install_status(
+    context: &ControlLineContext<'_, '_, '_>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> (bool, UsbFrame) {
+    (
+        false,
+        usb_response(
+            request_id,
+            UsbResponsePayload::InstallStatus(InstallStatus::from_runtime(
+                InstallRuntimeSnapshot {
+                    config: context.memory_config,
+                    persistence_source: context.persistence_source,
+                    record_state: context.persistence_record_state,
+                    record_sequence: *context.memory_sequence,
+                    sensor_ready: context.current_rtd_fault.is_none()
+                        && context.latest_status_temp_c.is_finite(),
+                    heater_fault_latched: context.heater_controller.fault_latched().is_some(),
+                    persistence_locked: context.ui_state.persistence_locked(),
+                    last_persistence_fault: context.ui_state.persistence_fault.clone(),
+                    persistence_fault_attention_pending: context
+                        .ui_state
+                        .persistence_fault_attention_pending,
+                },
+            )),
+        ),
+    )
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -1152,31 +1160,11 @@ fn process_thermal_tuning_start(
         let _ = value.push_str("unsealed");
         value
     });
-    if let Some(profile_command) = command.candidate_profile.as_ref()
-        && (profile_command.op != ThermalControlProfileOp::Preview
-            || profile_command.profile.is_none())
-    {
-        return (
-            false,
-            usb_error_response(
-                request_id,
-                "candidate_profile_required",
-                "Firmware tuning requires a RAM preview candidate profile.",
-            ),
-        );
-    }
     let expected_bank = power_class.profile_bank();
-    if command.candidate_profile.as_ref().is_some_and(|candidate| {
-        candidate.bank.map(ThermalProfileBank::from) != Some(expected_bank)
-    }) {
-        return (
-            false,
-            usb_error_response(
-                request_id,
-                "candidate_bank_mismatch",
-                "Candidate bank must match the requested power class.",
-            ),
-        );
+    if let Some((code, message)) =
+        validate_tuning_candidate(command.candidate_profile.as_ref(), expected_bank)
+    {
+        return (false, usb_error_response(request_id, code, message));
     }
     let candidate_profile_wire = command
         .candidate_profile
@@ -1234,7 +1222,17 @@ fn process_thermal_tuning_start(
     } else {
         context.thermal_tuning.start_at(start, context.elapsed_ms)
     };
-    let response = match result {
+    let response = thermal_tuning_start_response(context, request_id, result);
+    (true, response)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn thermal_tuning_start_response(
+    context: &mut ControlLineContext<'_, '_, '_>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    result: Result<(), flux_purr_firmware::thermal_tuning::ThermalTuningError>,
+) -> UsbFrame {
+    match result {
         Ok(()) => {
             context.ui_state.heater_enabled = false;
             usb_response(
@@ -1252,8 +1250,31 @@ fn process_thermal_tuning_start(
                 "Firmware thermal tuning was rejected and the heater remains disarmed.",
             )
         }
-    };
-    (true, response)
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn validate_tuning_candidate(
+    candidate_profile: Option<&flux_purr_firmware::control_plane::ThermalControlProfileCommand>,
+    expected_bank: ThermalProfileBank,
+) -> Option<(&'static str, &'static str)> {
+    if let Some(candidate) = candidate_profile
+        && (candidate.op != ThermalControlProfileOp::Preview || candidate.profile.is_none())
+    {
+        return Some((
+            "candidate_profile_required",
+            "Firmware tuning requires a RAM preview candidate profile.",
+        ));
+    }
+    if candidate_profile.is_some_and(|candidate| {
+        candidate.bank.map(ThermalProfileBank::from) != Some(expected_bank)
+    }) {
+        return Some((
+            "candidate_bank_mismatch",
+            "Candidate bank must match the requested power class.",
+        ));
+    }
+    None
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]

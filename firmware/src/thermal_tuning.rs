@@ -1900,37 +1900,7 @@ impl ThermalTuningRuntime {
             self.record_approach_curve_sample(sample);
             self.approach_curve_closed = sample.phase == ThermalTuningPhase::Hold;
         }
-        if self.first_hold_temperature_centi_c.is_some() {
-            self.hold_error_sum_centi_c = self.hold_error_sum_centi_c.saturating_add(
-                i64::from(expected_target) * 100 - i64::from(sample.temperature_centi_c),
-            );
-            // Candidate powers and the external analyzer use the PID logical
-            // request. PPS voltage compensation must not alter that domain.
-            let output = usize::from(sample.heater_requested_output_permille).min(1_000);
-            self.hold_entry_output_permille.get_or_insert(output as u16);
-            if output > 0 {
-                self.hold_entry_pulse_only &= output <= 100
-                    && sample.phase == ThermalTuningPhase::Hold
-                    && self
-                        .first_controller_hold_elapsed_ms
-                        .is_some_and(|entry| sample.elapsed_ms.saturating_sub(entry) <= 250);
-            }
-            self.hold_output_histogram[output] =
-                self.hold_output_histogram[output].saturating_add(1);
-            self.hold_output_count = self.hold_output_count.saturating_add(1);
-            self.min_controller_hold_temperature_centi_c = Some(
-                self.min_controller_hold_temperature_centi_c
-                    .map_or(sample.temperature_centi_c, |value| {
-                        value.min(sample.temperature_centi_c)
-                    }),
-            );
-            self.max_controller_hold_temperature_centi_c = Some(
-                self.max_controller_hold_temperature_centi_c
-                    .map_or(sample.temperature_centi_c, |value| {
-                        value.max(sample.temperature_centi_c)
-                    }),
-            );
-        }
+        self.record_controller_hold_output(sample, expected_target);
         if self.first_hold_elapsed_ms.is_some() {
             self.min_hold_temperature_centi_c = Some(
                 self.min_hold_temperature_centi_c
@@ -1960,6 +1930,44 @@ impl ThermalTuningRuntime {
         self.update_stability_evidence(sample, expected_target);
         self.max_temperature_centi_c = Some(
             self.max_temperature_centi_c
+                .map_or(sample.temperature_centi_c, |value| {
+                    value.max(sample.temperature_centi_c)
+                }),
+        );
+    }
+
+    fn record_controller_hold_output(
+        &mut self,
+        sample: &ThermalTuningSample,
+        expected_target: i16,
+    ) {
+        if self.first_hold_temperature_centi_c.is_none() {
+            return;
+        }
+        self.hold_error_sum_centi_c = self.hold_error_sum_centi_c.saturating_add(
+            i64::from(expected_target) * 100 - i64::from(sample.temperature_centi_c),
+        );
+        // Candidate powers and the external analyzer use the PID logical
+        // request. PPS voltage compensation must not alter that domain.
+        let output = usize::from(sample.heater_requested_output_permille).min(1_000);
+        self.hold_entry_output_permille.get_or_insert(output as u16);
+        if output > 0 {
+            self.hold_entry_pulse_only &= output <= 100
+                && sample.phase == ThermalTuningPhase::Hold
+                && self
+                    .first_controller_hold_elapsed_ms
+                    .is_some_and(|entry| sample.elapsed_ms.saturating_sub(entry) <= 250);
+        }
+        self.hold_output_histogram[output] = self.hold_output_histogram[output].saturating_add(1);
+        self.hold_output_count = self.hold_output_count.saturating_add(1);
+        self.min_controller_hold_temperature_centi_c = Some(
+            self.min_controller_hold_temperature_centi_c
+                .map_or(sample.temperature_centi_c, |value| {
+                    value.min(sample.temperature_centi_c)
+                }),
+        );
+        self.max_controller_hold_temperature_centi_c = Some(
+            self.max_controller_hold_temperature_centi_c
                 .map_or(sample.temperature_centi_c, |value| {
                     value.max(sample.temperature_centi_c)
                 }),
