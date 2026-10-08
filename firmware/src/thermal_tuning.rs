@@ -23,7 +23,11 @@ mod unverified_window_tests;
 
 pub const THERMAL_TUNING_TARGETS_C: [i16; 8] = [60, 80, 100, 120, 140, 160, 180, 220];
 pub const THERMAL_TUNING_EXECUTION_ORDER_C: [i16; 8] = [60, 220, 120, 80, 100, 160, 140, 180];
-pub const THERMAL_TUNING_MAX_TARGETS: usize = THERMAL_TUNING_TARGETS_C.len();
+// Keep the wire/runtime vector capacity at the historical envelope. The
+// canonical scope above is eight targets; this capacity is transport storage,
+// not permission to add another target (membership and order are validated
+// against the canonical execution order).
+pub const THERMAL_TUNING_MAX_TARGETS: usize = 9;
 pub const THERMAL_TUNING_EVENT_CAPACITY: usize = 256;
 // Samples carry the full local PPS/control evidence and must fit one bounded
 // JSONL response. Six events keep the largest sample-only page below the
