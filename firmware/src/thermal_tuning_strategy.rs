@@ -333,6 +333,9 @@ fn earlier_braking_candidate(
 
 fn hold_off_after_entry(evidence: TuneEvidence) -> bool {
     evidence.hold_off_sample_count == evidence.hold_sample_count
+        || (evidence.hold_entry_pulse_only
+            && evidence.hold_off_sample_count.saturating_mul(10)
+                >= evidence.hold_sample_count.saturating_mul(9))
         || (evidence
             .hold_entry_output_permille
             .is_some_and(|output| (1..=50).contains(&output))

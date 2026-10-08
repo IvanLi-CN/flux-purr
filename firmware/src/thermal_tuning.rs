@@ -409,6 +409,7 @@ pub struct ThermalTuningRuntime {
     batch_predicted_profile: Option<ThermalControlProfileConfig>,
     batch_current_score: Option<[f64; 11]>,
     batch_current_confirmable: bool,
+    batch_current_failure_evidence: Option<TuneEvidence>,
     pub seed_source: TuningReason,
     pub preview_update_pending: bool,
     pub trial_start_sequence: Option<u32>,
@@ -516,6 +517,7 @@ impl ThermalTuningRuntime {
             batch_predicted_profile: None,
             batch_current_score: None,
             batch_current_confirmable: false,
+            batch_current_failure_evidence: None,
             seed_source: TuningReason::new(),
             preview_update_pending: false,
             trial_start_sequence: None,
@@ -850,7 +852,7 @@ impl ThermalTuningRuntime {
             settle_time_ms,
             full_speed_limit_ms,
         } = evaluation;
-        if !passes && warmup_full {
+        let failure_evidence = if !passes && warmup_full {
             let evidence = self.candidate_failure_evidence(
                 target_c,
                 max_overshoot_centi_c,
@@ -859,7 +861,10 @@ impl ThermalTuningRuntime {
                 full_speed_limit_ms,
             );
             self.remember_observed_hold_failure(target_c, evidence);
-        }
+            Some(evidence)
+        } else {
+            None
+        };
         match self.trial_purpose {
             ThermalTuningTrialPurpose::Scout if passes => self.schedule_trial(
                 ThermalTuningTrialPurpose::HoldConfirm,
@@ -879,6 +884,7 @@ impl ThermalTuningRuntime {
             ThermalTuningTrialPurpose::BatchCurrent => {
                 self.batch_current_score = Some(score);
                 self.batch_current_confirmable = passes;
+                self.batch_current_failure_evidence = failure_evidence;
                 if let Some(predicted) = self.batch_predicted_profile {
                     self.install_candidate_profile(predicted, "predicted_from_scout")?;
                     self.schedule_trial(
@@ -886,11 +892,11 @@ impl ThermalTuningRuntime {
                         "cooling before predicted candidate",
                     )
                 } else {
-                    self.finish_candidate_batch(target_c, score, passes)
+                    self.finish_candidate_batch(target_c, score, passes, failure_evidence)
                 }
             }
             ThermalTuningTrialPurpose::BatchPredicted => {
-                self.finish_candidate_batch(target_c, score, passes)
+                self.finish_candidate_batch(target_c, score, passes, failure_evidence)
             }
             ThermalTuningTrialPurpose::HoldConfirm if passes => {
                 self.accepted_target_mask |= target_bit(target_c);
@@ -1009,6 +1015,7 @@ impl ThermalTuningRuntime {
         self.batch_predicted_profile = predicted;
         self.batch_current_score = None;
         self.batch_current_confirmable = false;
+        self.batch_current_failure_evidence = None;
         self.install_candidate_profile(current, "batch_current")?;
         self.schedule_trial(
             ThermalTuningTrialPurpose::BatchCurrent,
@@ -1097,16 +1104,28 @@ impl ThermalTuningRuntime {
         settle_time_ms: Option<u64>,
         full_speed_limit_ms: u32,
     ) -> bool {
-        let Some(original) = self.candidate_profile else {
-            return false;
-        };
-        self.mutate_candidate_for_failure(
+        let evidence = self.candidate_failure_evidence(
             target_c,
             overshoot,
             hold_p2p,
             settle_time_ms,
             full_speed_limit_ms,
         );
+        self.prepare_fresh_failure_proposal_from_evidence(target_c, evidence)
+    }
+
+    fn prepare_fresh_failure_proposal_from_evidence(
+        &mut self,
+        target_c: i16,
+        evidence: TuneEvidence,
+    ) -> bool {
+        if evidence.target_c != target_c {
+            return false;
+        }
+        let Some(original) = self.candidate_profile else {
+            return false;
+        };
+        self.mutate_candidate_from_evidence(target_c, evidence);
         if self.record_fresh_proposal(Some(original)) {
             return true;
         }
@@ -1118,13 +1137,6 @@ impl ThermalTuningRuntime {
             return false;
         };
         let previous = original.points[index].unwrap();
-        let evidence = self.candidate_failure_evidence(
-            target_c,
-            overshoot,
-            hold_p2p,
-            settle_time_ms,
-            full_speed_limit_ms,
-        );
         for attempt in 0..32 {
             let Some(point) = bounded_failure_alternative(previous, evidence, attempt) else {
                 continue;
@@ -1239,12 +1251,18 @@ impl ThermalTuningRuntime {
         target_c: i16,
         score: [f64; 11],
         confirmable: bool,
+        predicted_failure_evidence: Option<TuneEvidence>,
     ) -> Result<(), ThermalTuningError> {
         let current_score = self.batch_current_score.unwrap_or(score);
         let current_confirmable = self.batch_current_confirmable;
         let predicted_wins = self.trial_purpose == ThermalTuningTrialPurpose::BatchPredicted
             && (confirmable && !current_confirmable
                 || confirmable == current_confirmable && score_precedes(&score, &current_score));
+        let selected_failure_evidence = if predicted_wins {
+            predicted_failure_evidence
+        } else {
+            self.batch_current_failure_evidence
+        };
         if !predicted_wins {
             let current = self
                 .batch_current_profile
@@ -1268,11 +1286,23 @@ impl ThermalTuningRuntime {
         self.batch_predicted_profile = None;
         self.batch_current_score = None;
         self.batch_current_confirmable = false;
+        self.batch_current_failure_evidence = None;
         let selected_confirmable = if predicted_wins {
             confirmable
         } else {
             current_confirmable
         };
+        if !selected_confirmable {
+            // Reuse only the selected profile's measured failure. Repeating
+            // this failed profile as a Scout spends heat without a new proposal.
+            let Some(evidence) = selected_failure_evidence else {
+                return self.exhaust_candidate_search(target_c);
+            };
+            if !self.prepare_fresh_failure_proposal_from_evidence(target_c, evidence) {
+                return self.exhaust_candidate_search(target_c);
+            }
+            self.seed_source = bounded_reason("selected_failure_adjustment");
+        }
         self.schedule_trial(
             if selected_confirmable {
                 ThermalTuningTrialPurpose::HoldConfirm
@@ -1287,6 +1317,7 @@ impl ThermalTuningRuntime {
         )
     }
 
+    #[cfg(test)]
     fn mutate_candidate_for_failure(
         &mut self,
         target_c: i16,
@@ -1295,6 +1326,17 @@ impl ThermalTuningRuntime {
         settle_time_ms: Option<u64>,
         full_speed_limit_ms: u32,
     ) {
+        let evidence = self.candidate_failure_evidence(
+            target_c,
+            max_overshoot_centi_c,
+            hold_peak_to_peak_centi_c,
+            settle_time_ms,
+            full_speed_limit_ms,
+        );
+        self.mutate_candidate_from_evidence(target_c, evidence);
+    }
+
+    fn mutate_candidate_from_evidence(&mut self, target_c: i16, evidence: TuneEvidence) {
         let Some(previous) = self
             .candidate_profile
             .as_ref()
@@ -1309,13 +1351,6 @@ impl ThermalTuningRuntime {
         else {
             return;
         };
-        let evidence = self.candidate_failure_evidence(
-            target_c,
-            max_overshoot_centi_c,
-            hold_peak_to_peak_centi_c,
-            settle_time_ms,
-            full_speed_limit_ms,
-        );
         let tuned = if self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm {
             reseed_after_hold_confirm(previous, evidence)
         } else {
@@ -2362,6 +2397,7 @@ impl ThermalTuningRuntime {
             self.batch_predicted_profile = None;
             self.batch_current_score = None;
             self.batch_current_confirmable = false;
+            self.batch_current_failure_evidence = None;
             self.target_started_elapsed_ms = self.current_elapsed_ms;
             let target = self.targets_c[self.target_index];
             if self
@@ -2730,6 +2766,7 @@ impl ThermalTuningRuntime {
         self.batch_predicted_profile = None;
         self.batch_current_score = None;
         self.batch_current_confirmable = false;
+        self.batch_current_failure_evidence = None;
         self.seed_source.clear();
         self.preview_update_pending = false;
         self.trace_gap = false;
@@ -4423,8 +4460,15 @@ mod tests {
             ] {
                 record_current_trial_sample(&mut runtime, elapsed_ms, phase, temperature);
             }
-            assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown, "{purpose:?}");
-            assert_eq!(runtime.trial_index, 1, "{purpose:?}");
+            if purpose == ThermalTuningTrialPurpose::BatchPredicted {
+                // This isolated deadline harness has no preceding current
+                // trial. Never substitute the losing trial's facts for it.
+                assert_eq!(runtime.phase, ThermalTuningPhase::Failed);
+                assert!(!runtime.armed);
+            } else {
+                assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown, "{purpose:?}");
+                assert_eq!(runtime.trial_index, 1, "{purpose:?}");
+            }
             let decision_event = runtime
                 .events
                 .iter()
@@ -4804,6 +4848,97 @@ mod tests {
     }
 
     #[test]
+    fn captured_failed_batch_winner_must_change_before_another_scout() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_failed_batch.fixture.json")).unwrap();
+        for predicted_wins in [true, false] {
+            let mut runtime = started_single_target_runtime();
+            let mut current = runtime.candidate_profile.unwrap();
+            let point = current.points[0].as_mut().unwrap();
+            point.brake_distance_centi_c = 1_259;
+            point.approach_damping_exponent_permille = 1_000;
+            point.approach_lead_ticks = 0;
+            point.approach_power_permille = 1_000;
+            point.approach_floor_power_permille = 50;
+            point.approach_tail_window_centi_c = 0;
+            point.hold_power_permille = 56;
+            point.hold_reheat_power_permille = 56;
+            point.hold_kp_permille_per_c = 43;
+            point.hold_ki_permille_per_c_tick = 1;
+            point.hold_blend_ticks = 2;
+            point.hold_lead_ticks = 2;
+            let mut predicted = current;
+            predicted.points[0]
+                .as_mut()
+                .unwrap()
+                .approach_damping_exponent_permille = 1_500;
+            runtime.candidate_profile = Some(current);
+            runtime.batch_current_profile = Some(current);
+            runtime.batch_predicted_profile = Some(predicted);
+            runtime.trial_purpose = ThermalTuningTrialPurpose::BatchCurrent;
+            runtime.trial_index = 4;
+            for (index, trial) in fixture["trials"].as_array().unwrap().iter().enumerate() {
+                for row in trial["samples"].as_array().unwrap() {
+                    let mut observed = sample(
+                        row[0].as_u64().unwrap(),
+                        serde_json::from_value(row[2].clone()).unwrap(),
+                        row[1].as_i64().unwrap() as i16,
+                    );
+                    observed.heater_requested_output_permille = row[3].as_u64().unwrap() as u16;
+                    observed.heater_output_permille = observed.heater_requested_output_permille;
+                    runtime.update_trial_metrics(&observed, 60);
+                }
+                let decision = &trial["decision"];
+                let mut score: [f64; 11] =
+                    serde_json::from_value(decision["score"].clone()).unwrap();
+                // Exercise the other winner's cache without changing physical
+                // observations, failure facts or either qualification result.
+                if !predicted_wins && index == 0 {
+                    score = [0.0; 11];
+                }
+                runtime
+                    .advance_after_trial(
+                        60,
+                        TrialEvaluation {
+                            score,
+                            passes: false,
+                            warmup_full: true,
+                            max_overshoot_centi_c: Some(
+                                decision["maxOvershootCentiC"].as_u64().unwrap() as u16,
+                            ),
+                            hold_peak_to_peak_centi_c: Some(
+                                decision["holdPeakToPeakCentiC"].as_u64().unwrap() as u16,
+                            ),
+                            settle_time_ms: None,
+                            full_speed_limit_ms: 10_000,
+                        },
+                    )
+                    .unwrap();
+            }
+            let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+            assert_eq!(runtime.trial_purpose, ThermalTuningTrialPurpose::Scout);
+            assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+            assert_eq!(runtime.accepted_target_mask, 0);
+            if predicted_wins {
+                assert_eq!(next.approach_damping_exponent_permille, 2_000);
+                assert_eq!(next.brake_distance_centi_c, 1_259);
+            } else {
+                // The current trial has a different, larger measured excursion;
+                // its own feedback selects braking, not the predicted damping.
+                assert_eq!(next.approach_damping_exponent_permille, 1_000);
+                assert_eq!(next.brake_distance_centi_c, 1_559);
+            }
+            assert_eq!(next.hold_power_permille, 56);
+            assert_eq!(next.hold_reheat_power_permille, 56);
+            assert!(runtime.preview_update_pending);
+            assert!(runtime.preview_receipt.is_none());
+            assert_eq!(runtime.trial_index, 6);
+            assert!(runtime.batch_current_failure_evidence.is_none());
+            assert!(runtime.batch_current_profile.is_none());
+        }
+    }
+
+    #[test]
     fn candidate_scores_rank_lexicographically() {
         let mut current = [0.0; 11];
         let mut predicted = [0.0; 11];
@@ -5025,6 +5160,18 @@ mod tests {
         }
         let facts = runtime.candidate_failure_evidence(60, Some(576), Some(616), None, 10_000);
         assert!(facts.hold_entry_pulse_only);
+        let higher_approach = TuneEvidence {
+            approach_floor_only: false,
+            approach_output_range: Some((50, 700)),
+            ..facts
+        };
+        assert_eq!(
+            tune_point(previous, higher_approach),
+            ThermalControlProfilePointConfig {
+                approach_damping_exponent_permille: 2_000,
+                ..previous
+            }
+        );
         let proposed = tune_point(previous, facts);
         assert_eq!(
             proposed,
