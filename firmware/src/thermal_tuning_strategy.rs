@@ -30,6 +30,7 @@ pub(crate) struct TuneEvidence {
     pub hold_p90_output_permille: Option<u16>,
     pub approach_median_output_permille: Option<u16>,
     pub approach_floor_only: bool,
+    pub approach_output_range: Option<(u16, u16)>,
     pub approach_median_slope_c_per_s: Option<f64>,
     pub curve_class: CurveClass,
     pub first_hold_after_warmup_ms: Option<u64>,
@@ -77,6 +78,9 @@ pub(crate) fn tune_point(
 ) -> ThermalControlProfilePointConfig {
     if !evidence.tunable_stop {
         return previous;
+    }
+    if let Some(braked) = low_power_coasting_candidate(previous, evidence) {
+        return braked;
     }
     if let Some(damped) = coasting_high_side_candidate(previous, evidence) {
         return damped;
@@ -139,6 +143,9 @@ pub(crate) fn bounded_failure_alternative(
     let high = matches!(failure, GateFailure::BrokeHigh | GateFailure::MissedHigh)
         || evidence.overshoot_c > 3.0;
     let low = !high && matches!(failure, GateFailure::BrokeLow | GateFailure::MissedLow);
+    if high && low_power_coasting_evidence(evidence) {
+        return earlier_braking_candidate(previous, 40 * (attempt + 1));
+    }
     if !high && !low {
         return None;
     }
@@ -273,6 +280,41 @@ fn coasting_high_side_candidate(
         .saturating_add(step)
         .min(4_000);
     (point != previous).then_some(point)
+}
+
+fn low_power_coasting_candidate(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> Option<ThermalControlProfilePointConfig> {
+    if !low_power_coasting_evidence(evidence) {
+        return None;
+    }
+    // A small above-floor pulse is not floor-only evidence. Nevertheless,
+    // completely unpowered Hold with a large residual rise requires removal
+    // of stored Warmup heat before tuning an already almost-minimal Approach.
+    // Correct the measured excess toward the middle of the stable band.
+    let step = round_positive((evidence.overshoot_c - 0.75).max(0.4) * 100.0).clamp(40, 500);
+    Some(earlier_braking_candidate(previous, step).unwrap_or(previous))
+}
+
+fn low_power_coasting_evidence(evidence: TuneEvidence) -> bool {
+    if !evidence.tunable_stop
+        || evidence.target_c > 150
+        || !evidence.full_speed_failed
+        || evidence.stable_window_verified
+        || !evidence.first_band_observed
+        || evidence.hold_sample_count < 3
+        || evidence.hold_off_sample_count != evidence.hold_sample_count
+        || evidence.first_band_exit_centi_c.is_none_or(|temperature| {
+            i32::from(temperature) <= i32::from(evidence.target_c) * 100 + 150
+        })
+        || !evidence.approach_output_range.is_some_and(|(min, max)| {
+            min >= crate::thermal_plant::APPROACH_MIN_PERMILLE && max <= 100
+        })
+    {
+        return false;
+    }
+    true
 }
 
 fn earlier_braking_candidate(
@@ -428,6 +470,9 @@ pub(crate) fn reseed_after_hold_confirm(
 ) -> ThermalControlProfilePointConfig {
     if !evidence.tunable_stop {
         return previous;
+    }
+    if let Some(braked) = low_power_coasting_candidate(previous, evidence) {
+        return braked;
     }
     if let Some(damped) = coasting_high_side_candidate(previous, evidence) {
         return damped;
@@ -2031,6 +2076,7 @@ mod tests {
             hold_p90_output_permille: None,
             approach_median_output_permille: None,
             approach_floor_only: false,
+            approach_output_range: None,
             approach_median_slope_c_per_s: None,
             curve_class: CurveClass::Insufficient,
             first_hold_after_warmup_ms: None,

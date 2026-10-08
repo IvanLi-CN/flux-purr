@@ -451,6 +451,7 @@ pub struct ThermalTuningRuntime {
     approach_output_count: u32,
     model_approach_sample_count: u32,
     model_approach_floor_only: bool,
+    model_approach_output_range: Option<(u16, u16)>,
     approach_slopes_c_per_s: Vec<f64, THERMAL_TUNING_APPROACH_TRACE_CAPACITY>,
     near_target_evidence_overflow: bool,
     previous_sample_at_ms: Option<u64>,
@@ -556,6 +557,7 @@ impl ThermalTuningRuntime {
             approach_output_count: 0,
             model_approach_sample_count: 0,
             model_approach_floor_only: true,
+            model_approach_output_range: None,
             approach_slopes_c_per_s: Vec::new(),
             near_target_evidence_overflow: false,
             previous_sample_at_ms: None,
@@ -1404,6 +1406,9 @@ impl ThermalTuningRuntime {
             ),
             approach_floor_only: self.model_approach_sample_count >= 3
                 && self.model_approach_floor_only,
+            approach_output_range: (self.model_approach_sample_count >= 3)
+                .then_some(self.model_approach_output_range)
+                .flatten(),
             approach_median_slope_c_per_s: slopes.get(slope_index).copied(),
             curve_class: self.strategy_curve_class(target_c),
             first_hold_after_warmup_ms: self
@@ -1480,6 +1485,7 @@ impl ThermalTuningRuntime {
         self.approach_output_count = 0;
         self.model_approach_sample_count = 0;
         self.model_approach_floor_only = true;
+        self.model_approach_output_range = None;
         self.approach_slopes_c_per_s.clear();
         self.near_target_evidence_overflow = false;
         self.previous_sample_at_ms = None;
@@ -1818,6 +1824,13 @@ impl ThermalTuningRuntime {
                     self.model_approach_sample_count.saturating_add(1);
                 self.model_approach_floor_only &= sample.heater_requested_output_permille
                     == crate::thermal_plant::APPROACH_MIN_PERMILLE;
+                let requested = sample.heater_requested_output_permille;
+                self.model_approach_output_range = Some(
+                    self.model_approach_output_range
+                        .map_or((requested, requested), |(min, max)| {
+                            (min.min(requested), max.max(requested))
+                        }),
+                );
                 self.saw_approach = true;
                 self.warmup_exited_at_ms.get_or_insert(sample.elapsed_ms);
             }
@@ -4868,6 +4881,74 @@ mod tests {
             scores.push(score);
         }
         assert!(score_precedes(&scores[1], &scores[0]));
+    }
+
+    #[test]
+    fn captured_eight_target_a60_coast_corrects_warmup_energy_first() {
+        // firmware-pps5a-1791463860752, trial 0: Approach requests only
+        // 50/70 permille, followed by a completely unpowered Hold rising
+        // from 60.21 to 66.05 C. Reducing Approach damping alone cannot
+        // remove the heat already deposited during Warmup.
+        let mut runtime = started_single_target_runtime();
+        let mut profile = runtime.candidate_profile.unwrap();
+        let point = profile.points[0].as_mut().unwrap();
+        point.brake_distance_centi_c = 780;
+        point.approach_damping_exponent_permille = 1_000;
+        point.approach_lead_ticks = 0;
+        point.approach_power_permille = 1_000;
+        point.approach_floor_power_permille = 50;
+        point.approach_tail_window_centi_c = 0;
+        point.hold_power_permille = 56;
+        point.hold_reheat_power_permille = 56;
+        point.hold_kp_permille_per_c = 43;
+        point.hold_ki_permille_per_c_tick = 1;
+        point.hold_blend_ticks = 2;
+        point.hold_lead_ticks = 2;
+        let previous = *point;
+        runtime.candidate_profile = Some(profile);
+        for (elapsed, temperature, phase, requested) in [
+            (17_504, 5_251, ThermalTuningPhase::Approach, 50),
+            (19_281, 5_750, ThermalTuningPhase::Approach, 50),
+            (19_517, 5_813, ThermalTuningPhase::Approach, 70),
+            (19_719, 5_834, ThermalTuningPhase::Approach, 70),
+            (19_946, 5_851, ThermalTuningPhase::Approach, 50),
+            (20_870, 5_992, ThermalTuningPhase::Approach, 50),
+            (20_931, 6_021, ThermalTuningPhase::Hold, 0),
+            (21_219, 6_080, ThermalTuningPhase::Hold, 0),
+            (22_419, 6_172, ThermalTuningPhase::Hold, 0),
+            (27_049, 6_605, ThermalTuningPhase::Hold, 0),
+        ] {
+            let mut observed = sample(elapsed, phase, temperature);
+            observed.heater_requested_output_permille = requested;
+            observed.heater_output_permille = requested;
+            runtime.update_trial_metrics(&observed, 60);
+        }
+        let facts = runtime.candidate_failure_evidence(60, Some(605), Some(585), None, 10_000);
+        assert!(!facts.approach_floor_only);
+        assert_eq!(facts.approach_output_range, Some((50, 70)));
+        assert_eq!(facts.hold_off_sample_count, facts.hold_sample_count);
+        let proposed = tune_point(previous, facts);
+        assert!(
+            proposed.brake_distance_centi_c > previous.brake_distance_centi_c,
+            "coasting after low Approach power must reduce stored Warmup energy: {proposed:?}"
+        );
+        assert_eq!(proposed.brake_distance_centi_c, 1_280);
+        assert_eq!(
+            proposed,
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 1_280,
+                ..previous
+            }
+        );
+        assert_eq!(reseed_after_hold_confirm(previous, facts), proposed);
+        let mut heated = facts;
+        heated.approach_output_range = Some((50, 1_000));
+        assert_ne!(tune_point(previous, heated), proposed);
+        let mut protected = facts;
+        protected.approach_output_range = Some((0, 70));
+        assert_ne!(tune_point(previous, protected), proposed);
+        runtime.reset_trial_metrics();
+        assert!(runtime.model_approach_output_range.is_none());
     }
 
     #[test]
