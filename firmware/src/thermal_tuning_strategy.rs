@@ -22,6 +22,7 @@ pub(crate) struct TuneEvidence {
     pub hold_sample_count: u32,
     pub hold_off_sample_count: u32,
     pub hold_entry_output_permille: Option<u16>,
+    pub hold_entry_pulse_only: bool,
     pub hold_threshold_crossed: bool,
     pub hold_mean_error_c: Option<f64>,
     pub hold_max_below_c: Option<f64>,
@@ -290,7 +291,7 @@ fn low_power_coasting_candidate(
         return None;
     }
     // A small above-floor pulse is not floor-only evidence. Nevertheless,
-    // completely unpowered Hold with a large residual rise requires removal
+    // almost unpowered Hold with a large residual rise requires removal
     // of stored Warmup heat before tuning an already almost-minimal Approach.
     // Correct the measured excess toward the middle of the stable band.
     let step = round_positive((evidence.overshoot_c - 0.75).max(0.4) * 100.0).clamp(40, 500);
@@ -304,7 +305,10 @@ fn low_power_coasting_evidence(evidence: TuneEvidence) -> bool {
         || evidence.stable_window_verified
         || !evidence.first_band_observed
         || evidence.hold_sample_count < 3
-        || evidence.hold_off_sample_count != evidence.hold_sample_count
+        || !(evidence.hold_off_sample_count == evidence.hold_sample_count
+            || (evidence.hold_entry_pulse_only
+                && evidence.hold_off_sample_count.saturating_mul(10)
+                    >= evidence.hold_sample_count.saturating_mul(9)))
         || evidence.first_band_exit_centi_c.is_none_or(|temperature| {
             i32::from(temperature) <= i32::from(evidence.target_c) * 100 + 150
         })
@@ -2068,6 +2072,7 @@ mod tests {
             hold_sample_count: 0,
             hold_off_sample_count: 0,
             hold_entry_output_permille: None,
+            hold_entry_pulse_only: false,
             hold_threshold_crossed: false,
             hold_mean_error_c: None,
             hold_max_below_c: None,

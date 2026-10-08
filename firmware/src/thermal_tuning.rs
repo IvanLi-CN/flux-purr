@@ -447,6 +447,7 @@ pub struct ThermalTuningRuntime {
     hold_output_histogram: [u16; 1001],
     hold_output_count: u32,
     hold_entry_output_permille: Option<u16>,
+    hold_entry_pulse_only: bool,
     approach_output_histogram: [u16; 1001],
     approach_output_count: u32,
     model_approach_sample_count: u32,
@@ -553,6 +554,7 @@ impl ThermalTuningRuntime {
             hold_output_histogram: [0; 1001],
             hold_output_count: 0,
             hold_entry_output_permille: None,
+            hold_entry_pulse_only: true,
             approach_output_histogram: [0; 1001],
             approach_output_count: 0,
             model_approach_sample_count: 0,
@@ -1391,6 +1393,7 @@ impl ThermalTuningRuntime {
             hold_sample_count: self.hold_output_count,
             hold_off_sample_count: u32::from(self.hold_output_histogram[0]),
             hold_entry_output_permille: self.hold_entry_output_permille,
+            hold_entry_pulse_only: self.hold_entry_pulse_only,
             hold_threshold_crossed: self.hold_threshold_crossed,
             hold_mean_error_c,
             hold_max_below_c: self.min_controller_hold_temperature_centi_c.map(|minimum| {
@@ -1481,6 +1484,7 @@ impl ThermalTuningRuntime {
         self.hold_output_histogram = [0; 1001];
         self.hold_output_count = 0;
         self.hold_entry_output_permille = None;
+        self.hold_entry_pulse_only = true;
         self.approach_output_histogram = [0; 1001];
         self.approach_output_count = 0;
         self.model_approach_sample_count = 0;
@@ -1864,6 +1868,13 @@ impl ThermalTuningRuntime {
             // request. PPS voltage compensation must not alter that domain.
             let output = usize::from(sample.heater_requested_output_permille).min(1_000);
             self.hold_entry_output_permille.get_or_insert(output as u16);
+            if output > 0 {
+                self.hold_entry_pulse_only &= output <= 100
+                    && sample.phase == ThermalTuningPhase::Hold
+                    && self
+                        .first_controller_hold_elapsed_ms
+                        .is_some_and(|entry| sample.elapsed_ms.saturating_sub(entry) <= 250);
+            }
             self.hold_output_histogram[output] =
                 self.hold_output_histogram[output].saturating_add(1);
             self.hold_output_count = self.hold_output_count.saturating_add(1);
@@ -4914,7 +4925,7 @@ mod tests {
             (19_946, 5_851, ThermalTuningPhase::Approach, 50),
             (20_870, 5_992, ThermalTuningPhase::Approach, 50),
             (20_931, 6_021, ThermalTuningPhase::Hold, 0),
-            (21_219, 6_080, ThermalTuningPhase::Hold, 0),
+            (21_267, 6_080, ThermalTuningPhase::Hold, 0),
             (22_419, 6_172, ThermalTuningPhase::Hold, 0),
             (27_049, 6_605, ThermalTuningPhase::Hold, 0),
         ] {
@@ -4949,6 +4960,86 @@ mod tests {
         assert_ne!(tune_point(previous, protected), proposed);
         runtime.reset_trial_metrics();
         assert!(runtime.model_approach_output_range.is_none());
+    }
+
+    #[test]
+    fn captured_a60_brief_hold_entry_power_still_corrects_warmup_energy() {
+        // firmware-pps5a-1791468629135 trial 0: two 6% readings 60 ms
+        // apart at Hold entry, then no power throughout the residual rise.
+        let mut runtime = started_single_target_runtime();
+        let mut profile = runtime.candidate_profile.unwrap();
+        let point = profile.points[0].as_mut().unwrap();
+        point.brake_distance_centi_c = 780;
+        point.approach_damping_exponent_permille = 1_000;
+        point.approach_power_permille = 1_000;
+        point.approach_floor_power_permille = 50;
+        point.approach_tail_window_centi_c = 0;
+        point.hold_power_permille = 56;
+        point.hold_reheat_power_permille = 56;
+        point.hold_kp_permille_per_c = 43;
+        point.hold_ki_permille_per_c_tick = 1;
+        point.hold_blend_ticks = 2;
+        point.hold_lead_ticks = 2;
+        let previous = *point;
+        runtime.candidate_profile = Some(profile);
+        for (elapsed, temperature, phase, requested) in [
+            (17_742, 5_223, ThermalTuningPhase::Approach, 50),
+            (19_430, 5_733, ThermalTuningPhase::Approach, 50),
+            (20_735, 5_945, ThermalTuningPhase::Approach, 50),
+            (20_798, 5_963, ThermalTuningPhase::Hold, 60),
+            (20_858, 5_960, ThermalTuningPhase::Hold, 60),
+            (21_123, 6_009, ThermalTuningPhase::Hold, 0),
+            (21_323, 6_071, ThermalTuningPhase::Hold, 0),
+            (21_576, 6_106, ThermalTuningPhase::Hold, 0),
+            (21_782, 6_124, ThermalTuningPhase::Hold, 0),
+            (22_031, 6_144, ThermalTuningPhase::Hold, 0),
+            (22_286, 6_181, ThermalTuningPhase::Hold, 0),
+            (22_521, 6_192, ThermalTuningPhase::Hold, 0),
+            (22_774, 6_206, ThermalTuningPhase::Hold, 0),
+            (22_982, 6_224, ThermalTuningPhase::Hold, 0),
+            (23_234, 6_245, ThermalTuningPhase::Hold, 0),
+            (23_446, 6_283, ThermalTuningPhase::Hold, 0),
+            (23_698, 6_321, ThermalTuningPhase::Hold, 0),
+            (23_915, 6_341, ThermalTuningPhase::Hold, 0),
+            (24_153, 6_331, ThermalTuningPhase::Hold, 0),
+            (24_365, 6_409, ThermalTuningPhase::Hold, 0),
+            (24_617, 6_429, ThermalTuningPhase::Hold, 0),
+            (24_871, 6_442, ThermalTuningPhase::Hold, 0),
+            (25_133, 6_461, ThermalTuningPhase::Hold, 0),
+            (25_395, 6_475, ThermalTuningPhase::Hold, 0),
+            (25_647, 6_506, ThermalTuningPhase::Hold, 0),
+            (25_913, 6_496, ThermalTuningPhase::Hold, 0),
+            (26_114, 6_533, ThermalTuningPhase::Hold, 0),
+            (26_378, 6_560, ThermalTuningPhase::Hold, 0),
+            (26_631, 6_546, ThermalTuningPhase::Hold, 0),
+            (26_844, 6_553, ThermalTuningPhase::Hold, 0),
+            (27_098, 6_572, ThermalTuningPhase::Hold, 0),
+            (27_307, 6_564, ThermalTuningPhase::Hold, 0),
+            (27_507, 6_552, ThermalTuningPhase::Hold, 0),
+            (27_771, 6_576, ThermalTuningPhase::Hold, 0),
+        ] {
+            let mut observed = sample(elapsed, phase, temperature);
+            observed.heater_requested_output_permille = requested;
+            observed.heater_output_permille = requested;
+            runtime.update_trial_metrics(&observed, 60);
+        }
+        let facts = runtime.candidate_failure_evidence(60, Some(576), Some(616), None, 10_000);
+        assert!(facts.hold_entry_pulse_only);
+        let proposed = tune_point(previous, facts);
+        assert_eq!(
+            proposed,
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 1_280,
+                ..previous
+            }
+        );
+        let mut later_reheat = sample(28_000, ThermalTuningPhase::Hold, 6_570);
+        later_reheat.heater_requested_output_permille = 60;
+        later_reheat.heater_output_permille = 60;
+        runtime.update_trial_metrics(&later_reheat, 60);
+        let reheated = runtime.candidate_failure_evidence(60, Some(576), Some(616), None, 10_000);
+        assert!(!reheated.hold_entry_pulse_only);
+        assert_ne!(tune_point(previous, reheated), proposed);
     }
 
     #[test]
