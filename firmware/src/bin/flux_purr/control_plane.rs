@@ -1230,8 +1230,14 @@ pub(crate) fn record_thermal_plant_transient_sample(
         return false;
     }
     let elapsed_ticks = job.elapsed_ticks.min(u32::from(u16::MAX)) as u16;
+    // Reserve trace capacity for the cutoff response, not just startup. A
+    // temperature-only trigger omits the flat peak that identifies delay.
+    let cutoff_time_sample = job.phase == ThermalPlantAutoPhase::Cooling
+        && job.elapsed_ticks.saturating_sub(job.phase_started_tick) <= 200
+        && elapsed_ticks.saturating_sub(job.last_saved_tick) >= 10;
     let should_record = force
-        || job.sample_count < 24
+        || job.sample_count < 16
+        || cutoff_time_sample
         || job
             .samples
             .get(usize::from(job.sample_count).saturating_sub(1))

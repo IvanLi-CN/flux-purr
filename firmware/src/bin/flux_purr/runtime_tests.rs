@@ -6154,6 +6154,59 @@ fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
 }
 
 #[test]
+fn transient_cutoff_keeps_time_samples_when_temperature_has_not_moved_four_degrees() {
+    let mut job = CalibrationThermalPlantAutoJob {
+        run_id: 1,
+        phase: ThermalPlantAutoPhase::Cooling,
+        source_max_mv: 21_000,
+        source_current_ma: 5_000,
+        ambient_raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(30.0),
+        idle_samples: THERMAL_PLANT_AMBIENT_TICKS,
+        heater_curve: ThermalPlantCurveSampler::default(),
+        elapsed_ticks: 1_001,
+        phase_started_tick: 1_000,
+        sample_count: 68,
+        last_saved_temp_c: 220.0,
+        last_saved_tick: 1_000,
+        samples: [ThermalPlantTransientSample {
+            elapsed_ticks: 0,
+            raw_rtd_adc_mv: 0,
+            heater_voltage_125mv: 0,
+            duty_percent: 0,
+        }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    };
+    job.samples[67] = ThermalPlantTransientSample {
+        elapsed_ticks: 1_000,
+        raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(220.0),
+        heater_voltage_125mv: 168,
+        duty_percent: 100,
+    };
+    for tick in 1_001..=1_220 {
+        job.elapsed_ticks = tick;
+        // A slow post-cut peak remains invisible to the old 4C recorder.
+        let temperature = 220.0 + ((tick - 1_001) as f32 * 0.005).min(0.8);
+        assert!(record_thermal_plant_transient_sample(
+            &mut job,
+            runtime_test_raw_rtd_adc_mv_for_temp(temperature),
+            temperature,
+            21_000,
+            0,
+            false,
+        ));
+    }
+    let cutoff = &job.samples[68..usize::from(job.sample_count)];
+    assert_eq!(cutoff.first().unwrap().elapsed_ticks, 1_001);
+    assert!(cutoff.len() >= 20, "post-cut samples={}", cutoff.len());
+    assert!(
+        cutoff
+            .windows(2)
+            .all(|pair| pair[1].elapsed_ticks - pair[0].elapsed_ticks <= 10)
+    );
+    assert!(cutoff.last().unwrap().elapsed_ticks <= 1_200);
+    assert!(job.sample_count < THERMAL_PLANT_TRANSIENT_MAX_SAMPLES as u8);
+}
+
+#[test]
 fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
     fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
         let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
@@ -6259,6 +6312,32 @@ fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
         assert!(!manual_pps.enabled);
         assert!(memory_config.thermal_plant_transient_active.is_some());
         assert!(has_calibrated_heater_resistance_curve(&memory_config));
+        let transaction = memory_config
+            .thermal_plant_transient_active
+            .as_ref()
+            .unwrap();
+        let model = thermal_plant_projection_from_transient(transaction).unwrap();
+        assert!(
+            model.transport_delay_ms <= 500,
+            "zero-delay auto calibration fitted {}ms, class={source_current_ma}",
+            model.transport_delay_ms
+        );
+        let cutoff = transaction.samples[..usize::from(transaction.sample_count)]
+            .windows(2)
+            .position(|pair| pair[0].duty_percent > 0 && pair[1].duty_percent == 0)
+            .unwrap()
+            + 1;
+        let cutoff_tick = transaction.samples[cutoff].elapsed_ticks;
+        let response = transaction.samples[cutoff..usize::from(transaction.sample_count)]
+            .iter()
+            .take_while(|sample| sample.elapsed_ticks - cutoff_tick <= 190)
+            .collect::<Vec<_>>();
+        assert!(response.len() >= 19);
+        assert!(
+            response
+                .windows(2)
+                .all(|pair| pair[1].elapsed_ticks - pair[0].elapsed_ticks <= 10)
+        );
     }
 }
 
