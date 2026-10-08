@@ -1231,19 +1231,19 @@ pub(crate) struct ThermalFlagshipTuneArgs {
     pub(crate) runtime_rearm_attempts: u8,
     #[arg(
         long = "anchor-targets-c",
-        default_value = "60,80,100,120,140,160,180,220,240",
+        default_value = "60,80,100,120,140,160,180,220",
         help = "Deprecated legacy flag. Canonical 5A full-batch tuning now uses a single same-grade target set."
     )]
     pub(crate) anchor_targets_c: String,
     #[arg(
         long = "validation-targets-c",
-        default_value = "60,80,100,120,140,160,180,220,240",
+        default_value = "60,80,100,120,140,160,180,220",
         help = "Deprecated legacy flag. Canonical 5A full-batch tuning no longer runs a separate validation tier."
     )]
     pub(crate) validation_targets_c: String,
     #[arg(
         long = "tune-targets-c",
-        default_value = "60,80,100,120,140,160,180,220,240",
+        default_value = "60,80,100,120,140,160,180,220",
         help = "Comma-separated tuning targets. Firmware subsets are diagnostic-only and cannot qualify or be saved."
     )]
     pub(crate) tune_targets_c: String,

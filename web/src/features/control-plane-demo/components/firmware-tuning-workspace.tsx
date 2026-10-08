@@ -3,18 +3,18 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import type { ThermalTuningCommand, ThermalTuningEvent, ThermalTuningStatus } from '../contracts'
 import {
+  loadThermalTuningRecording,
+  persistThermalTuningRecording,
+} from '../thermal-tuning-browser-journal'
+import {
   nextTuningReadCommand,
   recordThermalTuningPage,
   type ThermalTuningRecording,
 } from '../thermal-tuning-recorder'
-import {
-  loadThermalTuningRecording,
-  persistThermalTuningRecording,
-} from '../thermal-tuning-browser-journal'
 import { exportThermalTuningV2 } from '../thermal-tuning-v2-export'
 import './firmware-tuning-workspace.css'
 
-const EXECUTION_ORDER = [60, 240, 140, 100, 80, 120, 180, 160, 220]
+const EXECUTION_ORDER = [60, 220, 120, 80, 100, 160, 140, 180]
 const SETTINGS_FIELDS = [
   'tempFilterAlphaPermille',
   'warmupReenterCentiC',
@@ -112,9 +112,11 @@ export function FirmwareTuningWorkspace({
         if (cancelled) return
         setError(messageOf(failure))
         if (supported) {
-          void readStatusRef.current()
+          void readStatusRef
+            .current()
             .then((current) => {
-              if (current.armed) return sendCommandRef.current({ op: 'cancel', runId: current.runId ?? undefined })
+              if (current.armed)
+                return sendCommandRef.current({ op: 'cancel', runId: current.runId ?? undefined })
             })
             .catch(() => {})
         }
@@ -146,7 +148,14 @@ export function FirmwareTuningWorkspace({
   )
 
   useEffect(() => {
-    if (!supported || !journalReady || pending || recording?.gap || (recording?.complete && identityVerified)) return
+    if (
+      !supported ||
+      !journalReady ||
+      pending ||
+      recording?.gap ||
+      (recording?.complete && identityVerified)
+    )
+      return
     let cancelled = false
     const timer = window.setTimeout(
       async () => {
@@ -173,7 +182,18 @@ export function FirmwareTuningWorkspace({
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [armed, identityVerified, journalReady, pending, pollAttempt, readStatus, recordStatus, recording, sendCommand, supported])
+  }, [
+    armed,
+    identityVerified,
+    journalReady,
+    pending,
+    pollAttempt,
+    readStatus,
+    recordStatus,
+    recording,
+    sendCommand,
+    supported,
+  ])
 
   useEffect(() => {
     if (!recording?.gap || !recording.status.armed || !recording.runId) return
@@ -250,7 +270,8 @@ export function FirmwareTuningWorkspace({
     candidateHash: status?.candidateHash ?? undefined,
     powerClass: status?.powerClass ?? undefined,
   }
-  const canSeal = identityVerified && terminal === 'candidate_ready' && recording?.complete && !status?.sealed
+  const canSeal =
+    identityVerified && terminal === 'candidate_ready' && recording?.complete && !status?.sealed
   const canSave =
     identityVerified &&
     terminal === 'candidate_ready' &&
@@ -289,7 +310,15 @@ export function FirmwareTuningWorkspace({
         </span>
         <Button
           type="button"
-          disabled={!supported || !journalReady || !identityVerified || !candidate || armed || terminal === 'candidate_ready' || pending}
+          disabled={
+            !supported ||
+            !journalReady ||
+            !identityVerified ||
+            !candidate ||
+            armed ||
+            terminal === 'candidate_ready' ||
+            pending
+          }
           onClick={start}
         >
           {pending ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : null}
@@ -442,7 +471,7 @@ export async function validateCandidate(value: unknown, name: string): Promise<I
       populatedPoints.some((point) => point?.targetTempC === target)
     )
   ) {
-    throw new Error('候选必须覆盖完整九目标 PPS 5A 范围。')
+    throw new Error('候选必须覆盖完整八目标 PPS 5A 范围。')
   }
   const values = [
     ...SETTINGS_FIELDS.map((field) => settings[field]),

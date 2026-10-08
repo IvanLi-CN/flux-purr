@@ -29,7 +29,7 @@ use super::{
     thermal_tuning_v2_report::{self, ThermalTuningV2ReportInput},
 };
 
-const FIRMWARE_PHYSICAL_TARGETS_C: &str = "60,80,100,120,140,160,180,220,240";
+const FIRMWARE_PHYSICAL_TARGETS_C: &str = "60,80,100,120,140,160,180,220";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
 const RUNTIME_AUDIT_INTERVAL: Duration = Duration::from_secs(5);
@@ -1647,7 +1647,7 @@ fn validate_firmware_args(
     let requested = parse_thermal_targets(Some(&args.tune_targets_c))?;
     let expected = parse_thermal_targets(Some(FIRMWARE_PHYSICAL_TARGETS_C))?;
     if requested.iter().any(|target| !expected.contains(target)) {
-        return Err("firmware engine targets must belong to the PPS 5A target set".into());
+        return Err("firmware engine targets must belong to the eight-target tuning set".into());
     }
     Ok(requested)
 }
@@ -3016,7 +3016,7 @@ mod tests {
 
     #[test]
     fn explicit_save_requires_verified_candidate_and_matching_preview_receipt() {
-        let physical = [60, 80, 100, 120, 140, 160, 180, 220, 240];
+        let physical = [60, 80, 100, 120, 140, 160, 180, 220];
         let runs = physical
             .iter()
             .map(|target| json!({
@@ -3053,7 +3053,7 @@ mod tests {
             "targetSet": {
                 "physicalC": physical,
                 "selectedC": physical,
-                "executionOrderC": [60, 240, 140, 100, 80, 120, 180, 160, 220]
+                "executionOrderC": [60, 220, 120, 80, 100, 160, 140, 180]
             },
             "qualificationScope": {"kind": "default-pps5a-full-batch", "diagnosticOnly": false},
             "reportRuns": runs,
@@ -3155,20 +3155,20 @@ mod tests {
             "candidate-1",
             "hash-1",
             &json!({}),
-            &selected_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220, 240]),
+            &selected_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220]),
         );
         assert_eq!(
             command["targetsC"],
-            json!([60, 240, 140, 100, 80, 120, 180, 160, 220])
+            json!([60, 220, 120, 80, 100, 160, 140, 180])
         );
         assert_eq!(command["candidateProfile"]["bank"], "pps5a");
     }
 
     #[test]
     fn firmware_diagnostic_subset_preserves_device_order() {
-        let selected = [60, 100, 240];
+        let selected = [60, 100, 220];
         let order = selected_execution_order(&selected);
-        assert_eq!(order, [60, 240, 100]);
+        assert_eq!(order, [60, 220, 100]);
         let command = firmware_start_command(
             "pps3a",
             "run-1",
@@ -3177,7 +3177,7 @@ mod tests {
             &json!({}),
             &order,
         );
-        assert_eq!(command["targetsC"], json!([60, 240, 100]));
+        assert_eq!(command["targetsC"], json!([60, 220, 100]));
         assert_eq!(command["powerClass"], "pps3a");
         assert_eq!(command["candidateProfile"]["bank"], "pps3a");
     }
@@ -3185,7 +3185,7 @@ mod tests {
     #[test]
     fn firmware_host_watchdog_covers_the_device_budget_per_selected_target() {
         assert_eq!(firmware_host_watchdog(1).as_secs(), 21 * 60);
-        assert_eq!(firmware_host_watchdog(9).as_secs(), 9 * 20 * 60 + 60);
+        assert_eq!(firmware_host_watchdog(8).as_secs(), 8 * 20 * 60 + 60);
     }
 
     #[test]
@@ -3263,14 +3263,14 @@ mod tests {
         };
         let Command::Thermal {
             command: ThermalCommand::Tune(selected),
-        } = parse("60,240").command
+        } = parse("60,220").command
         else {
             panic!("expected thermal tune command");
         };
-        assert_eq!(validate_firmware_args(&selected).unwrap(), [60, 240]);
+        assert_eq!(validate_firmware_args(&selected).unwrap(), [60, 220]);
         let Command::Thermal {
             command: ThermalCommand::Tune(unsupported),
-        } = parse("60,200").command
+        } = parse("60,240").command
         else {
             panic!("expected thermal tune command");
         };
@@ -3516,7 +3516,7 @@ mod tests {
                 })
             }))
             .route("/api/v1/devices/bench/status", get(|| async {
-                Json(json!({"thermalProfileMode": "100w", "thermalProfileResolvedBank": "pps5a",
+                Json(json!({"thermalProfileMode": "100w", "thermalProfileResolvedBank": "pps5a", "manualPpsEnabled": false,
                     "currentTempC": 43.5, "heaterPhysicalOutputPercent": 0,
                     "fanEnabled": true, "fanOutputLevel": "high", "fanPwmPermille": 0}))
             }))
@@ -3859,7 +3859,7 @@ mod tests {
             .filter_map(|point| point.get("targetTempC").and_then(serde_json::Value::as_i64))
             .map(|target| target as i16)
             .collect();
-        assert_eq!(targets, vec![60, 80, 100, 120, 140, 160, 180, 220, 240]);
+        assert_eq!(targets, vec![60, 80, 100, 120, 140, 160, 180, 220]);
         assert_eq!(profile["points"].as_array().unwrap().len(), 10);
         assert!(super::firmware_candidate_profile_hash(&profile).is_ok());
     }

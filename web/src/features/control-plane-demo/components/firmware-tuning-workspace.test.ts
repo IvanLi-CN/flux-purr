@@ -66,13 +66,13 @@ describe('firmware tuning workspace', () => {
       'holdLeadTicks',
     ]
     const settings = Object.fromEntries(settingsFields.map((field) => [field, 1]))
-    const points = [60, 240, 140, 100, 80, 120, 180, 160, 220].map((targetTempC) => ({
+    const points = [60, 220, 120, 80, 100, 160, 140, 180].map((targetTempC) => ({
       ...Object.fromEntries(pointFields.map((field) => [field, 1])),
       targetTempC,
     }))
     const value = {
       powerClass: 'pps5a',
-      candidateHash: 'sha256:841b20a8fec5278e37558f158496b234c89a2aca65f4393eb1a40fb4f6e40141',
+      candidateHash: 'sha256:896e40c0087904f10eee7db9ddacad5e391cfaf5915923aacf27f83f3ddefe53',
       profile: { bank: 'pps5a', value: { settings, points } },
     }
     await expect(validateCandidate(value, 'candidate.json')).resolves.toMatchObject({
@@ -87,6 +87,6 @@ describe('firmware tuning workspace', () => {
     ).rejects.toThrow('hash')
     await expect(
       validateCandidate({ ...value, profile: { value: { settings, points: [] } } }, 'empty.json')
-    ).rejects.toThrow('九目标')
+    ).rejects.toThrow('八目标')
   })
 })

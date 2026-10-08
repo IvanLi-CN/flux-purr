@@ -3118,12 +3118,9 @@ fn parses_thermal_tune_command() {
     assert_eq!(args.per_target_budget_seconds, 600);
     assert_eq!(args.max_tuning_rounds, Some(1));
     assert_eq!(args.runtime_rearm_attempts, 3);
-    assert_eq!(args.anchor_targets_c, "60,80,100,120,140,160,180,220,240");
-    assert_eq!(
-        args.validation_targets_c,
-        "60,80,100,120,140,160,180,220,240"
-    );
-    assert_eq!(args.tune_targets_c, "60,80,100,120,140,160,180,220,240");
+    assert_eq!(args.anchor_targets_c, "60,80,100,120,140,160,180,220");
+    assert_eq!(args.validation_targets_c, "60,80,100,120,140,160,180,220");
+    assert_eq!(args.tune_targets_c, "60,80,100,120,140,160,180,220");
     assert!(args.dry_run);
 }
 

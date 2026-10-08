@@ -3356,6 +3356,11 @@ fn validate_flagship_scope(
         )
         .into());
     }
+    if tune_targets_c.iter().any(|target| {
+        !flux_purr_firmware::thermal_tuning::THERMAL_TUNING_TARGETS_C.contains(target)
+    }) {
+        return Err("host-reference targets must belong to the eight-target tuning set".into());
+    }
     Ok(())
 }
 
@@ -3523,22 +3528,27 @@ mod tests {
     #[test]
     fn recursive_execution_order_matches_canonical_full_batch() {
         assert_eq!(
-            build_recursive_tuning_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220, 240]),
-            vec![60, 240, 140, 100, 80, 120, 180, 160, 220]
+            build_recursive_tuning_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220]),
+            flux_purr_firmware::thermal_tuning::THERMAL_TUNING_EXECUTION_ORDER_C
         );
     }
 
     #[test]
     fn flagship_scope_rejects_non_100w_profile_modes() {
-        assert!(validate_flagship_scope(ThermalProfileMode::W100, &[60, 240]).is_ok());
+        assert!(validate_flagship_scope(ThermalProfileMode::W100, &[60, 220]).is_ok());
         for mode in [ThermalProfileMode::W65, ThermalProfileMode::Auto] {
             assert_eq!(
-                validate_flagship_scope(mode, &[60, 240])
+                validate_flagship_scope(mode, &[60, 220])
                     .expect_err("non-100w mode must be rejected")
                     .to_string(),
                 "5A full-batch tuning requires --profile-mode 100w"
             );
         }
+    }
+
+    #[test]
+    fn flagship_scope_rejects_removed_240c_target() {
+        assert!(validate_flagship_scope(ThermalProfileMode::W100, &[60, 240]).is_err());
     }
 
     #[test]

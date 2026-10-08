@@ -1110,7 +1110,7 @@ pub struct ThermalTuningCommand {
     pub candidate_profile: Option<ThermalControlProfileCommand>,
 }
 
-pub const THERMAL_TUNING_TARGET_CAPACITY: usize = 9;
+pub const THERMAL_TUNING_TARGET_CAPACITY: usize = crate::thermal_tuning::THERMAL_TUNING_MAX_TARGETS;
 pub const THERMAL_TUNING_HASH_MAX_LEN: usize = 71;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4878,7 +4878,7 @@ mod tests {
     #[test]
     fn thermal_tuning_frame_round_trips_without_external_source_fields() {
         let frame = parse_usb_frame(
-            r#"{"type":"thermal_tuning","requestId":"run-1","op":"start","runId":"run-1","candidateId":"candidate-1","candidateHash":"hash-1","powerClass":"pps5a","targetsC":[60,240,140,100,80,120,180,160,220]}"#,
+            r#"{"type":"thermal_tuning","requestId":"run-1","op":"start","runId":"run-1","candidateId":"candidate-1","candidateHash":"hash-1","powerClass":"pps5a","targetsC":[60,220,120,80,100,160,140,180]}"#,
         )
         .expect("thermal tuning frame parses");
         let UsbFrame::ThermalTuning { command, .. } = &frame else {
@@ -4890,7 +4890,7 @@ mod tests {
         );
         assert_eq!(
             command.targets_c.as_ref().map(|targets| targets.len()),
-            Some(9)
+            Some(8)
         );
         let mut out = [0u8; USB_LINE_MAX_LEN];
         let encoded = write_usb_frame(&frame, &mut out).expect("thermal tuning frame writes");

@@ -1,5 +1,9 @@
 # Heater PID frontpanel runtime history
 
+## Eight-target qualification scope
+
+The owner removed240°C from tuning to avoid repeated high-temperature attempts. The highest tuning endpoint is220°C; recursive execution and accepted-bound interpolation use that endpoint. Existing nine-target evidence remains historical and is not rewritten as an eight-target run. This is a tuning-scope change, not a production temperature cap or a change to the protected220°C plant calibration.
+
 ## Legacy identity
 
 - Former legacy ID: `q2aw6`.

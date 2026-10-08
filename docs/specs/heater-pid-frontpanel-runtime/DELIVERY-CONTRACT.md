@@ -65,14 +65,14 @@
 
 1. 调优 orchestration 只能生成候选、安排试验、收集证据并请求 preview/save；每一轮真实加热必须调用生产兼容锚点的同一条控制路径。不得新增第二个 heater state machine、第二套功率公式、隐藏 PID 常量、专供调优的输出限幅，或用 host 推断温度来取代固件控制决策。
 2. 3A/5A普通加热和调优共同选择既有profile控制器，使effective parameters真正进入同一生产路径；清退独立3A plant PI。PD独立5ms服务、PPS/PWM映射、调度、保护和`thermal_plant_auto`保持。切换电源类别前必须停热并重置，不得在armed运行中热切换。
-3. 固件调优按请求类别使用`pps3a`或`pps5a` bank，分别验证完整九目标、独立确认、preview与EEPROM readback。有效point和settings必须完整materialize并由status逐字段读回；不得借用另一bank、另一Device、新运行之前的历史候选或隐藏残留。两组可通过各自精确串口与独立devd会话同时运行。
+3. 固件调优按请求类别使用`pps3a`或`pps5a` bank，分别验证完整八目标、独立确认、preview与EEPROM readback。有效point和settings必须完整materialize并由status逐字段读回；不得借用另一bank、另一Device、新运行之前的历史候选或隐藏残留。两组可通过各自精确串口与独立devd会话同时运行。
 4. 统一生产控制是主人明确要求的行为；其余生产控制律、PD/PPS语义、温度/时间/保存门槛的变更仍须另行研判与确认。
 
 ### 两种调优 engine 的固定差异
 
 | 边界 | 外部主控调优方案（本合同内的“旧方案”） | 新固件主控调优 |
 | --- | --- | --- |
-| 选择与范围 | 无`--engine`时维持原CLI；外部runner主控5A full-batch | 仅显式`--engine firmware`；按实际供电类别独立完成`pps3a`或`pps5a`完整九目标 |
+| 选择与范围 | 无`--engine`时维持原CLI；外部runner主控5A full-batch | 仅显式`--engine firmware`；按实际供电类别独立完成`pps3a`或`pps5a`完整八目标 |
 | 策略与生产控制 | 主机执行当前主干的冷却、seed/插值、scout、batch compare、score、gate、预算和 hold confirm；设备生产闭环负责加热 | 固件策略对冻结的 5A 可观测向量保持决策一致，60°C 起点同为 `<=35°C`；全程全速冷却及终止后释放按 [60°C 冷却起点合同](FIRMWARE-60C-COOLDOWN-CONTRACT.md) 执行；设备仍使用同一生产闭环，不能调用或复制外部 runner |
 | 数据来源 | 外部 source client 的 VBUS/source telemetry 与设备状态均可进入原报告 | 仅设备本地温度、VIN、PPS 合同/请求和控制证据；外部 VBUS、物理电流/功率不得推断或补造，PPS 合同电流仅为安全 ceiling |
 | 命令输入 | `--source-id`、`--source-url` 等外部 source 参数保持有效 | 拒绝外部 source 参数；设备 tuning command/status/event stream 按 runId 和 sequence 读回 |

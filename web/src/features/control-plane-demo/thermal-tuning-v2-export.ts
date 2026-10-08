@@ -4,8 +4,8 @@ import type { ThermalTuningEvent, ThermalTuningStatus } from './contracts'
 import { digestEventChain } from './thermal-tuning-device-digest'
 import type { ThermalTuningRecording } from './thermal-tuning-recorder'
 
-const PHYSICAL_TARGETS = [60, 80, 100, 120, 140, 160, 180, 220, 240]
-const EXECUTION_ORDER = [60, 240, 140, 100, 80, 120, 180, 160, 220]
+const PHYSICAL_TARGETS = [60, 80, 100, 120, 140, 160, 180, 220]
+const EXECUTION_ORDER = [60, 220, 120, 80, 100, 160, 140, 180]
 const textEncoder = new TextEncoder()
 const requiredSampleFields = [
   'sequence',

@@ -21,9 +21,9 @@ use crate::thermal_tuning_strategy::{
 #[path = "thermal_tuning_unverified_window_tests.rs"]
 mod unverified_window_tests;
 
-pub const THERMAL_TUNING_TARGETS_C: [i16; 9] = [60, 80, 100, 120, 140, 160, 180, 220, 240];
-pub const THERMAL_TUNING_EXECUTION_ORDER_C: [i16; 9] = [60, 240, 140, 100, 80, 120, 180, 160, 220];
-pub const THERMAL_TUNING_MAX_TARGETS: usize = 9;
+pub const THERMAL_TUNING_TARGETS_C: [i16; 8] = [60, 80, 100, 120, 140, 160, 180, 220];
+pub const THERMAL_TUNING_EXECUTION_ORDER_C: [i16; 8] = [60, 220, 120, 80, 100, 160, 140, 180];
+pub const THERMAL_TUNING_MAX_TARGETS: usize = THERMAL_TUNING_TARGETS_C.len();
 pub const THERMAL_TUNING_EVENT_CAPACITY: usize = 256;
 // Samples carry the full local PPS/control evidence and must fit one bounded
 // JSONL response. Six events keep the largest sample-only page below the
@@ -2370,13 +2370,12 @@ impl ThermalTuningRuntime {
             return None;
         }
         match target {
-            140 => Some((60, 240)),
-            100 => Some((60, 140)),
-            80 => Some((60, 100)),
-            120 => Some((100, 140)),
-            180 => Some((140, 240)),
-            160 => Some((140, 180)),
-            220 => Some((180, 240)),
+            120 => Some((60, 220)),
+            80 => Some((60, 120)),
+            100 => Some((80, 120)),
+            160 => Some((120, 220)),
+            140 => Some((120, 160)),
+            180 => Some((160, 220)),
             _ => None,
         }
     }
@@ -3268,13 +3267,13 @@ mod tests {
                 Some(point(160)),
                 Some(point(180)),
                 Some(point(220)),
-                Some(point(240)),
+                None,
                 None,
             ],
         };
         assert_eq!(
             hash_profile(&profile).unwrap().as_str(),
-            "sha256:841b20a8fec5278e37558f158496b234c89a2aca65f4393eb1a40fb4f6e40141"
+            "sha256:896e40c0087904f10eee7db9ddacad5e391cfaf5915923aacf27f83f3ddefe53"
         );
     }
 
@@ -3642,7 +3641,7 @@ mod tests {
 
     #[test]
     fn every_high_temperature_trial_waits_for_and_records_its_cooldown_boundary() {
-        for (target, threshold) in [(160, 12_000), (180, 15_000), (220, 20_000), (240, 22_000)] {
+        for (target, threshold) in [(160, 12_000), (180, 15_000), (220, 20_000)] {
             let mut runtime = ThermalTuningRuntime::new();
             runtime
                 .start(ThermalTuningStart {
@@ -5656,6 +5655,57 @@ mod tests {
     }
 
     #[test]
+    fn removed_240c_target_is_rejected_before_heating() {
+        for power_class in [
+            ThermalTuningPowerClass::Pps3a,
+            ThermalTuningPowerClass::Pps5a,
+        ] {
+            let mut runtime = ThermalTuningRuntime::new();
+            let result = runtime.start(ThermalTuningStart {
+                run_id: id("run-removed-target"),
+                candidate_id: id("candidate-removed-target"),
+                candidate_hash: hash("hash-removed-target"),
+                power_class,
+                targets: &[240],
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile_with_targets(&[240])),
+            });
+            assert_eq!(result, Err(ThermalTuningError::InvalidTargets));
+            assert!(!runtime.armed);
+            assert_eq!(
+                runtime.terminal_disposition,
+                ThermalTuningTerminalDisposition::Failed
+            );
+        }
+    }
+
+    #[test]
+    fn full_scope_only_seeds_from_already_confirmed_recursive_bounds() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .targets_c
+            .extend_from_slice(&THERMAL_TUNING_EXECUTION_ORDER_C)
+            .unwrap();
+        let mut visited = 0;
+        for target in THERMAL_TUNING_EXECUTION_ORDER_C {
+            if let Some((lower, upper)) = runtime.required_accepted_bounds(target) {
+                assert!(lower < target && target < upper);
+                assert_ne!(visited & target_bit(lower), 0);
+                assert_ne!(visited & target_bit(upper), 0);
+            } else {
+                assert!(target == 60 || target == 220);
+            }
+            visited |= target_bit(target);
+        }
+        assert_eq!(
+            visited.count_ones() as usize,
+            THERMAL_TUNING_TARGETS_C.len()
+        );
+    }
+
+    #[test]
     fn full_scope_prunes_midpoints_without_both_accepted_endpoints() {
         let mut runtime = ThermalTuningRuntime::new();
         runtime
@@ -5673,15 +5723,15 @@ mod tests {
             .unwrap();
         runtime.accepted_target_mask = target_bit(60);
         runtime.advance_target().unwrap();
-        assert_eq!(runtime.targets_c[runtime.target_index], 240);
-        runtime.failed_target_mask = target_bit(240);
+        assert_eq!(runtime.targets_c[runtime.target_index], 220);
+        runtime.failed_target_mask = target_bit(220);
         runtime.advance_target().unwrap();
         assert_eq!(
             runtime.terminal_disposition,
             ThermalTuningTerminalDisposition::Failed
         );
         assert!(!runtime.armed);
-        assert_eq!(runtime.failed_target_mask.count_ones(), 8);
+        assert_eq!(runtime.failed_target_mask.count_ones(), 7);
         assert_eq!(
             runtime
                 .events
@@ -5690,7 +5740,7 @@ mod tests {
                     event.reason.as_deref() == Some("interval_pruned_without_accepted_bounds")
                 })
                 .count(),
-            7
+            6
         );
     }
 
@@ -5699,8 +5749,8 @@ mod tests {
         let mut runtime = ThermalTuningRuntime::new();
         let mut profile = profile_with_targets(&THERMAL_TUNING_TARGETS_C);
         profile.points[0].as_mut().unwrap().brake_distance_centi_c = 400;
-        profile.points[8].as_mut().unwrap().brake_distance_centi_c = 800;
-        profile.points[4].as_mut().unwrap().brake_distance_centi_c = 300;
+        profile.points[7].as_mut().unwrap().brake_distance_centi_c = 800;
+        profile.points[3].as_mut().unwrap().brake_distance_centi_c = 300;
         runtime
             .start(ThermalTuningStart {
                 run_id: id("run-bounds"),
@@ -5716,16 +5766,16 @@ mod tests {
             .unwrap();
         runtime.accepted_target_mask = target_bit(60);
         runtime.advance_target().unwrap();
-        runtime.accepted_target_mask |= target_bit(240);
+        runtime.accepted_target_mask |= target_bit(220);
         runtime.advance_target().unwrap();
-        assert_eq!(runtime.targets_c[runtime.target_index], 140);
-        let snapshot = runtime.candidate_snapshot(Some(140));
+        assert_eq!(runtime.targets_c[runtime.target_index], 120);
+        let snapshot = runtime.candidate_snapshot(Some(120));
         assert_eq!(
             (snapshot.lower_target_c, snapshot.upper_target_c),
-            (Some(60), Some(240))
+            (Some(60), Some(220))
         );
         assert_eq!(snapshot.seed_source, "accepted_bounds_linear");
-        assert_eq!(snapshot.point.unwrap().brake_distance_centi_c, 578);
+        assert_eq!(snapshot.point.unwrap().brake_distance_centi_c, 550);
         assert_ne!(runtime.candidate_hash.as_deref(), Some("hash-bounds"));
         assert!(runtime.preview_update_pending);
         assert!(runtime.armed);

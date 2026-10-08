@@ -9,8 +9,8 @@ import {
   verifyTimingSamples,
 } from './thermal-tuning-v2-export'
 
-const TARGETS = [60, 80, 100, 120, 140, 160, 180, 220, 240]
-const EXECUTION_ORDER = [60, 240, 140, 100, 80, 120, 180, 160, 220]
+const TARGETS = [60, 80, 100, 120, 140, 160, 180, 220]
+const EXECUTION_ORDER = [60, 220, 120, 80, 100, 160, 140, 180]
 const CANDIDATE_HASH = `sha256:${'a'.repeat(64)}`
 
 function event(
@@ -335,7 +335,7 @@ describe('Web thermal-tuning-v2 export', () => {
     expect(await promotion('review_incomplete')).toBe('rejected')
   })
 
-  it('qualifies only a nine-target saved run with full receipts and trial evidence', async () => {
+  it('qualifies only an eight-target saved run with full receipts and trial evidence', async () => {
     const events: ThermalTuningEvent[] = []
     for (const targetC of TARGETS) {
       const base = TARGETS.indexOf(targetC) * 80_000
@@ -445,7 +445,7 @@ describe('Web thermal-tuning-v2 export', () => {
     const exported = await exportThermalTuningV2(captured, 'device-1', 'web_serial')
     const bundle = JSON.parse(exported.files['run.bundle.json'])
     expect(exported.ownerOutcome).toBe('passed')
-    expect(bundle.reportRuns).toHaveLength(9)
+    expect(bundle.reportRuns).toHaveLength(8)
     expect(
       bundle.reportRuns.every((run: { reviewOutcome: string }) => run.reviewOutcome === 'passed')
     ).toBe(true)
