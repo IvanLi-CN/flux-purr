@@ -260,9 +260,7 @@ fn coasting_high_side_candidate(
         || !evidence.first_band_observed
         || evidence.hold_sample_count < 3
         || !hold_off_after_entry(evidence)
-        || evidence.first_band_exit_centi_c.is_none_or(|temperature| {
-            i32::from(temperature) <= i32::from(evidence.target_c) * 100 + 150
-        })
+        || stability_gate_evidence(evidence).0 != GateFailure::BrokeHigh
     {
         return None;
     }
@@ -309,9 +307,7 @@ fn low_power_coasting_evidence(evidence: TuneEvidence) -> bool {
             || (evidence.hold_entry_pulse_only
                 && evidence.hold_off_sample_count.saturating_mul(10)
                     >= evidence.hold_sample_count.saturating_mul(9)))
-        || evidence.first_band_exit_centi_c.is_none_or(|temperature| {
-            i32::from(temperature) <= i32::from(evidence.target_c) * 100 + 150
-        })
+        || stability_gate_evidence(evidence).0 != GateFailure::BrokeHigh
         || !evidence.approach_output_range.is_some_and(|(min, max)| {
             min >= crate::thermal_plant::APPROACH_MIN_PERMILLE && max <= 100
         })
@@ -394,6 +390,7 @@ fn hold_recovery_candidate(
     if !evidence.first_band_observed
         || evidence.hold_sample_count < 3
         || evidence.overshoot_c > 3.0
+        || evidence.hold_max_below_c.is_some_and(|below| below <= 1.5)
         || evidence
             .first_band_exit_centi_c
             .is_none_or(|temperature| i32::from(temperature) >= lower_band)
@@ -433,6 +430,7 @@ fn hold_reheat_headroom_candidate(
         || !evidence.first_band_observed
         || evidence.hold_sample_count < 3
         || evidence.hold_off_sample_count < 3
+        || evidence.hold_max_below_c.is_some_and(|below| below <= 1.5)
         || evidence.overshoot_c > 1.5
         || evidence.hold_p2p_c > 3.0
         || evidence
@@ -877,6 +875,18 @@ fn stability_gate_evidence(evidence: TuneEvidence) -> (GateFailure, f64) {
     let target = i32::from(evidence.target_c) * 100;
     let lower = target - 150;
     let upper = target + 150;
+    // A first low-band exit can be an Approach measurement fluctuation.
+    // With physical Hold never below band, zero Hold supply and a later
+    // upper-band excursion, the observed failure is stored heat, not reheat.
+    // Preserve the first-exit fact and every qualification gate unchanged.
+    if evidence.first_band_observed
+        && evidence.hold_sample_count >= 3
+        && hold_off_after_entry(evidence)
+        && evidence.hold_max_below_c.is_some_and(|below| below <= 1.5)
+        && evidence.over_c > 1.5
+    {
+        return (GateFailure::BrokeHigh, evidence.over_c - 1.5);
+    }
     let temperature = if evidence.first_band_observed {
         evidence.first_band_exit_centi_c
     } else {

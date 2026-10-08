@@ -5043,6 +5043,109 @@ mod tests {
     }
 
     #[test]
+    fn captured_a60_approach_band_jitter_does_not_invent_a_hold_deficit() {
+        // firmware-pps5a-1791470799796 trial 3: the first band exit is
+        // 58.48 C in Approach, but every physical Hold request is zero
+        // while temperature rises to 62.61 C. More reheat is the wrong sign.
+        let mut runtime = started_single_target_runtime();
+        let mut profile = runtime.candidate_profile.unwrap();
+        let point = profile.points[0].as_mut().unwrap();
+        point.brake_distance_centi_c = 1_280;
+        point.approach_damping_exponent_permille = 1_000;
+        point.approach_lead_ticks = 0;
+        point.approach_power_permille = 1_000;
+        point.approach_floor_power_permille = 50;
+        point.approach_tail_window_centi_c = 0;
+        point.hold_power_permille = 56;
+        point.hold_reheat_power_permille = 56;
+        point.hold_kp_permille_per_c = 43;
+        point.hold_ki_permille_per_c_tick = 1;
+        point.hold_on_centi_c = 30;
+        point.hold_blend_ticks = 2;
+        point.hold_lead_ticks = 2;
+        let previous = *point;
+        runtime.candidate_profile = Some(profile);
+        for (elapsed, temperature, phase, requested) in [
+            (413_103, 4_726, ThermalTuningPhase::Approach, 50),
+            (413_164, 4_734, ThermalTuningPhase::Approach, 50),
+            (413_379, 4_801, ThermalTuningPhase::Approach, 50),
+            (415_026, 5_223, ThermalTuningPhase::Approach, 940),
+            (415_250, 5_292, ThermalTuningPhase::Approach, 940),
+            (415_452, 5_324, ThermalTuningPhase::Approach, 940),
+            (415_700, 5_412, ThermalTuningPhase::Approach, 490),
+            (415_933, 5_453, ThermalTuningPhase::Approach, 490),
+            (416_137, 5_490, ThermalTuningPhase::Approach, 280),
+            (416_343, 5_537, ThermalTuningPhase::Approach, 200),
+            (416_578, 5_579, ThermalTuningPhase::Approach, 110),
+            (416_819, 5_626, ThermalTuningPhase::Approach, 60),
+            (417_087, 5_668, ThermalTuningPhase::Approach, 60),
+            (417_329, 5_731, ThermalTuningPhase::Approach, 140),
+            (417_592, 5_765, ThermalTuningPhase::Approach, 50),
+            (417_833, 5_825, ThermalTuningPhase::Approach, 50),
+            (418_043, 5_857, ThermalTuningPhase::Approach, 90),
+            (418_265, 5_848, ThermalTuningPhase::Approach, 90),
+            (418_520, 5_892, ThermalTuningPhase::Approach, 50),
+            (418_779, 5_898, ThermalTuningPhase::Approach, 50),
+            (418_987, 5_930, ThermalTuningPhase::Approach, 50),
+            (419_117, 5_966, ThermalTuningPhase::Hold, 0),
+            (419_194, 5_964, ThermalTuningPhase::Hold, 0),
+            (419_413, 5_968, ThermalTuningPhase::Hold, 0),
+            (419_656, 6_012, ThermalTuningPhase::Hold, 0),
+            (419_868, 6_039, ThermalTuningPhase::Hold, 0),
+            (420_113, 6_075, ThermalTuningPhase::Hold, 0),
+            (420_345, 6_094, ThermalTuningPhase::Hold, 0),
+            (420_590, 6_114, ThermalTuningPhase::Hold, 0),
+            (420_802, 6_126, ThermalTuningPhase::Hold, 0),
+            (421_043, 6_122, ThermalTuningPhase::Hold, 0),
+            (421_289, 6_142, ThermalTuningPhase::Hold, 0),
+            (421_501, 6_160, ThermalTuningPhase::Hold, 0),
+            (421_747, 6_158, ThermalTuningPhase::Hold, 0),
+            (421_947, 6_164, ThermalTuningPhase::Hold, 0),
+            (422_182, 6_186, ThermalTuningPhase::Hold, 0),
+            (422_422, 6_179, ThermalTuningPhase::Hold, 0),
+            (422_701, 6_193, ThermalTuningPhase::Hold, 0),
+            (422_941, 6_197, ThermalTuningPhase::Hold, 0),
+            (423_174, 6_261, ThermalTuningPhase::Hold, 0),
+        ] {
+            let mut observed = sample(elapsed, phase, temperature);
+            observed.heater_requested_output_permille = requested;
+            observed.heater_output_permille = requested;
+            runtime.update_trial_metrics(&observed, 60);
+        }
+        let facts = runtime.candidate_failure_evidence(60, Some(261), Some(297), None, 10_000);
+        assert_eq!(facts.first_band_exit_centi_c, Some(5_848));
+        assert_eq!(facts.hold_off_sample_count, facts.hold_sample_count);
+        assert_eq!(facts.hold_max_below_c, Some(0.36));
+        assert_eq!(facts.over_c, 2.61);
+        let expected = ThermalControlProfilePointConfig {
+            approach_damping_exponent_permille: 2_000,
+            ..previous
+        };
+        assert_eq!(tune_point(previous, facts), expected);
+        assert_eq!(reseed_after_hold_confirm(previous, facts), expected);
+        for attempt in 0..8 {
+            let alternative = bounded_failure_alternative(previous, facts, attempt).unwrap();
+            assert_eq!(alternative.hold_reheat_power_permille, 56);
+            assert_eq!(alternative.hold_kp_permille_per_c, 43);
+            assert!(
+                alternative.approach_damping_exponent_permille > 1_000
+                    || alternative.brake_distance_centi_c > 1_280
+            );
+        }
+        // A genuinely cold physical Hold must retain the opposite feedback.
+        let cold_hold = TuneEvidence {
+            hold_max_below_c: Some(2.0),
+            under_c: 2.0,
+            over_c: 0.0,
+            overshoot_c: 0.0,
+            ..facts
+        };
+        let recovery = tune_point(previous, cold_hold);
+        assert_eq!(recovery.hold_reheat_power_permille, 136);
+        assert_eq!(recovery.approach_damping_exponent_permille, 1_000);
+    }
+
+    #[test]
     fn captured_floor_only_coast_search_changes_braking_not_unused_damping() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("thermal_tuning_floor_coast.fixture.json")).unwrap();
