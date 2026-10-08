@@ -1916,6 +1916,8 @@ fn runtime_production_pid_snapshot(
         ThermalPlantRuntimeInput {
             target_temp_c: state.ui_state.target_temp_c,
             measured_temp_c: state.latest_temp_c,
+            measurement_accepted: !state.control_measurement_guarded
+                && state.rtd_control_measurement_guard.last_accepted_at_ms == Some(elapsed_ms),
             ambient_temp_c,
             heater_enabled: state.ui_state.heater_enabled,
             model,

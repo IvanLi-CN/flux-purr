@@ -60,6 +60,7 @@ fn heater_profile_uses_calibrated_cooling_for_braking_and_early_recovery() {
     let input = ThermalPlantRuntimeInput {
         target_temp_c: 240,
         measured_temp_c: 237.0,
+        measurement_accepted: true,
         ambient_temp_c: 25.0,
         heater_enabled: true,
         // Observed rise exceeds the nominal calibrated rise, so live model
@@ -144,6 +145,7 @@ fn heater_cooling_brake_does_not_double_count_loss_in_observed_net_slope() {
     let input = ThermalPlantRuntimeInput {
         target_temp_c: 240,
         measured_temp_c: 231.725,
+        measurement_accepted: true,
         ambient_temp_c: 25.0,
         heater_enabled: true,
         max_power_mw: 100_000.0,
@@ -9704,6 +9706,7 @@ fn production_test_input(measured_temp_c: f32) -> ThermalPlantRuntimeInput {
         target_temp_c: 60,
         measured_temp_c,
         ambient_temp_c: 25.0,
+        measurement_accepted: true,
         heater_enabled: true,
         model: flux_purr_firmware::memory::ThermalPlantProjection {
             convection_mw_per_c: 100.0,
@@ -10332,6 +10335,86 @@ fn braking_approach_survives_rtd_reseeds_during_pps_steps() {
                 .0
                 .duty_percent
                 > 5
+        );
+    }
+}
+
+#[test]
+fn pps_sample_wait_does_not_invent_approach_deceleration() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 240;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(238.3);
+        controller.previous_measured_temp_c = Some(238.3);
+        controller.filtered_slope_c_per_profile_tick = 0.8;
+        controller.profile_last_control_at_ms = Some(2_950);
+        controller.approach_braking_remaining_ms = 2_650;
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 240;
+        point.brake_distance_centi_c = 197;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(238.3);
+        input.target_temp_c = 240;
+        input.model.transport_delay_ms = 2_650;
+        controller.update_production_at(kind, input, Some(profile));
+        let trusted_slope = controller.filtered_slope_c_per_profile_tick;
+        let mut transition = RtdPpsTransitionGuard::new(21_000);
+        let mut measurement = RtdControlMeasurementGuard::default();
+        measurement.reseed(238.3, 3_000);
+        for offset in (50..350).step_by(50) {
+            input.now_ms = 3_000 + offset;
+            let accepted = accept_rtd_control_sample_after_pps_transition(
+                &mut transition,
+                &mut controller,
+                &mut measurement,
+                238.3,
+                20_500,
+                input.now_ms,
+                237.8,
+            );
+            assert_eq!(accepted, None);
+            input.measurement_accepted = accepted.is_some();
+            let snapshot = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
+            assert_eq!(snapshot.duty_percent, 5);
+            assert_eq!(
+                controller.filtered_slope_c_per_profile_tick, trusted_slope,
+                "bank={bank:?}: a retained temperature is not a new observation"
+            );
+        }
+    }
+}
+
+#[test]
+fn resumed_production_measurement_uses_the_complete_sample_gap() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let profile = production_test_profile(1_000);
+        let mut input = production_test_input(45.0);
+        let mut coarse = HeaterController::new();
+        coarse.update_production_at(kind, input, Some(profile));
+        let mut blocked = coarse;
+        input.measurement_accepted = false;
+        for offset in (50..300).step_by(50) {
+            input.now_ms = 3_000 + offset;
+            blocked.update_production_at(kind, input, Some(profile));
+        }
+        input.now_ms = 3_300;
+        input.measured_temp_c = 45.3;
+        input.measurement_accepted = true;
+        let resumed = blocked.update_production_at(kind, input, Some(profile)).0;
+        let reference = coarse.update_production_at(kind, input, Some(profile)).0;
+        assert!((resumed.filtered_temp_c - reference.filtered_temp_c).abs() < 0.0001);
+        assert!(
+            (resumed.filtered_slope_c_per_s - reference.filtered_slope_c_per_s).abs() < 0.0001,
+            "bank={bank:?}: derivative must use 300ms, not the last 50ms control tick"
         );
     }
 }
@@ -12388,6 +12471,10 @@ fn five_amp_power_step_retry_continues_through_runtime_sampling_pipeline() {
     assert_eq!(ui_state.current_temp_deci_c, 307);
     assert_eq!(latest_temp_c, 25.37);
     assert_eq!(latest_temp_i16, 25);
+    assert!(
+        control_measurement_guarded,
+        "PPS sample wait must be observable"
+    );
     assert_eq!(controller.fault_latched(), None);
 }
 

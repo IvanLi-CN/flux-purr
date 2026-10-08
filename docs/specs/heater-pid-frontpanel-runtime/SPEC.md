@@ -141,6 +141,7 @@
 - 启动期间的 USB early-control 必须在启动阶段边界继续提供 `get_identity` 和既有 `startup_busy` 语义；背光控制建立后，固件先执行有界的 PD Sink 启动服务，再初始化显示并提交启动屏，之后才进入其它硬件初始化。PD 合同未就绪时仍必须在该有界窗口结束后继续到 Dashboard，并保持 `POWER/WAIT` 与 fail-closed 门控；显示初始化、启动帧刷屏和后续运行时都必须持续以独立 service cadence 处理 PD。任何被该 cadence 取消的显示 SPI transaction 都必须在 future drop 时释放 CS，不得把面板保持在选中状态。启动屏完成、恢复与网络初始化完成后，USB early-control 必须在进入 runtime loop 前发送 `boot_stage=runtime_ready`。GPIO47 默认保持 `0%`，只有显式 arm 且观察到 FUSB `Accept + PS_RDY` 后才允许输出。
 
 - Approach 初始制动的下降证据 MUST 按观察窗口判断净下降。只有读数超过窗口参考温度0.05°C才重开窗口；低于参考温度的单周期回弹不得清除趋势。连续两次确认仍分别要求窗口≥100ms、下降>0.15°C和滤波斜率≤−0.02°C/s；PPS/RTD重新播种必须清除窗口。不得用逐帧单调下降要求延迟已证实净降温后的模型供热。
+- 控制时钟与接受RTD采样的时钟 MUST 分开。PPS稳定等待或异常样本拒绝时，旧控制温度不能再次送入EMA、衰减斜率或增加下降确认次数；下一接受采样按完整间隔计算滤波与导数。控制时钟继续推进状态、制动时间、安全和调优期限。PPS等待同样回传heaterControlMeasurementGuarded=true，不能因保留旧温度或重新播种时间戳而冒充当前周期已接受采样；原始温度和故障检查仍逐周期保留。具体行为见[自然冷却控制合同](NATURAL-COOLING-CONTROL.md)。
 
 ### SHOULD
 

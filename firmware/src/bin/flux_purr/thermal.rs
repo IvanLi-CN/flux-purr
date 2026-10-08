@@ -760,6 +760,7 @@ pub(crate) struct HeaterController {
     pub(crate) phase_ticks: u16,
     pub(crate) phase_tick_remainder_ms: u64,
     pub(crate) profile_last_control_at_ms: Option<u64>,
+    pub(crate) profile_measurement_elapsed_ms: u64,
     pub(crate) recovering_from_hold: bool,
     pub(crate) duty_percent: u8,
     pub(crate) hold_entry_output_percent: u8,
@@ -784,6 +785,7 @@ pub(crate) struct HeaterController {
 pub(crate) struct ThermalPlantRuntimeInput {
     pub(crate) target_temp_c: i16,
     pub(crate) measured_temp_c: f32,
+    pub(crate) measurement_accepted: bool,
     pub(crate) ambient_temp_c: f32,
     pub(crate) heater_enabled: bool,
     pub(crate) model: flux_purr_firmware::memory::ThermalPlantProjection,
@@ -862,6 +864,7 @@ impl HeaterController {
             phase_ticks: 0,
             phase_tick_remainder_ms: 0,
             profile_last_control_at_ms: None,
+            profile_measurement_elapsed_ms: 0,
             recovering_from_hold: false,
             duty_percent: 0,
             hold_entry_output_percent: 0,
@@ -896,6 +899,7 @@ impl HeaterController {
         self.phase_ticks = 0;
         self.phase_tick_remainder_ms = 0;
         self.profile_last_control_at_ms = None;
+        self.profile_measurement_elapsed_ms = 0;
         self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
@@ -975,6 +979,7 @@ impl HeaterController {
         self.phase_ticks = 0;
         self.phase_tick_remainder_ms = 0;
         self.profile_last_control_at_ms = None;
+        self.profile_measurement_elapsed_ms = 0;
         self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
@@ -1018,7 +1023,9 @@ impl HeaterController {
             .previous_measured_temp_c
             .or(self.filtered_temp_c)
             .unwrap_or(measured_temp_c);
-        self.previous_measured_temp_c = Some(measured_temp_c);
+        if self.control_measurement_accepted() {
+            self.previous_measured_temp_c = Some(measured_temp_c);
+        }
 
         if measured_temp_c >= f32::from(HEATER_HARD_CUTOFF_TEMP_C) {
             self.latch_fault(HeaterFaultReason::OverTemp);
@@ -1122,6 +1129,7 @@ impl HeaterController {
         self.phase_ticks = 0;
         self.phase_tick_remainder_ms = 0;
         self.profile_last_control_at_ms = None;
+        self.profile_measurement_elapsed_ms = 0;
         self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
@@ -1154,6 +1162,9 @@ impl HeaterController {
             self.hold_coast_cooling_samples = 0;
             self.coast_cooling_reference_c = None;
             self.coast_cooling_elapsed_ms = 0;
+            return;
+        }
+        if !self.control_measurement_accepted() {
             return;
         }
         if measured_temp_c > previous_measured_temp_c + 0.05 {
@@ -1280,6 +1291,9 @@ impl HeaterController {
         let Some(input) = self.natural_cooling_input else {
             return false;
         };
+        if !input.measurement_accepted {
+            return false;
+        }
         let measured_c = input.measured_temp_c;
         let reference_c = *self.approach_cooling_reference_c.get_or_insert(measured_c);
         // Test the net observation-window decline, not a monotonic per-frame
@@ -1315,6 +1329,11 @@ impl HeaterController {
                 )
                 .is_some()
         })
+    }
+
+    fn control_measurement_accepted(&self) -> bool {
+        self.natural_cooling_input
+            .is_none_or(|input| input.measurement_accepted)
     }
 
     fn calculate_model_approach_duty(&self, frame: &ThermalControlFrame) -> Option<u8> {
@@ -1648,6 +1667,37 @@ impl HeaterController {
         (filtered, self.filtered_slope_c_per_profile_tick)
     }
 
+    fn measure_profile_temperature(
+        &mut self,
+        measured_temp_c: f32,
+        nominal_alpha: f32,
+        elapsed_ms: u64,
+    ) -> (f32, f32) {
+        // Outputs keep their control cadence while RTD acceptance can pause.
+        // Reusing the held value would invent zero velocity during that pause.
+        self.profile_measurement_elapsed_ms = self
+            .profile_measurement_elapsed_ms
+            .saturating_add(elapsed_ms);
+        if !self.control_measurement_accepted() {
+            return (
+                self.filtered_temp_c.unwrap_or(measured_temp_c),
+                self.filtered_slope_c_per_profile_tick,
+            );
+        }
+        let measurement_elapsed_ms = self.profile_measurement_elapsed_ms;
+        self.profile_measurement_elapsed_ms = 0;
+        self.filter_profile_measurement(
+            measured_temp_c,
+            scaled_filter_alpha_for_elapsed(
+                nominal_alpha,
+                measurement_elapsed_ms,
+                HEATER_PROFILE_TICK_MS,
+            ),
+            nominal_alpha,
+            measurement_elapsed_ms,
+        )
+    }
+
     fn measure_control_frame(
         &mut self,
         target_temp_c: i16,
@@ -1656,16 +1706,16 @@ impl HeaterController {
         control_target: ThermalControlTarget,
         elapsed_ms: u64,
     ) -> ThermalControlFrame {
-        let (filter_alpha, approach_max_cycles, hold_blend_cycles, hold_ki) =
+        let (_, approach_max_cycles, hold_blend_cycles, hold_ki) =
             control_cycle_parameters(control_target, elapsed_ms);
         let error_c = f32::from(target_temp_c) - measured_temp_c;
         let previous_error_c = f32::from(target_temp_c) - previous_measured_temp_c;
-        let (filtered_temp_c, filtered_slope_c_per_profile_tick) = self.filter_profile_measurement(
-            measured_temp_c,
-            filter_alpha,
-            control_target.settings.temp_filter_alpha,
-            elapsed_ms,
-        );
+        let (filtered_temp_c, filtered_slope_c_per_profile_tick) = self
+            .measure_profile_temperature(
+                measured_temp_c,
+                control_target.settings.temp_filter_alpha,
+                elapsed_ms,
+            );
         let control_error_c = f32::from(target_temp_c) - filtered_temp_c;
         let (
             natural_cooling_rate_c_per_s,
@@ -1756,6 +1806,7 @@ impl HeaterController {
         self.phase_ticks = 0;
         self.phase_tick_remainder_ms = 0;
         self.profile_last_control_at_ms = None;
+        self.profile_measurement_elapsed_ms = 0;
         self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;

@@ -905,7 +905,8 @@ pub(crate) fn apply_valid_rtd_measurement(
         *control.latest_control_temp_c = control_temp_c;
         *control.latest_control_temp_i16 = temp_c_to_whole_c(control_temp_c);
     }
-    *control.control_measurement_guarded = control.measurement_guard.guarded;
+    *control.control_measurement_guarded =
+        control.measurement_guard.guarded || control.transition_guard.blocked_until_ms.is_some();
     needs_redraw
 }
 
