@@ -1,0 +1,251 @@
+{
+  "sourceRunId": "firmware-pps5a-1791426806494",
+  "sourceBuild": "81214a27c5be7955a761374ee041c5fbfc2e16ef",
+  "targetC": 240,
+  "trialIndex": 5,
+  "point": {
+    "approachDampingExponentPermille": 100,
+    "approachFloorPowerPermille": 833,
+    "approachLeadTicks": 0,
+    "approachPowerPermille": 1000,
+    "approachTailWindowCentiC": 0,
+    "brakeDistanceCentiC": 110,
+    "holdBlendTicks": 3,
+    "holdEntryCentiC": 90,
+    "holdExitCentiC": 200,
+    "holdKiPermillePerCTick": 1,
+    "holdKpPermillePerC": 38,
+    "holdLeadTicks": 3,
+    "holdOffCentiC": 5,
+    "holdOnCentiC": 30,
+    "holdPowerPermille": 833,
+    "holdReheatPowerPermille": 833,
+    "overshootCutoffCentiC": 25,
+    "targetC": 240,
+    "warmupPowerPermille": 1000,
+    "warmupReenterCentiC": 400
+  },
+  "trialStartedAtMs": 875481,
+  "warmupExitedAtMs": 938829,
+  "overshootCentiC": 16,
+  "holdPeakToPeakCentiC": 186,
+  "sampleColumns": [
+    "elapsedMs",
+    "temperatureCentiC",
+    "phase",
+    "logicalRequestPermille",
+    "mosOutputPermille"
+  ],
+  "samples": [
+    [
+      938829,
+      23914,
+      "approach",
+      50,
+      50
+    ],
+    [
+      938910,
+      23929,
+      "approach",
+      50,
+      50
+    ],
+    [
+      939155,
+      23950,
+      "approach",
+      50,
+      50
+    ],
+    [
+      939395,
+      23923,
+      "approach",
+      50,
+      50
+    ],
+    [
+      939542,
+      23954,
+      "hold",
+      840,
+      920
+    ],
+    [
+      939612,
+      23919,
+      "hold",
+      840,
+      920
+    ],
+    [
+      939844,
+      23962,
+      "hold",
+      840,
+      920
+    ],
+    [
+      940098,
+      23915,
+      "hold",
+      850,
+      930
+    ],
+    [
+      940318,
+      23934,
+      "hold",
+      850,
+      930
+    ],
+    [
+      940570,
+      24016,
+      "hold",
+      0,
+      0
+    ],
+    [
+      940796,
+      23992,
+      "hold",
+      840,
+      920
+    ],
+    [
+      941037,
+      23995,
+      "hold",
+      850,
+      930
+    ],
+    [
+      941246,
+      23961,
+      "hold",
+      850,
+      930
+    ],
+    [
+      941446,
+      23968,
+      "hold",
+      850,
+      930
+    ],
+    [
+      941711,
+      23905,
+      "hold",
+      870,
+      950
+    ],
+    [
+      941915,
+      23975,
+      "hold",
+      850,
+      930
+    ],
+    [
+      942180,
+      23983,
+      "hold",
+      830,
+      910
+    ],
+    [
+      942394,
+      23973,
+      "hold",
+      840,
+      920
+    ],
+    [
+      942644,
+      23963,
+      "hold",
+      0,
+      0
+    ],
+    [
+      942856,
+      23983,
+      "hold",
+      0,
+      0
+    ],
+    [
+      943106,
+      23925,
+      "hold",
+      870,
+      950
+    ],
+    [
+      943316,
+      23928,
+      "hold",
+      870,
+      950
+    ],
+    [
+      943569,
+      23958,
+      "hold",
+      860,
+      940
+    ],
+    [
+      943781,
+      23919,
+      "hold",
+      880,
+      970
+    ],
+    [
+      943864,
+      23907,
+      "hold",
+      880,
+      970
+    ],
+    [
+      944106,
+      23911,
+      "hold",
+      880,
+      970
+    ],
+    [
+      944341,
+      23910,
+      "hold",
+      880,
+      970
+    ],
+    [
+      944571,
+      23900,
+      "hold",
+      880,
+      970
+    ],
+    [
+      944785,
+      23868,
+      "hold",
+      900,
+      990
+    ],
+    [
+      945020,
+      23830,
+      "hold",
+      910,
+      1000
+    ]
+  ]
+}

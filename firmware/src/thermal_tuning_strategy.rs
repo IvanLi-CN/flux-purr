@@ -376,6 +376,13 @@ fn hold_reheat_headroom_candidate(
     evidence: TuneEvidence,
 ) -> Option<ThermalControlProfilePointConfig> {
     let lower_band = i32::from(evidence.target_c) * 100 - 150;
+    let model_floor_handoff = evidence.approach_floor_only
+        && evidence.approach_median_output_permille
+            == Some(crate::thermal_plant::APPROACH_MIN_PERMILLE);
+    let legacy_high_output_handoff = previous.approach_floor_power_permille >= 900
+        && evidence
+            .approach_median_output_permille
+            .is_some_and(|output| output >= 900);
     if evidence.target_c < 180
         || !evidence.first_band_observed
         || evidence.hold_sample_count < 3
@@ -388,21 +395,20 @@ fn hold_reheat_headroom_candidate(
         || evidence
             .first_band_exit_centi_c
             .is_none_or(|temperature| i32::from(temperature) >= lower_band)
-        || evidence
-            .approach_median_output_permille
-            .is_none_or(|value| value < 900)
+        || !(model_floor_handoff || legacy_high_output_handoff)
         || evidence
             .hold_median_output_permille
             .is_none_or(|value| !(101..950).contains(&value))
         || evidence
             .hold_p90_output_permille
             .is_none_or(|value| value > 1000)
-        || previous.approach_floor_power_permille < 900
     {
         return None;
     }
     // Timely physical Hold followed by a low-band exit is not a missing
-    // Approach handoff. Preserve the smaller sustaining baseline and restore
+    // Approach handoff, including the model's measured 5% braking handoff.
+    // Its retained profile clamps do not describe the effective trajectory.
+    // Preserve the smaller sustaining baseline and restore
     // only the low-side reheat headroom lost by a ripple trim. A PI peak
     // at full output does not exhaust the configured base or lead headroom.
     let mut point = previous;
@@ -1466,6 +1472,97 @@ fn step_toward(current: u16, target: u16, step: u16, min: u16, max: u16) -> u16 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn model_floor_headroom_requires_complete_timely_low_side_hold_evidence() {
+        let previous = point(240);
+        let facts = TuneEvidence {
+            overshoot_c: 0.16,
+            hold_p2p_c: 1.86,
+            hold_sample_count: 26,
+            hold_off_sample_count: 3,
+            hold_median_output_permille: Some(833),
+            hold_p90_output_permille: Some(1000),
+            approach_median_output_permille: Some(50),
+            approach_floor_only: true,
+            first_hold_after_warmup_ms: Some(713),
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(23830),
+            settle_limit_ms: 5000,
+            ..evidence(240)
+        };
+        assert!(hold_reheat_headroom_candidate(previous, facts).is_some());
+        for unavailable in [
+            TuneEvidence {
+                approach_floor_only: false,
+                ..facts
+            },
+            TuneEvidence {
+                approach_median_output_permille: None,
+                ..facts
+            },
+            TuneEvidence {
+                approach_median_output_permille: Some(100),
+                ..facts
+            },
+            TuneEvidence {
+                first_hold_after_warmup_ms: Some(5001),
+                ..facts
+            },
+            TuneEvidence {
+                first_hold_after_warmup_ms: None,
+                ..facts
+            },
+            TuneEvidence {
+                first_band_exit_centi_c: Some(24160),
+                ..facts
+            },
+            TuneEvidence {
+                first_band_exit_centi_c: None,
+                ..facts
+            },
+            TuneEvidence {
+                first_band_observed: false,
+                ..facts
+            },
+            TuneEvidence {
+                hold_sample_count: 2,
+                ..facts
+            },
+            TuneEvidence {
+                hold_off_sample_count: 2,
+                ..facts
+            },
+            TuneEvidence {
+                overshoot_c: 1.51,
+                ..facts
+            },
+            TuneEvidence {
+                hold_p2p_c: 3.01,
+                ..facts
+            },
+            TuneEvidence {
+                hold_median_output_permille: Some(950),
+                ..facts
+            },
+            TuneEvidence {
+                hold_p90_output_permille: None,
+                ..facts
+            },
+        ] {
+            assert!(hold_reheat_headroom_candidate(previous, unavailable).is_none());
+        }
+        assert_eq!(
+            tune_point(
+                previous,
+                TuneEvidence {
+                    tunable_stop: false,
+                    ..facts
+                }
+            ),
+            previous
+        );
+    }
+
     #[test]
     fn saturated_pi_peak_does_not_hide_configured_reheat_or_timing_headroom() {
         // Captured 240C scout: physical Hold starts after 2343ms, then

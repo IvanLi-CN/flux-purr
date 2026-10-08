@@ -5034,6 +5034,70 @@ mod tests {
     }
 
     #[test]
+    fn captured_model_floor_handoff_recovers_hold_without_legacy_clamps() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_model_hold.fixture.json")).unwrap();
+        let mut runtime = ThermalTuningRuntime::new();
+        let mut profile = profile_with_targets(&[240]);
+        let wire: ThermalTuningCandidatePoint =
+            serde_json::from_value(fixture["point"].clone()).unwrap();
+        let previous = ThermalControlProfilePointConfig {
+            target_temp_c: wire.target_c,
+            brake_distance_centi_c: wire.brake_distance_centi_c,
+            warmup_power_permille: wire.warmup_power_permille,
+            approach_power_permille: wire.approach_power_permille,
+            approach_floor_power_permille: wire.approach_floor_power_permille,
+            approach_damping_exponent_permille: wire.approach_damping_exponent_permille,
+            approach_tail_window_centi_c: wire.approach_tail_window_centi_c,
+            hold_power_permille: wire.hold_power_permille,
+            hold_on_centi_c: wire.hold_on_centi_c,
+            hold_off_centi_c: wire.hold_off_centi_c,
+            hold_kp_permille_per_c: wire.hold_kp_permille_per_c,
+            hold_ki_permille_per_c_tick: wire.hold_ki_permille_per_c_tick,
+            hold_reheat_power_permille: wire.hold_reheat_power_permille,
+            hold_entry_centi_c: wire.hold_entry_centi_c,
+            hold_exit_centi_c: wire.hold_exit_centi_c,
+            warmup_reenter_centi_c: wire.warmup_reenter_centi_c,
+            approach_lead_ticks: wire.approach_lead_ticks,
+            hold_lead_ticks: wire.hold_lead_ticks,
+            hold_blend_ticks: wire.hold_blend_ticks,
+            overshoot_cutoff_centi_c: wire.overshoot_cutoff_centi_c,
+        };
+        profile.points[0] = Some(previous);
+        profile.sanitize();
+        runtime.candidate_profile = Some(profile);
+        runtime.trial_start_elapsed_ms = fixture["trialStartedAtMs"].as_u64();
+        runtime.warmup_exited_at_ms = fixture["warmupExitedAtMs"].as_u64();
+        runtime.warmup_full_output = true;
+        for row in fixture["samples"].as_array().unwrap() {
+            let mut observed = sample(
+                row[0].as_u64().unwrap(),
+                serde_json::from_value(row[2].clone()).unwrap(),
+                row[1].as_i64().unwrap() as i16,
+            );
+            observed.target_c = 240;
+            observed.heater_requested_output_permille = row[3].as_u64().unwrap() as u16;
+            observed.heater_output_permille = row[4].as_u64().unwrap() as u16;
+            runtime.current_elapsed_ms = observed.elapsed_ms;
+            runtime.update_trial_metrics(&observed, 240);
+        }
+        let facts = runtime.candidate_failure_evidence(240, Some(16), Some(186), None, 5_000);
+        assert!(facts.approach_floor_only);
+        assert_eq!(facts.approach_median_output_permille, Some(50));
+        assert!(facts.first_hold_after_warmup_ms.unwrap() <= 5_000);
+        assert_eq!(facts.first_band_exit_centi_c, Some(23_830));
+        assert!(runtime.stable_window_verified_at_ms.is_none());
+        assert_eq!(runtime.accepted_target_mask, 0);
+        let mut expected = previous;
+        expected.hold_reheat_power_permille = 913;
+        expected.hold_on_centi_c = 25;
+        expected.hold_lead_ticks = 2;
+        expected.hold_blend_ticks = 1;
+        assert_eq!(tune_point(previous, facts), expected);
+        assert_eq!(reseed_after_hold_confirm(previous, facts), expected);
+    }
+
+    #[test]
     fn captured_same_run_hold_failure_survives_a_pre_hold_retry() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("thermal_tuning_same_run_hold.fixture.json"))
