@@ -1232,6 +1232,10 @@ pub(crate) fn record_thermal_plant_transient_sample(
     let elapsed_ticks = job.elapsed_ticks.min(u32::from(u16::MAX)) as u16;
     let should_record = force
         || job.sample_count < 24
+        || job
+            .samples
+            .get(usize::from(job.sample_count).saturating_sub(1))
+            .is_some_and(|previous| previous.duty_percent != duty_percent)
         || (latest_temp_c - job.last_saved_temp_c).abs() >= THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C;
     if !should_record {
         return true;
@@ -1352,32 +1356,85 @@ pub(crate) fn transient_fit_row(
     delay_ticks: u16,
     ambient_temp_c: f32,
 ) -> Option<([f32; 3], f32)> {
-    const MIN_DERIVATIVE_WINDOW_TICKS: u16 = 10;
-    let previous_index = (0..index).rev().find(|candidate| {
-        samples[index]
-            .elapsed_ticks
-            .saturating_sub(samples[*candidate].elapsed_ticks)
-            >= MIN_DERIVATIVE_WINDOW_TICKS
-    })?;
-    let dt_ticks = samples[index]
-        .elapsed_ticks
-        .saturating_sub(samples[previous_index].elapsed_ticks);
-    let delayed_tick = samples[index].elapsed_ticks.saturating_sub(delay_ticks);
-    let delayed_index = (0..index)
+    const MIN_DERIVATIVE_WINDOW_TICKS: f32 = 10.0;
+    let endpoint_ticks = |at: usize| {
+        let before = at.saturating_sub(1);
+        (f32::from(samples[at].elapsed_ticks) + f32::from(samples[before].elapsed_ticks)) * 0.5
+    };
+    let end_ticks = endpoint_ticks(index);
+    let previous_index = (0..index)
         .rev()
-        .find(|candidate| samples[*candidate].elapsed_ticks <= delayed_tick)?;
-    let mid_temp_c = (temperatures_c[index] + temperatures_c[previous_index]) * 0.5;
+        .find(|candidate| end_ticks - endpoint_ticks(*candidate) >= MIN_DERIVATIVE_WINDOW_TICKS)?;
     let ambient_kelvin = ambient_temp_c + 273.15;
-    let kelvin = mid_temp_c + 273.15;
-    Some((
-        [
-            (temperatures_c[index] - temperatures_c[previous_index])
-                / (f32::from(dt_ticks) * HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0),
-            (mid_temp_c - ambient_temp_c).max(0.0),
-            kelvin.powi(4) - ambient_kelvin.powi(4),
-        ],
-        powers_mw[delayed_index],
-    ))
+    let mut values = [0.0; 3];
+    let mut energy_mj = 0.0;
+    // Average two complete energy balances, never interpolate energy at the
+    // temperature endpoints' time centroid: the centroid can straddle cutoff.
+    // Delta-T, passive losses and delayed input must share the same windows.
+    for offset in 0..=1 {
+        let first = previous_index.saturating_sub(offset);
+        let last = index.saturating_sub(offset);
+        let start = f32::from(samples[first].elapsed_ticks);
+        let end = f32::from(samples[last].elapsed_ticks);
+        let power_mw =
+            transient_mean_delayed_power_mw(samples, powers_mw, start, end, delay_ticks)?;
+        energy_mj += power_mw * (end - start) * HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0;
+        values[0] += temperatures_c[last] - temperatures_c[first];
+        for at in first + 1..=last {
+            let dt_s = f32::from(samples[at].elapsed_ticks - samples[at - 1].elapsed_ticks)
+                * HEATER_CONTROL_INTERVAL_MS as f32
+                / 1_000.0;
+            let left = temperatures_c[at - 1];
+            let right = temperatures_c[at];
+            values[1] +=
+                ((left - ambient_temp_c).max(0.0) + (right - ambient_temp_c).max(0.0)) * 0.5 * dt_s;
+            values[2] += ((left + 273.15).powi(4) + (right + 273.15).powi(4)
+                - 2.0 * ambient_kelvin.powi(4))
+                * 0.5
+                * dt_s;
+        }
+    }
+    Some((values.map(|value| value * 0.5), energy_mj * 0.5))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn transient_mean_delayed_power_mw(
+    samples: &[ThermalPlantTransientSample],
+    powers_mw: &[f32],
+    start_ticks: f32,
+    end_ticks: f32,
+    delay_ticks: u16,
+) -> Option<f32> {
+    if end_ticks <= start_ticks || samples.len() != powers_mw.len() {
+        return None;
+    }
+    let start = start_ticks - f32::from(delay_ticks);
+    let end = end_ticks - f32::from(delay_ticks);
+    let mut energy_mw_ticks = 0.0;
+    for index in 1..samples.len() {
+        let left = f32::from(samples[index - 1].elapsed_ticks);
+        let right = f32::from(samples[index].elapsed_ticks);
+        if right <= left {
+            return None;
+        }
+        let overlap_start = start.max(left);
+        let overlap_end = end.min(right);
+        if overlap_end <= overlap_start {
+            continue;
+        }
+        let before = samples[index - 1];
+        let after = samples[index];
+        // VIN changes continuously under the calibration's fixed PPS request,
+        // including current limiting. Only a duty change is a command edge.
+        let power = if before.duty_percent == after.duty_percent {
+            let mean_fraction = ((overlap_start + overlap_end) * 0.5 - left) / (right - left);
+            powers_mw[index - 1] + (powers_mw[index] - powers_mw[index - 1]) * mean_fraction
+        } else {
+            powers_mw[index - 1]
+        };
+        energy_mw_ticks += power * (overlap_end - overlap_start);
+    }
+    Some(energy_mw_ticks / (end_ticks - start_ticks))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

@@ -5006,6 +5006,19 @@ fn synthetic_trace(
     [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     usize,
 ) {
+    synthetic_trace_with_delay(memory_config, ambient_temp_c, 0)
+}
+
+fn synthetic_trace_with_delay(
+    memory_config: &MemoryConfig,
+    ambient_temp_c: f32,
+    delay_ticks: usize,
+) -> (
+    [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    usize,
+) {
+    let mut input_history = [0.0; 41];
+    assert!(delay_ticks < input_history.len());
     let capacity_mj_per_c = 100_000.0_f32;
     let convection_mw_per_c = 100.0_f32;
     let radiation_mw_per_k4 = 0.0000005_f32;
@@ -5047,6 +5060,7 @@ fn synthetic_trace(
         }
         if reached_cutoff {
             heating = false;
+            input_history[usize::from(tick) % input_history.len()] = 0.0;
             last_saved_temp_c = f32::MIN;
             continue;
         }
@@ -5061,11 +5075,14 @@ fn synthetic_trace(
         } else {
             0.0
         };
+        input_history[usize::from(tick) % input_history.len()] = power_mw;
+        let delayed_power_mw = input_history
+            [(usize::from(tick) + input_history.len() - delay_ticks) % input_history.len()];
         let temperature_k = temperature_c + 273.15;
         let ambient_k = ambient_temp_c + 273.15;
         let losses_mw = convection_mw_per_c * (temperature_c - ambient_temp_c)
             + radiation_mw_per_k4 * (temperature_k.powi(4) - ambient_k.powi(4));
-        temperature_c += (power_mw - losses_mw) / capacity_mj_per_c * 0.05;
+        temperature_c += (delayed_power_mw - losses_mw) / capacity_mj_per_c * 0.05;
     }
     (samples, sample_count)
 }
@@ -5368,6 +5385,83 @@ fn transient_thermal_fit_recovers_a_physical_model_from_heat_and_cool_trace() {
     assert_synthetic_model_guards(&mut memory_config, transaction, ambient_temp_c);
     assert_synthetic_apdo_and_persistence(&mut memory_config, transaction);
     assert_synthetic_invalid_trace_guards(&mut memory_config, transaction, ambient_temp_c);
+}
+
+#[test]
+fn transient_zero_delay_model_does_not_invent_a_multi_second_delay() {
+    let memory = synthetic_memory_config();
+    let (samples, count) = synthetic_trace(&memory, 25.0);
+    let data = prepare_transient_fit(
+        &samples,
+        count as u8,
+        None,
+        &memory,
+        runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+    )
+    .unwrap();
+    let (model, residual) = best_transient_projection(&data).unwrap();
+    assert!(
+        model.transport_delay_ms <= 500,
+        "zero-delay physical trace fitted {}ms of transport delay, residual={residual}",
+        model.transport_delay_ms
+    );
+}
+
+#[test]
+fn transient_fit_preserves_a_real_transport_delay() {
+    let memory = synthetic_memory_config();
+    let (samples, count) = synthetic_trace_with_delay(&memory, 25.0, 20);
+    let data = prepare_transient_fit(
+        &samples,
+        count as u8,
+        None,
+        &memory,
+        runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+    )
+    .unwrap();
+    let (model, residual) = best_transient_projection(&data).unwrap();
+    assert!(residual <= 0.2);
+    assert!(
+        (700..=1_300).contains(&model.transport_delay_ms),
+        "1000ms physical transport delay fitted {}ms, residual={residual}",
+        model.transport_delay_ms
+    );
+}
+
+#[test]
+fn transient_power_matches_the_temperature_derivative_interval() {
+    let samples = [0, 5, 10, 20].map(|elapsed_ticks| ThermalPlantTransientSample {
+        elapsed_ticks,
+        raw_rtd_adc_mv: 1000,
+        heater_voltage_125mv: 160,
+        duty_percent: if elapsed_ticks == 0 { 100 } else { 0 },
+    });
+    // A 250ms powered interval followed by 250ms off must contribute its
+    // energy to the 500ms temperature derivative, even though its endpoint
+    // power is zero. A delayed window includes only its actual overlap.
+    let powers = [1000.0, 0.0, 0.0, 0.0];
+    let (_, energy_mj) =
+        transient_fit_row(&samples, &[25.0, 26.0, 26.0, 26.0], &powers, 3, 0, 25.0).unwrap();
+    assert_eq!(energy_mj, 125.0);
+    assert_eq!(
+        transient_mean_delayed_power_mw(&samples, &powers, 0.0, 10.0, 0),
+        Some(500.0)
+    );
+    assert_eq!(
+        transient_mean_delayed_power_mw(&samples, &powers, 0.0, 10.0, 8),
+        Some(200.0)
+    );
+    let continuous_vin_samples = [0, 10].map(|elapsed_ticks| ThermalPlantTransientSample {
+        elapsed_ticks,
+        raw_rtd_adc_mv: 1000,
+        heater_voltage_125mv: if elapsed_ticks == 0 { 96 } else { 160 },
+        duty_percent: 100,
+    });
+    assert_eq!(
+        transient_mean_delayed_power_mw(&continuous_vin_samples, &[1000.0, 2000.0], 0.0, 10.0, 0),
+        Some(1500.0),
+        "measured VIN drift under fixed PPS is not a discrete duty edge"
+    );
 }
 
 const LIVE_DEVICE_TRACE: &[(u16, f32, u8)] = &[
@@ -5995,6 +6089,19 @@ fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     ));
     assert_eq!(job.samples[1].heater_voltage_125mv, 160);
     assert_eq!(job.samples[1].duty_percent, 100);
+
+    // Past the dense startup window, cutoff must still be recorded even
+    // when there is no temperature change. Otherwise the fit invents input
+    // energy until a later 4C cooling sample.
+    job.sample_count = 24;
+    job.samples[23] = job.samples[1];
+    job.elapsed_ticks = 3;
+    assert!(record_thermal_plant_transient_sample(
+        &mut job, 260, 26.0, 20_000, 0, false
+    ));
+    assert_eq!(job.sample_count, 25);
+    assert_eq!(job.samples[24].elapsed_ticks, 3);
+    assert_eq!(job.samples[24].duty_percent, 0);
 }
 
 #[test]
@@ -6084,8 +6191,9 @@ fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
             }
 
             let power_mw = if heater_duty_percent > 0 {
-                ((f32::from(source_mv) / 1_000.0).powi(2) / resistance_ohms * 1_000.0)
-                    .min(f32::from(source_mv) * f32::from(source_current_ma) / 1_000.0)
+                // In current limiting, heater voltage falls to I*R. The source
+                // capability Vmax*Imax is not the actual resistor power.
+                (measured_heater_mv as f32 / 1_000.0).powi(2) / resistance_ohms * 1_000.0
             } else {
                 0.0
             };
