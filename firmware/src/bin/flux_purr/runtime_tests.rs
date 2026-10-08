@@ -4472,6 +4472,7 @@ fn vin_auto_job_finishes_full_sweep_without_storage_overflow() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    elapsed_ticks_delta: 1,
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: vin_raw_mv,
                     latest_temp_c: 25.0,
@@ -4554,6 +4555,7 @@ fn vin_auto_job_reselects_current_when_sweep_crosses_apdo_boundary() {
             &mut memory_config,
             &mut manual_pps,
             CalibrationJobUpdateInput {
+                elapsed_ticks_delta: 1,
                 latest_rtd_raw_adc_mv: 0,
                 latest_vin_raw_adc_mv: vin_raw_mv,
                 latest_temp_c: 25.0,
@@ -4621,6 +4623,7 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    elapsed_ticks_delta: 1,
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: settled_raw_mv.saturating_sub(80),
                     latest_temp_c: 25.0,
@@ -4638,6 +4641,7 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    elapsed_ticks_delta: 1,
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: settled_raw_mv,
                     latest_temp_c: 25.0,
@@ -4955,6 +4959,7 @@ fn update_thermal_plant_job(
         memory_config,
         manual_pps,
         CalibrationJobUpdateInput {
+            elapsed_ticks_delta: 1,
             latest_rtd_raw_adc_mv: update.raw_rtd_adc_mv,
             latest_vin_raw_adc_mv: 0,
             latest_temp_c: update.temp_c,
@@ -6215,7 +6220,7 @@ fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
             .round() as u16
     }
 
-    for source_current_ma in [3_000, 5_000] {
+    for (source_current_ma, cycle_ms) in [(3_000, 50_u32), (5_000, 50), (3_000, 75), (5_000, 75)] {
         let mut calibration = CalibrationRuntimeState {
             mode: CalibrationMode::ThermalPlant,
             ..CalibrationRuntimeState::default()
@@ -6242,6 +6247,7 @@ fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
         let convection_mw_per_c = 100.0_f32;
         let radiation_mw_per_k4 = 0.00000005_f32;
         let mut temperature_c = ambient_temp_c;
+        let mut elapsed_clock = CalibrationElapsedClock::default();
         for _ in 0..(THERMAL_PLANT_AMBIENT_TICKS as usize
             + THERMAL_PLANT_HEAT_TIMEOUT_TICKS as usize
             + THERMAL_PLANT_COOL_TIMEOUT_TICKS as usize)
@@ -6274,6 +6280,7 @@ fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    elapsed_ticks_delta: elapsed_clock.advance(u64::from(cycle_ms)),
                     latest_rtd_raw_adc_mv: raw_rtd_adc_mv,
                     latest_vin_raw_adc_mv: 0,
                     latest_temp_c: reported_temp_c,
@@ -6303,7 +6310,7 @@ fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
             let ambient_k = ambient_temp_c + 273.15;
             let losses_mw = convection_mw_per_c * (temperature_c - ambient_temp_c)
                 + radiation_mw_per_k4 * (temperature_k.powi(4) - ambient_k.powi(4));
-            temperature_c += (power_mw - losses_mw) / capacity_mj_per_c * 0.05;
+            temperature_c += (power_mw - losses_mw) / capacity_mj_per_c * cycle_ms as f32 / 1_000.0;
         }
 
         assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
@@ -6317,6 +6324,11 @@ fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
             .as_ref()
             .unwrap();
         let model = thermal_plant_projection_from_transient(transaction).unwrap();
+        assert!(
+            (model.thermal_capacity_mj_per_c / capacity_mj_per_c - 1.0).abs() < 0.15,
+            "actual {cycle_ms}ms cadence fitted capacity {} instead of {capacity_mj_per_c}, class={source_current_ma}",
+            model.thermal_capacity_mj_per_c
+        );
         assert!(
             model.transport_delay_ms <= 500,
             "zero-delay auto calibration fitted {}ms, class={source_current_ma}",
@@ -6336,9 +6348,30 @@ fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
         assert!(
             response
                 .windows(2)
-                .all(|pair| pair[1].elapsed_ticks - pair[0].elapsed_ticks <= 10)
+                .all(|pair| pair[1].elapsed_ticks - pair[0].elapsed_ticks
+                    <= 10 + cycle_ms.div_ceil(50) as u16)
         );
     }
+}
+
+#[test]
+fn thermal_plant_elapsed_clock_retains_fractional_intervals() {
+    let mut clock = CalibrationElapsedClock::default();
+    let mut actual_ms = 0;
+    let mut ticks = 0;
+    for interval in [9, 47, 61, 75, 50, 115, 29, 2, 500] {
+        actual_ms += interval;
+        ticks += clock.advance(interval);
+        assert_eq!(u64::from(ticks), actual_ms / HEATER_CONTROL_INTERVAL_MS);
+    }
+    clock = CalibrationElapsedClock::default();
+    assert_eq!(clock.advance(49), 0);
+    assert_eq!(clock.advance(1), 1);
+    assert_eq!(clock.advance_for_run(Some(1), 49), 0);
+    assert_eq!(clock.advance_for_run(Some(2), 1), 0);
+    assert_eq!(clock.advance_for_run(Some(2), 49), 1);
+    assert_eq!(clock.advance_for_run(None, 49), 0);
+    assert_eq!(clock.advance_for_run(Some(3), 1), 0);
 }
 
 #[test]
@@ -6392,6 +6425,7 @@ fn thermal_plant_transient_cuts_heat_at_220_before_the_next_output_cycle() {
         &mut memory_config,
         &mut manual_pps,
         CalibrationJobUpdateInput {
+            elapsed_ticks_delta: 1,
             latest_rtd_raw_adc_mv: 1_200,
             latest_vin_raw_adc_mv: 0,
             latest_temp_c: THERMAL_PLANT_TARGET_TEMP_C,
@@ -6491,6 +6525,7 @@ fn thermal_plant_job_fails_before_sampling_after_a_manual_pps_override() {
         &mut memory_config,
         &mut manual_pps,
         CalibrationJobUpdateInput {
+            elapsed_ticks_delta: 1,
             latest_rtd_raw_adc_mv: 0,
             latest_vin_raw_adc_mv: 0,
             latest_temp_c: 20.0,
@@ -6535,6 +6570,7 @@ fn thermal_plant_job_disarms_on_missing_powered_electrical_observation() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    elapsed_ticks_delta: 1,
                     latest_rtd_raw_adc_mv: 250,
                     latest_vin_raw_adc_mv: 0,
                     latest_temp_c: 25.0,
@@ -6551,6 +6587,7 @@ fn thermal_plant_job_disarms_on_missing_powered_electrical_observation() {
             &mut memory_config,
             &mut manual_pps,
             CalibrationJobUpdateInput {
+                elapsed_ticks_delta: 1,
                 latest_rtd_raw_adc_mv: 260,
                 latest_vin_raw_adc_mv: 0,
                 latest_temp_c: 26.0,

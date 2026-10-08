@@ -81,6 +81,7 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) manual_pps_state: ManualPpsState,
     pub(crate) calibration_runtime_state: CalibrationRuntimeState,
     pub(crate) thermal_plant_workspace: &'static mut CalibrationThermalPlantWorkspace,
+    pub(crate) calibration_elapsed_clock: CalibrationElapsedClock,
     pub(crate) thermal_control_profile_preview: Option<ThermalControlProfile>,
     pub(crate) thermal_tuning: Box<flux_purr_firmware::thermal_tuning::ThermalTuningRuntime>,
     pub(crate) tuning_pd_wait_started_ms: Option<u64>,

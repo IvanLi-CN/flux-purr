@@ -130,6 +130,7 @@ macro_rules! build_runtime_loop_state {
             .try_get()
             .unwrap_or_else(PowerState::unavailable);
         let last_control_ms = 0;
+        let calibration_elapsed_clock = CalibrationElapsedClock::default();
         let next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
         let heater_control_timing = HeaterControlTiming::default();
         let tuning_pd_wait_started_ms = None;
@@ -256,6 +257,7 @@ macro_rules! build_runtime_loop_state {
             status_light_started_ms,
             runtime_started_ms,
             last_control_ms,
+            calibration_elapsed_clock,
             next_control_deadline_ms,
             heater_control_timing,
             ui_refresh_pending,

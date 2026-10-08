@@ -1230,6 +1230,11 @@ pub(crate) fn record_thermal_plant_transient_sample(
         return false;
     }
     let elapsed_ticks = job.elapsed_ticks.min(u32::from(u16::MAX)) as u16;
+    // The persisted time grid is 50ms. A faster call in the same cell is not
+    // a new fit observation; a duty edge is retained on the next time cell.
+    if job.sample_count > 0 && elapsed_ticks <= job.last_saved_tick {
+        return true;
+    }
     // Reserve trace capacity for the cutoff response, not just startup. A
     // temperature-only trigger omits the flat peak that identifies delay.
     let cutoff_time_sample = job.phase == ThermalPlantAutoPhase::Cooling
@@ -1802,12 +1807,40 @@ pub(crate) fn invalidate_transient_thermal_plant(memory_config: &mut MemoryConfi
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy)]
 pub(crate) struct CalibrationJobUpdateInput {
+    pub(crate) elapsed_ticks_delta: u32,
     pub(crate) latest_rtd_raw_adc_mv: u16,
     pub(crate) latest_vin_raw_adc_mv: u16,
     pub(crate) latest_temp_c: f32,
     pub(crate) pd_current_ma: u16,
     pub(crate) latest_vin_mv: u32,
     pub(crate) heater_duty_percent: u8,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CalibrationElapsedClock {
+    remainder_ms: u64,
+    run_id: Option<u32>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl CalibrationElapsedClock {
+    pub(crate) fn advance_for_run(&mut self, run_id: Option<u32>, elapsed_ms: u64) -> u32 {
+        if run_id != self.run_id {
+            self.remainder_ms = 0;
+            self.run_id = run_id;
+        }
+        if run_id.is_none() {
+            return 0;
+        }
+        self.advance(elapsed_ms)
+    }
+
+    pub(crate) fn advance(&mut self, elapsed_ms: u64) -> u32 {
+        let elapsed_ms = elapsed_ms.saturating_add(self.remainder_ms);
+        self.remainder_ms = elapsed_ms % HEATER_CONTROL_INTERVAL_MS;
+        (elapsed_ms / HEATER_CONTROL_INTERVAL_MS).min(u64::from(u32::MAX)) as u32
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2041,7 +2074,7 @@ pub(crate) fn update_thermal_plant_calibration_job(
         );
         return;
     };
-    job.elapsed_ticks = job.elapsed_ticks.saturating_add(1);
+    job.elapsed_ticks = job.elapsed_ticks.saturating_add(input.elapsed_ticks_delta);
     let phase_ok = match job.phase {
         ThermalPlantAutoPhase::Ambient => {
             update_thermal_ambient_phase(calibration, manual_pps, job, input, recorded_temp_c)

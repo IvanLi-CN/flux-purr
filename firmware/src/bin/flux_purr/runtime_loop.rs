@@ -1619,6 +1619,7 @@ pub(crate) fn runtime_update_calibration_job(
     state: &mut RuntimeLoopState,
     current_pd_observation: Option<PdStatusObservation>,
     calibration_live_rtd_temp_c: Option<f32>,
+    control_elapsed_ms: u64,
 ) -> bool {
     if flash_preparation::is_active() {
         if state.calibration_runtime_state.mode != CalibrationMode::Off
@@ -1641,6 +1642,18 @@ pub(crate) fn runtime_update_calibration_job(
         == CalibrationMode::ThermalPlant
         && state.calibration_runtime_state.job.kind == Some(CalibrationJobKind::ThermalPlant)
         && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running;
+    let run_id = thermal_plant_was_running
+        .then(|| {
+            state
+                .thermal_plant_workspace
+                .job
+                .as_ref()
+                .map(|job| job.run_id)
+        })
+        .flatten();
+    let elapsed_ticks_delta = state
+        .calibration_elapsed_clock
+        .advance_for_run(run_id, control_elapsed_ms);
     if state.current_rtd_fault.is_some() && thermal_plant_was_running {
         calibration_job_fail(
             &mut state.calibration_runtime_state,
@@ -1660,6 +1673,7 @@ pub(crate) fn runtime_update_calibration_job(
             &mut state.manual_pps_state,
             state.thermal_plant_workspace,
             CalibrationJobUpdateInput {
+                elapsed_ticks_delta,
                 latest_rtd_raw_adc_mv: state.latest_rtd_raw_adc_mv,
                 latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
                 latest_temp_c: calibration_temp_c,
@@ -2587,6 +2601,7 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
     needs_redraw |= runtime_apply_tuning_cooling_boundary(state, elapsed_ms);
     if elapsed_ms >= state.next_control_deadline_ms {
         let control_started_ms = elapsed_ms;
+        let control_elapsed_ms = control_started_ms.saturating_sub(state.last_control_ms);
         runtime_advance_heater_control_deadline(state, control_started_ms);
         runtime_apply_pending_tuning_preview(state);
         let active_thermal_settings = runtime_heater_output_settings(state);
@@ -2610,6 +2625,7 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
             state,
             current_pd_observation,
             calibration_live_rtd_temp_c,
+            control_elapsed_ms,
         );
         if fusb302b_capabilities_changed {
             disarm_calibration_after_capability_refresh(
