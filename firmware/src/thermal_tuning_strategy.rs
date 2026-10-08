@@ -29,6 +29,7 @@ pub(crate) struct TuneEvidence {
     pub first_hold_error_c: Option<f64>,
     pub hold_median_output_permille: Option<u16>,
     pub hold_p90_output_permille: Option<u16>,
+    pub hold_max_output_permille: Option<u16>,
     pub approach_median_output_permille: Option<u16>,
     pub approach_floor_only: bool,
     pub approach_output_range: Option<(u16, u16)>,
@@ -84,6 +85,9 @@ pub(crate) fn tune_point(
         return braked;
     }
     if let Some(damped) = coasting_high_side_candidate(previous, evidence) {
+        return damped;
+    }
+    if let Some(damped) = limited_hold_high_side_candidate(previous, evidence) {
         return damped;
     }
     if let Some(trimmed) = hold_ripple_trim_candidate(previous, evidence) {
@@ -151,7 +155,7 @@ pub(crate) fn bounded_failure_alternative(
         return None;
     }
     let hold_observed = evidence.first_band_observed && evidence.hold_sample_count >= 3;
-    if high && hold_observed && hold_off_after_entry(evidence) {
+    if high && hold_observed && (hold_off_after_entry(evidence) || limited_hold_outputs(evidence)) {
         if evidence.target_c <= 150 && evidence.approach_floor_only {
             return earlier_braking_candidate(previous, 40 * (attempt + 1));
         }
@@ -342,6 +346,45 @@ fn hold_off_after_entry(evidence: TuneEvidence) -> bool {
             && evidence.hold_off_sample_count.saturating_add(1) == evidence.hold_sample_count)
 }
 
+fn limited_hold_outputs(evidence: TuneEvidence) -> bool {
+    evidence.hold_sample_count >= 3
+        && evidence
+            .hold_max_output_permille
+            .is_some_and(|maximum| maximum <= 100)
+        && evidence.hold_off_sample_count.saturating_mul(5)
+            >= evidence.hold_sample_count.saturating_mul(4)
+}
+
+fn limited_hold_high_side_candidate(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> Option<ThermalControlProfilePointConfig> {
+    if !evidence.tunable_stop
+        || evidence.target_c > 150
+        || !evidence.full_speed_failed
+        || evidence.stable_window_verified
+        || !evidence.first_band_observed
+        || !limited_hold_outputs(evidence)
+        || !evidence.hold_max_below_c.is_some_and(|below| below <= 1.5)
+        || evidence.over_c <= 1.5
+        || !evidence.approach_output_range.is_some_and(|(min, max)| {
+            min >= crate::thermal_plant::APPROACH_MIN_PERMILLE && max > 100
+        })
+    {
+        return None;
+    }
+    // This is limited observed Hold supply, not a zero-power coast. Keep
+    // the handoff and Hold unchanged while reducing effective Approach heat.
+    let step = round_positive((evidence.overshoot_c - 1.5).max(0.5) * 1_000.0).clamp(500, 1_000);
+    Some(ThermalControlProfilePointConfig {
+        approach_damping_exponent_permille: previous
+            .approach_damping_exponent_permille
+            .saturating_add(step)
+            .min(4_000),
+        ..previous
+    })
+}
+
 fn saturated_hold_ripple_candidate(
     previous: ThermalControlProfilePointConfig,
     evidence: TuneEvidence,
@@ -480,6 +523,9 @@ pub(crate) fn reseed_after_hold_confirm(
         return braked;
     }
     if let Some(damped) = coasting_high_side_candidate(previous, evidence) {
+        return damped;
+    }
+    if let Some(damped) = limited_hold_high_side_candidate(previous, evidence) {
         return damped;
     }
     // Firmware-only high-temperature exception: use the complete confirmation
@@ -879,12 +925,12 @@ fn stability_gate_evidence(evidence: TuneEvidence) -> (GateFailure, f64) {
     let lower = target - 150;
     let upper = target + 150;
     // A first low-band exit can be an Approach measurement fluctuation.
-    // With physical Hold never below band, zero Hold supply and a later
+    // With physical Hold never below band, stopped or limited Hold supply and a later
     // upper-band excursion, the observed failure is stored heat, not reheat.
     // Preserve the first-exit fact and every qualification gate unchanged.
     if evidence.first_band_observed
         && evidence.hold_sample_count >= 3
-        && hold_off_after_entry(evidence)
+        && (hold_off_after_entry(evidence) || limited_hold_outputs(evidence))
         && evidence.hold_max_below_c.is_some_and(|below| below <= 1.5)
         && evidence.over_c > 1.5
     {
@@ -2092,6 +2138,7 @@ mod tests {
             first_hold_error_c: None,
             hold_median_output_permille: None,
             hold_p90_output_permille: None,
+            hold_max_output_permille: None,
             approach_median_output_permille: None,
             approach_floor_only: false,
             approach_output_range: None,
@@ -2288,6 +2335,96 @@ mod tests {
         assert_eq!(reseed_after_hold_confirm(saturated, facts), saturated);
         for attempt in 0..32 {
             assert!(bounded_failure_alternative(saturated, facts, attempt).is_none());
+        }
+    }
+
+    #[test]
+    fn limited_hold_high_side_feedback_requires_complete_low_output_facts() {
+        let previous = point(60);
+        let facts = TuneEvidence {
+            overshoot_c: 2.62,
+            over_c: 2.62,
+            hold_max_below_c: Some(0.49),
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(5_848),
+            hold_sample_count: 22,
+            hold_off_sample_count: 20,
+            hold_max_output_permille: Some(60),
+            approach_output_range: Some((50, 990)),
+            ..evidence(60)
+        };
+        let tuned = limited_hold_high_side_candidate(previous, facts).unwrap();
+        assert_eq!(
+            tuned,
+            ThermalControlProfilePointConfig {
+                approach_damping_exponent_permille: 2_000,
+                ..previous
+            }
+        );
+        for unavailable in [
+            TuneEvidence {
+                tunable_stop: false,
+                ..facts
+            },
+            TuneEvidence {
+                target_c: 160,
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+            TuneEvidence {
+                full_speed_failed: false,
+                ..facts
+            },
+            TuneEvidence {
+                first_band_observed: false,
+                ..facts
+            },
+            TuneEvidence {
+                hold_sample_count: 2,
+                hold_off_sample_count: 2,
+                ..facts
+            },
+            TuneEvidence {
+                hold_max_output_permille: None,
+                ..facts
+            },
+            TuneEvidence {
+                hold_max_output_permille: Some(101),
+                ..facts
+            },
+            TuneEvidence {
+                hold_off_sample_count: 17,
+                ..facts
+            },
+            TuneEvidence {
+                hold_max_below_c: Some(1.51),
+                ..facts
+            },
+            TuneEvidence {
+                hold_max_below_c: None,
+                ..facts
+            },
+            TuneEvidence {
+                over_c: 1.5,
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: Some((0, 990)),
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: Some((50, 100)),
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: None,
+                ..facts
+            },
+        ] {
+            assert!(limited_hold_high_side_candidate(previous, unavailable).is_none());
         }
     }
 

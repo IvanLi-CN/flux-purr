@@ -1437,6 +1437,11 @@ impl ThermalTuningRuntime {
             first_hold_error_c,
             hold_median_output_permille: self.hold_output_percentile(0.5).map(|value| value as u16),
             hold_p90_output_permille: self.hold_output_percentile(0.9).map(|value| value as u16),
+            hold_max_output_permille: self
+                .hold_output_histogram
+                .iter()
+                .rposition(|count| *count > 0)
+                .map(|output| output as u16),
             approach_median_output_permille: histogram_percentile(
                 &self.approach_output_histogram,
                 self.approach_output_count,
@@ -4919,15 +4924,10 @@ mod tests {
             assert_eq!(runtime.trial_purpose, ThermalTuningTrialPurpose::Scout);
             assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
             assert_eq!(runtime.accepted_target_mask, 0);
-            if predicted_wins {
-                assert_eq!(next.approach_damping_exponent_permille, 2_000);
-                assert_eq!(next.brake_distance_centi_c, 1_259);
-            } else {
-                // The current trial has a different, larger measured excursion;
-                // its own feedback selects braking, not the predicted damping.
-                assert_eq!(next.approach_damping_exponent_permille, 1_000);
-                assert_eq!(next.brake_distance_centi_c, 1_559);
-            }
+            // The larger current excursion needs +1000, while the predicted
+            // point needs +500. Borrowing either loser's facts changes this.
+            assert_eq!(next.approach_damping_exponent_permille, 2_000);
+            assert_eq!(next.brake_distance_centi_c, 1_259);
             assert_eq!(next.hold_power_permille, 56);
             assert_eq!(next.hold_reheat_power_permille, 56);
             assert!(runtime.preview_update_pending);
@@ -5095,6 +5095,51 @@ mod tests {
         assert_ne!(tune_point(previous, protected), proposed);
         runtime.reset_trial_metrics();
         assert!(runtime.model_approach_output_range.is_none());
+    }
+
+    #[test]
+    fn captured_a60_small_hold_pulses_select_effective_approach_damping() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_limited_hold.fixture.json")).unwrap();
+        let mut runtime = started_single_target_runtime();
+        let mut profile = runtime.candidate_profile.unwrap();
+        let point = profile.points[0].as_mut().unwrap();
+        point.brake_distance_centi_c = 1_243;
+        point.approach_damping_exponent_permille = 1_000;
+        point.approach_lead_ticks = 0;
+        point.approach_power_permille = 1_000;
+        point.approach_floor_power_permille = 50;
+        point.approach_tail_window_centi_c = 0;
+        point.hold_power_permille = 56;
+        point.hold_reheat_power_permille = 56;
+        point.hold_kp_permille_per_c = 43;
+        point.hold_ki_permille_per_c_tick = 1;
+        point.hold_blend_ticks = 2;
+        point.hold_lead_ticks = 2;
+        let previous = *point;
+        runtime.candidate_profile = Some(profile);
+        for row in fixture["samples"].as_array().unwrap() {
+            let mut observed = sample(
+                row[0].as_u64().unwrap(),
+                serde_json::from_value(row[2].clone()).unwrap(),
+                row[1].as_i64().unwrap() as i16,
+            );
+            observed.heater_requested_output_permille = row[3].as_u64().unwrap() as u16;
+            observed.heater_output_permille = observed.heater_requested_output_permille;
+            runtime.update_trial_metrics(&observed, 60);
+        }
+        let facts = runtime.candidate_failure_evidence(60, Some(262), Some(311), None, 10_000);
+        assert!(!facts.hold_entry_pulse_only);
+        assert_eq!(facts.hold_sample_count, 22);
+        assert_eq!(facts.hold_off_sample_count, 20);
+        assert_eq!(facts.hold_max_output_permille, Some(60));
+        assert_eq!(facts.hold_max_below_c, Some(0.49));
+        let expected = ThermalControlProfilePointConfig {
+            approach_damping_exponent_permille: 2_000,
+            ..previous
+        };
+        assert_eq!(tune_point(previous, facts), expected);
+        assert_eq!(reseed_after_hold_confirm(previous, facts), expected);
     }
 
     #[test]
