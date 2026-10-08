@@ -5743,6 +5743,74 @@ mod tests {
     }
 
     #[test]
+    fn captured_trajectory_hold_deficit_recovers_hold_before_approach() {
+        // B-group 36aa5d68, 220C batch-predicted trial 2. These are the
+        // complete recorded Approach/Hold requests, including the one stop.
+        let mut runtime = ThermalTuningRuntime::new();
+        let mut profile = profile_with_targets(&[220]);
+        let point = profile.points[0].as_mut().unwrap();
+        point.brake_distance_centi_c = 100;
+        point.approach_damping_exponent_permille = 910;
+        point.approach_floor_power_permille = 800;
+        point.hold_power_permille = 800;
+        point.hold_reheat_power_permille = 800;
+        point.hold_lead_ticks = 1;
+        point.hold_blend_ticks = 1;
+        point.hold_kp_permille_per_c = 235;
+        point.hold_ki_permille_per_c_tick = 3;
+        runtime.candidate_profile = Some(profile);
+        for (elapsed, phase, temperature, output) in [
+            (712_878, ThermalTuningPhase::Approach, 21_909, 50),
+            (712_959, ThermalTuningPhase::Approach, 21_946, 1_000),
+            (713_212, ThermalTuningPhase::Approach, 21_928, 980),
+            (713_441, ThermalTuningPhase::Approach, 21_901, 1_000),
+            (713_651, ThermalTuningPhase::Approach, 21_916, 1_000),
+            (713_881, ThermalTuningPhase::Approach, 21_946, 1_000),
+            (714_096, ThermalTuningPhase::Hold, 21_984, 870),
+            (714_158, ThermalTuningPhase::Hold, 21_957, 870),
+            (714_362, ThermalTuningPhase::Hold, 21_929, 890),
+            (714_574, ThermalTuningPhase::Hold, 21_973, 880),
+            (714_780, ThermalTuningPhase::Hold, 21_980, 850),
+            (715_039, ThermalTuningPhase::Hold, 22_012, 0),
+            (715_272, ThermalTuningPhase::Hold, 21_972, 810),
+            (715_513, ThermalTuningPhase::Hold, 21_913, 1_000),
+            (715_729, ThermalTuningPhase::Hold, 21_965, 900),
+            (715_930, ThermalTuningPhase::Hold, 21_935, 900),
+            (716_130, ThermalTuningPhase::Hold, 21_927, 990),
+            (716_339, ThermalTuningPhase::Hold, 21_902, 1_000),
+            (716_593, ThermalTuningPhase::Hold, 21_930, 980),
+            (716_808, ThermalTuningPhase::Hold, 21_953, 980),
+            (717_023, ThermalTuningPhase::Hold, 21_925, 1_000),
+            (717_249, ThermalTuningPhase::Hold, 21_933, 1_000),
+            (717_463, ThermalTuningPhase::Hold, 21_899, 1_000),
+            (717_681, ThermalTuningPhase::Hold, 21_908, 1_000),
+            (717_901, ThermalTuningPhase::Hold, 21_874, 1_000),
+            (718_141, ThermalTuningPhase::Hold, 21_874, 1_000),
+            (718_354, ThermalTuningPhase::Hold, 21_873, 1_000),
+            (718_627, ThermalTuningPhase::Hold, 21_851, 1_000),
+            (718_778, ThermalTuningPhase::Hold, 21_838, 1_000),
+        ] {
+            let mut observation = sample(elapsed, phase, temperature);
+            observation.target_c = 220;
+            observation.heater_requested_output_permille = output;
+            observation.heater_output_permille = output;
+            runtime.update_trial_metrics(&observation, 220);
+        }
+        let facts = runtime.candidate_failure_evidence(220, Some(12), Some(174), None, 5_000);
+        assert_eq!(facts.first_hold_after_warmup_ms, Some(1_218));
+        assert_eq!(facts.first_band_exit_centi_c, Some(21_838));
+        assert_eq!(facts.hold_off_sample_count, 1);
+        assert!(facts.hold_median_output_permille.unwrap() >= 950);
+        runtime.mutate_candidate_for_failure(220, Some(12), Some(174), None, 5_000);
+        let proposed = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert!(proposed.hold_power_permille >= 900);
+        assert!(proposed.hold_reheat_power_permille >= 900);
+        assert_eq!(proposed.hold_lead_ticks, 0);
+        assert_eq!(proposed.brake_distance_centi_c, 100);
+        assert_eq!(proposed.approach_damping_exponent_permille, 910);
+    }
+
+    #[test]
     fn trajectory_coasting_pulse_corrects_warmup_handoff_before_damping() {
         // A-group 36aa5d68 scout: a brief 20% Approach pulse,
         // mostly 5-10%, then entirely unpowered Hold still rises to 66.71C.

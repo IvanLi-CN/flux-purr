@@ -99,6 +99,9 @@ pub(crate) fn tune_point(
     if let Some(recovery) = saturated_hold_ripple_candidate(previous, evidence) {
         return recovery;
     }
+    if let Some(recovery) = saturated_trajectory_hold_deficit_candidate(previous, evidence) {
+        return recovery;
+    }
     if let Some(recovery) = hold_reheat_headroom_candidate(previous, evidence) {
         return recovery;
     }
@@ -433,6 +436,57 @@ fn saturated_hold_ripple_candidate(
     (point != previous).then_some(point)
 }
 
+fn saturated_trajectory_hold_deficit_candidate(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> Option<ThermalControlProfilePointConfig> {
+    let lower_band = i32::from(evidence.target_c) * 100 - 150;
+    if !evidence.tunable_stop
+        || !evidence.full_speed_failed
+        || evidence.stable_window_verified
+        || evidence.target_c < 180
+        || !evidence.first_band_observed
+        || evidence.hold_sample_count < 3
+        || evidence.overshoot_c > 1.5
+        || evidence.hold_p2p_c > 3.0
+        || evidence.hold_mean_error_c.is_none_or(|error| error <= 0.2)
+        || evidence.hold_max_below_c.is_none_or(|below| below <= 1.5)
+        || evidence
+            .first_hold_after_warmup_ms
+            .is_none_or(|time| time > evidence.settle_limit_ms)
+        || evidence
+            .first_band_exit_centi_c
+            .is_none_or(|temperature| i32::from(temperature) >= lower_band)
+        || evidence
+            .approach_output_range
+            .is_none_or(|(min, max)| min < 50 || max > 1_000)
+        || evidence
+            .approach_median_output_permille
+            .is_none_or(|output| output < 950)
+        || evidence
+            .hold_median_output_permille
+            .is_none_or(|output| output < 950)
+        || evidence
+            .hold_p90_output_permille
+            .is_none_or(|output| output < 950)
+    {
+        return None;
+    }
+    // A timely, near-full-output Approach already delivered physical Hold.
+    // Its subsequent low-band deficit supports sustaining/reheat feedback,
+    // even when there are too few stops for the separate ripple branches.
+    let mut point = previous;
+    point.hold_power_permille = previous.hold_power_permille.saturating_add(100).min(1_000);
+    point.hold_reheat_power_permille = previous
+        .hold_reheat_power_permille
+        .saturating_add(80)
+        .max(point.hold_power_permille)
+        .min(1_000);
+    point.hold_lead_ticks = previous.hold_lead_ticks.saturating_sub(1);
+    point.hold_blend_ticks = 1;
+    (point != previous).then_some(point)
+}
+
 fn hold_recovery_candidate(
     previous: ThermalControlProfilePointConfig,
     evidence: TuneEvidence,
@@ -541,6 +595,9 @@ pub(crate) fn reseed_after_hold_confirm(
         return conservative;
     }
     if let Some(recovery) = saturated_hold_ripple_candidate(previous, evidence) {
+        return recovery;
+    }
+    if let Some(recovery) = saturated_trajectory_hold_deficit_candidate(previous, evidence) {
         return recovery;
     }
     if let Some(recovery) = hold_reheat_headroom_candidate(previous, evidence) {
@@ -1585,6 +1642,78 @@ fn step_toward(current: u16, target: u16, step: u16, min: u16, max: u16) -> u16 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saturated_trajectory_recovery_requires_observed_low_side_hold() {
+        let previous = ThermalControlProfilePointConfig {
+            hold_power_permille: 800,
+            hold_reheat_power_permille: 800,
+            hold_lead_ticks: 1,
+            ..point(220)
+        };
+        let facts = TuneEvidence {
+            hold_sample_count: 23,
+            hold_mean_error_c: Some(0.8),
+            hold_max_below_c: Some(1.62),
+            hold_median_output_permille: Some(1_000),
+            hold_p90_output_permille: Some(1_000),
+            approach_median_output_permille: Some(1_000),
+            approach_output_range: Some((50, 1_000)),
+            first_hold_after_warmup_ms: Some(1_218),
+            settle_limit_ms: 5_000,
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(21_838),
+            ..evidence(220)
+        };
+        let proposed = saturated_trajectory_hold_deficit_candidate(previous, facts).unwrap();
+        assert_eq!(proposed.hold_power_permille, 900);
+        assert_eq!(proposed.hold_reheat_power_permille, 900);
+        assert_eq!(reseed_after_hold_confirm(previous, facts), proposed);
+        for rejected in [
+            TuneEvidence {
+                tunable_stop: false,
+                ..facts
+            },
+            TuneEvidence {
+                hold_sample_count: 0,
+                ..facts
+            },
+            TuneEvidence {
+                hold_mean_error_c: None,
+                ..facts
+            },
+            TuneEvidence {
+                first_hold_after_warmup_ms: Some(5_001),
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: Some((0, 1_000)),
+                ..facts
+            },
+            TuneEvidence {
+                hold_median_output_permille: Some(100),
+                ..facts
+            },
+            TuneEvidence {
+                first_band_exit_centi_c: Some(22_151),
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+        ] {
+            assert!(saturated_trajectory_hold_deficit_candidate(previous, rejected).is_none());
+        }
+        let saturated = ThermalControlProfilePointConfig {
+            hold_power_permille: 1_000,
+            hold_reheat_power_permille: 1_000,
+            hold_lead_ticks: 0,
+            hold_blend_ticks: 1,
+            ..previous
+        };
+        assert!(saturated_trajectory_hold_deficit_candidate(saturated, facts).is_none());
+    }
+
     #[test]
     fn model_floor_headroom_requires_complete_timely_low_side_hold_evidence() {
         let previous = point(240);
