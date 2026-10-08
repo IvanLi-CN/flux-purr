@@ -10418,6 +10418,120 @@ fn pps_segments_preserve_validated_initial_approach_cooling() {
 }
 
 #[test]
+fn pps_epoch_anchor_does_not_turn_voltage_offset_into_thermal_velocity() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        for offset_c in [-0.3, 0.3] {
+            let kind = ProductionThermalController::Profile(bank);
+            let (mut controller, profile, mut input) = pps_cooling_test_fixture(bank);
+            controller.approach_braking_remaining_ms = 0;
+            controller.filtered_slope_c_per_profile_tick = 0.4;
+            let mut transition = RtdPpsTransitionGuard::new(21_000);
+            let mut measurement = RtdControlMeasurementGuard::default();
+            measurement.reseed(238.3, 3_000);
+            let mut control_temp = 238.3;
+            let mut accepted_count = 0;
+            for elapsed in (50..=350).step_by(50) {
+                input.now_ms = 3_000 + elapsed;
+                let accepted = accept_rtd_control_sample_after_pps_transition(
+                    &mut transition,
+                    &mut controller,
+                    &mut measurement,
+                    control_temp,
+                    20_500,
+                    input.now_ms,
+                    238.3 + offset_c,
+                );
+                if let Some(temp) = accepted {
+                    control_temp = temp;
+                }
+                input.measured_temp_c = control_temp;
+                input.measurement_accepted = accepted.is_some();
+                let snapshot = controller
+                    .update_production_at(kind, input, Some(profile))
+                    .0;
+                if accepted.is_some() {
+                    accepted_count += 1;
+                    assert_eq!(elapsed, 350, "the production settling wait must complete");
+                    assert!(
+                        (snapshot.filtered_slope_c_per_s - 0.4).abs() < 0.001,
+                        "bank={bank:?}, offset={offset_c}: new PPS origin fabricated velocity {}",
+                        snapshot.filtered_slope_c_per_s
+                    );
+                    assert_eq!(snapshot.filtered_temp_c, control_temp);
+                }
+            }
+            assert_eq!(accepted_count, 1);
+            // Compare the next local interval with an independently seeded
+            // controller: neither the old origin nor its 300ms blind wait
+            // may affect the derivative in the new voltage epoch.
+            let mut local_reference = controller;
+            local_reference.reseed_measurement(control_temp);
+            local_reference.filtered_slope_c_per_profile_tick = 0.4;
+            input.now_ms = 3_400;
+            let local_temp = control_temp - 0.05;
+            let accepted = accept_rtd_control_sample_after_pps_transition(
+                &mut transition,
+                &mut controller,
+                &mut measurement,
+                control_temp,
+                20_500,
+                input.now_ms,
+                local_temp,
+            );
+            assert_eq!(accepted, Some(local_temp));
+            input.measured_temp_c = local_temp;
+            input.measurement_accepted = true;
+            let actual = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            let expected = local_reference
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            assert_eq!(actual.filtered_temp_c, expected.filtered_temp_c);
+            assert_eq!(
+                actual.filtered_slope_c_per_s,
+                expected.filtered_slope_c_per_s
+            );
+            assert_eq!(actual.duty_percent, expected.duty_percent);
+        }
+    }
+}
+
+#[test]
+fn pending_pps_measurement_origin_is_cleared_by_controller_resets() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let (mut base, profile, input) = pps_cooling_test_fixture(bank);
+        base.reseed_measurement_after_pps_step(input.measured_temp_c);
+        assert!(base.pps_measurement_anchor_pending);
+        for reason in 0..5 {
+            let mut reset = base;
+            let mut next = input;
+            next.now_ms += 50;
+            let kind = ProductionThermalController::Profile(bank);
+            match reason {
+                0 => reset.reseed_measurement(next.measured_temp_c),
+                1 => {
+                    next.heater_enabled = false;
+                    reset.update_production_at(kind, next, Some(profile));
+                }
+                2 => {
+                    next.target_temp_c = 250;
+                    reset.update_production_at(kind, next, Some(profile));
+                }
+                3 => {
+                    reset.latch_fault(HeaterFaultReason::OverTemp);
+                }
+                _ => reset.clear_fault_latch(),
+            }
+            assert!(
+                !reset.pps_measurement_anchor_pending,
+                "bank={bank:?}, reset={reason}"
+            );
+        }
+    }
+}
+
+#[test]
 fn pps_offsets_without_local_cooling_cannot_release_approach_braking() {
     for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
         let (mut controller, profile, mut input) = pps_cooling_test_fixture(bank);
@@ -10524,7 +10638,7 @@ fn pps_cooling_requires_two_new_local_confirmations_and_no_blind_intervals() {
             "the new origin is not a confirmation"
         );
         input.now_ms = 3_550;
-        input.measured_temp_c = 237.77;
+        input.measured_temp_c = 237.74;
         assert_eq!(
             controller
                 .update_production_at(kind, input, Some(profile))
@@ -10538,7 +10652,7 @@ fn pps_cooling_requires_two_new_local_confirmations_and_no_blind_intervals() {
         input.measurement_accepted = false;
         input.now_ms = 3_600;
         // The runtime retains the last control value when a raw sample is rejected.
-        input.measured_temp_c = 237.77;
+        input.measured_temp_c = 237.74;
         controller.update_production_at(kind, input, Some(profile));
         assert_eq!(controller.approach_cooling_samples, 0);
         input.measurement_accepted = true;

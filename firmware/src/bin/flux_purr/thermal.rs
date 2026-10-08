@@ -761,6 +761,7 @@ pub(crate) struct HeaterController {
     pub(crate) phase_tick_remainder_ms: u64,
     pub(crate) profile_last_control_at_ms: Option<u64>,
     pub(crate) profile_measurement_elapsed_ms: u64,
+    pub(crate) pps_measurement_anchor_pending: bool,
     pub(crate) recovering_from_hold: bool,
     pub(crate) duty_percent: u8,
     pub(crate) hold_entry_output_percent: u8,
@@ -868,6 +869,7 @@ impl HeaterController {
             phase_tick_remainder_ms: 0,
             profile_last_control_at_ms: None,
             profile_measurement_elapsed_ms: 0,
+            pps_measurement_anchor_pending: false,
             recovering_from_hold: false,
             duty_percent: 0,
             hold_entry_output_percent: 0,
@@ -906,6 +908,7 @@ impl HeaterController {
         self.phase_tick_remainder_ms = 0;
         self.profile_last_control_at_ms = None;
         self.profile_measurement_elapsed_ms = 0;
+        self.pps_measurement_anchor_pending = false;
         self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
@@ -949,6 +952,7 @@ impl HeaterController {
         self.previous_filtered_temp_c = Some(measured_temp_c);
         self.filtered_slope_c_per_profile_tick = 0.0;
         self.previous_measured_temp_c = Some(measured_temp_c);
+        self.pps_measurement_anchor_pending = false;
         self.coast_cooling_reference_c = None;
         self.coast_cooling_elapsed_ms = 0;
         self.reset_approach_cooling_evidence();
@@ -978,6 +982,9 @@ impl HeaterController {
             ));
         self.reseed_measurement(measured_temp_c);
         self.filtered_slope_c_per_profile_tick = rising_slope;
+        // The held control value still belongs to the old voltage epoch.
+        // Only the first accepted new-epoch sample can establish its origin.
+        self.pps_measurement_anchor_pending = true;
         if let Some((decline_c, elapsed_ms)) = validated_cooling {
             self.approach_cooling_validated_decline_c = decline_c;
             self.approach_cooling_elapsed_ms = elapsed_ms;
@@ -997,6 +1004,7 @@ impl HeaterController {
         self.phase_tick_remainder_ms = 0;
         self.profile_last_control_at_ms = None;
         self.profile_measurement_elapsed_ms = 0;
+        self.pps_measurement_anchor_pending = false;
         self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
@@ -1036,10 +1044,14 @@ impl HeaterController {
         let target_temp_c = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
         let last_target_temp_c = self.last_target_temp_c;
         self.last_target_temp_c = target_temp_c;
-        let previous_measured_temp_c = self
-            .previous_measured_temp_c
-            .or(self.filtered_temp_c)
-            .unwrap_or(measured_temp_c);
+        let previous_measured_temp_c =
+            if self.pps_measurement_anchor_pending && self.control_measurement_accepted() {
+                measured_temp_c
+            } else {
+                self.previous_measured_temp_c
+                    .or(self.filtered_temp_c)
+                    .unwrap_or(measured_temp_c)
+            };
         if self.control_measurement_accepted() {
             self.previous_measured_temp_c = Some(measured_temp_c);
         }
@@ -1736,6 +1748,16 @@ impl HeaterController {
                 self.filtered_temp_c.unwrap_or(measured_temp_c),
                 self.filtered_slope_c_per_profile_tick,
             );
+        }
+        if self.pps_measurement_anchor_pending {
+            // Neither the ADC origin shift nor the blind settling interval is
+            // a thermal derivative. Keep trusted positive Approach velocity;
+            // the next accepted interval updates it with ordinary filtering.
+            self.pps_measurement_anchor_pending = false;
+            self.profile_measurement_elapsed_ms = 0;
+            self.filtered_temp_c = Some(measured_temp_c);
+            self.previous_filtered_temp_c = Some(measured_temp_c);
+            return (measured_temp_c, self.filtered_slope_c_per_profile_tick);
         }
         let measurement_elapsed_ms = self.profile_measurement_elapsed_ms;
         self.profile_measurement_elapsed_ms = 0;

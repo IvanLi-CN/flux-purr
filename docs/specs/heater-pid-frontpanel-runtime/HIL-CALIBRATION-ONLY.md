@@ -1,5 +1,9 @@
 # Calibration-only tuning HIL
 
+## PPS temperature-origin regression
+
+A minimized regression through the actual PPS-transition/RTD-control guards and shared production controller tests a flat physical temperature with a±0.3°C new-voltage ADC-origin shift. Before correction, the−0.3°C case changes the retained+0.4°C/s Approach velocity into−0.23983058°C/s at the first accepted new-epoch reading. This is a deterministic implementation violation of cross-voltage difference exclusion, not an independent measurement of the plate's thermal velocity or proof of the entire240°C root cause. The corrected first sample anchors raw/filtered temperature without a derivative; the next local interval matches an independently seeded controller. Both power classes, settling wait and pending-origin resets are covered. Existing cooling-evidence regression uses a real new-epoch decline sufficient to establish its own negative slope instead of borrowing the origin offset. Exact committed-artifact HIL is still required; historical failed reports are not rewritten.
+
 ## Validated within-PPS cooling retention HIL
 
 Firmware `0.27.7-dev.a116df4`, source `a116df4f4d37fd8d952a990fbf20f436832eb17a`, implements the approved initial-braking observation policy. Both exact-port no-backup flashes complete and separate application identity readback matches the committed source after source `port_c` off/readback/on. A uses3328mV and ELF SHA-256 `015fd4ef7c62a91de1c5e533fa1bd5f8a189c3fffbe543a956f2286ad3145536`; B uses3340mV and SHA-256 `167b500923fd75ead6474222c81fa72bf60b6c22caef44740d83596aa3c6d9bf`. Release builds and boot-stack checks pass, with95404 bytes of ordinary headroom and94060 bytes under nested PD interruption. All208 focused binary control/measurement regressions pass. No PD, PPS voltage-selection, fan-policy, model-supply or qualification change is included.
