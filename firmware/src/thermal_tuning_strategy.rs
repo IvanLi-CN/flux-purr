@@ -1,6 +1,6 @@
 use crate::memory::ThermalControlProfilePointConfig;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CurveClass {
     OnCurve,
     BrakeLate,
@@ -9,7 +9,7 @@ pub(crate) enum CurveClass {
     Insufficient,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TuneEvidence {
     pub target_c: i16,
     pub tunable_stop: bool,
@@ -40,6 +40,27 @@ pub(crate) struct TuneEvidence {
     pub first_band_observed: bool,
     pub first_band_exit_centi_c: Option<i16>,
     pub deadline_temperature_centi_c: Option<i16>,
+}
+
+pub(crate) fn observed_low_side_hold_failure(evidence: TuneEvidence) -> bool {
+    evidence.tunable_stop
+        && evidence.overshoot_c <= 3.0
+        && evidence.first_band_observed
+        && evidence.hold_sample_count >= 3
+        && matches!(
+            stability_gate_evidence(evidence).0,
+            GateFailure::MissedLow | GateFailure::BrokeLow
+        )
+}
+
+pub(crate) fn unobserved_low_side_failure(evidence: TuneEvidence) -> bool {
+    evidence.tunable_stop
+        && evidence.overshoot_c <= 3.0
+        && evidence.hold_sample_count == 0
+        && matches!(
+            stability_gate_evidence(evidence).0,
+            GateFailure::MissedLow | GateFailure::BrokeLow
+        )
 }
 
 struct HoldRippleInputs {

@@ -13,7 +13,8 @@ use crate::thermal_tuning_limits::{
     TRIAL_TIMEOUT_MS, ThermalTuningTimingEvidence, original_settle_limit_ms,
 };
 use crate::thermal_tuning_strategy::{
-    CurveClass, TuneEvidence, bounded_failure_alternative, reseed_after_hold_confirm, tune_point,
+    CurveClass, TuneEvidence, bounded_failure_alternative, observed_low_side_hold_failure,
+    reseed_after_hold_confirm, tune_point, unobserved_low_side_failure,
 };
 
 #[cfg(test)]
@@ -367,6 +368,13 @@ pub enum ThermalTuningError {
     CandidateProfileRequired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ObservedHoldFailure {
+    point: ThermalControlProfilePointConfig,
+    trial_index: u8,
+    evidence: TuneEvidence,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalTuningRuntime {
     pub phase: ThermalTuningPhase,
@@ -393,6 +401,7 @@ pub struct ThermalTuningRuntime {
     pub candidate_profile: Option<ThermalControlProfileConfig>,
     batch_current_profile: Option<ThermalControlProfileConfig>,
     proposed_points: Vec<ThermalControlProfilePointConfig, 32>,
+    observed_hold_failures: Vec<ObservedHoldFailure, 2>,
     batch_predicted_profile: Option<ThermalControlProfileConfig>,
     batch_current_score: Option<[f64; 11]>,
     batch_current_confirmable: bool,
@@ -497,6 +506,7 @@ impl ThermalTuningRuntime {
             candidate_profile: None,
             batch_current_profile: None,
             proposed_points: Vec::new(),
+            observed_hold_failures: Vec::new(),
             batch_predicted_profile: None,
             batch_current_score: None,
             batch_current_confirmable: false,
@@ -832,6 +842,16 @@ impl ThermalTuningRuntime {
             settle_time_ms,
             full_speed_limit_ms,
         } = evaluation;
+        if !passes && warmup_full {
+            let evidence = self.candidate_failure_evidence(
+                target_c,
+                max_overshoot_centi_c,
+                hold_peak_to_peak_centi_c,
+                settle_time_ms,
+                full_speed_limit_ms,
+            );
+            self.remember_observed_hold_failure(target_c, evidence);
+        }
         match self.trial_purpose {
             ThermalTuningTrialPurpose::Scout if passes => self.schedule_trial(
                 ThermalTuningTrialPurpose::HoldConfirm,
@@ -1024,6 +1044,43 @@ impl ThermalTuningRuntime {
         self.proposed_points.push(point).is_ok()
     }
 
+    fn remember_observed_hold_failure(&mut self, target_c: i16, evidence: TuneEvidence) {
+        if evidence.target_c != target_c || !observed_low_side_hold_failure(evidence) {
+            return;
+        }
+        let Some(point) = self
+            .candidate_profile
+            .as_ref()
+            .and_then(|profile| {
+                profile
+                    .points
+                    .iter()
+                    .flatten()
+                    .find(|point| point.target_temp_c == target_c)
+            })
+            .copied()
+        else {
+            return;
+        };
+        let observed = ObservedHoldFailure {
+            point,
+            trial_index: self.trial_index,
+            evidence,
+        };
+        if let Some(previous) = self
+            .observed_hold_failures
+            .iter_mut()
+            .find(|previous| same_effective_search_point(previous.point, point))
+        {
+            *previous = observed;
+        } else {
+            if self.observed_hold_failures.is_full() {
+                self.observed_hold_failures.remove(0);
+            }
+            let _ = self.observed_hold_failures.push(observed);
+        }
+    }
+
     fn prepare_fresh_failure_proposal(
         &mut self,
         target_c: i16,
@@ -1088,6 +1145,72 @@ impl ThermalTuningRuntime {
         }
         self.candidate_profile = Some(original);
         self.candidate_hash = hash_profile(&original);
+        if self.prepare_observed_hold_failure_proposal(original, index, evidence) {
+            return true;
+        }
+        self.candidate_profile = Some(original);
+        self.candidate_hash = hash_profile(&original);
+        false
+    }
+
+    fn prepare_observed_hold_failure_proposal(
+        &mut self,
+        original: ThermalControlProfileConfig,
+        index: usize,
+        evidence: TuneEvidence,
+    ) -> bool {
+        let previous = original.points[index].unwrap();
+        let target_c = previous.target_temp_c;
+        // A later pre-Hold failure does not erase an earlier measured Hold
+        // deficit for this exact effective point. Use it only after the live
+        // Approach alternatives are exhausted, never as qualification data.
+        if evidence.target_c != target_c || !unobserved_low_side_failure(evidence) {
+            return false;
+        }
+        let Some(observed) = self
+            .observed_hold_failures
+            .iter()
+            .find(|observed| {
+                observed.evidence.target_c == target_c
+                    && same_effective_search_point(observed.point, previous)
+            })
+            .copied()
+        else {
+            return false;
+        };
+        for attempt in 0..32 {
+            let Some(point) = bounded_failure_alternative(previous, observed.evidence, attempt)
+            else {
+                continue;
+            };
+            let mut alternative = original;
+            alternative.points[index] = Some(point);
+            alternative.sanitize();
+            self.candidate_profile = Some(alternative);
+            if !self.record_fresh_proposal(Some(original)) {
+                continue;
+            }
+            if self
+                .install_candidate_profile(alternative, "same_run_observed_hold_failure")
+                .is_err()
+            {
+                return false;
+            }
+            let mut reason = TuningReason::new();
+            let _ = write!(
+                reason,
+                "same_run_hold_failure_trial_{}_proposed_distinct_point",
+                observed.trial_index
+            );
+            self.push_event(
+                ThermalTuningEventKind::Decision,
+                Some(target_c),
+                Some(self.trial_index),
+                None,
+                Some(reason.as_str()),
+            );
+            return true;
+        }
         false
     }
 
@@ -2204,6 +2327,7 @@ impl ThermalTuningRuntime {
         while self.target_index + 1 < self.targets_c.len() {
             self.target_index += 1;
             self.proposed_points.clear();
+            self.observed_hold_failures.clear();
             self.trial_index = 0;
             self.trial_purpose = ThermalTuningTrialPurpose::Scout;
             self.batch_current_profile = None;
@@ -2574,6 +2698,7 @@ impl ThermalTuningRuntime {
         self.preview_receipt = None;
         self.save_receipt = None;
         self.candidate_profile = None;
+        self.observed_hold_failures.clear();
         self.batch_current_profile = None;
         self.batch_predicted_profile = None;
         self.batch_current_score = None;
@@ -4906,6 +5031,164 @@ mod tests {
         assert_eq!(after.hold_kp_permille_per_c, before.hold_kp_permille_per_c);
         assert!(runtime.events.iter().any(|event| event.reason.as_deref()
             == Some("repeated_proposal_replaced_by_distinct_effective_point")));
+    }
+
+    #[test]
+    fn captured_same_run_hold_failure_survives_a_pre_hold_retry() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_same_run_hold.fixture.json"))
+                .unwrap();
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.targets_c.push(240).unwrap();
+        runtime.armed = true;
+        let mut original = profile_with_targets(&[240]);
+        let point = original.points[0].as_mut().unwrap();
+        point.brake_distance_centi_c = 110;
+        point.approach_power_permille = 1_000;
+        point.approach_floor_power_permille = 833;
+        point.approach_damping_exponent_permille = 100;
+        point.approach_tail_window_centi_c = 0;
+        point.hold_power_permille = 833;
+        point.hold_reheat_power_permille = 833;
+        point.hold_kp_permille_per_c = 38;
+        point.hold_ki_permille_per_c_tick = 1;
+        point.hold_blend_ticks = 3;
+        point.hold_lead_ticks = 3;
+        original.sanitize();
+        let previous = original.points[0].unwrap();
+        for trial in fixture["trials"].as_array().unwrap() {
+            runtime.reset_trial_metrics();
+            runtime.candidate_profile = Some(original);
+            runtime.candidate_hash = hash_profile(&original);
+            runtime.trial_index = trial["trialIndex"].as_u64().unwrap() as u8;
+            runtime.trial_purpose = ThermalTuningTrialPurpose::Scout;
+            runtime.trial_start_elapsed_ms = trial["trialStartedAtMs"].as_u64();
+            runtime.warmup_exited_at_ms = trial["warmupExitedAtMs"].as_u64();
+            runtime.target_started_elapsed_ms = runtime.trial_start_elapsed_ms.unwrap();
+            runtime.warmup_full_output = true;
+            for row in trial["samples"].as_array().unwrap() {
+                let mut observed = sample(
+                    row[0].as_u64().unwrap(),
+                    serde_json::from_value(row[2].clone()).unwrap(),
+                    row[1].as_i64().unwrap() as i16,
+                );
+                observed.target_c = 240;
+                observed.heater_requested_output_permille = row[3].as_u64().unwrap() as u16;
+                observed.heater_output_permille = row[4].as_u64().unwrap() as u16;
+                runtime.current_elapsed_ms = observed.elapsed_ms;
+                runtime.update_trial_metrics(&observed, 240);
+            }
+            assert!(runtime.stable_window_verified_at_ms.is_none());
+            if runtime.trial_index == 5 {
+                assert!(runtime.hold_output_count >= 3);
+                assert_eq!(runtime.first_band_exit_centi_c, Some(23_842));
+                runtime.finish_trial(runtime.current_elapsed_ms).unwrap();
+                assert_eq!(runtime.accepted_target_mask, 0);
+            } else {
+                assert_eq!(runtime.hold_output_count, 0);
+                runtime.proposed_points.clear();
+                runtime.proposed_points.push(previous).unwrap();
+                let mut tried = previous;
+                tried.brake_distance_centi_c = 100;
+                runtime.proposed_points.push(tried).unwrap();
+                assert!(runtime.prepare_fresh_failure_proposal(240, Some(0), None, None, 5_000));
+                let proposed = runtime.candidate_profile.unwrap().points[0].unwrap();
+                assert_eq!(
+                    proposed.brake_distance_centi_c,
+                    previous.brake_distance_centi_c
+                );
+                assert_eq!(proposed.approach_damping_exponent_permille, 100);
+                assert!(proposed.hold_reheat_power_permille > previous.hold_reheat_power_permille);
+                assert_eq!(runtime.hold_output_count, 0);
+                assert!(runtime.stable_window_verified_at_ms.is_none());
+                assert_eq!(runtime.accepted_target_mask, 0);
+                assert!(runtime.events.iter().any(|event| event.reason.as_deref()
+                    == Some("same_run_hold_failure_trial_5_proposed_distinct_point")));
+            }
+        }
+    }
+
+    #[test]
+    fn retained_hold_feedback_rejects_another_point_or_live_failure_direction() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.targets_c.push(240).unwrap();
+        let mut original = profile_with_targets(&[240]);
+        original.points[0].as_mut().unwrap().brake_distance_centi_c = 100;
+        runtime.candidate_profile = Some(original);
+        runtime.first_band_elapsed_ms = Some(1_000);
+        runtime.first_band_exit_centi_c = Some(23_840);
+        runtime.hold_output_count = 8;
+        runtime.hold_output_histogram[900] = 8;
+        let prior = runtime.candidate_failure_evidence(240, Some(0), Some(150), None, 5_000);
+        runtime.remember_observed_hold_failure(240, prior);
+        assert_eq!(runtime.observed_hold_failures.len(), 1);
+        runtime.reset_trial_metrics();
+        runtime.deadline_nearest_temperature_centi_c = Some(23_700);
+        let live = runtime.candidate_failure_evidence(240, Some(0), None, None, 5_000);
+        for incompatible in [
+            TuneEvidence {
+                tunable_stop: false,
+                ..live
+            },
+            TuneEvidence {
+                deadline_temperature_centi_c: Some(24_200),
+                ..live
+            },
+            TuneEvidence {
+                target_c: 220,
+                deadline_temperature_centi_c: Some(21_700),
+                ..live
+            },
+        ] {
+            assert!(!runtime.prepare_observed_hold_failure_proposal(original, 0, incompatible));
+        }
+        let mut another_point = original;
+        another_point.points[0]
+            .as_mut()
+            .unwrap()
+            .hold_power_permille += 1;
+        assert!(!runtime.prepare_observed_hold_failure_proposal(another_point, 0, live));
+        assert_eq!(runtime.hold_output_count, 0);
+        assert_eq!(runtime.accepted_target_mask, 0);
+        runtime.reset_for_run();
+        assert!(runtime.observed_hold_failures.is_empty());
+    }
+
+    #[test]
+    fn retained_hold_feedback_requires_measured_low_failure_and_clears_on_target_change() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.targets_c.extend_from_slice(&[240, 140]).unwrap();
+        runtime.candidate_profile = Some(profile_with_targets(&[240, 140]));
+        runtime.armed = true;
+        runtime.first_band_elapsed_ms = Some(1_000);
+        runtime.first_band_exit_centi_c = Some(23_840);
+        runtime.hold_output_count = 8;
+        let prior = runtime.candidate_failure_evidence(240, Some(0), Some(150), None, 5_000);
+        for invalid in [
+            TuneEvidence {
+                tunable_stop: false,
+                ..prior
+            },
+            TuneEvidence {
+                hold_sample_count: 0,
+                ..prior
+            },
+            TuneEvidence {
+                overshoot_c: 3.01,
+                ..prior
+            },
+            TuneEvidence {
+                first_band_exit_centi_c: Some(24_200),
+                ..prior
+            },
+        ] {
+            runtime.remember_observed_hold_failure(240, invalid);
+            assert!(runtime.observed_hold_failures.is_empty());
+        }
+        runtime.remember_observed_hold_failure(240, prior);
+        assert_eq!(runtime.observed_hold_failures.len(), 1);
+        runtime.advance_target().unwrap();
+        assert!(runtime.observed_hold_failures.is_empty());
     }
 
     #[test]
