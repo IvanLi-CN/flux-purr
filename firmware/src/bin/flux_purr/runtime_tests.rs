@@ -5429,6 +5429,55 @@ fn transient_fit_preserves_a_real_transport_delay() {
 }
 
 #[test]
+fn cached_transient_balances_match_direct_integrals_at_every_delay_edge() {
+    let memory = synthetic_memory_config();
+    let (samples, count) = synthetic_trace_with_delay(&memory, 25.0, 20);
+    let data = prepare_transient_fit(
+        &samples,
+        count as u8,
+        None,
+        &memory,
+        runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+    )
+    .unwrap();
+    let temperatures: Vec<_> = samples[..count]
+        .iter()
+        .map(|sample| projected_rtd_temperature_c(&memory, sample.raw_rtd_adc_mv).unwrap())
+        .collect();
+    let powers: Vec<_> = samples[..count]
+        .iter()
+        .zip(&temperatures)
+        .map(|(sample, temperature)| {
+            transient_sample_power_mw(*sample, *temperature, None, &memory).unwrap()
+        })
+        .collect();
+    let ambient =
+        projected_rtd_temperature_c(&memory, runtime_test_raw_rtd_adc_mv_for_temp(25.0)).unwrap();
+    for delay in [0, 1, 20, 99, 200] {
+        for index in 1..count {
+            let direct = transient_fit_row(
+                &samples[..count],
+                &temperatures,
+                &powers,
+                index,
+                delay,
+                ambient,
+            );
+            let cached = data.row(index, delay);
+            assert_eq!(direct.is_some(), cached.is_some());
+            if let (Some((values, energy)), Some((cached_values, cached_energy))) = (direct, cached)
+            {
+                assert_eq!(values, cached_values);
+                assert!(
+                    (energy - cached_energy).abs() <= 1.0 + energy.abs() * 0.0001,
+                    "energy mismatch at index={index} delay={delay}: direct={energy} cached={cached_energy}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn transient_power_matches_the_temperature_derivative_interval() {
     let samples = [0, 5, 10, 20].map(|elapsed_ticks| ThermalPlantTransientSample {
         elapsed_ticks,

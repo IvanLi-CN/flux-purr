@@ -1356,15 +1356,7 @@ pub(crate) fn transient_fit_row(
     delay_ticks: u16,
     ambient_temp_c: f32,
 ) -> Option<([f32; 3], f32)> {
-    const MIN_DERIVATIVE_WINDOW_TICKS: f32 = 10.0;
-    let endpoint_ticks = |at: usize| {
-        let before = at.saturating_sub(1);
-        (f32::from(samples[at].elapsed_ticks) + f32::from(samples[before].elapsed_ticks)) * 0.5
-    };
-    let end_ticks = endpoint_ticks(index);
-    let previous_index = (0..index)
-        .rev()
-        .find(|candidate| end_ticks - endpoint_ticks(*candidate) >= MIN_DERIVATIVE_WINDOW_TICKS)?;
+    let previous_index = transient_fit_previous_index(samples, index)?;
     let ambient_kelvin = ambient_temp_c + 273.15;
     let mut values = [0.0; 3];
     let mut energy_mj = 0.0;
@@ -1395,6 +1387,22 @@ pub(crate) fn transient_fit_row(
         }
     }
     Some((values.map(|value| value * 0.5), energy_mj * 0.5))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn transient_fit_previous_index(
+    samples: &[ThermalPlantTransientSample],
+    index: usize,
+) -> Option<usize> {
+    const MIN_DERIVATIVE_WINDOW_TICKS: f32 = 10.0;
+    let endpoint_ticks = |at: usize| {
+        let before = at.saturating_sub(1);
+        (f32::from(samples[at].elapsed_ticks) + f32::from(samples[before].elapsed_ticks)) * 0.5
+    };
+    let end_ticks = endpoint_ticks(index);
+    (0..index)
+        .rev()
+        .find(|candidate| end_ticks - endpoint_ticks(*candidate) >= MIN_DERIVATIVE_WINDOW_TICKS)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1441,9 +1449,48 @@ pub(crate) fn transient_mean_delayed_power_mw(
 pub(crate) struct TransientFitData {
     samples: [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     count: usize,
-    ambient_temp_c: f32,
-    temperatures_c: [f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     powers_mw: [f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    input_energy_mw_ticks: [f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    rows: [Option<([f32; 3], u8)>; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl TransientFitData {
+    fn input_energy_at(&self, elapsed_ticks: f32) -> f32 {
+        let samples = &self.samples[..self.count];
+        if elapsed_ticks <= f32::from(samples[0].elapsed_ticks) {
+            return 0.0;
+        }
+        let index =
+            samples.partition_point(|sample| f32::from(sample.elapsed_ticks) <= elapsed_ticks) - 1;
+        let mut energy = self.input_energy_mw_ticks[index];
+        if index + 1 < self.count {
+            let width = f32::from(samples[index + 1].elapsed_ticks - samples[index].elapsed_ticks);
+            let overlap = elapsed_ticks - f32::from(samples[index].elapsed_ticks);
+            let mut mean_power = self.powers_mw[index];
+            if samples[index].duty_percent == samples[index + 1].duty_percent {
+                mean_power += (self.powers_mw[index + 1] - mean_power) * overlap / width * 0.5;
+            }
+            energy += mean_power * overlap;
+        }
+        energy
+    }
+
+    pub(crate) fn row(&self, index: usize, delay_ticks: u16) -> Option<([f32; 3], f32)> {
+        let (values, previous_index) = self.rows[index]?;
+        let mut energy = 0.0;
+        for offset in 0..=1 {
+            let first = usize::from(previous_index).saturating_sub(offset);
+            let last = index.saturating_sub(offset);
+            let shift = f32::from(delay_ticks);
+            energy += self.input_energy_at(f32::from(self.samples[last].elapsed_ticks) - shift)
+                - self.input_energy_at(f32::from(self.samples[first].elapsed_ticks) - shift);
+        }
+        Some((
+            values,
+            energy * 0.5 * HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0,
+        ))
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1461,6 +1508,8 @@ pub(crate) fn prepare_transient_fit(
     let ambient_temp_c = projected_rtd_temperature_c(memory_config, ambient_raw_rtd_adc_mv)?;
     let mut temperatures_c = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut powers_mw = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut input_energy_mw_ticks = [0.0; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut rows = [None; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut powered_max_temp_c = f32::MIN;
     let mut powered_peak_index = None;
     for (index, sample) in samples[..count].iter().enumerate() {
@@ -1476,6 +1525,21 @@ pub(crate) fn prepare_transient_fit(
         }
         temperatures_c[index] = temperature_c;
         powers_mw[index] = power_mw;
+        if index > 0 {
+            let ticks = sample
+                .elapsed_ticks
+                .checked_sub(samples[index - 1].elapsed_ticks)?;
+            if ticks == 0 {
+                return None;
+            }
+            let mean_power = if samples[index - 1].duty_percent == sample.duty_percent {
+                (powers_mw[index - 1] + power_mw) * 0.5
+            } else {
+                powers_mw[index - 1]
+            };
+            input_energy_mw_ticks[index] =
+                input_energy_mw_ticks[index - 1] + mean_power * f32::from(ticks);
+        }
     }
     let powered_peak_index = powered_peak_index?;
     let last_sample_is_cooling = samples[..count]
@@ -1489,12 +1553,27 @@ pub(crate) fn prepare_transient_fit(
     {
         return None;
     }
+    for (index, row) in rows[..count].iter_mut().enumerate().skip(1) {
+        if let Some((values, _)) = transient_fit_row(
+            &samples[..count],
+            &temperatures_c[..count],
+            &powers_mw[..count],
+            index,
+            0,
+            ambient_temp_c,
+        ) {
+            *row = Some((
+                values,
+                transient_fit_previous_index(&samples[..count], index)? as u8,
+            ));
+        }
+    }
     Some(TransientFitData {
         samples: *samples,
         count,
-        ambient_temp_c,
-        temperatures_c,
         powers_mw,
+        input_energy_mw_ticks,
+        rows,
     })
 }
 
@@ -1506,14 +1585,7 @@ pub(crate) fn transient_fit_scales(
     let mut scale_sums = [0.0_f32; 3];
     let mut row_count = 0usize;
     for index in 1..data.count {
-        if let Some((values, _)) = transient_fit_row(
-            &data.samples[..data.count],
-            &data.temperatures_c[..data.count],
-            &data.powers_mw[..data.count],
-            index,
-            delay_ticks,
-            data.ambient_temp_c,
-        ) {
+        if let Some((values, _)) = data.row(index, delay_ticks) {
             for column in 0..3 {
                 scale_sums[column] += values[column] * values[column];
             }
@@ -1544,14 +1616,7 @@ pub(crate) fn transient_fit_normal_matrix(
     let mut power_sum_sq = 0.0_f32;
     let mut row_count = 0usize;
     for index in 1..data.count {
-        let Some((values, target)) = transient_fit_row(
-            &data.samples[..data.count],
-            &data.temperatures_c[..data.count],
-            &data.powers_mw[..data.count],
-            index,
-            delay_ticks,
-            data.ambient_temp_c,
-        ) else {
+        let Some((values, target)) = data.row(index, delay_ticks) else {
             continue;
         };
         let normalized = [
@@ -1616,14 +1681,7 @@ pub(crate) fn transient_projection_for_delay(
         ];
         let mut residual_sum_sq = 0.0_f32;
         for index in 1..data.count {
-            let Some((values, target)) = transient_fit_row(
-                &data.samples[..data.count],
-                &data.temperatures_c[..data.count],
-                &data.powers_mw[..data.count],
-                index,
-                delay_ticks,
-                data.ambient_temp_c,
-            ) else {
+            let Some((values, target)) = data.row(index, delay_ticks) else {
                 continue;
             };
             let predicted = coefficients[0] * values[0]
