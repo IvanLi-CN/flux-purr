@@ -773,6 +773,9 @@ pub(crate) struct HeaterController {
     pub(crate) approach_braking_remaining_ms: u64,
     pub(crate) approach_cooling_reference_c: Option<f32>,
     pub(crate) approach_cooling_elapsed_ms: u64,
+    pub(crate) approach_cooling_validated_decline_c: f32,
+    pub(crate) approach_cooling_previous_temp_c: Option<f32>,
+    pub(crate) approach_cooling_previous_at_ms: Option<u64>,
     pub(crate) approach_cooling_samples: u8,
     pub(crate) heater_was_enabled: bool,
     pub(crate) warmup_started_at_ms: Option<u64>,
@@ -877,6 +880,9 @@ impl HeaterController {
             approach_braking_remaining_ms: 0,
             approach_cooling_reference_c: None,
             approach_cooling_elapsed_ms: 0,
+            approach_cooling_validated_decline_c: 0.0,
+            approach_cooling_previous_temp_c: None,
+            approach_cooling_previous_at_ms: None,
             approach_cooling_samples: 0,
             heater_was_enabled: false,
             warmup_started_at_ms: None,
@@ -953,18 +959,29 @@ impl HeaterController {
         // a trusted positive thermal velocity. Erasing that velocity invents
         // deceleration and lets the model restore heat while the plate rises.
         // Negative velocity cannot survive a reset as cooling evidence.
-        let rising_slope = if self.heater_was_enabled
+        let model_approach = self.heater_was_enabled
             && self.fault_latched.is_none()
             && self.phase == HeaterControlPhase::Approach
-            && self.model_approach_available()
-            && self.filtered_slope_c_per_profile_tick.is_finite()
-        {
+            && self.model_approach_available();
+        let rising_slope = if model_approach && self.filtered_slope_c_per_profile_tick.is_finite() {
             self.filtered_slope_c_per_profile_tick.max(0.0)
         } else {
             0.0
         };
+        // Retain only intervals already observed inside a stable PPS epoch.
+        // Absolute origins, pending intervals, negative slope and confirmation
+        // count must be rebuilt; voltage-induced offsets never add cooling.
+        let validated_cooling = (model_approach && self.approach_braking_remaining_ms > 0)
+            .then_some((
+                self.approach_cooling_validated_decline_c,
+                self.approach_cooling_elapsed_ms,
+            ));
         self.reseed_measurement(measured_temp_c);
         self.filtered_slope_c_per_profile_tick = rising_slope;
+        if let Some((decline_c, elapsed_ms)) = validated_cooling {
+            self.approach_cooling_validated_decline_c = decline_c;
+            self.approach_cooling_elapsed_ms = elapsed_ms;
+        }
     }
 
     pub(crate) fn latch_fault(&mut self, reason: HeaterFaultReason) -> bool {
@@ -1241,9 +1258,12 @@ impl HeaterController {
                 .natural_cooling_input
                 .map_or(0, |input| u64::from(input.model.transport_delay_ms));
             self.reset_approach_cooling_evidence();
-            self.approach_cooling_reference_c = self
+            if let Some(input) = self
                 .natural_cooling_input
-                .map(|input| input.measured_temp_c);
+                .filter(|input| input.measurement_accepted)
+            {
+                self.anchor_approach_cooling_epoch(input.measured_temp_c, input.now_ms);
+            }
             return percent_from_permille(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
         }
         if self.approach_braking_remaining_ms > 0 {
@@ -1256,6 +1276,8 @@ impl HeaterController {
                 return percent_from_permille(
                     flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE,
                 );
+            } else {
+                self.clear_approach_braking();
             }
         }
         if let Some(duty_percent) = self.calculate_model_approach_duty(frame) {
@@ -1276,10 +1298,24 @@ impl HeaterController {
         )
     }
 
-    fn reset_approach_cooling_evidence(&mut self) {
+    fn reset_approach_cooling_epoch(&mut self) {
         self.approach_cooling_reference_c = None;
-        self.approach_cooling_elapsed_ms = 0;
+        self.approach_cooling_previous_temp_c = None;
+        self.approach_cooling_previous_at_ms = None;
         self.approach_cooling_samples = 0;
+    }
+
+    fn anchor_approach_cooling_epoch(&mut self, measured_c: f32, now_ms: u64) {
+        self.approach_cooling_reference_c = Some(measured_c);
+        self.approach_cooling_previous_temp_c = Some(measured_c);
+        self.approach_cooling_previous_at_ms = Some(now_ms);
+        self.approach_cooling_samples = 0;
+    }
+
+    fn reset_approach_cooling_evidence(&mut self) {
+        self.reset_approach_cooling_epoch();
+        self.approach_cooling_elapsed_ms = 0;
+        self.approach_cooling_validated_decline_c = 0.0;
     }
 
     fn clear_approach_braking(&mut self) {
@@ -1292,23 +1328,40 @@ impl HeaterController {
             return false;
         };
         if !input.measurement_accepted {
+            // No temperature delta or time interval may straddle a wait or a
+            // rejected observation. Sensor recovery still clears all evidence.
+            self.reset_approach_cooling_epoch();
             return false;
         }
         let measured_c = input.measured_temp_c;
-        let reference_c = *self.approach_cooling_reference_c.get_or_insert(measured_c);
+        let (Some(previous_c), Some(previous_at_ms), Some(reference_c)) = (
+            self.approach_cooling_previous_temp_c,
+            self.approach_cooling_previous_at_ms,
+            self.approach_cooling_reference_c,
+        ) else {
+            self.anchor_approach_cooling_epoch(measured_c, input.now_ms);
+            return false;
+        };
         // Test the net observation-window decline, not a monotonic per-frame
         // sequence. ADC noise can bounce while the plate is still cooling.
-        // A new peak starts a new window; PPS reseeds clear it separately.
+        // A new peak clears every epoch's evidence, not only the local window.
         if measured_c > reference_c + 0.05 {
             self.reset_approach_cooling_evidence();
-            self.approach_cooling_reference_c = Some(measured_c);
+            self.anchor_approach_cooling_epoch(measured_c, input.now_ms);
             return false;
         }
-        self.approach_cooling_elapsed_ms = self
-            .approach_cooling_elapsed_ms
-            .saturating_add(frame.elapsed_ms);
+        let elapsed_ms = input.now_ms.saturating_sub(previous_at_ms);
+        if elapsed_ms == 0 {
+            return false;
+        }
+        self.approach_cooling_previous_temp_c = Some(measured_c);
+        self.approach_cooling_previous_at_ms = Some(input.now_ms);
+        self.approach_cooling_validated_decline_c += previous_c - measured_c;
+        self.approach_cooling_elapsed_ms =
+            self.approach_cooling_elapsed_ms.saturating_add(elapsed_ms);
         let cooling = self.approach_cooling_elapsed_ms >= 100
-            && measured_c + 0.15 < reference_c
+            && self.approach_cooling_validated_decline_c > 0.15
+            && measured_c < reference_c
             && frame.filtered_slope_c_per_profile_tick <= -0.02;
         self.approach_cooling_samples = if cooling {
             self.approach_cooling_samples.saturating_add(1)
