@@ -5105,7 +5105,9 @@ mod tests {
         let mut heated = facts;
         heated.approach_output_range = Some((50, 1_000));
         heated.approach_median_output_permille = Some(500);
-        assert_ne!(tune_point(previous, heated), proposed);
+        assert_eq!(tune_point(previous, heated), proposed);
+        heated.overshoot_c = 2.0;
+        assert_ne!(tune_point(previous, heated).brake_distance_centi_c, 1_280);
         let mut protected = facts;
         protected.approach_output_range = Some((0, 70));
         assert_ne!(tune_point(previous, protected), proposed);
@@ -5230,7 +5232,7 @@ mod tests {
         assert_eq!(
             tune_point(previous, higher_approach),
             ThermalControlProfilePointConfig {
-                approach_damping_exponent_permille: 2_000,
+                brake_distance_centi_c: 1_280,
                 ..previous
             }
         );
@@ -5740,6 +5742,41 @@ mod tests {
         assert_eq!(runtime.observed_hold_failures.len(), 1);
         runtime.advance_target().unwrap();
         assert!(runtime.observed_hold_failures.is_empty());
+    }
+
+    #[test]
+    fn captured_severe_trajectory_coast_corrects_handoff_above_low_supply_threshold() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_trajectory_coast.fixture.json"))
+                .unwrap();
+        let mut runtime = ThermalTuningRuntime::new();
+        let mut profile = profile_with_targets(&[60]);
+        let previous = profile.points[0].as_mut().unwrap();
+        previous.brake_distance_centi_c = 780;
+        previous.approach_damping_exponent_permille = 1_000;
+        previous.hold_power_permille = 56;
+        previous.hold_reheat_power_permille = 56;
+        runtime.candidate_profile = Some(profile);
+        for recorded in fixture["samples"].as_array().unwrap() {
+            let phase = serde_json::from_value(recorded["phase"].clone()).unwrap();
+            let mut observation = sample(
+                recorded["elapsedMs"].as_u64().unwrap(),
+                phase,
+                recorded["temperatureCentiC"].as_i64().unwrap() as i16,
+            );
+            observation.heater_requested_output_permille =
+                recorded["requestPermille"].as_u64().unwrap() as u16;
+            observation.heater_output_permille = observation.heater_requested_output_permille;
+            runtime.update_trial_metrics(&observation, 60);
+        }
+        let facts = runtime.candidate_failure_evidence(60, Some(685), Some(683), None, 10_000);
+        assert_eq!(facts.approach_median_output_permille, Some(130));
+        assert_eq!(facts.hold_off_sample_count, facts.hold_sample_count);
+        runtime.mutate_candidate_for_failure(60, Some(685), Some(683), None, 10_000);
+        let proposed = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert!(proposed.brake_distance_centi_c > 780);
+        assert_eq!(proposed.approach_damping_exponent_permille, 1_000);
+        assert_eq!(proposed.hold_power_permille, 56);
     }
 
     #[test]

@@ -1,0 +1,283 @@
+{
+  "sourceSha": "653a54ef316ceff93e06d0f7ea6517f676cf1a81",
+  "runId": "firmware-pps5a-1791484919681",
+  "trialIndex": 0,
+  "samples": [
+    {
+      "elapsedMs": 17598,
+      "phase": "approach",
+      "temperatureCentiC": 5253,
+      "requestPermille": 50
+    },
+    {
+      "elapsedMs": 17679,
+      "phase": "approach",
+      "temperatureCentiC": 5274,
+      "requestPermille": 50
+    },
+    {
+      "elapsedMs": 17911,
+      "phase": "approach",
+      "temperatureCentiC": 5334,
+      "requestPermille": 120
+    },
+    {
+      "elapsedMs": 18171,
+      "phase": "approach",
+      "temperatureCentiC": 5447,
+      "requestPermille": 50
+    },
+    {
+      "elapsedMs": 18429,
+      "phase": "approach",
+      "temperatureCentiC": 5502,
+      "requestPermille": 130
+    },
+    {
+      "elapsedMs": 18678,
+      "phase": "approach",
+      "temperatureCentiC": 5552,
+      "requestPermille": 190
+    },
+    {
+      "elapsedMs": 18879,
+      "phase": "approach",
+      "temperatureCentiC": 5598,
+      "requestPermille": 170
+    },
+    {
+      "elapsedMs": 19139,
+      "phase": "approach",
+      "temperatureCentiC": 5659,
+      "requestPermille": 220
+    },
+    {
+      "elapsedMs": 19386,
+      "phase": "approach",
+      "temperatureCentiC": 5735,
+      "requestPermille": 280
+    },
+    {
+      "elapsedMs": 19616,
+      "phase": "approach",
+      "temperatureCentiC": 5813,
+      "requestPermille": 150
+    },
+    {
+      "elapsedMs": 19876,
+      "phase": "approach",
+      "temperatureCentiC": 5860,
+      "requestPermille": 150
+    },
+    {
+      "elapsedMs": 20088,
+      "phase": "approach",
+      "temperatureCentiC": 5900,
+      "requestPermille": 70
+    },
+    {
+      "elapsedMs": 20340,
+      "phase": "approach",
+      "temperatureCentiC": 5935,
+      "requestPermille": 50
+    },
+    {
+      "elapsedMs": 20597,
+      "phase": "hold",
+      "temperatureCentiC": 6002,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 20672,
+      "phase": "hold",
+      "temperatureCentiC": 6004,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 20888,
+      "phase": "hold",
+      "temperatureCentiC": 6045,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 21128,
+      "phase": "hold",
+      "temperatureCentiC": 6080,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 21336,
+      "phase": "hold",
+      "temperatureCentiC": 6115,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 21581,
+      "phase": "hold",
+      "temperatureCentiC": 6151,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 21848,
+      "phase": "hold",
+      "temperatureCentiC": 6154,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 22054,
+      "phase": "hold",
+      "temperatureCentiC": 6181,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 22321,
+      "phase": "hold",
+      "temperatureCentiC": 6211,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 22561,
+      "phase": "hold",
+      "temperatureCentiC": 6261,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 22771,
+      "phase": "hold",
+      "temperatureCentiC": 6275,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 22975,
+      "phase": "hold",
+      "temperatureCentiC": 6347,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 23238,
+      "phase": "hold",
+      "temperatureCentiC": 6375,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 23478,
+      "phase": "hold",
+      "temperatureCentiC": 6431,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 23687,
+      "phase": "hold",
+      "temperatureCentiC": 6446,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 23940,
+      "phase": "hold",
+      "temperatureCentiC": 6454,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 24154,
+      "phase": "hold",
+      "temperatureCentiC": 6473,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 24395,
+      "phase": "hold",
+      "temperatureCentiC": 6497,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 24608,
+      "phase": "hold",
+      "temperatureCentiC": 6514,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 24811,
+      "phase": "hold",
+      "temperatureCentiC": 6536,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 25081,
+      "phase": "hold",
+      "temperatureCentiC": 6535,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 25330,
+      "phase": "hold",
+      "temperatureCentiC": 6591,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 25542,
+      "phase": "hold",
+      "temperatureCentiC": 6566,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 25745,
+      "phase": "hold",
+      "temperatureCentiC": 6615,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 25995,
+      "phase": "hold",
+      "temperatureCentiC": 6607,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 26209,
+      "phase": "hold",
+      "temperatureCentiC": 6616,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 26463,
+      "phase": "hold",
+      "temperatureCentiC": 6647,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 26679,
+      "phase": "hold",
+      "temperatureCentiC": 6632,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 26921,
+      "phase": "hold",
+      "temperatureCentiC": 6640,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 27135,
+      "phase": "hold",
+      "temperatureCentiC": 6677,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 27336,
+      "phase": "hold",
+      "temperatureCentiC": 6670,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 27590,
+      "phase": "hold",
+      "temperatureCentiC": 6681,
+      "requestPermille": 0
+    },
+    {
+      "elapsedMs": 27665,
+      "phase": "hold",
+      "temperatureCentiC": 6685,
+      "requestPermille": 0
+    }
+  ]
+}

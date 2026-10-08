@@ -295,9 +295,9 @@ fn low_power_coasting_candidate(
     if !low_power_coasting_evidence(evidence) {
         return None;
     }
-    // A small above-floor pulse is not floor-only evidence. Nevertheless,
-    // almost unpowered Hold with a large residual rise requires removal
-    // of stored Warmup heat before tuning an already almost-minimal Approach.
+    // An above-floor request is not floor-only evidence. Severe overshoot
+    // during stopped Hold supports removing stored pre-Hold heat, even
+    // when its Approach median exceeds the low-supply classification.
     // Correct the measured excess toward the middle of the stable band.
     let step = round_positive((evidence.overshoot_c - 0.75).max(0.4) * 100.0).clamp(40, 500);
     Some(earlier_braking_candidate(previous, step).unwrap_or(previous))
@@ -318,7 +318,8 @@ fn low_power_coasting_evidence(evidence: TuneEvidence) -> bool {
         || !evidence.approach_output_range.is_some_and(|(min, max)| {
             min >= crate::thermal_plant::APPROACH_MIN_PERMILLE
                 && max <= 1_000
-                && (max <= 100
+                && (evidence.overshoot_c > 3.0
+                    || max <= 100
                     || evidence
                         .approach_median_output_permille
                         .is_some_and(|median| median <= 100))
