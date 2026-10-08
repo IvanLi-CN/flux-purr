@@ -4932,10 +4932,17 @@ mod tests {
             assert_eq!(runtime.trial_purpose, ThermalTuningTrialPurpose::Scout);
             assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
             assert_eq!(runtime.accepted_target_mask, 0);
-            // The larger current excursion needs +1000, while the predicted
-            // point needs +500. Borrowing either loser's facts changes this.
-            assert_eq!(next.approach_damping_exponent_permille, 2_000);
-            assert_eq!(next.brake_distance_centi_c, 1_259);
+            // The predicted prefix is unpowered; the current prefix has only
+            // 17/19 zero Hold samples and cannot use the 90% entrance exception.
+            // Each winner must retain its own braking or damping evidence.
+            assert_eq!(
+                next.approach_damping_exponent_permille,
+                if predicted_wins { 1_500 } else { 2_000 }
+            );
+            assert_eq!(
+                next.brake_distance_centi_c,
+                if predicted_wins { 1_371 } else { 1_259 }
+            );
             assert_eq!(next.hold_power_permille, 56);
             assert_eq!(next.hold_reheat_power_permille, 56);
             assert!(runtime.preview_update_pending);
@@ -5097,6 +5104,7 @@ mod tests {
         assert_eq!(reseed_after_hold_confirm(previous, facts), proposed);
         let mut heated = facts;
         heated.approach_output_range = Some((50, 1_000));
+        heated.approach_median_output_permille = Some(500);
         assert_ne!(tune_point(previous, heated), proposed);
         let mut protected = facts;
         protected.approach_output_range = Some((0, 70));
@@ -5216,6 +5224,7 @@ mod tests {
         let higher_approach = TuneEvidence {
             approach_floor_only: false,
             approach_output_range: Some((50, 700)),
+            approach_median_output_permille: Some(700),
             ..facts
         };
         assert_eq!(
@@ -5731,6 +5740,47 @@ mod tests {
         assert_eq!(runtime.observed_hold_failures.len(), 1);
         runtime.advance_target().unwrap();
         assert!(runtime.observed_hold_failures.is_empty());
+    }
+
+    #[test]
+    fn trajectory_coasting_pulse_corrects_warmup_handoff_before_damping() {
+        // A-group 36aa5d68 scout: a brief 20% Approach pulse,
+        // mostly 5-10%, then entirely unpowered Hold still rises to 66.71C.
+        let mut runtime = ThermalTuningRuntime::new();
+        let mut profile = profile_with_targets(&[60]);
+        let initial = profile.points[0].as_mut().unwrap();
+        initial.brake_distance_centi_c = 780;
+        initial.approach_damping_exponent_permille = 1_000;
+        runtime.candidate_profile = Some(profile);
+        for (elapsed, phase, temperature, output) in [
+            (10_641, ThermalTuningPhase::Warmup, 3_425, 1_000),
+            (17_259, ThermalTuningPhase::Approach, 5_247, 50),
+            (17_338, ThermalTuningPhase::Approach, 5_257, 50),
+            (17_575, ThermalTuningPhase::Approach, 5_341, 140),
+            (17_820, ThermalTuningPhase::Approach, 5_439, 50),
+            (18_061, ThermalTuningPhase::Approach, 5_521, 110),
+            (18_323, ThermalTuningPhase::Approach, 5_558, 180),
+            (18_561, ThermalTuningPhase::Approach, 5_631, 110),
+            (18_816, ThermalTuningPhase::Approach, 5_698, 200),
+            (19_056, ThermalTuningPhase::Approach, 5_767, 100),
+            (19_315, ThermalTuningPhase::Approach, 5_825, 170),
+            (19_546, ThermalTuningPhase::Approach, 5_856, 80),
+            (19_789, ThermalTuningPhase::Approach, 5_901, 70),
+            (20_035, ThermalTuningPhase::Approach, 5_925, 80),
+            (20_499, ThermalTuningPhase::Hold, 6_009, 0),
+            (21_836, ThermalTuningPhase::Hold, 6_183, 0),
+            (22_532, ThermalTuningPhase::Hold, 6_264, 0),
+            (27_172, ThermalTuningPhase::Hold, 6_671, 0),
+        ] {
+            let mut observation = sample(elapsed, phase, temperature);
+            observation.heater_requested_output_permille = output;
+            observation.heater_output_permille = output;
+            runtime.update_trial_metrics(&observation, 60);
+        }
+        runtime.mutate_candidate_for_failure(60, Some(671), Some(705), None, 10_000);
+        let proposed = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert!(proposed.brake_distance_centi_c > 780);
+        assert_eq!(proposed.approach_damping_exponent_permille, 1_000);
     }
 
     #[test]

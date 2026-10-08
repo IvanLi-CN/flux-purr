@@ -1,5 +1,7 @@
 # Heater PID frontpanel runtime history
 
+Exact-artifact trajectory HIL on36aa5d68 independently confirms B60°C, but A60°C retains6.71/6.09/6.06°C overshoot despite an entirely unpowered Hold. The third trial changes damping1000→2000 while leaving the7.8°C brake unchanged. A real-sample replay reproduces that search classification: a brief20% Approach pulse hides the5–10% median trajectory and selects damping alone. Low-supply coasting classification therefore considers the complete normal range and median before the peak; observed excess advances Warmup handoff through the existing bounded brake channel. A's canceled report retains its verified original trace and cannot be saved. Exact-artifact complete qualification remains required.
+
 The Operator approves explicit temperature/rate tracking after the audit establishes that Approach used instantaneous final-target error and a fixed minimum-power wait. ADR-0018 records the reference/tracker boundary, delayed applied-power history, unchanged qualification gates and fresh-calibration-only initialization. The shared controller replaces the obsolete braking timer/decline-release state with feasible reference generation and applied-input prediction; guarded measurement/epoch regressions remain. A regression reproduces high-loss minimum-power waiting and passes with predictive tracking; exact-artifact qualification remains required.
 
 ## Eight-target qualification scope
