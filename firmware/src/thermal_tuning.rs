@@ -1396,6 +1396,18 @@ impl ThermalTuningRuntime {
         let predicted_wins = self.trial_purpose == ThermalTuningTrialPurpose::BatchPredicted
             && (confirmable && !current_confirmable
                 || confirmable == current_confirmable && score_precedes(&score, &current_score));
+        // A measured stronger-damping loss should not starve the existing
+        // stored-heat channel by retrying finer damping around the winner.
+        let explore_braking = !predicted_wins
+            && !confirmable
+            && !current_confirmable
+            && failed_damping_comparison_needs_braking(
+                self.batch_current_profile,
+                self.batch_predicted_profile,
+                self.batch_current_failure_evidence,
+                predicted_failure_evidence,
+                target_c,
+            );
         let selected_failure_evidence = if predicted_wins {
             predicted_failure_evidence
         } else {
@@ -1436,7 +1448,9 @@ impl ThermalTuningRuntime {
             let Some(evidence) = selected_failure_evidence else {
                 return self.exhaust_candidate_search(target_c);
             };
-            if !self.prepare_fresh_failure_proposal_from_evidence(target_c, evidence) {
+            if !(explore_braking && self.prepare_failed_damping_braking(target_c, evidence))
+                && !self.prepare_fresh_failure_proposal_from_evidence(target_c, evidence)
+            {
                 return self.exhaust_candidate_search(target_c);
             }
             self.seed_source = bounded_reason("selected_failure_adjustment");
@@ -1453,6 +1467,51 @@ impl ThermalTuningRuntime {
                 "cooling before next tuning round"
             },
         )
+    }
+
+    fn prepare_failed_damping_braking(&mut self, target_c: i16, evidence: TuneEvidence) -> bool {
+        let Some(original) = self.candidate_profile else {
+            return false;
+        };
+        let Some(index) = original
+            .points
+            .iter()
+            .position(|point| point.is_some_and(|point| point.target_temp_c == target_c))
+        else {
+            return false;
+        };
+        let previous = original.points[index].unwrap();
+        for attempt in (1..32).step_by(2) {
+            let Some(point) = bounded_failure_alternative(previous, evidence, attempt) else {
+                continue;
+            };
+            if point.brake_distance_centi_c <= previous.brake_distance_centi_c {
+                continue;
+            }
+            let mut proposed = original;
+            proposed.points[index] = Some(point);
+            proposed.sanitize();
+            self.candidate_profile = Some(proposed);
+            if !self.record_fresh_proposal(Some(original)) {
+                continue;
+            }
+            if self
+                .install_candidate_profile(proposed, "failed_damping_braking")
+                .is_err()
+            {
+                return false;
+            }
+            self.push_event(
+                ThermalTuningEventKind::Decision,
+                Some(target_c),
+                Some(self.trial_index),
+                None,
+                Some("failed_damping_comparison_explores_braking"),
+            );
+            return true;
+        }
+        self.candidate_profile = Some(original);
+        false
     }
 
     #[cfg(test)]
@@ -3295,6 +3354,42 @@ fn damping_failure_side(evidence: TuneEvidence) -> Option<bool> {
     }
 }
 
+fn failed_damping_comparison_needs_braking(
+    current: Option<ThermalControlProfileConfig>,
+    predicted: Option<ThermalControlProfileConfig>,
+    current_evidence: Option<TuneEvidence>,
+    predicted_evidence: Option<TuneEvidence>,
+    target_c: i16,
+) -> bool {
+    let point = |profile: ThermalControlProfileConfig| {
+        profile
+            .points
+            .into_iter()
+            .flatten()
+            .find(|point| point.target_temp_c == target_c)
+    };
+    let Some(((current, predicted), (current_facts, predicted_facts))) = current
+        .and_then(point)
+        .zip(predicted.and_then(point))
+        .zip(current_evidence.zip(predicted_evidence))
+    else {
+        return false;
+    };
+    current_facts.target_c == target_c
+        && predicted_facts.target_c == target_c
+        && damping_failure_side(current_facts) == Some(true)
+        && damping_failure_side(predicted_facts) == Some(true)
+        && (current_facts.hold_off_sample_count == current_facts.hold_sample_count
+            || (current_facts.hold_entry_pulse_only
+                && current_facts.hold_off_sample_count.saturating_mul(10)
+                    >= current_facts.hold_sample_count.saturating_mul(9)))
+        && same_point_except_damping(current, predicted)
+        && predicted.approach_damping_exponent_permille > current.approach_damping_exponent_permille
+        && bounded_failure_alternative(current, current_facts, 1).is_some_and(|alternative| {
+            alternative.brake_distance_centi_c > current.brake_distance_centi_c
+        })
+}
+
 fn score_precedes(left: &[f64; 11], right: &[f64; 11]) -> bool {
     left.iter()
         .zip(right)
@@ -3524,6 +3619,93 @@ mod tests {
         assert_eq!(runtime.accepted_target_mask, 0);
         assert!(runtime.events.iter().any(|event| event.reason.as_deref()
             == Some("same_run_damping_bracket_trials_5_6_midpoint_2500")));
+    }
+
+    #[test]
+    fn captured_failed_damping_comparison_explores_the_existing_braking_channel() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_failed_damping.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        for trial in fixture["trials"].as_array().unwrap() {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            runtime.advance_after_trial(60, evaluation).unwrap();
+        }
+        let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(next.brake_distance_centi_c, 1_820);
+        assert_eq!(next.approach_damping_exponent_permille, 2_110);
+        assert_eq!(runtime.accepted_target_mask, 0);
+        assert!(
+            runtime.events.iter().any(|event| event.reason.as_deref()
+                == Some("failed_damping_comparison_explores_braking"))
+        );
+    }
+
+    #[test]
+    fn failed_damping_braking_requires_matching_measured_high_side_failures() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_failed_damping.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let mut pairs = std::vec::Vec::new();
+        for trial in fixture["trials"].as_array().unwrap() {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            pairs.push((
+                runtime.candidate_profile,
+                Some(runtime.candidate_failure_evidence(
+                    60,
+                    evaluation.max_overshoot_centi_c,
+                    evaluation.hold_peak_to_peak_centi_c,
+                    None,
+                    10_000,
+                )),
+            ));
+        }
+        let ((current, facts), (predicted, predicted_facts)) = (pairs[0], pairs[1]);
+        assert!(failed_damping_comparison_needs_braking(
+            current,
+            predicted,
+            facts,
+            predicted_facts,
+            60
+        ));
+        let facts = facts.unwrap();
+        for rejected in [
+            None,
+            Some(TuneEvidence {
+                target_c: 80,
+                ..facts
+            }),
+            Some(TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            }),
+            Some(TuneEvidence {
+                hold_off_sample_count: 0,
+                hold_entry_pulse_only: false,
+                hold_median_output_permille: Some(500),
+                hold_p90_output_permille: Some(600),
+                hold_max_output_permille: Some(800),
+                ..facts
+            }),
+        ] {
+            assert!(!failed_damping_comparison_needs_braking(
+                current,
+                predicted,
+                rejected,
+                predicted_facts,
+                60
+            ));
+        }
+        let mut different = predicted.unwrap();
+        different.points[0].as_mut().unwrap().brake_distance_centi_c += 1;
+        assert!(!failed_damping_comparison_needs_braking(
+            current,
+            Some(different),
+            Some(facts),
+            predicted_facts,
+            60
+        ));
     }
 
     #[test]
