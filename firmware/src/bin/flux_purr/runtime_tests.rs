@@ -12363,6 +12363,15 @@ fn tuning_temperature_retains_live_rtd_when_control_is_guarded() {
 }
 
 #[test]
+fn tuning_temperature_uses_retained_control_for_guarded_raw_jump() {
+    let reading =
+        tuning_temperature_evidence_with_control(51.54, 43.13, false, true, Some(278_552), 278_661);
+    assert_eq!(reading.temperature_centi_c, 4_313);
+    assert!(reading.measurement_valid);
+    assert!(!reading.cooldown_admission_ready);
+}
+
+#[test]
 fn tuning_temperature_faults_do_not_reuse_the_retained_display_reading() {
     for (temp_c, fault) in [(34.54, true), (f32::NAN, false), (f32::INFINITY, false)] {
         let reading = tuning_temperature_evidence(temp_c, fault, false, Some(10), 10);

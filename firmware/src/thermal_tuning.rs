@@ -263,6 +263,8 @@ pub struct ThermalTuningSample {
     pub candidate_id: TuningId,
     pub candidate_hash: TuningHash,
     pub temperature_centi_c: i16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_temperature_centi_c: Option<i16>,
     pub vin_mv: u32,
     pub pps_contract: ThermalTuningPpsContract,
     pub requested_mv: u16,
@@ -4127,6 +4129,7 @@ mod tests {
             candidate_id: id("candidate-hold"),
             candidate_hash: hash("hash-hold"),
             temperature_centi_c,
+            raw_temperature_centi_c: None,
             vin_mv: 12_000,
             pps_contract: ThermalTuningPpsContract {
                 voltage_mv: 21_000,
@@ -7511,6 +7514,7 @@ mod tests {
             candidate_id: id("candidate"),
             candidate_hash: hash("hash"),
             temperature_centi_c: 2500,
+            raw_temperature_centi_c: None,
             vin_mv: 12000,
             pps_contract: ThermalTuningPpsContract {
                 voltage_mv: 12000,

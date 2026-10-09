@@ -834,6 +834,7 @@ fn replay_firmware_trials_and_capture_decisions(
             candidate_hash: hash,
             // Cross the active cooldown gate before replaying unmodified historical samples.
             temperature_centi_c: 3_400,
+            raw_temperature_centi_c: None,
             vin_mv: 21_000,
             pps_contract: ThermalTuningPpsContract {
                 voltage_mv: 21_000,

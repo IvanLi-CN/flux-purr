@@ -2430,7 +2430,7 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
 #[cfg(target_arch = "xtensa")]
 fn runtime_update_tuning_cooling_latch(state: &mut RuntimeLoopState) {
     let tuning_temperature = tuning_temperature_evidence(
-        state.latest_display_temp_c,
+        state.latest_temp_c,
         state.current_rtd_fault.is_some(),
         state.control_measurement_guarded,
         state.rtd_control_measurement_guard.last_accepted_at_ms,
@@ -2870,8 +2870,10 @@ fn runtime_record_thermal_tuning_sample(
         state.ui_state.heater_enabled = false;
         return true;
     };
-    let temperature = tuning_temperature_evidence(
+    let raw_temperature_centi_c = (state.latest_display_temp_c * 100.0).round() as i16;
+    let temperature = tuning_temperature_evidence_with_control(
         state.latest_display_temp_c,
+        state.latest_temp_c,
         state.current_rtd_fault.is_some(),
         state.control_measurement_guarded,
         state.rtd_control_measurement_guard.last_accepted_at_ms,
@@ -2885,6 +2887,7 @@ fn runtime_record_thermal_tuning_sample(
         candidate_id,
         candidate_hash,
         temperature_centi_c: temperature.temperature_centi_c,
+        raw_temperature_centi_c: Some(raw_temperature_centi_c),
         vin_mv: state.latest_vin_mv,
         pps_contract: flux_purr_firmware::thermal_tuning::ThermalTuningPpsContract {
             voltage_mv: observation.contract_voltage_mv.unwrap_or_default(),
