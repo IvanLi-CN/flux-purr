@@ -1,5 +1,9 @@
 # Heater PID frontpanel runtime history
 
+The owner permits a temporary assumed absolute ADC-voltage correction after repeated A cooling waits, retaining the supplied ambient estimate near30°C. This bench assumption is separate from the measured3328mV excitation and absent user calibration; nonzero release builds are rejected. Applying or removing it requires fresh plant calibration and tuning qualification for that exact electrical mapping. No independent plate-temperature measurement is inferred from the ambient estimate.
+
+B组effd7800重复完成自身新标定初始化的八目标独立确认，标准原子保存及读回证明pps3a revision25。A组两轮同版本运行仍未通过60°C；第二轮触发提前制动搜索，下一提案未能在冷却预算耗尽前开始。室温约30°C与PPS冷却时35–36°C读数的差额只支持主人授权的临时假定试验，尚不能证明传感器偏差；原失败记录保留，新的电压映射必须重新取得标定与资格。
+
 B组9485eb63以自身新标定为种子完成八目标独立60秒确认，HOT=LOW及自动PPS保持，所有稳定窗口在原期限内开始；完整报告与原子保存读回证明pps3a参数组已持久化。A组fd350e7f确认220°C但60°C仍耗尽预算，完整回放暴露失败比较后的通道饥饿：较大阻尼无改善，下一提案仍优先微增阻尼。内部搜索对兼容高侧失败且选中候选停热Hold的比较，优先尝试已有有界提前制动通道；只改变实测失败后的提案顺序，保留原生产控制、有效预热、重复点与全部资格门槛。两组结果与新提案验证范围见[加热预测审计](HIL-TRAJECTORY-PREDICTION.md)。
 
 余热观测固件的A组实机试验暴露了搜索中的另一项缺陷：25.32°C制动距离使60°C试验从约35°C起点立即进入Approach，未取得全功率Warmup证据，却因峰值小0.01°C胜过有效预热的当前候选。内部比较首先保留预热有效性，提案须保留独立Warmup的温差空间；不把无效试验转为通过，也不更改生产交接与资格门槛。该运行仅确认220°C，未保存完整参数组。

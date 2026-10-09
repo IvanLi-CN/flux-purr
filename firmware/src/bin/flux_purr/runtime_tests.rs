@@ -12502,6 +12502,101 @@ fn rtd_fractional_millivolts_preserve_oversampled_temperature_resolution() {
     assert!((midpoint_temp - ((lower_temp + upper_temp) * 0.5)).abs() < 0.01);
 }
 
+fn assumed_offset_test_batch(temp_c: f32) -> RtdAdcBatch {
+    let resistance = pt1000_resistance_ohms_at(temp_c);
+    let mv =
+        f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance / (RTD_REFERENCE_RESISTOR_OHMS + resistance);
+    RtdAdcBatch {
+        mean_mv: mv,
+        min_mv: mv.floor() as u16,
+        max_mv: mv.ceil() as u16,
+        mean_raw_code: 2_280,
+        min_raw_code: 2_275,
+        max_raw_code: 2_285,
+    }
+}
+
+#[test]
+fn assumed_rtd_offset_is_separate_from_raw_diagnostics_and_user_calibration() {
+    let config = MemoryConfig::default();
+    let original = config.clone();
+    let batch = assumed_offset_test_batch(35.5);
+    let RtdSample::Valid(base) = rtd_sample_from_batch(&config, batch, 0) else {
+        panic!("default sample must be valid");
+    };
+    let RtdSample::Valid(adjusted) = rtd_sample_from_batch(&config, batch, -13_500) else {
+        panic!("assumed-offset sample must be valid");
+    };
+    assert!((base.temp_c - 35.5).abs() < 0.02);
+    assert!((adjusted.temp_c - 30.0).abs() < 0.03);
+    assert_eq!(adjusted.raw_adc_mv, base.raw_adc_mv);
+    assert_eq!(adjusted.raw_adc_min_mv, base.raw_adc_min_mv);
+    assert_eq!(adjusted.raw_adc_max_mv, base.raw_adc_max_mv);
+    assert_eq!(config, original);
+    assert_eq!(
+        correct_adc_mv(&config.adc_calibration, AdcCalibrationChannel::Vin, 1_234),
+        1_234
+    );
+}
+
+#[test]
+fn assumed_rtd_offset_yields_to_user_points_or_an_active_fit() {
+    let mut config = MemoryConfig::default();
+    config.adc_calibration.rtd.slots.a.offset_mv = 2.0;
+    assert_eq!(rtd_assumed_adc_offset_uv(&config, -13_500), 0);
+    let batch = assumed_offset_test_batch(30.0);
+    assert_eq!(
+        rtd_sample_from_batch(&config, batch, -13_500),
+        rtd_sample_from_batch(&config, batch, 0)
+    );
+    config.adc_calibration.rtd.slots.a.offset_mv = 0.0;
+    config.adc_calibration.rtd.samples[0] = Some(AdcCalibrationSample {
+        observed_mv: 1_030,
+        expected_mv: 1_031,
+        reference_temp_deci_c: None,
+        target_adc_mv: None,
+        reference_vin_mv: None,
+    });
+    assert_eq!(rtd_assumed_adc_offset_uv(&config, -13_500), 0);
+}
+
+#[test]
+fn assumed_rtd_offset_cannot_hide_original_sensor_or_overtemp_faults() {
+    let config = MemoryConfig::default();
+    for (mv, reason) in [
+        (
+            f32::from(RTD_SHORT_FAULT_MAX_MV),
+            HeaterFaultReason::SensorShort,
+        ),
+        (
+            f32::from(RTD_OPEN_FAULT_MIN_MV),
+            HeaterFaultReason::SensorOpen,
+        ),
+    ] {
+        let batch = RtdAdcBatch {
+            mean_mv: mv,
+            ..assumed_offset_test_batch(30.0)
+        };
+        for offset in [-20_000, 20_000] {
+            assert_eq!(
+                rtd_sample_from_batch(&config, batch, offset),
+                RtdSample::Fault {
+                    adc_mv: Some(mv.round() as u16),
+                    reason
+                }
+            );
+        }
+    }
+    let batch = assumed_offset_test_batch(421.0);
+    assert_eq!(
+        rtd_sample_from_batch(&config, batch, -20_000),
+        RtdSample::Fault {
+            adc_mv: Some(batch.mean_mv.round() as u16),
+            reason: HeaterFaultReason::OverTemp,
+        }
+    );
+}
+
 #[test]
 fn rtd_uses_nominal_regulator_feedback_divider_supply() {
     let expected_temperature_c = 31.0;

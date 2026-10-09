@@ -5,6 +5,7 @@ fn main() {
         .expect("firmware must live below the repository root");
     let resolver = repo_root.join("scripts/product-version.py");
     let build_mode = std::env::var("FLUX_PURR_BUILD_MODE").unwrap_or_else(|_| "development".into());
+    configure_rtd_assumption(&build_mode);
     let source_sha = match std::env::var("FLUX_PURR_SOURCE_SHA") {
         Ok(value) => {
             if !valid_source_sha(&value) {
@@ -65,6 +66,28 @@ fn main() {
         println!("cargo:rustc-link-arg=-Tlinkall.x");
         println!("cargo:rustc-link-arg=-Tdefmt.x");
     }
+}
+
+fn configure_rtd_assumption(build_mode: &str) {
+    let offset_uv = std::env::var("FLUX_PURR_RTD_ASSUMED_ADC_OFFSET_UV")
+        .unwrap_or_else(|_| "0".into())
+        .parse::<i32>()
+        .expect("FLUX_PURR_RTD_ASSUMED_ADC_OFFSET_UV must be an integer");
+    assert!(
+        (-20_000..=20_000).contains(&offset_uv),
+        "assumed RTD ADC offset must be within +/-20000uV"
+    );
+    assert!(
+        offset_uv == 0 || build_mode == "development",
+        "nonzero assumed RTD ADC offset is restricted to development builds"
+    );
+    let out_dir = std::env::var_os("OUT_DIR").expect("OUT_DIR");
+    std::fs::write(
+        std::path::Path::new(&out_dir).join("rtd_adc_assumption.rs"),
+        format!("pub(crate) const RTD_ASSUMED_ADC_OFFSET_UV: i32 = {offset_uv};\n"),
+    )
+    .expect("failed to write RTD ADC assumption configuration");
+    println!("cargo:rerun-if-env-changed=FLUX_PURR_RTD_ASSUMED_ADC_OFFSET_UV");
 }
 
 fn valid_source_sha(value: &str) -> bool {

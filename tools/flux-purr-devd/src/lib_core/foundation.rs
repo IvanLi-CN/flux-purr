@@ -1218,6 +1218,8 @@ pub struct AdcDiagnostics {
     pub rtd_raw_code_max: u16,
     pub rtd_raw_code_spread: u16,
     pub vin_raw_code_mean: u16,
+    #[serde(default)]
+    pub rtd_assumed_offset_uv: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

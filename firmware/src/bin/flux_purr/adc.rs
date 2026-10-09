@@ -371,6 +371,29 @@ pub(crate) async fn read_rtd_sample(
         RTD_RAW_CODE_MIN.store(batch.min_raw_code, Ordering::Relaxed);
         RTD_RAW_CODE_MAX.store(batch.max_raw_code, Ordering::Relaxed);
     }
+    rtd_sample_from_batch(memory_config, batch, RTD_ASSUMED_ADC_OFFSET_UV)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn rtd_assumed_adc_offset_uv(
+    memory_config: &MemoryConfig,
+    configured_offset_uv: i32,
+) -> i32 {
+    let channel = &memory_config.adc_calibration.rtd;
+    let fit = channel.active_slot_fit();
+    if channel.samples.iter().any(Option::is_some) || fit.gain != 1.0 || fit.offset_mv != 0.0 {
+        0
+    } else {
+        configured_offset_uv.clamp(-20_000, 20_000)
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn rtd_sample_from_batch(
+    memory_config: &MemoryConfig,
+    batch: RtdAdcBatch,
+    configured_offset_uv: i32,
+) -> RtdSample {
     let raw_adc_mv = batch.mean_mv.round() as u16;
     let raw_adc_fractional_mv = batch.mean_mv;
 
@@ -387,11 +410,23 @@ pub(crate) async fn read_rtd_sample(
         };
     }
 
-    let adc_fractional_mv = correct_adc_fractional_mv(
+    let base_adc_fractional_mv = correct_adc_fractional_mv(
         memory_config,
         AdcCalibrationChannel::Rtd,
         raw_adc_fractional_mv,
     );
+    let offset_uv = rtd_assumed_adc_offset_uv(memory_config, configured_offset_uv);
+    // A temporary negative assumption must not hide the original hard cutoff.
+    if offset_uv < 0
+        && rtd_resistance_ohms_from_fractional_mv(base_adc_fractional_mv)
+            .is_ok_and(|r| is_overtemp_sample(pt1000_temperature_c_from_resistance(r)))
+    {
+        return RtdSample::Fault {
+            adc_mv: Some(raw_adc_mv),
+            reason: HeaterFaultReason::OverTemp,
+        };
+    }
+    let adc_fractional_mv = base_adc_fractional_mv + offset_uv as f32 / 1_000.0;
     let adc_mv = adc_fractional_mv.round() as u16;
 
     match rtd_resistance_ohms_from_fractional_mv(adc_fractional_mv) {

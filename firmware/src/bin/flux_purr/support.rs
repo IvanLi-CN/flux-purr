@@ -1118,6 +1118,8 @@ pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_328;
 pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_208;
 #[cfg(all(feature = "rtd-supply-3340mv", not(feature = "rtd-supply-3208mv")))]
 pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_340;
+
+include!(concat!(env!("OUT_DIR"), "/rtd_adc_assumption.rs"));
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_SHORT_FAULT_MAX_MV: u16 = 150;
 #[cfg(any(target_arch = "xtensa", test))]

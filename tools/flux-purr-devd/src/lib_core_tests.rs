@@ -3269,6 +3269,24 @@ fn usb_response_decoder_preserves_adc_diagnostics() {
 
     assert_eq!(diagnostics.calibration_source, "efuse");
     assert_eq!(diagnostics.rtd_raw_code_spread, 4);
+    assert_eq!(diagnostics.rtd_assumed_offset_uv, 0);
+}
+
+#[test]
+fn adc_diagnostics_preserves_explicit_assumed_rtd_offset() {
+    let value = json!({
+        "calibrationSource": "efuse", "efuseVersion": 1, "attenuationDb": 6,
+        "initCode": 1850, "referenceCode": 1600, "referenceMv": 850,
+        "rtdRawCodeMean": 2100, "rtdRawCodeMin": 2098, "rtdRawCodeMax": 2102,
+        "rtdRawCodeSpread": 4, "vinRawCodeMean": 1800, "rtdAssumedOffsetUv": -13500
+    });
+    let diagnostics: AdcDiagnostics = serde_json::from_value(value).unwrap();
+    assert_eq!(diagnostics.rtd_assumed_offset_uv, -13_500);
+    assert_eq!(diagnostics.calibration_source, "efuse");
+    assert_eq!(
+        serde_json::to_value(diagnostics).unwrap()["rtdAssumedOffsetUv"],
+        -13_500
+    );
 }
 
 #[test]

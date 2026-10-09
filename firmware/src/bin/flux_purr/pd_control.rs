@@ -130,6 +130,7 @@ pub(crate) fn adc_diagnostics_wire() -> AdcDiagnosticsWire {
         rtd_raw_code_max: raw_max,
         rtd_raw_code_spread: raw_max.saturating_sub(raw_min),
         vin_raw_code_mean: VIN_RAW_CODE_MEAN.load(Ordering::Relaxed),
+        rtd_assumed_offset_uv: 0,
     }
 }
 

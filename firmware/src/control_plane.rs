@@ -228,6 +228,8 @@ pub struct AdcDiagnosticsWire {
     pub rtd_raw_code_max: u16,
     pub rtd_raw_code_spread: u16,
     pub vin_raw_code_mean: u16,
+    #[serde(default)]
+    pub rtd_assumed_offset_uv: i32,
 }
 
 /// Instantaneous digital pad readback, not fan voltage or tachometer evidence.
@@ -3655,6 +3657,7 @@ mod tests {
             rtd_raw_code_max: 2102,
             rtd_raw_code_spread: 4,
             vin_raw_code_mean: 1800,
+            rtd_assumed_offset_uv: -13_500,
         });
         let frame = UsbFrame::Response {
             request_id: string("req-pd"),
@@ -3672,6 +3675,7 @@ mod tests {
         assert!(json.contains(r#""ppsCapabilityMinMv":null"#));
         assert!(json.contains(r#""adcDiagnostics":{"calibrationSource":"efuse"#));
         assert!(json.contains(r#""rtdRawCodeSpread":4"#));
+        assert!(json.contains(r#""rtdAssumedOffsetUv":-13500"#));
         assert!(json.len() <= USB_LINE_MAX_LEN);
         assert!(!json.contains("fallback5v"));
         assert_eq!(
