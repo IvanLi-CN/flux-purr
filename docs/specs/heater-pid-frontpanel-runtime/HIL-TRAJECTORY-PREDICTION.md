@@ -1,44 +1,116 @@
-# Shared trajectory controller: HIL and prediction audit
+# 加热轨迹控制：实机结果、预测偏差与整改方案
 
-## Exact-artifact qualification
+## 当前结论
 
-Both devices run `0.27.7-dev.039af3f`, source `039af3f7fa0d238c6772b090ec7a7f446ea2a85b`, verified independently after flashing. A uses3328mV and ELF SHA-256 `90b3eda05aa2b8611d87ba4168f72d29e6ca4d09f7a9c13455f21790f184c213`; B uses3340mV and `e7fdeb709f30765daa40b91926b59f14236e9444bfa49d68fcc6ac2b64c8b6c8`. Initial parameters use each device's fresh calibration only: transactions1346525330/1471114022 and seed hashes `e36df0ad5eda7c8625defdc301d87977d7521b3500b3665a3fc3d622e3dc071a` / `f7ad58426161d9f2c74fb6854ba1d4da5609429995072a4e9acc0086186cb8f5`. No previous tuning candidate or saved bank initializes either run. Heating uses HOT=LOW and automatic PPS.
+A、B 两组完整八目标调优均未通过。A 组完成了 220°C 的独立 60 秒确认，60°C 未通过；B 组完成了 60°C 的独立确认，220°C 未通过。失败端点阻断了各自的六个中间目标，两组均未保存调优参数到 EEPROM。
 
-| Group | Run | Verified event range | Independently confirmed endpoint | Failed endpoint | Full eight-target outcome |
-| --- | --- | --- | --- | --- | --- |
-| A,100W/5A | `firmware-pps5a-1791523446485` | 0..6401 | 220°C:0.98°C overshoot,2.26°C p2p,60s confirmation | 60°C:20-minute target budget | Failed; no EEPROM save |
-| B,60W/3A | `firmware-pps3a-1791523446521` | 0..6180 | 60°C:0.14°C overshoot,0.56°C p2p,60s confirmation | 220°C:failed confirmation,then20-minute target budget | Failed; no EEPROM save |
+A 组新标定数据已复现明显的预测偏差：停热超过标定延迟后，记录温度仍约为 220.86°C，当前生产预测函数却预计约两秒后降到 217.41°C。当前公式没有表达这段仍在发生的热传递。这个结论证实了预测与记录响应不一致；它对全部调优失败的影响仍需闭环验证。
 
-Standard reports are `firmware/target/hil-dual-source/a/bundle-eight-bracket-039af3f7/index.html` and the corresponding `b/` path. Their complete, device-verified trace digests are `sha256:16eeb07da3cb3d6f185159f8a68dc6ee177cb64c7bf163fb081e529af3a958c9` and `sha256:21b565a6ea6bb3cf2f6903c1400089f3abf021ace17b9219efccc24a93cd80d2`. The six interior targets are blocked by the failed endpoint in each run; they are not tested or passed. Missing terminal safety events remain explicitly unconfirmed in the immutable reports. Separate standard status readbacks establish heater disabled,zero logical/MOS output,preview cleared,HOT=LOW and final temperatures34.37°C/28.62°C with released fans and Fixed5V idle. Those readbacks do not rewrite the report's missing event.
+建议在共享预测器中增加受约束的余热观测，用当前有效测温修正模型尚未表达的热传递。初步离线方案改善了 A 组误差，但仍有约 1.69°C 的偏差，且 B 组唯一可比片段的误差反而增大。因此，方案尚处于评估阶段，需要进一步回归验证后才能用于实机。
 
-A's60°C search obtains compatible high/low damping failures at2500‰/2750‰ with unchanged22.7°C braking. The2625‰ midpoint first reaches the stable band10025ms after Warmup exit,25ms after the original10000ms limit; it is not eligible for extension. A2562‰ proposal cannot heat before the target budget ends. Recorded high-side trial maxima near61.56°C are truncated when the window fails,not complete post-stop peaks. They cannot establish that a later peak is equally small or that an interpolated point passes.
+## 实机版本、数据来源与结果
 
-B's220°C trials5/8 pass short qualification,while independent confirmation6 loses the low stable-band edge and confirmation9 is interrupted during Warmup by the original target budget. The trial6 recorded p2p1.99°C does not replace the missing continuous stable-window witness. B therefore can reach220°C and short qualification under HOT=LOW; this run does not establish a hardware temperature limit or an inability to supply100% logical power.
+两台设备烧录后分别读回身份，均为 `0.27.7-dev.039af3f`，源码提交为 `039af3f7fa0d238c6772b090ec7a7f446ea2a85b`。A 组使用 3328mV 的 3V3 基准，固件 ELF SHA-256 为 `90b3eda05aa2b8611d87ba4168f72d29e6ca4d09f7a9c13455f21790f184c213`；B 组使用 3340mV，固件摘要为 `e7fdeb709f30765daa40b91926b59f14236e9444bfa49d68fcc6ac2b64c8b6c8`。
 
-## One-shot fan diagnostic
+两组初始参数只来自各自的新标定：模型事务分别为 1346525330、1471114022，初始参数摘要分别为 `e36df0ad5eda7c8625defdc301d87977d7521b3500b3665a3fc3d622e3dc071a`、`f7ad58426161d9f2c74fb6854ba1d4da5609429995072a4e9acc0086186cb8f5`。运行采用 HOT=LOW 和自动 PPS，没有导入过往调优候选或已保存参数作为起点。
 
-B's owner-authorized HOT=OFF220°C diagnostic on `fb2049b1` is completed and its authorization is consumed. Run `firmware-pps3a-1791520358136` retains verified events0..813,digest `sha256:c1627eb6fbc339429b572b1a42500bf3806f81551301b5228ed677c98c4b3db4`. Approach starts at177957ms/219.01°C; controller Hold occurs at178124ms/218.95°C,with zero heater output through179650ms. The controller returns to Approach at179796ms/217.77°C and fails without a qualified Hold witness. HOT=LOW is restored,full cooling reaches below35°C,and no candidate is saved. Controller phase entry,qualified Hold and independent confirmation are distinct facts. The OFF diagnostic does not isolate fan cooling as the sole cause.
+| 组别 | 已验证事件范围 | 独立确认通过的端点 | 未通过的端点 | 完整八目标结果 |
+| --- | --- | --- | --- | --- |
+| A：100W／5A | 0..6401 | 220°C：过冲 0.98°C，保温峰峰值 2.26°C，完成 60 秒确认 | 60°C：耗尽单目标 20 分钟预算 | 未通过；未写入 EEPROM |
+| B：60W／3A | 0..6180 | 60°C：过冲 0.14°C，保温峰峰值 0.56°C，完成 60 秒确认 | 220°C：独立确认失败，后续耗尽单目标预算 | 未通过；未写入 EEPROM |
 
-## Reproducible prediction counterexample
+A 组运行标识为 `firmware-pps5a-1791523446485`，标准报告位于 `firmware/target/hil-dual-source/a/bundle-eight-bracket-039af3f7/index.html`，完整、设备核验通过的轨迹摘要为 `sha256:16eeb07da3cb3d6f185159f8a68dc6ee177cb64c7bf163fb081e529af3a958c9`。B 组运行标识为 `firmware-pps3a-1791523446521`，报告位于对应的 `b/` 目录，轨迹摘要为 `sha256:21b565a6ea6bb3cf2f6903c1400089f3abf021ace17b9219efccc24a93cd80d2`。
 
-`AppliedHeatHistory::forecast` currently integrates delayed applied-power history and natural losses. Observed rise supplies only unknown history. Once zero-input history covers the calibrated transport delay,the predictor ignores continued observed thermal transfer and projects natural cooling. This follows the current formula; the audit establishes a representation mismatch with recorded response,not an array-index error or a complete causal explanation of every failed trial.
+两组的六个中间目标均未执行，不能计作通过。原报告缺少终止安全事件，仍明确保留“未确认”的历史事实。另行通过标准状态接口读回，两台均已停用加热、逻辑请求与 MOS 输出为零、清除预览，并保留 HOT=LOW；最终记录温度分别为 34.37°C、28.62°C，风扇已释放，电源回到固定 5V 待机。这些读回证明当时的设备状态，不能补写原报告中缺失的事件。
 
-Fresh A calibration records zero duty from78400ms/220.24°C. At80450ms it records220.86°C after2050ms of zero output,longer than the1900ms fitted delay. The production function predicts217.4141°C after another1900ms; the retained sample at82500ms is220.86°C,150ms after that forecast horizon. The3.4459°C discrepancy exceeds the stable band's1.5°C half-width. All12 selected dense cooling pairs exceed that half-width. The comparison uses recorded calibration temperature and fan-off follows the protected passive-calibration contract; it is not independent thermometry or per-sample fan telemetry.
+### A 组 60°C 为什么未通过
 
-A tuning trial0 supplies a separate constant-PPS,fan-off,zero-MOS example: at22436ms the temperature is62.20°C after2077ms of zero output. The production forecast is61.7376°C; the sample1845ms later is65.06°C,a3.3224°C difference. Thirteen of15 qualifying sampled pairs exceed1.5°C. These comparisons do not reconstruct the runtime's trusted/filtered temperature or prove unsampled actuator continuity. B's same dense-calibration method retains only one pair within the150ms horizon tolerance; its−0.1273°C error cannot establish that the entire B model is accurate.
+制动距离保持 22.7°C 时，阻尼 2500‰ 的候选从稳定带高侧离开，2750‰ 的候选在原期限内未完成交接。搜索取中点 2625‰，首次进入稳定带的时间为 Warmup 退出后 10025ms，比原 10000ms 期限晚 25ms，且不满足条件延长资格。下一候选 2562‰ 尚未开始加热，单目标预算就已耗尽。
 
-The minimized host replay calls the real production function and excludes tuning feedback,PPS transitions and profile search. Its command is `firmware/target/host/aarch64-apple-darwin/debug/forecast-audit --minimal`; it prints `forecast:217.4141C; observed:220.86C; error:3.4459C` and exits101 on the prediction assertion. The scratch source is `firmware/target/hil-dual-source/forecast-audit/src/main.rs`. Full inputs and audit outputs remain under each group's `calibration-cache-2737c831/`, `forecast-calibration-039af3f7.json` and A's `forecast-tuning-039af3f7.json`. This offline assertion is a diagnostic regression target,not an additional product qualification gate.
+高侧失败试验中约 61.56°C 的最大记录温度，是稳定窗口破裂、试验停止前的采样最大值。完整停热后峰值可能更高，不能凭这个截断值或插值结果推断新候选已经合格。
 
-## Proposed production correction — awaiting decision
+### B 组 220°C 为什么未通过
 
-The proposal adds a bounded observation of thermal transfer to the shared command-arrival predictor. It preserves independent Warmup,the model-generated Approach reference,the immediate5% entry request and the existing applied-power history. A transport delay describes when an electrical input affects the sensor; expiring that input history must not assert that every internal thermal gradient has disappeared. Fresh calibration and current accepted observations supply the correction; prior-run tuning parameters cannot supply it.
+试验 5、8 通过短试验门槛；独立确认试验 6 从稳定带低侧离开，试验 9 则在 Warmup 期间因单目标预算耗尽而停止。试验 6 的保温峰峰值虽然只有 1.99°C，仍缺少合格的连续稳定窗口证据。
 
-At a valid observation,the received-heat estimate is `Qobs=loss(T)+C×observedRise`. Compare it with the delayed applied-input estimate for the same time to obtain residual `r=Qobs−Qdelayed`. Only that residual corrects the future power integral; adding both Qobs and the full historical input would double-count heat. Bound and smooth the estimate using the calibrated plant,actual source capability and real observation time. Age the correction across prediction time and invalidate it after sensor recovery,disarm,target/source change or an expired observation. PPS origins must not create a residual from a cross-voltage difference; a new accepted segment establishes its own observation before updating it. A retained measurement cannot repeatedly contribute observation evidence.
+这些记录证明 B 组在 HOT=LOW 下能达到 220°C 并通过短试验。当前证据尚未确定独立确认失败的完整原因，也不能据此判断硬件温度上限。
 
-The affected production seams are `thermal_trajectory::AppliedHeatHistory::forecast` and the accepted-measurement/lifecycle plumbing of `HeaterController`. The initial implementation must compare the corrected predictor against an unchanged pure-delay plant as well as actual fresh-calibration traces. Hold's protected PI,fan policy,PD/PPS ownership,calibration fitting/storage,physical phase entrance,timing policy4,thermal limits and save gates remain outside this proposal. B's failed Hold confirmation remains a separate validation obligation; an improved A prediction cannot qualify B or all eight targets.
+## B 组一次性关风扇对照
 
-An offline,heater-off-only prototype bounds `loss+C×observedRise` and decays it over one calibrated delay. Adding an actual-delay observation window reduces the worst absolute error in the selected A tuning pairs from3.3224°C to1.5587°C,and in the selected A calibration pairs from3.4459°C to1.6939°C. It still misses the diagnostic1.5°C target; B's only matching pair worsens from0.1273°C to0.5449°C absolute error. The prototype is not production code or an accepted fix. Raw per-sample derivative compensation also amplifies quantization,so a direct unsmoothed replacement is rejected. Exact residual filtering and decay must be established with regression and physical feedback before deployment,not tuned against a previously accepted candidate or assumed successful from these selected segments.
+获准的 HOT=OFF、220°C 对照已经完成，采用 `fb2049b1` 固件。运行 `firmware-pps3a-1791520358136` 保留已验证事件 0..813，摘要为 `sha256:c1627eb6fbc339429b572b1a42500bf3806f81551301b5228ed677c98c4b3db4`。这次一次性授权已使用。
 
-Acceptance requires a before/after minimized predictor regression,unaltered delayed-input/reference feasibility checks,stable-PPS observation and noise coverage,cross-epoch offset rejection,held/rejected-measurement isolation and lifecycle reset tests. After the model assessment passes,commit/build/flash the exact3328mV/3340mV artifacts,verify both identities,and repeat the fresh-calibration-only eight-target runs with independent60-second confirmations. Complete device-verified reports and per-bank EEPROM readback remain necessary. No missing samples,relaxed thermal/time gate,HOT=OFF run or partial endpoint adoption can substitute for that acceptance.
+记录在 177957ms／219.01°C 进入 Approach；178124ms 出现控制器 Hold，报告温度为 218.95°C；随后加热输出保持零直到 179650ms。179796ms／217.77°C 又回到 Approach，最终没有形成合格保温。这里的温度是报告样本值，控制器阶段与保温资格必须分别审定。
 
-The correction changes a production prediction formula beyond the approved internal-search patch. [Delivery contract](DELIVERY-CONTRACT.md#本文术语旧方案与生产控制兼容锚点) requires separate assessment and confirmation for other production control-law changes. The proposal and offline evidence are reviewable before that decision; no unapproved observer is flashed.
+对照结束后已恢复 HOT=LOW，并全速冷却到 35°C 以下，没有保存候选。此前“没有进入 Hold”的描述不准确：它曾短暂进入控制器 Hold，但没有满足合格保温和独立确认要求。对照结果尚不能把风扇散热认定为唯一失败原因。
+
+## 已复现的预测偏差
+
+当前 `AppliedHeatHistory::forecast` 按标定延迟内的已施加功率和自然散热积分，预测新指令供热到达时的温度。只有缺少输入历史时，才使用观测升温率推算未知供热。连续零输出历史覆盖整个标定延迟后，函数直接预测自然冷却，观测到的持续热传递不再修正预测。
+
+代码执行的是当前文档规定的公式，但公式与 A 组记录响应存在偏差。标定得到的“传热延迟”描述输入影响温度观测的时间；用这一个延迟代表全部内部余热的持续时间，缺少实测支持。
+
+### 新标定中的反例
+
+| 观察项 | A 组记录或计算值 |
+| --- | --- |
+| 首个零输出记录 | 78400ms，220.24°C |
+| 用于预测的当前记录 | 80450ms，220.86°C |
+| 已连续停热时间 | 2050ms |
+| 标定延迟 | 1900ms |
+| 生产函数预测 1900ms 后的温度 | 217.4141°C |
+| 最接近预测时刻的后续记录 | 82500ms，220.86°C，晚于预测时刻 150ms |
+| 后续记录减去预测值 | 3.4459°C |
+
+按相同筛选方法，新标定中选出的 12 对密集冷却样本，误差都超过稳定带半宽 1.5°C。比较使用标定记录温度；风扇关闭来自受保护的被动标定流程约束，标定样本本身没有逐点风扇遥测。独立温度计的实测尚未参与这个结论。
+
+### 调优中的另一组反例
+
+A 组试验 0 在 PPS 合同恒定、风扇关闭、MOS 连续为零的片段中，22436ms 时记录 62.20°C，已经停热 2077ms。生产函数预测 61.7376°C，1845ms 后的记录却为 65.06°C，相差 3.3224°C。筛选出的 15 对样本中，13 对误差超过 1.5°C。
+
+这类回放没有重建运行时完整的可信测温与滤波状态，采样间隔内的执行器连续状态也尚未直接证明。B 组按照同样的 150ms 时间匹配容差，仅得到一对可比样本，误差为 −0.1273°C；样本数量不足以评价整个 B 组预测模型。
+
+### 最小复现与证据位置
+
+最小回放直接调用当前生产预测函数，输入只取新标定的模型与三个记录事实，不依赖调优反馈、PPS 切换或参数搜索。执行命令为 `firmware/target/host/aarch64-apple-darwin/debug/forecast-audit --minimal`；输出预测 217.4141°C、后续记录 220.86°C、误差 3.4459°C，随后因预测断言失败而退出，退出码为 101。
+
+诊断源码位于 `firmware/target/hil-dual-source/forecast-audit/src/main.rs`。完整输入和回放结果保留在各组 `calibration-cache-2737c831/`、`forecast-calibration-039af3f7.json`，以及 A 组 `forecast-tuning-039af3f7.json` 中。这里用 1.5°C 比较预测误差，是离线诊断和回归检验的目标，没有增加产品通过或保存门槛。
+
+## 整改方案与改动范围
+
+方案仍待确认：为共享预测器增加受约束的热传递观测。独立 Warmup、模型生成的 Approach 期望温度轨迹、进入 Approach 立即请求 5%，以及已施加功率历史继续执行原有职责。修正只使用新标定和本轮有效观测，不能引用过往调优参数。
+
+具体计算分两步：先根据实际温度变化估算当前收到的热量，再扣除原模型已经计算的延迟供热，只把差额用于修正预测。这样可以避免重复计算同一份加热能量。
+
+```text
+当前收到的热功率估计：Qobs = 自然散热功率 loss(T) + 热容量 C × 观测升温率
+模型差额：           r = Qobs − 同一时刻的延迟供热估计 Qdelayed
+未来温度预测：       原功率历史与自然散热积分 + 受约束的差额修正
+```
+
+差额需要按标定模型、实际源能力和真实观测间隔限幅、平滑，并随预测时间衰减。测温恢复、停热、目标或电源类别变化、观测过期时，应清除或使该修正失效。PPS 切换后的新采样段要先建立自己的观测原点，不能用跨电压档温差生成余热差额；保持或拒绝的读数不能重复累计观测证据。
+
+生产代码的改动位置是 `thermal_trajectory::AppliedHeatHistory::forecast`，以及 `HeaterController` 中接受测温和重置状态的衔接。Hold 的受保护 PI、风扇策略、PD/PPS 职责、标定拟合与存储、物理阶段入口、时间政策 4、温度要求和保存门槛均保持现有约束。B 组独立确认失败仍要单独验证，改善 A 组预测不能代替 B 组或完整八目标的验收。
+
+## 初步验证结果与风险
+
+离线原型只检查停热片段：对 `loss+C×观测升温率` 限幅，并在一个标定延迟内衰减；使用真实时间窗口平滑升温率后，结果如下。
+
+| 证据集 | 原预测误差 | 原型预测误差 | 评价 |
+| --- | --- | --- | --- |
+| A 组调优选定片段的最大绝对误差 | 3.3224°C | 1.5587°C | 改善，但仍超过诊断目标 |
+| A 组新标定选定片段的最大绝对误差 | 3.4459°C | 1.6939°C | 改善，但仍超过诊断目标 |
+| B 组唯一可比片段的绝对误差 | 0.1273°C | 0.5449°C | 误差增大，且样本不足 |
+
+直接用相邻样本的温差补偿会放大量化噪声，因此不能直接部署未平滑的方案。差额的滤波和衰减方式还需要回归与实测确定。当前原型没有进入生产固件，也没有证明调优已能通过。
+
+## 验收步骤
+
+1. 对最小预测反例执行修正前后的回归，同时验证理想延迟模型的输入历史计算和期望轨迹的可执行性，避免补偿重复计算能量。
+2. 覆盖同 PPS 档内观测、测温噪声、跨档温差、保持或拒绝读数，以及停热、测温恢复、目标和电源类别切换的状态清理。
+3. 软件评估通过后提交代码，分别构建 3328mV、3340mV 固件，烧录对应授权端口，并读回完整版本与产物身份。
+4. 两组都从各自的新标定初始化，完成八目标和各目标独立 60 秒确认；保留完整、设备核验通过的标准报告。
+5. 全组通过后，按各自电源类别保存到 EEPROM，并读回匹配的参数和保存凭据。
+
+遗漏样本、放宽温度或时间要求、关风扇诊断、局部端点通过，都不能替代以上验收。
+
+这项整改改变共享生产预测公式，超出已批准的内部搜索修正。[交付合同](DELIVERY-CONTRACT.md)第 69 行要求“其余生产控制律……的变更仍须另行研判与确认”。上述证据、风险和验收范围供主人审定；该预测修正尚未获准实施或烧录。
