@@ -162,7 +162,7 @@ pub(crate) fn bounded_failure_alternative(
         if evidence.target_c <= 150 && evidence.approach_floor_only {
             return earlier_braking_candidate(previous, 40 * (attempt + 1));
         }
-        return coasting_failure_alternative(previous, attempt);
+        return coasting_failure_alternative(previous, evidence, attempt);
     }
     let step = attempt / 4 + 1;
     let channel = attempt % 4;
@@ -238,6 +238,7 @@ pub(crate) fn bounded_failure_alternative(
 
 fn coasting_failure_alternative(
     previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
     attempt: u16,
 ) -> Option<ThermalControlProfilePointConfig> {
     let step = attempt / 4 + 1;
@@ -247,6 +248,11 @@ fn coasting_failure_alternative(
             .approach_damping_exponent_permille
             .saturating_add(100 * step)
             .min(4_000);
+        if point.approach_damping_exponent_permille == previous.approach_damping_exponent_permille
+            && let Some(horizon) = longer_trajectory_horizon(previous, evidence, 2 * step)
+        {
+            point = horizon;
+        }
     } else {
         point.brake_distance_centi_c = previous
             .brake_distance_centi_c
@@ -285,6 +291,31 @@ fn coasting_high_side_candidate(
         .approach_damping_exponent_permille
         .saturating_add(step)
         .min(4_000);
+    if point.approach_damping_exponent_permille == previous.approach_damping_exponent_permille {
+        // The trajectory uses max(calibrated delay, Approach lead) as its
+        // response horizon. Explore that existing channel before endlessly
+        // shifting Warmup while the model replaces its energy in Approach.
+        return longer_trajectory_horizon(previous, evidence, 2);
+    }
+    (point != previous).then_some(point)
+}
+
+fn longer_trajectory_horizon(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+    step: u16,
+) -> Option<ThermalControlProfilePointConfig> {
+    if !evidence.approach_output_range.is_some_and(|(min, max)| {
+        min >= crate::thermal_plant::APPROACH_MIN_PERMILLE
+            && max > crate::thermal_plant::APPROACH_MIN_PERMILLE
+            && max <= 1_000
+    }) {
+        return None;
+    }
+    let point = ThermalControlProfilePointConfig {
+        approach_lead_ticks: previous.approach_lead_ticks.saturating_add(step).min(12),
+        ..previous
+    };
     (point != previous).then_some(point)
 }
 
@@ -2251,6 +2282,7 @@ mod tests {
         let mut previous = point(60);
         previous.brake_distance_centi_c = 5_000;
         previous.approach_damping_exponent_permille = 4_000;
+        previous.approach_lead_ticks = 12;
         previous.hold_power_permille = 40;
         previous.hold_kp_permille_per_c = 4;
         let facts = TuneEvidence {
@@ -2573,6 +2605,59 @@ mod tests {
         ] {
             assert!(limited_hold_high_side_candidate(previous, unavailable).is_none());
         }
+    }
+
+    #[test]
+    fn saturated_coasting_horizon_requires_complete_normal_approach_evidence() {
+        let previous = ThermalControlProfilePointConfig {
+            approach_damping_exponent_permille: 4_000,
+            ..point(60)
+        };
+        let facts = TuneEvidence {
+            overshoot_c: 1.57,
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(6_157),
+            hold_sample_count: 14,
+            hold_off_sample_count: 14,
+            approach_output_range: Some((50, 790)),
+            ..evidence(60)
+        };
+        let expected = ThermalControlProfilePointConfig {
+            approach_lead_ticks: 2,
+            ..previous
+        };
+        assert_eq!(
+            coasting_high_side_candidate(previous, facts),
+            Some(expected)
+        );
+        assert_eq!(
+            bounded_failure_alternative(previous, facts, 0),
+            Some(expected)
+        );
+        let brake = bounded_failure_alternative(previous, facts, 1).unwrap();
+        assert_eq!(brake.approach_lead_ticks, previous.approach_lead_ticks);
+        assert_eq!(
+            brake.brake_distance_centi_c,
+            previous.brake_distance_centi_c + 40
+        );
+        for range in [None, Some((0, 790)), Some((50, 50)), Some((50, 1_010))] {
+            assert!(
+                longer_trajectory_horizon(
+                    previous,
+                    TuneEvidence {
+                        approach_output_range: range,
+                        ..facts
+                    },
+                    2
+                )
+                .is_none()
+            );
+        }
+        let saturated = ThermalControlProfilePointConfig {
+            approach_lead_ticks: 12,
+            ..previous
+        };
+        assert!(coasting_high_side_candidate(saturated, facts).is_none());
     }
 
     #[test]

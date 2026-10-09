@@ -3622,6 +3622,38 @@ mod tests {
     }
 
     #[test]
+    fn captured_saturated_damping_coast_search_uses_remaining_trajectory_horizon() {
+        let trial: serde_json::Value = serde_json::from_str(include_str!(
+            "thermal_tuning_saturated_damping.fixture.json"
+        ))
+        .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let evaluation = replay_damping_bracket_trial(&mut runtime, &trial);
+        let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+        let facts = runtime.candidate_failure_evidence(
+            60,
+            evaluation.max_overshoot_centi_c,
+            evaluation.hold_peak_to_peak_centi_c,
+            None,
+            evaluation.full_speed_limit_ms,
+        );
+        assert_eq!(facts.hold_off_sample_count, facts.hold_sample_count);
+        assert_eq!(facts.approach_output_range, Some((50, 790)));
+        assert_eq!(facts.overshoot_c, 1.57);
+        runtime.advance_after_trial(60, evaluation).unwrap();
+        let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(next.approach_lead_ticks, 2);
+        assert_eq!(
+            next,
+            ThermalControlProfilePointConfig {
+                approach_lead_ticks: 2,
+                ..previous
+            }
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
     fn captured_failed_damping_comparison_explores_the_existing_braking_channel() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("thermal_tuning_failed_damping.fixture.json"))

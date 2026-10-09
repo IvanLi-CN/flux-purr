@@ -5696,6 +5696,66 @@ const LIVE_DEVICE_TRACE: &[(u16, f32, u8)] = &[
 ];
 
 #[test]
+fn captured_calibration_rejects_impossible_startup_temperature_spikes() {
+    let trace: &[(u16, i16, u8, u8)] = include!("calibration_cutoff_fixture.rs");
+    let memory = MemoryConfig::default();
+    let mut curve = HeaterCurveConfig::default();
+    for (index, (temp_centi_c, resistance_milliohms)) in [
+        (0, 2948),
+        (2000, 3200),
+        (10096, 4218),
+        (14113, 4723),
+        (17632, 5166),
+        (20623, 5542),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        curve.points[index] = Some(HeaterCurvePoint {
+            temp_centi_c,
+            resistance_milliohms,
+        });
+    }
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, (elapsed_ticks, centi_c, heater_voltage_125mv, duty_percent)) in
+        trace.iter().copied().enumerate()
+    {
+        let resistance = pt1000_resistance_ohms_at(f32::from(centi_c) / 100.0);
+        let raw = f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance
+            / (RTD_REFERENCE_RESISTOR_OHMS + resistance)
+            - RTD_ASSUMED_ADC_OFFSET_UV as f32 / 1000.0;
+        samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks,
+            raw_rtd_adc_mv: raw.round() as u16,
+            heater_voltage_125mv,
+            duty_percent,
+        };
+    }
+    let data = prepare_transient_fit(
+        &samples,
+        trace.len() as u8,
+        Some(&curve),
+        &memory,
+        samples[0].raw_rtd_adc_mv,
+    );
+    if RTD_ASSUMED_ADC_OFFSET_UV == -13_500 {
+        assert!(
+            data.is_some(),
+            "the actual mapping covers both cutoff temperatures"
+        );
+    }
+    assert!(
+        data.as_ref().and_then(best_transient_projection).is_none(),
+        "37-to-51-to-36C startup spikes must not qualify a physical model"
+    );
+}
+
+#[test]
 fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
         let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
