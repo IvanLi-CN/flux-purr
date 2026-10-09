@@ -116,6 +116,7 @@
 - profile preview 必须只驻留 RAM。`runtime_config.thermalControlProfile.op=preview` 需要完整 profile，`op=clear_preview` 清除 preview；`op=save` 需要完整 profile 并写入 persistent active thermal profile，`op=clear_saved` 清除 persistent active profile；状态回显必须暴露 `thermalControlProfilePreview` 区分当前是否处于 RAM preview。
 - 有效模型的Approach阶段不得仅因欠温退回Warmup；恢复供热必须沿同一阶段的50..1000‰温度轨迹跟踪执行，保留阶段参考及首次Warmup退出期限。不得重启软启动、重新取得Warmup样本或把恢复当作新试验。非模型兼容路径的旧重入与真正停热、目标/源类别切换、故障的清理保持有效。
 - RTD实时测温与标定原始电压重算必须使用同一有效ADC映射；模型拟合、运行环境温度、曲线导出不得遗漏开发假定偏移或重复补偿原始值。缺省/用户校准优先级和未补偿过温保护保持原规则。映射不一致的模型不得继续用于资格测试，须重新标定；原始EEPROM电压和失败记录保留。
+- 标定的220°C实时停热不得为整数毫伏记录推迟。加热样本覆盖和持久化覆盖重验只允许使用最近整数原始电压的上侧0.5mV量化范围；拟合与报告仍使用原始中心值，不能补写温度或借用停热后峰值。该范围不放宽调优温度、冷却终点或安全门禁。
 - 低温目标发生 full-speed 低侧缺口时仍必须渐进调节；若缺口不超过 `0.5°C` 且该轮过冲不超过 `1.5°C`、hold p2p 不超过 `2.0°C`，允许把下一轮 approach 增量放宽到 `120‰`、刹车距离减少 `120c`、damping 减少 `180‰`，但仍不得一步提升到满功率，且候选必须重新通过完整安全门禁。
 - FUSB302B PPS 电压请求只按 `100mV` 单位对齐；AVS `25mV` 不作为首版 PPS 保温细分路径。
 - 目标温度与 preset 写入都必须 clamp 到 `0~400°C`。

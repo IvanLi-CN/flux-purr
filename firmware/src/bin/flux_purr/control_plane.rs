@@ -1558,8 +1558,10 @@ pub(crate) fn prepare_transient_fit(
     let last_sample_is_cooling = samples[..count]
         .last()
         .is_some_and(|sample| sample.duty_percent == 0);
-    if powered_max_temp_c < THERMAL_PLANT_TARGET_TEMP_C
-        || (temperatures_c[0] - ambient_temp_c).abs() > 8.0
+    if !thermal_plant_heating_sample_covers_target(
+        memory_config,
+        samples[powered_peak_index].raw_rtd_adc_mv,
+    ) || (temperatures_c[0] - ambient_temp_c).abs() > 8.0
         || powered_peak_index + 1 >= count
         || !last_sample_is_cooling
         || temperatures_c[count - 1] > THERMAL_PLANT_COOL_COMPLETE_TEMP_C

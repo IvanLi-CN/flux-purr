@@ -5393,6 +5393,73 @@ fn transient_thermal_fit_recovers_a_physical_model_from_heat_and_cool_trace() {
 }
 
 #[test]
+fn transient_heat_coverage_preserves_the_integer_adc_cutoff_bin() {
+    let memory = synthetic_memory_config();
+    let raw_offset_mv =
+        -rtd_assumed_adc_offset_uv(&memory, RTD_ASSUMED_ADC_OFFSET_UV) as f32 / 1_000.0;
+    let (mut samples, count) = synthetic_trace(&memory, 30.0);
+    for sample in &mut samples[..count] {
+        sample.raw_rtd_adc_mv = (f32::from(sample.raw_rtd_adc_mv) + raw_offset_mv).round() as u16;
+    }
+    let resistance = pt1000_resistance_ohms_at(THERMAL_PLANT_TARGET_TEMP_C);
+    let cutoff_raw_mv = (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance
+        / (RTD_REFERENCE_RESISTOR_OHMS + resistance)
+        + raw_offset_mv)
+        .round() as u16;
+    let cutoff_c = projected_rtd_temperature_c(&memory, cutoff_raw_mv).unwrap();
+    if RTD_ASSUMED_ADC_OFFSET_UV == -13_500 {
+        assert!(cutoff_c < THERMAL_PLANT_TARGET_TEMP_C);
+    }
+    for sample in samples[..count]
+        .iter_mut()
+        .filter(|sample| sample.duty_percent > 0)
+    {
+        sample.raw_rtd_adc_mv = sample.raw_rtd_adc_mv.min(cutoff_raw_mv);
+    }
+    samples[count - 1].raw_rtd_adc_mv =
+        (f32::from(runtime_test_raw_rtd_adc_mv_for_temp(79.0)) + raw_offset_mv).round() as u16;
+    let ambient_raw_mv = samples[0].raw_rtd_adc_mv;
+    let mut transaction = ThermalPlantTransientTransaction {
+        transaction_id: 1,
+        ambient_raw_rtd_adc_mv: ambient_raw_mv,
+        sample_count: count as u8,
+        projection: ThermalPlantProjectionRecord::from_projection(ThermalPlantProjection {
+            convection_mw_per_c: 100.0,
+            radiation_mw_per_k4: 0.0,
+            thermal_capacity_mj_per_c: 100_000.0,
+            transport_delay_ms: 50,
+        }),
+        samples,
+    };
+    assert!(thermal_plant_transient_trace_reaches_targets(
+        &transaction,
+        &memory
+    ));
+    assert!(prepare_transient_fit(&samples, count as u8, None, &memory, ambient_raw_mv).is_some());
+
+    for sample in transaction.samples[..count]
+        .iter_mut()
+        .filter(|sample| sample.duty_percent > 0)
+    {
+        sample.raw_rtd_adc_mv = sample.raw_rtd_adc_mv.min(cutoff_raw_mv - 1);
+    }
+    assert!(!thermal_plant_transient_trace_reaches_targets(
+        &transaction,
+        &memory
+    ));
+    assert!(
+        prepare_transient_fit(
+            &transaction.samples,
+            count as u8,
+            None,
+            &memory,
+            ambient_raw_mv,
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn transient_zero_delay_model_does_not_invent_a_multi_second_delay() {
     let memory = synthetic_memory_config();
     let (samples, count) = synthetic_trace(&memory, 25.0);

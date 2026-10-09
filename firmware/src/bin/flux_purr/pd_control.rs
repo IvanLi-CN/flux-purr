@@ -1184,8 +1184,10 @@ pub(crate) fn thermal_plant_transient_trace_reaches_targets(
     };
     let final_sample = samples.last().copied();
     let final_temp_c = temperatures_c[count - 1];
-    powered_max_temp_c >= THERMAL_PLANT_TARGET_TEMP_C
-        && (temperatures_c[0] - ambient_temp_c).abs() <= 8.0
+    thermal_plant_heating_sample_covers_target(
+        memory_config,
+        samples[powered_peak_index].raw_rtd_adc_mv,
+    ) && (temperatures_c[0] - ambient_temp_c).abs() <= 8.0
         && powered_peak_index + 1 < count
         && final_sample.is_some_and(|sample| sample.duty_percent == 0)
         && final_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
@@ -1714,14 +1716,32 @@ pub(crate) fn projected_rtd_temperature_c(
     memory_config: &MemoryConfig,
     raw_adc_mv: u16,
 ) -> Option<f32> {
-    let corrected_mv = corrected_rtd_adc_fractional_mv(
-        memory_config,
-        f32::from(raw_adc_mv),
-        RTD_ASSUMED_ADC_OFFSET_UV,
-    );
+    projected_rtd_fractional_temperature_c(memory_config, f32::from(raw_adc_mv))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[inline(never)]
+pub(crate) fn projected_rtd_fractional_temperature_c(
+    memory_config: &MemoryConfig,
+    raw_adc_mv: f32,
+) -> Option<f32> {
+    let corrected_mv =
+        corrected_rtd_adc_fractional_mv(memory_config, raw_adc_mv, RTD_ASSUMED_ADC_OFFSET_UV);
     rtd_resistance_ohms_from_fractional_mv(corrected_mv)
         .ok()
         .map(pt1000_temperature_c_from_resistance)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn thermal_plant_heating_sample_covers_target(
+    memory_config: &MemoryConfig,
+    raw_adc_mv: u16,
+) -> bool {
+    // The live fractional sample cuts heat at 220C. Persisted raw millivolts
+    // are rounded, so coverage uses the upper edge of that half-mV bin;
+    // fitting and reporting still use the unchanged sample centre.
+    projected_rtd_fractional_temperature_c(memory_config, f32::from(raw_adc_mv) + 0.5)
+        .is_some_and(|temperature_c| temperature_c >= THERMAL_PLANT_TARGET_TEMP_C)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

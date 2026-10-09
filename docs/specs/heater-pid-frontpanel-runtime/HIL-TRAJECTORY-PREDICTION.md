@@ -2,6 +2,10 @@
 
 ## 当前结论
 
+A组5a48dafb的新映射曲线完成113个样本，环境中心28.01°C、末个加热中心219.93°C、停热后峰值221.17°C、最终冷却中心79.91°C。实时220°C停热已经执行，prepare_transient_fit的整数毫伏精确覆盖比较却将末个带电样本判为欠温，返回thermal_plant_projection_invalid。原始记录保存在firmware/target/hil-dual-source/a/calibration-consistent-5a48dafb；不能使用停热后峰值伪造带电样本。修正仅计入原始电压的半毫伏舍入范围，重新烧录与标定仍是取得资格的必要步骤。
+
+B组47c5a609完整八目标已完成确认并保存：标准报告firmware/target/hil-dual-source/b/bundle-eight-phase-47c5a609-saved/index.html为passed，事件0..12110、摘要sha256:143b3cc24019741fba0463e84235e8afdb212bb78d1dd8e55ae42ab652636415。各目标均独立60秒确认且无条件延长；最大确认过冲0.55°C、最大峰峰值2.31°C，pps3a版本26原子保存且读回哈希66c72cde1336d60039829d6517086f283f0d6eb7f58419e593120e6f4056c31e一致。种子仍为自身新标定f7ad58426161d9f2c74fb6854ba1d4da5609429995072a4e9acc0086186cb8f5，未使用EEPROM调优或过去运行反馈。保存后独立状态读回heater disabled、逻辑/MOS均0、preview false、profile saved与全速冷却。
+
 A组事务`1346592335`存在已复现的映射缺陷，不能继续作为一致的新标定模型：实时ADC读取使用−13500µV，`projected_rtd_temperature_c`却仅做用户拟合，遗漏同一偏移。该函数同时供模型拟合、环境温度与曲线导出使用。原始1044mV的回归在修复前得到实时30.029118°C、重算35.5373°C；220°C校准末端的导出加热温度228.33°C也不应被解释为实时控制温度。两条路径统一后必须重新标定及实测，不能从这个单点回归宣称A组已收敛。
 
 `47c5a609`消除了模型Approach→Warmup重入，两类电源实机记录均未再出现该退回；A组60°C十四次试验仍耗尽预算。发现映射遗漏后标准取消后续220°C运行，完整标准报告为`firmware/target/hil-dual-source/a/bundle-eight-phase-47c5a609/index.html`，事件0..7968、摘要`sha256:d88d86032eae5909bbca77253a50432f575f1144447aab52a52691d4f98d35da`，未保存。它证明阶段修正的行为，不证明温度映射一致、全部八目标资格或模型本身正确。B组零偏移的同提交实测继续独立运行。
