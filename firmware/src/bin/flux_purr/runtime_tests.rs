@@ -11213,6 +11213,24 @@ fn adc_new_conversion_cannot_consume_the_previous_channel_while_busy() {
 }
 
 #[test]
+fn adc_idle_reset_boundary_retains_a_conversion_turnaround_interval() {
+    let elapsed = core::cell::Cell::new(0_u64);
+    let ready = wait_for_adc_idle(
+        || true,
+        || {
+            elapsed.set(elapsed.get() + 1);
+            elapsed.get()
+        },
+    );
+    let sample = ready.then(|| {
+        // Idle alone does not provide an interval after the previous reset.
+        if elapsed.get() < 50 { 3_980_u16 } else { 2_300 }
+    });
+    assert_eq!(sample, Some(2_300));
+    assert_eq!(elapsed.get(), 50);
+}
+
+#[test]
 fn adc_idle_gate_times_out_without_triggering_and_preserves_inflight_conversion() {
     let polls = core::cell::Cell::new(0_u64);
     let idle = wait_for_adc_idle(

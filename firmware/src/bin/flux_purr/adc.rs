@@ -253,14 +253,19 @@ pub(crate) fn wait_for_adc_idle(
 ) -> bool {
     // DONE can precede the end of the SAR state machine. Espressif's ADC1
     // RTC oneshot start waits for meas_status=0 before raising START again.
-    // This gate runs once, before START. It never waits on its own conversion.
-    while !is_idle() {
-        if elapsed_us() >= 1_000 {
+    // Leave a bounded turnaround interval after each reset as well as waiting
+    // for idle. This gate runs before START, never on its own conversion.
+    loop {
+        let idle = is_idle();
+        let elapsed = elapsed_us();
+        if idle && elapsed >= 50 {
+            return true;
+        }
+        if elapsed >= 1_000 {
             return false;
         }
         core::hint::spin_loop();
     }
-    true
 }
 
 #[cfg(target_arch = "xtensa")]
