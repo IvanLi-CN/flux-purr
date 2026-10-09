@@ -15108,6 +15108,85 @@ fn terminal_disarm_locks_pps_until_fixed_pd_write_completes() {
 }
 
 #[test]
+fn tuning_cooldown_releases_completed_calibration_power_lock_without_heating() {
+    for capability_ma in [3_000, 5_000] {
+        let mut backend = select_heater_power_backend(
+            Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(21_000),
+                pps_max_ma: Some(capability_ma),
+                ..Default::default()
+            }),
+            Some(Status::default()),
+        );
+        assert!(latch_terminal_fixed_pd_disarm(
+            &CalibrationRuntimeState {
+                immediate_heater_disarm_pending: true,
+                ..Default::default()
+            },
+            &mut backend,
+        ));
+        assert!(!release_terminal_fixed_pd_disarm_for_new_work(
+            &mut backend,
+            false,
+            false,
+            false,
+        ));
+        assert!(backend.terminal_fixed_pd_disarmed());
+        assert!(release_terminal_fixed_pd_disarm_for_new_work(
+            &mut backend,
+            false,
+            false,
+            true,
+        ));
+        let HeaterPowerBackend::PpsMos {
+            current_mode,
+            current_request_mv,
+            idle_request_mv,
+            capability_max_ma,
+            terminal_fixed_pd_disarmed,
+            ..
+        } = backend
+        else {
+            panic!("both source classes must retain the shared PPS backend");
+        };
+        assert!(!terminal_fixed_pd_disarmed);
+        assert_eq!(current_mode, None);
+        assert_eq!(capability_max_ma, capability_ma);
+        assert!(!automatic_heater_power_is_idle(false, 0, false, true));
+        let request_mv = automatic_pps_request_mv(
+            0,
+            false,
+            true,
+            current_request_mv,
+            idle_request_mv,
+            5_500,
+            21_000,
+        );
+        assert!(request_mv > idle_request_mv);
+        assert_eq!(
+            live_pps_gate_duty_percent(0, false, true, 21_000, request_mv, 0),
+            0
+        );
+        let (mut fixed, _) = production_power_fixture(capability_ma);
+        let active = fixed.active.as_mut().unwrap();
+        active.mode = PdContractRequestMode::Fixed;
+        active.voltage_mv = 5_000;
+        active.operating_current_ma = 1_000;
+        assert_eq!(
+            tuning_pd_wait_decision(fixed, None, 0, None, false),
+            TuningPdWaitDecision::Wait
+        );
+        let (ready, _) = production_power_fixture(capability_ma);
+        assert_eq!(
+            tuning_pd_wait_decision(ready, Some(0), 100, None, false),
+            TuningPdWaitDecision::Ready
+        );
+    }
+}
+
+#[test]
 fn manual_pps_calibration_releases_terminal_disarm_without_enabling_the_heater() {
     let mut backend = HeaterPowerBackend::PpsMos {
         pps_min_mv: 5_000,
@@ -15127,7 +15206,8 @@ fn manual_pps_calibration_releases_terminal_disarm_without_enabling_the_heater()
     assert!(release_terminal_fixed_pd_disarm_for_new_work(
         &mut backend,
         false,
-        true
+        true,
+        false
     ));
     assert!(matches!(
         backend,
@@ -15156,7 +15236,8 @@ fn manual_pps_releases_terminal_disarm_after_fixed_pd_fallback() {
     assert!(release_terminal_fixed_pd_disarm_for_new_work(
         &mut backend,
         false,
-        true
+        true,
+        false
     ));
     assert_eq!(
         backend,

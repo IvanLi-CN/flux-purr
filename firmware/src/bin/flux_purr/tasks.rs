@@ -62,6 +62,7 @@ where
         context.backend,
         context.heater_enabled,
         manual_pps_active,
+        context.tuning_power_stage,
     );
     if context.backend.terminal_fixed_pd_disarmed() {
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);

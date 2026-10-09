@@ -1492,12 +1492,14 @@ mod tests {
         assert!(!release_terminal_fixed_pd_disarm_for_new_work(
             &mut backend,
             false,
+            false,
             false
         ));
         assert!(backend.terminal_fixed_pd_disarmed());
         assert!(release_terminal_fixed_pd_disarm_for_new_work(
             &mut backend,
             true,
+            false,
             false
         ));
         assert!(!backend.terminal_fixed_pd_disarmed());

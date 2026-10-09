@@ -2732,8 +2732,9 @@ pub(crate) fn release_terminal_fixed_pd_disarm_for_new_work(
     backend: &mut HeaterPowerBackend,
     heater_enabled: bool,
     manual_pps_active: bool,
+    tuning_power_stage: bool,
 ) -> bool {
-    if !heater_enabled && !manual_pps_active {
+    if !heater_enabled && !manual_pps_active && !tuning_power_stage {
         return false;
     }
 
@@ -2749,8 +2750,9 @@ pub(crate) fn release_terminal_fixed_pd_disarm_for_new_work(
             idle_request_mv,
             ..
         } if *terminal_fixed_pd_disarmed => {
-            // A fresh heater or manual PPS intent re-arms negotiation. Clearing
-            // this latch does not confirm working power or enable physical PWM.
+            // Fresh heating, manual PPS or tuning power preparation re-arms
+            // negotiation. Clearing this latch does not confirm working power
+            // or enable physical PWM.
             *terminal_fixed_pd_disarmed = false;
             *current_mode = None;
             *current_request_mv = *idle_request_mv;

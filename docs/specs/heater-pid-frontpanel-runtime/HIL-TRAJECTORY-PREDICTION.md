@@ -2,6 +2,8 @@
 
 ## 当前结论
 
+A组39965633在统一−13500µV映射后重新完成220→80°C标定，事务1348360650、114个曲线样本、τ1550ms；自身标定种子摘要ee8cd26f6391a4188cce5424259a0dffe473bc50c2fe4b073ed062d5f33523d1，没有导入历史调优。首次运行firmware-pps5a-1791545954925及重试firmware-pps5a-1791546161803均在任何加热或试验样本之前失败，原始失败报告分别位于a/bundle-eight-quantized-39965633及a/bundle-eight-quantized-retry-39965633。记录Fixed5V/1A、requested none、ticket0却报告pd_request_timeout，原因是调用方的标定终态锁未识别新调优cooldown供电准备。新工作意图解除旧锁、自动申请并确认PPS的修正仍须实机验证；标定成功不能替代八目标资格，临时电压假定也不能证明绝对温度已人工校准。
+
 A组5a48dafb的新映射曲线完成113个样本，环境中心28.01°C、末个加热中心219.93°C、停热后峰值221.17°C、最终冷却中心79.91°C。实时220°C停热已经执行，prepare_transient_fit的整数毫伏精确覆盖比较却将末个带电样本判为欠温，返回thermal_plant_projection_invalid。原始记录保存在firmware/target/hil-dual-source/a/calibration-consistent-5a48dafb；不能使用停热后峰值伪造带电样本。修正仅计入原始电压的半毫伏舍入范围，重新烧录与标定仍是取得资格的必要步骤。
 
 B组47c5a609完整八目标已完成确认并保存：标准报告firmware/target/hil-dual-source/b/bundle-eight-phase-47c5a609-saved/index.html为passed，事件0..12110、摘要sha256:143b3cc24019741fba0463e84235e8afdb212bb78d1dd8e55ae42ab652636415。各目标均独立60秒确认且无条件延长；最大确认过冲0.55°C、最大峰峰值2.31°C，pps3a版本26原子保存且读回哈希66c72cde1336d60039829d6517086f283f0d6eb7f58419e593120e6f4056c31e一致。种子仍为自身新标定f7ad58426161d9f2c74fb6854ba1d4da5609429995072a4e9acc0086186cb8f5，未使用EEPROM调优或过去运行反馈。保存后独立状态读回heater disabled、逻辑/MOS均0、preview false、profile saved与全速冷却。
