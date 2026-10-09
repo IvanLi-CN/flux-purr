@@ -4937,7 +4937,7 @@ mod tests {
             // Each winner must retain its own braking or damping evidence.
             assert_eq!(
                 next.approach_damping_exponent_permille,
-                if predicted_wins { 1_500 } else { 2_000 }
+                if predicted_wins { 1_500 } else { 2_500 }
             );
             assert_eq!(
                 next.brake_distance_centi_c,
@@ -5093,11 +5093,11 @@ mod tests {
             proposed.brake_distance_centi_c > previous.brake_distance_centi_c,
             "coasting after low Approach power must reduce stored Warmup energy: {proposed:?}"
         );
-        assert_eq!(proposed.brake_distance_centi_c, 1_280);
+        assert_eq!(proposed.brake_distance_centi_c, 1_780);
         assert_eq!(
             proposed,
             ThermalControlProfilePointConfig {
-                brake_distance_centi_c: 1_280,
+                brake_distance_centi_c: 1_780,
                 ..previous
             }
         );
@@ -5107,7 +5107,7 @@ mod tests {
         heated.approach_median_output_permille = Some(500);
         assert_eq!(tune_point(previous, heated), proposed);
         heated.overshoot_c = 2.0;
-        assert_ne!(tune_point(previous, heated).brake_distance_centi_c, 1_280);
+        assert_ne!(tune_point(previous, heated).brake_distance_centi_c, 1_780);
         let mut protected = facts;
         protected.approach_output_range = Some((0, 70));
         assert_ne!(tune_point(previous, protected), proposed);
@@ -5153,7 +5153,7 @@ mod tests {
         assert_eq!(facts.hold_max_output_permille, Some(60));
         assert_eq!(facts.hold_max_below_c, Some(0.49));
         let expected = ThermalControlProfilePointConfig {
-            approach_damping_exponent_permille: 2_000,
+            approach_damping_exponent_permille: 2_120,
             ..previous
         };
         assert_eq!(tune_point(previous, facts), expected);
@@ -5232,7 +5232,7 @@ mod tests {
         assert_eq!(
             tune_point(previous, higher_approach),
             ThermalControlProfilePointConfig {
-                brake_distance_centi_c: 1_280,
+                brake_distance_centi_c: 1_780,
                 ..previous
             }
         );
@@ -5240,7 +5240,7 @@ mod tests {
         assert_eq!(
             proposed,
             ThermalControlProfilePointConfig {
-                brake_distance_centi_c: 1_280,
+                brake_distance_centi_c: 1_780,
                 ..previous
             }
         );
@@ -5329,7 +5329,7 @@ mod tests {
         assert_eq!(facts.hold_max_below_c, Some(0.36));
         assert_eq!(facts.over_c, 2.61);
         let expected = ThermalControlProfilePointConfig {
-            approach_damping_exponent_permille: 2_000,
+            approach_damping_exponent_permille: 2_110,
             ..previous
         };
         assert_eq!(tune_point(previous, facts), expected);
@@ -5774,7 +5774,7 @@ mod tests {
         assert_eq!(facts.hold_off_sample_count, facts.hold_sample_count);
         runtime.mutate_candidate_for_failure(60, Some(685), Some(683), None, 10_000);
         let proposed = runtime.candidate_profile.unwrap().points[0].unwrap();
-        assert!(proposed.brake_distance_centi_c > 780);
+        assert!(proposed.brake_distance_centi_c >= 1_780);
         assert_eq!(proposed.approach_damping_exponent_permille, 1_000);
         assert_eq!(proposed.hold_power_permille, 56);
     }

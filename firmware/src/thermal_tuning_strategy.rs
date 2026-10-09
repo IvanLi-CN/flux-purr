@@ -279,7 +279,7 @@ fn coasting_high_side_candidate(
         // change unused channels and fabricate an effective proposal.
         return Some(earlier_braking_candidate(previous, step).unwrap_or(previous));
     }
-    let step = round_positive((evidence.overshoot_c - 1.5).max(0.5) * 1_000.0).clamp(500, 1_000);
+    let step = high_side_damping_step(evidence.overshoot_c);
     let mut point = previous;
     point.approach_damping_exponent_permille = previous
         .approach_damping_exponent_permille
@@ -299,7 +299,15 @@ fn low_power_coasting_candidate(
     // during stopped Hold supports removing stored pre-Hold heat, even
     // when its Approach median exceeds the low-supply classification.
     // Correct the measured excess toward the middle of the stable band.
-    let step = round_positive((evidence.overshoot_c - 0.75).max(0.4) * 100.0).clamp(40, 500);
+    let excess = (evidence.overshoot_c - 0.75).max(0.4);
+    let step = if evidence.overshoot_c > 3.0 {
+        // Severe stopped-Hold rise needs a coarse stored-energy correction.
+        // Fine steps consume a whole reheating/cooling cycle while leaving
+        // the measured excess largely intact; retain the original point cap.
+        round_positive(excess * 200.0).clamp(40, 1_000)
+    } else {
+        round_positive(excess * 100.0).clamp(40, 500)
+    };
     Some(earlier_braking_candidate(previous, step).unwrap_or(previous))
 }
 
@@ -344,6 +352,10 @@ fn earlier_braking_candidate(
     (point != previous).then_some(point)
 }
 
+fn high_side_damping_step(overshoot_c: f64) -> u16 {
+    round_positive((overshoot_c - 1.5).max(0.5) * 1_000.0).clamp(1_000, 1_500)
+}
+
 fn hold_off_after_entry(evidence: TuneEvidence) -> bool {
     evidence.hold_off_sample_count == evidence.hold_sample_count
         || (evidence.hold_entry_pulse_only
@@ -384,7 +396,7 @@ fn limited_hold_high_side_candidate(
     }
     // This is limited observed Hold supply, not a zero-power coast. Keep
     // the handoff and Hold unchanged while reducing effective Approach heat.
-    let step = round_positive((evidence.overshoot_c - 1.5).max(0.5) * 1_000.0).clamp(500, 1_000);
+    let step = high_side_damping_step(evidence.overshoot_c);
     Some(ThermalControlProfilePointConfig {
         approach_damping_exponent_permille: previous
             .approach_damping_exponent_permille
@@ -2492,7 +2504,7 @@ mod tests {
         assert_eq!(
             tuned,
             ThermalControlProfilePointConfig {
-                approach_damping_exponent_permille: 2_000,
+                approach_damping_exponent_permille: 2_120,
                 ..previous
             }
         );
@@ -2584,7 +2596,7 @@ mod tests {
             ..evidence(60)
         };
         let expected = ThermalControlProfilePointConfig {
-            approach_damping_exponent_permille: 2_000,
+            approach_damping_exponent_permille: 2_500,
             ..previous
         };
         assert_eq!(tune_point(previous, facts), expected);
@@ -2631,7 +2643,7 @@ mod tests {
             ..previous
         };
         assert!(coasting_high_side_candidate(saturated, facts).is_none());
-        for (overshoot_c, step) in [(1.59, 500), (2.24, 740), (20.0, 1_000)] {
+        for (overshoot_c, step) in [(1.55, 1_000), (2.62, 1_120), (20.0, 1_500)] {
             let tuned = coasting_high_side_candidate(
                 previous,
                 TuneEvidence {
@@ -2675,7 +2687,7 @@ mod tests {
             ..evidence(60)
         };
         let expected = ThermalControlProfilePointConfig {
-            approach_damping_exponent_permille: 2_500,
+            approach_damping_exponent_permille: 3_000,
             ..previous
         };
         assert_eq!(tune_point(previous, facts), expected);
