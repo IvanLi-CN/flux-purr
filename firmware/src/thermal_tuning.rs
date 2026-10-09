@@ -1049,6 +1049,12 @@ impl ThermalTuningRuntime {
         let Some(point) = point else {
             return false;
         };
+        // A candidate whose static brake already covers the entire allowed
+        // start gap can skip Warmup before its full-output witness exists.
+        let start_gap_centi_c = (target - cooldown_threshold_c(target)) as u16 * 100;
+        if point.brake_distance_centi_c >= start_gap_centi_c {
+            return false;
+        }
         if previous_point.is_some_and(|previous| same_effective_search_point(previous, point))
             || self
                 .proposed_points
@@ -2492,7 +2498,11 @@ impl ThermalTuningRuntime {
             .zip(self.hold_output_percentile(0.9))
             .map_or(missing, |(median, p90)| (p90 - median).abs());
         let mut score = [
-            0.0,
+            if self.warmup_full_output && !self.warmup_full_output_invalid {
+                0.0
+            } else {
+                1.0
+            },
             if completed { 0.0 } else { 1.0 },
             gate_penalty,
             if low_margin { 1.0 } else { 0.0 },
@@ -5088,6 +5098,7 @@ mod tests {
     #[test]
     fn eleven_component_score_uses_local_hold_and_approach_evidence() {
         let mut runtime = ThermalTuningRuntime::new();
+        runtime.warmup_full_output = true;
         runtime.stable_window_verified_at_ms = Some(14_000);
         runtime.trial_start_elapsed_ms = Some(0);
         runtime.first_band_elapsed_ms = Some(5_200);
@@ -5325,6 +5336,69 @@ mod tests {
         }
         assert!(score_precedes(&scores[1], &scores[0]));
         assert!(!score_precedes(&scores[0], &scores[1]));
+    }
+
+    #[test]
+    fn captured_failed_rank_preserves_full_warmup_before_thermal_progress() {
+        // 9485eb63 A60 trials 2/3: a 0.01C smaller peak cannot outweigh
+        // the predicted trial's missing full-output Warmup witness.
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_warmup_search.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        replay_damping_bracket_trial(&mut runtime, &fixture["trials"][0]);
+        assert!(runtime.warmup_full_output && !runtime.warmup_full_output_invalid);
+        let current_score = runtime.trial_score(60, false, Some(158), Some(161), None);
+        replay_damping_bracket_trial(&mut runtime, &fixture["trials"][1]);
+        assert!(!runtime.warmup_full_output);
+        let predicted_score = runtime.trial_score(60, false, Some(157), Some(179), None);
+        assert!(score_precedes(&current_score, &predicted_score));
+        runtime.warmup_full_output = true;
+        runtime.warmup_full_output_invalid = true;
+        assert!(score_precedes(
+            &current_score,
+            &runtime.trial_score(60, false, Some(157), Some(179), None)
+        ));
+    }
+
+    #[test]
+    fn captured_start_gap_failure_uses_another_effective_search_channel() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_warmup_search.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let evaluation = replay_damping_bracket_trial(&mut runtime, &fixture["trials"][0]);
+        let original = runtime.candidate_profile.unwrap();
+        runtime.advance_after_trial(60, evaluation).unwrap();
+        let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert!(next.brake_distance_centi_c < 2_500);
+        assert!(!same_effective_search_point(
+            original.points[0].unwrap(),
+            next
+        ));
+        assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+        assert!(runtime.armed);
+        assert!(!runtime.events.iter().any(|event| event.reason.as_deref()
+            == Some("candidate_search_exhausted_no_distinct_safe_proposal")));
+    }
+
+    #[test]
+    fn search_rejects_a_brake_that_covers_the_allowed_start_gap() {
+        let mut runtime = started_single_target_runtime();
+        let mut original = runtime.candidate_profile.unwrap();
+        original.points[0].as_mut().unwrap().brake_distance_centi_c = 2_452;
+        let mut proposed = original;
+        proposed.points[0].as_mut().unwrap().brake_distance_centi_c = 2_532;
+        runtime.candidate_profile = Some(proposed);
+        assert!(!runtime.record_fresh_proposal(Some(original)));
+        assert!(runtime.proposed_points.is_empty());
+        proposed = original;
+        proposed.points[0]
+            .as_mut()
+            .unwrap()
+            .approach_damping_exponent_permille += 100;
+        runtime.candidate_profile = Some(proposed);
+        assert!(runtime.record_fresh_proposal(Some(original)));
     }
 
     #[test]
