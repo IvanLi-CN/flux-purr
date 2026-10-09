@@ -1,5 +1,7 @@
 # Heater PID frontpanel runtime history
 
+A组临时偏移试验暴露遗漏的重算路径：实时RTD使用−13.5mV，thermal-plant拟合、曲线导出及环境温度仍从未补偿电压计算，约5.5°C的低温口径差在高温区继续放大。共享映射修正该实现缺陷，事务1346592335保留作失败审计，不再用作新调优初始化；A组须重新标定，B组零偏移记录不受该温度换算遗漏影响。
+
 临时电压假定后的A组新标定运行保留60°C失败及原始尖峰，完整审计暴露旧Approach→Warmup重入仍作用于模型控制。该分支与已审定的模型Approach自行补热职责冲突；共享3A/5A阶段机让有效模型欠温恢复保持Approach、参考及原期限，仅非模型兼容路径保留旧重入。修正不将既有失败转为通过，需新提交精确产物实测。
 
 The owner permits a temporary assumed absolute ADC-voltage correction after repeated A cooling waits, retaining the supplied ambient estimate near30°C. This bench assumption is separate from the measured3328mV excitation and absent user calibration; nonzero release builds are rejected. Applying or removing it requires fresh plant calibration and tuning qualification for that exact electrical mapping. No independent plate-temperature measurement is inferred from the ambient estimate.

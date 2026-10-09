@@ -1714,10 +1714,10 @@ pub(crate) fn projected_rtd_temperature_c(
     memory_config: &MemoryConfig,
     raw_adc_mv: u16,
 ) -> Option<f32> {
-    let corrected_mv = correct_adc_fractional_mv(
+    let corrected_mv = corrected_rtd_adc_fractional_mv(
         memory_config,
-        AdcCalibrationChannel::Rtd,
         f32::from(raw_adc_mv),
+        RTD_ASSUMED_ADC_OFFSET_UV,
     );
     rtd_resistance_ohms_from_fractional_mv(corrected_mv)
         .ok()

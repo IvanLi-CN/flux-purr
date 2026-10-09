@@ -389,6 +389,19 @@ pub(crate) fn rtd_assumed_adc_offset_uv(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn corrected_rtd_adc_fractional_mv(
+    memory_config: &MemoryConfig,
+    raw_adc_fractional_mv: f32,
+    configured_offset_uv: i32,
+) -> f32 {
+    correct_adc_fractional_mv(
+        memory_config,
+        AdcCalibrationChannel::Rtd,
+        raw_adc_fractional_mv,
+    ) + rtd_assumed_adc_offset_uv(memory_config, configured_offset_uv) as f32 / 1_000.0
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn rtd_sample_from_batch(
     memory_config: &MemoryConfig,
     batch: RtdAdcBatch,
@@ -426,7 +439,8 @@ pub(crate) fn rtd_sample_from_batch(
             reason: HeaterFaultReason::OverTemp,
         };
     }
-    let adc_fractional_mv = base_adc_fractional_mv + offset_uv as f32 / 1_000.0;
+    let adc_fractional_mv =
+        corrected_rtd_adc_fractional_mv(memory_config, raw_adc_fractional_mv, configured_offset_uv);
     let adc_mv = adc_fractional_mv.round() as u16;
 
     match rtd_resistance_ohms_from_fractional_mv(adc_fractional_mv) {

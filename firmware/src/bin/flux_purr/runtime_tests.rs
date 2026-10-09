@@ -12556,6 +12556,43 @@ fn assumed_offset_test_batch(temp_c: f32) -> RtdAdcBatch {
 }
 
 #[test]
+fn projected_rtd_temperature_matches_live_adc_assumption() {
+    let memory = MemoryConfig::default();
+    for raw_mv in [1_044, 1_210, 1_420] {
+        let live = rtd_sample_from_batch(
+            &memory,
+            RtdAdcBatch {
+                mean_mv: f32::from(raw_mv),
+                min_mv: raw_mv,
+                max_mv: raw_mv,
+                ..assumed_offset_test_batch(30.0)
+            },
+            RTD_ASSUMED_ADC_OFFSET_UV,
+        );
+        let RtdSample::Valid(live) = live else {
+            panic!("valid RTD voltage required");
+        };
+        let projected = projected_rtd_temperature_c(&memory, raw_mv).unwrap();
+        assert!(
+            (projected - live.temp_c).abs() < 0.001,
+            "raw={raw_mv}: live={} projected={projected}",
+            live.temp_c
+        );
+        let sample = ThermalPlantTransientSample {
+            elapsed_ticks: 1,
+            raw_rtd_adc_mv: raw_mv,
+            heater_voltage_125mv: 168,
+            duty_percent: 100,
+        };
+        let page = thermal_plant_trace_page(&memory, &[sample], 1, 0, 0);
+        assert_eq!(
+            page.points[0].temperature_centi_c,
+            round_to_i16(live.temp_c * 100.0)
+        );
+    }
+}
+
+#[test]
 fn assumed_rtd_offset_is_separate_from_raw_diagnostics_and_user_calibration() {
     let config = MemoryConfig::default();
     let original = config.clone();
