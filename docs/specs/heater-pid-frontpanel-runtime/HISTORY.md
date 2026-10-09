@@ -1,6 +1,8 @@
 # Heater PID frontpanel runtime history
 
-`039af3f7` 的中点搜索使用本轮真实高、低侧阻尼失败，但 A 组 60°C 在原预算内仍未完成资格验证。B 组 220°C 的短试验成功也未完成独立确认，两组均未保存八目标参数组。A 组新被动标定响应提供了生产预测函数的最小反例：标定输入延迟结束后，预测温度与后续记录明显偏离。受约束的余热差额观测作为生产预测整改单独评估，保留物理入口、时间和保存要求；离线原型尚未达到部署条件。完整结果及中文整改说明见[加热预测审计与整改方案](HIL-TRAJECTORY-PREDICTION.md)。
+主人审定共享Approach预测器的余热观测修正后，按当前运行的能量差额引入有限寿命的观测状态。标定输入延迟不再被当成全部内部余热的持续时间，但差额只能由有效档内观测建立，未知历史和首个跨档读数不能证明它。新标定回归同时保留未修正预测的偏差，避免用额外观测虚构对原三事实反例的即时修复；完整精确产物HIL与保存资格仍须独立建立。
+
+`039af3f7` 的中点搜索使用本轮真实高、低侧阻尼失败，但 A 组 60°C 在原预算内仍未完成资格验证。B 组 220°C 的短试验成功也未完成独立确认，两组均未保存八目标参数组。A 组新被动标定响应提供了原生产预测函数的最小反例：标定输入延迟结束后，预测温度与后续记录明显偏离。受约束的余热差额观测作为生产预测整改单独审定，保留物理入口、时间和保存要求；离线原型的偏差促使实现增加真实区间能量核对和有限寿命，而非直接部署相邻样本差分。完整结果及中文整改说明见[加热预测审计与整改方案](HIL-TRAJECTORY-PREDICTION.md)。
 
 A fb2049b1 fails60°C and confirms220°C, saving nothing. At the same23.28°C brake, measured damping2000‰ produces high-band failure and3000‰ produces a pre-Hold deadline failure; the runtime instead changes braking and repeats identicalcurrent heating. Captured regressions establish both defects. The approved internal-search boundary now preserves compatible same-run opposite damping endpoints and proposes their midpoint; each completed failedScout supplies its own actualcurrent score and feedback for comparison with a separately measuredpredicted. All original physical, temporal and independent-confirmation gates remain. B's one-shot OFF220°C diagnostic briefly enters controller Hold, records approximately 1.5 seconds of zero heater output, and returns to Approach without a qualified Hold witness. HOT=LOW is restored; fan-only attribution is unsupported.
 

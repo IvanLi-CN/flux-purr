@@ -948,6 +948,7 @@ impl HeaterController {
         self.pps_measurement_anchor_pending = false;
         self.coast_cooling_reference_c = None;
         self.coast_cooling_elapsed_ms = 0;
+        self.applied_heat.reset_temperature_observation();
     }
 
     pub(crate) fn reseed_measurement_after_pps_step(&mut self, measured_temp_c: f32) {
@@ -965,7 +966,10 @@ impl HeaterController {
             0.0
         };
         // The observer origin changes, never the trajectory or applied heat.
+        let mut applied_heat = self.applied_heat;
+        applied_heat.reanchor_temperature();
         self.reseed_measurement(measured_temp_c);
+        self.applied_heat = applied_heat;
         self.filtered_slope_c_per_profile_tick = rising_slope;
         // The held control value still belongs to the old voltage epoch.
         // Only the first accepted new-epoch sample can establish its origin.
@@ -1059,6 +1063,7 @@ impl HeaterController {
         let control_target = thermal_profile
             .map(|profile| profile.control_target(target_temp_c))
             .unwrap_or_else(|| default_thermal_control_target(target_temp_c));
+        self.observe_temperature_transfer(now_ms, measured_temp_c);
         let frame = self.measure_control_frame(
             target_temp_c,
             measured_temp_c,
@@ -1284,6 +1289,26 @@ impl HeaterController {
     fn control_measurement_accepted(&self) -> bool {
         self.natural_cooling_input
             .is_none_or(|input| input.measurement_accepted)
+    }
+
+    fn observe_temperature_transfer(&mut self, now_ms: u64, measured_temp_c: f32) {
+        if !self.control_measurement_accepted() || !self.model_approach_available() {
+            return;
+        }
+        if self.pps_measurement_anchor_pending {
+            self.applied_heat.reanchor_temperature();
+        }
+        if let Some(input) = self.natural_cooling_input {
+            self.applied_heat.observe_temperature(
+                now_ms,
+                measured_temp_c,
+                flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
+                    model: input.model,
+                    ambient_c: input.ambient_temp_c,
+                    max_power_mw: input.max_power_mw,
+                },
+            );
+        }
     }
 
     fn calculate_trajectory_approach_duty(

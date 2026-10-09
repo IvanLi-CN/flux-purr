@@ -66,7 +66,7 @@
 1. 调优 orchestration 只能生成候选、安排试验、收集证据并请求 preview/save；每一轮真实加热必须调用生产兼容锚点的同一条控制路径。不得新增第二个 heater state machine、第二套功率公式、隐藏 PID 常量、专供调优的输出限幅，或用 host 推断温度来取代固件控制决策。
 2. 3A/5A普通加热和调优共同选择既有profile控制器，使effective parameters真正进入同一生产路径；清退独立3A plant PI。PD独立5ms服务、PPS/PWM映射、调度、保护和`thermal_plant_auto`保持。切换电源类别前必须停热并重置，不得在armed运行中热切换。
 3. 固件调优按请求类别使用`pps3a`或`pps5a` bank，分别验证完整八目标、独立确认、preview与EEPROM readback。有效point和settings必须完整materialize并由status逐字段读回；不得借用另一bank、另一Device、新运行之前的历史候选或隐藏残留。两组可通过各自精确串口与独立devd会话同时运行。
-4. 统一生产控制是主人明确要求的行为；其余生产控制律、PD/PPS语义、温度/时间/保存门槛的变更仍须另行研判与确认。
+4. 统一生产控制及共享Approach预测器的受约束余热观测已获主人批准。观测仅使用新标定、本轮真实施加供热和有效档内测温，按[自然冷却控制合同](NATURAL-COOLING-CONTROL.md)计算、限幅、衰减和清理；保持独立参考轨迹、Hold受保护PI、标定拟合/存储、PD/PPS语义、阶段入口和全部资格门禁。其余生产控制律、PD/PPS语义、温度/时间/保存门槛的变更仍须另行研判与确认。
 
 ### 两种调优 engine 的固定差异
 

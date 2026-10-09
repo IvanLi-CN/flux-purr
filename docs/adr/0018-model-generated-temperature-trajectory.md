@@ -16,6 +16,8 @@ The tracker predicts command-arrival temperature using bounded, time-weighted ap
 
 ## Consequences
 
+共享预测器使用受约束的余热差额观测修正纯延迟模型没有表达的传热。观测以本轮真实输入和有效档内温差的能量平衡为依据，不将完整散热补偿再次加到历史供热。只在已知历史上使用限幅、有限寿命的差额；PPS换档先重建原点，未知历史、拒绝测温与过期状态不构成观测。参考生成、Hold受保护PI、PD/PPS以及资格门禁保持各自职责，具体时间窗口与公式由热控SPEC关联的自然冷却控制合同定义。
+
 PPS measurement epochs neither restart the reference nor erase heat in flight. Actual temperature remains authoritative for phase entry and qualification; reaching a reference cannot qualify a trial. Initial points use fresh calibration and production constants; later search uses only the same run. Both source classes require exact-artifact eight-target HIL and independent confirmations before saving.
 
 ## Alternatives considered

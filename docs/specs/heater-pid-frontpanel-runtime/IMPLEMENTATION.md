@@ -1,6 +1,8 @@
 # Heater PID frontpanel runtime implementation
 
-固件 `039af3f7` 的两组完整八目标实机调优均未通过：A 组完成 220°C 独立确认，60°C 耗尽单目标 20 分钟预算；B 组完成 60°C 独立确认，220°C 确认失败后耗尽预算。完整、设备核验通过的轨迹，以及两台低于 35°C 的停热状态读回均已保留，没有保存参数组。用 A 组新被动标定记录回放生产预测函数，在连续零输入覆盖标定延迟后，复现了 3.4459°C 的未来温度低估。这证实预测与记录响应存在偏差，全部失败试验的因果链仍需验证。余热观测修正尚为待审定方案；中文说明、证据、改动范围和验证限制见[加热预测审计与整改方案](HIL-TRAJECTORY-PREDICTION.md)。
+共享预测器实现本轮有效测温区间的能量差额观测。档内接受温差、自然损失和同区间真实延迟输入按有效时间累计，不把保持值、跨PPS档温差或未知历史算作余热；合格差额限幅、随预测时间衰减并过期。PPS重建观测原点，传感器恢复和停热等生命周期清理观测。新标定回归覆盖热端在停热超过输入延迟后仍保持高温、B组被动冷却、理想延迟模型不重复供热、量化噪声、跨档证据、拒绝测温与失效状态。原参考轨迹、Hold/PD/PPS与验收门禁保持，精确产物烧录及两组完整八目标HIL仍待执行。
+
+固件 `039af3f7` 的两组完整八目标实机调优均未通过：A 组完成 220°C 独立确认，60°C 耗尽单目标 20 分钟预算；B 组完成 60°C 独立确认，220°C 确认失败后耗尽预算。完整、设备核验通过的轨迹，以及两台低于 35°C 的停热状态读回均已保留，没有保存参数组。用 A 组新被动标定记录回放原生产预测函数，在连续零输入覆盖标定延迟后，复现了 3.4459°C 的未来温度低估。这证实预测与记录响应存在偏差，全部失败试验的因果链仍需验证。主人已批准受约束余热观测整改；中文说明、证据、改动范围和验证限制见[加热预测审计与整改方案](HIL-TRAJECTORY-PREDICTION.md)。
 
 Exact-artifact A run `firmware-pps5a-1791519413599` on `fb2049b1` retains complete device-verified sequence0..6235 and independently adopts220°C. Its60°C trials5/6 have the same23.28°C braking and other effective parameters: damping2000‰ breaks the high stable-band edge at61.51°C, while3000‰ misses the original deadline at57.41°C without physicalHold. The failed20-minute run blocks six interior targets and saves nothing. Complete captured prefixes reproduce the search's loss of this interval and repeated heating of an identicalcurrent. Internal search bisects compatible same-run opposite damping failures and reuses the completedScout's actual comparison evidence, preserving all qualification and independent-confirmation gates. Physical eight-target qualification remains outstanding.
 

@@ -10365,9 +10365,10 @@ fn trajectory_reference_and_heat_history_survive_pps_origins_but_not_disarm() {
         controller.applied_heat.observe(2_000, 60_000.0);
         controller.applied_heat.observe(input.now_ms, 3_000.0);
         let trajectory = controller.approach_trajectory;
-        let history = controller.applied_heat;
+        let mut history = controller.applied_heat;
         assert!(trajectory.is_some());
         controller.reseed_measurement_after_pps_step(input.measured_temp_c - 0.3);
+        history.reanchor_temperature();
         assert_eq!(controller.approach_trajectory, trajectory);
         assert_eq!(controller.applied_heat, history);
         controller.update_production_at(
@@ -10384,6 +10385,32 @@ fn trajectory_reference_and_heat_history_survive_pps_origins_but_not_disarm() {
             flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new()
         );
     }
+}
+
+#[test]
+fn trajectory_heat_observation_rejects_held_samples_and_resets_on_recovery() {
+    let (mut controller, profile, input) = pps_cooling_test_fixture(ThermalProfileBank::Pps5a);
+    let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps5a);
+    controller.update_production_at(kind, input, Some(profile));
+    controller
+        .applied_heat
+        .configure(input.model.transport_delay_ms);
+    controller.applied_heat.observe(input.now_ms, 3_000.0);
+    let history = controller.applied_heat;
+    controller.update_production_at(
+        kind,
+        ThermalPlantRuntimeInput {
+            now_ms: input.now_ms + 100,
+            measurement_accepted: false,
+            ..input
+        },
+        Some(profile),
+    );
+    assert_eq!(controller.applied_heat, history);
+    let mut recovered = history;
+    recovered.reset_temperature_observation();
+    controller.reseed_measurement(input.measured_temp_c);
+    assert_eq!(controller.applied_heat, recovered);
 }
 
 #[test]
