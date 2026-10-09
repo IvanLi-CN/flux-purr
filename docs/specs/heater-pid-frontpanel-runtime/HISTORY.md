@@ -1,5 +1,7 @@
 # Heater PID frontpanel runtime history
 
+临时电压假定后的A组新标定运行保留60°C失败及原始尖峰，完整审计暴露旧Approach→Warmup重入仍作用于模型控制。该分支与已审定的模型Approach自行补热职责冲突；共享3A/5A阶段机让有效模型欠温恢复保持Approach、参考及原期限，仅非模型兼容路径保留旧重入。修正不将既有失败转为通过，需新提交精确产物实测。
+
 The owner permits a temporary assumed absolute ADC-voltage correction after repeated A cooling waits, retaining the supplied ambient estimate near30°C. This bench assumption is separate from the measured3328mV excitation and absent user calibration; nonzero release builds are rejected. Applying or removing it requires fresh plant calibration and tuning qualification for that exact electrical mapping. No independent plate-temperature measurement is inferred from the ambient estimate.
 
 B组effd7800重复完成自身新标定初始化的八目标独立确认，标准原子保存及读回证明pps3a revision25。A组两轮同版本运行仍未通过60°C；第二轮触发提前制动搜索，下一提案未能在冷却预算耗尽前开始。室温约30°C与PPS冷却时35–36°C读数的差额只支持主人授权的临时假定试验，尚不能证明传感器偏差；原失败记录保留，新的电压映射必须重新取得标定与资格。

@@ -10355,6 +10355,45 @@ fn trajectory_approach_restores_high_temperature_loss_before_transport_delay() {
 }
 
 #[test]
+fn trajectory_approach_keeps_reference_when_temperature_deficit_increases() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let (mut controller, profile, mut input) = pps_cooling_test_fixture(bank);
+        let trajectory = controller.approach_trajectory.unwrap();
+        let warmup_started_at_ms = controller.warmup_started_at_ms;
+        controller.reseed_measurement_after_pps_step(232.0);
+        input.measured_temp_c = 232.0;
+        input.now_ms += 100;
+        let (output, disarmed) = controller.update_production_at(kind, input, Some(profile));
+        assert!(!disarmed);
+        assert_eq!(output.phase, HeaterControlPhase::Approach, "{bank:?}");
+        assert!(
+            controller
+                .approach_trajectory
+                .unwrap()
+                .reference
+                .temperature_c
+                >= trajectory.reference.temperature_c,
+            "{bank:?}: reference must continue from its pre-deficit origin"
+        );
+        assert_eq!(controller.warmup_started_at_ms, warmup_started_at_ms);
+        assert_eq!(output.warmup_soft_start_percent, 100);
+        assert!(output.duty_percent > 5, "{bank:?}: model must recover heat");
+    }
+}
+
+#[test]
+fn legacy_approach_can_reenter_warmup_when_temperature_deficit_increases() {
+    let (mut controller, profile, _) = pps_cooling_test_fixture(ThermalProfileBank::Pps5a);
+    controller.reseed_measurement_after_pps_step(232.0);
+    controller.natural_cooling_input = None;
+    let output = controller.update_at(240, 232.0, true, Some(profile), 3_100);
+    assert_eq!(output.phase, HeaterControlPhase::Warmup);
+    assert!(controller.approach_trajectory.is_none());
+    assert_eq!(controller.warmup_started_at_ms, Some(3_100));
+}
+
+#[test]
 fn trajectory_reference_and_heat_history_survive_pps_origins_but_not_disarm() {
     for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
         let kind = ProductionThermalController::Profile(bank);

@@ -1435,8 +1435,9 @@ impl HeaterController {
             HeaterControlPhase::Approach => {
                 let timeout_hold_ready =
                     self.phase_ticks >= frame.approach_max_cycles && frame.hold_state_ready;
-                let reenter_warmup = frame.error_c
-                    >= frame.brake_distance_c + frame.control_target.warmup_reenter_error_c;
+                let reenter_warmup = !self.model_approach_available()
+                    && frame.error_c
+                        >= frame.brake_distance_c + frame.control_target.warmup_reenter_error_c;
                 let approach_hold_ready = frame.approach_control_error_c <= HOLD_ENTRY_BELOW_C
                     && frame.previous_error_c <= HOLD_ENTRY_BELOW_C + 0.5;
                 if reenter_warmup {
