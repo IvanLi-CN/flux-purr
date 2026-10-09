@@ -205,6 +205,9 @@ pub(crate) async fn read_adc_sample<PIN>(
 where
     PIN: AdcChannel,
 {
+    if !wait_for_adc1_idle() {
+        return None;
+    }
     loop {
         let poll_started_us = Instant::now().as_micros();
         match poll_adc_conversion(
@@ -240,6 +243,40 @@ pub(crate) fn poll_adc_conversion<T>(
             result => return result,
         }
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[inline(never)]
+pub(crate) fn wait_for_adc_idle(
+    mut is_idle: impl FnMut() -> bool,
+    mut elapsed_us: impl FnMut() -> u64,
+) -> bool {
+    // DONE can precede the end of the SAR state machine. Espressif's ADC1
+    // RTC oneshot start waits for meas_status=0 before raising START again.
+    // This gate runs once, before START. It never waits on its own conversion.
+    while !is_idle() {
+        if elapsed_us() >= 1_000 {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+    true
+}
+
+#[cfg(target_arch = "xtensa")]
+fn wait_for_adc1_idle() -> bool {
+    let started_us = Instant::now().as_micros();
+    wait_for_adc_idle(
+        || {
+            esp_hal::peripherals::SENS::regs()
+                .sar_slave_addr1()
+                .read()
+                .sar_saradc_meas_status()
+                .bits()
+                == 0
+        },
+        || Instant::now().as_micros().saturating_sub(started_us),
+    )
 }
 
 #[cfg(target_arch = "xtensa")]

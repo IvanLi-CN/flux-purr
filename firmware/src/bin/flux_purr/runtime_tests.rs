@@ -11183,6 +11183,53 @@ fn adc_conversion_polling_yields_when_slow_and_preserves_errors() {
 }
 
 #[test]
+fn adc_new_conversion_cannot_consume_the_previous_channel_while_busy() {
+    let idle_polls = core::cell::Cell::new(0_u64);
+    let reads = core::cell::Cell::new(0_u64);
+    let idle = wait_for_adc_idle(
+        || {
+            idle_polls.set(idle_polls.get() + 1);
+            idle_polls.get() >= 4
+        },
+        || idle_polls.get(),
+    );
+    let result = idle.then(|| {
+        poll_adc_conversion(
+            || {
+                reads.set(reads.get() + 1);
+                // A premature trigger still exposes the preceding VIN result.
+                Ok(if idle_polls.get() < 4 {
+                    3_980_u16
+                } else {
+                    2_300
+                })
+            },
+            || 0,
+        )
+    });
+    assert_eq!(result, Some(Ok(2_300)));
+    assert_eq!(reads.get(), 1);
+    assert!(idle);
+}
+
+#[test]
+fn adc_idle_gate_times_out_without_triggering_and_preserves_inflight_conversion() {
+    let polls = core::cell::Cell::new(0_u64);
+    let idle = wait_for_adc_idle(
+        || {
+            polls.set(polls.get() + 1);
+            false
+        },
+        || polls.get(),
+    );
+    assert!(!idle);
+    assert_eq!(polls.get(), 1_000);
+    let read = idle.then(|| panic!("busy ADC must not start a new conversion"));
+    assert_eq!(read, None::<u16>);
+    assert_eq!(poll_adc_conversion(|| Ok(2_300_u16), || 0,), Ok(2_300),);
+}
+
+#[test]
 fn production_source_class_change_disarms_before_switching_controller() {
     let mut controller = HeaterController::new();
     let (first, disarmed) = controller.update_production_at(
