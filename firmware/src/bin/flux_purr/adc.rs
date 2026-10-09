@@ -5,6 +5,22 @@ use super::*;
 use embedded_hal_async::i2c::I2c as _;
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const fn adc1_attenuation_db(channel: AdcCalibrationChannel) -> u8 {
+    match channel {
+        AdcCalibrationChannel::Vin => 11,
+        AdcCalibrationChannel::Rtd => 6,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn adc1_attenuation(channel: AdcCalibrationChannel) -> Attenuation {
+    match adc1_attenuation_db(channel) {
+        11 => Attenuation::_11dB,
+        _ => RTD_SAMPLE_ATTENUATION,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn vin_adc_mv_for_input_mv(input_mv: u32) -> u16 {
     let numerator = input_mv.saturating_mul(s3_frontpanel::VIN_DIVIDER_R_LOW_OHMS);
     let denominator =
@@ -158,7 +174,13 @@ pub(crate) type RtdAdcPin = esp_hal::analog::adc::AdcPin<
     AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
 >;
 #[cfg(target_arch = "xtensa")]
-pub(crate) type Adc1Curve = AdcCalCurve<esp_hal::peripherals::ADC1<'static>>;
+pub(crate) type Adc1CalibrationCurve = AdcCalCurve<esp_hal::peripherals::ADC1<'static>>;
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) struct Adc1Curve {
+    vin: Adc1CalibrationCurve,
+    rtd: Adc1CalibrationCurve,
+}
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn initialize_adc1(
@@ -175,9 +197,16 @@ pub(crate) fn initialize_adc1(
         && init_code.is_some()
         && reference_code.is_some()
         && reference_mv.is_some();
+    let vin_attenuation = adc1_attenuation(AdcCalibrationChannel::Vin);
+    let vin_efuse_ready = efuse_version == 1
+        && Efuse::rtc_calib_init_code(AdcCalibUnit::ADC1, vin_attenuation).is_some()
+        && Efuse::rtc_calib_cal_code(AdcCalibUnit::ADC1, vin_attenuation).is_some();
     #[cfg(feature = "web_serial")]
     {
-        ADC_CALIBRATION_SOURCE.store(if efuse_ready { 0 } else { 1 }, Ordering::Relaxed);
+        ADC_CALIBRATION_SOURCE.store(
+            if efuse_ready && vin_efuse_ready { 0 } else { 1 },
+            Ordering::Relaxed,
+        );
         ADC_EFUSE_VERSION.store(efuse_version, Ordering::Relaxed);
         ADC_INIT_CODE.store(init_code.unwrap_or(u16::MAX), Ordering::Relaxed);
         ADC_REFERENCE_CODE.store(reference_code.unwrap_or(u16::MAX), Ordering::Relaxed);
@@ -185,10 +214,19 @@ pub(crate) fn initialize_adc1(
     }
 
     let mut config = AdcConfig::new();
-    let vin_pin = config.enable_pin_with_cal::<_, AdcCalBasic<_>>(vin_gpio, RTD_SAMPLE_ATTENUATION);
-    let rtd_pin = config.enable_pin_with_cal::<_, AdcCalBasic<_>>(rtd_gpio, RTD_SAMPLE_ATTENUATION);
+    let vin_pin = config.enable_pin_with_cal::<_, AdcCalBasic<_>>(
+        vin_gpio,
+        adc1_attenuation(AdcCalibrationChannel::Vin),
+    );
+    let rtd_pin = config.enable_pin_with_cal::<_, AdcCalBasic<_>>(
+        rtd_gpio,
+        adc1_attenuation(AdcCalibrationChannel::Rtd),
+    );
     let adc = Adc::new(adc, config);
-    let curve = efuse_ready.then(|| Adc1Curve::new_cal(RTD_SAMPLE_ATTENUATION));
+    let curve = (efuse_ready && vin_efuse_ready).then(|| Adc1Curve {
+        vin: Adc1CalibrationCurve::new_cal(vin_attenuation),
+        rtd: Adc1CalibrationCurve::new_cal(RTD_SAMPLE_ATTENUATION),
+    });
     (adc, vin_pin, rtd_pin, curve)
 }
 
@@ -200,7 +238,7 @@ pub(crate) async fn read_adc_sample<PIN>(
         esp_hal::peripherals::ADC1<'static>,
         AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
     >,
-    curve: &Adc1Curve,
+    curve: &Adc1CalibrationCurve,
 ) -> Option<AdcConvertedSample>
 where
     PIN: AdcChannel,
@@ -299,7 +337,7 @@ pub(crate) async fn read_adc_batch<PIN>(
         esp_hal::peripherals::ADC1<'static>,
         AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
     >,
-    curve: &Adc1Curve,
+    curve: &Adc1CalibrationCurve,
 ) -> Option<RtdAdcBatch>
 where
     PIN: AdcChannel,
@@ -370,7 +408,7 @@ pub(crate) async fn read_calibrated_vin_mv(
     memory_config: &MemoryConfig,
 ) -> Option<(u16, u16, u16, u32)> {
     let curve = curve?;
-    let batch = read_adc_batch(adc, pin, curve).await?;
+    let batch = read_adc_batch(adc, pin, &curve.vin).await?;
     let raw_code = batch.mean_raw_code;
     let raw_adc_mv = batch.mean_mv.round() as u16;
     #[cfg(feature = "web_serial")]
@@ -401,7 +439,7 @@ pub(crate) async fn read_rtd_sample(
             reason: HeaterFaultReason::AdcReadFailed,
         };
     };
-    let Some(batch) = read_adc_batch(adc, pin, curve).await else {
+    let Some(batch) = read_adc_batch(adc, pin, &curve.rtd).await else {
         return RtdSample::Fault {
             adc_mv: None,
             reason: HeaterFaultReason::AdcReadFailed,

@@ -2,6 +2,24 @@ use super::*;
 use flux_purr_firmware::thermal_tuning::ThermalTuningPhase;
 
 #[test]
+fn vin_adc_range_covers_the_board_and_confirmed_pps_input() {
+    // Espressif specifies 1750mV at 6dB and 3100mV at 11dB. The actual
+    // board divider, rather than the RTD range, defines VIN's requirement.
+    let maximum_mv = match adc1_attenuation_db(AdcCalibrationChannel::Vin) {
+        6 => 1_750,
+        11 => 3_100,
+        attenuation => panic!("unverified VIN attenuation {attenuation}"),
+    };
+    for input_mv in [5_000, 12_000, 20_000, 21_000, 21_300, 28_000] {
+        let adc_mv = vin_adc_mv_for_input_mv(input_mv);
+        assert!(
+            adc_mv <= maximum_mv,
+            "{input_mv}mV input puts {adc_mv}mV on VIN ADC, above its {maximum_mv}mV range"
+        );
+    }
+}
+
+#[test]
 fn heater_coast_releases_on_smooth_cooling_at_fast_control_cadence() {
     let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
         settings: None,
