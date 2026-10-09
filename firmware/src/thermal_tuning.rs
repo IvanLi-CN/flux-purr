@@ -1267,6 +1267,9 @@ impl ThermalTuningRuntime {
         if self.record_fresh_proposal(Some(original)) {
             return true;
         }
+        if self.prepare_smaller_braking_proposal(original, target_c) {
+            return true;
+        }
         let Some(index) = original
             .points
             .iter()
@@ -1308,6 +1311,68 @@ impl ThermalTuningRuntime {
         }
         self.candidate_profile = Some(original);
         self.candidate_hash = hash_profile(&original);
+        false
+    }
+
+    fn prepare_smaller_braking_proposal(
+        &mut self,
+        original: ThermalControlProfileConfig,
+        target_c: i16,
+    ) -> bool {
+        let Some(index) = original
+            .points
+            .iter()
+            .position(|point| point.is_some_and(|point| point.target_temp_c == target_c))
+        else {
+            return false;
+        };
+        let previous = original.points[index].unwrap();
+        let Some(mut proposed_point) = self
+            .candidate_profile
+            .and_then(|profile| profile.points[index])
+        else {
+            return false;
+        };
+        let requested_brake = proposed_point.brake_distance_centi_c;
+        proposed_point.brake_distance_centi_c = previous.brake_distance_centi_c;
+        let start_gap = (target_c - cooldown_threshold_c(target_c)) as u16 * 100;
+        if requested_brake < start_gap
+            || requested_brake <= previous.brake_distance_centi_c
+            || !same_effective_search_point(previous, proposed_point)
+        {
+            return false;
+        }
+        // Preserve the measured coarse direction without discarding it for a
+        // tiny fallback when the full step would consume the Warmup gap.
+        let mut step = (requested_brake - previous.brake_distance_centi_c) / 2;
+        while step >= 40 {
+            let mut proposed = original;
+            proposed.points[index]
+                .as_mut()
+                .unwrap()
+                .brake_distance_centi_c = previous.brake_distance_centi_c.saturating_add(step);
+            proposed.sanitize();
+            self.candidate_profile = Some(proposed);
+            if !self.record_fresh_proposal(Some(original)) {
+                step /= 2;
+                continue;
+            }
+            if self
+                .install_candidate_profile(proposed, "bounded_coarse_braking")
+                .is_err()
+            {
+                return false;
+            }
+            self.push_event(
+                ThermalTuningEventKind::Decision,
+                Some(target_c),
+                Some(self.trial_index),
+                None,
+                Some("coarse_braking_step_bisected_to_preserve_warmup"),
+            );
+            return true;
+        }
+        self.candidate_profile = Some(original);
         false
     }
 
@@ -3650,6 +3715,29 @@ mod tests {
                 ..previous
             }
         );
+        assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
+    fn captured_coarse_brake_preserves_progress_inside_the_warmup_start_gap() {
+        let trial: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_brake_backoff.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let evaluation = replay_damping_bracket_trial(&mut runtime, &trial);
+        let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(previous.brake_distance_centi_c, 1_654);
+        runtime.advance_after_trial(60, evaluation).unwrap();
+        let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(next.brake_distance_centi_c, 2_144);
+        assert_eq!(
+            next,
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 2_144,
+                ..previous
+            }
+        );
+        assert!(runtime.armed);
         assert_eq!(runtime.accepted_target_mask, 0);
     }
 
