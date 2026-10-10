@@ -266,6 +266,7 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
         &mut state.manual_pps_state,
         &mut state.heater_pwm,
         &mut state.last_heater_duty,
+        state.pending_automatic_pps.is_some(),
     );
     match tuning_power_decision {
         Some(TuningPdWaitDecision::Ready) if state.tuning_pd_wait_started_ms.is_some() => {
@@ -945,6 +946,7 @@ pub(crate) async fn runtime_reconcile_network_state(
         &mut state.manual_pps_state,
         &mut state.heater_pwm,
         &mut state.last_heater_duty,
+        state.pending_automatic_pps.is_some(),
     );
 
     needs_redraw |= disarm_pending_thermal_plant_output(ThermalPlantDisarmContext {
@@ -1772,7 +1774,7 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         state.cooling_disabled_lock_latched,
         state.heater_controller.fault_latched().is_some(),
         model_allowed,
-        state.pd_contract_ready,
+        state.pd_contract_ready || state.pending_automatic_pps.is_some(),
     );
     desired_heater_enabled = consume_thermal_plant_completion_disarm(
         &mut state.calibration_runtime_state,
@@ -1785,7 +1787,7 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         state.ui_state.heater_enabled = desired_heater_enabled;
         needs_redraw = true;
     }
-    if force_output_off {
+    if force_output_off && state.pending_automatic_pps.is_none() {
         state.ui_state.heater_enabled = false;
     }
     if state.thermal_tuning.armed
@@ -1987,6 +1989,12 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         control_started_ms,
         elapsed_ms,
     } = context;
+    let allow_pending_pps_progress = state.pending_automatic_pps.is_some()
+        && !thermal_plant_calibration_running
+        && state.current_rtd_fault.is_none()
+        && state.heater_controller.fault_latched().is_none()
+        && !state.cooling_disabled_lock_latched
+        && !state.ui_state.persistence_locked();
     let output_changed = apply_heater_power_output(HeaterPowerOutputContext {
         pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
@@ -1999,7 +2007,7 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         current_temp_c: state.latest_temp_c,
         duty_percent: requested_duty_percent,
         heater_enabled: if force_output_off {
-            false
+            allow_pending_pps_progress
         } else if thermal_plant_calibration_running {
             state.calibration_runtime_state.heater_enabled
         } else {
@@ -2978,6 +2986,7 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
             &mut state.manual_pps_state,
             &mut state.heater_pwm,
             &mut state.last_heater_duty,
+            state.pending_automatic_pps.is_some(),
         );
         state.ui_refresh_pending = pd_redraw_after_flush;
         match display_flush_result {

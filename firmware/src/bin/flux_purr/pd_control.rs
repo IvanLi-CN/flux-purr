@@ -959,6 +959,7 @@ pub(crate) fn disarm_stale_heater_arm_after_pd_transition(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[allow(dead_code)]
 pub(crate) fn reconcile_pd_contract_intent(
     observation: Option<PdStatusObservation>,
     pd_contract_ready: &mut bool,
@@ -967,12 +968,33 @@ pub(crate) fn reconcile_pd_contract_intent(
     manual_pps_state: &mut ManualPpsState,
     physical_output_active: bool,
 ) -> bool {
+    reconcile_pd_contract_intent_with_pending_automatic_pps(
+        observation,
+        pd_contract_ready,
+        ui_state,
+        calibration_runtime_state,
+        manual_pps_state,
+        physical_output_active,
+        false,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn reconcile_pd_contract_intent_with_pending_automatic_pps(
+    observation: Option<PdStatusObservation>,
+    pd_contract_ready: &mut bool,
+    ui_state: &mut FrontPanelUiState,
+    calibration_runtime_state: &mut CalibrationRuntimeState,
+    manual_pps_state: &mut ManualPpsState,
+    physical_output_active: bool,
+    automatic_pps_transition_pending: bool,
+) -> bool {
     let current_pd_contract_ready = startup_pd_contract_ready(observation);
     let mut needs_redraw = *pd_contract_ready != current_pd_contract_ready;
     if needs_redraw {
         let pd_was_ready = *pd_contract_ready;
         *pd_contract_ready = current_pd_contract_ready;
-        if current_pd_contract_ready {
+        if current_pd_contract_ready && !automatic_pps_transition_pending {
             needs_redraw |= disarm_stale_heater_arm_after_pd_transition(
                 pd_was_ready,
                 current_pd_contract_ready,
@@ -983,6 +1005,7 @@ pub(crate) fn reconcile_pd_contract_intent(
     }
 
     if !current_pd_contract_ready
+        && !automatic_pps_transition_pending
         && (ui_state.heater_enabled
             || calibration_runtime_state.heater_enabled
             || physical_output_active
@@ -998,6 +1021,7 @@ pub(crate) fn reconcile_pd_contract_intent(
 }
 
 #[cfg(target_arch = "xtensa")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_pd_contract_observation<PWM>(
     observation: Option<PdStatusObservation>,
     pd_contract_ready: &mut bool,
@@ -1006,23 +1030,25 @@ pub(crate) fn apply_pd_contract_observation<PWM>(
     manual_pps_state: &mut ManualPpsState,
     heater_pwm: &mut PWM,
     last_heater_duty: &mut u8,
+    automatic_pps_transition_pending: bool,
 ) -> bool
 where
     PWM: SetDutyCycle,
 {
     let previous_pd_ready = *pd_contract_ready;
-    let needs_redraw = reconcile_pd_contract_intent(
+    let needs_redraw = reconcile_pd_contract_intent_with_pending_automatic_pps(
         observation,
         pd_contract_ready,
         ui_state,
         calibration_runtime_state,
         manual_pps_state,
         *last_heater_duty != 0,
+        automatic_pps_transition_pending,
     );
     if previous_pd_ready != *pd_contract_ready {
         info!("PD contract readiness -> {=bool}", *pd_contract_ready);
     }
-    if !*pd_contract_ready {
+    if !*pd_contract_ready && !automatic_pps_transition_pending {
         // Genuine unavailable or stale power still drops both intent and PWM;
         // normal negotiation carries the previous confirmed supply instead.
         apply_heater_duty(heater_pwm, 0, last_heater_duty);

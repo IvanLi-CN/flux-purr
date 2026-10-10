@@ -14715,6 +14715,45 @@ fn runtime_heater_reconcile_preserves_dashboard_heater_when_calibration_is_off()
 }
 
 #[test]
+fn pending_automatic_pps_preserves_heater_intent_during_contract_transition() {
+    let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    ui_state.heater_enabled = true;
+    let mut calibration_runtime_state = CalibrationRuntimeState::default();
+    let mut manual_pps_state = ManualPpsState::default();
+    let mut pd_contract_ready = true;
+    let transition_observation = PdStatusObservation {
+        status_raw: 0,
+        status: Status::from_register(0),
+        current_raw: 0,
+        current_ma: 0,
+        contract_voltage_mv: None,
+        contract: Contract::none(),
+    };
+
+    assert!(reconcile_pd_contract_intent_with_pending_automatic_pps(
+        Some(transition_observation),
+        &mut pd_contract_ready,
+        &mut ui_state,
+        &mut calibration_runtime_state,
+        &mut manual_pps_state,
+        false,
+        true,
+    ));
+    assert!(!pd_contract_ready);
+    assert!(ui_state.heater_enabled);
+    assert!(!calibration_runtime_state.heater_enabled);
+    assert!(reconcile_runtime_heater_enabled(
+        ui_state.heater_enabled,
+        calibration_runtime_state,
+        None,
+        false,
+        false,
+        true,
+        true,
+    ));
+}
+
+#[test]
 fn pd_unavailable_startup_enters_dashboard_with_heater_locked() {
     let pd_contract_ready = startup_pd_contract_ready(None);
     let state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
