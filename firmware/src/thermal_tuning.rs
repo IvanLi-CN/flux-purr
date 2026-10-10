@@ -272,9 +272,17 @@ pub struct ThermalTuningSample {
     pub heater_requested_output_permille: u16,
     pub heater_output_permille: u16,
     pub measurement_valid: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_accepted: Option<bool>,
     pub phase: ThermalTuningPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fan: Option<ThermalTuningFanSample>,
+}
+
+impl ThermalTuningSample {
+    fn has_fresh_measurement(&self) -> bool {
+        self.measurement_valid && self.measurement_accepted.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1896,9 +1904,8 @@ impl ThermalTuningRuntime {
         self.record_live_sample_with_cooldown_admission(sample, true)
     }
 
-    /// Record the live RTD fact even when the production measurement guard
-    /// retains an earlier control temperature. Only a current accepted
-    /// measurement may admit a new trial; the ordinary budget still runs.
+    /// Retain rejected RTD observations for audit, without treating the held
+    /// control value as fresh qualification evidence. Wall-clock budgets run.
     pub fn record_live_sample_with_cooldown_admission(
         &mut self,
         sample: ThermalTuningSample,
@@ -1923,6 +1930,10 @@ impl ThermalTuningRuntime {
         let startup_evidence_due = self.phase != ThermalTuningPhase::Cooldown
             && checked.phase == ThermalTuningPhase::Warmup
             && !self.warmup_full_output;
+        let measurement_gap_due = !checked.has_fresh_measurement()
+            && (self.first_hold_elapsed_ms.is_some()
+                || self.stable_window_started_at_ms.is_some()
+                || self.previous_sample_at_ms.is_some());
         // Recording cadence must not postpone a hard deadline or a broken
         // in-flight stable window beyond the current control cycle.
         let deadline_check_due = self.warmup_exited_at_ms.is_some_and(|warmup_exit_ms| {
@@ -1943,6 +1954,7 @@ impl ThermalTuningRuntime {
         });
         if !phase_changed
             && !startup_evidence_due
+            && !measurement_gap_due
             && !deadline_check_due
             && self.last_live_sample_elapsed_ms.is_some_and(|last| {
                 checked.elapsed_ms.saturating_sub(last) < THERMAL_TUNING_LIVE_SAMPLE_INTERVAL_MS
@@ -2087,6 +2099,7 @@ impl ThermalTuningRuntime {
         // evidence that the next warmup can raise power to the ceiling.
         let trial_power_ready = sample.pps_contract.confirmed
             && u32::from(sample.pps_contract.voltage_mv) == sample.pps_power_ceiling_mv;
+        let measurement_accepted = sample.has_fresh_measurement();
         self.push_event(
             ThermalTuningEventKind::Sample,
             Some(expected_target),
@@ -2109,7 +2122,12 @@ impl ThermalTuningRuntime {
             );
             return self.advance_target();
         }
-        if cooled && trial_power_ready && cooldown_admission_ready && self.armed {
+        if cooled
+            && trial_power_ready
+            && cooldown_admission_ready
+            && measurement_accepted
+            && self.armed
+        {
             self.phase = ThermalTuningPhase::Warmup;
             self.reset_trial_metrics();
             self.trial_start_temperature_centi_c = Some(start_temperature_centi_c);
@@ -2125,7 +2143,6 @@ impl ThermalTuningRuntime {
         }
         self.current_elapsed_ms = sample.elapsed_ms;
         self.update_warmup_output_evidence(sample);
-        self.update_strategy_evidence(sample, expected_target);
         match sample.phase {
             ThermalTuningPhase::Approach => {
                 self.model_approach_sample_count =
@@ -2150,16 +2167,15 @@ impl ThermalTuningRuntime {
                 // starts independently when the physical hold gate is met.
                 self.first_controller_hold_elapsed_ms
                     .get_or_insert(sample.elapsed_ms);
-                self.first_hold_temperature_centi_c
-                    .get_or_insert(sample.temperature_centi_c);
-                let target_centi_c = i32::from(expected_target) * 100;
-                let temperature_centi_c = i32::from(sample.temperature_centi_c);
-                if hold_entry_ready((target_centi_c - temperature_centi_c) as f32 / 100.0) {
-                    self.first_hold_elapsed_ms.get_or_insert(sample.elapsed_ms);
-                }
+                self.record_fresh_hold_entry(sample, expected_target);
             }
             _ => {}
         }
+        if !sample.has_fresh_measurement() {
+            self.interrupt_measurement_qualification();
+            return;
+        }
+        self.update_strategy_evidence(sample, expected_target);
         if sample.phase != ThermalTuningPhase::Warmup && !self.approach_curve_closed {
             self.record_approach_curve_sample(sample);
             self.approach_curve_closed = sample.phase == ThermalTuningPhase::Hold;
@@ -2198,6 +2214,35 @@ impl ThermalTuningRuntime {
                     value.max(sample.temperature_centi_c)
                 }),
         );
+    }
+
+    fn record_fresh_hold_entry(&mut self, sample: &ThermalTuningSample, target_c: i16) {
+        if !sample.has_fresh_measurement() {
+            return;
+        }
+        self.first_hold_temperature_centi_c
+            .get_or_insert(sample.temperature_centi_c);
+        let error_centi_c = i32::from(target_c) * 100 - i32::from(sample.temperature_centi_c);
+        if hold_entry_ready(error_centi_c as f32 / 100.0) {
+            self.first_hold_elapsed_ms.get_or_insert(sample.elapsed_ms);
+        }
+    }
+
+    fn interrupt_measurement_qualification(&mut self) {
+        // A retained value is not a new observation. Preserve a completed
+        // witness, but never bridge a gap in continuous Hold confirmation.
+        self.first_hold_elapsed_ms = None;
+        if self.stable_window_verified_at_ms.is_none() {
+            self.stable_window_started_at_ms = None;
+            self.stable_window_sample_count = 0;
+        }
+        self.stable_window_last_sample_ms = None;
+        self.previous_sample_at_ms = None;
+        self.previous_sample_temperature_centi_c = None;
+        if let Some(timing) = &mut self.trial_timing {
+            timing.warmup_exited_at_ms = self.warmup_exited_at_ms;
+            timing.stable_window_started_at_ms = self.stable_window_started_at_ms;
+        }
     }
 
     fn record_controller_hold_output(
@@ -4150,6 +4195,7 @@ mod tests {
                 380
             },
             measurement_valid: true,
+            measurement_accepted: None,
             phase,
             fan: None,
         }
@@ -7181,6 +7227,98 @@ mod tests {
     }
 
     #[test]
+    fn rejected_temperature_sample_breaks_qualification_without_disarming() {
+        let mut runtime = started_single_target_runtime();
+        runtime
+            .record_sample(sample(0, ThermalTuningPhase::Warmup, 3_000))
+            .unwrap();
+        runtime
+            .record_sample(sample(300, ThermalTuningPhase::Approach, 5_500))
+            .unwrap();
+        runtime
+            .record_live_sample(sample(600, ThermalTuningPhase::Hold, 6_000))
+            .unwrap();
+        assert_eq!(runtime.first_hold_elapsed_ms, Some(600));
+        let mut wire = serde_json::to_value(sample(650, ThermalTuningPhase::Hold, 6_000)).unwrap();
+        wire["measurementAccepted"] = serde_json::json!(false);
+        wire["rawTemperatureCentiC"] = serde_json::json!(8_249);
+        runtime
+            .record_live_sample(serde_json::from_value(wire).unwrap())
+            .unwrap();
+        assert!(runtime.armed);
+        assert_eq!(runtime.current_elapsed_ms, 650);
+        assert_eq!(runtime.first_hold_elapsed_ms, None);
+        assert_eq!(runtime.stable_window_started_at_ms, None);
+        assert_eq!(runtime.max_temperature_centi_c, Some(6_000));
+        assert_eq!(runtime.previous_sample_at_ms, None);
+        runtime
+            .record_sample(sample(900, ThermalTuningPhase::Hold, 6_010))
+            .unwrap();
+        assert_eq!(runtime.first_hold_elapsed_ms, Some(900));
+        assert_eq!(runtime.stable_window_started_at_ms, Some(900));
+    }
+
+    #[test]
+    fn rejected_temperature_keeps_wall_deadline_and_sensor_fault_gate() {
+        let mut runtime = started_single_target_runtime();
+        runtime
+            .record_sample(sample(0, ThermalTuningPhase::Warmup, 3_000))
+            .unwrap();
+        runtime
+            .record_sample(sample(1_000, ThermalTuningPhase::Approach, 5_500))
+            .unwrap();
+        let mut rejected = sample(11_000, ThermalTuningPhase::Approach, 6_000);
+        rejected.measurement_accepted = Some(false);
+        runtime.record_sample(rejected.clone()).unwrap();
+        assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+        let decision = runtime
+            .events
+            .iter()
+            .find_map(|event| event.decision.as_ref())
+            .unwrap();
+        assert_eq!(decision.disposition.as_str(), "rejected");
+        assert_eq!(
+            decision.stop_reason,
+            "full-speed-to-stable budget exhausted"
+        );
+
+        let mut runtime = started_single_target_runtime();
+        rejected.measurement_valid = false;
+        assert_eq!(
+            runtime.record_sample(rejected),
+            Err(ThermalTuningError::InvalidTransition)
+        );
+        assert!(!runtime.armed);
+    }
+
+    #[test]
+    fn rejected_temperature_restarts_independent_confirmation() {
+        let mut runtime = started_single_target_runtime();
+        runtime.trial_purpose = ThermalTuningTrialPurpose::HoldConfirm;
+        runtime
+            .record_sample(sample(0, ThermalTuningPhase::Warmup, 3_000))
+            .unwrap();
+        runtime
+            .record_sample(sample(300, ThermalTuningPhase::Approach, 5_500))
+            .unwrap();
+        record_dense_hold(&mut runtime, 600, 20_000, 6_000);
+        let verified = runtime.stable_window_verified_at_ms;
+        assert!(verified.is_some());
+        let mut rejected = sample(20_100, ThermalTuningPhase::Hold, 6_000);
+        rejected.measurement_accepted = Some(false);
+        runtime.record_live_sample(rejected).unwrap();
+        assert_eq!(runtime.first_hold_elapsed_ms, None);
+        assert_eq!(runtime.stable_window_verified_at_ms, verified);
+        record_dense_hold(&mut runtime, 20_400, 61_000, 6_000);
+        assert_eq!(runtime.first_hold_elapsed_ms, Some(20_400));
+        assert_eq!(runtime.accepted_target_mask, 0);
+        assert!(runtime.armed);
+        record_dense_hold(&mut runtime, 61_300, 80_200, 6_000);
+        record_current_trial_sample(&mut runtime, 80_400, ThermalTuningPhase::Hold, 6_000);
+        assert_eq!(runtime.accepted_target_mask, target_bit(60));
+    }
+
+    #[test]
     fn stable_window_started_before_deadline_can_finish_after_it() {
         let mut runtime = started_single_target_runtime();
         runtime
@@ -7527,6 +7665,7 @@ mod tests {
             heater_requested_output_permille: 1000,
             heater_output_permille: 0,
             measurement_valid: true,
+            measurement_accepted: None,
             phase: ThermalTuningPhase::Warmup,
             fan: None,
         };

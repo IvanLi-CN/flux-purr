@@ -973,6 +973,11 @@ fn timing_gate_valid(trial: &Value) -> bool {
             })
 }
 
+fn sample_measurement_accepted(sample: &Value) -> bool {
+    sample.get("measurementValid").and_then(Value::as_bool) == Some(true)
+        && sample.get("measurementAccepted").and_then(Value::as_bool) != Some(false)
+}
+
 fn verify_timing_samples(
     timing: &ThermalTuningTimingEvidence,
     target: i16,
@@ -1014,7 +1019,7 @@ fn verify_timing_samples(
                     .get("heaterRequestedOutputPermille")
                     .and_then(Value::as_u64)
                     != Some(u64::from(timing.allowed_approach_floor_permille))
-                || sample.get("measurementValid").and_then(Value::as_bool) != Some(true)
+                || !sample_measurement_accepted(sample)
         }) {
             reasons.push(if timing.allowed_approach_floor_permille == 50 {
                 "missing_real_50_permille_floor_sample"
@@ -1051,7 +1056,7 @@ fn verify_timing_samples(
                 stable_start = None;
             }
             last_time = Some(time);
-            if sample.get("measurementValid").and_then(Value::as_bool) == Some(true)
+            if sample_measurement_accepted(sample)
                 && sample
                     .get("temperatureCentiC")
                     .and_then(Value::as_i64)
@@ -1097,8 +1102,7 @@ fn stable_window_samples_valid(
             if time < start || time > verified {
                 continue;
             }
-            window_samples_valid &= sample.get("measurementValid").and_then(Value::as_bool)
-                == Some(true)
+            window_samples_valid &= sample_measurement_accepted(sample)
                 && sample
                     .get("temperatureCentiC")
                     .and_then(Value::as_i64)
@@ -2749,6 +2753,12 @@ mod tests {
             super::verify_timing_samples(&timing, 60, &samples.iter().collect::<Vec<_>>())
         };
         assert_eq!(verify(&samples)["verified"], true);
+        samples[4]["measurementAccepted"] = json!(false);
+        assert_eq!(verify(&samples)["verified"], false);
+        samples[4]["measurementAccepted"] = json!(true);
+        samples[1]["measurementAccepted"] = json!(false);
+        assert_eq!(verify(&samples)["verified"], false);
+        samples[1]["measurementAccepted"] = json!(true);
         samples[1]["heaterRequestedOutputPermille"] = json!(100);
         assert_eq!(verify(&samples)["verified"], false);
         samples[1]["heaterRequestedOutputPermille"] = json!(50);

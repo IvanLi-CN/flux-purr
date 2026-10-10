@@ -22,6 +22,7 @@ const DEVICE_EVENT_FIELDS: Record<string, string[]> = {
     'candidateId',
     'candidateHash',
     'temperatureCentiC',
+    'rawTemperatureCentiC',
     'vinMv',
     'ppsContract',
     'requestedMv',
@@ -29,6 +30,7 @@ const DEVICE_EVENT_FIELDS: Record<string, string[]> = {
     'heaterRequestedOutputPermille',
     'heaterOutputPermille',
     'measurementValid',
+    'measurementAccepted',
     'phase',
     'fan',
   ],
@@ -153,6 +155,11 @@ function serializeDeviceValue(value: unknown, path: string): string {
   const keys = (DEVICE_EVENT_FIELDS[path] ?? Object.keys(object)).filter((key) => {
     if (key === 'timing') return object[key] != null
     if (path === 'event.sample' && key === 'fan') return object[key] != null
+    if (
+      path === 'event.sample' &&
+      (key === 'rawTemperatureCentiC' || key === 'measurementAccepted')
+    )
+      return object[key] != null
     if (path.endsWith('.timing')) {
       if (key === 'configuredApproachFloorPermille') return Number(object[key] ?? 0) !== 0
       if (key === 'modelApproachFloorPermille') return object[key] != null

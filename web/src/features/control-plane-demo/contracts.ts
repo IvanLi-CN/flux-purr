@@ -253,6 +253,7 @@ export interface ThermalTuningSample {
   candidateId: string
   candidateHash: string
   temperatureCentiC: number
+  rawTemperatureCentiC?: number
   vinMv: number
   ppsContract: {
     voltageMv: number
@@ -265,6 +266,7 @@ export interface ThermalTuningSample {
   heaterRequestedOutputPermille: number
   heaterOutputPermille: number
   measurementValid: boolean
+  measurementAccepted?: boolean
   phase: ThermalTuningPhase
   fan?: { enabled: boolean; pwmPermille: number; outputLevel: FanOutputLevel }
 }

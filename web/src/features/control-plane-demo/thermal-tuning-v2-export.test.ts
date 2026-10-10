@@ -194,6 +194,15 @@ describe('Web thermal-tuning-v2 export', () => {
           : sample.heaterRequestedOutputPermille,
     }))
     expect(verifyTimingSamples(brakingTrial.timing, 60, brakingSamples).verified).toBe(true)
+    expect(
+      verifyTimingSamples(
+        brakingTrial.timing,
+        60,
+        brakingSamples.map((sample, index) =>
+          index === 4 ? { ...sample, measurementAccepted: false } : sample
+        )
+      ).verified
+    ).toBe(false)
     expect(verifyTimingSamples(brakingTrial.timing, 60, samples).verified).toBe(false)
     expect(
       verifyTimingSamples(brakingTrial.timing, 60, [

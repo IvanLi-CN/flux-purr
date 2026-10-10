@@ -2822,10 +2822,7 @@ fn runtime_record_thermal_tuning_sample(
     pid_snapshot: HeaterPidSnapshot,
     requested_duty_percent: u8,
 ) -> bool {
-    if !state.thermal_tuning.armed {
-        return false;
-    }
-    if state.tuning_pd_wait_started_ms.is_some() {
+    if !state.thermal_tuning.armed || state.tuning_pd_wait_started_ms.is_some() {
         return false;
     }
     let Some(observation) = state.last_pd_observation else {
@@ -2903,6 +2900,7 @@ fn runtime_record_thermal_tuning_sample(
         heater_requested_output_permille: u16::from(requested_duty_percent).saturating_mul(10),
         heater_output_permille: u16::from(state.last_heater_duty).saturating_mul(10),
         measurement_valid: temperature.measurement_valid,
+        measurement_accepted: Some(temperature.measurement_accepted),
         phase,
         fan: Some(tuning_fan_sample(state.fan_command)),
     };

@@ -12368,7 +12368,26 @@ fn tuning_temperature_uses_retained_control_for_guarded_raw_jump() {
         tuning_temperature_evidence_with_control(51.54, 43.13, false, true, Some(278_552), 278_661);
     assert_eq!(reading.temperature_centi_c, 4_313);
     assert!(reading.measurement_valid);
+    assert!(!reading.measurement_accepted);
     assert!(!reading.cooldown_admission_ready);
+    let stale = tuning_temperature_evidence_with_control(
+        43.13,
+        43.13,
+        false,
+        false,
+        Some(278_552),
+        278_661,
+    );
+    assert!(!stale.measurement_accepted);
+    let recovered = tuning_temperature_evidence_with_control(
+        43.14,
+        43.14,
+        false,
+        false,
+        Some(278_661),
+        278_661,
+    );
+    assert!(recovered.measurement_accepted);
 }
 
 #[test]

@@ -8,6 +8,7 @@ use flux_purr_firmware::heater_phase::{HOLD_ENTRY_BELOW_C, hold_entry_ready};
 pub(crate) struct TuningTemperatureEvidence {
     pub(crate) temperature_centi_c: i16,
     pub(crate) measurement_valid: bool,
+    pub(crate) measurement_accepted: bool,
     pub(crate) cooldown_admission_ready: bool,
 }
 
@@ -20,12 +21,13 @@ pub(crate) fn tuning_temperature_evidence(
     sample_elapsed_ms: u64,
 ) -> TuningTemperatureEvidence {
     let measurement_valid = !sensor_fault && live_rtd_temp_c.is_finite();
+    let measurement_accepted =
+        measurement_valid && !control_guarded && control_accepted_at_ms == Some(sample_elapsed_ms);
     TuningTemperatureEvidence {
         temperature_centi_c: (live_rtd_temp_c * 100.0).round() as i16,
         measurement_valid,
-        cooldown_admission_ready: measurement_valid
-            && !control_guarded
-            && control_accepted_at_ms == Some(sample_elapsed_ms),
+        measurement_accepted,
+        cooldown_admission_ready: measurement_accepted,
     }
 }
 
@@ -40,12 +42,13 @@ pub(crate) fn tuning_temperature_evidence_with_control(
 ) -> TuningTemperatureEvidence {
     let measurement_valid =
         !sensor_fault && live_rtd_temp_c.is_finite() && control_temp_c.is_finite();
+    let measurement_accepted =
+        measurement_valid && !control_guarded && control_accepted_at_ms == Some(sample_elapsed_ms);
     TuningTemperatureEvidence {
         temperature_centi_c: (control_temp_c * 100.0).round() as i16,
         measurement_valid,
-        cooldown_admission_ready: measurement_valid
-            && !control_guarded
-            && control_accepted_at_ms == Some(sample_elapsed_ms),
+        measurement_accepted,
+        cooldown_admission_ready: measurement_accepted,
     }
 }
 

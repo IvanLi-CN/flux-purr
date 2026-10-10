@@ -847,6 +847,7 @@ fn replay_firmware_trials_and_capture_decisions(
             heater_requested_output_permille: 0,
             heater_output_permille: 0,
             measurement_valid: true,
+            measurement_accepted: None,
             phase: ThermalTuningPhase::Cooldown,
             fan: None,
         };

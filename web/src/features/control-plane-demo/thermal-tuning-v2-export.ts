@@ -731,7 +731,8 @@ export function verifyTimingSamples(
     if (
       witness?.phase !== 'approach' ||
       witness.heaterRequestedOutputPermille !== timingPolicyFloor(timing) ||
-      witness.measurementValid !== true
+      witness.measurementValid !== true ||
+      witness.measurementAccepted === false
     )
       reasons.push(`missing_real_${timingPolicyFloor(timing)}_permille_floor_sample`)
     let stableStart: number | null = null
@@ -753,6 +754,7 @@ export function verifyTimingSamples(
       lastTime = time
       if (
         sample.measurementValid === true &&
+        sample.measurementAccepted !== false &&
         typeof sample.temperatureCentiC === 'number' &&
         Math.abs(sample.temperatureCentiC - Number(target) * 100) <= 150
       )
@@ -797,6 +799,7 @@ export function verifyTimingSamples(
     window.some(
       (sample) =>
         sample.measurementValid !== true ||
+        sample.measurementAccepted === false ||
         typeof sample.temperatureCentiC !== 'number' ||
         Math.abs(sample.temperatureCentiC - Number(target) * 100) > 150
     )
