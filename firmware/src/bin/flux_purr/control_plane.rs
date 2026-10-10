@@ -1599,16 +1599,35 @@ fn transient_temperature_acceptance(
     samples: &[ThermalPlantTransientSample],
     temperatures_c: &[f32],
 ) -> [bool; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES] {
+    const COOLING_RISE_GRACE_TICKS: u16 = 200; // 10s on the persisted 50ms grid.
+    const COOLING_RISE_TOLERANCE_C: f32 = 1.0;
     let mut accepted = [true; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut previous_accepted_index = 0;
+    let cooling_start_index = samples.iter().enumerate().position(|(index, sample)| {
+        index > 0
+            && sample.duty_percent == 0
+            && samples[..index]
+                .iter()
+                .any(|previous| previous.duty_percent > 0)
+    });
     for index in 1..samples.len() {
         let elapsed_s = f32::from(
             samples[index].elapsed_ticks - samples[previous_accepted_index].elapsed_ticks,
         ) * HEATER_CONTROL_INTERVAL_MS as f32
             / 1_000.0;
-        if (temperatures_c[index] - temperatures_c[previous_accepted_index]).abs()
-            > RTD_CONTROL_MAX_SLEW_C_PER_S * elapsed_s
-        {
+        let slew_violation = (temperatures_c[index] - temperatures_c[previous_accepted_index])
+            .abs()
+            > RTD_CONTROL_MAX_SLEW_C_PER_S * elapsed_s;
+        let late_cooling_rise = cooling_start_index.is_some_and(|start| {
+            samples[index].duty_percent == 0
+                && samples[index]
+                    .elapsed_ticks
+                    .saturating_sub(samples[start].elapsed_ticks)
+                    >= COOLING_RISE_GRACE_TICKS
+                && temperatures_c[index] - temperatures_c[previous_accepted_index]
+                    > COOLING_RISE_TOLERANCE_C
+        });
+        if slew_violation || late_cooling_rise {
             // A rejected reading cannot move the origin for the next sample.
             // Preserve every raw sample and applied-power interval for audit.
             accepted[index] = false;

@@ -5469,6 +5469,45 @@ fn transient_thermal_fit_recovers_with_an_instantaneous_contact_spike() {
 }
 
 #[test]
+fn transient_thermal_fit_rejects_late_cooling_contact_excursions() {
+    let memory = synthetic_memory_config();
+    let (mut samples, count) = synthetic_trace(&memory, 25.0);
+    let cooling_start = (1..count)
+        .find(|index| samples[*index].duty_percent == 0)
+        .expect("synthetic trace has a cooling phase");
+    let spike_index = (cooling_start..count)
+        .find(|index| {
+            samples[*index]
+                .elapsed_ticks
+                .saturating_sub(samples[cooling_start].elapsed_ticks)
+                >= 400
+        })
+        .expect("synthetic trace has a late cooling sample");
+    let base_temp_c = projected_rtd_temperature_c(&memory, samples[spike_index - 1].raw_rtd_adc_mv)
+        .expect("synthetic temperature projects");
+    samples[spike_index].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(base_temp_c + 5.0);
+    let data = prepare_transient_fit(
+        &samples,
+        count as u8,
+        None,
+        &memory,
+        samples[0].raw_rtd_adc_mv,
+    )
+    .expect("a late cooling contact excursion must be excluded, not abort the fit");
+    assert!(data.row(spike_index, 0).is_none());
+    let (_, residual) = fit_thermal_plant_transient(
+        321,
+        samples[0].raw_rtd_adc_mv,
+        &samples,
+        count as u8,
+        None,
+        &memory,
+    )
+    .expect("the physical trace remains fit-capable after excluding the excursion");
+    assert!(residual <= 0.20);
+}
+
+#[test]
 fn transient_thermal_fit_cannot_use_a_spike_for_heating_coverage() {
     let memory = synthetic_memory_config();
     let (mut samples, count) = synthetic_trace(&memory, 25.0);
