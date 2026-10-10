@@ -371,6 +371,7 @@ fn power_command_admission_decision(
     idle: bool,
     active_owner: Option<PowerIntentOwner>,
     inflight_refresh: bool,
+    inflight_idle: bool,
 ) -> PowerCommandAdmissionDecision {
     if should_join_refresh(refresh, inflight_refresh) {
         return PowerCommandAdmissionDecision::JoinRefresh;
@@ -378,7 +379,10 @@ fn power_command_admission_decision(
     let Some(active_owner) = active_owner else {
         return PowerCommandAdmissionDecision::Dispatch;
     };
-    if idle || owner.is_some_and(|owner| owner.priority() > active_owner.priority()) {
+    if idle
+        || (inflight_idle && owner.is_some() && !refresh)
+        || owner.is_some_and(|owner| owner.priority() > active_owner.priority())
+    {
         PowerCommandAdmissionDecision::SupersedeInflight
     } else {
         PowerCommandAdmissionDecision::SupersedeIncoming
@@ -852,6 +856,7 @@ where
         idle,
         transition.inflight.map(|(active_owner, _)| active_owner),
         *transition.inflight_refresh,
+        *transition.inflight_idle,
     ) {
         PowerCommandAdmissionDecision::JoinRefresh => {
             if transition.joined_refresh.push(ticket).is_err() {
@@ -1886,11 +1891,11 @@ mod tests {
         let automatic = Some(PowerIntentOwner::AutomaticThermal);
 
         assert_eq!(
-            power_command_admission_decision(None, true, false, calibration, true),
+            power_command_admission_decision(None, true, false, calibration, true, false),
             PowerCommandAdmissionDecision::JoinRefresh,
         );
         assert_eq!(
-            power_command_admission_decision(None, false, true, calibration, false),
+            power_command_admission_decision(None, false, true, calibration, false, true),
             PowerCommandAdmissionDecision::SupersedeInflight,
         );
         assert_eq!(
@@ -1900,6 +1905,18 @@ mod tests {
                 false,
                 automatic,
                 false,
+                false,
+            ),
+            PowerCommandAdmissionDecision::SupersedeInflight,
+        );
+        assert_eq!(
+            power_command_admission_decision(
+                Some(PowerIntentOwner::AutomaticThermal),
+                false,
+                false,
+                automatic,
+                false,
+                true,
             ),
             PowerCommandAdmissionDecision::SupersedeInflight,
         );
@@ -1910,11 +1927,12 @@ mod tests {
                 false,
                 calibration,
                 false,
+                false,
             ),
             PowerCommandAdmissionDecision::SupersedeIncoming,
         );
         assert_eq!(
-            power_command_admission_decision(None, false, false, None, false),
+            power_command_admission_decision(None, false, false, None, false, false),
             PowerCommandAdmissionDecision::Dispatch,
         );
         assert!(deferred_command_is_replaced(
