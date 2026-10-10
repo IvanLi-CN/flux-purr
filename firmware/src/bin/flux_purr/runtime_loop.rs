@@ -1521,6 +1521,7 @@ pub(crate) fn runtime_apply_rtd_sample(
                     measurement_guard: &mut state.rtd_control_measurement_guard,
                     control_measurement_guarded: &mut state.control_measurement_guarded,
                     heater_controller: &mut state.heater_controller,
+                    applied_heater_duty_percent: state.last_heater_duty,
                 },
                 current_request_mv,
                 elapsed_ms,

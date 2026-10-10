@@ -1523,18 +1523,12 @@ pub(crate) fn prepare_transient_fit(
     let mut powers_mw = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut input_energy_mw_ticks = [0.0; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut rows = [None; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
-    let mut powered_max_temp_c = f32::MIN;
-    let mut powered_peak_index = None;
     for (index, sample) in samples[..count].iter().enumerate() {
         let temperature_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)?;
         let power_mw =
             transient_sample_power_mw(*sample, temperature_c, preview_heater_curve, memory_config)?;
         if !temperature_c.is_finite() || !power_mw.is_finite() || power_mw < 0.0 {
             return None;
-        }
-        if sample.duty_percent == 100 && temperature_c > powered_max_temp_c {
-            powered_max_temp_c = temperature_c;
-            powered_peak_index = Some(index);
         }
         temperatures_c[index] = temperature_c;
         powers_mw[index] = power_mw;
@@ -1554,14 +1548,19 @@ pub(crate) fn prepare_transient_fit(
                 input_energy_mw_ticks[index - 1] + mean_power * f32::from(ticks);
         }
     }
-    let powered_peak_index = powered_peak_index?;
+    let accepted = transient_temperature_acceptance(&samples[..count], &temperatures_c[..count]);
+    let powered_peak_index = (0..count)
+        .filter(|index| accepted[*index] && samples[*index].duty_percent == 100)
+        .max_by(|left, right| temperatures_c[*left].total_cmp(&temperatures_c[*right]))?;
     let last_sample_is_cooling = samples[..count]
         .last()
         .is_some_and(|sample| sample.duty_percent == 0);
     if !thermal_plant_heating_sample_covers_target(
         memory_config,
         samples[powered_peak_index].raw_rtd_adc_mv,
-    ) || (temperatures_c[0] - ambient_temp_c).abs() > 8.0
+    ) || !accepted[0]
+        || !accepted[count - 1]
+        || (temperatures_c[0] - ambient_temp_c).abs() > 8.0
         || powered_peak_index + 1 >= count
         || !last_sample_is_cooling
         || temperatures_c[count - 1] > THERMAL_PLANT_COOL_COMPLETE_TEMP_C
@@ -1569,6 +1568,12 @@ pub(crate) fn prepare_transient_fit(
         return None;
     }
     for (index, row) in rows[..count].iter_mut().enumerate().skip(1) {
+        let Some(previous_index) = transient_fit_previous_index(&samples[..count], index) else {
+            continue;
+        };
+        if accepted[previous_index.saturating_sub(1)..=index].contains(&false) {
+            continue;
+        }
         if let Some((values, _)) = transient_fit_row(
             &samples[..count],
             &temperatures_c[..count],
@@ -1577,10 +1582,7 @@ pub(crate) fn prepare_transient_fit(
             0,
             ambient_temp_c,
         ) {
-            *row = Some((
-                values,
-                transient_fit_previous_index(&samples[..count], index)? as u8,
-            ));
+            *row = Some((values, previous_index as u8));
         }
     }
     Some(TransientFitData {
@@ -1590,6 +1592,31 @@ pub(crate) fn prepare_transient_fit(
         input_energy_mw_ticks,
         rows,
     })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn transient_temperature_acceptance(
+    samples: &[ThermalPlantTransientSample],
+    temperatures_c: &[f32],
+) -> [bool; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES] {
+    let mut accepted = [true; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut previous_accepted_index = 0;
+    for index in 1..samples.len() {
+        let elapsed_s = f32::from(
+            samples[index].elapsed_ticks - samples[previous_accepted_index].elapsed_ticks,
+        ) * HEATER_CONTROL_INTERVAL_MS as f32
+            / 1_000.0;
+        if (temperatures_c[index] - temperatures_c[previous_accepted_index]).abs()
+            > RTD_CONTROL_MAX_SLEW_C_PER_S * elapsed_s
+        {
+            // A rejected reading cannot move the origin for the next sample.
+            // Preserve every raw sample and applied-power interval for audit.
+            accepted[index] = false;
+        } else {
+            previous_accepted_index = index;
+        }
+    }
+    accepted
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

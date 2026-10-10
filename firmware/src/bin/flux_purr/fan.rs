@@ -877,6 +877,7 @@ pub(crate) struct RuntimeControlTemperatureState<'a> {
     pub(crate) measurement_guard: &'a mut RtdControlMeasurementGuard,
     pub(crate) control_measurement_guarded: &'a mut bool,
     pub(crate) heater_controller: &'a mut HeaterController,
+    pub(crate) applied_heater_duty_percent: u8,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -893,14 +894,17 @@ pub(crate) fn apply_valid_rtd_measurement(
         display.latest_display_temp_i16,
         measurement_temp_c,
     );
-    if let Some(control_temp_c) = accept_rtd_control_sample_after_pps_transition(
+    if let Some(control_temp_c) = accept_rtd_control_sample_after_pps_transition_with_output(
         control.transition_guard,
         control.heater_controller,
         control.measurement_guard,
         *control.latest_control_temp_c,
         request_mv,
         now_ms,
-        measurement_temp_c,
+        RtdControlObservation {
+            temperature_c: measurement_temp_c,
+            applied_heater_duty_percent: control.applied_heater_duty_percent,
+        },
     ) {
         *control.latest_control_temp_c = control_temp_c;
         *control.latest_control_temp_i16 = temp_c_to_whole_c(control_temp_c);
@@ -1063,7 +1067,7 @@ pub(crate) fn preserve_rtd_control_guard_when_heater_disabled(
     }
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 pub(crate) fn accept_rtd_control_sample_after_pps_transition(
     transition_guard: &mut RtdPpsTransitionGuard,
     heater_controller: &mut HeaterController,
@@ -1072,6 +1076,37 @@ pub(crate) fn accept_rtd_control_sample_after_pps_transition(
     request_mv: u16,
     now_ms: u64,
     measurement_temp_c: f32,
+) -> Option<f32> {
+    let applied_heater_duty_percent = heater_controller.duty_percent;
+    accept_rtd_control_sample_after_pps_transition_with_output(
+        transition_guard,
+        heater_controller,
+        measurement_guard,
+        last_control_temp_c,
+        request_mv,
+        now_ms,
+        RtdControlObservation {
+            temperature_c: measurement_temp_c,
+            applied_heater_duty_percent,
+        },
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+struct RtdControlObservation {
+    temperature_c: f32,
+    applied_heater_duty_percent: u8,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn accept_rtd_control_sample_after_pps_transition_with_output(
+    transition_guard: &mut RtdPpsTransitionGuard,
+    heater_controller: &mut HeaterController,
+    measurement_guard: &mut RtdControlMeasurementGuard,
+    last_control_temp_c: f32,
+    request_mv: u16,
+    now_ms: u64,
+    observation: RtdControlObservation,
 ) -> Option<f32> {
     let (accept_control_sample, reseed_filter) = transition_guard.observe(request_mv, now_ms);
     if reseed_filter {
@@ -1082,14 +1117,14 @@ pub(crate) fn accept_rtd_control_sample_after_pps_transition(
     let accepted = accept_control_sample
         .then(|| {
             measurement_guard.observe_with_heater_duty(
-                measurement_temp_c,
+                observation.temperature_c,
                 now_ms,
-                heater_controller.duty_percent,
+                observation.applied_heater_duty_percent,
             )
         })
         .flatten();
     if was_guarded && accepted.is_some() {
-        heater_controller.reseed_measurement(measurement_temp_c);
+        heater_controller.reseed_measurement(observation.temperature_c);
     }
     accepted
 }

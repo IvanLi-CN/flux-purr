@@ -5400,6 +5400,97 @@ fn assert_synthetic_invalid_trace_guards(
 }
 
 #[test]
+fn transient_thermal_fit_excludes_captured_instantaneous_spike_windows() {
+    let rows: std::vec::Vec<[u32; 4]> = serde_json::from_str(include_str!(
+        "../../../testdata/thermal-plant-a-spike-trace.json"
+    ))
+    .unwrap();
+    let mut memory = MemoryConfig::default();
+    for (index, (temp_centi_c, resistance_milliohms)) in [
+        (0, 2948),
+        (2000, 3200),
+        (10046, 4212),
+        (14079, 4719),
+        (17585, 5160),
+        (20665, 5547),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        memory.active_heater_curve.points[index] = Some(HeaterCurvePoint {
+            temp_centi_c,
+            resistance_milliohms,
+        });
+    }
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (sample, row) in samples.iter_mut().zip(&rows) {
+        *sample = ThermalPlantTransientSample {
+            elapsed_ticks: row[0] as u16,
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(row[1] as f32 / 100.0),
+            heater_voltage_125mv: row[2] as u8,
+            duty_percent: row[3] as u8,
+        };
+    }
+    let data = prepare_transient_fit(
+        &samples,
+        rows.len() as u8,
+        None,
+        &memory,
+        samples[0].raw_rtd_adc_mv,
+    )
+    .unwrap();
+    let peak_index = rows.iter().position(|row| row[1] == 8014).unwrap();
+    assert!(data.row(peak_index, 0).is_none());
+    assert!(data.row(peak_index + 1, 0).is_none());
+    assert!(data.row(rows.len() - 1, 0).is_some());
+}
+
+#[test]
+fn transient_thermal_fit_recovers_with_an_instantaneous_contact_spike() {
+    let memory = synthetic_memory_config();
+    let (mut samples, count) = synthetic_trace(&memory, 25.0);
+    samples[5].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(280.0);
+    let (transaction, residual) = fit_thermal_plant_transient(
+        123,
+        samples[0].raw_rtd_adc_mv,
+        &samples,
+        count as u8,
+        None,
+        &memory,
+    )
+    .expect("an isolated contact spike must not corrupt a physical trace");
+    assert_eq!(transaction.samples, samples);
+    assert!(residual <= 0.20);
+}
+
+#[test]
+fn transient_thermal_fit_cannot_use_a_spike_for_heating_coverage() {
+    let memory = synthetic_memory_config();
+    let (mut samples, count) = synthetic_trace(&memory, 25.0);
+    for sample in &mut samples[..count] {
+        sample.raw_rtd_adc_mv = sample
+            .raw_rtd_adc_mv
+            .min(runtime_test_raw_rtd_adc_mv_for_temp(200.0));
+    }
+    samples[5].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(280.0);
+    assert!(
+        prepare_transient_fit(
+            &samples,
+            count as u8,
+            None,
+            &memory,
+            samples[0].raw_rtd_adc_mv
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn transient_thermal_fit_recovers_a_physical_model_from_heat_and_cool_trace() {
     let ambient_temp_c = 25.0_f32;
     let mut memory_config = synthetic_memory_config();
@@ -12595,6 +12686,44 @@ fn pps_transition_reseed_keeps_last_trusted_control_temperature() {
 }
 
 #[test]
+fn rtd_guard_accepts_calibration_heating_with_idle_production_controller() {
+    let mut ui = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    let mut control_temp = 30.0;
+    let mut control_whole = 30;
+    let mut display_temp = 30.0;
+    let mut display_whole = 30;
+    let mut transition = RtdPpsTransitionGuard::new(21_000);
+    let mut measurement = RtdControlMeasurementGuard::default();
+    measurement.reseed(30.0, 0);
+    let mut guarded = false;
+    let mut controller = HeaterController::new();
+    // Calibration owns the applied 100% MOS output; production remains idle.
+    assert_eq!(controller.duty_percent, 0);
+    apply_valid_rtd_measurement(
+        RuntimeDisplayTemperatureState {
+            ui_state: &mut ui,
+            latest_display_temp_c: &mut display_temp,
+            latest_display_temp_i16: &mut display_whole,
+        },
+        RuntimeControlTemperatureState {
+            latest_control_temp_c: &mut control_temp,
+            latest_control_temp_i16: &mut control_whole,
+            transition_guard: &mut transition,
+            measurement_guard: &mut measurement,
+            control_measurement_guarded: &mut guarded,
+            heater_controller: &mut controller,
+            applied_heater_duty_percent: 100,
+        },
+        21_000,
+        100,
+        32.0,
+    );
+    assert_eq!(control_temp, 32.0);
+    assert!(!guarded);
+    assert_eq!(controller.duty_percent, 0);
+}
+
+#[test]
 fn rtd_control_guard_rejects_impossible_jump_without_hiding_raw_temperature() {
     let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
     let mut latest_control_temp_c = 140.0;
@@ -12620,6 +12749,7 @@ fn rtd_control_guard_rejects_impossible_jump_without_hiding_raw_temperature() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         12_000,
         50,
@@ -13203,6 +13333,7 @@ fn valid_rtd_measurement_promotes_startup_dashboard_to_ready() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         12_000,
         100,
@@ -13293,6 +13424,7 @@ fn valid_rtd_measurement_updates_display_and_control_on_request_change() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         15_000,
         100,
@@ -13344,6 +13476,7 @@ fn five_amp_power_step_retry_continues_through_runtime_sampling_pipeline() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         20_000,
         100,
@@ -13409,6 +13542,7 @@ fn valid_rtd_measurement_updates_control_after_request_stabilizes() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         15_000,
         100,
@@ -13427,6 +13561,7 @@ fn valid_rtd_measurement_updates_control_after_request_stabilizes() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         15_000,
         700,
@@ -13449,6 +13584,7 @@ fn valid_rtd_measurement_updates_control_after_request_stabilizes() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         15_000,
         1_000,
