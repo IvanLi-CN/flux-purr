@@ -142,13 +142,28 @@ pub(crate) fn tuning_pps_transition_decision(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[allow(dead_code)]
-pub(crate) fn pd_contract_negotiation_in_progress(power_state: PowerState) -> bool {
-    matches!(
+pub(crate) fn pd_contract_transition_in_progress(power_state: PowerState) -> bool {
+    if matches!(
         power_state.protocol,
         PowerProtocol::Discovering
             | PowerProtocol::WaitingForAccept
             | PowerProtocol::WaitingForPsRdy
-    )
+    ) {
+        return true;
+    }
+    power_state.protocol == PowerProtocol::Ready
+        && power_state.failure.is_none()
+        && power_state
+            .active
+            .is_some_and(|active| active.mode == PdContractRequestMode::Fixed)
+        && power_state
+            .source_capabilities
+            .pps
+            .iter()
+            .flatten()
+            .any(|range| {
+                range.max_mv >= FUSB302B_PD_ABSOLUTE_MIN_MV && range.max_current_ma >= 3_000
+            })
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -278,7 +293,7 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
         &mut state.heater_pwm,
         &mut state.last_heater_duty,
         state.pending_automatic_pps.is_some()
-            || pd_contract_negotiation_in_progress(state.power_state),
+            || pd_contract_transition_in_progress(state.power_state),
     );
     match tuning_power_decision {
         Some(TuningPdWaitDecision::Ready) if state.tuning_pd_wait_started_ms.is_some() => {
@@ -959,7 +974,7 @@ pub(crate) async fn runtime_reconcile_network_state(
         &mut state.heater_pwm,
         &mut state.last_heater_duty,
         state.pending_automatic_pps.is_some()
-            || pd_contract_negotiation_in_progress(state.power_state),
+            || pd_contract_transition_in_progress(state.power_state),
     );
 
     needs_redraw |= disarm_pending_thermal_plant_output(ThermalPlantDisarmContext {
@@ -1750,7 +1765,7 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         calibration_live_rtd_temp_c,
         state.latest_temp_c,
     );
-    let pd_contract_negotiating = pd_contract_negotiation_in_progress(state.power_state);
+    let pd_contract_negotiating = pd_contract_transition_in_progress(state.power_state);
     let force_output_off = !state.pd_contract_ready
         || thermal_plant_output_must_be_off(
             state.calibration_runtime_state,
@@ -2004,7 +2019,7 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         elapsed_ms,
     } = context;
     let allow_pending_pps_progress = (state.pending_automatic_pps.is_some()
-        || pd_contract_negotiation_in_progress(state.power_state))
+        || pd_contract_transition_in_progress(state.power_state))
         && !thermal_plant_calibration_running
         && state.current_rtd_fault.is_none()
         && state.heater_controller.fault_latched().is_none()
@@ -3002,7 +3017,7 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
             &mut state.heater_pwm,
             &mut state.last_heater_duty,
             state.pending_automatic_pps.is_some()
-                || pd_contract_negotiation_in_progress(state.power_state),
+                || pd_contract_transition_in_progress(state.power_state),
         );
         state.ui_refresh_pending = pd_redraw_after_flush;
         match display_flush_result {
