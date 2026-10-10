@@ -284,6 +284,16 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
         state.tuning_pd_wait_started_ms.get_or_insert(elapsed_ms);
         state.tuning_heater_rearm_pending |= state.ui_state.heater_enabled;
     }
+    let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
+        state.heater_power_backend,
+        state.ui_state.heater_enabled,
+        state.manual_pps_state.enabled,
+        thermal_model_heater_allowed(
+            &state.memory_config,
+            state.calibration_runtime_state,
+            state.manual_pps_state,
+        ),
+    );
     needs_redraw |= apply_pd_contract_observation(
         current_pd_observation,
         &mut state.pd_contract_ready,
@@ -293,7 +303,8 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
         &mut state.heater_pwm,
         &mut state.last_heater_duty,
         state.pending_automatic_pps.is_some()
-            || pd_contract_transition_in_progress(state.power_state),
+            || pd_contract_transition_in_progress(state.power_state)
+            || automatic_pps_start_allowed,
     );
     match tuning_power_decision {
         Some(TuningPdWaitDecision::Ready) if state.tuning_pd_wait_started_ms.is_some() => {
@@ -965,6 +976,16 @@ pub(crate) async fn runtime_reconcile_network_state(
         state.memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
     }
 
+    let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
+        state.heater_power_backend,
+        state.ui_state.heater_enabled,
+        state.manual_pps_state.enabled,
+        thermal_model_heater_allowed(
+            &state.memory_config,
+            state.calibration_runtime_state,
+            state.manual_pps_state,
+        ),
+    );
     needs_redraw |= apply_pd_contract_observation(
         state.last_pd_observation,
         &mut state.pd_contract_ready,
@@ -974,7 +995,8 @@ pub(crate) async fn runtime_reconcile_network_state(
         &mut state.heater_pwm,
         &mut state.last_heater_duty,
         state.pending_automatic_pps.is_some()
-            || pd_contract_transition_in_progress(state.power_state),
+            || pd_contract_transition_in_progress(state.power_state)
+            || automatic_pps_start_allowed,
     );
 
     needs_redraw |= disarm_pending_thermal_plant_output(ThermalPlantDisarmContext {
@@ -1795,6 +1817,12 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         state.calibration_runtime_state,
         state.manual_pps_state,
     );
+    let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
+        state.heater_power_backend,
+        state.ui_state.heater_enabled,
+        state.manual_pps_state.enabled,
+        model_allowed,
+    );
     let persistence_locked = state.ui_state.persistence_locked();
     let mut desired_heater_enabled = reconcile_runtime_heater_enabled(
         state.ui_state.heater_enabled,
@@ -1803,7 +1831,10 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         state.cooling_disabled_lock_latched,
         state.heater_controller.fault_latched().is_some(),
         model_allowed,
-        state.pd_contract_ready || state.pending_automatic_pps.is_some() || pd_contract_negotiating,
+        state.pd_contract_ready
+            || state.pending_automatic_pps.is_some()
+            || pd_contract_negotiating
+            || automatic_pps_start_allowed,
     );
     desired_heater_enabled = consume_thermal_plant_completion_disarm(
         &mut state.calibration_runtime_state,
@@ -1816,7 +1847,11 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         state.ui_state.heater_enabled = desired_heater_enabled;
         needs_redraw = true;
     }
-    if force_output_off && state.pending_automatic_pps.is_none() && !pd_contract_negotiating {
+    if force_output_off
+        && state.pending_automatic_pps.is_none()
+        && !pd_contract_negotiating
+        && !automatic_pps_start_allowed
+    {
         state.ui_state.heater_enabled = false;
     }
     if state.thermal_tuning.armed
@@ -2018,8 +2053,19 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         control_started_ms,
         elapsed_ms,
     } = context;
+    let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
+        state.heater_power_backend,
+        state.ui_state.heater_enabled,
+        state.manual_pps_state.enabled,
+        thermal_model_heater_allowed(
+            &state.memory_config,
+            state.calibration_runtime_state,
+            state.manual_pps_state,
+        ),
+    );
     let allow_pending_pps_progress = (state.pending_automatic_pps.is_some()
-        || pd_contract_transition_in_progress(state.power_state))
+        || pd_contract_transition_in_progress(state.power_state)
+        || automatic_pps_start_allowed)
         && !thermal_plant_calibration_running
         && state.current_rtd_fault.is_none()
         && state.heater_controller.fault_latched().is_none()
@@ -3008,6 +3054,16 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
             &mut state.last_heater_duty,
         )
         .await;
+        let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
+            state.heater_power_backend,
+            state.ui_state.heater_enabled,
+            state.manual_pps_state.enabled,
+            thermal_model_heater_allowed(
+                &state.memory_config,
+                state.calibration_runtime_state,
+                state.manual_pps_state,
+            ),
+        );
         let pd_redraw_after_flush = apply_pd_contract_observation(
             state.last_pd_observation,
             &mut state.pd_contract_ready,
@@ -3017,7 +3073,8 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
             &mut state.heater_pwm,
             &mut state.last_heater_duty,
             state.pending_automatic_pps.is_some()
-                || pd_contract_transition_in_progress(state.power_state),
+                || pd_contract_transition_in_progress(state.power_state)
+                || automatic_pps_start_allowed,
         );
         state.ui_refresh_pending = pd_redraw_after_flush;
         match display_flush_result {

@@ -253,6 +253,8 @@ pub struct ControlPlaneStatus {
     pub heater_output_percent: u8,
     #[serde(default)]
     pub heater_physical_output_percent: u8,
+    #[serde(default)]
+    pub heater_power_backend: String<ERROR_CODE_MAX_LEN>,
     pub active_cooling_enabled: bool,
     #[serde(default)]
     pub post_heat_cooling_mode: PostHeatCoolingMode,
@@ -569,6 +571,7 @@ impl ControlPlaneStatus {
                 heater_enabled: matches!(status.mode, DeviceMode::Sampling),
                 heater_output_percent,
                 heater_physical_output_percent: status.heater_physical_output_percent.min(100),
+                heater_power_backend: string("unknown"),
                 active_cooling_enabled: memory.active_cooling_enabled,
                 post_heat_cooling_mode: memory.post_heat_cooling_mode,
                 heating_fan_guard_mode: memory.heating_fan_guard_mode,

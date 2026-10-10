@@ -1629,6 +1629,19 @@ impl HeaterPowerBackend {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_pps_transition_can_preserve_heater_intent(
+    backend: HeaterPowerBackend,
+    heater_enabled: bool,
+    manual_pps_enabled: bool,
+    thermal_model_allowed: bool,
+) -> bool {
+    heater_enabled
+        && !manual_pps_enabled
+        && thermal_model_allowed
+        && matches!(backend, HeaterPowerBackend::PpsMos { .. })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn effective_pd_contract_mv(
     manual_pps: &ManualPpsState,
     observation: Option<PdStatusObservation>,

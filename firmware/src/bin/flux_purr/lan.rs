@@ -1007,8 +1007,18 @@ pub(crate) fn process_calibration_job_frame(
             ),
         );
     }
+    let thermal_plant_can_establish_contract = matches!(
+        (command.op, command.kind),
+        (
+            CalibrationJobOpWire::Start,
+            Some(CalibrationJobKindWire::ThermalPlantAuto)
+        )
+    ) && context.pd_controller
+        == ControllerKind::Fusb302b
+        && context.manual_pps.thermal_plant_source_limits().is_some();
     if matches!(command.op, CalibrationJobOpWire::Start)
         && !pd_contract_allows_calibration(context.pd_controller, context.last_pd_observation)
+        && !thermal_plant_can_establish_contract
     {
         return (
             false,

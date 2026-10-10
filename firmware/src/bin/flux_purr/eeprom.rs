@@ -2318,12 +2318,16 @@ pub(crate) fn automatic_pps_request_mv(
     control_floor_mv: u16,
     safe_max_mv: u16,
 ) -> u16 {
+    // The tuning power-preparation stage is disarmed and exists only to
+    // establish the validated working contract before Warmup. Request the
+    // source ceiling directly instead of stepping through the idle 12V
+    // request; some sources expose the thermal APDO only at its high-voltage
+    // end and reject that intermediate request.
+    if tuning_power_stage {
+        return safe_max_mv.max(control_floor_mv);
+    }
     heater_adjustable_request_mv(
-        if tuning_power_stage {
-            100
-        } else {
-            duty_percent
-        },
+        duty_percent,
         heater_enabled,
         current_request_mv,
         idle_request_mv,
@@ -2498,11 +2502,12 @@ pub(crate) fn select_fusb302b_heater_power_backend(
 
     constrain_heater_backend_to_controller(
         ControllerKind::Fusb302b,
-        select_heater_power_backend_with_source_limits(
-            capabilities,
-            None,
-            ManualPpsState::from_fusb302b_capabilities(Some(capabilities)).heater_source_limits(),
-        ),
+        select_heater_power_backend_with_source_limits(capabilities, None, {
+            let source = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+            source
+                .thermal_plant_source_limits()
+                .or_else(|| source.heater_source_limits())
+        }),
     )
 }
 

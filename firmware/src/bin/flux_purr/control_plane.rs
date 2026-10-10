@@ -169,6 +169,7 @@ pub(crate) fn populate_status_control_and_faults(
         let _ = value.push_str(reason.label());
         value
     });
+    status.heater_power_backend = error_code_string(context.heater_power_backend.label());
     status.fault_attention_pending = context.attention_pending_after_fault_clear;
     status.persistence_fault = ui_state.persistence_fault.clone();
     status.persistence_fault_attention_pending = ui_state.persistence_fault_attention_pending;

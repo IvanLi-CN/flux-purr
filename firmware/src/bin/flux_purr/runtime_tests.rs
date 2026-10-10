@@ -9540,7 +9540,7 @@ fn heater_armed_zero_output_steps_toward_working_floor() {
 fn tuning_cooldown_stages_full_pps_voltage_without_heater_output() {
     assert_eq!(
         automatic_pps_request_mv(0, false, true, 12_000, 12_000, 6_100, 21_000),
-        12_500
+        21_000
     );
     assert_eq!(
         automatic_pps_request_mv(0, false, true, 21_000, 12_000, 6_100, 21_000),
@@ -11839,6 +11839,93 @@ fn current_limit_fixed_pwm_fallback_uses_hysteresis() {
 }
 
 #[test]
+fn current_limit_fallback_waits_for_a_confirmed_pps_contract() {
+    assert!(!current_limit_fallback_requires_confirmed_pps(None));
+
+    let fixed = PdStatusObservation {
+        status_raw: 0,
+        status: Status {
+            pd_active: true,
+            ..Status::default()
+        },
+        current_raw: 0,
+        current_ma: 1_000,
+        contract_voltage_mv: Some(5_000),
+        contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
+    };
+    assert!(!current_limit_fallback_requires_confirmed_pps(Some(fixed)));
+
+    let pps = PdStatusObservation {
+        contract: Contract::observed(ContractKind::Pps, 20_000, 3_000),
+        current_ma: 3_000,
+        contract_voltage_mv: Some(20_000),
+        ..fixed
+    };
+    assert!(current_limit_fallback_requires_confirmed_pps(Some(pps)));
+}
+
+#[test]
+fn automatic_pps_start_failure_retries_while_fixed_contract_is_confirmed() {
+    let fixed = PdStatusObservation {
+        status_raw: 0,
+        status: Status {
+            pd_active: true,
+            ..Status::default()
+        },
+        current_raw: 0,
+        current_ma: 1_000,
+        contract_voltage_mv: Some(5_000),
+        contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
+    };
+    assert!(retry_pps_startup_after_fixed_contract_failure(Some(fixed)));
+
+    let pps = PdStatusObservation {
+        contract: Contract::observed(ContractKind::Pps, 20_000, 3_000),
+        current_ma: 3_000,
+        contract_voltage_mv: Some(20_000),
+        ..fixed
+    };
+    assert!(!retry_pps_startup_after_fixed_contract_failure(Some(pps)));
+    assert!(!retry_pps_startup_after_fixed_contract_failure(None));
+}
+
+#[test]
+fn automatic_pps_start_preserves_heater_intent_from_fixed_standby() {
+    let backend = HeaterPowerBackend::PpsMos {
+        pps_min_mv: 5_500,
+        idle_request_mv: 5_500,
+        pps_max_mv: 21_000,
+        adjustable_max_mv: 21_000,
+        capability_max_ma: 3_000,
+        current_mode: None,
+        current_request_mv: 5_500,
+        settle_until_ms: None,
+        next_request_at_ms: 0,
+        current_limit_fixed_pwm_active: false,
+        current_limit_fixed_request_confirmed: false,
+        terminal_fixed_pd_disarmed: false,
+    };
+
+    assert!(automatic_pps_transition_can_preserve_heater_intent(
+        backend, true, false, true
+    ));
+    assert!(!automatic_pps_transition_can_preserve_heater_intent(
+        backend, true, true, true
+    ));
+    assert!(!automatic_pps_transition_can_preserve_heater_intent(
+        backend, true, false, false
+    ));
+}
+
+#[test]
+fn tuning_power_preparation_requests_the_source_ceiling_directly() {
+    assert_eq!(
+        automatic_pps_request_mv(0, false, true, 12_000, 12_000, 6_100, 21_000),
+        21_000
+    );
+}
+
+#[test]
 fn adjustable_working_floor_respects_capability_and_maximum() {
     let settings = ThermalControlProfileSettings {
         auto_adjustable_working_floor_mv: 6_100,
@@ -14025,6 +14112,35 @@ fn fusb302b_initial_backend_uses_fusb302b_request_bounds() {
 
     assert_eq!(pps_min_mv, FUSB302B_PPS_MIN_MV);
     assert_eq!(pps_max_mv, FUSB302B_PPS_MAX_MV);
+}
+
+#[test]
+fn fusb302b_accepts_high_voltage_only_three_amp_pps_apdo() {
+    let mut capabilities = ch224q::AdjustablePowerCapabilities {
+        pps_covers_20v: true,
+        pps_min_mv: Some(12_000),
+        pps_max_mv: Some(21_000),
+        pps_max_ma: Some(3_000),
+        ..ch224q::AdjustablePowerCapabilities::default()
+    };
+    capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 12_000,
+        max_mv: 21_000,
+        max_ma: 3_000,
+    });
+
+    let HeaterPowerBackend::PpsMos {
+        pps_min_mv,
+        pps_max_mv,
+        capability_max_ma,
+        ..
+    } = select_fusb302b_heater_power_backend(Some(capabilities))
+    else {
+        panic!("a 12-21V/3A APDO is a valid automatic heater source");
+    };
+    assert_eq!(pps_min_mv, 12_000);
+    assert_eq!(pps_max_mv, 21_000);
+    assert_eq!(capability_max_ma, 3_000);
 }
 
 #[test]

@@ -2,6 +2,9 @@
 use super::*;
 
 #[cfg(target_arch = "xtensa")]
+const PPS_REQUEST_RETRY_DELAY_MS: u64 = 200;
+
+#[cfg(target_arch = "xtensa")]
 fn await_working_fixed_contract(pd_port: &PdPort, request_mv: u16) -> bool {
     if working_fixed_contract_confirmed(pd_port.snapshot().settled_observation(), request_mv) {
         return true;
@@ -499,6 +502,44 @@ pub(crate) enum CurrentLimitContractResult {
     Failed,
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn current_limit_fallback_requires_confirmed_pps(
+    observation: Option<PdStatusObservation>,
+) -> bool {
+    observation.is_some_and(|observation| {
+        observation.status.pd_active && observation.contract.kind == ContractKind::Pps
+    })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn retry_pps_startup_after_fixed_contract_failure(
+    observation: Option<PdStatusObservation>,
+) -> bool {
+    observation.is_some_and(|observation| {
+        observation.status.pd_active && observation.contract.kind == ContractKind::Fixed
+    })
+}
+
+#[cfg(target_arch = "xtensa")]
+fn defer_automatic_pps_retry_after_fixed_failure<PWM>(
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
+) -> bool
+where
+    PWM: SetDutyCycle,
+{
+    if !retry_pps_startup_after_fixed_contract_failure(context.pd_observation) {
+        return false;
+    }
+    if let HeaterPowerBackend::PpsMos {
+        next_request_at_ms, ..
+    } = context.backend
+    {
+        *next_request_at_ms = context.now_ms.saturating_add(PPS_REQUEST_RETRY_DELAY_MS);
+    }
+    apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+    true
+}
+
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn ensure_current_limit_contract<PWM>(
     context: &mut HeaterPowerOutputContext<'_, PWM>,
@@ -581,6 +622,13 @@ where
     else {
         return None;
     };
+    // A fixed standby contract is only the starting point for an automatic
+    // heating request. It must negotiate the advertised PPS APDO first; the
+    // fixed-PWM fallback is reserved for a confirmed PPS contract whose
+    // current-limited ceiling really falls below the working floor.
+    if !current_limit_fallback_requires_confirmed_pps(context.pd_observation) {
+        return None;
+    }
     if !should_apply_current_limit_fixed_pwm_fallback(
         context.duty_percent,
         manual_pps_active,
@@ -851,6 +899,9 @@ where
         }
         PdRequestState::Confirmed => {}
         PdRequestState::Failed => {
+            if defer_automatic_pps_retry_after_fixed_failure(context) {
+                return Some(false);
+            }
             return Some(fallback_from_adjustable_request(context).await);
         }
     }
@@ -950,7 +1001,13 @@ where
                 blank_heater: pending.blank_heater,
             },
         )),
-        AutomaticPpsTicketDecision::Failed => Some(fallback_from_adjustable_request(context).await),
+        AutomaticPpsTicketDecision::Failed => {
+            if defer_automatic_pps_retry_after_fixed_failure(context) {
+                Some(false)
+            } else {
+                Some(fallback_from_adjustable_request(context).await)
+            }
+        }
         AutomaticPpsTicketDecision::Wait => None,
     }
 }
