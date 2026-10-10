@@ -1242,6 +1242,10 @@ pub(crate) fn record_thermal_plant_transient_sample(
     let cutoff_time_sample = job.phase == ThermalPlantAutoPhase::Cooling
         && job.elapsed_ticks.saturating_sub(job.phase_started_tick) <= 200
         && elapsed_ticks.saturating_sub(job.last_saved_tick) >= 10;
+    // Contact excursions must not consume the bounded trace at control cadence.
+    // Startup, duty edges, forced endpoints and cutoff timing remain independent.
+    let temperature_step_sample = elapsed_ticks.saturating_sub(job.last_saved_tick) >= 10
+        && (latest_temp_c - job.last_saved_temp_c).abs() >= THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C;
     let should_record = force
         || job.sample_count < 16
         || cutoff_time_sample
@@ -1249,7 +1253,7 @@ pub(crate) fn record_thermal_plant_transient_sample(
             .samples
             .get(usize::from(job.sample_count).saturating_sub(1))
             .is_some_and(|previous| previous.duty_percent != duty_percent)
-        || (latest_temp_c - job.last_saved_temp_c).abs() >= THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C;
+        || temperature_step_sample;
     if !should_record {
         return true;
     }
@@ -1601,6 +1605,7 @@ fn transient_temperature_acceptance(
 ) -> [bool; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES] {
     const COOLING_RISE_GRACE_TICKS: u16 = 200; // 10s on the persisted 50ms grid.
     const COOLING_RISE_TOLERANCE_C: f32 = 1.0;
+    const HEATING_CONTACT_EXCURSION_TOLERANCE_C: f32 = 3.0;
     let mut accepted = [true; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut previous_accepted_index = 0;
     let cooling_start_index = samples.iter().enumerate().position(|(index, sample)| {
@@ -1627,9 +1632,23 @@ fn transient_temperature_acceptance(
                 && temperatures_c[index] - temperatures_c[previous_accepted_index]
                     > COOLING_RISE_TOLERANCE_C
         });
-        if slew_violation || late_cooling_rise {
+        let heating_contact_excursion = index + 1 < samples.len()
+            && samples[index - 1].duty_percent > 0
+            && samples[index].duty_percent > 0
+            && samples[index + 1].duty_percent > 0
+            && ((temperatures_c[index] - temperatures_c[index - 1]
+                > HEATING_CONTACT_EXCURSION_TOLERANCE_C
+                && temperatures_c[index] - temperatures_c[index + 1]
+                    > HEATING_CONTACT_EXCURSION_TOLERANCE_C)
+                || (temperatures_c[index - 1] - temperatures_c[index]
+                    > HEATING_CONTACT_EXCURSION_TOLERANCE_C
+                    && temperatures_c[index + 1] - temperatures_c[index]
+                        > HEATING_CONTACT_EXCURSION_TOLERANCE_C));
+        if slew_violation || late_cooling_rise || heating_contact_excursion {
             // A rejected reading cannot move the origin for the next sample.
-            // Preserve every raw sample and applied-power interval for audit.
+            // Preserve every raw sample and applied-power interval for audit. The
+            // local heating excursion guard catches contact peaks/valleys whose
+            // individual slew stays below the absolute-rate threshold.
             accepted[index] = false;
         } else {
             previous_accepted_index = index;

@@ -5508,6 +5508,49 @@ fn transient_thermal_fit_rejects_late_cooling_contact_excursions() {
 }
 
 #[test]
+fn transient_thermal_fit_excludes_sub_slew_heating_contact_peaks() {
+    let memory = synthetic_memory_config();
+    let (mut samples, count) = synthetic_trace(&memory, 25.0);
+    let spike_index = (24..count - 1)
+        .find(|index| {
+            samples[*index + 1].duty_percent > 0
+                && samples[*index].elapsed_ticks - samples[*index - 1].elapsed_ticks >= 10
+                && samples[*index + 1].elapsed_ticks - samples[*index].elapsed_ticks >= 10
+        })
+        .expect("trace has a sparse powered interval");
+    let previous =
+        projected_rtd_temperature_c(&memory, samples[spike_index - 1].raw_rtd_adc_mv).unwrap();
+    let next =
+        projected_rtd_temperature_c(&memory, samples[spike_index + 1].raw_rtd_adc_mv).unwrap();
+    let peak = previous.max(next) + 5.0;
+    samples[spike_index].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(peak);
+    let elapsed_s =
+        f32::from(samples[spike_index].elapsed_ticks - samples[spike_index - 1].elapsed_ticks)
+            * 0.05;
+    assert!((peak - previous) / elapsed_s < RTD_CONTROL_MAX_SLEW_C_PER_S);
+    let data = prepare_transient_fit(
+        &samples,
+        count as u8,
+        None,
+        &memory,
+        samples[0].raw_rtd_adc_mv,
+    )
+    .expect("an isolated sub-slew contact peak must not invalidate the physical trace");
+    assert!(data.row(spike_index, 0).is_none());
+    let (transaction, residual) = fit_thermal_plant_transient(
+        1,
+        samples[0].raw_rtd_adc_mv,
+        &samples,
+        count as u8,
+        None,
+        &memory,
+    )
+    .expect("the accepted physical observations remain fit-capable");
+    assert_eq!(transaction.samples, samples);
+    assert!(residual <= 0.20);
+}
+
+#[test]
 fn transient_thermal_fit_cannot_use_a_spike_for_heating_coverage() {
     let memory = synthetic_memory_config();
     let (mut samples, count) = synthetic_trace(&memory, 25.0);
@@ -6431,6 +6474,59 @@ fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     assert_eq!(job.sample_count, 25);
     assert_eq!(job.samples[24].elapsed_ticks, 3);
     assert_eq!(job.samples[24].duty_percent, 0);
+}
+
+#[test]
+fn transient_temperature_steps_are_rate_limited_after_dense_startup() {
+    let mut job = CalibrationThermalPlantAutoJob {
+        run_id: 1,
+        phase: ThermalPlantAutoPhase::Heating,
+        source_max_mv: 21_000,
+        source_current_ma: 5_000,
+        ambient_raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+        idle_samples: THERMAL_PLANT_AMBIENT_TICKS,
+        heater_curve: ThermalPlantCurveSampler::default(),
+        elapsed_ticks: 16,
+        phase_started_tick: 0,
+        sample_count: 16,
+        last_saved_temp_c: 25.0,
+        last_saved_tick: 16,
+        samples: [ThermalPlantTransientSample {
+            elapsed_ticks: 0,
+            raw_rtd_adc_mv: 0,
+            heater_voltage_125mv: 0,
+            duty_percent: 0,
+        }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    };
+    job.samples[15] = ThermalPlantTransientSample {
+        elapsed_ticks: 16,
+        raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+        heater_voltage_125mv: 168,
+        duty_percent: 100,
+    };
+
+    job.elapsed_ticks = 17;
+    assert!(record_thermal_plant_transient_sample(
+        &mut job,
+        runtime_test_raw_rtd_adc_mv_for_temp(30.0),
+        30.0,
+        21_000,
+        100,
+        false,
+    ));
+    assert_eq!(job.sample_count, 16);
+
+    job.elapsed_ticks = 26;
+    assert!(record_thermal_plant_transient_sample(
+        &mut job,
+        runtime_test_raw_rtd_adc_mv_for_temp(35.0),
+        35.0,
+        21_000,
+        100,
+        false,
+    ));
+    assert_eq!(job.sample_count, 17);
+    assert_eq!(job.samples[16].elapsed_ticks, 26);
 }
 
 #[test]
