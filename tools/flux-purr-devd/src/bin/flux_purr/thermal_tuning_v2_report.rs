@@ -1054,14 +1054,23 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains(".selection-dock{position:sticky;top:0"));
         assert!(REPORT_TEMPLATE.contains("class=\"selection-dock\""));
         assert!(REPORT_TEMPLATE.contains("id=\"voltageEvidence\""));
+        assert!(REPORT_TEMPLATE.contains("function voltageTrace(samples)"));
+        assert!(REPORT_TEMPLATE.contains("sample.measurementAccepted!==false"));
+        assert!(REPORT_TEMPLATE.contains("sample.ppsContractMv!==previous.ppsContractMv"));
         assert!(
-            REPORT_TEMPLATE
-                .contains("s.measurementAccepted===false||s.measurementValid===false?NaN")
+            REPORT_TEMPLATE.contains("Math.abs(Number(sample.vinMv)-Number(previous.vinMv))>600")
+        );
+        assert!(REPORT_TEMPLATE.contains("points:true"));
+        assert!(REPORT_TEMPLATE.contains("const axisValueLabel=(value,unit)=>unit==='mA'"));
+        assert!(
+            REPORT_TEMPLATE.contains("unit==='mA'?Math.max(1000,Math.ceil((ymax*1.1)/1000)*1000)")
         );
         assert!(REPORT_TEMPLATE.contains("const trialSamples=samplesForTrial();"));
         assert!(REPORT_TEMPLATE.contains("drawChart('temperatureChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('controlChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('voltageChart',samples,"));
+        assert!(REPORT_TEMPLATE.contains(r#"--legend-color:#6d4ab2">PPS request（虚线）"#));
+        assert!(REPORT_TEMPLATE.contains("label:'PPS request',color:'#6d4ab2',dash:[6,3]"));
         assert!(REPORT_TEMPLATE.contains("drawChart('currentChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("chartValue(s.ppsContractMa)"));
         assert!(REPORT_TEMPLATE.contains("mA · safety ceiling · local evidence"));
@@ -1096,9 +1105,7 @@ mod tests {
         assert!(
             REPORT_TEMPLATE.contains("value==null||!Number.isFinite(Number(value))?'unavailable'")
         );
-        assert!(
-            REPORT_TEMPLATE.contains("const lo=unit==='%'?0:ymin-pad, hi=unit==='%'?100:ymax+pad")
-        );
+        assert!(REPORT_TEMPLATE.contains("const lo=unit==='%'?0:unit==='mA'?0:ymin-pad"));
         assert!(REPORT_TEMPLATE.contains("class=\"chart-legend\""));
         assert!(REPORT_TEMPLATE.contains("canvas.dataset.sampleCount=String(samples.length)"));
         assert!(REPORT_TEMPLATE.contains("if(last)last.endElapsedMs=startElapsedMs"));
