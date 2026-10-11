@@ -1053,6 +1053,11 @@ mod tests {
     fn report_template_binds_all_charts_to_selected_trial_and_phase_band() {
         assert!(REPORT_TEMPLATE.contains(".selection-dock{position:sticky;top:0"));
         assert!(REPORT_TEMPLATE.contains("class=\"selection-dock\""));
+        assert!(REPORT_TEMPLATE.contains("id=\"voltageEvidence\""));
+        assert!(
+            REPORT_TEMPLATE
+                .contains("s.measurementAccepted===false||s.measurementValid===false?NaN")
+        );
         assert!(REPORT_TEMPLATE.contains("const trialSamples=samplesForTrial();"));
         assert!(REPORT_TEMPLATE.contains("drawChart('temperatureChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('controlChart',samples,"));
