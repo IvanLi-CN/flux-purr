@@ -510,6 +510,28 @@ fn serial_scan_without_fixed_target_lists_all_espressif_candidates() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn serial_scan_prefers_authorized_callout_alias_when_tty_is_enumerated() {
+    let port = serialport::SerialPortInfo {
+        port_name: "/dev/tty.usbmodem2111401".to_string(),
+        port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+            vid: ESP32S3_USB_SERIAL_JTAG_VID,
+            pid: ESP32S3_USB_SERIAL_JTAG_PID,
+            serial_number: Some("test-device".to_string()),
+            manufacturer: Some("Espressif".to_string()),
+            product: Some("USB JTAG/serial debug unit".to_string()),
+        }),
+    };
+
+    let devices = scan_serial_devices_from_available(None, &[port]);
+
+    assert_eq!(
+        devices[0].port_path.as_deref(),
+        Some("/dev/cu.usbmodem2111401")
+    );
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn serial_scan_accepts_a_filesystem_alias_for_a_fixed_target() {
