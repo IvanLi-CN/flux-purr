@@ -41,7 +41,6 @@
     .selection-dock{position:sticky;top:0;z-index:20;margin:0 0 16px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius);background:#ffffffee;box-shadow:0 4px 14px #17232a18;backdrop-filter:blur(10px)}
     .selection-row{display:grid;grid-template-columns:92px minmax(0,1fr);align-items:center;gap:10px}.selection-row>div{min-width:0}.selection-row+.selection-row{margin-top:8px}
     .selection-label{color:var(--muted);font:700 11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
-    .selection-context{margin-top:8px;padding-top:8px;border-top:1px solid var(--line);color:var(--ink);font:650 12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
     .target-tabs,.trial-tabs{display:flex;gap:0;overflow-x:auto;border:1px solid var(--line);border-radius:6px;background:#fff}
     .target-tabs button,.trial-tabs button{flex:0 0 auto;border:0;border-right:1px solid var(--line);background:#fff;color:var(--muted);min-height:36px;padding:0 14px;font:650 13px inherit;cursor:pointer}
     .target-tabs button:last-child,.trial-tabs button:last-child{border-right:0}
@@ -121,7 +120,6 @@
   <section class="selection-dock" aria-label="当前报告选择">
     <div class="selection-row"><span class="selection-label">目标温度</span><div class="target-tabs" id="targetTabs"></div></div>
     <div class="selection-row"><span class="selection-label">试验</span><div class="trial-tabs" id="trialTabs"></div></div>
-    <div class="selection-context" id="selectionContext" aria-live="polite"></div>
   </section>
 
   <section class="section-head"><div><h2>目标与采用试验</h2><p>摘要、主图和验收指标均引用同一 adopted trial；其它 trial 可独立切换。</p></div></section>
@@ -257,12 +255,6 @@ function renderTrialTabs(){
     ['recorded stable verification span',timing?.stableWindowStartedAtMs!=null&&timing?.stableWindowVerifiedAtMs!=null?ms(Number(timing.stableWindowVerifiedAtMs)-Number(timing.stableWindowStartedAtMs)):'unavailable']
   ];
   $('trialSummary').innerHTML=[['disposition',trial.disposition],['stop reason',trial.stopReason||'—'],['trial duration',ms(trialDuration)],['cooldown start',centiC(cooldown.startTemperatureCentiC)],['start limit',centiC(cooldown.thresholdCentiC)],['warmup',percent(trial.warmupRequestedOutputPermille)],['trial overshoot',degrees(trial.maxOvershootC)],['hold p2p',degrees(trial.holdPeakToPeakC)],['stable band',`${num(activeTarget-1.5)}..${num(activeTarget+1.5)}°C`],['stable verified',gate.settleTimeMs==null?'no / 10.00s window':`${ms(gate.settleTimeMs)} / ${ms(gate.limitMs)} gate`],['qualified Hold',`${ms(holdDuration)} / ${confirm?'60.00s confirm':'12.00s scout'}`],['60s confirm',`${seconds(trial.metrics?.holdConfirmSeconds)} / 60s`],['post-stop peak',postPeak==null?'unavailable':`${num(postPeak)}°C (${num(postPeak-activeTarget)}°C above target)`],['post-stop samples',String(after.length)],['sample range',`${trial.firstSequence??'—'}..${trial.lastSequence??'—'}`],...timingFacts].map(([label,value])=>`<div class="metric"><label>${esc(label)}</label><strong>${esc(value)}</strong></div>`).join('');
-}
-function renderSelectionContext(){
-  const run=currentRun(); const trial=currentTrial();
-  const disposition=trial.disposition||run.reviewOutcome||'—';
-  const trialLabel=trial.trialIndex==null?'no trial':`trial ${trial.trialIndex}`;
-  $('selectionContext').textContent=`当前上下文 · ${activeTarget}°C · ${trialLabel} · ${disposition}`;
 }
 const PHASE_COLORS={warmup:'#d98b2b',approach:'#2f78a8',hold:'#2d8a68',cooldown:'#7966a8',terminal:'#69757c',unknown:'#9aa5aa'};
 function phaseLabel(value){const phase=String(value||'unknown');if(phase.toLowerCase()==='hold')return 'Hold (controller)';return phase.replace(/(^|[_-])([a-z])/g,(_,prefix,letter)=>`${prefix}${letter.toUpperCase()}`);}
@@ -443,7 +435,7 @@ function renderCandidate(){
   $('candidateIdentity').textContent=`${CANDIDATE.candidateId||'—'} · ${CANDIDATE.candidateHash||'—'}`; $('candidateView').textContent=JSON.stringify(CANDIDATE,null,2);
   const local=BUNDLE.capability?.localEvidence||BUNDLE.capabilities?.localEvidence||{}; const unavailable=local.externalVbus==='unavailable'||local.physicalPower==='unavailable'; $('notice').textContent=unavailable?'报告仅使用设备本地 VIN、PPS 合同与控制事件；外部 VBUS/物理功率没有被伪造。':'报告使用设备本地证据。';
 }
-function render(){renderHeader();renderTrace();renderSafetySummary();renderSummary();renderTargetTabs();renderTrialTabs();renderSelectionContext();renderCharts();renderLedger();renderCandidate();}
+function render(){renderHeader();renderTrace();renderSafetySummary();renderSummary();renderTargetTabs();renderTrialTabs();renderCharts();renderLedger();renderCandidate();}
 for(const id of CHART_IDS){const canvas=$(id);canvas.addEventListener('pointermove',moveHover);canvas.addEventListener('pointerleave',clearHover);canvas.addEventListener('keydown',keyHover);canvas.addEventListener('blur',clearHover);}
 window.addEventListener('resize',()=>{clearHover();renderCharts();});render();
 </script>
