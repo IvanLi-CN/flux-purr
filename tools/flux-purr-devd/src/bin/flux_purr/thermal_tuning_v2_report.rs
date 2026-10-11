@@ -1051,6 +1051,10 @@ mod tests {
 
     #[test]
     fn report_template_binds_all_charts_to_selected_trial_and_phase_band() {
+        assert!(REPORT_TEMPLATE.contains(".selection-dock{position:sticky;top:0"));
+        assert!(REPORT_TEMPLATE.contains("class=\"selection-dock\""));
+        assert!(REPORT_TEMPLATE.contains("id=\"selectionContext\""));
+        assert!(REPORT_TEMPLATE.contains("当前上下文 ·"));
         assert!(REPORT_TEMPLATE.contains("const trialSamples=samplesForTrial();"));
         assert!(REPORT_TEMPLATE.contains("drawChart('temperatureChart',samples,"));
         assert!(REPORT_TEMPLATE.contains("drawChart('controlChart',samples,"));
