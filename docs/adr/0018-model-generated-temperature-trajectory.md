@@ -14,6 +14,8 @@ Warmup remains independent full-power heating. Approach starts with an immediate
 
 The tracker predicts command-arrival temperature using bounded, time-weighted applied-power history. Model feedforward and temperature/rate feedback determine subsequent 5%–100% requests. Applied power is estimated from VIN, physical duty and resistance, never presented as measured electrical power. Hold tracks the constant final target using the protected PI. PD/PPS ownership, voltage/PWM mapping and source limits remain unchanged.
 
+An upward Approach request is slew-limited by the calibrated transport delay; downward braking remains immediate. The limit bounds a model correction at the Warmup handoff without adding a second profile floor or ceiling, and still permits the request to reach the existing 1000‰ upper bound. Stable-window qualification consumes only accepted measurements, and the report records the last reset cause when a provisional window is interrupted.
+
 ## Consequences
 
 有效模型Approach的欠温恢复保留阶段参考并由现有5%–100%跟踪补热执行。旧profile的温差重入Warmup只适用于非模型兼容路径，不能清掉模型轨迹或重启软启动；固定Hold入口、首次Warmup退出期限及真正停热/故障生命周期保持独立。

@@ -797,6 +797,7 @@ pub(crate) struct HeaterController {
     pub(crate) applied_heat: flux_purr_firmware::thermal_trajectory::AppliedHeatHistory,
     pub(crate) approach_trajectory:
         Option<flux_purr_firmware::thermal_trajectory::TemperatureTrajectory>,
+    pub(crate) approach_last_request_permille: Option<u16>,
     pub(crate) heater_was_enabled: bool,
     pub(crate) warmup_started_at_ms: Option<u64>,
     pub(crate) production_controller: Option<ProductionThermalController>,
@@ -900,6 +901,7 @@ impl HeaterController {
             natural_cooling_input: None,
             applied_heat: flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new(),
             approach_trajectory: None,
+            approach_last_request_permille: None,
             heater_was_enabled: false,
             warmup_started_at_ms: None,
             production_controller: None,
@@ -1294,6 +1296,7 @@ impl HeaterController {
 
     fn clear_approach_braking(&mut self) {
         self.approach_trajectory = None;
+        self.approach_last_request_permille = None;
     }
 
     fn model_approach_available(&self) -> bool {
@@ -1360,6 +1363,8 @@ impl HeaterController {
                 input.now_ms,
                 predicted.temperature_c,
             ));
+            self.approach_last_request_permille =
+                Some(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
         }
         if entered_approach {
             return Some(percent_from_permille(
@@ -1377,9 +1382,19 @@ impl HeaterController {
             frame.control_target.approach_damping_exponent,
             plant,
         );
-        Some(percent_from_permille(
-            TemperatureTrajectory::request_permille(reference, predicted, horizon_s, plant),
-        ))
+        let requested_permille =
+            TemperatureTrajectory::request_permille(reference, predicted, horizon_s, plant);
+        let previous_permille = self
+            .approach_last_request_permille
+            .unwrap_or(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
+        let applied_permille = flux_purr_firmware::thermal_trajectory::slew_up_permille(
+            previous_permille,
+            requested_permille,
+            frame.elapsed_ms,
+            input.model.transport_delay_ms,
+        );
+        self.approach_last_request_permille = Some(applied_permille);
+        Some(percent_from_permille(applied_permille))
     }
 
     fn calculate_hold_duty(&mut self, frame: &ThermalControlFrame) -> u8 {

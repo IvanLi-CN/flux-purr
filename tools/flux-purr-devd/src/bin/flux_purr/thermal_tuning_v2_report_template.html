@@ -249,6 +249,7 @@ function renderTrialTabs(){
     ['original deadline',timingKnown?ms(timing.originalLimitMs):'unavailable'],
     ['first original-deadline check',[2,3].includes(timing?.policyVersion)?`${relativeTiming(timing.originalDeadlineObservedAtMs)} · ${timing.originalDeadlinePhase??'unavailable'}`:'unavailable'],
     ['sample evidence verification',[2,3].includes(timing?.policyVersion)?(trial.timingEvidenceVerification?.verified===true?'verified':`failed · ${(trial.timingEvidenceVerification?.reasons||['unavailable']).join(', ')}`):'historical · not current timing qualification'],
+    ['stable window last reset',timing?.stableWindowLastResetReason||'none recorded'],
     ['extension trigger after Warmup',relativeTiming(timing?.extendedAtMs)],
     ['finite extension cap',timingKnown?ms(timing.extensionLimitMs):'unavailable'],
     ['extra wait to stable-window start',timing?.extendedAtMs!=null&&gate.settleTimeMs!=null?ms(Math.max(0,Number(gate.settleTimeMs)-Number(timing.originalLimitMs))):'unavailable'],

@@ -1056,6 +1056,7 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("id=\"voltageEvidence\""));
         assert!(REPORT_TEMPLATE.contains("function voltageTrace(samples)"));
         assert!(REPORT_TEMPLATE.contains("sample.measurementAccepted!==false"));
+        assert!(REPORT_TEMPLATE.contains("timing?.stableWindowLastResetReason||'none recorded'"));
         assert!(REPORT_TEMPLATE.contains("sample.ppsContractMv!==previous.ppsContractMv"));
         assert!(
             REPORT_TEMPLATE.contains("Math.abs(Number(sample.vinMv)-Number(previous.vinMv))>600")

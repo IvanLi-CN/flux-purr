@@ -758,6 +758,7 @@ fn thermal_validation_rejects_a_partial_target_ladder() {
             stable_window_verified_at_ms: Some(16_000),
             settle_time_ms: Some(5_000),
             failure_reason: None,
+            stable_window_last_reset_reason: None,
         },
     }];
 
@@ -790,6 +791,7 @@ fn thermal_tuning_scout_validation_reports_failed_stage_limits() {
             stable_window_verified_at_ms: None,
             settle_time_ms: None,
             failure_reason: Some("full_speed_to_stable_timeout"),
+            stable_window_last_reset_reason: None,
         },
     }];
 
@@ -836,6 +838,7 @@ fn thermal_hold_confirm_validation_rejects_slow_full_speed_settle() {
             stable_window_verified_at_ms: Some(29_000),
             settle_time_ms: Some(18_000),
             failure_reason: Some("full_speed_to_stable_timeout"),
+            stable_window_last_reset_reason: None,
         },
     }];
 
@@ -868,6 +871,7 @@ fn thermal_hold_confirm_validation_uses_five_seconds_above_150c() {
             stable_window_verified_at_ms: Some(17_000),
             settle_time_ms: Some(6_000),
             failure_reason: Some("full_speed_to_stable_timeout"),
+            stable_window_last_reset_reason: None,
         },
     }];
 
@@ -900,6 +904,7 @@ fn thermal_hold_confirm_validation_allows_ten_seconds_at_or_below_150c() {
             stable_window_verified_at_ms: Some(21_000),
             settle_time_ms: Some(10_000),
             failure_reason: None,
+            stable_window_last_reset_reason: None,
         },
     }];
 
@@ -3419,6 +3424,25 @@ fn thermal_full_speed_tracker_accepts_hold_entry_within_ten_seconds() {
     assert_eq!(analysis.stable_window_started_at_ms, Some(2_000));
     assert_eq!(analysis.stable_window_verified_at_ms, Some(12_000));
     assert_eq!(analysis.settle_time_ms, Some(1_750));
+}
+
+#[test]
+fn thermal_full_speed_tracker_records_measurement_rejection_reset() {
+    let mut tracker = ThermalFullSpeedStableTracker::new(140);
+    assert_eq!(
+        tracker.observe_with_measurement(139.5, 1_000, Some("approach"), true),
+        ThermalFullSpeedStableObservation::Pending
+    );
+    assert_eq!(
+        tracker.observe_with_measurement(139.6, 2_000, Some("hold"), false),
+        ThermalFullSpeedStableObservation::Pending
+    );
+    let evidence = tracker.finalize();
+    assert_eq!(evidence.stable_window_started_at_ms, None);
+    assert_eq!(
+        evidence.stable_window_last_reset_reason,
+        Some("measurement_rejected")
+    );
 }
 
 #[test]

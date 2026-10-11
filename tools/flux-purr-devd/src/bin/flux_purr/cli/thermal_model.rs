@@ -178,6 +178,7 @@ pub(crate) struct ThermalFullSpeedStableAnalysis {
     pub(crate) stable_window_verified_at_ms: Option<u64>,
     pub(crate) settle_time_ms: Option<u64>,
     pub(crate) failure_reason: Option<&'static str>,
+    pub(crate) stable_window_last_reset_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -185,6 +186,7 @@ pub(crate) struct ThermalReplayStageSample {
     pub(crate) elapsed_ms: u64,
     pub(crate) current_temp_c: f64,
     pub(crate) heater_output_percent: u8,
+    pub(crate) measurement_accepted: bool,
     pub(crate) control_phase: Option<String>,
     pub(crate) control_phase_in_hold: bool,
     pub(crate) source_voltage_mv: Option<u64>,
@@ -237,6 +239,7 @@ pub(crate) struct ThermalFullSpeedStableTracker {
     pub(crate) stable_window_verified_at_ms: Option<u64>,
     pub(crate) settle_time_ms: Option<u64>,
     pub(crate) failure_reason: Option<&'static str>,
+    pub(crate) stable_window_last_reset_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -787,10 +790,38 @@ impl ThermalFullSpeedStableTracker {
             stable_window_verified_at_ms: None,
             settle_time_ms: None,
             failure_reason: None,
+            stable_window_last_reset_reason: None,
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn observe(
+        &mut self,
+        current_temp_c: f64,
+        elapsed_ms: u64,
+        control_phase: Option<&str>,
+    ) -> ThermalFullSpeedStableObservation {
+        self.observe_with_measurement(current_temp_c, elapsed_ms, control_phase, true)
+    }
+
+    pub(crate) fn observe_with_measurement(
+        &mut self,
+        current_temp_c: f64,
+        elapsed_ms: u64,
+        control_phase: Option<&str>,
+        measurement_accepted: bool,
+    ) -> ThermalFullSpeedStableObservation {
+        if !measurement_accepted {
+            if self.stable_window_started_at_ms.take().is_some() {
+                self.stable_time_reset("measurement_rejected");
+            }
+            self.settle_time_ms = None;
+            return ThermalFullSpeedStableObservation::Pending;
+        }
+        self.observe_accepted(current_temp_c, elapsed_ms, control_phase)
+    }
+
+    fn observe_accepted(
         &mut self,
         current_temp_c: f64,
         elapsed_ms: u64,
@@ -830,6 +861,11 @@ impl ThermalFullSpeedStableTracker {
                 return ThermalFullSpeedStableObservation::Verified;
             }
         } else if self.stable_window_started_at_ms.take().is_some() {
+            self.stable_time_reset(if current_temp_c > self.target_temp_c {
+                "stable_window_broke_high"
+            } else {
+                "stable_window_broke_low"
+            });
             self.settle_time_ms = None;
         }
 
@@ -850,7 +886,12 @@ impl ThermalFullSpeedStableTracker {
             stable_window_verified_at_ms: self.stable_window_verified_at_ms,
             settle_time_ms: self.settle_time_ms,
             failure_reason: self.failure_reason,
+            stable_window_last_reset_reason: self.stable_window_last_reset_reason,
         }
+    }
+
+    fn stable_time_reset(&mut self, reason: &'static str) {
+        self.stable_window_last_reset_reason = Some(reason);
     }
 }
 
@@ -1012,6 +1053,7 @@ impl ThermalStageResult {
                 "stableWindowVerifiedAtMs": self.full_speed_to_stable.stable_window_verified_at_ms,
                 "settleTimeMs": self.full_speed_to_stable.settle_time_ms,
                 "failureReason": self.full_speed_to_stable.failure_reason,
+                "stableWindowLastResetReason": self.full_speed_to_stable.stable_window_last_reset_reason,
             },
             "analysis": {
                 "firstHoldTempC": self.analysis.first_hold_temp_c,
@@ -1269,6 +1311,15 @@ pub(crate) fn thermal_full_speed_analysis(value: &Value) -> ThermalFullSpeedStab
         stable_window_verified_at_ms: field("stableWindowVerifiedAtMs"),
         settle_time_ms: field("settleTimeMs"),
         failure_reason,
+        stable_window_last_reset_reason: value
+            .pointer("/fullSpeedToStable/stableWindowLastResetReason")
+            .and_then(Value::as_str)
+            .map(|reason| match reason {
+                "measurement_rejected" => "measurement_rejected",
+                "stable_window_broke_high" => "stable_window_broke_high",
+                "stable_window_broke_low" => "stable_window_broke_low",
+                _ => "unknown",
+            }),
     }
 }
 
@@ -1351,6 +1402,14 @@ pub(crate) fn thermal_replay_stage_samples(
         let current_temp_c = thermal_control_temperature_c(status, Some(heater))?;
         let heater_output_percent =
             require_status_u64(heater, "heaterOutputPercent")?.min(u64::from(u8::MAX)) as u8;
+        // Older captured bundles predate the explicit validity field. Preserve
+        // their accepted-sample semantics and reject only an explicit invalid
+        // or rejected measurement.
+        let measurement_accepted = sample
+            .get("measurementValid")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+            && sample.get("measurementAccepted").and_then(Value::as_bool) != Some(false);
         let control_phase = status
             .get("heaterControlPhase")
             .or_else(|| sample.get("phase"))
@@ -1362,6 +1421,7 @@ pub(crate) fn thermal_replay_stage_samples(
             elapsed_ms,
             current_temp_c,
             heater_output_percent,
+            measurement_accepted,
             control_phase,
             control_phase_in_hold,
             source_voltage_mv: source_telemetry
@@ -1601,10 +1661,11 @@ pub(crate) fn thermal_replay_full_speed_to_stable(
 ) -> ThermalFullSpeedStableAnalysis {
     let mut tracker = ThermalFullSpeedStableTracker::new(target_temp_c);
     for sample in samples {
-        let _ = tracker.observe(
+        let _ = tracker.observe_with_measurement(
             sample.current_temp_c,
             sample.elapsed_ms,
             sample.control_phase.as_deref(),
+            sample.measurement_accepted,
         );
     }
     tracker.finalize()

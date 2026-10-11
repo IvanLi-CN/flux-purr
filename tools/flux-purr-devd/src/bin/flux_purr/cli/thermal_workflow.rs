@@ -4070,6 +4070,7 @@ pub(crate) fn dry_thermal_replay_sample(
         },
         current_temp_c,
         heater_output_percent,
+        measurement_accepted: true,
         control_phase: Some(if phase == "warmup" {
             "approach".to_string()
         } else {
@@ -4102,6 +4103,7 @@ pub(crate) fn dry_thermal_full_speed_analysis(rise_time_ms: u64) -> ThermalFullS
         stable_window_verified_at_ms: Some(rise_time_ms),
         settle_time_ms: Some(7_500),
         failure_reason: None,
+        stable_window_last_reset_reason: None,
     }
 }
 
@@ -5348,6 +5350,7 @@ pub(crate) fn measure_thermal_stage(
     update_thermal_stage_stop_reason(ThermalStageStopInput {
         stop_reason,
         sample_rate_violation: sample_rate.violation,
+        control_measurement_guarded,
         measurement_guard_violation,
         heater_output_seen: *heater_output_seen,
         elapsed_ms,
@@ -5454,6 +5457,7 @@ pub(crate) fn record_thermal_stage_observation(
         elapsed_ms,
         current_temp_c,
         heater_output_percent,
+        measurement_accepted: !control_measurement_guarded && !measurement_guard_violation,
         control_phase: control_phase.map(ToOwned::to_owned),
         control_phase_in_hold,
         source_voltage_mv: Some(source_telemetry.voltage_mv),
@@ -5490,6 +5494,7 @@ pub(crate) fn append_thermal_stage_sample(
 pub(crate) struct ThermalStageStopInput<'a> {
     pub(crate) stop_reason: &'a mut &'static str,
     pub(crate) sample_rate_violation: bool,
+    pub(crate) control_measurement_guarded: bool,
     pub(crate) measurement_guard_violation: bool,
     pub(crate) heater_output_seen: bool,
     pub(crate) elapsed_ms: u64,
@@ -5507,6 +5512,7 @@ pub(crate) fn update_thermal_stage_stop_reason(input: ThermalStageStopInput<'_>)
     let ThermalStageStopInput {
         stop_reason,
         sample_rate_violation,
+        control_measurement_guarded,
         measurement_guard_violation,
         heater_output_seen,
         elapsed_ms,
@@ -5536,7 +5542,12 @@ pub(crate) fn update_thermal_stage_stop_reason(input: ThermalStageStopInput<'_>)
         approach_guard.observe(current_temp_c, elapsed_ms, control_phase);
     }
     let full_speed_stop_reason = if *stop_reason == "timeout" {
-        match full_speed_tracker.observe(current_temp_c, elapsed_ms, control_phase) {
+        match full_speed_tracker.observe_with_measurement(
+            current_temp_c,
+            elapsed_ms,
+            control_phase,
+            !control_measurement_guarded && !measurement_guard_violation,
+        ) {
             ThermalFullSpeedStableObservation::Failed(reason) => Some(reason),
             _ => None,
         }
