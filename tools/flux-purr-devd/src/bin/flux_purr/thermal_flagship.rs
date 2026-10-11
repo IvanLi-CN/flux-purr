@@ -259,20 +259,19 @@ async fn tune_flagship_intervals(
         }
         let lower_target_c = context.tune_targets_c[lower_index];
         let upper_target_c = context.tune_targets_c[upper_index];
-        if !state.accepted_targets_c.contains(&lower_target_c)
-            || !state.accepted_targets_c.contains(&upper_target_c)
-        {
-            continue;
-        }
         let midpoint_index = interval_midpoint_index(lower_index, upper_index);
         let target_temp_c = context.tune_targets_c[midpoint_index];
-        state.current_profile = reseed_target_from_accepted_bounds(
-            &state.current_profile,
-            target_temp_c,
-            lower_target_c,
-            upper_target_c,
-            context.tune_targets_c,
-        )?;
+        if state.accepted_targets_c.contains(&lower_target_c)
+            && state.accepted_targets_c.contains(&upper_target_c)
+        {
+            state.current_profile = reseed_target_from_accepted_bounds(
+                &state.current_profile,
+                target_temp_c,
+                lower_target_c,
+                upper_target_c,
+                context.tune_targets_c,
+            )?;
+        }
         tune_flagship_target_at(context, state, target_temp_c).await?;
         if state
             .review_entries
@@ -283,7 +282,33 @@ async fn tune_flagship_intervals(
             interval_stack.push((lower_index, midpoint_index));
         }
     }
+
+    // A failed endpoint must not prune the rest of the requested target set. Only
+    // accepted bounds may provide an interpolation seed; every remaining target
+    // gets an independent run from the current same-run profile.
+    let attempted_targets = state
+        .review_entries
+        .iter()
+        .filter_map(|entry| entry.get("target").and_then(Value::as_i64))
+        .filter_map(|target| i16::try_from(target).ok())
+        .collect::<BTreeSet<_>>();
+    for target_temp_c in
+        pending_flagship_targets(context.tuning_execution_order_c, &attempted_targets)
+    {
+        tune_flagship_target_at(context, state, target_temp_c).await?;
+    }
     Ok(())
+}
+
+fn pending_flagship_targets(
+    execution_order_c: &[i16],
+    attempted_targets_c: &BTreeSet<i16>,
+) -> Vec<i16> {
+    execution_order_c
+        .iter()
+        .copied()
+        .filter(|target_temp_c| !attempted_targets_c.contains(target_temp_c))
+        .collect()
 }
 
 fn initial_flagship_intervals(
@@ -3530,6 +3555,17 @@ mod tests {
         assert_eq!(
             build_recursive_tuning_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220]),
             flux_purr_firmware::thermal_tuning::THERMAL_TUNING_EXECUTION_ORDER_C
+        );
+    }
+
+    #[test]
+    fn pending_targets_keep_unaccepted_interiors_in_the_run() {
+        let order = build_recursive_tuning_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220]);
+        let attempted = BTreeSet::from([60, 220]);
+
+        assert_eq!(
+            pending_flagship_targets(&order, &attempted),
+            vec![120, 80, 100, 160, 140, 180]
         );
     }
 
