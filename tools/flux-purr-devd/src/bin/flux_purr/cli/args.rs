@@ -1535,6 +1535,8 @@ pub(crate) struct TemperatureCalibrationHeaterArgs {
 pub(crate) struct TemperatureCalibrationCaptureArgs {
     #[command(flatten)]
     pub(crate) target: TargetSelector,
+    #[arg(long = "target-adc-mv")]
+    pub(crate) target_adc_mv: Option<u16>,
     #[arg(long = "reference-temp-c")]
     pub(crate) reference_temp_c: f32,
     #[arg(long = "observed-mv")]

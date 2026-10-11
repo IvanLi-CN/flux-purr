@@ -333,6 +333,7 @@ pub(crate) async fn handle_temperature_calibration_command(
             body.insert("op".to_string(), json!("capture"));
             body.insert("channel".to_string(), json!("rtd_adc"));
             body.insert("referenceTempC".to_string(), json!(args.reference_temp_c));
+            insert_if_some(&mut body, "targetAdcMv", args.target_adc_mv);
             insert_if_some(&mut body, "observedMv", args.observed_mv);
             request_with_lease(
                 client,
