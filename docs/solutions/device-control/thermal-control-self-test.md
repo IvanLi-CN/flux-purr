@@ -188,13 +188,7 @@ Current reusable rule set:
 
 ## Seed and baseline selection
 
-The current bank-aware defaults are:
-
-- `pps3a`: seed from the committed 65W accepted bundle
-- `pps5a`: seed from the committed 100W accepted bundle when it exists
-- `pps5a` fallback before an accepted 100W baseline exists: an explicit repository-maintained 100W seed bundle
-
-Until a committed `pps5a` accepted baseline exists, do not treat a stale saved `pps5a` EEPROM profile as current truth. Focused 100W retuning should start from an explicit preview seed, not from an arbitrary previously saved bank.
+The default tuning path starts both `pps3a` and `pps5a` from production defaults. It never discovers a bank baseline, historical tuning bundle, or saved EEPROM profile. An explicitly supplied seed profile is a diagnostic input only and must be recorded as such; that run cannot prove no-history tuning. Focused retuning therefore uses the current device's fresh calibration/model and same-run feedback unless the operator explicitly requests diagnostic replay.
 
 ## Candidate identification
 

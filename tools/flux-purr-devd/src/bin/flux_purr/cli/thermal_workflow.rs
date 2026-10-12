@@ -1756,11 +1756,6 @@ pub(crate) fn default_thermal_candidate_profile() -> Value {
     thermal_candidate_profile_to_value(&thermal_seed_candidate_profile())
 }
 
-pub(crate) const THERMAL_PPS3A_ACCEPTED_SEED_RELATIVE: &str = "thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd63w-pps3a/accepted-full-range-20hz/thermal-profile.accepted.json";
-pub(crate) const THERMAL_PPS5A_ACCEPTED_SEED_RELATIVE: &str = "thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd100w-pps5a/accepted-full-range-20hz/thermal-profile.accepted.json";
-pub(crate) const THERMAL_PPS5A_TUNING_SEED_RELATIVE: &str =
-    "thermal-self-test-runs/variants_100c_v6_hold220_cutoff90.json";
-
 pub(crate) fn flux_purr_repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1769,27 +1764,11 @@ pub(crate) fn flux_purr_repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-pub(crate) fn thermal_default_seed_candidates_for_bank(bank: &str) -> Vec<PathBuf> {
-    let repo_root = flux_purr_repo_root();
-    match bank {
-        "pps5a" => vec![
-            repo_root.join(THERMAL_PPS5A_ACCEPTED_SEED_RELATIVE),
-            repo_root.join(THERMAL_PPS5A_TUNING_SEED_RELATIVE),
-        ],
-        "pps3a" => vec![repo_root.join(THERMAL_PPS3A_ACCEPTED_SEED_RELATIVE)],
-        _ => Vec::new(),
-    }
-}
-
 pub(crate) fn load_thermal_default_seed_candidate_profile(
-    bank: &str,
+    _bank: &str,
 ) -> Result<(ThermalCandidateProfile, Option<PathBuf>), Box<dyn std::error::Error + Send + Sync>> {
-    for path in thermal_default_seed_candidates_for_bank(bank) {
-        if path.exists() {
-            let imported = serde_json::from_slice::<Value>(&fs::read(&path)?)?;
-            return Ok((thermal_candidate_profile_from_value(imported), Some(path)));
-        }
-    }
+    // A tune run starts from production constants and this device's current
+    // calibration/model. Historical profiles are never discovered implicitly.
     Ok((thermal_seed_candidate_profile(), None))
 }
 

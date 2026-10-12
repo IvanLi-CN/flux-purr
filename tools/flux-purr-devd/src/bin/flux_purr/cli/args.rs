@@ -1249,7 +1249,7 @@ pub(crate) struct ThermalFlagshipTuneArgs {
     pub(crate) tune_targets_c: String,
     #[arg(
         long = "seed-profile-file",
-        help = "Optional starting sparse/full thermal profile. Defaults to the resolved bank seed path."
+        help = "Optional explicit starting sparse/full thermal profile. Without it, tuning starts from production defaults."
     )]
     pub(crate) seed_profile_file: Option<PathBuf>,
     #[arg(

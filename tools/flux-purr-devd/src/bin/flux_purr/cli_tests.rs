@@ -4433,19 +4433,13 @@ fn thermal_profile_modes_preserve_65w_and_define_100w_defaults() {
 }
 
 #[test]
-fn thermal_default_seed_candidates_follow_bank_current_truth() {
-    let (_, pps3a_seed_path) = load_thermal_default_seed_candidate_profile("pps3a").unwrap();
-    let (_, pps5a_seed_path) = load_thermal_default_seed_candidate_profile("pps5a").unwrap();
-
-    assert!(
-        pps3a_seed_path
-            .as_ref()
-            .is_some_and(|path| path.ends_with(THERMAL_PPS3A_ACCEPTED_SEED_RELATIVE))
-    );
-    assert!(pps5a_seed_path.as_ref().is_some_and(|path| {
-        path.ends_with(THERMAL_PPS5A_ACCEPTED_SEED_RELATIVE)
-            || path.ends_with(THERMAL_PPS5A_TUNING_SEED_RELATIVE)
-    }));
+fn thermal_tuning_cold_start_uses_production_defaults_without_historical_seed() {
+    let expected = thermal_seed_candidate_profile();
+    for bank in ["pps3a", "pps5a"] {
+        let (profile, seed_path) = load_thermal_default_seed_candidate_profile(bank).unwrap();
+        assert_eq!(profile, expected);
+        assert!(seed_path.is_none());
+    }
 }
 
 #[test]

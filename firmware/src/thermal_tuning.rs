@@ -747,7 +747,12 @@ impl ThermalTuningRuntime {
             .current_elapsed_ms
             .saturating_sub(self.target_started_elapsed_ms)
             < THERMAL_TUNING_TARGET_BUDGET_MS;
-        let metric_passes = budget_available
+        // A continuous stable window that was already established before the
+        // target budget expires is allowed to finish its bounded 10 s witness.
+        // The target clock is never reset and a window that starts after the
+        // budget remains a hard failure.
+        let budget_window_continuation = self.target_budget_window_is_verified(budget_available);
+        let metric_passes = (budget_available || budget_window_continuation)
             && self
                 .trial_start_elapsed_ms
                 .is_some_and(|started| elapsed_ms.saturating_sub(started) < TRIAL_TIMEOUT_MS)
@@ -1523,8 +1528,8 @@ impl ThermalTuningRuntime {
             let Some(evidence) = selected_failure_evidence else {
                 return self.exhaust_candidate_search(target_c);
             };
-            if !(explore_braking && self.prepare_failed_damping_braking(target_c, evidence))
-                && !self.prepare_fresh_failure_proposal_from_evidence(target_c, evidence)
+            if !(self.prepare_fresh_failure_proposal_from_evidence(target_c, evidence)
+                || explore_braking && self.prepare_failed_damping_braking(target_c, evidence))
             {
                 return self.exhaust_candidate_search(target_c);
             }
@@ -1858,6 +1863,7 @@ impl ThermalTuningRuntime {
             .current_elapsed_ms
             .saturating_sub(self.target_started_elapsed_ms)
             >= THERMAL_TUNING_TARGET_BUDGET_MS
+            && !self.target_budget_window_is_in_progress()
         {
             return self.finish_trial(sample_elapsed_ms);
         }
@@ -1895,6 +1901,28 @@ impl ThermalTuningRuntime {
             self.finish_trial(sample_elapsed_ms)?;
         }
         Ok(())
+    }
+
+    fn target_budget_window_is_in_progress(&self) -> bool {
+        self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm
+            && self.stable_window_verified_at_ms.is_none()
+            && self.target_budget_window_started_before_deadline()
+    }
+
+    fn target_budget_window_is_verified(&self, budget_available: bool) -> bool {
+        !budget_available
+            && self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm
+            && self.stable_window_verified_at_ms.is_some()
+            && self.target_budget_window_started_before_deadline()
+    }
+
+    fn target_budget_window_started_before_deadline(&self) -> bool {
+        self.stable_window_started_at_ms.is_some_and(|started| {
+            started
+                < self
+                    .target_started_elapsed_ms
+                    .saturating_add(THERMAL_TUNING_TARGET_BUDGET_MS)
+        })
     }
 
     pub fn record_live_sample(
