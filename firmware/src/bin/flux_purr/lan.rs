@@ -1454,11 +1454,12 @@ fn process_thermal_tuning_read(
     after_sequence: Option<u32>,
 ) -> (bool, UsbFrame) {
     if after_sequence.is_some() && run_id.as_deref() != context.thermal_tuning.run_id.as_deref() {
-        context.thermal_tuning.fail("run_identity_mismatch");
-        context.thermal_tuning.trace_gap = true;
-        context.thermal_tuning.review_disposition =
-            flux_purr_firmware::thermal_tuning::ThermalTuningReviewDisposition::ReviewIncomplete;
-        context.ui_state.heater_enabled = false;
+        // A timed-out USB exchange can leave its complete frame queued behind
+        // the next request. Reject that stale acknowledgement without
+        // disarming the active run; the matching current-run read will follow
+        // and the host still owns cancellation if the identity is genuinely
+        // wrong. Treating a stale frame as a runtime failure used to terminate
+        // otherwise healthy tuning runs on the first retry.
         return (
             true,
             usb_error_response(
