@@ -5959,12 +5959,31 @@ pub(crate) fn parse_isolapurr_live_telemetry(
     })
 }
 
+pub(crate) fn isolapurr_live_pps_contract_is_ready(power: &Value) -> bool {
+    let protocol = power
+        .pointer("/diagnostics/active_protocol")
+        .or_else(|| power.pointer("/diagnostics/activeProtocol"))
+        .and_then(Value::as_str);
+    protocol == Some("pps")
+        && parse_isolapurr_live_telemetry(power)
+            .map(|telemetry| {
+                telemetry.status == "ok"
+                    && telemetry.voltage_mv >= THERMAL_SOURCE_MIN_READY_VOLTAGE_MV
+            })
+            .unwrap_or(false)
+}
+
 pub(crate) async fn set_isolapurr_output_auto(
     _client: &Client,
     source_url: &str,
     device_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_isolapurr_device_identity(source_url, device_id)?;
+    if let Ok(power) = isolapurr_cli_json_read(source_url, &["power", "show"])
+        && isolapurr_live_pps_contract_is_ready(&power)
+    {
+        return Ok(());
+    }
     let mut config = read_isolapurr_power_config(source_url)?;
     if !isolapurr_power_config_usb_c_path_is_default(&config) {
         let response = isolapurr_cli_json(

@@ -306,9 +306,12 @@ Thermal tuning and source failures must not be conflated.
 Treat the run as a source-side failure, not a thermal-profile result, when any of the following holds:
 
 - source capability readback does not match the intended class
+- source preparation tears down an already valid PPS contract or starts the stage before a valid PPS contract is confirmed
 - Flux Purr requests more than `5V`, but source telemetry remains near `5V`
 - source telemetry stops advancing
 - the source must be power-cycled before PPS negotiation recovers
+
+Source preparation is idempotent with respect to a valid working contract. When IsolaPurr already reports `active_protocol=pps` and healthy USB-C telemetry at or above the working-voltage threshold, the host must preserve that contract and must not issue `power output auto` or USB-C path normalization. When no valid PPS contract is present, preparation must establish and verify the eligible source capability before arming the heater. A fixed or near-5V readback is source evidence, not a thermal tuning result.
 
 Treat the run as a measurement-chain failure, not a tuning result, when any of the following holds:
 

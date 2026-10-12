@@ -3896,6 +3896,32 @@ fn parses_isolapurr_power_show_nested_usb_c_telemetry() {
 }
 
 #[test]
+fn preserves_an_already_ready_isolapurr_pps_contract() {
+    let power_show = json!({
+        "diagnostics": { "active_protocol": "pps" },
+        "ports": {
+            "ports": [{
+                "portId": "port_c",
+                "telemetry": {
+                    "status": "ok",
+                    "voltage_mv": 20_010,
+                    "current_ma": 1_240,
+                    "power_mw": 24_812,
+                    "sample_uptime_ms": 99,
+                }
+            }]
+        }
+    });
+    assert!(isolapurr_live_pps_contract_is_ready(&power_show));
+
+    let fixed = json!({
+        "diagnostics": { "active_protocol": "pd" },
+        "ports": power_show["ports"].clone(),
+    });
+    assert!(!isolapurr_live_pps_contract_is_ready(&fixed));
+}
+
+#[test]
 fn validates_isolapurr_thermal_capability_and_ready_voltage() {
     let config = json!({
         "capability": {
