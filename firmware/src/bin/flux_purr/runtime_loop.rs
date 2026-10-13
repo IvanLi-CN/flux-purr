@@ -1817,6 +1817,20 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         state.calibration_runtime_state,
         state.manual_pps_state,
     );
+    // A boot-time capability read can complete after the backend was
+    // conservatively initialized as fixed-PD fallback.  Re-select the PPS
+    // backend before evaluating the arm intent so a valid live APDO is not
+    // stranded behind the fallback's 12 V bootstrap request.
+    if model_allowed
+        && !state.manual_pps_state.enabled
+        && let Some(capabilities) = state.last_fusb302b_power_capabilities
+    {
+        let refreshed =
+            refresh_fusb302b_heater_power_backend(state.heater_power_backend, Some(capabilities));
+        if matches!(refreshed, HeaterPowerBackend::PpsMos { .. }) {
+            state.heater_power_backend = refreshed;
+        }
+    }
     let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
         state.heater_power_backend,
         state.ui_state.heater_enabled,
