@@ -1652,7 +1652,14 @@ pub(crate) fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) 
     if state.pd_port.controller_kind() != ControllerKind::Fusb302b {
         return false;
     }
-    let capabilities = adjustable_capabilities_from_view(state.power_state.source_capabilities);
+    // The PD service snapshot is populated directly by the FUSB302B task and
+    // can become valid before the UI-facing power-state view is published.
+    // Prefer it here so the first heater frame cannot remain on the fixed-PD
+    // fallback merely because that second publication path is one cycle late.
+    let capabilities = state
+        .pd_port
+        .capabilities()
+        .or_else(|| adjustable_capabilities_from_view(state.power_state.source_capabilities));
     if capabilities == state.last_fusb302b_power_capabilities {
         return false;
     }
@@ -1823,7 +1830,10 @@ pub(crate) async fn runtime_reconcile_heater_arming(
     // stranded behind the fallback's 12 V bootstrap request.
     if model_allowed
         && !state.manual_pps_state.enabled
-        && let Some(capabilities) = state.last_fusb302b_power_capabilities
+        && let Some(capabilities) = state
+            .pd_port
+            .capabilities()
+            .or(state.last_fusb302b_power_capabilities)
     {
         let refreshed =
             refresh_fusb302b_heater_power_backend(state.heater_power_backend, Some(capabilities));
