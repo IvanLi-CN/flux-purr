@@ -2071,6 +2071,12 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         && state.heater_controller.fault_latched().is_none()
         && !state.cooling_disabled_lock_latched
         && !state.ui_state.persistence_locked();
+    // A heater arm is intentionally held at zero duty until the working PPS
+    // contract is confirmed.  That zero-duty frame must still request the
+    // working voltage; otherwise the generic zero-output path steps down to
+    // the 12 V idle contract and the heater can never bootstrap PPS.
+    let power_negotiation_stage =
+        automatic_pps_start_allowed && !state.pd_contract_ready && allow_pending_pps_progress;
     let output_changed = apply_heater_power_output(HeaterPowerOutputContext {
         pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
@@ -2089,11 +2095,12 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         } else {
             state.ui_state.heater_enabled
         },
-        tuning_power_stage: state.thermal_tuning.armed
+        tuning_power_stage: (state.thermal_tuning.armed
             && state.thermal_tuning.phase
                 == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
             && state.current_rtd_fault.is_none()
-            && !state.ui_state.persistence_locked(),
+            && !state.ui_state.persistence_locked())
+            || power_negotiation_stage,
         control_phase: pid_snapshot.phase,
         initial_profile_approach: state.heater_controller.initial_profile_approach(),
         control_error_c: pid_snapshot.error_c,

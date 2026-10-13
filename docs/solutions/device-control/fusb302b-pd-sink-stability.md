@@ -48,6 +48,8 @@ For this PPS source, automatic GoodCRC and locally initiated headers use PD 3.0;
 
 A late Source Capabilities response alone is not grounds for a Sink Soft or Hard Reset. Local `RETRY_FAIL`, request timeout, and partial receive faults clear contract authorization, preserve Rd and the CC session, flush the affected FIFO, and retry bounded capability discovery. Reinitializing the PHY or restarting CC toggling during such recovery can remove the same VBUS that powers the MCU. Any observed low VBUS immediately interlocks heating; a controller-reported transition starts a short continuous-low confirmation before entering the VBUS-restore wait. That wait retains Rd and the configured CC/RX session, then resumes bounded capability discovery after VBUS returns.
 
+When a new heater arm is held at zero duty while the working contract is pending, that frame is not complete idle: the arm intent is active and the output is intentionally blanked by the safety gate. The runtime must keep the power-negotiation stage active, request the selected PPS/APDO ceiling, and wait for protocol-confirmed `Accept` plus `PS_RDY`; routing the same frame through the generic zero-output idle reset falls back to `5V` and prevents PPS bootstrap.
+
 ### Manual PPS release
 
 Clearing an override is an explicit Idle operation, not a fire-and-forget request. The controller retains its ticket, retries failed admission or terminal outcomes, and waits for the automatic idle contract before releasing manual ownership and resuming automatic thermal requests. Heater PWM remains off while restoration is pending. The expected idle voltage must come from the running firmware's policy and live source capabilities; it must not be copied from a previous HIL receipt.
