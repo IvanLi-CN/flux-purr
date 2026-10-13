@@ -10901,6 +10901,23 @@ fn calibrated_hold_does_not_reheat_into_delayed_high_side_energy() {
             "{bank:?}: short falling slope is not proof that heat in flight has dissipated"
         );
 
+        // The final under-target fallback must not bypass the arrival guard.
+        controller.applied_heat.observe(4_000, 90_000.0);
+        controller.applied_heat.observe(4_400, 0.0);
+        input.now_ms = 4_400;
+        input.measured_temp_c = 59.8;
+        controller.filtered_temp_c = Some(59.8);
+        controller.previous_measured_temp_c = Some(59.8);
+        controller.filtered_slope_c_per_profile_tick = 0.0;
+        controller.profile_last_control_at_ms = Some(4_350);
+        let below_target = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(
+            below_target.duty_percent, 0,
+            "{bank:?}: fallback reheating bypasses the delayed-energy limit"
+        );
+
         // Genuine cooling must still restore heat before undershoot. This is
         // the same production call site, with known zero-power history.
         input.now_ms = 8_000;

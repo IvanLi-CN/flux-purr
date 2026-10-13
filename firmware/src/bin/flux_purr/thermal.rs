@@ -1134,6 +1134,11 @@ impl HeaterController {
                 control_target,
             )
         };
+        let duty_percent = if self.phase == HeaterControlPhase::Hold {
+            self.limit_hold_arrival_power(&frame, duty_percent)
+        } else {
+            duty_percent
+        };
 
         self.duty_percent = duty_percent;
         let warmup_soft_start_percent = if self.phase == HeaterControlPhase::Warmup {
@@ -1425,8 +1430,7 @@ impl HeaterController {
         };
         let requested_permille = self.hold_requested_permille(frame, base_permille);
         let pi_percent = percent_from_permille(requested_permille.clamp(0.0, 1_000.0) as u16);
-        let duty_percent = if (frame.hold_guard_error_c > 0.0
-            || frame.natural_cooling_rate_c_per_s.is_some())
+        if (frame.hold_guard_error_c > 0.0 || frame.natural_cooling_rate_c_per_s.is_some())
             && self.phase_ticks < frame.hold_blend_cycles
         {
             let blend_ratio = f32::from(self.phase_ticks.saturating_add(1))
@@ -1438,8 +1442,7 @@ impl HeaterController {
                 + 0.5) as u8
         } else {
             pi_percent
-        };
-        self.limit_hold_arrival_power(frame, duty_percent)
+        }
     }
 
     fn limit_hold_arrival_power(&mut self, frame: &ThermalControlFrame, duty_percent: u8) -> u8 {
