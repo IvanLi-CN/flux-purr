@@ -1368,8 +1368,14 @@ impl HeaterController {
                 input.now_ms,
                 predicted.temperature_c,
             ));
-            self.approach_last_request_permille =
-                Some(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
+            // A Hold recovery has no new full-power Warmup to brake. Keep
+            // its current logical request as the upward-slew origin; the
+            // model may still reduce it immediately when heat is in flight.
+            self.approach_last_request_permille = Some(if self.recovering_from_hold {
+                u16::from(self.duty_percent) * 10
+            } else {
+                flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE
+            });
         }
         if entered_approach {
             return Some(percent_from_permille(

@@ -10754,6 +10754,73 @@ fn trajectory_approach_keeps_reference_when_temperature_deficit_increases() {
 }
 
 #[test]
+fn trajectory_hold_recovery_does_not_restart_the_warmup_braking_ramp() {
+    // A 9c3882aa 220C trial 2: Hold 219.49C/57% -> Approach
+    // 219.22C/11%, followed by 218.39C. Recovery has no new Warmup energy.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut profile = production_test_profile(1_000);
+        profile.settings.temp_filter_alpha = 1.0;
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 220;
+        point.approach_lead_ticks = 0;
+        point.approach_damping_exponent_permille = 100;
+        point.hold_entry_centi_c = 50;
+        point.hold_exit_centi_c = 70;
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 220;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.duty_percent = 57;
+        controller.filtered_temp_c = Some(219.29);
+        controller.previous_filtered_temp_c = Some(219.29);
+        controller.previous_measured_temp_c = Some(219.29);
+        controller.filtered_slope_c_per_profile_tick = -0.5;
+        controller.profile_last_control_at_ms = Some(2_900);
+        let mut input = production_test_input(219.22);
+        input.target_temp_c = 220;
+        input.max_power_mw = 100_000.0;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 205.21394,
+            radiation_mw_per_k4: 1.8367949e-7,
+            thermal_capacity_mj_per_c: 25_915.566,
+            transport_delay_ms: 1_950,
+        };
+        controller
+            .applied_heat
+            .configure(input.model.transport_delay_ms);
+        controller.applied_heat.observe(1_000, 35_000.0);
+        controller.applied_heat.observe(input.now_ms, 35_000.0);
+        let mut high_arrival = controller;
+        let (output, disarmed) = controller.update_production_at(kind, input, Some(profile));
+        assert!(!disarmed);
+        assert_eq!(output.phase, HeaterControlPhase::Approach);
+        assert!(controller.recovering_from_hold);
+        assert!(
+            output.duty_percent >= 40,
+            "{bank:?}: falling plate must retain recovery authority, {output:?}"
+        );
+        assert!(!controller.initial_profile_approach());
+
+        high_arrival.applied_heat =
+            flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new();
+        high_arrival
+            .applied_heat
+            .configure(input.model.transport_delay_ms);
+        high_arrival.applied_heat.observe(1_000, 90_000.0);
+        high_arrival.applied_heat.observe(input.now_ms, 90_000.0);
+        let reduced = high_arrival
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert!(
+            reduced.duty_percent < 57,
+            "{bank:?}: recovery origin must not become a hard power floor"
+        );
+    }
+}
+
+#[test]
 fn legacy_approach_can_reenter_warmup_when_temperature_deficit_increases() {
     let (mut controller, profile, _) = pps_cooling_test_fixture(ThermalProfileBank::Pps5a);
     controller.reseed_measurement_after_pps_step(232.0);
