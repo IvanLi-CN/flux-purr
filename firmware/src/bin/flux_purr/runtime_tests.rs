@@ -12859,6 +12859,30 @@ fn rtd_control_guard_recovers_after_a_stable_persistent_temperature_shift() {
 }
 
 #[test]
+fn rtd_control_guard_accepts_small_in_band_unpowered_noise() {
+    let mut guard = RtdControlMeasurementGuard::default();
+    // Fixed 13.5V A trial 4 on 86353a39: a roughly 0.5C raw step
+    // inside the stable band was rejected at the 100ms control cadence.
+    guard.reseed(60.86, 690_489);
+    assert_eq!(
+        guard.observe_with_heater_duty(61.36, 690_589, 0),
+        Some(61.36)
+    );
+    assert!(!guard.guarded);
+    assert_eq!(
+        guard.observe_with_heater_duty(60.92, 690_689, 0),
+        Some(60.92)
+    );
+    assert_eq!(guard.observe_with_heater_duty(61.62, 690_789, 0), None);
+    assert!(guard.guarded);
+    assert_eq!(guard.observe_with_heater_duty(64.0, 690_789, 0), None);
+    assert!(guard.guarded);
+    assert_eq!(guard.last_accepted_temp_c, Some(60.92));
+    assert_eq!(guard.observe_with_heater_duty(64.0, 694_789, 0), None);
+    assert!(guard.guarded);
+}
+
+#[test]
 fn rtd_control_guard_does_not_reseed_from_fast_unpowered_rise() {
     let mut measurement_guard = RtdControlMeasurementGuard::default();
     measurement_guard.reseed(80.0, 0);

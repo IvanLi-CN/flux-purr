@@ -1034,9 +1034,15 @@ impl RtdControlMeasurementGuard {
             (self.last_accepted_temp_c, self.last_accepted_at_ms)
         {
             let elapsed_ms = now_ms.saturating_sub(last_at_ms).max(25);
-            let max_unpowered_rise_c = (RTD_CONTROL_MAX_UNPOWERED_RISE_C_PER_S
-                * (elapsed_ms as f32 / 1_000.0))
-                .min(RTD_CONTROL_MAX_UNPOWERED_RISE_STEP_C);
+            // A time-scaled limit alone shrinks below ordinary RTD batch
+            // noise at the 100ms cadence. Count small observations as real
+            // thermal evidence; do not turn a stable-band fluctuation into
+            // a held sample. Large unpowered steps retain the original cap.
+            let max_unpowered_rise_c =
+                (RTD_CONTROL_MAX_UNPOWERED_RISE_C_PER_S * (elapsed_ms as f32 / 1_000.0)).clamp(
+                    RTD_CONTROL_MIN_UNPOWERED_RISE_STEP_C,
+                    RTD_CONTROL_MAX_UNPOWERED_RISE_STEP_C,
+                );
             if heater_duty_percent == 0
                 && measurement_temp_c > last_temp_c
                 && measurement_temp_c - last_temp_c > max_unpowered_rise_c
