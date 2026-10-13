@@ -10315,6 +10315,39 @@ fn production_power_fixture(max_ma: u16) -> (PowerState, ManualPpsState) {
     (power_state, manual_pps)
 }
 
+#[test]
+fn valid_fixed_idle_contract_still_requires_automatic_pps_bootstrap() {
+    let (mut power, manual_pps) = production_power_fixture(5_000);
+    let active = power.active.as_mut().unwrap();
+    active.mode = PdContractRequestMode::Fixed;
+    active.voltage_mv = 5_000;
+    active.operating_current_ma = 1_000;
+    assert!(power.available);
+    assert_eq!(power.protocol, PowerProtocol::Ready);
+    assert!(automatic_pps_working_contract_pending(
+        power,
+        ThermalProfileMode::W100,
+        &manual_pps,
+    ));
+    assert_eq!(
+        automatic_pps_request_mv(0, true, true, 12_000, 12_000, 5_500, 21_000),
+        21_000
+    );
+
+    let (ready, _) = production_power_fixture(5_000);
+    assert!(!automatic_pps_working_contract_pending(
+        ready,
+        ThermalProfileMode::W100,
+        &manual_pps,
+    ));
+    let (lower_current, _) = production_power_fixture(3_000);
+    assert!(automatic_pps_working_contract_pending(
+        lower_current,
+        ThermalProfileMode::W100,
+        &manual_pps,
+    ));
+}
+
 fn production_test_profile(approach_power_permille: u16) -> ThermalControlProfile {
     let mut points = [None; FRONTPANEL_PRESET_COUNT];
     points[0] = Some(ThermalControlProfilePoint {

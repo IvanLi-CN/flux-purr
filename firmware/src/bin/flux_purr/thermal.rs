@@ -136,6 +136,15 @@ pub(crate) fn production_thermal_controller(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_pps_working_contract_pending(
+    power_state: PowerState,
+    mode: ThermalProfileMode,
+    manual_pps: &ManualPpsState,
+) -> bool {
+    !production_thermal_controller(power_state, mode, manual_pps).is_profile()
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn heater_phase_pps_request_mv(
     governor: &mut HoldPpsGovernor,
     input: HoldPpsRequestInput,

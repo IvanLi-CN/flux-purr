@@ -1660,15 +1660,7 @@ pub(crate) fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) 
         .pd_port
         .capabilities()
         .or_else(|| adjustable_capabilities_from_view(state.power_state.source_capabilities));
-    let manual_pps_needs_refresh = !state.manual_pps_state.has_matching_pps_apdo(20_000, 3_000);
-    let backend_needs_refresh = !matches!(
-        state.heater_power_backend,
-        HeaterPowerBackend::PpsMos { .. }
-    );
-    if capabilities == state.last_fusb302b_power_capabilities
-        && !manual_pps_needs_refresh
-        && !backend_needs_refresh
-    {
+    if capabilities == state.last_fusb302b_power_capabilities {
         return false;
     }
     state.last_fusb302b_power_capabilities = capabilities;
@@ -1827,19 +1819,11 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         state.heater_controller.clear_fault_latch();
         info!("calibration heater re-arm -> cleared latched fault");
     }
-    // Refresh both the backend and the capability-bearing manual state before
-    // checking the model gate.  The service snapshot can be newer than the
-    // UI-facing power-state subscription by one control cycle.
-    let _ = runtime_refresh_source_capabilities(state);
     let model_allowed = thermal_model_heater_allowed(
         &state.memory_config,
         state.calibration_runtime_state,
         state.manual_pps_state,
     );
-    // A boot-time capability read can complete after the backend was
-    // conservatively initialized as fixed-PD fallback.  Re-select the PPS
-    // backend before evaluating the arm intent so a valid live APDO is not
-    // stranded behind the fallback's 12 V bootstrap request.
     let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
         state.heater_power_backend,
         state.ui_state.heater_enabled,
@@ -1985,7 +1969,20 @@ fn runtime_production_pid_snapshot(
         state.memory_config.thermal_profile_mode,
         &state.manual_pps_state,
     );
-    if state.tuning_pd_wait_started_ms.is_some() {
+    if state.tuning_pd_wait_started_ms.is_some()
+        || (state.ui_state.heater_enabled
+            && !kind.is_profile()
+            && automatic_pps_transition_can_preserve_heater_intent(
+                state.heater_power_backend,
+                state.ui_state.heater_enabled,
+                state.manual_pps_state.enabled,
+                thermal_model_heater_allowed(
+                    &state.memory_config,
+                    state.calibration_runtime_state,
+                    state.manual_pps_state,
+                ),
+            ))
+    {
         return pause_tuning_profile_controller(
             &mut state.heater_controller,
             state.ui_state.target_temp_c,
@@ -2098,8 +2095,13 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
     // contract is confirmed.  That zero-duty frame must still request the
     // working voltage; otherwise the generic zero-output path steps down to
     // the 12 V idle contract and the heater can never bootstrap PPS.
-    let power_negotiation_stage =
-        automatic_pps_start_allowed && !state.pd_contract_ready && allow_pending_pps_progress;
+    let power_negotiation_stage = automatic_pps_start_allowed
+        && automatic_pps_working_contract_pending(
+            state.power_state,
+            state.memory_config.thermal_profile_mode,
+            &state.manual_pps_state,
+        )
+        && allow_pending_pps_progress;
     let output_changed = apply_heater_power_output(HeaterPowerOutputContext {
         pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
