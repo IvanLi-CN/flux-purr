@@ -1660,7 +1660,15 @@ pub(crate) fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) 
         .pd_port
         .capabilities()
         .or_else(|| adjustable_capabilities_from_view(state.power_state.source_capabilities));
-    if capabilities == state.last_fusb302b_power_capabilities {
+    let manual_pps_needs_refresh = !state.manual_pps_state.has_matching_pps_apdo(20_000, 3_000);
+    let backend_needs_refresh = !matches!(
+        state.heater_power_backend,
+        HeaterPowerBackend::PpsMos { .. }
+    );
+    if capabilities == state.last_fusb302b_power_capabilities
+        && !manual_pps_needs_refresh
+        && !backend_needs_refresh
+    {
         return false;
     }
     state.last_fusb302b_power_capabilities = capabilities;
@@ -1819,6 +1827,10 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         state.heater_controller.clear_fault_latch();
         info!("calibration heater re-arm -> cleared latched fault");
     }
+    // Refresh both the backend and the capability-bearing manual state before
+    // checking the model gate.  The service snapshot can be newer than the
+    // UI-facing power-state subscription by one control cycle.
+    let _ = runtime_refresh_source_capabilities(state);
     let model_allowed = thermal_model_heater_allowed(
         &state.memory_config,
         state.calibration_runtime_state,
@@ -1828,19 +1840,6 @@ pub(crate) async fn runtime_reconcile_heater_arming(
     // conservatively initialized as fixed-PD fallback.  Re-select the PPS
     // backend before evaluating the arm intent so a valid live APDO is not
     // stranded behind the fallback's 12 V bootstrap request.
-    if model_allowed
-        && !state.manual_pps_state.enabled
-        && let Some(capabilities) = state
-            .pd_port
-            .capabilities()
-            .or(state.last_fusb302b_power_capabilities)
-    {
-        let refreshed =
-            refresh_fusb302b_heater_power_backend(state.heater_power_backend, Some(capabilities));
-        if matches!(refreshed, HeaterPowerBackend::PpsMos { .. }) {
-            state.heater_power_backend = refreshed;
-        }
-    }
     let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
         state.heater_power_backend,
         state.ui_state.heater_enabled,
