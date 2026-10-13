@@ -3537,6 +3537,15 @@ fn damping_failure_side(evidence: TuneEvidence) -> Option<bool> {
     {
         Some(true)
     } else if unobserved_low_side_failure(evidence)
+        || (evidence.hold_sample_count < 3
+            && evidence.first_band_exit_centi_c.is_none()
+            && evidence.overshoot_c <= 0.5
+            && evidence
+                .first_hold_after_warmup_ms
+                .is_some_and(|after| after > evidence.settle_limit_ms)
+            && evidence
+                .stable_window_after_warmup_ms
+                .is_some_and(|after| after > evidence.settle_limit_ms))
         || (evidence.hold_sample_count == 0
             && evidence.first_hold_after_warmup_ms.is_none()
             && evidence.first_band_exit_centi_c.is_none()
@@ -3799,9 +3808,72 @@ mod tests {
             warmup_full: decision["warmupFull"].as_bool().unwrap(),
             max_overshoot_centi_c: decision["maxOvershootCentiC"].as_u64().map(|v| v as u16),
             hold_peak_to_peak_centi_c: decision["holdPeakToPeakCentiC"].as_u64().map(|v| v as u16),
-            settle_time_ms: None,
+            settle_time_ms: decision["settleTimeMs"].as_u64(),
             full_speed_limit_ms: decision["hardGateFullSpeedToStableMs"].as_u64().unwrap() as u32,
         }
+    }
+
+    #[test]
+    fn captured_late_hold_entry_preserves_the_same_run_damping_bracket() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "thermal_tuning_late_hold_bracket.fixture.json"
+        ))
+        .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let mut first = None;
+        for trial in fixture["trials"].as_array().unwrap() {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            first.get_or_insert(runtime.candidate_profile.unwrap().points[0].unwrap());
+            let facts = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                evaluation.settle_time_ms,
+                10_000,
+            );
+            if trial["trialIndex"] == 4 {
+                assert_eq!(facts.hold_sample_count, 1);
+                assert_eq!(facts.first_hold_after_warmup_ms, Some(10_112));
+                assert_eq!(damping_failure_side(facts), Some(false), "{facts:?}");
+                for invalid in [
+                    TuneEvidence {
+                        hold_sample_count: 3,
+                        ..facts
+                    },
+                    TuneEvidence {
+                        first_hold_after_warmup_ms: Some(9_999),
+                        ..facts
+                    },
+                    TuneEvidence {
+                        stable_window_after_warmup_ms: Some(9_999),
+                        ..facts
+                    },
+                    TuneEvidence {
+                        overshoot_c: 0.51,
+                        ..facts
+                    },
+                    TuneEvidence {
+                        tunable_stop: false,
+                        ..facts
+                    },
+                ] {
+                    assert_eq!(damping_failure_side(invalid), None);
+                }
+            }
+            runtime.advance_after_trial(60, evaluation).unwrap();
+        }
+        let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(
+            next,
+            ThermalControlProfilePointConfig {
+                approach_damping_exponent_permille: 1_445,
+                ..first.unwrap()
+            }
+        );
+        assert!(runtime.armed);
+        assert_eq!(runtime.accepted_target_mask, 0);
+        assert!(runtime.events.iter().any(|event| event.reason.as_deref()
+            == Some("same_run_damping_bracket_trials_1_4_midpoint_1445")));
     }
 
     #[test]
