@@ -1404,8 +1404,8 @@ impl ThermalTuningRuntime {
     ) -> bool {
         // A real Hold entry before the deadline is useful evidence, even when
         // rejected samples or a PPS transition postpone the continuous-window
-        // start by a small amount. Move the Approach handoff earlier by one
-        // bounded brake step; do not alter Hold or waive the 10 s gate.
+        // start by a small amount. Raise the Approach handoff temperature by
+        // one bounded brake step; do not alter Hold or waive the 10 s gate.
         if !evidence.tunable_stop
             || !evidence.full_speed_failed
             || evidence.stable_window_verified
@@ -1432,12 +1432,9 @@ impl ThermalTuningRuntime {
             return false;
         };
         let previous = original.points[index].unwrap();
-        let start_gap = (target_c - cooldown_threshold_c(target_c)) as u16 * 100;
         let mut proposed_point = previous;
-        proposed_point.brake_distance_centi_c = previous
-            .brake_distance_centi_c
-            .saturating_add(40)
-            .min(start_gap.saturating_sub(1));
+        proposed_point.brake_distance_centi_c =
+            previous.brake_distance_centi_c.saturating_sub(40).max(1);
         if proposed_point.brake_distance_centi_c == previous.brake_distance_centi_c {
             return false;
         }
@@ -3937,7 +3934,7 @@ mod tests {
         assert_eq!(
             next,
             ThermalControlProfilePointConfig {
-                brake_distance_centi_c: previous.brake_distance_centi_c + 40,
+                brake_distance_centi_c: previous.brake_distance_centi_c - 40,
                 ..previous
             }
         );
