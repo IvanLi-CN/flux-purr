@@ -4275,6 +4275,31 @@ fn isolapurr_configured_thermal_source_class_detects_3a_and_5a_modes() {
 }
 
 #[test]
+fn isolapurr_3a_setup_does_not_retain_a_repeatedly_reapplied_pps_register_limit() {
+    let mut config = json!({
+        "capability": {
+            "power_watts": 65,
+            "protocols": { "pd": true },
+            "pd": { "pps": true, "fixed_voltages_mv": [9000, 12000, 15000, 20000] },
+            "current": { "pps3_limit_ma": 3000, "pd_pps_5a": false }
+        }
+    });
+    assert!(!isolapurr_power_config_has_thermal_capability(
+        &config, 65, false
+    ));
+    // The existing setup command selects 5000 for this register and disables
+    // the independent 5A advertisement. The MCU still enforces the 3A bank.
+    config["capability"]["current"]["pps3_limit_ma"] = json!(5000);
+    assert!(isolapurr_power_config_has_thermal_capability(
+        &config, 65, false
+    ));
+    assert_eq!(
+        isolapurr_configured_thermal_source_class(&config),
+        Some("pps3a")
+    );
+}
+
+#[test]
 fn isolapurr_write_response_requires_positive_acknowledgement() {
     assert!(isolapurr_cli_write_succeeded(&json!({"accepted": true})));
     assert!(isolapurr_cli_write_succeeded(&json!({"ok": true})));

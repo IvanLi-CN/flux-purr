@@ -6218,11 +6218,24 @@ pub(crate) fn isolapurr_configured_thermal_source_class(config: &Value) -> Optio
             .and_then(Value::as_u64)
     })
     .unwrap_or(0);
-    Some(if pps_max_ma >= 5_000 {
-        "pps5a"
-    } else {
-        "pps3a"
-    })
+    Some(
+        if pps_max_ma >= 5_000 && isolapurr_pd_pps_5a(capability) != Some(false) {
+            "pps5a"
+        } else {
+            "pps3a"
+        },
+    )
+}
+
+fn isolapurr_pd_pps_5a(capability: &Value) -> Option<bool> {
+    capability
+        .pointer("/current/pd_pps_5a")
+        .or_else(|| capability.pointer("/current/pdPps5a"))
+        .or_else(|| capability.pointer("/pd/pd_pps_5a"))
+        .or_else(|| capability.pointer("/pd/pdPps5a"))
+        .or_else(|| capability.get("pd_pps_5a"))
+        .or_else(|| capability.get("pdPps5a"))
+        .and_then(Value::as_bool)
 }
 
 pub(crate) fn isolapurr_power_config_has_thermal_capability(
@@ -6243,14 +6256,7 @@ pub(crate) fn isolapurr_power_config_has_thermal_capability(
             .or_else(|| capability.pointer("/pd/pps3LimitMa"))
             .and_then(Value::as_u64)
     });
-    let pd_pps_5a = capability
-        .pointer("/current/pd_pps_5a")
-        .or_else(|| capability.pointer("/current/pdPps5a"))
-        .or_else(|| capability.pointer("/pd/pd_pps_5a"))
-        .or_else(|| capability.pointer("/pd/pdPps5a"))
-        .or_else(|| capability.get("pd_pps_5a"))
-        .or_else(|| capability.get("pdPps5a"))
-        .and_then(Value::as_bool);
+    let pd_pps_5a = isolapurr_pd_pps_5a(capability);
     json_u64_any(
         capability.as_object().unwrap_or(&serde_json::Map::new()),
         &["power_watts", "powerWatts"],
@@ -6262,7 +6268,15 @@ pub(crate) fn isolapurr_power_config_has_thermal_capability(
             .or_else(|| capability.pointer("/pd/fixedVoltagesMv"))
             .and_then(Value::as_array)
             .is_some_and(|voltages| !voltages.is_empty())
-        && (!requires_pps_5a || (pps3_limit_ma >= Some(5_000) && pd_pps_5a == Some(true)))
+        // Match the existing source setup command in both classes. Retaining
+        // a 3000 register setting in auto PPS can leave the source repeatedly
+        // reapplying its profile; 3A advertisement has its own enable flag.
+        && pps3_limit_ma.is_none_or(|limit| limit >= 5_000)
+        && if requires_pps_5a {
+            pps3_limit_ma.is_some() && pd_pps_5a == Some(true)
+        } else {
+            pd_pps_5a != Some(true)
+        }
 }
 
 pub(crate) fn validate_isolapurr_ready_voltage(
