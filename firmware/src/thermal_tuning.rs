@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::adapters::pd::{FUSB302B_PD_ABSOLUTE_MAX_MV, FUSB302B_PD_ABSOLUTE_MIN_MV};
-use crate::heater_phase::hold_entry_ready;
+use crate::heater_phase::{HOLD_ENTRY_BELOW_C, hold_entry_ready};
 use crate::memory::{
     ThermalControlProfileConfig, ThermalControlProfilePointConfig, ThermalProfileBank,
 };
@@ -394,6 +394,45 @@ struct ObservedDampingFailure {
     point: ThermalControlProfilePointConfig,
     trial_index: u8,
     high_side: bool,
+}
+
+#[derive(Clone, Copy)]
+enum FailureBracketAxis {
+    Damping,
+    Braking,
+}
+
+impl FailureBracketAxis {
+    fn value(self, point: ThermalControlProfilePointConfig) -> u16 {
+        match self {
+            Self::Damping => point.approach_damping_exponent_permille,
+            Self::Braking => point.brake_distance_centi_c,
+        }
+    }
+
+    fn set(self, point: &mut ThermalControlProfilePointConfig, value: u16) {
+        match self {
+            Self::Damping => point.approach_damping_exponent_permille = value,
+            Self::Braking => point.brake_distance_centi_c = value,
+        }
+    }
+
+    fn same_family(
+        self,
+        mut left: ThermalControlProfilePointConfig,
+        mut right: ThermalControlProfilePointConfig,
+    ) -> bool {
+        self.set(&mut left, 0);
+        self.set(&mut right, 0);
+        same_effective_search_point(left, right)
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Damping => "same_run_damping_bracket",
+            Self::Braking => "same_run_braking_bracket",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1182,7 +1221,17 @@ impl ThermalTuningRuntime {
     }
 
     fn prepare_damping_bracket(&mut self, original: ThermalControlProfileConfig) -> bool {
-        let target = self.targets_c[self.target_index];
+        self.prepare_failure_bracket(original, FailureBracketAxis::Damping)
+    }
+
+    fn prepare_failure_bracket(
+        &mut self,
+        original: ThermalControlProfileConfig,
+        axis: FailureBracketAxis,
+    ) -> bool {
+        let Some(target) = self.targets_c.get(self.target_index).copied() else {
+            return false;
+        };
         let Some(index) = original
             .points
             .iter()
@@ -1193,7 +1242,7 @@ impl ThermalTuningRuntime {
         let previous = original.points[index].unwrap();
         let mut bracket: Option<(ObservedDampingFailure, ObservedDampingFailure)> = None;
         for high in &self.observed_damping_failures {
-            if !high.high_side || !same_point_except_damping(high.point, previous) {
+            if !high.high_side || !axis.same_family(high.point, previous) {
                 continue;
             }
             let low = self
@@ -1201,24 +1250,15 @@ impl ThermalTuningRuntime {
                 .iter()
                 .filter(|low| {
                     !low.high_side
-                        && same_point_except_damping(low.point, previous)
-                        && low
-                            .point
-                            .approach_damping_exponent_permille
-                            .saturating_sub(high.point.approach_damping_exponent_permille)
-                            >= 2
+                        && axis.same_family(low.point, previous)
+                        && axis.value(low.point).saturating_sub(axis.value(high.point)) >= 2
                 })
-                .min_by_key(|low| low.point.approach_damping_exponent_permille);
+                .min_by_key(|low| axis.value(low.point));
             let Some(low) = low else {
                 continue;
             };
-            let width = low.point.approach_damping_exponent_permille
-                - high.point.approach_damping_exponent_permille;
-            if bracket.is_none_or(|(h, l)| {
-                width
-                    < l.point.approach_damping_exponent_permille
-                        - h.point.approach_damping_exponent_permille
-            }) {
+            let width = axis.value(low.point) - axis.value(high.point);
+            if bracket.is_none_or(|(h, l)| width < axis.value(l.point) - axis.value(h.point)) {
                 bracket = Some((*high, *low));
             }
         }
@@ -1226,14 +1266,9 @@ impl ThermalTuningRuntime {
             return false;
         };
         let mut proposed = original;
-        let midpoint = high.point.approach_damping_exponent_permille
-            + (low.point.approach_damping_exponent_permille
-                - high.point.approach_damping_exponent_permille)
-                / 2;
-        proposed.points[index]
-            .as_mut()
-            .unwrap()
-            .approach_damping_exponent_permille = midpoint;
+        let midpoint =
+            axis.value(high.point) + (axis.value(low.point) - axis.value(high.point)) / 2;
+        axis.set(proposed.points[index].as_mut().unwrap(), midpoint);
         proposed.sanitize();
         self.candidate_profile = Some(proposed);
         if !self.record_fresh_proposal(Some(original)) {
@@ -1241,7 +1276,7 @@ impl ThermalTuningRuntime {
             return false;
         }
         if self
-            .install_candidate_profile(proposed, "same_run_damping_bracket")
+            .install_candidate_profile(proposed, axis.reason())
             .is_err()
         {
             self.candidate_profile = Some(original);
@@ -1250,8 +1285,11 @@ impl ThermalTuningRuntime {
         let mut reason = TuningReason::new();
         let _ = write!(
             reason,
-            "same_run_damping_bracket_trials_{}_{}_midpoint_{}",
-            high.trial_index, low.trial_index, midpoint
+            "{}_trials_{}_{}_midpoint_{}",
+            axis.reason(),
+            high.trial_index,
+            low.trial_index,
+            midpoint
         );
         self.push_event(
             ThermalTuningEventKind::Decision,
@@ -1275,7 +1313,10 @@ impl ThermalTuningRuntime {
             return false;
         };
         self.remember_damping_failure(target_c, evidence);
-        if damping_failure_side(evidence).is_some() && self.prepare_damping_bracket(original) {
+        if damping_failure_side(evidence).is_some()
+            && (self.prepare_damping_bracket(original)
+                || self.prepare_failure_bracket(original, FailureBracketAxis::Braking))
+        {
             return true;
         }
         self.mutate_candidate_from_evidence(target_c, evidence);
@@ -1528,8 +1569,8 @@ impl ThermalTuningRuntime {
             let Some(evidence) = selected_failure_evidence else {
                 return self.exhaust_candidate_search(target_c);
             };
-            if !(self.prepare_fresh_failure_proposal_from_evidence(target_c, evidence)
-                || explore_braking && self.prepare_failed_damping_braking(target_c, evidence))
+            if !(explore_braking && self.prepare_failed_damping_braking(target_c, evidence)
+                || self.prepare_fresh_failure_proposal_from_evidence(target_c, evidence))
             {
                 return self.exhaust_candidate_search(target_c);
             }
@@ -2702,7 +2743,15 @@ impl ThermalTuningRuntime {
             } else {
                 1.0
             },
-            if completed { 0.0 } else { 1.0 },
+            if completed {
+                0.0
+            } else if self.warmup_exited_at_ms.is_some() {
+                1.0
+            } else {
+                // A Warmup timeout has no Approach deadline temperature.
+                // Its missing-data sentinel cannot beat measured progress.
+                2.0
+            },
             gate_penalty,
             if low_margin { 1.0 } else { 0.0 },
             progress_base + first_band_penalty + temperature_gap_c.min(5.0),
@@ -3487,7 +3536,18 @@ fn damping_failure_side(evidence: TuneEvidence) -> Option<bool> {
         && evidence.over_c > 1.5
     {
         Some(true)
-    } else if unobserved_low_side_failure(evidence) {
+    } else if unobserved_low_side_failure(evidence)
+        || (evidence.hold_sample_count == 0
+            && evidence.first_hold_after_warmup_ms.is_none()
+            && evidence.first_band_exit_centi_c.is_none()
+            && evidence.overshoot_c <= 0.5
+            && evidence
+                .deadline_temperature_centi_c
+                .is_some_and(|temperature| {
+                    f32::from(evidence.target_c) - f32::from(temperature) / 100.0
+                        > HOLD_ENTRY_BELOW_C
+                }))
+    {
         Some(false)
     } else {
         None
@@ -3689,7 +3749,7 @@ mod tests {
         runtime.reset_trial_metrics();
         let wire: ThermalTuningCandidatePoint =
             serde_json::from_value(trial["point"].clone()).unwrap();
-        let mut profile = profile_with_targets(&[60]);
+        let mut profile = profile_with_targets(&[wire.target_c]);
         let point = profile.points[0].as_mut().unwrap();
         macro_rules! copy_fields {
             ($($field:ident),+ $(,)?) => { $(point.$field = wire.$field;)+ };
@@ -3727,8 +3787,10 @@ mod tests {
             );
             observed.heater_requested_output_permille = row[3].as_u64().unwrap() as u16;
             observed.heater_output_permille = row[4].as_u64().unwrap() as u16;
+            observed.measurement_accepted = row[5].as_bool();
             runtime.current_elapsed_ms = observed.elapsed_ms;
-            runtime.update_trial_metrics(&observed, 60);
+            observed.target_c = wire.target_c;
+            runtime.update_trial_metrics(&observed, wire.target_c);
         }
         let decision = &trial["decision"];
         TrialEvaluation {
@@ -3738,8 +3800,108 @@ mod tests {
             max_overshoot_centi_c: decision["maxOvershootCentiC"].as_u64().map(|v| v as u16),
             hold_peak_to_peak_centi_c: decision["holdPeakToPeakCentiC"].as_u64().map(|v| v as u16),
             settle_time_ms: None,
-            full_speed_limit_ms: 10_000,
+            full_speed_limit_ms: decision["hardGateFullSpeedToStableMs"].as_u64().unwrap() as u32,
         }
+    }
+
+    #[test]
+    fn captured_warmup_timeout_cannot_outrank_measured_approach_progress() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_warmup_rank.fixture.json")).unwrap();
+        let mut runtime = started_single_target_runtime();
+        runtime.targets_c[0] = 220;
+        let mut observed_scores = std::vec::Vec::new();
+        for trial in fixture["trials"].as_array().unwrap() {
+            let mut evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            evaluation.score = runtime.trial_score(
+                220,
+                false,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                None,
+            );
+            observed_scores.push(evaluation.score);
+            runtime.advance_after_trial(220, evaluation).unwrap();
+        }
+        assert!(
+            score_precedes(&observed_scores[1], &observed_scores[0]),
+            "{observed_scores:?}"
+        );
+        assert!(
+            runtime
+                .events
+                .iter()
+                .any(|event| event.reason.as_deref() == Some("candidate_batch_selected_predicted"))
+        );
+        assert!(runtime.armed);
+        assert_eq!(runtime.accepted_target_mask, 0);
+        assert!(!runtime.events.iter().any(|event| event.reason.as_deref()
+            == Some("candidate_search_exhausted_no_distinct_safe_proposal")));
+    }
+
+    #[test]
+    fn captured_opposite_braking_failures_bisect_the_same_run_interval() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_braking_bracket.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let mut first_point = None;
+        for trial in fixture["trials"].as_array().unwrap() {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            first_point.get_or_insert(runtime.candidate_profile.unwrap().points[0].unwrap());
+            let facts = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                None,
+                10_000,
+            );
+            assert_eq!(
+                damping_failure_side(facts),
+                Some(trial["trialIndex"] == 0),
+                "{facts:?}"
+            );
+            runtime.advance_after_trial(60, evaluation).unwrap();
+        }
+        let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(
+            next,
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 1_596,
+                ..first_point.unwrap()
+            }
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
+        assert!(runtime.events.iter().any(|event| event.reason.as_deref()
+            == Some("same_run_braking_bracket_trials_0_1_midpoint_1596")));
+    }
+
+    #[test]
+    fn braking_bracket_rejects_changed_parameters_and_cross_run_evidence() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_braking_bracket.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        for trial in fixture["trials"].as_array().unwrap() {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            let facts = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                None,
+                10_000,
+            );
+            runtime.remember_damping_failure(60, facts);
+        }
+        let mut changed = runtime.candidate_profile.unwrap();
+        changed.points[0]
+            .as_mut()
+            .unwrap()
+            .approach_damping_exponent_permille += 1;
+        assert!(!runtime.prepare_failure_bracket(changed, FailureBracketAxis::Braking));
+        let original = runtime.candidate_profile.unwrap();
+        runtime.reset_for_run();
+        assert!(!runtime.prepare_failure_bracket(original, FailureBracketAxis::Braking));
     }
 
     #[test]
