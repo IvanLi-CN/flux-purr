@@ -82,6 +82,7 @@
 - USB JSONL 的完整响应必须保留到发送完成；运行态 response writer 状态必须驻留在 runtime transport 中，端点背压时每轮最多填充一个非阻塞 USB packet。ESP32-S3 USB Serial/JTAG FIFO 自动提交完整 64-byte packet，只有最终短 packet 显式提交一次，之后必须只读取发送完成状态，不得在等待 host 接收时重复提交空 packet；每次成功写入或 flush 后返回主循环，在当前响应完成或明确失败前停止接收下一条请求。USB 背压、诊断输出或客户端停止读取不得阻塞 Front Panel、LED、热控、PD service 或 executor。
 - `TIMG0` watchdog 在第一个异步启动阶段前由独立 supervisor 启用，启动期间使用 boot-stage heartbeat，进入 `runtime_ready` 后切换为 Front Panel runtime 与 PD service 的单调心跳门控。supervisor 只在相应阶段要求的心跳自上次 feed 后推进时喂狗；任一任务、正常 executor 或 supervisor 停滞都必须停止 feed 并在硬件超时后复位。watchdog reset reason 必须沿既有 USB/U0 reset diagnostics 暴露，且 heater permit 在复位前后保持 fail-closed。
 - `hello` 必须返回 protocol version、framing、identity 和 capabilities。
+- 产品设备的 `Identity.resetReason` 必须返回硬件记录的本次启动复位原因，并在整个启动周期中可重复读取；它不依赖早期 USB 日志是否被主机捕获。旧固件和缺少硬件事实的 mock 可以省略该字段，未知原因只能报告 `unknown`，不得由断连、PPS 状态或读取失败推定原因。
 - `flash_preparation` capability 的 USB JSONL 请求为 `prepare_flash`、`get_flash_preparation` 与 `cancel_flash_preparation`。成功响应必须包含 `flashPreparation` 对象及 `heating`、`cooling`、`pdFixedOrDefault` 三个布尔字段；响应描述同一时刻已应用的硬件状态，不能用 ACK 代替。
 - 运行态尚未初始化时，三个 preparation 请求均返回可重试的 `startup_busy`；硬件初始化失败时均返回可重试的 `hardware_bringup_failed`。没有实际输出快照时不得构造成功的 preparation 状态。
 - `prepare_flash` 必须幂等建立无自动过期的 RAM 保持：清除并结算加热、手动 PPS、校准、热测试和输出启动意图，立即关断实际 heater PWM，允许安全冷却完成，并阻止新意图与旧请求重放。保持只由 `cancel_flash_preparation` 或 reset 解除；取消后不恢复旧请求，也不写 EEPROM 或删除校准结果。

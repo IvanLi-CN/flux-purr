@@ -77,6 +77,16 @@ impl StatusJournal {
     }
 
     fn record(&mut self, statuses: &mut Vec<Value>, mut status: Value) -> io::Result<()> {
+        if let Some(first) = statuses.first()
+            && ["runId", "candidateId", "powerClass", "targetsC"]
+                .iter()
+                .any(|field| status[*field] != first[*field])
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "tuning_run_lost: device run identity or scope changed; retained evidence remains bound to the original run",
+            ));
+        }
         if !status_has_new_evidence(statuses.last(), &status, self.last_profile_hash.as_deref()) {
             return Ok(());
         }
@@ -307,24 +317,19 @@ async fn run_firmware_tuning_until_interrupt(
         let mut after_sequence = next_event_sequence(&start);
         journal.record(&mut statuses, start)?;
         loop {
-            let mut read_body = json!({"op": "read", "runId": run_id});
-            if let Some(sequence) = after_sequence {
-                read_body["afterSequence"] = json!(sequence);
-            }
-            let status = request_leased(
+            let status = request_firmware_event_read(
                 client,
                 &resolved,
                 &lease.lease_id,
-                Method::POST,
-                "/thermal-tuning",
-                Some(read_body),
+                &run_id,
+                after_sequence,
             )
             .await
             .map_err(|error| {
                 eprintln!("firmware thermal tuning event read failed: {error}");
                 error
             })?;
-            after_sequence = next_event_sequence(&status).or(after_sequence);
+            after_sequence = next_event_sequence(&status).max(after_sequence);
             let caught_up = event_stream_caught_up(&status, after_sequence);
             let terminal = status
                 .get("terminalDisposition")
@@ -490,15 +495,8 @@ async fn cancel_and_drain_firmware_run(
     let max_pages = THERMAL_TUNING_EVENT_CAPACITY.div_ceil(THERMAL_TUNING_EVENT_PAGE_SIZE) + 1;
     for _ in 0..max_pages {
         let previous = after_sequence;
-        let status = request_leased(
-            client,
-            resolved,
-            lease_id,
-            Method::POST,
-            "/thermal-tuning",
-            Some(firmware_read_command(run_id, after_sequence)),
-        )
-        .await?;
+        let status =
+            request_firmware_event_read(client, resolved, lease_id, run_id, after_sequence).await?;
         require_disarmed_run(&status, run_id)?;
         let received = next_event_sequence(&status).max(after_sequence);
         let caught_up = event_stream_caught_up(&status, received);
@@ -639,15 +637,9 @@ pub(crate) async fn confirm_firmware_save(
             .last()
             .and_then(|status| status.pointer("/trace/lastSequence"))
             .and_then(Value::as_u64);
-        let current = request_leased(
-            client,
-            &resolved,
-            &lease.lease_id,
-            Method::POST,
-            "/thermal-tuning",
-            Some(firmware_read_command(run_id, last_sequence)),
-        )
-        .await?;
+        let current =
+            request_firmware_event_read(client, &resolved, &lease.lease_id, run_id, last_sequence)
+                .await?;
         if current.get("runId").and_then(Value::as_str) != Some(run_id)
             || current.get("candidateId").and_then(Value::as_str) != Some(candidate_id)
             || current.get("candidateHash").and_then(Value::as_str) != Some(candidate_hash)
@@ -670,13 +662,12 @@ pub(crate) async fn confirm_firmware_save(
         let seal_sequence = next_event_sequence(&sealed)
             .ok_or("sealed candidate did not emit an auditable transition")?;
         journal.record(&mut statuses, sealed)?;
-        let seal_ack = request_leased(
+        let seal_ack = request_firmware_event_read(
             client,
             &resolved,
             &lease.lease_id,
-            Method::POST,
-            "/thermal-tuning",
-            Some(firmware_read_command(run_id, Some(seal_sequence))),
+            run_id,
+            Some(seal_sequence),
         )
         .await?;
         if seal_ack.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
@@ -710,13 +701,12 @@ pub(crate) async fn confirm_firmware_save(
         }
         journal.record(&mut statuses, saved)?;
         if let Some(sequence) = statuses.last().and_then(next_event_sequence) {
-            let confirmed = request_leased(
+            let confirmed = request_firmware_event_read(
                 client,
                 &resolved,
                 &lease.lease_id,
-                Method::POST,
-                "/thermal-tuning",
-                Some(firmware_read_command(run_id, Some(sequence))),
+                run_id,
+                Some(sequence),
             )
             .await?;
             if confirmed.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
@@ -1355,15 +1345,8 @@ async fn confirm_terminal_tuning_events(
     run_id: &str,
     sequence: u64,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let confirmed = request_leased(
-        client,
-        resolved,
-        lease_id,
-        Method::POST,
-        "/thermal-tuning",
-        Some(firmware_read_command(run_id, Some(sequence))),
-    )
-    .await?;
+    let confirmed =
+        request_firmware_event_read(client, resolved, lease_id, run_id, Some(sequence)).await?;
     if confirmed.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
         || confirmed
             .pointer("/trace/lastSequence")
@@ -1402,6 +1385,28 @@ fn firmware_read_command(run_id: &str, after_sequence: Option<u64>) -> Value {
         command["afterSequence"] = json!(sequence);
     }
     command
+}
+
+async fn request_firmware_event_read(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    run_id: &str,
+    after_sequence: Option<u64>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let status = request_leased(
+        client,
+        resolved,
+        lease_id,
+        Method::POST,
+        "/thermal-tuning",
+        Some(firmware_read_command(run_id, after_sequence)),
+    )
+    .await?;
+    if status.get("runId").and_then(Value::as_str) != Some(run_id) {
+        return Err("tuning_run_lost: device no longer reports the requested tuning run".into());
+    }
+    Ok(status)
 }
 
 fn firmware_start_command(
@@ -2992,6 +2997,27 @@ mod tests {
             firmware_read_command("run-1", Some(17)),
             json!({"op": "read", "runId": "run-1", "afterSequence": 17})
         );
+    }
+
+    #[test]
+    fn restarted_device_status_cannot_contaminate_the_active_run_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = StatusJournal::create(directory.path()).unwrap();
+        let mut statuses = Vec::new();
+        let active = device_journal_fixture();
+        journal.record(&mut statuses, active.clone()).unwrap();
+        let reset = json!({
+            "runId": null, "candidateId": null, "powerClass": null,
+            "targetsC": [], "phase": "idle", "armed": false,
+            "terminalDisposition": "running",
+            "events": {"events": [], "nextSequence": null},
+            "trace": {"lastSequence": null, "digest": "", "complete": true, "gap": false}
+        });
+        let error = journal.record(&mut statuses, reset).unwrap_err();
+        assert!(error.to_string().contains("tuning_run_lost"));
+        assert_eq!(statuses, [active]);
+        let raw = std::fs::read_to_string(directory.path().join("device-statuses.ndjson")).unwrap();
+        assert_eq!(raw.lines().count(), 1);
     }
 
     #[test]

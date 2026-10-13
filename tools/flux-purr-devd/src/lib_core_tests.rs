@@ -4310,6 +4310,7 @@ fn runtime_verification_requires_product_firmware_kind() {
         firmware_version: bundle.manifest.identity.version.clone(),
         build_id: bundle.manifest.identity.build_id.clone(),
         git_sha: bundle.manifest.identity.source_sha.clone(),
+        reset_reason: None,
         board: "esp32-s3".into(),
         api_version: "2026-05-29".into(),
         protocol_version: "flux-purr.usb.v1".into(),

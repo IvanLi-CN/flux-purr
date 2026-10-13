@@ -16,6 +16,8 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 
 ### `Identity`
 
+Product firmware includes optional `resetReason`, the hardware-recorded cause of the current boot (for example `chip_power_on`, `core_software`, `core_mwdt0`, `system_brownout`, or `core_usb_jtag`). It remains readable for the lifetime of that boot independently of early boot log capture. Older firmware and mocks may omit it; unavailable hardware reasons are `unknown`, not inferred from connection or PD state.
+
 ```json
 {
   "deviceId": "flux-purr-s3-001",

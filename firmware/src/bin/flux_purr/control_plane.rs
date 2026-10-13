@@ -3346,7 +3346,13 @@ pub(crate) fn usb_response(
 pub(crate) fn hardware_identity() -> Identity {
     #[cfg(target_arch = "xtensa")]
     {
-        Identity::firmware_from_mac(esp_hal::efuse::Efuse::mac_address())
+        let mut identity = Identity::firmware_from_mac(esp_hal::efuse::Efuse::mac_address());
+        let reason = reset_reason_log_line(esp_hal::system::reset_reason())
+            .trim()
+            .strip_prefix("reset_reason=")
+            .unwrap_or("unknown");
+        identity.reset_reason = Some(reason.try_into().expect("hardware reset reason fits"));
+        identity
     }
     #[cfg(not(target_arch = "xtensa"))]
     {

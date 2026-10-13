@@ -31,6 +31,7 @@ export interface Identity {
   firmwareVersion: string
   buildId: string
   gitSha: string
+  resetReason?: string
   board: string
   apiVersion: string
   protocolVersion: string

@@ -132,6 +132,8 @@ pub struct Identity {
     pub firmware_version: String<32>,
     pub build_id: String<BUILD_ID_MAX_LEN>,
     pub git_sha: String<GIT_SHA_MAX_LEN>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_reason: Option<String<32>>,
     pub board: String<24>,
     pub api_version: String<16>,
     pub protocol_version: String<24>,
@@ -170,6 +172,7 @@ impl Identity {
             firmware_version: string(env!("FLUX_PURR_FW_VERSION")),
             build_id: string(env!("FLUX_PURR_BUILD_ID")),
             git_sha: string(env!("FLUX_PURR_SOURCE_SHA")),
+            reset_reason: None,
             board: string("esp32-s3"),
             api_version: string(CONTROL_PLANE_API_VERSION),
             protocol_version: string(USB_PROTOCOL_VERSION),
@@ -3576,6 +3579,19 @@ mod tests {
             parse_usb_frame(json).expect("compact response parses"),
             frame
         );
+    }
+
+    #[test]
+    fn identity_reset_reason_survives_wire_roundtrip_and_legacy_omission() {
+        let legacy = Identity::firmware_default();
+        let encoded = serde_json::to_string(&legacy).unwrap();
+        assert!(!encoded.contains("resetReason"));
+        assert_eq!(serde_json::from_str::<Identity>(&encoded).unwrap(), legacy);
+        let mut boot = legacy;
+        boot.reset_reason = Some(string("core_mwdt0"));
+        let encoded = serde_json::to_string(&boot).unwrap();
+        assert!(encoded.contains(r#""resetReason":"core_mwdt0""#));
+        assert_eq!(serde_json::from_str::<Identity>(&encoded).unwrap(), boot);
     }
 
     #[test]
