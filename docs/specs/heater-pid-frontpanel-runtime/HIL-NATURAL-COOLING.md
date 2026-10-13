@@ -1,5 +1,19 @@
 # Natural-cooling control and fan evidence
 
+## Device restart and retained-run evidence
+
+提交c93709bd对应的A/B产物在原授权端口直接执行成对无备份旁路，espflash均以exit0完成，并读回同提交应用身份；没有要求先确认手动下载模式。A/B的3V3编译基准分别为3328/3340mV。没有创建EEPROM备份归档，EEPROM整体健康状态未知，也没有保存新调优结果。
+
+B组60°C诊断firmware-pps3a-1791863049313在运行中重启，保留事件0..157；再次诊断firmware-pps3a-1791863351877在初始全速冷却期间重启，保留0..128。重启后硬件身份返回chip_power_on，RAM运行丢失，PPS回到5V。第二轮同步电源查询在host time1791863392736报告21.010V、116mA；1791863393826报告USB-C not_inserted、无电压值；1791863394891恢复PD Fixed与5.043V。电源uptime连续、输出使能保持true、recovery计数保持0。记录是约1Hz的部分观测，不能决定供电中断与MCU复位的先后因果，也不能把缺失电压值当作测得0V。停止调优后的5V空闲状态又观察到低uptime与相同复位原因，因此不能将问题仅归因于加热负载、Approach参数或PPS制动。复位根因仍未建立。
+
+通过B组对应的OvO USB-C port_c执行已授权的断电/上电后，原授权MCU端口原样返回。MOS为0、风扇关闭、Fixed5V待机观测仍出现uptime52→12秒；关闭B组devd并保持126秒无串口访问后，再次读取uptime仅51秒，resetReason仍为chip_power_on。这证明复位也发生在无调优、无串口轮询的待机区间；重新打开串口没有将uptime清零。不能仅据该复位码区分实际供电中断与外部复位线路，也没有证据支持通过调整调优参数解决它。
+
+A组停热待机时读到31.92°C；仅将PPS由5V切到21V、保持MOS为0与风扇关闭，20个连续状态样本为31.91–32.20°C，原始RTD ADC为1037–1038mV。清除手动PPS后恢复Fixed5V，温度31.64°C。该约30秒对照没有复现此前约37°C的冷却等待读数，也没有覆盖全速风扇负载或刚结束加热的状态；不能以此认定传感器、散热或动态测温已经正常。室温约30°C时本次待机偏差不足3°C，没有据此创建临时ADC偏移或用户校准点。
+
+两个B组报告均从原运行事件前缀正常生成failed/review_incomplete结论，没有将重启后的空闲状态追加进原日志或伪造终态；标准报告位于firmware/target/hil-restart-diagnostic-b-c93709bd-bundle与firmware/target/hil-restart-source-b-c93709bd-bundle。同步电源部分原始观测位于firmware/target/hil-restart-source-b-c93709bd/source-observation-prefix.ndjson。身份不匹配读取不会修改设备当前运行，但不能恢复重启后已丢失的RAM运行。
+
+A组完整范围运行firmware-pps5a-1791863151338在60°C完成两次试验：初始候选过冲2.72°C、qualified Hold峰峰值3.08°C；本轮预测候选分别降到1.56°C、2.07°C，仍未建立连续稳定窗口。其后MOS为0、全速风扇命令连续启用，读数长时间约36.7–37°C，未满足≤35°C下一轮起点，设备在1200027ms记录target_budget_exhausted_during_cooldown。运行随后转入220°C并在预热期间由主机标准取消，全部0..5162事件和设备摘要验证通过；标准报告firmware/target/hil-tuning-a-c93709bd-bundle保留host_canceled、failed/review_incomplete，不代表220°C终态或八目标资格。独立postflight确认两组heater disabled、MOS为0，A保留散热命令。没有通过或保存新参数。
+
 ## Artifact and test boundary
 
 The authorized device is `288485681c38`, reached only through the owner's exact MCU port and the repository CLI/devd. The bench source is IsolaPurr `f293cc9c139e`, USB-C `port_c`. No PD-module source changes are included in the natural-cooling work. EEPROM backup was explicitly bypassed; no archive was created and EEPROM health is unknown.
