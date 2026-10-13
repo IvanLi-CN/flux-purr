@@ -10853,6 +10853,73 @@ fn trajectory_controller_reaches_physical_hold_with_delayed_calibrated_plants() 
     }
 }
 
+#[test]
+fn calibrated_hold_does_not_reheat_into_delayed_high_side_energy() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        let mut input = production_test_input(61.03);
+        input.ambient_temp_c = 30.0;
+        input.now_ms = 4_000;
+        input.max_power_mw = 100_000.0;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 205.21394,
+            radiation_mw_per_k4: 1.8367949e-7,
+            thermal_capacity_mj_per_c: 25_915.566,
+            transport_delay_ms: 1_950,
+        };
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.hold_power_permille = 60;
+        point.hold_reheat_power_permille = 60;
+        point.hold_kp_permille_per_c = 8;
+        point.hold_ki_permille_per_c_tick = 2;
+        point.hold_off_centi_c = 120;
+        point.overshoot_cutoff_centi_c = 150;
+        point.hold_lead_ticks = 2;
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.phase_ticks = 100;
+        controller.profile_last_control_at_ms = Some(3_950);
+        controller.filtered_temp_c = Some(input.measured_temp_c);
+        controller.previous_measured_temp_c = Some(input.measured_temp_c);
+        controller.filtered_slope_c_per_profile_tick = -0.01;
+        controller
+            .applied_heat
+            .configure(input.model.transport_delay_ms);
+        controller.applied_heat.observe(2_000, 10_000.0);
+        controller.applied_heat.observe(input.now_ms, 0.0);
+
+        let output = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(output.phase, HeaterControlPhase::Hold);
+        assert_eq!(
+            output.duty_percent, 0,
+            "{bank:?}: short falling slope is not proof that heat in flight has dissipated"
+        );
+
+        // Genuine cooling must still restore heat before undershoot. This is
+        // the same production call site, with known zero-power history.
+        input.now_ms = 8_000;
+        input.measured_temp_c = 59.8;
+        controller.filtered_temp_c = Some(59.8);
+        controller.previous_measured_temp_c = Some(59.82);
+        controller.filtered_slope_c_per_profile_tick = -0.15;
+        controller.profile_last_control_at_ms = Some(7_950);
+        controller.applied_heat.observe(input.now_ms, 0.0);
+        let cooling = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert!(
+            cooling.duty_percent > 0,
+            "{bank:?}: recovery must remain available"
+        );
+    }
+}
+
 fn assert_trajectory_plant_handoff(
     bank: ThermalProfileBank,
     model: flux_purr_firmware::memory::ThermalPlantProjection,

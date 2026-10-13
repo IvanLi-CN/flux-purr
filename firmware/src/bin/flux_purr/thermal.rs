@@ -1425,7 +1425,8 @@ impl HeaterController {
         };
         let requested_permille = self.hold_requested_permille(frame, base_permille);
         let pi_percent = percent_from_permille(requested_permille.clamp(0.0, 1_000.0) as u16);
-        if (frame.hold_guard_error_c > 0.0 || frame.natural_cooling_rate_c_per_s.is_some())
+        let duty_percent = if (frame.hold_guard_error_c > 0.0
+            || frame.natural_cooling_rate_c_per_s.is_some())
             && self.phase_ticks < frame.hold_blend_cycles
         {
             let blend_ratio = f32::from(self.phase_ticks.saturating_add(1))
@@ -1437,7 +1438,45 @@ impl HeaterController {
                 + 0.5) as u8
         } else {
             pi_percent
+        };
+        self.limit_hold_arrival_power(frame, duty_percent)
+    }
+
+    fn limit_hold_arrival_power(&mut self, frame: &ThermalControlFrame, duty_percent: u8) -> u8 {
+        let Some(input) = self
+            .natural_cooling_input
+            .filter(|_| self.model_approach_available())
+        else {
+            return duty_percent;
+        };
+        let plant = flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
+            model: input.model,
+            ambient_c: input.ambient_temp_c,
+            max_power_mw: input.max_power_mw,
+        };
+        let predicted = self.applied_heat.forecast(
+            input.now_ms,
+            input.measured_temp_c,
+            frame.filtered_slope_c_per_profile_tick,
+            plant,
+        );
+        let horizon_s = frame
+            .natural_cooling_delay_s
+            .max(f32::from(frame.control_target.hold_lead_ticks))
+            .max(0.4);
+        let arrival_power_mw = (plant.loss_mw(predicted.temperature_c)
+            + input.model.thermal_capacity_mj_per_c
+                * (f32::from(input.target_temp_c) - predicted.temperature_c)
+                / horizon_s)
+            .clamp(0.0, input.max_power_mw);
+        // Apply after the entry blend so it cannot restore delayed heat into
+        // an already high future temperature. Floor conversion never rounds
+        // the bounded physical request above the calculated energy limit.
+        let limit_percent = (arrival_power_mw / input.max_power_mw * 100.0) as u8;
+        if duty_percent > limit_percent {
+            self.hold_integral_c = 0.0;
         }
+        duty_percent.min(limit_percent)
     }
 
     fn hold_requested_permille(&mut self, frame: &ThermalControlFrame, base_permille: f32) -> f32 {
