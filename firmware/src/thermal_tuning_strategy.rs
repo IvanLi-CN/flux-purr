@@ -14,6 +14,7 @@ pub(crate) struct TuneEvidence {
     pub target_c: i16,
     pub tunable_stop: bool,
     pub full_speed_failed: bool,
+    pub hold_pps_wait_interruptions: u32,
     pub overshoot_c: f64,
     pub hold_p2p_c: f64,
     pub residual_c: f64,
@@ -224,7 +225,7 @@ pub(crate) fn bounded_failure_alternative(
             point.brake_distance_centi_c = previous
                 .brake_distance_centi_c
                 .saturating_sub(40 * step)
-                .max(100)
+                .max(crate::memory::THERMAL_CONTROL_PROFILE_BRAKE_DISTANCE_MIN_CENTI_C)
         }
         (false, false, _) => {
             point.approach_damping_exponent_permille = previous
@@ -1030,6 +1031,21 @@ fn stability_gate_evidence(evidence: TuneEvidence) -> (GateFailure, f64) {
     let target = i32::from(evidence.target_c) * 100;
     let lower = target - 150;
     let upper = target + 150;
+    if evidence.full_speed_failed
+        && evidence.tunable_stop
+        && evidence.hold_sample_count == 0
+        && evidence.overshoot_c <= 0.5
+        && evidence.first_band_exit_centi_c.is_none()
+        && let Some(temperature) = evidence.deadline_temperature_centi_c
+        && f64::from(temperature) < f64::from(target) - 50.0
+    {
+        // Being inside the wider stable band does not establish physical Hold.
+        // Keep missing-Hold feedback in the Approach channels only.
+        return (
+            GateFailure::MissedLow,
+            (f64::from(target - 50 - i32::from(temperature)) / 100.0).max(0.05),
+        );
+    }
     // A first low-band exit can be an Approach measurement fluctuation.
     // With physical Hold never below band, stopped or limited Hold supply and a later
     // upper-band excursion, the observed failure is stored heat, not reheat.
@@ -2302,6 +2318,7 @@ mod tests {
             target_c,
             tunable_stop: true,
             full_speed_failed: true,
+            hold_pps_wait_interruptions: 0,
             overshoot_c: 0.0,
             hold_p2p_c: 0.0,
             residual_c: 0.0,

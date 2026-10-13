@@ -53,6 +53,9 @@ pub const THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_125MV: u8 = 40;
 pub const THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C: f32 = 2_000.0;
 pub const THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4: f32 = 0.000_01;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
+// The physical Hold entrance remains target - 0.5 C. Leave a 0.1 C
+// Approach margin without imposing the legacy one-degree search floor.
+pub const THERMAL_CONTROL_PROFILE_BRAKE_DISTANCE_MIN_CENTI_C: u16 = 60;
 pub const THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS: usize = THERMAL_CONTROL_PROFILE_MAX_POINTS;
 pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 750;
 pub const THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT: u16 = 400;
@@ -1091,7 +1094,9 @@ fn sanitize_thermal_profile_point(
 ) -> ThermalControlProfilePointConfig {
     ThermalControlProfilePointConfig {
         target_temp_c: clamp_temp_c(point.target_temp_c),
-        brake_distance_centi_c: point.brake_distance_centi_c.clamp(100, 5_000),
+        brake_distance_centi_c: point
+            .brake_distance_centi_c
+            .clamp(THERMAL_CONTROL_PROFILE_BRAKE_DISTANCE_MIN_CENTI_C, 5_000),
         warmup_power_permille: point.warmup_power_permille.min(1_000),
         warmup_reenter_centi_c: if point.warmup_reenter_centi_c == 0 {
             settings.warmup_reenter_centi_c
@@ -3778,7 +3783,9 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
         .take(THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS)
     {
         let target = clamp_temp_c(point.target_temp_c) as u16;
-        let brake_distance = point.brake_distance_centi_c.clamp(100, 5_000);
+        let brake_distance = point
+            .brake_distance_centi_c
+            .clamp(THERMAL_CONTROL_PROFILE_BRAKE_DISTANCE_MIN_CENTI_C, 5_000);
         let warmup_power = point.warmup_power_permille.min(1_000);
         let approach_power = point.approach_power_permille.min(1_000);
         let approach_floor_power = point.approach_floor_power_permille.min(1_000);
@@ -3853,7 +3860,9 @@ fn encode_thermal_control_profile_tcp2(
         .take(THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS)
     {
         let target = clamp_temp_c(point.target_temp_c);
-        let brake_distance = point.brake_distance_centi_c.clamp(100, 5_000);
+        let brake_distance = point
+            .brake_distance_centi_c
+            .clamp(THERMAL_CONTROL_PROFILE_BRAKE_DISTANCE_MIN_CENTI_C, 5_000);
         let approach_power = point.approach_power_permille.min(1_000);
         let warmup_power = point.warmup_power_permille.min(1_000);
         let warmup_reenter = point.warmup_reenter_centi_c.clamp(50, 5_000);
@@ -5242,6 +5251,22 @@ mod tests {
                 .approach_tail_window_centi_c,
             0
         );
+    }
+
+    #[test]
+    fn thermal_profile_physical_braking_margin_survives_persistence() {
+        let mut profile = sample_config().active_thermal_control_profile;
+        profile.points[0].as_mut().unwrap().brake_distance_centi_c = 60;
+        profile.sanitize();
+        assert_eq!(profile.points[0].unwrap().brake_distance_centi_c, 60);
+        let mut bytes = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
+        let len = encode_thermal_control_profile(&profile, &mut bytes);
+        assert_eq!(decode_thermal_control_profile(&bytes[..len]), profile);
+        let len = encode_thermal_control_profile_tcp2(&profile, &mut bytes);
+        assert_eq!(decode_thermal_control_profile(&bytes[..len]), profile);
+        profile.points[0].as_mut().unwrap().brake_distance_centi_c = 0;
+        profile.sanitize();
+        assert_eq!(profile.points[0].unwrap().brake_distance_centi_c, 60);
     }
 
     #[test]
