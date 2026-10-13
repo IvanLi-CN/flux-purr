@@ -199,6 +199,7 @@ Calibration-only commissioning on `a116df4f` flash/identity-verifies the approve
 - Firmware host tests, web unit tests, and frontpanel preview fixtures cover the runtime state model.
 - Safety paths retain fail-closed behavior when sensor, control, or transport checks fail.
 - Host-side frontpanel preview and state-transition tests cover placeholders, EEPROM restore, PD wait, initial sensor fault, first valid RTD promotion, and preservation of the last valid temperature after runtime faults.
+- The tuning engine's late-stable-window transformation keeps its `hold_exit_centi_c` proposal at or above the validated 1.5°C stable-band lower edge. This prevents a proposal such as 0.5°C from turning minor low-side motion into repeated Hold→Approach transitions; proposals without physical Hold feedback retain their unused Hold fields, and the initial production profile, fixed physical Hold gate, stable-window gate and independent confirmation remain unchanged.
 
 ## Remaining gaps
 

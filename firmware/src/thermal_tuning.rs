@@ -3904,6 +3904,7 @@ mod tests {
         assert!(runtime.events.iter().any(|event| event.reason.as_deref()
             == Some("candidate_search_exhausted_no_distinct_safe_proposal")));
     }
+
     use super::*;
     use crate::memory::{ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig};
 

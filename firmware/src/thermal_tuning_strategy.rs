@@ -1,5 +1,10 @@
 use crate::memory::ThermalControlProfilePointConfig;
 
+/// Hold re-entry must not be narrower than the lower edge of the validated
+/// +/-1.5 C stable band. This is a search-candidate constraint, not a
+/// production profile floor: the initial profile remains unchanged.
+pub(crate) const SEARCH_HOLD_EXIT_FLOOR_CENTI_C: u16 = 150;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CurveClass {
     OnCurve,
@@ -828,9 +833,10 @@ fn tune_base_point(
     if high_temp_power_limited {
         apply_high_temp_power_limit(&mut tuned, near_target_power);
     } else if timely_hold_late_stability {
-        tuned.hold_exit_centi_c = tuned
-            .hold_exit_centi_c
-            .max(round_positive((evidence.under_c + 0.2) * 100.0).clamp(80, 300));
+        tuned.hold_exit_centi_c = tuned.hold_exit_centi_c.max(
+            round_positive((evidence.under_c + 0.2) * 100.0)
+                .clamp(SEARCH_HOLD_EXIT_FLOOR_CENTI_C, 300),
+        );
     } else if low_temp_hold_entry_carry {
         let before = tuned.hold_lead_ticks;
         tuned.hold_lead_ticks = tuned
@@ -2881,6 +2887,23 @@ mod tests {
                 550
             );
         }
+    }
+
+    #[test]
+    fn late_stable_window_never_narrows_hold_reentry_below_stable_band() {
+        let mut previous = point(60);
+        previous.hold_exit_centi_c = 50;
+        let facts = TuneEvidence {
+            hold_sample_count: 2,
+            under_c: 0.3,
+            over_c: 0.4,
+            first_hold_after_warmup_ms: Some(9_000),
+            stable_window_after_warmup_ms: Some(10_001),
+            settle_limit_ms: 10_000,
+            ..evidence(60)
+        };
+        let tuned = tune_base_point(previous, facts);
+        assert_eq!(tuned.hold_exit_centi_c, SEARCH_HOLD_EXIT_FLOOR_CENTI_C);
     }
 
     #[test]
