@@ -1116,6 +1116,12 @@ impl HeaterController {
         if previous_phase != self.phase {
             self.update_hold_transition(&frame, measured_temp_c);
         }
+        // With a calibrated delay, a positive sensor derivative describes
+        // arriving old heat, not the temperature when this command arrives.
+        // The final energy limit owns modelled Hold braking and recovery.
+        if self.phase == HeaterControlPhase::Hold && self.model_approach_available() {
+            self.hold_coast_active = false;
+        }
         self.update_coast_state(&frame, measured_temp_c, previous_measured_temp_c);
         let entered_approach = previous_phase == HeaterControlPhase::Warmup
             && self.phase == HeaterControlPhase::Approach;
@@ -1409,9 +1415,10 @@ impl HeaterController {
     }
 
     fn calculate_hold_duty(&mut self, frame: &ThermalControlFrame) -> u8 {
-        if frame.hold_prediction_blocks_reheat
-            || frame.hold_filter_lag_blocks_reheat
-            || frame.hold_actual_overshoot_blocks_reheat
+        if !self.model_approach_available()
+            && (frame.hold_prediction_blocks_reheat
+                || frame.hold_filter_lag_blocks_reheat
+                || frame.hold_actual_overshoot_blocks_reheat)
         {
             self.hold_integral_c = 0.0;
             return 0;

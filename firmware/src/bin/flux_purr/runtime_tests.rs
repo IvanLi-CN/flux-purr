@@ -10921,6 +10921,78 @@ fn trajectory_controller_reaches_physical_hold_with_delayed_calibrated_plants() 
 }
 
 #[test]
+fn calibrated_hold_uses_arriving_energy_instead_of_a_stale_positive_slope() {
+    // Repaired A trial 15 repeatedly cuts Hold at 220.00..220.36C, then
+    // leaves the stable band at 218.31C. A positive filtered derivative is
+    // not evidence that the current command will still arrive above target.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 220;
+        point.hold_power_permille = 700;
+        point.hold_reheat_power_permille = 1_000;
+        point.hold_kp_permille_per_c = 62;
+        point.hold_ki_permille_per_c_tick = 1;
+        point.hold_on_centi_c = 5;
+        point.hold_off_centi_c = 240;
+        point.hold_blend_ticks = 1;
+        point.hold_lead_ticks = 0;
+        let mut input = production_test_input(220.12);
+        input.target_temp_c = 220;
+        input.ambient_temp_c = 30.0;
+        input.max_power_mw = 100_000.0;
+        input.now_ms = 5_000;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 201.96992,
+            radiation_mw_per_k4: 2.0132205e-7,
+            thermal_capacity_mj_per_c: 26_466.248,
+            transport_delay_ms: 2_000,
+        };
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 220;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.phase_ticks = 100;
+        controller.hold_coast_active = true;
+        controller.profile_last_control_at_ms = Some(4_950);
+        controller.filtered_temp_c = Some(220.02);
+        controller.previous_measured_temp_c = Some(220.09);
+        controller.filtered_slope_c_per_profile_tick = 0.2;
+        controller.applied_heat.configure(2_000);
+        controller.applied_heat.observe(2_000, 0.0);
+        controller.applied_heat.observe(input.now_ms, 0.0);
+        let mut high_arrival = controller;
+        let recovering = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(recovering.phase, HeaterControlPhase::Hold);
+        assert!(recovering.duty_percent > 0, "{bank:?}: {recovering:?}");
+
+        // Identical plate temperature and derivative with actual heat in
+        // flight must still cut power. The forecast, not the raw slope,
+        // distinguishes the two states through the production call site.
+        high_arrival.applied_heat =
+            flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new();
+        high_arrival.applied_heat.configure(2_000);
+        high_arrival.applied_heat.observe(2_000, 100_000.0);
+        high_arrival.applied_heat.observe(input.now_ms, 100_000.0);
+        let braking = high_arrival
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(braking.duty_percent, 0, "{bank:?}: {braking:?}");
+
+        input.now_ms += 50;
+        input.measured_temp_c = 224.0;
+        let cutoff = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(cutoff.duty_percent, 0, "{bank:?}: actual cutoff survives");
+    }
+}
+
+#[test]
 fn calibrated_hold_does_not_reheat_into_delayed_high_side_energy() {
     for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
         let kind = ProductionThermalController::Profile(bank);
