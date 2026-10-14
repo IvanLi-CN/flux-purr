@@ -2519,7 +2519,11 @@ mod device {
                 )
                 .unwrap_or(ResetResult::FAILED);
                 result.final_reset = recovery;
-                result.overall = "recovery_failed";
+                result.overall = if recovery.status == "pass" {
+                    "negotiation_failed"
+                } else {
+                    "recovery_failed"
+                };
                 result.next_sequence = sequence;
                 return result;
             }
@@ -3278,7 +3282,9 @@ mod tests {
             .split("Err(reason) =>")
             .nth(1)
             .expect("fan session must handle attach failure");
-        assert!(attach_failure.contains("result.overall = \"recovery_failed\""));
+        assert!(attach_failure.contains("result.overall = if recovery.status == \"pass\""));
+        assert!(attach_failure.contains("\"negotiation_failed\""));
+        assert!(attach_failure.contains("\"recovery_failed\""));
     }
 
     #[test]

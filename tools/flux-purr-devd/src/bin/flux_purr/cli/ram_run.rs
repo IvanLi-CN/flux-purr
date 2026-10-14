@@ -2859,28 +2859,41 @@ fn expected_fan_pd_selection(
         }
     }
 
-    let fixed = objects
-        .iter()
-        .filter_map(|object| fan_pd_candidate(*object, "fixed", object.1, "highest_fixed_5_to_12v"))
-        .filter(|candidate| (5_000..=12_000).contains(&candidate.target_mv))
-        .max_by_key(|candidate| candidate.target_mv);
+    let mut fixed = None;
+    for object in &objects {
+        let Some(candidate) =
+            fan_pd_candidate(*object, "fixed", object.1, "highest_fixed_5_to_12v")
+        else {
+            continue;
+        };
+        if (5_000..=12_000).contains(&candidate.target_mv)
+            && fixed
+                .is_none_or(|best: FanPdSelectionExpectation| candidate.target_mv > best.target_mv)
+        {
+            fixed = Some(candidate);
+        }
+    }
     if fixed.is_some() {
         return Ok(fixed);
     }
 
-    let pps = objects
-        .iter()
-        .filter_map(|object| {
-            if object.0 != "pps" || object.3 < 50 {
-                return None;
-            }
-            let target_mv = object.2.min(20_000) - (object.2.min(20_000) % 20);
-            if target_mv < object.1.max(5_000) {
-                return None;
-            }
-            fan_pd_candidate(*object, "pps", target_mv, "highest_pps_fallback")
-        })
-        .max_by_key(|candidate| candidate.target_mv);
+    let mut pps = None;
+    for object in &objects {
+        if object.0 != "pps" || object.3 < 50 {
+            continue;
+        }
+        let target_mv = object.2.min(20_000) - (object.2.min(20_000) % 20);
+        if target_mv < object.1.max(5_000) {
+            continue;
+        }
+        let Some(candidate) = fan_pd_candidate(*object, "pps", target_mv, "highest_pps_fallback")
+        else {
+            continue;
+        };
+        if pps.is_none_or(|best: FanPdSelectionExpectation| candidate.target_mv > best.target_mv) {
+            pps = Some(candidate);
+        }
+    }
     Ok(pps)
 }
 
@@ -4207,6 +4220,20 @@ mod tests {
         recovery_failed["result"]["finalReset"]["activeContract"] = Value::Null;
         assert!(validate_ram_success_response(&recovery_failed, FAN_PD_CAPABILITY).is_ok());
         assert!(fan_pd_requires_nonzero(&recovery_failed));
+    }
+
+    #[test]
+    fn fan_pd_policy_validation_keeps_first_tied_fallback_pdo() {
+        let fixed = expected_fan_pd_selection(&serde_json::json!([246210, 246210]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixed.position, 1);
+
+        let pps = (3u64 << 30) | (120u64 << 17) | (50u64 << 8) | 80;
+        let pps = expected_fan_pd_selection(&serde_json::json!([pps, pps]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(pps.position, 1);
     }
 
     #[test]
