@@ -404,7 +404,7 @@ fn hold_off_after_entry(evidence: TuneEvidence) -> bool {
             && evidence.hold_off_sample_count.saturating_add(1) == evidence.hold_sample_count)
 }
 
-fn limited_hold_outputs(evidence: TuneEvidence) -> bool {
+pub(crate) fn limited_hold_outputs(evidence: TuneEvidence) -> bool {
     evidence.hold_sample_count >= 3
         && evidence
             .hold_max_output_permille

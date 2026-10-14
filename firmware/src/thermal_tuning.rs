@@ -13,8 +13,9 @@ use crate::thermal_tuning_limits::{
     TRIAL_TIMEOUT_MS, ThermalTuningTimingEvidence, original_settle_limit_ms,
 };
 use crate::thermal_tuning_strategy::{
-    CurveClass, TuneEvidence, bounded_failure_alternative, observed_low_side_hold_failure,
-    reseed_after_hold_confirm, tune_point, unobserved_low_side_failure,
+    CurveClass, TuneEvidence, bounded_failure_alternative, limited_hold_outputs,
+    observed_low_side_hold_failure, reseed_after_hold_confirm, tune_point,
+    unobserved_low_side_failure,
 };
 
 #[cfg(test)]
@@ -3940,7 +3941,10 @@ fn failed_damping_comparison_needs_braking(
         && (current_facts.hold_off_sample_count == current_facts.hold_sample_count
             || (current_facts.hold_entry_pulse_only
                 && current_facts.hold_off_sample_count.saturating_mul(10)
-                    >= current_facts.hold_sample_count.saturating_mul(9)))
+                    >= current_facts.hold_sample_count.saturating_mul(9))
+            // Use the same limited-supply evidence that selected damping.
+            // Otherwise a losing comparison cannot escape that search axis.
+            || limited_hold_outputs(current_facts))
         && same_point_except_damping(current, predicted)
         && predicted.approach_damping_exponent_permille > current.approach_damping_exponent_permille
         && bounded_failure_alternative(current, current_facts, 1).is_some_and(|alternative| {
@@ -5173,6 +5177,124 @@ mod tests {
             runtime.events.iter().any(|event| event.reason.as_deref()
                 == Some("failed_damping_comparison_explores_braking"))
         );
+    }
+
+    #[test]
+    fn captured_limited_hold_damping_comparison_explores_braking() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "thermal_tuning_limited_comparison.fixture.json"
+        ))
+        .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let mut current_point = None;
+        for trial in fixture["trials"].as_array().unwrap() {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            current_point.get_or_insert(runtime.candidate_profile.unwrap().points[0].unwrap());
+            let facts = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                None,
+                10_000,
+            );
+            assert_eq!(damping_failure_side(facts), Some(true));
+            assert!(
+                facts
+                    .hold_max_output_permille
+                    .is_some_and(|output| output <= 100)
+            );
+            assert!(facts.hold_off_sample_count * 5 >= facts.hold_sample_count * 4);
+            assert!(facts.hold_off_sample_count * 10 < facts.hold_sample_count * 9);
+            runtime.advance_after_trial(60, evaluation).unwrap();
+        }
+        let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(
+            next,
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 1_750,
+                ..current_point.unwrap()
+            }
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
+        assert!(
+            runtime.events.iter().any(|event| event.reason.as_deref()
+                == Some("failed_damping_comparison_explores_braking"))
+        );
+    }
+
+    #[test]
+    fn captured_limited_hold_comparison_rejects_sustained_or_unqualified_heat() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "thermal_tuning_limited_comparison.fixture.json"
+        ))
+        .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let mut pairs = std::vec::Vec::new();
+        for trial in fixture["trials"].as_array().unwrap() {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            pairs.push((
+                runtime.candidate_profile,
+                Some(runtime.candidate_failure_evidence(
+                    60,
+                    evaluation.max_overshoot_centi_c,
+                    evaluation.hold_peak_to_peak_centi_c,
+                    None,
+                    10_000,
+                )),
+            ));
+        }
+        let ((current, facts), (predicted, predicted_facts)) = (pairs[0], pairs[1]);
+        assert!(failed_damping_comparison_needs_braking(
+            current,
+            predicted,
+            facts,
+            predicted_facts,
+            60,
+        ));
+        let facts = facts.unwrap();
+        for rejected in [
+            TuneEvidence {
+                hold_max_output_permille: Some(101),
+                ..facts
+            },
+            TuneEvidence {
+                hold_max_output_permille: None,
+                ..facts
+            },
+            TuneEvidence {
+                hold_off_sample_count: 0,
+                hold_entry_pulse_only: false,
+                hold_p90_output_permille: Some(51),
+                ..facts
+            },
+            TuneEvidence {
+                hold_off_sample_count: 0,
+                hold_entry_pulse_only: false,
+                hold_p90_output_permille: None,
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: Some((0, 540)),
+                ..facts
+            },
+            TuneEvidence {
+                over_c: 0.0,
+                under_c: 2.0,
+                ..facts
+            },
+        ] {
+            assert!(!failed_damping_comparison_needs_braking(
+                current,
+                predicted,
+                Some(rejected),
+                predicted_facts,
+                60,
+            ));
+        }
     }
 
     #[test]
@@ -7023,16 +7145,17 @@ mod tests {
             assert_eq!(runtime.trial_purpose, ThermalTuningTrialPurpose::Scout);
             assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
             assert_eq!(runtime.accepted_target_mask, 0);
-            // The predicted prefix is unpowered; the current prefix has only
-            // 17/19 zero Hold samples and cannot use the 90% entrance exception.
-            // Each winner must retain its own braking or damping evidence.
+            // The predicted prefix is unpowered. The current prefix has
+            // 17/19 zero Hold samples and qualifies as limited supply, but
+            // cannot claim the stricter 90% entrance exception. A losing
+            // damping comparison must now use its own braking escape.
             assert_eq!(
                 next.approach_damping_exponent_permille,
-                if predicted_wins { 1_500 } else { 2_000 }
+                if predicted_wins { 1_500 } else { 1_000 }
             );
             assert_eq!(
                 next.brake_distance_centi_c,
-                if predicted_wins { 1_371 } else { 1_259 }
+                if predicted_wins { 1_371 } else { 1_299 }
             );
             assert_eq!(next.hold_power_permille, 56);
             assert_eq!(next.hold_reheat_power_permille, 56);
