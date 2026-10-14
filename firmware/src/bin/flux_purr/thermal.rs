@@ -1165,6 +1165,14 @@ impl HeaterController {
         } else {
             duty_percent
         };
+        let duty_percent =
+            if self.phase != HeaterControlPhase::Warmup && !self.control_measurement_accepted() {
+                // The reference can advance during a PPS/sensor blind interval,
+                // but an old low reading cannot justify adding more heat.
+                duty_percent.min(self.duty_percent)
+            } else {
+                duty_percent
+            };
 
         self.duty_percent = duty_percent;
         let warmup_soft_start_percent = if self.phase == HeaterControlPhase::Warmup {
@@ -1431,6 +1439,11 @@ impl HeaterController {
             frame.elapsed_ms,
             input.model.transport_delay_ms,
         );
+        let applied_permille = if self.control_measurement_accepted() {
+            applied_permille
+        } else {
+            applied_permille.min(previous_permille)
+        };
         self.approach_last_request_permille = Some(applied_permille);
         Some(percent_from_permille(applied_permille))
     }
@@ -1455,12 +1468,14 @@ impl HeaterController {
         } else {
             0.0
         };
-        self.hold_integral_c = if frame.hold_ki > 0.0 {
+        self.hold_integral_c = if frame.hold_ki > 0.0 && self.control_measurement_accepted() {
             let elapsed_cycles = frame.elapsed_ms as f32 / HEATER_CONTROL_INTERVAL_MS as f32;
             (self.hold_integral_c + frame.hold_guard_error_c * elapsed_cycles)
                 .clamp(0.0, integral_limit)
-        } else {
+        } else if frame.hold_ki <= 0.0 {
             0.0
+        } else {
+            self.hold_integral_c
         };
         let requested_permille = self.hold_requested_permille(frame, base_permille);
         let pi_percent = percent_from_permille(requested_permille.clamp(0.0, 1_000.0) as u16);

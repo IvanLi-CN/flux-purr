@@ -10981,6 +10981,127 @@ fn held_approach_temperature_does_not_erase_heat_already_arriving() {
 }
 
 #[test]
+fn rejected_approach_measurements_cannot_raise_the_last_braking_request() {
+    // A 60C HIL held 54.18C for 16s while the raw channel was already above
+    // target. Advancing the reference without a new observation must not
+    // manufacture a reason to raise heating during the blind interval.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Warmup;
+        controller.filtered_temp_c = Some(54.18);
+        controller.previous_measured_temp_c = Some(54.18);
+        controller.profile_last_control_at_ms = Some(4_950);
+        let mut profile = production_test_profile(1_000);
+        profile.settings.temp_filter_alpha = 1.0;
+        profile.points[0].as_mut().unwrap().approach_lead_ticks = 0;
+        let mut input = production_test_input(54.18);
+        input.now_ms = 5_000;
+        input.ambient_temp_c = 28.61;
+        input.max_power_mw = 100_000.0;
+        input.model.convection_mw_per_c = 168.47858;
+        input.model.radiation_mw_per_k4 = 3.3575284e-7;
+        input.model.thermal_capacity_mj_per_c = 25_746.225;
+        input.model.transport_delay_ms = 1_800;
+        controller.applied_heat.configure(1_800);
+        controller.applied_heat.observe(2_000, 100_000.0);
+        controller.applied_heat.observe(input.now_ms, 5_000.0);
+        let first = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(first.duty_percent, 5);
+        for step in 1..=160 {
+            input.now_ms = 5_000 + step * 100;
+            input.measurement_accepted = false;
+            if step % 5 == 0 {
+                controller.reseed_measurement_after_pps_step(input.measured_temp_c);
+            }
+            let output = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            assert_eq!(output.phase, HeaterControlPhase::Approach);
+            assert_eq!(
+                output.duty_percent, 5,
+                "{bank:?}: a rejected reading must not increase braking power at {step}: {output:?}"
+            );
+            controller.applied_heat.observe(input.now_ms, 5_000.0);
+        }
+        input.now_ms += 100;
+        input.measurement_accepted = true;
+        input.measured_temp_c = 55.0;
+        controller.update_production_at(kind, input, Some(profile));
+        for step in 1..=20 {
+            input.now_ms += 100;
+            let output = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            if step == 20 {
+                assert!(
+                    output.duty_percent > 5,
+                    "fresh low readings must restore recovery authority"
+                );
+            }
+            controller
+                .applied_heat
+                .observe(input.now_ms, f32::from(output.duty_percent) * 1_000.0);
+        }
+    }
+}
+
+#[test]
+fn rejected_hold_measurements_do_not_resume_heat_or_wind_up_the_integral() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.filtered_temp_c = Some(59.6);
+        controller.previous_measured_temp_c = Some(59.6);
+        controller.profile_last_control_at_ms = Some(4_950);
+        let mut profile = production_test_profile(1_000);
+        profile.settings.temp_filter_alpha = 1.0;
+        let mut input = production_test_input(59.6);
+        input.now_ms = 5_000;
+        input.model.transport_delay_ms = 1_800;
+        input.max_power_mw = 100_000.0;
+        controller.applied_heat.configure(1_800);
+        controller.applied_heat.observe(2_000, 100_000.0);
+        controller.applied_heat.observe(input.now_ms, 0.0);
+        let first = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(first.phase, HeaterControlPhase::Hold);
+        assert_eq!(first.duty_percent, 0);
+        let integral = controller.hold_integral_c;
+        for step in 1..=160 {
+            input.now_ms = 5_000 + step * 100;
+            input.measurement_accepted = false;
+            let output = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            assert_eq!(output.phase, HeaterControlPhase::Hold);
+            assert_eq!(output.duty_percent, 0);
+            assert_eq!(controller.hold_integral_c, integral);
+            controller.applied_heat.observe(input.now_ms, 0.0);
+        }
+        input.now_ms += 100;
+        input.measurement_accepted = true;
+        let resumed = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert!(
+            resumed.duty_percent > 0,
+            "fresh low Hold readings must restore heat"
+        );
+    }
+}
+
+#[test]
 fn trajectory_heat_observation_rejects_held_samples_and_resets_on_recovery() {
     let (mut controller, profile, input) = pps_cooling_test_fixture(ThermalProfileBank::Pps5a);
     let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps5a);
