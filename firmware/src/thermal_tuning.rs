@@ -394,6 +394,7 @@ struct ObservedDampingFailure {
     point: ThermalControlProfilePointConfig,
     trial_index: u8,
     high_side: bool,
+    braking_error_centi_c: Option<u16>,
 }
 
 #[derive(Clone, Copy)]
@@ -1257,6 +1258,7 @@ impl ThermalTuningRuntime {
             point,
             trial_index: self.trial_index,
             high_side,
+            braking_error_centi_c: braking_failure_weight(evidence, high_side),
         };
         if let Some(previous) = self
             .observed_damping_failures
@@ -1322,9 +1324,8 @@ impl ThermalTuningRuntime {
             return false;
         };
         let mut proposed = original;
-        let midpoint =
-            axis.value(high.point) + (axis.value(low.point) - axis.value(high.point)) / 2;
-        axis.set(proposed.points[index].as_mut().unwrap(), midpoint);
+        let (value, method) = self.failure_bracket_value(previous, axis, high, low);
+        axis.set(proposed.points[index].as_mut().unwrap(), value);
         if matches!(axis, FailureBracketAxis::Damping)
             && axis.value(low.point) - axis.value(high.point) <= 50
         {
@@ -1350,11 +1351,12 @@ impl ThermalTuningRuntime {
         let mut reason = TuningReason::new();
         let _ = write!(
             reason,
-            "{}_trials_{}_{}_midpoint_{}",
+            "{}_trials_{}_{}_{}_{}",
             axis.reason(),
             high.trial_index,
             low.trial_index,
-            midpoint
+            method,
+            value
         );
         if proposed.points[index].unwrap().approach_lead_ticks != previous.approach_lead_ticks {
             let _ = write!(
@@ -1371,6 +1373,32 @@ impl ThermalTuningRuntime {
             Some(reason.as_str()),
         );
         true
+    }
+
+    fn failure_bracket_value(
+        &self,
+        previous: ThermalControlProfilePointConfig,
+        axis: FailureBracketAxis,
+        high: ObservedDampingFailure,
+        low: ObservedDampingFailure,
+    ) -> (u16, &'static str) {
+        let midpoint =
+            axis.value(high.point) + (axis.value(low.point) - axis.value(high.point)) / 2;
+        if matches!(axis, FailureBracketAxis::Braking)
+            && let Some(weighted) = weighted_braking_value(high, low)
+        {
+            let mut proposed = previous;
+            axis.set(&mut proposed, weighted);
+            if !same_effective_search_point(previous, proposed)
+                && !self
+                    .proposed_points
+                    .iter()
+                    .any(|point| same_effective_search_point(*point, proposed))
+            {
+                return (weighted, "weighted");
+            }
+        }
+        (midpoint, "midpoint")
     }
 
     fn prepare_fresh_failure_proposal_from_evidence(
@@ -3736,6 +3764,43 @@ fn same_point_except_damping(
     same_effective_search_point(left, right)
 }
 
+fn braking_failure_weight(evidence: TuneEvidence, high_side: bool) -> Option<u16> {
+    if high_side {
+        return evidence
+            .over_c
+            .is_finite()
+            .then_some((evidence.over_c * 100.0 + 0.5) as u16)
+            .filter(|weight| *weight > 0);
+    }
+    if evidence.hold_sample_count != 0 || evidence.first_hold_after_warmup_ms.is_some() {
+        return None;
+    }
+    let temperature = evidence.deadline_temperature_centi_c?;
+    let minimum = i32::from(evidence.target_c) * 100 - (HOLD_ENTRY_BELOW_C * 100.0) as i32;
+    u16::try_from(minimum - i32::from(temperature))
+        .ok()
+        .filter(|weight| *weight > 0)
+}
+
+fn weighted_braking_value(
+    high: ObservedDampingFailure,
+    low: ObservedDampingFailure,
+) -> Option<u16> {
+    let high_error = u32::from(high.braking_error_centi_c?);
+    let low_error = u32::from(low.braking_error_centi_c?);
+    let width = low
+        .point
+        .brake_distance_centi_c
+        .checked_sub(high.point.brake_distance_centi_c)?;
+    if width < 2 || high_error == 0 || low_error == 0 {
+        return None;
+    }
+    let offset = (u32::from(width) * high_error / (high_error + low_error)) as u16;
+    let upper = ((u32::from(width) * 3 / 4) as u16).min(width - 1).max(1);
+    let offset = offset.clamp((width / 4).max(1), upper);
+    Some(high.point.brake_distance_centi_c + offset)
+}
+
 fn damping_failure_side(evidence: TuneEvidence) -> Option<bool> {
     if evidence.target_c > 150
         || !evidence.tunable_stop
@@ -4152,6 +4217,128 @@ mod tests {
     }
 
     #[test]
+    fn captured_braking_errors_refine_the_same_run_interval() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_weighted_braking.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let mut facts = None;
+        for trial in fixture["trials"].as_array().unwrap().iter().take(2) {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            let observed = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                evaluation.settle_time_ms,
+                10_000,
+            );
+            runtime.remember_damping_failure(60, observed);
+            facts = Some(observed);
+        }
+        assert_eq!(facts.unwrap().deadline_temperature_centi_c, Some(5_900));
+        let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert!(runtime.prepare_fresh_failure_proposal_from_evidence(60, facts.unwrap()));
+        assert_eq!(
+            runtime.candidate_profile.unwrap().points[0].unwrap(),
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 2_302,
+                ..previous
+            }
+        );
+        let evaluation = replay_damping_bracket_trial(&mut runtime, &fixture["trials"][2]);
+        let facts = runtime.candidate_failure_evidence(
+            60,
+            evaluation.max_overshoot_centi_c,
+            evaluation.hold_peak_to_peak_centi_c,
+            evaluation.settle_time_ms,
+            10_000,
+        );
+        assert_eq!(facts.over_c, 1.53);
+        assert!(runtime.prepare_fresh_failure_proposal_from_evidence(60, facts));
+        assert_eq!(
+            runtime.candidate_profile.unwrap().points[0].unwrap(),
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 2_418,
+                ..previous
+            }
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
+    fn duplicate_weighted_braking_proposal_uses_the_remaining_midpoint() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_weighted_braking.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        for trial in fixture["trials"].as_array().unwrap().iter().take(2) {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            let facts = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                evaluation.settle_time_ms,
+                10_000,
+            );
+            runtime.remember_damping_failure(60, facts);
+        }
+        let original = runtime.candidate_profile.unwrap();
+        assert!(runtime.prepare_failure_bracket(original, FailureBracketAxis::Braking));
+        assert_eq!(
+            runtime.candidate_profile.unwrap().points[0]
+                .unwrap()
+                .brake_distance_centi_c,
+            2_302
+        );
+        assert!(runtime.prepare_failure_bracket(original, FailureBracketAxis::Braking));
+        assert_eq!(
+            runtime.candidate_profile.unwrap().points[0]
+                .unwrap()
+                .brake_distance_centi_c,
+            2_147
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
+    fn weighted_braking_remains_inside_the_measured_interval() {
+        let mut high = ObservedDampingFailure {
+            point: ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 1_000,
+                ..profile_with_targets(&[60]).points[0].unwrap()
+            },
+            trial_index: 0,
+            high_side: true,
+            braking_error_centi_c: Some(100),
+        };
+        let mut low = ObservedDampingFailure {
+            point: ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 2_000,
+                ..high.point
+            },
+            trial_index: 1,
+            high_side: false,
+            braking_error_centi_c: Some(100),
+        };
+        for (high_error, low_error, expected) in [
+            (100, 100, 1_500),
+            (u16::MAX, 1, 1_750),
+            (1, u16::MAX, 1_250),
+        ] {
+            high.braking_error_centi_c = Some(high_error);
+            low.braking_error_centi_c = Some(low_error);
+            assert_eq!(weighted_braking_value(high, low), Some(expected));
+        }
+        low.braking_error_centi_c = None;
+        assert_eq!(weighted_braking_value(high, low), None);
+        low.braking_error_centi_c = Some(0);
+        assert_eq!(weighted_braking_value(high, low), None);
+        low.braking_error_centi_c = Some(100);
+        low.point.brake_distance_centi_c = 1_001;
+        assert_eq!(weighted_braking_value(high, low), None);
+    }
+
+    #[test]
     fn captured_narrow_damping_interval_searches_the_approach_horizon() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "thermal_tuning_high_temperature_feedback.fixture.json"
@@ -4496,7 +4683,7 @@ mod tests {
     }
 
     #[test]
-    fn captured_opposite_braking_failures_bisect_the_same_run_interval() {
+    fn captured_opposite_braking_failures_weight_the_same_run_interval() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("thermal_tuning_braking_bracket.fixture.json"))
                 .unwrap();
@@ -4523,13 +4710,13 @@ mod tests {
         assert_eq!(
             next,
             ThermalControlProfilePointConfig {
-                brake_distance_centi_c: 1_596,
+                brake_distance_centi_c: 1_739,
                 ..first_point.unwrap()
             }
         );
         assert_eq!(runtime.accepted_target_mask, 0);
         assert!(runtime.events.iter().any(|event| event.reason.as_deref()
-            == Some("same_run_braking_bracket_trials_0_1_midpoint_1596")));
+            == Some("same_run_braking_bracket_trials_0_1_weighted_1739")));
     }
 
     #[test]
