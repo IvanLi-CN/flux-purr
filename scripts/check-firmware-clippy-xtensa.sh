@@ -23,3 +23,12 @@ cargo +esp clippy --locked \
      -D clippy::too_many_lines \
      -D clippy::too_many_arguments \
      -D clippy::excessive_nesting
+
+cargo +esp clippy --locked \
+  --manifest-path firmware/ram-fan-pd/Cargo.toml \
+  --target xtensa-esp32s3-none-elf \
+  --bin flux-purr-ram-fan-pd \
+  -- -D warnings \
+     -D clippy::too_many_lines \
+     -D clippy::too_many_arguments \
+     -D clippy::excessive_nesting

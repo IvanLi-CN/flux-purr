@@ -66,10 +66,18 @@ pub fn select_fan_contract(
     }
 
     let mut fallback_fixed = None;
-    for voltage_mv in [12_000, 11_000, 10_000, 9_000, 8_000, 7_000, 6_000, 5_000] {
-        if let Some(contract) = find_candidate(capabilities, Mode::Fixed, voltage_mv) {
+    let count = usize::from(capabilities.count).min(capabilities.objects.len());
+    for object in capabilities.objects[..count].iter().copied() {
+        if object.mode != Mode::Fixed || !(5_000..=12_000).contains(&object.min_mv) {
+            continue;
+        }
+        let Some(contract) = make_candidate(object, Mode::Fixed, object.min_mv) else {
+            continue;
+        };
+        if fallback_fixed.is_none_or(|best: SelectedContract| {
+            contract.target.voltage_mv > best.target.voltage_mv
+        }) {
             fallback_fixed = Some(contract);
-            break;
         }
     }
     if let Some(contract) = fallback_fixed {
@@ -222,6 +230,18 @@ mod tests {
         let selection =
             select_fan_contract(caps(&[fixed(1, 9_000, 5_000), fixed(2, 12_000, 1_500)])).unwrap();
         assert_eq!(selection.contract.target.voltage_mv, 12_000);
+        assert_eq!(selection.reason, SelectionReason::HighestFallbackFixed);
+    }
+
+    #[test]
+    fn fallback_fixed_considers_non_integer_advertised_voltages() {
+        let selection = select_fan_contract(caps(&[
+            fixed(1, 11_500, 5_000),
+            fixed(2, 12_000, 0),
+            fixed(3, 9_000, 5_000),
+        ]))
+        .unwrap();
+        assert_eq!(selection.contract.target.voltage_mv, 11_500);
         assert_eq!(selection.reason, SelectionReason::HighestFallbackFixed);
     }
 
