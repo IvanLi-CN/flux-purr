@@ -2624,22 +2624,37 @@ fn validate_fan_pd_summary(
     ) {
         return Err(format!("result.overall has an invalid value: {overall:?}"));
     }
-    if overall == "pass" {
+    if matches!(overall, "pass" | "power_degraded") {
         let selection = result
             .get("selection")
             .and_then(Value::as_object)
-            .ok_or_else(|| "a passing fan-pd result requires a confirmed selection".to_string())?;
+            .ok_or_else(|| {
+                "a completed fan-pd result requires a confirmed selection".to_string()
+            })?;
         let contract_mv = selection
             .get("contractMv")
             .and_then(Value::as_u64)
             .ok_or_else(|| "a passing fan-pd result requires contractMv".to_string())?;
+        let expected_gate = if overall == "pass" {
+            "pass"
+        } else {
+            "degraded"
+        };
+        let voltage_ok = if overall == "pass" {
+            contract_mv > 13_000
+        } else {
+            contract_mv <= 13_000
+        };
         if selection.get("contractConfirmed").and_then(Value::as_bool) != Some(true)
-            || contract_mv <= 13_000
-            || selection.get("powerGate").and_then(Value::as_str) != Some("pass")
-            || result.get("powerGate").and_then(Value::as_str) != Some("pass")
+            || !voltage_ok
+            || selection.get("powerGate").and_then(Value::as_str) != Some(expected_gate)
+            || result.get("powerGate").and_then(Value::as_str) != Some(expected_gate)
+            || result.get("warning").and_then(Value::as_bool) != Some(overall == "power_degraded")
+            || selection.get("warning").and_then(Value::as_bool)
+                != Some(overall == "power_degraded")
         {
             return Err(
-                "a passing fan-pd result requires a confirmed contract above 13V".to_string(),
+                "fan-pd contract voltage and power gate status are inconsistent".to_string(),
             );
         }
     }
@@ -2657,9 +2672,15 @@ fn validate_fan_pd_policy_selection(result: &serde_json::Map<String, Value>) -> 
         .and_then(Value::as_object)
         .ok_or_else(|| "result.policy must be an object".to_string())?;
     if policy.get("preferredMv") != Some(&serde_json::json!([15_000, 18_000, 20_000]))
+        || policy.get("fixedFallbackMinMv").and_then(Value::as_u64) != Some(5_000)
+        || policy.get("fixedFallbackMaxMv").and_then(Value::as_u64) != Some(12_000)
+        || policy.get("ppsFallbackMinMv").and_then(Value::as_u64) != Some(5_000)
+        || policy.get("ppsFallbackMaxMv").and_then(Value::as_u64) != Some(20_000)
         || policy.get("currentCeilingMa").and_then(Value::as_u64) != Some(5_000)
         || policy.get("powerGateMv").and_then(Value::as_u64) != Some(13_000)
         || policy.get("recoveryMode").and_then(Value::as_str) != Some("fixed_5v_contract")
+        || policy.get("stages").and_then(Value::as_str)
+            != Some("fan_50_percent_5s_100_percent_5s_0_percent_5s")
     {
         return Err("result.policy does not match the fixed fan-pd contract".to_string());
     }
@@ -2731,8 +2752,13 @@ fn validate_fan_pd_policy_selection(result: &serde_json::Map<String, Value>) -> 
             "result.selection claims a contract but sourceCapabilities has no usable fan-pd candidate"
                 .to_string()
         })?;
+        let contract_mv = selection
+            .get("contractMv")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "result.selection.contractMv is missing".to_string())?;
         if mode != expected.mode
             || target_mv != expected.target_mv
+            || contract_mv != expected.target_mv
             || selected_position != expected.position
             || advertised != expected.max_ma
             || current_ma != expected.contract_ma
@@ -4099,8 +4125,13 @@ mod tests {
                 "powerGate": "pass",
                 "policy": {
                     "preferredMv": [15000, 18000, 20000],
+                    "fixedFallbackMinMv": 5000,
+                    "fixedFallbackMaxMv": 12000,
+                    "ppsFallbackMinMv": 5000,
+                    "ppsFallbackMaxMv": 20000,
                     "currentCeilingMa": 5000,
                     "powerGateMv": 13000,
+                    "stages": "fan_50_percent_5s_100_percent_5s_0_percent_5s",
                     "recoveryMode": "fixed_5v_contract"
                 },
                 "sourceCapabilities": {"count": 1, "rawPdos": [307650]},
@@ -4146,10 +4177,17 @@ mod tests {
         degraded["result"]["overall"] = serde_json::json!("power_degraded");
         degraded["result"]["warning"] = serde_json::json!(true);
         degraded["result"]["powerGate"] = serde_json::json!("degraded");
+        degraded["result"]["sourceCapabilities"]["rawPdos"] = serde_json::json!([246210]);
+        degraded["result"]["selection"]["targetMv"] = serde_json::json!(12000);
+        degraded["result"]["selection"]["contractMv"] = serde_json::json!(12000);
+        degraded["result"]["selection"]["reason"] = serde_json::json!("highest_fixed_5_to_12v");
         degraded["result"]["selection"]["powerGate"] = serde_json::json!("degraded");
         degraded["result"]["selection"]["warning"] = serde_json::json!(true);
         assert!(validate_ram_success_response(&degraded, FAN_PD_CAPABILITY).is_ok());
         assert!(fan_pd_requires_nonzero(&degraded));
+        let mut contradictory_degraded = degraded.clone();
+        contradictory_degraded["result"]["selection"]["contractMv"] = serde_json::json!(15000);
+        assert!(validate_ram_success_response(&contradictory_degraded, FAN_PD_CAPABILITY).is_err());
         let mut recovery_failed = value;
         recovery_failed["result"]["overall"] = serde_json::json!("recovery_failed");
         recovery_failed["result"]["pd"] = serde_json::json!("owned");
