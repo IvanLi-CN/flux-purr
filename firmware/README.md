@@ -139,6 +139,9 @@ or supported by the production `flux-purr` firmware artifact.
 
 ## Build commands
 
+- Product and hardware-validation images use the complete default feature set: `esp32s3`, `web_serial`, `net_http`, and `buzzer-test`. Wi-Fi and HTTP are required product functions; a no-network compilation check does not provide a substitute image for normal hardware operation or thermal HIL.
+- The workspace release profile optimizes the `flux-purr-firmware` crate for size with `opt-level = "s"`, while dependencies retain their release defaults. The complete image must fit the existing `2 MiB` factory-app partition and pass the boot-stack check. Image-size failures require build or code optimization without removing required functions or changing the partition contract.
+
 - Before any Xtensa build in a fresh terminal:
   - `source /Users/ivan/export-esp.sh`
 
