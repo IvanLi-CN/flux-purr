@@ -1075,11 +1075,24 @@ pub(crate) fn serial_exchange_blocking(
     let mut read_buf = [0_u8; 256];
     let mut line = Vec::new();
     let mut discarding_overlong_line = false;
+    let mut read_retry = ReadOnlyResponseRetry::new(retry_policy, Instant::now());
 
     while Instant::now() < deadline {
+        let retry_now = Instant::now();
+        if read_retry.ready_to_retry(retry_now, deadline, retry_after_runtime_ready) {
+            require_usb_serial_identity(port_path, expected_usb_identity.as_ref())?;
+            read_retry.resend_if_stalled(
+                &mut *session.port,
+                request,
+                retry_now,
+                deadline,
+                retry_after_runtime_ready,
+            )?;
+        }
         match session.port.read(&mut read_buf) {
             Ok(0) => std::thread::sleep(SERIAL_READ_TIMEOUT),
             Ok(read) => {
+                read_retry.observe_progress(Instant::now());
                 let result = process_serial_read_chunk(
                     SerialResponseLineContext {
                         state,
@@ -1145,6 +1158,56 @@ pub(crate) fn serial_exchange_blocking(
         "Timed out waiting for a matching USB JSONL response.",
         true,
     ))
+}
+
+// A lost read response must not spend the entire 45s RPC budget without
+// acknowledging the 200ms tuning stream. Retry only idempotent reads, on the
+// existing open session, before its 256-event audit buffer can fill. Mutations
+// and boot/startup_busy recovery retain their separate single-shot rules.
+struct ReadOnlyResponseRetry {
+    enabled: bool,
+    remaining: u8,
+    last_progress: Instant,
+}
+
+impl ReadOnlyResponseRetry {
+    fn new(policy: SerialRetryPolicy, now: Instant) -> Self {
+        Self {
+            enabled: matches!(policy, SerialRetryPolicy::ReadOnly),
+            remaining: 2,
+            last_progress: now,
+        }
+    }
+
+    fn observe_progress(&mut self, now: Instant) {
+        self.last_progress = now;
+    }
+
+    fn ready_to_retry(&self, now: Instant, deadline: Instant, startup_pending: bool) -> bool {
+        self.enabled
+            && self.remaining > 0
+            && !startup_pending
+            && now < deadline
+            && now.saturating_duration_since(self.last_progress) >= Duration::from_secs(10)
+    }
+
+    fn resend_if_stalled(
+        &mut self,
+        port: &mut dyn SerialSessionPort,
+        request: &str,
+        now: Instant,
+        deadline: Instant,
+        startup_pending: bool,
+    ) -> Result<bool, HttpError> {
+        if !self.ready_to_retry(now, deadline, startup_pending) {
+            return Ok(false);
+        }
+        // Do not reopen or reset a live MCU to recover a missing response.
+        write_serial_request(port, request, deadline)?;
+        self.remaining -= 1;
+        self.last_progress = now;
+        Ok(true)
+    }
 }
 
 fn reopen_serial_request_with_identity(
@@ -2641,6 +2704,96 @@ mod write_tests {
         let request = "x".repeat(5_000);
         write_serial_request(&mut port, &request, Instant::now() + Duration::from_secs(1)).unwrap();
         assert_eq!(port.written, format!("{request}\n").as_bytes());
+    }
+
+    #[test]
+    fn lost_read_response_retries_the_same_event_ack_without_reopening() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(45);
+        let request =
+            r#"{"type":"thermal_tuning","op":"read","runId":"same-run","afterSequence":42}"#;
+        let mut port = IntermittentPort {
+            written: Vec::new(),
+            write_calls: 0,
+        };
+        let mut retry = ReadOnlyResponseRetry::new(SerialRetryPolicy::ReadOnly, now);
+        for seconds in [10, 20] {
+            assert!(
+                retry
+                    .resend_if_stalled(
+                        &mut port,
+                        request,
+                        now + Duration::from_secs(seconds),
+                        deadline,
+                        false
+                    )
+                    .unwrap()
+            );
+        }
+        assert!(
+            !retry
+                .resend_if_stalled(
+                    &mut port,
+                    request,
+                    now + Duration::from_secs(30),
+                    deadline,
+                    false
+                )
+                .unwrap()
+        );
+        assert_eq!(port.written, format!("{request}\n{request}\n").as_bytes());
+    }
+
+    #[test]
+    fn read_recovery_preserves_progress_startup_and_single_shot_boundaries() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(45);
+        let mut port = IntermittentPort {
+            written: Vec::new(),
+            write_calls: 0,
+        };
+        let mut mutation = ReadOnlyResponseRetry::new(SerialRetryPolicy::SingleShot, now);
+        assert!(
+            !mutation
+                .resend_if_stalled(
+                    &mut port,
+                    "mutation",
+                    now + Duration::from_secs(20),
+                    deadline,
+                    false
+                )
+                .unwrap()
+        );
+        let mut read = ReadOnlyResponseRetry::new(SerialRetryPolicy::ReadOnly, now);
+        assert!(
+            !read
+                .resend_if_stalled(
+                    &mut port,
+                    "read",
+                    now + Duration::from_secs(20),
+                    deadline,
+                    true
+                )
+                .unwrap()
+        );
+        read.observe_progress(now + Duration::from_secs(19));
+        assert!(
+            !read
+                .resend_if_stalled(
+                    &mut port,
+                    "read",
+                    now + Duration::from_secs(20),
+                    deadline,
+                    false
+                )
+                .unwrap()
+        );
+        assert!(
+            !read
+                .resend_if_stalled(&mut port, "read", deadline, deadline, false)
+                .unwrap()
+        );
+        assert!(port.written.is_empty());
     }
 
     #[test]

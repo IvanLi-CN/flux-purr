@@ -1467,12 +1467,12 @@ impl ThermalTuningRuntime {
             || evidence.under_c > 1.5
             || evidence.over_c > 1.5
             || evidence.first_band_exit_centi_c.is_some()
-            || !evidence
+            || evidence
                 .first_hold_after_warmup_ms
-                .is_some_and(|time| time <= evidence.settle_limit_ms)
-            || !evidence
+                .is_none_or(|time| time > evidence.settle_limit_ms)
+            || evidence
                 .stable_window_after_warmup_ms
-                .is_some_and(|time| time > evidence.settle_limit_ms)
+                .is_none_or(|time| time <= evidence.settle_limit_ms)
         {
             return false;
         }
@@ -1531,9 +1531,9 @@ impl ThermalTuningRuntime {
             || evidence.under_c > 1.5
             || evidence.over_c > 1.5
             || evidence.first_band_exit_centi_c.is_some()
-            || !evidence
+            || evidence
                 .first_hold_after_warmup_ms
-                .is_some_and(|at| at <= evidence.settle_limit_ms)
+                .is_none_or(|at| at > evidence.settle_limit_ms)
         {
             return false;
         }

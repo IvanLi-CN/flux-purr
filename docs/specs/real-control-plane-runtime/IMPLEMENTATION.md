@@ -4,6 +4,8 @@
 
 ## Current Status
 
+- Native serial只读RPC在10秒无接收进展时，于相同已打开会话重发原请求，最多两次且保持45秒总截止；每次重发前核对精确端口身份，不关闭或重开MCU串口。模拟丢失调优读响应的传输回归验证相同run/ACK保留，并覆盖partial write、接收进展、startup恢复、mutation禁止重发和最终截止边界。真实事件缺口仍不能通过HIL。
+
 - 产品identity从硬件复位寄存器返回本次启动的`resetReason`，支持启动后的重复查询，USB与LAN共用同一identity构造；devd原样保留。缺省与mock省略该可选字段，旧协议读回仍可用。这个诊断字段用于保留复位事实，不改变看门狗、供热许可或PD策略。
 
 - Fresh working-start intent survives ordinary Fixed-to-working negotiation while physical heat remains off until working power is confirmed. Contract loss, stale status, faults and explicit cancellation discard it without replay.

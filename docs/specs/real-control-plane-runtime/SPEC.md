@@ -116,6 +116,7 @@
 - devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
 - `flux-purr` CLI 必须为 status/runtime/wifi/monitor 等 devd-backed 操作自动创建、heartbeat 和释放 lease，支持 human 输出与 `--json` 输出，不要求用户手填 `leaseId`。固件操作由 `firmware-update-and-developer-flash` topic 管理：一般用户 `update` 使用显式 `--port`、本地已发布 bundle 与本地 CBOR control socket；开发者 `flash`/`recover` 使用显式 `--port`，直接串口执行且不创建或连接 devd。
 - CLI 与 devd 的 `update`、`flash`、`recover` 必须在 artifact/确认/授权/锁定之后执行各自既有的精确端口、身份、ROM、安全和 EEPROM 备份边界。它们不自动调用或要求设备 `flash_preparation` capability，也没有 host preparation timeout 或 `application_unresponsive` 旁路；设备侧 `prepare_flash`、status、cancel 仍是独立的 USB 操作。
+- Native serial只读RPC在连续10秒没有接收进展时，可在同一已打开会话上最多重发两次相同请求，重发前再次核对精确端口的USB身份；总45秒截止时间不延长。这样丢失一次事件读响应时仍能及时确认设备调优事件，避免在整个超时窗口里不取数而耗尽256条缓存。接收进展重新计算等待间隔，`startup_busy`继续使用runtime-ready恢复路径，任何mutation保持single-shot；重发不重开串口、不复位MCU、不更换设备、不推进尚未持久化的事件ACK。真实缓存缺口仍使运行不合格。
 - `monitor --tail` 从 `GET /api/v1/devices/{deviceId}/events/history?tail=N` 读取有序、有限的 JSON 历史，默认 20 条、最多沿用 SSE 的 120 条 replay 上限。不得通过仅保留 24 条事件的设备列表投影丢失复位、故障和启动证据；设备列表与 SSE 原有口径保持不变，该只读入口不向 MCU 发送命令。
 - `flux-purr pd pps set --volts <decimal> --amps <decimal> --device|--hardware` 与 `flux-purr pd pps clear --device|--hardware` 必须通过 lease 写 runtime contract；`--volts` 只接受 `0.1V` 步进、必须落在硬件 `5V~28V` 边界内且不高于实时 source capability，`--amps` 只接受 `0.05A` 步进且不高于 source capability。
 - `flux-purr hardware` 必须把 USB 设备记忆写入 OS 用户配置目录，`FLUX_PURR_HOME` 可覆盖；LAN record 使用独立字段持久化 base URL、hostname、last IPv4 和 redacted token。

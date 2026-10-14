@@ -1959,10 +1959,11 @@ pub(crate) fn thermal_plant_active_result(
     transaction: &ThermalPlantTransientTransaction,
 ) -> Option<ThermalPlantActiveResultWire> {
     let (projection, _) = thermal_plant_projection_for_runtime(memory_config)?;
+    let curve = projected_heater_curve(memory_config)?;
     Some(ThermalPlantActiveResultWire {
         transaction_id: transaction.transaction_id,
         curve: HeaterCurvePackageWire::from_memory(
-            &memory_config.active_heater_curve,
+            &curve,
             Some(&memory_config.heater_curve_raw_observations),
         ),
         convection_mw_per_c: Some(projection.convection_mw_per_c),

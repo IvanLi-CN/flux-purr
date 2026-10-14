@@ -5584,6 +5584,41 @@ fn transient_thermal_fit_recovers_a_physical_model_from_heat_and_cool_trace() {
 }
 
 #[test]
+fn thermal_plant_export_uses_the_runtime_resistance_projection() {
+    let mut memory = synthetic_memory_config();
+    let (samples, sample_count) = synthetic_trace(&memory, 25.0);
+    let transaction = assert_synthetic_fit(&memory, &samples, sample_count, 25.0);
+    memory.thermal_plant_transient_active = Some(transaction);
+    memory.heater_curve_transaction_id = Some(transaction.transaction_id);
+    // Stored temperatures may predate the currently effective ADC mapping.
+    // Raw observations remain the source for production resistance estimates.
+    memory.active_heater_curve.points[0]
+        .as_mut()
+        .unwrap()
+        .temp_centi_c = 5_000;
+    memory.active_heater_curve.points[1]
+        .as_mut()
+        .unwrap()
+        .temp_centi_c = 30_000;
+
+    let exported = thermal_plant_active_result(&memory, &transaction).unwrap();
+    let mut curve = HeaterCurveConfig::default();
+    for (index, point) in exported.curve.points.iter().enumerate() {
+        curve.points[index] = point.map(Into::into);
+    }
+    for temperature in [60.0, 120.0, 220.0] {
+        let exported_resistance = heater_resistance_ohms_from_curve(&curve, temperature)
+            .unwrap()
+            .max(default_estimated_heater_resistance_ohms(temperature));
+        let production_resistance = estimated_heater_resistance_ohms(temperature, None, &memory);
+        assert!(
+            (exported_resistance - production_resistance).abs() < 0.001,
+            "cold seed and production must use the same resistance at {temperature}C"
+        );
+    }
+}
+
+#[test]
 fn transient_heat_coverage_preserves_the_integer_adc_cutoff_bin() {
     let memory = synthetic_memory_config();
     let raw_offset_mv =
