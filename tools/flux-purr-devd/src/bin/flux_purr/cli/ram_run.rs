@@ -2681,6 +2681,7 @@ fn validate_fan_pd_policy_selection(result: &serde_json::Map<String, Value>) -> 
     let selection = result
         .get("selection")
         .ok_or_else(|| "result.selection is missing".to_string())?;
+    let expected = expected_fan_pd_selection(raw_pdos)?;
     if let Some(selection) = selection.as_object() {
         if !matches!(
             selection.get("mode").and_then(Value::as_str),
@@ -2695,6 +2696,10 @@ fn validate_fan_pd_policy_selection(result: &serde_json::Map<String, Value>) -> 
         if !(5_000..=20_000).contains(&target_mv) {
             return Err("result.selection.targetMv is outside the fan-pd range".to_string());
         }
+        let mode = selection
+            .get("mode")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "result.selection.mode is missing".to_string())?;
         let current_ma = selection
             .get("contractCurrentMa")
             .and_then(Value::as_u64)
@@ -2702,21 +2707,173 @@ fn validate_fan_pd_policy_selection(result: &serde_json::Map<String, Value>) -> 
         if !(1..=5_000).contains(&current_ma) {
             return Err("result.selection.contractCurrentMa is invalid".to_string());
         }
-        if selection.get("contractConfirmed").and_then(Value::as_bool) == Some(true) {
-            let advertised = selection
-                .get("sourceAdvertisedMaxMa")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| "result.selection.sourceAdvertisedMaxMa is missing".to_string())?;
-            if advertised == 0 || current_ma != advertised.min(5_000) {
-                return Err(
-                    "result.selection current does not match the advertised 5A ceiling".to_string(),
-                );
-            }
+        if selection.get("contractConfirmed").and_then(Value::as_bool) != Some(true) {
+            return Err("result.selection must confirm the selected contract".to_string());
+        }
+        let advertised = selection
+            .get("sourceAdvertisedMaxMa")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "result.selection.sourceAdvertisedMaxMa is missing".to_string())?;
+        if advertised == 0 || current_ma != advertised.min(5_000) {
+            return Err(
+                "result.selection current does not match the advertised 5A ceiling".to_string(),
+            );
+        }
+        let selected_position = selection
+            .get("selectedObjectPosition")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "result.selection.selectedObjectPosition is missing".to_string())?;
+        let reason = selection
+            .get("reason")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "result.selection.reason is missing".to_string())?;
+        let expected = expected.ok_or_else(|| {
+            "result.selection claims a contract but sourceCapabilities has no usable fan-pd candidate"
+                .to_string()
+        })?;
+        if mode != expected.mode
+            || target_mv != expected.target_mv
+            || selected_position != expected.position
+            || advertised != expected.max_ma
+            || current_ma != expected.contract_ma
+            || reason != expected.reason
+        {
+            return Err(
+                "result.selection does not match the advertised fan-pd policy choice".to_string(),
+            );
         }
     } else if !selection.is_null() {
         return Err("result.selection must be an object or null".to_string());
+    } else if matches!(
+        result.get("overall").and_then(Value::as_str),
+        Some("pass" | "power_degraded" | "fan_stage_failed")
+    ) {
+        return Err("a completed fan-pd test requires a selected contract".to_string());
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FanPdSelectionExpectation {
+    mode: &'static str,
+    target_mv: u64,
+    position: u64,
+    max_ma: u64,
+    contract_ma: u64,
+    reason: &'static str,
+}
+
+fn expected_fan_pd_selection(
+    raw_pdos: &[Value],
+) -> Result<Option<FanPdSelectionExpectation>, String> {
+    let mut objects = Vec::with_capacity(raw_pdos.len());
+    for (index, raw) in raw_pdos.iter().enumerate() {
+        let raw = raw
+            .as_u64()
+            .ok_or_else(|| format!("result.sourceCapabilities.rawPdos[{index}] is invalid"))?;
+        let raw = u32::try_from(raw).map_err(|_| {
+            format!("result.sourceCapabilities.rawPdos[{index}] is outside the u32 range")
+        })?;
+        let object = decode_pd_hil_source_object(raw, index + 1)?;
+        let object = object
+            .as_object()
+            .ok_or_else(|| format!("decoded source PDO {index} is not an object"))?;
+        let mode = match object.get("mode").and_then(Value::as_str) {
+            Some("fixed") => "fixed",
+            Some("pps") => "pps",
+            _ => return Err(format!("decoded source PDO {index} has an invalid mode")),
+        };
+        objects.push((
+            mode,
+            object
+                .get("minMv")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            object
+                .get("maxMv")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            object
+                .get("maxMa")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            object
+                .get("position")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+        ));
+    }
+
+    let preferred = [
+        ("fixed", 15_000, "preferred_fixed"),
+        ("pps", 15_000, "preferred_pps"),
+        ("fixed", 18_000, "preferred_fixed"),
+        ("pps", 18_000, "preferred_pps"),
+        ("fixed", 20_000, "preferred_fixed"),
+        ("pps", 20_000, "preferred_pps"),
+    ];
+    for (mode, target_mv, reason) in preferred {
+        if let Some(candidate) = objects
+            .iter()
+            .find_map(|object| fan_pd_candidate(*object, mode, target_mv, reason))
+        {
+            return Ok(Some(candidate));
+        }
+    }
+
+    let fixed = objects
+        .iter()
+        .filter_map(|object| fan_pd_candidate(*object, "fixed", object.1, "highest_fixed_5_to_12v"))
+        .filter(|candidate| (5_000..=12_000).contains(&candidate.target_mv))
+        .max_by_key(|candidate| candidate.target_mv);
+    if fixed.is_some() {
+        return Ok(fixed);
+    }
+
+    let pps = objects
+        .iter()
+        .filter_map(|object| {
+            if object.0 != "pps" || object.3 < 50 {
+                return None;
+            }
+            let target_mv = object.2.min(20_000) - (object.2.min(20_000) % 20);
+            if target_mv < object.1.max(5_000) {
+                return None;
+            }
+            fan_pd_candidate(*object, "pps", target_mv, "highest_pps_fallback")
+        })
+        .max_by_key(|candidate| candidate.target_mv);
+    Ok(pps)
+}
+
+fn fan_pd_candidate(
+    object: (&str, u64, u64, u64, u64),
+    mode: &'static str,
+    target_mv: u64,
+    reason: &'static str,
+) -> Option<FanPdSelectionExpectation> {
+    let voltage_matches = match mode {
+        "fixed" => object.0 == "fixed" && object.1 == target_mv && object.2 == target_mv,
+        "pps" => object.0 == "pps" && object.1 <= target_mv && target_mv <= object.2,
+        _ => false,
+    };
+    if !voltage_matches {
+        return None;
+    }
+    let ceiling = object.3.min(5_000);
+    let contract_ma = match mode {
+        "fixed" => ceiling / 10 * 10,
+        "pps" => ceiling / 50 * 50,
+        _ => 0,
+    };
+    (contract_ma > 0).then_some(FanPdSelectionExpectation {
+        mode,
+        target_mv,
+        position: object.4,
+        max_ma: object.3,
+        contract_ma,
+        reason,
+    })
 }
 
 fn validate_fan_pd_stages_and_recovery(
@@ -3946,11 +4103,13 @@ mod tests {
                     "powerGateMv": 13000,
                     "recoveryMode": "fixed_5v_contract"
                 },
-                "sourceCapabilities": {"count": 1, "rawPdos": [123]},
+                "sourceCapabilities": {"count": 1, "rawPdos": [307650]},
                 "selection": {
                     "mode": "fixed",
                     "targetMv": 15000,
                     "contractMv": 15000,
+                    "reason": "preferred_fixed",
+                    "selectedObjectPosition": 1,
                     "sourceAdvertisedMaxMa": 4500,
                     "contractCurrentMa": 4500,
                     "contractConfirmed": true,
@@ -3980,6 +4139,9 @@ mod tests {
         contradictory_pass["result"]["selection"]["contractMv"] = serde_json::json!(12_000);
         contradictory_pass["result"]["selection"]["powerGate"] = serde_json::json!("degraded");
         assert!(validate_ram_success_response(&contradictory_pass, FAN_PD_CAPABILITY).is_err());
+        let mut wrong_policy_choice = value.clone();
+        wrong_policy_choice["result"]["selection"]["targetMv"] = serde_json::json!(18000);
+        assert!(validate_ram_success_response(&wrong_policy_choice, FAN_PD_CAPABILITY).is_err());
         let mut degraded = value.clone();
         degraded["result"]["overall"] = serde_json::json!("power_degraded");
         degraded["result"]["warning"] = serde_json::json!(true);
