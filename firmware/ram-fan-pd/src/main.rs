@@ -2495,6 +2495,30 @@ mod device {
             Ok(packet) => packet,
             Err(reason) => {
                 emit_session_progress(usb, request_id, &mut sequence, reason);
+                let mut recovery_phy = Fusb302::with_address(&mut measurements.i2c, I2C_ADDRESS);
+                let mut recovery_cancel = CancelState::new();
+                let mut recovery_message_id = 0;
+                let mut recovery_source_message_id = None;
+                let recovery = reset_to_default(
+                    &mut recovery_phy,
+                    &mut measurements.adc,
+                    &mut measurements.vin,
+                    &measurements.vin_calibration,
+                    &measurements.pd_irq,
+                    true,
+                    validate_vin,
+                    usb,
+                    &mut recovery_cancel,
+                    now_ms().saturating_add(RECOVERY_TIMEOUT_MS),
+                    request_id,
+                    &mut sequence,
+                    &mut recovery_message_id,
+                    &mut recovery_source_message_id,
+                    None,
+                    None,
+                )
+                .unwrap_or(ResetResult::FAILED);
+                result.final_reset = recovery;
                 result.overall = "recovery_failed";
                 result.next_sequence = sequence;
                 return result;
