@@ -53,6 +53,9 @@ RGB, buzzer, and fan paths.
   untouched; the source contract must therefore be established before loading
   the RAM image. The CLI prints a compact `fs` progress frame when each PWM
   stage starts, after the compact `fp` power frame for the same session.
+- `ram-run test fan` prints a warning recommending `ram-run test fan-pd` when
+  the operator needs PD negotiation. The legacy command still leaves PD
+  untouched and never starts a negotiation itself.
 - A successful response has `ok=true`, a command-specific `result.detail`, and
   explicit `heater=off`, `pd=untouched`, and `eeprom=untouched` fields. Button
   snapshots include the sampled pressed state for all five keys; the default

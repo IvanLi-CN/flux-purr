@@ -67,6 +67,7 @@
 | heater-pid-frontpanel-runtime | active | `heater-pid-frontpanel-runtime/IMPLEMENTATION.md` | `heater-pid-frontpanel-runtime/SPEC.md` | - | Heater PID, fan policy, protection, and dashboard runtime truth source |
 | mini-hotplate-doc-baseline | archived | `mini-hotplate-doc-baseline/IMPLEMENTATION.md` | `mini-hotplate-doc-baseline/SPEC.md` | - | Source-collection and evidence baseline is complete |
 | pd-sink-voltage-hil | active | `pd-sink-voltage-hil/IMPLEMENTATION.md` | `pd-sink-voltage-hil/SPEC.md` | - | Approved exact Fixed/PPS voltage HIL design with VIN hold evidence and verified reset |
+| pd-fan-test | active | `pd-fan-test/IMPLEMENTATION.md` | `pd-fan-test/SPEC.md` | - | Standalone PD-aware fan RAM image, fixed/PPS selection policy, staged fan output, and verified 5V recovery |
 | pr-label-release-protection | active | `pr-label-release-protection/IMPLEMENTATION.md` | `pr-label-release-protection/SPEC.md` | - | Label-driven release intent and branch protection policy |
 | real-control-plane-runtime | active | `real-control-plane-runtime/IMPLEMENTATION.md` | `real-control-plane-runtime/SPEC.md` | - | Web, firmware, and native devd real transport contract |
 | release-failure-telegram-alerts | active | `release-failure-telegram-alerts/IMPLEMENTATION.md` | `release-failure-telegram-alerts/SPEC.md` | - | Release failure notification workflow and recovery context |

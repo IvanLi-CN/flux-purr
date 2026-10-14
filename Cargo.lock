@@ -1888,6 +1888,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-purr-pd-sink-core"
+version = "0.1.0"
+
+[[package]]
 name = "flux-purr-ram-bringup"
 version = "0.1.0"
 dependencies = [
@@ -1903,6 +1907,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-purr-ram-fan-pd"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embedded-hal 1.0.0",
+ "esp-hal",
+ "esp-rtos",
+ "flux-purr-pd-sink-core",
+ "fusb302",
+ "heapless 0.8.0",
+ "nb 1.1.0",
+ "serde",
+ "serde-json-core",
+ "serde_json",
+]
+
+[[package]]
 name = "flux-purr-ram-pd-hil"
 version = "0.1.0"
 dependencies = [
@@ -1910,6 +1931,7 @@ dependencies = [
  "embedded-hal 1.0.0",
  "esp-hal",
  "esp-rtos",
+ "flux-purr-pd-sink-core",
  "fusb302",
  "heapless 0.8.0",
  "nb 1.1.0",

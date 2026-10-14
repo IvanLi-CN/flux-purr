@@ -286,6 +286,26 @@ _Avoid_: APDO object position, Source Capabilities, requested voltage
 A bounded RAM bring-up session that discovers FUSB302B Source Capabilities, exercises exact Fixed PDO and PPS requests, samples the VIN Measurement Path, and returns the USB-C link to a verified attached fixed 5V recovery contract without interrupting VBUS. It is a validation surface, not a product Power Coordinator or a heater-power authority.
 _Avoid_: product PD session, production power request, measured load-current test
 
+**PD Fan Test Session**:
+A bounded standalone RAM firmware session that negotiates a PD Contract selected for fan validation, drives the fan test, and records the source capability and input-voltage evidence. Fixed PDO selection is preferred; PPS may be used only by an explicit fan-test fallback policy. It is distinct from the general RAM bring-up image and the full-matrix PD HIL Session.
+_Avoid_: general Fan Test, PPS fan test, product power session
+
+**Fan Test Power Gate**:
+The PD Fan Test Session's confirmed-contract check immediately before the three-stage fan run. A negotiated Fixed or PPS voltage above 13V satisfies the gate; a lower negotiated voltage is a degraded condition that must be logged as a warning before the fan stages begin.
+_Avoid_: VIN-only gate, 12V fan guarantee, current measurement gate
+
+**Fan Test PPS Fallback**:
+The explicit PPS branch of a PD Fan Test Session after the preferred Fixed choices are unavailable. It tries the same high-voltage targets after their Fixed alternatives, then uses the highest representable PPS voltage only when no usable Fixed PDO remains.
+_Avoid_: implicit PPS switch, PPS sweep, PPS-first fan policy
+
+**Power-Degraded Fan Result**:
+The terminal result of a PD Fan Test Session that completed its three fan stages after a confirmed Fixed or PPS contract at or below 13V. It records that the diagnostic ran while withholding the claim that the 12V fan had a qualifying high-voltage supply.
+_Avoid_: power failure, full-speed pass, successful 12V validation
+
+**Three-Stage Fan Run**:
+The bounded fan output sequence used by the RAM fan diagnostic: 50% PWM for 5 seconds, 100% PWM for 5 seconds, then 0% PWM for 5 seconds before safe-off. It exercises output stages and does not by itself measure fan speed.
+_Avoid_: speed qualification, tachometer test, continuous fan operation
+
 **PD Test Tier**:
 One exact mode-and-voltage target in a PD HIL Session, together with the contractual current target, negotiation result, VIN hold evidence, and recovery result.
 _Avoid_: nearest supported voltage, fallback tier, voltage sweep without a contract boundary
@@ -293,6 +313,10 @@ _Avoid_: nearest supported voltage, fallback tier, voltage sweep without a contr
 **Negotiated Current Target**:
 The operating current encoded in the RDO or PPS request after applying Source Capabilities and the HIL safety ceiling. It is a contractual current limit, not a measured VBUS load current.
 _Avoid_: current reading, source nameplate current, hardware over-current protection
+
+**Fan Test Current Target**:
+The current limit encoded in a PD Fan Test Session's Fixed or PPS request, capped at the repository fan-test ceiling and accepted without the PD HIL Session's 3A qualification floor. It remains a negotiated limit rather than a measured fan current.
+_Avoid_: fan current reading, source nameplate current, heater current qualification
 
 **VIN HIL Evidence**:
 The timestamped VIN Reading samples collected during a PD Test Tier's fixed hold interval. It verifies the device-side voltage observation only; it does not prove source-side current or power delivery.

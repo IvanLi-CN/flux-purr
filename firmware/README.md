@@ -157,11 +157,15 @@ or supported by the production `flux-purr` firmware artifact.
 - Build and validate the flash-free image:
   - `bash scripts/build-ram-bringup.sh`
   - `python3 firmware/ram-bringup/tools/check_ram_elf.py firmware/ram-bringup/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-bringup --json`
+- Build and validate the standalone PD-aware fan image:
+  - `bash scripts/build-ram-fan-pd.sh`
+  - `python3 firmware/ram-bringup/tools/check_ram_elf.py firmware/ram-fan-pd/target/xtensa-esp32s3-none-elf/release/flux-purr-ram-fan-pd --json`
 - Run a physical display, front-panel, or status-light scenario on the explicitly authorized port:
   - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run preview display --port <authorized-port>`
   - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run preview frontpanel --port <authorized-port>`
   - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run preview status-light --port <authorized-port>`
 - GPIO, ADC, I2C identification, RGB, buzzer, fan, and safe exit checks use the same typed `ram_bringup` JSONL protocol. Heater output remains off; PD and EEPROM are untouched.
+- `ram-run test fan-pd` uses the separate `ram-fan-pd` image and owns one PD contract before running its fan stages; it is not a `ram-bringup` or full PD HIL subcommand.
 
 ## MCU agentd diagnostic flow
 

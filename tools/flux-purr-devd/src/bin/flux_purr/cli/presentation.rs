@@ -89,6 +89,9 @@ fn render_ram_response(
     if capability == "test_pd_sink" {
         return render_pd_hil_summary(payload);
     }
+    if capability == "test_fan_pd" {
+        return render_fan_pd_summary(payload);
+    }
     let result = payload.get("result").unwrap_or(&Value::Null);
     let detail = result.get("detail").and_then(Value::as_str).unwrap_or("-");
     let mut output = format!(
@@ -170,6 +173,67 @@ fn render_ram_response(
         ));
     }
     Ok(output)
+}
+
+fn render_fan_pd_summary(
+    payload: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let result = payload
+        .get("result")
+        .ok_or("fan-pd summary is missing result")?;
+    let selection = result.get("selection").and_then(Value::as_object);
+    let contract = selection
+        .map(|selection| {
+            format!(
+                "{} {}mV {}mA",
+                selection.get("mode").and_then(Value::as_str).unwrap_or("-"),
+                selection
+                    .get("contractMv")
+                    .or_else(|| selection.get("targetMv"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+                selection
+                    .get("contractCurrentMa")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default(),
+            )
+        })
+        .unwrap_or_else(|| "none".to_string());
+    let overall = result
+        .get("overall")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_ascii_uppercase();
+    let reset = result
+        .get("finalReset")
+        .and_then(Value::as_object)
+        .map(|reset| {
+            reset
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        })
+        .unwrap_or("unknown")
+        .to_ascii_uppercase();
+    Ok(format!(
+        "FAN PD SUMMARY overall={} contract={} powerGate={} warning={} stages={} recovery={}",
+        overall,
+        contract,
+        result
+            .get("powerGate")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        result
+            .get("warning")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        result
+            .get("stages")
+            .and_then(|stages| stages.get("ok"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        reset,
+    ))
 }
 
 fn render_pd_hil_summary(

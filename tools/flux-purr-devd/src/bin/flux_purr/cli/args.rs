@@ -174,6 +174,7 @@ pub(crate) enum RamTestKind {
     Rgb,
     Buzzer,
     Fan,
+    FanPd,
     PdSink,
 }
 
@@ -186,6 +187,7 @@ impl RamTestKind {
             Self::Rgb => "test_rgb",
             Self::Buzzer => "test_buzzer",
             Self::Fan => "test_fan",
+            Self::FanPd => "test_fan_pd",
             Self::PdSink => "test_pd_sink",
         }
     }
