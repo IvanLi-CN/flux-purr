@@ -2211,7 +2211,8 @@ fn find_ram_response(
                     .map_err(|error| format!("fan-pd progress frame is invalid: {error}"))?;
             }
             if op == FAN_PD_CAPABILITY
-                && let Some(summary) = accept_fan_pd_summary_progress(summary_chunks, &value, op)?
+                && let Some(summary) =
+                    accept_fan_pd_summary_progress(summary_chunks, &value, request_id, op)?
             {
                 return Ok(Some(summary));
             }
@@ -2272,6 +2273,7 @@ fn find_ram_response(
 fn accept_fan_pd_summary_chunk(
     summary_chunks: &mut PdHilSummaryChunks,
     result: &Value,
+    request_id: &str,
     op: &str,
 ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(summary) = summary_chunks.accept(result)? else {
@@ -2279,6 +2281,13 @@ fn accept_fan_pd_summary_chunk(
     };
     if summary.get("type").and_then(Value::as_str) != Some("fan_pd_summary") {
         return Err("fan-pd summary chunk did not reconstruct a fan-pd summary".into());
+    }
+    if summary.get("requestId").and_then(Value::as_str) != Some(request_id)
+        || summary.get("firmwareKind").and_then(Value::as_str) != Some("ram_bringup")
+        || summary.get("imageKind").and_then(Value::as_str) != Some("fan_pd")
+        || summary.get("capability").and_then(Value::as_str) != Some(op)
+    {
+        return Err("fan-pd summary identity does not match the active request".into());
     }
     validate_ram_success_response(&summary, op)
         .map_err(|error| format!("RAM fan-pd summary for {op} is invalid: {error}"))?;
@@ -2288,12 +2297,13 @@ fn accept_fan_pd_summary_chunk(
 fn accept_fan_pd_summary_progress(
     summary_chunks: &mut PdHilSummaryChunks,
     value: &Value,
+    request_id: &str,
     op: &str,
 ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(result) = value.get("result") else {
         return Ok(None);
     };
-    accept_fan_pd_summary_chunk(summary_chunks, result, op)
+    accept_fan_pd_summary_chunk(summary_chunks, result, request_id, op)
 }
 
 fn print_ram_progress(value: &Value) {
@@ -2613,6 +2623,25 @@ fn validate_fan_pd_summary(
         "pass" | "power_degraded" | "negotiation_failed" | "fan_stage_failed" | "recovery_failed"
     ) {
         return Err(format!("result.overall has an invalid value: {overall:?}"));
+    }
+    if overall == "pass" {
+        let selection = result
+            .get("selection")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "a passing fan-pd result requires a confirmed selection".to_string())?;
+        let contract_mv = selection
+            .get("contractMv")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "a passing fan-pd result requires contractMv".to_string())?;
+        if selection.get("contractConfirmed").and_then(Value::as_bool) != Some(true)
+            || contract_mv <= 13_000
+            || selection.get("powerGate").and_then(Value::as_str) != Some("pass")
+            || result.get("powerGate").and_then(Value::as_str) != Some("pass")
+        {
+            return Err(
+                "a passing fan-pd result requires a confirmed contract above 13V".to_string(),
+            );
+        }
     }
     validate_fan_pd_policy_selection(result)?;
     validate_fan_pd_stages_and_recovery(result, overall)?;
@@ -3946,6 +3975,11 @@ mod tests {
             "fan-pd fixture should validate"
         );
         assert!(!fan_pd_requires_nonzero(&value));
+        let mut contradictory_pass = value.clone();
+        contradictory_pass["result"]["powerGate"] = serde_json::json!("degraded");
+        contradictory_pass["result"]["selection"]["contractMv"] = serde_json::json!(12_000);
+        contradictory_pass["result"]["selection"]["powerGate"] = serde_json::json!("degraded");
+        assert!(validate_ram_success_response(&contradictory_pass, FAN_PD_CAPABILITY).is_err());
         let mut degraded = value.clone();
         degraded["result"]["overall"] = serde_json::json!("power_degraded");
         degraded["result"]["warning"] = serde_json::json!(true);
@@ -4080,6 +4114,27 @@ mod tests {
         .expect("final response should be returned");
         assert_eq!(response["result"]["detail"], "fan_ready");
         assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn fan_pd_summary_chunks_must_match_the_active_request_identity() {
+        let summary = br#"{"type":"fan_pd_summary","requestId":"other","firmwareKind":"ram_bringup","imageKind":"fan_pd","capability":"test_fan_pd"}"#;
+        let data = summary
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let chunk = serde_json::json!({
+            "kind": "summary_chunk",
+            "count": 1,
+            "index": 0,
+            "encoding": "hex",
+            "data": data,
+        });
+        let mut summary_chunks = PdHilSummaryChunks::default();
+        let error =
+            accept_fan_pd_summary_chunk(&mut summary_chunks, &chunk, "active", FAN_PD_CAPABILITY)
+                .expect_err("mismatched summary identity must be rejected");
+        assert!(error.to_string().contains("identity"));
     }
 
     #[test]

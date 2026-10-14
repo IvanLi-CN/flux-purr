@@ -88,6 +88,10 @@ jobs:
         if: needs.classify.outputs.kind == 'source'
         run: cargo test --locked --manifest-path firmware/ram-pd-hil/Cargo.toml
 
+      - name: PD sink core and fan-pd protocol tests
+        if: needs.classify.outputs.kind == 'source'
+        run: cargo test --locked --manifest-path firmware/pd-sink-core/Cargo.toml && cargo test --locked --manifest-path firmware/ram-fan-pd/Cargo.toml
+
       - name: Setup Xtensa toolchain
         if: needs.classify.outputs.kind == 'source'
         uses: ./.github/actions/setup-xtensa
@@ -101,6 +105,10 @@ jobs:
       - name: PD HIL RAM ELF build and safety gate
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/build-ram-pd-hil.sh
+
+      - name: Fan PD RAM ELF build and safety gate
+        if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/build-ram-fan-pd.sh
 
       - name: RAM ELF safety checker
         if: needs.classify.outputs.kind == 'source'
