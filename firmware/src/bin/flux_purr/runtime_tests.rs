@@ -11052,7 +11052,68 @@ fn rejected_approach_measurements_cannot_raise_the_last_braking_request() {
 }
 
 #[test]
-fn fresh_approach_recovery_keeps_elapsed_slew_time_across_rejected_callbacks() {
+fn accepted_approach_deficit_can_apply_the_model_full_power_request() {
+    // At the B high-temperature endpoint the delayed-energy prediction and
+    // trajectory already account for transport delay. A second actuator ramp
+    // must not discard a fresh, model-bounded recovery request.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 220;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(218.0);
+        controller.previous_measured_temp_c = Some(218.0);
+        controller.last_accepted_measurement_at_ms = Some(5_000);
+        controller.profile_last_control_at_ms = Some(5_000);
+        controller.duty_percent = 5;
+        controller.approach_last_request_permille = Some(50);
+        controller.approach_trajectory =
+            Some(flux_purr_firmware::thermal_trajectory::TemperatureTrajectory::new(5_000, 219.0));
+        let mut profile = production_test_profile(1_000);
+        profile.points[0].as_mut().unwrap().target_temp_c = 220;
+        profile.points[0].as_mut().unwrap().approach_lead_ticks = 0;
+        let mut input = production_test_input(218.0);
+        input.target_temp_c = 220;
+        input.ambient_temp_c = 29.94;
+        input.max_power_mw = 63_000.0;
+        input.now_ms = 5_100;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 81.21304,
+            radiation_mw_per_k4: 6.7999764e-7,
+            thermal_capacity_mj_per_c: 30_629.809,
+            transport_delay_ms: 1_400,
+        };
+        controller.applied_heat.configure(1_400);
+        controller.applied_heat.observe(2_000, 3_150.0);
+        controller.applied_heat.observe(5_000, 3_150.0);
+        let mut rejected = controller;
+        let held = rejected
+            .update_production_at(
+                kind,
+                ThermalPlantRuntimeInput {
+                    measurement_accepted: false,
+                    ..input
+                },
+                Some(profile),
+            )
+            .0;
+        assert_eq!(held.phase, HeaterControlPhase::Approach);
+        assert_eq!(held.duty_percent, 5);
+        let output = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(output.phase, HeaterControlPhase::Approach);
+        assert_eq!(
+            output.duty_percent, 100,
+            "{bank:?}: fresh low temperature and bounded delayed heat must retain full recovery authority: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn fresh_approach_recovery_matches_across_rejected_callbacks() {
     // The same physical hold followed by the same fresh reading must not
     // acquire a slower recovery merely because PPS wait callbacks ran.
     for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
@@ -11098,7 +11159,7 @@ fn fresh_approach_recovery_keeps_elapsed_slew_time_across_rejected_callbacks() {
                 .duty_percent
                 .abs_diff(sparse_output.duty_percent)
                 <= 1,
-            "{bank:?}: callback cadence cannot discard the elapsed physical slew budget: sparse={sparse_output:?}, callbacks={callbacks_output:?}"
+            "{bank:?}: callback cadence cannot change the same fresh recovery: sparse={sparse_output:?}, callbacks={callbacks_output:?}"
         );
     }
 }
@@ -11201,6 +11262,16 @@ fn trajectory_controller_reaches_physical_hold_with_delayed_calibrated_plants() 
                 transport_delay_ms: 700,
             },
             60_000.0,
+        ),
+        (
+            ThermalProfileBank::Pps3a,
+            flux_purr_firmware::memory::ThermalPlantProjection {
+                convection_mw_per_c: 81.21304,
+                radiation_mw_per_k4: 6.7999764e-7,
+                thermal_capacity_mj_per_c: 30_629.809,
+                transport_delay_ms: 1_400,
+            },
+            63_000.0,
         ),
     ] {
         for target in [60, 220] {
@@ -11443,9 +11514,10 @@ fn assert_trajectory_plant_handoff(
         "{bank:?}/{target}: no physical Hold, final={}",
         input.measured_temp_c
     );
+    let handoff_limit_ms = if target <= 150 { 10_000 } else { 5_000 };
     assert!(
-        handoff_ms <= 10_000,
-        "{bank:?}/{target}: late handoff {handoff_ms}ms"
+        handoff_ms <= handoff_limit_ms,
+        "{bank:?}/{target}: late handoff {handoff_ms}ms (limit {handoff_limit_ms}ms)"
     );
     assert!(
         peak <= f32::from(target) + 3.0,

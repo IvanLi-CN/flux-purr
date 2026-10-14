@@ -808,7 +808,6 @@ pub(crate) struct HeaterController {
     pub(crate) approach_trajectory:
         Option<flux_purr_firmware::thermal_trajectory::TemperatureTrajectory>,
     pub(crate) approach_last_request_permille: Option<u16>,
-    pub(crate) approach_last_slew_at_ms: Option<u64>,
     pub(crate) heater_was_enabled: bool,
     pub(crate) warmup_started_at_ms: Option<u64>,
     pub(crate) production_controller: Option<ProductionThermalController>,
@@ -914,7 +913,6 @@ impl HeaterController {
             applied_heat: flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new(),
             approach_trajectory: None,
             approach_last_request_permille: None,
-            approach_last_slew_at_ms: None,
             heater_was_enabled: false,
             warmup_started_at_ms: None,
             production_controller: None,
@@ -1338,7 +1336,6 @@ impl HeaterController {
     fn clear_approach_braking(&mut self) {
         self.approach_trajectory = None;
         self.approach_last_request_permille = None;
-        self.approach_last_slew_at_ms = None;
     }
 
     fn model_approach_available(&self) -> bool {
@@ -1406,15 +1403,14 @@ impl HeaterController {
                 input.now_ms,
                 predicted.temperature_c,
             ));
-            // A Hold recovery has no new full-power Warmup to brake. Keep
-            // its current logical request as the upward-slew origin; the
-            // model may still reduce it immediately when heat is in flight.
+            // A Hold recovery has no new full-power Warmup to brake. Retain
+            // its current request during rejected observations; the model
+            // still owns any reduction or fresh-measurement recovery.
             self.approach_last_request_permille = Some(if self.recovering_from_hold {
                 u16::from(self.duty_percent) * 10
             } else {
                 flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE
             });
-            self.approach_last_slew_at_ms = Some(input.now_ms);
         }
         if entered_approach {
             return Some(percent_from_permille(
@@ -1437,26 +1433,15 @@ impl HeaterController {
         let previous_permille = self
             .approach_last_request_permille
             .unwrap_or(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
-        let slew_at_ms = *self
-            .approach_last_slew_at_ms
-            .get_or_insert(input.now_ms.saturating_sub(frame.elapsed_ms));
-        let applied_permille = flux_purr_firmware::thermal_trajectory::slew_up_permille(
-            previous_permille,
-            requested_permille,
-            input.now_ms.saturating_sub(slew_at_ms),
-            input.model.transport_delay_ms,
-        );
         let applied_permille = if self.control_measurement_accepted() {
-            applied_permille
+            requested_permille
         } else {
-            applied_permille.min(previous_permille)
+            requested_permille.min(previous_permille)
         };
-        // Rejected callbacks hold the output without consuming physical slew
-        // time. A fresh observation uses that elapsed interval once. A real
-        // reduction remains immediate and establishes its own slew origin.
-        if self.control_measurement_accepted() || applied_permille < previous_permille {
-            self.approach_last_slew_at_ms = Some(input.now_ms);
-        }
+        // The reference and arriving-energy forecast already account for
+        // transport delay. An additional actuator ramp would prolong a known
+        // heating deficit without changing either prediction. Fresh readings
+        // may use the model's entire bounded range; blind increases stay barred.
         self.approach_last_request_permille = Some(applied_permille);
         Some(percent_from_permille(applied_permille))
     }

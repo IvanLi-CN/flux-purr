@@ -406,33 +406,6 @@ impl TemperatureTrajectory {
     }
 }
 
-/// Limit only upward Approach requests using the calibrated transport delay.
-///
-/// Downward requests remain immediate so braking can still remove heat as soon
-/// as the model calls for it. An upward request gains at most one delay-scaled
-/// fraction of full scale per elapsed control interval. This bounds a model
-/// correction without introducing a second profile floor or ceiling.
-pub fn slew_up_permille(
-    previous_permille: u16,
-    requested_permille: u16,
-    elapsed_ms: u64,
-    transport_delay_ms: u32,
-) -> u16 {
-    if requested_permille <= previous_permille {
-        return requested_permille;
-    }
-    let delay_ms = u64::from(transport_delay_ms.max(1));
-    let elapsed_ms = elapsed_ms.max(1);
-    let step = elapsed_ms
-        .saturating_mul(1_000)
-        .saturating_add(delay_ms.saturating_sub(1))
-        .saturating_div(delay_ms)
-        .clamp(50, 1_000) as u16;
-    previous_permille
-        .saturating_add(step)
-        .min(requested_permille)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,17 +685,5 @@ mod tests {
             assert!((trajectory.reference.temperature_c - 60.0).abs() < 0.01);
             assert!(trajectory.reference.rise_c_per_s.abs() < 0.01);
         }
-    }
-
-    #[test]
-    fn approach_request_ramps_up_from_the_brake_request() {
-        assert_eq!(slew_up_permille(50, 900, 100, 1_900), 103);
-        assert_eq!(slew_up_permille(103, 900, 600, 1_900), 419);
-    }
-
-    #[test]
-    fn approach_request_brakes_immediately_and_reaches_full_request_after_delay() {
-        assert_eq!(slew_up_permille(900, 50, 50, 1_900), 50);
-        assert_eq!(slew_up_permille(50, 1_000, 1_900, 1_900), 1_000);
     }
 }
