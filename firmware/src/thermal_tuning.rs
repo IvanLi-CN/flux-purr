@@ -494,6 +494,7 @@ pub struct ThermalTuningRuntime {
     longest_stable_span_ms: u64,
     last_trial_request_mv: Option<u16>,
     hold_pps_wait_interruptions: u32,
+    guarded_hold_handoff: bool,
     max_band_excursion_centi_c: u16,
     approach_curve_samples: Vec<ThermalCurveSample, THERMAL_TUNING_APPROACH_TRACE_CAPACITY>,
     approach_curve_closed: bool,
@@ -605,6 +606,7 @@ impl ThermalTuningRuntime {
             longest_stable_span_ms: 0,
             last_trial_request_mv: None,
             hold_pps_wait_interruptions: 0,
+            guarded_hold_handoff: false,
             max_band_excursion_centi_c: 0,
             approach_curve_samples: Vec::new(),
             approach_curve_closed: false,
@@ -1548,7 +1550,9 @@ impl ThermalTuningRuntime {
         // rejected samples or a PPS transition postpone the continuous-window
         // start by a small amount. Raise the Approach handoff temperature by
         // one bounded brake step; do not alter Hold or waive the 10 s gate.
-        if !late_stability_handoff_failure(evidence) {
+        if !(late_stability_handoff_failure(evidence)
+            || interrupted_stability_handoff_failure(evidence))
+        {
             return false;
         }
         let Some(index) = original
@@ -1986,6 +1990,7 @@ impl ThermalTuningRuntime {
             full_speed_failed: self.stable_window_verified_at_ms.is_none()
                 || settle_time_ms.is_none_or(|value| value > u64::from(full_speed_limit_ms)),
             hold_pps_wait_interruptions: self.hold_pps_wait_interruptions,
+            guarded_hold_handoff: self.guarded_hold_handoff,
             overshoot_c: f64::from(max_overshoot_centi_c.unwrap_or_default()) / 100.0,
             // No qualified-Hold samples cannot establish a low ripple. Match
             // the external strategy's missing-evidence sentinel so a failed
@@ -2097,6 +2102,7 @@ impl ThermalTuningRuntime {
         self.longest_stable_span_ms = 0;
         self.last_trial_request_mv = None;
         self.hold_pps_wait_interruptions = 0;
+        self.guarded_hold_handoff = false;
         self.max_band_excursion_centi_c = 0;
         self.approach_curve_samples.clear();
         self.approach_curve_closed = false;
@@ -2515,6 +2521,15 @@ impl ThermalTuningRuntime {
             _ => {}
         }
         if !sample.has_fresh_measurement() {
+            self.guarded_hold_handoff |= sample.measurement_valid
+                && sample.phase == ThermalTuningPhase::Hold
+                && self.hold_output_count > 0
+                && self
+                    .first_controller_hold_elapsed_ms
+                    .is_some_and(|entry| sample.elapsed_ms.saturating_sub(entry) <= 1_000)
+                && sample
+                    .raw_temperature_centi_c
+                    .is_some_and(|raw| raw.abs_diff(sample.temperature_centi_c) <= 50);
             if request_changed
                 && self.first_hold_elapsed_ms.is_some()
                 && sample
@@ -3867,6 +3882,35 @@ fn late_stability_handoff_failure(evidence: TuneEvidence) -> bool {
             .is_some_and(|time| time > evidence.settle_limit_ms)
 }
 
+fn interrupted_stability_handoff_failure(evidence: TuneEvidence) -> bool {
+    evidence.tunable_stop
+        && evidence.target_c <= 150
+        && evidence.full_speed_failed
+        && !evidence.stable_window_verified
+        && !evidence.approach_floor_only
+        && evidence
+            .approach_output_range
+            .is_some_and(|(min, max)| min >= 50 && max <= 1_000)
+        && evidence.stable_window_after_warmup_ms.is_none()
+        && evidence.guarded_hold_handoff
+        && (1..=2).contains(&evidence.hold_sample_count)
+        && evidence.overshoot_c <= 1.5
+        && evidence.hold_p2p_c <= 3.0
+        && evidence.under_c <= 1.5
+        && evidence.over_c <= 1.5
+        && evidence.first_band_observed
+        && evidence.first_band_exit_centi_c.is_none()
+        && evidence
+            .first_hold_after_warmup_ms
+            .is_some_and(|time| time <= evidence.settle_limit_ms)
+        && evidence
+            .deadline_temperature_centi_c
+            .is_some_and(|temperature| {
+                let error = f64::from(evidence.target_c) - f64::from(temperature) / 100.0;
+                (-1.5..=f64::from(HOLD_ENTRY_BELOW_C)).contains(&error)
+            })
+}
+
 fn damping_failure_side(evidence: TuneEvidence) -> Option<bool> {
     if evidence.target_c > 150
         || !evidence.tunable_stop
@@ -3886,6 +3930,7 @@ fn damping_failure_side(evidence: TuneEvidence) -> Option<bool> {
     {
         Some(true)
     } else if late_stability_handoff_failure(evidence)
+        || interrupted_stability_handoff_failure(evidence)
         || unobserved_low_side_failure(evidence)
         || (evidence.hold_sample_count < 3
             && evidence.first_band_exit_centi_c.is_none()
@@ -4445,6 +4490,128 @@ mod tests {
         );
         assert_eq!(runtime.accepted_target_mask, 0);
         assert!(runtime.stable_window_verified_at_ms.is_none());
+    }
+
+    #[test]
+    fn captured_guarded_timely_handoff_retains_the_braking_interval() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_guarded_handoff.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let mut high_point = None;
+        let mut last_facts = None;
+        for (index, trial) in fixture["trials"].as_array().unwrap().iter().enumerate() {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            let facts = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                None,
+                10_000,
+            );
+            if index == 0 {
+                high_point = runtime.candidate_profile.unwrap().points[0];
+                assert_eq!(damping_failure_side(facts), Some(true));
+            } else if index == 1 {
+                assert_eq!(facts.hold_sample_count, 1);
+                assert_eq!(facts.first_hold_after_warmup_ms, Some(9_932));
+                assert!(facts.guarded_hold_handoff);
+                assert_eq!(facts.stable_window_after_warmup_ms, None);
+                assert_eq!(facts.deadline_temperature_centi_c, Some(5_951));
+                assert_eq!(facts.first_band_exit_centi_c, None);
+                assert!(facts.first_band_observed);
+            }
+            runtime.remember_damping_failure(60, facts);
+            last_facts = Some(facts);
+        }
+        assert!(runtime.prepare_fresh_failure_proposal_from_evidence(60, last_facts.unwrap()));
+        assert_eq!(
+            runtime.candidate_profile.unwrap().points[0].unwrap(),
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 1_834,
+                ..high_point.unwrap()
+            }
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
+        assert!(runtime.stable_window_verified_at_ms.is_none());
+    }
+
+    #[test]
+    fn guarded_handoff_feedback_requires_fresh_timely_in_band_observations() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_guarded_handoff.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let trial = &fixture["trials"][1];
+        let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+        let facts = runtime.candidate_failure_evidence(
+            60,
+            evaluation.max_overshoot_centi_c,
+            evaluation.hold_peak_to_peak_centi_c,
+            None,
+            10_000,
+        );
+        assert!(interrupted_stability_handoff_failure(facts));
+        for rejected in [
+            TuneEvidence {
+                guarded_hold_handoff: false,
+                ..facts
+            },
+            TuneEvidence {
+                tunable_stop: false,
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_after_warmup_ms: Some(9_900),
+                ..facts
+            },
+            TuneEvidence {
+                hold_sample_count: 0,
+                ..facts
+            },
+            TuneEvidence {
+                first_hold_after_warmup_ms: Some(10_001),
+                ..facts
+            },
+            TuneEvidence {
+                deadline_temperature_centi_c: None,
+                ..facts
+            },
+            TuneEvidence {
+                deadline_temperature_centi_c: Some(5_949),
+                ..facts
+            },
+            TuneEvidence {
+                first_band_exit_centi_c: Some(6_151),
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: Some((0, 540)),
+                ..facts
+            },
+            TuneEvidence {
+                approach_floor_only: true,
+                ..facts
+            },
+            TuneEvidence {
+                target_c: 160,
+                deadline_temperature_centi_c: Some(15_951),
+                ..facts
+            },
+        ] {
+            assert!(!interrupted_stability_handoff_failure(rejected));
+            assert_ne!(damping_failure_side(rejected), Some(false));
+        }
+        let mut spike = trial.clone();
+        spike["samples"].as_array_mut().unwrap().last_mut().unwrap()[7] = 7_000.into();
+        replay_damping_bracket_trial(&mut runtime, &spike);
+        assert!(!runtime.guarded_hold_handoff);
+        runtime.reset_trial_metrics();
+        assert!(!runtime.guarded_hold_handoff);
     }
 
     #[test]
