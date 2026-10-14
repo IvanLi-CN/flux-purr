@@ -13310,6 +13310,48 @@ fn rtd_pps_transition_guard_accepts_immediately_and_reseeds_on_request_change() 
 }
 
 #[test]
+fn pps_reseed_preserves_the_real_age_of_the_last_temperature_for_slew_checks() {
+    for stable_temperature_c in [54.47, 73.28] {
+        let mut transition = RtdPpsTransitionGuard::new(21_000);
+        let mut controller = HeaterController::new();
+        controller.reseed_measurement(52.30);
+        controller.duty_percent = 5;
+        let mut measurement = RtdControlMeasurementGuard::default();
+        measurement.reseed(52.30, 7_321);
+        assert_eq!(
+            accept_rtd_control_sample_after_pps_transition(
+                &mut transition,
+                &mut controller,
+                &mut measurement,
+                52.30,
+                20_500,
+                8_797,
+                stable_temperature_c,
+            ),
+            None
+        );
+        assert_eq!(measurement.last_accepted_at_ms, Some(7_321));
+        let accepted = accept_rtd_control_sample_after_pps_transition(
+            &mut transition,
+            &mut controller,
+            &mut measurement,
+            52.30,
+            20_500,
+            9_097,
+            stable_temperature_c,
+        );
+        if stable_temperature_c < 60.0 {
+            assert_eq!(accepted, Some(stable_temperature_c));
+            assert_eq!(measurement.last_accepted_at_ms, Some(9_097));
+        } else {
+            assert_eq!(accepted, None);
+            assert!(measurement.guarded);
+            assert_eq!(measurement.last_accepted_at_ms, Some(7_321));
+        }
+    }
+}
+
+#[test]
 fn rtd_pps_transition_rechecks_first_stable_sample_from_last_trusted_temperature() {
     let mut guard = RtdPpsTransitionGuard::new(18_000);
     let mut controller = HeaterController::new();

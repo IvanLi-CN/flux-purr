@@ -1117,7 +1117,11 @@ fn accept_rtd_control_sample_after_pps_transition_with_output(
     let (accept_control_sample, reseed_filter) = transition_guard.observe(request_mv, now_ms);
     if reseed_filter {
         heater_controller.reseed_measurement_after_pps_step(last_control_temp_c);
-        measurement_guard.reseed(last_control_temp_c, now_ms);
+        // Reset voltage-epoch recovery without pretending the retained
+        // temperature was measured again. Slew checks need its real age,
+        // including the 300 ms PPS wait, to admit physical heating normally.
+        let last_measured_at_ms = measurement_guard.last_accepted_at_ms.unwrap_or(now_ms);
+        measurement_guard.reseed(last_control_temp_c, last_measured_at_ms);
     }
     let was_guarded = measurement_guard.guarded;
     let accepted = accept_control_sample

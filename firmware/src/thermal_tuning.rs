@@ -919,6 +919,58 @@ impl ThermalTuningRuntime {
             settle_time_ms,
             full_speed_limit_ms,
         } = evaluation;
+        if !passes
+            && self.phase == ThermalTuningPhase::Warmup
+            && self.warmup_exited_at_ms.is_none()
+            && (self.trial_start_elapsed_ms.is_some_and(|started| {
+                self.current_elapsed_ms.saturating_sub(started) >= TRIAL_TIMEOUT_MS
+            }) || self
+                .current_elapsed_ms
+                .saturating_sub(self.target_started_elapsed_ms)
+                >= THERMAL_TUNING_TARGET_BUDGET_MS)
+        {
+            // A cold-start timeout never exercised Approach or Hold. Retry a
+            // materially warmer physical start instead of inventing feedback
+            // for their inactive parameters. Every attempt still stops at
+            // 180 s and goes through the normal full-speed cooldown gate.
+            let warmer_start_available = self.warmup_full_output
+                && !self.warmup_full_output_invalid
+                && self
+                    .trial_start_temperature_centi_c
+                    .zip(self.previous_sample_temperature_centi_c)
+                    .is_some_and(|(start, end)| {
+                        let admitted_end =
+                            i32::from(end).min(i32::from(cooldown_threshold_c(target_c)) * 100);
+                        admitted_end - i32::from(start) >= 500
+                    })
+                && self
+                    .previous_sample_at_ms
+                    .is_some_and(|last| self.current_elapsed_ms.saturating_sub(last) <= 1_000)
+                && self
+                    .current_elapsed_ms
+                    .saturating_sub(self.target_started_elapsed_ms)
+                    < THERMAL_TUNING_TARGET_BUDGET_MS;
+            if warmer_start_available {
+                self.push_event(
+                    ThermalTuningEventKind::Decision,
+                    Some(target_c),
+                    Some(self.trial_index),
+                    None,
+                    Some("warmup_timeout_retry_from_warmer_start"),
+                );
+                return self
+                    .schedule_trial(self.trial_purpose, "cooling before unchanged warmup retry");
+            }
+            self.failed_target_mask |= target_bit(target_c);
+            self.push_event(
+                ThermalTuningEventKind::Decision,
+                Some(target_c),
+                Some(self.trial_index),
+                None,
+                Some("warmup_timeout_without_safe_warmer_retry"),
+            );
+            return self.advance_target();
+        }
         let failure_evidence = if !passes && warmup_full {
             let evidence = self.candidate_failure_evidence(
                 target_c,
@@ -4220,22 +4272,139 @@ mod tests {
                 None,
             );
             observed_scores.push(evaluation.score);
-            runtime.advance_after_trial(220, evaluation).unwrap();
         }
         assert!(
             score_precedes(&observed_scores[1], &observed_scores[0]),
             "{observed_scores:?}"
         );
-        assert!(
-            runtime
-                .events
-                .iter()
-                .any(|event| event.reason.as_deref() == Some("candidate_batch_selected_predicted"))
-        );
-        assert!(runtime.armed);
         assert_eq!(runtime.accepted_target_mask, 0);
-        assert!(!runtime.events.iter().any(|event| event.reason.as_deref()
-            == Some("candidate_search_exhausted_no_distinct_safe_proposal")));
+        // Historical score vectors remain comparable. A real unobserved
+        // Warmup timeout now follows the separate preparation-retry path,
+        // rather than manufacturing an Approach parameter comparison.
+    }
+
+    #[test]
+    fn cold_start_warmup_timeout_retries_the_unchanged_point_within_budget() {
+        for power_class in [
+            ThermalTuningPowerClass::Pps3a,
+            ThermalTuningPowerClass::Pps5a,
+        ] {
+            let mut runtime = ThermalTuningRuntime::new();
+            runtime
+                .start(ThermalTuningStart {
+                    run_id: id("run-cold-warmup"),
+                    candidate_id: id("candidate-hold"),
+                    candidate_hash: hash("hash-hold"),
+                    power_class,
+                    targets: &[220],
+                    pps_ready: true,
+                    thermal_model_available: true,
+                    calibration_conflict: false,
+                    candidate_profile: Some(profile_with_targets(&[220])),
+                })
+                .unwrap();
+            let original = runtime.candidate_profile;
+            let original_hash = runtime.candidate_hash.clone();
+            let mut elapsed_ms = 0;
+            // Captured B run 1791950156245: both 180 s trials end during
+            // full-output Warmup. Their different starting temperatures are
+            // physical preparation evidence, not Approach parameter feedback.
+            for (start, end) in [(5_984, 18_704), (18_680, 21_624)] {
+                let mut cooling = sample(elapsed_ms, ThermalTuningPhase::Cooldown, start);
+                cooling.target_c = 220;
+                cooling.trial_index = runtime.trial_index;
+                cooling.candidate_hash = runtime.candidate_hash.clone().unwrap();
+                cooling.pps_contract.kind = power_class;
+                cooling.pps_contract.current_ma = power_class.required_current_ma();
+                cooling.heater_requested_output_permille = 0;
+                cooling.heater_output_permille = 0;
+                runtime.record_sample(cooling).unwrap();
+                let mut heating = sample(elapsed_ms + 1, ThermalTuningPhase::Warmup, start);
+                heating.target_c = 220;
+                heating.trial_index = runtime.trial_index;
+                heating.candidate_hash = runtime.candidate_hash.clone().unwrap();
+                heating.pps_contract = ThermalTuningPpsContract {
+                    kind: power_class,
+                    current_ma: power_class.required_current_ma(),
+                    ..heating.pps_contract
+                };
+                runtime.record_sample(heating.clone()).unwrap();
+                elapsed_ms += TRIAL_TIMEOUT_MS + 1;
+                heating.elapsed_ms = elapsed_ms;
+                heating.temperature_centi_c = end;
+                runtime.record_sample(heating).unwrap();
+                assert_eq!(runtime.phase, ThermalTuningPhase::Cooldown);
+                assert_eq!(runtime.candidate_profile, original);
+                assert_eq!(runtime.candidate_hash, original_hash);
+                assert!(runtime.proposed_points.is_empty());
+                assert!(runtime.armed);
+                assert_eq!(runtime.accepted_target_mask, 0);
+                assert_eq!(runtime.failed_target_mask, 0);
+                assert!(runtime.events.iter().any(|event| event.reason.as_deref()
+                    == Some("warmup_timeout_retry_from_warmer_start")));
+                assert!(runtime.events.iter().any(|event| {
+                    event.decision.as_ref().is_some_and(|decision| {
+                        decision.stop_reason == "trial stage timeout"
+                            && decision.disposition == "rejected"
+                    })
+                }));
+                elapsed_ms += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn unobserved_warmup_timeout_has_no_inactive_stage_parameter_feedback() {
+        for (start, end, fresh, full, origin) in [
+            (20_000, 21_624, true, true, 0),
+            (18_680, 18_800, true, true, 0),
+            (18_680, 21_624, false, true, 0),
+            (18_680, 21_624, true, false, 0),
+            (18_680, 21_624, true, true, THERMAL_TUNING_TARGET_BUDGET_MS),
+        ] {
+            let mut runtime = ThermalTuningRuntime::new();
+            runtime
+                .start(ThermalTuningStart {
+                    run_id: id("run-unobserved-warmup"),
+                    candidate_id: id("candidate-hold"),
+                    candidate_hash: hash("hash-hold"),
+                    power_class: ThermalTuningPowerClass::Pps5a,
+                    targets: &[220],
+                    pps_ready: true,
+                    thermal_model_available: true,
+                    calibration_conflict: false,
+                    candidate_profile: Some(profile_with_targets(&[220])),
+                })
+                .unwrap();
+            let original = runtime.candidate_profile;
+            let original_hash = runtime.candidate_hash.clone();
+            let mut cooling = sample(0, ThermalTuningPhase::Cooldown, start);
+            cooling.target_c = 220;
+            cooling.heater_requested_output_permille = 0;
+            cooling.heater_output_permille = 0;
+            runtime.record_sample(cooling).unwrap();
+            let mut heating = sample(origin + 1, ThermalTuningPhase::Warmup, start);
+            heating.target_c = 220;
+            runtime.record_sample(heating.clone()).unwrap();
+            if runtime.armed {
+                heating.elapsed_ms += TRIAL_TIMEOUT_MS;
+                heating.temperature_centi_c = end;
+                heating.measurement_accepted = Some(fresh);
+                if !full {
+                    heating.heater_output_permille = 500;
+                }
+                runtime.record_sample(heating).unwrap();
+            }
+            assert_eq!(runtime.phase, ThermalTuningPhase::Failed);
+            assert!(!runtime.armed);
+            assert_eq!(runtime.candidate_profile, original);
+            assert_eq!(runtime.candidate_hash, original_hash);
+            assert_eq!(runtime.accepted_target_mask, 0);
+            assert!(
+                !runtime.events.iter().any(|event| event.reason.as_deref()
+                    == Some("warmup_timeout_retry_from_warmer_start"))
+            );
+        }
     }
 
     #[test]
