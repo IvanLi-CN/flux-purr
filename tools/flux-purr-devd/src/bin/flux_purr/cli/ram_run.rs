@@ -2671,19 +2671,7 @@ fn validate_fan_pd_policy_selection(result: &serde_json::Map<String, Value>) -> 
         .get("policy")
         .and_then(Value::as_object)
         .ok_or_else(|| "result.policy must be an object".to_string())?;
-    if policy.get("preferredMv") != Some(&serde_json::json!([15_000, 18_000, 20_000]))
-        || policy.get("fixedFallbackMinMv").and_then(Value::as_u64) != Some(5_000)
-        || policy.get("fixedFallbackMaxMv").and_then(Value::as_u64) != Some(12_000)
-        || policy.get("ppsFallbackMinMv").and_then(Value::as_u64) != Some(5_000)
-        || policy.get("ppsFallbackMaxMv").and_then(Value::as_u64) != Some(20_000)
-        || policy.get("currentCeilingMa").and_then(Value::as_u64) != Some(5_000)
-        || policy.get("powerGateMv").and_then(Value::as_u64) != Some(13_000)
-        || policy.get("recoveryMode").and_then(Value::as_str) != Some("fixed_5v_contract")
-        || policy.get("stages").and_then(Value::as_str)
-            != Some("fan_50_percent_5s_100_percent_5s_0_percent_5s")
-    {
-        return Err("result.policy does not match the fixed fan-pd contract".to_string());
-    }
+    validate_fan_pd_policy_metadata(policy)?;
     let source = result
         .get("sourceCapabilities")
         .and_then(Value::as_object)
@@ -2699,6 +2687,30 @@ fn validate_fan_pd_policy_selection(result: &serde_json::Map<String, Value>) -> 
     if count > PD_HIL_MAX_SOURCE_PDOS || raw_pdos.len() != count as usize {
         return Err("result.sourceCapabilities is incomplete".to_string());
     }
+    validate_fan_pd_selection(result, raw_pdos)
+}
+
+fn validate_fan_pd_policy_metadata(policy: &serde_json::Map<String, Value>) -> Result<(), String> {
+    if policy.get("preferredMv") != Some(&serde_json::json!([15_000, 18_000, 20_000]))
+        || policy.get("fixedFallbackMinMv").and_then(Value::as_u64) != Some(5_000)
+        || policy.get("fixedFallbackMaxMv").and_then(Value::as_u64) != Some(12_000)
+        || policy.get("ppsFallbackMinMv").and_then(Value::as_u64) != Some(5_000)
+        || policy.get("ppsFallbackMaxMv").and_then(Value::as_u64) != Some(20_000)
+        || policy.get("currentCeilingMa").and_then(Value::as_u64) != Some(5_000)
+        || policy.get("powerGateMv").and_then(Value::as_u64) != Some(13_000)
+        || policy.get("recoveryMode").and_then(Value::as_str) != Some("fixed_5v_contract")
+        || policy.get("stages").and_then(Value::as_str)
+            != Some("fan_50_percent_5s_100_percent_5s_0_percent_5s")
+    {
+        return Err("result.policy does not match the fixed fan-pd contract".to_string());
+    }
+    Ok(())
+}
+
+fn validate_fan_pd_selection(
+    result: &serde_json::Map<String, Value>,
+    raw_pdos: &[Value],
+) -> Result<(), String> {
     let selection = result
         .get("selection")
         .ok_or_else(|| "result.selection is missing".to_string())?;
