@@ -1767,8 +1767,9 @@ pub(crate) fn flux_purr_repo_root() -> PathBuf {
 pub(crate) fn load_thermal_default_seed_candidate_profile(
     _bank: &str,
 ) -> Result<(ThermalCandidateProfile, Option<PathBuf>), Box<dyn std::error::Error + Send + Sync>> {
-    // A tune run starts from production constants and this device's current
-    // calibration/model. Historical profiles are never discovered implicitly.
+    // Static defaults for the host-reference/legacy workflow. The firmware
+    // runner derives its cold seed from the device's active calibration.
+    // Historical profile files are never discovered implicitly here.
     Ok((thermal_seed_candidate_profile(), None))
 }
 

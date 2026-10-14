@@ -22,12 +22,14 @@ use serde_json::{Value, json};
 use super::{
     ResolvedUsbTarget, ThermalCandidateProfile, ThermalFirmwareSaveArgs, ThermalFlagshipTuneArgs,
     ThermalProfileMode, ThermalTuneEngine, create_lease, current_unix_millis,
-    load_thermal_default_seed_candidate_profile, parse_thermal_targets, release_lease,
-    request_leased, resolve_target, spawn_heartbeat, thermal_candidate_point,
-    thermal_candidate_profile_from_value, thermal_candidate_profile_to_value,
-    thermal_interpolated_candidate_point,
+    parse_thermal_targets, release_lease, request_leased, resolve_target, spawn_heartbeat,
+    thermal_candidate_point, thermal_candidate_profile_from_value,
+    thermal_candidate_profile_to_value, thermal_interpolated_candidate_point,
     thermal_tuning_v2_report::{self, ThermalTuningV2ReportInput},
 };
+
+#[cfg(test)]
+use super::load_thermal_default_seed_candidate_profile;
 
 const FIRMWARE_PHYSICAL_TARGETS_C: &str = "60,80,100,120,140,160,180,220";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -214,14 +216,17 @@ async fn run_firmware_tuning_until_interrupt(
     }
     let run_id = format!("firmware-{power_class}-{}", current_unix_millis());
     let candidate_id = format!("{run_id}-candidate");
-    let candidate_profile = if let Some(path) = args.seed_profile_file.as_ref() {
+    let mut candidate_profile = if let Some(path) = args.seed_profile_file.as_ref() {
         let imported: Value = serde_json::from_slice(&fs::read(path)?)?;
         parse_firmware_seed_profile(imported, power_class)?
     } else {
-        let (profile, _) = load_thermal_default_seed_candidate_profile(power_class)?;
-        materialize_firmware_seed_profile(profile)?
+        Value::Null
     };
-    let candidate_hash = firmware_candidate_profile_hash(&candidate_profile)?;
+    let mut candidate_hash = if candidate_profile.is_null() {
+        "unprepared".to_owned()
+    } else {
+        firmware_candidate_profile_hash(&candidate_profile)?
+    };
     let input_dir = args.output_root.join(&run_id);
     fs::create_dir_all(&input_dir)?;
     let mut journal = StatusJournal::create(&input_dir)?;
@@ -230,6 +235,7 @@ async fn run_firmware_tuning_until_interrupt(
     let mut statuses = Vec::new();
     let mut identity_prepared = false;
     let mut profile_mode_prepared = false;
+    let mut device_start_attempted = false;
     let mut interruption_reason = "transport_or_runtime_failure";
     let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = tokio::select! {
         result = async {
@@ -241,6 +247,26 @@ async fn run_firmware_tuning_until_interrupt(
         let runtime = ensure_firmware_profile_mode(client, &resolved, &lease.lease_id, power_class).await?;
         journal.record_runtime(&run_id, None, &runtime)?;
         profile_mode_prepared = true;
+        if candidate_profile.is_null() {
+            let calibration = request_leased(
+                client, &resolved, &lease.lease_id, Method::GET,
+                "/calibration/thermal-plant/run", None,
+            ).await?;
+            candidate_profile = calibrated_firmware_seed_profile(&runtime, &calibration)?;
+            candidate_hash = firmware_candidate_profile_hash(&candidate_profile)?;
+            fs::write(input_dir.join("seed-calibration.json"), serde_json::to_vec_pretty(&json!({
+                "source": "device_active_calibration",
+                "runId": run_id,
+                "powerClass": power_class,
+                "thermalPlantModel": runtime["thermalPlantModel"],
+                "ppsCapabilityMaxMv": runtime["ppsCapabilityMaxMv"],
+                "ppsCapabilityMaxMa": runtime["ppsCapabilityMaxMa"],
+                "calibration": calibration,
+                "candidateHash": candidate_hash,
+                "candidateProfile": candidate_profile,
+            }))?)?;
+        }
+        device_start_attempted = true;
         let start = match request_leased(
             client,
             &resolved,
@@ -410,7 +436,10 @@ async fn run_firmware_tuning_until_interrupt(
             })
         }
     };
-    if result.is_err() && profile_mode_prepared {
+    if let Err(error) = &result {
+        eprintln!("firmware tuning failed: {error}");
+    }
+    if result.is_err() && device_start_attempted {
         match tokio::time::timeout(
             TERMINAL_DRAIN_TIMEOUT,
             cancel_and_drain_firmware_run(
@@ -452,15 +481,21 @@ async fn run_firmware_tuning_until_interrupt(
             bundle_dir: args.bundle_dir,
             run_id: Some(&run_id),
             power_class,
-            reason: if profile_mode_prepared {
+            reason: if device_start_attempted {
                 "transport_or_runtime_failure"
+            } else if profile_mode_prepared {
+                "calibration_seed_unavailable"
             } else if !identity_prepared {
                 "device_identity_not_confirmed"
             } else {
                 "profile_mode_not_confirmed"
             },
-            no_device_command: false,
-            attempted_candidate: Some((&candidate_id, &candidate_hash, &candidate_profile)),
+            no_device_command: !device_start_attempted,
+            attempted_candidate: (!candidate_profile.is_null()).then_some((
+                &candidate_id,
+                &candidate_hash,
+                &candidate_profile,
+            )),
             selected_targets: Some(&selected_targets),
         }),
     };
@@ -1608,6 +1643,163 @@ fn materialize_firmware_seed_profile(
     ))
 }
 
+fn calibrated_firmware_seed_profile(
+    runtime: &Value,
+    calibration: &Value,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    use flux_purr_firmware::memory::{
+        HeaterCurveConfig, HeaterCurvePoint, ThermalPlantProjection,
+        heater_resistance_ohms_from_curve,
+    };
+    use flux_purr_firmware::thermal_plant::{
+        natural_cooling_loss_mw, natural_cooling_rate_c_per_s,
+    };
+
+    let active = calibration
+        .get("activeResult")
+        .ok_or("active calibration required for a cold seed")?;
+    let transaction = active
+        .get("transactionId")
+        .and_then(Value::as_u64)
+        .filter(|id| *id != 0)
+        .ok_or("active calibration identity required")?;
+    if runtime
+        .pointer("/thermalPlantModel/projectionValid")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || runtime
+            .pointer("/thermalPlantModel/activeTransactionId")
+            .and_then(Value::as_u64)
+            != Some(transaction)
+    {
+        return Err("cold seed requires the matching active thermal calibration".into());
+    }
+    let number = |key: &str| -> Result<f32, Box<dyn std::error::Error + Send + Sync>> {
+        active
+            .get(key)
+            .and_then(Value::as_f64)
+            .map(|value| value as f32)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| format!("calibration {key} required").into())
+    };
+    let model = ThermalPlantProjection {
+        convection_mw_per_c: number("convectionMwPerC")?,
+        radiation_mw_per_k4: number("radiationMwPerK4")?,
+        thermal_capacity_mj_per_c: number("thermalCapacityMjPerC")?,
+        transport_delay_ms: active
+            .get("transportDelayMs")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or("calibration delay required")?,
+    };
+    // Ambient belongs to this fit. The current (possibly hot) plate reading is
+    // not an ambient observation and must never substitute for a missing one.
+    let ambient = calibration
+        .pointer("/tracePage/points")
+        .and_then(Value::as_array)
+        .and_then(|points| {
+            points.iter().find(|point| {
+                point.get("sampleIndex").and_then(Value::as_u64) == Some(0)
+                    && point.get("phase").and_then(Value::as_str) == Some("ambient")
+            })
+        })
+        .and_then(|point| point.get("temperatureCentiC"))
+        .and_then(Value::as_i64)
+        .filter(|value| (-5_000..=15_000).contains(value))
+        .map(|value| value as f32 / 100.0)
+        .ok_or("calibration ambient sample required")?;
+    if natural_cooling_rate_c_per_s(model, 60.0, ambient).is_none() {
+        return Err("invalid calibration cannot initialize thermal tuning".into());
+    }
+    let voltage_mv = runtime
+        .get("ppsCapabilityMaxMv")
+        .and_then(Value::as_u64)
+        .filter(|value| (5_000..=28_000).contains(value))
+        .ok_or("valid PPS voltage capability required")? as f32;
+    let current_ma = runtime
+        .get("ppsCapabilityMaxMa")
+        .and_then(Value::as_u64)
+        .filter(|value| (1_000..=5_000).contains(value))
+        .ok_or("valid PPS current capability required")? as f32;
+    let mut curve = HeaterCurveConfig::default();
+    let points = active
+        .pointer("/curve/points")
+        .and_then(Value::as_array)
+        .ok_or("calibrated resistance curve required")?;
+    if points.len() > curve.points.len() {
+        return Err("calibrated resistance curve exceeds its point capacity".into());
+    }
+    for (index, point) in points
+        .iter()
+        .enumerate()
+        .filter(|(_, point)| !point.is_null())
+    {
+        curve.points[index] = Some(HeaterCurvePoint {
+            temp_centi_c: point
+                .get("tempCentiC")
+                .and_then(Value::as_i64)
+                .and_then(|value| i16::try_from(value).ok())
+                .ok_or("calibrated curve temperature required")?,
+            resistance_milliohms: point
+                .get("resistanceMilliohms")
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or("positive calibrated resistance required")?,
+        });
+    }
+    if curve.points.iter().flatten().count() < 2 {
+        return Err(
+            "cold seed requires a calibrated resistance curve with at least two points".into(),
+        );
+    }
+    let mut seeded = Vec::new();
+    for target in THERMAL_TUNING_TARGETS_C {
+        let temperature_c = f32::from(target);
+        let resistance = heater_resistance_ohms_from_curve(&curve, temperature_c)
+            .ok_or("calibrated target resistance unavailable")?
+            .max(3.2 * (1.0 + 0.00393 * (temperature_c - 20.0)));
+        // Use the same resistance and contract bounds as production Pmax,
+        // rather than treating the nominal bank name as measured input power.
+        let maximum_power_mw = (voltage_mv * voltage_mv / resistance / 1_000.0)
+            .min(voltage_mv * current_ma / 1_000.0)
+            .max(1.0);
+        let loss_mw = natural_cooling_loss_mw(model, temperature_c, ambient);
+        let delay_s = model.transport_delay_ms as f32 / 1_000.0;
+        let brake_centi_c =
+            (((maximum_power_mw - loss_mw) / model.thermal_capacity_mj_per_c).max(0.0) * delay_s
+                + 0.5)
+                * 100.0;
+        let hold_permille = (loss_mw / maximum_power_mw * 1_000.0)
+            .round()
+            .clamp(50.0, 1_000.0) as u16;
+        // An integrating heat plant with transport delay: choose a closed-loop
+        // response of 3 delays (IMC lambda), so Kp = C / (Pmax * 4 delays).
+        let kp = (model.thermal_capacity_mj_per_c / (maximum_power_mw * 4.0 * delay_s.max(0.4))
+            * 1_000.0)
+            .round()
+            .clamp(1.0, 1_000.0) as u16;
+        seeded.push(json!({
+            "targetTempC": target,
+            "brakeDistanceCentiC": brake_centi_c.round().clamp(100.0, 5_000.0) as u16,
+            "warmupPowerPermille": 1_000, "warmupReenterCentiC": 400,
+            "approachPowerPermille": 1_000, "approachFloorPowerPermille": 50,
+            "approachDampingExponentPermille": 1_000, "approachTailWindowCentiC": 0,
+            "approachLeadTicks": 0, "holdLeadTicks": 0,
+            "holdPowerPermille": hold_permille, "holdReheatPowerPermille": hold_permille,
+            "holdEntryCentiC": 50, "holdExitCentiC": 150,
+            "holdOnCentiC": 30, "holdOffCentiC": 120, "overshootCutoffCentiC": 150,
+            "holdKpPermillePerC": kp, "holdKiPermillePerCTick": 1, "holdBlendTicks": 1
+        }));
+    }
+    Ok(firmware_candidate_profile_value(&json!({
+        "settings": {"tempFilterAlphaPermille": 750, "approachMaxTicks": 5,
+            "approachMinPowerRatioPermille": 0, "autoAdjustableWorkingFloorMv": 5_000,
+            "heaterCurrentReserveMa": 200},
+        "points": seeded
+    })))
+}
+
 fn firmware_candidate_profile_hash(
     profile: &Value,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -2476,6 +2668,122 @@ mod tests {
         assert_eq!(
             firmware_candidate_profile_hash(&materialized).unwrap(),
             firmware_candidate_profile_hash(&value).unwrap()
+        );
+    }
+
+    fn cold_start_calibration(
+        delay_ms: u32,
+        capacity: f32,
+        convection: f32,
+        radiation: f32,
+    ) -> serde_json::Value {
+        json!({
+            "tracePage": {"points": [{"sampleIndex": 0, "phase": "ambient", "temperatureCentiC": 3000}]},
+            "activeResult": {
+                "transactionId": 7,
+                "convectionMwPerC": convection,
+                "radiationMwPerK4": radiation,
+                "thermalCapacityMjPerC": capacity,
+                "transportDelayMs": delay_ms,
+                "curve": {"points": [
+                    {"tempCentiC": 2000, "resistanceMilliohms": 7000},
+                    {"tempCentiC": 22000, "resistanceMilliohms": 7000}
+                ]}
+            }
+        })
+    }
+
+    #[test]
+    fn firmware_cold_seed_uses_each_devices_calibration_instead_of_the_static_table() {
+        let runtime = json!({
+            "ppsCapabilityMaxMv": 21000, "ppsCapabilityMaxMa": 5000,
+            "thermalPlantModel": {"activeTransactionId": 7, "projectionValid": true}
+        });
+        let calibration_a = cold_start_calibration(2100, 25692.367, 179.62439, 3.0247352e-7);
+        let calibration_b = cold_start_calibration(600, 31705.057, 18.24584, 9.931854e-7);
+        let a = super::calibrated_firmware_seed_profile(&runtime, &calibration_a).unwrap();
+        let b = super::calibrated_firmware_seed_profile(&runtime, &calibration_b).unwrap();
+        assert_ne!(
+            a["points"][0]["brakeDistanceCentiC"],
+            b["points"][0]["brakeDistanceCentiC"]
+        );
+        assert_ne!(
+            a["points"][0]["holdPowerPermille"],
+            b["points"][0]["holdPowerPermille"]
+        );
+        for profile in [&a, &b] {
+            assert_eq!(profile["points"][0]["approachLeadTicks"], 0);
+            assert_eq!(profile["points"][0]["approachFloorPowerPermille"], 50);
+            assert_eq!(profile["points"][0]["warmupPowerPermille"], 1000);
+            assert_eq!(profile["points"][0]["holdEntryCentiC"], 50);
+        }
+        let mut with_history = runtime.clone();
+        with_history["thermalControl"] =
+            json!({"brakeDistanceCentiC": 5000, "holdPowerPermille": 1000});
+        with_history["thermalControlProfile"] =
+            json!({"points": [{"targetTempC": 60, "brakeDistanceCentiC": 5000}]});
+        assert_eq!(
+            super::calibrated_firmware_seed_profile(&with_history, &calibration_a).unwrap(),
+            a
+        );
+        let a_high = &a["points"][7];
+        assert!(
+            a_high["holdPowerPermille"].as_u64().unwrap()
+                > a["points"][0]["holdPowerPermille"].as_u64().unwrap()
+        );
+    }
+
+    #[test]
+    fn firmware_cold_seed_rejects_missing_mismatched_or_invalid_calibration() {
+        let runtime = json!({
+            "ppsCapabilityMaxMv": 21000, "ppsCapabilityMaxMa": 3000,
+            "thermalPlantModel": {"activeTransactionId": 7, "projectionValid": true}
+        });
+        let calibration = cold_start_calibration(600, 31705.057, 18.24584, 9.931854e-7);
+        for (pointer, value) in [
+            ("/activeResult/transactionId", json!(8)),
+            ("/activeResult/thermalCapacityMjPerC", json!(0)),
+            ("/activeResult/transportDelayMs", json!(60001)),
+            ("/activeResult/curve/points", json!([])),
+            ("/tracePage/points/0/phase", json!("heating")),
+        ] {
+            let mut invalid = calibration.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                super::calibrated_firmware_seed_profile(&runtime, &invalid).is_err(),
+                "{pointer}"
+            );
+        }
+        let mut unavailable = runtime.clone();
+        unavailable["thermalPlantModel"]["projectionValid"] = json!(false);
+        assert!(super::calibrated_firmware_seed_profile(&unavailable, &calibration).is_err());
+        assert!(super::calibrated_firmware_seed_profile(&runtime, &json!({})).is_err());
+    }
+
+    #[test]
+    fn firmware_cold_seed_preserves_energy_units_source_limits_and_canonical_hash() {
+        let runtime = json!({
+            "ppsCapabilityMaxMv": 21000, "ppsCapabilityMaxMa": 3000,
+            "thermalPlantModel": {"activeTransactionId": 7, "projectionValid": true}
+        });
+        let calibration = cold_start_calibration(1000, 20000.0, 1000.0, 0.0);
+        let profile = super::calibrated_firmware_seed_profile(&runtime, &calibration).unwrap();
+        // Pmax=63W, loss=30W, C=20J/C, delay=1s, ambient=30C.
+        assert_eq!(profile["points"][0]["brakeDistanceCentiC"], 215);
+        assert_eq!(profile["points"][0]["holdPowerPermille"], 476);
+        assert_eq!(profile["points"][0]["holdKpPermillePerC"], 79);
+        let mut padded = profile.clone();
+        padded["points"].as_array_mut().unwrap().resize(
+            flux_purr_firmware::frontpanel::FRONTPANEL_PRESET_COUNT,
+            serde_json::Value::Null,
+        );
+        let wire: flux_purr_firmware::control_plane::ThermalControlProfileWire =
+            serde_json::from_value(padded).unwrap();
+        let mut config: flux_purr_firmware::memory::ThermalControlProfileConfig = wire.into();
+        config.sanitize();
+        assert_eq!(
+            super::firmware_candidate_profile_hash(&profile).unwrap(),
+            super::hash_profile(&config).unwrap().as_str()
         );
     }
 
@@ -3554,7 +3862,12 @@ mod tests {
             .route("/api/v1/devices/bench/status", get(|| async {
                 Json(json!({"thermalProfileMode": "100w", "thermalProfileResolvedBank": "pps5a", "manualPpsEnabled": false,
                     "currentTempC": 43.5, "heaterPhysicalOutputPercent": 0,
+                    "ppsCapabilityMaxMv": 21000, "ppsCapabilityMaxMa": 5000,
+                    "thermalPlantModel": {"activeTransactionId": 7, "projectionValid": true},
                     "fanEnabled": true, "fanOutputLevel": "high", "fanPwmPermille": 0}))
+            }))
+            .route("/api/v1/devices/bench/calibration/thermal-plant/run", get(|| async {
+                Json(cold_start_calibration(2100, 25692.367, 179.62439, 3.0247352e-7))
             }))
             .route("/api/v1/devices/bench/thermal-tuning", post(move |Json(command): Json<serde_json::Value>| {
                 let commands = recorded_commands.clone();
@@ -3652,6 +3965,23 @@ mod tests {
             );
             return;
         }
+        let start_profile = commands
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|command| command["op"] == "start")
+            .unwrap()["candidateProfile"]["profile"]
+            .clone();
+        assert_ne!(
+            start_profile["points"][0]["brakeDistanceCentiC"], 1310,
+            "the real start command must carry the calibration-derived seed"
+        );
+        let seed_path = std::path::PathBuf::from(rendered["rawInputDir"].as_str().unwrap())
+            .join("seed-calibration.json");
+        let seed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(seed_path).unwrap()).unwrap();
+        assert_eq!(seed["source"], "device_active_calibration");
+        assert_eq!(seed["candidateProfile"], start_profile);
         let runtime_path = std::path::PathBuf::from(rendered["rawInputDir"].as_str().unwrap())
             .join("device-runtime-statuses.ndjson");
         let runtime_lines = std::fs::read_to_string(runtime_path).unwrap();
