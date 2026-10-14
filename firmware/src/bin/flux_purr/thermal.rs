@@ -788,6 +788,7 @@ pub(crate) struct HeaterController {
     pub(crate) previous_filtered_temp_c: Option<f32>,
     pub(crate) filtered_slope_c_per_profile_tick: f32,
     pub(crate) previous_measured_temp_c: Option<f32>,
+    pub(crate) last_accepted_measurement_at_ms: Option<u64>,
     pub(crate) phase: HeaterControlPhase,
     pub(crate) phase_ticks: u16,
     pub(crate) phase_tick_remainder_ms: u64,
@@ -893,6 +894,7 @@ impl HeaterController {
             previous_filtered_temp_c: None,
             filtered_slope_c_per_profile_tick: 0.0,
             previous_measured_temp_c: None,
+            last_accepted_measurement_at_ms: None,
             phase: HeaterControlPhase::Warmup,
             phase_ticks: 0,
             phase_tick_remainder_ms: 0,
@@ -929,6 +931,7 @@ impl HeaterController {
         self.previous_filtered_temp_c = None;
         self.filtered_slope_c_per_profile_tick = 0.0;
         self.previous_measured_temp_c = None;
+        self.last_accepted_measurement_at_ms = None;
         self.phase = HeaterControlPhase::Warmup;
         self.phase_ticks = 0;
         self.phase_tick_remainder_ms = 0;
@@ -979,6 +982,7 @@ impl HeaterController {
         self.previous_filtered_temp_c = Some(measured_temp_c);
         self.filtered_slope_c_per_profile_tick = 0.0;
         self.previous_measured_temp_c = Some(measured_temp_c);
+        self.last_accepted_measurement_at_ms = None;
         self.pps_measurement_anchor_pending = false;
         self.coast_cooling_reference_c = None;
         self.coast_cooling_elapsed_ms = 0;
@@ -1001,8 +1005,10 @@ impl HeaterController {
         };
         // The observer origin changes, never the trajectory or applied heat.
         let mut applied_heat = self.applied_heat;
+        let last_accepted_measurement_at_ms = self.last_accepted_measurement_at_ms;
         applied_heat.reanchor_temperature();
         self.reseed_measurement(measured_temp_c);
+        self.last_accepted_measurement_at_ms = last_accepted_measurement_at_ms;
         self.applied_heat = applied_heat;
         self.filtered_slope_c_per_profile_tick = rising_slope;
         // The held control value still belongs to the old voltage epoch.
@@ -1019,6 +1025,7 @@ impl HeaterController {
         self.previous_filtered_temp_c = None;
         self.filtered_slope_c_per_profile_tick = 0.0;
         self.previous_measured_temp_c = None;
+        self.last_accepted_measurement_at_ms = None;
         self.phase = HeaterControlPhase::Warmup;
         self.phase_ticks = 0;
         self.phase_tick_remainder_ms = 0;
@@ -1086,6 +1093,10 @@ impl HeaterController {
 
         if target_temp_c != last_target_temp_c {
             self.reset_for_target_change(measured_temp_c, now_ms);
+        }
+
+        if self.control_measurement_accepted() {
+            self.last_accepted_measurement_at_ms = Some(now_ms);
         }
 
         if !self.heater_was_enabled {
@@ -1372,8 +1383,9 @@ impl HeaterController {
             ambient_c: input.ambient_temp_c,
             max_power_mw: input.max_power_mw,
         };
-        let predicted = self.applied_heat.forecast(
+        let predicted = self.applied_heat.forecast_from_measurement(
             input.now_ms,
+            self.last_accepted_measurement_at_ms.unwrap_or(input.now_ms),
             input.measured_temp_c,
             frame.filtered_slope_c_per_profile_tick,
             plant,
@@ -1479,8 +1491,9 @@ impl HeaterController {
             ambient_c: input.ambient_temp_c,
             max_power_mw: input.max_power_mw,
         };
-        let predicted = self.applied_heat.forecast(
+        let predicted = self.applied_heat.forecast_from_measurement(
             input.now_ms,
+            self.last_accepted_measurement_at_ms.unwrap_or(input.now_ms),
             input.measured_temp_c,
             frame.filtered_slope_c_per_profile_tick,
             plant,

@@ -284,18 +284,39 @@ impl AppliedHeatHistory {
         observed_rise_c_per_s: f32,
         plant: TrajectoryPlant,
     ) -> ReferenceState {
+        self.forecast_from_measurement(now_ms, now_ms, measured_c, observed_rise_c_per_s, plant)
+    }
+
+    /// A held reading retains its accepted timestamp. Integrate heat arriving
+    /// since that observation as well as heat in flight to command arrival.
+    /// This prediction is not another accepted sensor measurement.
+    pub fn forecast_from_measurement(
+        &self,
+        now_ms: u64,
+        measured_at_ms: u64,
+        measured_c: f32,
+        observed_rise_c_per_s: f32,
+        plant: TrajectoryPlant,
+    ) -> ReferenceState {
         let delay_ms = u64::from(plant.model.transport_delay_ms);
+        let measured_at_ms = measured_at_ms.min(now_ms);
         let inferred_mw = (plant.loss_mw(measured_c)
             + plant.model.thermal_capacity_mj_per_c * observed_rise_c_per_s)
             .clamp(0.0, plant.max_power_mw);
         let mut temperature_c = measured_c;
-        let start_ms = now_ms.saturating_sub(delay_ms);
+        let start_ms = measured_at_ms.saturating_sub(delay_ms);
         let mut at_ms = start_ms;
         while at_ms < now_ms {
             let end_ms = ((at_ms / self.width_ms + 1) * self.width_ms).min(now_ms);
+            let arrival_ms = at_ms.saturating_add(delay_ms);
             let power_mw = self.power_at(at_ms).map_or(inferred_mw, |power_mw| {
-                (power_mw + self.residual_at(now_ms, at_ms - start_ms, plant))
-                    .clamp(0.0, plant.max_power_mw)
+                (power_mw
+                    + self.residual_at(
+                        arrival_ms.min(now_ms),
+                        arrival_ms.saturating_sub(now_ms),
+                        plant,
+                    ))
+                .clamp(0.0, plant.max_power_mw)
             });
             temperature_c +=
                 plant.rise(temperature_c, power_mw) * (end_ms - at_ms) as f32 / 1_000.0;
@@ -303,8 +324,8 @@ impl AppliedHeatHistory {
         }
         // Startup has no negative timestamps. Account for the uncovered prefix
         // once using observed velocity rather than counting it as stored power.
-        if now_ms < delay_ms {
-            temperature_c += observed_rise_c_per_s * (delay_ms - now_ms) as f32 / 1_000.0;
+        if measured_at_ms < delay_ms {
+            temperature_c += observed_rise_c_per_s * (delay_ms - measured_at_ms) as f32 / 1_000.0;
         }
         ReferenceState {
             temperature_c,
@@ -427,6 +448,38 @@ mod tests {
             ambient_c: 30.0,
             max_power_mw: 60_000.0,
         }
+    }
+
+    #[test]
+    fn held_measurement_forecast_matches_heat_integrated_since_observation() {
+        let plant = plant(700);
+        let mut history = AppliedHeatHistory::new();
+        history.configure(700);
+        history.observe(0, 60_000.0);
+        history.observe(1_000, 3_000.0);
+        let mut actual_c = 60.0;
+        for _ in 0..400 {
+            actual_c += (60_000.0 - 200.0 * (actual_c - 30.0)) / 20_000.0 * 0.001;
+        }
+        let fresh = history.forecast(1_400, actual_c, 0.0, plant);
+        let held = history.forecast_from_measurement(1_400, 1_000, 60.0, 0.0, plant);
+        let incorrectly_fresh = history.forecast(1_400, 60.0, 0.0, plant);
+        assert!((held.temperature_c - fresh.temperature_c).abs() < 0.03);
+        assert!(held.temperature_c - incorrectly_fresh.temperature_c > 1.0);
+        assert!((held.rise_c_per_s - fresh.rise_c_per_s).abs() < 0.01);
+    }
+
+    #[test]
+    fn held_temperature_forecast_also_accounts_for_unpowered_cooling() {
+        let plant = plant(700);
+        let mut history = AppliedHeatHistory::new();
+        history.configure(700);
+        history.observe(0, 0.0);
+        let held = history.forecast_from_measurement(1_900, 1_000, 220.0, 0.0, plant);
+        let incorrectly_fresh = history.forecast(1_900, 220.0, 0.0, plant);
+        assert!(held.temperature_c < incorrectly_fresh.temperature_c - 1.5);
+        // Forecasting never creates sensor observations or transfer evidence.
+        assert_eq!(history.transfer, HeatTransferObservation::default());
     }
 
     #[test]

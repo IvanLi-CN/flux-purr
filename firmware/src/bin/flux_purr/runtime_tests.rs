@@ -10898,6 +10898,89 @@ fn trajectory_reference_and_heat_history_survive_pps_origins_but_not_disarm() {
 }
 
 #[test]
+fn held_approach_temperature_does_not_erase_heat_already_arriving() {
+    // PPS settling keeps the last accepted temperature while old Warmup
+    // energy continues arriving. A held reading cannot become a new origin.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        for pps_step in [false, true] {
+            let kind = ProductionThermalController::Profile(bank);
+            let mut controller = HeaterController::new();
+            controller.production_controller = Some(kind);
+            controller.last_target_temp_c = 60;
+            controller.heater_was_enabled = true;
+            controller.phase = HeaterControlPhase::Approach;
+            controller.filtered_temp_c = Some(50.0);
+            controller.previous_measured_temp_c = Some(50.0);
+            controller.profile_last_control_at_ms = Some(4_950);
+            let mut profile = production_test_profile(1_000);
+            profile.settings.temp_filter_alpha = 1.0;
+            profile.points[0].as_mut().unwrap().approach_lead_ticks = 0;
+            let mut input = production_test_input(50.0);
+            input.now_ms = 5_000;
+            input.ambient_temp_c = 30.0;
+            input.max_power_mw = 100_000.0;
+            input.model.convection_mw_per_c = 200.0;
+            input.model.thermal_capacity_mj_per_c = 25_000.0;
+            input.model.transport_delay_ms = 2_100;
+            controller.applied_heat.configure(2_100);
+            controller.applied_heat.observe(2_000, 100_000.0);
+            controller.applied_heat.observe(5_000, 5_000.0);
+            controller.update_production_at(kind, input, Some(profile));
+            let mut fresh = controller;
+            let mut held = controller;
+            if pps_step {
+                held.reseed_measurement_after_pps_step(50.0);
+            }
+            assert_eq!(held.last_accepted_measurement_at_ms, Some(5_000));
+            // The just-issued braking command has not reached the plate.
+            // Integrate the known full-power input over this blind interval.
+            let mut actual_c = 50.0;
+            for _ in 0..900 {
+                actual_c += (100_000.0 - 200.0 * (actual_c - 30.0)) / 25_000.0 * 0.001;
+            }
+            input.now_ms = 5_900;
+            let fresh_output = fresh
+                .update_production_at(
+                    kind,
+                    ThermalPlantRuntimeInput {
+                        measured_temp_c: actual_c,
+                        ..input
+                    },
+                    Some(profile),
+                )
+                .0;
+            let held_output = held
+                .update_production_at(
+                    kind,
+                    ThermalPlantRuntimeInput {
+                        measurement_accepted: false,
+                        ..input
+                    },
+                    Some(profile),
+                )
+                .0;
+            assert_eq!(held_output.phase, HeaterControlPhase::Approach);
+            assert_eq!(fresh_output.phase, HeaterControlPhase::Approach);
+            assert_eq!(held.last_accepted_measurement_at_ms, Some(5_000));
+            assert_eq!(fresh.last_accepted_measurement_at_ms, Some(5_900));
+            assert!(
+                held_output.duty_percent <= fresh_output.duty_percent + 1,
+                "{bank:?}, pps_step={pps_step}: held={held_output:?}, fresh={fresh_output:?}"
+            );
+            held.update_production_at(
+                kind,
+                ThermalPlantRuntimeInput {
+                    heater_enabled: false,
+                    ..input
+                },
+                Some(profile),
+            );
+            assert_eq!(held.last_accepted_measurement_at_ms, None);
+        }
+    }
+}
+
+#[test]
 fn trajectory_heat_observation_rejects_held_samples_and_resets_on_recovery() {
     let (mut controller, profile, input) = pps_cooling_test_fixture(ThermalProfileBank::Pps5a);
     let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps5a);
