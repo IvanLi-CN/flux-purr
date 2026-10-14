@@ -101,9 +101,6 @@ mod device {
     const CAPABILITIES_PROTOCOL_RESET_WAIT_MS: u32 = 3_000;
     const SUMMARY_CHUNK_BYTES: usize = 64;
     const USB_FRAME_GAP_MS: u32 = 5;
-    const PROGRESS_FRAME_MAX: usize = 512;
-    const PROGRESS_QUEUE_DEPTH: usize = 16;
-    const PROGRESS_PUMP_BUDGET: usize = 64;
     const SESSION_TIMEOUT_MS: u32 = 210_000;
     const SAMPLE_GAP_LIMIT_MS: u32 = 250;
     const MAX_INVALID_SAMPLES: u16 = 3;
@@ -113,9 +110,8 @@ mod device {
     const FAN_PWM_STAGE_DURATION_MS: u32 = 5_000;
     const SKIP_PD_SESSION_FOR_DIAG: bool = false;
     const SKIP_DEFAULT_RECEIVE_FOR_DIAG: bool = false;
-    // Progress frames are queued in RAM and sent through the USB FIFO without
-    // waiting in the PD state machine. This keeps the human stream live while
-    // preserving the Source_Capabilities -> Request timing window.
+    // Progress frames use the ROM's synchronous byte writer so JSONL frames
+    // cannot be interleaved by USB FIFO packet submission.
     const EMIT_SESSION_PROGRESS: bool = false;
     const EMIT_TIER_PROGRESS: bool = true;
     const EMIT_SAMPLE_PROGRESS: bool = false;
@@ -154,65 +150,13 @@ mod device {
 
     struct ProgressStorage(UnsafeCell<String<512>>);
 
-    struct ProgressQueueStorage(UnsafeCell<ProgressQueue>);
-
-    struct ProgressQueue {
-        frames: [[u8; PROGRESS_FRAME_MAX]; PROGRESS_QUEUE_DEPTH],
-        lengths: [usize; PROGRESS_QUEUE_DEPTH],
-        offsets: [usize; PROGRESS_QUEUE_DEPTH],
-        head: usize,
-        tail: usize,
-        count: usize,
-    }
-
     // The RAM image services one USB request at a time, so this buffer has a
     // single synchronous owner while keeping the large JSON frame off the task stack.
     unsafe impl Sync for SummaryStorage {}
     unsafe impl Sync for ProgressStorage {}
-    unsafe impl Sync for ProgressQueueStorage {}
 
     static SUMMARY_STORAGE: SummaryStorage = SummaryStorage(UnsafeCell::new(String::new()));
     static PROGRESS_LINE_STORAGE: ProgressStorage = ProgressStorage(UnsafeCell::new(String::new()));
-    static PROGRESS_RESULT_STORAGE: ProgressStorage =
-        ProgressStorage(UnsafeCell::new(String::new()));
-    static PROGRESS_QUEUE_STORAGE: ProgressQueueStorage =
-        ProgressQueueStorage(UnsafeCell::new(ProgressQueue::new()));
-
-    impl ProgressQueue {
-        const fn new() -> Self {
-            Self {
-                frames: [[0; PROGRESS_FRAME_MAX]; PROGRESS_QUEUE_DEPTH],
-                lengths: [0; PROGRESS_QUEUE_DEPTH],
-                offsets: [0; PROGRESS_QUEUE_DEPTH],
-                head: 0,
-                tail: 0,
-                count: 0,
-            }
-        }
-
-        fn enqueue(&mut self, data: &[u8]) -> bool {
-            if data.is_empty()
-                || data.len() > PROGRESS_FRAME_MAX
-                || self.count == PROGRESS_QUEUE_DEPTH
-            {
-                return false;
-            }
-            let index = self.tail;
-            self.frames[index][..data.len()].copy_from_slice(data);
-            self.lengths[index] = data.len();
-            self.offsets[index] = 0;
-            self.tail = (self.tail + 1) % PROGRESS_QUEUE_DEPTH;
-            self.count += 1;
-            true
-        }
-
-        fn pop_front(&mut self) {
-            self.lengths[self.head] = 0;
-            self.offsets[self.head] = 0;
-            self.head = (self.head + 1) % PROGRESS_QUEUE_DEPTH;
-            self.count -= 1;
-        }
-    }
 
     type I2cBus = I2c<'static, Blocking>;
     type AdcDriver = Adc<'static, esp_hal::peripherals::ADC1<'static>, Blocking>;
@@ -514,7 +458,6 @@ mod device {
         cancel: &mut CancelState,
         deadline_ms: u32,
     ) -> Result<(), StopReason> {
-        pump_progress(usb);
         if cancel.poll(usb) {
             return Err(StopReason::Cancelled);
         }
@@ -531,62 +474,14 @@ mod device {
         result_json: &str,
     ) {
         // Keep nested JSON formatting off the small RTOS task stack. The RAM
-        // image handles one request synchronously, so these buffers have one
-        // owner at a time. Enqueue only here; USB FIFO writes happen from
-        // check_deadline so a progress frame cannot block PD negotiation.
+        // image handles one request synchronously, so this buffer has one
+        // owner at a time.
         let line = unsafe { &mut *PROGRESS_LINE_STORAGE.0.get() };
         line.clear();
         if protocol::write_progress(line, request_id, *sequence, result_json).is_ok() {
-            let queue = unsafe { &mut *PROGRESS_QUEUE_STORAGE.0.get() };
-            let _ = queue.enqueue(line.as_bytes());
+            super::rom_log_line(line.as_bytes());
         }
         *sequence = sequence.wrapping_add(1);
-    }
-
-    fn pump_progress(usb: &mut UsbSerialJtag<'static, Blocking>) {
-        let queue = unsafe { &mut *PROGRESS_QUEUE_STORAGE.0.get() };
-        let mut budget = PROGRESS_PUMP_BUDGET;
-        while budget > 0 && queue.count != 0 {
-            let index = queue.head;
-            while budget > 0 && queue.offsets[index] < queue.lengths[index] {
-                let offset = queue.offsets[index];
-                if usb.write_byte_nb(queue.frames[index][offset]).is_err() {
-                    let _ = usb.flush_tx_nb();
-                    return;
-                }
-                queue.offsets[index] = offset + 1;
-                budget -= 1;
-            }
-            if queue.offsets[index] < queue.lengths[index] {
-                let _ = usb.flush_tx_nb();
-                return;
-            }
-            if usb.flush_tx_nb().is_err() {
-                return;
-            }
-            queue.pop_front();
-        }
-        if budget == 0 {
-            let _ = usb.flush_tx_nb();
-        }
-    }
-
-    fn drain_progress(usb: &mut UsbSerialJtag<'static, Blocking>) {
-        let queue = unsafe { &mut *PROGRESS_QUEUE_STORAGE.0.get() };
-        while queue.count != 0 {
-            let index = queue.head;
-            let offset = queue.offsets[index];
-            let length = queue.lengths[index];
-            if offset < length && usb.write(&queue.frames[index][offset..length]).is_err() {
-                return;
-            }
-            queue.pop_front();
-        }
-    }
-
-    fn write_progress_text(usb: &mut UsbSerialJtag<'static, Blocking>, text: &str) -> bool {
-        use core::fmt::Write;
-        usb.write_str(text).is_ok()
     }
 
     fn emit_session_progress(
@@ -599,8 +494,7 @@ mod device {
         if !EMIT_SESSION_PROGRESS && !is_summary_stage {
             return;
         }
-        let result = unsafe { &mut *PROGRESS_RESULT_STORAGE.0.get() };
-        result.clear();
+        let mut result = String::<512>::new();
         let formatted = (|| -> core::fmt::Result {
             result
                 .push_str("{\"kind\":\"session\",\"stage\":\"")
@@ -633,8 +527,7 @@ mod device {
         if !EMIT_TIER_PROGRESS {
             return;
         }
-        let result = unsafe { &mut *PROGRESS_RESULT_STORAGE.0.get() };
-        result.clear();
+        let mut result = String::<512>::new();
         let index_text = TIER_INDEX_TEXT.get(index).copied().unwrap_or("?");
         let target_text = TIER_TARGET_TEXT.get(index).copied().unwrap_or("0");
         let mode = if index < pd::FIXED_TARGETS_MV.len() {
@@ -666,18 +559,18 @@ mod device {
         if !EMIT_SAMPLE_PROGRESS {
             return;
         }
-        let result = unsafe { &mut *PROGRESS_RESULT_STORAGE.0.get() };
-        result.clear();
-        use core::fmt::Write;
-        let _ = write!(
-            result,
-            "{{\"kind\":\"sample\",\"mode\":\"{}\",\"targetMv\":{},\"elapsedMs\":{},\"measuredVinMv\":{},\"valid\":{},\"heater\":\"off\",\"pd\":\"owned\",\"eeprom\":\"untouched\"}}",
-            tier.target.mode.as_str(),
-            tier.target.voltage_mv,
-            elapsed_ms,
-            measured_mv,
-            valid,
-        );
+        let mut result = String::<512>::new();
+        let _ = result.push_str("{\"kind\":\"sample\",\"mode\":\"");
+        let _ = result.push_str(tier.target.mode.as_str());
+        let _ = result.push_str("\",\"targetMv\":");
+        let _ = push_small_u32(&mut result, u32::from(tier.target.voltage_mv));
+        let _ = result.push_str(",\"elapsedMs\":");
+        let _ = push_small_u32(&mut result, elapsed_ms);
+        let _ = result.push_str(",\"measuredVinMv\":");
+        let _ = push_small_u32(&mut result, u32::from(measured_mv));
+        let _ = result.push_str(",\"valid\":");
+        let _ = result.push_str(if valid { "true" } else { "false" });
+        let _ = result.push_str(",\"heater\":\"off\",\"pd\":\"owned\",\"eeprom\":\"untouched\"}");
         emit_progress(usb, request_id, sequence, result.as_str());
     }
 
@@ -690,16 +583,15 @@ mod device {
         if !EMIT_CAPABILITY_PROGRESS {
             return;
         }
-        let result = unsafe { &mut *PROGRESS_RESULT_STORAGE.0.get() };
-        result.clear();
-        use core::fmt::Write;
+        let mut result = String::<512>::new();
         let _ = result.push_str("{\"kind\":\"capabilities\",\"count\":");
-        let _ = write!(result, "{},\"rawPdos\":[", capabilities.count);
+        let _ = push_small_u32(&mut result, u32::from(capabilities.count));
+        let _ = result.push_str(",\"rawPdos\":[");
         for index in 0..usize::from(capabilities.count) {
             if index != 0 {
                 let _ = result.push(',');
             }
-            let _ = write!(result, "{}", capabilities.objects[index].raw);
+            let _ = push_small_u32(&mut result, capabilities.objects[index].raw);
         }
         let _ = result.push_str("],\"objects\":[");
         for index in 0..usize::from(capabilities.count) {
@@ -707,27 +599,25 @@ mod device {
                 let _ = result.push(',');
             }
             let object = capabilities.objects[index];
-            let _ = write!(
-                result,
-                "{{\"position\":{},\"mode\":\"{}\",\"minMv\":{},\"maxMv\":{},\"maxMa\":{},\"raw\":{}}}",
-                object.position,
-                object.mode.as_str(),
-                object.min_mv,
-                object.max_mv,
-                object.max_ma,
-                object.raw,
-            );
+            let _ = result.push_str("{\"position\":");
+            let _ = push_small_u32(&mut result, u32::from(object.position));
+            let _ = result.push_str(",\"mode\":\"");
+            let _ = result.push_str(object.mode.as_str());
+            let _ = result.push_str("\",\"minMv\":");
+            let _ = push_small_u32(&mut result, u32::from(object.min_mv));
+            let _ = result.push_str(",\"maxMv\":");
+            let _ = push_small_u32(&mut result, u32::from(object.max_mv));
+            let _ = result.push_str(",\"maxMa\":");
+            let _ = push_small_u32(&mut result, u32::from(object.max_ma));
+            let _ = result.push_str(",\"raw\":");
+            let _ = push_small_u32(&mut result, object.raw);
+            let _ = result.push('}');
         }
         let _ = result.push_str("],\"heater\":\"off\",\"pd\":\"owned\",\"eeprom\":\"untouched\"}");
         emit_progress(usb, request_id, sequence, result.as_str());
     }
 
-    fn emit_summary_chunks(
-        usb: &mut UsbSerialJtag<'static, Blocking>,
-        request_id: &str,
-        sequence: &mut u32,
-        data: &[u8],
-    ) {
+    fn emit_summary_chunks(request_id: &str, sequence: &mut u32, data: &[u8]) {
         let chunk_count = data.len().div_ceil(SUMMARY_CHUNK_BYTES);
         for (index, chunk) in data.chunks(SUMMARY_CHUNK_BYTES).enumerate() {
             let line = unsafe { &mut *PROGRESS_LINE_STORAGE.0.get() };
@@ -742,7 +632,7 @@ mod device {
             )
             .is_ok()
             {
-                let _ = write_progress_text(usb, line.as_str());
+                super::rom_log_line(line.as_bytes());
             }
             *sequence = sequence.wrapping_add(1);
             delay_ms(USB_FRAME_GAP_MS);
@@ -759,26 +649,30 @@ mod device {
         if !EMIT_RECOVERY_PROGRESS {
             return;
         }
-        let result = unsafe { &mut *PROGRESS_RESULT_STORAGE.0.get() };
-        result.clear();
-        use core::fmt::Write;
-        let _ = write!(
-            result,
-            "{{\"kind\":\"recovery\",\"index\":{},\"status\":\"{}\",\"defaultVbusMv\":{},\"defaultAdcMv\":{},\"defaultAdcRawCode\":{},\"defaultContractMv\":{},\"defaultContractCurrentMa\":{},\"reason\":\"{}\",\"heater\":\"off\",\"pd\":\"{}\",\"eeprom\":\"untouched\"}}",
-            index + 1,
-            reset.status,
-            reset.default_vbus_mv,
-            reset.default_adc_mv,
-            reset.default_adc_raw_code,
-            pd::DEFAULT_CONTRACT_MV,
-            reset.default_contract_current_ma,
-            reset.reason,
-            if reset.status == "pass" {
-                "default_verified"
-            } else {
-                "resetting"
-            },
-        );
+        let mut result = String::<512>::new();
+        let _ = result.push_str("{\"kind\":\"recovery\",\"index\":");
+        let _ = push_small_u32(&mut result, u32::try_from(index + 1).unwrap_or(u32::MAX));
+        let _ = result.push_str(",\"status\":\"");
+        let _ = result.push_str(reset.status);
+        let _ = result.push_str("\",\"defaultVbusMv\":");
+        let _ = push_small_u32(&mut result, u32::from(reset.default_vbus_mv));
+        let _ = result.push_str(",\"defaultAdcMv\":");
+        let _ = push_small_u32(&mut result, u32::from(reset.default_adc_mv));
+        let _ = result.push_str(",\"defaultAdcRawCode\":");
+        let _ = push_small_u32(&mut result, u32::from(reset.default_adc_raw_code));
+        let _ = result.push_str(",\"defaultContractMv\":");
+        let _ = push_small_u32(&mut result, u32::from(pd::DEFAULT_CONTRACT_MV));
+        let _ = result.push_str(",\"defaultContractCurrentMa\":");
+        let _ = push_small_u32(&mut result, u32::from(reset.default_contract_current_ma));
+        let _ = result.push_str(",\"reason\":\"");
+        let _ = result.push_str(reset.reason);
+        let _ = result.push_str("\",\"heater\":\"off\",\"pd\":\"");
+        let _ = result.push_str(if reset.status == "pass" {
+            "default_verified"
+        } else {
+            "resetting"
+        });
+        let _ = result.push_str("\",\"eeprom\":\"untouched\"}");
         emit_progress(usb, request_id, sequence, result.as_str());
     }
 
@@ -2328,11 +2222,6 @@ mod device {
             }
             result.tiers[index] = tier;
             result.tier_count = index + 1;
-            // The terminal tier frame is now outside the PD response window.
-            // Drain here so the next request never inherits a full progress
-            // queue, while the Source_Capabilities -> Request path stays
-            // non-blocking.
-            drain_progress(usb);
             if matches!(tier.status, "cancelled" | "global_timeout") {
                 for remaining in index + 1..pd::TOTAL_TIERS {
                     result.tiers[remaining] = TierRecord {
@@ -2488,6 +2377,26 @@ mod device {
         Ok(tier)
     }
 
+    fn push_small_u32<const N: usize>(out: &mut String<N>, mut value: u32) -> core::fmt::Result {
+        let mut digits = [0u8; 10];
+        let mut length = 0usize;
+        if value == 0 {
+            digits[0] = 0;
+            length = 1;
+        } else {
+            while value != 0 {
+                digits[length] = (value % 10) as u8;
+                value /= 10;
+                length += 1;
+            }
+        }
+        for digit in digits[..length].iter().rev() {
+            out.push(char::from(b'0' + *digit))
+                .map_err(|_| core::fmt::Error)?;
+        }
+        Ok(())
+    }
+
     fn emit_fan_contract_progress(
         usb: &mut UsbSerialJtag<'static, Blocking>,
         request_id: &str,
@@ -2495,24 +2404,26 @@ mod device {
         selection: policy::FanSelection,
         tier: TierRecord,
     ) {
-        let result = unsafe { &mut *PROGRESS_RESULT_STORAGE.0.get() };
-        result.clear();
-        use core::fmt::Write;
+        let mut result = String::<512>::new();
         let gate = tier.contract_mv > policy::POWER_GATE_MV;
-        let _ = write!(
-            result,
-            "{{\"kind\":\"contract\",\"mode\":\"{}\",\"voltageMv\":{},\"currentMa\":{},\"sourceAdvertisedMaxMa\":{},\"sourceObjectPosition\":{},\"selectionReason\":\"{}\",\"powerGate\":\"{}\",\"warning\":{},\"heater\":\"off\",\"pd\":\"owned\",\"eeprom\":\"untouched\"}}",
-            tier.target.mode.as_str(),
-            tier.contract_mv,
-            tier.contract_current_ma,
-            tier.source_max_ma,
-            tier.selected_object_position,
-            selection.reason.as_str(),
-            if gate { "pass" } else { "degraded" },
-            if gate { "false" } else { "true" },
-        );
+        let _ = result.push_str("{\"kind\":\"contract\",\"mode\":\"");
+        let _ = result.push_str(tier.target.mode.as_str());
+        let _ = result.push_str("\",\"voltageMv\":");
+        let _ = push_small_u32(&mut result, u32::from(tier.contract_mv));
+        let _ = result.push_str(",\"currentMa\":");
+        let _ = push_small_u32(&mut result, u32::from(tier.contract_current_ma));
+        let _ = result.push_str(",\"sourceAdvertisedMaxMa\":");
+        let _ = push_small_u32(&mut result, u32::from(tier.source_max_ma));
+        let _ = result.push_str(",\"sourceObjectPosition\":");
+        let _ = push_small_u32(&mut result, u32::from(tier.selected_object_position));
+        let _ = result.push_str(",\"selectionReason\":\"");
+        let _ = result.push_str(selection.reason.as_str());
+        let _ = result.push_str("\",\"powerGate\":\"");
+        let _ = result.push_str(if gate { "pass" } else { "degraded" });
+        let _ = result.push_str("\",\"warning\":");
+        let _ = result.push_str(if gate { "false" } else { "true" });
+        let _ = result.push_str(",\"heater\":\"off\",\"pd\":\"owned\",\"eeprom\":\"untouched\"}");
         emit_progress(usb, request_id, sequence, result.as_str());
-        drain_progress(usb);
     }
 
     fn emit_fan_stage_progress(
@@ -2521,16 +2432,13 @@ mod device {
         sequence: &mut u32,
         duty_percent: u8,
     ) {
-        let result = unsafe { &mut *PROGRESS_RESULT_STORAGE.0.get() };
-        result.clear();
-        use core::fmt::Write;
-        let _ = write!(
-            result,
-            "{{\"kind\":\"pwm_stage\",\"dutyPercent\":{},\"durationMs\":{},\"heater\":\"off\",\"pd\":\"owned\",\"eeprom\":\"untouched\"}}",
-            duty_percent, FAN_PWM_STAGE_DURATION_MS,
-        );
+        let mut result = String::<512>::new();
+        let _ = result.push_str("{\"kind\":\"pwm_stage\",\"dutyPercent\":");
+        let _ = push_small_u32(&mut result, u32::from(duty_percent));
+        let _ = result.push_str(",\"durationMs\":");
+        let _ = push_small_u32(&mut result, FAN_PWM_STAGE_DURATION_MS);
+        let _ = result.push_str(",\"heater\":\"off\",\"pd\":\"owned\",\"eeprom\":\"untouched\"}");
         emit_progress(usb, request_id, sequence, result.as_str());
-        drain_progress(usb);
     }
 
     fn run_fan_stages(
@@ -2956,7 +2864,7 @@ mod device {
             .map_err(|_| core::fmt::Error)?;
         out.push_str(result.final_reset.reason)
             .map_err(|_| core::fmt::Error)?;
-        out.push_str("\"}}").map_err(|_| core::fmt::Error)?;
+        out.push_str("\"}").map_err(|_| core::fmt::Error)?;
         emit_stage("summary_final_reset_done");
         protocol::write_summary_suffix(out)
     }
@@ -2967,7 +2875,6 @@ mod device {
         result: &SessionResult,
         mut emit_stage: impl FnMut(&str),
     ) -> core::fmt::Result {
-        use core::fmt::Write;
         let pd_status = if result.final_reset.status == "pass" {
             "default_verified"
         } else {
@@ -3025,7 +2932,11 @@ mod device {
         }
         emit_stage("summary_tiers_done");
         let mut length_stage = String::<64>::new();
-        let _ = write!(length_stage, "summary_tiers_len_{}", out.len());
+        let _ = length_stage.push_str("summary_tiers_len_");
+        let _ = push_small_u32(
+            &mut length_stage,
+            u32::try_from(out.len()).unwrap_or(u32::MAX),
+        );
         emit_stage(length_stage.as_str());
         emit_stage("summary_final_reset_begin");
         if tier_count == 0 {
@@ -3116,10 +3027,8 @@ mod device {
         .is_ok()
         {
             emit_session_progress(usb, request_id, &mut summary_sequence, "summary_send");
-            drain_progress(usb);
-            emit_summary_chunks(usb, request_id, &mut summary_sequence, response.as_bytes());
+            emit_summary_chunks(request_id, &mut summary_sequence, response.as_bytes());
             emit_session_progress(usb, request_id, &mut summary_sequence, "summary_write_done");
-            drain_progress(usb);
         } else {
             emit_session_progress(
                 usb,

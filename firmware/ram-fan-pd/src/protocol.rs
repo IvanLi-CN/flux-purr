@@ -86,13 +86,29 @@ pub fn write_summary_prefix(
     overall: &str,
     pd_status: &str,
 ) -> core::fmt::Result {
-    use core::fmt::Write;
-    write!(
+    push_text(out, "{\"type\":\"fan_pd_summary\",\"requestId\":\"")?;
+    push_text(out, request_id)?;
+    push_text(out, "\",\"firmwareKind\":\"")?;
+    push_text(out, FIRMWARE_KIND)?;
+    push_text(out, "\",\"imageKind\":\"")?;
+    push_text(out, IMAGE_KIND)?;
+    push_text(out, "\",\"capability\":\"")?;
+    push_text(out, CAPABILITY)?;
+    push_text(
         out,
-        "{{\"type\":\"fan_pd_summary\",\"requestId\":\"{request_id}\",\"firmwareKind\":\"{FIRMWARE_KIND}\",\"imageKind\":\"{IMAGE_KIND}\",\"capability\":\"{CAPABILITY}\",\"ok\":true,\"result\":{{\"detail\":\"fan_pd_complete\",\"heater\":\"off\",\"pd\":\"{pd_status}\",\"eeprom\":\"untouched\",\"schemaVersion\":1,\"buildId\":\"{}\",\"sourceSha\":\"{}\",\"controller\":\"fusb302b\",\"overall\":\"{overall}\",",
-        env!("FLUX_PURR_RAM_BUILD_ID"),
-        env!("FLUX_PURR_RAM_SOURCE_SHA")
-    )
+        "\",\"ok\":true,\"result\":{\"detail\":\"fan_pd_complete\",\"heater\":\"off\",\"pd\":\"",
+    )?;
+    push_text(out, pd_status)?;
+    push_text(
+        out,
+        "\",\"eeprom\":\"untouched\",\"schemaVersion\":1,\"buildId\":\"",
+    )?;
+    push_text(out, env!("FLUX_PURR_RAM_BUILD_ID"))?;
+    push_text(out, "\",\"sourceSha\":\"")?;
+    push_text(out, env!("FLUX_PURR_RAM_SOURCE_SHA"))?;
+    push_text(out, "\",\"controller\":\"fusb302b\",\"overall\":\"")?;
+    push_text(out, overall)?;
+    push_text(out, "\",")
 }
 
 pub fn write_summary_suffix(out: &mut String<32_768>) -> core::fmt::Result {
@@ -107,15 +123,41 @@ pub fn write_summary_chunk_progress(
     count: usize,
     chunk: &[u8],
 ) -> core::fmt::Result {
-    use core::fmt::Write;
-    write!(
-        out,
-        "{{\"type\":\"progress\",\"requestId\":\"{request_id}\",\"firmwareKind\":\"{FIRMWARE_KIND}\",\"imageKind\":\"{IMAGE_KIND}\",\"capability\":\"{CAPABILITY}\",\"sequence\":{sequence},\"result\":{{\"kind\":\"summary_chunk\",\"index\":{index},\"count\":{count},\"encoding\":\"hex\",\"data\":\"",
-    )?;
+    push_text(out, "{\"type\":\"progress\",\"requestId\":\"")?;
+    push_text(out, request_id)?;
+    push_text(out, "\",\"firmwareKind\":\"")?;
+    push_text(out, FIRMWARE_KIND)?;
+    push_text(out, "\",\"imageKind\":\"")?;
+    push_text(out, IMAGE_KIND)?;
+    push_text(out, "\",\"capability\":\"")?;
+    push_text(out, CAPABILITY)?;
+    push_text(out, "\",\"sequence\":")?;
+    push_u32(out, sequence)?;
+    push_text(out, ",\"result\":{\"kind\":\"summary_chunk\",\"index\":")?;
+    push_usize(out, index)?;
+    push_text(out, ",\"count\":")?;
+    push_usize(out, count)?;
+    push_text(out, ",\"encoding\":\"hex\",\"data\":\"")?;
     for byte in chunk {
-        write!(out, "{byte:02x}")?;
+        push_hex_byte(out, *byte)?;
     }
     out.push_str("\"}}\n").map_err(|_| core::fmt::Error)
+}
+
+fn push_text<const N: usize>(out: &mut String<N>, text: &str) -> core::fmt::Result {
+    out.push_str(text).map_err(|_| core::fmt::Error)
+}
+
+fn push_usize<const N: usize>(out: &mut String<N>, value: usize) -> core::fmt::Result {
+    push_u32(out, u32::try_from(value).map_err(|_| core::fmt::Error)?)
+}
+
+fn push_hex_byte<const N: usize>(out: &mut String<N>, value: u8) -> core::fmt::Result {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(char::from(HEX[usize::from(value >> 4)]))
+        .map_err(|_| core::fmt::Error)?;
+    out.push(char::from(HEX[usize::from(value & 0x0f)]))
+        .map_err(|_| core::fmt::Error)
 }
 
 fn request_id_is_safe(request_id: &[u8]) -> bool {
@@ -170,5 +212,29 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(identity.as_bytes()).unwrap();
         assert_eq!(value["identity"]["imageKind"], IMAGE_KIND);
         assert_eq!(value["capabilities"][0], CAPABILITY);
+    }
+
+    #[test]
+    fn summary_prefix_and_suffix_close_both_json_objects() {
+        let mut summary = String::<32_768>::new();
+        write_summary_prefix(&mut summary, "r1", "pass", "default_verified").unwrap();
+        summary
+            .push_str(
+                "\"policy\":{},\"sourceCapabilities\":{},\"selection\":null,\"powerGate\":\"pass\",\"warning\":false,\"stages\":{\"ok\":true},\"finalReset\":{}",
+            )
+            .unwrap();
+        write_summary_suffix(&mut summary).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(summary.as_bytes()).unwrap();
+        assert_eq!(value["type"], "fan_pd_summary");
+        assert_eq!(value["result"]["overall"], "pass");
+    }
+
+    #[test]
+    fn summary_chunk_progress_is_jsonl() {
+        let mut progress = String::<512>::new();
+        write_summary_chunk_progress(&mut progress, "r1", 7, 1, 3, b"{}{}").unwrap();
+        let value: serde_json::Value = serde_json::from_slice(progress.as_bytes()).unwrap();
+        assert_eq!(value["result"]["kind"], "summary_chunk");
+        assert_eq!(value["result"]["data"], "7b7d7b7d");
     }
 }
