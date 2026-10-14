@@ -409,8 +409,17 @@ fn limited_hold_outputs(evidence: TuneEvidence) -> bool {
         && evidence
             .hold_max_output_permille
             .is_some_and(|maximum| maximum <= 100)
-        && evidence.hold_off_sample_count.saturating_mul(5)
+        && (evidence.hold_off_sample_count.saturating_mul(5)
             >= evidence.hold_sample_count.saturating_mul(4)
+            // Small, decaying entry requests can span several accepted
+            // samples. They are still low Hold supply when at least 90% of
+            // requests are no greater than the normal Approach minimum.
+            // Keep this measured failure in the one-axis damping search;
+            // the generic high-side branch changes several unrelated fields.
+            || (evidence.target_c <= 150
+                && evidence
+                    .hold_p90_output_permille
+                    .is_some_and(|output| output <= crate::thermal_plant::APPROACH_MIN_PERMILLE)))
 }
 
 fn limited_hold_high_side_candidate(
@@ -426,7 +435,7 @@ fn limited_hold_high_side_candidate(
         || !evidence.hold_max_below_c.is_some_and(|below| below <= 1.5)
         || evidence.over_c <= 1.5
         || !evidence.approach_output_range.is_some_and(|(min, max)| {
-            min >= crate::thermal_plant::APPROACH_MIN_PERMILLE && max > 100
+            min >= crate::thermal_plant::APPROACH_MIN_PERMILLE && max > 100 && max <= 1_000
         })
     {
         return None;
@@ -2627,6 +2636,82 @@ mod tests {
             },
         ] {
             assert!(limited_hold_high_side_candidate(previous, unavailable).is_none());
+        }
+    }
+
+    #[test]
+    fn low_supply_hold_percentiles_do_not_hide_sustained_heat_or_large_pulses() {
+        let previous = point(60);
+        let facts = TuneEvidence {
+            overshoot_c: 2.29,
+            over_c: 2.29,
+            hold_max_below_c: Some(0.46),
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(6_164),
+            hold_sample_count: 12,
+            hold_off_sample_count: 7,
+            hold_median_output_permille: Some(0),
+            hold_p90_output_permille: Some(40),
+            hold_max_output_permille: Some(80),
+            approach_output_range: Some((50, 760)),
+            ..evidence(60)
+        };
+        assert!(limited_hold_high_side_candidate(previous, facts).is_some());
+        for unavailable in [
+            TuneEvidence {
+                hold_max_output_permille: Some(101),
+                ..facts
+            },
+            TuneEvidence {
+                hold_max_output_permille: None,
+                ..facts
+            },
+            TuneEvidence {
+                hold_p90_output_permille: Some(51),
+                ..facts
+            },
+            TuneEvidence {
+                hold_p90_output_permille: None,
+                ..facts
+            },
+            TuneEvidence {
+                target_c: 160,
+                ..facts
+            },
+            TuneEvidence {
+                hold_sample_count: 2,
+                hold_off_sample_count: 1,
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: Some((0, 760)),
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: Some((50, 1_001)),
+                ..facts
+            },
+            TuneEvidence {
+                over_c: 1.5,
+                ..facts
+            },
+            TuneEvidence {
+                hold_max_below_c: Some(1.51),
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+            TuneEvidence {
+                tunable_stop: false,
+                ..facts
+            },
+        ] {
+            assert!(
+                limited_hold_high_side_candidate(previous, unavailable).is_none(),
+                "{unavailable:?}"
+            );
         }
     }
 

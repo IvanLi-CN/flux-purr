@@ -4191,6 +4191,45 @@ mod tests {
     }
 
     #[test]
+    fn captured_low_supply_hold_failure_changes_only_approach_damping() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_low_supply_hold.fixture.json"))
+                .unwrap();
+        for trial in fixture["trials"].as_array().unwrap() {
+            let mut runtime = started_single_target_runtime();
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+            let facts = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                evaluation.settle_time_ms,
+                10_000,
+            );
+            assert!(facts.hold_sample_count >= 3, "{facts:?}");
+            assert!(facts.hold_max_output_permille.unwrap() <= 100, "{facts:?}");
+            assert!(facts.hold_p90_output_permille.unwrap() <= 50, "{facts:?}");
+            assert!(facts.over_c > 1.5, "{facts:?}");
+            assert!(runtime.prepare_fresh_failure_proposal_from_evidence(60, facts));
+            let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+            assert!(
+                next.approach_damping_exponent_permille
+                    > previous.approach_damping_exponent_permille
+            );
+            assert_eq!(
+                next,
+                ThermalControlProfilePointConfig {
+                    approach_damping_exponent_permille: next.approach_damping_exponent_permille,
+                    ..previous
+                },
+                "trial {}: {facts:?}",
+                trial["trialIndex"]
+            );
+            assert_eq!(runtime.accepted_target_mask, 0);
+        }
+    }
+
+    #[test]
     fn captured_small_high_side_failure_uses_the_contracted_damping_step() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "thermal_tuning_small_high_side_step.fixture.json"
