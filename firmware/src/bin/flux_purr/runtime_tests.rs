@@ -11052,6 +11052,58 @@ fn rejected_approach_measurements_cannot_raise_the_last_braking_request() {
 }
 
 #[test]
+fn fresh_approach_recovery_keeps_elapsed_slew_time_across_rejected_callbacks() {
+    // The same physical hold followed by the same fresh reading must not
+    // acquire a slower recovery merely because PPS wait callbacks ran.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut sparse = HeaterController::new();
+        sparse.production_controller = Some(kind);
+        sparse.last_target_temp_c = 60;
+        sparse.heater_was_enabled = true;
+        sparse.phase = HeaterControlPhase::Approach;
+        sparse.filtered_temp_c = Some(54.0);
+        sparse.previous_measured_temp_c = Some(54.0);
+        sparse.last_accepted_measurement_at_ms = Some(5_000);
+        sparse.profile_last_control_at_ms = Some(5_000);
+        sparse.duty_percent = 5;
+        sparse.approach_last_request_permille = Some(50);
+        sparse.approach_trajectory =
+            Some(flux_purr_firmware::thermal_trajectory::TemperatureTrajectory::new(5_000, 54.0));
+        let mut profile = production_test_profile(1_000);
+        profile.settings.temp_filter_alpha = 1.0;
+        profile.points[0].as_mut().unwrap().approach_lead_ticks = 0;
+        let mut input = production_test_input(54.0);
+        input.model.transport_delay_ms = 1_400;
+        sparse.applied_heat.configure(1_400);
+        sparse.applied_heat.observe(2_000, 5_000.0);
+        sparse.applied_heat.observe(5_000, 5_000.0);
+        let mut callbacks = sparse;
+        for step in 1..=9 {
+            input.now_ms = 5_000 + step * 100;
+            input.measurement_accepted = false;
+            let held = callbacks.update_production_at(kind, input, Some(profile)).0;
+            assert_eq!(held.phase, HeaterControlPhase::Approach);
+            assert_eq!(held.duty_percent, 5);
+            callbacks.applied_heat.observe(input.now_ms, 5_000.0);
+        }
+        input.now_ms = 6_000;
+        input.measurement_accepted = true;
+        input.measured_temp_c = 53.9;
+        let sparse_output = sparse.update_production_at(kind, input, Some(profile)).0;
+        let callbacks_output = callbacks.update_production_at(kind, input, Some(profile)).0;
+        assert!(sparse_output.duty_percent >= 25);
+        assert!(
+            callbacks_output
+                .duty_percent
+                .abs_diff(sparse_output.duty_percent)
+                <= 1,
+            "{bank:?}: callback cadence cannot discard the elapsed physical slew budget: sparse={sparse_output:?}, callbacks={callbacks_output:?}"
+        );
+    }
+}
+
+#[test]
 fn rejected_hold_measurements_do_not_resume_heat_or_wind_up_the_integral() {
     for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
         let kind = ProductionThermalController::Profile(bank);
