@@ -4122,6 +4122,36 @@ mod tests {
     }
 
     #[test]
+    fn captured_small_high_side_failure_uses_the_contracted_damping_step() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "thermal_tuning_small_high_side_step.fixture.json"
+        ))
+        .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let evaluation = replay_damping_bracket_trial(&mut runtime, &fixture["trials"][0]);
+        let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+        let facts = runtime.candidate_failure_evidence(
+            60,
+            evaluation.max_overshoot_centi_c,
+            evaluation.hold_peak_to_peak_centi_c,
+            evaluation.settle_time_ms,
+            10_000,
+        );
+        assert_eq!(evaluation.max_overshoot_centi_c, Some(158));
+        assert_eq!(previous.approach_damping_exponent_permille, 1_000);
+        assert_eq!(previous.brake_distance_centi_c, 2_471);
+        assert!(runtime.prepare_fresh_failure_proposal_from_evidence(60, facts));
+        assert_eq!(
+            runtime.candidate_profile.unwrap().points[0].unwrap(),
+            ThermalControlProfilePointConfig {
+                approach_damping_exponent_permille: 1_500,
+                ..previous
+            }
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
     fn captured_narrow_damping_interval_searches_the_approach_horizon() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "thermal_tuning_high_temperature_feedback.fixture.json"
@@ -4536,10 +4566,22 @@ mod tests {
             serde_json::from_str(include_str!("thermal_tuning_damping_bracket.fixture.json"))
                 .unwrap();
         let mut runtime = started_single_target_runtime();
+        let mut last_facts = None;
         for trial in fixture["trials"].as_array().unwrap() {
             let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
-            runtime.advance_after_trial(60, evaluation).unwrap();
+            let facts = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                evaluation.settle_time_ms,
+                10_000,
+            );
+            // Preserve the recorded points without caching today's proposal
+            // between historical trials as if it had already been tested.
+            runtime.remember_damping_failure(60, facts);
+            last_facts = Some(facts);
         }
+        assert!(runtime.prepare_fresh_failure_proposal_from_evidence(60, last_facts.unwrap()));
         let next = runtime.candidate_profile.unwrap().points[0].unwrap();
         assert_eq!(next.brake_distance_centi_c, 2_328);
         assert_eq!(next.approach_damping_exponent_permille, 2_500);
@@ -6442,7 +6484,7 @@ mod tests {
             // Each winner must retain its own braking or damping evidence.
             assert_eq!(
                 next.approach_damping_exponent_permille,
-                if predicted_wins { 1_500 } else { 2_500 }
+                if predicted_wins { 1_500 } else { 2_000 }
             );
             assert_eq!(
                 next.brake_distance_centi_c,
@@ -6721,7 +6763,7 @@ mod tests {
         assert_eq!(facts.hold_max_output_permille, Some(60));
         assert_eq!(facts.hold_max_below_c, Some(0.49));
         let expected = ThermalControlProfilePointConfig {
-            approach_damping_exponent_permille: 2_120,
+            approach_damping_exponent_permille: 2_000,
             ..previous
         };
         assert_eq!(tune_point(previous, facts), expected);
@@ -6897,7 +6939,7 @@ mod tests {
         assert_eq!(facts.hold_max_below_c, Some(0.36));
         assert_eq!(facts.over_c, 2.61);
         let expected = ThermalControlProfilePointConfig {
-            approach_damping_exponent_permille: 2_110,
+            approach_damping_exponent_permille: 2_000,
             ..previous
         };
         assert_eq!(tune_point(previous, facts), expected);

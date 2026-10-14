@@ -390,7 +390,7 @@ fn earlier_braking_candidate(
 }
 
 fn high_side_damping_step(overshoot_c: f64) -> u16 {
-    round_positive((overshoot_c - 1.5).max(0.5) * 1_000.0).clamp(1_000, 1_500)
+    round_positive((overshoot_c - 1.5).max(0.5) * 1_000.0).clamp(500, 1_000)
 }
 
 fn hold_off_after_entry(evidence: TuneEvidence) -> bool {
@@ -2559,7 +2559,7 @@ mod tests {
         assert_eq!(
             tuned,
             ThermalControlProfilePointConfig {
-                approach_damping_exponent_permille: 2_120,
+                approach_damping_exponent_permille: 2_000,
                 ..previous
             }
         );
@@ -2704,7 +2704,7 @@ mod tests {
             ..evidence(60)
         };
         let expected = ThermalControlProfilePointConfig {
-            approach_damping_exponent_permille: 2_500,
+            approach_damping_exponent_permille: 2_000,
             ..previous
         };
         assert_eq!(tune_point(previous, facts), expected);
@@ -2751,7 +2751,7 @@ mod tests {
             ..previous
         };
         assert!(coasting_high_side_candidate(saturated, facts).is_none());
-        for (overshoot_c, step) in [(1.55, 1_000), (2.62, 1_120), (20.0, 1_500)] {
+        for (overshoot_c, step) in [(1.55, 500), (2.12, 620), (2.62, 1_000), (20.0, 1_000)] {
             let tuned = coasting_high_side_candidate(
                 previous,
                 TuneEvidence {
@@ -2795,7 +2795,7 @@ mod tests {
             ..evidence(60)
         };
         let expected = ThermalControlProfilePointConfig {
-            approach_damping_exponent_permille: 3_000,
+            approach_damping_exponent_permille: 2_500,
             ..previous
         };
         assert_eq!(tune_point(previous, facts), expected);
