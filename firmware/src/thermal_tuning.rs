@@ -3452,6 +3452,7 @@ impl ThermalTuningRuntime {
         self.preview_receipt = None;
         self.save_receipt = None;
         self.candidate_profile = None;
+        self.proposed_points.clear();
         self.observed_hold_failures.clear();
         self.observed_damping_failures.clear();
         self.batch_current_profile = None;
@@ -6021,6 +6022,41 @@ mod tests {
 
     fn started_single_target_runtime() -> ThermalTuningRuntime {
         started_runtime_with_profile(profile_with_targets(&[60]))
+    }
+
+    #[test]
+    fn restarted_run_can_propose_a_point_tested_only_in_the_previous_run() {
+        let original = profile_with_targets(&[60]);
+        let request = || ThermalTuningStart {
+            run_id: id("restart-run"),
+            candidate_id: id("restart-candidate"),
+            candidate_hash: hash("restart-hash"),
+            power_class: ThermalTuningPowerClass::Pps5a,
+            targets: &[60],
+            pps_ready: true,
+            thermal_model_available: true,
+            calibration_conflict: false,
+            candidate_profile: Some(original),
+        };
+        let mut proposed = original;
+        proposed.points[0].as_mut().unwrap().brake_distance_centi_c += 40;
+        for canceled in [true, false] {
+            let mut runtime = ThermalTuningRuntime::new();
+            runtime.start(request()).unwrap();
+            runtime.candidate_profile = Some(proposed);
+            assert!(runtime.record_fresh_proposal(Some(original)));
+            assert!(!runtime.record_fresh_proposal(Some(original)));
+            if canceled {
+                runtime.cancel("host interrupted").unwrap();
+            } else {
+                runtime.fail("target budget exhausted");
+            }
+            runtime.start(request()).unwrap();
+            runtime.candidate_profile = Some(proposed);
+            assert!(runtime.record_fresh_proposal(Some(original)));
+            assert!(!runtime.record_fresh_proposal(Some(original)));
+            assert_eq!(runtime.accepted_target_mask, 0);
+        }
     }
 
     #[test]
