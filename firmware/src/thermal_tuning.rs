@@ -1413,13 +1413,13 @@ impl ThermalTuningRuntime {
             return false;
         };
         self.remember_damping_failure(target_c, evidence);
-        if self.prepare_late_stability_proposal(original, target_c, evidence) {
-            return true;
-        }
         if damping_failure_side(evidence).is_some()
             && (self.prepare_damping_bracket(original)
                 || self.prepare_failure_bracket(original, FailureBracketAxis::Braking))
         {
+            return true;
+        }
+        if self.prepare_late_stability_proposal(original, target_c, evidence) {
             return true;
         }
         if self.prepare_in_band_hold_baseline(original, target_c, evidence) {
@@ -1486,22 +1486,7 @@ impl ThermalTuningRuntime {
         // rejected samples or a PPS transition postpone the continuous-window
         // start by a small amount. Raise the Approach handoff temperature by
         // one bounded brake step; do not alter Hold or waive the 10 s gate.
-        if !evidence.tunable_stop
-            || !evidence.full_speed_failed
-            || evidence.stable_window_verified
-            || evidence.hold_sample_count < 2
-            || evidence.overshoot_c > 1.5
-            || evidence.hold_p2p_c > 3.0
-            || evidence.under_c > 1.5
-            || evidence.over_c > 1.5
-            || evidence.first_band_exit_centi_c.is_some()
-            || evidence
-                .first_hold_after_warmup_ms
-                .is_none_or(|time| time > evidence.settle_limit_ms)
-            || evidence
-                .stable_window_after_warmup_ms
-                .is_none_or(|time| time <= evidence.settle_limit_ms)
-        {
+        if !late_stability_handoff_failure(evidence) {
             return false;
         }
         let Some(index) = original
@@ -3801,6 +3786,24 @@ fn weighted_braking_value(
     Some(high.point.brake_distance_centi_c + offset)
 }
 
+fn late_stability_handoff_failure(evidence: TuneEvidence) -> bool {
+    evidence.tunable_stop
+        && evidence.full_speed_failed
+        && !evidence.stable_window_verified
+        && evidence.hold_sample_count >= 2
+        && evidence.overshoot_c <= 1.5
+        && evidence.hold_p2p_c <= 3.0
+        && evidence.under_c <= 1.5
+        && evidence.over_c <= 1.5
+        && evidence.first_band_exit_centi_c.is_none()
+        && evidence
+            .first_hold_after_warmup_ms
+            .is_some_and(|time| time <= evidence.settle_limit_ms)
+        && evidence
+            .stable_window_after_warmup_ms
+            .is_some_and(|time| time > evidence.settle_limit_ms)
+}
+
 fn damping_failure_side(evidence: TuneEvidence) -> Option<bool> {
     if evidence.target_c > 150
         || !evidence.tunable_stop
@@ -3819,7 +3822,8 @@ fn damping_failure_side(evidence: TuneEvidence) -> Option<bool> {
         && evidence.over_c > 1.5
     {
         Some(true)
-    } else if unobserved_low_side_failure(evidence)
+    } else if late_stability_handoff_failure(evidence)
+        || unobserved_low_side_failure(evidence)
         || (evidence.hold_sample_count < 3
             && evidence.first_band_exit_centi_c.is_none()
             && evidence.overshoot_c <= 0.5
@@ -4217,6 +4221,46 @@ mod tests {
     }
 
     #[test]
+    fn captured_late_stability_failure_refines_the_same_run_braking_interval() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "thermal_tuning_late_stability_bracket.fixture.json"
+        ))
+        .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let mut last_facts = None;
+        for (index, trial) in fixture["trials"].as_array().unwrap().iter().enumerate() {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            let facts = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                evaluation.settle_time_ms,
+                10_000,
+            );
+            if index == 0 {
+                assert_eq!(facts.stable_window_after_warmup_ms, Some(10_012));
+                assert!(facts.hold_sample_count >= 2);
+                assert_eq!(facts.first_band_exit_centi_c, None);
+                assert!(!evaluation.passes);
+            }
+            runtime.remember_damping_failure(60, facts);
+            last_facts = Some(facts);
+        }
+        let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(previous.brake_distance_centi_c, 2_426);
+        assert!(runtime.prepare_fresh_failure_proposal_from_evidence(60, last_facts.unwrap()));
+        assert_eq!(
+            runtime.candidate_profile.unwrap().points[0].unwrap(),
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 2_446,
+                ..previous
+            }
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
+        assert!(runtime.stable_window_verified_at_ms.is_none());
+    }
+
+    #[test]
     fn captured_braking_errors_refine_the_same_run_interval() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("thermal_tuning_weighted_braking.fixture.json"))
@@ -4263,6 +4307,101 @@ mod tests {
             }
         );
         assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
+    fn captured_late_stability_proposal_prefers_the_existing_failed_interval() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "thermal_tuning_late_stability_bracket.fixture.json"
+        ))
+        .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let mut last_facts = None;
+        for index in [1, 0] {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, &fixture["trials"][index]);
+            let facts = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                evaluation.settle_time_ms,
+                10_000,
+            );
+            runtime.remember_damping_failure(60, facts);
+            last_facts = Some(facts);
+        }
+        let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(previous.brake_distance_centi_c, 2_466);
+        assert!(runtime.prepare_fresh_failure_proposal_from_evidence(60, last_facts.unwrap()));
+        assert_eq!(
+            runtime.candidate_profile.unwrap().points[0].unwrap(),
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 2_446,
+                ..previous
+            }
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
+    fn captured_late_stability_failure_requires_real_timely_hold_and_no_band_exit() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "thermal_tuning_late_stability_bracket.fixture.json"
+        ))
+        .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let evaluation = replay_damping_bracket_trial(&mut runtime, &fixture["trials"][0]);
+        let facts = runtime.candidate_failure_evidence(
+            60,
+            evaluation.max_overshoot_centi_c,
+            evaluation.hold_peak_to_peak_centi_c,
+            evaluation.settle_time_ms,
+            10_000,
+        );
+        assert_eq!(damping_failure_side(facts), Some(false));
+        assert_eq!(braking_failure_weight(facts, false), None);
+        for invalid in [
+            TuneEvidence {
+                tunable_stop: false,
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+            TuneEvidence {
+                hold_sample_count: 1,
+                ..facts
+            },
+            TuneEvidence {
+                first_band_exit_centi_c: Some(6_152),
+                ..facts
+            },
+            TuneEvidence {
+                first_hold_after_warmup_ms: None,
+                ..facts
+            },
+            TuneEvidence {
+                first_hold_after_warmup_ms: Some(10_001),
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_after_warmup_ms: None,
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_after_warmup_ms: Some(10_000),
+                ..facts
+            },
+        ] {
+            assert!(!late_stability_handoff_failure(invalid), "{invalid:?}");
+        }
+        assert_eq!(
+            damping_failure_side(TuneEvidence {
+                approach_output_range: Some((0, 1_000)),
+                ..facts
+            }),
+            None
+        );
     }
 
     #[test]
