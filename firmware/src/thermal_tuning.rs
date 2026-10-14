@@ -1980,7 +1980,7 @@ impl ThermalTuningRuntime {
             stable_window_verified: self.stable_window_verified_at_ms.is_some(),
             first_band_observed: self.first_band_elapsed_ms.is_some(),
             first_band_exit_centi_c: self.first_band_exit_centi_c,
-            deadline_temperature_centi_c: self.deadline_nearest_temperature_centi_c,
+            deadline_temperature_centi_c: self.deadline_temperature_evidence(),
         };
         if self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm {
             // Reconstruct the frozen host stage's Celsius differences before
@@ -2832,6 +2832,16 @@ impl ThermalTuningRuntime {
         }
     }
 
+    fn deadline_temperature_evidence(&self) -> Option<i16> {
+        // Use the same maximum observation gap as the stable-window witness.
+        // A formerly accepted value several seconds before the deadline is
+        // not evidence of the temperature at that deadline, even when every
+        // later held value is valid for conservative control.
+        (self.deadline_nearest_distance_ms <= 1_000)
+            .then_some(self.deadline_nearest_temperature_centi_c)
+            .flatten()
+    }
+
     fn hold_output_percentile(&self, percentile: f64) -> Option<f64> {
         if self.hold_output_count == 0 {
             return None;
@@ -2924,7 +2934,7 @@ impl ThermalTuningRuntime {
                 )
             } else if self.first_band_elapsed_ms.is_some() {
                 (0.0, 0.0)
-            } else if let Some(deadline_temp) = self.deadline_nearest_temperature_centi_c {
+            } else if let Some(deadline_temp) = self.deadline_temperature_evidence() {
                 let value = i32::from(deadline_temp);
                 if value < lower || value > upper {
                     (
@@ -3959,6 +3969,54 @@ mod tests {
 
     use super::*;
     use crate::memory::{ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig};
+
+    #[test]
+    fn captured_guarded_deadline_cannot_create_a_low_side_bracket() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_guarded_deadline.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        for (index, trial) in fixture["trials"].as_array().unwrap().iter().enumerate() {
+            let evaluation = replay_damping_bracket_trial(&mut runtime, trial);
+            let facts = runtime.candidate_failure_evidence(
+                60,
+                evaluation.max_overshoot_centi_c,
+                evaluation.hold_peak_to_peak_centi_c,
+                evaluation.settle_time_ms,
+                10_000,
+            );
+            if index == 0 {
+                assert_eq!(damping_failure_side(facts), Some(true));
+                runtime.remember_damping_failure(60, facts);
+            } else {
+                assert_eq!(runtime.deadline_nearest_distance_ms, 5_020);
+                assert_eq!(facts.deadline_temperature_centi_c, None, "{facts:?}");
+                assert_eq!(damping_failure_side(facts), None, "{facts:?}");
+                runtime.remember_damping_failure(60, facts);
+                assert_eq!(runtime.observed_damping_failures.len(), 1);
+                assert!(!runtime.prepare_damping_bracket(runtime.candidate_profile.unwrap()));
+            }
+        }
+        assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
+    fn deadline_witness_requires_a_nearby_accepted_sample() {
+        for (elapsed_ms, fresh, expected) in [
+            (9_000, true, Some(5_700)),
+            (11_000, true, Some(5_700)),
+            (8_999, true, None),
+            (11_001, true, None),
+            (10_000, false, None),
+        ] {
+            let mut runtime = started_single_target_runtime();
+            runtime.warmup_exited_at_ms = Some(0);
+            let mut observed = sample(elapsed_ms, ThermalTuningPhase::Approach, 5_700);
+            observed.measurement_accepted = Some(fresh);
+            runtime.update_trial_metrics(&observed, 60);
+            assert_eq!(runtime.deadline_temperature_evidence(), expected);
+        }
+    }
 
     #[test]
     fn captured_timely_hold_with_late_pps_window_keeps_searching_approach() {
@@ -7017,6 +7075,7 @@ mod tests {
         runtime.candidate_profile = Some(original);
         runtime.candidate_hash = hash_profile(&original);
         runtime.deadline_nearest_temperature_centi_c = Some(23_700);
+        runtime.deadline_nearest_distance_ms = 0;
         runtime.approach_output_count = 8;
         runtime.approach_output_histogram[1_000] = 8;
         runtime.approach_slopes_c_per_s.push(0.2).unwrap();
