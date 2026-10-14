@@ -14690,6 +14690,35 @@ fn fusb302b_capability_refresh_preserves_terminal_fixed_pd_disarm() {
 }
 
 #[test]
+fn complete_idle_clears_failed_pps_adapter_only_with_observed_capability() {
+    for current_ma in [3_000, 5_000] {
+        let (power, _) = production_power_fixture(current_ma);
+        let capabilities = adjustable_capabilities_from_view(power.source_capabilities);
+        let failed = HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::AdjustableRequestFailed,
+            fixed_request_confirmed: false,
+            fixed_request: ch224q::VoltageRequest::V12,
+            terminal_fixed_pd_disarmed: true,
+        };
+        let mut backend = failed;
+        assert!(!reset_idle_failed_pps_backend(&mut backend, None));
+        assert_eq!(backend, failed);
+        assert!(reset_idle_failed_pps_backend(&mut backend, capabilities));
+        assert!(matches!(
+            backend,
+            HeaterPowerBackend::PpsMos {
+                capability_max_ma,
+                terminal_fixed_pd_disarmed: true,
+                settle_until_ms: None,
+                next_request_at_ms: 0,
+                ..
+            } if capability_max_ma == current_ma
+        ));
+        assert!(!reset_idle_failed_pps_backend(&mut backend, capabilities));
+    }
+}
+
+#[test]
 fn fusb302b_rediscovery_preserves_terminal_fixed_pd_disarm() {
     let previous = HeaterPowerBackend::PpsMos {
         pps_min_mv: 5_500,
@@ -15982,6 +16011,44 @@ fn tuning_waits_for_working_pps_after_a_ready_fixed_idle_contract() {
         tuning_pd_wait_decision(ready, Some(100), 300, None, false),
         TuningPdWaitDecision::Ready
     );
+}
+
+#[test]
+fn automatic_pps_progress_requires_current_heating_or_tuning_intent() {
+    for current_ma in [3_000, 5_000] {
+        let (mut power, _) = production_power_fixture(current_ma);
+        let active = power.active.as_mut().unwrap();
+        active.mode = PdContractRequestMode::Fixed;
+        active.voltage_mv = 5_000;
+        active.operating_current_ma = 1_000;
+        for protocol in [
+            PowerProtocol::Ready,
+            PowerProtocol::WaitingForAccept,
+            PowerProtocol::WaitingForPsRdy,
+        ] {
+            power.protocol = protocol;
+            for ticket_pending in [false, true] {
+                assert!(
+                    !automatic_pps_progress_allowed(power, ticket_pending, false, false, false),
+                    "standby must not initiate or preserve a thermal request: {current_ma}mA {protocol:?} ticket={ticket_pending}"
+                );
+                assert!(automatic_pps_progress_allowed(
+                    power,
+                    ticket_pending,
+                    true,
+                    true,
+                    false
+                ));
+                assert!(automatic_pps_progress_allowed(
+                    power,
+                    ticket_pending,
+                    false,
+                    false,
+                    true
+                ));
+            }
+        }
+    }
 }
 
 #[test]

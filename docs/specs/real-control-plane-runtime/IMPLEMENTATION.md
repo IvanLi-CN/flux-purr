@@ -7,6 +7,7 @@
 - 产品identity从硬件复位寄存器返回本次启动的`resetReason`，支持启动后的重复查询，USB与LAN共用同一identity构造；devd原样保留。缺省与mock省略该可选字段，旧协议读回仍可用。这个诊断字段用于保留复位事实，不改变看门狗、供热许可或PD策略。
 
 - Fresh working-start intent survives ordinary Fixed-to-working negotiation while physical heat remains off until working power is confirmed. Contract loss, stale status, faults and explicit cancellation discard it without replay.
+- 自动热控PPS推进必须有当前加热或调优意图；观察到Fixed待机合同和PPS能力不能自行启动热控请求。完全待机清理遗留热控ticket，并仅在已观察到有效APDO时恢复失败输出适配器的PPS候选状态；它不发送工作请求、不解除终态安全锁、不开启MOS，也不把失败试验改为通过。新显式意图仍须重新确认工作合同。
 - `net::start_wifi_driver` uses the production `async_start::after_resource_idle` helper and the initialized shared I2C0 mutex to serialize configuration and the synchronous first poll of `WifiController::start_async` with ongoing PD/EEPROM transactions. The original future remains responsible for driver start events and timeout results after the mutex is released. Five native regressions cover exclusion, bus availability during event waits, results/errors and cancellation; product HIL covers cold first-radio activation under protocol-confirmed Fixed 5V and independent source telemetry.
 - Implementation: Web + browser Web Serial + `devd` + CLI + USB JSONL + firmware `net_http` runtime 已覆盖 identity、network、status、runtime mutation、artifact verify、flash dry-run、real flash 与 monitor event 的真实传输路径
 - Lifecycle: active

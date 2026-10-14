@@ -166,6 +166,20 @@ pub(crate) fn pd_contract_transition_in_progress(power_state: PowerState) -> boo
             })
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_pps_progress_allowed(
+    power_state: PowerState,
+    ticket_pending: bool,
+    automatic_start_allowed: bool,
+    heater_enabled: bool,
+    tuning_armed: bool,
+) -> bool {
+    (heater_enabled || tuning_armed)
+        && (ticket_pending
+            || pd_contract_transition_in_progress(power_state)
+            || automatic_start_allowed)
+}
+
 #[cfg(target_arch = "xtensa")]
 fn runtime_tuning_power_decision(
     state: &RuntimeLoopState,
@@ -2083,10 +2097,13 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
             state.manual_pps_state,
         ),
     );
-    let allow_pending_pps_progress = (state.pending_automatic_pps.is_some()
-        || pd_contract_transition_in_progress(state.power_state)
-        || automatic_pps_start_allowed)
-        && !thermal_plant_calibration_running
+    let allow_pending_pps_progress = automatic_pps_progress_allowed(
+        state.power_state,
+        state.pending_automatic_pps.is_some(),
+        automatic_pps_start_allowed,
+        state.ui_state.heater_enabled,
+        state.thermal_tuning.armed,
+    ) && !thermal_plant_calibration_running
         && state.current_rtd_fault.is_none()
         && state.heater_controller.fault_latched().is_none()
         && !state.cooling_disabled_lock_latched
@@ -2641,6 +2658,19 @@ fn runtime_restore_idle_power(state: &mut RuntimeLoopState, elapsed_ms: u64) {
         }
         state.idle_next_attempt_ms = elapsed_ms;
         return;
+    }
+    // Standby supersedes thermal negotiation. Its ticket and failed output
+    // adapter must not leak into the next explicit heating/tuning intent.
+    if let Some(pending) = state.pending_automatic_pps.take() {
+        state.pd_port.discard_ticket(pending.ticket);
+        reset_automatic_heater_backend(&mut state.heater_power_backend);
+        state.hold_pps_governor.reset();
+    }
+    if state.pd_port.controller_kind() == ControllerKind::Fusb302b {
+        reset_idle_failed_pps_backend(
+            &mut state.heater_power_backend,
+            state.last_fusb302b_power_capabilities,
+        );
     }
     if let Some(ticket) = state.idle_power_ticket
         && state.pd_port.try_take_ticket(ticket).is_some()

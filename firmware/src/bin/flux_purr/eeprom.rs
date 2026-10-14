@@ -2521,6 +2521,28 @@ pub(crate) fn refresh_fusb302b_heater_power_backend(
     refreshed
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn reset_idle_failed_pps_backend(
+    backend: &mut HeaterPowerBackend,
+    capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+) -> bool {
+    if !matches!(
+        *backend,
+        HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::AdjustableRequestFailed,
+            ..
+        }
+    ) {
+        return false;
+    }
+    let refreshed = refresh_fusb302b_heater_power_backend(*backend, capabilities);
+    if !matches!(refreshed, HeaterPowerBackend::PpsMos { .. }) {
+        return false;
+    }
+    *backend = refreshed;
+    true
+}
+
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn apply_heater_duty<PWM>(
     heater_pwm: &mut PWM,

@@ -69,6 +69,7 @@
   promotion, or user acceptance operation exists in the control plane. A successful automatic
   model calibration MUST leave the heater disarmed; a later explicit heater arm is the user's
   separate runtime choice.
+- 自动热控PPS请求必须绑定当前显式加热或调优意图；仅观察到Fixed待机合同及PPS能力不足以发起或保留热控请求。完全待机必须清理遗留自动热控ticket；在有效APDO仍已知时可重置失败输出适配器，但必须保留终态安全锁，不得自动重新开热或改写试验失败。后续新意图独立等待并确认工作合同，不能继承旧请求计时。
 - The protected model-calibration job is the only control-plane path allowed to heat while no
   active model exists. It requires a PPS APDO covering `20V` at `>=3A`; cancellation, disconnect,
   unsupported source, sensor fault, or malformed observation MUST immediately remove that
