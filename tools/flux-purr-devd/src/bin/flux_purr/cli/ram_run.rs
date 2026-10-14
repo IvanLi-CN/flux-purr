@@ -4224,15 +4224,13 @@ mod tests {
 
     #[test]
     fn fan_pd_policy_validation_keeps_first_tied_fallback_pdo() {
-        let fixed = expected_fan_pd_selection(&serde_json::json!([246210, 246210]))
-            .unwrap()
-            .unwrap();
+        let fixed_raw = vec![serde_json::json!(246210), serde_json::json!(246210)];
+        let fixed = expected_fan_pd_selection(&fixed_raw).unwrap().unwrap();
         assert_eq!(fixed.position, 1);
 
         let pps = (3u64 << 30) | (120u64 << 17) | (50u64 << 8) | 80;
-        let pps = expected_fan_pd_selection(&serde_json::json!([pps, pps]))
-            .unwrap()
-            .unwrap();
+        let pps_raw = vec![serde_json::json!(pps), serde_json::json!(pps)];
+        let pps = expected_fan_pd_selection(&pps_raw).unwrap().unwrap();
         assert_eq!(pps.position, 1);
     }
 
