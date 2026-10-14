@@ -1391,44 +1391,49 @@ impl ThermalTuningRuntime {
     ) -> Option<bool> {
         // A minimum response horizon cannot absorb the narrow failed tradeoff.
         // Explore braking from the actual high-side witness, retaining damping.
-        let mut proposed = original;
-        proposed.points[index] = Some(ThermalControlProfilePointConfig {
-            brake_distance_centi_c: high
-                .point
-                .brake_distance_centi_c
-                .saturating_add(40)
-                .min(5_000),
-            ..high.point
-        });
-        proposed.sanitize();
-        self.candidate_profile = Some(proposed);
-        if !self.record_fresh_proposal(Some(original)) {
-            self.candidate_profile = Some(original);
-            return None;
+        // Try smaller distinct steps before treating the start-gap boundary
+        // as exhausted; no rejected proposal starts a physical experiment.
+        for step in [40, 20, 10, 5, 2, 1] {
+            let mut proposed = original;
+            proposed.points[index] = Some(ThermalControlProfilePointConfig {
+                brake_distance_centi_c: high
+                    .point
+                    .brake_distance_centi_c
+                    .saturating_add(step)
+                    .min(5_000),
+                ..high.point
+            });
+            proposed.sanitize();
+            self.candidate_profile = Some(proposed);
+            if !self.record_fresh_proposal(Some(original)) {
+                continue;
+            }
+            if self
+                .install_candidate_profile(proposed, "narrow_damping_bracket_braking")
+                .is_err()
+            {
+                self.candidate_profile = Some(original);
+                return Some(false);
+            }
+            let mut reason = TuningReason::new();
+            let _ = write!(
+                reason,
+                "narrow_damping_trials_{}_{}_minimum_horizon_brake_{}",
+                high.trial_index,
+                low.trial_index,
+                proposed.points[index].unwrap().brake_distance_centi_c
+            );
+            self.push_event(
+                ThermalTuningEventKind::Decision,
+                Some(high.point.target_temp_c),
+                Some(self.trial_index),
+                None,
+                Some(reason.as_str()),
+            );
+            return Some(true);
         }
-        if self
-            .install_candidate_profile(proposed, "narrow_damping_bracket_braking")
-            .is_err()
-        {
-            self.candidate_profile = Some(original);
-            return Some(false);
-        }
-        let mut reason = TuningReason::new();
-        let _ = write!(
-            reason,
-            "narrow_damping_trials_{}_{}_minimum_horizon_brake_{}",
-            high.trial_index,
-            low.trial_index,
-            proposed.points[index].unwrap().brake_distance_centi_c
-        );
-        self.push_event(
-            ThermalTuningEventKind::Decision,
-            Some(high.point.target_temp_c),
-            Some(self.trial_index),
-            None,
-            Some(reason.as_str()),
-        );
-        Some(true)
+        self.candidate_profile = Some(original);
+        None
     }
 
     fn failure_bracket_value(
@@ -4281,6 +4286,47 @@ mod tests {
                 runtime.candidate_profile.unwrap().points[0].unwrap(),
                 ThermalControlProfilePointConfig {
                     brake_distance_centi_c: high_point.brake_distance_centi_c + 40,
+                    ..high_point
+                }
+            );
+            assert_eq!(runtime.accepted_target_mask, 0);
+        }
+    }
+
+    #[test]
+    fn captured_narrow_damping_bracket_near_start_gap_uses_a_legal_braking_step() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_narrow_boundary.fixture.json"))
+                .unwrap();
+        let trials = fixture["trials"].as_array().unwrap();
+        for order in [[0, 1], [1, 0]] {
+            let mut runtime = started_single_target_runtime();
+            let mut last_facts = None;
+            let mut high_point = None;
+            for trial_index in order {
+                let evaluation = replay_damping_bracket_trial(&mut runtime, &trials[trial_index]);
+                if trial_index == 1 {
+                    high_point = runtime.candidate_profile.unwrap().points[0];
+                }
+                let facts = runtime.candidate_failure_evidence(
+                    60,
+                    evaluation.max_overshoot_centi_c,
+                    evaluation.hold_peak_to_peak_centi_c,
+                    evaluation.settle_time_ms,
+                    10_000,
+                );
+                assert!(damping_failure_side(facts).is_some(), "{facts:?}");
+                runtime.remember_damping_failure(60, facts);
+                last_facts = Some(facts);
+            }
+            let high_point = high_point.unwrap();
+            assert_eq!(high_point.brake_distance_centi_c, 2_476);
+            assert_eq!(high_point.approach_damping_exponent_permille, 1_218);
+            assert!(runtime.prepare_fresh_failure_proposal_from_evidence(60, last_facts.unwrap()));
+            assert_eq!(
+                runtime.candidate_profile.unwrap().points[0].unwrap(),
+                ThermalControlProfilePointConfig {
+                    brake_distance_centi_c: 2_496,
                     ..high_point
                 }
             );
