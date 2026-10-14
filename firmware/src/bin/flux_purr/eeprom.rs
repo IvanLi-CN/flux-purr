@@ -2551,21 +2551,22 @@ pub(crate) fn apply_heater_duty<PWM>(
 ) where
     PWM: SetDutyCycle,
 {
-    let effective_duty_percent = if heater_permit_is_active(Instant::now().as_millis()) {
-        duty_percent
-    } else {
-        0
-    };
-    if effective_duty_percent == *last_duty_percent {
-        return;
-    }
-
-    let _ = heater_pwm.set_duty_cycle_percent(effective_duty_percent);
-    info!(
-        "heater output -> duty={=u8}% prev={=u8}%",
-        effective_duty_percent, *last_duty_percent,
+    let previous_percent = *last_duty_percent;
+    let _ = apply_permitted_heater_duty(
+        heater_pwm,
+        duty_percent,
+        last_duty_percent,
+        heater_permit_is_active(Instant::now().as_millis()),
     );
-    *last_duty_percent = effective_duty_percent;
+    // The gate rechecks the permit under its physical-output lock. Report that
+    // result if authorization changed between the outer check and the write.
+    *last_duty_percent = HeaterPwmGate::applied_duty_percent();
+    if previous_percent != *last_duty_percent {
+        info!(
+            "heater output -> duty={=u8}% prev={=u8}%",
+            *last_duty_percent, previous_percent,
+        );
+    }
 }
 
 #[cfg(target_arch = "xtensa")]

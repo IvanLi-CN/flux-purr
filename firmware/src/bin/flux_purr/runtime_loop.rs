@@ -266,6 +266,7 @@ pub(crate) fn tuning_pd_wait_decision(
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
     let mut needs_redraw = false;
+    state.last_heater_duty = HeaterPwmGate::applied_duty_percent();
     // Display I/O consumes the same watch receiver while keeping the physical
     // heater interlock current. Its notification can already be consumed when
     // this loop resumes, so refresh the cached state independently of changed().
@@ -2155,7 +2156,9 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         now_ms: elapsed_ms,
     })
     .await;
-    // Model input follows the applied backend output, not the logical request.
+    // Model input follows the gate after any asynchronous PD disarm, not the
+    // logical request or the output cached before an awaited backend operation.
+    state.last_heater_duty = HeaterPwmGate::applied_duty_percent();
     let applied_power_mw = if state.last_heater_duty == 0 {
         Some(0.0)
     } else {
@@ -3045,7 +3048,7 @@ fn runtime_record_thermal_tuning_sample(
             .unwrap_or_else(|| state.heater_power_backend.pd_request_mv()),
         pps_power_ceiling_mv: u32::from(adjustable_max_mv),
         heater_requested_output_permille: u16::from(requested_duty_percent).saturating_mul(10),
-        heater_output_permille: u16::from(state.last_heater_duty).saturating_mul(10),
+        heater_output_permille: u16::from(HeaterPwmGate::applied_duty_percent()).saturating_mul(10),
         measurement_valid: temperature.measurement_valid,
         measurement_accepted: Some(temperature.measurement_accepted),
         phase,

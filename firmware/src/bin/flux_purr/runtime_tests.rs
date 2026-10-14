@@ -2,6 +2,42 @@ use super::*;
 use flux_purr_firmware::thermal_tuning::ThermalTuningPhase;
 
 #[test]
+fn unchanged_heater_request_recovers_after_an_asynchronous_pd_disarm() {
+    struct Pwm {
+        applied: u16,
+    }
+    impl embedded_hal::pwm::ErrorType for Pwm {
+        type Error = core::convert::Infallible;
+    }
+    impl embedded_hal::pwm::SetDutyCycle for Pwm {
+        fn max_duty_cycle(&self) -> u16 {
+            100
+        }
+        fn set_duty_cycle(&mut self, duty: u16) -> Result<(), Self::Error> {
+            self.applied = duty;
+            Ok(())
+        }
+    }
+
+    // The PD task can clear the pin between front-panel control frames without
+    // updating the front panel's cached last output.
+    let mut pwm = Pwm { applied: 0 };
+    let mut last_percent = 0;
+    apply_permitted_heater_duty(&mut pwm, 100, &mut last_percent, true).unwrap();
+    assert_eq!(pwm.applied, 100);
+    pwm.applied = 0;
+    assert_eq!(last_percent, 100);
+
+    apply_permitted_heater_duty(&mut pwm, 100, &mut last_percent, true).unwrap();
+    assert_eq!(pwm.applied, 100, "a fresh permit must restore full Warmup");
+    apply_permitted_heater_duty(&mut pwm, 100, &mut last_percent, false).unwrap();
+    assert_eq!(pwm.applied, 0, "a missing permit must still fail closed");
+    assert_eq!(last_percent, 0);
+    apply_permitted_heater_duty(&mut pwm, 100, &mut last_percent, true).unwrap();
+    assert_eq!(pwm.applied, 100);
+}
+
+#[test]
 fn vin_adc_range_covers_the_board_and_confirmed_pps_input() {
     // Espressif specifies 1750mV at 6dB and 3100mV at 11dB. The actual
     // board divider, rather than the RTD range, defines VIN's requirement.

@@ -2,6 +2,24 @@
 use super::*;
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn apply_permitted_heater_duty<PWM>(
+    heater_pwm: &mut PWM,
+    requested_percent: u8,
+    last_percent: &mut u8,
+    permit_active: bool,
+) -> Result<(), PWM::Error>
+where
+    PWM: embedded_hal::pwm::SetDutyCycle,
+{
+    let effective_percent = if permit_active { requested_percent } else { 0 };
+    // The PD task can clear the physical pin independently of this cache.
+    // Reassert every permitted frame, even when the requested duty is unchanged.
+    heater_pwm.set_duty_cycle_percent(effective_percent)?;
+    *last_percent = effective_percent;
+    Ok(())
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const AUTOMATIC_PPS_TICKET_WAIT_MS: u64 = FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS + 500;
 
 #[cfg(any(target_arch = "xtensa", test))]

@@ -77,7 +77,7 @@ pub(crate) fn control_runtime_status_context(
         heater_power_backend: *context.heater_power_backend,
         pid_snapshot: context.pid_snapshot,
         heater_control_timing: context.heater_control_timing,
-        heater_physical_output_percent: context.last_heater_duty,
+        heater_physical_output_percent: HeaterPwmGate::applied_duty_percent(),
         manual_pps,
         fan_command: context.fan_command,
         fan_working_power_pending: context.fan_working_power_pending,

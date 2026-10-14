@@ -405,6 +405,9 @@ pub(crate) static PD_HEATER_PERMIT: AtomicU8 = AtomicU8::new(0);
 pub(crate) static PD_HEATER_PERMIT_EXPIRES_AT_MS: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(target_arch = "xtensa")]
+static APPLIED_HEATER_DUTY_PERCENT: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct HeaterPwmGate;
 
@@ -412,6 +415,10 @@ pub(crate) struct HeaterPwmGate;
 impl HeaterPwmGate {
     pub(crate) const fn new() -> Self {
         Self
+    }
+
+    pub(crate) fn applied_duty_percent() -> u8 {
+        APPLIED_HEATER_DUTY_PERCENT.load(Ordering::Acquire)
     }
 
     pub(crate) fn attach(pwm: RawHeaterPwm) {
@@ -452,9 +459,17 @@ impl SetDutyCycle for HeaterPwmGate {
                 PD_HEATER_PERMIT.store(0, Ordering::Release);
                 0
             };
-            if let Some(pwm) = slot.borrow_mut().as_mut() {
-                let _ = pwm.set_duty_cycle(effective_duty);
+            let mut storage = slot.borrow_mut();
+            let Some(pwm) = storage.as_mut() else {
+                APPLIED_HEATER_DUTY_PERCENT.store(0, Ordering::Release);
+                return;
+            };
+            if pwm.set_duty_cycle(effective_duty).is_err() {
+                return;
             }
+            let maximum = u32::from(pwm.max_duty_cycle()).max(1);
+            let percent = (u32::from(effective_duty) * 100 + maximum / 2) / maximum;
+            APPLIED_HEATER_DUTY_PERCENT.store(percent.min(100) as u8, Ordering::Release);
         });
         Ok(())
     }
