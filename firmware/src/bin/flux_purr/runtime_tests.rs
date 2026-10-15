@@ -427,6 +427,27 @@ fn pending_pd_terminal_model_covers_confirmation_failure_and_transition_waits() 
 }
 
 #[test]
+fn automatic_pd_ticket_confirmation_requires_the_requested_contract() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+    let request = PdContractRequest::pps(17_500, 3_000).unwrap();
+    let contract = source.select_exact_contract(request).unwrap();
+    let active = ConfirmedActiveContract::from_private_contract(contract, source).unwrap();
+
+    assert!(ticket_outcome_confirms_request(
+        TicketOutcome::Confirmed(active),
+        request,
+    ));
+    assert!(!ticket_outcome_confirms_request(
+        TicketOutcome::Confirmed(active),
+        PdContractRequest::pps(18_000, 3_000).unwrap(),
+    ));
+    assert!(!ticket_outcome_confirms_request(
+        TicketOutcome::TimedOut,
+        request,
+    ));
+}
+
+#[test]
 fn pd_snapshot_authorization_expires_after_the_service_heartbeat_window() {
     assert!(pd_snapshot_is_fresh(1_000, 1_000 + PD_SNAPSHOT_MAX_AGE_MS));
     assert!(!pd_snapshot_is_fresh(1_000, 1_001 + PD_SNAPSHOT_MAX_AGE_MS));
@@ -1110,11 +1131,13 @@ fn ordinary_idle_replaces_cooling_fixed_with_lowest_adequate_fixed() {
     assert!(!preferred_idle_contract_confirmed(None, source));
     assert!(!working_fixed_contract_confirmed(
         Some(observation(12_000, 420)),
-        12_000
+        12_000,
+        3_000
     ));
     assert!(working_fixed_contract_confirmed(
         Some(observation(12_000, 3_000)),
-        12_000
+        12_000,
+        3_000
     ));
     source.fixed[0] = Some((5_000, 500));
     assert!(preferred_idle_contract_confirmed(
@@ -1544,6 +1567,164 @@ fn ordinary_heater_restart_requires_exact_live_working_pps_confirmation() {
 }
 
 #[test]
+fn automatic_pps_recovery_rearms_after_a_pd_transition_without_voltage_change() {
+    let observation = PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 3_000,
+        contract_voltage_mv: Some(8_900),
+        contract: Contract::observed(ContractKind::Pps, 8_900, 3_000),
+    };
+
+    assert!(automatic_pps_contract_requires_recovery(
+        8_900, 8_900, 5_000, 3_000, None, false,
+    ));
+    assert!(!automatic_pps_contract_requires_recovery(
+        8_900, 8_900, 5_000, 3_000, None, true,
+    ));
+    assert!(!automatic_pps_contract_requires_recovery(
+        8_900,
+        8_900,
+        5_000,
+        3_000,
+        Some(observation),
+        false,
+    ));
+    assert!(automatic_pps_contract_requires_recovery(
+        8_900,
+        8_900,
+        5_000,
+        3_000,
+        Some(PdStatusObservation {
+            current_ma: 2_950,
+            contract: Contract::observed(ContractKind::Pps, 8_900, 2_950),
+            ..observation
+        }),
+        false,
+    ));
+}
+
+#[derive(Clone, Copy)]
+enum FakeAutomaticPpsRequestResult {
+    Pending,
+    Confirmed,
+    Failed,
+}
+
+fn fake_automatic_pps_transition_trace(
+    voltage_changed: bool,
+    mode_changed: bool,
+    safety_recovery_required: bool,
+    request_transition_pending: bool,
+    gate_duty_percent: u8,
+    blank_heater: bool,
+    result: FakeAutomaticPpsRequestResult,
+) -> Vec<&'static str> {
+    let mut trace = Vec::new();
+    if automatic_pps_transition_should_clear_pwm(
+        voltage_changed,
+        mode_changed,
+        safety_recovery_required,
+        request_transition_pending,
+        gate_duty_percent,
+        blank_heater,
+    ) {
+        trace.push("pwm-off");
+    }
+    if automatic_pps_transition_requires_request(
+        voltage_changed,
+        mode_changed,
+        safety_recovery_required,
+        request_transition_pending,
+    ) {
+        trace.push("pd-request");
+        match result {
+            FakeAutomaticPpsRequestResult::Pending => trace.push("wait"),
+            FakeAutomaticPpsRequestResult::Failed => trace.push("pause"),
+            FakeAutomaticPpsRequestResult::Confirmed => {
+                if automatic_pps_transition_should_restore_pwm(
+                    true,
+                    safety_recovery_required,
+                    blank_heater,
+                    gate_duty_percent,
+                ) {
+                    trace.push("pwm-restore");
+                }
+            }
+        }
+    }
+    trace
+}
+
+#[test]
+fn fake_automatic_pps_transition_clears_pwm_before_safety_request() {
+    assert_eq!(
+        fake_automatic_pps_transition_trace(
+            false,
+            false,
+            true,
+            false,
+            80,
+            false,
+            FakeAutomaticPpsRequestResult::Pending,
+        ),
+        vec!["pwm-off", "pd-request", "wait"]
+    );
+}
+
+#[test]
+fn fake_automatic_pps_transition_does_not_restore_after_stale_confirmation() {
+    assert_eq!(
+        fake_automatic_pps_transition_trace(
+            true,
+            false,
+            false,
+            false,
+            80,
+            true,
+            FakeAutomaticPpsRequestResult::Pending,
+        ),
+        vec!["pwm-off", "pd-request", "wait"]
+    );
+    assert!(!automatic_pps_transition_should_restore_pwm(
+        true, true, true, 80
+    ));
+}
+
+#[test]
+fn fake_automatic_pps_transition_pauses_after_failed_negotiation() {
+    assert_eq!(
+        fake_automatic_pps_transition_trace(
+            true,
+            false,
+            true,
+            false,
+            80,
+            true,
+            FakeAutomaticPpsRequestResult::Failed,
+        ),
+        vec!["pwm-off", "pd-request", "pause"]
+    );
+}
+
+#[test]
+fn fake_automatic_pps_transition_restores_after_confirmed_stable_request() {
+    assert_eq!(
+        fake_automatic_pps_transition_trace(
+            true,
+            false,
+            false,
+            false,
+            52,
+            false,
+            FakeAutomaticPpsRequestResult::Confirmed,
+        ),
+        vec!["pd-request", "pwm-restore"]
+    );
+}
+
+#[test]
 fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
     let mut backend = HeaterPowerBackend::PpsMos {
         pps_min_mv: 5_500,
@@ -1578,6 +1759,77 @@ fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
     assert_eq!(settle_until_ms, None);
     assert_eq!(next_request_at_ms, 0);
     assert!(!current_limit_fixed_request_confirmed);
+}
+
+#[test]
+fn automatic_heater_recovery_soft_start_ramps_after_a_safety_pause() {
+    assert_eq!(automatic_heater_recovery_soft_start_percent(None, 0), 100);
+    assert_eq!(
+        automatic_heater_recovery_soft_start_percent(Some(1_000), 1_000),
+        0
+    );
+    assert_eq!(
+        automatic_heater_recovery_soft_start_percent(Some(1_000), 1_500),
+        50
+    );
+    assert_eq!(
+        automatic_heater_recovery_soft_start_percent(Some(1_000), 2_000),
+        100
+    );
+    assert_eq!(
+        automatic_heater_recovery_soft_start_percent(Some(1_000), 4_000),
+        100
+    );
+}
+
+#[test]
+fn automatic_heater_recovery_stays_armed_during_zero_power_safety_pause() {
+    let started_at_ms = automatic_heater_recovery_started_at_ms(
+        None,
+        AutomaticHeaterRecoveryStateInput {
+            normal_auto: true,
+            heater_enabled: true,
+            force_output_off: false,
+            safety_paused: true,
+            requested_power_mw: 0,
+            automatic_output_was_active: true,
+            physical_duty_percent: 0,
+            now_ms: 1_000,
+        },
+    );
+    assert_eq!(started_at_ms, Some(1_000));
+
+    let started_at_ms = automatic_heater_recovery_started_at_ms(
+        started_at_ms,
+        AutomaticHeaterRecoveryStateInput {
+            normal_auto: true,
+            heater_enabled: true,
+            force_output_off: false,
+            safety_paused: true,
+            requested_power_mw: 0,
+            automatic_output_was_active: false,
+            physical_duty_percent: 0,
+            now_ms: 1_500,
+        },
+    );
+    assert_eq!(started_at_ms, Some(1_000));
+
+    assert_eq!(
+        automatic_heater_recovery_started_at_ms(
+            started_at_ms,
+            AutomaticHeaterRecoveryStateInput {
+                normal_auto: true,
+                heater_enabled: true,
+                force_output_off: false,
+                safety_paused: false,
+                requested_power_mw: 0,
+                automatic_output_was_active: false,
+                physical_duty_percent: 0,
+                now_ms: 1_600,
+            },
+        ),
+        None
+    );
 }
 
 #[test]
@@ -4925,18 +5177,18 @@ fn assert_synthetic_model_guards(
     );
     let mut unrelated_curve = memory_config.clone();
     unrelated_curve.heater_curve_transaction_id = Some(transaction.transaction_id + 1);
-    assert!(!thermal_model_heater_allowed(
+    assert!(thermal_model_heater_allowed(
         &unrelated_curve,
         CalibrationRuntimeState::default(),
         manual_pps
     ));
     let unrelated_wire = thermal_plant_runtime_wire(&unrelated_curve);
-    assert_eq!(unrelated_wire.state.as_str(), "invalid");
-    assert!(!unrelated_wire.projection_valid);
-    assert!(thermal_plant_projection_for_runtime(&unrelated_curve).is_none());
+    assert_eq!(unrelated_wire.state.as_str(), "active");
+    assert!(unrelated_wire.projection_valid);
+    assert!(thermal_plant_projection_for_runtime(&unrelated_curve).is_some());
     let mut missing_raw_curve = memory_config.clone();
     missing_raw_curve.heater_curve_raw_observations = HeaterCurveRawObservations::default();
-    assert!(!thermal_model_heater_allowed(
+    assert!(thermal_model_heater_allowed(
         &missing_raw_curve,
         CalibrationRuntimeState::default(),
         manual_pps
@@ -8656,7 +8908,7 @@ fn hold_pps_governor_keeps_the_approach_voltage_when_headroom_is_sufficient() {
 }
 
 #[test]
-fn hold_pps_governor_steps_toward_a_lower_safe_max_without_clamping() {
+fn hold_pps_governor_clamps_immediately_to_a_lower_safe_max() {
     let mut governor = HoldPpsGovernor::new();
     assert_eq!(
         governor.request_mv(HoldPpsRequestInput {
@@ -8669,7 +8921,7 @@ fn hold_pps_governor_steps_toward_a_lower_safe_max_without_clamping() {
             safe_max_mv: 6_100,
             now_ms: 0,
         }),
-        Some(18_500)
+        Some(6_100)
     );
     assert_eq!(
         governor.request_mv(HoldPpsRequestInput {
@@ -8677,12 +8929,12 @@ fn hold_pps_governor_steps_toward_a_lower_safe_max_without_clamping() {
             duty_percent: 40,
             actual_error_c: -1.0,
             filtered_slope_c_per_s: 0.05,
-            current_request_mv: 18_500,
+            current_request_mv: 6_100,
             control_floor_mv: 6_100,
             safe_max_mv: 6_100,
             now_ms: HEATER_PPS_SMALL_TRANSITION_MS,
         }),
-        Some(18_000)
+        Some(6_100)
     );
 }
 
@@ -9281,15 +9533,14 @@ fn calibrated_resistance_curve_sets_3a_plant_power_ceiling() {
     let pps5a_power_mw =
         heater_available_power_mw_for_temp(160.0, Some(21_000), Some(5_000), None, &config);
 
-    // The 20 V / 3.25 A APDO contributes its complete 65 W contract;
-    // R(T) remains part of the heater-watt estimate but does not lower the
-    // production voltage request or invent a board-current reserve.
-    assert!((64_000..=65_000).contains(&pps3a_power_mw));
+    // The selected curve is used directly and the automatic path reserves
+    // 200 mA before deriving the safe voltage and available heater power.
+    assert!((46_000..=49_000).contains(&pps3a_power_mw));
     assert!(pps5a_power_mw > 70_000);
 }
 
 #[test]
-fn production_pps_ceiling_is_the_selected_apdo_maximum_not_r_times_i() {
+fn production_pps_ceiling_uses_the_selected_resistance_and_current_budget() {
     let mut config = MemoryConfig::default();
     config.active_heater_curve.points[0] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
         temp_centi_c: 2_000,
@@ -9302,15 +9553,15 @@ fn production_pps_ceiling_is_the_selected_apdo_maximum_not_r_times_i() {
 
     assert_eq!(
         production_pps_request_ceiling_mv(215.0, 3_000, 200, 21_000, None, &config),
-        21_000
+        18_700
     );
 }
 
 #[test]
-fn pps_request_compensates_measured_path_drop_without_relaxing_plate_limit() {
+fn pps_request_path_drop_compensation_cannot_relax_the_plate_limit() {
     assert_eq!(
         heater_source_request_ceiling_mv(17_300, 17_300, 15_900, 21_000),
-        18_700
+        17_300
     );
     assert_eq!(
         heater_source_request_ceiling_mv(17_300, 17_300, 0, 21_000),
@@ -9318,12 +9569,12 @@ fn pps_request_compensates_measured_path_drop_without_relaxing_plate_limit() {
     );
     assert_eq!(
         heater_source_request_ceiling_mv(20_000, 21_000, 17_000, 21_000),
-        21_000
+        20_000
     );
 }
 
 #[test]
-fn pps3a_heater_lock_requires_a_saved_resistance_curve() {
+fn calibrated_heater_resistance_curve_remains_available_for_legacy_paths() {
     let mut config = MemoryConfig::default();
     assert!(!has_calibrated_heater_resistance_curve(&config));
 
@@ -9365,8 +9616,12 @@ fn raw_heater_observations_reproject_without_underestimating_the_model_floor() {
             resistance_milliohms: 3_936,
         });
 
-    let resistance = estimated_heater_resistance_ohms(216.7, None, &config);
-    assert!(resistance >= default_estimated_heater_resistance_ohms(216.7));
+    let resistance = automatic_heater_resistance_ohms(216.7, None, &config);
+    assert!(resistance < default_estimated_heater_resistance_ohms(216.7));
+    assert_eq!(
+        estimated_heater_resistance_with_source(216.7, None, &config).1,
+        AutomaticHeaterResistanceSource::ProjectedRaw
+    );
     assert_eq!(
         heater_safe_max_mv_for_temp(216.7, 4_700, 21_000, None, &config),
         21_000
@@ -9424,6 +9679,174 @@ fn effective_pps_current_limit_uses_contract_not_instantaneous_draw() {
     assert_eq!(refreshed_pps_contract_limits_the_budget, 3_000);
 
     assert_eq!(effective_pps_current_limit_ma(5_000, None), 5_000);
+}
+
+#[test]
+fn automatic_controller_power_budget_tracks_the_confirmed_contract_current() {
+    let observation = |current_ma, voltage_mv| PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma,
+        contract_voltage_mv: Some(voltage_mv),
+        contract: Contract::observed(ContractKind::Pps, voltage_mv, current_ma),
+    };
+    assert_eq!(
+        automatic_heater_controller_current_ma(
+            3_250,
+            5_000,
+            9_700,
+            Some(observation(3_000, 8_900)),
+        ),
+        3_000
+    );
+    assert_eq!(
+        automatic_heater_controller_current_ma(
+            3_250,
+            5_000,
+            9_700,
+            Some(observation(2_950, 8_900)),
+        ),
+        0
+    );
+    assert_eq!(
+        automatic_heater_controller_current_ma(3_250, 5_000, 9_700, None),
+        3_250
+    );
+}
+
+#[test]
+fn automatic_heater_policy_uses_per_apdo_budget_and_watt_units() {
+    let apdos = [
+        Some(ch224q::PpsApdo {
+            min_mv: 5_000,
+            max_mv: 20_000,
+            max_ma: 3_250,
+        }),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ];
+    let candidate = select_automatic_heater_pps_candidate(
+        &apdos,
+        5_000,
+        20_000,
+        HEATER_ADJUSTABLE_MAX_MV,
+        3.2,
+        None,
+    )
+    .expect("3.25 A APDO leaves a safe automatic range");
+    assert_eq!(candidate.current_ma, 3_250);
+    assert_eq!(candidate.allowed_mv, 9_700);
+    assert!((29_000..=30_000).contains(&candidate.power_mw));
+    assert_eq!(
+        heater_available_power_mw_for_temp(
+            20.0,
+            Some(20_000),
+            Some(3_250),
+            None,
+            &MemoryConfig::default(),
+        ),
+        29_403
+    );
+    assert_eq!(
+        automatic_heater_request_mv_from_power(15_000, 3.2, 5_000, 9_700),
+        6_900
+    );
+    assert_eq!(
+        automatic_heater_pwm_percent_for_power(5_000, 3.2, 5_500, 100),
+        52
+    );
+    assert!(!automatic_heater_fixed_is_safe(9_000, 3_000, 28_000, 3.2));
+    assert!(automatic_heater_fixed_is_safe(9_000, 3_250, 28_000, 3.2));
+}
+
+#[test]
+fn automatic_heater_policy_accepts_exact_3a_apdo_budget() {
+    let apdos = [
+        Some(ch224q::PpsApdo {
+            min_mv: 5_000,
+            max_mv: 20_000,
+            max_ma: 3_000,
+        }),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ];
+    let candidate = select_automatic_heater_pps_candidate(
+        &apdos,
+        5_000,
+        20_000,
+        HEATER_ADJUSTABLE_MAX_MV,
+        3.2,
+        None,
+    )
+    .expect("3 A APDO leaves a safe automatic range");
+    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.allowed_mv, 8_900);
+    assert_eq!(candidate.power_mw, 24_753);
+}
+
+#[test]
+fn automatic_heater_pps_selection_keeps_the_current_apdo_on_a_power_tie() {
+    let apdos = [
+        Some(ch224q::PpsApdo {
+            min_mv: 10_000,
+            max_mv: 20_000,
+            max_ma: 3_250,
+        }),
+        Some(ch224q::PpsApdo {
+            min_mv: 5_000,
+            max_mv: 20_000,
+            max_ma: 3_250,
+        }),
+        None,
+        None,
+        None,
+        None,
+        None,
+    ];
+    let candidate = select_automatic_heater_pps_candidate(
+        &apdos,
+        5_000,
+        20_000,
+        HEATER_ADJUSTABLE_MAX_MV,
+        3.2,
+        Some(7_000),
+    )
+    .expect("both APDOs are safe");
+    assert_eq!(candidate.advertisement_index, 1);
+}
+
+#[test]
+fn automatic_heater_fixed_fallback_uses_only_advertised_safe_contracts() {
+    let mut source = SourceCapabilitiesView::default();
+    source.fixed[0] = Some((5_000, 3_000));
+    source.fixed[1] = Some((9_000, 3_250));
+    source.fixed[2] = Some((15_000, 4_000));
+
+    let (request, request_ma) = automatic_heater_fixed_request(source, 3.2)
+        .expect("the advertised 9 V fixed PDO is safe after the current reserve");
+    assert_eq!(request, ch224q::VoltageRequest::V9);
+    assert_eq!(request_ma, 3_250);
+
+    source.fixed[1] = Some((9_000, 3_000));
+    let (request, request_ma) = automatic_heater_fixed_request(source, 3.2)
+        .expect("the advertised 5 V fixed PDO remains safe");
+    assert_eq!(request, ch224q::VoltageRequest::V5);
+    assert_eq!(request_ma, 3_000);
+
+    source.fixed[0] = Some((5_000, 1_500));
+    assert!(automatic_heater_fixed_request(source, 3.2).is_none());
+
+    source.fixed = [Some((28_000, 5_000)), None, None, None, None, None, None];
+    assert!(automatic_heater_fixed_request(source, 3.2).is_none());
 }
 
 #[test]
@@ -10351,6 +10774,7 @@ fn thermal_plant_filters_single_sample_slope_before_delay_prediction() {
         heater_enabled,
         model,
         max_power_mw: 100_000.0,
+        allow_integral: true,
         now_ms,
     };
 
@@ -11936,6 +12360,14 @@ fn persistence_lock_reason_is_exposed_before_other_runtime_gates() {
     assert_eq!(
         next_heater_lock_reason_with_persistence(false, None, false, true, true),
         None
+    );
+    assert_eq!(
+        next_heater_lock_reason_with_automatic_power(false, None, false, true, true, false),
+        Some(HeaterLockReason::NoSafeHeaterPower)
+    );
+    assert_eq!(
+        next_heater_lock_reason_with_automatic_power(true, None, false, true, true, false),
+        Some(HeaterLockReason::PersistenceRequired)
     );
 }
 

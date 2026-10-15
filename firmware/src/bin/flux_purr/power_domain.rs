@@ -1504,7 +1504,8 @@ mod tests {
         assert!(!manual.enabled);
         assert!(!working_fixed_contract_confirmed(
             port.snapshot().settled_observation(),
-            20_000
+            20_000,
+            MIN_HEATER_CONTRACT_MA
         ));
         match backend {
             HeaterPowerBackend::FixedPdPwmFallback {

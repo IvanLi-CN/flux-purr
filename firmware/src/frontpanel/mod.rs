@@ -716,6 +716,7 @@ pub enum HeaterLockReason {
     SensorFault,
     PdContractUnavailable,
     ThermalModelMissingForSourceClass,
+    NoSafeHeaterPower,
     PersistenceRequired,
 }
 
@@ -727,6 +728,7 @@ impl HeaterLockReason {
             Self::SensorFault => "sensor-fault",
             Self::PdContractUnavailable => "pd-contract-unavailable",
             Self::ThermalModelMissingForSourceClass => "thermal_model_missing_for_source_class",
+            Self::NoSafeHeaterPower => "no-safe-heater-power",
             Self::PersistenceRequired => "persistence-required",
         }
     }

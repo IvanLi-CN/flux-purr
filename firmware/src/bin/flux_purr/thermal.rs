@@ -666,6 +666,7 @@ pub(crate) struct ThermalPlantRuntimeInput {
     pub(crate) heater_enabled: bool,
     pub(crate) model: flux_purr_firmware::memory::ThermalPlantProjection,
     pub(crate) max_power_mw: f32,
+    pub(crate) allow_integral: bool,
     pub(crate) now_ms: u64,
 }
 
@@ -795,6 +796,7 @@ impl HeaterController {
             heater_enabled,
             model,
             max_power_mw,
+            allow_integral,
             now_ms,
         } = input;
         if !heater_enabled || self.fault_latched.is_some() {
@@ -809,6 +811,7 @@ impl HeaterController {
                 heater_enabled: false,
                 model,
                 max_power_mw,
+                allow_integral,
                 now_ms,
             });
         }
@@ -829,9 +832,8 @@ impl HeaterController {
         self.filtered_slope_c_per_profile_tick = slope_c_per_s;
         self.previous_filtered_temp_c = self.filtered_temp_c;
         self.filtered_temp_c = Some(filtered_temp_c);
-        let output = self
-            .thermal_plant_controller
-            .update(ThermalPlantControlInput {
+        let output = self.thermal_plant_controller.update_with_integral(
+            ThermalPlantControlInput {
                 model,
                 target_temp_c: f32::from(target_temp_c),
                 current_temp_c: filtered_temp_c,
@@ -839,7 +841,9 @@ impl HeaterController {
                 slope_c_per_s,
                 dt_s: HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0,
                 max_power_mw,
-            });
+            },
+            allow_integral,
+        );
         let duty_percent = if max_power_mw <= 0.0 {
             0
         } else {

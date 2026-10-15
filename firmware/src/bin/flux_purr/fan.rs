@@ -700,6 +700,28 @@ pub(crate) fn next_heater_lock_reason_with_persistence(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+pub(crate) fn next_heater_lock_reason_with_automatic_power(
+    persistence_locked: bool,
+    heater_fault: Option<HeaterFaultReason>,
+    cooling_disabled_lock_latched: bool,
+    thermal_model_heater_allowed: bool,
+    pd_contract_ready: bool,
+    automatic_heater_power_available: bool,
+) -> Option<HeaterLockReason> {
+    if let Some(reason) = next_heater_lock_reason_with_persistence(
+        persistence_locked,
+        heater_fault,
+        cooling_disabled_lock_latched,
+        thermal_model_heater_allowed,
+        pd_contract_ready,
+    ) {
+        return Some(reason);
+    }
+    (!automatic_heater_power_available).then_some(HeaterLockReason::NoSafeHeaterPower)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 pub(crate) fn next_dashboard_warning_visible(
     elapsed_ms: u64,
     heater_lock_reason: Option<HeaterLockReason>,
