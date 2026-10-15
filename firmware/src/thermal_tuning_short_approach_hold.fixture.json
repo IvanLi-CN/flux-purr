@@ -1,0 +1,458 @@
+{
+  "trials": [
+    {
+      "sourceSha": "2874b81590b0362fa06a5b662d63fceb96b522cc",
+      "runId": "firmware-pps5a-1792064046942",
+      "trialIndex": 0,
+      "point": {
+        "approachDampingExponentPermille": 1000,
+        "approachFloorPowerPermille": 50,
+        "approachLeadTicks": 0,
+        "approachPowerPermille": 1000,
+        "approachTailWindowCentiC": 0,
+        "brakeDistanceCentiC": 100,
+        "holdBlendTicks": 1,
+        "holdEntryCentiC": 50,
+        "holdExitCentiC": 150,
+        "holdKiPermillePerCTick": 1,
+        "holdKpPermillePerC": 21,
+        "holdLeadTicks": 0,
+        "holdOffCentiC": 120,
+        "holdOnCentiC": 30,
+        "holdPowerPermille": 641,
+        "holdReheatPowerPermille": 641,
+        "overshootCutoffCentiC": 150,
+        "targetC": 220,
+        "warmupPowerPermille": 1000,
+        "warmupReenterCentiC": 400
+      },
+      "decision": {
+        "approachToHold": true,
+        "disposition": "rejected",
+        "freeze": false,
+        "hardGateFullSpeedToStableMs": 5000,
+        "hardGateHoldPeakToPeakCentiC": 300,
+        "hardGateOvershootCentiC": 300,
+        "holdConfirm": false,
+        "holdPeakToPeakCentiC": 206,
+        "maxOvershootCentiC": 146,
+        "prune": true,
+        "purpose": "scout",
+        "score": [
+          0,
+          1,
+          3,
+          0,
+          0,
+          0.30000000000000004,
+          1.46,
+          2.06,
+          1000000000000,
+          70,
+          0.14651939359998778
+        ],
+        "settleTimeMs": null,
+        "stopReason": "full-speed-to-stable budget exhausted",
+        "timing": {
+          "allowedApproachFloorPermille": 50,
+          "configuredApproachFloorPermille": 50,
+          "effectiveApproachFloorPermille": 50,
+          "extendedAtMs": null,
+          "extensionLimitMs": 15000,
+          "floorObservedAtMs": 1027647,
+          "modelApproachFloorPermille": 50,
+          "originalDeadlineObservedAtMs": 1032702,
+          "originalDeadlinePhase": "hold",
+          "originalLimitMs": 5000,
+          "policyVersion": 4,
+          "stableWindowStartedAtMs": null,
+          "stableWindowVerifiedAtMs": null,
+          "warmupExitedAtMs": 1027647
+        },
+        "warmupFull": true
+      },
+      "samples": [
+        [
+          1027284,
+          21885,
+          "warmup",
+          1000,
+          1000,
+          true,
+          21000,
+          21885
+        ],
+        [
+          1027553,
+          21922,
+          "warmup",
+          1000,
+          1000,
+          true,
+          21000,
+          21922
+        ],
+        [
+          1027647,
+          21958,
+          "approach",
+          50,
+          50,
+          true,
+          20500,
+          21958
+        ],
+        [
+          1027749,
+          21989,
+          "hold",
+          640,
+          670,
+          true,
+          20500,
+          21989
+        ],
+        [
+          1027859,
+          21989,
+          "hold",
+          640,
+          670,
+          false,
+          20500,
+          21967
+        ],
+        [
+          1028143,
+          21989,
+          "hold",
+          640,
+          670,
+          false,
+          20500,
+          22000
+        ],
+        [
+          1028418,
+          22026,
+          "hold",
+          600,
+          620,
+          true,
+          20500,
+          22026
+        ],
+        [
+          1028621,
+          22072,
+          "hold",
+          0,
+          0,
+          true,
+          20500,
+          22072
+        ],
+        [
+          1028868,
+          22067,
+          "hold",
+          0,
+          0,
+          true,
+          20500,
+          22067
+        ],
+        [
+          1029145,
+          22085,
+          "hold",
+          0,
+          0,
+          true,
+          20500,
+          22085
+        ],
+        [
+          1029348,
+          22058,
+          "hold",
+          0,
+          0,
+          true,
+          20500,
+          22058
+        ],
+        [
+          1029585,
+          22056,
+          "hold",
+          720,
+          750,
+          true,
+          20500,
+          22056
+        ],
+        [
+          1029863,
+          22084,
+          "hold",
+          740,
+          770,
+          true,
+          20500,
+          22084
+        ],
+        [
+          1030086,
+          22095,
+          "hold",
+          740,
+          770,
+          true,
+          20500,
+          22095
+        ],
+        [
+          1030306,
+          22114,
+          "hold",
+          730,
+          760,
+          true,
+          20500,
+          22114
+        ],
+        [
+          1030602,
+          22110,
+          "hold",
+          730,
+          760,
+          true,
+          20500,
+          22110
+        ],
+        [
+          1030824,
+          22109,
+          "hold",
+          20,
+          20,
+          true,
+          20500,
+          22109
+        ],
+        [
+          1031051,
+          22110,
+          "hold",
+          670,
+          700,
+          true,
+          20500,
+          22110
+        ],
+        [
+          1031347,
+          22134,
+          "hold",
+          350,
+          360,
+          true,
+          20500,
+          22134
+        ],
+        [
+          1031568,
+          22146,
+          "hold",
+          90,
+          90,
+          true,
+          20500,
+          22146
+        ],
+        [
+          1031787,
+          22125,
+          "hold",
+          560,
+          580,
+          true,
+          20500,
+          22125
+        ],
+        [
+          1032084,
+          22112,
+          "hold",
+          670,
+          700,
+          true,
+          20500,
+          22112
+        ],
+        [
+          1032295,
+          22114,
+          "hold",
+          670,
+          700,
+          true,
+          20500,
+          22114
+        ],
+        [
+          1032589,
+          22123,
+          "hold",
+          600,
+          620,
+          true,
+          20500,
+          22123
+        ],
+        [
+          1032702,
+          22090,
+          "hold",
+          680,
+          710,
+          true,
+          20500,
+          22090
+        ],
+        [
+          1032928,
+          22098,
+          "hold",
+          670,
+          700,
+          true,
+          20500,
+          22098
+        ],
+        [
+          1033148,
+          22066,
+          "hold",
+          680,
+          710,
+          true,
+          20500,
+          22066
+        ],
+        [
+          1033423,
+          22072,
+          "hold",
+          670,
+          700,
+          true,
+          20500,
+          22072
+        ],
+        [
+          1033628,
+          22073,
+          "hold",
+          670,
+          700,
+          true,
+          20500,
+          22073
+        ],
+        [
+          1033850,
+          22050,
+          "hold",
+          680,
+          710,
+          true,
+          20500,
+          22050
+        ],
+        [
+          1034078,
+          22049,
+          "hold",
+          710,
+          740,
+          true,
+          20500,
+          22049
+        ],
+        [
+          1034358,
+          22029,
+          "hold",
+          710,
+          740,
+          true,
+          20500,
+          22029
+        ],
+        [
+          1034582,
+          22014,
+          "hold",
+          720,
+          750,
+          true,
+          20500,
+          22014
+        ],
+        [
+          1034822,
+          21972,
+          "hold",
+          730,
+          760,
+          true,
+          20500,
+          21972
+        ],
+        [
+          1035100,
+          21968,
+          "hold",
+          780,
+          810,
+          true,
+          20500,
+          21968
+        ],
+        [
+          1035321,
+          21970,
+          "hold",
+          780,
+          810,
+          true,
+          20500,
+          21970
+        ],
+        [
+          1035558,
+          21940,
+          "hold",
+          780,
+          780,
+          true,
+          21000,
+          21940
+        ],
+        [
+          1035744,
+          21979,
+          "hold",
+          770,
+          770,
+          false,
+          21000,
+          21950
+        ]
+      ]
+    }
+  ]
+}

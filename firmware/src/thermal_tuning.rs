@@ -498,6 +498,7 @@ pub struct ThermalTuningRuntime {
     longest_stable_span_ms: u64,
     last_trial_request_mv: Option<u16>,
     hold_pps_wait_interruptions: u32,
+    hold_pps_wait_pending: bool,
     guarded_hold_handoff: bool,
     max_band_excursion_centi_c: u16,
     approach_curve_samples: Vec<ThermalCurveSample, THERMAL_TUNING_APPROACH_TRACE_CAPACITY>,
@@ -610,6 +611,7 @@ impl ThermalTuningRuntime {
             longest_stable_span_ms: 0,
             last_trial_request_mv: None,
             hold_pps_wait_interruptions: 0,
+            hold_pps_wait_pending: false,
             guarded_hold_handoff: false,
             max_band_excursion_centi_c: 0,
             approach_curve_samples: Vec::new(),
@@ -1488,10 +1490,13 @@ impl ThermalTuningRuntime {
         {
             return true;
         }
-        if self.prepare_late_stability_proposal(original, target_c, evidence) {
+        if self.prepare_short_approach_hold_handoff(original, target_c, evidence) {
             return true;
         }
         if self.prepare_in_band_hold_baseline(original, target_c, evidence) {
+            return true;
+        }
+        if self.prepare_late_stability_proposal(original, target_c, evidence) {
             return true;
         }
         self.mutate_candidate_from_evidence(target_c, evidence);
@@ -1563,11 +1568,12 @@ impl ThermalTuningRuntime {
         evidence: TuneEvidence,
     ) -> bool {
         // A real Hold entry before the deadline is useful evidence, even when
-        // rejected samples or a PPS transition postpone the continuous-window
-        // start by a small amount. Raise the Approach handoff temperature by
+        // rejected samples postpone or interrupt the continuous window while
+        // the complete observed thermal prefix remains in band. Raise the handoff by
         // one bounded brake step; do not alter Hold or waive the 10 s gate.
         if !(late_stability_handoff_failure(evidence)
-            || interrupted_stability_handoff_failure(evidence))
+            || interrupted_stability_handoff_failure(evidence)
+            || in_band_interrupted_stability_failure(evidence))
         {
             return false;
         }
@@ -1608,6 +1614,57 @@ impl ThermalTuningRuntime {
             Some("late_stability_approach_handoff_brake_step"),
         );
         true
+    }
+
+    fn prepare_short_approach_hold_handoff(
+        &mut self,
+        original: ThermalControlProfileConfig,
+        target_c: i16,
+        evidence: TuneEvidence,
+    ) -> bool {
+        // One or two Approach samples do not prove a sustained floor for
+        // conditional extension. They also cannot erase a long measured Hold.
+        if !(1..=2).contains(&self.model_approach_sample_count)
+            || !self
+                .model_approach_output_range
+                .is_some_and(|(min, max)| min >= 50 && max <= 1_000)
+            || evidence.hold_pps_wait_interruptions == 0
+            || evidence.hold_sample_count < 12
+            || self
+                .first_controller_hold_elapsed_ms
+                .is_none_or(|started| self.current_elapsed_ms.saturating_sub(started) < 2_000)
+            || !in_band_interrupted_stability_temperature(TuneEvidence {
+                approach_output_range: self.model_approach_output_range,
+                ..evidence
+            })
+            || evidence.under_c > evidence.over_c + 0.5
+        {
+            return false;
+        }
+        let Some(index) = original
+            .points
+            .iter()
+            .position(|point| point.is_some_and(|point| point.target_temp_c == target_c))
+        else {
+            return false;
+        };
+        for step in 1..=8 {
+            let mut proposed = original;
+            let point = proposed.points[index].as_mut().unwrap();
+            point.brake_distance_centi_c = point
+                .brake_distance_centi_c
+                .saturating_add(40 * step)
+                .min(5_000);
+            proposed.sanitize();
+            self.candidate_profile = Some(proposed);
+            if self.record_fresh_proposal(Some(original)) {
+                return self
+                    .install_candidate_profile(proposed, "short_approach_timed_hold_handoff")
+                    .is_ok();
+            }
+        }
+        self.candidate_profile = Some(original);
+        false
     }
 
     fn prepare_in_band_hold_baseline(
@@ -2125,6 +2182,7 @@ impl ThermalTuningRuntime {
         self.longest_stable_span_ms = 0;
         self.last_trial_request_mv = None;
         self.hold_pps_wait_interruptions = 0;
+        self.hold_pps_wait_pending = false;
         self.guarded_hold_handoff = false;
         self.max_band_excursion_centi_c = 0;
         self.approach_curve_samples.clear();
@@ -2514,6 +2572,8 @@ impl ThermalTuningRuntime {
             .last_trial_request_mv
             .is_some_and(|previous| previous != sample.requested_mv);
         self.last_trial_request_mv = Some(sample.requested_mv);
+        let pps_wait_pending = self.hold_pps_wait_pending || request_changed;
+        self.hold_pps_wait_pending = request_changed && sample.has_fresh_measurement();
         self.update_warmup_output_evidence(sample);
         match sample.phase {
             ThermalTuningPhase::Approach => {
@@ -2553,7 +2613,7 @@ impl ThermalTuningRuntime {
                 && sample
                     .raw_temperature_centi_c
                     .is_some_and(|raw| raw.abs_diff(sample.temperature_centi_c) <= 50);
-            if request_changed
+            if pps_wait_pending
                 && self.first_hold_elapsed_ms.is_some()
                 && sample
                     .raw_temperature_centi_c
@@ -2561,6 +2621,7 @@ impl ThermalTuningRuntime {
             {
                 self.hold_pps_wait_interruptions =
                     self.hold_pps_wait_interruptions.saturating_add(1);
+                self.hold_pps_wait_pending = false;
             }
             self.interrupt_measurement_qualification();
             return;
@@ -3153,7 +3214,7 @@ impl ThermalTuningRuntime {
                 continue;
             }
             if let Some((lower, upper)) = self.required_accepted_bounds(target) {
-                self.seed_target_from_bounds(target, lower, upper)?;
+                self.activate_initial_target_seed(target, lower, upper)?;
             }
             self.phase = ThermalTuningPhase::Cooldown;
             self.reset_trial_metrics();
@@ -3179,7 +3240,7 @@ impl ThermalTuningRuntime {
         }
     }
 
-    fn seed_target_from_bounds(
+    fn activate_initial_target_seed(
         &mut self,
         target: i16,
         lower: i16,
@@ -3197,21 +3258,15 @@ impl ThermalTuningRuntime {
                 .find(|point| point.target_temp_c == target_c)
                 .copied()
         };
-        let lower_point = point_at(lower).ok_or(ThermalTuningError::CandidateProfileRequired)?;
-        let upper_point = point_at(upper).ok_or(ThermalTuningError::CandidateProfileRequired)?;
-        let seeded = interpolate_candidate_point(target, lower_point, upper_point);
-        let point = profile
-            .points
-            .iter_mut()
-            .flatten()
-            .find(|point| point.target_temp_c == target)
-            .ok_or(ThermalTuningError::CandidateProfileRequired)?;
-        *point = seeded;
-        profile.sanitize();
+        point_at(lower).ok_or(ThermalTuningError::CandidateProfileRequired)?;
+        point_at(upper).ok_or(ThermalTuningError::CandidateProfileRequired)?;
+        point_at(target).ok_or(ThermalTuningError::CandidateProfileRequired)?;
+        // Bounds authorize this interval; each untouched target already contains its
+        // own calibration-derived seed. Interpolation would erase that model input.
         self.candidate_hash = hash_profile(profile);
         self.preview_update_pending = true;
         self.preview_receipt = None;
-        self.seed_source = bounded_reason("accepted_bounds_linear");
+        self.seed_source = bounded_reason("initial_target_seed");
         Ok(())
     }
 
@@ -3746,55 +3801,6 @@ fn target_bit(target_c: i16) -> u16 {
         .map_or(0, |index| 1 << index)
 }
 
-fn interpolate_candidate_point(
-    target_c: i16,
-    lower: ThermalControlProfilePointConfig,
-    upper: ThermalControlProfilePointConfig,
-) -> ThermalControlProfilePointConfig {
-    if lower.target_temp_c >= upper.target_temp_c {
-        return ThermalControlProfilePointConfig {
-            target_temp_c: target_c,
-            ..lower
-        };
-    }
-    let numerator = f32::from(target_c - lower.target_temp_c);
-    let denominator = f32::from(upper.target_temp_c - lower.target_temp_c);
-    let ratio = numerator / denominator;
-    let interpolate = |left: u16, right: u16, ceiling: u16| {
-        (f32::from(left) + (f32::from(right) - f32::from(left)) * ratio + 0.5)
-            .clamp(0.0, f32::from(ceiling)) as u16
-    };
-    let mut seeded = lower;
-    seeded.target_temp_c = target_c;
-    seeded.warmup_power_permille = 1_000;
-    macro_rules! field {
-        ($name:ident, $ceiling:expr) => {
-            seeded.$name = interpolate(lower.$name, upper.$name, $ceiling);
-        };
-    }
-    field!(brake_distance_centi_c, 5_000);
-    field!(approach_power_permille, 1_000);
-    field!(approach_floor_power_permille, 1_000);
-    field!(approach_damping_exponent_permille, 4_000);
-    field!(approach_tail_window_centi_c, 5_000);
-    field!(hold_power_permille, 1_000);
-    field!(hold_reheat_power_permille, 1_000);
-    field!(warmup_reenter_centi_c, 5_000);
-    field!(hold_entry_centi_c, 5_000);
-    field!(hold_exit_centi_c, 5_000);
-    field!(hold_on_centi_c, 5_000);
-    field!(hold_off_centi_c, 5_000);
-    field!(overshoot_cutoff_centi_c, 5_000);
-    field!(hold_kp_permille_per_c, 10_000);
-    field!(hold_ki_permille_per_c_tick, 10_000);
-    seeded.hold_ki_permille_per_c_tick = seeded.hold_ki_permille_per_c_tick.max(1);
-    field!(hold_blend_ticks, 255);
-    seeded.hold_blend_ticks = seeded.hold_blend_ticks.max(1);
-    field!(approach_lead_ticks, 255);
-    field!(hold_lead_ticks, 255);
-    seeded
-}
-
 fn candidate_point(
     profile: &ThermalControlProfileConfig,
     target_c: i16,
@@ -3931,6 +3937,34 @@ fn interrupted_stability_handoff_failure(evidence: TuneEvidence) -> bool {
             .is_some_and(|temperature| {
                 let error = f64::from(evidence.target_c) - f64::from(temperature) / 100.0;
                 (-1.5..=f64::from(HOLD_ENTRY_BELOW_C)).contains(&error)
+            })
+}
+
+fn in_band_interrupted_stability_failure(evidence: TuneEvidence) -> bool {
+    evidence.hold_sample_count >= 30 && in_band_interrupted_stability_temperature(evidence)
+}
+
+fn in_band_interrupted_stability_temperature(evidence: TuneEvidence) -> bool {
+    evidence.tunable_stop
+        && evidence.full_speed_failed
+        && !evidence.stable_window_verified
+        && evidence.stable_window_after_warmup_ms.is_none()
+        && evidence.overshoot_c <= 1.5
+        && evidence.hold_p2p_c <= 3.0
+        && evidence.under_c <= 1.5
+        && evidence.over_c <= 1.5
+        && evidence.first_band_observed
+        && evidence.first_band_exit_centi_c.is_none()
+        && evidence
+            .approach_output_range
+            .is_some_and(|(min, max)| min >= 50 && max <= 1_000)
+        && evidence
+            .first_hold_after_warmup_ms
+            .is_some_and(|time| time <= evidence.settle_limit_ms)
+        && evidence
+            .deadline_temperature_centi_c
+            .is_some_and(|temperature| {
+                (i32::from(temperature) - i32::from(evidence.target_c) * 100).abs() <= 150
             })
 }
 
@@ -5043,6 +5077,210 @@ mod tests {
             }
         );
         assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
+    fn captured_timed_hold_prefix_cannot_exhaust_on_a_sample_count_boundary() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_short_timed_hold.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        runtime.targets_c[0] = 220;
+        let evaluation = replay_damping_bracket_trial(&mut runtime, &fixture["trials"][0]);
+        let facts = runtime.candidate_failure_evidence(
+            220,
+            evaluation.max_overshoot_centi_c,
+            evaluation.hold_peak_to_peak_centi_c,
+            evaluation.settle_time_ms,
+            5_000,
+        );
+        assert_eq!(facts.hold_sample_count, 24);
+        assert_eq!(facts.first_band_exit_centi_c, None);
+        assert_eq!(facts.hold_pps_wait_interruptions, 1);
+        let original = runtime.candidate_profile.unwrap();
+        for unavailable in [
+            TuneEvidence {
+                hold_sample_count: 11,
+                ..facts
+            },
+            TuneEvidence {
+                hold_pps_wait_interruptions: 0,
+                ..facts
+            },
+            TuneEvidence {
+                first_band_exit_centi_c: Some(21849),
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+        ] {
+            assert!(!runtime.prepare_short_approach_hold_handoff(original, 220, unavailable));
+        }
+        let ended_at = runtime.current_elapsed_ms;
+        runtime.current_elapsed_ms = runtime.first_controller_hold_elapsed_ms.unwrap() + 1_999;
+        assert!(!runtime.prepare_short_approach_hold_handoff(original, 220, facts));
+        runtime.current_elapsed_ms = ended_at;
+        assert!(
+            runtime.prepare_fresh_failure_proposal_from_evidence(220, facts),
+            "{facts:?}",
+        );
+        assert_ne!(runtime.candidate_profile, Some(original));
+        assert_eq!(runtime.accepted_target_mask, 0);
+        assert!(runtime.stable_window_verified_at_ms.is_none());
+    }
+
+    #[test]
+    fn captured_short_approach_preserves_observed_hold_search() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "thermal_tuning_short_approach_hold.fixture.json"
+        ))
+        .unwrap();
+        let mut runtime = started_single_target_runtime();
+        runtime.targets_c[0] = 220;
+        let evaluation = replay_damping_bracket_trial(&mut runtime, &fixture["trials"][0]);
+        let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+        let facts = runtime.candidate_failure_evidence(
+            220,
+            evaluation.max_overshoot_centi_c,
+            evaluation.hold_peak_to_peak_centi_c,
+            evaluation.settle_time_ms,
+            5_000,
+        );
+        assert_eq!(facts.approach_output_range, None);
+        assert!(facts.hold_sample_count >= 30, "{facts:?}");
+        assert_eq!(facts.first_band_exit_centi_c, None);
+        assert_eq!(facts.hold_pps_wait_interruptions, 1);
+        assert!(facts.over_c > facts.under_c + 0.5);
+        let original = runtime.candidate_profile.unwrap();
+        for invalid in [
+            TuneEvidence {
+                hold_pps_wait_interruptions: 0,
+                ..facts
+            },
+            TuneEvidence {
+                hold_sample_count: 11,
+                ..facts
+            },
+            TuneEvidence {
+                over_c: 1.51,
+                ..facts
+            },
+            TuneEvidence {
+                first_band_exit_centi_c: Some(22151),
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+            TuneEvidence {
+                tunable_stop: false,
+                ..facts
+            },
+            TuneEvidence {
+                first_hold_after_warmup_ms: Some(5_001),
+                ..facts
+            },
+            TuneEvidence {
+                under_c: 1.4,
+                over_c: 0.8,
+                ..facts
+            },
+        ] {
+            assert!(!runtime.prepare_short_approach_hold_handoff(original, 220, invalid));
+            assert_eq!(runtime.candidate_profile, Some(original));
+        }
+        assert!(
+            runtime.prepare_fresh_failure_proposal_from_evidence(220, facts),
+            "{facts:?}"
+        );
+        assert_eq!(
+            runtime.candidate_profile.unwrap().points[0].unwrap(),
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: previous.brake_distance_centi_c + 40,
+                ..previous
+            }
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
+        assert!(runtime.stable_window_verified_at_ms.is_none());
+    }
+
+    #[test]
+    fn captured_in_band_interruption_keeps_a_distinct_handoff_proposal() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "thermal_tuning_in_band_interruption.fixture.json"
+        ))
+        .unwrap();
+        let mut runtime = started_single_target_runtime();
+        runtime.targets_c[0] = 220;
+        let evaluation = replay_damping_bracket_trial(&mut runtime, &fixture["trials"][0]);
+        let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+        let facts = runtime.candidate_failure_evidence(
+            220,
+            evaluation.max_overshoot_centi_c,
+            evaluation.hold_peak_to_peak_centi_c,
+            evaluation.settle_time_ms,
+            5_000,
+        );
+        assert!(!evaluation.passes);
+        assert!(facts.hold_sample_count >= 30, "{facts:?}");
+        assert_eq!(facts.first_band_exit_centi_c, None);
+        assert_eq!(facts.stable_window_after_warmup_ms, None);
+        for invalid in [
+            TuneEvidence {
+                under_c: 1.51,
+                ..facts
+            },
+            TuneEvidence {
+                over_c: 1.51,
+                ..facts
+            },
+            TuneEvidence {
+                first_band_exit_centi_c: Some(21849),
+                ..facts
+            },
+            TuneEvidence {
+                hold_sample_count: 29,
+                ..facts
+            },
+            TuneEvidence {
+                tunable_stop: false,
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: Some((0, 340)),
+                ..facts
+            },
+            TuneEvidence {
+                first_hold_after_warmup_ms: Some(5_001),
+                ..facts
+            },
+            TuneEvidence {
+                deadline_temperature_centi_c: None,
+                ..facts
+            },
+        ] {
+            assert!(!in_band_interrupted_stability_failure(invalid));
+        }
+        assert!(
+            runtime.prepare_fresh_failure_proposal_from_evidence(220, facts),
+            "{facts:?}"
+        );
+        assert_eq!(
+            runtime.candidate_profile.unwrap().points[0].unwrap(),
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: 60,
+                ..previous
+            }
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
+        assert!(runtime.stable_window_verified_at_ms.is_none());
     }
 
     #[test]
@@ -8979,12 +9217,15 @@ mod tests {
     }
 
     #[test]
-    fn full_scope_midpoint_uses_accepted_parent_bounds() {
+    fn full_scope_midpoint_preserves_its_calibration_seed() {
         let mut runtime = ThermalTuningRuntime::new();
         let mut profile = profile_with_targets(&THERMAL_TUNING_TARGETS_C);
         profile.points[0].as_mut().unwrap().brake_distance_centi_c = 400;
         profile.points[7].as_mut().unwrap().brake_distance_centi_c = 800;
         profile.points[3].as_mut().unwrap().brake_distance_centi_c = 300;
+        let calibrated_midpoint = profile.points[3].unwrap();
+        let lower_point = profile.points[0].unwrap();
+        let upper_point = profile.points[7].unwrap();
         runtime
             .start(ThermalTuningStart {
                 run_id: id("run-bounds"),
@@ -9008,8 +9249,11 @@ mod tests {
             (snapshot.lower_target_c, snapshot.upper_target_c),
             (Some(60), Some(220))
         );
-        assert_eq!(snapshot.seed_source, "accepted_bounds_linear");
-        assert_eq!(snapshot.point.unwrap().brake_distance_centi_c, 550);
+        assert_eq!(snapshot.seed_source, "initial_target_seed");
+        let current = runtime.candidate_profile.unwrap();
+        assert_eq!(current.points[3], Some(calibrated_midpoint));
+        assert_eq!(current.points[0], Some(lower_point));
+        assert_eq!(current.points[7], Some(upper_point));
         assert_ne!(runtime.candidate_hash.as_deref(), Some("hash-bounds"));
         assert!(runtime.preview_update_pending);
         assert!(runtime.armed);

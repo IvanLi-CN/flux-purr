@@ -980,7 +980,9 @@ pub(crate) const HEATER_PPS_REQUEST_STEP_MV: u16 = 500;
 // Bound compensation so stale measurements cannot cause a large source jump.
 pub(crate) const HEATER_PPS_PATH_DROP_COMPENSATION_MAX_MV: u16 = 2_500;
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const HEATER_HOLD_PPS_INITIAL_SETTLE_MS: u64 = 10_000;
+// Recover observed voltage headroom before the short qualification deadline;
+// a ten-second first dwell interrupts the first complete stability witness.
+pub(crate) const HEATER_HOLD_PPS_INITIAL_SETTLE_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const HEATER_HOLD_PPS_STEADY_DWELL_MS: u64 = 2_000;
 #[cfg(any(target_arch = "xtensa", test))]

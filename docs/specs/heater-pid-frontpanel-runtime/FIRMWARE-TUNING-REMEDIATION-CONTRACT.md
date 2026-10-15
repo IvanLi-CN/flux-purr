@@ -45,6 +45,8 @@ Warmup保持独立全功率及100ms物理软启动。Warmup→Approach首个请�
 
 ### R1：核对完整旧方案一致性
 
+固件engine的逐目标模型初始化按[自然冷却控制合同](NATURAL-COOLING-CONTROL.md)保留每个目标独立计算的标定seed；两侧accepted点仅用于区间准入，不再覆盖未试验目标的初值。这是模型初始化对冻结外部线性seed策略的明确例外；accepted点冻结、失败区间裁剪、预算、全部资格门禁及生产profile插值不变。
+
 - 将初始 seed 选择、插值、候选变换、scout/confirm 输入投影、score、gate、预算、重试和 accepted-target blocking 逐项对照锁定基线。
 - 分别列出冻结基线、当前分支外部 runner、当前固件的差异；当前分支两个实现相同，不能证明与冻结基线相同。
 - 对 scout 超时后的证据范围与固件硬停止保留的样本前缀单独说明；不得用固件停止后的样本证明固件当时已经满足门槛。

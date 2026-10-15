@@ -1984,6 +1984,19 @@ fn runtime_production_pid_snapshot(
         state.memory_config.thermal_profile_mode,
         &state.manual_pps_state,
     );
+    let response_identity = (
+        state
+            .memory_config
+            .thermal_plant_transient_active
+            .as_ref()
+            .map_or(0, |transaction| transaction.transaction_id),
+        state.memory_config.adc_calibration,
+        ambient_temp_c,
+    );
+    if state.heater_controller.heat_response_identity != Some(response_identity) {
+        state.heater_controller.heat_response = thermal_plant_heat_response(&state.memory_config);
+        state.heater_controller.heat_response_identity = Some(response_identity);
+    }
     if state.tuning_pd_wait_started_ms.is_some()
         || (state.ui_state.heater_enabled
             && !kind.is_profile()

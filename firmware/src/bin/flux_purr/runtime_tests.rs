@@ -170,7 +170,12 @@ fn heater_profile_uses_calibrated_cooling_for_braking_and_early_recovery() {
     let recovery =
         recovery.expect("modelled loss must recover before the plate falls below target");
     assert!(recovery.error_c < 0.0);
-    assert!(recovery.duty_percent >= 20 && recovery.duty_percent < 100);
+    // The first positive recovery includes the existing entry blend; it does
+    // not need to jump immediately to twenty percent.
+    assert!(
+        recovery.duty_percent > 0 && recovery.duty_percent < 100,
+        "{recovery:?}"
+    );
 }
 
 #[test]
@@ -9672,6 +9677,39 @@ fn heater_physical_pwm_reduces_power_below_6_5v_working_floor() {
 }
 
 #[test]
+fn hold_pps_restores_observed_high_temperature_headroom_before_the_window_deadline() {
+    // The 220 C HIL held 20.5 V at 81% logical output and about 1 C
+    // undershoot. A ten-second initial dwell changed voltage just before the
+    // first continuous ten-second witness could finish, invalidating it.
+    let mut governor = HoldPpsGovernor::new();
+    let input = HoldPpsRequestInput {
+        phase: HeaterControlPhase::Hold,
+        duty_percent: 81,
+        actual_error_c: 1.0,
+        filtered_slope_c_per_s: 0.0,
+        current_request_mv: 20_500,
+        control_floor_mv: 12_000,
+        safe_max_mv: 21_000,
+        now_ms: 0,
+    };
+    assert_eq!(
+        heater_phase_pps_request_mv(&mut governor, input, false),
+        Some(20_500)
+    );
+    assert_eq!(
+        heater_phase_pps_request_mv(
+            &mut governor,
+            HoldPpsRequestInput {
+                now_ms: 1_000,
+                ..input
+            },
+            false
+        ),
+        Some(21_000)
+    );
+}
+
+#[test]
 fn hold_pps_governor_keeps_the_approach_voltage_when_headroom_is_sufficient() {
     let mut governor = HoldPpsGovernor::new();
     assert_eq!(
@@ -10465,6 +10503,364 @@ fn production_test_input(measured_temp_c: f32) -> ThermalPlantRuntimeInput {
         max_power_mw: 65_000.0,
         now_ms: 3_000,
     }
+}
+
+fn calibrated_tail_test_setup() -> (
+    flux_purr_firmware::thermal_response::HeatResponse,
+    ThermalPlantRuntimeInput,
+    ThermalControlProfile,
+) {
+    use flux_purr_firmware::thermal_response::{HeatResponse, reference_brake_c};
+    let response = HeatResponse {
+        delay_ms: 0,
+        decay_ms: 3_900,
+        rmse_c: 0.4,
+        maximum_error_c: 0.8,
+    };
+    let mut input = production_test_input(35.0);
+    input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+        convection_mw_per_c: 198.67226,
+        radiation_mw_per_k4: 2.2978014e-7,
+        thermal_capacity_mj_per_c: 25_843.268,
+        transport_delay_ms: 850,
+    };
+    input.max_power_mw = 105_000.0;
+    input.ambient_temp_c = 29.83;
+    let brake = reference_brake_c(
+        response,
+        input.model,
+        input.ambient_temp_c,
+        input.max_power_mw,
+        60.0,
+    );
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 60;
+    point.brake_distance_centi_c = (brake * 100.0).round() as u16;
+    point.approach_lead_ticks = 0;
+    point.hold_lead_ticks = 0;
+    point.approach_damping_exponent_permille = 1_000;
+    point.hold_power_permille = 66;
+    point.hold_reheat_power_permille = 66;
+    point.hold_kp_permille_per_c = 16;
+    config.points[1..].fill(None);
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    (response, input, profile)
+}
+
+#[test]
+fn calibrated_tail_drives_production_handoff_and_bounded_reheat() {
+    let (response, mut input, profile) = calibrated_tail_test_setup();
+    let mut controller = HeaterController::new();
+    controller.heat_response = Some(response);
+    let mut temperature = 35.0;
+    let mut received_mw = 0.0;
+    let mut handoff = None;
+    let mut handoff_ms = None;
+    let mut hold = None;
+    let mut stable_since = None;
+    let mut verified_since = None;
+    let mut peak = temperature;
+    for now_ms in (0..90_000).step_by(50) {
+        input.now_ms = now_ms;
+        input.measured_temp_c = temperature;
+        let (output, _) = controller.update_production_at(
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+            input,
+            Some(profile),
+        );
+        if output.phase == HeaterControlPhase::Approach {
+            if handoff.is_none() {
+                handoff = Some(temperature);
+                handoff_ms = Some(now_ms);
+                assert_eq!(output.duty_percent, 5);
+            }
+            assert!((5..=100).contains(&output.duty_percent), "{output:?}");
+        }
+        if output.phase == HeaterControlPhase::Hold {
+            assert!(temperature >= 59.5, "{temperature}");
+            hold.get_or_insert(now_ms);
+        }
+        if output.phase == HeaterControlPhase::Hold && (58.5..=61.5).contains(&temperature) {
+            let start = *stable_since.get_or_insert(now_ms);
+            if now_ms - start >= 10_000 {
+                verified_since.get_or_insert(start);
+            }
+        } else {
+            stable_since = None;
+        }
+        let applied_mw = input.max_power_mw * f32::from(output.duty_percent) / 100.0
+            * f32::from(output.warmup_soft_start_percent)
+            / 100.0;
+        controller.applied_heat.observe(now_ms, applied_mw);
+        let energy = response.step(&mut received_mw, applied_mw, 0.05);
+        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+            input.model,
+            temperature,
+            input.ambient_temp_c,
+        );
+        temperature += (energy - loss * 0.05) / input.model.thermal_capacity_mj_per_c;
+        peak = peak.max(temperature);
+    }
+    let handoff = handoff.unwrap();
+    assert!((46.0..=51.0).contains(&handoff), "{handoff}");
+    assert!(
+        hold.is_some(),
+        "handoff={handoff}, final={temperature}, peak={peak}"
+    );
+    assert!(peak <= 61.5, "{peak}");
+    let settled_ms = verified_since.unwrap() - handoff_ms.unwrap();
+    assert!(
+        settled_ms <= 10_000,
+        "settled={settled_ms} handoff={handoff} hold={hold:?} peak={peak}",
+    );
+    assert!((58.5..=61.5).contains(&temperature), "{temperature}");
+}
+
+#[test]
+fn complete_heat_model_does_not_double_count_approach_lead_in_warmup() {
+    let (response, mut input, profile) = calibrated_tail_test_setup();
+    let mut advanced = profile;
+    advanced.points[0].as_mut().unwrap().approach_lead_ticks = 7;
+    let mut controllers = [HeaterController::new(), HeaterController::new()];
+    for controller in &mut controllers {
+        controller.heat_response = Some(response);
+    }
+    let mut received_mw = 0.0;
+    for now_ms in (0..20_000).step_by(50) {
+        input.now_ms = now_ms;
+        let outputs: [_; 2] = core::array::from_fn(|index| {
+            controllers[index]
+                .update_production_at(
+                    ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+                    input,
+                    Some([profile, advanced][index]),
+                )
+                .0
+        });
+        assert_eq!(outputs[0].phase, outputs[1].phase);
+        if outputs[0].phase == HeaterControlPhase::Approach {
+            return;
+        }
+        let power = input.max_power_mw * f32::from(outputs[0].duty_percent) / 100.0
+            * f32::from(outputs[0].warmup_soft_start_percent)
+            / 100.0;
+        for controller in &mut controllers {
+            controller.applied_heat.observe(now_ms, power);
+        }
+        let energy = response.step(&mut received_mw, power, 0.05);
+        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+            input.model,
+            input.measured_temp_c,
+            input.ambient_temp_c,
+        );
+        input.measured_temp_c += (energy - loss * 0.05) / input.model.thermal_capacity_mj_per_c;
+    }
+    panic!("expected a calibrated handoff");
+}
+
+#[test]
+fn calibrated_high_temperature_hold_does_not_wait_for_a_low_side_exit() {
+    for extra_loss_mw in [5_000.0, 10_000.0] {
+        check_calibrated_high_temperature_hold(extra_loss_mw);
+    }
+}
+
+#[test]
+fn calibrated_hold_feedback_can_correct_the_model_endpoint_request() {
+    let (response, mut input, profile) = calibrated_tail_test_setup();
+    input.target_temp_c = 220;
+    input.measured_temp_c = 219.0;
+    input.max_power_mw = 78_000.0;
+    input.now_ms = 20_000;
+    let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps5a);
+    let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+        input.model,
+        219.0,
+        input.ambient_temp_c,
+    );
+    let outputs = [1, 21].map(|kp| {
+        let mut profile = profile;
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 220;
+        point.hold_kp_permille_per_c = kp;
+        point.hold_ki_permille_per_c_tick = 1;
+        point.hold_power_permille = 641;
+        point.hold_reheat_power_permille = 641;
+        point.hold_blend_ticks = 1;
+        point.hold_off_centi_c = 120;
+        point.overshoot_cutoff_centi_c = 150;
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.heat_response = Some(response);
+        controller.last_target_temp_c = 220;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.phase_ticks = 1_000;
+        controller.filtered_temp_c = Some(219.0);
+        controller.previous_filtered_temp_c = Some(219.0);
+        controller.previous_measured_temp_c = Some(219.0);
+        controller.last_accepted_measurement_at_ms = Some(19_950);
+        controller.profile_last_control_at_ms = Some(19_950);
+        controller.applied_heat.configure(850);
+        controller.applied_heat.configure_response(Some(response));
+        for now_ms in (0..=20_000).step_by(50) {
+            controller.applied_heat.observe(now_ms, loss);
+        }
+        controller
+            .update_production_at(kind, input, Some(profile))
+            .0
+    });
+    assert_eq!(outputs[0].phase, HeaterControlPhase::Hold);
+    assert_eq!(outputs[1].phase, HeaterControlPhase::Hold);
+    assert!(
+        outputs[1].duty_percent > outputs[0].duty_percent,
+        "{outputs:?}"
+    );
+}
+
+#[test]
+fn calibrated_hold_recovers_a_one_degree_deficit_within_the_response_time() {
+    let (response, mut input, mut profile) = calibrated_tail_test_setup();
+    input.target_temp_c = 220;
+    input.max_power_mw = 78_000.0;
+    let point = profile.points[0].as_mut().unwrap();
+    point.target_temp_c = 220;
+    point.hold_power_permille = 641;
+    point.hold_reheat_power_permille = 641;
+    point.hold_kp_permille_per_c = 21;
+    point.hold_ki_permille_per_c_tick = 1;
+    point.hold_blend_ticks = 1;
+    point.hold_off_centi_c = 120;
+    point.overshoot_cutoff_centi_c = 150;
+    let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps5a);
+    let mut controller = HeaterController::new();
+    controller.production_controller = Some(kind);
+    controller.heat_response = Some(response);
+    controller.last_target_temp_c = 220;
+    controller.heater_was_enabled = true;
+    controller.phase = HeaterControlPhase::Hold;
+    controller.phase_ticks = 1_000;
+    controller.filtered_temp_c = Some(219.0);
+    controller.previous_filtered_temp_c = Some(219.0);
+    controller.previous_measured_temp_c = Some(219.0);
+    controller.last_accepted_measurement_at_ms = Some(19_950);
+    controller.profile_last_control_at_ms = Some(19_950);
+    controller.applied_heat.configure(850);
+    controller.applied_heat.configure_response(Some(response));
+    let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+        input.model,
+        219.0,
+        input.ambient_temp_c,
+    );
+    for now_ms in (0..=20_000).step_by(50) {
+        controller.applied_heat.observe(now_ms, loss);
+    }
+    let mut temperature = 219.0;
+    let mut heat = loss;
+    let mut recovered_at_ms = None;
+    for now_ms in (20_000..80_000).step_by(50) {
+        input.now_ms = now_ms;
+        input.measured_temp_c = temperature;
+        let output = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(output.phase, HeaterControlPhase::Hold);
+        assert!(
+            (218.5..=221.5).contains(&temperature),
+            "{now_ms}: {temperature}"
+        );
+        if temperature >= 219.75 {
+            recovered_at_ms.get_or_insert(now_ms - 20_000);
+        }
+        let power = input.max_power_mw * f32::from(output.duty_percent) / 100.0;
+        controller.applied_heat.observe(now_ms, power);
+        let energy = response.step(&mut heat, power, 0.05);
+        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+            input.model,
+            temperature,
+            input.ambient_temp_c,
+        );
+        temperature += (energy - loss * 0.05) / input.model.thermal_capacity_mj_per_c;
+    }
+    assert!(
+        recovered_at_ms.is_some_and(|at| at <= u64::from(response.decay_ms) * 3),
+        "{recovered_at_ms:?}"
+    );
+}
+
+fn check_calibrated_high_temperature_hold(fan_loss_mw: f32) {
+    let (response, mut input, mut profile) = calibrated_tail_test_setup();
+    input.target_temp_c = 220;
+    input.max_power_mw = 78_000.0;
+    let point = profile.points[0].as_mut().unwrap();
+    point.target_temp_c = 220;
+    point.brake_distance_centi_c = (flux_purr_firmware::thermal_response::reference_brake_c(
+        response,
+        input.model,
+        input.ambient_temp_c,
+        input.max_power_mw,
+        220.0,
+    ) * 100.0)
+        .round() as u16;
+    point.hold_power_permille = 641;
+    point.hold_reheat_power_permille = 641;
+    point.hold_kp_permille_per_c = 21;
+    point.hold_off_centi_c = 120;
+    point.overshoot_cutoff_centi_c = 150;
+    let mut controller = HeaterController::new();
+    controller.heat_response = Some(response);
+    let mut temperature = 200.0;
+    let mut received_mw = 0.0;
+    let mut entered_hold = false;
+    let mut minimum_hold_c = f32::MAX;
+    let mut peak_hold_c = f32::MIN;
+    for now_ms in (0..100_000).step_by(50) {
+        input.now_ms = now_ms;
+        input.measured_temp_c = temperature;
+        let (output, _) = controller.update_production_at(
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+            input,
+            Some(profile),
+        );
+        entered_hold |= output.phase == HeaterControlPhase::Hold;
+        if entered_hold {
+            minimum_hold_c = minimum_hold_c.min(temperature);
+            peak_hold_c = peak_hold_c.max(temperature);
+            assert_eq!(
+                output.phase,
+                HeaterControlPhase::Hold,
+                "at {now_ms}: {temperature}"
+            );
+        }
+        let applied_mw = input.max_power_mw * f32::from(output.duty_percent) / 100.0
+            * f32::from(output.warmup_soft_start_percent)
+            / 100.0;
+        controller.applied_heat.observe(now_ms, applied_mw);
+        let energy = response.step(&mut received_mw, applied_mw, 0.05);
+        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+            input.model,
+            temperature,
+            input.ambient_temp_c,
+        );
+        // A bounded periodic loss represents the heating fan/environment.
+        // The accepted-temperature observer must recover its missing heat;
+        // a static PI baseline must not cap that recovery indefinitely.
+        let extra_loss_mw = if now_ms % 10_000 < 5_000 {
+            fan_loss_mw
+        } else {
+            0.0
+        };
+        temperature +=
+            (energy - (loss + extra_loss_mw) * 0.05) / input.model.thermal_capacity_mj_per_c;
+    }
+    assert!(entered_hold);
+    assert!(minimum_hold_c >= 218.5, "{minimum_hold_c}");
+    assert!(peak_hold_c <= 221.5, "{peak_hold_c}");
 }
 
 #[test]

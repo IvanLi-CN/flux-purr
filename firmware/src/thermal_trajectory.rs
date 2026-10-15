@@ -3,9 +3,32 @@
 
 use crate::memory::ThermalPlantProjection;
 use crate::thermal_plant::natural_cooling_loss_mw;
+use crate::thermal_response::{HeatResponse, HeatStep};
 
 const HEAT_BUCKETS: usize = 64;
 const MEASUREMENT_GAP_MS: u64 = 1_000;
+
+struct ForecastBias {
+    extra_loss_mw: f32,
+    stored_heat_mw: f32,
+}
+
+impl ForecastBias {
+    fn new(net_mw: f32) -> Self {
+        Self {
+            extra_loss_mw: net_mw.min(0.0),
+            stored_heat_mw: net_mw.max(0.0),
+        }
+    }
+
+    fn energy(&mut self, step: HeatStep, dt_s: f32) -> f32 {
+        self.extra_loss_mw * dt_s + step.advance(&mut self.stored_heat_mw, 0.0)
+    }
+
+    fn net_mw(&self) -> f32 {
+        self.extra_loss_mw + self.stored_heat_mw
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct HeatTransferObservation {
@@ -18,6 +41,7 @@ struct HeatTransferObservation {
     temperature_delta_c: f32,
     loss_energy_mj: f32,
     delayed_energy_mj: f32,
+    received_energy_mj: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,6 +67,15 @@ pub struct ReferenceState {
     pub rise_c_per_s: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct TrackingTarget {
+    pub temperature_c: f32,
+    pub minimum_permille: u16,
+    pub ahead_ms: u64,
+    /// Time for this correction before resuming the target's maintenance heat.
+    pub command_ms: u64,
+}
+
 /// A bounded history covers the entire calibrated delay, even at 60 seconds.
 /// Buckets store time-weighted power; repeated callbacks cannot invent energy.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -55,6 +88,8 @@ pub struct AppliedHeatHistory {
     current_energy_mj: f32,
     current_span_ms: u64,
     transfer: HeatTransferObservation,
+    response: Option<HeatResponse>,
+    received_mw: f32,
 }
 
 impl Default for AppliedHeatHistory {
@@ -73,6 +108,8 @@ impl AppliedHeatHistory {
             current_power_mw: 0.0,
             current_energy_mj: 0.0,
             current_span_ms: 0,
+            response: None,
+            received_mw: 0.0,
             transfer: HeatTransferObservation {
                 origin: None,
                 last_measurement_ms: None,
@@ -83,6 +120,7 @@ impl AppliedHeatHistory {
                 temperature_delta_c: 0.0,
                 loss_energy_mj: 0.0,
                 delayed_energy_mj: 0.0,
+                received_energy_mj: 0.0,
             },
         }
     }
@@ -119,6 +157,22 @@ impl AppliedHeatHistory {
             self.observe(now_ms, power_mw);
             return;
         }
+        if let Some(response) = self.response {
+            let mut delivered_at_ms = at_ms;
+            while delivered_at_ms < now_ms {
+                let end_ms = (delivered_at_ms + 50).min(now_ms);
+                let input_mw = delivered_at_ms
+                    .checked_sub(u64::from(response.delay_ms))
+                    .and_then(|source_ms| self.power_at(source_ms))
+                    .unwrap_or(0.0);
+                response.step(
+                    &mut self.received_mw,
+                    input_mw,
+                    (end_ms - delivered_at_ms) as f32 / 1_000.0,
+                );
+                delivered_at_ms = end_ms;
+            }
+        }
         // A long pause is a held output, not thousands of callback iterations.
         if now_ms - at_ms > self.width_ms * HEAT_BUCKETS as u64 {
             at_ms = now_ms - self.width_ms * (HEAT_BUCKETS as u64 - 1);
@@ -142,6 +196,189 @@ impl AppliedHeatHistory {
         }
         self.last_at_ms = Some(now_ms);
         self.current_power_mw = power_mw;
+    }
+
+    pub fn configure_response(&mut self, response: Option<HeatResponse>) {
+        if self.response != response {
+            self.response = response;
+            self.received_mw = 0.0;
+        }
+    }
+
+    /// Same-state reachability bounds for trajectory inversion. Electrical
+    /// history is fixed; only commands issued from now onward are varied.
+    pub fn predict_response(
+        &self,
+        now_ms: u64,
+        measured_at_ms: u64,
+        measured_c: f32,
+        future_power_mw: f32,
+        horizon_ms: u64,
+        plant: TrajectoryPlant,
+    ) -> Option<(ReferenceState, f32)> {
+        let response = self.response?;
+        let start_ms = measured_at_ms.min(now_ms);
+        let mut received_mw = self.response_heat_at(start_ms, now_ms)?;
+        let mut temperature_c = measured_c;
+        let mut peak_c = measured_c;
+        let mut at_ms = start_ms;
+        let end_ms = now_ms + horizon_ms;
+        let mut bias = ForecastBias::new(self.response_bias_mw(now_ms));
+        let step = response.discretize(0.1);
+        while at_ms < end_ms {
+            let next_ms = (at_ms + 100).min(end_ms);
+            let input_mw = self.forecast_input_mw(at_ms, now_ms, future_power_mw, response);
+            let dt_s = (next_ms - at_ms) as f32 / 1_000.0;
+            let interval_step = if next_ms - at_ms == 100 {
+                step
+            } else {
+                response.discretize(dt_s)
+            };
+            let energy = interval_step.advance(&mut received_mw, input_mw);
+            let bias_energy = bias.energy(interval_step, dt_s);
+            temperature_c += (energy + bias_energy - plant.loss_mw(temperature_c) * dt_s)
+                / plant.model.thermal_capacity_mj_per_c;
+            peak_c = peak_c.max(temperature_c);
+            at_ms = next_ms;
+        }
+        Some((
+            ReferenceState {
+                temperature_c,
+                rise_c_per_s: plant.rise(temperature_c, received_mw + bias.net_mw()),
+            },
+            peak_c,
+        ))
+    }
+
+    fn response_heat_at(&self, start_ms: u64, now_ms: u64) -> Option<f32> {
+        let response = self.response?;
+        let mut received_mw = self.received_mw;
+        // Reconstruct the heat state at the accepted reading. This is a
+        // short, bounded inverse integration, not a fabricated measurement.
+        let mut at_ms = self.last_at_ms.unwrap_or(start_ms).min(now_ms);
+        while at_ms > start_ms {
+            let before_ms = at_ms.saturating_sub(50).max(start_ms);
+            let input_mw = before_ms
+                .checked_sub(u64::from(response.delay_ms))
+                .and_then(|source_ms| self.power_at(source_ms))
+                .unwrap_or(0.0);
+            let mut unit = 1.0;
+            response.step(&mut unit, 0.0, (at_ms - before_ms) as f32 / 1_000.0);
+            // A reduced PPS setting bounds future input, not heat stored
+            // under an earlier, stronger contract.
+            received_mw = (input_mw + (received_mw - input_mw) / unit).max(0.0);
+            at_ms = before_ms;
+        }
+        while at_ms < start_ms {
+            let next_ms = (at_ms + 50).min(start_ms);
+            let input_mw = self.forecast_input_mw(at_ms, now_ms, 0.0, response);
+            response.step(
+                &mut received_mw,
+                input_mw,
+                (next_ms - at_ms) as f32 / 1_000.0,
+            );
+            at_ms = next_ms;
+        }
+        Some(received_mw)
+    }
+
+    fn forecast_input_mw(
+        &self,
+        at_ms: u64,
+        now_ms: u64,
+        future_mw: f32,
+        response: HeatResponse,
+    ) -> f32 {
+        let Some(source_ms) = at_ms.checked_sub(u64::from(response.delay_ms)) else {
+            return 0.0;
+        };
+        if source_ms < now_ms {
+            self.power_at(source_ms).unwrap_or(self.current_power_mw)
+        } else {
+            future_mw
+        }
+    }
+
+    pub fn tracking_request_permille(
+        &self,
+        now_ms: u64,
+        measured_at_ms: u64,
+        measured_c: f32,
+        target: TrackingTarget,
+        plant: TrajectoryPlant,
+    ) -> Option<u16> {
+        self.tracking_request_bounds(now_ms, measured_at_ms, measured_c, target, plant, 0.0)
+            .map(|(request, _)| request)
+    }
+
+    /// Return endpoint feedforward separately from the complete peak limit,
+    /// so feedback can correct a model error without defeating that limit.
+    pub fn tracking_request_bounds(
+        &self,
+        now_ms: u64,
+        measured_at_ms: u64,
+        measured_c: f32,
+        target: TrackingTarget,
+        plant: TrajectoryPlant,
+        peak_headroom_c: f32,
+    ) -> Option<(u16, u16)> {
+        let response = self.response?;
+        let mut at_ms = measured_at_ms.min(now_ms);
+        let heat = self.response_heat_at(at_ms, now_ms)?;
+        let mut heats = [heat; 2];
+        let mut temperatures = [measured_c; 2];
+        // A falling plate can already be above its reference. Restoring heat
+        // toward that reference must not be blocked by an unavoidable initial
+        // temperature; prevent a new peak above the existing temperature.
+        let peak_ceiling_c = (target.temperature_c + peak_headroom_c.max(0.0)).max(measured_c);
+        let mut peak_request = 1_000.0_f32;
+        let end_ms = now_ms + target.ahead_ms;
+        let mut bias = ForecastBias::new(self.response_bias_mw(now_ms));
+        let command_end_ms = now_ms
+            .saturating_add(target.command_ms)
+            .saturating_add(u64::from(response.delay_ms));
+        let step = response.discretize(0.1);
+        while at_ms < end_ms {
+            let next_ms = (at_ms + 100).min(end_ms);
+            let dt_s = (next_ms - at_ms) as f32 / 1_000.0;
+            let interval_step = if next_ms - at_ms == 100 {
+                step
+            } else {
+                response.discretize(dt_s)
+            };
+            let maintenance_mw = (plant.loss_mw(target.temperature_c) - bias.net_mw())
+                .clamp(0.0, plant.max_power_mw);
+            let future_powers = if at_ms < command_end_ms {
+                [0.0, plant.max_power_mw]
+            } else {
+                [maintenance_mw; 2]
+            };
+            let bias_energy = bias.energy(interval_step, dt_s);
+            for (index, future_mw) in future_powers.into_iter().enumerate() {
+                let input_mw = self.forecast_input_mw(at_ms, now_ms, future_mw, response);
+                let energy = interval_step.advance(&mut heats[index], input_mw);
+                temperatures[index] += (energy + bias_energy
+                    - plant.loss_mw(temperatures[index]) * dt_s)
+                    / plant.model.thermal_capacity_mj_per_c;
+            }
+            let difference_c = temperatures[1] - temperatures[0];
+            if next_ms > now_ms
+                && (difference_c > 0.000_01 || temperatures[0] > peak_ceiling_c + 0.001)
+            {
+                peak_request = peak_request
+                    .min((peak_ceiling_c - temperatures[0]) / difference_c.max(0.000_01) * 1_000.0);
+            }
+            at_ms = next_ms;
+        }
+        let endpoint_request = (target.temperature_c - temperatures[0])
+            / (temperatures[1] - temperatures[0]).max(0.001)
+            * 1_000.0;
+        Some((
+            endpoint_request
+                .min(peak_request)
+                .clamp(f32::from(target.minimum_permille), 1_000.0) as u16,
+            peak_request.clamp(f32::from(target.minimum_permille), 1_000.0) as u16,
+        ))
     }
 
     fn power_at(&self, at_ms: u64) -> Option<f32> {
@@ -203,7 +440,10 @@ impl AppliedHeatHistory {
             self.transfer.origin = Some((now_ms, temperature_c));
             return;
         };
-        let delay_ms = u64::from(plant.model.transport_delay_ms);
+        let delay_ms = u64::from(
+            self.response
+                .map_or(plant.model.transport_delay_ms, |response| response.delay_ms),
+        );
         let elapsed_ms = now_ms - origin_ms;
         if elapsed_ms < 100 {
             return;
@@ -225,10 +465,15 @@ impl AppliedHeatHistory {
             at_ms = next_ms;
         }
         let elapsed_s = elapsed_ms as f32 / 1_000.0;
+        let window_ms = if self.response.is_some() {
+            delay_ms.max(1_000) * 2
+        } else {
+            delay_ms.max(100) * 2
+        };
         if self
             .transfer
             .window_start_ms
-            .is_some_and(|start_ms| now_ms.saturating_sub(start_ms) > delay_ms.max(100) * 2)
+            .is_some_and(|start_ms| now_ms.saturating_sub(start_ms) > window_ms)
         {
             self.clear_transfer_energy_window();
         }
@@ -238,6 +483,10 @@ impl AppliedHeatHistory {
         self.transfer.temperature_delta_c += temperature_c - origin_c;
         self.transfer.loss_energy_mj += plant.loss_mw((origin_c + temperature_c) * 0.5) * elapsed_s;
         self.transfer.delayed_energy_mj += delayed_energy_mj;
+        if self.response.is_some() {
+            self.correct_response_heat(origin_ms, now_ms, plant);
+            return;
+        }
         // Accumulate only intervals with their own accepted temperature
         // origin. PPS gaps and ADC shifts contribute no time or temperature
         // difference; valid evidence on either side may share this average.
@@ -254,12 +503,84 @@ impl AppliedHeatHistory {
         self.clear_transfer_energy_window();
     }
 
+    fn response_interval_energy(&self, start_ms: u64, end_ms: u64) -> Option<f32> {
+        let response = self.response?;
+        let mut at_ms = self.last_at_ms?;
+        let mut received_mw = self.received_mw;
+        while at_ms < end_ms {
+            let next_ms = (at_ms + 50).min(end_ms);
+            let input_mw = self.forecast_input_mw(at_ms, end_ms, self.current_power_mw, response);
+            response.step(
+                &mut received_mw,
+                input_mw,
+                (next_ms - at_ms) as f32 / 1_000.0,
+            );
+            at_ms = next_ms;
+        }
+        if at_ms != end_ms {
+            return None;
+        }
+        let mut energy_mj = 0.0;
+        while at_ms > start_ms {
+            let previous_ms = at_ms.saturating_sub(50).max(start_ms);
+            let dt_s = (at_ms - previous_ms) as f32 / 1_000.0;
+            let input_mw = previous_ms
+                .checked_sub(u64::from(response.delay_ms))
+                .and_then(|source_ms| self.power_at(source_ms))?;
+            let mut alpha = 1.0;
+            response.step(&mut alpha, 0.0, dt_s);
+            received_mw = input_mw + (received_mw - input_mw) / alpha;
+            let mut before = received_mw;
+            energy_mj += response.step(&mut before, input_mw, dt_s);
+            at_ms = previous_ms;
+        }
+        Some(energy_mj)
+    }
+
+    fn correct_response_heat(&mut self, start_ms: u64, now_ms: u64, plant: TrajectoryPlant) {
+        let Some(energy_mj) = self.response_interval_energy(start_ms, now_ms) else {
+            self.clear_transfer_energy_window();
+            return;
+        };
+        self.transfer.received_energy_mj += energy_mj;
+        if self.transfer.valid_ms < 1_000 {
+            return;
+        }
+        // Keep calibrated electrical heat separate from the observed net heat
+        // discrepancy. Correcting q alone makes a persistent extra loss decay
+        // away in every forecast, producing a permanent tracking offset.
+        let innovation_mj = self.transfer.loss_energy_mj
+            + plant.model.thermal_capacity_mj_per_c * self.transfer.temperature_delta_c
+            - self.transfer.received_energy_mj;
+        let discrepancy_mw = innovation_mj / (self.transfer.valid_ms as f32 / 1_000.0);
+        let previous_mw = self.response_bias_mw(now_ms);
+        let bias_mw = (0.75 * previous_mw + 0.25 * discrepancy_mw)
+            .clamp(-plant.max_power_mw, plant.max_power_mw);
+        self.transfer.residual = Some((now_ms, bias_mw));
+        self.clear_transfer_energy_window();
+    }
+
+    fn response_bias_mw(&self, now_ms: u64) -> f32 {
+        let Some((observed_ms, bias_mw)) = self.transfer.residual else {
+            return 0.0;
+        };
+        let lifetime_ms = self
+            .response
+            .map_or(0, |response| u64::from(response.decay_ms).max(1_000) * 2);
+        if now_ms < observed_ms || now_ms - observed_ms > lifetime_ms {
+            0.0
+        } else {
+            bias_mw
+        }
+    }
+
     fn clear_transfer_energy_window(&mut self) {
         self.transfer.window_start_ms = None;
         self.transfer.valid_ms = 0;
         self.transfer.temperature_delta_c = 0.0;
         self.transfer.loss_energy_mj = 0.0;
         self.transfer.delayed_energy_mj = 0.0;
+        self.transfer.received_energy_mj = 0.0;
     }
 
     fn residual_at(&self, now_ms: u64, future_ms: u64, plant: TrajectoryPlant) -> f32 {
@@ -298,6 +619,19 @@ impl AppliedHeatHistory {
         observed_rise_c_per_s: f32,
         plant: TrajectoryPlant,
     ) -> ReferenceState {
+        if let Some(response) = self.response {
+            return self
+                .predict_response(
+                    now_ms,
+                    measured_at_ms,
+                    measured_c,
+                    self.current_power_mw,
+                    u64::from(response.delay_ms),
+                    plant,
+                )
+                .unwrap()
+                .0;
+        }
         let delay_ms = u64::from(plant.model.transport_delay_ms);
         let measured_at_ms = measured_at_ms.min(now_ms);
         let inferred_mw = (plant.loss_mw(measured_c)
@@ -404,6 +738,30 @@ impl TemperatureTrajectory {
             plant.loss_mw(reference.temperature_c) + plant.model.thermal_capacity_mj_per_c * rise;
         (power_mw * 1_000.0 / plant.max_power_mw).clamp(50.0, 1_000.0) as u16
     }
+
+    /// Forecasting a known reference is different from accepting a long gap
+    /// in live measurements. Advance bounded chunks without truncating time.
+    pub fn projected(
+        self,
+        ahead_ms: u64,
+        target_c: f32,
+        horizon_s: f32,
+        damping: f32,
+        plant: TrajectoryPlant,
+    ) -> ReferenceState {
+        let mut future = self;
+        let end_ms = self.last_at_ms + ahead_ms;
+        while future.last_at_ms < end_ms {
+            future.advance(
+                (future.last_at_ms + 5_000).min(end_ms),
+                target_c,
+                horizon_s,
+                damping,
+                plant,
+            );
+        }
+        future.reference
+    }
 }
 
 #[cfg(test)]
@@ -421,6 +779,383 @@ mod tests {
             ambient_c: 30.0,
             max_power_mw: 60_000.0,
         }
+    }
+
+    #[test]
+    fn exact_response_observations_do_not_bias_instantaneous_heat() {
+        let mut plant = plant(850);
+        plant.model.convection_mw_per_c = 0.0;
+        let response = HeatResponse {
+            delay_ms: 0,
+            decay_ms: 3_950,
+            rmse_c: 0.0,
+            maximum_error_c: 0.0,
+        };
+        let mut history = AppliedHeatHistory::new();
+        history.configure(850);
+        history.configure_response(Some(response));
+        let mut temperature_c = 35.0;
+        let mut received_mw = 0.0;
+        history.observe(0, plant.max_power_mw);
+        history.observe_temperature(0, temperature_c, plant);
+        for now_ms in (50..=12_000).step_by(50) {
+            let input_mw = if now_ms <= 6_000 {
+                plant.max_power_mw
+            } else {
+                0.05 * plant.max_power_mw
+            };
+            history.observe(now_ms - 50, input_mw);
+            temperature_c += response.step(&mut received_mw, input_mw, 0.05)
+                / plant.model.thermal_capacity_mj_per_c;
+            history.observe_temperature(now_ms, temperature_c, plant);
+            history.observe(now_ms, input_mw);
+            if now_ms % 1_000 == 0 {
+                assert!(
+                    (history.received_mw - received_mw).abs() < 100.0,
+                    "at {now_ms}: model={}, actual={received_mw}",
+                    history.received_mw,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_positive_transfer_discrepancy_cannot_supply_heat_after_its_tail() {
+        let plant = plant(0);
+        let response = HeatResponse {
+            delay_ms: 0,
+            decay_ms: 3_950,
+            rmse_c: 0.0,
+            maximum_error_c: 0.0,
+        };
+        let mut history = AppliedHeatHistory::new();
+        history.configure_response(Some(response));
+        history.observe(0, 0.0);
+        // An accepted rise can reveal heat not represented by the input
+        // history. That is finite stored heat, not an independent heater.
+        let mut actual_heat_mw = 30_000.0;
+        let mut temperature_c = 50.0;
+        history.observe_temperature(0, temperature_c, plant);
+        for now_ms in (50..=2_000).step_by(50) {
+            let energy = response.step(&mut actual_heat_mw, 0.0, 0.05);
+            temperature_c += (energy - plant.loss_mw(temperature_c) * 0.05)
+                / plant.model.thermal_capacity_mj_per_c;
+            history.observe_temperature(now_ms, temperature_c, plant);
+            history.observe(now_ms, 0.0);
+        }
+        let (predicted, _) = history
+            .predict_response(
+                2_000,
+                2_000,
+                temperature_c,
+                0.0,
+                response.horizon_ms(),
+                plant,
+            )
+            .unwrap();
+        assert!(
+            predicted.rise_c_per_s < 0.0,
+            "zero input must cool after the finite heat tail: {predicted:?}",
+        );
+    }
+
+    #[test]
+    fn tracking_cannot_hide_a_near_term_peak_behind_a_cooler_endpoint() {
+        let mut plant = plant(0);
+        plant.model.thermal_capacity_mj_per_c = 25_843.268;
+        plant.max_power_mw = 105_000.0;
+        let response = HeatResponse {
+            delay_ms: 0,
+            decay_ms: 3_950,
+            rmse_c: 0.0,
+            maximum_error_c: 0.0,
+        };
+        let mut history = AppliedHeatHistory::new();
+        history.configure_response(Some(response));
+        history.observe(0, 0.0);
+        history.received_mw = 20_000.0;
+        let request = history
+            .tracking_request_permille(
+                0,
+                0,
+                59.0,
+                TrackingTarget {
+                    temperature_c: 60.0,
+                    minimum_permille: 0,
+                    ahead_ms: response.horizon_ms(),
+                    command_ms: response.horizon_ms(),
+                },
+                plant,
+            )
+            .unwrap();
+        let (_, peak) = history
+            .predict_response(
+                0,
+                0,
+                59.0,
+                plant.max_power_mw * f32::from(request) / 1_000.0,
+                response.horizon_ms(),
+                plant,
+            )
+            .unwrap();
+        assert!(peak <= 60.05, "request={request} predicted peak={peak}");
+    }
+
+    #[test]
+    fn peak_envelope_preserves_stationary_loss_compensation() {
+        let plant = plant(0);
+        let response = HeatResponse {
+            delay_ms: 0,
+            decay_ms: 3_950,
+            rmse_c: 0.0,
+            maximum_error_c: 0.0,
+        };
+        let mut history = AppliedHeatHistory::new();
+        history.configure_response(Some(response));
+        history.observe(0, plant.loss_mw(60.0));
+        history.received_mw = plant.loss_mw(60.0);
+        let request = history
+            .tracking_request_permille(
+                0,
+                0,
+                60.0,
+                TrackingTarget {
+                    temperature_c: 60.0,
+                    minimum_permille: 0,
+                    ahead_ms: response.horizon_ms(),
+                    command_ms: response.horizon_ms(),
+                },
+                plant,
+            )
+            .unwrap();
+        assert!((95..=105).contains(&request), "{request}");
+    }
+
+    #[test]
+    fn hold_feedback_has_room_below_a_separate_complete_peak_limit() {
+        let plant = plant(0);
+        let response = HeatResponse {
+            delay_ms: 0,
+            decay_ms: 3_950,
+            rmse_c: 0.0,
+            maximum_error_c: 0.0,
+        };
+        let mut history = AppliedHeatHistory::new();
+        history.configure_response(Some(response));
+        history.observe(0, plant.loss_mw(60.0));
+        history.received_mw = plant.loss_mw(60.0);
+        let (request, maximum) = history
+            .tracking_request_bounds(
+                0,
+                0,
+                60.0,
+                TrackingTarget {
+                    temperature_c: 60.0,
+                    minimum_permille: 0,
+                    ahead_ms: response.horizon_ms(),
+                    command_ms: response.horizon_ms(),
+                },
+                plant,
+                0.5,
+            )
+            .unwrap();
+        assert!(maximum > request, "request={request}, maximum={maximum}");
+        let (endpoint, peak) = history
+            .predict_response(
+                0,
+                0,
+                60.0,
+                plant.max_power_mw * f32::from(maximum) / 1_000.0,
+                response.horizon_ms(),
+                plant,
+            )
+            .unwrap();
+        assert!(endpoint.temperature_c > 60.1, "{endpoint:?}");
+        assert!(peak <= 60.51, "{peak}");
+    }
+
+    #[test]
+    fn finite_hold_correction_checks_the_complete_post_command_tail() {
+        let plant = plant(0);
+        let response = HeatResponse {
+            delay_ms: 0,
+            decay_ms: 3_950,
+            rmse_c: 0.0,
+            maximum_error_c: 0.0,
+        };
+        let mut history = AppliedHeatHistory::new();
+        history.configure_response(Some(response));
+        let initial_heat = plant.loss_mw(59.0);
+        history.observe(0, initial_heat);
+        history.received_mw = initial_heat;
+        let target = TrackingTarget {
+            temperature_c: 60.0,
+            minimum_permille: 0,
+            ahead_ms: response.horizon_ms(),
+            command_ms: u64::from(response.decay_ms),
+        };
+        let (request, ceiling) = history
+            .tracking_request_bounds(0, 0, 59.0, target, plant, 0.5)
+            .unwrap();
+        let (_, constant_ceiling) = history
+            .tracking_request_bounds(
+                0,
+                0,
+                59.0,
+                TrackingTarget {
+                    command_ms: target.ahead_ms,
+                    ..target
+                },
+                plant,
+                0.5,
+            )
+            .unwrap();
+        assert!(ceiling > constant_ceiling && request <= ceiling);
+        let mut temperature = 59.0;
+        let mut heat = initial_heat;
+        let mut peak = temperature;
+        for at_ms in (0..target.ahead_ms).step_by(50) {
+            let input = if at_ms < target.command_ms {
+                plant.max_power_mw * f32::from(ceiling) / 1_000.0
+            } else {
+                plant.loss_mw(target.temperature_c)
+            };
+            let energy = response.step(&mut heat, input, 0.05);
+            temperature += (energy - plant.loss_mw(temperature) * 0.05)
+                / plant.model.thermal_capacity_mj_per_c;
+            peak = peak.max(temperature);
+        }
+        assert!(peak <= 60.51, "{peak}");
+    }
+
+    #[test]
+    fn falling_hold_recovers_heat_before_crossing_the_target() {
+        let mut plant = plant(0);
+        plant.max_power_mw = 78_000.0;
+        plant.model.thermal_capacity_mj_per_c = 25_843.268;
+        let response = HeatResponse {
+            delay_ms: 0,
+            decay_ms: 3_950,
+            rmse_c: 0.0,
+            maximum_error_c: 0.0,
+        };
+        let mut history = AppliedHeatHistory::new();
+        history.configure_response(Some(response));
+        history.observe(0, 0.0);
+        history.received_mw = 20_000.0;
+        let request = history
+            .tracking_request_permille(
+                0,
+                0,
+                220.5,
+                TrackingTarget {
+                    temperature_c: 220.0,
+                    minimum_permille: 0,
+                    ahead_ms: response.horizon_ms(),
+                    command_ms: response.horizon_ms(),
+                },
+                plant,
+            )
+            .unwrap();
+        let (endpoint, peak) = history
+            .predict_response(
+                0,
+                0,
+                220.5,
+                plant.max_power_mw * f32::from(request) / 1_000.0,
+                response.horizon_ms(),
+                plant,
+            )
+            .unwrap();
+        assert!(request > 400, "{request}");
+        assert!(
+            (endpoint.temperature_c - 220.0).abs() < 0.05,
+            "{endpoint:?}"
+        );
+        assert!(peak <= 220.51, "{peak}");
+    }
+
+    #[test]
+    fn lower_future_source_capacity_cannot_erase_heat_already_in_flight() {
+        let mut plant = plant(0);
+        plant.max_power_mw = 100_000.0;
+        let response = HeatResponse {
+            delay_ms: 0,
+            decay_ms: 4_000,
+            rmse_c: 0.0,
+            maximum_error_c: 0.0,
+        };
+        let mut history = AppliedHeatHistory::new();
+        history.configure_response(Some(response));
+        history.observe(0, 100_000.0);
+        history.observe(10_000, 100_000.0);
+        let original = history
+            .predict_response(10_000, 9_000, 50.0, 0.0, 0, plant)
+            .unwrap();
+        plant.max_power_mw = 40_000.0;
+        let reduced = history
+            .predict_response(10_000, 9_000, 50.0, 0.0, 0, plant)
+            .unwrap();
+        assert!((original.0.temperature_c - reduced.0.temperature_c).abs() < 0.001);
+        assert!((original.0.rise_c_per_s - reduced.0.rise_c_per_s).abs() < 0.001);
+    }
+
+    #[test]
+    fn warmup_prediction_must_cover_the_shutdown_tail_beyond_pure_delay() {
+        let plant = plant(850);
+        let mut history = AppliedHeatHistory::new();
+        history.configure(850);
+        let response = HeatResponse {
+            delay_ms: 850,
+            decay_ms: 4_000,
+            rmse_c: 0.0,
+            maximum_error_c: 0.0,
+        };
+        history.configure_response(Some(response));
+        history.observe(0, 60_000.0);
+        history.observe(10_000, 3_000.0);
+        // A four-second transfer tail contains heat after the 850ms transport
+        // interval. This is a model regression, not a historical tuning seed.
+        let (_, peak_c) = history
+            .predict_response(10_000, 10_000, 49.0, 3_000.0, response.horizon_ms(), plant)
+            .unwrap();
+        assert!(peak_c > 55.0, "{peak_c}");
+        history.observe(11_000, 3_000.0);
+        let before = history
+            .predict_response(11_000, 11_000, 52.0, 3_000.0, response.horizon_ms(), plant)
+            .unwrap();
+        history.reanchor_temperature();
+        let after = history
+            .predict_response(11_000, 11_000, 52.0, 3_000.0, response.horizon_ms(), plant)
+            .unwrap();
+        assert_eq!(before, after);
+        assert!(
+            after.1 > 55.0,
+            "tail must survive transport expiry and PPS reanchor"
+        );
+    }
+
+    #[test]
+    fn forecast_advances_heat_to_a_newer_measurement_before_predicting() {
+        let plant = plant(0);
+        let response = HeatResponse {
+            delay_ms: 0,
+            decay_ms: 4_000,
+            rmse_c: 0.0,
+            maximum_error_c: 0.0,
+        };
+        let mut history = AppliedHeatHistory::new();
+        history.configure_response(Some(response));
+        history.observe(0, 60_000.0);
+        let before = history
+            .predict_response(1_000, 1_000, 40.0, 3_000.0, 8_000, plant)
+            .unwrap();
+        history.observe(1_000, 60_000.0);
+        let after = history
+            .predict_response(1_000, 1_000, 40.0, 3_000.0, 8_000, plant)
+            .unwrap();
+        assert!((before.0.temperature_c - after.0.temperature_c).abs() < 0.001);
+        assert!((before.1 - after.1).abs() < 0.001);
     }
 
     #[test]

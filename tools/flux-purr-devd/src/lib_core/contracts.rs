@@ -226,6 +226,8 @@ pub struct ThermalPlantActiveResult {
     pub radiation_mw_per_k4: Option<f32>,
     pub thermal_capacity_mj_per_c: Option<f32>,
     pub transport_delay_ms: Option<u32>,
+    #[serde(default)]
+    pub heat_response: Option<flux_purr_firmware::thermal_response::HeatResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

@@ -1970,6 +1970,7 @@ pub(crate) fn thermal_plant_active_result(
         radiation_mw_per_k4: Some(projection.radiation_mw_per_k4),
         thermal_capacity_mj_per_c: Some(projection.thermal_capacity_mj_per_c),
         transport_delay_ms: Some(projection.transport_delay_ms),
+        heat_response: thermal_plant_heat_response(memory_config),
     })
 }
 
@@ -2020,4 +2021,38 @@ pub(crate) fn thermal_plant_projection_for_runtime(
     let ambient_temp_c =
         projected_rtd_temperature_c(memory_config, transaction.ambient_raw_rtd_adc_mv)?;
     Some((projection, ambient_temp_c))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn thermal_plant_heat_response(
+    memory_config: &MemoryConfig,
+) -> Option<flux_purr_firmware::thermal_response::HeatResponse> {
+    use flux_purr_firmware::thermal_response::{ResponseSample, fit_shutdown_response};
+    let (model, ambient_c) = thermal_plant_projection_for_runtime(memory_config)?;
+    let transaction = memory_config.thermal_plant_transient_active.as_ref()?;
+    let curve = projected_heater_curve(memory_config)?;
+    let count = usize::from(transaction.sample_count);
+    let mut samples = [ResponseSample::default(); THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut temperatures = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, sample) in transaction.samples[..count].iter().enumerate() {
+        let temperature_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)?;
+        temperatures[index] = temperature_c;
+        samples[index] = ResponseSample {
+            at_ms: u32::from(sample.elapsed_ticks) * HEATER_CONTROL_INTERVAL_MS as u32,
+            temperature_c,
+            power_mw: transient_sample_power_mw(
+                *sample,
+                temperature_c,
+                Some(&curve),
+                memory_config,
+            )?,
+            accepted: true,
+        };
+    }
+    let accepted =
+        transient_temperature_acceptance(&transaction.samples[..count], &temperatures[..count]);
+    for index in 0..count {
+        samples[index].accepted = accepted[index];
+    }
+    fit_shutdown_response(&samples[..count], model, ambient_c)
 }

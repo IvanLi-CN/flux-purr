@@ -491,6 +491,8 @@ pub struct ThermalPlantActiveResultWire {
     pub radiation_mw_per_k4: Option<f32>,
     pub thermal_capacity_mj_per_c: Option<f32>,
     pub transport_delay_ms: Option<u32>,
+    #[serde(default)]
+    pub heat_response: Option<crate::thermal_response::HeatResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

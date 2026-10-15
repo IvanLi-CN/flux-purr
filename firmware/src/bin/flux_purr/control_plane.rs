@@ -1600,7 +1600,7 @@ pub(crate) fn prepare_transient_fit(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn transient_temperature_acceptance(
+pub(crate) fn transient_temperature_acceptance(
     samples: &[ThermalPlantTransientSample],
     temperatures_c: &[f32],
 ) -> [bool; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES] {

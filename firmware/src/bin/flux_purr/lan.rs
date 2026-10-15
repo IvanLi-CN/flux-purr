@@ -1486,7 +1486,7 @@ fn thermal_tuning_status(
     include_profile_with_events: bool,
 ) -> flux_purr_firmware::control_plane::ThermalTuningStatusWire {
     let mut pps_control_policy_version = heapless::String::<32>::new();
-    let _ = pps_control_policy_version.push_str("hold-pps-governor-v1");
+    let _ = pps_control_policy_version.push_str("hold-pps-governor-v2");
     let (apdo_min_mv, apdo_max_mv) = match *context.heater_power_backend {
         HeaterPowerBackend::PpsMos {
             pps_min_mv,

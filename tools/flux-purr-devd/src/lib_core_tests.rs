@@ -2,6 +2,26 @@ use super::*;
 use std::process::ExitStatus;
 use tempfile::tempdir;
 
+#[test]
+fn calibration_bridge_preserves_the_firmware_shutdown_response() {
+    let response = flux_purr_firmware::thermal_response::HeatResponse {
+        delay_ms: 0,
+        decay_ms: 3_900,
+        rmse_c: 0.4,
+        maximum_error_c: 0.8,
+    };
+    let mut active = ThermalPlantActiveResult::default();
+    active.heat_response = Some(response);
+    let wire = serde_json::to_value(&active).unwrap();
+    let decoded: ThermalPlantActiveResult = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(decoded.heat_response, Some(response));
+    assert_eq!(wire["heatResponse"]["decayMs"], 3_900);
+    let mut legacy = wire;
+    legacy.as_object_mut().unwrap().remove("heatResponse");
+    let decoded: ThermalPlantActiveResult = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.heat_response, None);
+}
+
 #[path = "product_hil_tests.rs"]
 mod product_hil;
 

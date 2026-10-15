@@ -593,6 +593,7 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
             radiation_mw_per_k4: Some(0.0002),
             thermal_capacity_mj_per_c: Some(42_000.0),
             transport_delay_ms: Some(500),
+            heat_response: None,
         }),
     }
 }

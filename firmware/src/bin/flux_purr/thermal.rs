@@ -805,6 +805,9 @@ pub(crate) struct HeaterController {
     pub(crate) coast_cooling_reference_c: Option<f32>,
     pub(crate) natural_cooling_input: Option<ThermalPlantRuntimeInput>,
     pub(crate) applied_heat: flux_purr_firmware::thermal_trajectory::AppliedHeatHistory,
+    pub(crate) heat_response: Option<flux_purr_firmware::thermal_response::HeatResponse>,
+    pub(crate) heat_response_identity:
+        Option<(u32, flux_purr_firmware::memory::AdcCalibrationConfig, f32)>,
     pub(crate) approach_trajectory:
         Option<flux_purr_firmware::thermal_trajectory::TemperatureTrajectory>,
     pub(crate) approach_last_request_permille: Option<u16>,
@@ -911,6 +914,8 @@ impl HeaterController {
             coast_cooling_reference_c: None,
             natural_cooling_input: None,
             applied_heat: flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new(),
+            heat_response: None,
+            heat_response_identity: None,
             approach_trajectory: None,
             approach_last_request_permille: None,
             heater_was_enabled: false,
@@ -964,7 +969,13 @@ impl HeaterController {
         }
         let heater_enabled = input.heater_enabled && !disarm_for_source_change && kind.is_profile();
         self.natural_cooling_input = kind.is_profile().then_some(input);
-        self.applied_heat.configure(input.model.transport_delay_ms);
+        self.applied_heat.configure(
+            input
+                .model
+                .transport_delay_ms
+                .max(self.heat_response.map_or(0, |response| response.delay_ms)),
+        );
+        self.applied_heat.configure_response(self.heat_response);
         let snapshot = self.update_at(
             input.target_temp_c,
             input.measured_temp_c,
@@ -1108,6 +1119,7 @@ impl HeaterController {
         let control_target = thermal_profile
             .map(|profile| profile.control_target(target_temp_c))
             .unwrap_or_else(|| default_thermal_control_target(target_temp_c));
+        self.applied_heat.configure_response(self.heat_response);
         self.observe_temperature_transfer(now_ms, measured_temp_c);
         let frame = self.measure_control_frame(
             target_temp_c,
@@ -1145,7 +1157,16 @@ impl HeaterController {
         self.update_coast_state(&frame, measured_temp_c, previous_measured_temp_c);
         let entered_approach = previous_phase == HeaterControlPhase::Warmup
             && self.phase == HeaterControlPhase::Approach;
-        let duty_percent = self.calculate_duty_percent(&frame, entered_approach);
+        let hold_model_requests = if self.phase == HeaterControlPhase::Hold {
+            self.full_response_hold_requests()
+        } else {
+            None
+        };
+        let duty_percent = self.calculate_duty_percent(
+            &frame,
+            entered_approach,
+            hold_model_requests.map(|requests| requests.0),
+        );
         let predictive_coast_active = self.hold_coast_active
             || (self.phase == HeaterControlPhase::Approach && approach_predictive_coast_ready);
         let model_approach_active =
@@ -1161,7 +1182,11 @@ impl HeaterController {
             )
         };
         let duty_percent = if self.phase == HeaterControlPhase::Hold {
-            self.limit_hold_arrival_power(&frame, duty_percent)
+            self.limit_hold_arrival_power(
+                &frame,
+                duty_percent,
+                hold_model_requests.map(|requests| requests.1),
+            )
         } else {
             duty_percent
         };
@@ -1293,6 +1318,7 @@ impl HeaterController {
         &mut self,
         frame: &ThermalControlFrame,
         entered_approach: bool,
+        hold_model_request: Option<u8>,
     ) -> u8 {
         if self.hold_coast_active
             || frame.hold_guard_error_c <= -frame.control_target.overshoot_cutoff_c
@@ -1305,7 +1331,7 @@ impl HeaterController {
                 percent_from_permille(frame.control_target.warmup_power_permille)
             }
             HeaterControlPhase::Approach => self.calculate_approach_duty(frame, entered_approach),
-            HeaterControlPhase::Hold => self.calculate_hold_duty(frame),
+            HeaterControlPhase::Hold => self.calculate_hold_duty(frame, hold_model_request),
         }
     }
 
@@ -1420,6 +1446,10 @@ impl HeaterController {
         let horizon_s = frame
             .natural_cooling_delay_s
             .max(f32::from(frame.control_target.approach_lead_ticks))
+            .max(
+                self.heat_response
+                    .map_or(0.0, |response| response.decay_ms as f32 / 1_000.0),
+            )
             .max(0.4);
         let reference = self.approach_trajectory.as_mut()?.advance(
             input.now_ms,
@@ -1428,8 +1458,16 @@ impl HeaterController {
             frame.control_target.approach_damping_exponent,
             plant,
         );
-        let requested_permille =
-            TemperatureTrajectory::request_permille(reference, predicted, horizon_s, plant);
+        let requested_permille = if self.heat_response.is_some() {
+            self.full_response_approach_request(
+                input,
+                horizon_s,
+                frame.control_target.approach_damping_exponent,
+                plant,
+            )?
+        } else {
+            TemperatureTrajectory::request_permille(reference, predicted, horizon_s, plant)
+        };
         let previous_permille = self
             .approach_last_request_permille
             .unwrap_or(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
@@ -1446,7 +1484,68 @@ impl HeaterController {
         Some(percent_from_permille(applied_permille))
     }
 
-    fn calculate_hold_duty(&mut self, frame: &ThermalControlFrame) -> u8 {
+    fn full_response_approach_request(
+        &self,
+        input: ThermalPlantRuntimeInput,
+        horizon_s: f32,
+        damping: f32,
+        plant: flux_purr_firmware::thermal_trajectory::TrajectoryPlant,
+    ) -> Option<u16> {
+        let response = self.heat_response?;
+        let ahead_ms = response.horizon_ms();
+        let future = self.approach_trajectory.as_ref()?.projected(
+            4 * u64::from(response.decay_ms),
+            f32::from(input.target_temp_c),
+            horizon_s,
+            damping,
+            plant,
+        );
+        self.applied_heat.tracking_request_permille(
+            input.now_ms,
+            self.last_accepted_measurement_at_ms.unwrap_or(input.now_ms),
+            input.measured_temp_c,
+            flux_purr_firmware::thermal_trajectory::TrackingTarget {
+                temperature_c: future.temperature_c,
+                minimum_permille: 50,
+                ahead_ms,
+                command_ms: ahead_ms,
+            },
+            plant,
+        )
+    }
+
+    fn full_response_hold_requests(&self) -> Option<(u8, u8)> {
+        let input = self.natural_cooling_input?;
+        let response = self
+            .heat_response
+            .filter(|_| self.model_approach_available())?;
+        let (request, ceiling) = self.applied_heat.tracking_request_bounds(
+            input.now_ms,
+            self.last_accepted_measurement_at_ms.unwrap_or(input.now_ms),
+            input.measured_temp_c,
+            flux_purr_firmware::thermal_trajectory::TrackingTarget {
+                temperature_c: f32::from(input.target_temp_c),
+                minimum_permille: 0,
+                ahead_ms: response.horizon_ms(),
+                command_ms: u64::from(response.decay_ms),
+            },
+            flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
+                model: input.model,
+                ambient_c: input.ambient_temp_c,
+                max_power_mw: input.max_power_mw,
+            },
+            // PI may trim the model's endpoint request while the complete
+            // predicted peak remains at least 1 C inside the stable band.
+            0.5,
+        )?;
+        Some(((request / 10) as u8, (ceiling / 10) as u8))
+    }
+
+    fn calculate_hold_duty(
+        &mut self,
+        frame: &ThermalControlFrame,
+        model_request: Option<u8>,
+    ) -> u8 {
         if !self.model_approach_available()
             && (frame.hold_prediction_blocks_reheat
                 || frame.hold_filter_lag_blocks_reheat
@@ -1456,10 +1555,18 @@ impl HeaterController {
             return 0;
         }
         let target = frame.control_target;
-        let base_permille = hold_effective_base_permille(
-            frame.hold_guard_error_c,
-            frame.hold_reenter_error_c,
-            target,
+        // The complete calibrated model supplies anticipatory feedforward,
+        // including observed heat deficits. A static loss estimate cannot cap
+        // it; PI still trims the request and the same forecast limits energy.
+        let base_permille = model_request.map_or_else(
+            || {
+                hold_effective_base_permille(
+                    frame.hold_guard_error_c,
+                    frame.hold_reenter_error_c,
+                    target,
+                )
+            },
+            |request| f32::from(request) * 10.0,
         );
         let integral_limit = if frame.hold_ki > 0.0 {
             ((1_000.0 - base_permille) / frame.hold_ki).clamp(0.0, 255.0)
@@ -1492,7 +1599,12 @@ impl HeaterController {
         }
     }
 
-    fn limit_hold_arrival_power(&mut self, frame: &ThermalControlFrame, duty_percent: u8) -> u8 {
+    fn limit_hold_arrival_power(
+        &mut self,
+        frame: &ThermalControlFrame,
+        duty_percent: u8,
+        model_ceiling: Option<u8>,
+    ) -> u8 {
         let Some(input) = self
             .natural_cooling_input
             .filter(|_| self.model_approach_available())
@@ -1504,6 +1616,13 @@ impl HeaterController {
             ambient_c: input.ambient_temp_c,
             max_power_mw: input.max_power_mw,
         };
+        if self.heat_response.is_some() {
+            let limit = model_ceiling.unwrap_or(0);
+            if duty_percent > limit {
+                self.hold_integral_c = 0.0;
+            }
+            return duty_percent.min(limit);
+        }
         let predicted = self.applied_heat.forecast_from_measurement(
             input.now_ms,
             self.last_accepted_measurement_at_ms.unwrap_or(input.now_ms),
@@ -1708,6 +1827,16 @@ impl HeaterController {
                         as u16,
                 )
             });
+        if let Some(brake) = input.and_then(|input| {
+            self.full_response_brake(
+                input,
+                target_temp_c,
+                measured_temp_c,
+                target.brake_distance_c,
+            )
+        }) {
+            return (rate, delay_s, feedforward, brake);
+        }
         // Net rise already includes loss. Infer delayed heat, then subtract the
         // passive loss expected over that delay instead of counting it twice.
         let future_rate = input.and_then(|input| {
@@ -1743,6 +1872,40 @@ impl HeaterController {
             corrected_model_brake.min(target.brake_distance_c + target.warmup_reenter_error_c),
         );
         (rate, delay_s, feedforward, brake)
+    }
+
+    fn full_response_brake(
+        &self,
+        input: ThermalPlantRuntimeInput,
+        target_c: i16,
+        measured_c: f32,
+        candidate_brake_c: f32,
+    ) -> Option<f32> {
+        let response = self.heat_response?;
+        let plant = flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
+            model: input.model,
+            ambient_c: input.ambient_temp_c,
+            max_power_mw: input.max_power_mw,
+        };
+        let (_, peak_c) = self.applied_heat.predict_response(
+            input.now_ms,
+            self.last_accepted_measurement_at_ms.unwrap_or(input.now_ms),
+            measured_c,
+            0.05 * input.max_power_mw,
+            response.horizon_ms(),
+            plant,
+        )?;
+        let reference = flux_purr_firmware::thermal_response::reference_brake_c(
+            response,
+            input.model,
+            input.ambient_temp_c,
+            input.max_power_mw,
+            f32::from(target_c),
+        );
+        Some(
+            (peak_c - measured_c + candidate_brake_c - reference)
+                .clamp(HOLD_ENTRY_BELOW_C + 0.1, 50.0),
+        )
     }
 
     fn hold_guard_error(error_c: f32, predicted_error_c: f32, target: ThermalControlTarget) -> f32 {
@@ -1887,12 +2050,16 @@ impl HeaterController {
             && error_c <= control_target.hold_exit_error_c
             && control_error_c <= control_target.hold_exit_error_c;
         let hold_exit_error_c = error_c;
-        let warmup_handoff_error_c = warmup_handoff_error_c(
-            brake_distance_c,
-            control_target.warmup_reenter_error_c,
-            filtered_slope_c_per_profile_tick,
-            control_target.approach_lead_ticks,
-        );
+        let warmup_handoff_error_c = if self.heat_response.is_some() {
+            brake_distance_c
+        } else {
+            warmup_handoff_error_c(
+                brake_distance_c,
+                control_target.warmup_reenter_error_c,
+                filtered_slope_c_per_profile_tick,
+                control_target.approach_lead_ticks,
+            )
+        };
         ThermalControlFrame {
             control_target,
             elapsed_ms,

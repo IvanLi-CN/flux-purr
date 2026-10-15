@@ -1692,6 +1692,22 @@ fn calibrated_firmware_seed_profile(
             .and_then(|value| u32::try_from(value).ok())
             .ok_or("calibration delay required")?,
     };
+    let response: flux_purr_firmware::thermal_response::HeatResponse = serde_json::from_value(
+        active
+            .get("heatResponse")
+            .cloned()
+            .ok_or("calibrated shutdown response required")?,
+    )?;
+    if response.decay_ms < 100
+        || response.decay_ms > 12_000
+        || response.delay_ms > 5_000
+        || !response.rmse_c.is_finite()
+        || response.rmse_c > 1.0
+        || !response.maximum_error_c.is_finite()
+        || response.maximum_error_c > 2.0
+    {
+        return Err("invalid calibrated shutdown response".into());
+    }
     // Ambient belongs to this fit. The current (possibly hot) plate reading is
     // not an ambient observation and must never substitute for a missing one.
     let ambient = calibration
@@ -1765,11 +1781,14 @@ fn calibrated_firmware_seed_profile(
             .min(voltage_mv * current_ma / 1_000.0)
             .max(1.0);
         let loss_mw = natural_cooling_loss_mw(model, temperature_c, ambient);
-        let delay_s = model.transport_delay_ms as f32 / 1_000.0;
-        let brake_centi_c =
-            (((maximum_power_mw - loss_mw) / model.thermal_capacity_mj_per_c).max(0.0) * delay_s
-                + 0.5)
-                * 100.0;
+        let delay_s = (response.delay_ms + response.decay_ms) as f32 / 1_000.0;
+        let brake_centi_c = flux_purr_firmware::thermal_response::reference_brake_c(
+            response,
+            model,
+            ambient,
+            maximum_power_mw,
+            temperature_c,
+        ) * 100.0;
         let hold_permille = (loss_mw / maximum_power_mw * 1_000.0)
             .round()
             .clamp(50.0, 1_000.0) as u16;
@@ -2685,6 +2704,8 @@ mod tests {
                 "radiationMwPerK4": radiation,
                 "thermalCapacityMjPerC": capacity,
                 "transportDelayMs": delay_ms,
+                "heatResponse": {"delayMs": delay_ms, "decayMs": 1000,
+                    "rmseC": 0.4, "maximumErrorC": 0.8},
                 "curve": {"points": [
                     {"tempCentiC": 2000, "resistanceMilliohms": 7000},
                     {"tempCentiC": 22000, "resistanceMilliohms": 7000}
@@ -2744,6 +2765,8 @@ mod tests {
             ("/activeResult/transactionId", json!(8)),
             ("/activeResult/thermalCapacityMjPerC", json!(0)),
             ("/activeResult/transportDelayMs", json!(60001)),
+            ("/activeResult/heatResponse", json!(null)),
+            ("/activeResult/heatResponse/rmseC", json!(1.1)),
             ("/activeResult/curve/points", json!([])),
             ("/tracePage/points/0/phase", json!("heating")),
         ] {
@@ -2768,10 +2791,15 @@ mod tests {
         });
         let calibration = cold_start_calibration(1000, 20000.0, 1000.0, 0.0);
         let profile = super::calibrated_firmware_seed_profile(&runtime, &calibration).unwrap();
-        // Pmax=63W, loss=30W, C=20J/C, delay=1s, ambient=30C.
-        assert_eq!(profile["points"][0]["brakeDistanceCentiC"], 215);
+        // Pmax=63W, loss=30W, C=20J/C, d=tau=1s, ambient=30C.
+        // The linear convection ODE gives about 2.31C before the 60C peak;
+        // the fixed 0.5C Hold-entry tolerance is not a braking margin.
+        let brake = profile["points"][0]["brakeDistanceCentiC"]
+            .as_u64()
+            .unwrap();
+        assert!((225..=235).contains(&brake), "{brake}");
         assert_eq!(profile["points"][0]["holdPowerPermille"], 476);
-        assert_eq!(profile["points"][0]["holdKpPermillePerC"], 79);
+        assert_eq!(profile["points"][0]["holdKpPermillePerC"], 40);
         let mut padded = profile.clone();
         padded["points"].as_array_mut().unwrap().resize(
             flux_purr_firmware::frontpanel::FRONTPANEL_PRESET_COUNT,
