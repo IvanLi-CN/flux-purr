@@ -13,8 +13,8 @@ use crate::thermal_tuning_limits::{
     TRIAL_TIMEOUT_MS, ThermalTuningTimingEvidence, original_settle_limit_ms,
 };
 use crate::thermal_tuning_strategy::{
-    CurveClass, TuneEvidence, bounded_failure_alternative, limited_hold_outputs,
-    observed_low_side_hold_failure, reseed_after_hold_confirm, tune_point,
+    CurveClass, TuneEvidence, bounded_failure_alternative, braking_boundary_damping_candidate,
+    limited_hold_outputs, observed_low_side_hold_failure, reseed_after_hold_confirm, tune_point,
     unobserved_low_side_failure,
 };
 
@@ -1530,6 +1530,17 @@ impl ThermalTuningRuntime {
             );
             return true;
         }
+        if let Some(point) = braking_boundary_damping_candidate(previous, evidence) {
+            let mut alternative = original;
+            alternative.points[index] = Some(point);
+            alternative.sanitize();
+            self.candidate_profile = Some(alternative);
+            if self.record_fresh_proposal(Some(original)) {
+                return self
+                    .install_candidate_profile(alternative, "braking_boundary_approach_damping")
+                    .is_ok();
+            }
+        }
         self.candidate_profile = Some(original);
         self.candidate_hash = hash_profile(&original);
         if self.prepare_observed_hold_failure_proposal(original, index, evidence) {
@@ -1941,7 +1952,14 @@ impl ThermalTuningRuntime {
             return;
         };
         let tuned = if self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm {
-            reseed_after_hold_confirm(previous, evidence)
+            let reseeded = reseed_after_hold_confirm(previous, evidence);
+            if same_effective_search_point(previous, reseeded) {
+                // A no-op in the frozen parsed-stage reseed does not exhaust
+                // the firmware strategy's complete same-run Hold evidence.
+                tune_point(previous, evidence)
+            } else {
+                reseeded
+            }
         } else {
             tune_point(previous, evidence)
         };
@@ -4299,6 +4317,95 @@ mod tests {
             settle_time_ms: decision["settleTimeMs"].as_u64(),
             full_speed_limit_ms: decision["hardGateFullSpeedToStableMs"].as_u64().unwrap() as u32,
         }
+    }
+
+    #[test]
+    fn captured_coarse_braking_boundary_retains_an_effective_search_direction() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_start_boundary.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        let evaluation = replay_damping_bracket_trial(&mut runtime, &fixture["trials"][0]);
+        let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+        let facts = runtime.candidate_failure_evidence(
+            60,
+            evaluation.max_overshoot_centi_c,
+            evaluation.hold_peak_to_peak_centi_c,
+            evaluation.settle_time_ms,
+            10_000,
+        );
+        assert_eq!(previous.brake_distance_centi_c, 2_461);
+        assert!(
+            runtime.prepare_fresh_failure_proposal_from_evidence(60, facts),
+            "{facts:?}"
+        );
+        let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(
+            next,
+            ThermalControlProfilePointConfig {
+                approach_damping_exponent_permille: 2_000,
+                ..previous
+            }
+        );
+        for rejected in [
+            TuneEvidence {
+                tunable_stop: false,
+                ..facts
+            },
+            TuneEvidence {
+                approach_floor_only: true,
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: Some((0, 1_000)),
+                ..facts
+            },
+            TuneEvidence {
+                hold_off_sample_count: 0,
+                ..facts
+            },
+        ] {
+            assert!(braking_boundary_damping_candidate(previous, rejected).is_none());
+        }
+        assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
+    fn captured_confirmed_window_hold_ripple_retains_search_feedback() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_start_boundary.fixture.json"))
+                .unwrap();
+        let mut runtime = started_single_target_runtime();
+        runtime.targets_c[0] = 220;
+        let evaluation = replay_damping_bracket_trial(&mut runtime, &fixture["trials"][1]);
+        runtime.trial_purpose = ThermalTuningTrialPurpose::HoldConfirm;
+        let previous = runtime.candidate_profile.unwrap().points[0].unwrap();
+        let facts = runtime.candidate_failure_evidence(
+            220,
+            evaluation.max_overshoot_centi_c,
+            evaluation.hold_peak_to_peak_centi_c,
+            evaluation.settle_time_ms,
+            5_000,
+        );
+        assert_eq!(reseed_after_hold_confirm(previous, facts), previous);
+        let expected = tune_point(previous, facts);
+        assert!(
+            runtime.prepare_fresh_failure_proposal_from_evidence(220, facts),
+            "{facts:?}"
+        );
+        let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+        assert_eq!(next, expected);
+        assert!(!same_effective_search_point(previous, next));
+        assert_eq!(next.brake_distance_centi_c, previous.brake_distance_centi_c);
+        assert_eq!(
+            next.approach_damping_exponent_permille,
+            previous.approach_damping_exponent_permille
+        );
+        assert_eq!(runtime.accepted_target_mask, 0);
     }
 
     #[test]

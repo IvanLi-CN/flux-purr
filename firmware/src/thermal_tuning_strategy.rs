@@ -376,6 +376,30 @@ fn low_power_coasting_evidence(evidence: TuneEvidence) -> bool {
     true
 }
 
+pub(crate) fn braking_boundary_damping_candidate(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> Option<ThermalControlProfilePointConfig> {
+    if !low_power_coasting_evidence(evidence) || evidence.approach_floor_only {
+        return None;
+    }
+    // Once every legal earlier-braking proposal is exhausted, the measured
+    // above-floor Approach heat still has an independent reduction channel.
+    // Never use an unobservable damping change for an all-floor trajectory.
+    let point = ThermalControlProfilePointConfig {
+        approach_damping_exponent_permille: previous
+            .approach_damping_exponent_permille
+            .saturating_add(high_side_damping_step(evidence.overshoot_c))
+            .min(4_000),
+        ..previous
+    };
+    if point != previous {
+        Some(point)
+    } else {
+        longer_trajectory_horizon(previous, evidence, 2)
+    }
+}
+
 fn earlier_braking_candidate(
     previous: ThermalControlProfilePointConfig,
     step_centi_c: u16,
