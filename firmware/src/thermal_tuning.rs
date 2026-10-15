@@ -402,6 +402,7 @@ struct ObservedDampingFailure {
 enum FailureBracketAxis {
     Damping,
     Braking,
+    ResponseHorizon,
 }
 
 impl FailureBracketAxis {
@@ -409,6 +410,7 @@ impl FailureBracketAxis {
         match self {
             Self::Damping => point.approach_damping_exponent_permille,
             Self::Braking => point.brake_distance_centi_c,
+            Self::ResponseHorizon => point.approach_lead_ticks,
         }
     }
 
@@ -416,6 +418,7 @@ impl FailureBracketAxis {
         match self {
             Self::Damping => point.approach_damping_exponent_permille = value,
             Self::Braking => point.brake_distance_centi_c = value,
+            Self::ResponseHorizon => point.approach_lead_ticks = value,
         }
     }
 
@@ -433,6 +436,7 @@ impl FailureBracketAxis {
         match self {
             Self::Damping => "same_run_damping_bracket",
             Self::Braking => "same_run_braking_bracket",
+            Self::ResponseHorizon => "same_run_response_horizon_bracket",
         }
     }
 }
@@ -1479,7 +1483,8 @@ impl ThermalTuningRuntime {
         self.remember_damping_failure(target_c, evidence);
         if damping_failure_side(evidence).is_some()
             && (self.prepare_damping_bracket(original)
-                || self.prepare_failure_bracket(original, FailureBracketAxis::Braking))
+                || self.prepare_failure_bracket(original, FailureBracketAxis::Braking)
+                || self.prepare_failure_bracket(original, FailureBracketAxis::ResponseHorizon))
         {
             return true;
         }
@@ -4406,6 +4411,45 @@ mod tests {
             previous.approach_damping_exponent_permille
         );
         assert_eq!(runtime.accepted_target_mask, 0);
+    }
+
+    #[test]
+    fn captured_opposite_response_horizons_explore_the_measured_interval() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("thermal_tuning_horizon_bracket.fixture.json"))
+                .unwrap();
+        let trials = fixture["trials"].as_array().unwrap();
+        for order in [[0, 1], [1, 0]] {
+            let mut runtime = started_single_target_runtime();
+            let mut last_facts = None;
+            let mut high_point = None;
+            for index in order {
+                let evaluation = replay_damping_bracket_trial(&mut runtime, &trials[index]);
+                let facts = runtime.candidate_failure_evidence(
+                    60,
+                    evaluation.max_overshoot_centi_c,
+                    evaluation.hold_peak_to_peak_centi_c,
+                    evaluation.settle_time_ms,
+                    10_000,
+                );
+                assert_eq!(damping_failure_side(facts), Some(index == 0), "{facts:?}");
+                if index == 0 {
+                    high_point = runtime.candidate_profile.unwrap().points[0];
+                }
+                runtime.remember_damping_failure(60, facts);
+                last_facts = Some(facts);
+            }
+            assert!(runtime.prepare_fresh_failure_proposal_from_evidence(60, last_facts.unwrap()));
+            let next = runtime.candidate_profile.unwrap().points[0].unwrap();
+            assert_eq!(
+                next,
+                ThermalControlProfilePointConfig {
+                    approach_lead_ticks: 1,
+                    ..high_point.unwrap()
+                }
+            );
+            assert_eq!(runtime.accepted_target_mask, 0);
+        }
     }
 
     #[test]
