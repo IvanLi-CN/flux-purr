@@ -5033,8 +5033,22 @@ const SYNTHETIC_TARGET_MARGIN_C: f32 = 2.0;
 fn runtime_test_raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
     let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
     (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
-        / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
+        / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms)
+        - RTD_ASSUMED_ADC_OFFSET_UV as f32 / 1_000.0)
         .round() as u16
+}
+
+#[test]
+fn synthetic_raw_rtd_temperatures_invert_the_active_assumed_offset() {
+    let memory = MemoryConfig::default();
+    for temperature in [25.0, 30.0, 80.0, 100.0, 160.0, 220.0] {
+        let raw_mv = runtime_test_raw_rtd_adc_mv_for_temp(temperature);
+        let projected = projected_rtd_temperature_c(&memory, raw_mv).unwrap();
+        assert!(
+            (projected - temperature).abs() < 0.3,
+            "{temperature}: {projected}"
+        );
+    }
 }
 
 fn synthetic_memory_config() -> MemoryConfig {
@@ -5665,9 +5679,6 @@ fn transient_heat_coverage_preserves_the_integer_adc_cutoff_bin() {
     let raw_offset_mv =
         -rtd_assumed_adc_offset_uv(&memory, RTD_ASSUMED_ADC_OFFSET_UV) as f32 / 1_000.0;
     let (mut samples, count) = synthetic_trace(&memory, 30.0);
-    for sample in &mut samples[..count] {
-        sample.raw_rtd_adc_mv = (f32::from(sample.raw_rtd_adc_mv) + raw_offset_mv).round() as u16;
-    }
     let resistance = pt1000_resistance_ohms_at(THERMAL_PLANT_TARGET_TEMP_C);
     let cutoff_raw_mv = (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance
         / (RTD_REFERENCE_RESISTOR_OHMS + resistance)
@@ -5683,8 +5694,7 @@ fn transient_heat_coverage_preserves_the_integer_adc_cutoff_bin() {
     {
         sample.raw_rtd_adc_mv = sample.raw_rtd_adc_mv.min(cutoff_raw_mv);
     }
-    samples[count - 1].raw_rtd_adc_mv =
-        (f32::from(runtime_test_raw_rtd_adc_mv_for_temp(79.0)) + raw_offset_mv).round() as u16;
+    samples[count - 1].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(79.0);
     let ambient_raw_mv = samples[0].raw_rtd_adc_mv;
     let mut transaction = ThermalPlantTransientTransaction {
         transaction_id: 1,
@@ -6024,13 +6034,6 @@ fn captured_calibration_rejects_impossible_startup_temperature_spikes() {
 
 #[test]
 fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
-    fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
-        let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
-        (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
-            / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
-            .round() as u16
-    }
-
     let memory_config = MemoryConfig {
         commissioning_required: false,
         ..MemoryConfig::default()
@@ -6067,7 +6070,7 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     for (index, (elapsed_ticks, temp_c, duty_percent)) in trace.iter().copied().enumerate() {
         samples[index] = ThermalPlantTransientSample {
             elapsed_ticks,
-            raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(temp_c),
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temp_c),
             heater_voltage_125mv: 160,
             duty_percent,
         };
@@ -6084,7 +6087,7 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     assert!(
         fit_thermal_plant_transient(
             0x4c49_5645,
-            raw_rtd_adc_mv_for_temp(32.67),
+            runtime_test_raw_rtd_adc_mv_for_temp(32.67),
             &samples,
             trace.len() as u8,
             Some(&preview_curve),
@@ -6095,7 +6098,7 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     );
 
     let mut terminal_samples = samples;
-    terminal_samples[trace.len() - 1].raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(79.73);
+    terminal_samples[trace.len() - 1].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(79.73);
     let terminal_temp_c = projected_rtd_temperature_c(
         &memory_config,
         terminal_samples[trace.len() - 1].raw_rtd_adc_mv,
@@ -6104,7 +6107,7 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     assert!(thermal_plant_cooling_complete(79.73, terminal_temp_c));
     let (_, residual) = fit_thermal_plant_transient(
         0x4c49_5645,
-        raw_rtd_adc_mv_for_temp(32.67),
+        runtime_test_raw_rtd_adc_mv_for_temp(32.67),
         &terminal_samples,
         trace.len() as u8,
         Some(&preview_curve),
