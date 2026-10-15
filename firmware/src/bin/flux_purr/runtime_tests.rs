@@ -9481,6 +9481,35 @@ fn automatic_heater_policy_uses_per_apdo_budget_and_watt_units() {
 }
 
 #[test]
+fn automatic_heater_policy_accepts_exact_3a_apdo_budget() {
+    let apdos = [
+        Some(ch224q::PpsApdo {
+            min_mv: 5_000,
+            max_mv: 20_000,
+            max_ma: 3_000,
+        }),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ];
+    let candidate = select_automatic_heater_pps_candidate(
+        &apdos,
+        5_000,
+        20_000,
+        HEATER_ADJUSTABLE_MAX_MV,
+        3.2,
+        None,
+    )
+    .expect("3 A APDO leaves a safe automatic range");
+    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.allowed_mv, 8_900);
+    assert_eq!(candidate.power_mw, 24_753);
+}
+
+#[test]
 fn automatic_heater_pps_selection_keeps_the_current_apdo_on_a_power_tie() {
     let apdos = [
         Some(ch224q::PpsApdo {

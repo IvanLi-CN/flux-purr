@@ -686,6 +686,7 @@ where
 pub(crate) async fn handle_pps_settle_period<PWM>(
     context: &mut HeaterPowerOutputContext<'_, PWM>,
     source_request_ceiling_mv: u16,
+    request_current_ma: u16,
 ) -> Option<bool>
 where
     PWM: SetDutyCycle,
@@ -737,6 +738,7 @@ where
                     observation.status.pd_active
                         && observation.contract.kind == ContractKind::Pps
                         && observation.contract_voltage_mv == Some(current_request_mv)
+                        && observation.current_ma >= request_current_ma
                 })
                 .and_then(|observation| observation.contract_voltage_mv);
             confirmed_mv.map_or(0, |voltage_mv| {
@@ -773,6 +775,7 @@ pub(crate) struct PpsVoltageTransition {
     mode_changed: bool,
     voltage_changed: bool,
     request_transition_pending: bool,
+    safety_recovery_required: bool,
     gate_duty_percent: u8,
     blank_heater: bool,
 }
@@ -880,7 +883,9 @@ pub(crate) async fn apply_pps_voltage_transition<PWM>(
 where
     PWM: SetDutyCycle,
 {
-    if !(request.voltage_changed || request.mode_changed) || request.request_transition_pending {
+    if !(request.voltage_changed || request.mode_changed || request.safety_recovery_required)
+        || request.request_transition_pending
+    {
         return None;
     }
     let HeaterPowerBackend::PpsMos {
@@ -1123,6 +1128,7 @@ where
             mode_changed,
             voltage_changed,
             request_transition_pending,
+            safety_recovery_required,
             gate_duty_percent,
             blank_heater,
         },
@@ -1146,7 +1152,7 @@ where
         active_request_gate_duty_percent,
         context.last_physical_duty_percent,
     );
-    if voltage_changed || mode_changed {
+    if voltage_changed || mode_changed || safety_recovery_required {
         info!(
             "heater pps request temp_c={=f32} control={=u8}% safe_heater_mv={=u16} source_ceiling_mv={=u16} control_floor_mv={=u16} request_mv={=u16}",
             context.current_temp_c,
@@ -1184,6 +1190,11 @@ where
     };
     let effective_current_limit_ma =
         effective_pps_current_limit_ma(limits.capability_max_ma, context.pd_observation);
+    let request_current_ma = if context.normal_auto {
+        effective_current_limit_ma
+    } else {
+        limits.request_current_ma
+    };
     let safe_max_mv = if context.normal_auto {
         production_pps_request_ceiling_mv(
             context.current_temp_c,
@@ -1243,7 +1254,9 @@ where
     {
         return result;
     }
-    if let Some(result) = handle_pps_settle_period(&mut context, source_request_ceiling_mv).await {
+    if let Some(result) =
+        handle_pps_settle_period(&mut context, source_request_ceiling_mv, request_current_ma).await
+    {
         return result;
     }
     apply_pps_voltage_request(
@@ -1252,7 +1265,7 @@ where
         safe_max_mv,
         source_request_ceiling_mv,
         control_floor_mv,
-        limits.request_current_ma,
+        request_current_ma,
     )
     .await
 }
