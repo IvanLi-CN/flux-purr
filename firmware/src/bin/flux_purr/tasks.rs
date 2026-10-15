@@ -936,6 +936,7 @@ where
         let Some(candidate) =
             automatic_heater_fixed_request(context.source_capabilities, resistance_ohms)
         else {
+            apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
             info!(
                 "automatic heater paused: no safe Fixed fallback temp_c={=f32}",
                 context.current_temp_c,
