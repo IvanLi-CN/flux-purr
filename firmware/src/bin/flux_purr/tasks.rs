@@ -927,6 +927,12 @@ pub(crate) async fn fallback_from_adjustable_request<PWM>(
 where
     PWM: SetDutyCycle,
 {
+    match poll_pending_automatic_power_ticket(context) {
+        AutomaticPowerTicketPoll::Pending => return false,
+        AutomaticPowerTicketPoll::None
+        | AutomaticPowerTicketPoll::Confirmed
+        | AutomaticPowerTicketPoll::Failed => {}
+    }
     let (fixed_request, fixed_request_current_ma) = if context.normal_auto {
         let resistance_ohms = automatic_heater_resistance_ohms(
             context.current_temp_c,
