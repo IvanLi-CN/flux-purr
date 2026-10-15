@@ -158,7 +158,7 @@ pub(crate) fn bounded_failure_alternative(
     let high = matches!(failure, GateFailure::BrokeHigh | GateFailure::MissedHigh)
         || evidence.overshoot_c > 3.0;
     let low = !high && matches!(failure, GateFailure::BrokeLow | GateFailure::MissedLow);
-    if high && low_power_coasting_evidence(evidence) {
+    if high && low_power_coasting_evidence(previous, evidence) {
         return earlier_braking_candidate(previous, 40 * (attempt + 1));
     }
     if !high && !low {
@@ -330,7 +330,7 @@ fn low_power_coasting_candidate(
     previous: ThermalControlProfilePointConfig,
     evidence: TuneEvidence,
 ) -> Option<ThermalControlProfilePointConfig> {
-    if !low_power_coasting_evidence(evidence) {
+    if !low_power_coasting_evidence(previous, evidence) {
         return None;
     }
     // An above-floor request is not floor-only evidence. Severe overshoot
@@ -349,14 +349,32 @@ fn low_power_coasting_candidate(
     Some(earlier_braking_candidate(previous, step).unwrap_or(previous))
 }
 
-fn low_power_coasting_evidence(evidence: TuneEvidence) -> bool {
+fn low_power_coasting_evidence(
+    previous: ThermalControlProfilePointConfig,
+    evidence: TuneEvidence,
+) -> bool {
+    // Quantized requests up to the existing maintenance baseline, with at
+    // least half of Hold stopped, still identify stored pre-Hold heat. Do
+    // not turn this into a multi-axis correction just because a few samples
+    // exceed the old fixed 100-permille low-supply classification.
+    let maintenance = previous.hold_power_permille.div_ceil(10) * 10;
+    let limited_maintenance = maintenance > 100
+        && evidence.hold_off_sample_count.saturating_mul(2) >= evidence.hold_sample_count
+        && evidence.hold_max_below_c.is_some_and(|below| below <= 1.5)
+        && evidence
+            .hold_max_output_permille
+            .is_some_and(|maximum| maximum <= maintenance)
+        && evidence
+            .approach_median_output_permille
+            .is_some_and(|median| median > 100 && median <= maintenance);
     if !evidence.tunable_stop
         || evidence.target_c > 150
         || !evidence.full_speed_failed
         || evidence.stable_window_verified
         || !evidence.first_band_observed
         || evidence.hold_sample_count < 3
-        || !(evidence.hold_off_sample_count == evidence.hold_sample_count
+        || !(limited_maintenance
+            || evidence.hold_off_sample_count == evidence.hold_sample_count
             || (evidence.hold_entry_pulse_only
                 && evidence.hold_off_sample_count.saturating_mul(10)
                     >= evidence.hold_sample_count.saturating_mul(9)))
@@ -364,7 +382,8 @@ fn low_power_coasting_evidence(evidence: TuneEvidence) -> bool {
         || !evidence.approach_output_range.is_some_and(|(min, max)| {
             min >= crate::thermal_plant::APPROACH_MIN_PERMILLE
                 && max <= 1_000
-                && (evidence.overshoot_c > 3.0
+                && (limited_maintenance
+                    || evidence.overshoot_c > 3.0
                     || max <= 100
                     || evidence
                         .approach_median_output_permille
@@ -380,7 +399,7 @@ pub(crate) fn braking_boundary_damping_candidate(
     previous: ThermalControlProfilePointConfig,
     evidence: TuneEvidence,
 ) -> Option<ThermalControlProfilePointConfig> {
-    if !low_power_coasting_evidence(evidence) || evidence.approach_floor_only {
+    if !low_power_coasting_evidence(previous, evidence) || evidence.approach_floor_only {
         return None;
     }
     // Once every legal earlier-braking proposal is exhausted, the measured
@@ -2663,6 +2682,121 @@ mod tests {
         ] {
             assert!(limited_hold_high_side_candidate(previous, unavailable).is_none());
         }
+    }
+
+    #[test]
+    fn maintenance_scaled_braking_requires_complete_bounded_supply() {
+        let previous = ThermalControlProfilePointConfig {
+            hold_power_permille: 138,
+            ..point(100)
+        };
+        let facts = TuneEvidence {
+            overshoot_c: 1.54,
+            over_c: 1.54,
+            hold_max_below_c: Some(0.48),
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(10_154),
+            hold_sample_count: 24,
+            hold_off_sample_count: 12,
+            hold_max_output_permille: Some(140),
+            approach_median_output_permille: Some(140),
+            approach_output_range: Some((50, 200)),
+            ..evidence(100)
+        };
+        assert!(low_power_coasting_evidence(previous, facts));
+        assert_eq!(
+            tune_point(previous, facts),
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: previous.brake_distance_centi_c + 79,
+                ..previous
+            }
+        );
+        for unavailable in [
+            TuneEvidence {
+                hold_off_sample_count: 11,
+                ..facts
+            },
+            TuneEvidence {
+                hold_max_output_permille: Some(141),
+                ..facts
+            },
+            TuneEvidence {
+                hold_max_output_permille: None,
+                ..facts
+            },
+            TuneEvidence {
+                hold_max_below_c: Some(1.51),
+                ..facts
+            },
+            TuneEvidence {
+                hold_max_below_c: None,
+                ..facts
+            },
+            TuneEvidence {
+                approach_median_output_permille: Some(141),
+                ..facts
+            },
+            TuneEvidence {
+                approach_median_output_permille: Some(100),
+                ..facts
+            },
+            TuneEvidence {
+                approach_median_output_permille: None,
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: Some((0, 200)),
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: Some((50, 1_001)),
+                ..facts
+            },
+            TuneEvidence {
+                approach_output_range: None,
+                ..facts
+            },
+            TuneEvidence {
+                hold_sample_count: 2,
+                ..facts
+            },
+            TuneEvidence {
+                first_band_observed: false,
+                ..facts
+            },
+            TuneEvidence {
+                first_band_exit_centi_c: Some(9_849),
+                ..facts
+            },
+            TuneEvidence {
+                stable_window_verified: true,
+                ..facts
+            },
+            TuneEvidence {
+                full_speed_failed: false,
+                ..facts
+            },
+            TuneEvidence {
+                tunable_stop: false,
+                ..facts
+            },
+            TuneEvidence {
+                target_c: 160,
+                ..facts
+            },
+        ] {
+            assert!(
+                !low_power_coasting_evidence(previous, unavailable),
+                "{unavailable:?}"
+            );
+        }
+        assert!(!low_power_coasting_evidence(
+            ThermalControlProfilePointConfig {
+                hold_power_permille: 100,
+                ..previous
+            },
+            facts
+        ));
     }
 
     #[test]
