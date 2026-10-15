@@ -8837,7 +8837,7 @@ fn hold_pps_governor_keeps_the_approach_voltage_when_headroom_is_sufficient() {
 }
 
 #[test]
-fn hold_pps_governor_steps_toward_a_lower_safe_max_without_clamping() {
+fn hold_pps_governor_clamps_immediately_to_a_lower_safe_max() {
     let mut governor = HoldPpsGovernor::new();
     assert_eq!(
         governor.request_mv(HoldPpsRequestInput {
@@ -8850,7 +8850,7 @@ fn hold_pps_governor_steps_toward_a_lower_safe_max_without_clamping() {
             safe_max_mv: 6_100,
             now_ms: 0,
         }),
-        Some(18_500)
+        Some(6_100)
     );
     assert_eq!(
         governor.request_mv(HoldPpsRequestInput {
@@ -8858,12 +8858,12 @@ fn hold_pps_governor_steps_toward_a_lower_safe_max_without_clamping() {
             duty_percent: 40,
             actual_error_c: -1.0,
             filtered_slope_c_per_s: 0.05,
-            current_request_mv: 18_500,
+            current_request_mv: 6_100,
             control_floor_mv: 6_100,
             safe_max_mv: 6_100,
             now_ms: HEATER_PPS_SMALL_TRANSITION_MS,
         }),
-        Some(18_000)
+        Some(6_100)
     );
 }
 
@@ -9772,6 +9772,9 @@ fn automatic_heater_fixed_fallback_uses_only_advertised_safe_contracts() {
     assert_eq!(request_ma, 3_000);
 
     source.fixed[0] = Some((5_000, 1_500));
+    assert!(automatic_heater_fixed_request(source, 3.2).is_none());
+
+    source.fixed = [Some((28_000, 5_000)), None, None, None, None, None, None];
     assert!(automatic_heater_fixed_request(source, 3.2).is_none());
 }
 

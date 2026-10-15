@@ -306,9 +306,7 @@ impl HoldPpsGovernor {
                 .saturating_add(HEATER_PPS_REQUEST_STEP_MV)
                 .min(control_floor_mv)
         } else if current_request_mv > bounded_safe_max_mv {
-            current_request_mv
-                .saturating_sub(HEATER_PPS_REQUEST_STEP_MV)
-                .max(bounded_safe_max_mv)
+            bounded_safe_max_mv
         } else {
             current_request_mv
         }

@@ -180,13 +180,15 @@ pub(crate) fn automatic_heater_fixed_request(
         .enumerate()
         .filter_map(|(advertisement_index, fixed)| {
             let (voltage_mv, fixed_max_ma) = (*fixed)?;
+            if voltage_mv > FUSB302B_FIXED_MAX_MV {
+                return None;
+            }
             let request = match voltage_mv {
                 5_000 => ch224q::VoltageRequest::V5,
                 9_000 => ch224q::VoltageRequest::V9,
                 12_000 => ch224q::VoltageRequest::V12,
                 15_000 => ch224q::VoltageRequest::V15,
                 20_000 => ch224q::VoltageRequest::V20,
-                28_000 => ch224q::VoltageRequest::V28,
                 _ => return None,
             };
             let request_ma = encode_automatic_fixed_current_ma(fixed_max_ma);

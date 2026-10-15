@@ -208,7 +208,8 @@ where
                 context.manual_pps.pending_power_ticket = None;
                 context.manual_pps.pending_power_request_mv = None;
                 if !context.manual_pps.enabled {
-                    return None;
+                    apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+                    return Some(false);
                 }
                 if matches!(outcome, TicketOutcome::Confirmed(_)) {
                     context.manual_pps.applied_mv = confirmed_mv;
@@ -441,14 +442,14 @@ where
         PdRequestState::Confirmed => Some(true),
         PdRequestState::Pending(ticket) => {
             if context.normal_auto {
-                *context.pending_automatic_power_request = Some(PendingAutomaticPowerRequest {
-                    ticket,
-                    request: PdContractRequest::fixed(
-                        fixed_request.millivolts(),
-                        fixed_request_current_ma,
-                    )
-                    .expect("automatic fixed fallback request is valid"),
-                });
+                let Ok(request) =
+                    PdContractRequest::fixed(fixed_request.millivolts(), fixed_request_current_ma)
+                else {
+                    context.pd_port.discard_ticket(ticket);
+                    return Some(false);
+                };
+                *context.pending_automatic_power_request =
+                    Some(PendingAutomaticPowerRequest { ticket, request });
             } else {
                 context.pd_port.discard_ticket(ticket);
             }
