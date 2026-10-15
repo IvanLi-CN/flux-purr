@@ -1606,6 +1606,45 @@ pub(crate) fn automatic_heater_recovery_soft_start_percent(
     })
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) struct AutomaticHeaterRecoveryStateInput {
+    pub(crate) normal_auto: bool,
+    pub(crate) heater_enabled: bool,
+    pub(crate) force_output_off: bool,
+    pub(crate) safety_paused: bool,
+    pub(crate) requested_power_mw: u32,
+    pub(crate) automatic_output_was_active: bool,
+    pub(crate) physical_duty_percent: u8,
+    pub(crate) now_ms: u64,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_heater_recovery_started_at_ms(
+    started_at_ms: Option<u64>,
+    input: AutomaticHeaterRecoveryStateInput,
+) -> Option<u64> {
+    if !input.normal_auto || !input.heater_enabled || input.force_output_off {
+        return None;
+    }
+    if input.automatic_output_was_active
+        && input.physical_duty_percent == 0
+        && (input.requested_power_mw > 0 || input.safety_paused)
+    {
+        return started_at_ms.or(Some(input.now_ms));
+    }
+    if input.requested_power_mw == 0 && !input.safety_paused {
+        return None;
+    }
+    if input.physical_duty_percent != 0
+        && started_at_ms.is_some_and(|started_at_ms| {
+            input.now_ms.saturating_sub(started_at_ms) >= HEATER_WARMUP_SOFT_START_MS
+        })
+    {
+        return None;
+    }
+    started_at_ms
+}
+
 #[cfg(target_arch = "xtensa")]
 fn runtime_automatic_heater_power_available(state: &RuntimeLoopState) -> bool {
     let normal_auto = state.calibration_runtime_state.mode == CalibrationMode::Off
@@ -1742,6 +1781,10 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
     let normal_auto = state.calibration_runtime_state.mode == CalibrationMode::Off
         && !state.manual_pps_state.enabled;
     let automatic_output_was_active = normal_auto && state.last_heater_duty != 0;
+    let automatic_heater_safety_paused = normal_auto
+        && !force_output_off
+        && state.ui_state.heater_enabled
+        && runtime_heater_source_limits(state, true).is_none();
     let recovery_soft_start_percent = automatic_heater_recovery_soft_start_percent(
         state.automatic_heater_recovery_started_ms,
         elapsed_ms,
@@ -1785,21 +1828,24 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         now_ms: elapsed_ms,
     })
     .await;
-    if !normal_auto || !state.ui_state.heater_enabled || requested_power_mw == 0 {
-        state.automatic_heater_recovery_started_ms = None;
-    } else if automatic_output_was_active && state.last_heater_duty == 0 {
-        state
-            .automatic_heater_recovery_started_ms
-            .get_or_insert(elapsed_ms);
-        info!("automatic heater output paused; recovery soft-start armed");
-    } else if state.last_heater_duty != 0
-        && state
-            .automatic_heater_recovery_started_ms
-            .is_some_and(|started_at_ms| {
-                elapsed_ms.saturating_sub(started_at_ms) >= HEATER_WARMUP_SOFT_START_MS
-            })
+    let previous_recovery_started_at_ms = state.automatic_heater_recovery_started_ms;
+    state.automatic_heater_recovery_started_ms = automatic_heater_recovery_started_at_ms(
+        previous_recovery_started_at_ms,
+        AutomaticHeaterRecoveryStateInput {
+            normal_auto,
+            heater_enabled: state.ui_state.heater_enabled,
+            force_output_off,
+            safety_paused: automatic_heater_safety_paused,
+            requested_power_mw,
+            automatic_output_was_active,
+            physical_duty_percent: state.last_heater_duty,
+            now_ms: elapsed_ms,
+        },
+    );
+    if previous_recovery_started_at_ms.is_none()
+        && state.automatic_heater_recovery_started_ms.is_some()
     {
-        state.automatic_heater_recovery_started_ms = None;
+        info!("automatic heater output paused; recovery soft-start armed");
     }
     state.heater_control_timing.cycle_ms = Instant::now()
         .as_millis()

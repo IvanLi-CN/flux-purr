@@ -1783,6 +1783,56 @@ fn automatic_heater_recovery_soft_start_ramps_after_a_safety_pause() {
 }
 
 #[test]
+fn automatic_heater_recovery_stays_armed_during_zero_power_safety_pause() {
+    let started_at_ms = automatic_heater_recovery_started_at_ms(
+        None,
+        AutomaticHeaterRecoveryStateInput {
+            normal_auto: true,
+            heater_enabled: true,
+            force_output_off: false,
+            safety_paused: true,
+            requested_power_mw: 0,
+            automatic_output_was_active: true,
+            physical_duty_percent: 0,
+            now_ms: 1_000,
+        },
+    );
+    assert_eq!(started_at_ms, Some(1_000));
+
+    let started_at_ms = automatic_heater_recovery_started_at_ms(
+        started_at_ms,
+        AutomaticHeaterRecoveryStateInput {
+            normal_auto: true,
+            heater_enabled: true,
+            force_output_off: false,
+            safety_paused: true,
+            requested_power_mw: 0,
+            automatic_output_was_active: false,
+            physical_duty_percent: 0,
+            now_ms: 1_500,
+        },
+    );
+    assert_eq!(started_at_ms, Some(1_000));
+
+    assert_eq!(
+        automatic_heater_recovery_started_at_ms(
+            started_at_ms,
+            AutomaticHeaterRecoveryStateInput {
+                normal_auto: true,
+                heater_enabled: true,
+                force_output_off: false,
+                safety_paused: false,
+                requested_power_mw: 0,
+                automatic_output_was_active: false,
+                physical_duty_percent: 0,
+                now_ms: 1_600,
+            },
+        ),
+        None
+    );
+}
+
+#[test]
 fn flash_preparation_readiness_does_not_depend_on_vin_measurements() {
     let observation = PdStatusObservation {
         status_raw: FUSB302B_STATUS0_VBUSOK,
