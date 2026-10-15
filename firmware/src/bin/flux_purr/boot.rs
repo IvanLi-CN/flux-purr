@@ -952,6 +952,7 @@ impl BootRuntimeState {
                 Some(
                     HeaterLockReason::PdContractUnavailable
                         | HeaterLockReason::ThermalModelMissingForSourceClass
+                        | HeaterLockReason::NoSafeHeaterPower
                 )
             ),
             heater_enabled: self.ui_state.heater_enabled,

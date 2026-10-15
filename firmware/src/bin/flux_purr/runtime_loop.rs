@@ -1547,6 +1547,15 @@ fn runtime_heater_source_limits(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn runtime_automatic_heater_power_available(state: &RuntimeLoopState) -> bool {
+    let normal_auto = state.calibration_runtime_state.mode == CalibrationMode::Off
+        && !state.manual_pps_state.enabled;
+    !normal_auto
+        || !state.ui_state.heater_enabled
+        || runtime_heater_source_limits(state, true).is_some()
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_update_heater_controller(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
@@ -2054,10 +2063,11 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
     );
     runtime_restore_idle_power(state, elapsed_ms);
     let persistence_locked = state.ui_state.persistence_locked();
+    let automatic_heater_power_available = runtime_automatic_heater_power_available(state);
     sync_frontpanel_runtime_state(
         &mut state.ui_state,
         fan_decision,
-        next_heater_lock_reason_with_persistence(
+        next_heater_lock_reason_with_automatic_power(
             persistence_locked,
             state.heater_controller.fault_latched(),
             state.cooling_disabled_lock_latched,
@@ -2067,6 +2077,7 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
                 state.manual_pps_state,
             ),
             state.pd_contract_ready,
+            automatic_heater_power_available,
         ),
         elapsed_ms,
     )
@@ -2203,6 +2214,7 @@ pub(crate) async fn runtime_reconcile_network_and_status(
             Some(
                 HeaterLockReason::PdContractUnavailable
                     | HeaterLockReason::ThermalModelMissingForSourceClass
+                    | HeaterLockReason::NoSafeHeaterPower
             )
         ),
         calibration_active: state.calibration_runtime_state.mode != CalibrationMode::Off,

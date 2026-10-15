@@ -1546,6 +1546,45 @@ fn ordinary_heater_restart_requires_exact_live_working_pps_confirmation() {
 }
 
 #[test]
+fn automatic_pps_recovery_rearms_after_a_pd_transition_without_voltage_change() {
+    let observation = PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma: 3_000,
+        contract_voltage_mv: Some(8_900),
+        contract: Contract::observed(ContractKind::Pps, 8_900, 3_000),
+    };
+
+    assert!(automatic_pps_contract_requires_recovery(
+        8_900, 8_900, 5_000, 3_000, None, false,
+    ));
+    assert!(!automatic_pps_contract_requires_recovery(
+        8_900, 8_900, 5_000, 3_000, None, true,
+    ));
+    assert!(!automatic_pps_contract_requires_recovery(
+        8_900,
+        8_900,
+        5_000,
+        3_000,
+        Some(observation),
+        false,
+    ));
+    assert!(automatic_pps_contract_requires_recovery(
+        8_900,
+        8_900,
+        5_000,
+        3_000,
+        Some(PdStatusObservation {
+            current_ma: 2_950,
+            contract: Contract::observed(ContractKind::Pps, 8_900, 2_950),
+            ..observation
+        }),
+        false,
+    ));
+}
+
+#[test]
 fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
     let mut backend = HeaterPowerBackend::PpsMos {
         pps_min_mv: 5_500,
@@ -12072,6 +12111,14 @@ fn persistence_lock_reason_is_exposed_before_other_runtime_gates() {
     assert_eq!(
         next_heater_lock_reason_with_persistence(false, None, false, true, true),
         None
+    );
+    assert_eq!(
+        next_heater_lock_reason_with_automatic_power(false, None, false, true, true, false),
+        Some(HeaterLockReason::NoSafeHeaterPower)
+    );
+    assert_eq!(
+        next_heater_lock_reason_with_automatic_power(true, None, false, true, true, false),
+        Some(HeaterLockReason::PersistenceRequired)
     );
 }
 

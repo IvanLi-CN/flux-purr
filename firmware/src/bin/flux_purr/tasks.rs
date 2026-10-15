@@ -53,6 +53,28 @@ pub(crate) fn working_pps_request_confirmed(
     })
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_pps_contract_requires_recovery(
+    current_request_mv: u16,
+    source_request_ceiling_mv: u16,
+    control_floor_mv: u16,
+    request_current_ma: u16,
+    settled_observation: Option<PdStatusObservation>,
+    transition_pending: bool,
+) -> bool {
+    if transition_pending {
+        return false;
+    }
+    current_request_mv > source_request_ceiling_mv
+        || current_request_mv < control_floor_mv
+        || !settled_observation.is_some_and(|observation| {
+            observation.status.pd_active
+                && observation.contract.kind == ContractKind::Pps
+                && observation.contract_voltage_mv == Some(current_request_mv)
+                && observation.current_ma >= request_current_ma
+        })
+}
+
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_heater_power_output<PWM>(
     mut context: HeaterPowerOutputContext<'_, PWM>,
@@ -1090,19 +1112,19 @@ where
     let request_mode = adjustable_mode_for_request(request_mv, pps_max_mv);
     let mode_changed = !manual_pps_active && current_mode != Some(request_mode);
     let voltage_changed = !manual_pps_active && current_request_mv != request_mv;
-    let observed_contract_is_unsafe = context.normal_auto
-        && context.pd_observation.is_some_and(|observation| {
-            observation.status.pd_active
-                && (observation.contract.kind != ContractKind::Pps
-                    || observation.contract_voltage_mv != Some(current_request_mv)
-                    || observation.current_ma < request_current_ma)
-        });
+    let pd_snapshot = context.pd_port.snapshot();
     let safety_recovery_required = context.normal_auto
-        && (current_request_mv > source_request_ceiling_mv
-            || current_request_mv < control_floor_mv
-            || observed_contract_is_unsafe);
-    let request_transition_pending =
-        !manual_pps_active && !safety_recovery_required && context.now_ms < next_request_at_ms;
+        && automatic_pps_contract_requires_recovery(
+            current_request_mv,
+            source_request_ceiling_mv,
+            control_floor_mv,
+            request_current_ma,
+            pd_snapshot.settled_observation(),
+            pd_snapshot.transition_pending,
+        );
+    let request_transition_pending = !manual_pps_active
+        && !safety_recovery_required
+        && (context.now_ms < next_request_at_ms || pd_snapshot.transition_pending);
     let gate_duty_percent = pps_confirmed_gate_duty_percent(
         context,
         current_request_mv,

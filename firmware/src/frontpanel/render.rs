@@ -1280,6 +1280,8 @@ fn draw_dashboard_status(
         draw_dashboard_status_line(canvas, 4, "EEPROM", "RESTORE", theme.warning, theme.warning);
     } else if state.heater_lock_reason == Some(HeaterLockReason::PdContractUnavailable) {
         draw_dashboard_status_line(canvas, 4, "POWER", "WAIT", theme.warning, theme.warning);
+    } else if state.heater_lock_reason == Some(HeaterLockReason::NoSafeHeaterPower) {
+        draw_dashboard_status_line(canvas, 4, "POWER", "LIMIT", theme.warning, theme.warning);
     } else if state.heater_lock_reason.is_some() && state.dashboard_warning_visible {
         let fault_label = match state.heater_lock_reason {
             Some(HeaterLockReason::SensorFault) => "SENSOR",
