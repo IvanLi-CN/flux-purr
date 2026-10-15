@@ -75,6 +75,45 @@ pub(crate) fn automatic_pps_contract_requires_recovery(
         })
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_pps_transition_requires_request(
+    voltage_changed: bool,
+    mode_changed: bool,
+    safety_recovery_required: bool,
+    request_transition_pending: bool,
+) -> bool {
+    (voltage_changed || mode_changed || safety_recovery_required) && !request_transition_pending
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_pps_transition_should_clear_pwm(
+    voltage_changed: bool,
+    mode_changed: bool,
+    safety_recovery_required: bool,
+    request_transition_pending: bool,
+    gate_duty_percent: u8,
+    blank_heater: bool,
+) -> bool {
+    gate_duty_percent == 0
+        || blank_heater
+        || (automatic_pps_transition_requires_request(
+            voltage_changed,
+            mode_changed,
+            safety_recovery_required,
+            request_transition_pending,
+        ) && safety_recovery_required)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_pps_transition_should_restore_pwm(
+    request_confirmed: bool,
+    safety_recovery_required: bool,
+    blank_heater: bool,
+    gate_duty_percent: u8,
+) -> bool {
+    request_confirmed && !safety_recovery_required && !blank_heater && gate_duty_percent > 0
+}
+
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_heater_power_output<PWM>(
     mut context: HeaterPowerOutputContext<'_, PWM>,
@@ -803,6 +842,18 @@ pub(crate) struct PpsVoltageTransition {
 }
 
 #[cfg(target_arch = "xtensa")]
+fn pps_transition_should_clear_pwm(request: &PpsVoltageTransition) -> bool {
+    automatic_pps_transition_should_clear_pwm(
+        request.voltage_changed,
+        request.mode_changed,
+        request.safety_recovery_required,
+        request.request_transition_pending,
+        request.gate_duty_percent,
+        request.blank_heater,
+    )
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn fallback_from_adjustable_request<PWM>(
     context: &mut HeaterPowerOutputContext<'_, PWM>,
 ) -> bool
@@ -905,9 +956,12 @@ pub(crate) async fn apply_pps_voltage_transition<PWM>(
 where
     PWM: SetDutyCycle,
 {
-    if !(request.voltage_changed || request.mode_changed || request.safety_recovery_required)
-        || request.request_transition_pending
-    {
+    if !automatic_pps_transition_requires_request(
+        request.voltage_changed,
+        request.mode_changed,
+        request.safety_recovery_required,
+        request.request_transition_pending,
+    ) {
         return None;
     }
     let HeaterPowerBackend::PpsMos {
@@ -949,8 +1003,12 @@ where
             return Some(fallback_from_adjustable_request(context).await);
         }
     }
-    if should_restore_gate_after_adjustable_request(request.blank_heater, request.gate_duty_percent)
-    {
+    if automatic_pps_transition_should_restore_pwm(
+        true,
+        request.safety_recovery_required,
+        request.blank_heater,
+        request.gate_duty_percent,
+    ) {
         apply_heater_duty(
             context.heater_pwm,
             request.gate_duty_percent,
@@ -1078,6 +1136,100 @@ fn pps_confirmed_gate_duty_percent<PWM>(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn active_pps_request_gate_duty_percent<PWM>(
+    context: &HeaterPowerOutputContext<'_, PWM>,
+    request_transition_pending: bool,
+    current_request_mv: u16,
+    source_request_ceiling_mv: u16,
+    request_current_ma: u16,
+    gate_duty_percent: u8,
+) -> u8
+where
+    PWM: SetDutyCycle,
+{
+    if request_transition_pending {
+        pps_confirmed_gate_duty_percent(
+            context,
+            current_request_mv,
+            source_request_ceiling_mv,
+            request_current_ma,
+        )
+    } else {
+        gate_duty_percent
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+struct PpsVoltageRequestLog {
+    safe_max_mv: u16,
+    source_request_ceiling_mv: u16,
+    control_floor_mv: u16,
+    request_mv: u16,
+    voltage_changed: bool,
+    mode_changed: bool,
+    safety_recovery_required: bool,
+}
+
+#[cfg(target_arch = "xtensa")]
+struct PpsTransitionSafetyInput {
+    manual_pps_active: bool,
+    current_request_mv: u16,
+    source_request_ceiling_mv: u16,
+    control_floor_mv: u16,
+    request_current_ma: u16,
+    next_request_at_ms: u64,
+}
+
+#[cfg(target_arch = "xtensa")]
+struct PpsTransitionSafety {
+    recovery_required: bool,
+    request_pending: bool,
+}
+
+#[cfg(target_arch = "xtensa")]
+fn pps_transition_safety<PWM>(
+    context: &HeaterPowerOutputContext<'_, PWM>,
+    input: PpsTransitionSafetyInput,
+) -> PpsTransitionSafety {
+    let pd_snapshot = context.pd_port.snapshot();
+    let recovery_required = context.normal_auto
+        && automatic_pps_contract_requires_recovery(
+            input.current_request_mv,
+            input.source_request_ceiling_mv,
+            input.control_floor_mv,
+            input.request_current_ma,
+            pd_snapshot.settled_observation(),
+            pd_snapshot.transition_pending,
+        );
+    PpsTransitionSafety {
+        recovery_required,
+        request_pending: !input.manual_pps_active
+            && !recovery_required
+            && (context.now_ms < input.next_request_at_ms || pd_snapshot.transition_pending),
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn log_pps_voltage_request<PWM>(
+    context: &HeaterPowerOutputContext<'_, PWM>,
+    request: PpsVoltageRequestLog,
+) where
+    PWM: SetDutyCycle,
+{
+    if request.voltage_changed || request.mode_changed || request.safety_recovery_required {
+        info!(
+            "heater pps request temp_c={=f32} control={=u8}% safe_heater_mv={=u16} source_ceiling_mv={=u16} control_floor_mv={=u16} request_mv={=u16}",
+            context.current_temp_c,
+            context.duty_percent,
+            request.safe_max_mv,
+            request.source_request_ceiling_mv,
+            request.control_floor_mv,
+            request.request_mv,
+        );
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_pps_voltage_request<PWM>(
     context: &mut HeaterPowerOutputContext<'_, PWM>,
     manual_pps_active: bool,
@@ -1112,19 +1264,19 @@ where
     let request_mode = adjustable_mode_for_request(request_mv, pps_max_mv);
     let mode_changed = !manual_pps_active && current_mode != Some(request_mode);
     let voltage_changed = !manual_pps_active && current_request_mv != request_mv;
-    let pd_snapshot = context.pd_port.snapshot();
-    let safety_recovery_required = context.normal_auto
-        && automatic_pps_contract_requires_recovery(
+    let transition_safety = pps_transition_safety(
+        context,
+        PpsTransitionSafetyInput {
+            manual_pps_active,
             current_request_mv,
             source_request_ceiling_mv,
             control_floor_mv,
             request_current_ma,
-            pd_snapshot.settled_observation(),
-            pd_snapshot.transition_pending,
-        );
-    let request_transition_pending = !manual_pps_active
-        && !safety_recovery_required
-        && (context.now_ms < next_request_at_ms || pd_snapshot.transition_pending);
+            next_request_at_ms,
+        },
+    );
+    let safety_recovery_required = transition_safety.recovery_required;
+    let request_transition_pending = transition_safety.request_pending;
     let gate_duty_percent = pps_confirmed_gate_duty_percent(
         context,
         current_request_mv,
@@ -1138,53 +1290,48 @@ where
         pps_min_mv,
         pps_max_mv,
     );
-    if gate_duty_percent == 0 || blank_heater {
+    let transition = PpsVoltageTransition {
+        request_mv,
+        request_current_ma,
+        request_mode,
+        mode_changed,
+        voltage_changed,
+        request_transition_pending,
+        safety_recovery_required,
+        gate_duty_percent,
+        blank_heater,
+    };
+    if pps_transition_should_clear_pwm(&transition) {
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
     }
-    if let Some(result) = apply_pps_voltage_transition(
-        &mut *context,
-        PpsVoltageTransition {
-            request_mv,
-            request_current_ma,
-            request_mode,
-            mode_changed,
-            voltage_changed,
-            request_transition_pending,
-            safety_recovery_required,
-            gate_duty_percent,
-            blank_heater,
-        },
-    )
-    .await
-    {
+    if let Some(result) = apply_pps_voltage_transition(&mut *context, transition).await {
         return result;
     }
-    let active_request_gate_duty_percent = if request_transition_pending {
-        pps_confirmed_gate_duty_percent(
-            context,
-            current_request_mv,
-            source_request_ceiling_mv,
-            request_current_ma,
-        )
-    } else {
-        gate_duty_percent
-    };
+    let active_request_gate_duty_percent = active_pps_request_gate_duty_percent(
+        context,
+        request_transition_pending,
+        current_request_mv,
+        source_request_ceiling_mv,
+        request_current_ma,
+        gate_duty_percent,
+    );
     apply_heater_duty(
         context.heater_pwm,
         active_request_gate_duty_percent,
         context.last_physical_duty_percent,
     );
-    if voltage_changed || mode_changed || safety_recovery_required {
-        info!(
-            "heater pps request temp_c={=f32} control={=u8}% safe_heater_mv={=u16} source_ceiling_mv={=u16} control_floor_mv={=u16} request_mv={=u16}",
-            context.current_temp_c,
-            context.duty_percent,
+    log_pps_voltage_request(
+        context,
+        PpsVoltageRequestLog {
             safe_max_mv,
             source_request_ceiling_mv,
             control_floor_mv,
             request_mv,
-        );
-    }
+            voltage_changed,
+            mode_changed,
+            safety_recovery_required,
+        },
+    );
     false
 }
 

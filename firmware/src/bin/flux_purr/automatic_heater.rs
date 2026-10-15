@@ -50,6 +50,28 @@ pub(crate) fn encode_automatic_fixed_current_ma(max_ma: u16) -> u16 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_heater_controller_current_ma(
+    candidate_current_ma: u16,
+    contract_min_mv: u16,
+    contract_max_mv: u16,
+    observation: Option<PdStatusObservation>,
+) -> u16 {
+    let Some(observation) = observation else {
+        return candidate_current_ma;
+    };
+    let Some(contract_mv) = observation.contract_voltage_mv else {
+        return 0;
+    };
+    if !observation.status.pd_active
+        || !(contract_min_mv..=contract_max_mv).contains(&contract_mv)
+        || observation.current_ma < MIN_HEATER_CONTRACT_MA
+    {
+        return 0;
+    }
+    candidate_current_ma.min(observation.current_ma)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn automatic_heater_pps_candidate(
     apdo: ch224q::PpsApdo,
     request_min_mv: u16,

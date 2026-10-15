@@ -1547,6 +1547,50 @@ fn runtime_heater_source_limits(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn runtime_automatic_heater_effective_current_ma(
+    state: &RuntimeLoopState,
+    source_limits: Option<(u16, u16, u16)>,
+) -> u16 {
+    let Some((min_mv, max_mv, candidate_current_ma)) = source_limits else {
+        return 0;
+    };
+    automatic_heater_controller_current_ma(
+        candidate_current_ma,
+        min_mv,
+        max_mv,
+        state.last_pd_observation,
+    )
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_automatic_heater_integral_allowed(
+    state: &RuntimeLoopState,
+    source_limits: Option<(u16, u16, u16)>,
+    force_output_off: bool,
+) -> bool {
+    if force_output_off
+        || !state.ui_state.heater_enabled
+        || !state.heater_controller.heater_was_enabled
+        || state.last_pid_snapshot.warmup_soft_start_percent < 100
+    {
+        return false;
+    }
+    let Some((min_mv, max_mv, request_current_ma)) = source_limits else {
+        return false;
+    };
+    let Some(observation) = state.last_pd_observation else {
+        return false;
+    };
+    let Some(contract_mv) = observation.contract_voltage_mv else {
+        return false;
+    };
+    observation.status.pd_active
+        && !state.pd_port.snapshot().transition_pending
+        && (min_mv..=max_mv).contains(&contract_mv)
+        && observation.current_ma >= request_current_ma
+}
+
+#[cfg(target_arch = "xtensa")]
 fn runtime_automatic_heater_power_available(state: &RuntimeLoopState) -> bool {
     let normal_auto = state.calibration_runtime_state.mode == CalibrationMode::Off
         && !state.manual_pps_state.enabled;
@@ -1565,10 +1609,21 @@ pub(crate) fn runtime_update_heater_controller(
     let normal_auto = state.calibration_runtime_state.mode == CalibrationMode::Off
         && !state.manual_pps_state.enabled;
     let runtime_source_limits = runtime_heater_source_limits(state, normal_auto);
+    let effective_source_current_ma = if normal_auto {
+        runtime_automatic_heater_effective_current_ma(state, runtime_source_limits)
+    } else {
+        runtime_source_limits.map_or(0, |(_, _, current_ma)| current_ma)
+    };
+    let allow_thermal_integral = !normal_auto
+        || runtime_automatic_heater_integral_allowed(
+            state,
+            runtime_source_limits,
+            force_output_off,
+        );
     let max_power_mw = heater_available_power_mw_for_temp(
         state.latest_temp_c,
         runtime_source_limits.map(|(_, max_mv, _)| max_mv),
-        runtime_source_limits.map(|(_, _, max_ma)| max_ma),
+        Some(effective_source_current_ma),
         preview_heater_curve_config(state.preview_heater_curve.as_ref()),
         &state.memory_config,
     );
@@ -1592,6 +1647,7 @@ pub(crate) fn runtime_update_heater_controller(
                         heater_enabled: state.ui_state.heater_enabled,
                         model,
                         max_power_mw: max_power_mw as f32,
+                        allow_integral: allow_thermal_integral,
                         now_ms: elapsed_ms,
                     })
             }

@@ -49,6 +49,14 @@ impl ThermalPlantController {
     }
 
     pub fn update(&mut self, input: ThermalPlantControlInput) -> ThermalPlantControlOutput {
+        self.update_with_integral(input, true)
+    }
+
+    pub fn update_with_integral(
+        &mut self,
+        input: ThermalPlantControlInput,
+        allow_integral: bool,
+    ) -> ThermalPlantControlOutput {
         let ThermalPlantControlInput {
             model,
             target_temp_c,
@@ -152,7 +160,7 @@ impl ThermalPlantController {
         let integration_pushes_into_saturation = (unsaturated > approach_power_limit_mw
             && error_c > 0.0)
             || (unsaturated < 0.0 && error_c < 0.0);
-        if !saturated || !integration_pushes_into_saturation {
+        if allow_integral && (!saturated || !integration_pushes_into_saturation) {
             self.integral_error_c_s =
                 (self.integral_error_c_s + error_c * dt_s).clamp(-2_000.0, 2_000.0);
         }
@@ -255,6 +263,27 @@ mod tests {
             max_power_mw: 100_000.0,
         });
         assert_eq!(output.requested_power_mw, 0.0);
+    }
+
+    #[test]
+    fn paused_actuator_freezes_the_integral_until_power_can_resume() {
+        let mut controller = ThermalPlantController::default();
+        let input = ThermalPlantControlInput {
+            model: model(),
+            target_temp_c: 100.0,
+            current_temp_c: 25.0,
+            ambient_temp_c: 25.0,
+            slope_c_per_s: 0.0,
+            dt_s: 0.05,
+            max_power_mw: 100_000.0,
+        };
+        for _ in 0..10 {
+            controller.update_with_integral(input, false);
+        }
+        assert_eq!(controller.integral_error_c_s, 0.0);
+
+        controller.update_with_integral(input, true);
+        assert!(controller.integral_error_c_s > 0.0);
     }
 
     #[test]

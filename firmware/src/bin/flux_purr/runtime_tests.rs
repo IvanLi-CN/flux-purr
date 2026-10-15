@@ -1584,6 +1584,125 @@ fn automatic_pps_recovery_rearms_after_a_pd_transition_without_voltage_change() 
     ));
 }
 
+#[derive(Clone, Copy)]
+enum FakeAutomaticPpsRequestResult {
+    Pending,
+    Confirmed,
+    Failed,
+}
+
+fn fake_automatic_pps_transition_trace(
+    voltage_changed: bool,
+    mode_changed: bool,
+    safety_recovery_required: bool,
+    request_transition_pending: bool,
+    gate_duty_percent: u8,
+    blank_heater: bool,
+    result: FakeAutomaticPpsRequestResult,
+) -> Vec<&'static str> {
+    let mut trace = Vec::new();
+    if automatic_pps_transition_should_clear_pwm(
+        voltage_changed,
+        mode_changed,
+        safety_recovery_required,
+        request_transition_pending,
+        gate_duty_percent,
+        blank_heater,
+    ) {
+        trace.push("pwm-off");
+    }
+    if automatic_pps_transition_requires_request(
+        voltage_changed,
+        mode_changed,
+        safety_recovery_required,
+        request_transition_pending,
+    ) {
+        trace.push("pd-request");
+        match result {
+            FakeAutomaticPpsRequestResult::Pending => trace.push("wait"),
+            FakeAutomaticPpsRequestResult::Failed => trace.push("pause"),
+            FakeAutomaticPpsRequestResult::Confirmed => {
+                if automatic_pps_transition_should_restore_pwm(
+                    true,
+                    safety_recovery_required,
+                    blank_heater,
+                    gate_duty_percent,
+                ) {
+                    trace.push("pwm-restore");
+                }
+            }
+        }
+    }
+    trace
+}
+
+#[test]
+fn fake_automatic_pps_transition_clears_pwm_before_safety_request() {
+    assert_eq!(
+        fake_automatic_pps_transition_trace(
+            false,
+            false,
+            true,
+            false,
+            80,
+            false,
+            FakeAutomaticPpsRequestResult::Pending,
+        ),
+        vec!["pwm-off", "pd-request", "wait"]
+    );
+}
+
+#[test]
+fn fake_automatic_pps_transition_does_not_restore_after_stale_confirmation() {
+    assert_eq!(
+        fake_automatic_pps_transition_trace(
+            true,
+            false,
+            false,
+            false,
+            80,
+            true,
+            FakeAutomaticPpsRequestResult::Pending,
+        ),
+        vec!["pwm-off", "pd-request", "wait"]
+    );
+    assert!(!automatic_pps_transition_should_restore_pwm(
+        true, true, true, 80
+    ));
+}
+
+#[test]
+fn fake_automatic_pps_transition_pauses_after_failed_negotiation() {
+    assert_eq!(
+        fake_automatic_pps_transition_trace(
+            true,
+            false,
+            true,
+            false,
+            80,
+            true,
+            FakeAutomaticPpsRequestResult::Failed,
+        ),
+        vec!["pwm-off", "pd-request", "pause"]
+    );
+}
+
+#[test]
+fn fake_automatic_pps_transition_restores_after_confirmed_stable_request() {
+    assert_eq!(
+        fake_automatic_pps_transition_trace(
+            true,
+            false,
+            false,
+            false,
+            52,
+            false,
+            FakeAutomaticPpsRequestResult::Confirmed,
+        ),
+        vec!["pd-request", "pwm-restore"]
+    );
+}
+
 #[test]
 fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
     let mut backend = HeaterPowerBackend::PpsMos {
@@ -9471,6 +9590,40 @@ fn effective_pps_current_limit_uses_contract_not_instantaneous_draw() {
 }
 
 #[test]
+fn automatic_controller_power_budget_tracks_the_confirmed_contract_current() {
+    let observation = |current_ma, voltage_mv| PdStatusObservation {
+        status_raw: FUSB302B_STATUS0_VBUSOK,
+        status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+        current_raw: 0,
+        current_ma,
+        contract_voltage_mv: Some(voltage_mv),
+        contract: Contract::observed(ContractKind::Pps, voltage_mv, current_ma),
+    };
+    assert_eq!(
+        automatic_heater_controller_current_ma(
+            3_250,
+            5_000,
+            9_700,
+            Some(observation(3_000, 8_900)),
+        ),
+        3_000
+    );
+    assert_eq!(
+        automatic_heater_controller_current_ma(
+            3_250,
+            5_000,
+            9_700,
+            Some(observation(2_950, 8_900)),
+        ),
+        0
+    );
+    assert_eq!(
+        automatic_heater_controller_current_ma(3_250, 5_000, 9_700, None),
+        3_250
+    );
+}
+
+#[test]
 fn automatic_heater_policy_uses_per_apdo_budget_and_watt_units() {
     let apdos = [
         Some(ch224q::PpsApdo {
@@ -10526,6 +10679,7 @@ fn thermal_plant_filters_single_sample_slope_before_delay_prediction() {
         heater_enabled,
         model,
         max_power_mw: 100_000.0,
+        allow_integral: true,
         now_ms,
     };
 

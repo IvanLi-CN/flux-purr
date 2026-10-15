@@ -2266,7 +2266,7 @@ pub(crate) fn should_blank_heater_for_pps_range_change(
         )
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 pub(crate) fn should_restore_gate_after_adjustable_request(
     blank_heater: bool,
     gate_duty_percent: u8,
