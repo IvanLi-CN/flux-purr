@@ -297,7 +297,10 @@ impl HoldPpsGovernor {
         control_floor_mv: u16,
         safe_max_mv: u16,
     ) -> u16 {
-        let bounded_safe_max_mv = safe_max_mv.max(control_floor_mv);
+        if safe_max_mv < control_floor_mv {
+            return safe_max_mv;
+        }
+        let bounded_safe_max_mv = safe_max_mv;
         if current_request_mv < control_floor_mv {
             current_request_mv
                 .saturating_add(HEATER_PPS_REQUEST_STEP_MV)
@@ -336,7 +339,10 @@ impl HoldPpsGovernor {
 
         // A nonzero command below the working floor is handled by the fixed-PWM safety
         // fallback before this governor. Keep the idle path well-defined too.
-        let bounded_safe_max_mv = safe_max_mv.max(control_floor_mv);
+        if safe_max_mv < control_floor_mv {
+            return Some(safe_max_mv);
+        }
+        let bounded_safe_max_mv = safe_max_mv;
         let bounded_request_mv = Self::step_request_into_bounds(
             current_request_mv,
             control_floor_mv,
@@ -1110,22 +1116,12 @@ pub(crate) fn thermal_model_heater_allowed(
             .is_some_and(|transaction| {
                 thermal_plant_projection_from_transient(&transaction).is_some()
                     && thermal_plant_transient_trace_reaches_targets(&transaction, memory_config)
-                    && thermal_plant_curve_is_bound(memory_config, transaction)
             });
     if !plant_is_available {
         return false;
     }
 
     manual_pps.has_matching_pps_apdo(20_000, 3_000)
-        && has_persisted_heater_resistance_curve(memory_config)
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn thermal_plant_curve_is_bound(
-    memory_config: &MemoryConfig,
-    transaction: ThermalPlantTransientTransaction,
-) -> bool {
-    memory_config.heater_curve_transaction_id == Some(transaction.transaction_id)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1292,6 +1288,25 @@ impl ManualPpsState {
 
     pub(crate) fn heater_source_limits(&self) -> Option<(u16, u16, u16)> {
         self.contiguous_pps_source_limits(HEATER_ADJUSTABLE_MIN_MV)
+    }
+
+    pub(crate) fn automatic_heater_pps_candidate(
+        &self,
+        current_temp_c: f32,
+        preview_heater_curve: Option<&HeaterCurveConfig>,
+        memory_config: &MemoryConfig,
+        current_request_mv: Option<u16>,
+    ) -> Option<AutomaticHeaterPpsCandidate> {
+        let resistance_ohms =
+            automatic_heater_resistance_ohms(current_temp_c, preview_heater_curve, memory_config);
+        select_automatic_heater_pps_candidate(
+            &self.capability_apdos,
+            self.request_min_mv,
+            self.request_max_mv,
+            HEATER_ADJUSTABLE_MAX_MV,
+            resistance_ohms,
+            current_request_mv,
+        )
     }
 
     fn single_pps_source_limits(&self, anchor_mv: u16) -> Option<(u16, u16, u16)> {
@@ -1689,10 +1704,9 @@ pub(crate) fn thermal_plant_runtime_wire(memory_config: &MemoryConfig) -> Therma
     let active_projection = memory_config
         .thermal_plant_transient_active
         .and_then(|transaction| {
-            (thermal_plant_curve_is_bound(memory_config, transaction)
-                && thermal_plant_transient_trace_reaches_targets(&transaction, memory_config))
-            .then(|| thermal_plant_projection_from_transient(&transaction))
-            .flatten()
+            (thermal_plant_transient_trace_reaches_targets(&transaction, memory_config))
+                .then(|| thermal_plant_projection_from_transient(&transaction))
+                .flatten()
         });
     let state =
         if memory_config.thermal_plant_transient_active.is_some() && active_projection.is_none() {
@@ -1911,9 +1925,7 @@ pub(crate) fn thermal_plant_projection_for_runtime(
     memory_config: &MemoryConfig,
 ) -> Option<(flux_purr_firmware::memory::ThermalPlantProjection, f32)> {
     let transaction = memory_config.thermal_plant_transient_active?;
-    if !thermal_plant_curve_is_bound(memory_config, transaction)
-        || !thermal_plant_transient_trace_reaches_targets(&transaction, memory_config)
-    {
+    if !thermal_plant_transient_trace_reaches_targets(&transaction, memory_config) {
         return None;
     }
     let projection = thermal_plant_projection_from_transient(&transaction)?;

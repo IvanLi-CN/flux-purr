@@ -26,7 +26,7 @@ The production controller is:
 
 `Ctheta * dT/dt = Ph - kc * (T - Ta) - kr * (Tk^4 - TaK^4)`
 
-with loss feed-forward, predictive PI, saturation, and conditional anti-windup. `pps3a` uses the same active plant when it has a valid `20V` PPS capability and the persisted raw heater observations project to at least two `R(T)` points. Its actuator ceiling is derived at runtime as `Pmax(T) = min(Vsource^2 / R(T), Vsource * Isource)`. The production PPS request ceiling is the selected APDO maximum voltage; neither `R(T)` nor a profile current reserve lowers it. The APDO contract owns the current boundary, while fixed-PD fallback continues to enforce its negotiated current through PWM. No second thermal-loss, heat-capacity, RTD, or point-local profile calibration exists for 3A.
+with loss feed-forward, predictive PI, saturation, and conditional anti-windup. `pps3a` uses the same active plant when it has a valid `20V` PPS capability; a valid thermal plant is sufficient for normal automatic heating even when no persisted resistance curve exists. Automatic resistance resolution is RAM preview, projected raw observations, saved curve, then the theoretical model. For each selected APDO, the actuator ceiling is derived at runtime as `Iheater=max(Icontract_encoded-0.2A,0)`, `Vlimit=min(Vsource_max,Vhardware_max,R(T)*Iheater)`, and `Pmax(T)=Vlimit^2/R(T)`. PPS voltage is quantized downward, fixed-PD fallback is eligible only when its full-on current fits the same budget, and PWM uses the confirmed contract voltage to allocate the watt request. No second thermal-loss, heat-capacity, RTD, or point-local profile calibration exists for 3A.
 
 Legacy profile controls remain only for decoding historical records and rerendering historical review bundles. They must not be used to arm the current thermal plant model.
 
@@ -181,9 +181,9 @@ Current reusable rule set:
 - capability-class resolution is based on configured / advertised source capability, not live current
 - when multiple PPS APDOs cover `20V`, select one APDO by highest maximum current, then highest maximum voltage, then lowest minimum voltage; never combine fields from separate APDOs
 - explicit `65w` / `100w` are forced mode selections
-- safety limiting still uses live current plus `heaterCurrentReserveMa`
+- normal automatic safety limiting uses the encoded APDO current with a fixed `200mA` board reserve; calibration and manual PPS retain their existing reserve/PWM strategy
 - CH224Q `0x50` reports the active contract current and may reduce the safe current limit, but it must not promote a lower advertised capability into `pps5a`
-- current reserve remains part of the persisted settings and protects the board from consuming the full advertised source budget
+- the persisted `heaterCurrentReserveMa` field remains for compatibility and legacy paths; normal automatic heating always reserves `200mA` for the board before selecting a contract
 - a `20V/5A` live run requires a compliant eMarked 5A USB-C cable and both the source telemetry and CH224Q live-current readback must confirm the contract before heater arm
 
 ## Seed and baseline selection

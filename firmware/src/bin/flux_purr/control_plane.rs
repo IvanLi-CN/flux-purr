@@ -1631,19 +1631,15 @@ pub(crate) fn rebuild_transient_thermal_plant_for_current_inputs(
         return false;
     };
 
-    let rebuilt = has_persisted_heater_resistance_curve(memory_config)
-        .then(|| {
-            fit_thermal_plant_transient(
-                previous.transaction_id,
-                previous.ambient_raw_rtd_adc_mv,
-                &previous.samples,
-                previous.sample_count,
-                None,
-                memory_config,
-            )
-            .map(|(transaction, _)| transaction)
-        })
-        .flatten();
+    let rebuilt = fit_thermal_plant_transient(
+        previous.transaction_id,
+        previous.ambient_raw_rtd_adc_mv,
+        &previous.samples,
+        previous.sample_count,
+        None,
+        memory_config,
+    )
+    .map(|(transaction, _)| transaction);
     let rebuilt = if let Some(rebuilt) = rebuilt {
         rebuilt
     } else {

@@ -43,16 +43,17 @@ The `70 mm x 70 mm` heater stack also uses separate non-heater companion boards 
 
 ## 4) Common Electrical Model
 
-Each heater plate must be measured during bring-up. Its measured resistance curve is used to estimate heater power and thermal-plant input.
+Each heater plate must be measured during bring-up. Its measured resistance curve is used first when normal automatic heating estimates electrical power; the firmware falls back to projected raw observations, a saved curve, and finally the theoretical model when calibration data is absent. Calibration and manual PPS paths keep their existing electrical control behavior.
 
-For a selected PPS APDO, the firmware power estimate is:
+For normal automatic heating, the firmware evaluates each actual PPS APDO independently:
 
 ```text
-Pmax(T) = min(V_source_max^2 / R_estimated(T), V_source_max * I_source_max)
-V_cmd <= V_source_max
+I_heater_budget = max(I_contract_encoded - 0.200 A, 0)
+V_limit(T) = min(V_source_max, V_hardware_max, R_estimated(T) * I_heater_budget)
+Pmax(T) = V_limit(T)^2 / R_estimated(T)
 ```
 
-The APDO contract owns the current boundary. `R_estimated(T)` and profile current reserve do not lower the PPS/AVS request ceiling; fixed-PD fallback uses PWM to enforce its negotiated current.
+PPS current is encoded downward to the protocol step and voltage is encoded downward to `100mV`. An APDO whose safe voltage is below its effective minimum is rejected. Fixed-PD fallback is eligible only when `V_fixed / R_estimated(T) <= I_heater_budget`; PWM duty cannot make an unsafe fixed voltage eligible. PPS is preferred over Fixed, and the selection never combines fields from separate APDOs.
 
 Copper temperature coefficient used for first-order estimation:
 
@@ -60,7 +61,7 @@ Copper temperature coefficient used for first-order estimation:
 R(T) = R20 * (1 + 0.00393 * (T - 20))
 ```
 
-The fixed-PD tables in the version files are intended for firmware voltage-step selection. Temperature rows are rounded and biased toward the points where each fixed voltage crosses about `3 A` or `5 A`, before applying source current limits.
+The fixed-PD tables in the version files remain reference data for calibration and legacy voltage-step selection. Normal automatic heating applies the live resistance and source-current budget before selecting a fixed voltage.
 
 ## 5) Surface Finish and Solder Mask
 

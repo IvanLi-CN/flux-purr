@@ -964,10 +964,6 @@ pub(crate) const HEATER_PPS_REQUEST_HYSTERESIS_MV: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const HEATER_PPS_REQUEST_STEP_MV: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
-// VIN is measured at the heater while PPS is requested at the source.
-// Bound compensation so stale measurements cannot cause a large source jump.
-pub(crate) const HEATER_PPS_PATH_DROP_COMPENSATION_MAX_MV: u16 = 2_500;
-#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const HEATER_HOLD_PPS_INITIAL_SETTLE_MS: u64 = 10_000;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const HEATER_HOLD_PPS_STEADY_DWELL_MS: u64 = 2_000;

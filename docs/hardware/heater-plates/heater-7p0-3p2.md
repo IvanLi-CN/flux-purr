@@ -38,34 +38,34 @@ The version is intended to work across these source classes:
 - PD 100 W: `20 V / 5 A`
 - PD 140 W class: `28 V` class operation, current-limited by the discovered source contract
 
-Estimated maximum heater power for `R20 = 3.2 ohm`, after applying the source current contract:
+Estimated maximum automatic-heating power for `R20 = 3.2 ohm`, after reserving `200mA` from the encoded source current contract:
 
 | Heater temperature | Estimated resistance | PD 65 W | PD 100 W | PD 140 W class |
 | ---: | ---: | ---: | ---: | ---: |
-| `0 C` | `2.95 ohm` | `31 W` | `74 W` | `74 W` |
-| `20 C` | `3.20 ohm` | `34 W` | `80 W` | `80 W` |
-| `60 C` | `3.70 ohm` | `39 W` | `93 W` | `93 W` |
-| `138 C` | `4.68 ohm` | `49 W` | `85 W` | `117 W` |
-| `183 C` | `5.25 ohm` | `55 W` | `76 W` | `131 W` |
-| `217 C` | `5.68 ohm` | `60 W` | `70 W` | `138 W` |
-| `235 C` | `5.90 ohm` | `62 W` | `68 W` | `133 W` |
-| `245 C` | `6.03 ohm` | `64 W` | `66 W` | `130 W` |
-| `250 C` | `6.09 ohm` | `64 W` | `66 W` | `129 W` |
+| `0 C` | `2.95 ohm` | `27 W` | `68 W` | `68 W` |
+| `20 C` | `3.20 ohm` | `30 W` | `74 W` | `74 W` |
+| `60 C` | `3.70 ohm` | `34 W` | `85 W` | `85 W` |
+| `138 C` | `4.68 ohm` | `44 W` | `85 W` | `108 W` |
+| `183 C` | `5.25 ohm` | `49 W` | `76 W` | `121 W` |
+| `217 C` | `5.68 ohm` | `53 W` | `70 W` | `131 W` |
+| `235 C` | `5.90 ohm` | `55 W` | `68 W` | `133 W` |
+| `245 C` | `6.03 ohm` | `56 W` | `66 W` | `130 W` |
+| `250 C` | `6.09 ohm` | `57 W` | `66 W` | `129 W` |
 
-Low-temperature operation must be voltage-limited because full source voltage can exceed the source current contract before the copper trace heats up. At `20 C`, the expected current-limit voltage is about `10.4 V` for a `3.25 A` source and about `16.0 V` for a `5 A` source.
+Low-temperature operation must be voltage-limited because full source voltage can exceed the source current contract before the copper trace heats up. Automatic heating reserves `200mA`, so at `20 C` the expected current-limit voltage is about `9.7 V` for a `3.25 A` source and about `15.3 V` for a `5 A` source.
 
-PD 65 W cold-start compatibility is conditional: at `0 C` and `20 C`, a `12 V` full-on drive exceeds a `3.25 A` source contract. A `3.25 A` source must therefore use a negotiated voltage below the current-limit voltage, or a validated firmware current-limit mode, before static full-on operation. Static `12 V` operation on a `3.25 A` source becomes approximately current-contract safe only once the plate is near `60 C` or hotter.
+PD 65 W cold-start compatibility is conditional: at `0 C` and `20 C`, a `12 V` full-on drive exceeds the `3.05 A` automatic heater budget of a `3.25 A` source. Automatic heating therefore uses a negotiated voltage below the current-limit voltage, or a safe advertised Fixed PDO, before full-on operation. Static `12 V` operation on a `3.25 A` source becomes approximately current-contract safe only once the plate is near `105 C` or hotter.
 
 Approximate fixed-voltage threshold guide:
 
-| Fixed voltage | About 5 A | About 3 A | Use note |
+| Fixed voltage | 5 A source (`4.8 A` heater) | 3.25 A source (`3.05 A` heater) | Use note |
 | ---: | ---: | ---: | --- |
 | `5 V` | below normal range | below normal range | safe low-power fallback |
-| `9 V` | below normal range | about `5 C` | below about `5 C`, 9 V is slightly above 3 A |
-| `12 V` | below normal range | about `85 C` | below about `85 C`, 12 V is above 3 A |
-| `15 V` | about `5 C` | about `165 C` | useful middle step after cold-start limiting |
-| `20 V` | about `85 C` | about `296 C` | still about `3.3 A` at `250 C` |
-| `28 V` | about `211 C` | about `508 C` | high-power step for EPR-class sources only |
+| `9 V` | below normal range | about `21 C` | lower source must use a lower Fixed PDO below this temperature |
+| `12 V` | below normal range | about `105 C` | below about `105 C`, 12 V is above the automatic budget |
+| `15 V` | about `14 C` | about `192 C` | useful middle step after cold-start limiting |
+| `20 V` | about `97 C` | about `334 C` | the 3.25 A source remains limited through the normal range |
+| `28 V` | about `229 C` | above normal range | high-power step for EPR-class sources only |
 
 Fixed-voltage current and power estimates for `R20 = 3.2 ohm`, before applying source current limits:
 

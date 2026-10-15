@@ -1865,22 +1865,50 @@ pub(crate) fn projected_heater_curve(memory_config: &MemoryConfig) -> Option<Hea
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn estimated_heater_resistance_with_source(
+    current_temp_c: f32,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
+) -> (f32, AutomaticHeaterResistanceSource) {
+    if let Some(resistance) = preview_heater_curve
+        .and_then(|curve| heater_resistance_ohms_from_curve(curve, current_temp_c))
+    {
+        return (resistance, AutomaticHeaterResistanceSource::RamPreview);
+    }
+    if let Some(resistance) = projected_heater_curve(memory_config)
+        .and_then(|curve| heater_resistance_ohms_from_curve(&curve, current_temp_c))
+    {
+        return (resistance, AutomaticHeaterResistanceSource::ProjectedRaw);
+    }
+    if let Some(resistance) =
+        heater_resistance_ohms_from_curve(&memory_config.active_heater_curve, current_temp_c)
+    {
+        return (resistance, AutomaticHeaterResistanceSource::SavedCurve);
+    }
+    (
+        default_estimated_heater_resistance_ohms(current_temp_c),
+        AutomaticHeaterResistanceSource::Theoretical,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn estimated_heater_resistance_ohms(
     current_temp_c: f32,
     preview_heater_curve: Option<&HeaterCurveConfig>,
     memory_config: &MemoryConfig,
 ) -> f32 {
-    let estimated = preview_heater_curve
-        .and_then(|curve| heater_resistance_ohms_from_curve(curve, current_temp_c))
-        .or_else(|| {
-            projected_heater_curve(memory_config)
-                .and_then(|curve| heater_resistance_ohms_from_curve(&curve, current_temp_c))
-        })
-        .or_else(|| {
-            heater_resistance_ohms_from_curve(&memory_config.active_heater_curve, current_temp_c)
-        })
-        .unwrap_or_else(|| default_estimated_heater_resistance_ohms(current_temp_c));
-    estimated.max(default_estimated_heater_resistance_ohms(current_temp_c))
+    estimated_heater_resistance_with_source(current_temp_c, preview_heater_curve, memory_config)
+        .0
+        .max(default_estimated_heater_resistance_ohms(current_temp_c))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_heater_resistance_ohms(
+    current_temp_c: f32,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
+) -> f32 {
+    estimated_heater_resistance_with_source(current_temp_c, preview_heater_curve, memory_config).0
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1930,14 +1958,39 @@ pub(crate) fn heater_safe_max_mv_for_temp(
 
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn production_pps_request_ceiling_mv(
-    _current_temp_c: f32,
-    _source_current_limit_ma: u16,
-    _reserve_ma: u16,
+    current_temp_c: f32,
+    source_current_limit_ma: u16,
+    reserve_ma: u16,
     source_voltage_max_mv: u16,
-    _preview_heater_curve: Option<&HeaterCurveConfig>,
-    _memory_config: &MemoryConfig,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
 ) -> u16 {
-    source_voltage_max_mv
+    automatic_heater_safe_max_mv_for_temp(
+        current_temp_c,
+        heater_available_current_ma(source_current_limit_ma, reserve_ma),
+        floor_mv_to_100mv(source_voltage_max_mv.min(HEATER_ADJUSTABLE_MAX_MV)),
+        preview_heater_curve,
+        memory_config,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_heater_safe_max_mv_for_temp(
+    current_temp_c: f32,
+    effective_current_limit_ma: u16,
+    source_voltage_max_mv: u16,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
+) -> u16 {
+    if effective_current_limit_ma == 0 {
+        return 0;
+    }
+    let estimated_mv =
+        (automatic_heater_resistance_ohms(current_temp_c, preview_heater_curve, memory_config)
+            * f32::from(effective_current_limit_ma))
+        .max(0.0)
+        .min(f32::from(u16::MAX)) as u16;
+    floor_mv_to_100mv(estimated_mv).min(source_voltage_max_mv)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1949,24 +2002,30 @@ pub(crate) fn heater_available_power_mw_for_temp(
     memory_config: &MemoryConfig,
 ) -> u32 {
     let source_voltage_max_mv = capability_max_mv.unwrap_or(0).min(HEATER_ADJUSTABLE_MAX_MV);
-    let available_current_ma = capability_max_ma.unwrap_or(0);
-    if source_voltage_max_mv == 0 || available_current_ma == 0 {
+    let source_current_limit_ma = capability_max_ma.unwrap_or(0);
+    if source_voltage_max_mv == 0 || source_current_limit_ma == 0 {
         return 0;
     }
 
+    let available_current_ma =
+        heater_available_current_ma(source_current_limit_ma, AUTOMATIC_HEATER_CURRENT_RESERVE_MA);
+    if available_current_ma == 0 {
+        return 0;
+    }
     let resistance_ohms =
-        estimated_heater_resistance_ohms(current_temp_c, preview_heater_curve, memory_config);
+        automatic_heater_resistance_ohms(current_temp_c, preview_heater_curve, memory_config);
     if !resistance_ohms.is_finite() || resistance_ohms <= 0.0 {
         return 0;
     }
-    let resistance_limited_power_mw = f32::from(source_voltage_max_mv)
-        * f32::from(source_voltage_max_mv)
-        / resistance_ohms
-        / 1_000.0;
-    let contract_power_mw =
-        f32::from(source_voltage_max_mv) * f32::from(available_current_ma) / 1_000.0;
-    resistance_limited_power_mw
-        .min(contract_power_mw)
+    let safe_mv = production_pps_request_ceiling_mv(
+        current_temp_c,
+        source_current_limit_ma,
+        AUTOMATIC_HEATER_CURRENT_RESERVE_MA,
+        source_voltage_max_mv,
+        preview_heater_curve,
+        memory_config,
+    );
+    (f32::from(safe_mv) * f32::from(safe_mv) / resistance_ohms / 1_000.0)
         .max(0.0)
         .min(u32::MAX as f32) as u32
 }
@@ -1974,20 +2033,11 @@ pub(crate) fn heater_available_power_mw_for_temp(
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn heater_source_request_ceiling_mv(
     safe_heater_mv: u16,
-    current_request_mv: u16,
-    measured_heater_mv: u32,
+    _current_request_mv: u16,
+    _measured_heater_mv: u32,
     source_voltage_max_mv: u16,
 ) -> u16 {
-    let measured_heater_mv = measured_heater_mv.min(u32::from(u16::MAX)) as u16;
-    if measured_heater_mv == 0 || current_request_mv <= measured_heater_mv {
-        return safe_heater_mv.min(source_voltage_max_mv);
-    }
-    let path_drop_mv = current_request_mv
-        .saturating_sub(measured_heater_mv)
-        .min(HEATER_PPS_PATH_DROP_COMPENSATION_MAX_MV);
-    safe_heater_mv
-        .saturating_add(path_drop_mv)
-        .min(source_voltage_max_mv)
+    floor_mv_to_100mv(safe_heater_mv.min(source_voltage_max_mv))
 }
 
 #[cfg(test)]
@@ -2000,11 +2050,6 @@ pub(crate) fn has_calibrated_heater_resistance_curve(memory_config: &MemoryConfi
         .count()
         >= 2
         || projected_heater_curve(memory_config).is_some()
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn has_persisted_heater_resistance_curve(memory_config: &MemoryConfig) -> bool {
-    projected_heater_curve(memory_config).is_some()
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

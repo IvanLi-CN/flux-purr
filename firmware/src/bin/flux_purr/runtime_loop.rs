@@ -1503,13 +1503,59 @@ pub(crate) async fn runtime_reconcile_heater_arming(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn runtime_heater_source_limits(
+    state: &RuntimeLoopState,
+    normal_auto: bool,
+) -> Option<(u16, u16, u16)> {
+    if normal_auto {
+        let preview_heater_curve = preview_heater_curve_config(state.preview_heater_curve.as_ref());
+        state
+            .manual_pps_state
+            .automatic_heater_pps_candidate(
+                state.latest_temp_c,
+                preview_heater_curve,
+                &state.memory_config,
+                None,
+            )
+            .map(|candidate| (candidate.min_mv, candidate.allowed_mv, candidate.current_ma))
+            .or_else(|| {
+                automatic_heater_fixed_request(
+                    state.power_state.source_capabilities,
+                    automatic_heater_resistance_ohms(
+                        state.latest_temp_c,
+                        preview_heater_curve,
+                        &state.memory_config,
+                    ),
+                )
+                .map(|(request, request_ma)| {
+                    let voltage_mv = request.millivolts();
+                    (voltage_mv, voltage_mv, request_ma)
+                })
+            })
+    } else {
+        state.manual_pps_state.heater_source_limits().or_else(|| {
+            state
+                .last_pd_observation
+                .filter(|observation| observation.status.pd_active)
+                .and_then(|observation| {
+                    observation
+                        .contract_voltage_mv
+                        .map(|voltage_mv| (voltage_mv, voltage_mv, observation.current_ma))
+                })
+        })
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_update_heater_controller(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
     force_output_off: bool,
-) -> (HeaterPidSnapshot, u8, bool) {
+) -> (HeaterPidSnapshot, u8, u32, bool) {
     let runtime_plant = thermal_plant_projection_for_runtime(&state.memory_config);
-    let runtime_source_limits = state.manual_pps_state.heater_source_limits();
+    let normal_auto = state.calibration_runtime_state.mode == CalibrationMode::Off
+        && !state.manual_pps_state.enabled;
+    let runtime_source_limits = runtime_heater_source_limits(state, normal_auto);
     let max_power_mw = heater_available_power_mw_for_temp(
         state.latest_temp_c,
         runtime_source_limits.map(|(_, max_mv, _)| max_mv),
@@ -1571,7 +1617,17 @@ pub(crate) fn runtime_update_heater_controller(
         state.ui_state.heater_output_percent = requested_duty_percent;
         needs_redraw = true;
     }
-    (pid_snapshot, requested_duty_percent, needs_redraw)
+    let requested_power_mw = if force_output_off {
+        0
+    } else {
+        (u32::from(pid_snapshot.duty_percent) * max_power_mw / 100).min(max_power_mw)
+    };
+    (
+        pid_snapshot,
+        requested_duty_percent,
+        requested_power_mw,
+        needs_redraw,
+    )
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1579,6 +1635,7 @@ pub(crate) struct RuntimeHeaterOutputContext<'a> {
     state: &'a mut RuntimeLoopState,
     pid_snapshot: HeaterPidSnapshot,
     requested_duty_percent: u8,
+    requested_power_mw: u32,
     force_output_off: bool,
     thermal_plant_calibration_running: bool,
     active_thermal_settings: ThermalControlProfileSettings,
@@ -1593,6 +1650,7 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         state,
         pid_snapshot,
         requested_duty_percent,
+        requested_power_mw,
         force_output_off,
         thermal_plant_calibration_running,
         active_thermal_settings,
@@ -1600,6 +1658,8 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         control_started_ms,
         elapsed_ms,
     } = context;
+    let normal_auto = state.calibration_runtime_state.mode == CalibrationMode::Off
+        && !state.manual_pps_state.enabled;
     let output_changed = apply_heater_power_output(HeaterPowerOutputContext {
         pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
@@ -1609,6 +1669,8 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         pd_observation: current_pd_observation,
         measured_heater_mv: state.latest_vin_mv,
         current_temp_c: state.latest_temp_c,
+        source_capabilities: state.power_state.source_capabilities,
+        requested_power_mw,
         duty_percent: requested_duty_percent,
         heater_enabled: if force_output_off {
             false
@@ -1617,6 +1679,7 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         } else {
             state.ui_state.heater_enabled
         },
+        normal_auto,
         control_phase: pid_snapshot.phase,
         control_error_c: pid_snapshot.error_c,
         filtered_slope_c_per_s: pid_snapshot.filtered_slope_c_per_s,
@@ -1870,8 +1933,11 @@ pub(crate) async fn runtime_force_heater_safe_off(
         pd_observation: state.last_pd_observation,
         measured_heater_mv: state.latest_vin_mv,
         current_temp_c: state.latest_temp_c,
+        source_capabilities: state.power_state.source_capabilities,
+        requested_power_mw: 0,
         duty_percent: 0,
         heater_enabled: false,
+        normal_auto: false,
         control_phase: HeaterControlPhase::Warmup,
         control_error_c: -1.0,
         filtered_slope_c_per_s: -1.0,
@@ -2213,7 +2279,7 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
             )
             .await;
         needs_redraw |= arming_needs_redraw;
-        let (pid_snapshot, requested_duty_percent, controller_needs_redraw) =
+        let (pid_snapshot, requested_duty_percent, requested_power_mw, controller_needs_redraw) =
             runtime_update_heater_controller(state, elapsed_ms, force_thermal_plant_output_off);
         needs_redraw |= controller_needs_redraw;
         let thermal_plant_calibration_running = state.calibration_runtime_state.mode
@@ -2223,6 +2289,7 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
             state,
             pid_snapshot,
             requested_duty_percent,
+            requested_power_mw,
             force_output_off: force_thermal_plant_output_off,
             thermal_plant_calibration_running,
             active_thermal_settings,
