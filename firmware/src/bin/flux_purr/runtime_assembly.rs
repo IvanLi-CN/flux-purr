@@ -17,6 +17,7 @@ macro_rules! build_runtime_loop_state {
             fan_pwm,
             heater_pwm,
             last_heater_duty,
+            automatic_heater_recovery_started_ms,
             boot_memory_io_scratch,
             #[cfg(feature = "web_serial")]
             eeprom_snapshot_session,
@@ -216,6 +217,7 @@ macro_rules! build_runtime_loop_state {
             active_thermal_settings,
             last_pid_snapshot,
             last_heater_duty,
+            automatic_heater_recovery_started_ms,
             cooling_disabled_lock_latched,
             cooling_disabled_lock_armed,
             fan_policy_state,

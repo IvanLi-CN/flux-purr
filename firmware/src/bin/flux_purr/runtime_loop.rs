@@ -1574,6 +1574,8 @@ fn runtime_automatic_heater_integral_allowed(
     if force_output_off
         || !state.ui_state.heater_enabled
         || !state.heater_controller.heater_was_enabled
+        || state.last_heater_duty == 0
+        || state.automatic_heater_recovery_started_ms.is_some()
         || state.last_pid_snapshot.warmup_soft_start_percent < 100
     {
         return false;
@@ -1591,6 +1593,17 @@ fn runtime_automatic_heater_integral_allowed(
         && !state.pd_port.snapshot().transition_pending
         && (min_mv..=max_mv).contains(&contract_mv)
         && observation.current_ma >= request_current_ma
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_heater_recovery_soft_start_percent(
+    started_at_ms: Option<u64>,
+    now_ms: u64,
+) -> u8 {
+    started_at_ms.map_or(100, |started_at_ms| {
+        (now_ms.saturating_sub(started_at_ms).saturating_mul(100) / HEATER_WARMUP_SOFT_START_MS)
+            .min(100) as u8
+    })
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1728,6 +1741,18 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
     } = context;
     let normal_auto = state.calibration_runtime_state.mode == CalibrationMode::Off
         && !state.manual_pps_state.enabled;
+    let automatic_output_was_active = normal_auto && state.last_heater_duty != 0;
+    let recovery_soft_start_percent = automatic_heater_recovery_soft_start_percent(
+        state.automatic_heater_recovery_started_ms,
+        elapsed_ms,
+    );
+    let warmup_soft_start_percent = if normal_auto {
+        pid_snapshot
+            .warmup_soft_start_percent
+            .min(recovery_soft_start_percent)
+    } else {
+        pid_snapshot.warmup_soft_start_percent
+    };
     let output_changed = apply_heater_power_output(HeaterPowerOutputContext {
         pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
@@ -1752,7 +1777,7 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         control_phase: pid_snapshot.phase,
         control_error_c: pid_snapshot.error_c,
         filtered_slope_c_per_s: pid_snapshot.filtered_slope_c_per_s,
-        warmup_soft_start_percent: pid_snapshot.warmup_soft_start_percent,
+        warmup_soft_start_percent,
         last_physical_duty_percent: &mut state.last_heater_duty,
         preview_heater_curve: preview_heater_curve_config(state.preview_heater_curve.as_ref()),
         memory_config: &state.memory_config,
@@ -1760,6 +1785,22 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         now_ms: elapsed_ms,
     })
     .await;
+    if !normal_auto || !state.ui_state.heater_enabled || requested_power_mw == 0 {
+        state.automatic_heater_recovery_started_ms = None;
+    } else if automatic_output_was_active && state.last_heater_duty == 0 {
+        state
+            .automatic_heater_recovery_started_ms
+            .get_or_insert(elapsed_ms);
+        info!("automatic heater output paused; recovery soft-start armed");
+    } else if state.last_heater_duty != 0
+        && state
+            .automatic_heater_recovery_started_ms
+            .is_some_and(|started_at_ms| {
+                elapsed_ms.saturating_sub(started_at_ms) >= HEATER_WARMUP_SOFT_START_MS
+            })
+    {
+        state.automatic_heater_recovery_started_ms = None;
+    }
     state.heater_control_timing.cycle_ms = Instant::now()
         .as_millis()
         .saturating_sub(state.runtime_started_ms)
@@ -2315,7 +2356,8 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
             runtime_apply_rtd_sample(state, rtd_sample, current_request_mv, elapsed_ms);
         needs_redraw |= rtd_needs_redraw;
 
-        let current_pd_observation = state.last_pd_observation;
+        let current_pd_observation = state.pd_port.snapshot().settled_observation();
+        state.last_pd_observation = current_pd_observation;
         needs_redraw |= runtime_update_fault_attention(state, elapsed_ms);
         let fusb302b_capabilities_changed = runtime_refresh_source_capabilities(state);
         if fusb302b_capabilities_changed {

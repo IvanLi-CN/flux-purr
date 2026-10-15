@@ -136,6 +136,12 @@ where
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
         return false;
     }
+    if context.normal_auto {
+        // The runtime cache is only a status hint. Before any automatic output
+        // decision, use the PD service's settled snapshot so a capability or
+        // contract change cannot authorize PWM for one more control cycle.
+        context.pd_observation = context.pd_port.snapshot().settled_observation();
+    }
     if !context.normal_auto
         && let Some(pending) = context.pending_automatic_power_request.take()
     {

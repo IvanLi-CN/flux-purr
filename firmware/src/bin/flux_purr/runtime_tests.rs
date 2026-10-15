@@ -1762,6 +1762,27 @@ fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
 }
 
 #[test]
+fn automatic_heater_recovery_soft_start_ramps_after_a_safety_pause() {
+    assert_eq!(automatic_heater_recovery_soft_start_percent(None, 0), 100);
+    assert_eq!(
+        automatic_heater_recovery_soft_start_percent(Some(1_000), 1_000),
+        0
+    );
+    assert_eq!(
+        automatic_heater_recovery_soft_start_percent(Some(1_000), 1_500),
+        50
+    );
+    assert_eq!(
+        automatic_heater_recovery_soft_start_percent(Some(1_000), 2_000),
+        100
+    );
+    assert_eq!(
+        automatic_heater_recovery_soft_start_percent(Some(1_000), 4_000),
+        100
+    );
+}
+
+#[test]
 fn flash_preparation_readiness_does_not_depend_on_vin_measurements() {
     let observation = PdStatusObservation {
         status_raw: FUSB302B_STATUS0_VBUSOK,
