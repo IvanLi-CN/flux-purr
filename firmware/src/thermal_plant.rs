@@ -271,7 +271,7 @@ mod tests {
         let input = ThermalPlantControlInput {
             model: model(),
             target_temp_c: 100.0,
-            current_temp_c: 25.0,
+            current_temp_c: 99.0,
             ambient_temp_c: 25.0,
             slope_c_per_s: 0.0,
             dt_s: 0.05,
