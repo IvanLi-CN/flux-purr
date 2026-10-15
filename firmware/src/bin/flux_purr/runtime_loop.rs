@@ -1412,6 +1412,9 @@ fn runtime_hold_heater_for_flash(state: &mut RuntimeLoopState) -> bool {
         needs_redraw = true;
     }
     state.calibration_runtime_state.heater_enabled = false;
+    if let Some(pending) = state.pending_automatic_power_request.take() {
+        state.pd_port.discard_ticket(pending.ticket);
+    }
     if let Some(ticket) = state.manual_pps_state.pending_power_ticket.take() {
         state.pd_port.discard_ticket(ticket);
     }
@@ -1729,6 +1732,7 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
         backend: &mut state.heater_power_backend,
+        pending_automatic_power_request: &mut state.pending_automatic_power_request,
         hold_pps_governor: &mut state.hold_pps_governor,
         manual_pps: &mut state.manual_pps_state,
         pd_observation: current_pd_observation,
@@ -1993,6 +1997,7 @@ pub(crate) async fn runtime_force_heater_safe_off(
         pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,
         backend: &mut state.heater_power_backend,
+        pending_automatic_power_request: &mut state.pending_automatic_power_request,
         hold_pps_governor: &mut state.hold_pps_governor,
         manual_pps: &mut state.manual_pps_state,
         pd_observation: state.last_pd_observation,

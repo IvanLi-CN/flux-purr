@@ -6,6 +6,7 @@ pub(crate) struct HeaterPowerOutputContext<'a, PWM> {
     pub(crate) pd_port: &'a PdPort,
     pub(crate) heater_pwm: &'a mut PWM,
     pub(crate) backend: &'a mut HeaterPowerBackend,
+    pub(crate) pending_automatic_power_request: &'a mut Option<PendingAutomaticPowerRequest>,
     pub(crate) hold_pps_governor: &'a mut HoldPpsGovernor,
     pub(crate) manual_pps: &'a mut ManualPpsState,
     pub(crate) pd_observation: Option<PdStatusObservation>,

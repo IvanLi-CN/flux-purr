@@ -17,7 +17,7 @@
 - Firmware host tests, web unit tests, and frontpanel preview fixtures cover the runtime state model.
 - Safety paths retain fail-closed behavior when sensor, control, or transport checks fail.
 - Host-side frontpanel preview and state-transition tests cover placeholders, EEPROM restore, PD wait, initial sensor fault, first valid RTD promotion, and preservation of the last valid temperature after runtime faults.
-- Firmware host tests cover current encoding, resistance-source priority, 200mA budget calculations, per-APDO selection, confirmed-contract power ceilings, watt-to-voltage/PWM mapping, fixed-voltage rejection, path-drop ceiling enforcement, theoretical admission, actuator-paused integral freeze, legacy calibration-path behavior, and the host fake-PD/PWM transition decisions used by the asynchronous output path.
+- Firmware host tests cover current encoding, resistance-source priority, 200mA budget calculations, per-APDO selection, confirmed-contract power ceilings, watt-to-voltage/PWM mapping, fixed-voltage rejection, path-drop ceiling enforcement, theoretical admission, actuator-paused integral freeze, non-blocking PD ticket terminal matching, legacy calibration-path behavior, and the host fake-PD/PWM transition decisions used by the asynchronous output path.
 
 ## Remaining gaps
 

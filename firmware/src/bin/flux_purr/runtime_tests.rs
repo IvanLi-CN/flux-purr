@@ -427,6 +427,27 @@ fn pending_pd_terminal_model_covers_confirmation_failure_and_transition_waits() 
 }
 
 #[test]
+fn automatic_pd_ticket_confirmation_requires_the_requested_contract() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+    let request = PdContractRequest::pps(17_500, 3_000).unwrap();
+    let contract = source.select_exact_contract(request).unwrap();
+    let active = ConfirmedActiveContract::from_private_contract(contract, source).unwrap();
+
+    assert!(ticket_outcome_confirms_request(
+        TicketOutcome::Confirmed(active),
+        request,
+    ));
+    assert!(!ticket_outcome_confirms_request(
+        TicketOutcome::Confirmed(active),
+        PdContractRequest::pps(18_000, 3_000).unwrap(),
+    ));
+    assert!(!ticket_outcome_confirms_request(
+        TicketOutcome::TimedOut,
+        request,
+    ));
+}
+
+#[test]
 fn pd_snapshot_authorization_expires_after_the_service_heartbeat_window() {
     assert!(pd_snapshot_is_fresh(1_000, 1_000 + PD_SNAPSHOT_MAX_AGE_MS));
     assert!(!pd_snapshot_is_fresh(1_000, 1_001 + PD_SNAPSHOT_MAX_AGE_MS));

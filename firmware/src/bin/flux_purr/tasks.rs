@@ -9,25 +9,22 @@ fn request_idle_restore_fire_and_forget(pd_port: &PdPort) {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn await_working_fixed_contract(pd_port: &PdPort, request_mv: u16, request_ma: u16) -> bool {
+fn request_working_fixed_contract(
+    pd_port: &PdPort,
+    request_mv: u16,
+    request_ma: u16,
+) -> PdRequestState {
     if working_fixed_contract_confirmed(
         pd_port.snapshot().settled_observation(),
         request_mv,
         request_ma,
     ) {
-        return true;
+        return PdRequestState::Confirmed;
     }
     let Ok(request) = PdContractRequest::fixed(request_mv, request_ma) else {
-        return false;
+        return PdRequestState::Failed;
     };
-    match pd_port.request_fixed_contract(request) {
-        PdRequestState::Confirmed => true,
-        PdRequestState::Pending(ticket) => {
-            pd_port.discard_ticket(ticket);
-            false
-        }
-        PdRequestState::Failed => false,
-    }
+    pd_port.request_fixed_contract(request)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -51,6 +48,20 @@ pub(crate) fn working_pps_request_confirmed(
             && observation.contract.voltage_mv == request.voltage_mv()
             && observation.contract.current_ma >= request.operating_current_ma()
     })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn ticket_outcome_confirms_request(
+    outcome: TicketOutcome,
+    request: PdContractRequest,
+) -> bool {
+    matches!(
+        outcome,
+        TicketOutcome::Confirmed(contract)
+            if contract.mode == request.mode()
+                && contract.voltage_mv == request.voltage_mv()
+                && contract.operating_current_ma >= request.operating_current_ma()
+    )
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -125,6 +136,11 @@ where
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
         return false;
     }
+    if !context.normal_auto
+        && let Some(pending) = context.pending_automatic_power_request.take()
+    {
+        context.pd_port.discard_ticket(pending.ticket);
+    }
     let manual_pps_active = context.manual_pps.enabled;
     let _ = release_terminal_fixed_pd_disarm_for_new_work(
         context.backend,
@@ -158,6 +174,9 @@ where
         context.duty_percent,
         context.manual_pps.enabled,
     ) {
+        if let Some(pending) = context.pending_automatic_power_request.take() {
+            context.pd_port.discard_ticket(pending.ticket);
+        }
         // The runtime owns standby and fan-only supply. Forget cached working
         // power so the next heating intent confirms its supply before PWM.
         reset_automatic_heater_backend(context.backend);
@@ -405,13 +424,54 @@ fn fixed_fallback_duty_percent<PWM>(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn request_fixed_fallback_contract<PWM>(
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
+    fixed_request: ch224q::VoltageRequest,
+    fixed_request_current_ma: u16,
+) -> Option<bool>
+where
+    PWM: SetDutyCycle,
+{
+    apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+    match request_working_fixed_contract(
+        context.pd_port,
+        fixed_request.millivolts(),
+        fixed_request_current_ma,
+    ) {
+        PdRequestState::Confirmed => Some(true),
+        PdRequestState::Pending(ticket) => {
+            if context.normal_auto {
+                *context.pending_automatic_power_request = Some(PendingAutomaticPowerRequest {
+                    ticket,
+                    request: PdContractRequest::fixed(
+                        fixed_request.millivolts(),
+                        fixed_request_current_ma,
+                    )
+                    .expect("automatic fixed fallback request is valid"),
+                });
+            } else {
+                context.pd_port.discard_ticket(ticket);
+            }
+            None
+        }
+        PdRequestState::Failed => Some(false),
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_fixed_pd_fallback<PWM>(
-    context: HeaterPowerOutputContext<'_, PWM>,
+    mut context: HeaterPowerOutputContext<'_, PWM>,
     manual_pps_active: bool,
 ) -> bool
 where
     PWM: SetDutyCycle,
 {
+    match poll_pending_automatic_power_ticket(&mut context) {
+        AutomaticPowerTicketPoll::Pending => return false,
+        AutomaticPowerTicketPoll::None
+        | AutomaticPowerTicketPoll::Confirmed
+        | AutomaticPowerTicketPoll::Failed => {}
+    }
     let HeaterPowerBackend::FixedPdPwmFallback {
         reason,
         fixed_request_confirmed: initial_fixed_request_confirmed,
@@ -457,12 +517,12 @@ where
             )
         };
     if !fixed_request_confirmed && !manual_pps_active {
-        apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
-        if !await_working_fixed_contract(
-            context.pd_port,
-            fixed_request.millivolts(),
-            fixed_request_current_ma,
-        ) {
+        let Some(request_confirmed_now) =
+            request_fixed_fallback_contract(&mut context, fixed_request, fixed_request_current_ma)
+        else {
+            return false;
+        };
+        if !request_confirmed_now {
             return false;
         }
         fixed_request_confirmed = true;
@@ -829,6 +889,13 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy)]
+pub(crate) struct PendingAutomaticPowerRequest {
+    pub(crate) ticket: PowerTicket,
+    pub(crate) request: PdContractRequest,
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) struct PpsVoltageTransition {
     request_mv: u16,
     request_current_ma: u16,
@@ -860,7 +927,6 @@ pub(crate) async fn fallback_from_adjustable_request<PWM>(
 where
     PWM: SetDutyCycle,
 {
-    apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
     let (fixed_request, fixed_request_current_ma) = if context.normal_auto {
         let resistance_ohms = automatic_heater_resistance_ohms(
             context.current_temp_c,
@@ -880,11 +946,9 @@ where
     } else {
         (ch224q::VoltageRequest::V12, MIN_HEATER_CONTRACT_MA)
     };
-    let fixed_request_confirmed = await_working_fixed_contract(
-        context.pd_port,
-        fixed_request.millivolts(),
-        fixed_request_current_ma,
-    );
+    let fixed_request_confirmed =
+        request_fixed_fallback_contract(context, fixed_request, fixed_request_current_ma)
+            .unwrap_or(false);
     *context.backend = HeaterPowerBackend::FixedPdPwmFallback {
         reason: HeaterPowerBackendReason::AdjustableRequestFailed,
         fixed_request_confirmed,
@@ -992,8 +1056,15 @@ where
     };
     match request_state {
         PdRequestState::Pending(ticket) => {
-            context.pd_port.discard_ticket(ticket);
-            if request.blank_heater {
+            if context.normal_auto {
+                *context.pending_automatic_power_request = Some(PendingAutomaticPowerRequest {
+                    ticket,
+                    request: request_contract,
+                });
+            } else {
+                context.pd_port.discard_ticket(ticket);
+            }
+            if request.blank_heater || context.normal_auto {
                 apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
             }
             return Some(false);
@@ -1002,6 +1073,12 @@ where
         PdRequestState::Failed => {
             return Some(fallback_from_adjustable_request(context).await);
         }
+    }
+    if !working_pps_request_confirmed(
+        context.pd_port.snapshot().settled_observation(),
+        request_contract,
+    ) {
+        return Some(fallback_from_adjustable_request(context).await);
     }
     if automatic_pps_transition_should_restore_pwm(
         true,
@@ -1230,6 +1307,63 @@ fn log_pps_voltage_request<PWM>(
 }
 
 #[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy)]
+enum AutomaticPowerTicketPoll {
+    None,
+    Pending,
+    Confirmed,
+    Failed,
+}
+
+#[cfg(target_arch = "xtensa")]
+fn poll_pending_automatic_power_ticket<PWM>(
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
+) -> AutomaticPowerTicketPoll
+where
+    PWM: SetDutyCycle,
+{
+    let Some(pending) = *context.pending_automatic_power_request else {
+        return AutomaticPowerTicketPoll::None;
+    };
+    let Some(outcome) = context.pd_port.try_take_ticket(pending.ticket) else {
+        apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+        return AutomaticPowerTicketPoll::Pending;
+    };
+    *context.pending_automatic_power_request = None;
+    let settled_observation = context.pd_port.snapshot().settled_observation();
+    let observation_confirms = match pending.request.mode() {
+        PdContractRequestMode::Fixed => working_fixed_contract_confirmed(
+            settled_observation,
+            pending.request.voltage_mv(),
+            pending.request.operating_current_ma(),
+        ),
+        PdContractRequestMode::Pps => {
+            working_pps_request_confirmed(settled_observation, pending.request)
+        }
+    };
+    if ticket_outcome_confirms_request(outcome, pending.request) && observation_confirms {
+        context.pd_observation = settled_observation;
+        AutomaticPowerTicketPoll::Confirmed
+    } else {
+        AutomaticPowerTicketPoll::Failed
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn handle_pending_automatic_power_request<PWM>(
+    context: &mut HeaterPowerOutputContext<'_, PWM>,
+) -> Option<bool>
+where
+    PWM: SetDutyCycle,
+{
+    match poll_pending_automatic_power_ticket(context) {
+        AutomaticPowerTicketPoll::Pending => Some(false),
+        AutomaticPowerTicketPoll::Failed => Some(fallback_from_adjustable_request(context).await),
+        AutomaticPowerTicketPoll::None | AutomaticPowerTicketPoll::Confirmed => None,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_pps_voltage_request<PWM>(
     context: &mut HeaterPowerOutputContext<'_, PWM>,
     manual_pps_active: bool,
@@ -1241,6 +1375,9 @@ pub(crate) async fn apply_pps_voltage_request<PWM>(
 where
     PWM: SetDutyCycle,
 {
+    if let Some(result) = handle_pending_automatic_power_request(context).await {
+        return result;
+    }
     let HeaterPowerBackend::PpsMos {
         pps_min_mv,
         idle_request_mv,
