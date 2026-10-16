@@ -88,35 +88,41 @@ pub(crate) async fn handle_thermal_command(
         ThermalCommand::ConfirmFirmwareSave(args) => {
             thermal_firmware::confirm_firmware_save(client, default_devd, args).await
         }
-        ThermalCommand::Report { command } => match command {
-            ThermalReportCommand::RenderSelfTest(args) => {
-                thermal_report::render_self_test_evidence_bundle(
-                    thermal_report::ThermalSelfTestReportInput {
-                        run_dirs: args.run_dir,
-                        output_dir: args.output_dir,
-                    },
-                )
-            }
-            ThermalReportCommand::RerenderLegacy(args) => {
-                thermal_report::rerender_legacy_preliminary_review_bundle(
-                    thermal_report::ThermalLegacyReportInput {
-                        legacy_bundle_dir: args.legacy_bundle_dir,
-                        output_dir: args.output_dir,
-                    },
-                )
-            }
-            ThermalReportCommand::RenderV2(args) => {
-                thermal_firmware::prepare_v2_device_journal(&args.input_dir)?;
-                thermal_tuning_v2_report::render_v2_bundle(
-                    thermal_tuning_v2_report::ThermalTuningV2ReportInput {
-                        input_dir: args.input_dir,
-                        output_dir: args.output_dir,
-                    },
-                )
-            }
-        },
+        ThermalCommand::Report { command } => render_thermal_report(command),
         ThermalCommand::Retune(args) => {
             thermal_retune::run_thermal_retune(client, default_devd, args).await
+        }
+    }
+}
+
+fn render_thermal_report(
+    command: ThermalReportCommand,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    match command {
+        ThermalReportCommand::RenderSelfTest(args) => {
+            thermal_report::render_self_test_evidence_bundle(
+                thermal_report::ThermalSelfTestReportInput {
+                    run_dirs: args.run_dir,
+                    output_dir: args.output_dir,
+                },
+            )
+        }
+        ThermalReportCommand::RerenderLegacy(args) => {
+            thermal_report::rerender_legacy_preliminary_review_bundle(
+                thermal_report::ThermalLegacyReportInput {
+                    legacy_bundle_dir: args.legacy_bundle_dir,
+                    output_dir: args.output_dir,
+                },
+            )
+        }
+        ThermalReportCommand::RenderV2(args) => {
+            thermal_firmware::prepare_v2_device_journal(&args.input_dir)?;
+            thermal_tuning_v2_report::render_v2_bundle(
+                thermal_tuning_v2_report::ThermalTuningV2ReportInput {
+                    input_dir: args.input_dir,
+                    output_dir: args.output_dir,
+                },
+            )
         }
     }
 }

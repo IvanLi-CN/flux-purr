@@ -2684,34 +2684,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn maintenance_scaled_braking_requires_complete_bounded_supply() {
-        let previous = ThermalControlProfilePointConfig {
-            hold_power_permille: 138,
-            ..point(100)
-        };
-        let facts = TuneEvidence {
-            overshoot_c: 1.54,
-            over_c: 1.54,
-            hold_max_below_c: Some(0.48),
-            first_band_observed: true,
-            first_band_exit_centi_c: Some(10_154),
-            hold_sample_count: 24,
-            hold_off_sample_count: 12,
-            hold_max_output_permille: Some(140),
-            approach_median_output_permille: Some(140),
-            approach_output_range: Some((50, 200)),
-            ..evidence(100)
-        };
-        assert!(low_power_coasting_evidence(previous, facts));
-        assert_eq!(
-            tune_point(previous, facts),
-            ThermalControlProfilePointConfig {
-                brake_distance_centi_c: previous.brake_distance_centi_c + 79,
-                ..previous
-            }
-        );
-        for unavailable in [
+    fn unavailable_maintenance_supply(facts: TuneEvidence) -> [TuneEvidence; 18] {
+        [
             TuneEvidence {
                 hold_off_sample_count: 11,
                 ..facts
@@ -2784,7 +2758,37 @@ mod tests {
                 target_c: 160,
                 ..facts
             },
-        ] {
+        ]
+    }
+
+    #[test]
+    fn maintenance_scaled_braking_requires_complete_bounded_supply() {
+        let previous = ThermalControlProfilePointConfig {
+            hold_power_permille: 138,
+            ..point(100)
+        };
+        let facts = TuneEvidence {
+            overshoot_c: 1.54,
+            over_c: 1.54,
+            hold_max_below_c: Some(0.48),
+            first_band_observed: true,
+            first_band_exit_centi_c: Some(10_154),
+            hold_sample_count: 24,
+            hold_off_sample_count: 12,
+            hold_max_output_permille: Some(140),
+            approach_median_output_permille: Some(140),
+            approach_output_range: Some((50, 200)),
+            ..evidence(100)
+        };
+        assert!(low_power_coasting_evidence(previous, facts));
+        assert_eq!(
+            tune_point(previous, facts),
+            ThermalControlProfilePointConfig {
+                brake_distance_centi_c: previous.brake_distance_centi_c + 79,
+                ..previous
+            }
+        );
+        for unavailable in unavailable_maintenance_supply(facts) {
             assert!(
                 !low_power_coasting_evidence(previous, unavailable),
                 "{unavailable:?}"

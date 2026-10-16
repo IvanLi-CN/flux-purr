@@ -1,6 +1,6 @@
 // Complete public trace from A calibration on 0741c4b5.
 // Columns: elapsed ticks, temperature centi-C, VIN 125mV units, applied duty.
-&[
+const CALIBRATION_CUTOFF_TRACE: &[(u16, i16, u8, u8)] = &[
     (46, 2720, 170, 0),
     (48, 2720, 155, 100),
     (49, 2760, 156, 100),
@@ -121,4 +121,4 @@
     (4641, 8635, 171, 0),
     (4814, 8220, 171, 0),
     (4935, 7991, 170, 0),
-]
+];

@@ -1052,14 +1052,8 @@ pub(crate) fn serial_exchange_blocking(
     } = context;
     let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
     let deadline = Instant::now() + serial_request_timeout(retry_policy, request.len());
-    let mut session = take_or_open_serial_session_with_identity(
+    let mut session = open_and_write_serial_request(
         &mut serial_sessions,
-        port_path,
-        deadline,
-        expected_usb_identity.as_ref(),
-    )?;
-    session = write_serial_request_with_reopen_with_identity(
-        session,
         port_path,
         request,
         deadline,
@@ -1148,10 +1142,40 @@ pub(crate) fn serial_exchange_blocking(
         }
     }
 
+    serial_exchange_timeout(&mut serial_sessions, port_path, session)
+}
+
+fn open_and_write_serial_request(
+    serial_sessions: &mut SerialSessionMap,
+    port_path: &str,
+    request: &str,
+    deadline: Instant,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<SerialSession, HttpError> {
+    let session = take_or_open_serial_session_with_identity(
+        serial_sessions,
+        port_path,
+        deadline,
+        expected_usb_identity,
+    )?;
+    write_serial_request_with_reopen_with_identity(
+        session,
+        port_path,
+        request,
+        deadline,
+        expected_usb_identity,
+    )
+}
+
+fn serial_exchange_timeout(
+    serial_sessions: &mut SerialSessionMap,
+    port_path: &str,
+    session: SerialSession,
+) -> Result<Value, HttpError> {
     // Keep the USB-JTAG session open after a timeout. Reopening this class of
     // port can reset the MCU; JSONL newline framing and request-id matching let
     // the next RPC discard any stale partial response without reopening it.
-    store_serial_session(&mut serial_sessions, port_path, session);
+    store_serial_session(serial_sessions, port_path, session);
     Err(HttpError::new(
         StatusCode::GATEWAY_TIMEOUT,
         "usb_response_timeout",

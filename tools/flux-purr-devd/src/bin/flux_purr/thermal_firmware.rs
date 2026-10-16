@@ -219,70 +219,161 @@ async fn run_firmware_tuning_until_interrupt(
     }
     let run_id = format!("firmware-{power_class}-{}", current_unix_millis());
     let candidate_id = format!("{run_id}-candidate");
-    let mut candidate_profile = if let Some(path) = args.seed_profile_file.as_ref() {
+    let candidate_profile = if let Some(path) = args.seed_profile_file.as_ref() {
         let imported: Value = serde_json::from_slice(&fs::read(path)?)?;
         parse_firmware_seed_profile(imported, power_class)?
     } else {
         Value::Null
     };
-    let mut candidate_hash = if candidate_profile.is_null() {
+    let candidate_hash = if candidate_profile.is_null() {
         "unprepared".to_owned()
     } else {
         firmware_candidate_profile_hash(&candidate_profile)?
     };
     let input_dir = args.output_root.join(&run_id);
     fs::create_dir_all(&input_dir)?;
-    let mut journal = StatusJournal::create(&input_dir)?;
+    let journal = StatusJournal::create(&input_dir)?;
     let lease = create_lease(client, &resolved).await?;
     let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-    let mut statuses = Vec::new();
-    let mut identity_prepared = false;
-    let mut profile_mode_prepared = false;
-    let mut device_start_attempted = false;
+    let mut run = FirmwareRun {
+        client,
+        resolved: &resolved,
+        lease_id: &lease.lease_id,
+        args: &args,
+        input_dir: &input_dir,
+        run_id: &run_id,
+        candidate_id: &candidate_id,
+        power_class,
+        selected_targets: &selected_targets,
+        execution_order: &execution_order,
+        candidate_profile,
+        candidate_hash,
+        journal,
+        statuses: Vec::new(),
+        identity_prepared: false,
+        profile_mode_prepared: false,
+        device_start_attempted: false,
+    };
     let mut interruption_reason = "transport_or_runtime_failure";
-    let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = tokio::select! {
-        result = async {
-        let identity =
-            request_leased(client, &resolved, &lease.lease_id, Method::GET, "/identity", None)
-                .await?;
-        record_device_identity(&input_dir, &run_id, &identity)?;
-        identity_prepared = true;
-        let runtime = ensure_firmware_profile_mode(client, &resolved, &lease.lease_id, power_class).await?;
-        journal.record_runtime(&run_id, None, &runtime)?;
-        profile_mode_prepared = true;
-        if candidate_profile.is_null() {
-            let calibration = request_leased(
-                client, &resolved, &lease.lease_id, Method::GET,
-                "/calibration/thermal-plant/run", None,
-            ).await?;
-            candidate_profile = calibrated_firmware_seed_profile(&runtime, &calibration)?;
-            candidate_hash = firmware_candidate_profile_hash(&candidate_profile)?;
-            fs::write(input_dir.join("seed-calibration.json"), serde_json::to_vec_pretty(&json!({
-                "source": "device_active_calibration",
-                "runId": run_id,
-                "powerClass": power_class,
-                "thermalPlantModel": runtime["thermalPlantModel"],
-                "ppsCapabilityMaxMv": runtime["ppsCapabilityMaxMv"],
-                "ppsCapabilityMaxMa": runtime["ppsCapabilityMaxMa"],
-                "calibration": calibration,
-                "candidateHash": candidate_hash,
-                "candidateProfile": candidate_profile,
-            }))?)?;
+    let result = tokio::select! {
+        result = run.execute() => result,
+        signal = interrupt => {
+            interruption_reason = "host_canceled";
+            Err(match signal {
+                Ok(()) => "firmware thermal tuning interrupted; cancel and trace drain requested".into(),
+                Err(error) => Box::new(error) as Box<dyn std::error::Error + Send + Sync>,
+            })
         }
-        device_start_attempted = true;
+    };
+    let rendered = run.recover_and_render(result, interruption_reason).await;
+    let release_result = release_lease(client, &resolved.devd, &lease.lease_id).await;
+    heartbeat.abort();
+    release_result?;
+    rendered
+}
+
+enum FirmwareStart {
+    Started(Value),
+    HostFailure(Value),
+}
+
+struct FirmwareRun<'a> {
+    client: &'a Client,
+    resolved: &'a ResolvedUsbTarget,
+    lease_id: &'a str,
+    args: &'a ThermalFlagshipTuneArgs,
+    input_dir: &'a Path,
+    run_id: &'a str,
+    candidate_id: &'a str,
+    power_class: &'a str,
+    selected_targets: &'a [i16],
+    execution_order: &'a [i16],
+    candidate_profile: Value,
+    candidate_hash: String,
+    journal: StatusJournal,
+    statuses: Vec<Value>,
+    identity_prepared: bool,
+    profile_mode_prepared: bool,
+    device_start_attempted: bool,
+}
+
+impl FirmwareRun<'_> {
+    async fn execute(&mut self) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        self.prepare().await?;
+        let start = match self.start().await? {
+            FirmwareStart::Started(start) => start,
+            FirmwareStart::HostFailure(rendered) => return Ok(rendered),
+        };
+        self.collect(start).await?;
+        self.render()
+    }
+
+    async fn prepare(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let identity = request_leased(
+            self.client,
+            self.resolved,
+            self.lease_id,
+            Method::GET,
+            "/identity",
+            None,
+        )
+        .await?;
+        record_device_identity(self.input_dir, self.run_id, &identity)?;
+        self.identity_prepared = true;
+        let runtime = ensure_firmware_profile_mode(
+            self.client,
+            self.resolved,
+            self.lease_id,
+            self.power_class,
+        )
+        .await?;
+        self.journal.record_runtime(self.run_id, None, &runtime)?;
+        self.profile_mode_prepared = true;
+        if self.candidate_profile.is_null() {
+            let calibration = request_leased(
+                self.client,
+                self.resolved,
+                self.lease_id,
+                Method::GET,
+                "/calibration/thermal-plant/run",
+                None,
+            )
+            .await?;
+            self.candidate_profile = calibrated_firmware_seed_profile(&runtime, &calibration)?;
+            self.candidate_hash = firmware_candidate_profile_hash(&self.candidate_profile)?;
+            fs::write(
+                self.input_dir.join("seed-calibration.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "source": "device_active_calibration",
+                    "runId": self.run_id,
+                    "powerClass": self.power_class,
+                    "thermalPlantModel": runtime["thermalPlantModel"],
+                    "ppsCapabilityMaxMv": runtime["ppsCapabilityMaxMv"],
+                    "ppsCapabilityMaxMa": runtime["ppsCapabilityMaxMa"],
+                    "calibration": calibration,
+                    "candidateHash": self.candidate_hash,
+                    "candidateProfile": self.candidate_profile,
+                }))?,
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn start(&mut self) -> Result<FirmwareStart, Box<dyn std::error::Error + Send + Sync>> {
+        self.device_start_attempted = true;
         let start = match request_leased(
-            client,
-            &resolved,
-            &lease.lease_id,
+            self.client,
+            self.resolved,
+            self.lease_id,
             Method::POST,
             "/thermal-tuning",
             Some(firmware_start_command(
-                power_class,
-                &run_id,
-                &candidate_id,
-                &candidate_hash,
-                &candidate_profile,
-                &execution_order,
+                self.power_class,
+                self.run_id,
+                self.candidate_id,
+                &self.candidate_hash,
+                &self.candidate_profile,
+                self.execution_order,
             )),
         )
         .await
@@ -291,66 +382,75 @@ async fn run_firmware_tuning_until_interrupt(
             Err(error) => {
                 eprintln!("firmware thermal tuning start failed: {error}");
                 let rejected = request_leased(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
+                    self.client,
+                    self.resolved,
+                    self.lease_id,
                     Method::POST,
                     "/thermal-tuning",
-                    Some(firmware_read_command(&run_id, None)),
+                    Some(firmware_read_command(self.run_id, None)),
                 )
                 .await;
                 match rejected {
                     Ok(status)
                         if is_confirmed_rejected_start(
-                            power_class,
+                            self.power_class,
                             &status,
-                            &run_id,
-                            &candidate_id,
-                            &candidate_hash,
+                            self.run_id,
+                            self.candidate_id,
+                            &self.candidate_hash,
                         ) =>
                     {
                         status
                     }
                     _ => {
                         let _ = request_leased(
-                            client,
-                            &resolved,
-                            &lease.lease_id,
+                            self.client,
+                            self.resolved,
+                            self.lease_id,
                             Method::POST,
                             "/thermal-tuning",
                             Some(json!({"op": "cancel"})),
                         )
                         .await;
-                        return render_host_failure(HostFailureInput {
-                            device_id: &resolved.device,
-                            output_root: &args.output_root,
-                            bundle_dir: args.bundle_dir.clone(),
-                            run_id: Some(&run_id),
-                            power_class,
-                            reason: "start_not_confirmed",
-                            no_device_command: false,
-                            attempted_candidate: Some((
-                                &candidate_id,
-                                &candidate_hash,
-                                &candidate_profile,
-                            )),
-                            selected_targets: Some(&selected_targets),
-                        });
+                        return Ok(FirmwareStart::HostFailure(render_host_failure(
+                            HostFailureInput {
+                                device_id: &self.resolved.device,
+                                output_root: &self.args.output_root,
+                                bundle_dir: self.args.bundle_dir.clone(),
+                                run_id: Some(self.run_id),
+                                power_class: self.power_class,
+                                reason: "start_not_confirmed",
+                                no_device_command: false,
+                                attempted_candidate: Some((
+                                    self.candidate_id,
+                                    &self.candidate_hash,
+                                    &self.candidate_profile,
+                                )),
+                                selected_targets: Some(self.selected_targets),
+                            },
+                        )?));
                     }
                 }
             }
         };
 
-        let deadline = Instant::now() + firmware_host_watchdog(selected_targets.len());
+        Ok(FirmwareStart::Started(start))
+    }
+
+    async fn collect(
+        &mut self,
+        start: Value,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let deadline = Instant::now() + firmware_host_watchdog(self.selected_targets.len());
         let mut next_runtime_audit = Instant::now();
         let mut after_sequence = next_event_sequence(&start);
-        journal.record(&mut statuses, start)?;
+        self.journal.record(&mut self.statuses, start)?;
         loop {
             let status = request_firmware_event_read(
-                client,
-                &resolved,
-                &lease.lease_id,
-                &run_id,
+                self.client,
+                self.resolved,
+                self.lease_id,
+                self.run_id,
                 after_sequence,
             )
             .await
@@ -367,33 +467,45 @@ async fn run_firmware_tuning_until_interrupt(
                     matches!(value, "candidate_ready" | "passed" | "failed" | "canceled")
                 });
             let trace_gap = status_trace_gap(&status);
-            journal.record(&mut statuses, status)?;
+            self.journal.record(&mut self.statuses, status)?;
             if terminal
                 && caught_up
                 && !trace_gap
                 && let Some(sequence) = after_sequence
             {
                 let confirmed = confirm_terminal_tuning_events(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
-                    &run_id,
+                    self.client,
+                    self.resolved,
+                    self.lease_id,
+                    self.run_id,
                     sequence,
                 )
                 .await?;
-                journal.record(&mut statuses, confirmed)?;
+                self.journal.record(&mut self.statuses, confirmed)?;
             }
             if terminal && caught_up {
                 break;
             }
             if caught_up && Instant::now() >= next_runtime_audit {
                 let runtime = request_leased(
-                    client, &resolved, &lease.lease_id, Method::GET, "/status", None,
-                ).await?;
-                journal.record_runtime(&run_id, after_sequence, &runtime)?;
-                eprintln!("firmware tuning: temperature={}C heater={}%, fan command enabled={} level={} pwm={}permille",
-                    runtime["currentTempC"], runtime["heaterPhysicalOutputPercent"],
-                    runtime["fanEnabled"], runtime["fanOutputLevel"], runtime["fanPwmPermille"]);
+                    self.client,
+                    self.resolved,
+                    self.lease_id,
+                    Method::GET,
+                    "/status",
+                    None,
+                )
+                .await?;
+                self.journal
+                    .record_runtime(self.run_id, after_sequence, &runtime)?;
+                eprintln!(
+                    "firmware tuning: temperature={}C heater={}%, fan command enabled={} level={} pwm={}permille",
+                    runtime["currentTempC"],
+                    runtime["heaterPhysicalOutputPercent"],
+                    runtime["fanEnabled"],
+                    runtime["fanOutputLevel"],
+                    runtime["fanPwmPermille"]
+                );
                 next_runtime_audit = Instant::now() + RUNTIME_AUDIT_INTERVAL;
             }
             if Instant::now() >= deadline {
@@ -404,108 +516,108 @@ async fn run_firmware_tuning_until_interrupt(
             }
         }
 
-        let candidate_hash = statuses
+        Ok(())
+    }
+
+    fn render(&self) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let candidate_hash = self
+            .statuses
             .last()
             .and_then(|status| status.get("candidateHash"))
             .and_then(Value::as_str)
-            .unwrap_or(&candidate_hash)
+            .unwrap_or(&self.candidate_hash)
             .to_string();
 
         write_v2_input(V2Input {
-            input_dir: &input_dir,
-            device_id: &resolved.device,
-            run_id: &run_id,
-            candidate_id: &candidate_id,
+            input_dir: self.input_dir,
+            device_id: &self.resolved.device,
+            run_id: self.run_id,
+            candidate_id: self.candidate_id,
             candidate_hash: &candidate_hash,
-            candidate_profile: &candidate_profile,
-            statuses: &statuses,
+            candidate_profile: &self.candidate_profile,
+            statuses: &self.statuses,
             host_interruption: None,
-            selected_targets: &selected_targets,
-            execution_order: &execution_order,
+            selected_targets: self.selected_targets,
+            execution_order: self.execution_order,
         })?;
         let mut rendered =
             thermal_tuning_v2_report::render_v2_bundle(ThermalTuningV2ReportInput {
-                input_dir: input_dir.clone(),
-                output_dir: args.bundle_dir.clone(),
+                input_dir: self.input_dir.to_path_buf(),
+                output_dir: self.args.bundle_dir.clone(),
             })?;
-        rendered["rawInputDir"] = json!(input_dir);
+        rendered["rawInputDir"] = json!(self.input_dir);
         Ok(rendered)
-        } => result,
-        signal = interrupt => {
-            interruption_reason = "host_canceled";
-            Err(match signal {
-                Ok(()) => "firmware thermal tuning interrupted; cancel and trace drain requested".into(),
-                Err(error) => Box::new(error) as Box<dyn std::error::Error + Send + Sync>,
-            })
-        }
-    };
-    if let Err(error) = &result {
-        eprintln!("firmware tuning failed: {error}");
     }
-    if result.is_err() && device_start_attempted {
-        match tokio::time::timeout(
-            TERMINAL_DRAIN_TIMEOUT,
-            cancel_and_drain_firmware_run(
-                client,
-                &resolved,
-                &lease.lease_id,
-                &run_id,
-                &mut journal,
-                &mut statuses,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => eprintln!("thermal tuning cancel/trace recovery failed: {error}"),
-            Err(_) => {
-                eprintln!("thermal tuning cancel/trace recovery exceeded its bounded deadline")
+
+    async fn recover_and_render(
+        &mut self,
+        result: Result<Value, Box<dyn std::error::Error + Send + Sync>>,
+        interruption_reason: &str,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        if let Err(error) = &result {
+            eprintln!("firmware tuning failed: {error}");
+        }
+        if result.is_err() && self.device_start_attempted {
+            match tokio::time::timeout(
+                TERMINAL_DRAIN_TIMEOUT,
+                cancel_and_drain_firmware_run(
+                    self.client,
+                    self.resolved,
+                    self.lease_id,
+                    self.run_id,
+                    &mut self.journal,
+                    &mut self.statuses,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("thermal tuning cancel/trace recovery failed: {error}"),
+                Err(_) => {
+                    eprintln!("thermal tuning cancel/trace recovery exceeded its bounded deadline")
+                }
             }
         }
+        match result {
+            Ok(rendered) => Ok(rendered),
+            Err(_) if !self.statuses.is_empty() => render_interrupted_run(InterruptedRunInput {
+                device_id: &self.resolved.device,
+                output_root: &self.args.output_root,
+                bundle_dir: self.args.bundle_dir.clone(),
+                run_id: self.run_id,
+                candidate_id: self.candidate_id,
+                seed_candidate_hash: &self.candidate_hash,
+                candidate_profile: &self.candidate_profile,
+                statuses: &self.statuses,
+                selected_targets: self.selected_targets,
+                execution_order: self.execution_order,
+                reason: interruption_reason,
+            }),
+            Err(_) => render_host_failure(HostFailureInput {
+                device_id: &self.resolved.device,
+                output_root: &self.args.output_root,
+                bundle_dir: self.args.bundle_dir.clone(),
+                run_id: Some(self.run_id),
+                power_class: self.power_class,
+                reason: if self.device_start_attempted {
+                    "transport_or_runtime_failure"
+                } else if self.profile_mode_prepared {
+                    "calibration_seed_unavailable"
+                } else if !self.identity_prepared {
+                    "device_identity_not_confirmed"
+                } else {
+                    "profile_mode_not_confirmed"
+                },
+                no_device_command: !self.device_start_attempted,
+                attempted_candidate: (!self.candidate_profile.is_null()).then_some((
+                    self.candidate_id,
+                    &self.candidate_hash,
+                    &self.candidate_profile,
+                )),
+                selected_targets: Some(self.selected_targets),
+            }),
+        }
     }
-    let rendered = match result {
-        Ok(rendered) => Ok(rendered),
-        Err(_) if !statuses.is_empty() => render_interrupted_run(InterruptedRunInput {
-            device_id: &resolved.device,
-            output_root: &args.output_root,
-            bundle_dir: args.bundle_dir,
-            run_id: &run_id,
-            candidate_id: &candidate_id,
-            seed_candidate_hash: &candidate_hash,
-            candidate_profile: &candidate_profile,
-            statuses: &statuses,
-            selected_targets: &selected_targets,
-            execution_order: &execution_order,
-            reason: interruption_reason,
-        }),
-        Err(_) => render_host_failure(HostFailureInput {
-            device_id: &resolved.device,
-            output_root: &args.output_root,
-            bundle_dir: args.bundle_dir,
-            run_id: Some(&run_id),
-            power_class,
-            reason: if device_start_attempted {
-                "transport_or_runtime_failure"
-            } else if profile_mode_prepared {
-                "calibration_seed_unavailable"
-            } else if !identity_prepared {
-                "device_identity_not_confirmed"
-            } else {
-                "profile_mode_not_confirmed"
-            },
-            no_device_command: !device_start_attempted,
-            attempted_candidate: (!candidate_profile.is_null()).then_some((
-                &candidate_id,
-                &candidate_hash,
-                &candidate_profile,
-            )),
-            selected_targets: Some(&selected_targets),
-        }),
-    };
-    let release_result = release_lease(client, &resolved.devd, &lease.lease_id).await;
-    heartbeat.abort();
-    release_result?;
-    rendered
 }
 
 async fn cancel_and_drain_firmware_run(
@@ -678,45 +790,20 @@ pub(crate) async fn confirm_firmware_save(
         let current =
             request_firmware_event_read(client, &resolved, &lease.lease_id, run_id, last_sequence)
                 .await?;
-        if current.get("runId").and_then(Value::as_str) != Some(run_id)
-            || current.get("candidateId").and_then(Value::as_str) != Some(candidate_id)
-            || current.get("candidateHash").and_then(Value::as_str) != Some(candidate_hash)
-            || current.get("powerClass").and_then(Value::as_str) != Some(power_class)
-            || current.get("terminalDisposition").and_then(Value::as_str) != Some("candidate_ready")
-            || current.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
-        {
-            return Err("device candidate identity or trace changed before confirmation".into());
-        }
+        require_save_candidate_identity(
+            &current,
+            [run_id, candidate_id, candidate_hash, power_class],
+        )?;
         journal.record(&mut statuses, current)?;
-        let sealed = request_leased(
-            client,
-            &resolved,
-            &lease.lease_id,
-            Method::POST,
-            "/thermal-tuning",
-            Some(json!({"op": "seal"})),
-        )
-        .await?;
-        let seal_sequence = next_event_sequence(&sealed)
-            .ok_or("sealed candidate did not emit an auditable transition")?;
-        journal.record(&mut statuses, sealed)?;
-        let seal_ack = request_firmware_event_read(
+        seal_firmware_candidate(
             client,
             &resolved,
             &lease.lease_id,
             run_id,
-            Some(seal_sequence),
+            &mut journal,
+            &mut statuses,
         )
         .await?;
-        if seal_ack.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
-            || seal_ack
-                .pointer("/trace/lastSequence")
-                .and_then(Value::as_u64)
-                != Some(seal_sequence)
-        {
-            return Err("sealed candidate transition was not acknowledged".into());
-        }
-        journal.record(&mut statuses, seal_ack)?;
         let saved = request_leased(
             client,
             &resolved,
@@ -738,25 +825,15 @@ pub(crate) async fn confirm_firmware_save(
             return Err("device did not return a verified save receipt".into());
         }
         journal.record(&mut statuses, saved)?;
-        if let Some(sequence) = statuses.last().and_then(next_event_sequence) {
-            let confirmed = request_firmware_event_read(
-                client,
-                &resolved,
-                &lease.lease_id,
-                run_id,
-                Some(sequence),
-            )
-            .await?;
-            if confirmed.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
-                || confirmed
-                    .pointer("/trace/lastSequence")
-                    .and_then(Value::as_u64)
-                    != Some(sequence)
-            {
-                return Err("saved tuning receipt event was not confirmed".into());
-            }
-            journal.record(&mut statuses, confirmed)?;
-        }
+        acknowledge_saved_candidate(
+            client,
+            &resolved,
+            &lease.lease_id,
+            run_id,
+            &mut journal,
+            &mut statuses,
+        )
+        .await?;
         let candidate_profile = candidate
             .pointer("/profile/value")
             .ok_or("candidate profile missing from input")?;
@@ -785,6 +862,82 @@ pub(crate) async fn confirm_firmware_save(
     heartbeat.abort();
     release_result?;
     result
+}
+
+async fn acknowledge_saved_candidate(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    run_id: &str,
+    journal: &mut StatusJournal,
+    statuses: &mut Vec<Value>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(sequence) = statuses.last().and_then(next_event_sequence) {
+        let confirmed =
+            request_firmware_event_read(client, resolved, lease_id, run_id, Some(sequence)).await?;
+        if confirmed.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
+            || confirmed
+                .pointer("/trace/lastSequence")
+                .and_then(Value::as_u64)
+                != Some(sequence)
+        {
+            return Err("saved tuning receipt event was not confirmed".into());
+        }
+        journal.record(statuses, confirmed)?;
+    }
+    Ok(())
+}
+
+fn require_save_candidate_identity(
+    current: &Value,
+    identity: [&str; 4],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let [run_id, candidate_id, candidate_hash, power_class] = identity;
+    if current.get("runId").and_then(Value::as_str) != Some(run_id)
+        || current.get("candidateId").and_then(Value::as_str) != Some(candidate_id)
+        || current.get("candidateHash").and_then(Value::as_str) != Some(candidate_hash)
+        || current.get("powerClass").and_then(Value::as_str) != Some(power_class)
+        || current.get("terminalDisposition").and_then(Value::as_str) != Some("candidate_ready")
+        || current.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
+    {
+        return Err("device candidate identity or trace changed before confirmation".into());
+    }
+    Ok(())
+}
+
+async fn seal_firmware_candidate(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    run_id: &str,
+    journal: &mut StatusJournal,
+    statuses: &mut Vec<Value>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let sealed = request_leased(
+        client,
+        resolved,
+        lease_id,
+        Method::POST,
+        "/thermal-tuning",
+        Some(json!({"op": "seal"})),
+    )
+    .await?;
+    let seal_sequence = next_event_sequence(&sealed)
+        .ok_or("sealed candidate did not emit an auditable transition")?;
+    journal.record(statuses, sealed)?;
+    let seal_ack =
+        request_firmware_event_read(client, resolved, lease_id, run_id, Some(seal_sequence))
+            .await?;
+    if seal_ack.pointer("/trace/gap").and_then(Value::as_bool) != Some(false)
+        || seal_ack
+            .pointer("/trace/lastSequence")
+            .and_then(Value::as_u64)
+            != Some(seal_sequence)
+    {
+        return Err("sealed candidate transition was not acknowledged".into());
+    }
+    journal.record(statuses, seal_ack)?;
+    Ok(())
 }
 
 fn validate_save_input(
@@ -1065,26 +1218,7 @@ fn verify_timing_samples(
     let deadline = timing
         .warmup_exited_at_ms
         .and_then(|exit| exit.checked_add(u64::from(timing.original_limit_ms)));
-    let first_check = deadline.and_then(|deadline| {
-        samples.iter().find(|sample| {
-            sample
-                .get("elapsedMs")
-                .and_then(Value::as_u64)
-                .is_some_and(|time| time >= deadline)
-        })
-    });
-    let recorded_phase = timing
-        .original_deadline_phase
-        .and_then(|phase| serde_json::to_value(phase).ok());
-    if first_check
-        .and_then(|sample| sample.get("elapsedMs"))
-        .and_then(Value::as_u64)
-        != timing.original_deadline_observed_at_ms
-        || first_check
-            .and_then(|sample| sample.get("phase"))
-            .and_then(Value::as_str)
-            != recorded_phase.as_ref().and_then(Value::as_str)
-    {
+    if !first_deadline_matches(timing, samples, deadline) {
         reasons.push("first_original_deadline_check_mismatch");
     }
     if let Some(extended) = timing.extended_at_ms {
@@ -1163,6 +1297,32 @@ fn verify_timing_samples(
     }
     json!({"verified": timing.supported_policy() && reasons.is_empty(),
         "source": "trial_samples", "reasons": reasons})
+}
+
+fn first_deadline_matches(
+    timing: &ThermalTuningTimingEvidence,
+    samples: &[&Value],
+    deadline: Option<u64>,
+) -> bool {
+    let first_check = deadline.and_then(|deadline| {
+        samples.iter().find(|sample| {
+            sample
+                .get("elapsedMs")
+                .and_then(Value::as_u64)
+                .is_some_and(|time| time >= deadline)
+        })
+    });
+    let recorded_phase = timing
+        .original_deadline_phase
+        .and_then(|phase| serde_json::to_value(phase).ok());
+    first_check
+        .and_then(|sample| sample.get("elapsedMs"))
+        .and_then(Value::as_u64)
+        == timing.original_deadline_observed_at_ms
+        && first_check
+            .and_then(|sample| sample.get("phase"))
+            .and_then(Value::as_str)
+            == recorded_phase.as_ref().and_then(Value::as_str)
 }
 
 fn stable_window_samples_valid(
@@ -1709,10 +1869,7 @@ fn calibrated_firmware_seed_profile(
     runtime: &Value,
     calibration: &Value,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    use flux_purr_firmware::memory::{
-        HeaterCurveConfig, HeaterCurvePoint, ThermalPlantProjection,
-        heater_resistance_ohms_from_curve,
-    };
+    use flux_purr_firmware::memory::heater_resistance_ohms_from_curve;
     use flux_purr_firmware::thermal_plant::{
         natural_cooling_loss_mw, natural_cooling_rate_c_per_s,
     };
@@ -1720,6 +1877,138 @@ fn calibrated_firmware_seed_profile(
     let active = calibration
         .get("activeResult")
         .ok_or("active calibration required for a cold seed")?;
+    let (model, response) = calibrated_seed_model(runtime, active)?;
+    // Ambient belongs to this fit. The current (possibly hot) plate reading is
+    // not an ambient observation and must never substitute for a missing one.
+    let ambient = calibration
+        .pointer("/tracePage/points")
+        .and_then(Value::as_array)
+        .and_then(|points| {
+            points.iter().find(|point| {
+                point.get("sampleIndex").and_then(Value::as_u64) == Some(0)
+                    && point.get("phase").and_then(Value::as_str) == Some("ambient")
+            })
+        })
+        .and_then(|point| point.get("temperatureCentiC"))
+        .and_then(Value::as_i64)
+        .filter(|value| (-5_000..=15_000).contains(value))
+        .map(|value| value as f32 / 100.0)
+        .ok_or("calibration ambient sample required")?;
+    if natural_cooling_rate_c_per_s(model, 60.0, ambient).is_none() {
+        return Err("invalid calibration cannot initialize thermal tuning".into());
+    }
+    let voltage_mv = runtime
+        .get("ppsCapabilityMaxMv")
+        .and_then(Value::as_u64)
+        .filter(|value| (5_000..=28_000).contains(value))
+        .ok_or("valid PPS voltage capability required")? as f32;
+    let current_ma = runtime
+        .get("ppsCapabilityMaxMa")
+        .and_then(Value::as_u64)
+        .filter(|value| (1_000..=5_000).contains(value))
+        .ok_or("valid PPS current capability required")? as f32;
+    let curve = calibrated_seed_curve(active)?;
+    let mut seeded = Vec::new();
+    for target in THERMAL_TUNING_TARGETS_C {
+        let temperature_c = f32::from(target);
+        let resistance = heater_resistance_ohms_from_curve(&curve, temperature_c)
+            .ok_or("calibrated target resistance unavailable")?
+            .max(3.2 * (1.0 + 0.00393 * (temperature_c - 20.0)));
+        // Use the same resistance and contract bounds as production Pmax,
+        // rather than treating the nominal bank name as measured input power.
+        let maximum_power_mw = (voltage_mv * voltage_mv / resistance / 1_000.0)
+            .min(voltage_mv * current_ma / 1_000.0)
+            .max(1.0);
+        let loss_mw = natural_cooling_loss_mw(model, temperature_c, ambient);
+        let delay_s = (response.delay_ms + response.decay_ms) as f32 / 1_000.0;
+        let brake_centi_c = flux_purr_firmware::thermal_response::reference_brake_c(
+            response,
+            model,
+            ambient,
+            maximum_power_mw,
+            temperature_c,
+        ) * 100.0;
+        let hold_permille = (loss_mw / maximum_power_mw * 1_000.0)
+            .round()
+            .clamp(50.0, 1_000.0) as u16;
+        // An integrating heat plant with transport delay: choose a closed-loop
+        // response of 3 delays (IMC lambda), so Kp = C / (Pmax * 4 delays).
+        let kp = (model.thermal_capacity_mj_per_c / (maximum_power_mw * 4.0 * delay_s.max(0.4))
+            * 1_000.0)
+            .round()
+            .clamp(1.0, 1_000.0) as u16;
+        seeded.push(json!({
+            "targetTempC": target,
+            "brakeDistanceCentiC": brake_centi_c.round().clamp(100.0, 5_000.0) as u16,
+            "warmupPowerPermille": 1_000, "warmupReenterCentiC": 400,
+            "approachPowerPermille": 1_000, "approachFloorPowerPermille": 50,
+            "approachDampingExponentPermille": 1_000, "approachTailWindowCentiC": 0,
+            "approachLeadTicks": 0, "holdLeadTicks": 0,
+            "holdPowerPermille": hold_permille, "holdReheatPowerPermille": hold_permille,
+            "holdEntryCentiC": 50, "holdExitCentiC": 150,
+            "holdOnCentiC": 30, "holdOffCentiC": 120, "overshootCutoffCentiC": 150,
+            "holdKpPermillePerC": kp, "holdKiPermillePerCTick": 1, "holdBlendTicks": 1
+        }));
+    }
+    Ok(firmware_candidate_profile_value(&json!({
+        "settings": {"tempFilterAlphaPermille": 750, "approachMaxTicks": 5,
+            "approachMinPowerRatioPermille": 0, "autoAdjustableWorkingFloorMv": 5_000,
+            "heaterCurrentReserveMa": 200},
+        "points": seeded
+    })))
+}
+
+fn calibrated_seed_curve(
+    active: &Value,
+) -> Result<flux_purr_firmware::memory::HeaterCurveConfig, Box<dyn std::error::Error + Send + Sync>>
+{
+    use flux_purr_firmware::memory::{HeaterCurveConfig, HeaterCurvePoint};
+    let mut curve = HeaterCurveConfig::default();
+    let points = active
+        .pointer("/curve/points")
+        .and_then(Value::as_array)
+        .ok_or("calibrated resistance curve required")?;
+    if points.len() > curve.points.len() {
+        return Err("calibrated resistance curve exceeds its point capacity".into());
+    }
+    for (index, point) in points
+        .iter()
+        .enumerate()
+        .filter(|(_, point)| !point.is_null())
+    {
+        curve.points[index] = Some(HeaterCurvePoint {
+            temp_centi_c: point
+                .get("tempCentiC")
+                .and_then(Value::as_i64)
+                .and_then(|value| i16::try_from(value).ok())
+                .ok_or("calibrated curve temperature required")?,
+            resistance_milliohms: point
+                .get("resistanceMilliohms")
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or("positive calibrated resistance required")?,
+        });
+    }
+    if curve.points.iter().flatten().count() < 2 {
+        return Err(
+            "cold seed requires a calibrated resistance curve with at least two points".into(),
+        );
+    }
+    Ok(curve)
+}
+
+fn calibrated_seed_model(
+    runtime: &Value,
+    active: &Value,
+) -> Result<
+    (
+        flux_purr_firmware::memory::ThermalPlantProjection,
+        flux_purr_firmware::thermal_response::HeatResponse,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    use flux_purr_firmware::memory::ThermalPlantProjection;
     let transaction = active
         .get("transactionId")
         .and_then(Value::as_u64)
@@ -1770,115 +2059,7 @@ fn calibrated_firmware_seed_profile(
     {
         return Err("invalid calibrated shutdown response".into());
     }
-    // Ambient belongs to this fit. The current (possibly hot) plate reading is
-    // not an ambient observation and must never substitute for a missing one.
-    let ambient = calibration
-        .pointer("/tracePage/points")
-        .and_then(Value::as_array)
-        .and_then(|points| {
-            points.iter().find(|point| {
-                point.get("sampleIndex").and_then(Value::as_u64) == Some(0)
-                    && point.get("phase").and_then(Value::as_str) == Some("ambient")
-            })
-        })
-        .and_then(|point| point.get("temperatureCentiC"))
-        .and_then(Value::as_i64)
-        .filter(|value| (-5_000..=15_000).contains(value))
-        .map(|value| value as f32 / 100.0)
-        .ok_or("calibration ambient sample required")?;
-    if natural_cooling_rate_c_per_s(model, 60.0, ambient).is_none() {
-        return Err("invalid calibration cannot initialize thermal tuning".into());
-    }
-    let voltage_mv = runtime
-        .get("ppsCapabilityMaxMv")
-        .and_then(Value::as_u64)
-        .filter(|value| (5_000..=28_000).contains(value))
-        .ok_or("valid PPS voltage capability required")? as f32;
-    let current_ma = runtime
-        .get("ppsCapabilityMaxMa")
-        .and_then(Value::as_u64)
-        .filter(|value| (1_000..=5_000).contains(value))
-        .ok_or("valid PPS current capability required")? as f32;
-    let mut curve = HeaterCurveConfig::default();
-    let points = active
-        .pointer("/curve/points")
-        .and_then(Value::as_array)
-        .ok_or("calibrated resistance curve required")?;
-    if points.len() > curve.points.len() {
-        return Err("calibrated resistance curve exceeds its point capacity".into());
-    }
-    for (index, point) in points
-        .iter()
-        .enumerate()
-        .filter(|(_, point)| !point.is_null())
-    {
-        curve.points[index] = Some(HeaterCurvePoint {
-            temp_centi_c: point
-                .get("tempCentiC")
-                .and_then(Value::as_i64)
-                .and_then(|value| i16::try_from(value).ok())
-                .ok_or("calibrated curve temperature required")?,
-            resistance_milliohms: point
-                .get("resistanceMilliohms")
-                .and_then(Value::as_u64)
-                .and_then(|value| u16::try_from(value).ok())
-                .filter(|value| *value > 0)
-                .ok_or("positive calibrated resistance required")?,
-        });
-    }
-    if curve.points.iter().flatten().count() < 2 {
-        return Err(
-            "cold seed requires a calibrated resistance curve with at least two points".into(),
-        );
-    }
-    let mut seeded = Vec::new();
-    for target in THERMAL_TUNING_TARGETS_C {
-        let temperature_c = f32::from(target);
-        let resistance = heater_resistance_ohms_from_curve(&curve, temperature_c)
-            .ok_or("calibrated target resistance unavailable")?
-            .max(3.2 * (1.0 + 0.00393 * (temperature_c - 20.0)));
-        // Use the same resistance and contract bounds as production Pmax,
-        // rather than treating the nominal bank name as measured input power.
-        let maximum_power_mw = (voltage_mv * voltage_mv / resistance / 1_000.0)
-            .min(voltage_mv * current_ma / 1_000.0)
-            .max(1.0);
-        let loss_mw = natural_cooling_loss_mw(model, temperature_c, ambient);
-        let delay_s = (response.delay_ms + response.decay_ms) as f32 / 1_000.0;
-        let brake_centi_c = flux_purr_firmware::thermal_response::reference_brake_c(
-            response,
-            model,
-            ambient,
-            maximum_power_mw,
-            temperature_c,
-        ) * 100.0;
-        let hold_permille = (loss_mw / maximum_power_mw * 1_000.0)
-            .round()
-            .clamp(50.0, 1_000.0) as u16;
-        // An integrating heat plant with transport delay: choose a closed-loop
-        // response of 3 delays (IMC lambda), so Kp = C / (Pmax * 4 delays).
-        let kp = (model.thermal_capacity_mj_per_c / (maximum_power_mw * 4.0 * delay_s.max(0.4))
-            * 1_000.0)
-            .round()
-            .clamp(1.0, 1_000.0) as u16;
-        seeded.push(json!({
-            "targetTempC": target,
-            "brakeDistanceCentiC": brake_centi_c.round().clamp(100.0, 5_000.0) as u16,
-            "warmupPowerPermille": 1_000, "warmupReenterCentiC": 400,
-            "approachPowerPermille": 1_000, "approachFloorPowerPermille": 50,
-            "approachDampingExponentPermille": 1_000, "approachTailWindowCentiC": 0,
-            "approachLeadTicks": 0, "holdLeadTicks": 0,
-            "holdPowerPermille": hold_permille, "holdReheatPowerPermille": hold_permille,
-            "holdEntryCentiC": 50, "holdExitCentiC": 150,
-            "holdOnCentiC": 30, "holdOffCentiC": 120, "overshootCutoffCentiC": 150,
-            "holdKpPermillePerC": kp, "holdKiPermillePerCTick": 1, "holdBlendTicks": 1
-        }));
-    }
-    Ok(firmware_candidate_profile_value(&json!({
-        "settings": {"tempFilterAlphaPermille": 750, "approachMaxTicks": 5,
-            "approachMinPowerRatioPermille": 0, "autoAdjustableWorkingFloorMv": 5_000,
-            "heaterCurrentReserveMa": 200},
-        "points": seeded
-    })))
+    Ok((model, response))
 }
 
 fn firmware_candidate_profile_hash(
@@ -2043,7 +2224,7 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         run_id,
         candidate_id,
         candidate_hash,
-        candidate_profile,
+        candidate_profile: _,
         statuses,
         host_interruption,
         selected_targets,
@@ -2074,6 +2255,106 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         candidate_id,
         candidate_hash,
     );
+    let (candidate, candidate_metadata) = report_candidate_metadata(&input, power_class, terminal);
+    let (pps_policy_version, pps_voltage_bounds) = report_pps_metadata(statuses);
+    let bundle = json!({
+        "schema": "thermal-tuning-v2",
+        "runId": run_id,
+        "engine": "firmware",
+        "device": device,
+        "firmware": firmware,
+        "powerClass": power_class,
+        "sourceClass": "device-local",
+        "ppsControlPolicyVersion": pps_policy_version,
+        "ppsVoltageBounds": pps_voltage_bounds,
+        "targetSet": {"physicalC": targets, "selectedC": selected_targets, "executionOrderC": execution_order},
+        "qualificationScope": {"kind": if selected_targets.len() == targets.len() { format!("default-{power_class}-full-batch") } else { "diagnostic-retest".to_string() }, "targetCount": selected_targets.len(), "diagnosticOnly": selected_targets.len() != targets.len()},
+        "terminalDisposition": terminal,
+        "reviewDisposition": if host_interruption.is_some() { json!("review_incomplete") } else { statuses.last().and_then(|status| status.get("reviewDisposition")).cloned().unwrap_or_else(|| json!("review_incomplete")) },
+        "hostInterruption": host_interruption.map(|reason| json!({"reason": reason, "lastDeviceTerminalDisposition": device_terminal, "deviceState": "unconfirmed"})),
+        "deviceTrace": device_trace,
+        "deviceTraceVerification": device_trace_verification,
+        "reportRuns": report_runs,
+        "candidate": candidate_metadata,
+        "referenceComparison": {
+            "fixture": "external-5a-conformance-v1",
+            "status": "pending_device_conformance_evidence",
+            "algorithmCopied": false
+        },
+        "capability": {"localEvidence": {
+            "vin": "available",
+            "ppsContract": "available",
+            "externalVbus": "unavailable",
+            "physicalPower": "unavailable"
+        }}
+    });
+
+    fs::write(
+        input_dir.join("run.bundle.json"),
+        serde_json::to_vec_pretty(&bundle)?,
+    )?;
+    fs::write(
+        input_dir.join("thermal-profile.candidate.json"),
+        serde_json::to_vec_pretty(&candidate)?,
+    )?;
+    write_ndjson(&input_dir.join("samples.ndjson"), &samples)?;
+    write_ndjson(&input_dir.join("decision-ledger.ndjson"), &ledger)?;
+    fs::write(
+        input_dir.join("device-statuses.json"),
+        serde_json::to_vec(&statuses)?,
+    )?;
+    Ok(())
+}
+
+fn report_pps_metadata(statuses: &[Value]) -> (Option<&Value>, Value) {
+    let pps_bounds = statuses.iter().rev().find_map(|status| {
+        status
+            .get("ppsVoltageBounds")
+            .filter(|value| !value.is_null())
+    });
+    let pps_policy_version = statuses.iter().rev().find_map(|status| {
+        status
+            .get("ppsControlPolicyVersion")
+            .filter(|value| !value.is_null())
+    });
+    let bound = |field: &str| {
+        pps_bounds
+            .and_then(|value| value.get(field))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let pps_voltage_bounds = json!({
+        "absoluteMinMv": bound("absoluteMinMv"),
+        "absoluteMaxMv": bound("absoluteMaxMv"),
+        "policyFloorMv": bound("policyFloorMv"),
+        "apdoMinMv": bound("apdoMinMv"),
+        "apdoMaxMv": bound("apdoMaxMv"),
+        "availability": if pps_bounds.is_none() {
+            "unavailable_device_status_field"
+        } else if pps_bounds.and_then(|value| value.get("apdoMinMv")).and_then(Value::as_u64).is_some()
+            && pps_bounds.and_then(|value| value.get("apdoMaxMv")).and_then(Value::as_u64).is_some()
+        {
+            "device_local"
+        } else {
+            "unavailable_selected_apdo"
+        }
+    });
+    (pps_policy_version, pps_voltage_bounds)
+}
+
+fn report_candidate_metadata(
+    input: &V2Input<'_>,
+    power_class: &str,
+    terminal: &str,
+) -> (Value, Value) {
+    let V2Input {
+        run_id,
+        candidate_id,
+        candidate_hash,
+        candidate_profile,
+        statuses,
+        ..
+    } = *input;
     let effective_candidate_profile = statuses
         .iter()
         .rev()
@@ -2132,75 +2413,6 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
     } else {
         "rejected"
     };
-    let pps_bounds = statuses.iter().rev().find_map(|status| {
-        status
-            .get("ppsVoltageBounds")
-            .filter(|value| !value.is_null())
-    });
-    let pps_policy_version = statuses.iter().rev().find_map(|status| {
-        status
-            .get("ppsControlPolicyVersion")
-            .filter(|value| !value.is_null())
-    });
-    let bound = |field: &str| {
-        pps_bounds
-            .and_then(|value| value.get(field))
-            .cloned()
-            .unwrap_or(Value::Null)
-    };
-    let pps_voltage_bounds = json!({
-        "absoluteMinMv": bound("absoluteMinMv"),
-        "absoluteMaxMv": bound("absoluteMaxMv"),
-        "policyFloorMv": bound("policyFloorMv"),
-        "apdoMinMv": bound("apdoMinMv"),
-        "apdoMaxMv": bound("apdoMaxMv"),
-        "availability": if pps_bounds.is_none() {
-            "unavailable_device_status_field"
-        } else if pps_bounds.and_then(|value| value.get("apdoMinMv")).and_then(Value::as_u64).is_some()
-            && pps_bounds.and_then(|value| value.get("apdoMaxMv")).and_then(Value::as_u64).is_some()
-        {
-            "device_local"
-        } else {
-            "unavailable_selected_apdo"
-        }
-    });
-    let bundle = json!({
-        "schema": "thermal-tuning-v2",
-        "runId": run_id,
-        "engine": "firmware",
-        "device": device,
-        "firmware": firmware,
-        "powerClass": power_class,
-        "sourceClass": "device-local",
-        "ppsControlPolicyVersion": pps_policy_version,
-        "ppsVoltageBounds": pps_voltage_bounds,
-        "targetSet": {"physicalC": targets, "selectedC": selected_targets, "executionOrderC": execution_order},
-        "qualificationScope": {"kind": if selected_targets.len() == targets.len() { format!("default-{power_class}-full-batch") } else { "diagnostic-retest".to_string() }, "targetCount": selected_targets.len(), "diagnosticOnly": selected_targets.len() != targets.len()},
-        "terminalDisposition": terminal,
-        "reviewDisposition": if host_interruption.is_some() { json!("review_incomplete") } else { statuses.last().and_then(|status| status.get("reviewDisposition")).cloned().unwrap_or_else(|| json!("review_incomplete")) },
-        "hostInterruption": host_interruption.map(|reason| json!({"reason": reason, "lastDeviceTerminalDisposition": device_terminal, "deviceState": "unconfirmed"})),
-        "deviceTrace": device_trace,
-        "deviceTraceVerification": device_trace_verification,
-        "reportRuns": report_runs,
-        "candidate": {
-            "candidateId": candidate_id,
-            "candidateHash": candidate_hash,
-            "powerClass": power_class,
-            "profileAvailability": profile_source,
-            "promotionState": candidate_state
-        },
-        "referenceComparison": {
-            "fixture": "external-5a-conformance-v1",
-            "status": "pending_device_conformance_evidence",
-            "algorithmCopied": false
-        },
-        "capability": {"localEvidence": {
-            "vin": "available",
-            "ppsContract": "available",
-            "externalVbus": "unavailable",
-            "physicalPower": "unavailable"
-        }}
-    });
     let candidate = json!({
         "schema": "thermal-tuning-v2",
         "runId": run_id,
@@ -2214,21 +2426,11 @@ fn write_v2_input(input: V2Input<'_>) -> Result<(), Box<dyn std::error::Error + 
         },
         "profile": {"bank": power_class, "source": profile_source, "value": effective_candidate_profile}
     });
-    fs::write(
-        input_dir.join("run.bundle.json"),
-        serde_json::to_vec_pretty(&bundle)?,
-    )?;
-    fs::write(
-        input_dir.join("thermal-profile.candidate.json"),
-        serde_json::to_vec_pretty(&candidate)?,
-    )?;
-    write_ndjson(&input_dir.join("samples.ndjson"), &samples)?;
-    write_ndjson(&input_dir.join("decision-ledger.ndjson"), &ledger)?;
-    fs::write(
-        input_dir.join("device-statuses.json"),
-        serde_json::to_vec(&statuses)?,
-    )?;
-    Ok(())
+    (
+        candidate,
+        json!({"candidateId": candidate_id, "candidateHash": candidate_hash,
+        "powerClass": power_class, "profileAvailability": profile_source, "promotionState": candidate_state}),
+    )
 }
 
 fn profile_matches_hash(profile: &Value, candidate_hash: &str) -> bool {
@@ -2430,16 +2632,7 @@ fn build_report_trial(
             "powerClass": null
         })
     });
-    let decision = ledger.iter().find(|item| {
-        item.get("kind").and_then(Value::as_str) == Some("decision")
-            && item.get("targetC").and_then(Value::as_i64) == Some(i64::from(target))
-            && item.get("trialIndex").and_then(Value::as_i64) == Some(trial_index)
-            && item.get("decision").is_some()
-    });
-    let decision_record = decision
-        .and_then(|item| item.get("decision"))
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let decision_record = trial_decision(ledger, target, trial_index);
     let disposition = decision_record
         .get("disposition")
         .and_then(Value::as_str)
@@ -2450,21 +2643,7 @@ fn build_report_trial(
     let sample_end = trial_record
         .get("sampleEndSequence")
         .and_then(Value::as_u64);
-    let sample_values = samples
-        .iter()
-        .filter(|sample| {
-            sample.get("targetC").and_then(Value::as_i64) == Some(i64::from(target))
-                && sample.get("trialIndex").and_then(Value::as_i64) == Some(trial_index)
-                && sample.get("phase").and_then(Value::as_str) != Some("cooldown")
-                && sample
-                    .get("sequence")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|sequence| {
-                        sample_start.is_none_or(|start| sequence >= start)
-                            && sample_end.is_none_or(|end| sequence <= end)
-                    })
-        })
-        .collect::<Vec<_>>();
+    let sample_values = trial_samples(samples, target, trial_index, sample_start, sample_end);
     let bounds = sample_bounds_for_trial(&sample_values);
     let phases = phase_path(&sample_values);
     let warmup_request = sample_values
@@ -2530,6 +2709,39 @@ fn build_report_trial(
         "canonicalCandidate": candidate,
         "stopReason": decision_record.get("stopReason").cloned().unwrap_or_else(|| json!(event.get("reason").and_then(Value::as_str).unwrap_or("device_terminal_failure")))
     });
+    append_trial_timing(
+        &mut result,
+        &trial_record,
+        &decision_record,
+        target,
+        &sample_values,
+    );
+    if disposition == "adopted" && adopted_trial_passes_gates(&result) {
+        result["reviewOutcome"] = json!("passed");
+    }
+    result
+}
+
+fn trial_decision(ledger: &[Value], target: i16, trial_index: i64) -> Value {
+    let decision = ledger.iter().find(|item| {
+        item.get("kind").and_then(Value::as_str) == Some("decision")
+            && item.get("targetC").and_then(Value::as_i64) == Some(i64::from(target))
+            && item.get("trialIndex").and_then(Value::as_i64) == Some(trial_index)
+            && item.get("decision").is_some()
+    });
+    decision
+        .and_then(|item| item.get("decision"))
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
+fn append_trial_timing(
+    result: &mut Value,
+    trial_record: &Value,
+    decision_record: &Value,
+    target: i16,
+    sample_values: &[&Value],
+) {
     if let Some(object) = result.as_object_mut() {
         let trial_timing = trial_record.get("timing").filter(|value| !value.is_null());
         let decision_timing = decision_record
@@ -2557,12 +2769,32 @@ fn build_report_trial(
         .and_then(|value| serde_json::from_value::<ThermalTuningTimingEvidence>(value.clone()).ok())
     {
         result["timingEvidenceVerification"] =
-            verify_timing_samples(&timing, target, &sample_values);
+            verify_timing_samples(&timing, target, sample_values);
     }
-    if disposition == "adopted" && adopted_trial_passes_gates(&result) {
-        result["reviewOutcome"] = json!("passed");
-    }
-    result
+}
+
+fn trial_samples(
+    samples: &[Value],
+    target: i16,
+    trial_index: i64,
+    sample_start: Option<u64>,
+    sample_end: Option<u64>,
+) -> Vec<&Value> {
+    samples
+        .iter()
+        .filter(|sample| {
+            sample.get("targetC").and_then(Value::as_i64) == Some(i64::from(target))
+                && sample.get("trialIndex").and_then(Value::as_i64) == Some(trial_index)
+                && sample.get("phase").and_then(Value::as_str) != Some("cooldown")
+                && sample
+                    .get("sequence")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|sequence| {
+                        sample_start.is_none_or(|start| sequence >= start)
+                            && sample_end.is_none_or(|end| sequence <= end)
+                    })
+        })
+        .collect::<Vec<_>>()
 }
 
 fn sample_bounds_for_trial(samples: &[&Value]) -> (Value, Value, Value, Value) {
@@ -2719,7 +2951,7 @@ mod tests {
         memory::ThermalControlProfileConfig,
         thermal_tuning::{ThermalTuningEvent, digest_event_chain, hash_profile},
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     #[test]
     fn firmware_tuning_requires_confirmed_automatic_power_before_mode_changes() {
@@ -3957,21 +4189,89 @@ mod tests {
         identity_available: bool,
         interrupt_requested: bool,
     ) {
-        use axum::{
-            Json, Router,
-            routing::{delete, get, post},
-        };
         use std::sync::{Arc, Mutex};
 
         let directory = tempfile::tempdir().unwrap();
         let output_root = directory.path().join("input");
         let report_dir = directory.path().join("report");
         let commands = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
-        let recorded_commands = commands.clone();
         let (interrupt_sender, interrupt_receiver) = tokio::sync::oneshot::channel();
         let interrupt_sender = Arc::new(Mutex::new(Some(interrupt_sender)));
         let lease_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let released = lease_released.clone();
+        let app = interrupted_transport_app(
+            commands.clone(),
+            interrupt_sender,
+            lease_released.clone(),
+            identity_available,
+            trace_gap,
+            interrupt_requested,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let cli = Cli::parse_from([
+            "flux-purr",
+            "thermal",
+            "tune",
+            "--engine",
+            "firmware",
+            "--device",
+            "bench",
+            "--tune-targets-c",
+            "60",
+            "--output-root",
+            output_root.to_str().unwrap(),
+            "--bundle-dir",
+            report_dir.to_str().unwrap(),
+        ]);
+        let Command::Thermal {
+            command: ThermalCommand::Tune(args),
+        } = cli.command
+        else {
+            panic!("expected firmware tune command");
+        };
+        let interrupt = async move {
+            if interrupt_requested {
+                interrupt_receiver.await.map_err(std::io::Error::other)
+            } else {
+                std::future::pending().await
+            }
+        };
+        let rendered = super::run_firmware_tuning_until_interrupt(
+            &reqwest::Client::new(),
+            &base,
+            args,
+            interrupt,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert!(lease_released.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(rendered["ownerOutcome"], "failed");
+        if !identity_available {
+            assert!(commands.lock().unwrap().is_empty());
+            let bundle: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(report_dir.join("run.bundle.json")).unwrap())
+                    .unwrap();
+            assert_eq!(bundle["rejectionReason"], "device_identity_not_confirmed");
+            assert_eq!(
+                bundle["firmware"]["availability"],
+                "unavailable_device_identity"
+            );
+            return;
+        }
+        assert_interrupted_transport_evidence(
+            &commands,
+            &rendered,
+            &report_dir,
+            trace_gap,
+            interrupt_requested,
+        );
+    }
+
+    fn interruption_events() -> (Vec<Value>, String) {
         let events: Vec<serde_json::Value> = (0..3)
             .map(|sequence| {
                 json!({
@@ -3989,7 +4289,25 @@ mod tests {
             .map(|event| serde_json::from_value(event.clone()).unwrap())
             .collect();
         let digest = digest_event_chain(&typed_events);
-        let app = Router::new()
+        (events, digest.to_string())
+    }
+
+    fn interrupted_transport_app(
+        recorded_commands: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+        interrupt_sender: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        >,
+        released: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        identity_available: bool,
+        trace_gap: bool,
+        interrupt_requested: bool,
+    ) -> axum::Router {
+        use axum::{
+            Json, Router,
+            routing::{delete, get, post},
+        };
+        let (events, digest) = interruption_events();
+        Router::new()
             .route("/api/v1/devices/bench/leases", post(|| async {
                 Json(json!({"leaseId": "test", "ttlMs": 10000}))
             }))
@@ -4058,63 +4376,16 @@ mod tests {
                         "events": {"nextSequence": page.last().map(|event| event["sequence"].clone()), "events": page}
                     })))
                 }
-            }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let cli = Cli::parse_from([
-            "flux-purr",
-            "thermal",
-            "tune",
-            "--engine",
-            "firmware",
-            "--device",
-            "bench",
-            "--tune-targets-c",
-            "60",
-            "--output-root",
-            output_root.to_str().unwrap(),
-            "--bundle-dir",
-            report_dir.to_str().unwrap(),
-        ]);
-        let Command::Thermal {
-            command: ThermalCommand::Tune(args),
-        } = cli.command
-        else {
-            panic!("expected firmware tune command");
-        };
-        let interrupt = async move {
-            if interrupt_requested {
-                interrupt_receiver.await.map_err(std::io::Error::other)
-            } else {
-                std::future::pending().await
-            }
-        };
-        let rendered = super::run_firmware_tuning_until_interrupt(
-            &reqwest::Client::new(),
-            &base,
-            args,
-            interrupt,
-        )
-        .await
-        .unwrap();
-        server.abort();
-        assert!(lease_released.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(rendered["ownerOutcome"], "failed");
-        if !identity_available {
-            assert!(commands.lock().unwrap().is_empty());
-            let bundle: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(report_dir.join("run.bundle.json")).unwrap())
-                    .unwrap();
-            assert_eq!(bundle["rejectionReason"], "device_identity_not_confirmed");
-            assert_eq!(
-                bundle["firmware"]["availability"],
-                "unavailable_device_identity"
-            );
-            return;
-        }
+            }))
+    }
+
+    fn assert_interrupted_transport_evidence(
+        commands: &std::sync::Mutex<Vec<Value>>,
+        rendered: &Value,
+        report_dir: &std::path::Path,
+        trace_gap: bool,
+        interrupt_requested: bool,
+    ) {
         let start_profile = commands
             .lock()
             .unwrap()

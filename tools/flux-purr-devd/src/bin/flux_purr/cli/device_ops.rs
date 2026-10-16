@@ -122,8 +122,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::RamRun { command } => execute_ram_run(command)?,
     };
 
-    let pd_hil_failed = ram_run::pd_hil_requires_nonzero(&payload);
-    let fan_pd_failed = ram_run::fan_pd_requires_nonzero(&payload);
     if cli.json {
         println!(
             "{}",
@@ -133,6 +131,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("{}", render_human(&payload)?);
     }
     drop(managed_devd);
+    validate_ram_run_result(&payload)
+}
+
+fn validate_ram_run_result(
+    payload: &Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let pd_hil_failed = ram_run::pd_hil_requires_nonzero(payload);
+    let fan_pd_failed = ram_run::fan_pd_requires_nonzero(payload);
     if pd_hil_failed {
         let overall = payload
             .get("result")

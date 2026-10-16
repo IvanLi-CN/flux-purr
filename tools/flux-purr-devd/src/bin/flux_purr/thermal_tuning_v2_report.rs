@@ -52,20 +52,7 @@ pub(crate) struct ThermalTuningV2ReportInput {
 pub(crate) fn render_v2_bundle(
     input: ThermalTuningV2ReportInput,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let input_dir = absolute_path(&input.input_dir)?;
-    let output_dir = absolute_path(
-        &input
-            .output_dir
-            .unwrap_or_else(|| input_dir.join("rendered")),
-    )?;
-    if input_dir == output_dir {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "v2 report output directory must be different from the input directory",
-        )
-        .into());
-    }
-
+    let (input_dir, output_dir) = report_paths(input)?;
     let mut bundle = read_json(&input_dir.join("run.bundle.json"))?;
     let samples = read_ndjson(&input_dir.join("samples.ndjson"))?;
     let ledger = read_ndjson(&input_dir.join("decision-ledger.ndjson"))?;
@@ -138,33 +125,16 @@ pub(crate) fn render_v2_bundle(
     let html = render_html(&html_data)?;
     fs::write(output_dir.join("index.html"), html.as_bytes())?;
 
-    let mut file_digests = Map::new();
-    file_digests.insert(
-        "index.html".to_string(),
-        json!(sha256_digest(html.as_bytes())),
-    );
-    file_digests.insert(
-        "samples.ndjson".to_string(),
-        json!(sha256_digest(&samples_bytes)),
-    );
-    file_digests.insert(
-        "thermal-profile.candidate.json".to_string(),
-        json!(sha256_digest(&candidate_bytes)),
-    );
-    file_digests.insert(
-        "decision-ledger.ndjson".to_string(),
-        json!(sha256_digest(&ledger_bytes)),
-    );
-    bundle["fileDigests"] = Value::Object(file_digests.clone());
-    bundle["fileDigestBasis"] =
-        json!("run.bundle.json hashes itself with its own digest field omitted");
-    bundle["fileDigests"]["run.bundle.json"] = Value::Null;
-    let bundle_basis = serde_json::to_vec_pretty(&bundle)?;
-    let bundle_digest = sha256_digest(&bundle_basis);
-    bundle["fileDigests"]["run.bundle.json"] = json!(bundle_digest);
-    let bundle_bytes = serde_json::to_vec_pretty(&bundle)?;
-    fs::write(output_dir.join("run.bundle.json"), &bundle_bytes)?;
-
+    write_bundle_digests(
+        &output_dir,
+        &mut bundle,
+        [
+            html.as_bytes(),
+            &samples_bytes,
+            &candidate_bytes,
+            &ledger_bytes,
+        ],
+    )?;
     Ok(json!({
         "ok": true,
         "operation": "thermal_report.render_v2",
@@ -176,6 +146,58 @@ pub(crate) fn render_v2_bundle(
         "trace": bundle.get("trace").cloned().unwrap_or(Value::Null),
         "files": bundle.get("files").cloned().unwrap_or(Value::Null),
     }))
+}
+
+fn report_paths(
+    input: ThermalTuningV2ReportInput,
+) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error + Send + Sync>> {
+    let input_dir = absolute_path(&input.input_dir)?;
+    let output_dir = absolute_path(
+        &input
+            .output_dir
+            .unwrap_or_else(|| input_dir.join("rendered")),
+    )?;
+    if input_dir == output_dir {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "v2 report output directory must be different from the input directory",
+        )
+        .into());
+    }
+
+    Ok((input_dir, output_dir))
+}
+
+fn write_bundle_digests(
+    output_dir: &Path,
+    bundle: &mut Value,
+    contents: [&[u8]; 4],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut file_digests = Map::new();
+    file_digests.insert("index.html".to_string(), json!(sha256_digest(contents[0])));
+    file_digests.insert(
+        "samples.ndjson".to_string(),
+        json!(sha256_digest(contents[1])),
+    );
+    file_digests.insert(
+        "thermal-profile.candidate.json".to_string(),
+        json!(sha256_digest(contents[2])),
+    );
+    file_digests.insert(
+        "decision-ledger.ndjson".to_string(),
+        json!(sha256_digest(contents[3])),
+    );
+    bundle["fileDigests"] = Value::Object(file_digests.clone());
+    bundle["fileDigestBasis"] =
+        json!("run.bundle.json hashes itself with its own digest field omitted");
+    bundle["fileDigests"]["run.bundle.json"] = Value::Null;
+    let bundle_basis = serde_json::to_vec_pretty(bundle)?;
+    let bundle_digest = sha256_digest(&bundle_basis);
+    bundle["fileDigests"]["run.bundle.json"] = json!(bundle_digest);
+    let bundle_bytes = serde_json::to_vec_pretty(bundle)?;
+    fs::write(output_dir.join("run.bundle.json"), &bundle_bytes)?;
+
+    Ok(())
 }
 
 fn candidate_promotion_verified(bundle: &Value, candidate: &Value) -> bool {
@@ -320,6 +342,16 @@ fn audit_events(bundle: &Value, samples: &[Value], ledger: &[Value]) -> EventAud
     } else {
         reasons.push("no trace events".to_string());
     }
+    finish_event_audit(by_sequence, counts, reasons)
+}
+
+fn finish_event_audit(
+    by_sequence: BTreeMap<u64, Value>,
+    counts: BTreeMap<String, usize>,
+    reasons: Vec<String>,
+) -> EventAudit {
+    let first = by_sequence.keys().next().copied();
+    let last = by_sequence.keys().next_back().copied();
     let ordered = by_sequence.values().cloned().collect::<Vec<_>>();
     let trace_digest = sha256_digest(&ndjson_bytes(&ordered).unwrap_or_default());
     let gap = (!reasons.is_empty()).then(|| {
@@ -545,41 +577,45 @@ fn normalized_report_runs(
                 run["stopReason"] = json!(reason);
             }
         }
-        let Some(trials) = run.get_mut("trials").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        let Some(target) = target else { continue };
-        for trial in trials {
-            let start = trial
-                .pointer("/cooldownGate/startTemperatureCentiC")
-                .and_then(Value::as_i64);
-            let threshold = trial
-                .pointer("/cooldownGate/thresholdCentiC")
-                .and_then(Value::as_i64);
-            trial["cooldownGate"] = json!({
-                "startTemperatureCentiC": start,
-                "thresholdCentiC": threshold,
-                "availability": if start.is_some() && threshold.is_some() {
-                    "device_local"
-                } else {
-                    "unavailable_device_trial_record"
-                }
-            });
-            let Some(trial_index) = trial.get("trialIndex").and_then(Value::as_i64) else {
-                continue;
-            };
-            let Some((first_sequence, last_sequence, first_elapsed, last_elapsed)) =
-                sample_bounds(samples, target, trial_index)
-            else {
-                continue;
-            };
-            fill_trial_bounds(
-                trial,
-                [first_sequence, last_sequence, first_elapsed, last_elapsed],
-            );
-        }
+        normalize_trial_bounds(run, samples, target);
     }
     Ok(normalized)
+}
+
+fn normalize_trial_bounds(run: &mut Value, samples: &[Value], target: Option<i64>) {
+    let Some(trials) = run.get_mut("trials").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let Some(target) = target else { return };
+    for trial in trials {
+        let start = trial
+            .pointer("/cooldownGate/startTemperatureCentiC")
+            .and_then(Value::as_i64);
+        let threshold = trial
+            .pointer("/cooldownGate/thresholdCentiC")
+            .and_then(Value::as_i64);
+        trial["cooldownGate"] = json!({
+            "startTemperatureCentiC": start,
+            "thresholdCentiC": threshold,
+            "availability": if start.is_some() && threshold.is_some() {
+                "device_local"
+            } else {
+                "unavailable_device_trial_record"
+            }
+        });
+        let Some(trial_index) = trial.get("trialIndex").and_then(Value::as_i64) else {
+            continue;
+        };
+        let Some((first_sequence, last_sequence, first_elapsed, last_elapsed)) =
+            sample_bounds(samples, target, trial_index)
+        else {
+            continue;
+        };
+        fill_trial_bounds(
+            trial,
+            [first_sequence, last_sequence, first_elapsed, last_elapsed],
+        );
+    }
 }
 
 pub(super) fn target_budget_stop_reason(ledger: &[Value], target: i64) -> Option<&str> {

@@ -538,6 +538,16 @@ impl ControlPlaneStatus {
         unsafe { result.assume_init() }
     }
 
+    fn fan_display_state(status: &DeviceStatus, memory: &MemoryConfig) -> FanDisplayState {
+        if !memory.active_cooling_enabled {
+            FanDisplayState::Off
+        } else if status.fan_enabled {
+            FanDisplayState::Run
+        } else {
+            FanDisplayState::Auto
+        }
+    }
+
     #[inline(never)]
     fn write_device_status(
         out: *mut Self,
@@ -547,13 +557,7 @@ impl ControlPlaneStatus {
         network: NetworkSummary,
     ) {
         let heater_output_percent = status.heater_output_percent.min(100);
-        let fan_display_state = if !memory.active_cooling_enabled {
-            FanDisplayState::Off
-        } else if status.fan_enabled {
-            FanDisplayState::Run
-        } else {
-            FanDisplayState::Auto
-        };
+        let fan_display_state = Self::fan_display_state(&status, memory);
         let fan_output_level = if !status.fan_enabled {
             FanOutputLevel::Off
         } else if status.fan_pwm_permille <= crate::FAN_HIGH_PWM_PERMILLE {

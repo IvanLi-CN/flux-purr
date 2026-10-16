@@ -407,7 +407,12 @@ pub fn app(state: AppState) -> Router {
         )
         .with_state(state.clone());
 
-    if state.config.allow_dev_cors {
+    router = apply_dev_cors(router, state.config.allow_dev_cors);
+    router
+}
+
+fn apply_dev_cors(mut router: Router, allow_dev_cors: bool) -> Router {
+    if allow_dev_cors {
         router = router.layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::predicate(|origin, _| {

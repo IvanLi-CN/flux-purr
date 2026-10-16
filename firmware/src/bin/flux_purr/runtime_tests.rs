@@ -1,6 +1,8 @@
 use super::*;
 use flux_purr_firmware::thermal_tuning::ThermalTuningPhase;
 
+include!("calibration_cutoff_fixture.rs");
+
 #[test]
 fn unchanged_heater_request_recovers_after_an_asynchronous_pd_disarm() {
     struct Pwm {
@@ -5974,7 +5976,7 @@ const LIVE_DEVICE_TRACE: &[(u16, f32, u8)] = &[
 
 #[test]
 fn captured_calibration_rejects_impossible_startup_temperature_spikes() {
-    let trace: &[(u16, i16, u8, u8)] = include!("calibration_cutoff_fixture.rs");
+    let trace = CALIBRATION_CUTOFF_TRACE;
     let memory = MemoryConfig::default();
     let mut curve = HeaterCurveConfig::default();
     for (index, (temp_centi_c, resistance_milliohms)) in [
@@ -6661,112 +6663,119 @@ fn transient_cutoff_keeps_time_samples_when_temperature_has_not_moved_four_degre
     assert!(job.sample_count < THERMAL_PLANT_TRANSIENT_MAX_SAMPLES as u8);
 }
 
-#[test]
-fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
-    fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
-        let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
-        (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
-            / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
-            .round() as u16
-    }
+fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
+    let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
+    (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
+        / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
+        .round() as u16
+}
 
-    for (source_current_ma, cycle_ms) in [(3_000, 50_u32), (5_000, 50), (3_000, 75), (5_000, 75)] {
-        let mut calibration = CalibrationRuntimeState {
-            mode: CalibrationMode::ThermalPlant,
-            ..CalibrationRuntimeState::default()
+fn run_transient_calibration_cycle(
+    source_current_ma: u16,
+    cycle_ms: u32,
+) -> (CalibrationRuntimeState, MemoryConfig, f32) {
+    let mut calibration = CalibrationRuntimeState {
+        mode: CalibrationMode::ThermalPlant,
+        ..CalibrationRuntimeState::default()
+    };
+    let mut memory_config = MemoryConfig::default();
+    let mut manual_pps =
+        ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_000),
+            pps_max_mv: Some(20_000),
+            pps_max_ma: Some(source_current_ma),
+            ..Default::default()
+        }));
+    calibration_job_start(
+        &mut calibration,
+        CalibrationJobKind::ThermalPlant,
+        &mut memory_config,
+        &mut manual_pps,
+    )
+    .unwrap();
+
+    let ambient_temp_c = 25.0_f32;
+    let capacity_mj_per_c = 30_000.0_f32;
+    let convection_mw_per_c = 100.0_f32;
+    let radiation_mw_per_k4 = 0.00000005_f32;
+    let mut temperature_c = ambient_temp_c;
+    let mut elapsed_clock = CalibrationElapsedClock::default();
+    for _ in 0..(THERMAL_PLANT_AMBIENT_TICKS as usize
+        + THERMAL_PLANT_HEAT_TIMEOUT_TICKS as usize
+        + THERMAL_PLANT_COOL_TIMEOUT_TICKS as usize)
+    {
+        let heater_duty_percent = u8::from(calibration.heater_enabled) * 100;
+        match test_thermal_plant_phase() {
+            Some(ThermalPlantAutoPhase::Heating) => assert_eq!(heater_duty_percent, 100),
+            Some(ThermalPlantAutoPhase::Cooling) => assert_eq!(heater_duty_percent, 0),
+            Some(ThermalPlantAutoPhase::Ambient) | None => {}
+        }
+        let source_mv = manual_pps.target_mv.unwrap_or(0);
+        let resistance_ohms = estimated_heater_resistance_ohms(temperature_c, None, &memory_config);
+        let pd_current_ma = if heater_duty_percent > 0 {
+            ((f32::from(source_mv) / resistance_ohms).round() as u16).min(source_current_ma)
+        } else {
+            0
         };
-        let mut memory_config = MemoryConfig::default();
-        let mut manual_pps =
-            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
-                pps_covers_20v: true,
-                pps_min_mv: Some(5_000),
-                pps_max_mv: Some(20_000),
-                pps_max_ma: Some(source_current_ma),
-                ..Default::default()
-            }));
-        calibration_job_start(
+        let measured_heater_mv = if heater_duty_percent > 0 {
+            u32::from(source_mv).min((f32::from(pd_current_ma) * resistance_ohms).round() as u32)
+        } else {
+            0
+        };
+        let raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(temperature_c);
+        let reported_temp_c = projected_rtd_temperature_c(&memory_config, raw_rtd_adc_mv).unwrap();
+        update_calibration_job_state(
             &mut calibration,
-            CalibrationJobKind::ThermalPlant,
             &mut memory_config,
             &mut manual_pps,
-        )
-        .unwrap();
-
-        let ambient_temp_c = 25.0_f32;
-        let capacity_mj_per_c = 30_000.0_f32;
-        let convection_mw_per_c = 100.0_f32;
-        let radiation_mw_per_k4 = 0.00000005_f32;
-        let mut temperature_c = ambient_temp_c;
-        let mut elapsed_clock = CalibrationElapsedClock::default();
-        for _ in 0..(THERMAL_PLANT_AMBIENT_TICKS as usize
-            + THERMAL_PLANT_HEAT_TIMEOUT_TICKS as usize
-            + THERMAL_PLANT_COOL_TIMEOUT_TICKS as usize)
-        {
-            let heater_duty_percent = u8::from(calibration.heater_enabled) * 100;
-            match test_thermal_plant_phase() {
-                Some(ThermalPlantAutoPhase::Heating) => assert_eq!(heater_duty_percent, 100),
-                Some(ThermalPlantAutoPhase::Cooling) => assert_eq!(heater_duty_percent, 0),
-                Some(ThermalPlantAutoPhase::Ambient) | None => {}
-            }
-            let source_mv = manual_pps.target_mv.unwrap_or(0);
-            let resistance_ohms =
-                estimated_heater_resistance_ohms(temperature_c, None, &memory_config);
-            let pd_current_ma = if heater_duty_percent > 0 {
-                ((f32::from(source_mv) / resistance_ohms).round() as u16).min(source_current_ma)
-            } else {
-                0
-            };
-            let measured_heater_mv = if heater_duty_percent > 0 {
-                u32::from(source_mv)
-                    .min((f32::from(pd_current_ma) * resistance_ohms).round() as u32)
-            } else {
-                0
-            };
-            let raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(temperature_c);
-            let reported_temp_c =
-                projected_rtd_temperature_c(&memory_config, raw_rtd_adc_mv).unwrap();
-            update_calibration_job_state(
-                &mut calibration,
-                &mut memory_config,
-                &mut manual_pps,
-                CalibrationJobUpdateInput {
-                    elapsed_ticks_delta: elapsed_clock.advance(u64::from(cycle_ms)),
-                    latest_rtd_raw_adc_mv: raw_rtd_adc_mv,
-                    latest_vin_raw_adc_mv: 0,
-                    latest_temp_c: reported_temp_c,
-                    pd_current_ma,
-                    latest_vin_mv: measured_heater_mv,
-                    heater_duty_percent,
-                },
-            );
-            if calibration.job.status == CalibrationJobStatus::Completed {
-                break;
-            }
-            if calibration.job.status == CalibrationJobStatus::Failed {
-                panic!(
-                    "thermal plant job failed: {:?}, physical_temp={temperature_c}, reported_temp={reported_temp_c}, samples={}",
-                    calibration.job.message, calibration.job.samples_collected
-                );
-            }
-
-            let power_mw = if heater_duty_percent > 0 {
-                // In current limiting, heater voltage falls to I*R. The source
-                // capability Vmax*Imax is not the actual resistor power.
-                (measured_heater_mv as f32 / 1_000.0).powi(2) / resistance_ohms * 1_000.0
-            } else {
-                0.0
-            };
-            let temperature_k = temperature_c + 273.15;
-            let ambient_k = ambient_temp_c + 273.15;
-            let losses_mw = convection_mw_per_c * (temperature_c - ambient_temp_c)
-                + radiation_mw_per_k4 * (temperature_k.powi(4) - ambient_k.powi(4));
-            temperature_c += (power_mw - losses_mw) / capacity_mj_per_c * cycle_ms as f32 / 1_000.0;
+            CalibrationJobUpdateInput {
+                elapsed_ticks_delta: elapsed_clock.advance(u64::from(cycle_ms)),
+                latest_rtd_raw_adc_mv: raw_rtd_adc_mv,
+                latest_vin_raw_adc_mv: 0,
+                latest_temp_c: reported_temp_c,
+                pd_current_ma,
+                latest_vin_mv: measured_heater_mv,
+                heater_duty_percent,
+            },
+        );
+        if calibration.job.status == CalibrationJobStatus::Completed {
+            break;
         }
+        if calibration.job.status == CalibrationJobStatus::Failed {
+            panic!(
+                "thermal plant job failed: {:?}, physical_temp={temperature_c}, reported_temp={reported_temp_c}, samples={}",
+                calibration.job.message, calibration.job.samples_collected
+            );
+        }
+
+        let power_mw = if heater_duty_percent > 0 {
+            // In current limiting, heater voltage falls to I*R. The source
+            // capability Vmax*Imax is not the actual resistor power.
+            (measured_heater_mv as f32 / 1_000.0).powi(2) / resistance_ohms * 1_000.0
+        } else {
+            0.0
+        };
+        let temperature_k = temperature_c + 273.15;
+        let ambient_k = ambient_temp_c + 273.15;
+        let losses_mw = convection_mw_per_c * (temperature_c - ambient_temp_c)
+            + radiation_mw_per_k4 * (temperature_k.powi(4) - ambient_k.powi(4));
+        temperature_c += (power_mw - losses_mw) / capacity_mj_per_c * cycle_ms as f32 / 1_000.0;
+    }
+
+    assert!(!manual_pps.enabled);
+    (calibration, memory_config, capacity_mj_per_c)
+}
+
+#[test]
+fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
+    for (source_current_ma, cycle_ms) in [(3_000, 50_u32), (5_000, 50), (3_000, 75), (5_000, 75)] {
+        let (calibration, memory_config, capacity_mj_per_c) =
+            run_transient_calibration_cycle(source_current_ma, cycle_ms);
 
         assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
         assert_eq!(calibration.mode, CalibrationMode::Off);
         assert!(!calibration.heater_enabled);
-        assert!(!manual_pps.enabled);
         assert!(memory_config.thermal_plant_transient_active.is_some());
         assert!(has_calibrated_heater_resistance_curve(&memory_config));
         let transaction = memory_config

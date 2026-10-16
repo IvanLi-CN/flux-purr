@@ -1082,17 +1082,7 @@ impl HeaterController {
         let target_temp_c = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
         let last_target_temp_c = self.last_target_temp_c;
         self.last_target_temp_c = target_temp_c;
-        let previous_measured_temp_c =
-            if self.pps_measurement_anchor_pending && self.control_measurement_accepted() {
-                measured_temp_c
-            } else {
-                self.previous_measured_temp_c
-                    .or(self.filtered_temp_c)
-                    .unwrap_or(measured_temp_c)
-            };
-        if self.control_measurement_accepted() {
-            self.previous_measured_temp_c = Some(measured_temp_c);
-        }
+        let previous_measured_temp_c = self.advance_measurement_history(measured_temp_c);
 
         if measured_temp_c >= f32::from(HEATER_HARD_CUTOFF_TEMP_C) {
             self.latch_fault(HeaterFaultReason::OverTemp);
@@ -1131,9 +1121,6 @@ impl HeaterController {
         let ThermalControlFrame {
             control_target,
             error_c,
-            filtered_temp_c,
-            filtered_slope_c_per_profile_tick,
-            control_error_c,
             hold_control_error_c,
             approach_predictive_coast_ready,
             ..
@@ -1200,6 +1187,10 @@ impl HeaterController {
             };
 
         self.duty_percent = duty_percent;
+        self.control_snapshot(&frame, now_ms)
+    }
+
+    fn control_snapshot(&self, frame: &ThermalControlFrame, now_ms: u64) -> HeaterPidSnapshot {
         let warmup_soft_start_percent = if self.phase == HeaterControlPhase::Warmup {
             self.warmup_started_at_ms
                 .map(|started_at_ms| {
@@ -1212,15 +1203,30 @@ impl HeaterController {
         };
 
         HeaterPidSnapshot {
-            duty_percent,
+            duty_percent: self.duty_percent,
             warmup_soft_start_percent,
-            error_c,
-            control_error_c,
-            filtered_temp_c,
-            filtered_slope_c_per_s: filtered_slope_c_per_profile_tick,
+            error_c: frame.error_c,
+            control_error_c: frame.control_error_c,
+            filtered_temp_c: frame.filtered_temp_c,
+            filtered_slope_c_per_s: frame.filtered_slope_c_per_profile_tick,
             coast_active: self.hold_coast_active,
             phase: self.phase,
         }
+    }
+
+    fn advance_measurement_history(&mut self, measured_temp_c: f32) -> f32 {
+        let previous = if self.pps_measurement_anchor_pending && self.control_measurement_accepted()
+        {
+            measured_temp_c
+        } else {
+            self.previous_measured_temp_c
+                .or(self.filtered_temp_c)
+                .unwrap_or(measured_temp_c)
+        };
+        if self.control_measurement_accepted() {
+            self.previous_measured_temp_c = Some(measured_temp_c);
+        }
+        previous
     }
 
     fn reset_disabled_output(

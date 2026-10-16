@@ -1021,20 +1021,19 @@ pub(crate) fn reconcile_pd_contract_intent_with_pending_automatic_pps(
 }
 
 #[cfg(target_arch = "xtensa")]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_pd_contract_observation<PWM>(
     observation: Option<PdStatusObservation>,
     pd_contract_ready: &mut bool,
     ui_state: &mut FrontPanelUiState,
     calibration_runtime_state: &mut CalibrationRuntimeState,
     manual_pps_state: &mut ManualPpsState,
-    heater_pwm: &mut PWM,
-    last_heater_duty: &mut u8,
+    heater_output: (&mut PWM, &mut u8),
     automatic_pps_transition_pending: bool,
 ) -> bool
 where
     PWM: SetDutyCycle,
 {
+    let (heater_pwm, last_heater_duty) = heater_output;
     let previous_pd_ready = *pd_contract_ready;
     let needs_redraw = reconcile_pd_contract_intent_with_pending_automatic_pps(
         observation,

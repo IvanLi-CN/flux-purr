@@ -563,112 +563,114 @@ impl Default for ThermalTuningRuntime {
 }
 
 impl ThermalTuningRuntime {
+    const EMPTY: Self = Self {
+        phase: ThermalTuningPhase::Idle,
+        terminal_disposition: ThermalTuningTerminalDisposition::Running,
+        review_disposition: ThermalTuningReviewDisposition::Pending,
+        power_class: None,
+        run_id: None,
+        candidate_id: None,
+        candidate_hash: None,
+        targets_c: Vec::new(),
+        target_index: 0,
+        trial_index: 0,
+        trial_purpose: ThermalTuningTrialPurpose::Scout,
+        target_started_elapsed_ms: 0,
+        accepted_target_mask: 0,
+        failed_target_mask: 0,
+        armed: false,
+        sealed: false,
+        save_confirmed: false,
+        preview_receipt: None,
+        save_receipt: None,
+        trace_gap: false,
+        events: Vec::new(),
+        candidate_profile: None,
+        batch_current_profile: None,
+        proposed_points: Vec::new(),
+        observed_hold_failures: Vec::new(),
+        observed_damping_failures: Vec::new(),
+        batch_predicted_profile: None,
+        batch_current_score: None,
+        batch_current_confirmable: false,
+        batch_current_failure_evidence: None,
+        seed_source: TuningReason::new(),
+        preview_update_pending: false,
+        trial_start_sequence: None,
+        trial_start_elapsed_ms: None,
+        trial_start_temperature_centi_c: None,
+        trial_sample_start_sequence: None,
+        trial_sample_end_sequence: None,
+        warmup_full_output: false,
+        warmup_full_output_invalid: false,
+        warmup_physical_transient_started_at_ms: None,
+        saw_approach: false,
+        saw_hold: false,
+        first_hold_elapsed_ms: None,
+        warmup_exited_at_ms: None,
+        stable_window_started_at_ms: None,
+        stable_window_verified_at_ms: None,
+        max_temperature_centi_c: None,
+        min_hold_temperature_centi_c: None,
+        max_hold_temperature_centi_c: None,
+        trial_timing: None,
+        stable_window_sample_count: 0,
+        stable_window_last_sample_ms: None,
+        longest_stable_span_ms: 0,
+        last_trial_request_mv: None,
+        hold_pps_wait_interruptions: 0,
+        hold_pps_wait_pending: false,
+        qualification_continuity: QualificationContinuity::new(),
+        guarded_hold_handoff: false,
+        max_band_excursion_centi_c: 0,
+        approach_curve_samples: Vec::new(),
+        approach_curve_closed: false,
+        approach_curve_overflow: false,
+        approach_tail_abs_error_sum_c: 0.0,
+        approach_tail_count: 0,
+        approach_tail_max_above_c: 0.0,
+        approach_tail_max_below_c: 0.0,
+        approach_tail_first_sign: 0,
+        approach_tail_last_sign: 0,
+        approach_tail_sign_changes: 0,
+        approach_curve_last_elapsed_ms: None,
+        hold_output_histogram: [0; 1001],
+        hold_output_count: 0,
+        hold_entry_output_permille: None,
+        hold_entry_pulse_only: true,
+        approach_output_histogram: [0; 1001],
+        approach_output_count: 0,
+        model_approach_sample_count: 0,
+        model_approach_floor_only: true,
+        model_approach_output_range: None,
+        approach_slopes_c_per_s: Vec::new(),
+        near_target_evidence_overflow: false,
+        previous_sample_at_ms: None,
+        previous_sample_temperature_centi_c: None,
+        first_controller_hold_elapsed_ms: None,
+        first_hold_temperature_centi_c: None,
+        min_controller_hold_temperature_centi_c: None,
+        max_controller_hold_temperature_centi_c: None,
+        hold_error_sum_centi_c: 0,
+        hold_threshold_crossed: false,
+        first_band_elapsed_ms: None,
+        first_band_exit_centi_c: None,
+        deadline_nearest_distance_ms: u64::MAX,
+        deadline_nearest_temperature_centi_c: None,
+        trace_digest: TuningHash::new(),
+        retained_trace_digest: TuningHash::new(),
+        first_sequence: None,
+        last_sequence: None,
+        last_delivered_sequence: None,
+        last_acknowledged_sequence: None,
+        next_sequence: 0,
+        current_elapsed_ms: 0,
+        sample_clock_origin_ms: None,
+        last_live_sample_elapsed_ms: None,
+    };
+
     pub const fn new() -> Self {
-        Self {
-            phase: ThermalTuningPhase::Idle,
-            terminal_disposition: ThermalTuningTerminalDisposition::Running,
-            review_disposition: ThermalTuningReviewDisposition::Pending,
-            power_class: None,
-            run_id: None,
-            candidate_id: None,
-            candidate_hash: None,
-            targets_c: Vec::new(),
-            target_index: 0,
-            trial_index: 0,
-            trial_purpose: ThermalTuningTrialPurpose::Scout,
-            target_started_elapsed_ms: 0,
-            accepted_target_mask: 0,
-            failed_target_mask: 0,
-            armed: false,
-            sealed: false,
-            save_confirmed: false,
-            preview_receipt: None,
-            save_receipt: None,
-            trace_gap: false,
-            events: Vec::new(),
-            candidate_profile: None,
-            batch_current_profile: None,
-            proposed_points: Vec::new(),
-            observed_hold_failures: Vec::new(),
-            observed_damping_failures: Vec::new(),
-            batch_predicted_profile: None,
-            batch_current_score: None,
-            batch_current_confirmable: false,
-            batch_current_failure_evidence: None,
-            seed_source: TuningReason::new(),
-            preview_update_pending: false,
-            trial_start_sequence: None,
-            trial_start_elapsed_ms: None,
-            trial_start_temperature_centi_c: None,
-            trial_sample_start_sequence: None,
-            trial_sample_end_sequence: None,
-            warmup_full_output: false,
-            warmup_full_output_invalid: false,
-            warmup_physical_transient_started_at_ms: None,
-            saw_approach: false,
-            saw_hold: false,
-            first_hold_elapsed_ms: None,
-            warmup_exited_at_ms: None,
-            stable_window_started_at_ms: None,
-            stable_window_verified_at_ms: None,
-            max_temperature_centi_c: None,
-            min_hold_temperature_centi_c: None,
-            max_hold_temperature_centi_c: None,
-            trial_timing: None,
-            stable_window_sample_count: 0,
-            stable_window_last_sample_ms: None,
-            longest_stable_span_ms: 0,
-            last_trial_request_mv: None,
-            hold_pps_wait_interruptions: 0,
-            hold_pps_wait_pending: false,
-            qualification_continuity: QualificationContinuity::new(),
-            guarded_hold_handoff: false,
-            max_band_excursion_centi_c: 0,
-            approach_curve_samples: Vec::new(),
-            approach_curve_closed: false,
-            approach_curve_overflow: false,
-            approach_tail_abs_error_sum_c: 0.0,
-            approach_tail_count: 0,
-            approach_tail_max_above_c: 0.0,
-            approach_tail_max_below_c: 0.0,
-            approach_tail_first_sign: 0,
-            approach_tail_last_sign: 0,
-            approach_tail_sign_changes: 0,
-            approach_curve_last_elapsed_ms: None,
-            hold_output_histogram: [0; 1001],
-            hold_output_count: 0,
-            hold_entry_output_permille: None,
-            hold_entry_pulse_only: true,
-            approach_output_histogram: [0; 1001],
-            approach_output_count: 0,
-            model_approach_sample_count: 0,
-            model_approach_floor_only: true,
-            model_approach_output_range: None,
-            approach_slopes_c_per_s: Vec::new(),
-            near_target_evidence_overflow: false,
-            previous_sample_at_ms: None,
-            previous_sample_temperature_centi_c: None,
-            first_controller_hold_elapsed_ms: None,
-            first_hold_temperature_centi_c: None,
-            min_controller_hold_temperature_centi_c: None,
-            max_controller_hold_temperature_centi_c: None,
-            hold_error_sum_centi_c: 0,
-            hold_threshold_crossed: false,
-            first_band_elapsed_ms: None,
-            first_band_exit_centi_c: None,
-            deadline_nearest_distance_ms: u64::MAX,
-            deadline_nearest_temperature_centi_c: None,
-            trace_digest: TuningHash::new(),
-            retained_trace_digest: TuningHash::new(),
-            first_sequence: None,
-            last_sequence: None,
-            last_delivered_sequence: None,
-            last_acknowledged_sequence: None,
-            next_sequence: 0,
-            current_elapsed_ms: 0,
-            sample_clock_origin_ms: None,
-            last_live_sample_elapsed_ms: None,
-        }
+        Self::EMPTY
     }
 
     pub fn start(&mut self, request: ThermalTuningStart<'_>) -> Result<(), ThermalTuningError> {
@@ -799,9 +801,7 @@ impl ThermalTuningRuntime {
         let full_speed_limit_ms = self.active_settle_limit_ms(target_c);
         let warmup_full = self.warmup_full_output && !self.warmup_full_output_invalid;
         let approach_to_hold = self.saw_approach && self.saw_hold;
-        let scout_hold_complete = self.first_hold_elapsed_ms.is_some_and(|started| {
-            elapsed_ms.saturating_sub(started) >= THERMAL_TUNING_SCOUT_HOLD_MS
-        });
+        let scout_hold_complete = self.scout_hold_complete_at(elapsed_ms);
         let hold_confirm = self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm
             && self.first_hold_elapsed_ms.is_some_and(|started| {
                 elapsed_ms.saturating_sub(started) >= THERMAL_TUNING_HOLD_CONFIRM_MS
@@ -810,10 +810,7 @@ impl ThermalTuningRuntime {
             .current_elapsed_ms
             .saturating_sub(self.target_started_elapsed_ms)
             < THERMAL_TUNING_TARGET_BUDGET_MS;
-        // A continuous stable window that was already established before the
-        // target budget expires is allowed to finish its bounded 10 s witness.
-        // The target clock is never reset and a window that starts after the
-        // budget remains a hard failure.
+        // Only a window established within the unchanged target budget may finish its witness.
         let budget_window_continuation = self.target_budget_window_is_verified(budget_available);
         let metric_passes = (budget_available || budget_window_continuation)
             && self
@@ -887,6 +884,12 @@ impl ThermalTuningRuntime {
         )
     }
 
+    fn scout_hold_complete_at(&self, elapsed_ms: u64) -> bool {
+        self.first_hold_elapsed_ms.is_some_and(|started| {
+            elapsed_ms.saturating_sub(started) >= THERMAL_TUNING_SCOUT_HOLD_MS
+        })
+    }
+
     fn trial_stop_reason(&self, input: TrialStopReasonInput) -> &'static str {
         if input.passes && self.trial_purpose == ThermalTuningTrialPurpose::HoldConfirm {
             "candidate passed hard gates and 60s hold confirm"
@@ -949,47 +952,7 @@ impl ThermalTuningRuntime {
                 .saturating_sub(self.target_started_elapsed_ms)
                 >= THERMAL_TUNING_TARGET_BUDGET_MS)
         {
-            // A cold-start timeout never exercised Approach or Hold. Retry a
-            // materially warmer physical start instead of inventing feedback
-            // for their inactive parameters. Every attempt still stops at
-            // 180 s and goes through the normal full-speed cooldown gate.
-            let warmer_start_available = self.warmup_full_output
-                && !self.warmup_full_output_invalid
-                && self
-                    .trial_start_temperature_centi_c
-                    .zip(self.previous_sample_temperature_centi_c)
-                    .is_some_and(|(start, end)| {
-                        let admitted_end =
-                            i32::from(end).min(i32::from(cooldown_threshold_c(target_c)) * 100);
-                        admitted_end - i32::from(start) >= 500
-                    })
-                && self
-                    .previous_sample_at_ms
-                    .is_some_and(|last| self.current_elapsed_ms.saturating_sub(last) <= 1_000)
-                && self
-                    .current_elapsed_ms
-                    .saturating_sub(self.target_started_elapsed_ms)
-                    < THERMAL_TUNING_TARGET_BUDGET_MS;
-            if warmer_start_available {
-                self.push_event(
-                    ThermalTuningEventKind::Decision,
-                    Some(target_c),
-                    Some(self.trial_index),
-                    None,
-                    Some("warmup_timeout_retry_from_warmer_start"),
-                );
-                return self
-                    .schedule_trial(self.trial_purpose, "cooling before unchanged warmup retry");
-            }
-            self.failed_target_mask |= target_bit(target_c);
-            self.push_event(
-                ThermalTuningEventKind::Decision,
-                Some(target_c),
-                Some(self.trial_index),
-                None,
-                Some("warmup_timeout_without_safe_warmer_retry"),
-            );
-            return self.advance_target();
+            return self.finish_warmup_timeout(target_c);
         }
         let failure_evidence = if !passes && warmup_full {
             let evidence = self.candidate_failure_evidence(
@@ -1048,6 +1011,50 @@ impl ThermalTuningRuntime {
                 full_speed_limit_ms,
             ),
         }
+    }
+
+    fn finish_warmup_timeout(&mut self, target_c: i16) -> Result<(), ThermalTuningError> {
+        // A cold-start timeout never exercised Approach or Hold. Retry a
+        // materially warmer physical start instead of inventing feedback
+        // for their inactive parameters. Every attempt still stops at
+        // 180 s and goes through the normal full-speed cooldown gate.
+        let warmer_start_available = self.warmup_full_output
+            && !self.warmup_full_output_invalid
+            && self
+                .trial_start_temperature_centi_c
+                .zip(self.previous_sample_temperature_centi_c)
+                .is_some_and(|(start, end)| {
+                    let admitted_end =
+                        i32::from(end).min(i32::from(cooldown_threshold_c(target_c)) * 100);
+                    admitted_end - i32::from(start) >= 500
+                })
+            && self
+                .previous_sample_at_ms
+                .is_some_and(|last| self.current_elapsed_ms.saturating_sub(last) <= 1_000)
+            && self
+                .current_elapsed_ms
+                .saturating_sub(self.target_started_elapsed_ms)
+                < THERMAL_TUNING_TARGET_BUDGET_MS;
+        if warmer_start_available {
+            self.push_event(
+                ThermalTuningEventKind::Decision,
+                Some(target_c),
+                Some(self.trial_index),
+                None,
+                Some("warmup_timeout_retry_from_warmer_start"),
+            );
+            return self
+                .schedule_trial(self.trial_purpose, "cooling before unchanged warmup retry");
+        }
+        self.failed_target_mask |= target_bit(target_c);
+        self.push_event(
+            ThermalTuningEventKind::Decision,
+            Some(target_c),
+            Some(self.trial_index),
+            None,
+            Some("warmup_timeout_without_safe_warmer_retry"),
+        );
+        self.advance_target()
     }
 
     fn retry_or_fail_trial(
@@ -2608,34 +2615,7 @@ impl ThermalTuningRuntime {
         let pps_wait_pending = self.hold_pps_wait_pending || request_changed;
         self.hold_pps_wait_pending = request_changed && sample.has_fresh_measurement();
         self.update_warmup_output_evidence(sample);
-        match sample.phase {
-            ThermalTuningPhase::Approach => {
-                self.model_approach_sample_count =
-                    self.model_approach_sample_count.saturating_add(1);
-                self.model_approach_floor_only &= sample.heater_requested_output_permille
-                    == crate::thermal_plant::APPROACH_MIN_PERMILLE;
-                let requested = sample.heater_requested_output_permille;
-                self.model_approach_output_range = Some(
-                    self.model_approach_output_range
-                        .map_or((requested, requested), |(min, max)| {
-                            (min.min(requested), max.max(requested))
-                        }),
-                );
-                self.saw_approach = true;
-                self.warmup_exited_at_ms.get_or_insert(sample.elapsed_ms);
-            }
-            ThermalTuningPhase::Hold => {
-                self.saw_hold = true;
-                self.warmup_exited_at_ms.get_or_insert(sample.elapsed_ms);
-                // Strategy analysis starts at the controller's first Hold
-                // sample, including entry residual heat. Qualification timing
-                // starts independently when the physical hold gate is met.
-                self.first_controller_hold_elapsed_ms
-                    .get_or_insert(sample.elapsed_ms);
-                self.record_fresh_hold_entry(sample, expected_target);
-            }
-            _ => {}
-        }
+        self.record_trial_phase(sample, expected_target);
         if !sample.has_fresh_measurement() {
             let bounded_pps_pause = measurement == QualificationMeasurement::PpsPause
                 && self.trial_timing.is_some_and(|timing| {
@@ -2706,6 +2686,37 @@ impl ThermalTuningRuntime {
                     value.max(sample.temperature_centi_c)
                 }),
         );
+    }
+
+    fn record_trial_phase(&mut self, sample: &ThermalTuningSample, expected_target: i16) {
+        match sample.phase {
+            ThermalTuningPhase::Approach => {
+                self.model_approach_sample_count =
+                    self.model_approach_sample_count.saturating_add(1);
+                self.model_approach_floor_only &= sample.heater_requested_output_permille
+                    == crate::thermal_plant::APPROACH_MIN_PERMILLE;
+                let requested = sample.heater_requested_output_permille;
+                self.model_approach_output_range = Some(
+                    self.model_approach_output_range
+                        .map_or((requested, requested), |(min, max)| {
+                            (min.min(requested), max.max(requested))
+                        }),
+                );
+                self.saw_approach = true;
+                self.warmup_exited_at_ms.get_or_insert(sample.elapsed_ms);
+            }
+            ThermalTuningPhase::Hold => {
+                self.saw_hold = true;
+                self.warmup_exited_at_ms.get_or_insert(sample.elapsed_ms);
+                // Strategy analysis starts at the controller's first Hold
+                // sample, including entry residual heat. Qualification timing
+                // starts independently when the physical hold gate is met.
+                self.first_controller_hold_elapsed_ms
+                    .get_or_insert(sample.elapsed_ms);
+                self.record_fresh_hold_entry(sample, expected_target);
+            }
+            _ => {}
+        }
     }
 
     fn record_fresh_hold_entry(&mut self, sample: &ThermalTuningSample, target_c: i16) {
@@ -3104,6 +3115,44 @@ impl ThermalTuningRuntime {
         )
     }
 
+    fn trial_progress(
+        &self,
+        target_c: i16,
+        completed: bool,
+        settle_ms: Option<f64>,
+        limit_ms: f64,
+        low_margin: bool,
+    ) -> (f64, f64) {
+        let target_centi = i32::from(target_c) * 100;
+        let lower = target_centi - i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C);
+        let upper = target_centi + i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C);
+        let (progress_base, temperature_gap_c) =
+            if completed && settle_ms.is_some_and(|value| value <= limit_ms) {
+                (if low_margin { 0.25 } else { 0.0 }, 0.0)
+            } else if let Some(exit) = self.first_band_exit_centi_c {
+                let value = i32::from(exit);
+                (
+                    1.0,
+                    f64::from((lower - value).max(value - upper).max(0)) / 100.0,
+                )
+            } else if self.first_band_elapsed_ms.is_some() {
+                (0.0, 0.0)
+            } else if let Some(deadline_temp) = self.deadline_temperature_evidence() {
+                let value = i32::from(deadline_temp);
+                if value < lower || value > upper {
+                    (
+                        3.0,
+                        f64::from((lower - value).max(value - upper).max(0)) / 100.0,
+                    )
+                } else {
+                    (2.0, 0.0)
+                }
+            } else {
+                (4.0, 0.0)
+            };
+        (progress_base, temperature_gap_c)
+    }
+
     fn trial_score(
         &self,
         target_c: i16,
@@ -3135,33 +3184,8 @@ impl ThermalTuningRuntime {
         };
         let low_margin = completed
             && settle_ms.is_some_and(|value| value <= limit_ms && limit_ms - value < margin_ms);
-        let target_centi = i32::from(target_c) * 100;
-        let lower = target_centi - i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C);
-        let upper = target_centi + i32::from(THERMAL_TUNING_STABLE_BAND_CENTI_C);
         let (progress_base, temperature_gap_c) =
-            if completed && settle_ms.is_some_and(|value| value <= limit_ms) {
-                (if low_margin { 0.25 } else { 0.0 }, 0.0)
-            } else if let Some(exit) = self.first_band_exit_centi_c {
-                let value = i32::from(exit);
-                (
-                    1.0,
-                    f64::from((lower - value).max(value - upper).max(0)) / 100.0,
-                )
-            } else if self.first_band_elapsed_ms.is_some() {
-                (0.0, 0.0)
-            } else if let Some(deadline_temp) = self.deadline_temperature_evidence() {
-                let value = i32::from(deadline_temp);
-                if value < lower || value > upper {
-                    (
-                        3.0,
-                        f64::from((lower - value).max(value - upper).max(0)) / 100.0,
-                    )
-                } else {
-                    (2.0, 0.0)
-                }
-            } else {
-                (4.0, 0.0)
-            };
+            self.trial_progress(target_c, completed, settle_ms, limit_ms, low_margin);
         let first_band_penalty = self.first_band_elapsed_ms.map_or(0.0, |value| {
             (value.saturating_sub(self.trial_start_elapsed_ms.unwrap_or(0)) as f64 / 1_000_000.0)
                 .min(0.5)
@@ -10097,6 +10121,10 @@ mod tests {
                 && trial.start_elapsed_ms == 13_000
                 && trial.end_elapsed_ms == Some(73_600)
         }));
+        assert_single_target_save_gates(&mut runtime);
+    }
+
+    fn assert_single_target_save_gates(runtime: &mut ThermalTuningRuntime) {
         let digest_before_ack = runtime.trace().digest;
         runtime.events_after(runtime.trace().last_sequence);
         assert_eq!(runtime.trace().digest, digest_before_ack);

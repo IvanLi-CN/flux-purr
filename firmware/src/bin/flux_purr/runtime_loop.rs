@@ -315,8 +315,7 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
         &mut state.ui_state,
         &mut state.calibration_runtime_state,
         &mut state.manual_pps_state,
-        &mut state.heater_pwm,
-        &mut state.last_heater_duty,
+        (&mut state.heater_pwm, &mut state.last_heater_duty),
         state.pending_automatic_pps.is_some()
             || pd_contract_transition_in_progress(state.power_state)
             || automatic_pps_start_allowed,
@@ -1007,8 +1006,7 @@ pub(crate) async fn runtime_reconcile_network_state(
         &mut state.ui_state,
         &mut state.calibration_runtime_state,
         &mut state.manual_pps_state,
-        &mut state.heater_pwm,
-        &mut state.last_heater_duty,
+        (&mut state.heater_pwm, &mut state.last_heater_duty),
         state.pending_automatic_pps.is_some()
             || pd_contract_transition_in_progress(state.power_state)
             || automatic_pps_start_allowed,
@@ -1826,14 +1824,7 @@ pub(crate) async fn runtime_reconcile_heater_arming(
         ui_state: &mut state.ui_state,
         last_heater_duty: &mut state.last_heater_duty,
     });
-    if state.calibration_runtime_state.mode != CalibrationMode::Off
-        && state.calibration_runtime_state.heater_enabled
-        && state.current_rtd_fault.is_none()
-        && state.heater_controller.fault_latched().is_some()
-    {
-        state.heater_controller.clear_fault_latch();
-        info!("calibration heater re-arm -> cleared latched fault");
-    }
+    runtime_clear_calibration_heater_fault(state);
     let model_allowed = thermal_model_heater_allowed(
         &state.memory_config,
         state.calibration_runtime_state,
@@ -2172,6 +2163,29 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
     // Model input follows the gate after any asynchronous PD disarm, not the
     // logical request or the output cached before an awaited backend operation.
     state.last_heater_duty = HeaterPwmGate::applied_duty_percent();
+    runtime_observe_applied_heat(state);
+    state.heater_control_timing.cycle_ms = Instant::now()
+        .as_millis()
+        .saturating_sub(state.runtime_started_ms)
+        .saturating_sub(control_started_ms)
+        .min(u64::from(u16::MAX)) as u16;
+    output_changed
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_clear_calibration_heater_fault(state: &mut RuntimeLoopState) {
+    if state.calibration_runtime_state.mode != CalibrationMode::Off
+        && state.calibration_runtime_state.heater_enabled
+        && state.current_rtd_fault.is_none()
+        && state.heater_controller.fault_latched().is_some()
+    {
+        state.heater_controller.clear_fault_latch();
+        info!("calibration heater re-arm -> cleared latched fault");
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_observe_applied_heat(state: &mut RuntimeLoopState) {
     let applied_power_mw = if state.last_heater_duty == 0 {
         Some(0.0)
     } else {
@@ -2194,12 +2208,6 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
             .applied_heat
             .observe(applied_at_ms, power_mw);
     }
-    state.heater_control_timing.cycle_ms = Instant::now()
-        .as_millis()
-        .saturating_sub(state.runtime_started_ms)
-        .saturating_sub(control_started_ms)
-        .min(u64::from(u16::MAX)) as u16;
-    output_changed
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -3148,8 +3156,7 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
             &mut state.ui_state,
             &mut state.calibration_runtime_state,
             &mut state.manual_pps_state,
-            &mut state.heater_pwm,
-            &mut state.last_heater_duty,
+            (&mut state.heater_pwm, &mut state.last_heater_duty),
             state.pending_automatic_pps.is_some()
                 || pd_contract_transition_in_progress(state.power_state)
                 || automatic_pps_start_allowed,
