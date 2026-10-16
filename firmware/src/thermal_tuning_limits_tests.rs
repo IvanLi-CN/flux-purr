@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn model_floor_binds_the_actual_law_without_adopting_unused_profile_bounds() {
     let mut timing = ThermalTuningTimingEvidence::for_model_point(point(420, 650));
-    assert_eq!(timing.policy_version, 4);
+    assert_eq!(timing.policy_version, 5);
     assert_eq!(timing.configured_approach_floor_permille, 420);
     assert_eq!(timing.effective_approach_floor_permille, 50);
     assert_eq!(timing.allowed_approach_floor_permille, 50);

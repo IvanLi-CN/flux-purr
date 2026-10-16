@@ -25,6 +25,7 @@ pub mod thermal_response;
 pub mod thermal_trajectory;
 pub mod thermal_tuning;
 pub mod thermal_tuning_limits;
+pub mod thermal_tuning_measurement;
 mod thermal_tuning_strategy;
 pub mod wifi_state;
 

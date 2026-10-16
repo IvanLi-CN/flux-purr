@@ -1056,7 +1056,7 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("id=\"voltageEvidence\""));
         assert!(REPORT_TEMPLATE.contains("function voltageTrace(samples)"));
         assert!(REPORT_TEMPLATE.contains("sample.measurementAccepted!==false"));
-        assert!(REPORT_TEMPLATE.contains("timing?.stableWindowLastResetReason||'none recorded'"));
+        assert!(REPORT_TEMPLATE.contains("timing?.stableWindowLastResetReason||'未记录'"));
         assert!(REPORT_TEMPLATE.contains("sample.ppsContractMv!==previous.ppsContractMv"));
         assert!(
             REPORT_TEMPLATE.contains("Math.abs(Number(sample.vinMv)-Number(previous.vinMv))>600")
@@ -1092,11 +1092,11 @@ mod tests {
             REPORT_TEMPLATE.contains("chartRange==='full'?[...trialSamples,...postTrialSamples()]")
         );
         assert!(REPORT_TEMPLATE.contains("stableBand:[activeTarget-1.5,activeTarget+1.5]"));
-        assert!(REPORT_TEMPLATE.contains("['trial duration',ms(trialDuration)]"));
+        assert!(REPORT_TEMPLATE.contains("['试验时长',ms(trialDuration)]"));
         assert!(REPORT_TEMPLATE.contains(
-            "['qualified Hold',`${ms(holdDuration)} / ${confirm?'60.00s confirm':'12.00s scout'}`]"
+            "['qualified Hold 时长',`${ms(holdDuration)} / ${confirm?'60.00s confirm':'12.00s scout'}`]"
         ));
-        assert!(REPORT_TEMPLATE.contains("['post-stop peak',postPeak==null?'unavailable'"));
+        assert!(REPORT_TEMPLATE.contains("['停热后峰值',postPeak==null?'未采集'"));
         assert!(REPORT_TEMPLATE.contains("for(const id of CHART_IDS){const canvas=$(id);canvas.addEventListener('pointermove',moveHover)"));
         assert!(REPORT_TEMPLATE.contains("line.dataset.sequence=String(sample.sequence)"));
         assert!(REPORT_TEMPLATE.contains("tooltip.dataset.sequence=String(sample.sequence)"));

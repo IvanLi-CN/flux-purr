@@ -12,6 +12,9 @@ use crate::memory::{
 use crate::thermal_tuning_limits::{
     TRIAL_TIMEOUT_MS, ThermalTuningTimingEvidence, original_settle_limit_ms,
 };
+use crate::thermal_tuning_measurement::{
+    QualificationContinuity, QualificationMeasurement, QualificationObservation,
+};
 use crate::thermal_tuning_strategy::{
     CurveClass, TuneEvidence, bounded_failure_alternative, braking_boundary_damping_candidate,
     limited_hold_outputs, observed_low_side_hold_failure, reseed_after_hold_confirm, tune_point,
@@ -504,6 +507,7 @@ pub struct ThermalTuningRuntime {
     last_trial_request_mv: Option<u16>,
     hold_pps_wait_interruptions: u32,
     hold_pps_wait_pending: bool,
+    qualification_continuity: QualificationContinuity,
     guarded_hold_handoff: bool,
     max_band_excursion_centi_c: u16,
     approach_curve_samples: Vec<ThermalCurveSample, THERMAL_TUNING_APPROACH_TRACE_CAPACITY>,
@@ -617,6 +621,7 @@ impl ThermalTuningRuntime {
             last_trial_request_mv: None,
             hold_pps_wait_interruptions: 0,
             hold_pps_wait_pending: false,
+            qualification_continuity: QualificationContinuity::new(),
             guarded_hold_handoff: false,
             max_band_excursion_centi_c: 0,
             approach_curve_samples: Vec::new(),
@@ -2190,6 +2195,7 @@ impl ThermalTuningRuntime {
         self.last_trial_request_mv = None;
         self.hold_pps_wait_interruptions = 0;
         self.hold_pps_wait_pending = false;
+        self.qualification_continuity = QualificationContinuity::new();
         self.guarded_hold_handoff = false;
         self.max_band_excursion_centi_c = 0;
         self.approach_curve_samples.clear();
@@ -2257,6 +2263,7 @@ impl ThermalTuningRuntime {
         }
         self.trial_sample_end_sequence = Some(sample.sequence);
         let sample_elapsed_ms = sample.elapsed_ms;
+        let sample_is_fresh = sample.has_fresh_measurement();
         self.push_event(
             ThermalTuningEventKind::Sample,
             Some(sample.target_c),
@@ -2292,7 +2299,8 @@ impl ThermalTuningRuntime {
         } else {
             THERMAL_TUNING_SCOUT_HOLD_MS
         };
-        if self
+        if sample_is_fresh
+            && self
             .first_hold_elapsed_ms
             .is_some_and(|started| sample_elapsed_ms.saturating_sub(started) >= required_hold_ms)
             // Hold duration is a minimum, not a stable-window cutoff. A
@@ -2575,6 +2583,20 @@ impl ThermalTuningRuntime {
             self.trial_start_elapsed_ms = Some(sample.elapsed_ms);
         }
         self.current_elapsed_ms = sample.elapsed_ms;
+        let measurement = self
+            .qualification_continuity
+            .observe(QualificationObservation {
+                elapsed_ms: sample.elapsed_ms,
+                requested_mv: Some(sample.requested_mv),
+                valid: sample.measurement_valid,
+                accepted: sample.has_fresh_measurement(),
+                temperature_centi_c: sample.temperature_centi_c,
+                raw_temperature_centi_c: sample.raw_temperature_centi_c,
+                target_c: expected_target,
+            });
+        if measurement == QualificationMeasurement::FreshAfterGap {
+            self.interrupt_measurement_qualification();
+        }
         let request_changed = self
             .last_trial_request_mv
             .is_some_and(|previous| previous != sample.requested_mv);
@@ -2611,6 +2633,11 @@ impl ThermalTuningRuntime {
             _ => {}
         }
         if !sample.has_fresh_measurement() {
+            let bounded_pps_pause = measurement == QualificationMeasurement::PpsPause
+                && self.trial_timing.is_some_and(|timing| {
+                    timing.policy_version
+                        == crate::thermal_tuning_limits::PPS_CONTINUITY_TIMING_POLICY_VERSION
+                });
             self.guarded_hold_handoff |= sample.measurement_valid
                 && sample.phase == ThermalTuningPhase::Hold
                 && self.hold_output_count > 0
@@ -2620,7 +2647,8 @@ impl ThermalTuningRuntime {
                 && sample
                     .raw_temperature_centi_c
                     .is_some_and(|raw| raw.abs_diff(sample.temperature_centi_c) <= 50);
-            if pps_wait_pending
+            if !bounded_pps_pause
+                && pps_wait_pending
                 && self.first_hold_elapsed_ms.is_some()
                 && sample
                     .raw_temperature_centi_c
@@ -2630,7 +2658,9 @@ impl ThermalTuningRuntime {
                     self.hold_pps_wait_interruptions.saturating_add(1);
                 self.hold_pps_wait_pending = false;
             }
-            self.interrupt_measurement_qualification();
+            if !bounded_pps_pause {
+                self.interrupt_measurement_qualification();
+            }
             return;
         }
         self.update_strategy_evidence(sample, expected_target);
@@ -6968,7 +6998,7 @@ mod tests {
         }
         assert_eq!(runtime.phase, ThermalTuningPhase::Approach);
         assert_eq!(runtime.trial_index, 0);
-        assert_eq!(runtime.trial_timing.unwrap().policy_version, 4);
+        assert_eq!(runtime.trial_timing.unwrap().policy_version, 5);
         assert!(runtime.events.iter().all(|event| event.decision.is_none()));
     }
 
@@ -9429,6 +9459,38 @@ mod tests {
         }
         assert_eq!(runtime.stable_window_started_at_ms, Some(1_000));
         assert_eq!(runtime.stable_window_verified_at_ms, Some(11_000));
+    }
+
+    #[test]
+    fn pps_wait_after_deadline_preserves_only_a_bounded_provisional_window() {
+        let mut runtime = started_single_target_runtime();
+        runtime
+            .record_sample(sample(0, ThermalTuningPhase::Warmup, 3_000))
+            .unwrap();
+        runtime
+            .record_sample(sample(1_000, ThermalTuningPhase::Approach, 5_500))
+            .unwrap();
+        record_dense_hold(&mut runtime, 9_000, 11_200, 6_000);
+        let count = runtime.stable_window_sample_count;
+        let mut waiting = sample(11_400, ThermalTuningPhase::Hold, 6_000);
+        waiting.requested_mv = 20_500;
+        waiting.pps_contract.voltage_mv = 20_500;
+        waiting.measurement_accepted = Some(false);
+        waiting.raw_temperature_centi_c = Some(6_015);
+        runtime.record_sample(waiting.clone()).unwrap();
+        assert_eq!(runtime.phase, ThermalTuningPhase::Hold);
+        assert_eq!(runtime.stable_window_started_at_ms, Some(9_000));
+        assert_eq!(
+            runtime.stable_window_sample_count, count,
+            "held samples are not witnesses"
+        );
+        assert_eq!(runtime.stable_window_verified_at_ms, None);
+        waiting.elapsed_ms = 11_600;
+        waiting.measurement_accepted = Some(true);
+        runtime.record_sample(waiting).unwrap();
+        assert_eq!(runtime.stable_window_started_at_ms, Some(9_000));
+        record_dense_hold(&mut runtime, 11_800, 19_000, 6_000);
+        assert_eq!(runtime.stable_window_verified_at_ms, Some(19_000));
     }
 
     #[test]

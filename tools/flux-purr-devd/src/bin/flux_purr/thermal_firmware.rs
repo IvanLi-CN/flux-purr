@@ -15,6 +15,9 @@ use flux_purr_firmware::{
         THERMAL_TUNING_TARGETS_C, ThermalTuningEvent, digest_event_chain, hash_profile,
     },
     thermal_tuning_limits::{ThermalTuningTimingEvidence, original_settle_limit_ms},
+    thermal_tuning_measurement::{
+        QualificationContinuity, QualificationMeasurement, QualificationObservation,
+    },
 };
 use reqwest::{Client, Method};
 use serde_json::{Value, json};
@@ -1003,12 +1006,55 @@ fn sample_measurement_accepted(sample: &Value) -> bool {
         && sample.get("measurementAccepted").and_then(Value::as_bool) != Some(false)
 }
 
+fn qualification_measurements(
+    timing: &ThermalTuningTimingEvidence,
+    target: i16,
+    samples: &[&Value],
+) -> Vec<QualificationMeasurement> {
+    let mut continuity = QualificationContinuity::new();
+    samples
+        .iter()
+        .map(|sample| {
+            if timing.policy_version != 5 {
+                return if sample_measurement_accepted(sample) {
+                    QualificationMeasurement::Fresh
+                } else {
+                    QualificationMeasurement::Rejected
+                };
+            }
+            let temperature = |field| {
+                sample
+                    .get(field)
+                    .and_then(Value::as_i64)
+                    .and_then(|v| i16::try_from(v).ok())
+            };
+            continuity.observe(QualificationObservation {
+                elapsed_ms: sample
+                    .get("elapsedMs")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(u64::MAX),
+                requested_mv: sample
+                    .get("ppsRequestedMv")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u16::try_from(v).ok()),
+                valid: sample.get("measurementValid").and_then(Value::as_bool) == Some(true)
+                    && temperature("temperatureCentiC").is_some(),
+                accepted: sample_measurement_accepted(sample),
+                temperature_centi_c: temperature("temperatureCentiC").unwrap_or(i16::MIN),
+                raw_temperature_centi_c: temperature("rawTemperatureCentiC"),
+                target_c: target,
+            })
+        })
+        .collect()
+}
+
 fn verify_timing_samples(
     timing: &ThermalTuningTimingEvidence,
     target: i16,
     samples: &[&Value],
 ) -> Value {
     let mut reasons = Vec::new();
+    let measurements = qualification_measurements(timing, target, samples);
     let deadline = timing
         .warmup_exited_at_ms
         .and_then(|exit| exit.checked_add(u64::from(timing.original_limit_ms)));
@@ -1054,7 +1100,7 @@ fn verify_timing_samples(
         }
         let mut stable_start = None;
         let mut last_time: Option<u64> = None;
-        for sample in samples {
+        for (sample, measurement) in samples.iter().zip(&measurements) {
             let Some(time) = sample.get("elapsedMs").and_then(Value::as_u64) else {
                 continue;
             };
@@ -1075,6 +1121,9 @@ fn verify_timing_samples(
                 reasons.push("floor_request_raised_before_deadline");
             }
             if timing.warmup_exited_at_ms.is_none_or(|exit| time < exit) {
+                continue;
+            }
+            if *measurement == QualificationMeasurement::PpsPause {
                 continue;
             }
             if last_time.is_some_and(|last| time.saturating_sub(last) > 1_000) {
@@ -1119,12 +1168,18 @@ fn stable_window_samples_valid(
         .zip(timing.stable_window_verified_at_ms);
     let mut window_times = Vec::new();
     let mut window_samples_valid = true;
+    let measurements = qualification_measurements(timing, target, samples);
     if let Some((start, verified)) = window {
-        for sample in samples {
+        for (sample, measurement) in samples.iter().zip(measurements) {
             let Some(time) = sample.get("elapsedMs").and_then(Value::as_u64) else {
                 continue;
             };
             if time < start || time > verified {
+                continue;
+            }
+            if measurement == QualificationMeasurement::PpsPause {
+                // A pause preserves a provisional start but is not a witness.
+                window_samples_valid &= time != start && time != verified;
                 continue;
             }
             window_samples_valid &= sample_measurement_accepted(sample)
@@ -3040,6 +3095,47 @@ mod tests {
         trial["timing"]["extendedAtMs"] = serde_json::Value::Null;
         trial["fullSpeedToStable"]["limitMs"] = json!(10000);
         assert!(super::timing_gate_valid(&trial)); // Other metric gates still reject 12s > 10s.
+    }
+
+    #[test]
+    fn pps_pause_qualification_matches_firmware_without_rewriting_historical_policy() {
+        let timing: flux_purr_firmware::thermal_tuning_limits::ThermalTuningTimingEvidence =
+            serde_json::from_value(json!({"policyVersion": 5, "originalLimitMs": 5000,
+                "extensionLimitMs": 15000, "allowedApproachFloorPermille": 50,
+                "effectiveApproachFloorPermille": 50, "modelApproachFloorPermille": 50,
+                "configuredApproachFloorPermille": 130, "originalDeadlineObservedAtMs": 6000,
+                "originalDeadlinePhase": "hold", "floorObservedAtMs": null,
+                "extendedAtMs": null, "warmupExitedAtMs": 1000,
+                "stableWindowStartedAtMs": 2000, "stableWindowVerifiedAtMs": 12000}))
+            .unwrap();
+        let mut samples: Vec<serde_json::Value> = (2000..=12000)
+            .step_by(250)
+            .map(|time| {
+                json!({
+                    "elapsedMs": time, "phase": "hold", "temperatureCentiC": 22000,
+                    "rawTemperatureCentiC": 21997, "measurementValid": true,
+                    "measurementAccepted": ![6250,6500].contains(&time),
+                    "ppsRequestedMv": if time < 6000 {20500} else {21000}
+                })
+            })
+            .collect();
+        let check = |timing: &_, samples: &[serde_json::Value]| {
+            super::verify_timing_samples(timing, 220, &samples.iter().collect::<Vec<_>>())["verified"]
+                == true
+        };
+        assert!(check(&timing, &samples));
+        let mut historical = timing;
+        historical.policy_version = 4;
+        assert!(!check(&historical, &samples));
+        samples[17]["rawTemperatureCentiC"] = json!(24000);
+        assert!(!check(&timing, &samples));
+        samples[17]["rawTemperatureCentiC"] = json!(21997);
+        for sample in &mut samples {
+            if (6250..=7250).contains(&sample["elapsedMs"].as_u64().unwrap()) {
+                sample["measurementAccepted"] = json!(false);
+            }
+        }
+        assert!(!check(&timing, &samples));
     }
 
     #[test]

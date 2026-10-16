@@ -12,6 +12,7 @@ pub const TRIAL_TIMEOUT_MS: u64 = 180_000;
 pub const TIMING_POLICY_VERSION: u8 = 2;
 pub const MODEL_APPROACH_TIMING_POLICY_VERSION: u8 = 3;
 pub const BRAKING_APPROACH_TIMING_POLICY_VERSION: u8 = 4;
+pub const PPS_CONTINUITY_TIMING_POLICY_VERSION: u8 = 5;
 pub const EXTENSION_FLOOR_PERMILLE: u16 = 100;
 
 pub const fn original_settle_limit_ms(target_c: i16) -> u32 {
@@ -73,7 +74,7 @@ impl ThermalTuningTimingEvidence {
 
     pub fn for_model_point(point: ThermalControlProfilePointConfig) -> Self {
         Self {
-            policy_version: BRAKING_APPROACH_TIMING_POLICY_VERSION,
+            policy_version: PPS_CONTINUITY_TIMING_POLICY_VERSION,
             allowed_approach_floor_permille: crate::thermal_plant::APPROACH_MIN_PERMILLE,
             effective_approach_floor_permille: crate::thermal_plant::APPROACH_MIN_PERMILLE,
             model_approach_floor_permille: Some(crate::thermal_plant::APPROACH_MIN_PERMILLE),
@@ -86,7 +87,7 @@ impl ThermalTuningTimingEvidence {
             TIMING_POLICY_VERSION | MODEL_APPROACH_TIMING_POLICY_VERSION => {
                 Some(EXTENSION_FLOOR_PERMILLE)
             }
-            BRAKING_APPROACH_TIMING_POLICY_VERSION => {
+            BRAKING_APPROACH_TIMING_POLICY_VERSION | PPS_CONTINUITY_TIMING_POLICY_VERSION => {
                 Some(crate::thermal_plant::APPROACH_MIN_PERMILLE)
             }
             _ => None,
@@ -99,7 +100,9 @@ impl ThermalTuningTimingEvidence {
         }
         match self.policy_version {
             TIMING_POLICY_VERSION => self.model_approach_floor_permille.is_none(),
-            MODEL_APPROACH_TIMING_POLICY_VERSION | BRAKING_APPROACH_TIMING_POLICY_VERSION => {
+            MODEL_APPROACH_TIMING_POLICY_VERSION
+            | BRAKING_APPROACH_TIMING_POLICY_VERSION
+            | PPS_CONTINUITY_TIMING_POLICY_VERSION => {
                 self.model_approach_floor_permille == Some(self.allowed_approach_floor_permille)
                     && self.effective_approach_floor_permille
                         == self.allowed_approach_floor_permille

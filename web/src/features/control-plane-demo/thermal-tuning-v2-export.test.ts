@@ -78,6 +78,46 @@ function recording(
 }
 
 describe('Web thermal-tuning-v2 export', () => {
+  it('preserves only bounded PPS pauses under policy 5, without counting held samples', () => {
+    const timing = {
+      policyVersion: 5,
+      originalLimitMs: 5000,
+      extensionLimitMs: 15000,
+      allowedApproachFloorPermille: 50,
+      effectiveApproachFloorPermille: 50,
+      modelApproachFloorPermille: 50,
+      configuredApproachFloorPermille: 130,
+      originalDeadlineObservedAtMs: 6000,
+      originalDeadlinePhase: 'hold',
+      floorObservedAtMs: null,
+      extendedAtMs: null,
+      warmupExitedAtMs: 1000,
+      stableWindowStartedAtMs: 2000,
+      stableWindowVerifiedAtMs: 12000,
+    }
+    const samples = Array.from({ length: 41 }, (_, index) => {
+      const time = 2000 + index * 250
+      return {
+        elapsedMs: time,
+        phase: 'hold',
+        temperatureCentiC: 22000,
+        rawTemperatureCentiC: 21997,
+        measurementValid: true,
+        measurementAccepted: ![6250, 6500].includes(time),
+        ppsRequestedMv: time < 6000 ? 20500 : 21000,
+      }
+    })
+    expect(verifyTimingSamples(timing, 220, samples).verified).toBe(true)
+    expect(verifyTimingSamples({ ...timing, policyVersion: 4 }, 220, samples).verified).toBe(false)
+    samples[17].rawTemperatureCentiC = 24000
+    expect(verifyTimingSamples(timing, 220, samples).verified).toBe(false)
+    samples[17].rawTemperatureCentiC = 21997
+    for (const sample of samples) {
+      if (sample.elapsedMs >= 6250 && sample.elapsedMs <= 7250) sample.measurementAccepted = false
+    }
+    expect(verifyTimingSamples(timing, 220, samples).verified).toBe(false)
+  })
+
   it('requires bound floor evidence and a complete stable window for extended timing', () => {
     const trial = {
       targetC: 60,

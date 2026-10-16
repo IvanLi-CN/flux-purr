@@ -14,7 +14,7 @@ Warmup remains independent full-power heating. Approach starts with an immediate
 
 The tracker predicts command-arrival temperature using bounded, time-weighted applied-power history. Model feedforward and temperature/rate feedback determine subsequent 5%–100% requests. Applied power is estimated from VIN, physical duty and resistance, never presented as measured electrical power. Hold tracks the constant final target using the protected PI. PD/PPS ownership, voltage/PWM mapping and source limits remain unchanged.
 
-An upward Approach request is slew-limited by the calibrated transport delay; downward braking remains immediate. The limit bounds a model correction at the Warmup handoff without adding a second profile floor or ceiling, and still permits the request to reach the existing 1000‰ upper bound. Stable-window qualification consumes only accepted measurements, and the report records the last reset cause when a provisional window is interrupted.
+An upward Approach request is slew-limited by the calibrated transport delay; downward braking remains immediate. The limit bounds a model correction at the Warmup handoff without adding a second profile floor or ceiling, and still permits the request to reach the existing 1000‰ upper bound. Stable-window qualification consumes only accepted measurements. A bounded, identified PPS sampling pause may retain a provisional start within the existing one-second sampling-gap bound; rejected values never count as witnesses or complete qualification. Other rejected observations reset continuity. The timing policy and raw evidence remain explicit in reports.
 
 ## Consequences
 

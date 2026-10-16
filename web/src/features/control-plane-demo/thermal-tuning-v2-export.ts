@@ -610,7 +610,7 @@ function trialPassesGates(trial: ReturnType<typeof buildTrial>): boolean {
 }
 
 function timingPolicyFloor(timing: JsonObject) {
-  if (timing.policyVersion === 4) return 50
+  if (timing.policyVersion === 4 || timing.policyVersion === 5) return 50
   if (timing.policyVersion === 2 || timing.policyVersion === 3) return 100
   return null
 }
@@ -621,7 +621,7 @@ function supportedTimingPolicy(timing: JsonObject) {
     floor != null &&
     timing.allowedApproachFloorPermille === floor &&
     ((timing.policyVersion === 2 && timing.modelApproachFloorPermille == null) ||
-      ((timing.policyVersion === 3 || timing.policyVersion === 4) &&
+      ((timing.policyVersion === 3 || timing.policyVersion === 4 || timing.policyVersion === 5) &&
         timing.modelApproachFloorPermille === floor &&
         timing.effectiveApproachFloorPermille === floor))
   )
@@ -716,6 +716,45 @@ export function verifyTimingSamples(
   const reasons: string[] = []
   if (!timing || !supportedTimingPolicy(timing))
     return { verified: false, source: 'trial_samples', reasons: ['unsupported_timing_policy'] }
+  const ppsPauses = new Set<JsonObject>()
+  if (timing.policyVersion === 5) {
+    let lastRequest: number | null = null
+    let lastAccepted: number | null = null
+    let edge: number | null = null
+    for (const sample of samples) {
+      const time = numeric(sample.elapsedMs)
+      const request = numeric(sample.ppsRequestedMv)
+      if (time == null) continue
+      if (lastRequest != null && request != null && request !== lastRequest) edge = time
+      lastRequest = request
+      if (sample.measurementValid === true && sample.measurementAccepted !== false) {
+        if (lastAccepted != null && time > lastAccepted && edge !== time) edge = null
+        lastAccepted = time
+        continue
+      }
+      const temp = numeric(sample.temperatureCentiC)
+      const raw = numeric(sample.rawTemperatureCentiC)
+      if (
+        sample.measurementValid === true &&
+        edge != null &&
+        time >= edge &&
+        time - edge <= 1_000 &&
+        lastAccepted != null &&
+        time >= lastAccepted &&
+        time - lastAccepted <= 1_000 &&
+        temp != null &&
+        raw != null &&
+        Math.abs(temp - Number(target) * 100) <= 150 &&
+        Math.abs(raw - Number(target) * 100) <= 150 &&
+        Math.abs(raw - temp) <= 50
+      ) {
+        ppsPauses.add(sample)
+      } else {
+        edge = null
+        lastAccepted = null
+      }
+    }
+  }
   const exit = numeric(timing.warmupExitedAtMs)
   const deadline = exit == null ? null : exit + Number(timing.originalLimitMs)
   const firstCheck =
@@ -750,6 +789,7 @@ export function verifyTimingSamples(
       )
         reasons.push('floor_request_raised_before_deadline')
       if (exit == null || time < exit) continue
+      if (ppsPauses.has(sample)) continue
       if (lastTime != null && time - lastTime > 1_000) stableStart = null
       lastTime = time
       if (
@@ -785,7 +825,11 @@ export function verifyTimingSamples(
       : samples.filter(
           (sample) => Number(sample.elapsedMs) >= start && Number(sample.elapsedMs) <= verified
         )
-  const times = [...new Set(window.map((sample) => Number(sample.elapsedMs)))]
+  const times = [
+    ...new Set(
+      window.filter((sample) => !ppsPauses.has(sample)).map((sample) => Number(sample.elapsedMs))
+    ),
+  ]
   if (
     start == null ||
     verified == null ||
@@ -798,10 +842,11 @@ export function verifyTimingSamples(
     ) ||
     window.some(
       (sample) =>
-        sample.measurementValid !== true ||
-        sample.measurementAccepted === false ||
-        typeof sample.temperatureCentiC !== 'number' ||
-        Math.abs(sample.temperatureCentiC - Number(target) * 100) > 150
+        !ppsPauses.has(sample) &&
+        (sample.measurementValid !== true ||
+          sample.measurementAccepted === false ||
+          typeof sample.temperatureCentiC !== 'number' ||
+          Math.abs(sample.temperatureCentiC - Number(target) * 100) > 150)
     )
   )
     reasons.push('stable_window_not_verified_from_samples')
