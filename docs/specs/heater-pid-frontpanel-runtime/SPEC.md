@@ -346,6 +346,12 @@ None
 
 ## Visual Evidence
 
+- 标准 HIL 报告的桌面与移动视图展示吸顶目标／试验选择器、按 Warmup／Approach／Hold 分组的实际控制参数，以及阶段边界。来源为 `firmware/target/hil-preservation-review-bundle/index.html`；桌面截图为 `2320×1369`，移动视口为 `393×852`，两张截图均经 owner 确认。截图中的 `adopted` 与 `60s` 保留设备历史判定，不构成连续 Hold 合格证明；相关判定缺陷与资格撤回见 [HIL-CALIBRATED-AFTERHEAT.md](./HIL-CALIBRATED-AFTERHEAT.md)。
+
+![Grouped trial parameters desktop](./assets/pps-trial-parameters-desktop.png)
+
+![Grouped trial parameters mobile](./assets/pps-trial-parameters-mobile.png)
+
 - 条件延长报告：真实诊断运行 `firmware-pps5a-1791049262325` 经标准 `render-v2` 生成，桌面 `1440×1000` 与移动 `393×852` 截图均经 owner 确认。60°C trial 6 显示原始 10 秒门槛、实际下限观察、条件触发、30 秒上限与独立 60 秒确认；诊断范围不构成默认九目标资格。两张截图仅验证报告呈现，未裁剪、未重绘。
 
 ![Conditional extension report desktop](./assets/conditional-extension-desktop.png)
