@@ -2,7 +2,7 @@
 
 ## 结论与产物
 
-完整余热预测、最晚Warmup交接和同轮制动搜索修正已实现，八目标HIL资格仍未取得，没有保存调优候选。实现与模型边界见[NATURAL-COOLING-CONTROL.md](NATURAL-COOLING-CONTROL.md)。
+完整余热预测、最晚Warmup交接、同轮制动搜索和PPS采样连续性修正已实现。A组在`19d8f76d96ea349696845e813081b05f808cb49e`完成八目标独立确认，候选经匹配的原子保存与读回验证写入EEPROM；历史失败记录仍保留原判定。实现与模型边界见[NATURAL-COOLING-CONTROL.md](NATURAL-COOLING-CONTROL.md)。
 
 生产实现提交为`fde397adb9a96891bc835d8807dede17f02ad5bc`，PI初始化时间尺度文档为`b0e8ca74`，同轮制动反馈修正为`c6affb72e2f309756ebf4bcd5f4c1f83d25bee4a`。测试数据的ADC偏移反算修正提交为`205405b947896b706f4f8b215ab843421205aab0`。未导入历史调优候选，初值只来自设备绑定的标定事务。
 
@@ -70,3 +70,40 @@
 搜索随后以`candidate_search_exhausted_no_distinct_safe_proposal`结束220°C，120/80/100/160/140/180°C均以`interval_pruned_without_accepted_bounds`跳过，没有实际运行。这是已运行目标的采样连续性失败及后续无新候选的搜索终态，不能归因为本轮出现异常高温，也不证明硬件无法加热到220°C。PPS等待样本不得跨接连续资格；要取得通过，仍需新候选的完整实测窗口与独立确认，不能冻结PPS或放宽门槛来改判现有轨迹。
 
 0..3874共3875个事件连续，设备摘要与标准报告五文件摘要分别验证通过，标准报告trace摘要为`ef54aaf727d0c404da2053c927e87a1bb74b1081323fa9b718b515b779ac3896`，结果为failed／review complete。逐样本审计未发现全速冷却、正常Approach下限、固定Hold入口、标定初值或已接纳目标门禁违规；这不是八目标全部通过的证明。原始目录为`firmware/target/hil-fresh-calibrated-afterheat-a-77c0366b-retry/firmware-pps5a-1792121119665`，标准报告为`firmware/target/hil-fresh-calibrated-afterheat-a-77c0366b-retry-bundle/index.html`。没有EEPROM候选保存，终态读回heater disabled、MOS0、preview关闭、无手动PPS覆盖，保留全速散热至既有释放门槛。冷却后再次读回30.27°C、MOS0、无测温守卫或故障，风扇已按规则释放，合同恢复5V Fixed待机。
+
+## 有界PPS采样暂停的资格连续性
+
+固件`a9cecdfa35f8b75904e9a2d98b26a8dd680a036e`采用policy 5：已识别的PPS采样暂停只在原最大1秒接纳样本间隔内保留窗口起点，拒收值不成为样本见证；窗口仍须满足真实接纳样本密度、原始期限及完整10秒验证。CLI与固件共用连续性分类器，Web导出按相同规则复核，policy 2–4的历史结果不改判。相关固件、CLI、报告与Web共280项测试通过，完整功能release构建、原生目标严格Clippy及boot-stack检查通过；全库Rust样式检查仍受未修改的`calibration_cutoff_fixture.rs`解析问题阻断，不声称全仓检查通过。
+
+原端口无备份自动烧录完成并读回`0.27.7-dev.a9cecdf`及完整提交身份；ELF SHA-256为`b9a068a46ab992384198763ce025062aedbea10774f0b4a9236ae0f6790c585d`，镜像占1792144/2097152字节，CPU0栈及嵌套PD中断余量分别为85340B、84748B。没有EEPROM备份归档，EEPROM整体健康状态未知；B组未被操作。3328mV、`−11000µV`、HOT=LOW、标定事务`1346461204`保持，运行`firmware-pps5a-1792125697895`仅以该标定生成初值，没有导入历史调优候选。
+
+60°C的trial3完成独立60秒确认，过冲0.85°C、Hold峰峰值1.34°C、稳定窗口起点9106ms，原期限10000ms，无条件延长。220°C的trial1也完成独立60秒确认，过冲1.00°C、Hold峰峰值2.42°C；窗口在Warmup退出后674ms开始，连续10135ms后验证，原期限5000ms，无条件延长。220°C确认中，sequence2214–2216分别为525883、526012、526127ms的PPS恢复21V采样等待，控制温度219.46°C、原始温度219.74–219.78°C，`measurementAccepted=false`完整保留；这些拒收值没有增加有效样本数，也没有清空此前真实窗口。验证完成时间527084ms来自后续真实接纳样本。这直接覆盖了旧运行在期限之后因正常PPS等待错误清空未完成窗口的失败路径，局部通过不代替整轮八目标资格。
+
+100°C的trial0暴露请求与合同异步生效的遗漏：sequence6688在1581219ms接纳99.49°C，请求已从13.5V改为13V而确认合同仍为13.5V；sequence6690在1581341ms接纳99.51°C并看到13V合同；sequence6691在1581458ms进入采样等待，控制99.51°C、原始99.62°C。只跟踪请求的分类器在中间接纳样本处过早清除边沿，导致下一条正常暂停清空稳定起点；此时已超过1581177ms原期限，试验立即失败，随后搜索耗尽。热端没有越出98.5–101.5°C稳定带，这一失败不能解释成实际失稳。`19d8f76d`同时跟踪请求与匹配的已确认合同边沿；实际时序的分类与运行时回归，以及CLI/Web一致性向量均通过，仍拒绝未知/不匹配合同、原始尖峰和超过1秒的暂停。该修正不改写原失败，须由新产物HIL重新建立资格。
+
+该轮八目标全部实际运行，60/80/120/140/160/180/220°C完成独立60秒确认，仅100°C失败，整轮failed，未保存EEPROM候选。其它确认的过冲／Hold峰峰值／原期限内稳定起点分别为80°C：1.12°C／1.62°C／6935ms；120°C：1.28°C／2.09°C／3348ms；140°C：1.02°C／1.84°C／8055ms；160°C：0.95°C／1.80°C／2066ms；180°C：1.11°C／1.98°C／3313ms。事件0..9834连续，设备摘要独立核验通过，标准五文件报告摘要为`6cce6cefa7bb4cf2b0f65799fecbde9bd00bda1653b87b17e9ea6c5f9c0e97c8`，review complete；原始记录与报告分别保存在`firmware/target/hil-pps-continuity-a-a9cecdfa-full/firmware-pps5a-1792125697895`及`firmware/target/hil-pps-continuity-a-a9cecdfa-full-bundle/index.html`。终态读回heater disabled、MOS0、preview关闭、无手动PPS覆盖，全速散热仍在执行。
+
+`19d8f76d96ea349696845e813081b05f808cb49e`的283项相关固件、CLI、报告与Web测试、严格Clippy、完整功能release及栈检查通过。ELF SHA-256为`ae6f40bc077280e4516e050b04c5608027e19c096c96e37a1cd2e68e8733b20e`，镜像1792128/2097152字节，CPU0及嵌套PD中断余量分别85340B、84748B。第一次烧录返回USB身份复核失败，随后只读枚举确认原精确端口和USB序列号仍在；应用读取超时后，同一端口的标准无备份烧录重试完成，设备读回`0.27.7-dev.19d8f76`及完整SHA，没有端口切换或EEPROM备份归档。启动后的首个测试尝试在加热前因缺少PPS能力停止；原始记录`firmware-pps5a-1792128293388`保留，不能视为温控试验失败或完整trace。对已授权A组电源`f293cc9c139e`的USB-C供电重新上电后，原端口及USB身份保持，设备恢复21V/5A PPS能力；当前Fixed待机合同不替代或限制该能力判断。
+
+运行`firmware-pps5a-1792128448518`的100°C trial7完成独立60秒确认，过冲0.92°C、峰峰值1.50°C，稳定窗在Warmup退出后8007ms开始、连续10010ms后验证，原10000ms期限不延长。该窗口有40个真实接纳样本、3个拒收值，最大接纳间隔587ms。sequence9039在2128223ms接纳99.11°C并请求14.5V，确认合同仍15V；sequence9041又接纳99.52°C、合同仍15V；sequence9042–9044才观察到14.5V合同并进入采样等待，控制99.52°C、原始99.17–99.36°C。对应合同边沿使先前真实窗口得到保留，拒收值没有成为样本见证；sequence9045于2128911ms以真实99.42°C恢复接纳。它直接覆盖“请求后还有接纳样本、合同随后才生效”的遗漏路径，资格仍由后续真实样本完成。
+
+## 八目标独立确认与EEPROM保存
+
+运行`firmware-pps5a-1792128448518`以同一标定事务`1346461204`初始化，全部八个目标实际运行并完成独立60秒确认；没有导入历史调优候选。每个接纳试验的采样时序均由CLI根据原始样本独立验证通过，稳定窗口起点满足原期限，没有使用条件延长。trial编号从0开始，60/80/100°C分别在trial3/6/7取得最终确认；这些结果不构成“三轮内必然收敛”的证明。
+
+| 目标 | 独立确认trial | 过冲 | Hold峰峰值 | 稳定窗口起点距Warmup退出 | 原期限 |
+| --- | --- | --- | --- | --- | --- |
+| 60°C | 3 | 1.00°C | 1.51°C | 8691ms | 10000ms |
+| 80°C | 6 | 1.00°C | 1.45°C | 7964ms | 10000ms |
+| 100°C | 7 | 0.92°C | 1.50°C | 8007ms | 10000ms |
+| 120°C | 2 | 0.90°C | 1.71°C | 4690ms | 10000ms |
+| 140°C | 2 | 1.03°C | 2.45°C | 4656ms | 10000ms |
+| 160°C | 1 | 0.45°C | 1.44°C | 3961ms | 5000ms |
+| 180°C | 1 | 0.99°C | 1.95°C | 2600ms | 5000ms |
+| 220°C | 1 | 0.73°C | 2.62°C | 0ms | 5000ms |
+
+设备返回`candidate_ready`后，使用标准`thermal confirm-firmware-save`对同一run、candidate及pps5a功率级执行seal、事件确认、原子保存和读回核验。保存回执为`bank=pps5a`、`bankRevision=64`、`atomic=true`、`readbackVerified=true`；candidateHash与bankHash均为`sha256:05dec9f8ebfaca2febc84cdda551773c512c075ab1026731c9ce6f4ff6734034`。完整事件0..11466连续，设备trace验证通过，标准报告结果为passed／review complete，trace摘要为`bf88e31cd6cc1a44599de2aa6f44f3da5e37d537fee51ec0f8d242450cfffe55`。
+
+原始目录为`firmware/target/hil-pps-applied-continuity-a-19d8f76d-retry/firmware-pps5a-1792128448518`，匹配保存回执的五文件报告为`firmware/target/hil-pps-applied-continuity-a-19d8f76d-retry-saved-bundle/index.html`。保存后设备读回`profileSource=saved`、`profileActive=true`、`profileCoversTarget=true`、preview关闭、无手动PPS覆盖；停热全速散热后读到34.45°C、MOS0，风扇按既有门槛释放。B组保持未操作。
+
+随后仅对A组已授权USB-C供电断电／上电，原串口及USB序列号保持，设备身份读回同一完整SHA、`resetReason=chip_power_on`。在始终停热状态下临时选择180°C，设备从`saved`来源读出的全部候选字段与报告180°C点一致，包括制动距离364、Hold基线423‰、Kp16和Ki1；目标随后恢复启动时的59°C。59°C低于60°C最低锚点，`profileCoversTarget=false`不表示保存失败。终态读回38.24°C、heater disabled、MOS0、preview关闭、无手动PPS覆盖、风扇关闭，Fixed5V待机，PPS能力仍为21V/5A。该读回证明断电持久化与参数加载，不构成新的测温精度或59°C温控资格验证。
