@@ -5333,7 +5333,7 @@ async fn spawn_flaky_thermal_status_server(
 
 #[tokio::test]
 async fn thermal_status_retry_recovers_after_single_timeout() {
-    let (resolved, attempts, server) = spawn_flaky_thermal_status_server(1, 150).await;
+    let (resolved, attempts, server) = spawn_flaky_thermal_status_server(1, 1_500).await;
     let client = Client::new();
     client
         .get(format!("{}/ready", resolved.devd))
@@ -5345,7 +5345,7 @@ async fn thermal_status_retry_recovers_after_single_timeout() {
         &client,
         &resolved,
         "lease-test",
-        Duration::from_millis(50),
+        Duration::from_millis(500),
         2,
     )
     .await
@@ -5359,7 +5359,7 @@ async fn thermal_status_retry_recovers_after_single_timeout() {
 
 #[tokio::test]
 async fn thermal_status_retry_recovers_after_transient_usb_burst() {
-    let (resolved, attempts, server) = spawn_flaky_thermal_status_server(4, 150).await;
+    let (resolved, attempts, server) = spawn_flaky_thermal_status_server(4, 1_500).await;
     let client = Client::new();
     client
         .get(format!("{}/ready", resolved.devd))
@@ -5371,7 +5371,7 @@ async fn thermal_status_retry_recovers_after_transient_usb_burst() {
         &client,
         &resolved,
         "lease-test",
-        Duration::from_millis(50),
+        Duration::from_millis(500),
         5,
     )
     .await
