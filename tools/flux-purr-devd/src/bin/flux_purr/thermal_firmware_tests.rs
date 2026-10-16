@@ -819,6 +819,7 @@ fn explicit_save_requires_verified_candidate_and_matching_preview_receipt() {
                 "holdPeakToPeakC": 1.8,
                 "canonicalCandidate": {"point": {"approachFloorPowerPermille": 100, "holdPowerPermille": 100}},
                 "timingEvidenceVerification": {"verified": true},
+                "holdEvidenceVerification": {"verified": true, "continuousHoldMs": 60000},
                 "timing": {"policyVersion": 2, "originalLimitMs": super::original_settle_limit_ms(*target),
                     "extensionLimitMs": super::original_settle_limit_ms(*target) * 3,
                     "allowedApproachFloorPermille": 100, "effectiveApproachFloorPermille": 100,
@@ -1588,6 +1589,23 @@ fn confirmed_trial_projection_preserves_bound_target_and_timing() {
     assert_eq!(runs[0]["adoptedTrialIndex"], 1);
     assert_eq!(runs[0]["trials"][0]["targetC"], 60);
     assert!(super::adopted_trial_passes_gates(&runs[0]["trials"][0]));
+    let mut recovering = samples.clone();
+    for sample in &mut recovering {
+        let time = sample["elapsedMs"].as_u64().unwrap();
+        if (30_000..32_000).contains(&time) {
+            sample["phase"] = json!("approach");
+        }
+    }
+    let rejected = build_report_runs(&[60], &recovering, &ledger, "candidate-1", "hash-1");
+    let trial = &rejected[0]["trials"][0];
+    assert_eq!(trial["disposition"], "adopted");
+    assert_eq!(trial["deviceHoldConfirm"], true);
+    assert_eq!(trial["reviewOutcome"], "failed");
+    assert_eq!(
+        trial["holdEvidenceVerification"]["continuousHoldMs"],
+        41_000
+    );
+    assert!(trial["metrics"]["holdConfirmSeconds"].is_null());
     for (sample_index, field, value) in [
         (2, "heaterRequestedOutputPermille", json!(225)),
         (2, "measurementValid", json!(false)),
@@ -1601,6 +1619,64 @@ fn confirmed_trial_projection_preserves_bound_target_and_timing() {
         assert_eq!(runs[0]["reviewOutcome"], "failed", "{field}");
         assert_eq!(runs[0]["trials"][0]["disposition"], "adopted");
     }
+}
+
+#[test]
+fn continuous_hold_verification_preserves_only_bounded_pps_pauses() {
+    let timing: super::ThermalTuningTimingEvidence = serde_json::from_value(json!({
+        "policyVersion": 5, "originalLimitMs": 5000, "extensionLimitMs": 15000,
+        "allowedApproachFloorPermille": 50, "effectiveApproachFloorPermille": 50,
+        "modelApproachFloorPermille": 50, "configuredApproachFloorPermille": 50
+    }))
+    .unwrap();
+    let mut samples: Vec<Value> = (0..=240)
+        .map(|index| {
+            json!({
+                "sequence": index, "elapsedMs": index * 250, "phase": "hold",
+                "temperatureCentiC": 22000, "rawTemperatureCentiC": 22000,
+                "measurementValid": true, "measurementAccepted": true,
+                "ppsRequestedMv": if index < 120 { 21000 } else { 20500 },
+                "ppsContractMv": if index < 120 { 21000 } else { 20500 },
+                "ppsContractConfirmed": true
+            })
+        })
+        .collect();
+    samples[120]["measurementAccepted"] = json!(false);
+    let verify = |samples: &[Value]| {
+        super::verify_hold_samples(Some(&timing), 220, &samples.iter().collect::<Vec<_>>())
+    };
+    assert_eq!(verify(&samples)["verified"], true);
+    for field in ["ppsRequestedMv", "ppsContractMv"] {
+        for invalid in [json!(20500.5), json!(-1), json!(65536)] {
+            let mut malformed = samples.clone();
+            for sample in &mut malformed {
+                sample["ppsRequestedMv"] = json!(21000);
+                sample["ppsContractMv"] = json!(21000);
+            }
+            for sample in malformed.iter_mut().take(120) {
+                sample[field] = invalid.clone();
+            }
+            assert_eq!(verify(&malformed)["verified"], false, "{field}={invalid}");
+        }
+    }
+    samples[120]["phase"] = json!("approach");
+    assert_eq!(verify(&samples)["verified"], false);
+    samples[120]["phase"] = json!("hold");
+    samples[120]["measurementValid"] = json!(false);
+    assert_eq!(verify(&samples)["verified"], false);
+    samples[120]["measurementValid"] = json!(true);
+    let mut missing = samples.clone();
+    missing.drain(118..124);
+    assert_eq!(verify(&missing)["verified"], false);
+    let sparse: Vec<_> = samples.iter().step_by(2).cloned().collect();
+    assert_eq!(verify(&sparse)["verified"], false);
+    for field in ["temperatureCentiC", "rawTemperatureCentiC"] {
+        let mut malformed = samples.clone();
+        malformed[120][field] = json!(22000.5);
+        assert_eq!(verify(&malformed)["verified"], false, "{field}");
+    }
+    samples[120]["elapsedMs"] = samples[119]["elapsedMs"].clone();
+    assert_eq!(verify(&samples)["reasons"][0], "invalid_sample_order");
 }
 
 #[test]

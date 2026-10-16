@@ -1,6 +1,8 @@
 # Heater PID frontpanel runtime implementation
 
-当前代码保留模型调优、PPS采样连续性、八目标报告和EEPROM保存链路；A组设备接纳记录仍有连续Hold资格缺口：220°C确认曾退出Hold，随后沿用首次入口计时，不能证明连续60秒Hold。整轮HIL通过声明已撤回，原始事件和保存凭据保留，具体分段及后续整改见[HIL-CALIBRATED-AFTERHEAT.md](HIL-CALIBRATED-AFTERHEAT.md)。
+当前代码保留模型调优、PPS采样连续性、八目标报告和EEPROM保存链路。固件在任何非Hold阶段样本上重置当前保温计时，重新满足物理入口后重新计时；已完成的稳定窗口和累计温度极值保留。搜索反馈独立保留已观测的完整12秒片段，不把它用于当前片段的通过判定。CLI与Web从原始样本核验末段连续60秒、采样密度、时序及有界PPS暂停，设备声明不能代替该证据或取得保存资格。
+
+A组历史220°C确认曾退出Hold，随后沿用首次入口计时，不能证明连续60秒Hold。原始八目标样本复核显示60–180°C七个确认片段各有60.088–60.282秒，220°C末段仅41.117秒而被拒绝。整轮HIL通过声明仍撤回；原始事件和保存凭据保留，新固件的真机资格仍待验证，具体分段见[HIL-CALIBRATED-AFTERHEAT.md](HIL-CALIBRATED-AFTERHEAT.md)。
 
 Web固件调优工作区使用独立`firmware-tuning`路由，键盘标签切换及浏览器历史保持该路由。未选中时面板保留挂载以维持运行状态，同时退出布局，避免挤压加热曲线标定的温度轨迹和代表点表格。报告参数按Warmup、Approach和Hold分组，历史设备接纳标记不能替代连续Hold验收。
 

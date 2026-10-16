@@ -404,6 +404,7 @@ function buildTrial(
         ? decisionTiming
         : { availability: 'mismatched_device_timing_evidence' }
       : null
+  const holdEvidenceVerification = verifyHoldSamples(timing, event.targetC, trialSamples)
   const metrics = {
     warmupRequestedOutputPermille: warmupRequest,
     phasePath,
@@ -412,8 +413,9 @@ function buildTrial(
     holdConfirmSeconds:
       trial.purpose === 'hold_confirm' &&
       result.purpose === 'hold_confirm' &&
-      result.holdConfirm === true
-        ? 60
+      result.holdConfirm === true &&
+      holdEvidenceVerification.verified
+        ? holdEvidenceVerification.continuousHoldMs / 1_000
         : null,
     fullSpeedToStable,
   }
@@ -425,6 +427,8 @@ function buildTrial(
     candidateHash: candidate.candidateHash ?? fallbackHash,
     disposition,
     reviewOutcome: 'failed',
+    deviceHoldConfirm: result.holdConfirm === true,
+    holdEvidenceVerification,
     metrics,
     warmupRequestedOutputPermille: warmupRequest,
     maxOvershootC,
@@ -602,7 +606,9 @@ function trialPassesGates(trial: ReturnType<typeof buildTrial>): boolean {
     trial.maxOvershootC <= 3 &&
     trial.holdPeakToPeakC != null &&
     trial.holdPeakToPeakC <= 3 &&
-    trial.metrics.holdConfirmSeconds === 60 &&
+    trial.metrics.holdConfirmSeconds != null &&
+    trial.metrics.holdConfirmSeconds >= 60 &&
+    trial.holdEvidenceVerification.verified &&
     typeof gate.settleTimeMs === 'number' &&
     typeof gate.limitMs === 'number' &&
     gate.settleTimeMs <= gate.limitMs
@@ -708,24 +714,23 @@ export function timingGateValid(trial: JsonObject) {
   )
 }
 
-export function verifyTimingSamples(
-  timing: JsonObject | null,
-  target: unknown,
-  samples: JsonObject[]
-) {
-  const reasons: string[] = []
-  if (!timing || !supportedTimingPolicy(timing))
-    return { verified: false, source: 'trial_samples', reasons: ['unsupported_timing_policy'] }
+function qualificationPpsPauses(timing: JsonObject | null, target: unknown, samples: JsonObject[]) {
   const ppsPauses = new Set<JsonObject>()
-  if (timing.policyVersion === 5) {
+  const voltage = (value: unknown) => {
+    const parsed = numeric(value)
+    return parsed != null && Number.isInteger(parsed) && parsed >= 0 && parsed <= 65_535
+      ? parsed
+      : null
+  }
+  if (timing?.policyVersion === 5) {
     let lastRequest: number | null = null
     let lastContract: number | null = null
     let lastAccepted: number | null = null
     let edge: number | null = null
     for (const sample of samples) {
       const time = numeric(sample.elapsedMs)
-      const request = numeric(sample.ppsRequestedMv)
-      const contract = sample.ppsContractConfirmed === true ? numeric(sample.ppsContractMv) : null
+      const request = voltage(sample.ppsRequestedMv)
+      const contract = sample.ppsContractConfirmed === true ? voltage(sample.ppsContractMv) : null
       if (time == null) continue
       if (
         (lastRequest != null && request != null && request !== lastRequest) ||
@@ -753,7 +758,13 @@ export function verifyTimingSamples(
         time >= lastAccepted &&
         time - lastAccepted <= 1_000 &&
         temp != null &&
+        Number.isInteger(temp) &&
+        temp >= -32_768 &&
+        temp <= 32_767 &&
         raw != null &&
+        Number.isInteger(raw) &&
+        raw >= -32_768 &&
+        raw <= 32_767 &&
         Math.abs(temp - Number(target) * 100) <= 150 &&
         Math.abs(raw - Number(target) * 100) <= 150 &&
         Math.abs(raw - temp) <= 50
@@ -765,6 +776,96 @@ export function verifyTimingSamples(
       }
     }
   }
+  return ppsPauses
+}
+
+export function verifyHoldSamples(
+  timing: JsonObject | null,
+  target: unknown,
+  samples: JsonObject[]
+) {
+  const evidence = {
+    verified: false,
+    source: 'trial_samples',
+    continuousHoldMs: 0,
+    longestHoldMs: 0,
+    reasons: [] as string[],
+  }
+  if (!timing || !supportedTimingPolicy(timing)) {
+    evidence.reasons.push('unsupported_timing_policy')
+    return evidence
+  }
+  const targetC = numeric(target)
+  if (targetC == null || !Number.isInteger(targetC) || targetC < -32_768 || targetC > 32_767) {
+    evidence.reasons.push('invalid_target')
+    return evidence
+  }
+  const pauses = qualificationPpsPauses(timing, target, samples)
+  let start: number | null = null
+  let lastFresh: number | null = null
+  let previous: { sequence: number; time: number } | null = null
+  let count = 0
+  for (const sample of samples) {
+    const time = numeric(sample.elapsedMs)
+    const sequence = numeric(sample.sequence)
+    if (
+      time == null ||
+      sequence == null ||
+      !Number.isSafeInteger(time) ||
+      !Number.isSafeInteger(sequence) ||
+      time < 0 ||
+      sequence < 0 ||
+      (previous != null && (time <= previous.time || sequence <= previous.sequence))
+    ) {
+      evidence.reasons.push('invalid_sample_order')
+      return evidence
+    }
+    previous = { sequence, time }
+    const temperature = numeric(sample.temperatureCentiC)
+    const fresh =
+      sample.measurementValid === true &&
+      sample.measurementAccepted !== false &&
+      temperature != null &&
+      Number.isInteger(temperature) &&
+      temperature >= -32_768 &&
+      temperature <= 32_767
+    const pause = pauses.has(sample)
+    if (
+      sample.phase !== 'hold' ||
+      (!fresh && !pause) ||
+      (lastFresh != null && time - lastFresh > 1_000)
+    ) {
+      start = null
+      lastFresh = null
+      count = 0
+      evidence.continuousHoldMs = 0
+    }
+    if (sample.phase !== 'hold' || !fresh) continue
+    const error = targetC * 100 - Number(temperature)
+    if (start == null && error >= -300 && error <= 50) start = time
+    if (start != null) {
+      lastFresh = time
+      count += 1
+      evidence.continuousHoldMs = time - start
+      if ((count - 1) * 1_000 >= evidence.continuousHoldMs * 3)
+        evidence.longestHoldMs = Math.max(evidence.longestHoldMs, evidence.continuousHoldMs)
+    }
+  }
+  evidence.verified =
+    evidence.continuousHoldMs >= 60_000 && (count - 1) * 1_000 >= evidence.continuousHoldMs * 3
+  if (!evidence.verified) evidence.reasons.push('continuous_hold_not_verified_from_samples')
+  return evidence
+}
+
+export function verifyTimingSamples(
+  timing: JsonObject | null,
+  target: unknown,
+  samples: JsonObject[]
+) {
+  const reasons: string[] = []
+  if (!timing || !supportedTimingPolicy(timing))
+    return { verified: false, source: 'trial_samples', reasons: ['unsupported_timing_policy'] }
+  const ppsPauses = qualificationPpsPauses(timing, target, samples)
   const exit = numeric(timing.warmupExitedAtMs)
   const deadline = exit == null ? null : exit + Number(timing.originalLimitMs)
   const firstCheck =

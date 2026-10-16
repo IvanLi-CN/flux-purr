@@ -6,12 +6,103 @@ import type { ThermalTuningRecording } from './thermal-tuning-recorder'
 import {
   exportThermalTuningV2,
   timingGateValid,
+  verifyHoldSamples,
   verifyTimingSamples,
 } from './thermal-tuning-v2-export'
 
 const TARGETS = [60, 80, 100, 120, 140, 160, 180, 220]
 const EXECUTION_ORDER = [60, 220, 120, 80, 100, 160, 140, 180]
 const CANDIDATE_HASH = `sha256:${'a'.repeat(64)}`
+
+describe('continuous Hold evidence', () => {
+  const timing = {
+    policyVersion: 5,
+    modelApproachFloorPermille: 50,
+    allowedApproachFloorPermille: 50,
+    effectiveApproachFloorPermille: 50,
+  }
+  const observation = (time: number, sequence: number, phase = 'hold') => ({
+    sequence,
+    elapsedMs: time,
+    phase,
+    temperatureCentiC: 22_000,
+    rawTemperatureCentiC: 22_000,
+    measurementValid: true,
+    measurementAccepted: true,
+    ppsRequestedMv: 21_000,
+    ppsContractMv: 21_000,
+    ppsContractConfirmed: true,
+  })
+  const continuous = () =>
+    Array.from({ length: 241 }, (_, index) => observation(index * 250, index))
+
+  it('rejects the recorded 14.133s and 41.117s Hold shape instead of adding segments', () => {
+    const samples: ReturnType<typeof observation>[] = []
+    for (const [start, end, phase] of [
+      [39_195, 53_328, 'hold'],
+      [53_328, 58_084, 'approach'],
+      [58_084, 99_201, 'hold'],
+    ] as const) {
+      for (let time = start; time < end; time += 250)
+        samples.push(observation(time, samples.length, phase))
+    }
+    samples.push(observation(99_201, samples.length))
+    const result = verifyHoldSamples(timing, 220, samples)
+    expect(result).toMatchObject({
+      verified: false,
+      continuousHoldMs: 41_117,
+      longestHoldMs: 41_117,
+    })
+    for (let time = 99_334; time <= 118_084; time += 250)
+      samples.push(observation(time, samples.length))
+    expect(verifyHoldSamples(timing, 220, samples).verified).toBe(true)
+  })
+
+  it('keeps a bounded PPS pause but rejects a phase exit, bad observation, missing interval or disorder', () => {
+    const samples = continuous()
+    samples[120].ppsRequestedMv = 20_500
+    samples[120].ppsContractMv = 20_500
+    samples[120].measurementAccepted = false
+    for (const sample of samples.slice(121)) {
+      sample.ppsRequestedMv = 20_500
+      sample.ppsContractMv = 20_500
+    }
+    expect(verifyHoldSamples(timing, 220, samples).verified).toBe(true)
+    for (const field of ['temperatureCentiC', 'rawTemperatureCentiC'] as const) {
+      const malformedPause = structuredClone(samples)
+      malformedPause[120][field] = 22_000.5
+      expect(verifyHoldSamples(timing, 220, malformedPause).verified).toBe(false)
+    }
+    const phaseExit = structuredClone(samples)
+    phaseExit[120].phase = 'approach'
+    expect(verifyHoldSamples(timing, 220, phaseExit).verified).toBe(false)
+    const rejected = continuous()
+    rejected[120].measurementAccepted = false
+    expect(verifyHoldSamples(timing, 220, rejected).verified).toBe(false)
+    const missing = continuous().filter((_, index) => index < 118 || index > 123)
+    expect(verifyHoldSamples(timing, 220, missing).verified).toBe(false)
+    const duplicate = continuous()
+    duplicate[120].elapsedMs = duplicate[119].elapsedMs
+    expect(verifyHoldSamples(timing, 220, duplicate).reasons).toContain('invalid_sample_order')
+    const sparse = continuous().filter((_, index) => index % 2 === 0)
+    expect(verifyHoldSamples(timing, 220, sparse).verified).toBe(false)
+    const malformed = continuous()
+    malformed[120].temperatureCentiC = 22_000.5
+    expect(verifyHoldSamples(timing, 220, malformed).verified).toBe(false)
+    expect(verifyHoldSamples(timing, null, continuous()).verified).toBe(false)
+  })
+
+  it('does not manufacture a PPS pause from malformed request or contract voltages', () => {
+    for (const field of ['ppsRequestedMv', 'ppsContractMv'] as const) {
+      for (const invalid of [20_500.5, -1, 65_536]) {
+        const samples = continuous()
+        for (const sample of samples.slice(0, 120)) sample[field] = invalid
+        samples[120].measurementAccepted = false
+        expect(verifyHoldSamples(timing, 220, samples).verified).toBe(false)
+      }
+    }
+  })
+})
 
 function event(
   sequence: number,

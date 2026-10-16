@@ -494,6 +494,7 @@ pub struct ThermalTuningRuntime {
     pub saw_approach: bool,
     pub saw_hold: bool,
     pub first_hold_elapsed_ms: Option<u64>,
+    longest_qualified_hold_ms: u64,
     pub warmup_exited_at_ms: Option<u64>,
     pub stable_window_started_at_ms: Option<u64>,
     pub stable_window_verified_at_ms: Option<u64>,
@@ -607,6 +608,7 @@ impl ThermalTuningRuntime {
         saw_approach: false,
         saw_hold: false,
         first_hold_elapsed_ms: None,
+        longest_qualified_hold_ms: 0,
         warmup_exited_at_ms: None,
         stable_window_started_at_ms: None,
         stable_window_verified_at_ms: None,
@@ -2153,9 +2155,9 @@ impl ThermalTuningRuntime {
                 .zip(self.warmup_exited_at_ms)
                 .map(|(stable, warmup)| stable.saturating_sub(warmup)),
             settle_limit_ms: u64::from(full_speed_limit_ms),
-            scout_hold_complete: self.first_hold_elapsed_ms.is_some_and(|started| {
-                self.current_elapsed_ms.saturating_sub(started) >= THERMAL_TUNING_SCOUT_HOLD_MS
-            }),
+            // Search may use an already observed uninterrupted 12s segment;
+            // trial completion still requires the current segment's clock.
+            scout_hold_complete: self.longest_qualified_hold_ms >= THERMAL_TUNING_SCOUT_HOLD_MS,
             stable_window_verified: self.stable_window_verified_at_ms.is_some(),
             first_band_observed: self.first_band_elapsed_ms.is_some(),
             first_band_exit_centi_c: self.first_band_exit_centi_c,
@@ -2189,6 +2191,7 @@ impl ThermalTuningRuntime {
         self.saw_approach = false;
         self.saw_hold = false;
         self.first_hold_elapsed_ms = None;
+        self.longest_qualified_hold_ms = 0;
         self.warmup_exited_at_ms = None;
         self.stable_window_started_at_ms = None;
         self.stable_window_verified_at_ms = None;
@@ -2653,7 +2656,7 @@ impl ThermalTuningRuntime {
             self.approach_curve_closed = sample.phase == ThermalTuningPhase::Hold;
         }
         self.record_controller_hold_output(sample, expected_target);
-        if self.first_hold_elapsed_ms.is_some() {
+        if self.first_hold_elapsed_ms.is_some() || self.min_hold_temperature_centi_c.is_some() {
             self.min_hold_temperature_centi_c = Some(
                 self.min_hold_temperature_centi_c
                     .map_or(sample.temperature_centi_c, |value| {
@@ -2689,6 +2692,12 @@ impl ThermalTuningRuntime {
     }
 
     fn record_trial_phase(&mut self, sample: &ThermalTuningSample, expected_target: i16) {
+        // A recovery into Approach ends this Hold segment even when its
+        // temperature is retained during a PPS pause. A later fresh physical
+        // Hold entry starts a new qualification clock, never a sum of segments.
+        if sample.phase != ThermalTuningPhase::Hold {
+            self.first_hold_elapsed_ms = None;
+        }
         match sample.phase {
             ThermalTuningPhase::Approach => {
                 self.model_approach_sample_count =
@@ -2728,6 +2737,11 @@ impl ThermalTuningRuntime {
         let error_centi_c = i32::from(target_c) * 100 - i32::from(sample.temperature_centi_c);
         if hold_entry_ready(error_centi_c as f32 / 100.0) {
             self.first_hold_elapsed_ms.get_or_insert(sample.elapsed_ms);
+        }
+        if let Some(started) = self.first_hold_elapsed_ms {
+            self.longest_qualified_hold_ms = self
+                .longest_qualified_hold_ms
+                .max(sample.elapsed_ms.saturating_sub(started));
         }
     }
 

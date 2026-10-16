@@ -923,10 +923,17 @@ impl ThermalHoldTracker {
         control_phase_in_hold: bool,
     ) -> ThermalHoldObservation {
         let target_temp_c = f64::from(self.target_temp_c);
+        // Keep every observation after the first qualified entry, even while
+        // recovery is waiting to start a new qualification clock.
+        if self.rise_time_ms.is_some() {
+            self.min_c = self.min_c.min(current_temp_c);
+            self.max_c = self.max_c.max(current_temp_c);
+        }
+        if !control_phase_in_hold {
+            self.first_hold_started_at = None;
+            return ThermalHoldObservation::Warmup;
+        }
         if self.first_hold_started_at.is_none() {
-            if !control_phase_in_hold {
-                return ThermalHoldObservation::Warmup;
-            }
             if current_temp_c < target_temp_c - self.entered_threshold_c {
                 return ThermalHoldObservation::Warmup;
             }
