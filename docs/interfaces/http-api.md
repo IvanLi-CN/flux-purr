@@ -454,7 +454,7 @@ The diagnostic is a test session layered on the ordinary firmware runtime: it us
 
 `op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`. `vin_adc_auto` writes shared `vin_adc` samples; `thermal_plant_auto` enters its internal runtime state directly and is the protected single-run transient job. It requires a PPS capability covering `20V` at `>=3A`, records the raw whole-device supply boundary while heating to `220C`, turns the heater off in that same control cycle, and completes after passive cooling to `80C`. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
 
-`GET /api/v1/devices/:id/calibration/thermal-plant/run?lease_id=...&after_sample=<cursor>` returns the v1 `ThermalPlantRunSnapshot`. `after_sample` defaults to `0`; the response starts at that sample index, returns at most 16 trace points, and includes `nextSample` when more points remain. The response exposes projected temperature, measured heater voltage, duty, elapsed time, and phase only; raw ADC values are excluded. The payload is bounded below 8 KiB. `attempt` reports the live or terminal run and `activeResult` is populated only after the persisted transaction commits. Clients should stop polling after terminal `restartAllowed=true`. A missing `thermal_plant_run` identity capability is an explicit compatibility state, not a retryable endpoint error.
+`GET /api/v1/devices/:id/calibration/thermal-plant/run?lease_id=...&after_sample=<cursor>` returns the v2 `ThermalPlantRunSnapshot`. `after_sample` defaults to `0`; the response starts at that sample index, returns at most 16 trace points, and includes `nextSample` when more points remain. Trace pages expose projected temperature, measured heater voltage, duty, elapsed time, and phase. The separate optional `supplyBoundary` includes retained raw RTD/VIN ADC observations, requested voltage/current, elapsed time, WiFi driver state, advertised and usable APDO ranges, and the assumed 3V3 reference needed for later reprojection. The payload is bounded below 8 KiB. `attempt` reports the live or terminal run and `activeResult` is populated only after the persisted transaction commits. Clients should stop polling after terminal `restartAllowed=true`. A missing `thermal_plant_run` identity capability is an explicit compatibility state, not a retryable endpoint error.
 
 `POST /api/v1/devices/:id/eeprom` is the USB/devd-only advanced raw EEPROM maintenance endpoint. It requires an active lease and native USB serial transport; it is not exposed through the device LAN API or Web console. Physical heater output must already be `0%`.
 
@@ -490,7 +490,7 @@ The diagnostic is a test session layered on the ordinary firmware runtime: it us
 }
 ```
 
-`op` is `preview | clear_preview`. Preview updates runtime heater curve state without writing EEPROM.
+`op` is `preview | clear_preview`. The legacy `preview` request is rejected with `heater_curve_format_obsolete`; its resistance values cannot affect runtime control. `clear_preview` remains an idempotent clear operation.
 
 `POST /api/v1/devices/:id/heater-curve/save` body:
 
@@ -500,7 +500,7 @@ The diagnostic is a test session layered on the ordinary firmware runtime: it us
 }
 ```
 
-Save copies the preview curve to active curve and schedules persistent memory commit. If no preview exists, the request is rejected with `heater_curve_preview_required`.
+Legacy save requests are rejected with `heater_curve_format_obsolete`. The whole-device supply boundary is committed atomically with the thermal model by `thermal_plant_auto`; this endpoint cannot persist a resistance curve or migrate old calibration.
 
 `GET /api/v1/artifacts` response:
 
@@ -856,7 +856,7 @@ The response payload is the same `ThermalPlantRunSnapshot` returned by the nativ
 }
 ```
 
-Supported operations are `preview` and `clear_preview`. The response returns `HeaterCurveState`.
+The legacy `preview` operation returns `heater_curve_format_obsolete`. `clear_preview` returns `HeaterCurveState` with empty legacy curve fields. The supply boundary is exposed separately as `supplyBoundary`.
 
 ### `heater_curve_save`
 
@@ -867,7 +867,7 @@ Supported operations are `preview` and `clear_preview`. The response returns `He
 }
 ```
 
-The response returns `HeaterCurveState`. Saved `active` curve is restored from persistent device memory after reboot; preview is not restored.
+The operation returns `heater_curve_format_obsolete`. Persisted legacy resistance calibration is treated as absent after reboot; only a current-format whole-device supply boundary and its associated thermal calibration can be restored.
 
 ### `error`
 
