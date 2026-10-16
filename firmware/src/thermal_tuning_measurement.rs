@@ -5,6 +5,7 @@
 pub struct QualificationObservation {
     pub elapsed_ms: u64,
     pub requested_mv: Option<u16>,
+    pub confirmed_contract_mv: Option<u16>,
     pub valid: bool,
     pub accepted: bool,
     pub temperature_centi_c: i16,
@@ -23,6 +24,7 @@ pub enum QualificationMeasurement {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QualificationContinuity {
     last_request_mv: Option<u16>,
+    last_confirmed_contract_mv: Option<u16>,
     last_accepted_at_ms: Option<u64>,
     pps_edge_at_ms: Option<u64>,
 }
@@ -31,26 +33,35 @@ impl QualificationContinuity {
     pub const fn new() -> Self {
         Self {
             last_request_mv: None,
+            last_confirmed_contract_mv: None,
             last_accepted_at_ms: None,
             pps_edge_at_ms: None,
         }
     }
 
     pub fn observe(&mut self, sample: QualificationObservation) -> QualificationMeasurement {
-        if self
+        let request_edge = self
             .last_request_mv
             .zip(sample.requested_mv)
-            .is_some_and(|(a, b)| a != b)
-        {
+            .is_some_and(|(a, b)| a != b);
+        let applied_edge = self
+            .last_confirmed_contract_mv
+            .zip(sample.confirmed_contract_mv)
+            .is_some_and(|(a, b)| a != b && Some(b) == sample.requested_mv);
+        if request_edge || applied_edge {
             self.pps_edge_at_ms = Some(sample.elapsed_ms);
         }
         self.last_request_mv = sample.requested_mv;
+        if let Some(contract) = sample.confirmed_contract_mv {
+            self.last_confirmed_contract_mv = Some(contract);
+        }
         if sample.valid && sample.accepted {
             let pause_expired = self.pps_edge_at_ms.is_some()
                 && self
                     .last_accepted_at_ms
                     .is_some_and(|last| sample.elapsed_ms.saturating_sub(last) > 1_000);
-            // The request edge can precede the ADC pause by one control tick.
+            // Either the request or its confirmed application can precede the
+            // ADC pause by one control tick, with fresh samples in between.
             if self
                 .last_accepted_at_ms
                 .is_some_and(|last| sample.elapsed_ms > last)
@@ -98,6 +109,7 @@ mod tests {
         QualificationObservation {
             elapsed_ms: time,
             requested_mv: Some(request),
+            confirmed_contract_mv: Some(request),
             valid: true,
             accepted,
             temperature_centi_c: 22_000,
@@ -179,5 +191,45 @@ mod tests {
             continuity.observe(observation(1_001, 21_000, true)),
             QualificationMeasurement::FreshAfterGap
         );
+    }
+
+    #[test]
+    fn confirmed_contract_edge_can_follow_an_intermediate_accepted_sample() {
+        // Captured 100C sequence 6688 -> 6690 -> 6691: the request moves
+        // first, a fresh sample observes the applied contract, then ADC waits.
+        let mut continuity = QualificationContinuity::new();
+        continuity.observe(observation(0, 13_500, true));
+        let mut requested = observation(200, 13_000, true);
+        requested.confirmed_contract_mv = Some(13_500);
+        continuity.observe(requested);
+        assert_eq!(
+            continuity.observe(observation(322, 13_000, true)),
+            QualificationMeasurement::Fresh
+        );
+        assert_eq!(
+            continuity.observe(observation(439, 13_000, false)),
+            QualificationMeasurement::PpsPause
+        );
+    }
+
+    #[test]
+    fn unconfirmed_or_mismatched_contracts_do_not_establish_a_pause() {
+        for contract in [None, Some(12_500)] {
+            let mut continuity = QualificationContinuity::new();
+            continuity.observe(observation(0, 13_500, true));
+            let mut requested = observation(200, 13_000, true);
+            requested.confirmed_contract_mv = Some(13_500);
+            continuity.observe(requested);
+            let mut applied = observation(322, 13_000, true);
+            applied.confirmed_contract_mv = contract;
+            continuity.observe(applied);
+            let mut rejected = applied;
+            rejected.elapsed_ms = 439;
+            rejected.accepted = false;
+            assert_eq!(
+                continuity.observe(rejected),
+                QualificationMeasurement::Rejected
+            );
+        }
     }
 }

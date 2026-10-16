@@ -2588,6 +2588,10 @@ impl ThermalTuningRuntime {
             .observe(QualificationObservation {
                 elapsed_ms: sample.elapsed_ms,
                 requested_mv: Some(sample.requested_mv),
+                confirmed_contract_mv: sample
+                    .pps_contract
+                    .confirmed
+                    .then_some(sample.pps_contract.voltage_mv),
                 valid: sample.measurement_valid,
                 accepted: sample.has_fresh_measurement(),
                 temperature_centi_c: sample.temperature_centi_c,
@@ -9490,6 +9494,37 @@ mod tests {
         runtime.record_sample(waiting).unwrap();
         assert_eq!(runtime.stable_window_started_at_ms, Some(9_000));
         record_dense_hold(&mut runtime, 11_800, 19_000, 6_000);
+        assert_eq!(runtime.stable_window_verified_at_ms, Some(19_000));
+    }
+
+    #[test]
+    fn applied_pps_edge_preserves_a_window_after_an_intermediate_fresh_sample() {
+        let mut runtime = started_single_target_runtime();
+        runtime
+            .record_sample(sample(0, ThermalTuningPhase::Warmup, 3_000))
+            .unwrap();
+        runtime
+            .record_sample(sample(1_000, ThermalTuningPhase::Approach, 5_500))
+            .unwrap();
+        record_dense_hold(&mut runtime, 9_000, 10_800, 6_000);
+        let mut requested = sample(11_000, ThermalTuningPhase::Hold, 6_000);
+        requested.requested_mv = 20_500;
+        // A fresh sample can still carry the old, confirmed contract.
+        runtime.record_sample(requested.clone()).unwrap();
+        requested.elapsed_ms = 11_122;
+        requested.pps_contract.voltage_mv = 20_500;
+        runtime.record_sample(requested.clone()).unwrap();
+        let count = runtime.stable_window_sample_count;
+        requested.elapsed_ms = 11_239;
+        requested.measurement_accepted = Some(false);
+        requested.raw_temperature_centi_c = Some(6_010);
+        runtime.record_sample(requested).unwrap();
+        assert_eq!(runtime.phase, ThermalTuningPhase::Hold);
+        assert_eq!(runtime.stable_window_started_at_ms, Some(9_000));
+        assert_eq!(runtime.stable_window_sample_count, count);
+        assert_eq!(runtime.stable_window_verified_at_ms, None);
+        record_dense_hold(&mut runtime, 11_400, 19_000, 6_000);
+        record_current_trial_sample(&mut runtime, 19_000, ThermalTuningPhase::Hold, 6_000);
         assert_eq!(runtime.stable_window_verified_at_ms, Some(19_000));
     }
 

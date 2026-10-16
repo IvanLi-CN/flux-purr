@@ -245,8 +245,6 @@ function renderTrialTabs(){
   if(!trials.length){$('trialSummary').innerHTML='';return;}
   const trial=currentTrial(); const gate=trial.fullSpeedToStable||{}; const cooldown=trial.cooldownGate||{};
   const samples=samplesForTrial(); const after=postTrialSamples();
-  const holdStart=samples.find(sample=>sample.phase==='hold'&&Number(sample.temperatureCentiC)>=activeTarget*100-50&&Math.abs(Number(sample.temperatureCentiC)-activeTarget*100)<=300);
-  const holdDuration=holdStart&&samples.length?Math.max(0,Number(samples[samples.length-1].elapsedMs)-Number(holdStart.elapsedMs)):null;
   const trialDuration=trial.firstElapsedMs!=null&&trial.lastElapsedMs!=null?Math.max(0,Number(trial.lastElapsedMs)-Number(trial.firstElapsedMs)):samples.length?Math.max(0,Number(samples[samples.length-1].elapsedMs)-Number(samples[0].elapsedMs)):null;
   const postTemperatures=after.map(sample=>Number(sample.temperatureCentiC)).filter(Number.isFinite);
   const postPeak=postTemperatures.length?Math.max(...postTemperatures)/100:null;
@@ -290,7 +288,6 @@ function renderTrialTabs(){
     ]:[]),
     ['起测温度 / 起测上限',`${centiC(cooldown.startTemperatureCentiC)} / ${centiC(cooldown.thresholdCentiC)}`],
     ['采样序列',`${trial.firstSequence??'—'}..${trial.lastSequence??'—'}`],
-    ['qualified Hold 时长',`${ms(holdDuration)} / ${confirm?'60.00s confirm':'12.00s scout'}`],
     ['停热后峰值',postPeak==null?'未采集':`${num(postPeak)}°C (${num(postPeak-activeTarget)}°C above target)`],
     ['停热后样本数',String(after.length)]
   ];

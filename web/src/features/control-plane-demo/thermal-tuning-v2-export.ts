@@ -719,14 +719,24 @@ export function verifyTimingSamples(
   const ppsPauses = new Set<JsonObject>()
   if (timing.policyVersion === 5) {
     let lastRequest: number | null = null
+    let lastContract: number | null = null
     let lastAccepted: number | null = null
     let edge: number | null = null
     for (const sample of samples) {
       const time = numeric(sample.elapsedMs)
       const request = numeric(sample.ppsRequestedMv)
+      const contract = sample.ppsContractConfirmed === true ? numeric(sample.ppsContractMv) : null
       if (time == null) continue
-      if (lastRequest != null && request != null && request !== lastRequest) edge = time
+      if (
+        (lastRequest != null && request != null && request !== lastRequest) ||
+        (lastContract != null &&
+          contract != null &&
+          contract !== lastContract &&
+          contract === request)
+      )
+        edge = time
       lastRequest = request
+      if (contract != null) lastContract = contract
       if (sample.measurementValid === true && sample.measurementAccepted !== false) {
         if (lastAccepted != null && time > lastAccepted && edge !== time) edge = null
         lastAccepted = time

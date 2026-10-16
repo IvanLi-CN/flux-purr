@@ -1093,9 +1093,6 @@ mod tests {
         );
         assert!(REPORT_TEMPLATE.contains("stableBand:[activeTarget-1.5,activeTarget+1.5]"));
         assert!(REPORT_TEMPLATE.contains("['试验时长',ms(trialDuration)]"));
-        assert!(REPORT_TEMPLATE.contains(
-            "['qualified Hold 时长',`${ms(holdDuration)} / ${confirm?'60.00s confirm':'12.00s scout'}`]"
-        ));
         assert!(REPORT_TEMPLATE.contains("['停热后峰值',postPeak==null?'未采集'"));
         assert!(REPORT_TEMPLATE.contains("for(const id of CHART_IDS){const canvas=$(id);canvas.addEventListener('pointermove',moveHover)"));
         assert!(REPORT_TEMPLATE.contains("line.dataset.sequence=String(sample.sequence)"));

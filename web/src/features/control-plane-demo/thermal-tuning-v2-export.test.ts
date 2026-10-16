@@ -109,6 +109,24 @@ describe('Web thermal-tuning-v2 export', () => {
     })
     expect(verifyTimingSamples(timing, 220, samples).verified).toBe(true)
     expect(verifyTimingSamples({ ...timing, policyVersion: 4 }, 220, samples).verified).toBe(false)
+    const appliedSamples = samples.map((sample) => ({
+      ...sample,
+      measurementAccepted: ![6500, 6750].includes(sample.elapsedMs),
+      ppsContractConfirmed: true,
+      ppsContractMv: sample.elapsedMs < 6250 ? 20500 : 21000,
+    }))
+    expect(verifyTimingSamples(timing, 220, appliedSamples).verified).toBe(true)
+    expect(verifyTimingSamples({ ...timing, policyVersion: 4 }, 220, appliedSamples).verified).toBe(
+      false
+    )
+    for (const confirmed of [false, true]) {
+      const unknownOrMismatched = appliedSamples.map((sample) => ({
+        ...sample,
+        ppsContractConfirmed: confirmed,
+        ppsContractMv: sample.elapsedMs < 6250 ? 20500 : 21250,
+      }))
+      expect(verifyTimingSamples(timing, 220, unknownOrMismatched).verified).toBe(false)
+    }
     samples[17].rawTemperatureCentiC = 24000
     expect(verifyTimingSamples(timing, 220, samples).verified).toBe(false)
     samples[17].rawTemperatureCentiC = 21997

@@ -1037,6 +1037,13 @@ fn qualification_measurements(
                     .get("ppsRequestedMv")
                     .and_then(Value::as_u64)
                     .and_then(|v| u16::try_from(v).ok()),
+                confirmed_contract_mv: sample
+                    .get("ppsContractConfirmed")
+                    .and_then(Value::as_bool)
+                    .filter(|confirmed| *confirmed)
+                    .and_then(|_| sample.get("ppsContractMv"))
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u16::try_from(v).ok()),
                 valid: sample.get("measurementValid").and_then(Value::as_bool) == Some(true)
                     && temperature("temperatureCentiC").is_some(),
                 accepted: sample_measurement_accepted(sample),
@@ -3127,6 +3134,25 @@ mod tests {
         let mut historical = timing;
         historical.policy_version = 4;
         assert!(!check(&historical, &samples));
+        let mut applied_samples = samples.clone();
+        for sample in &mut applied_samples {
+            let time = sample["elapsedMs"].as_u64().unwrap();
+            sample["measurementAccepted"] = json!(![6500, 6750].contains(&time));
+            sample["ppsContractConfirmed"] = json!(true);
+            sample["ppsContractMv"] = json!(if time < 6250 { 20500 } else { 21000 });
+        }
+        assert!(check(&timing, &applied_samples));
+        assert!(!check(&historical, &applied_samples));
+        for confirmed in [false, true] {
+            let mut unknown_or_mismatched = applied_samples.clone();
+            for sample in &mut unknown_or_mismatched {
+                sample["ppsContractConfirmed"] = json!(confirmed);
+                if sample["elapsedMs"].as_u64().unwrap() >= 6250 {
+                    sample["ppsContractMv"] = json!(21250);
+                }
+            }
+            assert!(!check(&timing, &unknown_or_mismatched));
+        }
         samples[17]["rawTemperatureCentiC"] = json!(24000);
         assert!(!check(&timing, &samples));
         samples[17]["rawTemperatureCentiC"] = json!(21997);
