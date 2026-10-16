@@ -58,3 +58,15 @@
 该轮在181469ms通过标准取消并完整排空事件，0..750连续，设备摘要验证通过，摘要为`9f9cec957047b7dc49bb1916936deecf1a6f06fdd80dc91f0eb4e263bc6473de`。没有开始物理加热试验、没有adopted目标、没有EEPROM候选保存。标准报告保持failed／review_incomplete，不把事件完整误作热资格完整。原始目录为`firmware/target/hil-fresh-calibrated-afterheat-a-77c0366b-full/firmware-pps5a-1792120402692`，五文件报告为`firmware/target/hil-fresh-calibrated-afterheat-a-77c0366b-full-bundle/index.html`。
 
 取消后读回heater disabled、MOS0、无preview、无手动PPS覆盖，新热模型有效；原始测温仍异常，屏幕值不能作为真实台面温度。全速风扇命令继续保留，未用偏移或资格放宽掩盖接触故障。需要A组PT1000连接恢复稳定后，再核对冷态映射、按有效同映射标定启动完整八目标流程；未经完整独立确认和匹配保存回执，不能把当前实现或旧局部通过记录称为HIL通过。
+
+## 同映射重试的局部通过与搜索终态
+
+运行`firmware-pps5a-1792121119665`继续使用完整固件`77c0366b`、3328mV和`−11000µV`映射，以及标定事务`1346461204`；没有导入上一运行候选。启动读数29.66°C，3795个样本中的最高原始温度为220.71°C，未复现上一轮276.38°C的异常。未复现不构成接触问题永久消失的证明。
+
+60°C在trial6完成独立60秒确认并被设备接纳：过冲1.03°C、Hold峰峰值1.45°C，稳定窗口在Warmup退出后9789ms开始、连续10274ms后验证，满足原10000ms门槛，没有条件延长。初始短试验及中间候选的局部通过没有替代该次独立确认；整轮仍不能因此获得保存资格。
+
+220°C的trial0短试验通过，过冲0.56°C、Hold峰峰值1.19°C、稳定窗口起点687ms。trial1独立确认记录过冲0.71°C、峰峰值1.14°C；trial2的不同候选仅将Approach lead从0改为1，记录过冲0.66°C、峰峰值1.15°C。两次失败均发生在原5000ms期限之后、连续窗口验证之前：PPS请求从20.5V恢复到21V时出现非接纳样本，窗口按既有规则中断。trial1的sequence3647为868505ms，距离Warmup退出5873ms；trial2的最后样本sequence3865为919100ms，距离Warmup退出6333ms。两次控制温度仍位于稳定带内，不能把这些热指标合格的短前缀当作完整稳定窗口或60秒确认。
+
+搜索随后以`candidate_search_exhausted_no_distinct_safe_proposal`结束220°C，120/80/100/160/140/180°C均以`interval_pruned_without_accepted_bounds`跳过，没有实际运行。这是已运行目标的采样连续性失败及后续无新候选的搜索终态，不能归因为本轮出现异常高温，也不证明硬件无法加热到220°C。PPS等待样本不得跨接连续资格；要取得通过，仍需新候选的完整实测窗口与独立确认，不能冻结PPS或放宽门槛来改判现有轨迹。
+
+0..3874共3875个事件连续，设备摘要与标准报告五文件摘要分别验证通过，标准报告trace摘要为`ef54aaf727d0c404da2053c927e87a1bb74b1081323fa9b718b515b779ac3896`，结果为failed／review complete。逐样本审计未发现全速冷却、正常Approach下限、固定Hold入口、标定初值或已接纳目标门禁违规；这不是八目标全部通过的证明。原始目录为`firmware/target/hil-fresh-calibrated-afterheat-a-77c0366b-retry/firmware-pps5a-1792121119665`，标准报告为`firmware/target/hil-fresh-calibrated-afterheat-a-77c0366b-retry-bundle/index.html`。没有EEPROM候选保存，终态读回heater disabled、MOS0、preview关闭、无手动PPS覆盖，保留全速散热至既有释放门槛。冷却后再次读回30.27°C、MOS0、无测温守卫或故障，风扇已按规则释放，合同恢复5V Fixed待机。
